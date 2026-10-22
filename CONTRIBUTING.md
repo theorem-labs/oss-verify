@@ -13,6 +13,10 @@ To report a vulnerability, follow [SECURITY.md](SECURITY.md). Do not open a publ
 
 This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md).
 
+## Review of an enrollment
+
+Usually we do not accept a fork, a new project, or a project that nobody maintains. A person reviews each enrollment. The triage comment on the pull request helps the review: for example, it shows the licence, the activity and the criticality score of the project. If we decline a project, we tell you why in the pull request.
+
 ## Attribution
 
 We do not require credit. If you fix a bug that OSS Verify found, we ask for one line about it. Put the line in the commit message, or in the place where you give credits. Give the id from our report in it, for example:
