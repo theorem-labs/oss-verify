@@ -25,3 +25,17 @@ Theorem maintains this repository. To report a vulnerability in this repository,
 ## Findings about an enrolled project
 
 A finding is a failure that we find in an enrolled project while we work on a proof. We send it privately to the project's `primary_contact`. We set no disclosure deadline, and we do not publish findings ([docs/what-gets-proven.md](docs/what-gets-proven.md#findings)).
+
+## Who receives reports
+
+* Only a core maintainer can enroll a project. A person reviews each enrollment before we merge it.
+* The triage comment shows whether the project's security policy, and its OSS-Fuzz project, give the address in `primary_contact`.
+* We send findings only to `primary_contact` and `auto_ccs`. If you set `pgp`, we encrypt each report to your key and send it to `primary_contact` only.
+* We send the findings of a seeded project to no one automatically.
+* A statement is about the binaries that we build from your repository at a pinned commit, with the fuzz targets in `fuzz_targets`.
+
+## How we keep the data secure
+
+* We build your project from its public repository. The compile step has no network access.
+* If you set `pgp`, we encrypt each report to your key.
+* We do not publish findings. What we publish does not show a finding that is not public.

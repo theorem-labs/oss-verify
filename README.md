@@ -5,7 +5,7 @@ OSS Verify is a Theorem program that verifies open-source software. We prove the
 
 ## Who can enroll
 
-A core maintainer of an established open-source project can enroll it. The project needs at least one fuzz target and a build that our builder can do. [docs/faq.md](docs/faq.md#how-do-you-choose-projects) tells how we choose projects. We seeded some projects already, and a maintainer can adopt one ([docs/project-yaml.md](docs/project-yaml.md#seeded-projects)).
+A core maintainer of an established open-source project can enroll it. The project needs at least one fuzz target and a build that our builder can do. [theorem.dev/oss-verify](https://theorem.dev/oss-verify/#what-projects-are-eligible) tells how we choose projects. We seeded some projects already, and a maintainer can adopt one ([docs/project-yaml.md](docs/project-yaml.md#seeded-projects)).
 
 ## Enroll with a coding agent
 
@@ -19,14 +19,6 @@ https://raw.githubusercontent.com/theorem-labs/oss-verify/refs/heads/main/AGENTS
 The agent asks you what "correct" means for your code, and which findings and patches you want. Then it makes `projects/<name>/` and runs the checks. You push its branch to your fork of this repository, and you open the pull request.
 
 > **WARNING:** The agent runs `tools/check`. `tools/check` builds the project's `Dockerfile` with network access. Use the agent only on a project that you trust ([SECURITY.md](SECURITY.md)).
-
-### For coding agents
-
-Get the instructions and follow them:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/theorem-labs/oss-verify/refs/heads/main/AGENTS.md
-```
 
 ## Enroll a project
 
@@ -54,7 +46,7 @@ To pause the project, set `disabled: true` in `project.yaml`. To leave, remove `
 
 ## Learn more
 
-Visit [theorem.dev/oss-verify](https://theorem.dev/oss-verify/) for answers to common questions, and [docs/faq.md](docs/faq.md) for the questions that it does not answer. [SECURITY.md](SECURITY.md) tells how to report a vulnerability in this repository. Use of OSS Verify is subject to the [OSS Verify terms](https://theorem.dev/oss-verify/terms/). We accept only enrollment pull requests ([CONTRIBUTING.md](CONTRIBUTING.md)).
+The [OSS Verify FAQ](https://theorem.dev/oss-verify/#faq) answers questions. [SECURITY.md](SECURITY.md) tells how to report a vulnerability in this repository. Use of OSS Verify is subject to the [OSS Verify terms](https://theorem.dev/oss-verify/terms/). We accept only enrollment pull requests ([CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ## Licence
 

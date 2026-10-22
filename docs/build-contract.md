@@ -28,6 +28,10 @@ The builder adds the interface of OSS-Fuzz. Its driver, compiler wrappers and fl
 
 Each binary is a static riscv64 Linux program for RV64G (`-march=rv64g -mabi=lp64d`), linked with lld against musl.
 
+## Static riscv64 programs
+
+The statements use a formal model of a riscv64 Linux process ([what-gets-proven.md](what-gets-proven.md#the-statements)). A statement is about each byte of the program. A static program holds all of its code: the library, the fuzz target, the driver and the C library. Thus no code from outside the binary runs.
+
 ## Toolchains
 
 A new toolchain image changes the bytes of each binary that it builds, and a proof is about specified bytes. Thus each project is built with one toolchain image, its vintage.
@@ -322,6 +326,8 @@ The exit status tells the result ([above](#exit-statuses)).
 We will write the lock in the proofs repository from the manifest. The lock is the only place that records the commit. `tools/check --lock <file>` builds the commit that a lock names, and compares each binary with the lock ([below](#check-a-binary-against-a-lock)). The lock can be a manifest or an oss-fuzz-theorems `harness.yaml`.
 
 ## Reproducibility
+
+A statement is about the exact bytes of a binary, which the lock pins by their SHA-256. You can rebuild a binary and compare it with the lock only if each build gives the same bytes.
 
 `tools/check --twice` builds everything a second time from the start, with `docker build --no-cache`, a new fetch and a new compile of each build. It fails if a byte is different. The Build check of a pull request runs `tools/check --twice` too.
 
