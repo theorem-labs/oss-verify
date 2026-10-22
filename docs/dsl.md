@@ -2,7 +2,7 @@
 
 This page describes the DSL format: how a DSL fuzz target reads its input as a small program of API calls, and what it writes. It is for maintainers and coding agents who write DSL fuzz targets, and for readers of their statements.
 
-A DSL fuzz target is also called an API driver. It is a fuzz target with the usual shape: an `LLVMFuzzerTestOneInput` ([build-contract.md](build-contract.md#the-fuzz-targets)). Inside that function, a small virtual machine runs the program that the input holds. Each operation of the program calls the library. The project defines its own operations. The machine gives the frames, the checks, the observables and the limits that this page describes.
+A DSL fuzz target is also called an API driver. It is the starting point for a fuzz target at the level of the API. It is a fuzz target with the usual shape: an `LLVMFuzzerTestOneInput` ([build-contract.md](build-contract.md#the-fuzz-targets)). Inside that function, a small virtual machine runs the program that the input holds. Each operation of the program calls the library. The project defines its own operations. The machine gives the frames, the checks, the observables and the limits that this page describes.
 
 **Pending.** The runtime of the DSL is not in this repository yet. It comes with a later toolchain version. The parts of this page that are not settled yet are marked "pending".
 

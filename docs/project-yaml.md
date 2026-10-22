@@ -196,7 +196,9 @@ With each value, we hold back each statement that shows a finding that is not pu
 
 ## Seeded projects
 
-We seeded some projects ourselves, on branches named `draft-generic-oss-fuzz-<name>` ([faq.md](faq.md#how-do-you-choose-projects)). We used the build data of the oss-fuzz-theorems 2026.10 release. A seeded project has `primary_contact: n/a`. Its `project.yaml` starts with two comment lines that tell that we seeded it. `tools/validate.py` warns about `n/a`, and the triage comment on a pull request shows it.
+We seeded some projects ourselves, on branches named `draft-generic-oss-fuzz-<name>`. We used the build data of the oss-fuzz-theorems 2026.10 release. A seeded project has `primary_contact: n/a`. Its `project.yaml` starts with two comment lines that tell that we seeded it. `tools/validate.py` warns about `n/a`, and the triage comment on a pull request shows it.
+
+We seeded the projects of OSS-Fuzz, at its commit `bd2ce21991a94a362b92fb1bf25f86d5a1a60842`, that our builder can build and that we can describe honestly. A seeded `project.yaml` gives only what the recorded build data tells, and no guess. [seeded-projects.tsv](seeded-projects.tsv) lists each of the 1,381 projects of OSS-Fuzz at that commit. For a project that we did not seed, it gives the reason.
 
 A core maintainer can adopt a seeded project:
 

@@ -127,7 +127,7 @@ A proof does not cover these items:
 
 When we work on a proof, we can find a failure instead. An example is an input on which a fuzz target crashes, hangs, fails an assertion or fails a sanitizer check. We call this failure a finding.
 
-[faq.md](faq.md#what-do-maintainers-receive) tells what a finding contains, and who generates findings and patches. We obey these rules:
+A finding contains the input, the build and the binary, and the steps to reproduce it. It contains a patch when we have one. We also send each build problem to `primary_contact`. [theorem.dev/oss-verify](https://theorem.dev/oss-verify/#what-will-maintainers-receive) tells who generates findings and patches. We obey these rules:
 
 * **We send the finding to you privately.** We send it to `primary_contact` and to each address in `auto_ccs`. If you set `pgp`, we encrypt the finding to your key and send it to `primary_contact` only.
 * **There is no disclosure deadline.** We do not set a date on which a finding becomes public.

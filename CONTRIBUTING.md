@@ -12,3 +12,20 @@ You make contributions under the Apache License 2.0 ([LICENSE](LICENSE), section
 To report a vulnerability, follow [SECURITY.md](SECURITY.md). Do not open a public issue for it.
 
 This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md).
+
+## Attribution
+
+We do not require credit. If you fix a bug that OSS Verify found, we ask for one line about it. Put the line in the commit message, or in the place where you give credits. Give the id from our report in it, for example:
+
+    Found by Theorem's OSS Verify, as finding THM-2026-7K3QF9XA.
+
+The id helps us find which findings were real and which got fixed.
+
+A finding id has these parts, in this order:
+
+1. `THM-`;
+2. the year in which we first report the finding, for example `2026`;
+3. a hyphen, `-`;
+4. 8 random characters from Crockford's base32 alphabet, in capitals. This alphabet has the digits 0 to 9, and the letters A to Z but not I, L, O and U.
+
+As a regular expression, an id is `THM-[0-9]{4}-[0-9A-HJKMNP-TV-Z]{8}`. Each finding gets one id, when we first report it. We never use an id again. A duplicate of a finding keeps the id of that finding.
