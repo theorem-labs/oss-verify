@@ -15,7 +15,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import validate  # noqa: E402
 
 KEY = "-----BEGIN PGP PUBLIC KEY BLOCK-----\nmQINBF...\n-----END PGP PUBLIC KEY BLOCK-----\n"
-MINIMAL = "repo: https://github.com/example/project#v1.0\nprimary_contact: security@example.org\nlanguage: c\n"
+CONTACT = "security@libexample.dev"
+MINIMAL = f"repo: https://github.com/example/project#v1.0\nprimary_contact: {CONTACT}\nlanguage: c\n"
 
 
 class ProjectDir:
@@ -58,7 +59,7 @@ class ValidProjects(unittest.TestCase):
     def test_every_field(self):
         text = (
             "repo: https://github.com/example/project#0123456789abcdef0123456789abcdef01234567\n"
-            "primary_contact: security@example.org\nhomepage: https://example.org\nlanguage: c++\n"
+            f"primary_contact: {CONTACT}\nhomepage: https://example.org\nlanguage: c++\n"
             "disabled: false\nsanitizers: [address]\nfuzz_targets: [a_fuzzer, b-fuzzer.x]\npublish: eager\n"
             "budgets:\n  halts: 16GiB\n  agrees:\n    address: [2GiB, 512GiB]\n"
             "proofs:\n  repo: https://github.com/example/proofs#main\n  path: projects/example\n"
@@ -81,12 +82,12 @@ class ValidProjects(unittest.TestCase):
         self.assertIn("in the repository at .oss-verify/Dockerfile", summary)
 
     def test_seeded_project_warns(self):
-        problems, warnings, _ = check(MINIMAL.replace("security@example.org", "n/a"))
+        problems, warnings, _ = check(MINIMAL.replace(CONTACT, "n/a"))
         self.assertEqual(problems, [])
         self.assertTrue(any("primary_contact is n/a" in warning for warning in warnings))
 
     def test_seeded_project_without_build_files_warns(self):
-        problems, warnings, summary = check(MINIMAL.replace("security@example.org", "n/a"), {})
+        problems, warnings, summary = check(MINIMAL.replace(CONTACT, "n/a"), {})
         self.assertEqual(problems, [])
         self.assertTrue(any("no build files yet" in warning for warning in warnings))
         self.assertIn("Dockerfile: none yet", summary)
@@ -108,6 +109,16 @@ class ValidProjects(unittest.TestCase):
         problems, warnings, _ = check(MINIMAL.replace("#v1.0", "#abc1234"))
         self.assertEqual(problems, [])
         self.assertTrue(any("shortened commit" in warning for warning in warnings))
+
+    def test_placeholder_address_warns(self):
+        for address in ("dry-run@example.invalid", "security@example.org", "a@mail.example.com", "x@host.test"):
+            problems, warnings, _ = check(MINIMAL.replace(CONTACT, address))
+            self.assertEqual(problems, [])
+            self.assertTrue(any(f"{address} is a placeholder" in warning for warning in warnings), warnings)
+        _, warnings, _ = check(MINIMAL + "auto_ccs: [team@example.net]\n")
+        self.assertTrue(any("team@example.net is a placeholder" in warning for warning in warnings), warnings)
+        # A real domain that only contains "example" is not one.
+        self.assertEqual(check(MINIMAL.replace(CONTACT, "security@myexample.org"))[1], [])
 
 
 class Builds(unittest.TestCase):
@@ -310,7 +321,7 @@ class Problems(unittest.TestCase):
         self.assertProblem(MINIMAL + "homepage: ftp://example.org\n", "homepage must be")
 
     def test_addresses(self):
-        self.assertProblem(MINIMAL.replace("security@example.org", "nobody"), "bad email")
+        self.assertProblem(MINIMAL.replace(CONTACT, "nobody"), "bad email")
         self.assertProblem(MINIMAL + "auto_ccs: a@b.cd\n", "auto_ccs must be a list")
         self.assertProblem(MINIMAL + "auto_ccs: [a@b.cd, nope]\n", "bad email 'nope'")
 
@@ -417,7 +428,7 @@ class Output(unittest.TestCase):
         return code, out.getvalue(), err.getvalue()
 
     def test_main(self):
-        with ProjectDir({"project.yaml": MINIMAL.replace("security@example.org", "n/a"),
+        with ProjectDir({"project.yaml": MINIMAL.replace(CONTACT, "n/a"),
                          "Dockerfile": "FROM x", "build.sh": "x"}) as directory:
             code, out, err = self.run_main(directory)
             self.assertEqual(code, 0)

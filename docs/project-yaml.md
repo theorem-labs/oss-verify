@@ -34,7 +34,7 @@ Give exactly one git repository, as an `https://` URL. We clone it anonymously.
 
 After `#`, give one of these:
 
-* A branch or a tag. Each build uses the commit that the branch or tag names at that time.
+* A branch or a tag. Each build uses the commit that the branch or tag names when the build starts. We do not build again each time the branch moves ([what-gets-proven.md](what-gets-proven.md#when)).
 * A full commit id: 40 hexadecimal digits, or 64 for a SHA-256 repository. Each build then uses exactly that commit.
 
 The lock in the proofs repository records the commit of each build. It is the only place that records it. `tools/validate.py` warns you about a ref that looks like a shortened commit id.
@@ -47,7 +47,7 @@ These fields work as they do in OSS Scanner.
 * `auto_ccs` lists more addresses. Each report goes to them too.
 * `pgp` holds your armored OpenPGP public key. We then encrypt each report to this key, and send it to `primary_contact` only. Thus you cannot use `pgp` with `auto_ccs`.
 
-The addresses are public. Use an address that you are glad to publish, such as a security alias. We send each finding privately to these addresses ([what-gets-proven.md](what-gets-proven.md#findings)).
+The addresses are public. Use an address that you are glad to publish, such as a security alias. We send each finding privately to these addresses ([what-gets-proven.md](what-gets-proven.md#findings)). `tools/validate.py` warns about an address at a domain that is reserved for examples, such as `example.org` or `.invalid`, because no report reaches it.
 
 A seeded project has `primary_contact: n/a` until a maintainer adopts it ([below](#seeded-projects)).
 
@@ -67,7 +67,7 @@ This table is the only list of languages in these documents. It gives the status
 | `jvm` | Java, Kotlin and the other JVM languages | halts statements only; JVM binaries are not byte-reproducible yet | `*.java` `*.kt` |
 | `javascript` | JavaScript | held | `*.js` `*.mjs` `*.cjs` `*.ts` |
 | | Ruby, Lua | in progress: `tools/validate.py` does not accept them yet | |
-| | R | pending, likely address-only (pending): `tools/validate.py` does not accept it yet | |
+| | R | pending (likely address-only): `tools/validate.py` does not accept it yet | |
 | | Swift | not possible: RISC-V LLVM has no Swift calling convention | |
 
 Our builder builds `c`, `c++`, `rust`, `python` and `go` projects today. `tools/validate.py` warns about the other languages, and `tools/check` refuses them. The builders of the other languages are pending. We add each one to [infra/toolchains.tsv](../infra/toolchains.tsv) after its image is published.
@@ -227,7 +227,7 @@ The build files of a seeded project come from the build recipe of that release. 
 A seed corpus is a zip file of example inputs of one fuzz target. Together, its inputs run each API call and each property check of the fuzz target at least once ([.claude/skills/add-project/SKILL.md](../.claude/skills/add-project/SKILL.md), step 3.3). OSS-Fuzz uses the same name. A seed corpus must obey these rules:
 
 * Its name is `<target>_seed_corpus.zip`. If you give `fuzz_targets`, it lists `<target>`.
-* Each input is a file at the top level of the zip file.
+* Each input is a file at the top level of the zip file. It is an input as libFuzzer takes it, without the six-byte header that the driver reads ([build-contract.md](build-contract.md#the-driver)).
 * It holds at most 1,024 inputs.
 * Its size is at most 1 MiB, and at most 16 MiB when uncompressed.
 

@@ -10,7 +10,8 @@
     tools/validate.py projects/<name> check the directories named
 
 If there are problems, prints one line per problem and exits 1. Otherwise prints one summary line per project, and
-any warnings, and exits 0. Runs offline and never writes anything. Requires PyYAML (pip install pyyaml).
+any warnings, and exits 0. Runs offline and never writes anything. Requires PyYAML (on Ubuntu, apt install
+python3-yaml).
 
 Fields allowed in project.yaml:
 
@@ -54,7 +55,7 @@ import check_build
 try:
     import yaml
 except ImportError:
-    sys.exit("tools/validate.py needs PyYAML: pip install pyyaml")
+    sys.exit("tools/validate.py needs PyYAML: on Ubuntu, apt install python3-yaml")
 
 PROJECTS = pathlib.Path(__file__).resolve().parent.parent / "projects"
 
@@ -101,6 +102,9 @@ PGP_END = "-----END PGP PUBLIC KEY BLOCK-----"
 
 # The contact of a project we seeded, which no maintainer has adopted yet.
 NO_CONTACT = "n/a"
+# Domains reserved for documentation and testing (RFC 2606, RFC 6761), which no real mailbox uses: an address there
+# is a placeholder left in project.yaml.
+RESERVED_DOMAIN = re.compile(r"(?:.*\.)?(?:example\.(?:com|net|org)|example|invalid|test|localhost)", re.IGNORECASE)
 # The values of language, OSS-Fuzz's names, each with the suffixes of the harness sources it permits beside
 # project.yaml: its own, and C's and C++'s for native code. The language table in docs/project-yaml.md, the documents'
 # only list of them, gives the same values.
@@ -549,6 +553,12 @@ def config_warnings(config, files):
         warnings.append(
             "primary_contact is n/a: only a project we seeded may say that, and only until a maintainer adopts it"
         )
+    contacts = [config.get("primary_contact")]
+    if isinstance(config.get("auto_ccs"), list):
+        contacts += config["auto_ccs"]
+    for address in contacts:
+        if isinstance(address, str) and RESERVED_DOMAIN.fullmatch(address.rpartition("@")[2]):
+            warnings.append(f"{address} is a placeholder: its domain is reserved for examples, so no report reaches it")
     repo = config.get("repo")
     if isinstance(repo, str) and "#" in repo:
         ref = repo.split("#", 1)[1]

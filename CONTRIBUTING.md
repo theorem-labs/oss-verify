@@ -15,7 +15,9 @@ This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md).
 
 ## Review of an enrollment
 
-Usually we do not accept a fork, a new project, or a project that nobody maintains. A person reviews each enrollment. The triage comment on the pull request helps the review: for example, it shows the licence, the activity and the criticality score of the project. If we decline a project, we tell you why in the pull request.
+Usually we do not accept a fork, a new project, or a project that nobody maintains. A person reviews each enrollment. The triage comment on the pull request helps the review: for example, it shows the licence, the activity and the criticality score of the project. If we decline a project, we tell you why in the pull request. To see the triage comment before you open the pull request, run `.github/scripts/triage.py --repo theorem-labs/oss-verify --local projects/<name> --login <your GitHub account>`.
+
+On your first pull request to this repository, GitHub holds the `tests` check until one of our maintainers approves its run. The other checks run at once. For a pull request from a fork, `tests` then passes without running anything: `enrollment` and `project-builds` check your project.
 
 ## Attribution
 

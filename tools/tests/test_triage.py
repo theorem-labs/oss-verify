@@ -19,7 +19,7 @@ SPEC.loader.exec_module(triage)
 REPO = "theorem-labs/oss-verify"
 INDEX = f"repos/{triage.PROOFS_REPO}/contents/{triage.PROOFS_INDEX}"
 SEEDED = "repo: https://example.invalid/example\nprimary_contact: n/a\nlanguage: c\n"
-ENROLLED = "repo: https://example.invalid/example\nprimary_contact: security@example.org\nlanguage: c\n"
+ENROLLED = "repo: https://example.invalid/example\nprimary_contact: security@libexample.dev\nlanguage: c\n"
 
 
 class FakeGitHub:
@@ -284,6 +284,23 @@ class Comment(unittest.TestCase):
     def test_nothing_under_projects(self):
         gh = self.pull(SEEDED, "NONE", changed=["README.md"])
         self.assertEqual(triage.triage(gh, REPO, 7), "")
+
+    def test_a_local_directory_before_the_pull_request(self):
+        # No pull request exists yet: nothing about one is asked of GitHub, and the directory is read as it is here.
+        with tempfile.TemporaryDirectory() as scratch:
+            directory = pathlib.Path(scratch) / "example"
+            directory.mkdir()
+            for name, text in {"project.yaml": ENROLLED, "Dockerfile": "FROM x\n", "build.sh": "#!/bin/bash\n"}.items():
+                (directory / name).write_text(text)
+            template = (ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md").read_text(encoding="utf-8")
+            gh = FakeGitHub()
+            comment = triage.triage_local(gh, REPO, directory, "someone", template)
+        self.assertTrue(comment.startswith(triage.MARKER + "\n"))
+        self.assertIn("opened by `someone`", comment)
+        self.assertIn("| ✅ | Pull request scope | only this project's directory |", comment)
+        self.assertIn("| ✅ | `tools/validate.py` | passes |", comment)
+        self.assertIn("| ⚠️ | Checklist | ", comment)
+        self.assertFalse([path for path in gh.fetched if "/pulls/" in path], gh.fetched)
 
 
 if __name__ == "__main__":

@@ -8,9 +8,13 @@
 """Write the triage comment for an enrollment pull request, as Markdown on standard output.
 
     GITHUB_TOKEN=... .github/scripts/triage.py --repo theorem-labs/oss-verify --pr 123
+    .github/scripts/triage.py --repo theorem-labs/oss-verify --local projects/<name> --login <you> [--body <file>]
 
 Run by .github/workflows/triage.yaml, or by hand to see what it would say. Prints nothing when the pull request
-does not touch projects/.
+does not touch projects/. With --local, it writes the comment for a projects/<name>/ on this machine before any pull
+request exists, as opened by --login with the description in --body (default: .github/PULL_REQUEST_TEMPLATE.md,
+unticked). Without GITHUB_TOKEN, GitHub limits anonymous requests, and the rows that need GraphQL say "could not be
+checked".
 
 The pull request is read as data through the GitHub API: nothing from it is checked out or executed, and a read-only
 token is enough. The token goes to api.github.com alone, and no other host is contacted. Text from the pull request,
@@ -881,32 +885,23 @@ def repository_rows(gh: GitHub, config: dict, beside: set[str], login: str) -> t
     ]
 
 
-def triage(gh: GitHub, repo: str, number: int) -> str:
-    """Return the comment for a pull request, or "" if it does not touch projects/."""
-    pull = gh.get(f"repos/{repo}/pulls/{number}")
-    names, outside = split_paths(changed_paths(gh, repo, number))
-    if not names:
-        return ""
-    name, login = names[0], pull["user"]["login"]
+def comment(gh: GitHub, repo: str, name: str, directory: pathlib.Path, login: str, association: str, body: str,
+            paths: list[str], changed_files: int) -> str:
+    """The comment for projects/<name>/ as it is in `directory`, in a pull request by `login` that changes `paths`."""
+    names, outside = split_paths(paths)
     heading = f"{MARKER}\n### Enrollment triage: {code('projects/' + name)}\n\n"
-
-    with tempfile.TemporaryDirectory() as scratch:
-        directory = pathlib.Path(scratch) / name
-        # A name validate.py would refuse is not fetched; check_project() reports it without reading the directory.
-        if validate.NAME.fullmatch(name) and not fetch_project(gh, repo, pull["head"]["sha"], name, directory):
-            return f"{heading}This pull request removes the project's directory: a withdrawal, nothing to triage.\n"
-        problems, warnings, _ = validate.check_project(directory)
-        config = read_config(directory)
-        beside = {path.name for path in directory.glob("*")}
+    problems, warnings, _ = validate.check_project(directory)
+    config = read_config(directory)
+    beside = {path.name for path in directory.glob("*")}
 
     described, rows = repository_rows(gh, config, beside, login)
     if config.get("primary_contact") == validate.NO_CONTACT:
-        rows.append(row("Seeded contact", seeded_contact_row, config, pull.get("author_association") or ""))
+        rows.append(row("Seeded contact", seeded_contact_row, config, association))
     rows += [
         row("Proofs index", proofs_index_row, gh, name),
-        row("Pull request scope", scope_row, names, outside, pull["changed_files"]),
+        row("Pull request scope", scope_row, names, outside, changed_files),
         row("`tools/validate.py`", validate_row, problems, warnings),
-        row("Checklist", checklist_row, pull.get("body") or ""),
+        row("Checklist", checklist_row, body),
     ]
     table = "\n".join(f"| {mark} | {check} | {result} |" for mark, check, result in rows)
     return (
@@ -918,12 +913,52 @@ def triage(gh: GitHub, repo: str, number: int) -> str:
     )
 
 
+def triage(gh: GitHub, repo: str, number: int) -> str:
+    """Return the comment for a pull request, or "" if it does not touch projects/."""
+    pull = gh.get(f"repos/{repo}/pulls/{number}")
+    paths = changed_paths(gh, repo, number)
+    names, _ = split_paths(paths)
+    if not names:
+        return ""
+    name = names[0]
+    with tempfile.TemporaryDirectory() as scratch:
+        directory = pathlib.Path(scratch) / name
+        # A name validate.py would refuse is not fetched; check_project() reports it without reading the directory.
+        if validate.NAME.fullmatch(name) and not fetch_project(gh, repo, pull["head"]["sha"], name, directory):
+            return (f"{MARKER}\n### Enrollment triage: {code('projects/' + name)}\n\n"
+                    "This pull request removes the project's directory: a withdrawal, nothing to triage.\n")
+        return comment(gh, repo, name, directory, pull["user"]["login"], pull.get("author_association") or "",
+                       pull.get("body") or "", paths, pull["changed_files"])
+
+
+def triage_local(gh: GitHub, repo: str, directory: pathlib.Path, login: str, body: str) -> str:
+    """Return the comment that a pull request adding `directory` as projects/<its name>/ would get, from a fork, as
+    opened by `login` with the description `body`."""
+    name = directory.name
+    paths = [f"projects/{name}/{path.name}" for path in sorted(directory.glob("*"))]
+    return comment(gh, repo, name, directory, login, "NONE", body, paths, len(paths))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--repo", required=True, help="the repository the pull request is in, as owner/name")
-    parser.add_argument("--pr", required=True, type=int, help="the pull request's number")
+    which = parser.add_mutually_exclusive_group(required=True)
+    which.add_argument("--pr", type=int, help="the pull request's number")
+    which.add_argument("--local", type=pathlib.Path, help="a projects/<name> directory on this machine")
+    parser.add_argument("--login", help="with --local: the GitHub account that will open the pull request")
+    parser.add_argument("--body", type=pathlib.Path, help="with --local: a file with the pull request's description")
     options = parser.parse_args()
-    sys.stdout.write(triage(GitHub(os.environ.get("GITHUB_TOKEN")), options.repo, options.pr))
+    gh = GitHub(os.environ.get("GITHUB_TOKEN"))
+    if options.pr is not None:
+        if options.login or options.body:
+            parser.error("--login and --body go with --local")
+        sys.stdout.write(triage(gh, options.repo, options.pr))
+        return 0
+    if not options.login:
+        parser.error("--local needs --login, the account that will open the pull request")
+    template = pathlib.Path(__file__).resolve().parents[1] / "PULL_REQUEST_TEMPLATE.md"
+    body = (options.body or template).read_text(encoding="utf-8")
+    sys.stdout.write(triage_local(gh, options.repo, options.local.resolve(), options.login, body))
     return 0
 
 

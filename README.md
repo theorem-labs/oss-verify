@@ -25,7 +25,7 @@ Enroll this project in OSS Verify by following the instructions here:
 https://raw.githubusercontent.com/theorem-labs/oss-verify/refs/heads/main/AGENTS.md
 ```
 
-The agent asks you what "correct" means for your code, and which findings and patches you want. Then it makes `projects/<name>/` and runs the checks. You push its branch to your fork of this repository, and you open the pull request.
+The agent asks you what "correct" means for your code, and which findings and patches you want. Then it makes `projects/<name>/` and runs the checks, on a machine that has what [Enroll a project](#enroll-a-project) lists. You push its branch to your fork of this repository, and you open the pull request.
 
 > **WARNING:** The agent runs `tools/check`. `tools/check` builds the project's `Dockerfile` with network access. Use the agent only on a project that you trust ([SECURITY.md](SECURITY.md)).
 
@@ -33,11 +33,13 @@ The agent asks you what "correct" means for your code, and which findings and pa
 
 > **WARNING:** `tools/check` builds the project's `Dockerfile` with network access. Use it only on a project that you trust ([SECURITY.md](SECURITY.md)).
 
+You need a Linux x86-64 machine with Docker, git, and Python 3 with PyYAML (on Ubuntu, `apt install python3-yaml`), and about 10 GB of free disk. The first run of `tools/check` downloads a toolchain image of about 6 GB.
+
 1. Fork this repository.
 2. Make `projects/<name>/` from [templates/](templates/): `project.yaml` ([docs/project-yaml.md](docs/project-yaml.md)), a `Dockerfile` and a `build.sh` ([docs/build-contract.md](docs/build-contract.md)).
 3. Optional: write a `patch_style.md`. Tell us which findings, reports and patches you want, and how they must look.
 4. Run `tools/validate.py projects/<name>`. Correct each problem that it shows.
-5. Run `tools/check --twice <name>`. Make sure that it builds each fuzz target, and that the second build has the same bytes.
+5. Run `tools/check --no-shell --twice <name>`. Make sure that it builds each fuzz target, and that the second build has the same bytes. Without `--no-shell`, `tools/check` opens a shell in the build image when it finishes.
 6. Open a pull request. Complete its checklist.
 
 ## After we merge

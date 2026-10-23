@@ -60,6 +60,7 @@ We check builds ported from oss-fuzz-theorems against the release's binaries, on
 | `$ARCHITECTURE`, `$FUZZING_ENGINE` | `riscv64`; `none`, the OSS-Fuzz name for a driver that runs inputs from files |
 | `$CMAKE_TOOLCHAIN_FILE` | a CMake toolchain file for this build. CMake 3.21 and later find it without help. |
 | `$AR`, `$NM`, `$RANLIB`, `$STRIP`, `$OBJCOPY` | the LLVM tools, as `riscv64-linux-musl-ar` and the other names, which are also on `PATH` |
+| `<fuzzer/FuzzedDataProvider.h>` | on the include path of `$CC` and `$CXX`, as in OSS-Fuzz |
 | `$SOURCE_DATE_EPOCH` | `1756684800`, for each tool that writes a date |
 
 `compile` runs `build.sh` with `bash -eux`, from the `WORKDIR` of the `Dockerfile`. The `build.sh` of a Go project gets the environment that OSS-Fuzz gives a Go project instead ([go/compile-go](../infra/base-builder/go/compile-go)).
@@ -109,7 +110,7 @@ The driver is compiled with no sanitizer flags in each build. The library and th
 
 ## What the Dockerfile must do
 
-Start from [templates/Dockerfile](../templates/Dockerfile). Obey these rules:
+Start from [templates/Dockerfile](../templates/Dockerfile). For a small, complete example written by hand, read [tools/tests/fixtures/example/](../tools/tests/fixtures/example/) or [projects/cjson/](../projects/cjson/). Obey these rules:
 
 1. Start with `FROM ${BASE_BUILDER}`, after `ARG BASE_BUILDER=oss-verify-base-builder`. `tools/check` gives the builder that it made.
 2. Declare `ARG REPO` and `ARG COMMIT`.
@@ -124,9 +125,13 @@ If the `Dockerfile` is in the project's repository (`dockerfile` in `project.yam
 
 ## What build.sh must do
 
-Start from [templates/build.sh](../templates/build.sh). Obey these rules:
+Start from [templates/build.sh](../templates/build.sh). The examples above have a `build.sh` of this form. Obey these rules:
 
-1. Build the library as a static library, with `$CC`, `$CXX`, `$CFLAGS` and `$CXXFLAGS`. CMake finds `$CMAKE_TOOLCHAIN_FILE` without help. Give each other build system the cross-compilers, the sysroot and static linking in its own way.
+1. Build the library as a static library, with `$CC`, `$CXX`, `$CFLAGS` and `$CXXFLAGS`. CMake finds `$CMAKE_TOOLCHAIN_FILE` without help. Give each other build system the cross-compilers, the sysroot and static linking in its own way. A header-only library has no library to build: compile each fuzz target against its headers, and link it with `$LIB_FUZZING_ENGINE` only:
+
+        $CXX $CXXFLAGS -std=c++17 -Iinclude -c "$SRC/example_fuzzer.cpp" -o "$WORK/example_fuzzer.o"
+        $CXX $CXXFLAGS "$WORK/example_fuzzer.o" -o "$OUT/example_fuzzer" $LIB_FUZZING_ENGINE
+
 2. Compile each fuzz target.
 3. Link each fuzz target into `$OUT` through `$CC` or `$CXX`, with `$LIB_FUZZING_ENGINE`:
 
@@ -168,7 +173,7 @@ The two integers are little-endian.
 * The driver writes each return value on standard output.
 * A fuzz target linked with `$LIB_FUZZING_ENGINE` ignores the allocation mask. An allocation-failure fuzz target uses it ([below](#allocation-failure-fuzz-targets)).
 
-Thus an OSS-Fuzz testcase needs six zero bytes in front of it: `00 00 00 00 00 00`.
+Thus an OSS-Fuzz testcase needs six zero bytes in front of it: `00 00 00 00 00 00`. A seed corpus holds inputs as libFuzzer takes them, without these six bytes ([project-yaml.md](project-yaml.md#seed-corpora)).
 
 ### Exit statuses
 
@@ -324,6 +329,8 @@ The exit status tells the result ([above](#exit-statuses)).
 * `rebuild`, only with `--twice`: the second build ([below](#reproducibility)).
 
 We will write the lock in the proofs repository from the manifest. The lock is the only place that records the commit. `tools/check --lock <file>` builds the commit that a lock names, and compares each binary with the lock ([below](#check-a-binary-against-a-lock)). The lock can be a manifest or an oss-fuzz-theorems `harness.yaml`.
+
+If you run `tools/check` before you commit the project directory, the manifest says `modified: true` under `oss_verifier`. Commit first if you want a manifest that names exactly the commit you built. It does not change what we pin: we write the lock from our own build of the merged directory.
 
 ## Reproducibility
 

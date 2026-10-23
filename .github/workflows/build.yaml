@@ -28,9 +28,9 @@ name: "Build"
 # replace an earlier result with a pass.
 # A failure is usually the project's, but it can be the runner's: GitHub's runner may run out of disk or time on a
 # build that works on a larger machine. A maintainer then reruns the failed job (gh run rerun <run> --failed). If it
-# fails again for the runner's reason, the maintainer builds the project with `tools/check --twice <name>` on a larger
-# machine and says so in the pull request; the check stays red until a rerun passes, so merging before then needs a
-# bypass of the ruleset that requires it.
+# fails again for the runner's reason, the maintainer builds the project with `tools/check --no-shell --twice <name>` on
+# a larger machine and says so in the pull request; the check stays red until a rerun passes, so merging before then
+# needs a bypass of the ruleset that requires it.
 #
 # pull_request_target, not pull_request, so the pull request cannot edit this workflow or tools/check:
 #   - The checkout is the base branch, never the pull request, so a project is built with the base branch's tools.
@@ -39,13 +39,9 @@ name: "Build"
 #   - Its Dockerfile runs only inside `docker build`, and its build.sh only inside `docker run --network=none`, never
 #     as a step on the runner.
 #
-# This job builds code from anyone. The toolchain images in infra/toolchains.tsv are private until OSS Verify's launch,
-# so for a pull request from a branch of this repository, and only then, the job signs in to ghcr.io with its
-# packages: read token in a Docker config of its own, pulls the one image tools/check will build FROM, then signs out
-# and deletes that config before the pull request's Dockerfile or build.sh runs. The image's contents do reach that
-# Dockerfile, which is why a pull request from a fork never gets a private image: it pulls without signing in, and its
-# build fails at the pull until the image is public. Once every toolchain image is public, remove the sign-in and
-# packages: read. Never add a secret, a cache, an artifact or a write permission available to pull-request code.
+# This job builds code from anyone. The toolchain images in infra/toolchains.tsv are public, so the job pulls the one
+# image tools/check will build FROM without signing in, for every pull request, before the pull request's Dockerfile
+# or build.sh runs. Never add a secret, a cache, an artifact or a write permission available to pull-request code.
 # Runs do not wait for a maintainer's approval. To build only on request, remove pull_request_target below.
 #
 # To build a pull request by number:
@@ -82,7 +78,6 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-      packages: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with:
@@ -111,30 +106,16 @@ jobs:
         if: steps.project.outputs.name != ''
         env:
           NAME: ${{ steps.project.outputs.name }}
-          # Only a branch of this repository gets the token (see the top of this file).
-          GH_TOKEN: ${{ steps.project.outputs.same_repository == 'true' && github.token || '' }}
         run: |
           set -euo pipefail
-          # The image is chosen before anything signs in. Until the token is printed again, the runner reads none of
-          # tools/check's output about the project as a workflow command.
+          # Until the token is printed again, the runner reads none of tools/check's output about the project as a
+          # workflow command.
           resume="$(openssl rand -hex 16)"
           echo "::stop-commands::$resume"
           image=$(python3 tools/check --print-toolchain "projects/$NAME" < /dev/null)
           echo "::$resume::"
           [[ $image == *@sha256:* ]] || { echo "::error::Unpinned toolchain image: $image"; exit 1; }
-          if [ -z "$GH_TOKEN" ]; then
-            echo "A pull request from a fork: pulling $image without signing in. While the image is private, this fails."
-            docker pull "$image"
-            exit 0
-          fi
-          export DOCKER_CONFIG="$RUNNER_TEMP/oss-verify-ghcr"
-          mkdir -p "$DOCKER_CONFIG"
-          trap 'docker --config "$DOCKER_CONFIG" logout ghcr.io >/dev/null 2>&1 || true; rm -rf "$DOCKER_CONFIG"' EXIT
-          echo "$GH_TOKEN" | docker --config "$DOCKER_CONFIG" login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          docker --config "$DOCKER_CONFIG" pull "$image"
-          docker --config "$DOCKER_CONFIG" logout ghcr.io
-          rm -rf "$DOCKER_CONFIG"
-          trap - EXIT
+          docker pull "$image"
 
       - name: Build the project twice with tools/check
         if: steps.project.outputs.name != ''

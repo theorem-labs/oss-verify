@@ -8,7 +8,8 @@
 Build a project's fuzz targets the way we do, collect the binaries, and write the build manifest.
 
     tools/check <name>                  build projects/<name>: every build its project.yaml asks for
-    tools/check --build asan <name>     only some builds (repeat --build; plain, ubsan, asan, asan-ubsan)
+    tools/check --build asan <name>     only some builds (repeat --build; plain, ubsan, asan, asan-ubsan); out/
+                                        then holds only these builds' binaries
     tools/check --twice <name>          then build it all again from scratch, and compare every byte
     tools/check --lock <file> <name>    compare with a lock: a manifest from an earlier check, or a harness.yaml
                                         (repeat --lock to compare with several, such as one harness.yaml each)
@@ -38,7 +39,8 @@ It runs these steps:
        size and SHA-256 of every binary the second build made, and result: identical or differs.
     9. Open a shell in the project image with no network and out/ at /out, unless --no-shell.
 
-Everything is kept in ~/.cache/oss-verify-check/<name>, or in --dir if given.
+Everything is kept in ~/.cache/oss-verify-check/<name>, or in --dir if given. Each run replaces out/ there, so the
+binaries of an earlier run's other builds are gone after a run with --build.
 
 Security note: the project's Dockerfile is built with network access, as `docker build` would. Check a project from
 someone you don't trust on a machine with nothing to lose.
@@ -46,7 +48,7 @@ someone you don't trust on a machine with nothing to lose.
 Exit codes: 0 if the project builds (and, with --twice or --lock, every byte matches); 1 if it does not build; 2 if
 projects/<name>/ breaks the enrollment rules; 3 if it builds but the bytes differ (--twice or --lock).
 
-Requires git, Docker (with the toolchain image available) and PyYAML (pip install pyyaml).
+Requires git, Docker (with the toolchain image available) and PyYAML (on Ubuntu, apt install python3-yaml).
 """
 import argparse
 import contextlib
