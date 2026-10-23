@@ -110,7 +110,7 @@ The driver is compiled with no sanitizer flags in each build. The library and th
 
 ## What the Dockerfile must do
 
-Start from [templates/Dockerfile](../templates/Dockerfile). For a small, complete example written by hand, read [tools/tests/fixtures/example/](../tools/tests/fixtures/example/) or [projects/cjson/](../projects/cjson/). Obey these rules:
+Start from [templates/Dockerfile](../templates/Dockerfile). Two builds written by hand are small examples. [projects/cjson/](../projects/cjson/) builds cJSON's own fuzz target with CMake; its `build.sh` also copies the checkout to the path where the oss-fuzz-theorems release built it, which only a build that must match the release's bytes needs. [tools/tests/fixtures/example/](../tools/tests/fixtures/example/) is a test project, whose `Dockerfile` takes the source from the build context, as a `Dockerfile` in your repository does, and whose `fuzz/` subdirectory a project directory cannot have. Obey these rules:
 
 1. Start with `FROM ${BASE_BUILDER}`, after `ARG BASE_BUILDER=oss-verify-base-builder`. `tools/check` gives the builder that it made.
 2. Declare `ARG REPO` and `ARG COMMIT`.
@@ -125,7 +125,7 @@ If the `Dockerfile` is in the project's repository (`dockerfile` in `project.yam
 
 ## What build.sh must do
 
-Start from [templates/build.sh](../templates/build.sh). The examples above have a `build.sh` of this form. Obey these rules:
+Start from [templates/build.sh](../templates/build.sh). Obey these rules:
 
 1. Build the library as a static library, with `$CC`, `$CXX`, `$CFLAGS` and `$CXXFLAGS`. CMake finds `$CMAKE_TOOLCHAIN_FILE` without help. Give each other build system the cross-compilers, the sysroot and static linking in its own way. A header-only library has no library to build: compile each fuzz target against its headers, and link it with `$LIB_FUZZING_ENGINE` only:
 

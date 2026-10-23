@@ -166,12 +166,13 @@ We write the lock from the manifest of `tools/check` ([build-contract.md](build-
 
 ## Where the claims come from
 
-Each public claim rests on three pinned inputs:
+Each public claim rests on three pinned inputs, and on a fourth when a proof needed a patch:
 
 * the commit of the project's source;
 * the commit of this repository that holds the build files;
-* the digest of the toolchain image.
+* the digest of the toolchain image;
+* for a proof that needed a patch to the project's code, the patch, which we publish with the proof ([above](#publishing)).
 
-We pin only binaries that two clean builds reproduce ([build-contract.md](build-contract.md#reproducibility)). A published proof uses the released process model, these build files, and the project's source as it is or with a patch that fixes a public finding ([above](#publishing)). The build files in the project directory contain build patches only, which change how the project builds and fix no bug ([project-yaml.md](project-yaml.md#build-patches)).
+We pin only binaries that two clean builds reproduce ([build-contract.md](build-contract.md#reproducibility)). A published proof uses the released process model, these build files, and the project's source as it is, or with the published patch. A patch that fixes a bug is never in the project directory: the build files there contain build patches only, which change how the project builds and fix no bug ([project-yaml.md](project-yaml.md#build-patches)).
 
-To check a binary yourself, follow [build-contract.md](build-contract.md#check-a-binary-against-a-lock). It tells how to rebuild the binary and compare it with the lock.
+To check a binary yourself, follow [build-contract.md](build-contract.md#check-a-binary-against-a-lock). It tells how to rebuild the binary and compare it with the lock. `tools/check` builds the project's source as it is, so it does not rebuild a binary that needed a patch to the project's code.

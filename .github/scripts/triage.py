@@ -7,8 +7,8 @@
 # package-rank row.
 """Write the triage comment for an enrollment pull request, as Markdown on standard output.
 
-    GITHUB_TOKEN=... .github/scripts/triage.py --repo theorem-labs/oss-verify --pr 123
-    .github/scripts/triage.py --repo theorem-labs/oss-verify --local projects/<name> --login <you> [--body <file>]
+    GITHUB_TOKEN=... python3 .github/scripts/triage.py --repo theorem-labs/oss-verify --pr 123
+    python3 .github/scripts/triage.py --repo theorem-labs/oss-verify --local projects/<name> --login <you> [--body <file>]
 
 Run by .github/workflows/triage.yaml, or by hand to see what it would say. Prints nothing when the pull request
 does not touch projects/. With --local, it writes the comment for a projects/<name>/ on this machine before any pull
