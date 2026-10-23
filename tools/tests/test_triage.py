@@ -3,6 +3,7 @@
 """Tests for .github/scripts/triage.py, offline, with a fake GitHub API:  python3 -m pytest tools/tests"""
 import importlib.util
 import pathlib
+import re
 import sys
 import tempfile
 import unittest
@@ -258,9 +259,17 @@ class Comment(unittest.TestCase):
         self.assertIn("| ⚠️ | `tools/validate.py` | passes, with warnings", comment)
         self.assertIn("not a github.com repository", comment)
         self.assertIn(f"https://github.com/{REPO}#enroll-a-project", comment)
-        # The anchor is the README heading GitHub renders it from.
-        headings = [line[3:].strip() for line in (ROOT / "README.md").read_text().splitlines() if line.startswith("## ")]
-        self.assertIn("enroll-a-project", [h.lower().replace(" ", "-") for h in headings])
+
+    def test_the_comment_links_a_readme_heading(self):
+        comment = triage.triage(self.pull(SEEDED, "NONE"), REPO, 7)
+        anchor = re.search(rf"https://github\.com/{re.escape(REPO)}#([a-z0-9-]+)", comment)[1]
+        headings, fenced = [], False
+        for line in (ROOT / "README.md").read_text(encoding="utf-8").splitlines():
+            if line.startswith("```"):
+                fenced = not fenced
+            elif not fenced and line.startswith("## "):
+                headings.append(line[3:].strip().lower().replace(" ", "-"))
+        self.assertIn(anchor, headings)
 
     def test_an_enrolled_project(self):
         comment = triage.triage(self.pull(ENROLLED, "NONE"), REPO, 7)
