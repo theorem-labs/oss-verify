@@ -51,7 +51,7 @@ import validate
 API = "https://api.github.com"
 RAW = "application/vnd.github.raw"
 MAX_RATE_LIMIT_WAIT = 65  # seconds
-# A larger answer is refused. A file we only search (a license, a security policy) is read up to the smaller limit.
+# A larger answer is refused. A file asked for as text is read up to the smaller limit, unless all of it is asked for.
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 MAX_TEXT_BYTES = 256 * 1024
 # The workflow finds the comment to update by this first line.
@@ -77,16 +77,13 @@ LOW_CRITICALITY = 0.4
 
 GITHUB_REPO = re.compile(r"https://(?:www\.)?github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?(?:#(.+))?")
 LOGIN = re.compile(r"[A-Za-z0-9-]+")
-# These two run on text anyone can write (a description, a SECURITY.md), so nothing in them is unbounded or
-# crosses a line: a long run of one character must not make them slow.
+# This runs on text anyone can write (a pull request's description), so it does not cross a line: a long run of one
+# character must not make it slow.
 CHECKBOX = re.compile(r"^[ \t]*[-*][ \t]+\[([ xX])\][ \t]+(.+)$", re.MULTILINE)
-EMAIL = re.compile(r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){1,8}")
 # How many OSS-Fuzz projects with a name like the repository's are read to see whether one is for it.
 OSS_FUZZ_CANDIDATES = 5
 # A GitHub repository as OSS-Fuzz's project.yaml files name it in main_repo: any scheme, often with .git.
 MAIN_REPO = re.compile(r"(?:\w+://|git@)?(?:www\.)?github\.com[/:]([^/\s]+/[^/\s#]+?)(?:\.git)?/?")
-# Where GitHub looks for a repository's security policy.
-SECURITY_POLICY_PATHS = ("SECURITY.md", ".github/SECURITY.md", "docs/SECURITY.md")
 # Where a project keeps its OSS Verify files in its own repository, as the README suggests.
 IN_REPO_DIRECTORY = ".oss-verify"
 
@@ -464,14 +461,14 @@ def checklist_row(body: str) -> tuple[str, str]:
 
 def seeded_contact_row(config: dict, association: str) -> tuple[str, str]:
     """primary_contact: n/a is how a project we seeded says that no maintainer has adopted it yet. From anyone else,
-    an enrollment needs the project's security contact."""
+    an enrollment names the address that gets findings."""
     if association in ASSOCIATIONS:
         return INFO, ("`n/a`: a project seeded by this repository's maintainers, not enrolled by the project's own. It is "
                       "published only while it has no findings, and a finding for it is sent to no one automatically "
                       "(docs/what-gets-proven.md, Findings)")
     return WARN, (
         "`primary_contact` is `n/a`, which only a project seeded by this repository's maintainers may say: an "
-        "enrollment names the project's security contact"
+        "enrollment names the address that gets findings"
     )
 
 
@@ -595,40 +592,6 @@ def maintainer_row(gh: GitHub, slug: str, meta: dict, login: str) -> tuple[str, 
     return (WARN if roles or recent else FAIL), evidence
 
 
-def security_policy(gh: GitHub, slug: str, owner: str) -> tuple[str, str] | None:
-    """Find the security policy that applies to the repository: its own, or else the one its owner keeps for all
-    their repositories in <owner>/.github. Return the policy's repository and its text, or None."""
-    for repo in (slug, f"{quote(owner, safe='')}/.github"):
-        for path in SECURITY_POLICY_PATHS:
-            text = gh.text(f"repos/{repo}/contents/{path}")
-            if text is not None:
-                return repo, text
-    return None
-
-
-def contact_row(gh: GitHub, slug: str, meta: dict, config: dict) -> tuple[str, str]:
-    """Does the repository's own security policy name the address that reports would go to?"""
-    contact = config.get("primary_contact")
-    if not isinstance(contact, str):
-        return WARN, "project.yaml names no contact"
-    if contact == validate.NO_CONTACT:
-        return INFO, "project.yaml names no contact (`n/a`), so there is nothing to check"
-    policy = security_policy(gh, slug, meta["owner"]["login"])
-    if policy is None:
-        return INFO, f"no `SECURITY.md` to check {code(contact)} against"
-    repo, text = policy
-    where = "`SECURITY.md`" if repo == slug else f"`SECURITY.md` of {code(repo)}"
-    # Whole addresses are compared, so that security@example.org is not found inside another address.
-    given = sorted({address.lower() for address in EMAIL.findall(text)})
-    if contact.lower() in given:
-        return OK, f"{code(contact)} is in {where}"
-    # Many policies ask for reports through GitHub and give no address at all; that is not a mismatch.
-    if not given:
-        return INFO, f"{where} gives no email address to check {code(contact)} against"
-    shown = ", ".join(code(address) for address in given[:3]) + (" …" if len(given) > 3 else "")
-    return WARN, f"{code(contact)} is not in {where}, which gives {shown}"
-
-
 def squash(name: str) -> str:
     """A name reduced to its letters and digits, so that PcapPlusPlus and pcap-plus-plus compare equal."""
     return re.sub(r"[^a-z0-9]", "", name.lower())
@@ -655,12 +618,12 @@ def oss_fuzz_candidates(slug: str, names: list[str]) -> list[str]:
     return [name for _, _, name in ranked[:OSS_FUZZ_CANDIDATES]]
 
 
-def oss_fuzz_projects(gh: GitHub, slug: str) -> tuple[dict[str, dict], dict[str, object]]:
-    """Find the OSS-Fuzz projects that fuzz this repository: each one's name and project.yaml. Also return the
-    main_repo of any project named exactly after the repository or its owner that is for some other repository."""
+def oss_fuzz_projects(gh: GitHub, slug: str) -> tuple[list[str], dict[str, object]]:
+    """Find the names of the OSS-Fuzz projects that fuzz this repository. Also return the main_repo of any project
+    named exactly after the repository or its owner that is for some other repository."""
     listing = gh.get("repos/google/oss-fuzz/git/trees/HEAD:projects")["tree"]
     owner, name = (squash(part) for part in slug.split("/"))
-    found, namesakes = {}, {}
+    found, namesakes = [], {}
     for candidate in oss_fuzz_candidates(slug, [entry["path"] for entry in listing if entry["type"] == "tree"]):
         text = gh.text(f"repos/google/oss-fuzz/contents/projects/{quote(candidate, safe='')}/project.yaml")
         try:
@@ -671,39 +634,21 @@ def oss_fuzz_projects(gh: GitHub, slug: str) -> tuple[dict[str, dict], dict[str,
         main_repo = project.get("main_repo") if isinstance(project, dict) else None
         match = MAIN_REPO.fullmatch(main_repo.strip()) if isinstance(main_repo, str) else None
         if match and match.group(1).lower() == slug.lower():
-            found[candidate] = project
+            found.append(candidate)
         elif isinstance(project, dict) and squash(candidate) in (name, owner):
             namesakes[candidate] = main_repo
     return found, namesakes
 
 
-def oss_fuzz_row(gh: GitHub, slug: str, config: dict) -> tuple[str, str]:
-    """Is the repository in OSS-Fuzz, whose fuzz targets we verify, and does OSS-Fuzz report to the same address?"""
+def oss_fuzz_row(gh: GitHub, slug: str) -> tuple[str, str]:
+    """Is the repository in OSS-Fuzz, whose fuzz targets we verify?"""
     projects, namesakes = oss_fuzz_projects(gh, slug)
     if not projects and namesakes:
         others = "; ".join(f"{code(name)} there is for {code(main_repo)}" for name, main_repo in namesakes.items())
         return INFO, f"no OSS-Fuzz project is for this repository, but {others}"
     if not projects:
         return INFO, "not found in OSS-Fuzz"
-    result = f"in OSS-Fuzz as {', '.join(code(name) for name in projects)}"
-
-    contact = config.get("primary_contact")
-    if not isinstance(contact, str) or contact == validate.NO_CONTACT:
-        return OK, result
-    primary, ccs = set(), set()
-    for project in projects.values():
-        if isinstance(project.get("primary_contact"), str):
-            primary.add(project["primary_contact"].lower())
-        for key in ("auto_ccs", "vendor_ccs"):
-            listed = project.get(key)
-            listed = [listed] if isinstance(listed, str) else listed if isinstance(listed, list) else []
-            ccs.update(address.lower() for address in listed if isinstance(address, str))
-    if contact.lower() in primary:
-        return OK, f"{result}, with the same primary contact"
-    theirs = ", ".join(code(address) for address in sorted(primary)) or "not given"
-    if contact.lower() in ccs:
-        return OK, f"{result}, which CCs {code(contact)} (its primary contact is {theirs})"
-    return WARN, f"{result}, whose contacts do not include {code(contact)} (its primary contact is {theirs})"
+    return OK, f"in OSS-Fuzz as {', '.join(code(name) for name in projects)}"
 
 
 def verifier_files_row(gh: GitHub, slug: str, ref: str | None, config: dict, beside: set[str]) -> tuple[str, str]:
@@ -879,8 +824,7 @@ def repository_rows(gh: GitHub, config: dict, beside: set[str], login: str) -> t
         row("Criticality score", criticality_row, gh, slug, meta),
         row("License", license_row, gh, slug, meta),
         row("Opened by an active maintainer", maintainer_row, gh, slug, meta, login),
-        row("Contact in `SECURITY.md`", contact_row, gh, slug, meta, config),
-        row("OSS-Fuzz", oss_fuzz_row, gh, slug, config),
+        row("OSS-Fuzz", oss_fuzz_row, gh, slug),
         row(f"`{IN_REPO_DIRECTORY}/` in the repository", verifier_files_row, gh, slug, ref, config, beside),
     ]
 

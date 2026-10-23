@@ -29,7 +29,6 @@ A finding is a failure that we find in an enrolled project while we work on a pr
 ## Who receives reports
 
 * Only a core maintainer can enroll a project. A person reviews each enrollment before we merge it.
-* The triage comment shows whether the project's security policy, and its OSS-Fuzz project, give the address in `primary_contact`.
 * We send findings only to `primary_contact` and `auto_ccs`. If you set `pgp`, we encrypt each report to your key and send it to `primary_contact` only.
 * We send the findings of a seeded project to no one automatically.
 * A statement is about the binaries that we build from your repository at a pinned commit, with the fuzz targets in `fuzz_targets`.

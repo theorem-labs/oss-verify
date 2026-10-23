@@ -8,7 +8,6 @@ Before I opened this pull request, I made sure of each point:
 - [ ] This pull request changes only `projects/<name>/`, for one project, and `tools/validate.py` finds no problem in it.
 - [ ] `tools/check --no-shell --twice <name>` builds each fuzz target that I want verified, and the second build has the same bytes.
 - [ ] Each property that a fuzz target checks stops the fuzz target when it is false (in C and C++, `abort()`, not `assert()`), an input in its seed corpus runs it, and its comment records a one-line change that makes it fail (step 3 of `.claude/skills/add-project/SKILL.md`).
-- [ ] `primary_contact` is the email address of the project's security contact.
 - [ ] A `Dockerfile` and a `build.sh` are next to `project.yaml`. Or they are in one directory of the project's repository, and `dockerfile:` gives the path of the `Dockerfile`.
 - [ ] `patch_style.md` (optional) tells which findings, reports and patches I want, and how they must look. It is next to `project.yaml`, or in the project's repository at the path that `patch_style:` gives.
 

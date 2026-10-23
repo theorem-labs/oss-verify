@@ -12,7 +12,7 @@ We accept an established open-source project ([theorem.dev/oss-verify](https://t
 3. The project has a public git repository, which we get anonymously over `https`. One project directory names one repository.
 4. The project has at least one fuzz target: its own, its OSS-Fuzz fuzz targets, or new ones.
 5. Our builder can build the project. The [language table](docs/project-yaml.md#language) tells which languages it builds today.
-6. The project has a security contact. We send each finding to this address.
+6. The enrollment names, in `primary_contact`, the one address that gets findings.
 
 We seeded some projects already, and a maintainer can adopt one ([docs/project-yaml.md](docs/project-yaml.md#seeded-projects)).
 

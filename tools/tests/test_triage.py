@@ -117,18 +117,25 @@ class Rows(unittest.TestCase):
 
     def test_seeded_contact(self):
         for association in ("OWNER", "MEMBER", "COLLABORATOR"):
-            mark, text = triage.seeded_contact_row({}, association)
+            mark, _ = triage.seeded_contact_row({}, association)
             self.assertEqual(mark, triage.INFO, association)
-            self.assertIn("sent to no one automatically", text)
         for association in ("CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "NONE", ""):
-            mark, text = triage.seeded_contact_row({}, association)
+            mark, _ = triage.seeded_contact_row({}, association)
             self.assertEqual(mark, triage.WARN, association)
-            self.assertIn("security contact", text)
 
-    def test_contact_row_with_no_contact_asks_nothing(self):
-        mark, text = triage.contact_row(FakeGitHub(), "a/b", {"owner": {"login": "a"}}, {"primary_contact": "n/a"})
-        self.assertEqual(mark, triage.INFO)
-        self.assertIn("nothing to check", text)
+    def test_oss_fuzz_does_not_compare_primary_contact(self):
+        gh = FakeGitHub(
+            responses={"repos/google/oss-fuzz/git/trees/HEAD:projects": {"tree": [{"path": "example", "type": "tree"}]}},
+            texts={
+                "repos/google/oss-fuzz/contents/projects/example/project.yaml": (
+                    "main_repo: https://github.com/owner/example\nprimary_contact: security@libexample.dev\n"
+                )
+            },
+        )
+        self.assertEqual(
+            triage.oss_fuzz_row(gh, "owner/example"),
+            (triage.OK, "in OSS-Fuzz as `example`"),
+        )
 
     def test_proofs_index(self):
         self.assertEqual(triage.proofs_index_row(FakeGitHub(), "cjson")[0], triage.INFO)

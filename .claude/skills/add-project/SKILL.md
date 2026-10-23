@@ -155,7 +155,7 @@ If a dependency needs a patch to build, make it a build patch in `projects/<name
 Start from `templates/project.yaml` (`docs/project-yaml.md`). Fill in these fields:
 
 - `repo`, with `#<tag or branch>`;
-- `primary_contact`, the security contact, which is public;
+- `primary_contact`, the address that gets findings, which is public;
 - `language`, from the list in `docs/project-yaml.md`;
 - `fuzz_targets`, each fuzz target that you wrote or kept;
 - `patch_style`, if `patch_style.md` is in the project's repository;

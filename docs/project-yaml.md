@@ -203,7 +203,7 @@ We seeded the projects of OSS-Fuzz, at its commit `bd2ce21991a94a362b92fb1bf25f8
 A core maintainer can adopt a seeded project:
 
 1. Copy its `projects/<name>/`, or its `tools/seeds/<name>/`, to `projects/<name>/` in a branch of your fork.
-2. Set `primary_contact` to the project's security contact.
+2. Set `primary_contact` to the address that gets findings.
 3. Remove the two comment lines.
 4. Do the steps in the [README](../README.md#enroll-a-project) from step 3.
 
