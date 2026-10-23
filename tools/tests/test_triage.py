@@ -257,7 +257,10 @@ class Comment(unittest.TestCase):
         self.assertIn("| ✅ | Pull request scope |", comment)
         self.assertIn("| ⚠️ | `tools/validate.py` | passes, with warnings", comment)
         self.assertIn("not a github.com repository", comment)
-        self.assertIn(f"https://github.com/{REPO}#how-to-sign-up", comment)
+        self.assertIn(f"https://github.com/{REPO}#enroll-a-project", comment)
+        # The anchor is the README heading GitHub renders it from.
+        headings = [line[3:].strip() for line in (ROOT / "README.md").read_text().splitlines() if line.startswith("## ")]
+        self.assertIn("enroll-a-project", [h.lower().replace(" ", "-") for h in headings])
 
     def test_an_enrolled_project(self):
         comment = triage.triage(self.pull(ENROLLED, "NONE"), REPO, 7)

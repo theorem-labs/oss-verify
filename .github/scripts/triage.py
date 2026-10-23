@@ -913,7 +913,7 @@ def triage(gh: GitHub, repo: str, number: int) -> str:
         f"{heading}Repository: {described} · opened by {code(login)}\n\n"
         f"| | Check | Result |\n|:-:|---|---|\n{table}\n\n"
         f"<sub>Automated, from public data, to help reviewers. Enrollment is decided case by case "
-        f"([how to sign up](https://github.com/{repo}#how-to-sign-up)). If you think we got something wrong, please "
+        f"([how to enroll a project](https://github.com/{repo}#enroll-a-project)). If you think we got something wrong, please "
         f"tell us in a reply.</sub>\n"
     )
 
