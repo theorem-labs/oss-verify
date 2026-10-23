@@ -1,0 +1,10 @@
+# canvas-mcp: a Model Context Protocol server for Canvas LMS. Enrolled by its maintainer.
+# docs/project-yaml.md describes each field.
+repo: https://github.com/vishalsachdev/canvas-mcp#main
+primary_contact: vishal@illinois.edu
+homepage: https://github.com/vishalsachdev/canvas-mcp
+language: python
+sanitizers: [address, undefined]
+fuzz_targets:
+  - fuzz_html
+publish: after_fixes

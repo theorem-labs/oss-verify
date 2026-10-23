@@ -1,0 +1,8 @@
+# Copyright 2026 Vishal Sachdev
+# SPDX-License-Identifier: Apache-2.0
+# The source trees of the canvas-mcp build, in the layout of a ported Python build (tools/seeds/mdurl/sources).
+# No pydist line: build.sh installs nothing with pip (see its cm_stage).
+# kind	path	arguments: see lay-out-sources
+tree	ext/canvas-mcp-fuzz_html/src	upstream/canvas-mcp
+copy	targets/canvas-mcp-fuzz_html/fuzz_html.py	fuzz_html.py
+corpus	targets/canvas-mcp-fuzz_html/seeds	fuzz_html_seed_corpus.zip
