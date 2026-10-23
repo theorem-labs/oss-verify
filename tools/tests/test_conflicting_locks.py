@@ -15,6 +15,7 @@ TOOLS = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS))
 import check_build
 import manifest
+from test_manifest import PT_LOAD, elf  # noqa: E402
 
 LOADER = importlib.machinery.SourceFileLoader("check_conflicting_locks", str(TOOLS / "check"))
 SPEC = importlib.util.spec_from_loader("check_conflicting_locks", LOADER)
@@ -22,6 +23,7 @@ CHECK = importlib.util.module_from_spec(SPEC)
 LOADER.exec_module(CHECK)
 COMMIT = "a" * 40
 TOOLCHAIN = "example.invalid/toolchain@sha256:" + "0" * 64
+STATIC = {"text_bytes": 1, "static": True}
 
 
 @pytest.fixture
@@ -49,20 +51,21 @@ def lock_check(tmp_path):
         manifest.write_manifest(path, manifest.manifest(
             project="demo", repo="https://example.invalid/demo", ref=COMMIT, commit=COMMIT,
             oss_verify=None, builder={"toolchain": TOOLCHAIN}, sources={}, builds=["plain"],
-            targets=["fuzzer"], entries={"fuzzer": {"plain": entry(artifact)}}))
+            targets=["fuzzer"], entries={"fuzzer": {"plain": entry(artifact)}}, layouts={"fuzzer": {"plain": STATIC}}))
         locks[name] = path
     duplicate = tmp_path / "duplicate.yaml"
     duplicate_data = manifest.manifest(
         project="demo", repo="https://example.invalid/demo", ref=COMMIT, commit=COMMIT,
         oss_verify=None, builder={"toolchain": TOOLCHAIN}, sources={}, builds=["plain"],
-        targets=["fuzzer"], entries={"fuzzer": {"plain": {**entry(produced), "file": "renamed.plain"}}})
+        targets=["fuzzer"], entries={"fuzzer": {"plain": {**entry(produced), "file": "renamed.plain"}}},
+        layouts={"fuzzer": {"plain": STATIC}})
     manifest.write_manifest(duplicate, duplicate_data)
     locks["duplicate"] = duplicate
     other = tmp_path / "other.yaml"
     manifest.write_manifest(other, manifest.manifest(
         project="demo", repo="https://example.invalid/demo", ref=COMMIT, commit=COMMIT,
         oss_verify=None, builder={"toolchain": TOOLCHAIN}, sources={}, builds=["plain"],
-        targets=["other"], entries={"other": {"plain": entry(produced)}}))
+        targets=["other"], entries={"other": {"plain": entry(produced)}}, layouts={"other": {"plain": STATIC}}))
     locks["other"] = other
 
     def run(order, include_other=False):
@@ -72,8 +75,17 @@ def lock_check(tmp_path):
         argv.append(str(project))
         output = io.StringIO()
         outputs = {**fresh, **({"other": {"plain": entry(produced)}} if include_other else {})}
+
+        def build_all(*args, **kwargs):
+            for target, builds in outputs.items():
+                for pin in builds.values():
+                    path = tmp_path / "work" / "out" / target / pin["file"]
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(elf(symtab=False, sections=[(".text", 1)], segments=[PT_LOAD]))
+            return "builder", "project", list(outputs), outputs
+
         with mock.patch.object(sys, "argv", argv), \
-                mock.patch.object(CHECK, "build_all", return_value=("builder", "project", list(outputs), outputs)) as build, \
+                mock.patch.object(CHECK, "build_all", side_effect=build_all) as build, \
                 mock.patch.object(check_build, "image_id", return_value="sha256:image"), \
                 mock.patch.object(check_build, "sources", return_value={}), \
                 mock.patch.object(check_build, "oss_verify_state", return_value=None), \

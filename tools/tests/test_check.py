@@ -17,6 +17,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import check_build  # noqa: E402
 import manifest  # noqa: E402
 import validate  # noqa: E402
+from test_manifest import PT_DYNAMIC, PT_INTERP, PT_LOAD, elf  # noqa: E402
 
 TOOLS = pathlib.Path(__file__).resolve().parents[1]
 LOADER = importlib.machinery.SourceFileLoader("check_tool", str(TOOLS / "check"))
@@ -36,6 +37,17 @@ def entries(sha256s):
 
 
 FIRST = entries(["1" * 64, "2" * 64, "3" * 64, "4" * 64])
+
+
+def binaries(out, collected, segments=(PT_LOAD,), data=None):
+    """Write a published binary for each of collect()'s entries in `out`, as collect() does: `data`, or a small ELF
+    file with these program header types."""
+    data = elf(symtab=False, sections=[(".text", 1234)], segments=segments) if data is None else data
+    for target, builds in collected.items():
+        for entry in builds.values():
+            path = pathlib.Path(out) / target / entry["file"]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
 
 
 class Rebuild(unittest.TestCase):
@@ -74,9 +86,8 @@ class Rebuild(unittest.TestCase):
                                        "other_fuzzer.plain: in this build, not in the lock"])
 
 
-class Twice(unittest.TestCase):
-    """tools/check --twice writes the rebuild block after its comparison, identical or not, and exits 3 if the builds
-    differ."""
+class Project(unittest.TestCase):
+    """A project to give tools/check, whose builds are replaced."""
 
     def setUp(self):
         self.scratch = tempfile.TemporaryDirectory()
@@ -90,16 +101,9 @@ class Twice(unittest.TestCase):
         (self.project / "build.sh").write_text("#!/bin/bash\n")
         self.work = root / "work"
 
-    def check(self, second):
-        calls = []
-
-        def build_all(*args, **kwargs):
-            calls.append(yaml.safe_load((self.work / "manifest.yaml").read_text()) if calls else None)
-            if len(calls) == 1:
-                return "builder", "project", ["demo_fuzzer"], FIRST
-            return "builder-twice", "project-twice", ["demo_fuzzer"], second
-
-        argv = ["tools/check", "--twice", "--no-shell", "--toolchain", TOOLCHAIN, "--dir", str(self.work),
+    def main(self, options, build_all):
+        """Run tools/check with these options and build_all in place of the builds: (exit code, output, errors)."""
+        argv = ["tools/check", "--no-shell", "--toolchain", TOOLCHAIN, "--dir", str(self.work), *options,
                 str(self.project)]
         with contextlib.ExitStack() as stack:
             stack.enter_context(mock.patch.object(sys, "argv", argv))
@@ -108,8 +112,28 @@ class Twice(unittest.TestCase):
             stack.enter_context(mock.patch.object(check_build, "image_id", lambda tag: f"sha256:{tag}"))
             stack.enter_context(mock.patch.object(check_build, "sources", lambda tag, *, labels: {}))
             stack.enter_context(mock.patch.object(check_build, "oss_verify_state", lambda job: None))
-            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            output = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            errors = stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
             code = check_tool.main()
+        return code, output.getvalue(), errors.getvalue()
+
+
+class Twice(Project):
+    """tools/check --twice writes the rebuild block after its comparison, identical or not, and exits 3 if the builds
+    differ."""
+
+    def check(self, second):
+        calls = []
+
+        def build_all(*args, **kwargs):
+            calls.append(yaml.safe_load((self.work / "manifest.yaml").read_text()) if calls else None)
+            if len(calls) == 1:
+                binaries(self.work / "out", FIRST)
+                return "builder", "project", ["demo_fuzzer"], FIRST
+            binaries(self.work / "twice" / "out", second)
+            return "builder-twice", "project-twice", ["demo_fuzzer"], second
+
+        code, _, _ = self.main(["--twice"], build_all)
         # While the second build ran, the manifest had no rebuild block yet.
         self.assertEqual(len(calls), 2)
         self.assertNotIn("rebuild", calls[1])
@@ -148,6 +172,60 @@ class Twice(unittest.TestCase):
         self.assertEqual(data["rebuild"]["result"], "differs")
         self.assertEqual(data["rebuild"]["targets"]["demo_fuzzer"]["builds"]["ubsan"]["sha256"], "e" * 64)
         self.assertEqual(data["targets"]["demo_fuzzer"]["builds"]["ubsan"]["sha256"], "2" * 64)
+
+
+class Binaries(Project):
+    """tools/check lists each binary's .text size and linkage, writes them as a Markdown table with --summary, records
+    them in the manifest, and refuses a binary that is not statically linked."""
+
+    def check(self, segments, published=None):
+        summary = self.work.parent / "summary.md"
+
+        def build_all(*args, **kwargs):
+            binaries(self.work / "out", FIRST, segments, published)
+            return "builder", "project", ["demo_fuzzer"], FIRST
+
+        code, output, errors = self.main(["--summary", str(summary)], build_all)
+        rows = [line.split("|")[1:-1] for line in summary.read_text().splitlines()[2:]]
+        data = yaml.safe_load((self.work / "manifest.yaml").read_text())
+        return code, output, errors, [[cell.strip() for cell in row] for row in rows], data
+
+    def test_a_static_binary(self):
+        code, output, errors, rows, data = self.check([PT_LOAD])
+        self.assertEqual(code, 0)
+        self.assertEqual(errors, "")
+        self.assertEqual(rows, [["`demo_fuzzer`", build, f"{1000 + i:,}", "1,234", "yes"]
+                                for i, build in enumerate(BUILDS)])
+        self.assertEqual(data["layout"], {"demo_fuzzer": {build: {"text_bytes": 1234, "static": True}
+                                                          for build in BUILDS}})
+        for build in BUILDS:
+            self.assertIn(f"demo_fuzzer.{build}", output)
+
+    def test_a_dynamic_binary_breaks_the_enrollment_rules(self):
+        for segment in (PT_INTERP, PT_DYNAMIC):
+            with self.subTest(segment=segment):
+                code, _, errors, rows, data = self.check([PT_LOAD, segment])
+                self.assertEqual(code, 2)
+                self.assertEqual(len(errors.splitlines()), len(BUILDS))
+                self.assertEqual([row[4] for row in rows], ["no"] * len(BUILDS))
+                self.assertEqual({entry["static"] for entry in data["layout"]["demo_fuzzer"].values()}, {False})
+
+    def test_an_unreadable_binary_breaks_the_enrollment_rules(self):
+        code, _, errors, rows, data = self.check([], b"\x7fELF")
+        self.assertEqual(code, 2)
+        self.assertEqual(len(errors.splitlines()), len(BUILDS))
+        self.assertEqual([row[3:] for row in rows], [["unknown", "unknown"]] * len(BUILDS))
+        self.assertEqual(data["layout"]["demo_fuzzer"]["plain"], {"text_bytes": None, "static": None})
+
+    def test_target_names_are_escaped_in_the_summary(self):
+        name = "a|b`c\n<d>@e"
+        table = check_tool.summary_table([name], ["plain"], {name: {"plain": {"bytes": 1}}},
+                                         {name: {"plain": {"text_bytes": 1, "static": True}}})
+        lines = table.splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(lines[-1].count("|"), 6)
+        self.assertEqual(lines[-1].count("`"), 2)
+        self.assertFalse(any(character in lines[-1] for character in "<>@"))
 
 
 class UbsanSettings(unittest.TestCase):

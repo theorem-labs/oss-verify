@@ -13,7 +13,7 @@ An OSS-Fuzz `Dockerfile` and `build.sh` do not run here without changes. They ex
 1. Make the builder image from [infra/base-builder/](../infra/base-builder/), from a toolchain image ([below](#toolchains)).
 2. Build the project image from the project's `Dockerfile`, on the builder. `tools/check` gives the build arguments `COMMIT` (the full commit that `repo#ref` names), `REPO` and `BASE_BUILDER`. Only this step has network access.
 3. Run `compile` in a new container of the project image, with no network (`docker run --network=none`). Do this once for each build that `project.yaml` asks for: `plain`, `ubsan`, `asan` and `asan-ubsan`. `compile` sets the compilers and flags of the build and runs `$SRC/build.sh`.
-4. Find the fuzz targets in the `$OUT` of each build. Copy each binary to `out/<target>/<target>.<build>`. Write the manifest, with the SHA-256 of each binary.
+4. Find the fuzz targets in the `$OUT` of each build. Copy each binary to `out/<target>/<target>.<build>`. Write the manifest, with the SHA-256 of each binary. `tools/check` lists each binary with its size, the size of its `.text` section, `static` or `dynamic`, and its SHA-256. With `--summary <file>`, it also writes this list as a Markdown table; the Build check of a pull request shows that table. A binary with a `PT_INTERP` or `PT_DYNAMIC` program header is dynamically linked. `tools/check` refuses a dynamically linked binary, and one whose program headers it cannot read, with exit status 2, the status for a project that breaks the enrollment rules.
 
 ## The builder
 
@@ -326,6 +326,7 @@ The exit status tells the result ([above](#exit-statuses)).
 * `sources`: each git checkout under `$SRC` in the project image, with its commit;
 * `builds` and `fuzz_targets`: what we built, with "each fuzz target" written as a list;
 * `targets.<target>.builds.<build>`: the `file`, `bytes` and `sha256` of each binary, in the format of the `builds:` section of an oss-fuzz-theorems `harness.yaml`;
+* `layout.<target>.<build>`: the `text_bytes` of each binary (the size of its `.text` section), and `static`, true for a binary with no `PT_INTERP` or `PT_DYNAMIC` program header; a value that `tools/check` cannot read is `null`;
 * `rebuild`, only with `--twice`: the second build ([below](#reproducibility)).
 
 We will write the lock in the proofs repository from the manifest. The lock is the only place that records the commit. `tools/check --lock <file>` builds the commit that a lock names, and compares each binary with the lock ([below](#check-a-binary-against-a-lock)). The lock can be a manifest or an oss-fuzz-theorems `harness.yaml`.

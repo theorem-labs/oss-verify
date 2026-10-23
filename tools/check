@@ -16,6 +16,7 @@ Build a project's fuzz targets the way we do, collect the binaries, and write th
     tools/check --toolchain <image> <name>
                                         build FROM this toolchain image, not the lock's or the newest
     tools/check --no-shell <name>       stop after the build instead of opening a shell
+    tools/check --summary <file> <name> also write the binaries of the first build as a Markdown table to <file>
     tools/check --print-toolchain <name>
                                         print the toolchain image `tools/check <name>` builds FROM, and build nothing
 
@@ -30,10 +31,12 @@ It runs these steps:
     5. Run `compile` once per build, each in a fresh container with no network (docker run --network=none).
     6. Find the fuzz targets: executables in $OUT whose symbol table defines LLVMFuzzerTestOneInput, present in every
        build (or those fuzz_targets lists). Collect each one's published (stripped) bytes as
-       out/<target>/<target>.<build>.
+       out/<target>/<target>.<build>, and read the size of its .text section and whether it is statically linked (no
+       PT_INTERP or PT_DYNAMIC program header).
     7. Write manifest.yaml: the repository, ref and commit, this repository's commit, the builder and the toolchain
        image it was built FROM, the git checkouts in the image, and the file, size and SHA-256 of every target in
-       every build.
+       every build, with the .text size and linkage of each one. List each binary with these values; stop if one is
+       not statically linked.
     8. With --twice, build everything again from scratch (steps 3 to 6, with docker build --no-cache), compare every
        byte, and only then add the rebuild block to manifest.yaml: this host, the time, the second builder, the file,
        size and SHA-256 of every binary the second build made, and result: identical or differs.
@@ -46,13 +49,15 @@ Security note: the project's Dockerfile is built with network access, as `docker
 someone you don't trust on a machine with nothing to lose.
 
 Exit codes: 0 if the project builds (and, with --twice or --lock, every byte matches); 1 if it does not build; 2 if
-projects/<name>/ breaks the enrollment rules; 3 if it builds but the bytes differ (--twice or --lock).
+projects/<name>/ breaks the enrollment rules, or a fuzz target is not statically linked; 3 if it builds but the bytes
+differ (--twice or --lock).
 
 Requires git, Docker (with the toolchain image available) and PyYAML (on Ubuntu, apt install python3-yaml).
 """
 import argparse
 import contextlib
 import datetime
+import os
 import pathlib
 import socket
 import subprocess
@@ -64,6 +69,8 @@ import validate
 from check_build import Failed, Job, say, step
 
 DIFFERENT = 3
+# The bytes of a target name that the step summary shows as they are. Every other byte is shown as %XX.
+MARKDOWN_NAME = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._+-")
 
 
 def load(project):
@@ -174,6 +181,30 @@ def shell(tag, out, home):
     subprocess.call(["docker", "run", *container, tag, "bash"])
 
 
+def text_size(layout):
+    """A binary's .text size, with thousands separators, or unknown."""
+    return "unknown" if layout["text_bytes"] is None else f"{layout['text_bytes']:,}"
+
+
+def markdown_name(name):
+    """A target name as Markdown code. A pull request chooses it, so every byte but A-Z a-z 0-9 . _ + - is shown as
+    %XX: no name can end the code span, split the table row or become markup."""
+    encoded = "".join(chr(byte) if byte in MARKDOWN_NAME else f"%{byte:02X}" for byte in os.fsencode(name))
+    return f"`{encoded}`"
+
+
+def summary_table(targets, builds, entries, layouts):
+    """A Markdown table with one row for each binary: target, build, file bytes, .text bytes, and whether it is static."""
+    rows = ["| target | build | file bytes | `.text` bytes | static |", "|---|---|---:|---:|---|"]
+    for target in targets:
+        for build in builds:
+            layout = layouts[target][build]
+            static = {True: "yes", False: "no"}.get(layout["static"], "unknown")
+            rows.append(f"| {markdown_name(target)} | {build} | {entries[target][build]['bytes']:,} | "
+                        f"{text_size(layout)} | {static} |")
+    return "\n".join(rows) + "\n"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("project", help="a name under projects/, or the path of a directory with a project.yaml")
@@ -183,6 +214,8 @@ def main():
                         help="compare with this lock (a manifest or a harness.yaml); repeatable")
     parser.add_argument("--toolchain", help="build FROM this toolchain image (default: the lock's, else the newest)")
     parser.add_argument("--no-shell", action="store_true", help="stop after the build")
+    parser.add_argument("--summary", type=pathlib.Path,
+                        help="also write the binaries of the first build to this file, as a Markdown table")
     parser.add_argument("--dir", type=pathlib.Path, help=f"where to work (default: {check_build.CACHE}/<name>)")
     parser.add_argument("--print-toolchain", action="store_true",
                         help="print the toolchain image the build is FROM, and build nothing (exit 0)")
@@ -248,20 +281,33 @@ def main():
         say(f"\nBUILD FAILED: {failure}")
         return 1
 
+    layouts = manifest.layouts(work / "out", entries)
     data = manifest.manifest(
         project=job.name, repo=job.repo, ref=job.ref, commit=commit, oss_verify=check_build.oss_verify_state(job),
         builder={"toolchain": toolchain, "image": check_build.image_id(builder),
                  "project_image": check_build.image_id(tag)},
         sources=check_build.sources(tag, labels=check_build.work_label(work)), builds=job.builds, targets=targets,
-        entries=entries,
+        entries=entries, layouts=layouts,
     )
     manifest.write_manifest(work / "manifest.yaml", data)
     step("built")
     for target in targets:
         for build in job.builds:
-            entry = entries[target][build]
-            say(f"  out/{target}/{entry['file']:<40} {entry['bytes']:>10,} bytes  sha256 {entry['sha256']}")
+            entry, layout = entries[target][build], layouts[target][build]
+            linkage = {True: "static", False: "dynamic"}.get(layout["static"], "unknown")
+            say(f"  out/{target}/{entry['file']:<40} {entry['bytes']:>10,} bytes  {text_size(layout):>10} .text  "
+                f"{linkage:<7}  sha256 {entry['sha256']}")
     say(f"manifest: {work / 'manifest.yaml'}")
+    if options.summary:
+        options.summary.write_text(summary_table(targets, job.builds, entries, layouts), encoding="utf-8")
+    not_static = [(f"out/{target}/{entries[target][build]['file']}", layouts[target][build]["static"])
+                  for target in targets for build in job.builds if layouts[target][build]["static"] is not True]
+    for binary, static in not_static:
+        why = "is dynamically linked" if static is False else "has program headers that cannot be read"
+        print(validate.printable(f"{job.name}: {binary} {why}: a fuzz target must be statically linked (no PT_INTERP "
+                                 "or PT_DYNAMIC program header)"), file=sys.stderr)
+    if not_static:
+        return 2
 
     code = 0
     if options.twice:

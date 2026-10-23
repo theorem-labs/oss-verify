@@ -19,6 +19,7 @@ TOOLS = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS))
 import check_build  # noqa: E402
 import manifest  # noqa: E402
+from test_manifest import PT_LOAD, elf  # noqa: E402
 
 LOADER = importlib.machinery.SourceFileLoader("check_source_pinning", str(TOOLS / "check"))
 SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
@@ -127,6 +128,9 @@ class LockedBuild(GitRepository):
 
         def build_all(job, commit, *args, **kwargs):
             built.append(commit)
+            path = self.work / "out" / "demo_fuzzer" / PIN["file"]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(elf(symtab=False, sections=[(".text", 1)], segments=[PT_LOAD]))
             return "builder", "project", ["demo_fuzzer"], {"demo_fuzzer": {"plain": dict(PIN)}}
 
         with contextlib.ExitStack() as stack:

@@ -10,6 +10,7 @@ are what is collected, published and pinned.
 
 The manifest's targets.<target>.builds section has the shape of the builds: section of an oss-fuzz-theorems
 harness.yaml (file, bytes, sha256 for each build), so that the lock in the proofs repository can take it as it is.
+Its layout section gives each binary's .text size and whether it is statically linked, apart from that harness shape.
 With --twice, its rebuild block records the second build in the same shape, and whether the two are identical.
 """
 import hashlib
@@ -29,9 +30,13 @@ GO_TARGETS = ".go-fuzz-targets"
 
 SHT_SYMTAB = 2
 SHN_UNDEF = 0
+SHN_XINDEX = 0xFFFF
 STT_FUNC = 2
 STB_GLOBAL, STB_WEAK = 1, 2
 ET_EXEC, ET_DYN = 2, 3
+PT_DYNAMIC, PT_INTERP = 2, 3
+PN_XNUM = 0xFFFF
+TEXT = b".text\0"
 MAX_ELF_BYTES = 4 << 30
 
 
@@ -51,8 +56,9 @@ def sha256_of(path):
 def read_elf(path):
     """Return (header fields, section headers) of an ELF file, or None if it is not one we can read.
 
-    Each section header is (type, offset, size, link, entsize). Reads only the headers and what they point to; a
-    malformed file is not an error, just not an ELF file.
+    The header fields are type, wide, order, phoff, phentsize, phnum and shstrndx. Each section header is (type,
+    offset, size, link, entsize, name), where name is the offset of its name in the section-header string table.
+    Reads only the headers and what they point to; a malformed file is not an error, just not an ELF file.
     """
     try:
         with open(path, "rb") as handle:
@@ -64,22 +70,79 @@ def read_elf(path):
             layout = order + ("HHIQQQIHHHHHH" if wide else "HHIIIIIHHHHHH")
             if len(header) < struct.calcsize(layout):
                 return None
-            (e_type, _, _, _, _, e_shoff, _, _, _, _, e_shentsize, e_shnum, _) = struct.unpack(layout, header)
+            (e_type, _, _, _, e_phoff, e_shoff, _, _, e_phentsize, e_phnum, e_shentsize, e_shnum,
+             e_shstrndx) = struct.unpack(layout, header)
+            fields = {"type": e_type, "wide": wide, "order": order, "phoff": e_phoff, "phentsize": e_phentsize,
+                      "phnum": e_phnum, "shstrndx": e_shstrndx}
             entry = order + ("IIQQQQIIQQ" if wide else "IIIIIIIIII")
             if e_shoff == 0 or e_shnum == 0 or e_shentsize < struct.calcsize(entry) or e_shnum > 65535:
-                return {"type": e_type, "wide": wide, "order": order}, []
+                return fields, []
             sections = []
             for index in range(e_shnum):
                 handle.seek(e_shoff + index * e_shentsize)
                 raw = handle.read(struct.calcsize(entry))
                 if len(raw) < struct.calcsize(entry):
                     return None
-                fields = struct.unpack(entry, raw)
+                values = struct.unpack(entry, raw)
                 # sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link, sh_info, sh_addralign, sh_entsize
-                sections.append((fields[1], fields[4], fields[5], fields[6], fields[9]))
-            return {"type": e_type, "wide": wide, "order": order}, sections
-    except OSError:
+                sections.append((values[1], values[4], values[5], values[6], values[9], values[0]))
+            return fields, sections
+    except (OSError, ValueError):  # ValueError: an offset larger than any file
         return None
+
+
+def binary_layout(path):
+    """Return {"text_bytes", "static"} of an ELF file, or None if it is not one we can read.
+
+    text_bytes is the size of the section named .text in the section-header string table (e_shstrndx), or None if the
+    file has no such section. static is True if no program header is PT_INTERP or PT_DYNAMIC. Reads only the headers,
+    four bytes of each program header and six bytes of each section's name; a malformed file is not an error.
+    """
+    parsed = read_elf(path)
+    if parsed is None:
+        return None
+    header, sections = parsed
+    try:
+        with open(path, "rb") as handle:
+            kinds = program_header_types(handle, header)
+            if kinds is None:
+                return None
+            return {"text_bytes": section_size(handle, sections, header["shstrndx"], TEXT),
+                    "static": not ({PT_INTERP, PT_DYNAMIC} & kinds)}
+    except (OSError, ValueError):  # ValueError: an offset larger than any file
+        return None
+
+
+def program_header_types(handle, header):
+    """The p_type of every program header, or None if they cannot be read."""
+    count, size = header["phnum"], header["phentsize"]
+    if count == 0:
+        return set()
+    if count == PN_XNUM or size < (56 if header["wide"] else 32):  # PN_XNUM: the count is in section 0
+        return None
+    kinds = set()
+    for index in range(count):
+        handle.seek(header["phoff"] + index * size)
+        raw = handle.read(4)
+        if len(raw) < 4:
+            return None
+        kinds.add(struct.unpack(header["order"] + "I", raw)[0])
+    return kinds
+
+
+def section_size(handle, sections, names, wanted):
+    """The size of the first section whose name, with its NUL, is `wanted`, or None if there is none."""
+    if names == SHN_XINDEX and sections:
+        names = sections[0][3]  # the index is in section 0's sh_link
+    if names == SHN_UNDEF or names >= len(sections):
+        return None
+    _, offset, size, *_ = sections[names]
+    for _, _, section_bytes, _, _, name in sections:
+        if name <= size - len(wanted):
+            handle.seek(offset + name)
+            if handle.read(len(wanted)) == wanted:
+                return section_bytes
+    return None
 
 
 def defined_symbols(path, wanted):
@@ -92,10 +155,10 @@ def defined_symbols(path, wanted):
     symbol = order + ("IBBHQQ" if wide else "IIIBBH")
     found = set()
     with open(path, "rb") as handle:
-        for kind, offset, size, link, entsize in sections:
+        for kind, offset, size, link, entsize, _ in sections:
             if kind != SHT_SYMTAB or entsize < struct.calcsize(symbol) or link >= len(sections):
                 continue
-            _, str_offset, str_size, _, _ = sections[link]
+            _, str_offset, str_size, *_ = sections[link]
             if size > MAX_ELF_BYTES or str_size > MAX_ELF_BYTES:
                 continue
             handle.seek(str_offset)
@@ -217,7 +280,16 @@ def collect(raw, targets, out):
     return entries, problems
 
 
-def manifest(*, project, repo, ref, commit, oss_verify, builder, sources, builds, targets, entries):
+def layouts(out, entries):
+    """The layout of each binary that collect() copied to `out`: {target: {build: {text_bytes, static}}}, with None
+    for each value that cannot be read."""
+    out = pathlib.Path(out)
+    return {target: {build: binary_layout(out / target / entry["file"]) or {"text_bytes": None, "static": None}
+                     for build, entry in builds.items()}
+            for target, builds in entries.items()}
+
+
+def manifest(*, project, repo, ref, commit, oss_verify, builder, sources, builds, targets, entries, layouts):
     """The build manifest of one check, as a mapping ready for YAML."""
     return {
         "schema": MANIFEST_SCHEMA,
@@ -231,6 +303,7 @@ def manifest(*, project, repo, ref, commit, oss_verify, builder, sources, builds
         "builds": builds,
         "fuzz_targets": targets,
         "targets": {target: {"builds": entries[target]} for target in targets},
+        "layout": {target: layouts[target] for target in targets},
     }
 
 

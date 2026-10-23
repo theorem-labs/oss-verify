@@ -4,7 +4,8 @@
 name: "Build"
 # Builds the project an enrollment pull request adds or changes with tools/check --twice: everything is built a second
 # time from scratch, and the two builds must have the same bytes, as they must before we pin a binary. The output is in
-# the run's log.
+# the run's log; the step summary also has one row for each binary: its target, build, file size, .text size and whether
+# it is statically linked.
 #
 # project-builds is a required check: it runs on every pull request (.github/scripts/take-project says which project
 # it takes):
@@ -127,9 +128,11 @@ jobs:
           resume="$(openssl rand -hex 16)"
           echo "::stop-commands::$resume"
           code=0
+          summary="$RUNNER_TEMP/binaries.md"
           # The path, as in the pull step, never the bare name: tools/check reads a bare name as a directory of the
-          # checkout's root when that directory has a project.yaml, as templates/ does.
-          python3 tools/check --no-shell --twice "projects/$NAME" < /dev/null || code=$?
+          # checkout's root when that directory has a project.yaml, as templates/ does. Its table shows a target name,
+          # which the pull request chooses, in code with every unusual byte as %XX.
+          python3 tools/check --no-shell --twice --summary "$summary" "projects/$NAME" < /dev/null || code=$?
           echo "::$resume::"
 
           case $code in
@@ -140,5 +143,9 @@ jobs:
             *) result="could not be checked: tools/check exited $code" ;;
           esac
           echo "\`projects/$NAME/\` at \`${SHA:0:7}\` $result." >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "$summary" ]; then
+            echo >> "$GITHUB_STEP_SUMMARY"
+            cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+          fi
           [ "$code" = 0 ] || echo "::error::projects/$NAME/ $result."
           exit "$code"
