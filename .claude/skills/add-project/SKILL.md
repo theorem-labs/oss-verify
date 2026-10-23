@@ -137,7 +137,7 @@ For a `python` project, the fuzz targets are atheris harnesses. Write the build 
 
 For a `go` project, the fuzz targets are its OSS-Fuzz Go fuzz targets, and `build.sh` is its OSS-Fuzz `build.sh`, as it is (`docs/build-contract.md`, "Go fuzz targets"). Write the build files in the form of a ported Go build, for example `tools/seeds/go-toml/`. Pin the modules in a `go.lock`, and get them with a `gomodules` line in `sources`. Leave out `sanitizers`, or give `sanitizers: []`.
 
-Copy `templates/Dockerfile` and `templates/build.sh` into `projects/<name>/`. Port the project's build (`docs/build-contract.md`). Two builds written by hand are small examples (`docs/build-contract.md`, "What the Dockerfile must do"): `projects/cjson/`, and the test project `tools/tests/fixtures/example/`. The other projects in `projects/` and `tools/seeds/` are mostly ports of a release build, which use the helpers of `release-target.sh`. Do not copy their form for a new build.
+Copy `templates/Dockerfile` and `templates/build.sh` into `projects/<name>/`. Port the project's build (`docs/build-contract.md`). Two builds written by hand are small examples (`docs/build-contract.md`, "What the Dockerfile must do"): `projects/cjson/`, and the test project `tools/tests/fixtures/example/`. The other projects in `projects/` and `tools/seeds/` are mostly ports of a release build, which use the helpers of `release-target.sh`. For a `c` or `c++` project, do not copy their form for a new build.
 
 - In the `Dockerfile`, start with `FROM ${BASE_BUILDER}`.
 - Declare `ARG REPO` and `ARG COMMIT`.
@@ -181,7 +181,7 @@ For `ubsan_checks`, suggest the default: it is the list of OSS-Fuzz for the proj
 1. Make a branch that changes only `projects/<name>/`.
 2. Write the pull request description from `.github/PULL_REQUEST_TEMPLATE.md`.
 3. In the context note, give a summary of what each fuzz target checks, in a few lines.
-4. Optional: show the triage comment that the pull request will get: `python3 .github/scripts/triage.py --repo theorem-labs/oss-verify --local projects/<name> --login <maintainer's GitHub account> --body <the description>`. Without `GITHUB_TOKEN`, its GraphQL rows say "could not be checked".
+4. Optional: show the triage comment that the pull request will get: `python3 .github/scripts/triage.py --repo theorem-labs/oss-verify --local projects/<name> --login <maintainer's GitHub account> --body <a file holding the description>`. Without `GITHUB_TOKEN`, its GraphQL rows say "could not be checked".
 5. Show the branch and the description to the maintainer.
 6. Let the maintainer open the pull request. Only the maintainer can confirm "I am a core maintainer" and "I accept the OSS Verify terms".
 

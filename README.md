@@ -33,7 +33,7 @@ The agent asks you what "correct" means for your code, and which findings and pa
 
 > **WARNING:** `tools/check` builds the project's `Dockerfile` with network access. Use it only on a project that you trust ([SECURITY.md](SECURITY.md)).
 
-You need a Linux x86-64 machine with Docker, git, and Python 3 with PyYAML (on Ubuntu, `apt install python3-yaml`), and about 10 GB of free disk. The first run of `tools/check` downloads a toolchain image: about 1.1 GB, which takes about 6 GB of disk.
+You need a Linux x86-64 machine with Docker, git, and Python 3 with PyYAML (on Ubuntu, `apt install python3-yaml`), and about 10 GB of free disk. The first run of `tools/check` downloads a toolchain image of about 1.1 GB, which unpacks to about 5 GB.
 
 1. Fork this repository.
 2. Make `projects/<name>/` from [templates/](templates/): `project.yaml` ([docs/project-yaml.md](docs/project-yaml.md)), a `Dockerfile` and a `build.sh` ([docs/build-contract.md](docs/build-contract.md)).

@@ -152,11 +152,13 @@ There is no fixed timeline. A proof takes days of work, and often more. We can a
 
 ## Publishing
 
-The `publish` field tells us when to publish the proofs, and the `proofs` field tells where ([project-yaml.md](project-yaml.md#publish)). We publish three items:
+The `publish` field tells us when to publish the proofs, and the `proofs` field tells where ([project-yaml.md](project-yaml.md#publish)). We publish:
 
 * the statements about the project's binaries;
 * the proofs of these statements;
-* the lock: the SHA-256 of each binary, the commit that we built it from, and the toolchain.
+* the lock: the SHA-256 of each binary, the commit that we built it from, and the toolchain;
+* the binaries and the source archives that we built them from;
+* each patch a proof needed, once its finding is public (below).
 
 We write the lock from the manifest of `tools/check` ([build-contract.md](build-contract.md#the-manifest)). Each value of `publish` obeys these rules:
 
