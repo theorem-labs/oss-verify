@@ -1,0 +1,7 @@
+# Copyright 2026 SQLPage contributors. SPDX-License-Identifier: Apache-2.0
+repo: https://github.com/sqlpage/SQLPage#fuzz/oss-enrollment
+primary_contact: ophir@sql-page.com
+homepage: https://sql-page.com/
+language: rust
+fuzz_targets: [sql_file]
+publish: after_fixes

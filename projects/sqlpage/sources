@@ -1,0 +1,6 @@
+# Copyright 2026 SQLPage contributors. SPDX-License-Identifier: Apache-2.0
+# The lock belongs to the generated static-library shim, not sqlpage-fuzz.
+tree	ext/sqlpage-sql-file/src	upstream/sqlpage
+patch	ext/sqlpage-sql-file/src	rust-duration-compat.patch
+copy	targets/sqlpage-sql-file/Cargo.lock	Cargo.lock
+crates	ext/sqlpage-sql-file/vendor	targets/sqlpage-sql-file/Cargo.lock	ext/sqlpage-sql-file/src	fuzz	sql_file
