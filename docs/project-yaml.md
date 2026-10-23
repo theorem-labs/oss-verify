@@ -247,7 +247,7 @@ Each file must obey these rules:
 * Its name uses only `A-Z a-z 0-9 . _ -` and starts with a letter or digit.
 * It is UTF-8 text. A seed corpus is the only exception.
 * Its size is at most 128 KiB for `project.yaml`.
-* Its size is at most 256 KiB for `build.sh`, a fuzz target source or a build patch.
+* Its size is at most 256 KiB for `build.sh`, a fuzz target source, a file that `sources` copies or reads, or a build patch.
 * Its size is at most 64 KiB for each other file.
 
 The project directory holds at most 64 files. Its name uses only `a-z 0-9 . _ -`, starts with a letter or digit, and has at most 63 characters.
