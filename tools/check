@@ -36,9 +36,7 @@ It runs these steps:
     7. Write manifest.yaml: the repository, ref and commit, this repository's commit, the builder and the toolchain
        image it was built FROM, the git checkouts in the image, and the file, size and SHA-256 of every target in
        every build, with the .text size and linkage of each one. List each binary with these values; stop if one is
-       not statically linked. At the end of the run, warn about each plain binary whose .text section is over
-       1,000,000 bytes, the most that the size check of an enrollment passes without a person (README.md, "Who can
-       enroll").
+       not statically linked.
     8. With --twice, build everything again from scratch (steps 3 to 6, with docker build --no-cache), compare every
        byte, and only then add the rebuild block to manifest.yaml: this host, the time, the second builder, the file,
        size and SHA-256 of every binary the second build made, and result: identical or differs.
@@ -71,9 +69,6 @@ import validate
 from check_build import Failed, Job, say, step
 
 DIFFERENT = 3
-# The largest .text section of a plain binary that the size check of an enrollment passes without a person (README.md,
-# "Who can enroll"). A larger one gets a warning: a person at Theorem reviews its size, and can decline the project.
-TEXT_LIMIT = 1_000_000
 # The bytes of a target name that the step summary shows as they are. Every other byte is shown as %XX.
 MARKDOWN_NAME = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._+-")
 
@@ -208,19 +203,6 @@ def summary_table(targets, builds, entries, layouts):
             rows.append(f"| {markdown_name(target)} | {build} | {entries[target][build]['bytes']:,} | "
                         f"{text_size(layout)} | {static} |")
     return "\n".join(rows) + "\n"
-
-
-def size_warnings(targets, builds, entries, layouts):
-    """One line for each plain binary whose .text section is over TEXT_LIMIT bytes."""
-    lines = []
-    for target in targets if "plain" in builds else []:
-        text_bytes = layouts[target]["plain"]["text_bytes"]
-        if text_bytes is not None and text_bytes > TEXT_LIMIT:
-            lines.append(validate.printable(
-                f"warning: out/{target}/{entries[target]['plain']['file']} has a .text section of {text_bytes:,} "
-                f"bytes, over the {TEXT_LIMIT:,} bytes that the size check passes without a person: a person at "
-                "Theorem reviews its size, and can decline the project because of it (README.md, \"Who can enroll\")"))
-    return lines
 
 
 def main():
@@ -363,9 +345,6 @@ def main():
             say(f"\nTHE LOCK PINS NONE OF THESE BUILDS ({', '.join(map(str, options.lock))})")
             code = DIFFERENT
 
-    # Last, after every build and comparison, where it is seen.
-    for line in size_warnings(targets, job.builds, entries, layouts):
-        print(line, file=sys.stderr)
     if not options.no_shell:
         shell(tag, work / "out", work)
     return code

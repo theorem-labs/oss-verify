@@ -176,8 +176,7 @@ class Twice(Project):
 
 class Binaries(Project):
     """tools/check lists each binary's .text size and linkage, writes them as a Markdown table with --summary, records
-    them in the manifest, warns about a plain binary whose .text is over the size rule, and refuses a binary that is not
-    statically linked."""
+    them in the manifest, and refuses a binary that is not statically linked."""
 
     def check(self, segments, published=None):
         summary = self.work.parent / "summary.md"
@@ -217,21 +216,6 @@ class Binaries(Project):
         self.assertEqual(len(errors.splitlines()), len(BUILDS))
         self.assertEqual([row[3:] for row in rows], [["unknown", "unknown"]] * len(BUILDS))
         self.assertEqual(data["layout"]["demo_fuzzer"]["plain"], {"text_bytes": None, "static": None})
-
-    def test_a_plain_text_section_over_the_size_rule_gets_one_warning(self):
-        """1,000,000 bytes of .text pass the size check without a person; one byte more is warned about, for the plain
-        build only, and the check still passes."""
-        for size, warned in ((1_000_000, False), (1_000_001, True)):
-            with self.subTest(size=size):
-                code, _, errors, rows, _ = self.check([], elf(symtab=False, sections=[(".text", size)],
-                                                              segments=[PT_LOAD]))
-                self.assertEqual(code, 0)
-                self.assertEqual([row[3] for row in rows], [f"{size:,}"] * len(BUILDS))
-                lines = errors.splitlines()
-                self.assertEqual(len(lines), 1 if warned else 0, errors)
-                if warned:
-                    self.assertIn("out/demo_fuzzer/demo_fuzzer.plain", lines[0])
-                    self.assertIn(f"{size:,}", lines[0])
 
     def test_target_names_are_escaped_in_the_summary(self):
         name = "a|b`c\n<d>@e"

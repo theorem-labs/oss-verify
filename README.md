@@ -14,7 +14,7 @@ We accept an established open-source project ([theorem.dev/oss-verify](https://t
 5. Our builder can build the project. The [language table](docs/project-yaml.md#language) tells which languages it builds today.
 6. The enrollment names, in `primary_contact`, the one address that gets findings.
 
-The size of the binaries counts too. `tools/check` shows the size of the `.text` section of each binary. If the `.text` section of each plain binary (`<target>.plain`) is 1,000,000 bytes (1 MB) or smaller, the size is not an obstacle. If one is larger, a person at Theorem reviews its size, and can decline the project because of it. The size of the file does not count. The size is known only after a build. Thus run `tools/check` early, before you put much work into an enrollment.
+A project of any size can enroll. A smaller plain build (`<target>.plain`, whose `.text` size `tools/check` shows) is likely to be proved sooner.
 
 We seeded some projects already, and a maintainer can adopt one ([docs/project-yaml.md](docs/project-yaml.md#seeded-projects)).
 
@@ -41,7 +41,7 @@ You need a Linux x86-64 machine with Docker, git, and Python 3 with PyYAML (on U
 2. Make `projects/<name>/` from [templates/](templates/): `project.yaml` ([docs/project-yaml.md](docs/project-yaml.md)), a `Dockerfile` and a `build.sh` ([docs/build-contract.md](docs/build-contract.md)).
 3. Optional: write a `patch_style.md`. Tell us which findings, reports and patches you want, and how they must look.
 4. Run `tools/validate.py projects/<name>`. Correct each problem that it shows.
-5. Run `tools/check --no-shell --twice <name>`. Make sure that it builds each fuzz target, and that the second build has the same bytes. Read the `.text` size of each plain binary in its output ([Who can enroll](#who-can-enroll)). Without `--no-shell`, `tools/check` opens a shell in the build image when it finishes.
+5. Run `tools/check --no-shell --twice <name>`. Make sure that it builds each fuzz target, and that the second build has the same bytes. Without `--no-shell`, `tools/check` opens a shell in the build image when it finishes.
 6. Open a pull request. Complete its checklist.
 
 ## After we merge
