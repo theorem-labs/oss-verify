@@ -76,7 +76,7 @@ These are the common compile flags:
 
 The `-fno-builtin-*` flags keep each allocation an ordinary call in all four builds. Thus the optimizer cannot remove or merge an allocation in one build and keep it in a different build.
 
-`compile` builds the driver with these flags and `-fno-plt`. clang does not use `-fno-plt` for this target. Thus each build writes `warning: argument unused during compilation: '-fno-plt'` seven times, before `build.sh` starts. You can ignore this warning. `$CFLAGS` does not have `-fno-plt`.
+`compile` builds the driver with these flags and `-fno-plt`. clang does not use `-fno-plt` for this target. Thus each C, C++, Rust and Python build writes `warning: argument unused during compilation: '-fno-plt'` seven times, before `build.sh` starts. You can ignore this warning. `$CFLAGS` does not have `-fno-plt`.
 
 | build | `$SANITIZER` | sanitizer flags | a detected error |
 |---|---|---|---|
@@ -114,9 +114,15 @@ The driver is compiled with no sanitizer flags in each build. The library and th
 
 The sealed AddressSanitizer runtime intercepts functions through the linker's `--wrap` option. Each `asan` and `asan-ubsan` link gets `-Wl,--wrap=<function>` for each function on the runtime's list, and the runtime defines `__wrap_<function>` for them (for example `__wrap_fopen`). The list in the toolchain image has 380 functions. The builder removes `iconv` from it, so the links wrap 379 functions. `fopen`, `time`, `clock_gettime` and `dlopen` are on the list.
 
-Thus do not link with `-Wl,--wrap=<function>` for a function on the list, and do not define `__wrap_<function>` for it. If you define `__wrap_<function>`, two objects define it, and the link of the AddressSanitizer builds fails. To replace a function on the list, rename the call when you compile. For example, compile the file that calls `fopen()` with `-Dfopen=my_fopen`, and define `my_fopen` in your fuzz target. This method works in all four builds.
+Thus do not link with `-Wl,--wrap=<function>` for a function on the list, and do not define `__wrap_<function>` for it. If you define `__wrap_<function>`, two objects define it, and the link of the AddressSanitizer builds fails. To replace a function on the list, rename the call when you compile. This method works in all four builds:
+
+* Compile the file that calls the function with `-D<function>=<name>`, for example `-Dfopen=my_fopen`. `-D` changes each use of the name in that file and in the headers that it includes. Thus use it only in a C file, and only for a name that has no other meaning there.
+* Define `my_fopen` in your fuzz target. In a C++ fuzz target, define it with `extern "C"`.
+* If the library's archive also has that file, compile a second copy of it with `-D` for this fuzz target only. Link the copy before the archive. Then the other fuzz targets do not need `my_fopen`. libreac's `build.sh` does this for its pcap reader.
 
 The list is a file in the toolchain image: `/opt/asan-static-rt/lib/clang/20/lib/riscv64-unknown-linux-musl/libclang_rt.asan.a.wrap`. Each `--wrap=<function>` line names one function. To read it, run `docker run --rm --entrypoint cat <image> <path>`, with the image from [infra/toolchains.tsv](../infra/toolchains.tsv). [infra/base-builder/toolchain.sh](../infra/base-builder/toolchain.sh) removes the `--wrap=iconv` line.
+
+The driver's seals also use `--wrap`, in all four builds: `getenv`, `getpid`, `getppid`, `mkstemp`, `mkostemp`, `mkstemps` and `mkostemps`. Do not wrap these functions, and do not define `__wrap_<function>` for them.
 
 ## What the Dockerfile must do
 

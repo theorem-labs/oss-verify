@@ -223,15 +223,13 @@ def image_id(tag):
 
 
 def require_buildkit():
-    """Refuse to start without BuildKit. tools/check builds with `docker build --progress=plain`, which the legacy
-    builder refuses with "unknown flag: --progress". Docker Desktop has BuildKit; Ubuntu's docker.io package needs the
-    docker-buildx package beside it."""
-    if run("docker", "buildx", "version", quiet=True) != 0:
-        raise Failed("tools/check needs Docker with BuildKit, and `docker buildx version` fails. "
-                     "Install the buildx plugin (on Ubuntu, `apt install docker-buildx`), then run tools/check again.")
-    if os.environ.get("DOCKER_BUILDKIT") == "0":
-        raise Failed("tools/check needs Docker with BuildKit, and DOCKER_BUILDKIT=0 turns it off. "
-                     "Unset DOCKER_BUILDKIT, then run tools/check again.")
+    """Refuse to start when `docker build` refuses `--progress=plain`, which tools/check gives each build. Docker 23 and
+    later refuse it with the legacy builder: without the buildx plugin (Ubuntu's docker.io package alone), or with
+    DOCKER_BUILDKIT set to a false value. The probe asks for the help text, so it builds nothing."""
+    if run("docker", "build", "--progress=plain", "--help", quiet=True) != 0:
+        raise Failed("tools/check needs Docker with BuildKit, and `docker build --progress=plain --help` fails. "
+                     "Install the buildx plugin (on Ubuntu, `apt install docker-buildx`; from Docker's own "
+                     "repository, `docker-buildx-plugin`), unset DOCKER_BUILDKIT, then run tools/check again.")
 
 
 def build_builder(image=None, suffix="", no_cache=False):
