@@ -101,14 +101,18 @@ def TestOneInput(data):
                 _check(value[:1] not in ("\"", "'"), "P2: unquoted value starts with a quote")
                 _check(not any(char.isspace() for char in value), "P2: unquoted value has white space")
 
-    # P3. remove_html_tags removes exactly the tags that iter_html_tags finds, and nothing else. Thus a text with no
-    # "<" comes back unchanged.
-    # Mutant: html.py `parts.append(text[cursor:token.start])` -> `parts.append(text[cursor:token.start - 1])`.
-    # Input: b"a<b>c" (one character too few comes back).
-    removed = cm_html.remove_html_tags(text)
-    _check(len(removed) == len(text) - sum(tag.end - tag.start for tag in tags), "P3: remove_html_tags lost text")
-    if "<" not in text:
-        _check(removed == text, "P3: text with no '<' changed")
+    # P3. remove_html_tags removes exactly the tags that iter_html_tags finds, and nothing else: its result is the
+    # text outside the tag spans, in order and unchanged. P1 makes the spans ordered and disjoint, so this text is
+    # well defined.
+    # Mutant: html.py `parts.append(text[cursor:token.start])` -> `parts.append(text[cursor + 1:token.start + 1])`.
+    # Input: b"a<b>c" (the result is then "<c", which has the length of "ac" but not its text).
+    expected = []
+    cursor = 0
+    for tag in tags:
+        expected.append(text[cursor:tag.start])
+        cursor = tag.end
+    expected.append(text[cursor:])
+    _check(cm_html.remove_html_tags(text) == "".join(expected), "P3: remove_html_tags changed text outside the tags")
 
     # P4. strip_html_tags gives normalized plain text: no space or blank line at either end, no run of two
     # spaces, no tab or no-break space (an entity such as &#9; or &nbsp; decodes to one before the normalization),
