@@ -1,0 +1,34 @@
+diff --git a/src/app_config.rs b/src/app_config.rs
+index 6e916645..64308b04 100644
+--- a/src/app_config.rs
++++ b/src/app_config.rs
+@@ -95,7 +95,7 @@ impl AppConfig {
+             if is_sqlite {
+                 None
+             } else {
+-                Some(Duration::from_mins(30))
++                Some(Duration::from_secs(30 * 60))
+             },
+         );
+         self.database_connection_max_lifetime = resolve_timeout(
+@@ -103,7 +103,7 @@ impl AppConfig {
+             if is_sqlite {
+                 None
+             } else {
+-                Some(Duration::from_hours(1))
++                Some(Duration::from_secs(60 * 60))
+             },
+         );
+     }
+diff --git a/src/webserver/oidc.rs b/src/webserver/oidc.rs
+index 91f0b082..d97a0ac1 100644
+--- a/src/webserver/oidc.rs
++++ b/src/webserver/oidc.rs
+@@ -51,6 +51,6 @@ const SQLPAGE_LOGOUT_URI: &str = "/sqlpage/oidc_logout";
+ const SQLPAGE_NONCE_COOKIE_NAME: &str = "sqlpage_oidc_nonce";
+ const SQLPAGE_TMP_LOGIN_STATE_COOKIE_PREFIX: &str = "sqlpage_oidc_state_";
+-const OIDC_CLIENT_MAX_REFRESH_INTERVAL: Duration = Duration::from_hours(1);
++const OIDC_CLIENT_MAX_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
+ const OIDC_CLIENT_MIN_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+ const OIDC_HTTP_BODY_TIMEOUT: Duration = OIDC_CLIENT_MIN_REFRESH_INTERVAL;
+ const SQLPAGE_OIDC_REDIRECT_COUNT_COOKIE: &str = "sqlpage_oidc_redirect_count";
