@@ -105,7 +105,7 @@ for f in out/*/*.*; do
 done
 ```
 
-1. **Size.** Take the `.text` size of each plain binary (`<target>.plain`). Each one is 1,000,000 bytes or smaller: **pass**. Each larger one: **person**, for Sami or Jason. If no `.text` size is available for a plain binary, the verdict is **person**: write why in the summary, for example "the Build check has no `.text` column, and `out/` is not available". The file size is not the measure. Write it in the facts as a second number. Write the file size and the `.text` size of each binary of each build in the summary. Do not put the size in the comment.
+1. **Size.** Write the file size and the `.text` size of each binary of each build in the summary. Size is not a condition of enrollment: it is never a **fail** or a **person**, and it does not go in the comment.
 2. **Static.** Each binary is `static`: no `PT_INTERP` and no `PT_DYNAMIC` program header. Then the verdict is **pass**. `tools/check` refuses a binary that is `dynamic`, or whose program headers it cannot read, with exit status 2. Thus a passed Build check that lists each binary as `static` is enough. A binary that is `dynamic` is **fail**. If no listing gives the linkage, write **person** and give the reason.
 
 ### E. The rubric

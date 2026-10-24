@@ -14,6 +14,8 @@ We accept an established open-source project ([theorem.dev/oss-verify](https://t
 5. Our builder can build the project. The [language table](docs/project-yaml.md#language) tells which languages it builds today.
 6. The enrollment names, in `primary_contact`, the one address that gets findings.
 
+A project of any size can enroll. Because of our capacity, we are most likely to respond quickly to a project in C whose plain binaries (`<target>.plain`) are statically linked and have less than 1 MB of `.text`, the size that `tools/check` shows. If your organisation wants to help us increase that capacity, so that we can take on more projects now, write to [oss-verify@theorem.dev](mailto:oss-verify@theorem.dev). We are interested in corporate partners and sponsorship.
+
 We seeded some projects already, and a maintainer can adopt one ([docs/project-yaml.md](docs/project-yaml.md#seeded-projects)).
 
 ## Enroll with a coding agent

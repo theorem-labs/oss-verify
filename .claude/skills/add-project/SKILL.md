@@ -11,6 +11,8 @@ The result is one directory, `projects/<name>/`, and a pull request that the mai
 
 Before you start, read these documents: `README.md`, `docs/project-yaml.md`, `docs/build-contract.md`, `docs/what-gets-proven.md` and, for API-level fuzz targets, `docs/dsl.md`. Work only in `projects/<name>/`.
 
+A project of any size can enroll. Tell the maintainer what the README says in "Who can enroll": because of our capacity, we are most likely to respond quickly to a project in C whose plain binaries (`<target>.plain`) are statically linked and have less than 1 MB of `.text`, and an organisation that wants to help us take on more projects can write to oss-verify@theorem.dev.
+
 You need what the README's "Enroll a project" lists for `tools/check`. Steps 3.3 and 3.4 also need a native clang with libFuzzer, `llvm-profdata`, `llvm-cov` and `unzip`: on Ubuntu, `apt install clang llvm unzip`. To run the riscv64 binaries yourself (`docs/build-contract.md`, "Run a binary"), you need `qemu-riscv64`: on Ubuntu, `apt install qemu-user`.
 
 ## 1. Ask what "correct" means
