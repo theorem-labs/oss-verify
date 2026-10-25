@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+"""Write the Slack message with an enrollment's facts, as build.yaml's comment job sends it to #proving-oss-fuzz.
+
+    slack-notice --name <name> --language <language> --url <pull request URL> --result <text> --binaries <table.md>
+
+It prints the JSON body of an incoming webhook's request: the pull request, the project, its language, the build's
+result, and one line for each binary of the table that tools/check --summary writes (target, build, file bytes,
+.text bytes, static). A pull request chooses some of this text, so each &, < and > is escaped as Slack asks: no text
+can become a link, a mention or markup.
+"""
+import argparse
+import json
+import pathlib
+import sys
+
+MAX_ROWS = 60
+COLUMNS = ("target", "build", "file bytes", ".text bytes", "static")
+
+
+def escape(text):
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def rows(table):
+    """The cells of each binary's row of a tools/check --summary table: not its header, nor its separator."""
+    for line in table.splitlines():
+        cells = [cell.strip().strip("`") for cell in line.strip().strip("|").split("|")]
+        if len(cells) == len(COLUMNS) and cells[0] != "target" and not set(cells[0]) <= set("-:"):
+            yield cells
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--name", required=True)
+    parser.add_argument("--language", default="")
+    parser.add_argument("--url", required=True)
+    parser.add_argument("--result", default="")
+    parser.add_argument("--binaries", type=pathlib.Path)
+    options = parser.parse_args()
+
+    table = options.binaries.read_text(encoding="utf-8", errors="replace") if options.binaries else ""
+    binaries = list(rows(table))
+    lines = [f"*Enrollment: {escape(options.name)}* ({escape(options.url)})",
+             f"Language: {escape(options.language or 'not given')}.",
+             f"Build: {escape(options.result or 'no result')}."]
+    if binaries:
+        widths = [max(len(column), *(len(row[i]) for row in binaries)) for i, column in enumerate(COLUMNS)]
+        shown = [COLUMNS] + binaries[:MAX_ROWS]
+        text = "\n".join("  ".join(cell.rjust(width) if i in (2, 3) else cell.ljust(width)
+                                   for i, (cell, width) in enumerate(zip(row, widths))).rstrip()
+                         for row in shown)
+        lines += ["", "```", escape(text), "```"]
+        if len(binaries) > MAX_ROWS:
+            lines.append(f"And {len(binaries) - MAX_ROWS} more binaries: the Build check's summary lists them all.")
+    else:
+        lines.append("No binaries: the build made none.")
+    json.dump({"text": "\n".join(lines)}, sys.stdout)
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

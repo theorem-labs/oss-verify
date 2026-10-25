@@ -11,7 +11,9 @@ name: "Triage"
 # That makes this workflow run with the base repository's token on input from anyone, so it is split in two:
 #   gather   reads the pull request through the GitHub API, as data, with a read-only token. Its checkout is the base
 #            branch (the default for pull_request_target), never the pull request, so no code from the pull request runs.
-#   comment  holds the only write permission, and does nothing but post the text gather produced.
+#   comment  does nothing but post the text gather produced, as the oss-verify GitHub App (oss-verify[bot]), with an
+#            installation token that can write pull requests in this repository only. It makes that token from the
+#            App's client id and its private key, the repository secret OSS_VERIFY_APP_PRIVATE_KEY.
 # Values from the event reach the scripts through environment variables, never by ${{ }} substitution into them.
 #
 # A pull request that has had none of the events below since this workflow was added has no comment. Someone with
@@ -76,19 +78,26 @@ jobs:
     if: needs.gather.outputs.comment != ''
     runs-on: ubuntu-latest
     timeout-minutes: 2
-    permissions:
-      pull-requests: write
+    permissions: {}
     steps:
+      - name: Get the oss-verify App's token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0 (sha-pinned)
+        with:
+          client-id: Iv23liAWPMahJZYsw3un
+          private-key: ${{ secrets.OSS_VERIFY_APP_PRIVATE_KEY }}
+          permission-pull-requests: write
+
       - name: Post the comment, or update the one already there
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number || inputs.pr }}
           COMMENT: ${{ needs.gather.outputs.comment }}
         run: |
-          # Other workflows may comment as github-actions[bot] too; ours is the one that starts with the marker.
+          # Ours is the oss-verify App's comment that starts with the marker.
           existing=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- oss-verify-triage -->"))) | .id')
+            --jq '.[] | select(.user.login == "oss-verify[bot]" and (.body | startswith("<!-- oss-verify-triage -->"))) | .id')
           existing=${existing%%$'\n'*}
           if [ -n "$existing" ]; then
             jq -n --arg body "$COMMENT" '{body: $body}' | gh api --method PATCH "repos/$REPO/issues/comments/$existing" --input - > /dev/null

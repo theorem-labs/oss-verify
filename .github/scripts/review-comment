@@ -8,7 +8,8 @@
 It prints the comment: the marker that build.yaml's comment job finds it by, the review's comment to the maintainer
 (or, when the review did not run, why), and the report of tools/check --checks, folded. The review's text comes from a
 model that read the pull request, so it is refused if it holds what looks like a credential, and cut to a length that
-GitHub takes.
+GitHub takes. It sits between two comment lines of its own, which are removed from the model's text, so that a later
+run whose review did not run takes back exactly that text from the posted comment.
 """
 import argparse
 import pathlib
@@ -16,7 +17,9 @@ import re
 import sys
 
 MARKER = "<!-- oss-verify-review -->"
-CHECKS_SUMMARY = "<details><summary>What the breakage and coverage checks measured</summary>"
+# The review's own text lies between these two lines, and nothing else does.
+START = "<!-- oss-verify-review: start -->"
+END = "<!-- oss-verify-review: end -->"
 # GitHub refuses a comment over 65,536 characters.
 MAX_REVIEW = 40_000
 MAX_CHECKS = 20_000
@@ -41,27 +44,29 @@ def main():
     options = parser.parse_args()
 
     review = options.review.read_text(encoding="utf-8", errors="replace") if options.review else ""
+    note = ""
     if options.previous and options.why:
-        previous = options.previous.read_text(encoding="utf-8", errors="replace")
-        body = previous.split("\n## Enrollment review\n", 1)[-1]
-        for end in (f"\n{CHECKS_SUMMARY}", "\n<sub>Claude wrote this review"):
-            body = body.rsplit(end, 1)[0]
-        body = re.sub(r"^\*\*The review of the last push did not run[^\n]*\n\n", "", body.strip())
-        if body and not body.startswith("The review agent did not run"):
-            review = (f"**The review of the last push did not run: {options.why}. This is the review of an earlier "
-                      "push.**\n\n" + body)
+        previous = options.previous.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
+        start, end = previous.find(START), previous.rfind(END)
+        if start != -1 and end > start:
+            review = previous[start + len(START):end]
+            note = (f"**The review of the last push did not run: {options.why}. This is the review of an earlier "
+                    "push.**")
     if CREDENTIAL.search(review):
-        review, options.why = "", "its text held what looks like a credential, so it was not posted"
-    review = review.replace(MARKER, "")
+        review, note, options.why = "", "", "its text held what looks like a credential, so it was not posted"
+    for line in (MARKER, START, END):
+        review = review.replace(line, "")
     parts = [MARKER, "## Enrollment review", ""]
     if review.strip():
-        parts.append(cut(review, MAX_REVIEW, "the rest is in the review job's log"))
+        if note:
+            parts += [note, ""]
+        parts += [START, cut(review, MAX_REVIEW, "the rest is in the review job's log"), END]
     else:
         parts.append(f"The review agent did not run on this push: {options.why or 'the review job failed'}. "
                      "A person at Theorem reviews the enrollment.")
     checks = options.checks.read_text(encoding="utf-8", errors="replace") if options.checks else ""
     if checks.strip():
-        parts += ["", CHECKS_SUMMARY, "",
+        parts += ["", "<details><summary>What the breakage and coverage checks measured</summary>", "",
                   cut(checks.replace(MARKER, ""), MAX_CHECKS, "the rest is in the Build check's summary"), "",
                   "</details>"]
     parts += ["", "<sub>Claude wrote this review, following `.claude/skills/review-enrollment/SKILL.md`, and "

@@ -52,7 +52,7 @@ env -i PATH="$PATH" HOME="$HOME" LANG=C.UTF-8 "${pass[@]}" \
   || status=$?
 if [ "$status" != 0 ] || jq -e .is_error "$in/claude.json" > /dev/null 2>&1; then
   # Claude Code's own error (for example "Authentication failed" from the token exchange), not the review's text.
-  echo "review-run: Claude Code exited $status: $(jq -r '"\(.subtype // "")" + (if .is_error then ": \(.result // "" | .[0:500])" else "" end)' "$in/claude.json" 2>/dev/null)" >&2
+  echo "review-run: Claude Code exited $status: $(jq -r '"\(.subtype // "")" + (if .is_error then ": \(.result // "" | tostring | .[0:500])" else "" end)' "$in/claude.json" 2>/dev/null)" >&2
   tail -c 2000 "$in/claude.err" >&2
   exit 1
 fi

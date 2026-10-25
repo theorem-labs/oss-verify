@@ -55,24 +55,35 @@ name: "Build"
 # The review job runs no code of the pull request or the project. It holds the only identity token (id-token: write),
 # which it trades for a short-lived Anthropic token by workload identity federation: no API key is stored. Claude gets
 # three tools only, Read, Glob and Grep, inside the checkout (.github/scripts/review-run), and an environment without
-# the runner's tokens. The comment job holds the only write permission, and posts text, refused if it holds what
-# looks like a credential (.github/scripts/review-comment).
+# the runner's tokens. The comment job alone writes: it posts text, refused if it holds what looks like a credential
+# (.github/scripts/review-comment), as the oss-verify GitHub App (oss-verify[bot]), with an installation token that
+# can write pull requests in this repository only. It makes that token from the App's client id below and its
+# private key, the repository secret OSS_VERIFY_APP_PRIVATE_KEY, and runs no code of the pull request or the project.
 # Runs do not wait for a maintainer's approval. To build only on request, remove pull_request_target below.
 #
 # The review reaches Claude by workload identity federation, with no stored key: the review job's GitHub identity token
-# is traded for an Anthropic token, by the federation rule whose ids the Review step gives (ids, not secrets). The rule,
-# made in the Claude Console of Anthropic's organization "Theorem - HDO", accepts only this workflow file as the default
-# branch has it, in this repository, and grants Claude calls only:
+# is traded for an Anthropic token, by the federation rule whose ids the Review step gives (ids, not secrets). Two rules,
+# made in the Claude Console of Anthropic's organization "Theorem - HDO", grant Claude calls only, and each accepts only
+# this workflow file in this repository as one branch has it:
 #   issuer   fdis_01JvJ1UhZ8X2HHgcmXqjkJbc: https://token.actions.githubusercontent.com, keys by discovery
-#   match    subject_prefix "repo:theorem-labs@212152656/oss-verify@1429568498:*", audience "https://api.anthropic.com",
-#            claims {"repository_id": "1429568498",
-#                    "workflow_ref": "theorem-labs/oss-verify/.github/workflows/build.yaml@refs/heads/main"}
+#   main     fdrl_019restxFx3PhpLhbziQoQKf: subject_prefix "repo:theorem-labs@212152656/oss-verify@1429568498:*",
+#            audience "https://api.anthropic.com", claims {"repository_id": "1429568498",
+#            "workflow_ref": "theorem-labs/oss-verify/.github/workflows/build.yaml@refs/heads/main"}
+#   test     fdrl_019NVessgKqckm7owmasqfm7: the same, but for build.yaml as a branch refs/heads/ci-test/<name> has it
 #   target   the service account oss-verify-ci (svac_01WdHTLcJPEfiPttcuLK1hGT), with the developer role
 #   scope    workspace:inference, in the workspace Default+CVP, with a token lifetime of 3600 seconds
-# The numbers are the immutable ids of theorem-labs and of this repository. The subject ends in :pull_request on a
-# pull request's run and in :ref:refs/heads/main on a run started by hand; workflow_ref is this file on main for both,
-# and a pull request cannot change it, because pull_request_target runs the default branch's workflow. Renaming this
-# file needs the rule changed. Only the review job asks for an identity token.
+# The numbers are the immutable ids of theorem-labs and of this repository. The Review step takes the test rule when
+# the run's ref is a ci-test/ branch, and the main rule otherwise. A pull request's run has the ref of its base branch,
+# and runs that branch's workflow (pull_request_target), so a pull request cannot change workflow_ref; a run started by
+# hand has the ref it was started on. To try a change of this workflow before it merges, push it to a branch
+# ci-test/<name> (only people with write access can) and start it there:
+#   gh workflow run build.yaml --ref ci-test/<name> -f pr=123
+# Renaming this file needs both rules changed. Only the review job asks for an identity token.
+#
+# On the first run for a pull request, and on each run started by hand, the comment job also sends the build's facts
+# (the project, its language, the build's result, and the size and linkage of each binary) to the Slack channel
+# #proving-oss-fuzz, through the incoming webhook in the repository secret SLACK_WEBHOOK_URL, which can post to that
+# one channel only. Without the secret it sends nothing, and says so in a warning.
 #
 # The review's Claude Code exports its usage by OpenTelemetry to Theorem's cost collector when the repository variable
 # OTEL_EXPORTER_OTLP_ENDPOINT (the collector's public URL) and the repository secret OTEL_COLLECTOR_TOKEN (its bearer
@@ -123,6 +134,7 @@ jobs:
       result: ${{ steps.build.outputs.result }}
       binaries: ${{ steps.build.outputs.binaries }}
       checks: ${{ steps.build.outputs.checks }}
+      language: ${{ steps.build.outputs.language }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with:
@@ -213,10 +225,16 @@ jobs:
           commit=$(python3 -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["commit"])' \
             ~/.cache/oss-verify-check/"$NAME"/manifest.yaml 2> /dev/null || true)
           [[ $commit =~ ^[0-9a-f]{40}$ ]] || commit=""
+          # For the Slack notice: the language project.yaml gives, only if it is one of tools/validate.py's names.
+          language=$(python3 -c 'import sys, yaml; sys.path.insert(0, "tools"); import validate
+          value = yaml.safe_load(open(sys.argv[1])).get("language")
+          print(value if isinstance(value, str) and value in validate.LANGUAGES else "")' \
+            "projects/$NAME/project.yaml" 2> /dev/null || true)
           # A random delimiter, so that no text can end an output early.
           delimiter="output-$(openssl rand -hex 16)"
           {
             echo "commit=$commit"
+            echo "language=$language"
             echo "result=\`projects/$NAME/\` at \`${SHA:0:7}\` $result"
             for output in binaries checks; do
               file=$summary
@@ -305,6 +323,7 @@ jobs:
           mkdir -m 700 "$RUNNER_TEMP/oidc"
           curl -sSf -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://api.anthropic.com" | jq -r .value > "$RUNNER_TEMP/oidc/jwt"
+          echo "::add-mask::$(cat "$RUNNER_TEMP/oidc/jwt")"
 
       - name: Review
         id: review
@@ -315,8 +334,8 @@ jobs:
           # Claude Code trades the identity token for an Anthropic token on its first request. The token lives as
           # long as the rule says (an hour), longer than this step.
           ANTHROPIC_IDENTITY_TOKEN_FILE: ${{ runner.temp }}/oidc/jwt
-          # The federation rule above, in Anthropic's organization "Theorem - HDO".
-          ANTHROPIC_FEDERATION_RULE_ID: fdrl_019restxFx3PhpLhbziQoQKf
+          # The federation rule above, in Anthropic's organization "Theorem - HDO": the test rule for a ci-test/ branch.
+          ANTHROPIC_FEDERATION_RULE_ID: ${{ startsWith(github.ref, 'refs/heads/ci-test/') && 'fdrl_019NVessgKqckm7owmasqfm7' || 'fdrl_019restxFx3PhpLhbziQoQKf' }}
           ANTHROPIC_ORGANIZATION_ID: 5fd73c3e-8a2c-4166-b80d-fb5ce0c1b4a6
           ANTHROPIC_SERVICE_ACCOUNT_ID: svac_01WdHTLcJPEfiPttcuLK1hGT
           ANTHROPIC_WORKSPACE_ID: wrkspc_01Qr1iUVcow4jdgQM7Amfks5
@@ -347,17 +366,26 @@ jobs:
     timeout-minutes: 5
     permissions:
       # contents: read only for the checkout of .github/scripts, which a job with no contents permission cannot make.
+      # It writes with the oss-verify App's token, not this job's.
       contents: read
-      pull-requests: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with:
           persist-credentials: false
           sparse-checkout: .github/scripts
 
+      - name: Get the oss-verify App's token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0 (sha-pinned)
+        with:
+          client-id: Iv23liAWPMahJZYsw3un
+          private-key: ${{ secrets.OSS_VERIFY_APP_PRIVATE_KEY }}
+          permission-pull-requests: write
+
       - name: Post the comment, or update the one already there
+        id: post
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number || inputs.pr }}
           REVIEW: ${{ needs.review.outputs.comment }}
@@ -372,9 +400,9 @@ jobs:
             success) why="" ;;
             *) why="the review job ended with the result $REVIEW_RESULT" ;;
           esac
-          # Other workflows may comment as github-actions[bot] too; ours is the one that starts with the marker.
+          # Ours is the oss-verify App's comment that starts with the marker.
           existing=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- oss-verify-review -->"))) | .id')
+            --jq '.[] | select(.user.login == "oss-verify[bot]" and (.body | startswith("<!-- oss-verify-review -->"))) | .id')
           existing=${existing%%$'\n'*}
           # A review that did not run leaves the last one in place, and says so above it.
           if [ -n "$why" ] && [ -n "$existing" ]; then
@@ -383,6 +411,7 @@ jobs:
               --checks "$RUNNER_TEMP/checks.md" > "$RUNNER_TEMP/comment.md"
             jq -n --rawfile body "$RUNNER_TEMP/comment.md" '{body: $body}' \
               | gh api --method PATCH "repos/$REPO/issues/comments/$existing" --input - > /dev/null
+            echo "posted=updated" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           python3 .github/scripts/review-comment --review "$RUNNER_TEMP/review.md" --why "$why" \
@@ -390,7 +419,31 @@ jobs:
           if [ -n "$existing" ]; then
             jq -n --rawfile body "$RUNNER_TEMP/comment.md" '{body: $body}' \
               | gh api --method PATCH "repos/$REPO/issues/comments/$existing" --input - > /dev/null
+            echo "posted=updated" >> "$GITHUB_OUTPUT"
           else
             jq -n --rawfile body "$RUNNER_TEMP/comment.md" '{body: $body}' \
               | gh api --method POST "repos/$REPO/issues/$PR/comments" --input - > /dev/null
+            echo "posted=new" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Send the build's facts to #proving-oss-fuzz
+        # Once for each pull request, when its comment is first posted, and again on each run started by hand.
+        if: ${{ !cancelled() && (steps.post.outputs.posted == 'new' || github.event_name == 'workflow_dispatch') }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          URL: ${{ github.server_url }}/${{ github.repository }}/pull/${{ github.event.pull_request.number || inputs.pr }}
+          NAME: ${{ needs.project-builds.outputs.name }}
+          LANGUAGE: ${{ needs.project-builds.outputs.language }}
+          RESULT: ${{ needs.project-builds.outputs.result }}
+          BINARIES: ${{ needs.project-builds.outputs.binaries }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "::warning::The repository secret SLACK_WEBHOOK_URL is not set, so the facts were not sent to #proving-oss-fuzz."
+            exit 0
+          fi
+          printf '%s' "$BINARIES" > "$RUNNER_TEMP/binaries.md"
+          python3 .github/scripts/slack-notice --name "$NAME" --language "$LANGUAGE" --url "$URL" --result "$RESULT" \
+            --binaries "$RUNNER_TEMP/binaries.md" > "$RUNNER_TEMP/slack.json"
+          curl -sSf --retry 2 -H 'Content-Type: application/json' --data-binary @"$RUNNER_TEMP/slack.json" \
+            "$SLACK_WEBHOOK_URL" > /dev/null

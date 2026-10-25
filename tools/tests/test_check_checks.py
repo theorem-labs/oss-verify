@@ -1,6 +1,8 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for tools/check_checks.py and .github/scripts/review-comment that need no Docker:  python3 -m pytest tools/tests"""
+"""Tests for tools/check_checks.py, .github/scripts/review-comment and .github/scripts/slack-notice that need no Docker:
+python3 -m pytest tools/tests"""
+import json
 import importlib.machinery
 import importlib.util
 import pathlib
@@ -156,24 +158,45 @@ class ReviewComment(unittest.TestCase):
         self.assertIn("### report", text)
 
     def test_no_review(self):
-        text = self.comment("", why="the review is not set up in this repository yet")
-        self.assertIn("did not run on this push: the review is not set up", text)
+        text = self.comment("", why="the review job did not start")
+        self.assertIn("did not run on this push: the review job did not start", text)
+        self.assertNotIn(review_comment.START, text)
 
-    def test_a_review_that_did_not_run_keeps_the_last_one(self):
-        first = self.comment("Thanks.\n\n<details><summary>x</summary>y</details>\n\n1. Fix X.\n", checks="")
+    def kept(self, previous, why, checks):
         with tempfile.TemporaryDirectory() as directory:
             directory = pathlib.Path(directory)
-            for why in ("the review job ended with the result failure", "again"):
-                (directory / "previous.md").write_text(first)
-                (directory / "checks.md").write_text("### report\n")
-                first = subprocess.run([sys.executable, str(REVIEW_COMMENT), "--previous", str(directory / "previous.md"),
-                                        "--why", why, "--checks", str(directory / "checks.md")],
-                                       capture_output=True, text=True, check=True).stdout
-                self.assertIn("1. Fix X.", first)
-                self.assertIn(f"did not run: {why}", first)
-                self.assertEqual(first.count("did not run"), 1)
-                self.assertEqual(first.count("### report"), 1)
-                self.assertEqual(first.count("<sub>Claude wrote this review"), 1)
+            (directory / "previous.md").write_text(previous)
+            (directory / "checks.md").write_text(checks)
+            return subprocess.run([sys.executable, str(REVIEW_COMMENT), "--previous", str(directory / "previous.md"),
+                                   "--why", why, "--checks", str(directory / "checks.md")],
+                                  capture_output=True, text=True, check=True).stdout
+
+    def test_a_review_that_did_not_run_keeps_the_last_one(self):
+        # The model's text holds the lines that the comment itself uses: the checks' summary, the footer, and the
+        # review's own start and end lines. None of them may cut the review when it is kept.
+        review = ("Thanks.\n\n<details><summary>x</summary>y</details>\n\n"
+                  "<details><summary>What the breakage and coverage checks measured</summary>\n\n1. Fix X.\n\n"
+                  "<sub>Claude wrote this review, quoted</sub>\n\n"
+                  f"{review_comment.START}\n{review_comment.END}\n2. Fix Y.\n")
+        first = self.comment(review, checks="")
+        for why, checks in (("the review job ended with the result failure", "### report\n"), ("again", ""),
+                            ("and again", "### report\n")):
+            kept = self.kept(first.replace("\n", "\r\n"), why, checks)
+            self.assertIn("1. Fix X.", kept)
+            self.assertIn("2. Fix Y.", kept)
+            self.assertIn(f"did not run: {why}", kept)
+            self.assertEqual(kept.count("did not run"), 1)
+            self.assertEqual(kept.count("### report"), 1 if checks else 0)
+            self.assertEqual(kept.count(review_comment.START), 1)
+            self.assertEqual(kept.count(review_comment.END), 1)
+            self.assertTrue(kept.rstrip().endswith("decides nothing: a person at Theorem reviews the enrollment.</sub>"))
+            first = kept
+
+    def test_a_comment_with_no_review_keeps_none(self):
+        none = self.comment("", why="the review job did not start")
+        kept = self.kept(none, "the review job ended with the result failure", "")
+        self.assertIn("did not run on this push: the review job ended with the result failure", kept)
+        self.assertNotIn("This is the review of an earlier push", kept)
 
     def test_a_credential_is_never_posted(self):
         token = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJyZXBvOngifQ.c2lnbmF0dXJl"
@@ -181,6 +204,36 @@ class ReviewComment(unittest.TestCase):
             text = self.comment(f"Here: {leak}")
             self.assertNotIn(leak, text)
             self.assertIn("looks like a credential", text)
+
+
+class SlackNotice(unittest.TestCase):
+    def notice(self, table, name="libreac", language="c"):
+        with tempfile.TemporaryDirectory() as directory:
+            binaries = pathlib.Path(directory) / "binaries.md"
+            binaries.write_text(table)
+            out = subprocess.run([sys.executable, str(ROOT / ".github" / "scripts" / "slack-notice"), "--name", name,
+                                  "--language", language, "--url", "https://github.com/theorem-labs/oss-verify/pull/19",
+                                  "--result", "`projects/libreac/` at `abc1234` builds",
+                                  "--binaries", str(binaries)], capture_output=True, text=True, check=True).stdout
+        return json.loads(out)["text"]
+
+    def test_the_facts_of_each_binary(self):
+        text = self.notice("| target | build | file bytes | `.text` bytes | static |\n|---|---|---:|---:|---|\n"
+                           "| `fuzz_ctrl` | plain | 812,345 | 400,000 | yes |\n"
+                           "| `fuzz_ctrl` | address | 2,812,345 | 1,400,000 | yes |\n")
+        self.assertIn("Language: c.", text)
+        self.assertIn("pull/19", text)
+        self.assertEqual(text.count("fuzz_ctrl"), 2)
+        self.assertIn("812,345", text)
+        self.assertIn("1,400,000", text)
+        self.assertNotIn("---", text)
+
+    def test_no_text_becomes_a_mention_or_a_link(self):
+        text = self.notice("", name="<!channel> <https://x|y> &")
+        self.assertNotIn("<!channel>", text)
+        self.assertIn("&lt;!channel&gt;", text)
+        self.assertIn("&amp;", text)
+        self.assertIn("No binaries", text)
 
 
 if __name__ == "__main__":
