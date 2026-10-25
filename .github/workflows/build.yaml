@@ -77,9 +77,10 @@ name: "Build"
 # the run's ref is a ci-test/ branch, and the main rule otherwise. Each rule's `workflow: "Build"` claim is this
 # workflow's `name:` at the ref the run reads: pull_request_target always reads main (GITHUB_REF=refs/heads/main),
 # and workflow_dispatch reads the ref it was started on. The test rule is reachable only through
-# `gh workflow run build.yaml --ref ci-test/<name> -f pr=123`, which needs write access on this repository, and only
-# as long as this file on that branch keeps `name: "Build"`. Renaming this file or this workflow on main needs the
-# main rule changed. Only the review job asks for an identity token.
+# `gh workflow run build.yaml --ref ci-test/<name> -f pr=<n>`, which needs write access on this repository, and only
+# as long as this file on that branch keeps `name: "Build"`. A ci-test run posts its comment on that pull request,
+# so point it at a test pull request (one opened by this repository, not a maintainer's open enrollment). Renaming
+# this file or this workflow on main needs the main rule changed. Only the review job asks for an identity token.
 #
 # On the first run for a pull request, and on each run started by hand, the comment job also sends the build's facts
 # (the project, its language, the build's result, and the size and linkage of each binary) to the Slack channel
@@ -412,7 +413,7 @@ jobs:
             echo "posted=new" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Send the build's facts to #proving-oss-fuzz
+      - name: "Send the build's facts to #proving-oss-fuzz"
         # Once for each pull request, when its comment is first posted, and again on each run started by hand.
         if: ${{ steps.post.outputs.posted == 'new' || github.event_name == 'workflow_dispatch' }}
         env:
