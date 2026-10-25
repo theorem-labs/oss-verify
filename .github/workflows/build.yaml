@@ -364,7 +364,7 @@ jobs:
   comment:
     needs: [project-builds, review]
     # Only when the review ran and wrote a comment: a failed review leaves the last comment in place.
-    if: ${{ needs.project-builds.outputs.name != '' && needs.review.result == 'success' && needs.review.outputs.comment != '' }}
+    if: ${{ !cancelled() && needs.project-builds.outputs.name != '' && needs.review.result == 'success' && needs.review.outputs.comment != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

@@ -33,19 +33,19 @@ def cut(text, limit, where):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--review", type=pathlib.Path, help="the review's comment.md")
-    parser.add_argument("--why", default="", help="why there is no review, if there is none")
     parser.add_argument("--checks", type=pathlib.Path, help="the report of tools/check --checks")
     options = parser.parse_args()
 
     review = options.review.read_text(encoding="utf-8", errors="replace") if options.review else ""
+    why = ""
     if CREDENTIAL.search(review):
-        review, options.why = "", "its text held what looks like a credential, so it was not posted"
+        review, why = "", "its text held what looks like a credential, so it was not posted"
     review = review.replace(MARKER, "")
     parts = [MARKER, "## Enrollment review", ""]
     if review.strip():
         parts.append(cut(review, MAX_REVIEW, "the rest is in the review job's log"))
     else:
-        parts.append(f"The review agent did not run on this push: {options.why or 'it wrote no comment'}. "
+        parts.append(f"The review agent did not run on this push: {why or 'it wrote no comment'}. "
                      "A person at Theorem reviews the enrollment.")
     checks = options.checks.read_text(encoding="utf-8", errors="replace") if options.checks else ""
     if checks.strip():

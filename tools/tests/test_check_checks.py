@@ -141,13 +141,13 @@ class Mutants(unittest.TestCase):
 
 
 class ReviewComment(unittest.TestCase):
-    def comment(self, review, why="", checks="### report\n"):
+    def comment(self, review, checks="### report\n"):
         with tempfile.TemporaryDirectory() as directory:
             directory = pathlib.Path(directory)
             (directory / "review.md").write_text(review)
             (directory / "checks.md").write_text(checks)
             return subprocess.run([sys.executable, str(REVIEW_COMMENT), "--review", str(directory / "review.md"),
-                                   "--why", why, "--checks", str(directory / "checks.md")],
+                                   "--checks", str(directory / "checks.md")],
                                   capture_output=True, text=True, check=True).stdout
 
     def test_the_marker_comes_first_once(self):

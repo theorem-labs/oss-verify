@@ -33,8 +33,7 @@ gh pr diff "$PR" -R "$REPO" > "$out/pr.diff" 2>&1
 keep review-comments.txt gh api --paginate "repos/$REPO/pulls/$PR/comments" \
   --jq '.[] | "\(.user.login) \(.path):\(.line) \(.body)"'
 # Any user can comment with the triage marker; take only the oss-verify App's comment, which this repository posts.
-# A fallback to github-actions[bot] stays as long as this comment job already runs for an open pull request.
-jq -r '[.comments[]? | select(.author.login == "oss-verify")] + [.comments[]? | select(.author.login == "github-actions")]
+jq -r '[.comments[]? | select(.author.login == "oss-verify")]
        | map(.body | select(startswith("<!-- oss-verify-triage -->"))) | .[0] // ""' "$out/pr.json" \
   > "$out/triage-comment.md" 2>/dev/null || true
 keep triage-today.md env GITHUB_TOKEN="${GH_TOKEN:-}" python3 .github/scripts/triage.py --repo "$REPO" --pr "$PR"
