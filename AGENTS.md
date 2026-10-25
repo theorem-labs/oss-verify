@@ -13,4 +13,5 @@ Obey these rules:
 3. Follow the rules for the project directory in [docs/project-yaml.md](docs/project-yaml.md).
 4. Follow the rules for the build in [docs/build-contract.md](docs/build-contract.md).
 5. Read the project's `Dockerfile` before you run `tools/check` on it.
-6. Do not open the pull request. Give it to the maintainer, who opens it and accepts the terms.
+6. Give each file of code its licence lines, as the skill says in step 3.8. A copied file keeps its own; no check finds a missing one.
+7. Do not open the pull request. Give it to the maintainer, who opens it and accepts the terms.

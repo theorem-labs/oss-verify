@@ -127,7 +127,15 @@ You can also return -1 to reject an input that is outside the domain of a proper
 
 In all other cases, return 0. Change each expected outcome into `return 0`, narrowly. Examine the library's error code, or catch the one exception type that the API documents.
 
-Give each file a header that tells what it is and its licence. A file copied from the project's repository keeps the project's licence and tells so.
+### 3.8 Give each file its licence lines
+
+Each file of code that you put in `projects/<name>/` (fuzz targets, `Dockerfile`, `build.sh`, scripts) begins, after any `#!` line, with licence lines: comment lines that say whose the file is and under which licence. `project.yaml`, `sources`, locks and seed inputs need none. Take the first case that fits:
+
+1. **You copied the file from somewhere**, whole or in part: the project's repository, OSS-Fuzz, or another project. Keep its licence lines unchanged, for example the Google header of an OSS-Fuzz `build.sh`. If the file has none, add `Copyright <year> <its authors>` and `SPDX-License-Identifier: <its licence>`, as the licence file of the repository it came from says, and the URL and commit it came from.
+2. **You changed a copied file**: also add one line under its licence lines that says who changed it, when and what changed, true of this file. For example: `Modified 2026 by Alex Doe: the build for the OSS Verify builder.` The files of `templates/` show the form.
+3. **You wrote the file**: `Copyright <year> <your name or organisation>` and `SPDX-License-Identifier: Apache-2.0`, as in `templates/build.sh`. A contribution is under the Apache License 2.0 ([CONTRIBUTING.md](../../../CONTRIBUTING.md)).
+
+Do not add a licence file, and do not change `LICENSE`, `LICENSES/` or `NOTICE`. In the pull request, say which files came from where. No check reads licence lines: the person who reviews the enrollment does.
 
 ## 4. Port the build
 
