@@ -63,22 +63,23 @@ name: "Build"
 #
 # The review reaches Claude by workload identity federation, with no stored key: the review job's GitHub identity token
 # is traded for an Anthropic token, by the federation rule whose ids the Review step gives (ids, not secrets). Two rules,
-# made in the Claude Console of Anthropic's organization "Theorem - HDO", grant Claude calls only, and each accepts only
-# this workflow file in this repository as one branch has it:
+# made in the Claude Console of Anthropic's organization "Theorem - HDO", grant Claude calls only:
 #   issuer   fdis_01JvJ1UhZ8X2HHgcmXqjkJbc: https://token.actions.githubusercontent.com, keys by discovery
 #   main     fdrl_019restxFx3PhpLhbziQoQKf: subject_prefix "repo:theorem-labs@212152656/oss-verify@1429568498:*",
 #            audience "https://api.anthropic.com", claims {"repository_id": "1429568498",
-#            "workflow_ref": "theorem-labs/oss-verify/.github/workflows/build.yaml@refs/heads/main"}
-#   test     fdrl_019NVessgKqckm7owmasqfm7: the same, but for build.yaml as a branch refs/heads/ci-test/<name> has it
+#            "ref": "refs/heads/main", "workflow": "Build"}
+#   test     fdrl_019NVessgKqckm7owmasqfm7: subject_prefix
+#            "repo:theorem-labs@212152656/oss-verify@1429568498:ref:refs/heads/ci-test/*", audience
+#            "https://api.anthropic.com", claims {"repository_id": "1429568498", "workflow": "Build"}
 #   target   the service account oss-verify-ci (svac_01WdHTLcJPEfiPttcuLK1hGT), with the developer role
 #   scope    workspace:inference, in the workspace Default+CVP, with a token lifetime of 3600 seconds
 # The numbers are the immutable ids of theorem-labs and of this repository. The Review step takes the test rule when
-# the run's ref is a ci-test/ branch, and the main rule otherwise. A pull request's run has the ref of its base branch,
-# and runs that branch's workflow (pull_request_target), so a pull request cannot change workflow_ref; a run started by
-# hand has the ref it was started on. To try a change of this workflow before it merges, push it to a branch
-# ci-test/<name> (only people with write access can) and start it there:
-#   gh workflow run build.yaml --ref ci-test/<name> -f pr=123
-# Renaming this file needs both rules changed. Only the review job asks for an identity token.
+# the run's ref is a ci-test/ branch, and the main rule otherwise. Each rule's `workflow: "Build"` claim is this
+# workflow's `name:` at the ref the run reads: pull_request_target always reads main (GITHUB_REF=refs/heads/main),
+# and workflow_dispatch reads the ref it was started on. The test rule is reachable only through
+# `gh workflow run build.yaml --ref ci-test/<name> -f pr=123`, which needs write access on this repository, and only
+# as long as this file on that branch keeps `name: "Build"`. Renaming this file or this workflow on main needs the
+# main rule changed. Only the review job asks for an identity token.
 #
 # On the first run for a pull request, and on each run started by hand, the comment job also sends the build's facts
 # (the project, its language, the build's result, and the size and linkage of each binary) to the Slack channel
@@ -361,7 +362,8 @@ jobs:
 
   comment:
     needs: [project-builds, review]
-    if: ${{ !cancelled() && needs.project-builds.outputs.name != '' }}
+    # Only when the review ran and wrote a comment: a failed review leaves the last comment in place.
+    if: ${{ needs.project-builds.outputs.name != '' && needs.review.result == 'success' && needs.review.outputs.comment != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -389,33 +391,17 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number || inputs.pr }}
           REVIEW: ${{ needs.review.outputs.comment }}
-          REVIEW_RESULT: ${{ needs.review.result }}
           CHECKS: ${{ needs.project-builds.outputs.checks }}
         run: |
           set -euo pipefail
           printf '%s' "$REVIEW" > "$RUNNER_TEMP/review.md"
           printf '%s' "$CHECKS" > "$RUNNER_TEMP/checks.md"
-          case $REVIEW_RESULT in
-            skipped) why="the review job did not start" ;;
-            success) why="" ;;
-            *) why="the review job ended with the result $REVIEW_RESULT" ;;
-          esac
+          python3 .github/scripts/review-comment --review "$RUNNER_TEMP/review.md" \
+            --checks "$RUNNER_TEMP/checks.md" > "$RUNNER_TEMP/comment.md"
           # Ours is the oss-verify App's comment that starts with the marker.
           existing=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
             --jq '.[] | select(.user.login == "oss-verify[bot]" and (.body | startswith("<!-- oss-verify-review -->"))) | .id')
           existing=${existing%%$'\n'*}
-          # A review that did not run leaves the last one in place, and says so above it.
-          if [ -n "$why" ] && [ -n "$existing" ]; then
-            gh api "repos/$REPO/issues/comments/$existing" --jq .body > "$RUNNER_TEMP/previous.md"
-            python3 .github/scripts/review-comment --previous "$RUNNER_TEMP/previous.md" --why "$why" \
-              --checks "$RUNNER_TEMP/checks.md" > "$RUNNER_TEMP/comment.md"
-            jq -n --rawfile body "$RUNNER_TEMP/comment.md" '{body: $body}' \
-              | gh api --method PATCH "repos/$REPO/issues/comments/$existing" --input - > /dev/null
-            echo "posted=updated" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          python3 .github/scripts/review-comment --review "$RUNNER_TEMP/review.md" --why "$why" \
-            --checks "$RUNNER_TEMP/checks.md" > "$RUNNER_TEMP/comment.md"
           if [ -n "$existing" ]; then
             jq -n --rawfile body "$RUNNER_TEMP/comment.md" '{body: $body}' \
               | gh api --method PATCH "repos/$REPO/issues/comments/$existing" --input - > /dev/null
@@ -428,7 +414,7 @@ jobs:
 
       - name: Send the build's facts to #proving-oss-fuzz
         # Once for each pull request, when its comment is first posted, and again on each run started by hand.
-        if: ${{ !cancelled() && (steps.post.outputs.posted == 'new' || github.event_name == 'workflow_dispatch') }}
+        if: ${{ steps.post.outputs.posted == 'new' || github.event_name == 'workflow_dispatch' }}
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           URL: ${{ github.server_url }}/${{ github.repository }}/pull/${{ github.event.pull_request.number || inputs.pr }}

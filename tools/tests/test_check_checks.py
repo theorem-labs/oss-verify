@@ -158,45 +158,14 @@ class ReviewComment(unittest.TestCase):
         self.assertIn("### report", text)
 
     def test_no_review(self):
-        text = self.comment("", why="the review job did not start")
-        self.assertIn("did not run on this push: the review job did not start", text)
-        self.assertNotIn(review_comment.START, text)
+        text = self.comment("")
+        self.assertIn("did not run on this push: it wrote no comment", text)
 
-    def kept(self, previous, why, checks):
-        with tempfile.TemporaryDirectory() as directory:
-            directory = pathlib.Path(directory)
-            (directory / "previous.md").write_text(previous)
-            (directory / "checks.md").write_text(checks)
-            return subprocess.run([sys.executable, str(REVIEW_COMMENT), "--previous", str(directory / "previous.md"),
-                                   "--why", why, "--checks", str(directory / "checks.md")],
-                                  capture_output=True, text=True, check=True).stdout
-
-    def test_a_review_that_did_not_run_keeps_the_last_one(self):
-        # The model's text holds the lines that the comment itself uses: the checks' summary, the footer, and the
-        # review's own start and end lines. None of them may cut the review when it is kept.
-        review = ("Thanks.\n\n<details><summary>x</summary>y</details>\n\n"
-                  "<details><summary>What the breakage and coverage checks measured</summary>\n\n1. Fix X.\n\n"
-                  "<sub>Claude wrote this review, quoted</sub>\n\n"
-                  f"{review_comment.START}\n{review_comment.END}\n2. Fix Y.\n")
-        first = self.comment(review, checks="")
-        for why, checks in (("the review job ended with the result failure", "### report\n"), ("again", ""),
-                            ("and again", "### report\n")):
-            kept = self.kept(first.replace("\n", "\r\n"), why, checks)
-            self.assertIn("1. Fix X.", kept)
-            self.assertIn("2. Fix Y.", kept)
-            self.assertIn(f"did not run: {why}", kept)
-            self.assertEqual(kept.count("did not run"), 1)
-            self.assertEqual(kept.count("### report"), 1 if checks else 0)
-            self.assertEqual(kept.count(review_comment.START), 1)
-            self.assertEqual(kept.count(review_comment.END), 1)
-            self.assertTrue(kept.rstrip().endswith("decides nothing: a person at Theorem reviews the enrollment.</sub>"))
-            first = kept
-
-    def test_a_comment_with_no_review_keeps_none(self):
-        none = self.comment("", why="the review job did not start")
-        kept = self.kept(none, "the review job ended with the result failure", "")
-        self.assertIn("did not run on this push: the review job ended with the result failure", kept)
-        self.assertNotIn("This is the review of an earlier push", kept)
+    def test_a_review_with_details_is_posted_whole(self):
+        text = self.comment("Thanks.\n\n<details><summary>x</summary>y</details>\n\n1. Fix X.\n\n2. Fix Y.\n")
+        self.assertIn("1. Fix X.", text)
+        self.assertIn("2. Fix Y.", text)
+        self.assertEqual(text.count("<sub>Claude wrote this review"), 1)
 
     def test_a_credential_is_never_posted(self):
         token = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJyZXBvOngifQ.c2lnbmF0dXJl"

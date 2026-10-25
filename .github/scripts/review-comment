@@ -6,10 +6,10 @@
     review-comment [--review <comment.md>] [--why <text>] [--checks <checks.md>]
 
 It prints the comment: the marker that build.yaml's comment job finds it by, the review's comment to the maintainer
-(or, when the review did not run, why), and the report of tools/check --checks, folded. The review's text comes from a
+(or, when its text was refused, why), and the report of tools/check --checks, folded. The review's text comes from a
 model that read the pull request, so it is refused if it holds what looks like a credential, and cut to a length that
-GitHub takes. It sits between two comment lines of its own, which are removed from the model's text, so that a later
-run whose review did not run takes back exactly that text from the posted comment.
+GitHub takes. The comment job runs it only after a review that succeeded: when the review fails, the job posts no
+comment.
 """
 import argparse
 import pathlib
@@ -17,9 +17,6 @@ import re
 import sys
 
 MARKER = "<!-- oss-verify-review -->"
-# The review's own text lies between these two lines, and nothing else does.
-START = "<!-- oss-verify-review: start -->"
-END = "<!-- oss-verify-review: end -->"
 # GitHub refuses a comment over 65,536 characters.
 MAX_REVIEW = 40_000
 MAX_CHECKS = 20_000
@@ -38,31 +35,17 @@ def main():
     parser.add_argument("--review", type=pathlib.Path, help="the review's comment.md")
     parser.add_argument("--why", default="", help="why there is no review, if there is none")
     parser.add_argument("--checks", type=pathlib.Path, help="the report of tools/check --checks")
-    parser.add_argument("--previous", type=pathlib.Path,
-                        help="the comment already posted: with --why, keep its review, below a note that this push "
-                             "had none")
     options = parser.parse_args()
 
     review = options.review.read_text(encoding="utf-8", errors="replace") if options.review else ""
-    note = ""
-    if options.previous and options.why:
-        previous = options.previous.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
-        start, end = previous.find(START), previous.rfind(END)
-        if start != -1 and end > start:
-            review = previous[start + len(START):end]
-            note = (f"**The review of the last push did not run: {options.why}. This is the review of an earlier "
-                    "push.**")
     if CREDENTIAL.search(review):
-        review, note, options.why = "", "", "its text held what looks like a credential, so it was not posted"
-    for line in (MARKER, START, END):
-        review = review.replace(line, "")
+        review, options.why = "", "its text held what looks like a credential, so it was not posted"
+    review = review.replace(MARKER, "")
     parts = [MARKER, "## Enrollment review", ""]
     if review.strip():
-        if note:
-            parts += [note, ""]
-        parts += [START, cut(review, MAX_REVIEW, "the rest is in the review job's log"), END]
+        parts.append(cut(review, MAX_REVIEW, "the rest is in the review job's log"))
     else:
-        parts.append(f"The review agent did not run on this push: {options.why or 'the review job failed'}. "
+        parts.append(f"The review agent did not run on this push: {options.why or 'it wrote no comment'}. "
                      "A person at Theorem reviews the enrollment.")
     checks = options.checks.read_text(encoding="utf-8", errors="replace") if options.checks else ""
     if checks.strip():
