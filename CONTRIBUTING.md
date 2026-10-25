@@ -9,7 +9,7 @@ To enroll a project, follow the [README](README.md), or give a coding agent the 
 
 You make contributions under the Apache License 2.0 ([LICENSE](LICENSE), section 5). There is no separate contributor licence agreement. The driver in `infra/base-builder/driver/`, which takes no contributions, is under MIT OR Apache-2.0, so that a program under version 2 of the GNU GPL can be linked with it ([NOTICE](NOTICE)). A contribution to a file whose SPDX line says MIT OR Apache-2.0, or to a file or lines that NOTICE says are MIT OR Apache-2.0, is made under both licences.
 
-Each file of code that you add begins with licence lines. A file that you copied keeps its own, and a file that you wrote says `SPDX-License-Identifier: Apache-2.0`. Step 3.8 of [the add-project skill](.claude/skills/add-project/SKILL.md) gives the cases. No check reads these lines, so the review of the enrollment does.
+Each file of code that you add begins with licence lines. A file that you copied keeps its own (a seeded project's files are copied byte for byte), and a file that you wrote says `SPDX-License-Identifier: Apache-2.0`, or `MIT OR Apache-2.0` for a project under version 2 of the GNU GPL only. Step 3.8 of [the add-project skill](.claude/skills/add-project/SKILL.md) gives every case. No check reads these lines.
 
 To report a vulnerability, follow [SECURITY.md](SECURITY.md). Do not open a public issue for it.
 

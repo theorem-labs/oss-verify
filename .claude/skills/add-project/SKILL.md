@@ -129,13 +129,14 @@ In all other cases, return 0. Change each expected outcome into `return 0`, narr
 
 ### 3.8 Give each file its licence lines
 
-Each file of code that you put in `projects/<name>/` (fuzz targets, `Dockerfile`, `build.sh`, scripts) begins, after any `#!` line, with licence lines: comment lines that say whose the file is and under which licence. `project.yaml`, `sources`, locks and seed inputs need none. Take the first case that fits:
+Each file of code that you put in `projects/<name>/` (fuzz targets, `Dockerfile`, `build.sh`, scripts) begins, after any `#!` line, with licence lines: comment lines that say whose the file is and under which licence. Build patches (they change the project's own files, which keep the project's licence), `project.yaml`, `sources`, `series`, `patch_style.md`, locks and seed inputs need none. "You" below is the maintainer for whom you write the files: ask them which name and organisation to give. Use the first of these cases that fits:
 
-1. **You copied the file from somewhere**, whole or in part: the project's repository, OSS-Fuzz, or another project. Keep its licence lines unchanged, for example the Google header of an OSS-Fuzz `build.sh`. If the file has none, add `Copyright <year> <its authors>` and `SPDX-License-Identifier: <its licence>`, as the licence file of the repository it came from says, and the URL and commit it came from.
-2. **You changed a copied file**: also add one line under its licence lines that says who changed it, when and what changed, true of this file. For example: `Modified 2026 by Alex Doe: the build for the OSS Verify builder.` The files of `templates/` show the form.
-3. **You wrote the file**: `Copyright <year> <your name or organisation>` and `SPDX-License-Identifier: Apache-2.0`, as in `templates/build.sh`. A contribution is under the Apache License 2.0 ([CONTRIBUTING.md](../../../CONTRIBUTING.md)).
+1. **A seeded project's file**, from `tools/seeds/<name>/` or `projects/<name>/` of this repository: copy it byte for byte and add nothing. [NOTICE](../../../NOTICE) gives its licence, by line number.
+2. **A file started from `templates/`**: delete the template's comments and give it the lines of a file that you wrote (case 4), as `projects/cjson/Dockerfile` does.
+3. **A file copied from elsewhere**, whole or in part: the project's repository, OSS-Fuzz, or another project. Keep its licence lines unchanged, for example the Google header of an OSS-Fuzz `build.sh`. If it has none, add `SPDX-License-Identifier: <its licence>`, as the LICENSE and NOTICE of the repository it came from say, and a line with the URL and commit it came from; add a `Copyright` line only when that repository names the holder. If you changed the file, also add one line under its licence lines that says who changed it, when, and what changed in this file, as `tools/validate.py` does. For example: `Modified 2026 by Alex Doe: built with the OSS Verify builder.`
+4. **A file that you wrote**: `Copyright <year> <your name or organisation>` and `SPDX-License-Identifier: Apache-2.0`, as in `templates/build.sh`. A contribution is under the Apache License 2.0 ([CONTRIBUTING.md](../../../CONTRIBUTING.md)). If the project is under version 2 of the GNU GPL only, give `SPDX-License-Identifier: MIT OR Apache-2.0` instead, because GPL-2.0 code cannot be linked with Apache-2.0-only code ([NOTICE](../../../NOTICE)).
 
-Do not add a licence file, and do not change `LICENSE`, `LICENSES/` or `NOTICE`. In the pull request, say which files came from where. No check reads licence lines: the person who reviews the enrollment does.
+Do not add a licence file, and do not change `LICENSE`, `LICENSES/` or `NOTICE`. In the pull request, say which files came from where. No check reads licence lines, so get them right before you give the branch to the maintainer.
 
 ## 4. Port the build
 
@@ -190,7 +191,7 @@ For `ubsan_checks`, suggest the default: it is the list of OSS-Fuzz for the proj
 
 1. Make a branch that changes only `projects/<name>/`.
 2. Write the pull request description from `.github/PULL_REQUEST_TEMPLATE.md`.
-3. In the context note, give a summary of what each fuzz target checks, in a few lines.
+3. In the context note, give a summary of what each fuzz target checks, in a few lines, and say which files came from where (3.8).
 4. Optional: show the triage comment that the pull request will get: `python3 .github/scripts/triage.py --repo theorem-labs/oss-verify --local projects/<name> --login <maintainer's GitHub account> --body <a file holding the description>`. Without `GITHUB_TOKEN`, its GraphQL rows say "could not be checked".
 5. Show the branch and the description to the maintainer.
 6. Let the maintainer open the pull request. Only the maintainer can confirm "I am a core maintainer" and "I accept the OSS Verify terms".
