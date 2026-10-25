@@ -6,3 +6,4 @@ homepage: https://github.com/DaveGamble/cJSON
 language: c
 sanitizers: [address, undefined]
 fuzz_targets: [cjson_read_fuzzer]
+# Test of the federation rule pin for the enrollment review (agentvm, 2026-10-25). Do not merge.
