@@ -1,5 +1,5 @@
 # Copyright 2026 SQLPage contributors. SPDX-License-Identifier: Apache-2.0
-repo: https://github.com/sqlpage/SQLPage#8862de80719549ac9add914b0ecb3f915913eccb
+repo: https://github.com/sqlpage/SQLPage#main
 primary_contact: ophir@sql-page.com
 homepage: https://sql-page.com/
 language: rust
