@@ -1,0 +1,23 @@
+# A throwaway measurement, never merged: which Actions cache entries a pull request's own run can read and write.
+name: "Cache scope probe"
+on:
+  pull_request:
+    branches: [main]
+permissions: {}
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
+        with:
+          persist-credentials: false
+      - name: Probe the cache service with this run's own cache token
+        uses: ./.github/actions/cache-probe
+        env:
+          PR: ${{ github.event.pull_request.number }}
+          # Saved by push runs on main (refs/heads/main scope); key and version as the REST API lists them.
+          MAIN_KEY: codeql-overlay-base-database-1-433570c23e836bda-go-2.27.3-33845fb4d52cb6513b996f6eb15d21954abef3dc-40284759121-1
+          MAIN_VERSION: d96c176a7c72d361c40b4e5bcab0abec796173d7f00eca68f52f8039917812e4
+          # The probe pull requests whose own entries this run tries to read (none on the first probe).
+          OTHER_PRS: ""

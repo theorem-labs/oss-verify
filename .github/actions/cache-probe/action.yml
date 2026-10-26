@@ -1,0 +1,5 @@
+name: cache-probe
+description: Throwaway measurement of the cache scopes a run can read and write. Never merged.
+runs:
+  using: node24
+  main: index.js
