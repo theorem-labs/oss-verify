@@ -6,3 +6,4 @@ homepage: https://github.com/DaveGamble/cJSON
 language: c
 sanitizers: [address, undefined]
 fuzz_targets: [cjson_read_fuzzer]
+# A test of #63: this line changes nothing.
