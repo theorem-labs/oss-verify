@@ -25,16 +25,19 @@
 # Without the two variables it exports nothing.
 # No value of that environment is ever an argument of a process: another user on the machine can read a process's
 # arguments, but not its environment.
+# In CI it keeps Claude Code's workload identity usable for a review of any length, and runs Claude Code once more when
+# it ends without a review (both below). A run that ends without a comment writes why, in plain words, to
+# <directory>/failure.txt, and Claude Code's own message, for the job's summary, to <directory>/failure-detail.txt.
 # With REVIEW_SESSION=<directory outside this checkout> and HEAD_SHA=<the pull request's head commit>, the review keeps
 # its conversation: build.yaml's review job restores that directory from the sealed artifact of the last review
 # (.github/scripts/review-session), so that the review of each push resumes the conversation of the last review of the
 # pull request, and knows what it asked for and why. The directory holds `session` (id=<the conversation's id>,
-# head=<the commit it reviewed>, dir=<its folder in ~/.claude/projects>) and the conversation, <id>.jsonl. Claude Code
-# resumes it in a fork with a new id
-# (--resume --fork-session), so a review that fails leaves the last one whole. When the directory holds no
-# conversation, or the resumed run fails before its second turn, the review starts fresh. The log says which:
-# "resuming the conversation <id> of the review of <commit>", or "a fresh review". After a review that wrote a
-# comment, the directory holds this review's conversation instead.
+# head=<the commit it reviewed>, dir=<its folder in ~/.claude/projects>) and the conversation, <id>.jsonl. The first
+# try resumes it in a fork with a new id (--resume --fork-session), so a review that fails leaves the last one whole;
+# when that try ends without a review ("No conversation found", a conversation too long to load, or any other reason),
+# the second try is a fresh review. When the directory holds no conversation, the review starts fresh. The log says
+# which: "resuming the conversation <id> of the review of <commit>", or "a fresh review". After a review that wrote a
+# comment, the directory holds this review's conversation instead, unless it holds what looks like a credential.
 set -euo pipefail
 
 in=${1:?usage: review-run <directory>}
@@ -42,6 +45,10 @@ in=${1:?usage: review-run <directory>}
 [[ $NAME =~ ^[a-z0-9][a-z0-9._-]{0,62}$ ]] || { echo "review-run: NAME is not a project name" >&2; exit 2; }
 case $(realpath "$in")/ in "$(pwd -P)"/*) ;; *) echo "review-run: $in is not inside this checkout" >&2; exit 2 ;; esac
 model=${REVIEW_MODEL:-claude-opus-5-5}
+# The seconds between two new identity tokens (below); a test makes it shorter.
+every=${REVIEW_TOKEN_EVERY:-60}
+[[ $every =~ ^[1-9][0-9]{0,3}$ ]] || { echo "review-run: REVIEW_TOKEN_EVERY is not a number of seconds" >&2; exit 2; }
+rm -f "$in/failure.txt" "$in/failure-detail.txt"
 session_dir=${REVIEW_SESSION:-}
 if [ -n "$session_dir" ]; then
   case $(realpath -m "$session_dir")/ in
@@ -97,6 +104,8 @@ if [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ] && [ -n "${OTEL_COLLECTOR_TOKEN:-}"
   if [ "$answer" != 200 ]; then
     echo "review-run: the collector at $OTEL_EXPORTER_OTLP_ENDPOINT answered ${answer:-nothing} to an empty export" \
       "with OTEL_COLLECTOR_TOKEN, not 200: the review's usage would be lost. Check the token and the endpoint." >&2
+    echo "the cost collector answered ${answer:-nothing}, not 200, to an empty export with OTEL_COLLECTOR_TOKEN" \
+      "before the review" > "$in/failure.txt"
     exit 1
   fi
   # The CI service account's label only on the identity that build.yaml's review job gets for it.
@@ -114,55 +123,153 @@ if [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ] && [ -n "${OTEL_COLLECTOR_TOKEN:-}"
 else
   echo "review-run: no OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_COLLECTOR_TOKEN: usage is not exported"
 fi
-# Claude Code's whole environment, one NUL-ended entry each, goes through a pipe to a launcher that execs it with that
-# environment only, as env -i would, and stdin from /dev/null. env -i took the entries as arguments. A loop of
-# `export -n` over `compgen -e` in this shell would not do it: bash passes on environment entries whose names are not
-# variable names, such as A.B=1, and the loop does not remove exported functions either.
-#   review <prompt> <Claude Code's arguments for the conversation...>
-review() {
+
+# Workload identity federation, in build.yaml's review job. A GitHub identity token lives about five minutes and may be
+# exchanged once, and the Anthropic token Claude Code mints from it lives at most twice what was left of it: about ten
+# minutes. Before that ends Claude Code mints a new one from the file ANTHROPIC_IDENTITY_TOKEN_FILE names, which it
+# reads again for it, and an identity token that is expired or already exchanged is refused ("Token exchange failed
+# with status 401 ... Authentication failed"), which ends the review. See "Token lifetime and refresh" in
+# https://platform.claude.com/docs/en/manage-claude/workload-identity-federation and "Token lifetime" in its GitHub
+# Actions page. So while Claude Code runs, a new identity token is written into that file every minute, from the
+# request URL and token the runner gives a job with id-token: write, and one more before a second try. Outside CI there
+# is no such URL and nothing to write: Claude Code uses the person's own login.
+token_file=${ANTHROPIC_IDENTITY_TOKEN_FILE:-}
+[ -n "$token_file" ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ] \
+  || token_file=
+# The request token reaches curl through a pipe, as the collector's does. The new token replaces the file in one rename,
+# from a file of this process's own: the loop below and the fetch before a second try can run at the same time.
+new_identity_token() {
+  [ -n "$token_file" ] || return 0
+  local new="$token_file.new.$BASHPID"
+  curl -q -sSf --max-time 20 -H @<(builtin printf 'Authorization: Bearer %s\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN") \
+      "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://api.anthropic.com" | jq -r '.value // empty' > "$new" \
+    && [ -s "$new" ] && mv -f "$new" "$token_file"
+}
+rotating=""
+# The loop is stopped and waited for, so that no new token is written once this script has ended. Nothing here may
+# change the exit status: it runs as the EXIT trap, after exit 3 too.
+stop_rotating() {
+  [ -z "$rotating" ] || { kill "$rotating" && wait "$rotating"; } 2> /dev/null || true
+  rm -f "$token_file".new.* || true
+  [ ! -s "$in/identity-token.log" ] || cat "$in/identity-token.log" >&2 || true
+}
+if [ -n "$token_file" ]; then
+  # The loop sleeps in the background, so that it can end at once when it is stopped between two tokens (and after the
+  # token it is fetching, if it is stopped then). What it says goes to a file of its own, not to this script's output.
+  : > "$in/identity-token.log"
+  (
+    trap '[ -z "${!:-}" ] || kill "$!" 2> /dev/null; exit 0' TERM
+    while :; do
+      sleep "$every" &
+      wait "$!"
+      new_identity_token || echo "review-run: could not write a new identity token at $(date -u +%H:%M:%S)"
+    done
+  ) > "$in/identity-token.log" 2>&1 &
+  rotating=$!
+  trap stop_rotating EXIT
+fi
+
+# Whether standard input holds what looks like a credential (an identity token, an Anthropic or GitHub token), by
+# review-comment's own scan, or the collector's token. Fails closed: an error of the scan counts as a credential.
+holds_credential() {
+  local text scan=0
+  text=$(cat)
+  if [ -n "${OTEL_COLLECTOR_TOKEN:-}" ] && [[ $text == *"$OTEL_COLLECTOR_TOKEN"* ]]; then return 0; fi
+  builtin printf '%s' "$text" | python3 "$here/review-comment" --holds-credential || scan=$?
+  [ "$scan" != 3 ]
+}
+here=$(dirname "$(realpath "$0")")
+
+# The file tools never read the runner's temporary directory or the identity token's: --restricted keeps them inside
+# this checkout, and this deny rule says so again, should that ever change. `//` starts an absolute path in a rule.
+deny=()
+for directory in "${RUNNER_TEMP:-}" "${ANTHROPIC_IDENTITY_TOKEN_FILE:+$(dirname "$ANTHROPIC_IDENTITY_TOKEN_FILE")}"; do
+  [ -z "$directory" ] || deny+=("Read(/$(realpath -m "$directory")/**)")
+done
+[ ${#deny[@]} = 0 ] || deny=(--disallowedTools "${deny[@]}")
+
+# Claude Code's exit status is kept, and how it ended is read from claude.json and written where a reader sees it. All
+# tries stop at 40 minutes, inside the review step's 45, so that a review that runs too long says so too (exit status
+# 124). A try that ends without a review is tried once more if 10 minutes are left, and not after the time limit or
+# without a new identity token for it. Each try is a conversation of its own id: the first resumes the last review's
+# conversation when there is one, and the second is a fresh review.
+deadline=$((SECONDS + 40 * 60))
+first_why=""
+for try in 1 2; do
+  status=0
+  id=$(uuid)
+  text=$prompt conversation=(--session-id "$id") resumed=""
+  if [ -n "$last_id" ] && [ "$try" = 1 ]; then
+    echo "review-run: resuming the conversation $last_id of the review of $last_head, as $id"
+    text=$again conversation=(--resume "$last_id" --fork-session --session-id "$id") resumed=yes
+  elif [ -n "$last_id" ]; then
+    echo "review-run: the resumed review of the conversation $last_id ended without a review: a fresh review, as $id"
+  elif [ "$try" = 1 ]; then
+    echo "review-run: no conversation of an earlier review of pull request #$PR: a fresh review, as $id"
+  fi
+  # Claude Code's whole environment, one NUL-ended entry each, goes through a pipe to a launcher that execs it with
+  # that environment only, as env -i would, and stdin from /dev/null. env -i took the entries as arguments. A loop of
+  # `export -n` over `compgen -e` in this shell would not do it: bash passes on environment entries whose names are not
+  # variable names, such as A.B=1, and the loop does not remove exported functions either.
   {
     builtin printf '%s\0' "PATH=$PATH" "HOME=$HOME" LANG=C.UTF-8
     for variable in $(compgen -e); do
       case $variable in ANTHROPIC_*|CLAUDE_CODE_*) builtin printf '%s\0' "$variable=${!variable}" ;; esac
     done
     [ ${#telemetry[@]} = 0 ] || builtin printf '%s\0' "${telemetry[@]}"
-  } | python3 -c '
+  } | timeout --kill-after=60 "$((deadline - SECONDS))s" python3 -c '
 import os, sys
 environment = dict(entry.split(b"=", 1) for entry in sys.stdin.buffer.read().split(b"\0") if entry)
 with open(os.devnull, "rb") as empty:
     os.dup2(empty.fileno(), 0)
 os.execvpe(sys.argv[1], sys.argv[1:], environment)' \
-    claude -p "$1" "${@:2}" --restricted --tools Read,Glob,Grep --strict-mcp-config --permission-mode dontAsk \
-      --model "$model" --effort xhigh --max-turns 300 --output-format json > "$in/claude.json" 2> "$in/claude.err"
-}
-failed() { [ "$1" != 0 ] || jq -e .is_error "$in/claude.json" > /dev/null 2>&1; }
-status=0
-id=$(uuid)
-if [ -n "$last_id" ]; then
-  echo "review-run: resuming the conversation $last_id of the review of $last_head, as $id"
-  review "$again" --resume "$last_id" --fork-session --session-id "$id" || status=$?
-  # Not resumed, if it failed before its second turn ("No conversation found", a conversation too long to load): a
-  # fresh review then, whose conversation the next push resumes instead of this one.
-  turns=$(jq -r '.num_turns // 0' "$in/claude.json" 2> /dev/null || true)
-  [[ $turns =~ ^[0-9]+$ ]] || turns=0
-  if failed "$status" && [ "$turns" -le 1 ]; then
-    echo "review-run: Claude Code could not resume the conversation $last_id (exit $status): a fresh review instead"
-    tail -c 2000 "$in/claude.err"
-    status=0
-    id=$(uuid)
-    echo "review-run: a fresh review, as $id"
-    review "$prompt" --session-id "$id" || status=$?
+    claude -p "$text" "${conversation[@]}" --restricted --tools Read,Glob,Grep --strict-mcp-config \
+      --permission-mode dontAsk "${deny[@]}" \
+      --model "$model" --effort xhigh --max-turns 300 --output-format json > "$in/claude.json" 2> "$in/claude.err" \
+    || status=$?
+  # Its kind of ending (subtype), turns and seconds, each checked, so that failure.txt holds no text of Claude Code's.
+  subtype=- turns=- seconds=-
+  read -r subtype turns seconds < <(jq -r '[.subtype // "-", .num_turns // "-", ((.duration_ms // 0) / 1000 | floor)]
+    | map(tostring) | join(" ")' "$in/claude.json" 2> /dev/null) || true
+  [[ $subtype =~ ^[a-z_]{1,40}$ ]] || subtype=-
+  [[ $turns =~ ^[0-9]{1,9}$ ]] || turns=-
+  [[ $seconds =~ ^[0-9]{1,9}$ ]] || seconds=-
+  ok=$(jq -r 'if (.is_error // false) == false and (.result | type) == "string" and .result != ""
+    then "yes" else "no" end' "$in/claude.json" 2> /dev/null) || ok=no
+  [ "$status" != 0 ] || [ "$ok" != yes ] || break
+  why="Claude Code ended with exit status $status"
+  [ "$status" != 124 ] || why="$why, stopped at its 40-minute limit"
+  [ "$subtype" = - ] || why="$why, $subtype after $turns turns and $seconds seconds"
+  [ "$ok" = yes ] || why="$why, and wrote no review"
+  # Claude Code's own words on why (for example "API Error: Token exchange failed with status 401"), with every
+  # control character a space: a line break would end the line outside the review step's stop-commands window. The
+  # log and the job summary are public, so words that hold what looks like a credential are not shown, checked
+  # before they are cut, so that a cut cannot hide one.
+  detail=$(jq -j '[.result, (.errors | if type == "array" then .[] else . end)] | map(select(type == "string"))
+    | join("; ")' "$in/claude.json" 2> /dev/null | tr '[:cntrl:]' ' ') || true
+  if holds_credential <<< "$detail"; then
+    detail="(not shown: it holds what looks like a credential)"
   fi
-else
-  echo "review-run: no conversation of an earlier review of pull request #$PR: a fresh review, as $id"
-  review "$prompt" --session-id "$id" || status=$?
-fi
-if failed "$status"; then
-  # Claude Code's own error (for example "Authentication failed" from the token exchange), not the review's text.
-  echo "review-run: Claude Code exited $status: $(jq -r '"\(.subtype // "")" + (if .is_error then ": \(.result // "" | tostring | .[0:500])" else "" end)' "$in/claude.json" 2>/dev/null)" >&2
-  tail -c 2000 "$in/claude.err" >&2
-  exit 1
-fi
+  detail=${detail:0:1000}
+  echo "review-run: $why (try $try): ${detail:-no message} ($(wc -c < "$in/claude.json") bytes in $in/claude.json)" >&2
+  errors=$(tail -c 2000 "$in/claude.err") || errors=""
+  if [ -n "$errors" ] && holds_credential < "$in/claude.err"; then
+    echo "review-run: Claude Code's standard error is not shown: it holds what looks like a credential" >&2
+  elif [ -n "$errors" ]; then
+    builtin printf '%s\n' "$errors" >&2
+  fi
+  if [ "$try" = 2 ]; then
+    if [ "$why" = "$first_why" ]; then why="$why, on both tries"; else why="$why, on the second try"; fi
+  elif [ "$status" = 124 ] || [ $((deadline - SECONDS)) -lt 600 ] || ! new_identity_token; then
+    try=2
+  fi
+  if [ "$try" = 2 ]; then
+    printf '%s\n' "$why" > "$in/failure.txt"
+    printf '%s\n' "${detail:-no message}" > "$in/failure-detail.txt"
+    exit 1
+  fi
+  first_why=$why
+done
 # The comment only: a line that ends in a colon, such as "Here is the comment:", and a rule (---) after it, in its first
 # six lines, go. Any other rule stays.
 jq -r 'if .is_error then error("the review ended with an error: \(.result // .subtype)") else .result end' \
@@ -170,23 +277,27 @@ jq -r 'if .is_error then error("the review ended with an error: \(.result // .su
                           NR <= 6 && !cut { held = held $0 "\n"; next }
                           { printf "%s", held; held = ""; print }
                           END { printf "%s", held }' > "$in/comment.md"
-[ -s "$in/comment.md" ] || { echo "review-run: the review wrote no comment" >&2; exit 1; }
-echo "review-run: $(wc -c < "$in/comment.md") bytes in $in/comment.md, by $model"
+if [ ! -s "$in/comment.md" ]; then
+  echo "review-run: the review wrote no comment" >&2
+  echo "the review wrote no comment once its opening line was cut" > "$in/failure.txt"
+  exit 1
+fi
+echo "review-run: $(wc -c < "$in/comment.md") bytes in $in/comment.md, by $model, $subtype after $turns turns and" \
+  "$seconds seconds (try $try${resumed:+, resumed})"
 # This review's conversation, for the next push's review, in place of the last one. The review cannot read this run's
-# tokens, so its conversation holds none of them; it is not kept if it does.
+# tokens, so its conversation holds none of them; it is not kept if it holds what looks like a credential, or the
+# identity token now in the file.
 if [ -n "$session_dir" ]; then
   mkdir -p "$session_dir"
   rm -f "$session_dir/session" "$session_dir"/*.jsonl
   file=$(find "$HOME/.claude/projects" -name "$id.jsonl" -print -quit 2> /dev/null || true)
-  conversation="" identity=""
-  [ -z "$file" ] || conversation=$(< "$file")
+  identity=""
   [ ! -f "${ANTHROPIC_IDENTITY_TOKEN_FILE:-}" ] || identity=$(< "$ANTHROPIC_IDENTITY_TOKEN_FILE")
-  if [ -z "$conversation" ]; then
+  if [ -z "$file" ] || [ ! -s "$file" ]; then
     echo "review-run: Claude Code kept no conversation $id: the next push's review starts fresh"
-  elif [[ -n ${OTEL_COLLECTOR_TOKEN:-} && $conversation == *"$OTEL_COLLECTOR_TOKEN"* ]] \
-      || [[ -n $identity && $conversation == *"$identity"* ]]; then
-    echo "review-run: the conversation $id holds a token of this run, so it is not kept: the next push's review starts" \
-      "fresh"
+  elif holds_credential < "$file" || { [ -n "$identity" ] && [[ $(< "$file") == *"$identity"* ]]; }; then
+    echo "review-run: the conversation $id holds what looks like a credential, so it is not kept: the next push's" \
+      "review starts fresh"
   else
     cp "$file" "$session_dir/"
     printf 'id=%s\nhead=%s\ndir=%s\n' "$id" "$HEAD_SHA" "$(basename "$(dirname "$file")")" > "$session_dir/session"

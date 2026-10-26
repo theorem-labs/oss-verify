@@ -280,7 +280,12 @@ def main():
     parser.add_argument("--head", default="", help="the commit of the pull request that this run is of")
     parser.add_argument("--run", default="", help="the URL of this run")
     parser.add_argument("--previous", type=pathlib.Path, help="the comment already posted, kept if there is no review")
+    parser.add_argument("--holds-credential", action="store_true",
+                        help="only read standard input, and exit 0 if it holds what looks like a credential, 3 if not "
+                             "(any other status is an error: a caller treats it as a credential)")
     options = parser.parse_args()
+    if options.holds_credential:
+        return 0 if credential(sys.stdin.buffer.read().decode("utf-8", errors="replace")) else 3
     head = options.head if re.fullmatch(r"[0-9a-f]{7,40}", options.head) else ""
     run = options.run if re.fullmatch(r"https://[A-Za-z0-9./_-]+", options.run) else ""
 

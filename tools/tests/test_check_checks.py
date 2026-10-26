@@ -837,9 +837,11 @@ class Screening(unittest.TestCase):
 
 
 class ReviewRun(unittest.TestCase):
-    """review-run with a fake claude, and a collector on 127.0.0.1 that takes one token."""
+    """review-run with a fake claude, and, on 127.0.0.1, a collector that takes one token and a GitHub identity token
+    endpoint that gives a new token each time to the request token it takes."""
     TOKEN = "collector-token-not-a-secret"
-    SECRETS = (TOKEN, "sk-ant-oat01-notasecret", "ghs_notasecretnotasecret", "dotted-not-a-secret")
+    REQUEST_TOKEN = "request-token-not-a-secret"
+    SECRETS = (TOKEN, REQUEST_TOKEN, "sk-ant-oat01-notasecret", "ghs_notasecretnotasecret", "dotted-not-a-secret")
     FOLDER = "-home-runner-work-oss-verify-oss-verify"
     HEAD = "1" * 40
     LAST = "2" * 40
@@ -850,6 +852,8 @@ class ReviewRun(unittest.TestCase):
         import threading
         self.headers = []
         self.answers = []
+        self.issued = []
+        self.identity_fails = False
         test = self
 
         class Collector(http.server.BaseHTTPRequestHandler):
@@ -860,10 +864,24 @@ class ReviewRun(unittest.TestCase):
                 self.send_response(test.answers.pop(0) if test.answers else 200 if right else 401)
                 self.end_headers()
 
+            def do_GET(self):
+                right = (self.headers.get("Authorization") == f"Bearer {test.REQUEST_TOKEN}"
+                         and self.path == "/token?x=1&audience=https://api.anthropic.com")
+                if test.identity_fails or not right:
+                    self.send_response(500 if right else 401)
+                    self.end_headers()
+                    return
+                test.issued.append(f"jwt-{len(test.issued) + 1}")
+                body = json.dumps({"value": test.issued[-1]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
             def log_message(self, *args):
                 pass
 
-        self.server = http.server.HTTPServer(("127.0.0.1", 0), Collector)
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Collector)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.directory = pathlib.Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.directory)
@@ -902,6 +920,39 @@ class ReviewRun(unittest.TestCase):
         self.session = pathlib.Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.session)
 
+    def fake_claude(self, *calls, wait=0):
+        """A claude that, on its call N, appends the identity token file's text to `tokens` (and again after `wait`
+        seconds, as Claude Code reads it again for each exchange), then prints calls[N-1][0] as its result and exits
+        with calls[N-1][1]."""
+        for n, (result, status) in enumerate(calls, 1):
+            (self.directory / f"result.{n}").write_text(json.dumps(result))
+            (self.directory / f"status.{n}").write_text(str(status))
+        (self.directory / "bin" / "claude").write_text(
+            "#!/bin/bash\n"
+            f"cd {self.directory}\n"
+            "n=$(( $(cat calls 2> /dev/null || echo 0) + 1 )); echo $n > calls\n"
+            'read_token() { { cat "$ANTHROPIC_IDENTITY_TOKEN_FILE"; echo; } >> tokens; }\n'
+            f"read_token\n{f'sleep {wait}; read_token' if wait else ''}\n"
+            '[ -f err.$n ] && cat err.$n >&2\n'
+            'cat result.$n; exit "$(cat status.$n)"\n')
+
+    def identity(self, **environment):
+        """The review step's environment for workload identity: the token file the step before wrote, and the URL and
+        request token a new one is fetched with."""
+        token_file = self.directory / "oidc" / "jwt"
+        token_file.parent.mkdir(exist_ok=True)
+        token_file.write_text("jwt-0\n")
+        return {"ANTHROPIC_IDENTITY_TOKEN_FILE": str(token_file), "ACTIONS_ID_TOKEN_REQUEST_TOKEN": self.REQUEST_TOKEN,
+                "ACTIONS_ID_TOKEN_REQUEST_URL": f"http://127.0.0.1:{self.server.server_port}/token?x=1",
+                **environment}
+
+    def tokens(self):
+        return (self.directory / "tokens").read_text().split()
+
+    def failure(self):
+        paths = (self.directory / "review" / "failure.txt", self.directory / "review" / "failure-detail.txt")
+        return tuple(path.read_text() if path.exists() else None for path in paths)
+
     def run_review(self, **environment):
         base = {"PATH": f"{self.directory / 'bin'}:{os.environ['PATH']}", "HOME": str(self.directory / "home"),
                 "PR": "8", "NAME": "libreac", "GH_TOKEN": "ghs_notasecretnotasecret",
@@ -935,7 +986,7 @@ class ReviewRun(unittest.TestCase):
         return dict(entry.decode().split("=", 1) for entry in entries if entry)
 
     def test_no_value_is_an_argument_and_the_environment_is_the_allow_list(self):
-        out = self.run_review(**self.collector())
+        out = self.run_review(**self.collector(**self.identity()))
         self.assertEqual(out.returncode, 0, out.stderr)
         argv = (self.directory / "argv").read_text()
         self.assertIn("claude", argv)
@@ -944,9 +995,10 @@ class ReviewRun(unittest.TestCase):
             self.assertNotIn(secret, out.stdout + out.stderr)
         child = self.child()
         self.assertEqual(set(child), {"PATH", "HOME", "LANG", "ANTHROPIC_API_KEY", "CLAUDE_CODE_EFFORT",
-                                      "CLAUDE_CODE_ENABLE_TELEMETRY", "OTEL_LOGS_EXPORTER", "OTEL_METRICS_EXPORTER",
-                                      "OTEL_EXPORTER_OTLP_PROTOCOL", "OTEL_EXPORTER_OTLP_ENDPOINT",
-                                      "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_RESOURCE_ATTRIBUTES"})
+                                      "ANTHROPIC_IDENTITY_TOKEN_FILE", "CLAUDE_CODE_ENABLE_TELEMETRY",
+                                      "OTEL_LOGS_EXPORTER", "OTEL_METRICS_EXPORTER", "OTEL_EXPORTER_OTLP_PROTOCOL",
+                                      "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS",
+                                      "OTEL_RESOURCE_ATTRIBUTES"})
         self.assertEqual(child["OTEL_EXPORTER_OTLP_HEADERS"], f"Authorization=Bearer {self.TOKEN}")
         self.assertEqual(child["CLAUDE_CODE_ENABLE_TELEMETRY"], "1")
         self.assertNotIn("theorem.credential", child["OTEL_RESOURCE_ATTRIBUTES"])
@@ -968,6 +1020,8 @@ class ReviewRun(unittest.TestCase):
         self.assertIn("answered 401", out.stderr)
         self.assertNotIn("wrong-token-not-a-secret", out.stdout + out.stderr)
         self.assertFalse((self.directory / "environ").exists())
+        self.assertEqual(self.failure()[0], "the cost collector answered 401, not 200, to an empty export with "
+                                            "OTEL_COLLECTOR_TOKEN before the review\n")
 
     def test_a_curlrc_never_prints_the_token(self):
         (self.directory / ".curlrc").write_text(f"verbose\ntrace-ascii {self.directory}/trace\n")
@@ -978,7 +1032,8 @@ class ReviewRun(unittest.TestCase):
 
     def test_a_token_refused_after_the_review_keeps_the_review_and_fails(self):
         self.answers = [200, 401]
-        out = self.run_review(**self.collector())
+        # With workload identity too: stopping the identity token loop at the end leaves the exit status as it is.
+        out = self.run_review(**self.collector(**self.identity()))
         self.assertEqual(out.returncode, 3, out.stderr)
         self.assertIn("answered 401", out.stderr)
         self.assertIn("usage is likely lost", out.stderr)
@@ -1033,7 +1088,9 @@ class ReviewRun(unittest.TestCase):
         (self.directory / "fail-resume").touch()
         out = self.run_review(**self.resume())
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertIn(f"could not resume the conversation {self.OLD} (exit 1): a fresh review instead", out.stdout)
+        self.assertIn(f"the resumed review of the conversation {self.OLD} ended without a review: a fresh review",
+                      out.stdout)
+        self.assertIn("(try 2)", out.stdout)
         resumed, fresh = self.claude_calls()
         self.assertIn("--resume", resumed)
         self.assertNotIn("--resume", fresh)
@@ -1048,15 +1105,17 @@ class ReviewRun(unittest.TestCase):
         self.assertNotIn("--resume", call)
 
     def test_a_conversation_that_holds_a_token_of_the_run_is_not_kept(self):
+        # The collector's token, the identity token in the file now, and one shaped like an earlier identity token:
+        # the file gets a new one every minute, so an earlier one is no longer in it.
         jwt = self.directory / "jwt"
         jwt.write_text("identity-token-not-a-secret")
-        for token in (self.TOKEN, "identity-token-not-a-secret"):
+        for token in (self.TOKEN, "identity-token-not-a-secret", JWT):
             with self.subTest(token=token):
                 self.last_review()
                 (self.directory / "said").write_text(f"the token is {token}\n")
                 out = self.run_review(**self.collector(**self.resume(ANTHROPIC_IDENTITY_TOKEN_FILE=str(jwt))))
                 self.assertEqual(out.returncode, 0, out.stderr)
-                self.assertIn("holds a token of this run, so it is not kept", out.stdout)
+                self.assertIn("holds what looks like a credential, so it is not kept", out.stdout)
                 self.assertNotIn(token, out.stdout + out.stderr)
                 self.assertEqual(list(self.session.iterdir()), [])
 
@@ -1067,6 +1126,121 @@ class ReviewRun(unittest.TestCase):
         out = self.run_review(**self.resume(HEAD_SHA="main"))
         self.assertEqual(out.returncode, 2)
         self.assertIn("REVIEW_SESSION needs HEAD_SHA", out.stderr)
+
+    def test_the_identity_token_file_gets_a_new_token_while_claude_runs(self):
+        # #48, #49 and #50 (runs 40275097872, 40275102913, 40275107446): Claude Code read the file again about ten
+        # minutes in, found the token it had exchanged at the start, and the exchange answered 401. Here it reads the
+        # file at its start and again 3 seconds later, with a new token due every second.
+        self.fake_claude(({"is_error": False, "result": "Thanks."}, 0), wait=3)
+        out = self.run_review(**self.identity(REVIEW_TOKEN_EVERY="1"))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        first, later = self.tokens()
+        self.assertEqual(first, "jwt-0")
+        self.assertIn(later, self.issued)
+        argv = (self.directory / "argv").read_text()
+        self.assertNotIn(self.REQUEST_TOKEN, argv + out.stdout + out.stderr)
+        self.assertIn("audience=https://api.anthropic.com", argv)
+        # Once review-run has ended, no token is written any more, and no temporary file is left.
+        token_file = self.directory / "oidc" / "jwt"
+        written = token_file.read_text()
+        time.sleep(2.5)
+        self.assertEqual(token_file.read_text(), written)
+        self.assertEqual(sorted(path.name for path in token_file.parent.iterdir()), ["jwt"])
+
+    def test_a_401_mid_review_is_tried_again_with_a_new_identity_token(self):
+        out = self.run_review_twice(API_401, (REVIEW_OK, 0))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(self.tokens(), ["jwt-0", "jwt-1"])
+        self.assertIn(f"review-run: {WHY_401} (try 1): API Error: Token exchange failed with status 401", out.stderr)
+        self.assertIn("success after 31 turns and 250 seconds (try 2)", out.stdout)
+        self.assertEqual((self.directory / "review" / "comment.md").read_text(), "Thanks.\n")
+        self.assertEqual(self.failure(), (None, None))
+
+    def test_a_review_that_fails_twice_says_why(self):
+        out = self.run_review_twice(API_401, API_401)
+        self.assertEqual(out.returncode, 1, out.stderr)
+        why, detail = self.failure()
+        self.assertEqual(why, WHY_401 + ", on both tries\n")
+        self.assertEqual(detail, API_401[0]["result"].replace("\n", " ") + "\n")
+        self.assertFalse((self.directory / "review" / "comment.md").exists())
+
+    def test_without_a_new_identity_token_there_is_no_second_try(self):
+        self.identity_fails = True
+        out = self.run_review_twice(API_401, (REVIEW_OK, 0))
+        self.assertEqual(out.returncode, 1, out.stderr)
+        self.assertEqual(self.tokens(), ["jwt-0"])
+        self.assertEqual(self.failure()[0], WHY_401 + "\n")
+
+    def test_a_result_that_is_not_json_says_so(self):
+        out = self.run_review_twice(("not json", 1), ("not json", 1))
+        self.assertEqual(out.returncode, 1, out.stderr)
+        self.assertEqual(self.failure(), ("Claude Code ended with exit status 1, and wrote no review, on both tries\n",
+                                          "no message\n"))
+
+    def test_the_review_step_shows_each_line_review_run_writes(self):
+        pattern = re.compile(re.search(r"grep -m1 -xE '([^']+)' \.review/failure\.txt", review_step()["run"]).group(1))
+        long_kind = ({**API_401[0], "subtype": "e" * 40, "num_turns": 10 ** 9 - 1, "duration_ms": 10 ** 12 - 1}, 1)
+        for calls in ((API_401, API_401), (API_401, long_kind), (("x", 124), ("x", 124))):
+            with self.subTest(calls=calls):
+                self.run_review_twice(*calls)
+                why = self.failure()[0]
+                self.assertRegex(why, r"\A.+\n\Z")
+                self.assertTrue(pattern.fullmatch(why.rstrip("\n")), why)
+
+    def test_a_message_that_holds_a_credential_is_not_shown(self):
+        # A run whose result or standard error quotes a credential, such as the identity token it could read: the log
+        # and failure-detail.txt, which the public job summary shows, hold neither. A credential just past the
+        # 1,000-character cut is found too, since the check reads the message before the cut.
+        for leak, padding in ((JWT, ""), (JWT, "x" * 990 + " "), ("sk-ant-oat01-" + "a" * 20, ""),
+                              ("ghs_" + "b" * 36, "")):
+            with self.subTest(leak=leak[:12], padding=len(padding)):
+                for n in (1, 2):
+                    (self.directory / f"err.{n}").write_text(f"stderr {leak}\n")
+                failed = ({**API_401[0], "result": f"API Error: {padding}{leak}"}, 1)
+                out = self.run_review_twice(failed, failed)
+                self.assertEqual(out.returncode, 1, out.stderr)
+                why, detail = self.failure()
+                self.assertEqual(detail, "(not shown: it holds what looks like a credential)\n")
+                self.assertNotIn(leak, out.stdout + out.stderr)
+                self.assertIn("standard error is not shown: it holds what looks like a credential", out.stderr)
+        for n in (1, 2):
+            (self.directory / f"err.{n}").write_text("plain stderr\n")
+        out = self.run_review_twice(API_401, API_401)
+        self.assertIn("plain stderr", out.stderr)
+        self.assertIn("Token exchange failed", self.failure()[1])
+
+    def test_the_file_tools_may_not_read_the_identity_token_or_runner_temp(self):
+        # --restricted keeps Read, Glob and Grep in the checkout; the deny rule names the two directories too. Claude
+        # Code reads `//` as the start of an absolute path in a rule (a `/` rule is relative to the project).
+        temp = self.directory / "temp"
+        self.fake_claude((REVIEW_OK, 0))
+        out = self.run_review(**self.identity(RUNNER_TEMP=str(temp)))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        argv = (self.directory / "argv").read_text().split("\0")
+        at = argv.index("--disallowedTools")
+        self.assertEqual(argv[at + 1:at + 3], [f"Read(/{temp}/**)", f"Read(/{self.directory / 'oidc'}/**)"])
+        self.assertTrue(argv[at + 1].startswith("Read(//"))
+        self.assertEqual(argv[at + 3], "--model")
+        # A person's own run has neither directory, and no rule.
+        for name in ("argv", "calls"):
+            (self.directory / name).unlink()
+        self.fake_claude((REVIEW_OK, 0))
+        out = self.run_review()
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertNotIn("--disallowedTools", (self.directory / "argv").read_text())
+
+    def run_review_twice(self, *calls):
+        for name in ("calls", "tokens"):
+            (self.directory / name).unlink(missing_ok=True)
+        self.fake_claude(*calls)
+        return self.run_review(**self.identity())
+
+
+def review_step():
+    steps = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["jobs"]["review"]["steps"]
+    matches = [step for step in steps if step.get("id") == "review"]
+    assert len(matches) == 1, matches
+    return matches[0]
 
 
 class ReviewSession(unittest.TestCase):
@@ -1233,6 +1407,92 @@ class ReviewSession(unittest.TestCase):
         self.assertEqual(review["permissions"].get("actions"), "read")
 
 
+@unittest.skipUnless(shutil.which("openssl"), "the review step needs openssl")
+class ReviewStep(unittest.TestCase):
+    """build.yaml's own Review step, over a stand-in review-run that fails: what the run's page and summary say."""
+
+    def run_step(self, code, failure=None, detail=None, scan=True):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            (directory / ".github" / "scripts").mkdir(parents=True)
+            if scan:
+                shutil.copy(REVIEW_COMMENT, directory / ".github" / "scripts" / "review-comment")
+            (directory / ".review").mkdir()
+            # What review-run leaves after exit status 3: the review is written.
+            (directory / ".review" / "comment.md").write_text("Thanks.\n")
+            script = directory / ".github" / "scripts" / "review-run"
+            script.write_text(f"#!/bin/bash\nexit {code}\n")
+            script.chmod(0o755)
+            for name, text in (("failure.txt", failure), ("failure-detail.txt", detail)):
+                if text is not None:
+                    (directory / ".review" / name).write_text(text)
+            token = directory / "jwt"
+            token.write_text("jwt-0\n")
+            (directory / "summary").write_text("")
+            environment = {**os.environ, "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:9",
+                           "OTEL_COLLECTOR_TOKEN": "collector-token-not-a-secret",
+                           "ANTHROPIC_IDENTITY_TOKEN_FILE": str(token), "GITHUB_OUTPUT": str(directory / "output"),
+                           "GITHUB_STEP_SUMMARY": str(directory / "summary")}
+            run = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", review_step()["run"]],
+                                 cwd=directory, env=environment, capture_output=True, text=True)
+            self.assertFalse(token.exists(), "the identity token file is removed")
+            return run.returncode, run.stdout, (directory / "summary").read_text()
+
+    def test_a_review_that_did_not_finish_says_why_in_the_summary(self):
+        code, out, summary = self.run_step(1, WHY_401 + ", on both tries\n", API_401[0]["result"] + "\n")
+        self.assertEqual(code, 1)
+        self.assertIn(f"::error::The review did not finish: {WHY_401}, on both tries\n", out)
+        self.assertIn("### The review did not finish\n", summary)
+        self.assertIn(f"\n{WHY_401}, on both tries.\n", summary)
+        self.assertIn("\n```\nAPI Error: Token exchange failed with status 401", summary)
+
+    def test_the_summary_shows_no_other_text(self):
+        # A failure.txt line that is not plain words is not shown, and Claude Code's message cannot leave its code
+        # block or carry the collector's token.
+        generic = "review-run ended with exit status 1 before Claude Code wrote a result"
+        for failure, detail, shown in (
+                (None, None, generic), ("::warning::x\n", None, generic), ("x" * 201 + "\n", None, generic),
+                ("plain words\n", "a\n```\n# Heading `x`\n", "plain words")):
+            with self.subTest(failure=failure, detail=detail):
+                code, out, summary = self.run_step(1, failure, detail)
+                self.assertEqual(code, 1)
+                self.assertIn(f"::error::The review did not finish: {shown}\n", out)
+                self.assertNotIn("::warning::", out + summary)
+                self.assertEqual(summary.count("```"), 2 if detail else 0, summary)
+                self.assertNotIn("\n# Heading", summary)
+        _, _, summary = self.run_step(1, "plain words\n", "it was collector-token-not-a-secret\n")
+        self.assertNotIn("collector-token-not-a-secret", summary)
+        self.assertNotIn("```", summary)
+
+    def test_a_review_that_finished_writes_no_summary(self):
+        code, out, summary = self.run_step(3)
+        self.assertEqual((code, summary), (0, ""))
+        self.assertNotIn("::error::", out)
+
+    def test_a_message_that_holds_a_credential_is_not_in_the_summary(self):
+        for detail in (f"API Error: {JWT}\n", "x" * 1100 + f" {JWT}\n", "it was collector-token-not-a-secret\n"):
+            with self.subTest(detail=detail[:20]):
+                code, out, summary = self.run_step(1, "plain words\n", detail)
+                self.assertEqual(code, 1)
+                self.assertIn("plain words.", summary)
+                self.assertNotIn("```", summary)
+                self.assertNotIn(JWT[:20], summary + out)
+                self.assertNotIn("collector-token-not-a-secret", summary + out)
+        # If the scan cannot run, the message is not shown either.
+        _, _, summary = self.run_step(1, "plain words\n", "API Error: harmless\n", scan=False)
+        self.assertNotIn("harmless", summary)
+
+
+# A JWT in the shape of a GitHub identity token, {"alg":"RS256"} and {"sub":"not-a-secret"}: not a real one.
+JWT = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJub3QtYS1zZWNyZXQifQ.c2lnbmF0dXJlLW5vdC1yZWFs"
+REVIEW_OK = {"type": "result", "subtype": "success", "is_error": False, "num_turns": 31, "duration_ms": 250400,
+             "result": "Thanks."}
+# The result Claude Code wrote on #48, #49 and #50 when its second token exchange was refused.
+API_401 = ({"type": "result", "subtype": "success", "is_error": True, "num_turns": 40, "duration_ms": 596000,
+            "result": "API Error: Token exchange failed with status 401 (request-id req_x):\n"
+                      '{"error":{"type":"authentication_error","message":"Authentication failed"}} Ensure your '
+                      "federation rule matches your identity token."}, 1)
+WHY_401 = "Claude Code ended with exit status 1, success after 40 turns and 596 seconds, and wrote no review"
 
 if __name__ == "__main__":
     unittest.main()
