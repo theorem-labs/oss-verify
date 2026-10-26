@@ -7,6 +7,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import pathlib
 import shutil
 import subprocess
@@ -201,9 +202,12 @@ class Jobs(unittest.TestCase):
                          [".github/scripts/app-token"])
         self.assertNotIn("write", (jobs["decide"].get("permissions") or {}).values())
 
-    def test_the_workflow_does_not_name_the_private_repository(self):
+    def test_the_workflow_names_no_other_theorem_labs_repository(self):
+        # The event's target is named by its id alone, so that this public file and its log name no private
+        # repository.
         text = (ROOT / ".github" / "workflows" / "enroll-dispatch.yml").read_text()
-        self.assertNotIn("proofs-internal", text)
+        named = set(re.findall(r"theorem-labs/([A-Za-z0-9._-]+)", text))
+        self.assertLessEqual(named, {"oss-verify"}, named)
         self.assertIn('INTERNAL_ID: "1425069221"', text)
 
     def test_the_record_job_runs_no_code_of_the_pull_request_and_holds_nothing(self):
