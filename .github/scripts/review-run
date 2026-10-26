@@ -24,6 +24,9 @@
 # Without the two variables it exports nothing.
 # No value of that environment is ever an argument of a process: another user on the machine can read a process's
 # arguments, but not its environment.
+# In CI it keeps Claude Code's workload identity usable for a review of any length, and tries a review that ends
+# without a comment once more (both below). A run that ends without a comment writes why, in plain words, to
+# <directory>/failure.txt, and Claude Code's own message, for the job's summary, to <directory>/failure-detail.txt.
 set -euo pipefail
 
 in=${1:?usage: review-run <directory>}
@@ -31,6 +34,10 @@ in=${1:?usage: review-run <directory>}
 [[ $NAME =~ ^[a-z0-9][a-z0-9._-]{0,62}$ ]] || { echo "review-run: NAME is not a project name" >&2; exit 2; }
 case $(realpath "$in")/ in "$(pwd -P)"/*) ;; *) echo "review-run: $in is not inside this checkout" >&2; exit 2 ;; esac
 model=${REVIEW_MODEL:-claude-opus-5-5}
+# The seconds between two new identity tokens (below); a test makes it shorter.
+every=${REVIEW_TOKEN_EVERY:-60}
+[[ $every =~ ^[1-9][0-9]{0,3}$ ]] || { echo "review-run: REVIEW_TOKEN_EVERY is not a number of seconds" >&2; exit 2; }
+rm -f "$in/failure.txt" "$in/failure-detail.txt"
 
 prompt="You are the agent of OSS Verify's enrollment check, in CI, on pull request #$PR of theorem-labs/oss-verify, \
 which adds or changes projects/$NAME/. Read .claude/skills/review-enrollment/SKILL.md and do the review that it \
@@ -54,6 +61,8 @@ if [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ] && [ -n "${OTEL_COLLECTOR_TOKEN:-}"
   if [ "$answer" != 200 ]; then
     echo "review-run: the collector at $OTEL_EXPORTER_OTLP_ENDPOINT answered ${answer:-nothing} to an empty export" \
       "with OTEL_COLLECTOR_TOKEN, not 200: the review's usage would be lost. Check the token and the endpoint." >&2
+    echo "the cost collector answered ${answer:-nothing}, not 200, to an empty export with OTEL_COLLECTOR_TOKEN" \
+      "before the review" > "$in/failure.txt"
     exit 1
   fi
   # The CI service account's label only on the identity that build.yaml's review job gets for it.
@@ -71,32 +80,102 @@ if [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ] && [ -n "${OTEL_COLLECTOR_TOKEN:-}"
 else
   echo "review-run: no OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_COLLECTOR_TOKEN: usage is not exported"
 fi
-status=0
-# Claude Code's whole environment, one NUL-ended entry each, goes through a pipe to a launcher that execs it with that
-# environment only, as env -i would, and stdin from /dev/null. env -i took the entries as arguments. A loop of
-# `export -n` over `compgen -e` in this shell would not do it: bash passes on environment entries whose names are not
-# variable names, such as A.B=1, and the loop does not remove exported functions either.
-{
-  builtin printf '%s\0' "PATH=$PATH" "HOME=$HOME" LANG=C.UTF-8
-  for variable in $(compgen -e); do
-    case $variable in ANTHROPIC_*|CLAUDE_CODE_*) builtin printf '%s\0' "$variable=${!variable}" ;; esac
-  done
-  [ ${#telemetry[@]} = 0 ] || builtin printf '%s\0' "${telemetry[@]}"
-} | python3 -c '
+
+# Workload identity federation, in build.yaml's review job. A GitHub identity token lives about five minutes and may be
+# exchanged once, and the Anthropic token Claude Code mints from it lives at most twice what was left of it: about ten
+# minutes. Before that ends Claude Code mints a new one from the file ANTHROPIC_IDENTITY_TOKEN_FILE names, which it
+# reads again for it, and an identity token that is expired or already exchanged is refused ("Token exchange failed
+# with status 401 ... Authentication failed"), which ends the review. See "Token lifetime and refresh" in
+# https://platform.claude.com/docs/en/manage-claude/workload-identity-federation and "Token lifetime" in its GitHub
+# Actions page. So while Claude Code runs, a new identity token is written into that file every minute, from the
+# request URL and token the runner gives a job with id-token: write, and one more before a second try. Outside CI there
+# is no such URL and nothing to write: Claude Code uses the person's own login.
+token_file=${ANTHROPIC_IDENTITY_TOKEN_FILE:-}
+[ -n "$token_file" ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ] \
+  || token_file=
+# The request token reaches curl through a pipe, as the collector's does; the new token replaces the file in one rename.
+new_identity_token() {
+  [ -n "$token_file" ] || return 0
+  curl -q -sSf --max-time 20 -H @<(builtin printf 'Authorization: Bearer %s\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN") \
+      "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://api.anthropic.com" | jq -r '.value // empty' > "$token_file.new" \
+    && [ -s "$token_file.new" ] && mv -f "$token_file.new" "$token_file"
+}
+rotating=""
+stop_rotating() {
+  [ -z "$rotating" ] || kill "$rotating" 2> /dev/null || true
+  rm -f "$token_file.new"
+  [ ! -s "$in/identity-token.log" ] || cat "$in/identity-token.log" >&2
+}
+if [ -n "$token_file" ]; then
+  # What the loop says goes to a file of its own, not to this script's output: its sleep outlives the kill above by up
+  # to a minute, and a caller that reads this script's output to its end would wait for it.
+  : > "$in/identity-token.log"
+  while sleep "$every"; do
+    new_identity_token || echo "review-run: could not write a new identity token at $(date -u +%H:%M:%S)"
+  done > "$in/identity-token.log" 2>&1 &
+  rotating=$!
+  trap stop_rotating EXIT
+fi
+
+# Claude Code's exit status is kept, and how it ended is read from claude.json and written where a reader sees it. All
+# tries stop at 40 minutes, inside the review step's 45, so that a review that runs too long says so too (exit status
+# 124). A try that ends without a review is tried once more if 10 minutes are left, and not after the time limit or
+# without a new identity token for it.
+deadline=$((SECONDS + 40 * 60))
+first_why=""
+for try in 1 2; do
+  status=0
+  # Claude Code's whole environment, one NUL-ended entry each, goes through a pipe to a launcher that execs it with
+  # that environment only, as env -i would, and stdin from /dev/null. env -i took the entries as arguments. A loop of
+  # `export -n` over `compgen -e` in this shell would not do it: bash passes on environment entries whose names are not
+  # variable names, such as A.B=1, and the loop does not remove exported functions either.
+  {
+    builtin printf '%s\0' "PATH=$PATH" "HOME=$HOME" LANG=C.UTF-8
+    for variable in $(compgen -e); do
+      case $variable in ANTHROPIC_*|CLAUDE_CODE_*) builtin printf '%s\0' "$variable=${!variable}" ;; esac
+    done
+    [ ${#telemetry[@]} = 0 ] || builtin printf '%s\0' "${telemetry[@]}"
+  } | timeout --kill-after=60 "$((deadline - SECONDS))s" python3 -c '
 import os, sys
 environment = dict(entry.split(b"=", 1) for entry in sys.stdin.buffer.read().split(b"\0") if entry)
 with open(os.devnull, "rb") as empty:
     os.dup2(empty.fileno(), 0)
 os.execvpe(sys.argv[1], sys.argv[1:], environment)' \
-  claude -p "$prompt" --restricted --tools Read,Glob,Grep --strict-mcp-config --permission-mode dontAsk \
-    --model "$model" --effort xhigh --max-turns 300 --output-format json > "$in/claude.json" 2> "$in/claude.err" \
-  || status=$?
-if [ "$status" != 0 ] || jq -e .is_error "$in/claude.json" > /dev/null 2>&1; then
-  # Claude Code's own error (for example "Authentication failed" from the token exchange), not the review's text.
-  echo "review-run: Claude Code exited $status: $(jq -r '"\(.subtype // "")" + (if .is_error then ": \(.result // "" | tostring | .[0:500])" else "" end)' "$in/claude.json" 2>/dev/null)" >&2
+    claude -p "$prompt" --restricted --tools Read,Glob,Grep --strict-mcp-config --permission-mode dontAsk \
+      --model "$model" --effort xhigh --max-turns 300 --output-format json > "$in/claude.json" 2> "$in/claude.err" \
+    || status=$?
+  # Its kind of ending (subtype), turns and seconds, each checked, so that failure.txt holds no text of Claude Code's.
+  subtype=- turns=- seconds=-
+  read -r subtype turns seconds < <(jq -r '[.subtype // "-", .num_turns // "-", ((.duration_ms // 0) / 1000 | floor)]
+    | map(tostring) | join(" ")' "$in/claude.json" 2> /dev/null) || true
+  [[ $subtype =~ ^[a-z_]{1,40}$ ]] || subtype=-
+  [[ $turns =~ ^[0-9]{1,9}$ ]] || turns=-
+  [[ $seconds =~ ^[0-9]{1,9}$ ]] || seconds=-
+  ok=$(jq -r 'if (.is_error // false) == false and (.result | type) == "string" and .result != ""
+    then "yes" else "no" end' "$in/claude.json" 2> /dev/null) || ok=no
+  [ "$status" != 0 ] || [ "$ok" != yes ] || break
+  why="Claude Code ended with exit status $status"
+  [ "$status" != 124 ] || why="$why, stopped at its 40-minute limit"
+  [ "$subtype" = - ] || why="$why, $subtype after $turns turns and $seconds seconds"
+  [ "$ok" = yes ] || why="$why, and wrote no review"
+  # Claude Code's own words on why (for example "API Error: Token exchange failed with status 401"), with every
+  # control character a space: a line break would end the line outside the review step's stop-commands window.
+  detail=$(jq -j '[.result, (.errors | if type == "array" then .[] else . end)] | map(select(type == "string"))
+    | join("; ")' "$in/claude.json" 2> /dev/null | tr '[:cntrl:]' ' ' | cut -c1-1000) || true
+  echo "review-run: $why (try $try): ${detail:-no message} ($(wc -c < "$in/claude.json") bytes in $in/claude.json)" >&2
   tail -c 2000 "$in/claude.err" >&2
-  exit 1
-fi
+  if [ "$try" = 2 ]; then
+    if [ "$why" = "$first_why" ]; then why="$why, on both tries"; else why="$why, on the second try"; fi
+  elif [ "$status" = 124 ] || [ $((deadline - SECONDS)) -lt 600 ] || ! new_identity_token; then
+    try=2
+  fi
+  if [ "$try" = 2 ]; then
+    printf '%s\n' "$why" > "$in/failure.txt"
+    printf '%s\n' "${detail:-no message}" > "$in/failure-detail.txt"
+    exit 1
+  fi
+  first_why=$why
+done
 # The comment only: a line that ends in a colon, such as "Here is the comment:", and a rule (---) after it, in its first
 # six lines, go. Any other rule stays.
 jq -r 'if .is_error then error("the review ended with an error: \(.result // .subtype)") else .result end' \
@@ -104,8 +183,13 @@ jq -r 'if .is_error then error("the review ended with an error: \(.result // .su
                           NR <= 6 && !cut { held = held $0 "\n"; next }
                           { printf "%s", held; held = ""; print }
                           END { printf "%s", held }' > "$in/comment.md"
-[ -s "$in/comment.md" ] || { echo "review-run: the review wrote no comment" >&2; exit 1; }
-echo "review-run: $(wc -c < "$in/comment.md") bytes in $in/comment.md, by $model"
+if [ ! -s "$in/comment.md" ]; then
+  echo "review-run: the review wrote no comment" >&2
+  echo "the review wrote no comment once its opening line was cut" > "$in/failure.txt"
+  exit 1
+fi
+echo "review-run: $(wc -c < "$in/comment.md") bytes in $in/comment.md, by $model, $subtype after $turns turns and" \
+  "$seconds seconds (try $try)"
 if [ ${#telemetry[@]} != 0 ]; then
   answer=$(collector)
   if [ "$answer" != 200 ]; then

@@ -326,8 +326,10 @@ jobs:
         env:
           PR: ${{ github.event.pull_request.number || inputs.pr }}
           NAME: ${{ needs.project-builds.outputs.name }}
-          # Claude Code trades the identity token for an Anthropic token on its first request. The token lives as
-          # long as the rule says (an hour), longer than this step.
+          # Claude Code trades the identity token for an Anthropic token, which lives at most twice the five minutes a
+          # GitHub identity token has, and reads this file again for each new one. review-run writes a new identity
+          # token into it every minute, through the request URL and token the runner gives this step, so that each
+          # exchange reads one that is not expired and not used before.
           ANTHROPIC_IDENTITY_TOKEN_FILE: ${{ runner.temp }}/oidc/jwt
           # The federation rule above, in Anthropic's organization "Theorem - HDO": the test rule for a ci-test/ branch.
           ANTHROPIC_FEDERATION_RULE_ID: ${{ startsWith(github.ref, 'refs/heads/ci-test/') && 'fdrl_019NVessgKqckm7owmasqfm7' || 'fdrl_019restxFx3PhpLhbziQoQKf' }}
@@ -350,13 +352,36 @@ jobs:
           echo "::stop-commands::$resume"
           code=0
           .github/scripts/review-run .review || code=$?
-          rm -f "$ANTHROPIC_IDENTITY_TOKEN_FILE"
+          rm -f "$ANTHROPIC_IDENTITY_TOKEN_FILE" "$ANTHROPIC_IDENTITY_TOKEN_FILE.new"
           echo "::$resume::"
           # 3: the review is written, but the collector refused the token after it. The comment is still posted, and
           # the next step fails the job.
           if [ "$code" = 3 ]; then
             echo "collector=refused" >> "$GITHUB_OUTPUT"
           elif [ "$code" != 0 ]; then
+            # Why, on the run's page and in the job's summary, not only in the log above: review-run's own line of
+            # plain words from failure.txt, and Claude Code's message from failure-detail.txt with no backtick, so
+            # that it stays inside its code block.
+            failure=$(grep -m1 -xE '[A-Za-z0-9 ,._()-]{1,200}' .review/failure.txt 2> /dev/null) || failure=""
+            failure=${failure:-review-run ended with exit status $code before Claude Code wrote a result}
+            detail=$(head -c 1000 .review/failure-detail.txt 2> /dev/null | tr -d '`' | tr '[:cntrl:]' ' ') || true
+            if [ -n "$OTEL_COLLECTOR_TOKEN" ] && [[ $detail == *"$OTEL_COLLECTOR_TOKEN"* ]]; then detail=""; fi
+            echo "::error::The review did not finish: $failure"
+            {
+              echo "### The review did not finish"
+              echo
+              echo "$failure."
+              if [ -n "$detail" ]; then
+                echo
+                echo "Claude Code's message:"
+                echo
+                echo '```'
+                echo "$detail"
+                echo '```'
+              fi
+              echo
+              echo "The log of the Review step has each try's ending."
+            } >> "$GITHUB_STEP_SUMMARY"
             exit "$code"
           fi
           # The collector's token never leaves this job (review-comment refuses the other credentials). Compared in
