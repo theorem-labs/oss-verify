@@ -402,6 +402,10 @@ class ReviewRun(unittest.TestCase):
     """review-run with a fake claude, and a collector on 127.0.0.1 that takes one token."""
     TOKEN = "collector-token-not-a-secret"
     SECRETS = (TOKEN, "sk-ant-oat01-notasecret", "ghs_notasecretnotasecret", "dotted-not-a-secret")
+    FOLDER = "-home-runner-work-oss-verify-oss-verify"
+    HEAD = "1" * 40
+    LAST = "2" * 40
+    OLD = "0f97bfe1-152c-4ec0-a947-fb9d1ba5c35b"
 
     def setUp(self):
         import http.server
@@ -434,17 +438,35 @@ class ReviewRun(unittest.TestCase):
             real = shutil.which(command)
             (bin / command).write_text(f"#!/bin/bash\nprintf '%s\\0' {command} \"$@\" >> {self.directory}/argv\n"
                                        f"exec {real} \"$@\"\n")
+        # claude also keeps its conversation as the real one does, in $HOME/.claude/projects/<folder>/<id>.jsonl, and
+        # refuses to resume one that is not there, or any one at all when the file fail-resume exists.
         (bin / "claude").write_text(
             f"#!/bin/bash\nprintf '%s\\0' claude \"$@\" >> {self.directory}/argv\n"
+            f"{{ printf '%s\\0' \"$@\"; printf '\\0'; }} >> {self.directory}/calls\n"
             f"cat /proc/$$/environ > {self.directory}/environ\n"
+            'id="" resume=""\n'
+            'while [ $# -gt 0 ]; do case $1 in --session-id) id=$2 ;; --resume) resume=$2 ;; esac; shift; done\n'
+            'if [ -n "$resume" ]; then\n'
+            f'  if [ -e {self.directory}/fail-resume ] || ! [ -f "$HOME/.claude/projects/{self.FOLDER}/$resume.jsonl" ]; then\n'
+            '    echo "No conversation found with session ID: $resume" >&2; exit 1\n'
+            '  fi\n'
+            'fi\n'
+            'if [ -n "$id" ]; then\n'
+            f'  mkdir -p "$HOME/.claude/projects/{self.FOLDER}"\n'
+            f'  {{ echo "{{\\"resumed\\": \\"$resume\\"}}"; cat {self.directory}/said 2> /dev/null; }} \\\n'
+            f'    > "$HOME/.claude/projects/{self.FOLDER}/$id.jsonl"\n'
+            'fi\n'
             'echo \'{"is_error": false, "result": "Thanks."}\'\n')
         for script in bin.iterdir():
             script.chmod(0o755)
         (self.directory / "review").mkdir()
+        (self.directory / "home").mkdir()
+        self.session = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.session)
 
     def run_review(self, **environment):
-        base = {"PATH": f"{self.directory / 'bin'}:{os.environ['PATH']}", "HOME": os.environ["HOME"], "PR": "8",
-                "NAME": "libreac", "GH_TOKEN": "ghs_notasecretnotasecret",
+        base = {"PATH": f"{self.directory / 'bin'}:{os.environ['PATH']}", "HOME": str(self.directory / "home"),
+                "PR": "8", "NAME": "libreac", "GH_TOKEN": "ghs_notasecretnotasecret",
                 "ANTHROPIC_API_KEY": "sk-ant-oat01-notasecret", "CLAUDE_CODE_EFFORT": "x",
                 "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://elsewhere", "A.B": "dotted-not-a-secret",
                 "BASH_FUNC_f%%": "() { echo dotted-not-a-secret; }"}
@@ -454,6 +476,21 @@ class ReviewRun(unittest.TestCase):
     def collector(self, **environment):
         return {"OTEL_EXPORTER_OTLP_ENDPOINT": f"http://127.0.0.1:{self.server.server_port}/",
                 "OTEL_COLLECTOR_TOKEN": self.TOKEN, **environment}
+
+    def resume(self, **environment):
+        return {"REVIEW_SESSION": str(self.session), "HEAD_SHA": self.HEAD, **environment}
+
+    def last_review(self, said="I asked for a seed corpus."):
+        (self.session / "session").write_text(f"id={self.OLD}\nhead={self.LAST}\ndir={self.FOLDER}\n")
+        (self.session / f"{self.OLD}.jsonl").write_text(said + "\n")
+
+    def claude_calls(self):
+        calls = (self.directory / "calls").read_text().split("\0\0")[:-1]
+        return [call.split("\0") for call in calls]
+
+    def kept(self):
+        fields = dict(line.split("=", 1) for line in (self.session / "session").read_text().splitlines())
+        return fields, (self.session / f"{fields['id']}.jsonl").read_text()
 
     def child(self):
         entries = (self.directory / "environ").read_bytes().split(b"\0")
@@ -524,6 +561,74 @@ class ReviewRun(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(set(self.child()), {"PATH", "HOME", "LANG", "ANTHROPIC_API_KEY", "CLAUDE_CODE_EFFORT"})
         self.assertEqual(self.headers, [])
+
+    def test_a_first_review_is_fresh_and_keeps_its_conversation(self):
+        out = self.run_review(**self.resume())
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("a fresh review", out.stdout)
+        [call] = self.claude_calls()
+        self.assertNotIn("--resume", call)
+        new = call[call.index("--session-id") + 1]
+        self.assertEqual(self.kept(), ({"id": new, "head": self.HEAD, "dir": self.FOLDER}, '{"resumed": ""}\n'))
+        self.assertIn(f"kept the conversation {new} of the review of {self.HEAD}", out.stdout)
+
+    def test_a_later_review_resumes_the_last_conversation_in_a_fork(self):
+        self.last_review()
+        out = self.run_review(**self.resume())
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn(f"resuming the conversation {self.OLD} of the review of {self.LAST}", out.stdout)
+        [call] = self.claude_calls()
+        self.assertEqual(call[call.index("--resume") + 1], self.OLD)
+        self.assertIn("--fork-session", call)
+        new = call[call.index("--session-id") + 1]
+        self.assertNotEqual(new, self.OLD)
+        prompt = call[call.index("-p") + 1]
+        self.assertIn(f"you reviewed its commit {self.LAST[:12]}, and your last message", prompt)
+        self.assertIn("review/since-last-review.diff", prompt)
+        # The new conversation, which holds the last one, in place of it.
+        self.assertEqual(self.kept(), ({"id": new, "head": self.HEAD, "dir": self.FOLDER},
+                                       f'{{"resumed": "{self.OLD}"}}\n'))
+        self.assertFalse((self.session / f"{self.OLD}.jsonl").exists())
+
+    def test_a_conversation_that_cannot_be_resumed_gives_a_fresh_review(self):
+        self.last_review()
+        (self.directory / "fail-resume").touch()
+        out = self.run_review(**self.resume())
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn(f"could not resume the conversation {self.OLD} (exit 1): a fresh review instead", out.stdout)
+        resumed, fresh = self.claude_calls()
+        self.assertIn("--resume", resumed)
+        self.assertNotIn("--resume", fresh)
+        self.assertEqual(self.kept()[0]["id"], fresh[fresh.index("--session-id") + 1])
+
+    def test_a_session_file_that_is_not_whole_gives_a_fresh_review(self):
+        (self.session / "session").write_text(f"id=../../x\nhead={self.LAST}\ndir={self.FOLDER}\n")
+        out = self.run_review(**self.resume())
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("does not name a whole conversation", out.stdout)
+        [call] = self.claude_calls()
+        self.assertNotIn("--resume", call)
+
+    def test_a_conversation_that_holds_a_token_of_the_run_is_not_kept(self):
+        jwt = self.directory / "jwt"
+        jwt.write_text("identity-token-not-a-secret")
+        for token in (self.TOKEN, "identity-token-not-a-secret"):
+            with self.subTest(token=token):
+                self.last_review()
+                (self.directory / "said").write_text(f"the token is {token}\n")
+                out = self.run_review(**self.collector(**self.resume(ANTHROPIC_IDENTITY_TOKEN_FILE=str(jwt))))
+                self.assertEqual(out.returncode, 0, out.stderr)
+                self.assertIn("holds a token of this run, so it is not kept", out.stdout)
+                self.assertNotIn(token, out.stdout + out.stderr)
+                self.assertEqual(list(self.session.iterdir()), [])
+
+    def test_the_conversation_is_kept_outside_the_checkout_with_its_commit(self):
+        out = self.run_review(**self.resume(REVIEW_SESSION=str(self.directory / "session")))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("REVIEW_SESSION is inside this checkout", out.stderr)
+        out = self.run_review(**self.resume(HEAD_SHA="main"))
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("REVIEW_SESSION needs HEAD_SHA", out.stderr)
 
 
 if __name__ == "__main__":

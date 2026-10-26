@@ -5,7 +5,8 @@
 # Runs the enrollment review: Claude Code follows .claude/skills/review-enrollment/SKILL.md on the files that
 # review-gather wrote, and its last message, the comment to the maintainer, is written to <directory>/comment.md.
 #
-#   PR=<number> NAME=<project> .github/scripts/review-run <directory inside this checkout>
+#   PR=<number> NAME=<project> [HEAD_SHA=<head commit> REVIEW_SESSION=<directory>] \
+#     .github/scripts/review-run <directory inside this checkout>
 #
 # Run it from the root of the base branch's checkout. build.yaml's review job runs it in CI. A person can run it on
 # their own machine too, with their own Claude Code login, to see the comment a pull request would get: run
@@ -24,6 +25,15 @@
 # Without the two variables it exports nothing.
 # No value of that environment is ever an argument of a process: another user on the machine can read a process's
 # arguments, but not its environment.
+# With REVIEW_SESSION=<directory outside this checkout> and HEAD_SHA=<the pull request's head commit>, the review keeps
+# its conversation: build.yaml's review job restores that directory from the Actions cache, so that the review of each
+# push resumes the conversation of the last review of the pull request, and knows what it asked for and why. The
+# directory holds `session` (id=<the conversation's id>, head=<the commit it reviewed>, dir=<its folder in
+# ~/.claude/projects>) and the conversation, <id>.jsonl. Claude Code resumes it in a fork with a new id
+# (--resume --fork-session), so a review that fails leaves the last one whole. When the directory holds no
+# conversation, or the resumed run fails before its second turn, the review starts fresh. The log says which:
+# "resuming the conversation <id> of the review of <commit>", or "a fresh review". After a review that wrote a
+# comment, the directory holds this review's conversation instead.
 set -euo pipefail
 
 in=${1:?usage: review-run <directory>}
@@ -31,12 +41,44 @@ in=${1:?usage: review-run <directory>}
 [[ $NAME =~ ^[a-z0-9][a-z0-9._-]{0,62}$ ]] || { echo "review-run: NAME is not a project name" >&2; exit 2; }
 case $(realpath "$in")/ in "$(pwd -P)"/*) ;; *) echo "review-run: $in is not inside this checkout" >&2; exit 2 ;; esac
 model=${REVIEW_MODEL:-claude-opus-5-5}
+session_dir=${REVIEW_SESSION:-}
+if [ -n "$session_dir" ]; then
+  case $(realpath -m "$session_dir")/ in
+    "$(pwd -P)"/*) echo "review-run: REVIEW_SESSION is inside this checkout" >&2; exit 2 ;;
+  esac
+  [[ ${HEAD_SHA:-} =~ ^[0-9a-f]{40}$ ]] || { echo "review-run: REVIEW_SESSION needs HEAD_SHA, a commit" >&2; exit 2; }
+fi
+uuid() { python3 -c 'import uuid; print(uuid.uuid4())'; }
 
 prompt="You are the agent of OSS Verify's enrollment check, in CI, on pull request #$PR of theorem-labs/oss-verify, \
 which adds or changes projects/$NAME/. Read .claude/skills/review-enrollment/SKILL.md and do the review that it \
 describes, as its section \"In CI\" says. The workflow gathered the inputs into $in/, and the pull request's \
 projects/$NAME/ is in this checkout. Your last message is the comment to the maintainer, in Markdown, and nothing \
 else: it starts with the sentence of thanks, with no line before it about you or your review."
+
+# The conversation of the last review, when REVIEW_SESSION holds one that is whole.
+last_id="" last_head=""
+if [ -n "$session_dir" ] && [ -f "$session_dir/session" ]; then
+  last_id=$(sed -n 's/^id=//p' "$session_dir/session")
+  last_head=$(sed -n 's/^head=//p' "$session_dir/session")
+  last_dir=$(sed -n 's/^dir=//p' "$session_dir/session")
+  if [[ $last_id =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ && $last_head =~ ^[0-9a-f]{40}$ \
+        && $last_dir =~ ^-[A-Za-z0-9-]{1,200}$ ]] && [ -s "$session_dir/$last_id.jsonl" ]; then
+    mkdir -p "$HOME/.claude/projects/$last_dir"
+    cp "$session_dir/$last_id.jsonl" "$HOME/.claude/projects/$last_dir/"
+  else
+    echo "review-run: $session_dir/session does not name a whole conversation"
+    last_id=""
+  fi
+fi
+again="This is a new push to pull request #$PR. Earlier in this conversation you reviewed its commit \
+${last_head:0:12}, and your last message was the comment that the workflow posted. The workflow gathered the inputs \
+again into $in/, for its commit ${HEAD_SHA:-}, and put the pull request's projects/$NAME/ in this checkout again. Any \
+of those files can have changed: read again each one that you use, and use nothing that you read before. \
+$in/since-last-review.diff has the changes to projects/$NAME/ since the commit that you reviewed. Read \
+.claude/skills/review-enrollment/SKILL.md again, because main can have changed it, and do the review again, as its \
+section \"In CI\" says for a later push. Your last message is the new comment to the maintainer, in Markdown, and \
+nothing else: it starts with the sentence of thanks, with no line before it about you or your review."
 
 # The HTTP status that the collector answers to an export of no records with the token (000 when it did not answer in
 # time). The header reaches curl through a pipe that the builtin printf writes, not an argument; -q, first, keeps a
@@ -71,27 +113,50 @@ if [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ] && [ -n "${OTEL_COLLECTOR_TOKEN:-}"
 else
   echo "review-run: no OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_COLLECTOR_TOKEN: usage is not exported"
 fi
-status=0
 # Claude Code's whole environment, one NUL-ended entry each, goes through a pipe to a launcher that execs it with that
 # environment only, as env -i would, and stdin from /dev/null. env -i took the entries as arguments. A loop of
 # `export -n` over `compgen -e` in this shell would not do it: bash passes on environment entries whose names are not
 # variable names, such as A.B=1, and the loop does not remove exported functions either.
-{
-  builtin printf '%s\0' "PATH=$PATH" "HOME=$HOME" LANG=C.UTF-8
-  for variable in $(compgen -e); do
-    case $variable in ANTHROPIC_*|CLAUDE_CODE_*) builtin printf '%s\0' "$variable=${!variable}" ;; esac
-  done
-  [ ${#telemetry[@]} = 0 ] || builtin printf '%s\0' "${telemetry[@]}"
-} | python3 -c '
+#   review <prompt> <Claude Code's arguments for the conversation...>
+review() {
+  {
+    builtin printf '%s\0' "PATH=$PATH" "HOME=$HOME" LANG=C.UTF-8
+    for variable in $(compgen -e); do
+      case $variable in ANTHROPIC_*|CLAUDE_CODE_*) builtin printf '%s\0' "$variable=${!variable}" ;; esac
+    done
+    [ ${#telemetry[@]} = 0 ] || builtin printf '%s\0' "${telemetry[@]}"
+  } | python3 -c '
 import os, sys
 environment = dict(entry.split(b"=", 1) for entry in sys.stdin.buffer.read().split(b"\0") if entry)
 with open(os.devnull, "rb") as empty:
     os.dup2(empty.fileno(), 0)
 os.execvpe(sys.argv[1], sys.argv[1:], environment)' \
-  claude -p "$prompt" --restricted --tools Read,Glob,Grep --strict-mcp-config --permission-mode dontAsk \
-    --model "$model" --effort xhigh --max-turns 300 --output-format json > "$in/claude.json" 2> "$in/claude.err" \
-  || status=$?
-if [ "$status" != 0 ] || jq -e .is_error "$in/claude.json" > /dev/null 2>&1; then
+    claude -p "$1" "${@:2}" --restricted --tools Read,Glob,Grep --strict-mcp-config --permission-mode dontAsk \
+      --model "$model" --effort xhigh --max-turns 300 --output-format json > "$in/claude.json" 2> "$in/claude.err"
+}
+failed() { [ "$1" != 0 ] || jq -e .is_error "$in/claude.json" > /dev/null 2>&1; }
+status=0
+id=$(uuid)
+if [ -n "$last_id" ]; then
+  echo "review-run: resuming the conversation $last_id of the review of $last_head, as $id"
+  review "$again" --resume "$last_id" --fork-session --session-id "$id" || status=$?
+  # Not resumed, if it failed before its second turn ("No conversation found", a conversation too long to load): a
+  # fresh review then, whose conversation the next push resumes instead of this one.
+  turns=$(jq -r '.num_turns // 0' "$in/claude.json" 2> /dev/null || true)
+  [[ $turns =~ ^[0-9]+$ ]] || turns=0
+  if failed "$status" && [ "$turns" -le 1 ]; then
+    echo "review-run: Claude Code could not resume the conversation $last_id (exit $status): a fresh review instead"
+    tail -c 2000 "$in/claude.err"
+    status=0
+    id=$(uuid)
+    echo "review-run: a fresh review, as $id"
+    review "$prompt" --session-id "$id" || status=$?
+  fi
+else
+  echo "review-run: no conversation of an earlier review of pull request #$PR: a fresh review, as $id"
+  review "$prompt" --session-id "$id" || status=$?
+fi
+if failed "$status"; then
   # Claude Code's own error (for example "Authentication failed" from the token exchange), not the review's text.
   echo "review-run: Claude Code exited $status: $(jq -r '"\(.subtype // "")" + (if .is_error then ": \(.result // "" | tostring | .[0:500])" else "" end)' "$in/claude.json" 2>/dev/null)" >&2
   tail -c 2000 "$in/claude.err" >&2
@@ -106,6 +171,27 @@ jq -r 'if .is_error then error("the review ended with an error: \(.result // .su
                           END { printf "%s", held }' > "$in/comment.md"
 [ -s "$in/comment.md" ] || { echo "review-run: the review wrote no comment" >&2; exit 1; }
 echo "review-run: $(wc -c < "$in/comment.md") bytes in $in/comment.md, by $model"
+# This review's conversation, for the next push's review, in place of the last one. The review cannot read this run's
+# tokens, so its conversation holds none of them; it is not kept if it does.
+if [ -n "$session_dir" ]; then
+  mkdir -p "$session_dir"
+  rm -f "$session_dir/session" "$session_dir"/*.jsonl
+  file=$(find "$HOME/.claude/projects" -name "$id.jsonl" -print -quit 2> /dev/null || true)
+  conversation="" identity=""
+  [ -z "$file" ] || conversation=$(< "$file")
+  [ ! -f "${ANTHROPIC_IDENTITY_TOKEN_FILE:-}" ] || identity=$(< "$ANTHROPIC_IDENTITY_TOKEN_FILE")
+  if [ -z "$conversation" ]; then
+    echo "review-run: Claude Code kept no conversation $id: the next push's review starts fresh"
+  elif [[ -n ${OTEL_COLLECTOR_TOKEN:-} && $conversation == *"$OTEL_COLLECTOR_TOKEN"* ]] \
+      || [[ -n $identity && $conversation == *"$identity"* ]]; then
+    echo "review-run: the conversation $id holds a token of this run, so it is not kept: the next push's review starts" \
+      "fresh"
+  else
+    cp "$file" "$session_dir/"
+    printf 'id=%s\nhead=%s\ndir=%s\n' "$id" "$HEAD_SHA" "$(basename "$(dirname "$file")")" > "$session_dir/session"
+    echo "review-run: kept the conversation $id of the review of $HEAD_SHA, for the next push's review to resume"
+  fi
+fi
 if [ ${#telemetry[@]} != 0 ]; then
   answer=$(collector)
   if [ "$answer" != 200 ]; then

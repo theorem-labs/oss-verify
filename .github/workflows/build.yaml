@@ -11,7 +11,8 @@ name: "Build"
 # Then two more jobs:
 #   review   Claude Code follows .claude/skills/review-enrollment/SKILL.md on what the workflow gathered: the pull
 #            request, the project's source at the built commit, and the build's results. It writes a comment that asks
-#            the maintainer for each fix.
+#            the maintainer for each fix. On a later push it resumes the conversation of the last review, so it knows
+#            what it asked for and why, and checks those requests against the changes since then.
 #   comment  posts that comment, with the checks' report folded under it, or replaces the one already there. The
 #            comment starts with <!-- oss-verify-review -->, as the triage comment starts with its own marker.
 #
@@ -90,6 +91,18 @@ name: "Build"
 # theorem.credential=oss-verify-ci (.github/scripts/review-run sets them). The review fails if either is not set, or if
 # the collector does not answer 200 to an empty export with the token before the review starts, rather than lose the
 # review's spend in silence. If it refuses one after the review, the comment is still posted and the review job fails.
+#
+# The review's conversation goes from one push to the next in the Actions cache, under the key
+# enroll-review/<pull request>/<project>/<run id>-<attempt>. The review job restores the newest one of the pull request
+# and project, review-run resumes it in a fork (claude --resume <id> --fork-session) and keeps the new conversation,
+# and the review job saves that once the review has written a comment. The log of the Review step says which it did:
+# "review-run: resuming the conversation <id> of the review of <commit>", or "a fresh review". Only a run on the
+# default branch (pull_request_target, or a run started by hand) writes a cache that this job reads: a pull request's
+# own runs write theirs where this job does not look. But a pull request's own runs can read these caches, as GitHub
+# lets a run read its base branch's caches, and tests.yaml runs on pull_request with the pull request's copy of it. A
+# conversation holds the public inputs the review read and the review's own reasoning, which no log shows, and no
+# token: review-run keeps none that holds a token of the run. GitHub drops a cache that no run has read for 7 days,
+# and the review then starts fresh.
 #
 # To build a pull request by number:
 #   gh workflow run build.yaml -f pr=123
@@ -282,6 +295,15 @@ jobs:
           HEAD_SHA: ${{ needs.project-builds.outputs.sha }}
         run: GITHUB_STEP_SUMMARY=/dev/null .github/scripts/take-project build
 
+      # The conversation of the last review of this pull request and project, which the review resumes (the Actions
+      # cache, at the top of this file). None on its first review, or once the cache has dropped it: a fresh review.
+      - name: Restore the last review's conversation
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
+        with:
+          path: ${{ runner.temp }}/review-session
+          key: enroll-review/${{ github.event.pull_request.number || inputs.pr }}/${{ needs.project-builds.outputs.name }}/${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: enroll-review/${{ github.event.pull_request.number || inputs.pr }}/${{ needs.project-builds.outputs.name }}/
+
       - name: Gather what the review reads
         timeout-minutes: 15
         env:
@@ -294,6 +316,9 @@ jobs:
           BINARIES: ${{ needs.project-builds.outputs.binaries }}
           CHECKS: ${{ needs.project-builds.outputs.checks }}
           BUILD_CONCLUSION: ${{ needs.project-builds.result }}
+          # For the changes since the last review's commit, when there is one.
+          HEAD_SHA: ${{ needs.project-builds.outputs.sha }}
+          REVIEW_SESSION: ${{ runner.temp }}/review-session
         run: |
           dpkg -s python3-yaml unzip > /dev/null 2>&1 \
             || sudo apt-get install -y -qq python3-yaml unzip \
@@ -337,6 +362,10 @@ jobs:
           # Usage, to Theorem's cost collector. review-run checks that the collector takes the token.
           OTEL_EXPORTER_OTLP_ENDPOINT: ${{ vars.OTEL_EXPORTER_OTLP_ENDPOINT }}
           OTEL_COLLECTOR_TOKEN: ${{ secrets.OTEL_COLLECTOR_TOKEN }}
+          # The conversation of the last review, which review-run resumes, and the commit this review is of. After a
+          # review, the directory holds this review's conversation, which the next step keeps for the next push.
+          HEAD_SHA: ${{ needs.project-builds.outputs.sha }}
+          REVIEW_SESSION: ${{ runner.temp }}/review-session
         run: |
           # Without the two, review-run exports nothing, which is for a person's own run: here it would lose the
           # review's spend in silence.
@@ -367,6 +396,14 @@ jobs:
           fi
           delimiter="review-$(openssl rand -hex 16)"
           { echo "comment<<$delimiter"; head -c 60000 .review/comment.md; echo; echo "$delimiter"; } >> "$GITHUB_OUTPUT"
+          if [ -s "$REVIEW_SESSION/session" ]; then echo "session=kept" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Keep this review's conversation for the next push's review
+        if: ${{ steps.review.outputs.session == 'kept' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
+        with:
+          path: ${{ runner.temp }}/review-session
+          key: enroll-review/${{ github.event.pull_request.number || inputs.pr }}/${{ needs.project-builds.outputs.name }}/${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Fail if the collector refused the token after the review
         if: ${{ steps.review.outputs.collector == 'refused' }}

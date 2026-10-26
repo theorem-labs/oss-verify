@@ -5,7 +5,7 @@
 # Gathers what the enrollment review reads, so that the review agent needs no shell, no network and no token:
 #
 #   GH_TOKEN=<read-only token> REPO=<owner>/<name> PR=<number> NAME=<project> COMMIT=<built commit> \
-#     .github/scripts/review-gather <directory>
+#     [HEAD_SHA=<head commit> REVIEW_SESSION=<directory>] .github/scripts/review-gather <directory>
 #
 # build.yaml's review job runs it from the base branch's checkout, after take-project has put the pull request's
 # projects/<name>/ into that checkout. It runs no code of the pull request or of the project: it reads the pull request
@@ -148,5 +148,15 @@ if [[ ${COMMIT:-} =~ ^[0-9a-f]{40}$ ]]; then
     rm -rf "$source"
     echo "review-gather: could not fetch $COMMIT from $repo" > "$out/source.txt"
   fi
+fi
+# The changes to projects/<name>/ since the commit of the last review, when build.yaml restored that review's
+# conversation into REVIEW_SESSION (review-run resumes it): HEAD_SHA is the head commit the build took.
+since=$(sed -n 's/^head=//p' "${REVIEW_SESSION:-/nonexistent}/session" 2> /dev/null || true)
+since_diff() {
+  gh api -H 'Accept: application/vnd.github.diff' "repos/$REPO/compare/$since...$HEAD_SHA" \
+    | awk -v a="a/$dir/" -v b="b/$dir/" '/^diff --git / { take = index($3, a) == 1 || index($4, b) == 1 } take'
+}
+if [[ $since =~ ^[0-9a-f]{40}$ && ${HEAD_SHA:-} =~ ^[0-9a-f]{40}$ ]]; then
+  keep since-last-review.diff since_diff
 fi
 ls -la "$out"
