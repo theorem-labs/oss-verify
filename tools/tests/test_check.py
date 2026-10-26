@@ -409,16 +409,24 @@ class Toolchains(unittest.TestCase):
         # each toolchain's digest is chosen in one file. The files git tracks are read, but for a project's own
         # (projects/), whose locks may name the toolchain they were built with.
         root = TOOLS.parent
+        dockerfile = (root / "infra" / "base-builder" / "Dockerfile").read_text(encoding="utf-8")
+        self.assertEqual([line for line in dockerfile.splitlines() if line.startswith("ARG TOOLCHAIN")],
+                         ["ARG TOOLCHAIN"])
         listed = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--", ".", ":!projects"],
                                 capture_output=True)
-        if listed.returncode != 0:
-            self.skipTest("not a git checkout: git ls-files lists nothing to read")
+        tracked = listed.stdout.decode().split("\0") if listed.returncode == 0 else []
+        if "infra/toolchains.tsv" not in tracked:
+            self.skipTest("not a git checkout of this repository: git ls-files does not list infra/toolchains.tsv")
         digests = {image.partition("@sha256:")[2].encode() for _, image, _, _ in check_build.toolchains()}
         self.assertTrue(digests and all(len(d) == 64 for d in digests), digests)
-        named = sorted(rel for rel in listed.stdout.decode().split("\0") if rel and (root / rel).is_file()
-                       and not (root / rel).is_symlink()
-                       and any(d in (root / rel).read_bytes() for d in digests))
-        self.assertEqual(named, ["infra/toolchains.tsv"])
+        named = []
+        for rel in tracked:
+            path = root / rel
+            if rel and path.is_file() and not path.is_symlink():
+                data = path.read_bytes()
+                if any(d in data for d in digests):
+                    named.append(rel)
+        self.assertEqual(sorted(named), ["infra/toolchains.tsv"])
 
 
 if __name__ == "__main__":

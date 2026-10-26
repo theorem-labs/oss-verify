@@ -84,7 +84,7 @@ def test_it_prints_the_image_tools_check_builds_from(tmp_path, monkeypatch, lang
     (PROJECT.format("[c]") + "ubsan_checks: {}\n", BUILD_FILES),  # tools/validate.py raised on it
     ("not: [valid\n", BUILD_FILES),
 ])
-def test_a_project_tools_check_refuses_gets_the_default_and_exit_0(tmp_path, monkeypatch, text, files):
+def test_a_project_tools_check_refuses_gets_the_newest_c_toolchain_and_exit_0(tmp_path, monkeypatch, text, files):
     # tools/check stops before it builds anything, and the workflow still needs an image to pull and a zero exit, so
     # that tools/check gives its own report in the next step.
     directory = project(tmp_path, text, files)
