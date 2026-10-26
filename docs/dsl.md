@@ -176,3 +176,5 @@ This payload makes a store, stores `v` under `k1` and reads it back. Then it che
 To run it under the driver, put the outer header in front of it: six zero bytes ([build-contract.md](build-contract.md#run-a-binary)). The run writes the trace of the three operations, then a summary line with `steps=3 ok=3 err=0 skip=0 chk=1 fail=0`. The call returns 0. If you change the last frame to `ff 02 03 01`, the check fails, and the call returns -1.
 
 A property of `kv` itself goes in a project operation, as a check that aborts. For example, `get` can check that a key read right after `put` gives the stored value, and call `abort()` if it does not.
+
+<!-- A production check of #73: this line changes only documentation. -->
