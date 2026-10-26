@@ -19,5 +19,5 @@ jobs:
           # Saved by push runs on main (refs/heads/main scope); key and version as the REST API lists them.
           MAIN_KEY: codeql-overlay-base-database-1-433570c23e836bda-go-2.27.3-33845fb4d52cb6513b996f6eb15d21954abef3dc-40284759121-1
           MAIN_VERSION: d96c176a7c72d361c40b4e5bcab0abec796173d7f00eca68f52f8039917812e4
-          # The probe pull requests whose own entries this run tries to read (none on the first probe).
-          OTHER_PRS: ""
+          # The probe pull requests whose own entries this run tries to read (the first probe).
+          OTHER_PRS: "53"
