@@ -24,8 +24,8 @@
 # Without the two variables it exports nothing.
 # No value of that environment is ever an argument of a process: another user on the machine can read a process's
 # arguments, but not its environment.
-# In CI it keeps Claude Code's workload identity usable for a review of any length, and tries a review that ends
-# without a comment once more (both below). A run that ends without a comment writes why, in plain words, to
+# In CI it keeps Claude Code's workload identity usable for a review of any length, and runs Claude Code once more when
+# it ends without a review (both below). A run that ends without a comment writes why, in plain words, to
 # <directory>/failure.txt, and Claude Code's own message, for the job's summary, to <directory>/failure-detail.txt.
 set -euo pipefail
 
@@ -93,26 +93,35 @@ fi
 token_file=${ANTHROPIC_IDENTITY_TOKEN_FILE:-}
 [ -n "$token_file" ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ] \
   || token_file=
-# The request token reaches curl through a pipe, as the collector's does; the new token replaces the file in one rename.
+# The request token reaches curl through a pipe, as the collector's does. The new token replaces the file in one rename,
+# from a file of this process's own: the loop below and the fetch before a second try can run at the same time.
 new_identity_token() {
   [ -n "$token_file" ] || return 0
+  local new="$token_file.new.$BASHPID"
   curl -q -sSf --max-time 20 -H @<(builtin printf 'Authorization: Bearer %s\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN") \
-      "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://api.anthropic.com" | jq -r '.value // empty' > "$token_file.new" \
-    && [ -s "$token_file.new" ] && mv -f "$token_file.new" "$token_file"
+      "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://api.anthropic.com" | jq -r '.value // empty' > "$new" \
+    && [ -s "$new" ] && mv -f "$new" "$token_file"
 }
 rotating=""
+# The loop is stopped and waited for, so that no new token is written once this script has ended. Nothing here may
+# change the exit status: it runs as the EXIT trap, after exit 3 too.
 stop_rotating() {
-  [ -z "$rotating" ] || kill "$rotating" 2> /dev/null || true
-  rm -f "$token_file.new"
-  [ ! -s "$in/identity-token.log" ] || cat "$in/identity-token.log" >&2
+  [ -z "$rotating" ] || { kill "$rotating" && wait "$rotating"; } 2> /dev/null || true
+  rm -f "$token_file".new.* || true
+  [ ! -s "$in/identity-token.log" ] || cat "$in/identity-token.log" >&2 || true
 }
 if [ -n "$token_file" ]; then
-  # What the loop says goes to a file of its own, not to this script's output: its sleep outlives the kill above by up
-  # to a minute, and a caller that reads this script's output to its end would wait for it.
+  # The loop sleeps in the background, so that it can end at once when it is stopped between two tokens (and after the
+  # token it is fetching, if it is stopped then). What it says goes to a file of its own, not to this script's output.
   : > "$in/identity-token.log"
-  while sleep "$every"; do
-    new_identity_token || echo "review-run: could not write a new identity token at $(date -u +%H:%M:%S)"
-  done > "$in/identity-token.log" 2>&1 &
+  (
+    trap '[ -z "${!:-}" ] || kill "$!" 2> /dev/null; exit 0' TERM
+    while :; do
+      sleep "$every" &
+      wait "$!"
+      new_identity_token || echo "review-run: could not write a new identity token at $(date -u +%H:%M:%S)"
+    done
+  ) > "$in/identity-token.log" 2>&1 &
   rotating=$!
   trap stop_rotating EXIT
 fi

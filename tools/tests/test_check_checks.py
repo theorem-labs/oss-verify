@@ -993,7 +993,8 @@ class ReviewRun(unittest.TestCase):
 
     def test_a_token_refused_after_the_review_keeps_the_review_and_fails(self):
         self.answers = [200, 401]
-        out = self.run_review(**self.collector())
+        # With workload identity too: stopping the identity token loop at the end leaves the exit status as it is.
+        out = self.run_review(**self.collector(**self.identity()))
         self.assertEqual(out.returncode, 3, out.stderr)
         self.assertIn("answered 401", out.stderr)
         self.assertIn("usage is likely lost", out.stderr)
@@ -1028,6 +1029,12 @@ class ReviewRun(unittest.TestCase):
         argv = (self.directory / "argv").read_text()
         self.assertNotIn(self.REQUEST_TOKEN, argv + out.stdout + out.stderr)
         self.assertIn("audience=https://api.anthropic.com", argv)
+        # Once review-run has ended, no token is written any more, and no temporary file is left.
+        token_file = self.directory / "oidc" / "jwt"
+        written = token_file.read_text()
+        time.sleep(2.5)
+        self.assertEqual(token_file.read_text(), written)
+        self.assertEqual(sorted(path.name for path in token_file.parent.iterdir()), ["jwt"])
 
     def test_a_401_mid_review_is_tried_again_with_a_new_identity_token(self):
         out = self.run_review_twice(API_401, (REVIEW_OK, 0))

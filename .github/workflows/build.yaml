@@ -352,7 +352,7 @@ jobs:
           echo "::stop-commands::$resume"
           code=0
           .github/scripts/review-run .review || code=$?
-          rm -f "$ANTHROPIC_IDENTITY_TOKEN_FILE" "$ANTHROPIC_IDENTITY_TOKEN_FILE.new"
+          rm -f "$ANTHROPIC_IDENTITY_TOKEN_FILE" "$ANTHROPIC_IDENTITY_TOKEN_FILE".new.*
           echo "::$resume::"
           # 3: the review is written, but the collector refused the token after it. The comment is still posted, and
           # the next step fails the job.
