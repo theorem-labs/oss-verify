@@ -51,6 +51,13 @@ def git(*args, cwd=None, env=None):
                           capture_output=True, text=True).stdout.strip()
 
 
+def isolated_git_env(tmp_path):
+    """An environment in which git reads no configuration of this machine: an empty HOME under tmp_path."""
+    home = tmp_path / "home"
+    home.mkdir()
+    return {"PATH": os.environ["PATH"], "HOME": str(home), "GIT_CONFIG_GLOBAL": str(home / "gitconfig"), **GIT_ENV}
+
+
 class PullRequest:
     """A repository whose main has projects/other/, a pull request's commit on it, and the checkout of main.
 
@@ -64,10 +71,7 @@ class PullRequest:
 
     def __init__(self, tmp_path, files, removed=(), parent=None, landed=None, renamed=None, on_main=None):
         self.tmp = tmp_path
-        home = tmp_path / "home"
-        home.mkdir()
-        self.env = {"PATH": os.environ["PATH"], "HOME": str(home), "GIT_CONFIG_GLOBAL": str(home / "gitconfig"),
-                    **GIT_ENV}
+        self.env = isolated_git_env(tmp_path)
         self.origin = origin = tmp_path / "origin"
         git("init", "-q", "-b", "main", str(origin), env=self.env)
         (origin / "projects" / "other").mkdir(parents=True)
@@ -248,7 +252,7 @@ def test_a_fork_that_changes_two_projects_and_nothing_else_fails(tmp_path, head)
 @pytest.mark.parametrize("head", ["someone/oss-verify", ""])
 @pytest.mark.parametrize("change", list(NOT_A_PROJECT))
 def test_a_fork_that_changes_no_project_but_other_files_fails(tmp_path, head, change):
-    # It must not pass as "nothing to validate": a fork's tests job runs none of its code, so these checks are the only
+    # It must not pass as "nothing to validate": a fork's tests check runs none of its code, so these checks are the only
     # ones that judge it.
     files = NOT_A_PROJECT[change]
     code, log, values, summary = PullRequest(tmp_path, files).run(head)
@@ -263,7 +267,7 @@ def test_a_branch_of_this_repository_that_is_not_an_enrollment_says_so(tmp_path)
     assert code == 0, log
     assert values.get("name", "") == ""
     expected = ("Not an enrollment (it changes 2 projects and 1 file outside projects/<name>/): nothing to validate. "
-                "The tests job (tests.yaml) validates every project.")
+                "The tests check (tests.yaml) validates every project.")
     assert expected in log
     assert expected in summary
 

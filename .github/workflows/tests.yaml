@@ -6,18 +6,32 @@ name: "Tests"
 # runs nothing, and passes with "not run" in its summary: a fork's pull request may change only one projects/<name>/,
 # and enrollment (validate.yaml) and project-builds (build.yaml) are the checks that judge it.
 #
-# tests is a required check, so the job always runs, under the static name tests: GitHub does not evaluate the name:
-# expression of a job it skips, so a skipped job, or one named by an expression, may never report tests. The fork
-# condition is on the steps instead.
+# Each commit is judged on its own changes: for a pull request, GitHub's merge of it against the base branch; for a push
+# to main, against the commit before the push. The jobs:
+#   route     decides which of the two jobs below the changes need, from the paths they change (git diff, renames as
+#             both names):
+#               - only documentation (docs/, and the Markdown files at the top but README.md, which a test reads):
+#                 docs, which runs the one test that reads those files;
+#               - anything else: suite;
+#               - nothing: neither.
+#             A run started by hand, or a push whose earlier commit cannot be read, runs suite.
+#   suite     the tests in tools/tests, and tools/validate.py on every project.
+#   docs      tools/tests/test_check.py's test that no tracked file but infra/toolchains.tsv names a toolchain digest:
+#             it reads every file git tracks, the documentation too. A new test that reads the documentation goes here
+#             as well.
+#   required  always runs, after the others, and reports the required check tests (.github/scripts/collect): it passes
+#             only if route passed, each job route asked for passed, and the other was skipped. A skipped job counts as
+#             a pass where a check is required, so neither suite nor docs is the required check.
 #
-# On a pull request the checkout is GitHub's merge of it into its base branch. It fails for a pull request into any
-# branch but the default one, as enrollment and project-builds do (build.yaml says why), and runs on edited too, so
-# that changing the base runs it again. A title or description edit runs it again as well. After a change of base, the
-# edited event may still name the merge into the old base (https://github.com/actions/checkout/issues/919), so the job
-# also fails unless the merge's first parent is on the base branch, and says to push a commit: a rerun checks out the
-# same merge.
+# On a pull request the checkout is GitHub's merge of it into its base branch. route fails for a pull request into any
+# branch but the default one, as enrollment and project-builds do (build.yaml says why). The workflow runs on edited
+# too, so that changing the base runs it again. After a change of base, the edited event may still name the merge into
+# the old base (https://github.com/actions/checkout/issues/919), so route also fails unless the merge's first parent is
+# on the base branch, and says to push a commit: a rerun checks out the same merge. An edit of the title or description
+# alone changes no commit: route runs nothing, and required reports under the name "title or description edited", not
+# tests, so the head commit's own result stands; such a run has a concurrency group of its own, so it cancels nothing.
 #
-# The job gets no secret, cache, artifact or write permission. Never add one. Its contents: read token goes to
+# No job gets a secret, cache, artifact or write permission. Never add one. The contents: read token goes to
 # actions/checkout and to the step that asks the API where the merge's first parent is, never to a step that runs the
 # branch's code.
 #
@@ -35,19 +49,30 @@ on:
 
 permissions: {}
 
+env:
+  # A pull request from a fork, whose code this workflow runs none of.
+  FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+
 concurrency:
-  group: tests-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  # A pull request's newer run cancels its older one, which loses nothing: each run judges the merge against the base.
+  # A push to main has a group of its own, the commit's: route compares a push with the commit before it, so a later
+  # push must never cancel it, or the changes of the cancelled push would never be tested. An edit of the title or
+  # description alone has a group of its own too, the run's, so it cancels nothing.
+  group: ${{ github.event.action == 'edited' && !github.event.changes.base && format('tests-edited-{0}', github.run_id) || github.event_name == 'push' && format('tests-push-{0}', github.sha) || format('tests-{0}-{1}', github.event_name, github.event.pull_request.number || github.ref) }}
   cancel-in-progress: true
 
 jobs:
-  tests:
-    name: tests
+  route:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     permissions:
       contents: read
     env:
-      FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+      # The same test as the concurrency group's and the required job's name.
+      EDIT_ONLY: ${{ github.event.action == 'edited' && !github.event.changes.base }}
+    outputs:
+      suite: ${{ steps.paths.outputs.suite }}
+      docs: ${{ steps.paths.outputs.docs }}
     steps:
       - name: The pull request targets the default branch
         if: github.event_name == 'pull_request'
@@ -63,25 +88,33 @@ jobs:
       - name: A pull request from a fork runs nothing here
         if: env.FORK == 'true'
         run: |
-          message="Not run: this pull request is from a fork, whose code this job does not run. enrollment and project-builds check its projects/<name>/."
+          message="Not run: this pull request is from a fork, whose code this workflow does not run. enrollment and project-builds check its projects/<name>/."
+          echo "$message"
+          echo "$message" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: An edit of the title or description runs nothing
+        if: env.EDIT_ONLY == 'true' && env.FORK != 'true'
+        run: |
+          message="Not run: this run is for an edit of the pull request's title or description, which changes no commit. The check tests of the head commit's own run stands."
           echo "$message"
           echo "$message" >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
-        if: env.FORK != 'true'
+        if: env.FORK != 'true' && env.EDIT_ONLY != 'true'
         with:
           persist-credentials: false
+          # The commit and its parents, for its changes against its first parent.
+          fetch-depth: 2
 
       - name: The checkout is the merge into the base branch
-        if: github.event_name == 'pull_request' && env.FORK != 'true'
+        if: github.event_name == 'pull_request' && env.FORK != 'true' && env.EDIT_ONLY != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           BASE: ${{ github.event.pull_request.base.ref }}
         run: |
-          # The merge's first parent is the base branch's commit it was made on. HEAD^1 does not resolve in this
-          # depth-1 checkout, so the parent is read from the commit itself.
-          parent=$(git cat-file commit HEAD | awk '$1 == "parent" { print $2; exit }')
+          # The merge's first parent is the base branch's commit it was made on.
+          parent=$(git rev-parse HEAD^1)
           status=$(gh api "repos/$REPO/compare/$parent...$(jq -rn --arg b "$BASE" '$b | @uri')" --jq .status)
           case $status in
             identical|ahead) ;;
@@ -90,16 +123,71 @@ jobs:
                exit 1 ;;
           esac
 
+      - name: Which jobs the changes need
+        id: paths
+        if: env.FORK != 'true' && env.EDIT_ONLY != 'true'
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          say() { echo "$1"; echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
+          from=""
+          case $EVENT in
+            pull_request) from=HEAD^1 ;;
+            # The commit main was at before the push, fetched without credentials (the repository is public). A new
+            # branch's push, or one whose earlier commit cannot be fetched, has none to compare with.
+            push)
+              if [[ $BEFORE =~ ^[0-9a-f]{40}$ && ! $BEFORE =~ ^0+$ ]] \
+                  && git fetch --quiet --no-tags --depth=1 origin "$BEFORE"; then
+                from=$BEFORE
+              fi ;;
+          esac
+          if [ -z "$from" ]; then
+            echo "suite=true" >> "$GITHUB_OUTPUT"
+            say "suite runs: a $EVENT run has no earlier commit to compare with."
+            exit 0
+          fi
+          git diff --no-renames --name-only -z "$from" HEAD > "$RUNNER_TEMP/paths"
+          changed=0 other=0
+          while IFS= read -r -d '' path; do
+            changed=$((changed + 1))
+            # docs/, and a Markdown file at the top but README.md (tools/tests/test_triage.py reads it).
+            if [[ $path == docs/* || ( $path != */* && $path == *.md && $path != README.md ) ]]; then
+              continue
+            fi
+            other=$((other + 1))
+          done < "$RUNNER_TEMP/paths"
+          if (( other )); then
+            echo "suite=true" >> "$GITHUB_OUTPUT"
+            say "suite runs: $other of the $changed changed files are not documentation."
+          elif (( changed )); then
+            echo "docs=true" >> "$GITHUB_OUTPUT"
+            say "docs runs: the $changed changed files are all documentation."
+          else
+            say "Nothing runs: the commit changes no file."
+          fi
+
+  suite:
+    needs: route
+    if: needs.route.outputs.suite == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
+        with:
+          persist-credentials: false
+
       # strace: tools/tests checks that the review's helpers keep the GitHub token out of every process's arguments.
       # cryptography: .github/scripts/review-session seals the review's conversation with it.
       - name: Install PyYAML, pytest, cryptography and strace
-        if: env.FORK != 'true'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml python3-pytest python3-cryptography strace
 
       # The binary checks' rules (tools/binary_isa.py, tools/syscall_shapes.py) are tested against the files of the
       # public process model at the commit they were written against, fetched anonymously.
       - name: The process model the binary checks were written against
-        if: env.FORK != 'true'
         run: |
           commit=$(python3 -c 'import sys; sys.path.insert(0, "tools"); import binary_isa, syscall_shapes
           assert binary_isa.MODEL_COMMIT == syscall_shapes.MODEL_COMMIT, "the two checks name two model commits"
@@ -112,9 +200,64 @@ jobs:
       # The Docker tests (tools/tests/test_builder.py, test_binary_checks_docker.py) need the toolchain image and are
       # skipped here.
       - name: The tests in tools/tests
-        if: env.FORK != 'true'
         run: python3 -m pytest -q -p no:cacheprovider tools/tests
 
       - name: Every project passes tools/validate.py
-        if: env.FORK != 'true'
         run: python3 tools/validate.py < /dev/null
+
+  docs:
+    needs: route
+    if: needs.route.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
+        with:
+          persist-credentials: false
+
+      - name: Install PyYAML and pytest
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml python3-pytest
+
+      - name: The tests that read the documentation
+        run: |
+          set -o pipefail
+          python3 -m pytest -q -p no:cacheprovider -rs \
+            "tools/tests/test_check.py::Toolchains::test_infra_toolchains_tsv_is_the_one_file_that_names_a_toolchain_digest" \
+            | tee "$RUNNER_TEMP/pytest"
+          # Each test here must run and pass: one skips itself outside a git checkout.
+          if ! grep -qE '^[0-9]+ passed' "$RUNNER_TEMP/pytest" || grep -qE '[0-9]+ skipped' "$RUNNER_TEMP/pytest"; then
+            echo "::error::A test that reads the documentation did not run."
+            exit 1
+          fi
+
+  required:
+    # The required check tests (the top of this file). GitHub evaluates the name of a job that runs, and this one always
+    # runs.
+    name: ${{ github.event.action == 'edited' && !github.event.changes.base && 'title or description edited' || 'tests' }}
+    needs: [route, suite, docs]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      # Only for the checkout of .github/scripts.
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+          # This job runs no code of a fork: a fork's run takes the script from the default branch as it is now, not
+          # from the event's base.sha, which can be a commit from before the script existed. (A fork's pull request
+          # can change this workflow itself; enrollment fails it for any change outside one projects/<name>/.)
+          ref: ${{ env.FORK == 'true' && github.event.repository.default_branch || '' }}
+
+      - name: Every job route asked for passed, and no other ran
+        env:
+          ROUTE: ${{ needs.route.result }}
+          SUITE: ${{ needs.suite.result }}
+          ASKED_SUITE: ${{ needs.route.outputs.suite == 'true' }}
+          DOCS: ${{ needs.docs.result }}
+          ASKED_DOCS: ${{ needs.route.outputs.docs == 'true' }}
+        run: .github/scripts/collect "$ROUTE" "suite:$SUITE:$ASKED_SUITE" "docs:$DOCS:$ASKED_DOCS"

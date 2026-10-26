@@ -16,6 +16,13 @@ name: "Triage"
 #            App's client id and its private key, the repository secret OSS_VERIFY_APP_PRIVATE_KEY.
 # Values from the event reach the scripts through environment variables, never by ${{ }} substitution into them.
 #
+# Two more jobs: route runs first and asks for gather only when the comment can change: a run started
+# by hand, or a pull request that touches projects/ (the paths GitHub lists for it, renames under both names), on any
+# event but an edit of the title alone, which the comment does not show. An edit of the description runs gather: the
+# comment reports on the checklist in it. required always runs, last, and passes only if route passed, gather passed
+# when route asked for it, and comment passed when gather wrote one (.github/scripts/collect); any job route did not ask
+# for must be skipped. Its check, triage, is not required by the ruleset: the comment decides nothing.
+#
 # A pull request that has had none of the events below since this workflow was added has no comment. Someone with
 # write access can ask for one, or for a fresh one, from the same two jobs with the same permissions:
 #   gh workflow run triage.yaml -f pr=123
@@ -41,11 +48,52 @@ on:
 permissions: {}
 
 concurrency:
-  group: triage-${{ github.event.pull_request.number || inputs.pr }}
+  # An edit of the title alone has a group of its own, the run's, so that it cancels no run that is writing the comment.
+  group: ${{ github.event.action == 'edited' && !github.event.changes.body && !github.event.changes.base && format('triage-edited-{0}', github.run_id) || format('triage-{0}', github.event.pull_request.number || inputs.pr) }}
   cancel-in-progress: true
 
 jobs:
+  route:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      gather: ${{ steps.paths.outputs.gather }}
+    steps:
+      - name: Whether the comment can change
+        id: paths
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
+          EVENT: ${{ github.event_name }}
+          TITLE_ONLY: ${{ github.event.action == 'edited' && !github.event.changes.body && !github.event.changes.base }}
+        run: |
+          set -euo pipefail
+          say() { echo "$1"; echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
+          if [ "$EVENT" = workflow_dispatch ]; then
+            echo "gather=true" >> "$GITHUB_OUTPUT"
+            say "gather runs: started by hand."
+            exit 0
+          fi
+          if [ "$TITLE_ONLY" = true ]; then
+            say "Nothing runs: an edit of the pull request's title, which the comment does not show."
+            exit 0
+          fi
+          # A failed read fails this job, and so the check: it never reads as "touches nothing".
+          gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" \
+            --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/paths"
+          if grep -q '^projects/' "$RUNNER_TEMP/paths"; then
+            echo "gather=true" >> "$GITHUB_OUTPUT"
+            say "gather runs: the pull request touches projects/."
+          else
+            say "Nothing runs: the pull request touches nothing under projects/, so it gets no comment."
+          fi
+
   gather:
+    needs: route
+    if: needs.route.outputs.gather == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -104,3 +152,28 @@ jobs:
           else
             jq -n --arg body "$COMMENT" '{body: $body}' | gh api --method POST "repos/$REPO/issues/$PR/comments" --input - > /dev/null
           fi
+
+  required:
+    name: triage
+    needs: [route, gather, comment]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      # Only for the checkout of .github/scripts.
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - name: Every job route asked for passed, and no other ran
+        env:
+          ROUTE: ${{ needs.route.result }}
+          GATHER: ${{ needs.gather.result }}
+          ASKED_GATHER: ${{ needs.route.outputs.gather == 'true' }}
+          COMMENT: ${{ needs.comment.result }}
+          # gather asks for the comment by writing one.
+          ASKED_COMMENT: ${{ needs.gather.outputs.comment != '' }}
+        run: .github/scripts/collect "$ROUTE" "gather:$GATHER:$ASKED_GATHER" "comment:$COMMENT:$ASKED_COMMENT"

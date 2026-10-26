@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+#
+# The last job of a routed workflow (validate.yaml, tests.yaml, triage.yaml) runs this, after every other job of its
+# run and whatever their results:
+#
+#   .github/scripts/collect ROUTE_RESULT JOB:RESULT:ASKED...
+#
+# ROUTE_RESULT and each RESULT are the result GitHub gives a job (needs.<job>.result: success, failure, cancelled or
+# skipped), and ASKED is true when the workflow's route job asked for JOB. It passes only if route passed, every job
+# route asked for passed, and every other job was skipped. GitHub counts a skipped job as a pass where a check is
+# required, so a workflow's required check is the job that runs this, never a job that route may skip.
+#
+# What did not pass goes to the log, as an error each, and to the step summary; the exit status is then 1.
+set -euo pipefail
+
+route=${1:-}
+failed=() passed=() skipped=()
+[ "$route" = success ] || failed+=("route: ${route:-no result}")
+for job in "${@:2}"; do
+  IFS=: read -r name result asked <<< "$job"
+  want=skipped
+  [ "$asked" != true ] || want=success
+  if [ "$result" != "$want" ]; then
+    failed+=("$name: ${result:-no result}, where route asks for $want")
+  elif [ "$want" = success ]; then
+    passed+=("$name")
+  else
+    skipped+=("$name")
+  fi
+done
+
+if (( ${#failed[@]} )); then
+  for line in "${failed[@]}"; do echo "::error::$line"; done
+  { echo "### Not passed"; echo; printf -- '- %s\n' "${failed[@]}"; } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+  exit 1
+fi
+message="Passed: route, and the jobs it asked for (${passed[*]:-none}). Skipped, as route asked: ${skipped[*]:-none}."
+echo "$message"
+echo "$message" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"

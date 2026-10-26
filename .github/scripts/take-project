@@ -35,7 +35,7 @@
 #       - one project changed: that project is taken, as from a fork. The other files are not taken, and the log and
 #         step summary say how many there are; the project is checked with the base branch's tools.
 #       - no project, or several: it is not an enrollment. It passes with nothing to build or validate, and the log
-#         and step summary say so. The tests job (tests.yaml) runs this repository's tests and validates every
+#         and step summary say so. The tests check (tests.yaml) runs this repository's tests and validates every
 #         project on such a pull request.
 #     Above the API's limit of LISTED files the list is cut short, so the count of listed projects that merging
 #     leaves alone is not reported; what merging changes still decides, because git reads the whole commit. A fork
@@ -201,7 +201,7 @@ if [ "$same_repository" = true ]; then
     nothing "Merged, this pull request only removes projects: nothing to $action."
   fi
   if (( projects != 1 )); then
-    nothing "Not an enrollment (it changes $(count "$projects" project) and $(count "$outside" file) outside projects/<name>/): nothing to $action. The tests job (tests.yaml) validates every project."
+    nothing "Not an enrollment (it changes $(count "$projects" project) and $(count "$outside" file) outside projects/<name>/): nothing to $action. The tests check (tests.yaml) validates every project."
   fi
   IFS= read -r -d '' name < "$RUNNER_TEMP/kept"
   # The files as GitHub's merge would have them: a project the base branch renamed since the branch left it is the
