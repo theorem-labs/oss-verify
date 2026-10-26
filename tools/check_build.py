@@ -177,7 +177,7 @@ def toolchains():
     (ubsan_checks). languages are the values of project.yaml's language that the image builds."""
     rows = [line.split("\t") for line in TOOLCHAINS.read_text(encoding="utf-8").splitlines()
             if line.strip() and not line.startswith("#")]
-    if not rows or any(len(row) < 4 or row[2] not in UBSAN_MODES or not row[3] for row in rows):
+    if not rows or any(len(row) < 4 or not row[1] or row[2] not in UBSAN_MODES or not row[3] for row in rows):
         raise Failed(f"{TOOLCHAINS} lists no toolchain, or a row has no image, no ubsan of {', '.join(UBSAN_MODES)} "
                      "or no languages")
     return [(row[0], row[1], row[2], tuple(row[3].split(","))) for row in rows]
