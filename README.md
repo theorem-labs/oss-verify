@@ -44,6 +44,10 @@ You need a Linux x86-64 machine with Docker and its buildx plugin, git, and Pyth
 5. Run `tools/check --no-shell --twice <name>`. Make sure that it builds each fuzz target, and that the second build has the same bytes. Without `--no-shell`, `tools/check` opens a shell in the build image when it finishes.
 6. Open a pull request. Complete its checklist.
 
+## When the checks pass
+
+When every required check of your pull request passes, and each plain binary has at most 1 MB of `.text`, we start to write the theorem statements for the commit that the pull request is at. We start a few projects a day. If your pull request must wait for a later day, it gets the label `statements-queued`. If a plain binary has more than 1 MB of `.text`, the pull request gets the label `size-review`, and we decide what to do. A new commit on the pull request starts this again.
+
 ## After we merge
 
 1. We build the fuzz targets two times, and pin the SHA-256 of each binary in a lock.

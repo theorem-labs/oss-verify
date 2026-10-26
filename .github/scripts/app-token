@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+#
+# Makes an installation token of the OSS Verify App for one repository, named by its numeric id, with one permission,
+# and writes it to $GITHUB_OUTPUT as `token`, masked:
+#
+#   APP_KEY=<the App's PEM key> CLIENT_ID=<the App's client id> REPOSITORY_ID=<id> PERMISSION=<name> ACCESS=<read|write> \
+#     .github/scripts/app-token
+#
+# actions/create-github-app-token takes a repository by its name, and the runner prints an action's inputs in the
+# log, which is public here. enroll-dispatch.yml's event goes to a private repository whose name this repository
+# does not publish, so its token is made here, from the id, by GitHub's documented steps: a JWT the key signs (RS256,
+# issued by the client id, ten minutes at most), the App's installation for this repository, and an installation token
+# for `repository_ids` [REPOSITORY_ID] with `permissions` {PERMISSION: ACCESS}. GitHub refuses a repository the
+# installation does not hold. The key reaches openssl through a process substitution and the JWT reaches curl through
+# one: neither is ever a process's argument or a file. Revoke the token when done:
+#   GH_TOKEN=<token> gh api --method DELETE installation/token
+set -euo pipefail
+: "${APP_KEY:?}" "${CLIENT_ID:?}" "${GITHUB_OUTPUT:?}" "${GITHUB_REPOSITORY:?}"
+[[ $REPOSITORY_ID =~ ^[1-9][0-9]*$ ]] || { echo "app-token: REPOSITORY_ID is not a repository id" >&2; exit 2; }
+[[ $PERMISSION =~ ^[a-z_]+$ && $ACCESS =~ ^(read|write)$ ]] || { echo "app-token: not a permission" >&2; exit 2; }
+
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+now=$(date +%s)
+header=$(builtin printf '{"alg":"RS256","typ":"JWT"}' | b64url)
+claims=$(jq -cn --argjson iat "$((now - 60))" --argjson exp "$((now + 540))" --arg iss "$CLIENT_ID" \
+  '{iat: $iat, exp: $exp, iss: $iss}' | b64url)
+signature=$(builtin printf '%s.%s' "$header" "$claims" \
+  | openssl dgst -sha256 -sign <(builtin printf '%s\n' "$APP_KEY") | b64url)
+jwt="$header.$claims.$signature"
+builtin printf '::add-mask::%s\n' "$jwt"
+
+api() {
+  curl -q -sSf -H @<(builtin printf 'Authorization: Bearer %s\n' "$jwt") -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' "$@"
+}
+installation=$(api "https://api.github.com/repos/$GITHUB_REPOSITORY/installation" | jq -er '.id')
+[[ $installation =~ ^[1-9][0-9]*$ ]] || { echo "app-token: no installation id" >&2; exit 1; }
+token=$(jq -cn --argjson id "$REPOSITORY_ID" --arg p "$PERMISSION" --arg a "$ACCESS" \
+    '{repository_ids: [$id], permissions: {($p): $a}}' \
+  | api -X POST --data-binary @- "https://api.github.com/app/installations/$installation/access_tokens" \
+  | jq -er '.token')
+builtin printf '::add-mask::%s\n' "$token"
+builtin printf 'token=%s\n' "$token" >> "$GITHUB_OUTPUT"

@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+"""Decide what enroll-dispatch.yml does after a check of an enrollment pull request completes.
+
+    GH_TOKEN=... REPO=theorem-labs/oss-verify HEAD_SHA=<commit> RUN_EVENT=<event> .github/scripts/enroll-dispatch
+
+enroll-dispatch.yml runs it on workflow_run, when a run of Build, Validate, Terms or Tests completes. HEAD_SHA is the
+commit that run checked, and RUN_EVENT the event that started it. It reads GitHub's API only, with a read-only token:
+nothing of the pull request is checked out or run. It writes four lines to $GITHUB_OUTPUT (or to standard output
+without it): decision, pr, project and sha, and one line, reason, that says why. The decision is one of:
+
+  dispatch     every required check of the default branch's ruleset passed at HEAD_SHA, the pull request changes
+               files under one projects/<name>/ only, and each plain binary of the build's record has at most
+               TEXT_LIMIT bytes of .text: the workflow asks the internal repository's statements workflow to start
+  size-review  the same, but a plain binary has more .text than TEXT_LIMIT, or a size that the build could not read:
+               the workflow labels the pull request size-review, and a person decides
+  none         anything else: not a pull request's run, no open pull request into the default branch at HEAD_SHA,
+               not one project, a required check not passed yet (its own completion runs this again), or no build
+               record of that head
+
+The build record is the artifact enrollment-record of the Build run whose project-builds check passed at HEAD_SHA.
+build.yaml's record job writes it from project-builds' outputs, which this repository's tools wrote; it is read here as
+data, and every value is checked against the shape it must have.
+"""
+from __future__ import annotations
+
+import io
+import json
+import os
+import re
+import subprocess
+import sys
+import zipfile
+
+# Sami Jawhar's size line for statements without a person's decision, "Up to 1 MB" of a plain binary's .text
+# (dispatch://OSSV-141/ask/7c73eb21), the README's "less than 1 MB of .text, the size that tools/check shows": 1 MB is
+# 1,000,000 bytes here, as the README's MB is (its seed corpus limit says MiB where it means 1,048,576).
+TEXT_LIMIT = 1_000_000
+RECORD_ARTIFACT = "enrollment-record"
+RECORD_SCHEMA = "oss-verify enrollment record v1"
+DEFAULT_BRANCH = "main"
+# The API lists at most 3,000 files of a pull request; above that, the list is not the whole change.
+MAX_LISTED_FILES = 3000
+MAX_ARTIFACT_BYTES = 1 << 20
+NAME = re.compile(r"[a-z0-9][a-z0-9_-]*")
+SHA = re.compile(r"[0-9a-f]{40}")
+RUN_URL = re.compile(r"https://github\.com/[^/]+/[^/]+/actions/runs/([0-9]+)(/job/[0-9]+)?")
+
+
+class Api:
+    """GitHub's REST API through the gh command-line tool, which reads GH_TOKEN."""
+
+    def run(self, path: str, *flags: str) -> bytes:
+        return subprocess.run(["gh", "api", *flags, "--", path], check=True, capture_output=True).stdout
+
+    def get(self, path: str):
+        return json.loads(self.run(path))
+
+    def pages(self, path: str) -> list:
+        """Every page of a paginated answer, as a list of pages."""
+        return json.loads(self.run(path, "--paginate", "--slurp"))
+
+    def raw(self, path: str) -> bytes:
+        return self.run(path)
+
+
+def outcome(decision: str, reason: str, pr: int | None = None, project: str = "", sha: str = "") -> dict:
+    return {"decision": decision, "pr": "" if pr is None else str(pr), "project": project, "sha": sha,
+            "reason": " ".join(reason.split())}
+
+
+def the_pull_request(api: Api, repo: str, sha: str) -> dict | list:
+    """The one open pull request into the default branch whose head is `sha`, or the list of all such."""
+    found = [p for page in api.pages(f"repos/{repo}/pulls?state=open&base={DEFAULT_BRANCH}&per_page=100")
+             for p in page if (p.get("head") or {}).get("sha") == sha]
+    return found[0] if len(found) == 1 else found
+
+
+def the_project(files: list[dict]) -> tuple[str | None, str]:
+    """The one project a pull request's files change, or None and why not.
+
+    Every path, and the old path of a renamed file, must be under projects/<name>/ for one name; the change must leave
+    that project with a file (a pull request that only removes the project is not an enrollment)."""
+    if len(files) >= MAX_LISTED_FILES:
+        return None, f"it changes {len(files)} files or more, more than the API lists"
+    names, kept = set(), False
+    for f in files:
+        for path in (f.get("filename"), f.get("previous_filename")):
+            if path is None:
+                continue
+            parts = str(path).split("/")
+            if len(parts) < 3 or parts[0] != "projects" or not NAME.fullmatch(parts[1]):
+                return None, f"it changes {path!r}, which is not under one projects/<name>/"
+            names.add(parts[1])
+        kept |= f.get("status") != "removed"
+    if len(names) != 1:
+        return None, f"it changes {len(names)} projects, not one"
+    if not kept:
+        return None, "it removes its project"
+    return names.pop(), ""
+
+
+def required_checks(api: Api, repo: str) -> list[tuple[str, int | None]]:
+    """(context, integration id) of every status check the default branch's rules require."""
+    out = []
+    for rule in api.get(f"repos/{repo}/rules/branches/{DEFAULT_BRANCH}"):
+        if rule.get("type") == "required_status_checks":
+            for check in (rule.get("parameters") or {}).get("required_status_checks") or []:
+                out.append((check["context"], check.get("integration_id")))
+    return out
+
+
+def latest_check_runs(api: Api, repo: str, sha: str) -> dict[tuple[str, int], dict]:
+    """The newest check run of each name and app at `sha`."""
+    latest = {}
+    for page in api.pages(f"repos/{repo}/commits/{sha}/check-runs?filter=latest&per_page=100"):
+        for run in page.get("check_runs") or []:
+            key = (run.get("name"), (run.get("app") or {}).get("id"))
+            if key not in latest or run["id"] > latest[key]["id"]:
+                latest[key] = run
+    return latest
+
+
+def unpassed(required: list[tuple[str, int | None]], latest: dict) -> tuple[list[str], dict | None]:
+    """The required checks that have not passed, and the passed project-builds run (None if it has not passed)."""
+    waiting, build = [], None
+    for context, app in required:
+        runs = [r for (name, app_id), r in latest.items() if name == context and (app is None or app_id == app)]
+        run = max(runs, key=lambda r: r["id"]) if runs else None
+        if run is None or run.get("status") != "completed" or run.get("conclusion") != "success":
+            state = "not run" if run is None else run.get("conclusion") or run.get("status")
+            waiting.append(f"{context} ({state})")
+        elif context == "project-builds":
+            build = run
+    return waiting, build
+
+
+def build_record(api: Api, repo: str, check_run: dict) -> tuple[dict | None, str]:
+    """The record build.yaml's record job uploaded in the run of this project-builds check, or None and why not."""
+    match = RUN_URL.fullmatch(str(check_run.get("details_url") or ""))
+    if not match:
+        return None, "the project-builds check names no Actions run"
+    run_id = match.group(1)
+    artifacts = [a for page in api.pages(f"repos/{repo}/actions/runs/{run_id}/artifacts?name={RECORD_ARTIFACT}"
+                                         "&per_page=100")
+                 for a in page.get("artifacts") or [] if a.get("name") == RECORD_ARTIFACT and not a.get("expired")]
+    if len(artifacts) != 1:
+        return None, f"Build run {run_id} has {len(artifacts)} unexpired {RECORD_ARTIFACT} artifacts, not one"
+    if int(artifacts[0].get("size_in_bytes") or 0) > MAX_ARTIFACT_BYTES:
+        return None, f"Build run {run_id}'s {RECORD_ARTIFACT} is larger than {MAX_ARTIFACT_BYTES} bytes"
+    data = api.raw(f"repos/{repo}/actions/artifacts/{artifacts[0]['id']}/zip")
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            names = archive.namelist()
+            if names != ["record.json"] or archive.getinfo("record.json").file_size > MAX_ARTIFACT_BYTES:
+                return None, f"Build run {run_id}'s {RECORD_ARTIFACT} holds {names}, not record.json alone"
+            return json.loads(archive.read("record.json")), ""
+    except (zipfile.BadZipFile, ValueError) as error:
+        return None, f"Build run {run_id}'s {RECORD_ARTIFACT} cannot be read: {error}"
+
+
+def oversized(record: dict) -> list[str]:
+    """Each plain binary whose .text is above TEXT_LIMIT or unknown, as text for the reason line."""
+    out = []
+    for target, builds in sorted(record["text_bytes"].items()):
+        size = builds.get("plain")
+        if size is None:
+            out.append(f"{target}.plain (.text size unknown)")
+        elif size > TEXT_LIMIT:
+            out.append(f"{target}.plain ({size:,} bytes of .text)")
+    return out
+
+
+def record_problem(record: object, pr: int, project: str, sha: str) -> str:
+    """Why the record cannot be used for this pull request's head, or ''."""
+    if not isinstance(record, dict) or record.get("schema") != RECORD_SCHEMA:
+        return "the build record has another shape"
+    if record.get("pr") != pr or record.get("project") != project or record.get("sha") != sha:
+        return (f"the build record is of pull request {record.get('pr')!r}, project {record.get('project')!r} at "
+                f"{record.get('sha')!r}")
+    text = record.get("text_bytes")
+    if not isinstance(text, dict) or not text:
+        return "the build record lists no binary"
+    for target, builds in text.items():
+        if not isinstance(builds, dict) or "plain" not in builds:
+            return f"the build record has no plain build of {target!r}"
+        for size in builds.values():
+            if size is not None and (not isinstance(size, int) or isinstance(size, bool) or size < 0):
+                return f"the build record gives {target!r} a .text size that is not a byte count"
+    return ""
+
+
+def decide(api: Api, repo: str, sha: str, run_event: str) -> dict:
+    if run_event not in ("pull_request_target", "pull_request"):
+        return outcome("none", f"the run that completed was started by {run_event}, not by a pull request")
+    if not SHA.fullmatch(sha):
+        return outcome("none", f"{sha!r} is not a commit id")
+    pull = the_pull_request(api, repo, sha)
+    if isinstance(pull, list):
+        return outcome("none", f"{len(pull)} open pull requests into {DEFAULT_BRANCH} have head {sha}, not one", sha=sha)
+    number = pull["number"]
+    files = [f for page in api.pages(f"repos/{repo}/pulls/{number}/files?per_page=100") for f in page]
+    project, why = the_project(files)
+    if project is None:
+        return outcome("none", f"pull request {number} is not one enrollment: {why}", number, sha=sha)
+    waiting, build = unpassed(required_checks(api, repo), latest_check_runs(api, repo, sha))
+    if waiting:
+        return outcome("none", f"pull request {number}: required checks not passed at {sha[:7]}: {', '.join(waiting)}",
+                       number, project, sha)
+    if build is None:
+        return outcome("none", f"pull request {number}: the ruleset does not require project-builds", number, project,
+                       sha)
+    record, why = build_record(api, repo, build)
+    why = why or record_problem(record, number, project, sha)
+    if why:
+        return outcome("none", f"pull request {number}: {why}", number, project, sha)
+    over = oversized(record)
+    if over:
+        return outcome("size-review", f"pull request {number}: projects/{project}/ at {sha[:7]} has a plain binary "
+                       f"above {TEXT_LIMIT:,} bytes of .text: {', '.join(over)}", number, project, sha)
+    return outcome("dispatch", f"pull request {number}: projects/{project}/ at {sha[:7]} passed every required check, "
+                   f"and each plain binary has at most {TEXT_LIMIT:,} bytes of .text", number, project, sha)
+
+
+def main() -> int:
+    result = decide(Api(), os.environ["REPO"], os.environ.get("HEAD_SHA", ""), os.environ.get("RUN_EVENT", ""))
+    lines = "".join(f"{key}={value}\n" for key, value in result.items())
+    path = os.environ.get("GITHUB_OUTPUT")
+    if path:
+        with open(path, "a", encoding="utf-8") as out:
+            out.write(lines)
+    sys.stdout.write(lines)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

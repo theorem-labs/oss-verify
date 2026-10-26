@@ -8,7 +8,10 @@ name: "Build"
 # it is statically linked. With --checks, tools/check also measures what the fuzz targets' checks catch on their seed
 # inputs (docs/build-contract.md, "The checks of a fuzz target"), and the step summary has that report too.
 #
-# Then two more jobs:
+# Then three more jobs:
+#   record   writes the build's record, the artifact enrollment-record: the pull request, the project, the commit
+#            project-builds built, and each binary's .text bytes, for enroll-dispatch.yml, which starts the theorem
+#            statements once every required check has passed.
 #   review   Claude Code follows .claude/skills/review-enrollment/SKILL.md on what the workflow gathered: the pull
 #            request, the project's source at the built commit, and the build's results. It writes a comment that asks
 #            the maintainer for each fix.
@@ -127,7 +130,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-    # Text that this repository's tools wrote, for the review and comment jobs.
+    # Text that this repository's tools wrote, for the review, comment and record jobs.
     outputs:
       name: ${{ steps.project.outputs.name }}
       sha: ${{ steps.project.outputs.sha }}
@@ -135,6 +138,7 @@ jobs:
       result: ${{ steps.build.outputs.result }}
       binaries: ${{ steps.build.outputs.binaries }}
       checks: ${{ steps.build.outputs.checks }}
+      text: ${{ steps.build.outputs.text }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with:
@@ -225,10 +229,19 @@ jobs:
           commit=$(python3 -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["commit"])' \
             ~/.cache/oss-verify-check/"$NAME"/manifest.yaml 2> /dev/null || true)
           [[ $commit =~ ^[0-9a-f]{40}$ ]] || commit=""
+          # For the record job: each binary's .text bytes from the same manifest's layout (tools/manifest.py), as one
+          # line of JSON {target: {build: bytes, or null when it could not be read}}.
+          text=$(python3 -c 'import json, sys, yaml
+          layout = yaml.safe_load(open(sys.argv[1]))["layout"]
+          print(json.dumps({t: {b: v["text_bytes"] for b, v in builds.items()} for t, builds in layout.items()},
+                           sort_keys=True, separators=(",", ":")))' \
+            ~/.cache/oss-verify-check/"$NAME"/manifest.yaml 2> /dev/null || true)
+          [[ $text == "{"*"}" && $text != *$'\n'* ]] || text=""
           # A random delimiter, so that no text can end an output early.
           delimiter="output-$(openssl rand -hex 16)"
           {
             echo "commit=$commit"
+            echo "text=$text"
             echo "result=\`projects/$NAME/\` at \`${SHA:0:7}\` $result"
             for output in binaries checks; do
               file=$summary
@@ -246,6 +259,38 @@ jobs:
 
           [ "$code" = 0 ] || echo "::error::projects/$NAME/ $result."
           exit "$code"
+
+  record:
+    # The build's record, for enroll-dispatch.yml: the pull request, the project, the head commit project-builds built,
+    # and each binary's .text bytes. A workflow that another run starts cannot read this run's job outputs, so this
+    # job writes them, as text that this repository's tools wrote, into the artifact enrollment-record. It runs no code
+    # of the pull request or the project, checks out nothing, and holds no permission: the artifact goes up with the
+    # runner's own artifact token, which every job has.
+    needs: project-builds
+    if: ${{ !cancelled() && needs.project-builds.result == 'success' && needs.project-builds.outputs.name != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Write the record
+        env:
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
+          NAME: ${{ needs.project-builds.outputs.name }}
+          SHA: ${{ needs.project-builds.outputs.sha }}
+          TEXT: ${{ needs.project-builds.outputs.text }}
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/record"
+          jq -n --argjson pr "$PR" --arg project "$NAME" --arg sha "$SHA" --argjson text "${TEXT:-null}" \
+            '{schema: "oss-verify enrollment record v1", pr: $pr, project: $project, sha: $sha, text_bytes: $text}' \
+            > "$RUNNER_TEMP/record/record.json"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2 (sha-pinned)
+        with:
+          name: enrollment-record
+          path: ${{ runner.temp }}/record/record.json
+          if-no-files-found: error
+          retention-days: 30
 
   review:
     # Claude reviews the enrollment with .claude/skills/review-enrollment/SKILL.md. It runs after the build, whatever
