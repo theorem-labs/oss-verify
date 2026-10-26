@@ -154,7 +154,7 @@ fi
 since=$(sed -n 's/^head=//p' "${REVIEW_SESSION:-/nonexistent}/session" 2> /dev/null || true)
 since_diff() {
   gh api -H 'Accept: application/vnd.github.diff' "repos/$REPO/compare/$since...$HEAD_SHA" \
-    | awk -v a="a/$dir/" -v b="b/$dir/" '/^diff --git / { take = index($3, a) == 1 || index($4, b) == 1 } take'
+    | awk -v a="a/$dir/" -v b="b/$dir/" '/^diff --git / { take = index($0, "diff --git " a) == 1 || index($0, " " b) > 0 } take'
 }
 if [[ $since =~ ^[0-9a-f]{40}$ && ${HEAD_SHA:-} =~ ^[0-9a-f]{40}$ ]]; then
   keep since-last-review.diff since_diff

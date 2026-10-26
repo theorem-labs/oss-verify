@@ -6,29 +6,35 @@ repository's review job can read it.
 
     REPO=<owner/name> PR=<number> NAME=<project> REVIEW_CONVERSATION_KEY=<base64 of 32 random bytes> \\
       review-session seal <directory> <file>
-    GH_TOKEN=<token that can read the repository's Actions> REPO=... PR=... NAME=... REVIEW_CONVERSATION_KEY=... \\
-      review-session restore <directory>
+    GH_TOKEN=<token that can read the repository's Actions and issues> REPO=... PR=... NAME=... \\
+      REVIEW_CONVERSATION_KEY=... review-session restore <directory>
 
 <directory> is review-run's REVIEW_SESSION: `session` (id=, head=, dir=) and the conversation, <id>.jsonl.
 
 Why sealed, and why not the Actions cache: the conversation holds the review's reasoning, which no log or comment
 shows. Every pull request's own run, a fork's too, can read the Actions caches of main: a pull_request run's cache
-token grants read on refs/heads/main (measured on this repository in pull request #53, run 40290795197), and GitHub
-says so ("Anyone who can open a pull request against your repository can read the contents of caches in the base
-branch", https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching). The review job runs
-on pull_request_target, whose cache writes land in main's scope, and are refused there anyway (read-only by default
-since https://github.blog/changelog/2026-06-26-read-only-actions-cache-for-untrusted-triggers). So the sealed
-conversation is an artifact of the review's run, named enroll-review-<pull request>-<project>, which anyone signed in
-to GitHub can download: it is sealed with AES-256-GCM under a key derived from the repository secret
-REVIEW_CONVERSATION_KEY, which GitHub never gives a fork's pull_request run. The sealed data names the repository, the
-pull request and the project, so a conversation opens only for the review of the same pull request and project.
+token grants read on refs/heads/main (measured on this repository on 2026-10-26, in pull requests #53 and #54), and
+GitHub says so ("Anyone who can open a pull request against your repository can read the contents of caches in the
+base branch", https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching). The review job
+runs on pull_request_target, whose cache writes would land in main's scope, and are refused there anyway (read-only
+by default since https://github.blog/changelog/2026-06-26-read-only-actions-cache-for-untrusted-triggers). So the
+sealed conversation is an artifact of the review's run, named enroll-review-<pull request>-<project>, which anyone
+signed in to GitHub can download: it is sealed with AES-256-GCM under a key derived from the secret
+REVIEW_CONVERSATION_KEY of the environment that only build.yaml's review job on main uses. The sealed data names the
+repository, the pull request and the project, so a conversation opens only for the review of the same pull request
+and project.
 
 seal writes <file> from <directory>. restore writes <directory> from the newest artifact of that name that a run of
-build.yaml on pull_request_target or workflow_dispatch uploaded and that opens with the key; it skips any other (a
-pull request's own run can upload an artifact of any name). With no such artifact, or without the key, it writes
-nothing and the review starts fresh; either way it exits 0, and it says which.
+build.yaml on pull_request_target or workflow_dispatch uploaded, that opens with the key, and whose review is the one
+the pull request's review comment shows now (the commit in the comment's metadata line), so that the review that
+resumes it is told the truth when it is told that its last message is the comment the workflow posted. It skips any
+other artifact: a pull request's own run can upload an artifact of any name, a review whose conversation was not kept
+or whose comment was not posted leaves an older one. With none, without the key, or on any error, it writes nothing
+and the review starts fresh; it always exits 0, and it says which.
 """
 import base64
+import importlib.machinery
+import importlib.util
 import io
 import json
 import os
@@ -43,18 +49,35 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+# The review comment's marker and metadata line, as review-comment writes them and build.yaml's comment job finds them.
+_LOADER = importlib.machinery.SourceFileLoader("review_comment",
+                                              str(pathlib.Path(__file__).with_name("review-comment")))
+review_comment = importlib.util.module_from_spec(importlib.util.spec_from_loader("review_comment", _LOADER))
+_LOADER.exec_module(review_comment)
+BOT = "oss-verify[bot]"
+
 VERSION = "oss-verify enroll-review conversation v1"
 MAGIC = (VERSION + "\n").encode()
 MEMBER = "conversation.sealed"
-# The runs whose artifacts are this job's own: build.yaml, on the events that run the default branch's copy of it.
+# The runs whose artifacts are this job's own: build.yaml as the default branch has it, on pull_request_target (GitHub
+# runs the default branch's workflow for it, whatever the pull request's base:
+# https://github.blog/changelog/2025-11-07-actions-pull_request_target-and-environment-branch-protections-changes)
+# or on workflow_dispatch started on the default branch. A run of build.yaml started by hand on another branch, which
+# that branch's copy can change, is not one: its head_branch is that branch.
 WORKFLOW = ".github/workflows/build.yaml"
 EVENTS = ("pull_request_target", "workflow_dispatch")
-# The newest artifacts tried, and the most bytes read of one.
+# The most artifacts of this job's own runs downloaded, the most runs looked up (one artifact of a name per run, so a
+# run of a pull request's own costs it one push), and the most bytes read of one artifact.
 TRIES = 10
+RUNS = 100
 MAX_BYTES = 64 << 20
 ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 HEAD = re.compile(r"[0-9a-f]{40}")
 FOLDER = re.compile(r"-[A-Za-z0-9-]{1,200}")
+
+
+class Fresh(Exception):
+    """Nothing to restore: the review starts fresh, for the reason given."""
 
 
 def say(text):
@@ -64,11 +87,11 @@ def say(text):
 def context():
     repo, pr, name = os.environ.get("REPO", ""), os.environ.get("PR", ""), os.environ.get("NAME", "")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
-        sys.exit("review-session: REPO is not owner/name")
+        raise ValueError("REPO is not owner/name")
     if not re.fullmatch(r"[0-9]+", pr):
-        sys.exit("review-session: PR is not a number")
+        raise ValueError("PR is not a number")
     if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,62}", name):
-        sys.exit("review-session: NAME is not a project name")
+        raise ValueError("NAME is not a project name")
     return repo, pr, name
 
 
@@ -81,18 +104,18 @@ def associated(repo, pr, name):
 
 
 def key():
-    """The AES-256 key, or None (with a warning) when the repository secret is not set."""
+    """The AES-256 key, or None, with a warning, when the secret is not set. ValueError when it is not a key."""
     text = os.environ.get("REVIEW_CONVERSATION_KEY", "").strip()
     if not text:
-        print("::warning::The repository secret REVIEW_CONVERSATION_KEY is not set, so the review's conversation is "
-              "neither restored nor kept, and each push gets a fresh review.", flush=True)
+        print("::warning::The secret REVIEW_CONVERSATION_KEY of the environment enroll-review is not set, so the "
+              "review's conversation is neither restored nor kept, and each push gets a fresh review.", flush=True)
         return None
     try:
         raw = base64.b64decode(text, validate=True)
     except ValueError:
-        sys.exit("review-session: REVIEW_CONVERSATION_KEY is not base64")
+        raise ValueError("REVIEW_CONVERSATION_KEY is not base64") from None
     if len(raw) < 32:
-        sys.exit("review-session: REVIEW_CONVERSATION_KEY holds fewer than 32 bytes")
+        raise ValueError("REVIEW_CONVERSATION_KEY holds fewer than 32 bytes")
     return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=VERSION.encode()).derive(raw)
 
 
@@ -104,7 +127,7 @@ def seal(directory, file):
     fields = dict(line.split("=", 1) for line in (directory / "session").read_text().splitlines() if "=" in line)
     conversation_id, head, folder = fields.get("id", ""), fields.get("head", ""), fields.get("dir", "")
     if not (ID.fullmatch(conversation_id) and HEAD.fullmatch(head) and FOLDER.fullmatch(folder)):
-        sys.exit(f"review-session: {directory}/session does not name a whole conversation")
+        raise ValueError(f"{directory}/session does not name a whole conversation")
     plain = json.dumps({"id": conversation_id, "head": head, "dir": folder,
                         "conversation": (directory / f"{conversation_id}.jsonl").read_text()}).encode()
     nonce = os.urandom(12)
@@ -129,9 +152,28 @@ def unseal(blob, secret, repo, pr, name):
     return fields
 
 
-def gh(path):
-    """The body of a GET of the GitHub API, through gh, which takes the token from GH_TOKEN in its environment."""
-    return subprocess.run(["gh", "api", path], check=True, capture_output=True, timeout=120).stdout
+def gh(path, pages=False):
+    """The body of a GET of the GitHub API, through gh, which takes the token from GH_TOKEN in its environment. The key
+    is not in gh's environment. With pages, every page, as a JSON list of the pages."""
+    environment = {k: v for k, v in os.environ.items() if k != "REVIEW_CONVERSATION_KEY"}
+    arguments = ["gh", "api", *(["--paginate", "--slurp"] if pages else []), path]
+    return subprocess.run(arguments, check=True, capture_output=True, timeout=300, env=environment).stdout
+
+
+def posted_head(repo, pr):
+    """The commit whose review the pull request's review comment shows: the comment build.yaml's comment job keeps,
+    the oss-verify App's first comment that starts with the marker."""
+    comments = [c for page in json.loads(gh(f"repos/{repo}/issues/{pr}/comments?per_page=100", pages=True))
+                for c in page]
+    ours = [c for c in comments if (c.get("user") or {}).get("login") == BOT
+            and str(c.get("body", "")).startswith(review_comment.MARKER)]
+    if not ours:
+        raise Fresh(f"pull request #{pr} has no review comment")
+    lines = str(ours[0]["body"]).split("\n")
+    meta = review_comment.META.match(lines[1]) if len(lines) > 1 else None
+    if not meta or meta.group("status") == "none" or not HEAD.fullmatch(meta.group("head") or ""):
+        raise Fresh(f"the review comment of pull request #{pr} shows no review of a commit")
+    return meta.group("head")
 
 
 def restore(directory):
@@ -139,50 +181,78 @@ def restore(directory):
     secret = key()
     if secret is None:
         return
+    posted = posted_head(repo, pr)
+    default = json.loads(gh(f"repos/{repo}"))["default_branch"]
     wanted = artifact_name(pr, name)
-    try:
-        listed = json.loads(gh(f"repos/{repo}/actions/artifacts?name={wanted}&per_page=100"))["artifacts"]
-    except (subprocess.SubprocessError, ValueError, KeyError) as error:
-        say(f"could not list the artifacts {wanted} ({type(error).__name__}): a fresh review")
-        return
+    listed = [a for page in json.loads(gh(f"repos/{repo}/actions/artifacts?name={wanted}&per_page=100", pages=True))
+              for a in page.get("artifacts", [])]
     listed = sorted((a for a in listed if a.get("name") == wanted and not a.get("expired")),
-                    key=lambda a: a.get("created_at", ""), reverse=True)
-    for artifact in listed[:TRIES]:
-        run_id = (artifact.get("workflow_run") or {}).get("id")
-        try:
-            run = json.loads(gh(f"repos/{repo}/actions/runs/{int(run_id)}"))
-            if run.get("path") != WORKFLOW or run.get("event") not in EVENTS \
-                    or (run.get("repository") or {}).get("full_name") != repo:
-                say(f"skipped the artifact {artifact.get('id')}: run {run_id} is not build.yaml on {' or '.join(EVENTS)}")
-                continue
-            if int(artifact.get("size_in_bytes", 0)) > MAX_BYTES:
-                say(f"skipped the artifact {artifact.get('id')}: larger than {MAX_BYTES} bytes")
-                continue
-            with zipfile.ZipFile(io.BytesIO(gh(f"repos/{repo}/actions/artifacts/{int(artifact['id'])}/zip"))) as z:
-                info = z.getinfo(MEMBER)
-                blob = z.read(info) if info.file_size <= MAX_BYTES else b""
-        except (subprocess.SubprocessError, ValueError, KeyError, TypeError, zipfile.BadZipFile) as error:
-            say(f"could not read the artifact {artifact.get('id')} ({type(error).__name__})")
+                    key=lambda a: str(a.get("created_at", "")), reverse=True)
+    trusted, tried = {}, 0
+    for artifact in listed:
+        artifact_id, run_id = int(artifact["id"]), int((artifact.get("workflow_run") or {}).get("id") or 0)
+        if run_id not in trusted:
+            if len(trusted) == RUNS:
+                say(f"looked up {RUNS} runs, the most it does")
+                break
+            run = json.loads(gh(f"repos/{repo}/actions/runs/{run_id}"))
+            trusted[run_id] = (run.get("path") == WORKFLOW and run.get("event") in EVENTS
+                               and (run.get("repository") or {}).get("full_name") == repo
+                               and (run.get("event") == "pull_request_target" or run.get("head_branch") == default))
+            if not trusted[run_id]:
+                say(f"skipped the artifacts of run {run_id}: it is not build.yaml of {default} on "
+                    f"{' or '.join(EVENTS)}")
+        if not trusted[run_id]:
             continue
+        if tried == TRIES:
+            say(f"tried {TRIES} artifacts of build.yaml's runs, the most it does")
+            break
+        tried += 1
+        if int(artifact.get("size_in_bytes", 0)) > MAX_BYTES:
+            say(f"skipped the artifact {artifact_id} of run {run_id}: larger than {MAX_BYTES} bytes")
+            continue
+        with zipfile.ZipFile(io.BytesIO(gh(f"repos/{repo}/actions/artifacts/{artifact_id}/zip"))) as z:
+            info = z.getinfo(MEMBER)
+            if info.file_size > MAX_BYTES:
+                say(f"skipped the artifact {artifact_id} of run {run_id}: larger than {MAX_BYTES} bytes")
+                continue
+            blob = z.read(info)
         fields = unseal(blob, secret, repo, pr, name)
         if fields is None:
-            say(f"skipped the artifact {artifact.get('id')} of run {run_id}: it does not open with the key for "
+            say(f"skipped the artifact {artifact_id} of run {run_id}: it does not open with the key for "
                 f"pull request #{pr} and {name}")
+            continue
+        if fields["head"] != posted:
+            say(f"skipped the artifact {artifact_id} of run {run_id}: its review is of {fields['head']}, and the "
+                f"review comment shows the review of {posted}")
             continue
         directory.mkdir(parents=True, exist_ok=True)
         (directory / f"{fields['id']}.jsonl").write_text(fields["conversation"])
         (directory / "session").write_text(f"id={fields['id']}\nhead={fields['head']}\ndir={fields['dir']}\n")
         say(f"restored the conversation {fields['id']} of the review of {fields['head']}, from run {run_id}")
         return
-    say(f"no sealed conversation of an earlier review of pull request #{pr} and {name}: a fresh review")
+    raise Fresh(f"no sealed conversation of the review of {posted} on pull request #{pr} and {name}")
 
 
 def main():
     arguments = sys.argv[1:]
     if arguments[:1] == ["seal"] and len(arguments) == 3:
-        seal(pathlib.Path(arguments[1]), pathlib.Path(arguments[2]))
+        try:
+            seal(pathlib.Path(arguments[1]), pathlib.Path(arguments[2]))
+        except (ValueError, OSError) as error:
+            sys.exit(f"review-session: {error}")
     elif arguments[:1] == ["restore"] and len(arguments) == 2:
-        restore(pathlib.Path(arguments[1]))
+        # Whatever goes wrong, the review runs, fresh: the review matters more than what it remembers.
+        try:
+            restore(pathlib.Path(arguments[1]))
+        except Fresh as reason:
+            say(f"{reason}: a fresh review")
+        except subprocess.CalledProcessError as error:
+            say(f"the GitHub API call {error.cmd[-1]} failed (exit {error.returncode}): a fresh review")
+        except Exception as error:  # noqa: BLE001 -- any failure means a fresh review, never no review
+            say(f"could not restore a conversation ({type(error).__name__}: {error}): a fresh review")
+            if isinstance(error, ValueError):
+                print(f"::warning::review-session: {error}", flush=True)
     else:
         sys.exit(__doc__.split("\n\n")[1])
 

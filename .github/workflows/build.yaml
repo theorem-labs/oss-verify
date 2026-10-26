@@ -94,19 +94,27 @@ name: "Build"
 #
 # The review's conversation goes from one push to the next as an artifact of the review's run, named
 # enroll-review-<pull request>-<project>, sealed (AES-256-GCM) by .github/scripts/review-session under a key derived
-# from the repository secret REVIEW_CONVERSATION_KEY (32 random bytes, base64). The review job restores the newest one
-# of the pull request and project that build.yaml uploaded and that opens with the key, review-run resumes it in a fork
-# (claude --resume <id> --fork-session) and keeps the new conversation, and the review job seals and uploads that once
-# the review has written a comment. The log of the Review step says which it did: "review-run: resuming the
-# conversation <id> of the review of <commit>", or "a fresh review". A conversation holds the public inputs the review
-# read and the review's own reasoning, which no log or comment shows, and no token: review-run keeps none that holds a
-# token of the run. It is sealed because anyone signed in to GitHub can download this repository's artifacts, and it
-# is not in the Actions cache because every pull request's own run, a fork's too, can read main's caches (the header
-# of .github/scripts/review-session has the measurement). GitHub never gives the secret to a fork's pull_request run;
-# runs of branches of this repository get it, as they get the other secrets. Without the secret the review runs fresh
-# on each push, with a warning. An artifact lasts as long as the repository's artifact retention (90 days by default).
-# To make the secret: openssl rand -base64 32 | gh secret set REVIEW_CONVERSATION_KEY -R theorem-labs/oss-verify
-# (changing it discards every kept conversation: each pull request's next review starts fresh).
+# from REVIEW_CONVERSATION_KEY (32 random bytes, base64), a secret of the environment enroll-review. The review job
+# restores the newest one of the pull request and project that build.yaml uploaded, that opens with the key, and whose
+# review is the one the review comment shows; review-run resumes it in a fork (claude --resume <id> --fork-session) and
+# keeps the new conversation, and the review job seals and uploads that once the review has written a comment. The logs
+# of the Restore and Review steps say which it did: "review-run: resuming the conversation <id> of the review of
+# <commit>", or "a fresh review". A conversation holds the public inputs the review read and the review's own
+# reasoning, which no log or comment shows, and no token: review-run keeps none that looks like a credential. It is
+# sealed because anyone signed in to GitHub can download this repository's artifacts, and it is not in the Actions
+# cache because every pull request's own run, a fork's too, can read main's caches (the header of
+# .github/scripts/review-session has the measurement).
+# Only the review job holds the key: the environment's deployment branch rule allows main alone, and GitHub checks it
+# against the run's ref, which is main for pull_request_target and refs/pull/<n>/merge for a pull request's own run
+# (https://github.blog/changelog/2025-11-07-actions-pull_request_target-and-environment-branch-protections-changes).
+# A run on a ci-test/ branch uses the environment enroll-review-test instead, which holds no key unless someone gives it
+# one, so it reviews fresh. Without the key the review runs fresh on each push, with a warning. An artifact lasts as
+# long as the repository's artifact retention (90 days by default). To make the environment's rule and the key (an
+# admin of this repository; a new key discards every kept conversation):
+#   gh api -X PUT repos/theorem-labs/oss-verify/environments/enroll-review \
+#     -F 'deployment_branch_policy[protected_branches]=false' -F 'deployment_branch_policy[custom_branch_policies]=true'
+#   gh api -X POST repos/theorem-labs/oss-verify/environments/enroll-review/deployment-branch-policies -f name=main
+#   openssl rand -base64 32 | gh secret set REVIEW_CONVERSATION_KEY --env enroll-review -R theorem-labs/oss-verify
 #
 # To build a pull request by number:
 #   gh workflow run build.yaml -f pr=123
@@ -271,12 +279,18 @@ jobs:
     if: ${{ !cancelled() && needs.project-builds.outputs.name != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    # For the key that seals the review's conversation, which only a run on main gets (the top of this file). No
+    # deployment: the environment holds a secret, and the pull request shows no deployment.
+    environment:
+      name: ${{ startsWith(github.ref, 'refs/heads/ci-test/') && 'enroll-review-test' || 'enroll-review' }}
+      deployment: false
     permissions:
       contents: read
       pull-requests: read
       # For the pull request's checks, which the review reads.
       checks: read
       statuses: read
+      # Also for the artifacts of the review's earlier runs (the conversation).
       actions: read
       # Only for the GitHub identity token that workload identity federation trades for an Anthropic token.
       id-token: write

@@ -1245,7 +1245,8 @@ def review_step():
 
 class ReviewSession(unittest.TestCase):
     """review-session seals the conversation for one pull request and project, and restores only what opens with the
-    key from build.yaml's own runs, through a fake gh that serves the Actions API from files."""
+    key from build.yaml's own runs and is of the review the review comment shows, through a fake gh that serves the
+    GitHub API from files."""
     SCRIPT = ROOT / ".github" / "scripts" / "review-session"
     KEY = base64.b64encode(b"k" * 32).decode()
     ID = "0f97bfe1-152c-4ec0-a947-fb9d1ba5c35b"
@@ -1253,28 +1254,34 @@ class ReviewSession(unittest.TestCase):
     FOLDER = "-home-runner-work-oss-verify-oss-verify"
     REPO = "theorem-labs/oss-verify"
     TOKEN = "ghs_notasecretnotasecret"
+    ARTIFACTS = f"repos/{REPO}/actions/artifacts?name=enroll-review-8-libreac&per_page=100"
+    COMMENTS = f"repos/{REPO}/issues/8/comments?per_page=100"
 
     def setUp(self):
         self.directory = pathlib.Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.directory)
         (self.directory / "bin").mkdir()
         (self.directory / "api").mkdir()
-        # gh api <path>: the file api/<path with / and ? as _>, or exit 1 as gh does on a 404. Its arguments and its
-        # GH_TOKEN are recorded.
+        # gh api [--paginate --slurp] <path>: the file api/<path with / ? & = as _> (in a list, one page, with --slurp),
+        # or exit 1 as gh does on a 404. Its arguments, its GH_TOKEN and whether it has the key are recorded.
         gh = self.directory / "bin" / "gh"
         gh.write_text(f"#!{sys.executable}\nimport os, pathlib, re, sys\n"
                       f"root = pathlib.Path({str(self.directory)!r})\n"
                       "with open(root / 'argv', 'a') as f: f.write(' '.join(sys.argv[1:]) + '\\n')\n"
                       "(root / 'gh-token').write_text(os.environ.get('GH_TOKEN', ''))\n"
-                      "page = root / 'api' / re.sub(r'[/?&=]', '_', sys.argv[2])\n"
+                      "if 'REVIEW_CONVERSATION_KEY' in os.environ: (root / 'gh-had-the-key').touch()\n"
+                      "page = root / 'api' / re.sub(r'[/?&=]', '_', sys.argv[-1])\n"
                       "if not page.exists(): sys.exit('gh: Not Found (HTTP 404)')\n"
-                      "sys.stdout.buffer.write(page.read_bytes())\n")
+                      "body = page.read_bytes()\n"
+                      "sys.stdout.buffer.write(b'[' + body + b']' if '--slurp' in sys.argv else body)\n")
         gh.chmod(0o755)
         self.session = self.directory / "session"
         self.session.mkdir()
         (self.session / "session").write_text(f"id={self.ID}\nhead={self.HEAD}\ndir={self.FOLDER}\n")
         (self.session / f"{self.ID}.jsonl").write_text('{"said": "I asked for a seed corpus."}\n')
         self.artifacts = []
+        self.comment(self.HEAD)
+        self.page(f"repos/{self.REPO}", json.dumps({"default_branch": "main"}).encode())
 
     def run_session(self, *arguments, **environment):
         base = {"PATH": f"{self.directory / 'bin'}:{os.environ['PATH']}", "REPO": self.REPO, "PR": "8",
@@ -1285,30 +1292,42 @@ class ReviewSession(unittest.TestCase):
     def page(self, path, body):
         (self.directory / "api" / re.sub(r"[/?&=]", "_", path)).write_bytes(body)
 
+    def comment(self, head, status="review", login="oss-verify[bot]"):
+        """The pull request's review comment, as review-comment writes it, after a forged one by someone else."""
+        meta = review_comment.meta_line(head, status)
+        self.page(self.COMMENTS, json.dumps([
+            {"user": {"login": "someone"},
+             "body": f"{review_comment.MARKER}\n{review_comment.meta_line('9' * 40, 'review')}\n"},
+            {"user": {"login": login}, "body": f"{review_comment.MARKER}\n{meta}\n\n## Enrollment review\n"}]).encode())
+
     def upload(self, sealed, run, event="pull_request_target", path=".github/workflows/build.yaml",
-               created="2026-10-26T01:00:00Z", name="enroll-review-8-libreac"):
-        """An artifact of the given run, which the fake Actions API lists and serves."""
+               created="2026-10-26T01:00:00Z", name="enroll-review-8-libreac", branch="enroll/libreac"):
+        """An artifact of the given run, which the fake Actions API lists and serves. A pull_request_target run's
+        head_branch is the pull request's head branch; a workflow_dispatch run's is the branch it was started on."""
         artifact = 100 + len(self.artifacts)
         archive = io.BytesIO()
         with zipfile.ZipFile(archive, "w") as z:
             z.writestr("conversation.sealed", sealed.read_bytes() if isinstance(sealed, pathlib.Path) else sealed)
         self.page(f"repos/{self.REPO}/actions/artifacts/{artifact}/zip", archive.getvalue())
         self.page(f"repos/{self.REPO}/actions/runs/{run}",
-                  json.dumps({"path": path, "event": event, "repository": {"full_name": self.REPO}}).encode())
+                  json.dumps({"path": path, "event": event, "head_branch": branch,
+                              "repository": {"full_name": self.REPO}}).encode())
         self.artifacts.append({"id": artifact, "name": name, "expired": False, "created_at": created,
                                "size_in_bytes": 1000, "workflow_run": {"id": run}})
-        self.page(f"repos/{self.REPO}/actions/artifacts?name=enroll-review-8-libreac&per_page=100",
-                  json.dumps({"artifacts": self.artifacts}).encode())
+        self.page(self.ARTIFACTS, json.dumps({"artifacts": self.artifacts}).encode())
 
-    def seal(self, **environment):
+    def seal(self, head=None, **environment):
+        if head:
+            (self.session / "session").write_text(f"id={self.ID}\nhead={head}\ndir={self.FOLDER}\n")
         sealed = self.directory / f"sealed-{len(list(self.directory.glob('sealed-*')))}"
         out = self.run_session("seal", str(self.session), str(sealed), **environment)
         self.assertEqual(out.returncode, 0, out.stderr)
         return sealed
 
-    def restored(self):
+    def restored(self, **environment):
         target = self.directory / "restored"
-        out = self.run_session("restore", str(target))
+        shutil.rmtree(target, ignore_errors=True)
+        out = self.run_session("restore", str(target), **environment)
         self.assertEqual(out.returncode, 0, out.stderr)
         files = sorted(p.name for p in target.iterdir()) if target.exists() else []
         return out.stdout, files, target
@@ -1355,44 +1374,99 @@ class ReviewSession(unittest.TestCase):
         self.upload(b"forged", 44, created="2026-10-26T04:00:00Z")
         stdout, files, _ = self.restored()
         self.assertIn("from run 41", stdout)
-        self.assertIn("run 42 is not build.yaml", stdout)
-        self.assertIn("run 43 is not build.yaml", stdout)
+        self.assertIn("run 42: it is not build.yaml of main", stdout)
+        self.assertIn("run 43: it is not build.yaml of main", stdout)
         self.assertIn("artifact 103 of run 44: it does not open", stdout)
         zips = [line for line in (self.directory / "argv").read_text().splitlines() if line.endswith("/zip")]
         self.assertEqual(zips, [f"api repos/{self.REPO}/actions/artifacts/103/zip",
                                 f"api repos/{self.REPO}/actions/artifacts/100/zip"])
         self.assertEqual(len(files), 2)
 
+    def test_a_run_started_by_hand_on_another_branch_is_not_read(self):
+        # Its build.yaml is that branch's copy, which anyone who can push a branch can change. Started on main, it is
+        # read.
+        self.upload(self.seal(), 41, event="workflow_dispatch", branch="main", created="2026-10-26T01:00:00Z")
+        self.upload(b"forged", 42, event="workflow_dispatch", branch="ci-test/x", created="2026-10-26T02:00:00Z")
+        stdout, files, _ = self.restored()
+        self.assertIn("run 42: it is not build.yaml of main", stdout)
+        self.assertIn("from run 41", stdout)
+        zips = [line for line in (self.directory / "argv").read_text().splitlines() if line.endswith("/zip")]
+        self.assertEqual(zips, [f"api repos/{self.REPO}/actions/artifacts/100/zip"])
+
+    def test_a_flood_of_artifacts_from_pull_requests_own_runs_does_not_hide_the_review(self):
+        # One artifact of the name per run; 30 runs of a fork's own, newer than the review's, cost a lookup each and no
+        # download, and do not count against the artifacts tried.
+        self.upload(self.seal(), 41, created="2026-10-26T01:00:00Z")
+        for run in range(1000, 1030):
+            self.upload(b"forged", run, event="pull_request", created=f"2026-10-26T02:{run - 1000:02d}:00Z")
+        stdout, files, _ = self.restored()
+        self.assertIn("from run 41", stdout)
+        zips = [line for line in (self.directory / "argv").read_text().splitlines() if line.endswith("/zip")]
+        self.assertEqual(len(zips), 1)
+
+    def test_a_conversation_whose_review_is_not_the_one_posted_is_not_resumed(self):
+        # The last review kept no conversation, or its comment was not posted: the newest artifact that opens is of
+        # another commit than the one the review comment shows, and an older one of that commit is resumed.
+        self.upload(self.seal(head="3" * 40), 41, created="2026-10-26T01:00:00Z")
+        self.upload(self.seal(head="4" * 40), 42, created="2026-10-26T02:00:00Z")
+        self.comment("3" * 40)
+        stdout, files, target = self.restored()
+        self.assertIn(f"artifact 101 of run 42: its review is of {'4' * 40}, and the review comment shows the review "
+                      f"of {'3' * 40}", stdout)
+        self.assertIn("from run 41", stdout)
+        self.comment("5" * 40)
+        stdout, files, _ = self.restored()
+        self.assertIn(f"no sealed conversation of the review of {'5' * 40} on pull request #8 and libreac: a fresh "
+                      "review", stdout)
+        self.assertEqual(files, [])
+
+    def test_without_a_review_comment_of_a_commit_the_review_is_fresh(self):
+        self.upload(self.seal(), 41)
+        for status, login, said in (("none", "oss-verify[bot]", "shows no review of a commit"),
+                                    ("review", "someone-else", "has no review comment")):
+            with self.subTest(status=status, login=login):
+                self.comment(self.HEAD, status, login)
+                stdout, files, _ = self.restored()
+                self.assertIn(said, stdout)
+                self.assertEqual(files, [])
+
     def test_no_artifact_or_no_api_gives_a_fresh_review(self):
         stdout, files, _ = self.restored()
-        self.assertIn("could not list the artifacts enroll-review-8-libreac", stdout)
-        self.page(f"repos/{self.REPO}/actions/artifacts?name=enroll-review-8-libreac&per_page=100",
-                  b'{"artifacts": []}')
+        self.assertIn(f"the GitHub API call {self.ARTIFACTS} failed (exit 1): a fresh review", stdout)
+        self.page(self.ARTIFACTS, b'{"artifacts": []}')
         stdout, files, _ = self.restored()
-        self.assertIn("no sealed conversation of an earlier review of pull request #8 and libreac", stdout)
+        self.assertIn(f"no sealed conversation of the review of {self.HEAD} on pull request #8 and libreac", stdout)
         self.assertEqual(files, [])
+        # Anything else that goes wrong: still a fresh review, never a failed step.
+        self.page(self.ARTIFACTS, b"not json")
+        stdout, files, _ = self.restored()
+        self.assertIn("could not restore a conversation (JSONDecodeError", stdout)
 
     def test_without_the_key_nothing_is_kept_or_restored_and_it_says_so(self):
         sealed = self.directory / "sealed"
         out = self.run_session("seal", str(self.session), str(sealed), REVIEW_CONVERSATION_KEY="")
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertIn("::warning::The repository secret REVIEW_CONVERSATION_KEY is not set", out.stdout)
+        self.assertIn("::warning::The secret REVIEW_CONVERSATION_KEY of the environment enroll-review is not set",
+                      out.stdout)
         self.assertFalse(sealed.exists())
-        out = self.run_session("restore", str(self.directory / "restored"), REVIEW_CONVERSATION_KEY="")
-        self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertIn("::warning::", out.stdout)
+        stdout, files, _ = self.restored(REVIEW_CONVERSATION_KEY="")
+        self.assertIn("::warning::", stdout)
         self.assertFalse((self.directory / "argv").exists())
+        # A key that is not one: seal fails, and restore gives a fresh review with a warning.
         out = self.run_session("seal", str(self.session), str(sealed), REVIEW_CONVERSATION_KEY="c2hvcnQ=")
         self.assertNotEqual(out.returncode, 0)
         self.assertIn("fewer than 32 bytes", out.stderr)
+        stdout, files, _ = self.restored(REVIEW_CONVERSATION_KEY="not base64!")
+        self.assertIn("::warning::review-session: REVIEW_CONVERSATION_KEY is not base64", stdout)
 
-    def test_the_token_is_never_an_argument(self):
+    def test_the_token_is_never_an_argument_and_gh_never_gets_the_key(self):
         self.upload(self.seal(), 41)
         self.restored()
         self.assertNotIn(self.TOKEN, (self.directory / "argv").read_text())
         self.assertEqual((self.directory / "gh-token").read_text(), self.TOKEN)
+        self.assertFalse((self.directory / "gh-had-the-key").exists())
 
-    def test_build_yaml_keeps_the_conversation_out_of_the_cache_and_the_key_out_of_the_review(self):
+    def test_build_yaml_keeps_the_conversation_out_of_the_cache_and_the_key_in_the_review_jobs_environment(self):
         review = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["jobs"]["review"]
         steps = {step.get("name", ""): step for step in review["steps"]}
         self.assertFalse([s for s in review["steps"] if "actions/cache" in s.get("uses", "")])
@@ -1400,7 +1474,13 @@ class ReviewSession(unittest.TestCase):
                          if "REVIEW_CONVERSATION_KEY" in json.dumps(step.get("env", {})))
         self.assertEqual(holders, ["Restore the last review's conversation",
                                    "Seal this review's conversation for the next push's review"])
+        self.assertEqual(review["environment"], {
+            "name": "${{ startsWith(github.ref, 'refs/heads/ci-test/') && 'enroll-review-test' || 'enroll-review' }}",
+            "deployment": False})
         upload = steps["Keep the sealed conversation for the next push's review"]
+        # Without the key, Seal writes no file, so nothing is uploaded and no step fails.
+        self.assertEqual(upload["if"], "${{ steps.seal.outputs.sealed != '' }}")
+        self.assertIn('if [ -s "$sealed" ]', steps["Seal this review's conversation for the next push's review"]["run"])
         self.assertTrue(upload["uses"].startswith("actions/upload-artifact@"))
         self.assertEqual(upload["with"]["name"], "enroll-review-${{ github.event.pull_request.number || inputs.pr }}"
                          "-${{ needs.project-builds.outputs.name }}")
