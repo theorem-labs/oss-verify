@@ -25,8 +25,6 @@ COLLECT = ROOT / ".github" / "scripts" / "collect"
 WORKFLOWS = ROOT / ".github" / "workflows"
 # Each routed workflow, and the check its required job reports: the names the default branch's ruleset requires.
 REQUIRED = {"validate.yaml": "enrollment", "tests.yaml": "tests", "triage.yaml": "triage"}
-# The test that an event is an edit of the title or description alone, which changes no commit.
-EDIT_ONLY = "github.event.action == 'edited' && !github.event.changes.base"
 
 
 def workflow(name):
@@ -128,14 +126,16 @@ def test_only_the_required_job_reports_the_required_check(name):
 
 
 @pytest.mark.parametrize("name", ["validate.yaml", "tests.yaml"])
-def test_an_edit_of_the_title_or_description_reports_under_another_name_and_cancels_nothing(name):
+def test_a_workflow_that_reports_a_required_check_never_runs_on_an_edit(name):
+    # GitHub reads a required check from the head's newest run of the workflow. A run for an edit of the title,
+    # description or base changes no commit; if it ran, it would have to report the check again. So it does not run, and
+    # the required job's name is static.
     flow = workflow(name)
-    check = REQUIRED[name]
-    # The same test in the three places it decides: the run's concurrency group, route, and the required job's name.
-    group = flow["concurrency"]["group"]
-    assert group.startswith(f"${{{{ {EDIT_ONLY} && format('") and "{0}', github.run_id) ||" in group
-    assert flow["jobs"]["route"]["env"]["EDIT_ONLY"] == f"${{{{ {EDIT_ONLY} }}}}"
-    assert flow["jobs"]["required"]["name"] == f"${{{{ {EDIT_ONLY} && 'title or description edited' || '{check}' }}}}"
+    on = flow.get("on", flow.get(True))
+    event = "pull_request" if name == "tests.yaml" else "pull_request_target"
+    assert on[event]["types"] == ["opened", "reopened", "synchronize"]
+    assert flow["jobs"]["required"]["name"] == REQUIRED[name]
+    assert "edited" not in str(flow["concurrency"]["group"])
 
 
 def test_triage_skips_only_an_edit_of_the_title_alone():
@@ -149,7 +149,7 @@ def test_triage_skips_only_an_edit_of_the_title_alone():
 def test_a_push_to_main_is_never_cancelled_by_a_later_push():
     # route compares a push with the commit before it, so a cancelled push's changes would never be tested.
     group = workflow("tests.yaml")["concurrency"]["group"]
-    assert f"|| github.event_name == 'push' && format('tests-push-{{0}}', github.sha) ||" in group
+    assert group.startswith("${{ github.event_name == 'push' && format('tests-push-{0}', github.sha) ||")
 
 
 def test_a_forks_tests_collector_runs_the_default_branchs_script():
@@ -166,16 +166,15 @@ def test_a_forks_tests_collector_runs_the_default_branchs_script():
     assert all(s.get("if", "").count("env.FORK != 'true'") for s in route if "uses" in s or s.get("id") == "paths")
 
 
-@pytest.mark.parametrize("edit_only, outputs", [("false", "validate=true\n"), ("true", "")])
-def test_validate_route_asks_for_validate_unless_the_event_is_an_edit(tmp_path, edit_only, outputs):
+def test_validate_route_asks_for_validate(tmp_path):
     jobs = workflow("validate.yaml")["jobs"]
     decide = step(jobs["route"], "Whether the event changes what is validated")
     output = tmp_path / "output"
     run = subprocess.run(["bash", "-e", "-c", decide["run"]], capture_output=True, text=True,
-                         env={**os.environ, "EDIT_ONLY": edit_only, "GITHUB_OUTPUT": str(output),
+                         env={**os.environ, "GITHUB_OUTPUT": str(output),
                               "GITHUB_STEP_SUMMARY": str(tmp_path / "summary")})
     assert run.returncode == 0, run.stderr
-    assert (output.read_text() if output.exists() else "") == outputs
+    assert output.read_text() == "validate=true\n"
     # validate takes the project once, itself, and runs only when route asks for it.
     assert jobs["validate"]["needs"] == "route"
     assert jobs["validate"]["if"] == "needs.route.outputs.validate == 'true'"

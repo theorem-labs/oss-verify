@@ -495,7 +495,8 @@ def test_a_pull_request_into_another_branch_fails(tmp_path, head, change):
 
 
 def test_a_pull_request_whose_base_changes_to_main_is_taken(tmp_path):
-    # Changing the base sends edited, and this run against main takes the project as for any enrollment.
+    # After a change of base, the next run (a push, or closing and reopening) against main takes the project as for any
+    # enrollment.
     pull = PullRequest(tmp_path, ENROLLMENT)
     code, log, _, _ = pull.run("someone/oss-verify", base="licence/driver-mit-or-apache")
     assert code == 1, log
