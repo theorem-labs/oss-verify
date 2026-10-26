@@ -910,6 +910,7 @@ class ReviewRun(unittest.TestCase):
             "n=$(( $(cat calls 2> /dev/null || echo 0) + 1 )); echo $n > calls\n"
             'read_token() { { cat "$ANTHROPIC_IDENTITY_TOKEN_FILE"; echo; } >> tokens; }\n'
             f"read_token\n{f'sleep {wait}; read_token' if wait else ''}\n"
+            '[ -f err.$n ] && cat err.$n >&2\n'
             'cat result.$n; exit "$(cat status.$n)"\n')
 
     def identity(self, **environment):
@@ -1076,6 +1077,48 @@ class ReviewRun(unittest.TestCase):
                 self.assertRegex(why, r"\A.+\n\Z")
                 self.assertTrue(pattern.fullmatch(why.rstrip("\n")), why)
 
+    def test_a_message_that_holds_a_credential_is_not_shown(self):
+        # A run whose result or standard error quotes a credential, such as the identity token it could read: the log
+        # and failure-detail.txt, which the public job summary shows, hold neither. A credential just past the
+        # 1,000-character cut is found too, since the check reads the message before the cut.
+        for leak, padding in ((JWT, ""), (JWT, "x" * 990 + " "), ("sk-ant-oat01-" + "a" * 20, ""),
+                              ("ghs_" + "b" * 36, "")):
+            with self.subTest(leak=leak[:12], padding=len(padding)):
+                for n in (1, 2):
+                    (self.directory / f"err.{n}").write_text(f"stderr {leak}\n")
+                failed = ({**API_401[0], "result": f"API Error: {padding}{leak}"}, 1)
+                out = self.run_review_twice(failed, failed)
+                self.assertEqual(out.returncode, 1, out.stderr)
+                why, detail = self.failure()
+                self.assertEqual(detail, "(not shown: it holds what looks like a credential)\n")
+                self.assertNotIn(leak, out.stdout + out.stderr)
+                self.assertIn("standard error is not shown: it holds what looks like a credential", out.stderr)
+        for n in (1, 2):
+            (self.directory / f"err.{n}").write_text("plain stderr\n")
+        out = self.run_review_twice(API_401, API_401)
+        self.assertIn("plain stderr", out.stderr)
+        self.assertIn("Token exchange failed", self.failure()[1])
+
+    def test_the_file_tools_may_not_read_the_identity_token_or_runner_temp(self):
+        # --restricted keeps Read, Glob and Grep in the checkout; the deny rule names the two directories too. Claude
+        # Code reads `//` as the start of an absolute path in a rule (a `/` rule is relative to the project).
+        temp = self.directory / "temp"
+        self.fake_claude((REVIEW_OK, 0))
+        out = self.run_review(**self.identity(RUNNER_TEMP=str(temp)))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        argv = (self.directory / "argv").read_text().split("\0")
+        at = argv.index("--disallowedTools")
+        self.assertEqual(argv[at + 1:at + 3], [f"Read(/{temp}/**)", f"Read(/{self.directory / 'oidc'}/**)"])
+        self.assertTrue(argv[at + 1].startswith("Read(//"))
+        self.assertEqual(argv[at + 3], "--model")
+        # A person's own run has neither directory, and no rule.
+        for name in ("argv", "calls"):
+            (self.directory / name).unlink()
+        self.fake_claude((REVIEW_OK, 0))
+        out = self.run_review()
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertNotIn("--disallowedTools", (self.directory / "argv").read_text())
+
     def run_review_twice(self, *calls):
         for name in ("calls", "tokens"):
             (self.directory / name).unlink(missing_ok=True)
@@ -1094,10 +1137,12 @@ def review_step():
 class ReviewStep(unittest.TestCase):
     """build.yaml's own Review step, over a stand-in review-run that fails: what the run's page and summary say."""
 
-    def run_step(self, code, failure=None, detail=None):
+    def run_step(self, code, failure=None, detail=None, scan=True):
         with tempfile.TemporaryDirectory() as directory:
             directory = pathlib.Path(directory)
             (directory / ".github" / "scripts").mkdir(parents=True)
+            if scan:
+                shutil.copy(REVIEW_COMMENT, directory / ".github" / "scripts" / "review-comment")
             (directory / ".review").mkdir()
             # What review-run leaves after exit status 3: the review is written.
             (directory / ".review" / "comment.md").write_text("Thanks.\n")
@@ -1150,7 +1195,22 @@ class ReviewStep(unittest.TestCase):
         self.assertEqual((code, summary), (0, ""))
         self.assertNotIn("::error::", out)
 
+    def test_a_message_that_holds_a_credential_is_not_in_the_summary(self):
+        for detail in (f"API Error: {JWT}\n", "x" * 1100 + f" {JWT}\n", "it was collector-token-not-a-secret\n"):
+            with self.subTest(detail=detail[:20]):
+                code, out, summary = self.run_step(1, "plain words\n", detail)
+                self.assertEqual(code, 1)
+                self.assertIn("plain words.", summary)
+                self.assertNotIn("```", summary)
+                self.assertNotIn(JWT[:20], summary + out)
+                self.assertNotIn("collector-token-not-a-secret", summary + out)
+        # If the scan cannot run, the message is not shown either.
+        _, _, summary = self.run_step(1, "plain words\n", "API Error: harmless\n", scan=False)
+        self.assertNotIn("harmless", summary)
 
+
+# A JWT in the shape of a GitHub identity token, {"alg":"RS256"} and {"sub":"not-a-secret"}: not a real one.
+JWT = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJub3QtYS1zZWNyZXQifQ.c2lnbmF0dXJlLW5vdC1yZWFs"
 REVIEW_OK = {"type": "result", "subtype": "success", "is_error": False, "num_turns": 31, "duration_ms": 250400,
              "result": "Thanks."}
 # The result Claude Code wrote on #48, #49 and #50 when its second token exchange was refused.

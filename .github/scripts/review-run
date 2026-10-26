@@ -126,6 +126,25 @@ if [ -n "$token_file" ]; then
   trap stop_rotating EXIT
 fi
 
+# Whether standard input holds what looks like a credential (an identity token, an Anthropic or GitHub token), by
+# review-comment's own scan, or the collector's token. Fails closed: an error of the scan counts as a credential.
+holds_credential() {
+  local text scan=0
+  text=$(cat)
+  if [ -n "${OTEL_COLLECTOR_TOKEN:-}" ] && [[ $text == *"$OTEL_COLLECTOR_TOKEN"* ]]; then return 0; fi
+  builtin printf '%s' "$text" | python3 "$here/review-comment" --holds-credential || scan=$?
+  [ "$scan" != 3 ]
+}
+here=$(dirname "$(realpath "$0")")
+
+# The file tools never read the runner's temporary directory or the identity token's: --restricted keeps them inside
+# this checkout, and this deny rule says so again, should that ever change. `//` starts an absolute path in a rule.
+deny=()
+for directory in "${RUNNER_TEMP:-}" "${ANTHROPIC_IDENTITY_TOKEN_FILE:+$(dirname "$ANTHROPIC_IDENTITY_TOKEN_FILE")}"; do
+  [ -z "$directory" ] || deny+=("Read(/$(realpath -m "$directory")/**)")
+done
+[ ${#deny[@]} = 0 ] || deny=(--disallowedTools "${deny[@]}")
+
 # Claude Code's exit status is kept, and how it ended is read from claude.json and written where a reader sees it. All
 # tries stop at 40 minutes, inside the review step's 45, so that a review that runs too long says so too (exit status
 # 124). A try that ends without a review is tried once more if 10 minutes are left, and not after the time limit or
@@ -151,6 +170,7 @@ with open(os.devnull, "rb") as empty:
     os.dup2(empty.fileno(), 0)
 os.execvpe(sys.argv[1], sys.argv[1:], environment)' \
     claude -p "$prompt" --restricted --tools Read,Glob,Grep --strict-mcp-config --permission-mode dontAsk \
+      "${deny[@]}" \
       --model "$model" --effort xhigh --max-turns 300 --output-format json > "$in/claude.json" 2> "$in/claude.err" \
     || status=$?
   # Its kind of ending (subtype), turns and seconds, each checked, so that failure.txt holds no text of Claude Code's.
@@ -168,11 +188,22 @@ os.execvpe(sys.argv[1], sys.argv[1:], environment)' \
   [ "$subtype" = - ] || why="$why, $subtype after $turns turns and $seconds seconds"
   [ "$ok" = yes ] || why="$why, and wrote no review"
   # Claude Code's own words on why (for example "API Error: Token exchange failed with status 401"), with every
-  # control character a space: a line break would end the line outside the review step's stop-commands window.
+  # control character a space: a line break would end the line outside the review step's stop-commands window. The
+  # log and the job summary are public, so words that hold what looks like a credential are not shown, checked
+  # before they are cut, so that a cut cannot hide one.
   detail=$(jq -j '[.result, (.errors | if type == "array" then .[] else . end)] | map(select(type == "string"))
-    | join("; ")' "$in/claude.json" 2> /dev/null | tr '[:cntrl:]' ' ' | cut -c1-1000) || true
+    | join("; ")' "$in/claude.json" 2> /dev/null | tr '[:cntrl:]' ' ') || true
+  if holds_credential <<< "$detail"; then
+    detail="(not shown: it holds what looks like a credential)"
+  fi
+  detail=${detail:0:1000}
   echo "review-run: $why (try $try): ${detail:-no message} ($(wc -c < "$in/claude.json") bytes in $in/claude.json)" >&2
-  tail -c 2000 "$in/claude.err" >&2
+  errors=$(tail -c 2000 "$in/claude.err") || errors=""
+  if [ -n "$errors" ] && holds_credential < "$in/claude.err"; then
+    echo "review-run: Claude Code's standard error is not shown: it holds what looks like a credential" >&2
+  elif [ -n "$errors" ]; then
+    builtin printf '%s\n' "$errors" >&2
+  fi
   if [ "$try" = 2 ]; then
     if [ "$why" = "$first_why" ]; then why="$why, on both tries"; else why="$why, on the second try"; fi
   elif [ "$status" = 124 ] || [ $((deadline - SECONDS)) -lt 600 ] || ! new_identity_token; then

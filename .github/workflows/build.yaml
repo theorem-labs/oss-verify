@@ -361,10 +361,16 @@ jobs:
           elif [ "$code" != 0 ]; then
             # Why, on the run's page and in the job's summary, not only in the log above: review-run's own line of
             # plain words from failure.txt, and Claude Code's message from failure-detail.txt with no backtick, so
-            # that it stays inside its code block.
+            # that it stays inside its code block. The summary is public: a message that holds what looks like a
+            # credential (review-comment's scan, over the whole file; an error of the scan counts as one) or the
+            # collector's token is not shown.
             failure=$(grep -m1 -xE '[A-Za-z0-9 ,._()-]{1,200}' .review/failure.txt 2> /dev/null) || failure=""
             failure=${failure:-review-run ended with exit status $code before Claude Code wrote a result}
             detail=$(head -c 1000 .review/failure-detail.txt 2> /dev/null | tr -d '`' | tr '[:cntrl:]' ' ') || true
+            scan=0
+            [ -z "$detail" ] || python3 .github/scripts/review-comment --holds-credential < .review/failure-detail.txt \
+              || scan=$?
+            if [ "$scan" != 3 ]; then detail=""; fi
             if [ -n "$OTEL_COLLECTOR_TOKEN" ] && [[ $detail == *"$OTEL_COLLECTOR_TOKEN"* ]]; then detail=""; fi
             echo "::error::The review did not finish: $failure"
             {
