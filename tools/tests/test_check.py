@@ -404,6 +404,18 @@ class Toolchains(unittest.TestCase):
             check_tool.main()
         self.assertIn("builds c, c++, not python", str(stop.exception.code))
 
+    def test_a_seeded_project_with_no_build_files_is_refused_with_exit_1(self):
+        # tools/validate.py only warns about it (it breaks no enrollment rule, so not exit 2); there is nothing to build
+        project = pathlib.Path(self.enterContext(tempfile.TemporaryDirectory())) / "demo"
+        project.mkdir()
+        (project / "project.yaml").write_text(
+            "repo: https://example.org/demo#" + "a" * 40 + "\nprimary_contact: n/a\nlanguage: c\n")
+        with mock.patch.object(sys, "argv", ["tools/check", "--no-shell", str(project)]), \
+                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as stop:
+            check_tool.main()
+        self.assertIsInstance(stop.exception.code, str)  # sys.exit(message): exit status 1
+        self.assertIn("has no Dockerfile", stop.exception.code)
+
     def test_infra_toolchains_tsv_is_the_one_file_that_names_a_toolchain_digest(self):
         # The builder's Dockerfile takes the toolchain as a build argument with no default (tools/check passes it), so
         # each toolchain's digest is chosen in one file. The files git tracks are read, but for a project's own
