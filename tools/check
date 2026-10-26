@@ -102,6 +102,12 @@ def load(project):
                  "(docs/project-yaml.md#language)")
     repo, _, ref = config["repo"].partition("#")
     beside = {path.name for path in directory.iterdir()}
+    # A seeded project (primary_contact n/a) may have no build files yet: tools/validate.py only warns about it, and
+    # there is nothing to build.
+    if "Dockerfile" not in beside and config.get("dockerfile") is None:
+        print(validate.printable(f"{directory.name}: no Dockerfile, beside project.yaml or as dockerfile:, so there "
+                                 "is nothing to build"), file=sys.stderr)
+        sys.exit(2)
     return Job(
         name=directory.name,
         directory=directory,

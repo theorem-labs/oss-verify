@@ -81,6 +81,7 @@ def test_it_prints_the_image_tools_check_builds_from(tmp_path, monkeypatch, lang
     (PROJECT.format("jvm"), BUILD_FILES),
     (PROJECT.format("javascript"), BUILD_FILES),
     (PROJECT.format("rust"), ()),  # no Dockerfile: an enrollment problem
+    (PROJECT.format("c").replace("security@example.org", "n/a"), ()),  # a seeded project with no build files yet
     (PROJECT.format("[c]") + "ubsan_checks: {}\n", BUILD_FILES),  # tools/validate.py raised on it
     ("not: [valid\n", BUILD_FILES),
 ])
