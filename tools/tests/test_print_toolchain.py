@@ -89,7 +89,7 @@ def test_a_project_tools_check_refuses_gets_the_default_and_exit_0(tmp_path, mon
     # that tools/check gives its own report in the next step.
     directory = project(tmp_path, text, files)
     assert built_from(directory, monkeypatch) is None
-    assert printed(directory) == (0, check_build.toolchain() + "\n")
+    assert printed(directory) == (0, check_build.newest_toolchain() + "\n")
 
 
 def test_standard_output_holds_only_the_image(tmp_path):

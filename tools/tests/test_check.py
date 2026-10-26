@@ -6,6 +6,7 @@ import importlib.machinery
 import importlib.util
 import io
 import pathlib
+import re
 import sys
 import tempfile
 import unittest
@@ -402,6 +403,16 @@ class Toolchains(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as stop:
             check_tool.main()
         self.assertIn("builds c, c++, not python", str(stop.exception.code))
+
+    def test_infra_toolchains_tsv_is_the_one_file_that_names_a_toolchain_image(self):
+        # The builder's Dockerfile takes the toolchain as a build argument with no default (tools/check passes it), so
+        # each toolchain's digest is chosen in one file. A project's own files (projects/) are not read.
+        image = re.compile(r"oss-fuzz-theorems-toolchain[a-z-]*@sha256:[0-9a-f]{64}")
+        root = TOOLS.parent
+        named = sorted(str(path.relative_to(root)) for path in root.rglob("*")
+                       if path.is_file() and path.relative_to(root).parts[0] not in (".git", "projects")
+                       and image.search(path.read_text(encoding="utf-8", errors="replace")))
+        self.assertEqual(named, ["infra/toolchains.tsv"])
 
 
 if __name__ == "__main__":

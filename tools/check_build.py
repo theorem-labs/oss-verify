@@ -24,7 +24,6 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 BUILDER_DIR = ROOT / "infra" / "base-builder"
 CACHE = pathlib.Path(os.environ.get("XDG_CACHE_HOME") or "~/.cache").expanduser() / "oss-verify-check"
 FULL_COMMIT = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
-TOOLCHAIN_ARG = re.compile(r"^ARG TOOLCHAIN=(\S+)$", re.M)
 TOOLCHAINS = ROOT / "infra" / "toolchains.tsv"
 # How a toolchain's UBSan builds choose their checks: the release's fixed flags, or the project's ubsan_checks.
 UBSAN_MODES = ("fixed", "checks")
@@ -170,14 +169,6 @@ def tree_hash(directory):
             digest.update(f"{path.relative_to(directory)}\0{path.stat().st_mode & 0o111:o}\0".encode())
             digest.update(path.read_bytes() + b"\0")
     return digest.hexdigest()
-
-
-def toolchain():
-    """The toolchain image infra/base-builder/Dockerfile builds FROM when given none (its ARG TOOLCHAIN default)."""
-    match = TOOLCHAIN_ARG.search((BUILDER_DIR / "Dockerfile").read_text(encoding="utf-8"))
-    if not match:
-        raise Failed("infra/base-builder/Dockerfile pins no toolchain (ARG TOOLCHAIN=...)")
-    return match.group(1)
 
 
 def toolchains():
