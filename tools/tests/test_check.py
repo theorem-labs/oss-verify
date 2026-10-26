@@ -412,9 +412,12 @@ class Toolchains(unittest.TestCase):
         dockerfile = (root / "infra" / "base-builder" / "Dockerfile").read_text(encoding="utf-8")
         self.assertEqual([line for line in dockerfile.splitlines() if line.startswith("ARG TOOLCHAIN")],
                          ["ARG TOOLCHAIN"])
-        listed = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--", ".", ":!projects"],
-                                capture_output=True)
-        tracked = listed.stdout.decode().split("\0") if listed.returncode == 0 else []
+        try:
+            listed = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--", ".", ":!projects"],
+                                    capture_output=True)
+        except OSError:  # no git
+            listed = None
+        tracked = listed.stdout.decode().split("\0") if listed and listed.returncode == 0 else []
         if "infra/toolchains.tsv" not in tracked:
             self.skipTest("not a git checkout of this repository: git ls-files does not list infra/toolchains.tsv")
         digests = {image.partition("@sha256:")[2].encode() for _, image, _, _ in check_build.toolchains()}

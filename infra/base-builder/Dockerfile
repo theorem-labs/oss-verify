@@ -2,14 +2,15 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 #
-# The oss-verify builder: the pinned toolchain image plus the interface a project's Dockerfile and build.sh are
-# written against, in OSS-Fuzz's names ($SRC, $WORK, $OUT, $CC, $CFLAGS, $LIB_FUZZING_ENGINE, $SANITIZER, compile).
+# The oss-verify builder: a toolchain image, pinned by digest in infra/toolchains.tsv or a lock, plus the interface a
+# project's Dockerfile and build.sh are written against, in OSS-Fuzz's names ($SRC, $WORK, $OUT, $CC, $CFLAGS,
+# $LIB_FUZZING_ENGINE, $SANITIZER, compile).
 # docs/build-contract.md describes it.
 #
 # The toolchain image is a build argument with no default, so the build fails without one ("base name (${TOOLCHAIN})
 # should not be blank"). tools/check passes it (--build-arg TOOLCHAIN=<image>): the image --toolchain gives, else the
 # one the project's lock names, else the newest for the project's language in infra/toolchains.tsv, the one file that
-# chooses a toolchain (docs/build-contract.md, "Toolchains"). The parser directive on line 1 keeps BuildKit from
+# lists the toolchains (docs/build-contract.md, "Toolchains"). The parser directive on line 1 keeps BuildKit from
 # warning, on every build, that the argument has no default.
 ARG TOOLCHAIN
 FROM ${TOOLCHAIN}
