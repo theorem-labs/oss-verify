@@ -120,16 +120,16 @@ def load(project):
 def toolchain_for(project):
     """The toolchain image that `tools/check <project>`, with no --lock or --toolchain, builds FROM: the newest for the
     project's language. For a project that it refuses before it builds anything (one that breaks the enrollment rules,
-    or in a language with no builder or no toolchain yet), the builder's default: the newest for C in
-    infra/toolchains.tsv."""
+    or in a language with no builder or no toolchain yet), the newest for C in infra/toolchains.tsv, so that the caller
+    still has an image to pull."""
     try:
         # load() prints its warnings on standard output, which holds only the image here.
         with contextlib.redirect_stdout(sys.stderr):
             job = load(project)
         return check_build.newest_toolchain(job.language)
     except (SystemExit, Failed):
-        print(f"tools/check refuses {project} before it builds anything: the builder's default toolchain",
-              file=sys.stderr)
+        print(f"tools/check refuses {project} before it builds anything: the newest C toolchain "
+              "(infra/toolchains.tsv)", file=sys.stderr)
         return check_build.newest_toolchain()
 
 

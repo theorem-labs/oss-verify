@@ -6,7 +6,7 @@ import importlib.machinery
 import importlib.util
 import io
 import pathlib
-import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -404,14 +404,20 @@ class Toolchains(unittest.TestCase):
             check_tool.main()
         self.assertIn("builds c, c++, not python", str(stop.exception.code))
 
-    def test_infra_toolchains_tsv_is_the_one_file_that_names_a_toolchain_image(self):
+    def test_infra_toolchains_tsv_is_the_one_file_that_names_a_toolchain_digest(self):
         # The builder's Dockerfile takes the toolchain as a build argument with no default (tools/check passes it), so
-        # each toolchain's digest is chosen in one file. A project's own files (projects/) are not read.
-        image = re.compile(r"oss-fuzz-theorems-toolchain[a-z-]*@sha256:[0-9a-f]{64}")
+        # each toolchain's digest is chosen in one file. The files git tracks are read, but for a project's own
+        # (projects/), whose locks may name the toolchain they were built with.
         root = TOOLS.parent
-        named = sorted(str(path.relative_to(root)) for path in root.rglob("*")
-                       if path.is_file() and path.relative_to(root).parts[0] not in (".git", "projects")
-                       and image.search(path.read_text(encoding="utf-8", errors="replace")))
+        listed = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--", ".", ":!projects"],
+                                capture_output=True)
+        if listed.returncode != 0:
+            self.skipTest("not a git checkout: git ls-files lists nothing to read")
+        digests = {image.partition("@sha256:")[2].encode() for _, image, _, _ in check_build.toolchains()}
+        self.assertTrue(digests and all(len(d) == 64 for d in digests), digests)
+        named = sorted(rel for rel in listed.stdout.decode().split("\0") if rel and (root / rel).is_file()
+                       and not (root / rel).is_symlink()
+                       and any(d in (root / rel).read_bytes() for d in digests))
         self.assertEqual(named, ["infra/toolchains.tsv"])
 
 
