@@ -91,9 +91,10 @@ jobs:
           esac
 
       # strace: tools/tests checks that the review's helpers keep the GitHub token out of every process's arguments.
-      - name: Install PyYAML, pytest and strace
+      # cryptography: .github/scripts/review-session seals the review's conversation with it.
+      - name: Install PyYAML, pytest, cryptography and strace
         if: env.FORK != 'true'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml python3-pytest strace
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml python3-pytest python3-cryptography strace
 
       # The Docker tests (tools/tests/test_builder.py) need the toolchain image and are skipped here.
       - name: The tests in tools/tests

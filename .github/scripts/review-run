@@ -26,10 +26,11 @@
 # No value of that environment is ever an argument of a process: another user on the machine can read a process's
 # arguments, but not its environment.
 # With REVIEW_SESSION=<directory outside this checkout> and HEAD_SHA=<the pull request's head commit>, the review keeps
-# its conversation: build.yaml's review job restores that directory from the Actions cache, so that the review of each
-# push resumes the conversation of the last review of the pull request, and knows what it asked for and why. The
-# directory holds `session` (id=<the conversation's id>, head=<the commit it reviewed>, dir=<its folder in
-# ~/.claude/projects>) and the conversation, <id>.jsonl. Claude Code resumes it in a fork with a new id
+# its conversation: build.yaml's review job restores that directory from the sealed artifact of the last review
+# (.github/scripts/review-session), so that the review of each push resumes the conversation of the last review of the
+# pull request, and knows what it asked for and why. The directory holds `session` (id=<the conversation's id>,
+# head=<the commit it reviewed>, dir=<its folder in ~/.claude/projects>) and the conversation, <id>.jsonl. Claude Code
+# resumes it in a fork with a new id
 # (--resume --fork-session), so a review that fails leaves the last one whole. When the directory holds no
 # conversation, or the resumed run fails before its second turn, the review starts fresh. The log says which:
 # "resuming the conversation <id> of the review of <commit>", or "a fresh review". After a review that wrote a

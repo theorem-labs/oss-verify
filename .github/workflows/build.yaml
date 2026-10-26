@@ -92,17 +92,21 @@ name: "Build"
 # the collector does not answer 200 to an empty export with the token before the review starts, rather than lose the
 # review's spend in silence. If it refuses one after the review, the comment is still posted and the review job fails.
 #
-# The review's conversation goes from one push to the next in the Actions cache, under the key
-# enroll-review/<pull request>/<project>/<run id>-<attempt>. The review job restores the newest one of the pull request
-# and project, review-run resumes it in a fork (claude --resume <id> --fork-session) and keeps the new conversation,
-# and the review job saves that once the review has written a comment. The log of the Review step says which it did:
-# "review-run: resuming the conversation <id> of the review of <commit>", or "a fresh review". Only a run on the
-# default branch (pull_request_target, or a run started by hand) writes a cache that this job reads: a pull request's
-# own runs write theirs where this job does not look. But a pull request's own runs can read these caches, as GitHub
-# lets a run read its base branch's caches, and tests.yaml runs on pull_request with the pull request's copy of it. A
-# conversation holds the public inputs the review read and the review's own reasoning, which no log shows, and no
-# token: review-run keeps none that holds a token of the run. GitHub drops a cache that no run has read for 7 days,
-# and the review then starts fresh.
+# The review's conversation goes from one push to the next as an artifact of the review's run, named
+# enroll-review-<pull request>-<project>, sealed (AES-256-GCM) by .github/scripts/review-session under a key derived
+# from the repository secret REVIEW_CONVERSATION_KEY (32 random bytes, base64). The review job restores the newest one
+# of the pull request and project that build.yaml uploaded and that opens with the key, review-run resumes it in a fork
+# (claude --resume <id> --fork-session) and keeps the new conversation, and the review job seals and uploads that once
+# the review has written a comment. The log of the Review step says which it did: "review-run: resuming the
+# conversation <id> of the review of <commit>", or "a fresh review". A conversation holds the public inputs the review
+# read and the review's own reasoning, which no log or comment shows, and no token: review-run keeps none that holds a
+# token of the run. It is sealed because anyone signed in to GitHub can download this repository's artifacts, and it
+# is not in the Actions cache because every pull request's own run, a fork's too, can read main's caches (the header
+# of .github/scripts/review-session has the measurement). GitHub never gives the secret to a fork's pull_request run;
+# runs of branches of this repository get it, as they get the other secrets. Without the secret the review runs fresh
+# on each push, with a warning. An artifact lasts as long as the repository's artifact retention (90 days by default).
+# To make the secret: openssl rand -base64 32 | gh secret set REVIEW_CONVERSATION_KEY -R theorem-labs/oss-verify
+# (changing it discards every kept conversation: each pull request's next review starts fresh).
 #
 # To build a pull request by number:
 #   gh workflow run build.yaml -f pr=123
@@ -295,14 +299,21 @@ jobs:
           HEAD_SHA: ${{ needs.project-builds.outputs.sha }}
         run: GITHUB_STEP_SUMMARY=/dev/null .github/scripts/take-project build
 
-      # The conversation of the last review of this pull request and project, which the review resumes (the Actions
-      # cache, at the top of this file). None on its first review, or once the cache has dropped it: a fresh review.
+      # The conversation of the last review of this pull request and project, which the review resumes (sealed, at the
+      # top of this file). None on its first review, or once its artifact has expired: a fresh review.
       - name: Restore the last review's conversation
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
-        with:
-          path: ${{ runner.temp }}/review-session
-          key: enroll-review/${{ github.event.pull_request.number || inputs.pr }}/${{ needs.project-builds.outputs.name }}/${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: enroll-review/${{ github.event.pull_request.number || inputs.pr }}/${{ needs.project-builds.outputs.name }}/
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
+          NAME: ${{ needs.project-builds.outputs.name }}
+          REVIEW_CONVERSATION_KEY: ${{ secrets.REVIEW_CONVERSATION_KEY }}
+        run: |
+          dpkg -s python3-cryptography > /dev/null 2>&1 \
+            || sudo apt-get install -y -qq python3-cryptography \
+            || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-cryptography; }
+          .github/scripts/review-session restore "$RUNNER_TEMP/review-session"
 
       - name: Gather what the review reads
         timeout-minutes: 15
@@ -398,12 +409,30 @@ jobs:
           { echo "comment<<$delimiter"; head -c 60000 .review/comment.md; echo; echo "$delimiter"; } >> "$GITHUB_OUTPUT"
           if [ -s "$REVIEW_SESSION/session" ]; then echo "session=kept" >> "$GITHUB_OUTPUT"; fi
 
-      - name: Keep this review's conversation for the next push's review
+      - name: Seal this review's conversation for the next push's review
+        id: seal
         if: ${{ steps.review.outputs.session == 'kept' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
+        env:
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
+          NAME: ${{ needs.project-builds.outputs.name }}
+          REVIEW_CONVERSATION_KEY: ${{ secrets.REVIEW_CONVERSATION_KEY }}
+        run: |
+          sealed="$RUNNER_TEMP/review-sealed/conversation.sealed"
+          .github/scripts/review-session seal "$RUNNER_TEMP/review-session" "$sealed"
+          if [ -s "$sealed" ]; then echo "sealed=$sealed" >> "$GITHUB_OUTPUT"; fi
+
+      # Public, as every artifact of this repository is: it opens only with the key (the top of this file).
+      - name: Keep the sealed conversation for the next push's review
+        if: ${{ steps.seal.outputs.sealed != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (sha-pinned)
         with:
-          path: ${{ runner.temp }}/review-session
-          key: enroll-review/${{ github.event.pull_request.number || inputs.pr }}/${{ needs.project-builds.outputs.name }}/${{ github.run_id }}-${{ github.run_attempt }}
+          name: enroll-review-${{ github.event.pull_request.number || inputs.pr }}-${{ needs.project-builds.outputs.name }}
+          path: ${{ steps.seal.outputs.sealed }}
+          if-no-files-found: error
+          # Sealed bytes do not compress. A re-run of the job replaces the artifact of its run.
+          compression-level: 0
+          overwrite: true
 
       - name: Fail if the collector refused the token after the review
         if: ${{ steps.review.outputs.collector == 'refused' }}
