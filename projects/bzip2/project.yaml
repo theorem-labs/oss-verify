@@ -3,6 +3,6 @@
 repo: https://sourceware.org/git/bzip2#f5dfc96063fef2d9c5446d0733867d899ef9b942
 primary_contact: n/a
 homepage: https://sourceware.org/bzip2
-language: cobol
+language: ada
 sanitizers: [address, undefined]
 fuzz_targets: [bzip2_compress_target, bzip2_decompress_target, bzip2_fd]
