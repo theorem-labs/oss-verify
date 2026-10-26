@@ -24,12 +24,13 @@ name: "Tests"
 #             a pass where a check is required, so neither suite nor docs is the required check.
 #
 # On a pull request the checkout is GitHub's merge of it into its base branch. route fails for a pull request into any
-# branch but the default one, as enrollment and project-builds do (build.yaml says why). The workflow runs on edited
-# too, so that changing the base runs it again. After a change of base, the edited event may still name the merge into
-# the old base (https://github.com/actions/checkout/issues/919), so route also fails unless the merge's first parent is
-# on the base branch, and says to push a commit: a rerun checks out the same merge. An edit of the title or description
-# alone changes no commit: route runs nothing, and required reports under the name "title or description edited", not
-# tests, so the head commit's own result stands; such a run has a concurrency group of its own, so it cancels nothing.
+# branch but the default one, as enrollment and project-builds do (build.yaml says why). The workflow does not run on
+# edited, which GitHub sends for an edit of the title or description (nothing this judges changes) and for a change
+# of base. After a change of base, push a commit to run it again; until then a pull request into another branch keeps
+# its failed check, and one moved to the default branch from another keeps the failure it got there. route also fails
+# unless the merge's first parent is on the base branch: a run after a change of base, such as one started by a reopen
+# or a rerun, can check out a merge into the earlier base (https://github.com/actions/checkout/issues/919). It then says
+# to push a commit, since a rerun checks out the same merge.
 #
 # No job gets a secret, cache, artifact or write permission. Never add one. The contents: read token goes to
 # actions/checkout and to the step that asks the API where the merge's first parent is, never to a step that runs the
@@ -42,7 +43,7 @@ name: "Tests"
 
 on:
   pull_request:
-    types: [opened, reopened, synchronize, edited]
+    types: [opened, reopened, synchronize]
   push:
     branches: [main]
   workflow_dispatch:
@@ -56,9 +57,8 @@ env:
 concurrency:
   # A pull request's newer run cancels its older one, which loses nothing: each run judges the merge against the base.
   # A push to main has a group of its own, the commit's: route compares a push with the commit before it, so a later
-  # push must never cancel it, or the changes of the cancelled push would never be tested. An edit of the title or
-  # description alone has a group of its own too, the run's, so it cancels nothing.
-  group: ${{ github.event.action == 'edited' && !github.event.changes.base && format('tests-edited-{0}', github.run_id) || github.event_name == 'push' && format('tests-push-{0}', github.sha) || format('tests-{0}-{1}', github.event_name, github.event.pull_request.number || github.ref) }}
+  # push must never cancel it, or the changes of the cancelled push would never be tested.
+  group: ${{ github.event_name == 'push' && format('tests-push-{0}', github.sha) || format('tests-{0}-{1}', github.event_name, github.event.pull_request.number || github.ref) }}
   cancel-in-progress: true
 
 jobs:
@@ -67,9 +67,6 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-    env:
-      # The same test as the concurrency group's and the required job's name.
-      EDIT_ONLY: ${{ github.event.action == 'edited' && !github.event.changes.base }}
     outputs:
       suite: ${{ steps.paths.outputs.suite }}
       docs: ${{ steps.paths.outputs.docs }}
@@ -81,7 +78,7 @@ jobs:
           DEFAULT: ${{ github.event.pull_request.base.repo.default_branch }}
         run: |
           if [ "$BASE" != "$DEFAULT" ]; then
-            echo "::error::This pull request targets $BASE, not $DEFAULT: its checks are for $DEFAULT only. Changing its base to $DEFAULT runs them again."
+            echo "::error::This pull request targets $BASE, not $DEFAULT: its checks are for $DEFAULT only. Change its base to $DEFAULT, then push a commit to run them again."
             exit 1
           fi
 
@@ -92,22 +89,15 @@ jobs:
           echo "$message"
           echo "$message" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: An edit of the title or description runs nothing
-        if: env.EDIT_ONLY == 'true' && env.FORK != 'true'
-        run: |
-          message="Not run: this run is for an edit of the pull request's title or description, which changes no commit. The check tests of the head commit's own run stands."
-          echo "$message"
-          echo "$message" >> "$GITHUB_STEP_SUMMARY"
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
-        if: env.FORK != 'true' && env.EDIT_ONLY != 'true'
+        if: env.FORK != 'true'
         with:
           persist-credentials: false
           # The commit and its parents, for its changes against its first parent.
           fetch-depth: 2
 
       - name: The checkout is the merge into the base branch
-        if: github.event_name == 'pull_request' && env.FORK != 'true' && env.EDIT_ONLY != 'true'
+        if: github.event_name == 'pull_request' && env.FORK != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -125,7 +115,7 @@ jobs:
 
       - name: Which jobs the changes need
         id: paths
-        if: env.FORK != 'true' && env.EDIT_ONLY != 'true'
+        if: env.FORK != 'true'
         env:
           EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}
@@ -233,9 +223,8 @@ jobs:
           fi
 
   required:
-    # The required check tests (the top of this file). GitHub evaluates the name of a job that runs, and this one always
-    # runs.
-    name: ${{ github.event.action == 'edited' && !github.event.changes.base && 'title or description edited' || 'tests' }}
+    # The required check tests (the top of this file). A static name: GitHub reports the check under it on every run.
+    name: tests
     needs: [route, suite, docs]
     if: always()
     runs-on: ubuntu-latest

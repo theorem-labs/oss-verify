@@ -10,17 +10,15 @@ name: "Validate"
 # pull request that changes no file or removes its project, and for one from a branch of this repository whose merge
 # changes no project or several ("Not an enrollment"). The merge decides for a branch of this repository however many
 # files it changes; a fork that changes more than the 3000 files the API lists fails. It fails for a pull request into
-# any branch but the default one, and if the pull request's head or base moves while the step reads it. It runs on
-# edited too, so that changing the base runs it again. An edit of the title or description alone changes no commit: it
-# validates nothing, and its collector reports under the name "title or description edited", not enrollment, so the
-# head commit's own result stands, a failure as well as a pass; such a run has a concurrency group of its own, so it
-# cancels nothing. This repository's own tests are tests.yaml.
+# any branch but the default one, and if the pull request's head or base moves while the step reads it. It does not
+# run on edited, which GitHub sends for an edit of the title or description (nothing this judges changes) and for a
+# change of base. After a change of base, a push or closing and reopening the pull request runs it again; until then a
+# pull request into another branch keeps its failed check. This repository's own tests are tests.yaml.
 #
-# The jobs: route asks for validate unless the event is an edit of the title or description alone; validate takes the
-# project with take-project and runs tools/validate.py on it, or passes with nothing to validate; required always runs,
-# after both, and reports the required check enrollment. It passes only if route passed and validate passed when route
-# asked for it, or was skipped when route did not. A skipped job counts as a pass where a check is required, so validate
-# is never the required check.
+# The jobs: route asks for validate on every event this workflow takes, since each is a commit to judge; validate takes
+# the project with take-project and runs tools/validate.py on it, or passes with nothing to validate; required always
+# runs, after both, and reports the required check enrollment with .github/scripts/collect, so that the check is never
+# a job that could be skipped.
 #
 # As in build.yaml: pull_request_target, so the pull request cannot edit this workflow or the validator; the checkout
 # is the base branch; only the files directly inside the one projects/<name>/ are taken from the pull request, as
@@ -36,7 +34,7 @@ run-name: ${{ github.event.pull_request.title || format('Pull request {0}', inpu
 
 on:
   pull_request_target:
-    types: [opened, reopened, synchronize, edited]
+    types: [opened, reopened, synchronize]
   workflow_dispatch:
     inputs:
       pr:
@@ -47,9 +45,8 @@ on:
 permissions: {}
 
 concurrency:
-  # By event too, so that a run started by hand never cancels the pull request's own run of the required check. An edit
-  # of the title or description alone has a group of its own, the run's, so it cancels nothing.
-  group: ${{ github.event.action == 'edited' && !github.event.changes.base && format('validate-edited-{0}', github.run_id) || format('validate-{0}-{1}', github.event_name, github.event.pull_request.number || inputs.pr) }}
+  # By event too, so that a run started by hand never cancels the pull request's own run of the required check.
+  group: validate-${{ github.event_name }}-${{ github.event.pull_request.number || inputs.pr }}
   cancel-in-progress: true
 
 jobs:
@@ -57,21 +54,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
-    env:
-      # The same test as the concurrency group's and the required job's name.
-      EDIT_ONLY: ${{ github.event.action == 'edited' && !github.event.changes.base }}
     outputs:
       validate: ${{ steps.decide.outputs.validate }}
     steps:
-      - name: Whether the event changes what is validated
+      - name: Every event here asks for validate
         id: decide
         run: |
-          if [ "$EDIT_ONLY" = true ]; then
-            message="Nothing to validate: this run is for an edit of the pull request's title or description, which changes no commit. The check enrollment of the head commit's own run stands."
-          else
-            echo "validate=true" >> "$GITHUB_OUTPUT"
-            message="validate runs: it takes the pull request's project, if it has one (.github/scripts/take-project)."
-          fi
+          echo "validate=true" >> "$GITHUB_OUTPUT"
+          message="validate runs: it takes the pull request's project, if it has one (.github/scripts/take-project)."
           echo "$message"
           echo "$message" >> "$GITHUB_STEP_SUMMARY"
 
@@ -123,9 +113,9 @@ jobs:
           exit "$code"
 
   required:
-    # The required check enrollment (the top of this file), with .github/scripts/collect. GitHub evaluates the name of a
-    # job that runs, and this one always runs.
-    name: ${{ github.event.action == 'edited' && !github.event.changes.base && 'title or description edited' || 'enrollment' }}
+    # The required check enrollment (the top of this file), with .github/scripts/collect. A static name: GitHub reports
+    # the check under it on every run.
+    name: enrollment
     needs: [route, validate]
     if: always()
     runs-on: ubuntu-latest

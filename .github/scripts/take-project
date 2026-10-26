@@ -15,8 +15,8 @@
 #
 # Every check is for the pull request as it targets the default branch. A pull request into another branch fails with
 # "This pull request targets <base>, not <default>", so that a result judged against another branch never stands as
-# a pass on the head commit once the base is changed to the default branch. Changing the base sends GitHub's edited
-# action, on which build.yaml and validate.yaml run again.
+# a pass on the head commit once the base is changed to the default branch. After a change of base, a push to the
+# branch, or closing and reopening the pull request, runs the checks again.
 #
 # An enrollment changes only files directly inside one projects/<name>/. A path at any depth inside projects/<name>/
 # counts as a change to that project. A path not directly inside one projects/<name>/, a file in a subdirectory of a
@@ -53,7 +53,7 @@
 # The commit is HEAD_SHA, the event's head on a pull_request_target run, or the API's head on a run started by hand.
 # The API lists the files of whatever the pull request's head and base are when it is asked. If the head is another
 # commit, or the base another branch, before or after the list is read, this fails rather than pair one commit's list
-# with another's files; the run for the newest commit or base checks it.
+# with another's files; the next run (for a newer commit, or after a change of base) checks it.
 #
 # Writes to $GITHUB_OUTPUT: name (empty when there is nothing to build or validate), sha, and same_repository (true
 # for a branch of this repository).
@@ -85,7 +85,7 @@ current() {
   local base default
   base=$(jq -r .base.ref <<< "$1")
   default=$(jq -r .base.repo.default_branch <<< "$1")
-  [ "$base" = "$default" ] || fail "This pull request targets $base, not $default: its checks are for $default only. Changing its base to $default runs them again."
+  [ "$base" = "$default" ] || fail "This pull request targets $base, not $default: its checks are for $default only. Change its base to $default, then push a commit or close and reopen the pull request to run them again."
 }
 
 [[ $PR =~ ^[0-9]+$ ]] || fail "Not a pull request number."
