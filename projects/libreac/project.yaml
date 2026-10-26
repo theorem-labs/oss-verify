@@ -1,0 +1,19 @@
+# libreac: the C library for Roland REAC audio over Ethernet (EtherType 0x8819): frame decode and encode, control
+# blocks, stagebox identity and head-amps, discovery, and the pcap reader. Pinned to the head of
+# FreeREAC/libreac#29 (issue #28): v1.8.0 and the five fuzz checks of the second review, fuzz/ only.
+repo: https://github.com/FreeREAC/libreac#f37a23c5048969d56bf4f1c6b2f3d9270222ed5f
+primary_contact: linuxnow@gmail.com
+homepage: https://github.com/FreeREAC/libreac
+language: c
+sanitizers: [address, undefined]
+fuzz_targets:
+  - fuzz_decode
+  - fuzz_ctrl
+  - fuzz_identity
+  - fuzz_disco
+  - fuzz_scene
+  - fuzz_boxreg
+  - fuzz_knock
+  - fuzz_grant
+  - fuzz_pcap
+mutants: fuzz/sabotage

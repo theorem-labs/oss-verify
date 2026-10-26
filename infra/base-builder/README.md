@@ -1,6 +1,6 @@
 # The builder image
 
-Every project's `Dockerfile` starts `FROM` this image. It is a toolchain image plus OSS-Fuzz's interface: by default the one the oss-fuzz-theorems 2026.10 release built its binaries in, pinned by digest (`ARG TOOLCHAIN` in the [Dockerfile](Dockerfile)); `tools/check` passes the toolchain a project's lock names, or the newest in [infra/toolchains.tsv](../toolchains.tsv) ([docs/build-contract.md](../../docs/build-contract.md#toolchains)). [docs/build-contract.md](../../docs/build-contract.md) is the contract a project builds against; this page says what is where.
+Every project's `Dockerfile` starts `FROM` this image. It is a toolchain image plus OSS-Fuzz's interface. The [Dockerfile](Dockerfile) takes the toolchain image as a build argument (`ARG TOOLCHAIN`) with no default: `tools/check` passes the toolchain `--toolchain` gives, else the one a project's lock names, else the newest for the project's language in [infra/toolchains.tsv](../toolchains.tsv) ([docs/build-contract.md](../../docs/build-contract.md#toolchains)). [docs/build-contract.md](../../docs/build-contract.md) is the contract a project builds against; this page says what is where.
 
 | path in the image | what it is |
 |---|---|

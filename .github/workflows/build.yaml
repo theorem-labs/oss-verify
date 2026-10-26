@@ -450,6 +450,11 @@ jobs:
     if: ${{ !cancelled() && needs.project-builds.outputs.name != '' && (needs.review.result != 'success' || needs.review.outputs.comment != '') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # One comment job at a time for a pull request, whatever event started its run (the run's own group is by event):
+    # two at once could each find no comment, each post one, and only the first would ever be updated after.
+    concurrency:
+      group: build-comment-${{ github.event.pull_request.number || inputs.pr }}
+      cancel-in-progress: false
     permissions:
       # contents: read only for the checkout of .github/scripts, which a job with no contents permission cannot make.
       # It writes with the oss-verify App's token, not this job's.
@@ -481,12 +486,20 @@ jobs:
           set -euo pipefail
           printf '%s' "$REVIEW" > "$RUNNER_TEMP/review.md"
           printf '%s' "$CHECKS" > "$RUNNER_TEMP/checks.md"
+          # Only a run of the pull request's current head posts: a run of an older head that finished later would
+          # replace the newer head's review, or mark it not current. The current head's own run posts.
+          current=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)
+          if [ "$current" != "$HEAD_SHA" ]; then
+            echo "The pull request's head is now $current, not $HEAD_SHA: the run of $current posts the comment."
+            exit 0
+          fi
           # Ours is the oss-verify App's comment that starts with the marker.
           existing=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
             --jq '.[] | select(.user.login == "oss-verify[bot]" and (.body | startswith("<!-- oss-verify-review -->"))) | .id')
           existing=${existing%%$'\n'*}
-          # The comment already posted, whenever there is one: review-comment keeps it, marked not current, if this
-          # push's review is empty, blank or refused once it has screened it.
+          # The comment already posted, whenever there is one: review-comment keeps it, marked not current (or as it
+          # was, when it is the review of this same commit), if this push's review is empty, blank or refused once it
+          # has screened it.
           previous=()
           if [ -n "$existing" ]; then
             gh api "repos/$REPO/issues/comments/$existing" --jq .body > "$RUNNER_TEMP/previous.md"

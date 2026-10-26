@@ -5,17 +5,27 @@
 
     review-comment [--review <comment.md>] [--checks <checks.md>] [--head <sha>] [--run <url>] [--previous <comment>]
 
-It prints the comment: the marker that build.yaml's comment job finds it by, a metadata line, the review's comment to
-the maintainer (or, when there is none, why), and the report of tools/check --checks, folded. The review's text comes
-from a model that read the pull request and the checks text from the project's source, so each is screened on its own:
-a text that holds what looks like a credential is refused (and the other kept), each is cut to a length that GitHub
-takes, and each is stripped of any HTML comment that could read as this script's own.
+It prints the comment: the marker that build.yaml's comment job finds it by, a metadata line, what this script writes
+(the footer, a notice when the review is not current or did not run, a note where a text was cut), the report of
+tools/check --checks as an indented code block, and last the review's comment to the maintainer. The review's text
+comes from a model that read the pull request, and the checks text from the project's source, so each is screened on
+its own: a text that holds what looks like a credential is refused (and the other kept), and each is cut to a length
+that GitHub takes. A review that is nothing but HTML comments that name this script counts as no review.
+
+Neither text is otherwise changed, character for character: Markdown code in them reaches GitHub as written, and so
+does an HTML comment, which hides nothing of this script's. What they cannot reach is what this script writes. It all
+comes before them; the review comes last, so nothing it leaves open (an HTML comment, a tag, a code fence) has
+anything after it to hide; and every line of the checks report is indented four spaces into a code block, which only
+a line indented less can end, so nothing in the report can end it early or be read as HTML.
 
 The commit the review is of and whether there is a review live in the metadata line only, the second line of the
-comment, which this script alone writes. They are never read from the body. So with --previous and no usable review
-(the review of this push did not finish, or wrote nothing, or wrote what is refused), it keeps the comment already
-posted, unchanged but for a metadata line and a first paragraph that say it is not current, naming the commit it is of
-and the commit that had no review.
+comment, which this script alone writes. They are never read from the body, so a marker or a metadata line in either
+text is inert. So with --previous and no usable review (the review of this push did not finish, or wrote nothing, or
+wrote what is refused), it keeps the comment already posted, unchanged, below a metadata line, a notice that says it
+is not current, naming the commit it is of and the commit that had no review, and the footer. Keeping a kept comment
+again gives the same comment: what this script wrote above the old one is written afresh, not kept as part of it. A
+comment that is the review of this same commit stays the review: as it was posted, or, if it was kept as not current,
+written again as the review.
 """
 import argparse
 import pathlib
@@ -28,13 +38,22 @@ HEADING = "## Enrollment review"
 MAX_COMMENT = 65_000
 MAX_REVIEW = 40_000
 MAX_CHECKS = 20_000
-# A GitHub identity token (a JWT), an Anthropic token or key, a GitHub token.
-CREDENTIAL = re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|sk-ant-[A-Za-z0-9_-]{8,}|gh[opsu]_[A-Za-z0-9]{20,}"
-                        r"|github_pat_[A-Za-z0-9_]{20,}")
+# What a credential looks like: a GitHub identity token (a JWT), an Anthropic token or key, a GitHub token. The scan
+# below reads each run of token characters once, rather than a regular expression of these four alternatives, whose
+# JWT branch reads the rest of the text again at every "eyJ" that no dot follows.
+RUN = re.compile(r"[A-Za-z0-9_-]+")
+GITHUB = re.compile(r"gh[opsu]_")
+GITHUB_PAT = re.compile(r"github_pat_")
+GITHUB_BODY = re.compile(r"[A-Za-z0-9]{20}")
+GITHUB_PAT_BODY = re.compile(r"[A-Za-z0-9_]{20}")
+ANTHROPIC = "sk-ant-"
+JWT = "eyJ"
 # The metadata line, always the second line of the comment and written by this script alone: the format version, the
 # commit the review is of, and the status (review: a review is here; none: there is none; stale: a kept review that a
-# later push's review did not replace). It is the only place the status and the commit are read from.
-META = re.compile(r"^<!-- oss-verify-meta v=1"
+# later push's review did not replace). It is the only place the status and the commit are read from. The version is
+# the layout: 1, the review first and the footer last (before this layout); 2, what this script writes first, then
+# the checks, the review last. Only in a comment of version 2 is the first paragraph (after a notice) this script's.
+META = re.compile(r"^<!-- oss-verify-meta v=(?P<version>[12])"
                   r"(?: head=(?P<head>[0-9a-f]{7,40}))?"
                   r" status=(?P<status>review|none|stale) -->$")
 # The no-review paragraph that this script wrote before the metadata line existed, in full: a legacy comment that is
@@ -43,70 +62,194 @@ LEGACY_NO_REVIEW = re.compile(r"The review agent did not run on this push: [^\n]
                               r"A person at Theorem reviews the enrollment\.")
 
 
+def comment_end(text, start, closes):
+    """Where the HTML comment whose <!-- is at start ends, or -1 when nothing ends it. As HTML's tokenizer reads a
+    comment (its comment start, comment end and comment end bang states), <!--> and <!---> are whole comments, and
+    any other ends at the first --> or --!> after its <!--. closes holds, for each of --> and --!>, where it was last
+    found (None: nowhere further on), so that each is searched for from a later place each time and the whole scan
+    stays linear in the text."""
+    body = start + 4
+    if text.startswith(">", body):
+        return body + 1
+    if text.startswith("->", body):
+        return body + 2
+    ends = []
+    for close in ("-->", "--!>"):
+        if closes[close] is not None and closes[close] < body:
+            found = text.find(close, body)
+            closes[close] = found if found != -1 else None
+        if closes[close] is not None:
+            ends.append(closes[close] + len(close))
+    return min(ends, default=-1)
+
+
 def neutralize(text):
-    """text with each HTML comment that names this script's prefix replaced by a space, so that text this script did not
-    write never reads, to a person or a parser, as one of its own lines. One forward scan, linear in the text: a comment
-    runs from <!-- to the first --> after it, as in HTML, and the separator left in its place cannot join the text
-    around it into a new one. A <!-- with no --> after it is escaped, so it cannot hide the rest of the comment."""
-    out, at = [], 0
-    while True:
-        start = text.find("<!--", at)
-        if start == -1:
-            out.append(text[at:])
-            return "".join(out)
-        end = text.find("-->", start + 4)
+    """text with each HTML comment that names this script's prefix replaced by a space. It is used only to tell whether
+    a review is nothing but such comments (then it is no review); what is posted is the review as written, since
+    Markdown shows some of these spans as text (in code, or after a backslash) and the metadata is read from line 2
+    only. One forward scan, linear in the text: a comment runs from <!-- to where HTML ends it (comment_end), and the
+    space left in its place cannot join the text around it into a new one. A <!-- that nothing closes is left."""
+    out, at, closes = [], 0, {"-->": -1, "--!>": -1}
+    while (start := text.find("<!--", at)) != -1:
+        end = comment_end(text, start, closes)
         if end == -1:
-            # No later --> exists, so every <!-- from here on is unterminated.
-            out += [text[at:start], text[start:].replace("<!--", "&lt;!--")]
-            return "".join(out)
-        span = text[start:end + 3]
+            break
+        span = text[start:end]
         out += [text[at:start], " " if "oss-verify" in span.lower() else span]
-        at = end + 3
+        at = end
+    return "".join(out) + text[at:]
 
 
-def cut(text, limit, where):
-    text = text.strip()
-    return text if len(text) <= limit else text[:limit].rstrip() + f"\n\n(Cut at {limit:,} characters: {where}.)"
+def credential(text):
+    """Whether text holds what looks like a credential. One pass: every check below is bounded, and each run of token
+    characters is read a fixed number of times, so the cost is linear in the text."""
+    runs = [(found.start(), found.group()) for found in RUN.finditer(text)]
+    for index, (start, run) in enumerate(runs):
+        # An Anthropic token or key: sk-ant- and at least 8 more token characters, all inside this run. The first
+        # occurrence has the most of the run after it, so no later one needs trying.
+        at = run.find(ANTHROPIC)
+        if at != -1 and len(run) - at - len(ANTHROPIC) >= 8:
+            return True
+        # A GitHub token: its prefix and 20 more characters of the right kind, tried at each prefix (an earlier one can
+        # fail where a later one matches). Each try reads at most 20 characters, and prefixes do not overlap.
+        for prefix, body in ((GITHUB, GITHUB_BODY), (GITHUB_PAT, GITHUB_PAT_BODY)):
+            for found in prefix.finditer(run):
+                if body.match(run, found.end()):
+                    return True
+        # A JWT: eyJ, at least 10 more token characters, a dot, and at least 10 more. A dot ends a run, so the dot can
+        # only be the character after this run, and the second part can only be the run after it.
+        at = run.find(JWT)
+        after = start + len(run)
+        if (at != -1 and len(run) - at - len(JWT) >= 10 and text[after:after + 1] == "."
+                and index + 1 < len(runs) and runs[index + 1][0] == after + 1 and len(runs[index + 1][1]) >= 10):
+            return True
+    return False
+
+
+# CommonMark's line endings: a carriage return alone ends a line too.
+LINE_END = re.compile(r"\r\n|\r|\n")
+INDENT = "    "
+
+
+def code_block(text, limit):
+    """(block, whole): text as an indented code block of at most limit characters, and whether all of text is in it.
+    Every line is put four spaces in, so every line is code: an indented code block ends only at a line indented less,
+    and none is, and GitHub reads nothing in a code block as Markdown or HTML. Not a fenced block: GitHub's renderer
+    closes a fence of more than 255 backticks at any line of 255 or more, so no fence is longer than every run."""
+    lines, size = [], 0
+    for line in LINE_END.split(text):
+        line = INDENT + line
+        if size + len(line) > limit:
+            lines.append(line[:max(0, limit - size)].rstrip())
+            return "\n".join(lines).rstrip(), False
+        lines.append(line)
+        size += len(line) + 1
+    return "\n".join(lines), True
 
 
 def meta_line(head, status):
-    return f"<!-- oss-verify-meta v=1{f' head={head}' if head else ''} status={status} -->"
+    return f"<!-- oss-verify-meta v=2{f' head={head}' if head else ''} status={status} -->"
+
+
+# Blank lines, as CommonMark has them: nothing but spaces and tabs.
+LEADING_BLANK = re.compile(r"(?:[ \t]*\n)+")
+
+
+def trim(text):
+    """text without its leading blank lines and its trailing whitespace. Not strip(): the spaces that start the first
+    line stay, since they can make it an indented code block."""
+    found = LEADING_BLANK.match(text)
+    return text[found.end() if found else 0:].rstrip()
 
 
 def read_previous(previous):
-    """The posted comment's (status, head, body): status/head from the metadata line only, None when it is legacy."""
+    """The posted comment's (status, head, version, body): status/head/version from the metadata line only, None when
+    it is legacy."""
     lines = previous.replace("\r\n", "\n").split("\n")
-    status = head = None
+    status = head = version = None
     if len(lines) >= 2 and lines[0].strip() == MARKER:
         match = META.match(lines[1].strip())
         if match:
-            status, head = match.group("status"), match.group("head")
+            status, head, version = match.group("status"), match.group("head"), match.group("version")
     start = previous.find("\n" + HEADING + "\n")
     body = previous[start + len(HEADING) + 2:] if start != -1 else previous.replace(MARKER, "")
-    return status, head, body.strip()
+    return status, head, version, trim(body)
 
 
-def assemble(head, status, body, footer=True):
-    """The comment: marker, metadata, heading, body, and (by default) the footer, cut so the whole stays in bounds."""
-    parts = [MARKER, meta_line(head, status), "", HEADING, ""]
-    tail = []
-    if footer:
-        of = f"It is the review of `{head[:7]}`. " if head else ""
-        tail = ["", "<sub>Claude wrote this review, following `.claude/skills/review-enrollment/SKILL.md`, and "
-                f"`tools/check --checks` measured the checks. It can be wrong. {of}Each push replaces it, or marks it "
-                "not current if the push's review does not finish. It decides nothing: a person at Theorem reviews "
-                "the enrollment.</sub>"]
-    room = MAX_COMMENT - len("\n".join(parts + ["", *tail])) - 1
-    return "\n".join(parts + [cut(body, room, "the rest is in the review job's log"), *tail]) + "\n"
+FOOTER = ("<sub>Claude wrote this review, following `.claude/skills/review-enrollment/SKILL.md`, and "
+          "`tools/check --checks` measured the checks. It can be wrong. {of}Each push replaces it, or marks it not "
+          "current if the push's review does not finish. It decides nothing: a person at Theorem reviews the "
+          "enrollment.</sub>")
+# The footer as this script writes it, for any commit: a kept comment loses it from its front, and gets it again.
+FOOTER_WRITTEN = re.compile(r"(?:It is the review of `[0-9a-f]{7}`\. )?".join(map(re.escape, FOOTER.split("{of}"))))
+CHECKS_SUMMARY = "<details><summary>What the breakage and coverage checks measured</summary>"
+REVIEW_CUT = "The review is cut at {:,} characters: {}."
+KEPT_WHERE = "the rest is in an earlier run of the review job"
+# The sentence that ends the notice of a kept comment that a keep cut, as this script writes it. It is in the notice,
+# which this script alone writes, so no text of the review can be read as it.
+KEPT_CUT = re.compile(r" The review is cut at (?P<at>[0-9]{1,3}(?:,[0-9]{3})?) characters: " + re.escape(KEPT_WHERE)
+                      + r"\.\Z")
+
+
+def assemble(head, status, notes, checks="", review="", where="the rest is in the review job's log",
+             review_limit=MAX_REVIEW, cut_at=None, cut_in_notice=False):
+    """The comment, at most MAX_COMMENT characters: the marker and metadata, the heading, the notes (what this script
+    writes), the checks report as a code block, and the review last. Only the checks and the review are cut, by
+    slicing, and a note before them says where; nothing else in them changes. cut_at: where an earlier run cut the
+    review, said again if this run need not cut it further. cut_in_notice: that note ends the first note, rather than
+    being a paragraph of its own."""
+    notes = list(notes)
+    checks, review = trim(checks), trim(review)
+    blocks = [f"{MARKER}\n{meta_line(head, status)}", HEADING, *notes]
+    if checks:
+        block, whole = code_block(checks, MAX_CHECKS)
+        if not whole:
+            blocks.append(f"The checks report is cut to fit in {MAX_CHECKS:,} characters: the rest is in the Build "
+                          "check's summary.")
+        blocks.append(f"{CHECKS_SUMMARY}\n\n{block}\n\n</details>")
+    # Room for the review: what is left once every other block, the note it may need and the joins are counted.
+    room = MAX_COMMENT - len("\n\n".join(blocks)) - len(REVIEW_CUT.format(10 ** 9, where)) - 6
+    limit = max(0, min(review_limit, room))
+    if len(review) > limit:
+        review, cut_at = review[:limit].rstrip(), limit
+    if cut_at is not None:
+        if cut_in_notice:
+            blocks[2] += " " + REVIEW_CUT.format(cut_at, where)
+        else:
+            blocks.insert(2 + len(notes), REVIEW_CUT.format(cut_at, where))
+    if review:
+        blocks.append(review)
+    return "\n\n".join(blocks) + "\n"
 
 
 def not_current(previous, head, run):
-    """The comment already posted, kept but marked not the review of head; None when it holds no review to keep."""
-    status, of_head, body = read_previous(previous)
+    """The comment already posted, kept: as the review of head when it is that, else marked not the review of head;
+    None when it holds no review to keep."""
+    status, of_head, version, body = read_previous(previous)
+    current = bool(head) and of_head == head and status in ("review", "stale")
+    if current and status == "review":
+        # A later run for the same commit (a rerun, or an edit of the pull request) wrote no review: this one is
+        # still the review of it, kept as posted. GitHub keeps the comment's last newline and `gh --jq` adds one, so
+        # one is put back, and a rerun does not add a line each time.
+        return previous.rstrip("\n") + "\n"
+    paragraphs = body.split("\n\n")
+    cut_at = None
     if status == "stale":
-        # Drop the notice this script put first last time, so the marks do not stack; the review follows it.
-        body = body.split("\n\n", 1)[1].strip() if "\n\n" in body else ""
-    if status == "none" or not body.strip():
+        # The notice this script put first last time, and in it where that keep cut the old comment: both are written
+        # again below, so the marks do not stack and the old comment is not cut again.
+        cut = KEPT_CUT.search(paragraphs[0])
+        cut_at = int(cut.group("at").replace(",", "")) if cut else None
+        paragraphs = paragraphs[1:]
+    # The footer, first after the notice in a comment of this layout (version 2), is written again below too. A review
+    # that a keep had cut and that is current again carries the cut sentence at the end of its footer instead. In an
+    # older layout the first paragraph is the review's, so nothing is read from it.
+    if version == "2" and paragraphs:
+        cut = KEPT_CUT.search(paragraphs[0])
+        if FOOTER_WRITTEN.fullmatch(paragraphs[0][:cut.start()] if cut else paragraphs[0]):
+            cut_at = int(cut.group("at").replace(",", "")) if cut else cut_at
+            paragraphs = paragraphs[1:]
+    body = trim("\n\n".join(paragraphs))
+    if status == "none" or not body:
         return None
     if status is None:
         # Legacy, before the metadata line: keep it unless its first paragraph is exactly the no-review sentence this
@@ -115,11 +258,19 @@ def not_current(previous, head, run):
             return None
         of_head = None
     of = f"`{of_head[:7]}`" if of_head else "an earlier commit"
+    footer = FOOTER.format(of=f"It is the review of {of}. " if of_head else "")
+    if current:
+        # A kept review of this very commit (the pull request went back to it): it is current again.
+        return assemble(of_head, "review", [footer], review=body, where=KEPT_WHERE, review_limit=MAX_COMMENT,
+                        cut_at=cut_at, cut_in_notice=True)
     this = f"`{head[:7]}`" if head else "the last push"
     where = f" ([the run]({run}))" if run else ""
     note = (f"**Not current:** this is the review of {of}. The review of {this} did not finish with a review that "
             f"can be posted{where}. A person at Theorem reviews the enrollment.")
-    return assemble(of_head, "stale", f"{note}\n\n{body}", footer=False)
+    # The old comment, its checks and review as they were posted, goes last and unchanged, so the notice and the footer
+    # above it stay visible whatever it holds; only its length is cut, if it must be.
+    return assemble(of_head, "stale", [note, footer], review=body, where=KEPT_WHERE, review_limit=MAX_COMMENT,
+                    cut_at=cut_at, cut_in_notice=True)
 
 
 def main():
@@ -135,13 +286,15 @@ def main():
 
     review = options.review.read_text(encoding="utf-8", errors="replace") if options.review else ""
     why = ""
-    if CREDENTIAL.search(review):
+    if credential(review):
         review, why = "", "its text held what looks like a credential, so it was not posted"
-    review = neutralize(review).strip()
-    # No usable review (none, blank, refused, or only this script's markers): keep the one already posted, if any.
+    review = trim(review)
+    if not neutralize(review).strip():
+        review = ""
+    # No usable review (none, blank, refused, or nothing but this script's markers): keep the one already posted.
     if options.previous and not review:
         previous = options.previous.read_text(encoding="utf-8", errors="replace")
-        if CREDENTIAL.search(previous):
+        if credential(previous):
             why = why or "it wrote no comment"
             why += ", and the last review held what looks like a credential, so it is not kept"
         else:
@@ -149,24 +302,21 @@ def main():
             if kept is not None:
                 sys.stdout.write(kept)
                 return 0
+    of = f"It is the review of `{head[:7]}`. " if head else ""
     if review:
-        body = cut(review, MAX_REVIEW, "the rest is in the review job's log")
-        status = "review"
+        notes, status = [FOOTER.format(of=of)], "review"
     else:
         this = f" (`{head[:7]}`)" if head else ""
         where = f" ([the run]({run}))" if run else ""
-        body = (f"The review agent did not run on this push{this}: {why or 'it wrote no comment'}{where}. "
-                "A person at Theorem reviews the enrollment.")
+        notes = [f"The review agent did not run on this push{this}: {why or 'it wrote no comment'}{where}. "
+                 "A person at Theorem reviews the enrollment.", FOOTER.format(of=of)]
         status = "none"
     checks = options.checks.read_text(encoding="utf-8", errors="replace") if options.checks else ""
-    if CREDENTIAL.search(checks):
+    if credential(checks):
         # The checks text comes from the project's source: refused on its own, so a safe review is still posted.
         checks = ("The report held what looks like a credential, so it was not posted. It is in the Build check's "
                   "summary.")
-    if checks.strip():
-        body += ("\n\n<details><summary>What the breakage and coverage checks measured</summary>\n\n"
-                 + cut(neutralize(checks), MAX_CHECKS, "the rest is in the Build check's summary") + "\n\n</details>")
-    sys.stdout.write(assemble(head, status, body))
+    sys.stdout.write(assemble(head, status, notes, checks=checks, review=review))
     return 0
 
 

@@ -86,7 +86,7 @@ Use `dockerfile` only if the `Dockerfile` is in your repository. We recommend th
 * If the `Dockerfile` and `build.sh` are in the project directory, do not set `dockerfile`. The build context is then the project directory.
 * If you set `dockerfile`, the build context is your repository at the commit that we build. Put `build.sh` next to the `Dockerfile`, unless the `Dockerfile` makes `$SRC/build.sh`. Then put your fuzz target sources, build patches and `sources` file in your repository too. Only `project.yaml`, `patch_style.md` and seed corpora can then be in the project directory.
 
-A seeded project can have no build files yet. `tools/validate.py` warns about it, and `tools/check` cannot build it.
+A seeded project can have no build files yet. `tools/validate.py` warns about it, and `tools/check` refuses it, because there is nothing to build.
 
 ### sanitizers
 

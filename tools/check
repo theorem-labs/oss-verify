@@ -102,6 +102,11 @@ def load(project):
                  "(docs/project-yaml.md#language)")
     repo, _, ref = config["repo"].partition("#")
     beside = {path.name for path in directory.iterdir()}
+    # A seeded project (primary_contact n/a) may have no build files yet: tools/validate.py only warns about it, and
+    # there is nothing to build. Like a language with no builder yet, that is not a broken enrollment rule: exit 1.
+    if "Dockerfile" not in beside and config.get("dockerfile") is None:
+        sys.exit(f"tools/check: {directory.name} has no Dockerfile, beside project.yaml or as dockerfile:, so there is "
+                 "nothing to build (a seeded project)")
     return Job(
         name=directory.name,
         directory=directory,
@@ -120,16 +125,17 @@ def load(project):
 def toolchain_for(project):
     """The toolchain image that `tools/check <project>`, with no --lock or --toolchain, builds FROM: the newest for the
     project's language. For a project that it refuses before it builds anything (one that breaks the enrollment rules,
-    or in a language with no builder or no toolchain yet), the builder's default, infra/base-builder/Dockerfile's."""
+    one in a language with no builder or no toolchain yet, or a seeded project with no build files yet), the newest for
+    C in infra/toolchains.tsv, so that the caller still has an image to pull."""
     try:
         # load() prints its warnings on standard output, which holds only the image here.
         with contextlib.redirect_stdout(sys.stderr):
             job = load(project)
         return check_build.newest_toolchain(job.language)
     except (SystemExit, Failed):
-        print(f"tools/check refuses {project} before it builds anything: the builder's default toolchain",
-              file=sys.stderr)
-        return check_build.toolchain()
+        print(f"tools/check refuses {project} before it builds anything: the newest C toolchain "
+              "(infra/toolchains.tsv)", file=sys.stderr)
+        return check_build.newest_toolchain()
 
 
 def ubsan_settings(job, toolchain):

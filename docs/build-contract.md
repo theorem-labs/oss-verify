@@ -17,7 +17,7 @@ An OSS-Fuzz `Dockerfile` and `build.sh` do not run here without changes. They ex
 
 ## The builder
 
-The default toolchain image is the one that the oss-fuzz-theorems 2026.10 release built its binaries in: `ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain@sha256:6a6b4816865c7ec61801ae0fcab6d9c81a599ffcb20616576a9c668abd8b0a7b`. It contains these items:
+The toolchain image for C and C++ is the one that the oss-fuzz-theorems 2026.10 release built its binaries in, the row `oss-fuzz-theorems-2026.10` of [infra/toolchains.tsv](../infra/toolchains.tsv). It contains these items:
 
 * clang 20.1.8 for `riscv64-linux-musl`, and lld;
 * the musl sysroot at `/opt/musl-sysroot`, with static builds of common libraries that a project can link;
@@ -36,8 +36,8 @@ The statements use [Linux Process Semantics (LPS)](https://github.com/theorem-la
 
 A new toolchain image changes the bytes of each binary that it builds, and a proof is about specified bytes. Thus each project is built with one toolchain image, its vintage.
 
-* [infra/toolchains.tsv](../infra/toolchains.tsv) lists the published toolchain images, oldest first, and the languages that each one builds ([project-yaml.md](project-yaml.md#language)). Today it lists four images: the default above, which builds C and C++, and the Rust, Python and Go toolchains of the same release. We add a new image only after its publication.
-* The builder gets the toolchain image as a build argument (`--build-arg TOOLCHAIN=<image>`). Its `Dockerfile` uses the default above.
+* [infra/toolchains.tsv](../infra/toolchains.tsv) lists the published toolchain images, oldest first, and the languages that each one builds ([project-yaml.md](project-yaml.md#language)). Today it lists four images: the C and C++ image above, and the Rust, Python and Go toolchains of the same release. We add a new image only after its publication. Outside `projects/`, no other file names the digest of a toolchain image.
+* The builder gets the toolchain image as a build argument (`--build-arg TOOLCHAIN=<image>`). Its `Dockerfile` has no default, so a build without the argument fails.
 * `tools/check --lock` builds with the toolchain that the lock names. For a manifest, this is `builder.toolchain`. For a `harness.yaml` of oss-fuzz-theorems, it is the `build.builder` field of the `project.yaml` two directories above.
 * If you give more than one lock, the locks must name the same toolchain.
 * Without a lock, `tools/check` builds with the newest toolchain for the project's language: the last row that lists it. `--toolchain <image>` overrides the lock and the newest toolchain.

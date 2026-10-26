@@ -99,9 +99,10 @@ done
 
 
 def docker_ready():
-    """Whether Docker runs and the pinned toolchain image is here."""
+    """Whether Docker runs and the toolchain image the fixture builds FROM (the newest for C) is here."""
     try:
-        return subprocess.run(["docker", "image", "inspect", check_build.toolchain()], capture_output=True).returncode == 0
+        return subprocess.run(["docker", "image", "inspect", check_build.newest_toolchain()],
+                              capture_output=True).returncode == 0
     except OSError:
         return False
 
