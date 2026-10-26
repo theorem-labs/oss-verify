@@ -1491,6 +1491,8 @@ class ReviewSession(unittest.TestCase):
         upload = steps["Keep the sealed conversation for the next push's review"]
         # Without the key, Seal writes no file, so nothing is uploaded and no step fails.
         self.assertEqual(upload["if"], "${{ steps.seal.outputs.sealed != '' }}")
+        # A failed Restore step gives a fresh review, never no review.
+        self.assertIs(steps["Restore the last review's conversation"].get("continue-on-error"), True)
         self.assertIn('if [ -s "$sealed" ]', steps["Seal this review's conversation for the next push's review"]["run"])
         self.assertTrue(upload["uses"].startswith("actions/upload-artifact@"))
         self.assertEqual(upload["with"]["name"], "enroll-review-${{ github.event.pull_request.number || inputs.pr }}"
