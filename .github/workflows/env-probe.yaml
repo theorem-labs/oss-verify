@@ -1,0 +1,18 @@
+# A throwaway measurement, never merged: does GitHub take `environment.deployment: false` with an expression name.
+name: "Environment probe"
+on:
+  pull_request:
+    branches: [main]
+permissions: {}
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: ${{ startsWith(github.ref, 'refs/heads/ci-test/') && 'enroll-review-test' || 'enroll-review-test' }}
+      deployment: false
+    steps:
+      - name: Say whether the key reached this run
+        env:
+          KEY: ${{ secrets.REVIEW_CONVERSATION_KEY }}
+        run: if [ -n "$KEY" ]; then echo "KEY present"; else echo "KEY absent"; fi; echo "ref=$GITHUB_REF"
