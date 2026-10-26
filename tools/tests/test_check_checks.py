@@ -1430,6 +1430,17 @@ class ReviewSession(unittest.TestCase):
                 self.assertIn(said, stdout)
                 self.assertEqual(files, [])
 
+    def test_the_comment_is_read_as_review_comment_reads_it(self):
+        # A comment edited in the web page can come back with CRLF line ends; review-comment still reads it as a
+        # review of its commit, and so does restore.
+        self.upload(self.seal(), 41)
+        meta = review_comment.meta_line(self.HEAD, "stale")
+        self.page(self.COMMENTS, json.dumps([{"user": {"login": "oss-verify[bot]"},
+                                              "body": f"{review_comment.MARKER}\r\n{meta}\r\n\r\nThanks.\r\n"}]).encode())
+        stdout, files, _ = self.restored()
+        self.assertIn("from run 41", stdout)
+        self.assertEqual(len(files), 2)
+
     def test_no_artifact_or_no_api_gives_a_fresh_review(self):
         stdout, files, _ = self.restored()
         self.assertIn(f"the GitHub API call {self.ARTIFACTS} failed (exit 1): a fresh review", stdout)

@@ -169,11 +169,11 @@ def posted_head(repo, pr):
             and str(c.get("body", "")).startswith(review_comment.MARKER)]
     if not ours:
         raise Fresh(f"pull request #{pr} has no review comment")
-    lines = str(ours[0]["body"]).split("\n")
-    meta = review_comment.META.match(lines[1]) if len(lines) > 1 else None
-    if not meta or meta.group("status") == "none" or not HEAD.fullmatch(meta.group("head") or ""):
+    # review-comment's own reader of the metadata line, so that both read a comment the same way.
+    status, head, _, _ = review_comment.read_previous(str(ours[0]["body"]))
+    if status in (None, "none") or not HEAD.fullmatch(head or ""):
         raise Fresh(f"the review comment of pull request #{pr} shows no review of a commit")
-    return meta.group("head")
+    return head
 
 
 def restore(directory):

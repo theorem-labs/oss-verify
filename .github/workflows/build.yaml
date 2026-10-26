@@ -314,8 +314,11 @@ jobs:
         run: GITHUB_STEP_SUMMARY=/dev/null .github/scripts/take-project build
 
       # The conversation of the last review of this pull request and project, which the review resumes (sealed, at the
-      # top of this file). None on its first review, or once its artifact has expired: a fresh review.
+      # top of this file). None on its first review, or once its artifact has expired: a fresh review. A failure of
+      # this step (an install, a time limit) gives a fresh review too, never no review: review-run resumes only a
+      # directory whose `session` file, written last, names a whole conversation.
       - name: Restore the last review's conversation
+        continue-on-error: true
         timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
