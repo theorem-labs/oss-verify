@@ -32,23 +32,15 @@ keep checks.json gh pr view "$PR" -R "$REPO" --json statusCheckRollup
 gh pr diff "$PR" -R "$REPO" > "$out/pr.diff" 2>&1
 keep review-comments.txt gh api --paginate "repos/$REPO/pulls/$PR/comments" \
   --jq '.[] | "\(.user.login) \(.path):\(.line) \(.body)"'
-# One triage.py run writes two files. triage-today.md is the full table (--summary): the review reads every row (its
-# standing, stars, outside participants, criticality score and OSS-Fuzz rows too), not only the five that the public
-# comment carries, and it ends with the exit status, as keep's files do, after triage.py's standard error.
-# triage-comment.md is the public comment (standard output), which review-run checks and build.yaml's comment job
-# posts: it holds the comment alone, and a run that fails leaves none.
+# Any user can comment with the triage marker; take only the oss-verify App's comment, which this repository posts.
+jq -r '[.comments[]? | select(.author.login == "oss-verify")]
+       | map(.body | select(startswith("<!-- oss-verify-triage -->"))) | .[0] // ""' "$out/pr.json" \
+  > "$out/triage-comment.md" 2>/dev/null || true
+# --full: the review reads every row of the triage (its standing, stars, outside participants, criticality score and
+# OSS-Fuzz rows too), not only the five that the public comment carries.
 # triage.py reads GITHUB_TOKEN from the environment; the assignment prefix exports it to python3 without it becoming an
 # argument of any process (env put it in the argument vector, which another user on the machine can read).
-triage() {
-  local status=0
-  rm -f "$out/triage-today.md" "$out/triage-comment.md"
-  GITHUB_TOKEN="${GH_TOKEN:-}" python3 .github/scripts/triage.py --repo "$REPO" --pr "$PR" \
-    --summary "$out/triage-today.md" > "$out/triage-comment.md" 2> "$out/triage.err" || status=$?
-  { cat "$out/triage.err"; echo "(exit status $status)"; } >> "$out/triage-today.md"
-  rm -f "$out/triage.err"
-  [ "$status" = 0 ] || rm -f "$out/triage-comment.md"
-}
-triage
+GITHUB_TOKEN="${GH_TOKEN:-}" keep triage-today.md python3 .github/scripts/triage.py --repo "$REPO" --pr "$PR" --full
 keep validate.txt python3 tools/validate.py "$dir"
 # Claude Code reads a CLAUDE.md beside a file that it reads as instructions. The pull request's are data, so they go
 # from the checkout once the validator has reported them (rule 1 of review.md).

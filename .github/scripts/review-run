@@ -4,12 +4,10 @@
 #
 # Runs the enrollment review: Claude Code checks what review.md says (main's copy, at the root of this checkout) on the
 # files that review-gather wrote, with .claude/skills/review-enrollment/SKILL.md for where they are, and its last
-# message, the comment to the maintainer, is written to <directory>/comment.md once it passes the check of messages to
-# maintainers (below).
+# message, the comment to the maintainer, is written to <directory>/comment.md.
 #
 #   PR=<number> NAME=<project> [HEAD_SHA=<head commit> REVIEW_SESSION=<directory>] \
 #     .github/scripts/review-run <directory inside this checkout>
-#   PR=<number> NAME=<project> .github/scripts/review-run --triage <directory inside this checkout>
 #
 # Run it from the root of the base branch's checkout. build.yaml's review job runs it in CI. A person can run it on
 # their own machine too, with their own Claude Code login, to see the comment a pull request would get: run
@@ -39,6 +37,9 @@
 # In CI it keeps Claude Code's workload identity usable for a review of any length, and runs Claude Code once more when
 # it ends without a review (both below). A run that ends without a comment writes why, in plain words, to
 # <directory>/failure.txt, and Claude Code's own message, for the job's summary, to <directory>/failure-detail.txt.
+# Then a fresh Claude Code, with no tool, one turn and a new identity token, reads comment.md against
+# .claude/skills/write-to-maintainer/SKILL.md (its judge.md is the prompt). Unless its answer is `pass`, the comment is
+# not posted: failure.txt says "the comment failed the reader check (rule N)", and the log names the rule only.
 # With REVIEW_SESSION=<directory outside this checkout> and HEAD_SHA=<the pull request's head commit>, the review keeps
 # its session: build.yaml's review job restores that directory from the Actions cache, so that the review of each push
 # resumes the same Claude Code session as the last review of the pull request, and knows what it asked for and why. The
@@ -50,45 +51,19 @@
 # The log says which: "resuming the session <id> (the review of <commit>), to review only <commit>..<commit>", or "a
 # fresh review". After a review that wrote a comment, the directory holds the session of that review, unless its
 # conversation holds what looks like a credential.
-# The comment is checked as .claude/skills/write-to-maintainer says (main's copy, in this script's checkout) before it
-# is kept. measure.py counts its visible characters and numbered items. When it keeps the limits, a fresh reader judges
-# its words: a new Claude Code session, under a new id, kept nowhere, with no tool, one turn and the review's model, run
-# through review-served as the review is, on the prompt that the skill's route builds (judge.md, SKILL.md, the kind
-# `review` and the comment). Its answer is read into <directory>/judge.json: the comment passes only when the first
-# JSON object of that answer has the verdict "pass" and review-served's check of what answered passes. Anything else
-# fails it, with no second reader. A comment that fails is written once more: the review's own session is resumed
-# (claude --resume <id>) with what measure.py and the reader found, for the whole comment again, which goes through
-# the same cuts and the same check. When that fails too, failure.txt says "the comment failed the maintainer-text check
-# after one rewrite (first <why>, then <why>)", the comment goes to comment.refused.md, and the exit status is 1:
-# build.yaml's comment job then keeps the comment already posted, marked not current. A rewrite that review-served
-# refuses is not published, as a review is (exit status 4). The log has one line for each check: the counts, and the
-# verdict with the names of the rules that the reader found broken; never the comment, nor the reader's quotes. The
-# reader's text never reaches comment.md. The kept session is the review's, with the rewrite's turn when there was one.
-# The triage comment that review-gather wrote to <directory>/triage-comment.md is checked by a run of its own,
-# `review-run --triage <directory>`, so that it is judged whatever happened to the review: build.yaml's review job runs
-# it as a step of its own, also after a review that failed or was refused. It runs no review: the same check, of the
-# kind `triage`, with no rewrite, and <directory>/triage-verdict says pass or fail, for build.yaml's comment job, which
-# posts the triage comment only on a pass. It changes no file of the review's, and its exit status is 0 whatever the
-# verdict (2 on a usage error).
 set -euo pipefail
 
-mode=review
-if [ "${1:-}" = --triage ]; then mode=triage; shift; fi
-in=${1:?usage: review-run [--triage] <directory>}
+in=${1:?usage: review-run <directory>}
 [[ $PR =~ ^[0-9]+$ ]] || { echo "review-run: PR is not a number" >&2; exit 2; }
 [[ $NAME =~ ^[a-z0-9][a-z0-9._-]{0,62}$ ]] || { echo "review-run: NAME is not a project name" >&2; exit 2; }
 case $(realpath "$in")/ in "$(pwd -P)"/*) ;; *) echo "review-run: $in is not inside this checkout" >&2; exit 2 ;; esac
+# This run's record of a lost export only: a file left by an earlier run in the same directory is not this run's.
+rm -f "$in/export-lost.txt"
 model=${REVIEW_MODEL:-claude-opus-5-5}
 # The seconds between two new identity tokens (below); a test makes it shorter.
 every=${REVIEW_TOKEN_EVERY:-60}
 [[ $every =~ ^[1-9][0-9]{0,3}$ ]] || { echo "review-run: REVIEW_TOKEN_EVERY is not a number of seconds" >&2; exit 2; }
-# This run's records only: a file left by an earlier run in the same directory is not this run's. A triage run removes
-# its own only, and keeps the review's.
-if [ "$mode" = triage ]; then
-  rm -f "$in/triage-verdict" "$in/triage-judge.json"
-else
-  rm -f "$in/export-lost.txt" "$in/failure.txt" "$in/failure-detail.txt" "$in/judge.json" "$in/comment.refused.md"
-fi
+rm -f "$in/failure.txt" "$in/failure-detail.txt"
 session_dir=${REVIEW_SESSION:-}
 if [ -n "$session_dir" ]; then
   case $(realpath -m "$session_dir")/ in
@@ -108,10 +83,8 @@ prompt="You are the agent of OSS Verify's enrollment check, in CI, on pull reque
 which adds or changes projects/$NAME/. Read review.md, at the root of this checkout: it says what you check and how \
 you write the comment. Read .claude/skills/review-enrollment/SKILL.md for where your inputs are, and do the review as \
 its section \"In CI\" says. The workflow gathered the inputs into $in/, and the pull request's projects/$NAME/ is in \
-this checkout. Read .claude/skills/write-to-maintainer/SKILL.md, and write the comment as it says: the decision first, \
-then only the changes that block the merge, at most 5, with the details in one <details> block. Your last message is \
-the comment to the maintainer, in Markdown, and nothing else: it starts with the decision sentence, with no line \
-before it."
+this checkout. Your last message is the comment to the maintainer, in Markdown, and nothing else: it follows \
+.claude/skills/write-to-maintainer/SKILL.md, with no line before it about you or your review."
 
 # The session of the last review, when REVIEW_SESSION holds one that is whole and review-gather wrote the diff since
 # its commit (keep's last line is the command's exit status). The diff can be empty, when the push changed nothing in
@@ -144,12 +117,10 @@ new request comes only from the diff. For each request of your last comment, rea
 about (the files of projects/$NAME/, the build's results, the description, the checks, the project's source): drop \
 the request when that input shows its fix, and keep it otherwise. The workflow gathered those inputs again into \
 $in/, and put the pull request's projects/$NAME/ in this checkout again. Your new comment replaces the last one, so \
-it must be complete without it: it lists what still blocks the merge at this head, and says nothing about what \
-changed or what was fixed. Do the review as the section \"In CI\" of .claude/skills/review-enrollment/SKILL.md says \
-for a later push. Read .claude/skills/write-to-maintainer/SKILL.md, and write the comment as it says: the decision \
-first, then only the changes that block the merge, at most 5, with the details in one <details> block. Your last \
-message is the new comment to the maintainer, in Markdown, and nothing else: it starts with the decision sentence, \
-with no line before it."
+it must be complete without it. Do the review as the section \"In CI\" of .claude/skills/review-enrollment/SKILL.md \
+says for a later push. Your last message is the new comment to the maintainer, in Markdown, and nothing else: it \
+lists what still blocks at this head and nothing about what changed. It follows \
+.claude/skills/write-to-maintainer/SKILL.md, with no line before it about you or your review."
 
 # The HTTP status that the collector answers to an export of no records with the token (000 when it did not answer in
 # time). The header reaches curl through a pipe that the builtin printf writes, not an argument; -q, first, keeps a
@@ -196,11 +167,8 @@ fi
 # with status 401 ... Authentication failed"), which ends the review. See "Token lifetime and refresh" in
 # https://platform.claude.com/docs/en/manage-claude/workload-identity-federation and "Token lifetime" in its GitHub
 # Actions page. So while Claude Code runs, a new identity token is written into that file every minute, from the
-# request URL and token the runner gives a job with id-token: write, and one more before each Claude Code process after
-# the review's first try: a second try, each reader of a check, a rewrite. Each process exchanges the token it finds at
-# its start, and a token that one process exchanged is refused to the next. A process that gets no new token is not
-# started: the run ends as the run without a second try does. Outside CI there is no such URL and nothing to write:
-# Claude Code uses the person's own login.
+# request URL and token the runner gives a job with id-token: write, and one more before a second try. Outside CI there
+# is no such URL and nothing to write: Claude Code uses the person's own login.
 token_file=${ANTHROPIC_IDENTITY_TOKEN_FILE:-}
 [ -n "$token_file" ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ] \
   || token_file=
@@ -249,20 +217,6 @@ holds_credential() {
   [ "$scan" != 3 ]
 }
 here=$(dirname "$(realpath "$0")")
-# Claude Code's standard error, the file $1, on this script's: its end, unless the file names a finding held back for
-# private review or holds what looks like a credential. The scan reads the whole file, and what is shown is the end of
-# that same file, byte for byte.
-show_error() {
-  if [ ! -s "$1" ]; then
-    return 0
-  elif grep -qiE "$held_mention" "$1"; then
-    echo "review-run: Claude Code's standard error is not shown: it names a finding held back for private review" >&2
-  elif holds_credential "$1"; then
-    echo "review-run: Claude Code's standard error is not shown: it holds what looks like a credential" >&2
-  else
-    tail -c 2000 "$1" >&2
-  fi
-}
 
 # The file tools never read the runner's temporary directory or the identity token's: --restricted keeps them inside
 # this checkout, and these deny rules say so again, should that ever change. Claude Code 2.1.310 matches a path in a
@@ -285,238 +239,13 @@ done
 # Code when the environment, Claude Code's settings or its Anthropic profile send its requests elsewhere than the API of
 # the provider asked for (REVIEW_PROVIDER, by default anthropic), ANTHROPIC_BASE_URL for one. Its exit status 4, with a
 # record that does not pass, means that another provider or model answered, or that nothing shows which: that review
-# is not published, and is not tried again. Both tries, the resumed and the fresh, go through it, and so do the rewrite
-# of a comment that fails its check and the reader of that check.
+# is not published, and is not tried again. Both tries, the resumed and the fresh, go through it. It runs in the
+# environment below, the one it gives Claude Code, so it reads that one.
 served="$(dirname "$0")/review-served"
 asked=${REVIEW_PROVIDER:-anthropic}/$model
 "$served" asked "$asked" || { echo "review-run: REVIEW_PROVIDER/REVIEW_MODEL is not one review-served can check" >&2
                               exit 2; }
 deadline=$((SECONDS + 40 * 60))
-# Runs Claude Code, with the arguments after the first two, under review-served, which writes what answered and how it
-# ended into the directory $1, beside Claude Code's standard error (claude.err). It stops Claude Code after $2 seconds
-# (exit status 124), and does not start it when no second is left.
-# Claude Code's whole environment, one NUL-ended entry each, goes through a pipe to a launcher that execs
-# review-served, with this same Python, with that environment only, as env -i would, and stdin from /dev/null;
-# review-served starts Claude Code with that environment as it is. env -i took the entries as arguments. A loop of
-# `export -n` over `compgen -e` in this shell would not do it: bash passes on environment entries whose names are not
-# variable names, such as A.B=1, and the loop does not remove exported functions either.
-launch() {
-  local directory=$1 seconds=$2 variable
-  shift 2
-  [ "$seconds" -gt 0 ] || return 124
-  {
-    builtin printf '%s\0' "PATH=$PATH" "HOME=$HOME" LANG=C.UTF-8
-    for variable in $(compgen -e); do
-      case $variable in ANTHROPIC_*|CLAUDE_CODE_*) builtin printf '%s\0' "$variable=${!variable}" ;; esac
-    done
-    [ ${#telemetry[@]} = 0 ] || builtin printf '%s\0' "${telemetry[@]}"
-  } | timeout --kill-after=60 "${seconds}s" python3 -c '
-import os, sys
-environment = dict(entry.split(b"=", 1) for entry in sys.stdin.buffer.read().split(b"\0") if entry)
-with open(os.devnull, "rb") as empty:
-    os.dup2(empty.fileno(), 0)
-os.execve(sys.executable, [sys.executable, *sys.argv[1:]], environment)' \
-    "$served" run "$directory" "$asked" -- claude "$@" > /dev/null 2> "$directory/claude.err"
-}
-# Whether a run that ended with exit status $1, and whose record review-served's check answered with exit status $2, is
-# not published, and not tried again: review-served stopped it or refused its record, another endpoint, provider or
-# model answered a run that also failed by itself, or a run that ended well has no record that passes.
-refused() { [ "$2" = 1 ] || { [ "$2" != 0 ] && { [ "$1" = 4 ] || [ "$1" = 0 ]; }; }; }
-# Says that the review is not published, with what review-served's check said ($1) and Claude Code's standard error
-# (the file $2), writes it to failure.txt, and exits 4.
-not_published() {
-  echo "review-run: the review is not published: $1" >&2
-  show_error "$2"
-  printf 'the review is not published: %s\n' "$1" > "$in/failure.txt"
-  exit 4
-}
-# How the run whose last event is the file $1 (claude.json) ended: its kind of ending (subtype), turns and seconds,
-# each checked, so that failure.txt holds no text of Claude Code's, and ok=yes when it ended with a result.
-ending() {
-  subtype=- turns=- seconds=-
-  read -r subtype turns seconds < <(jq -r '[.subtype // "-", .num_turns // "-", ((.duration_ms // 0) / 1000 | floor)]
-    | map(tostring) | join(" ")' "$1" 2> /dev/null) || true
-  [[ $subtype =~ ^[a-z_]{1,40}$ ]] || subtype=-
-  [[ $turns =~ ^[0-9]{1,9}$ ]] || turns=-
-  [[ $seconds =~ ^[0-9]{1,9}$ ]] || seconds=-
-  ok=$(jq -r 'if (.is_error // false) == false and (.result | type) == "string" and .result != ""
-    then "yes" else "no" end' "$1" 2> /dev/null) || ok=no
-}
-# The check of the comment (the top of this file says what it does), with the skill's own files, main's copy.
-skill="$here/../../.claude/skills/write-to-maintainer"
-# The reader's answer, from its last event (the file $1, claude.json), as judge.json: the JSON object that starts at
-# the first "{" of the result's text, with its verdict "pass" or "fail" and its findings' rule, quote and fix. Anything
-# else, an error, no object, an object that does not parse or another verdict, is the verdict "unreadable". Exit status
-# 0 only for "pass".
-read_verdict='
-import json, sys
-try:
-    with open(sys.argv[1], encoding="utf-8") as f:
-        result = json.load(f)
-except (OSError, ValueError):
-    result = None
-text = result.get("result") if isinstance(result, dict) and not result.get("is_error", False) else None
-found = None
-if isinstance(text, str) and "{" in text:
-    try:
-        found = json.JSONDecoder().raw_decode(text, text.index("{"))[0]
-    except ValueError:
-        found = None
-if not isinstance(found, dict):
-    found = {}
-findings = found.get("findings") if isinstance(found.get("findings"), list) else []
-answer = {"verdict": found.get("verdict") if found.get("verdict") in ("pass", "fail") else "unreadable",
-          "findings": [{key: str(finding.get(key, "")) for key in ("rule", "quote", "fix")}
-                       for finding in findings if isinstance(finding, dict)]}
-print(json.dumps(answer))
-sys.exit(0 if answer["verdict"] == "pass" else 1)'
-# Checks the message in the file $1, of the kind $2 (review or triage), with the reader's record in the directory $3
-# and its answer in the file $4, and returns 0 when it passes. When it fails, gate_reasons says why in a few plain
-# words, for failure.txt (build.yaml shows it only when it is letters, digits, spaces and ,._()-), and gate_findings
-# what to change, for the rewrite. gate_token is no when no new identity token could be written for the reader, which
-# is then not started. The log names counts and rules only: the reader's answer quotes the message, and is shown to no
-# one.
-check_comment() {
-  local file=$1 kind=$2 judge_dir=$3 judge_json=$4
-  local measured measure_status=0 chars items prompt_text reader limit answered judge_status=0 judge_served=0 outcome
-  local rules nonce
-  gate_reasons="" gate_findings="" gate_token=""
-  measured=$(python3 "$skill/measure.py" --kind "$kind" "$file") || measure_status=$?
-  chars=$(jq -r .visible_chars <<< "$measured" 2> /dev/null) || chars=-
-  items=$(jq -r .items <<< "$measured" 2> /dev/null) || items=-
-  [[ $chars =~ ^[0-9]{1,9}$ ]] || chars=-
-  [[ $items =~ ^[0-9]{1,9}$ ]] || items=-
-  if [ "$measure_status" = 1 ]; then
-    echo "review-run: measure.py: $chars visible characters and $items numbered items, over a limit"
-    gate_reasons="$chars visible characters and $items items, over a limit"
-    gate_findings=$(jq -r '.broken[] | "- \(.)"' <<< "$measured" 2> /dev/null) || gate_findings=""
-    gate_findings=${gate_findings:-"- The comment breaks a limit of SKILL.md."}
-    return 1
-  elif [ "$measure_status" != 0 ] || [ "$chars" = - ] || [ "$items" = - ]; then
-    echo "review-run: measure.py could not measure the comment (exit status $measure_status)" >&2
-    gate_reasons="measure.py could not measure it"
-    gate_findings="- The limits of SKILL.md could not be measured on the comment."
-    return 1
-  fi
-  echo "review-run: measure.py: $chars visible characters and $items numbered items, within the limits"
-  reader=$(uuid)
-  mkdir -p "$judge_dir"
-  rm -f "$judge_dir/served" "$judge_dir/claude.json" "$judge_json"
-  # The prompt as the skill's route builds it. The message is between two marker lines that hold a random code, new
-  # for each reader, which the prompt names before the message: the message was written before the code was drawn, so
-  # it cannot hold the end marker. The x keeps the message's last line break, which $( ) would drop.
-  nonce=$(python3 -c 'import secrets; print(secrets.token_hex(16))') || nonce=""
-  prompt_text=$([[ $nonce =~ ^[0-9a-f]{32}$ ]] && cat "$skill/judge.md" && printf '\n\n' && cat "$skill/SKILL.md" \
-    && printf '\n\nKind: %s\n\nThe message is between the lines <<<MESSAGE-%s and MESSAGE-%s>>>.\n\n<<<MESSAGE-%s\n' \
-      "$kind" "$nonce" "$nonce" "$nonce" && cat "$file" && printf '\nMESSAGE-%s>>>\nx' "$nonce") || prompt_text=""
-  limit=$((deadline - SECONDS))
-  [ "$limit" -le 600 ] || limit=600
-  if [ -z "$prompt_text" ]; then
-    echo "review-run: could not read $skill/judge.md or SKILL.md for the reader" >&2
-    judge_status=2
-  elif ! new_identity_token; then
-    echo "review-run: the reader (session $reader) is not started: no new identity token could be written for it" >&2
-    gate_reasons="no new identity token for the reader" gate_token=no
-    return 1
-  else
-    launch "$judge_dir" "$limit" -p "${prompt_text%x}" --session-id "$reader" --no-session-persistence --restricted \
-      --tools "" --strict-mcp-config --disable-slash-commands --permission-mode dontAsk \
-      --model "$model" --effort xhigh --max-turns 1 --output-format stream-json --verbose || judge_status=$?
-  fi
-  answered=$({ cat "$judge_dir/served" 2> /dev/null || true; } | "$served" check) || judge_served=$?
-  python3 -c "$read_verdict" "$judge_dir/claude.json" > "$judge_json" 2> /dev/null || true
-  outcome=$(jq -r .verdict "$judge_json" 2> /dev/null) || outcome=unreadable
-  rules=$(jq -r '[.findings[].rule | select(test("^[a-z][a-z-]{0,39}$"))] | unique | join(", ")' "$judge_json" \
-    2> /dev/null) || rules=""
-  gate_findings="- The check could not read a verdict of the reader on the comment."
-  if [ "$judge_status" != 0 ]; then
-    echo "review-run: the reader (session $reader) fails: Claude Code ended with exit status $judge_status" >&2
-    show_error "$judge_dir/claude.err"
-    gate_reasons="the reader ended with exit status $judge_status"
-  elif [ "$judge_served" != 0 ]; then
-    echo "review-run: the reader (session $reader) fails: what answered it does not pass: $answered" >&2
-    gate_reasons="the reader record did not pass"
-  elif [ "$outcome" = pass ]; then
-    echo "review-run: the reader (session $reader, answered by $answered): pass"
-    return 0
-  elif [ "$outcome" = fail ]; then
-    echo "review-run: the reader (session $reader, answered by $answered): fail, rules ${rules:-none named}"
-    gate_reasons="the reader found ${rules:-no rule named}"
-    # Its quotes go to the review's session only when they hold nothing that this script never shows.
-    if grep -qiE "$held_mention" "$judge_json" || holds_credential "$judge_json"; then
-      gate_findings="- A reader found these rules of SKILL.md broken: ${rules:-none named}."
-    else
-      gate_findings=$(jq -r '.findings[] | "- \(.rule): \"\(.quote)\" Fix: \(.fix)"' "$judge_json" 2> /dev/null) \
-        || gate_findings=""
-      gate_findings=${gate_findings:-"- A reader did not pass the comment, and named no rule."}
-    fi
-  else
-    echo "review-run: the reader (session $reader, answered by $answered): fail, its answer holds no verdict"
-    gate_reasons="the reader answer held no verdict"
-  fi
-  return 1
-}
-# The rewrite: the review's own session, resumed once (it keeps its id), writes the whole comment again from what the
-# check found. Its record and result go to rewrite/, so that served stays the review's record, which the comment job
-# names; the rewrite's is checked the same way, and one that review-served refuses is not published.
-rewrite_comment() {
-  local fix line
-  fix="The comment you wrote does not pass the check of messages to maintainers. The check found:
-
-$gate_findings
-
-Read .claude/skills/write-to-maintainer/SKILL.md again, and write the whole comment again so that it passes: the \
-decision first, then only the changes that block the merge, at most 5, with the details in one <details> block. Do \
-not write again a finding that you held back for private review: the workflow keeps it already. Your last message is \
-the comment to the maintainer, in Markdown, and nothing else: it starts with the decision sentence, with no line \
-before it."
-  mkdir -p "$in/rewrite"
-  rm -f "$in/rewrite/served" "$in/rewrite/claude.json"
-  if ! new_identity_token; then
-    line="the comment failed the maintainer-text check ($first_reasons), and no new identity token could be written"
-    line="$line for its rewrite"
-    echo "review-run: $line" >&2
-    printf '%s\n' "${line:0:200}" > "$in/failure.txt"
-    mv "$in/comment.md" "$in/comment.refused.md"
-    exit 1
-  fi
-  status=0
-  launch "$in/rewrite" "$((deadline - SECONDS))" -p "$fix" --resume "$id" --restricted --tools Read,Glob,Grep \
-    --strict-mcp-config --permission-mode dontAsk "${deny[@]}" \
-    --model "$model" --effort xhigh --max-turns 50 --output-format stream-json --verbose || status=$?
-  served_status=0
-  answered=$({ cat "$in/rewrite/served" 2> /dev/null || true; } | "$served" check) || served_status=$?
-  if refused "$status" "$served_status"; then
-    # The record of what answered the comment that is not published, for the comment job to name.
-    rm -f "$in/served"
-    [ ! -f "$in/rewrite/served" ] || cp "$in/rewrite/served" "$in/served"
-    not_published "$answered" "$in/rewrite/claude.err"
-  fi
-  ending "$in/rewrite/claude.json"
-  if [ "$status" != 0 ] || [ "$ok" != yes ]; then
-    echo "review-run: the rewrite of the session $id ended with exit status $status, $subtype after $turns turns," \
-      "and wrote no comment" >&2
-    show_error "$in/rewrite/claude.err"
-    line="the comment failed the maintainer-text check ($first_reasons), and its rewrite wrote no comment"
-    printf '%s\n' "${line:0:200}" > "$in/failure.txt"
-    mv "$in/comment.md" "$in/comment.refused.md"
-    exit 1
-  fi
-  echo "review-run: the rewrite, answered by $answered, $subtype after $turns turns and $seconds seconds"
-}
-if [ "$mode" = triage ]; then
-  # The triage comment, with its reader's record in judge-triage/ and its answer in triage-judge.json. A program wrote
-  # it from an approved template, so there is no rewrite: it passes or it fails. The log has one line: the verdict and
-  # the rules, never the text.
-  triage_verdict=fail gate_reasons="review-gather wrote no triage comment"
-  if [ -s "$in/triage-comment.md" ] \
-      && check_comment "$in/triage-comment.md" triage "$in/judge-triage" "$in/triage-judge.json"; then
-    triage_verdict=pass gate_reasons=""
-  fi
-  echo "$triage_verdict" > "$in/triage-verdict"
-  echo "review-run: the triage comment: $triage_verdict${gate_reasons:+ ($gate_reasons)}"
-  exit 0
-fi
 first_why=""
 for try in 1 2; do
   status=0
@@ -535,14 +264,54 @@ for try in 1 2; do
     echo "review-run: no session to resume (none was kept, or a line above says why it is not used):" \
       "a fresh review, as $id"
   fi
-  launch "$in" "$((deadline - SECONDS))" -p "$text" "${conversation[@]}" --restricted --tools Read,Glob,Grep \
-    --strict-mcp-config --permission-mode dontAsk "${deny[@]}" \
-    --model "$model" --effort xhigh --max-turns 300 --output-format stream-json --verbose || status=$?
+  # Claude Code's whole environment, one NUL-ended entry each, goes through a pipe to a launcher that execs
+  # review-served, with this same Python, with that environment only, as env -i would, and stdin from /dev/null;
+  # review-served starts Claude Code with that environment as it is. env -i took the entries as arguments. A loop of
+  # `export -n` over `compgen -e` in this shell would not do it: bash passes on environment entries whose names are not
+  # variable names, such as A.B=1, and the loop does not remove exported functions either.
+  {
+    builtin printf '%s\0' "PATH=$PATH" "HOME=$HOME" LANG=C.UTF-8
+    for variable in $(compgen -e); do
+      case $variable in ANTHROPIC_*|CLAUDE_CODE_*) builtin printf '%s\0' "$variable=${!variable}" ;; esac
+    done
+    [ ${#telemetry[@]} = 0 ] || builtin printf '%s\0' "${telemetry[@]}"
+  } | timeout --kill-after=60 "$((deadline - SECONDS))s" python3 -c '
+import os, sys
+environment = dict(entry.split(b"=", 1) for entry in sys.stdin.buffer.read().split(b"\0") if entry)
+with open(os.devnull, "rb") as empty:
+    os.dup2(empty.fileno(), 0)
+os.execve(sys.executable, [sys.executable, *sys.argv[1:]], environment)' \
+    "$served" run "$in" "$asked" -- \
+    claude -p "$text" "${conversation[@]}" --restricted --tools Read,Glob,Grep --strict-mcp-config \
+      --permission-mode dontAsk "${deny[@]}" \
+      --model "$model" --effort xhigh --max-turns 300 --output-format stream-json --verbose > /dev/null \
+      2> "$in/claude.err" || status=$?
   # What answered, as review-served checks its record: the counts, or why the review is not to be posted.
   served_status=0
   answered=$({ cat "$in/served" 2> /dev/null || true; } | "$served" check) || served_status=$?
-  if refused "$status" "$served_status"; then not_published "$answered" "$in/claude.err"; fi
-  ending "$in/claude.json"
+  # Not published, and not tried again: review-served stopped it or refused its record, another endpoint, provider or
+  # model answered a run that also failed by itself, or a try that ended well has no record that passes.
+  if [ "$served_status" = 1 ] || { [ "$served_status" != 0 ] && { [ "$status" = 4 ] || [ "$status" = 0 ]; }; }; then
+    echo "review-run: the review is not published: $answered" >&2
+    if [ -s "$in/claude.err" ] && grep -qiE "$held_mention" "$in/claude.err"; then
+      echo "review-run: Claude Code's standard error is not shown: it names a finding held back for private review" >&2
+    elif [ -s "$in/claude.err" ] && holds_credential "$in/claude.err"; then
+      echo "review-run: Claude Code's standard error is not shown: it holds what looks like a credential" >&2
+    else
+      tail -c 2000 "$in/claude.err" >&2
+    fi
+    printf 'the review is not published: %s\n' "$answered" > "$in/failure.txt"
+    exit 4
+  fi
+  # Its kind of ending (subtype), turns and seconds, each checked, so that failure.txt holds no text of Claude Code's.
+  subtype=- turns=- seconds=-
+  read -r subtype turns seconds < <(jq -r '[.subtype // "-", .num_turns // "-", ((.duration_ms // 0) / 1000 | floor)]
+    | map(tostring) | join(" ")' "$in/claude.json" 2> /dev/null) || true
+  [[ $subtype =~ ^[a-z_]{1,40}$ ]] || subtype=-
+  [[ $turns =~ ^[0-9]{1,9}$ ]] || turns=-
+  [[ $seconds =~ ^[0-9]{1,9}$ ]] || seconds=-
+  ok=$(jq -r 'if (.is_error // false) == false and (.result | type) == "string" and .result != ""
+    then "yes" else "no" end' "$in/claude.json" 2> /dev/null) || ok=no
   [ "$status" != 0 ] || [ "$ok" != yes ] || break
   why="Claude Code ended with exit status $status"
   [ "$status" != 124 ] || why="$why, stopped at its 40-minute limit"
@@ -563,7 +332,14 @@ for try in 1 2; do
   fi
   detail=${detail:0:1000}
   echo "review-run: $why (try $try): ${detail:-no message} ($(wc -c < "$in/claude.json") bytes in $in/claude.json)" >&2
-  show_error "$in/claude.err"
+  # The scan reads the whole file, and what is shown is the end of that same file, byte for byte.
+  if [ -s "$in/claude.err" ] && grep -qiE "$held_mention" "$in/claude.err"; then
+    echo "review-run: Claude Code's standard error is not shown: it names a finding held back for private review" >&2
+  elif [ -s "$in/claude.err" ] && holds_credential "$in/claude.err"; then
+    echo "review-run: Claude Code's standard error is not shown: it holds what looks like a credential" >&2
+  elif [ -s "$in/claude.err" ]; then
+    tail -c 2000 "$in/claude.err" >&2
+  fi
   if [ "$try" = 2 ]; then
     if [ "$why" = "$first_why" ]; then why="$why, on both tries"; else why="$why, on the second try"; fi
   elif [ "$status" = 124 ] || [ $((deadline - SECONDS)) -lt 600 ] || ! new_identity_token; then
@@ -576,74 +352,78 @@ for try in 1 2; do
   fi
   first_why=$why
 done
-# The comment, from the result in the file $1 (a claude.json), into comment.md. A held finding comes out of the result
-# first, before anything else is cut from it: from the first held_marker line on, the result goes to held-finding.md,
-# which nothing here prints and build.yaml stores for its hold job, which sends it to the disclosure route
-# (.github/scripts/review-held). A rewrite (below) that writes again a held part when the review held one already
-# keeps the review's: the same finding is stored once. If anything that names a held finding is still in the rest,
+# A held finding comes out of the result first, before anything else is cut from it: from the first held_marker line
+# on, the result goes to held-finding.md, which nothing here prints and build.yaml stores for its hold job, which sends
+# it to the disclosure route (.github/scripts/review-held). If anything that names a held finding is still in the rest,
 # nothing is published, and the rest is held too, as one more finding (a marker the cut did not know, say), so that the
 # review job stores it all the same and nothing of it is lost.
-take_comment() {
-  rm -f "$in/comment.md" "$in/held-new.md"
-  jq -r 'if .is_error then error("the review ended with an error") else .result end' "$1" \
-    | awk -v held="$in/held-new.md" -v marker="$held_marker" \
-        '!h && tolower($0) ~ marker { h = 1 } h { print > held; next } { print }' > "$in/comment.raw"
-  if [ -s "$in/held-new.md" ] && [ ! -s "$in/held-finding.md" ]; then
-    mv "$in/held-new.md" "$in/held-finding.md"
-    echo "review-run: the review holds back a finding for private review; no log shows it"
-  fi
-  rm -f "$in/held-new.md"
-  if grep -qiE "$held_mention" "$in/comment.raw"; then
-    {
-      echo "<!-- held finding -->"
-      echo "title: [held] $NAME/not known: a review whose comment named a held finding outside its marker"
-      echo "why held: the workflow could not tell the finding from the comment, so it holds the whole comment"
-      echo
-      cat "$in/comment.raw"
-    } >> "$in/held-finding.md"
-    echo "review-run: the comment still names a held finding outside its own part, so nothing of it is published" >&2
-    echo "the comment named a held finding outside its own part, so it is not posted" > "$in/failure.txt"
-    exit 1
-  fi
-  # The comment only: a line that ends in a colon, such as "Here is the comment:", and a rule (---) after it, in its
-  # first six lines, go. Any other rule stays.
-  awk 'NR <= 6 && !cut && /^---+[[:space:]]*$/ && held ~ /:[[:space:]]*\n[[:space:]]*$/ { cut = 1; held = ""; next }
-       NR <= 6 && !cut { held = held $0 "\n"; next }
-       { printf "%s", held; held = ""; print }
-       END { printf "%s", held }' "$in/comment.raw" > "$in/comment.md"
-  if [ ! -s "$in/comment.md" ]; then
-    echo "review-run: the review wrote no comment" >&2
-    echo "the review wrote no comment once its opening line was cut" > "$in/failure.txt"
-    exit 1
-  fi
-}
 rm -f "$in/held-finding.md"
-take_comment "$in/claude.json"
+jq -r 'if .is_error then error("the review ended with an error") else .result end' "$in/claude.json" \
+  | awk -v held="$in/held-finding.md" -v marker="$held_marker" \
+      '!h && tolower($0) ~ marker { h = 1 } h { print > held; next } { print }' > "$in/comment.raw"
+if [ -s "$in/held-finding.md" ]; then
+  echo "review-run: the review holds back a finding for private review; no log shows it"
+fi
+if grep -qiE "$held_mention" "$in/comment.raw"; then
+  {
+    echo "<!-- held finding -->"
+    echo "title: [held] $NAME/not known: a review whose comment named a held finding outside its marker"
+    echo "why held: the workflow could not tell the finding from the comment, so it holds the whole comment"
+    echo
+    cat "$in/comment.raw"
+  } >> "$in/held-finding.md"
+  echo "review-run: the comment still names a held finding outside its own part, so nothing of it is published" >&2
+  echo "the comment named a held finding outside its own part, so it is not posted" > "$in/failure.txt"
+  exit 1
+fi
+# The comment only: a line that ends in a colon, such as "Here is the comment:", and a rule (---) after it, in its first
+# six lines, go. Any other rule stays.
+awk 'NR <= 6 && !cut && /^---+[[:space:]]*$/ && held ~ /:[[:space:]]*\n[[:space:]]*$/ { cut = 1; held = ""; next }
+     NR <= 6 && !cut { held = held $0 "\n"; next }
+     { printf "%s", held; held = ""; print }
+     END { printf "%s", held }' "$in/comment.raw" > "$in/comment.md"
+if [ ! -s "$in/comment.md" ]; then
+  echo "review-run: the review wrote no comment" >&2
+  echo "the review wrote no comment once its opening line was cut" > "$in/failure.txt"
+  exit 1
+fi
+# The reader: a new Claude Code, in the review's environment less telemetry, sees judge.md, SKILL.md and the comment
+# between two marker lines it cannot guess. Its first line must be `pass`; no answer of it is ever logged.
+skill=.claude/skills/write-to-maintainer code=$(uuid | tr -d -) verdict=""
+reader="$(cat "$skill/judge.md")
+
+$(cat "$skill/SKILL.md")
+
+The comment is between the line BEGIN-$code and the line END-$code.
+BEGIN-$code
+$(cat "$in/comment.md")
+END-$code"
+if new_identity_token; then
+  verdict=$({
+    builtin printf '%s\0' "PATH=$PATH" "HOME=$HOME" LANG=C.UTF-8
+    for variable in $(compgen -e); do
+      case $variable in ANTHROPIC_*|CLAUDE_CODE_*) builtin printf '%s\0' "$variable=${!variable}" ;; esac
+    done
+  } | timeout --kill-after=30 300s python3 -c '
+import os, sys
+environment = dict(entry.split(b"=", 1) for entry in sys.stdin.buffer.read().split(b"\0") if entry)
+with open(os.devnull, "rb") as empty:
+    os.dup2(empty.fileno(), 0)
+os.execvpe(sys.argv[1], sys.argv[1:], environment)' \
+    claude -p "$reader" --tools '' --max-turns 1 --model "$model" --no-session-persistence --output-format json \
+    2> /dev/null | jq -r '.result | strings' 2> /dev/null | sed -n 1p) || verdict=""
+fi
+if [ "$verdict" != pass ]; then
+  rule=""
+  [[ $verdict =~ ^fail[[:space:]]+(rule[[:space:]]*)?([0-9]{1,2})([^0-9]|$) ]] && rule=" (rule ${BASH_REMATCH[2]})"
+  echo "review-run: reader: fail$rule" >&2
+  echo "the comment failed the reader check$rule" > "$in/failure.txt"
+  rm -f "$in/comment.md"
+  exit 1
+fi
+echo "review-run: reader: pass"
 echo "review-run: $(wc -c < "$in/comment.md") bytes in $in/comment.md, asked for $asked, answered by $answered," \
   "$subtype after $turns turns and $seconds seconds (try $try${resumed:+, resumed})"
-
-first_reasons=""
-for pass in 1 2; do
-  if check_comment "$in/comment.md" review "$in/judge" "$in/judge.json"; then break; fi
-  if [ "$gate_token" = no ]; then
-    line="the comment was not checked, because no new identity token could be written for its reader"
-    echo "review-run: $line" >&2
-    printf '%s\n' "$line" > "$in/failure.txt"
-    mv "$in/comment.md" "$in/comment.refused.md"
-    exit 1
-  elif [ "$pass" = 2 ]; then
-    line="the comment failed the maintainer-text check after one rewrite (first $first_reasons, then $gate_reasons)"
-    echo "review-run: $line" >&2
-    printf '%s\n' "${line:0:200}" > "$in/failure.txt"
-    mv "$in/comment.md" "$in/comment.refused.md"
-    exit 1
-  fi
-  first_reasons=$gate_reasons
-  echo "review-run: the comment fails the check ($gate_reasons): resuming the session $id once to write it again"
-  rewrite_comment
-  take_comment "$in/rewrite/claude.json"
-  echo "review-run: $(wc -c < "$in/comment.md") bytes in $in/comment.md, from the rewrite"
-done
 # This review's session, for the next push's review, in place of the last one. The review cannot read this run's
 # tokens, so its conversation holds none of them; it is not kept if it holds what looks like a credential, or the
 # identity token now in the file. When it is not kept, the cache keeps the last session that was.

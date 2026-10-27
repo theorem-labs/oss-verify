@@ -32,7 +32,7 @@
 # It runs on workflow_run, so this file and the script are main's, whatever the pull request holds, and it runs no
 # code of the pull request: decide reads the API as data with a read-only token. dispatch alone holds a credential:
 # the OSS Verify App's installation token, made from the App's key, which it reads at run time from Secret Manager by
-# Google workload identity federation, as build.yaml's comment and hold jobs do. It declares the GitHub
+# Google workload identity federation, as build.yaml's and triage.yaml's comment jobs do. It declares the GitHub
 # Environment `comment`, whose claim is the only way to act as the account that reads the key; decide must never
 # be given id-token: write or that environment. Each token it makes holds one permission on one repository: pull
 # requests of this repository for the label (actions/create-github-app-token), contents of the private repository for
@@ -108,7 +108,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # Gets this job, and no other, the App's key: only a token with this environment's claim may act as the account
-    # that reads it, as for build.yaml's comment and hold jobs. Removing this line does not weaken the job; it
+    # that reads it, as for build.yaml's and triage.yaml's comment jobs. Removing this line does not weaken the job; it
     # stops it working. deployment: false, as there, so that a run posts no deployment; the claim is in the token
     # either way.
     environment:
@@ -121,7 +121,7 @@ jobs:
       id-token: write
     env:
       # Public identifiers, not credentials: the provider and the account that reads the App's key, as in build.yaml's
-      # comment and hold jobs.
+      # and triage.yaml's comment jobs.
       GCP_WORKLOAD_IDENTITY_PROVIDER: projects/805240912354/locations/global/workloadIdentityPools/github/providers/github-ossv
       GCP_SERVICE_ACCOUNT: ossv-app-comment@theorem-agent-infra.iam.gserviceaccount.com
       # The private statements repository, by its id.
@@ -162,7 +162,7 @@ jobs:
           create_credentials_file: false
           export_environment_variables: false
 
-      # The App's private key, from Secret Manager, as build.yaml's comment and hold jobs read it. Each
+      # The App's private key, from Secret Manager, as build.yaml's and triage.yaml's comment jobs read it. Each
       # non-blank line of the key is masked, and so is its base64 form.
       - name: Read the oss-verify App's key
         id: key

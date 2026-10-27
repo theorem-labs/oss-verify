@@ -410,13 +410,11 @@ class CommandLine(unittest.TestCase):
 
 
 class Callers(unittest.TestCase):
-    def test_the_workflow_puts_the_full_table_in_the_job_summary_and_posts_nothing(self):
+    def test_the_workflow_puts_the_full_table_in_the_job_summary_and_the_comment_in_the_output(self):
         # The gather step's own script, run with stand-ins for dpkg and python3: the stand-in python3 prints a comment and
-        # writes a table to the file after --summary, as triage.py does. build.yaml posts the comment, so this keeps none.
+        # writes a table to the file after --summary, as triage.py does.
         jobs = validate.yaml.safe_load((ROOT / ".github" / "workflows" / "triage.yaml").read_text())["jobs"]
-        self.assertEqual(set(jobs), {"route", "gather", "required"})
-        self.assertNotIn("outputs", jobs["gather"])
-        [script] = [s["run"] for s in jobs["gather"]["steps"] if s.get("name") == "Write the full table"]
+        [script] = [s["run"] for s in jobs["gather"]["steps"] if s.get("name") == "Write the comment"]
         with tempfile.TemporaryDirectory() as scratch:
             scratch = pathlib.Path(scratch)
             bin = scratch / "bin"
@@ -436,44 +434,15 @@ class Callers(unittest.TestCase):
             self.assertEqual(argv[:6], [".github/scripts/triage.py", "--repo", REPO, "--pr", "7", "--summary"])
             self.assertEqual(argv[6], str(scratch / "summary"))
             self.assertEqual((scratch / "summary").read_text(), "FULL\n")
-            self.assertFalse((scratch / "output").exists())
-            self.assertNotIn("COMMENT", run.stdout)
+            output = (scratch / "output").read_text().split("\n")
+        self.assertTrue(output[0].startswith("comment<<triage-"), output)
+        self.assertEqual(output[1:3], ["COMMENT", output[0].removeprefix("comment<<")])
 
-    def gather_triage(self, status=0):
-        """review-gather's triage(), run with a stand-in python3 that prints a comment, writes a table to the file after
-        --summary and an error line, and exits with `status`: (its argument vectors, the files it left)."""
+    def test_the_review_reads_the_full_table(self):
         gather = (ROOT / ".github" / "scripts" / "review-gather").read_text()
-        function = re.search(r"^triage\(\) \{\n.*?^\}$", gather, re.M | re.S)[0]
-        with tempfile.TemporaryDirectory() as scratch:
-            scratch = pathlib.Path(scratch)
-            (scratch / "bin").mkdir()
-            (scratch / "out").mkdir()
-            (scratch / "bin" / "python3").write_text(
-                f'#!/bin/bash\nprintf "%s\\n" "$@" "--" >> {scratch}/argv\n'
-                'while [ $# -gt 0 ]; do [ "$1" = --summary ] && echo FULL >> "$2"; shift; done\n'
-                f'echo COMMENT; echo oops >&2; exit {status}\n')
-            (scratch / "bin" / "python3").chmod(0o755)
-            run = subprocess.run(["bash", "-c", f"set -uo pipefail\nout={scratch / 'out'} REPO=o/r PR=7\n"
-                                                f"{function}\ntriage"],
-                                 env={**os.environ, "PATH": f"{scratch / 'bin'}:{os.environ['PATH']}"},
-                                 capture_output=True, text=True)
-            self.assertEqual(run.returncode, 0, run.stderr)
-            argv = (scratch / "argv").read_text().split("--\n")[:-1]
-            return argv, {p.name: p.read_text() for p in (scratch / "out").iterdir()}
-
-    def test_the_review_gets_the_full_table_and_the_comment_from_one_run(self):
-        argv, files = self.gather_triage()
-        # One run of triage.py.
-        [call] = [call.split() for call in argv]
-        self.assertEqual(call[:6], [".github/scripts/triage.py", "--repo", "o/r", "--pr", "7", "--summary"])
-        self.assertTrue(call[6].endswith("/out/triage-today.md"), call)
-        self.assertEqual(len(call), 7)
-        # The full table ends with the error and the exit status, as keep's files do; the comment is the comment alone.
-        self.assertEqual(files, {"triage-today.md": "FULL\noops\n(exit status 0)\n", "triage-comment.md": "COMMENT\n"})
-
-    def test_a_failed_triage_leaves_no_comment(self):
-        _, files = self.gather_triage(status=1)
-        self.assertEqual(files, {"triage-today.md": "FULL\noops\n(exit status 1)\n"})
+        call = re.search(r"^.*\bkeep triage-today\.md (.*)$", gather, re.M)[1]
+        self.assertEqual(call.split(), ["python3", ".github/scripts/triage.py", "--repo", '"$REPO"', "--pr", '"$PR"',
+                                        "--full"])
 
 
 if __name__ == "__main__":
