@@ -1003,6 +1003,33 @@ class PostingStep(unittest.TestCase):
                 self.assertIn("\n    Fix Y.\n", summary[0])
                 self.assertIn(f"\n    {review_comment.MARKER}\n", summary[0])
 
+    def test_the_triage_comment_is_a_draft_without_its_variable(self):
+        # triage.yaml's own posting step: with OSSV_POST_TRIAGE anything but post, it calls gh not at all and writes the
+        # draft to the summary; with post, it posts.
+        workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "triage.yaml").read_text())
+        name = "Post the comment, or update the one already there"
+        matches = [s for s in workflow["jobs"]["comment"]["steps"] if s.get("name") == name]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["env"]["POST_TO_PR"], "${{ vars.OSSV_POST_TRIAGE }}")
+        for value, posts in (("", False), ("draft", False), ("Post", False), ("post", True)):
+            with tempfile.TemporaryDirectory() as directory:
+                directory = pathlib.Path(directory)
+                (directory / "bin").mkdir()
+                (directory / "bin" / "gh").write_text(
+                    f'#!/bin/bash\necho "$*" >> {directory}/calls\n'
+                    f'case "$*" in *"--method POST"*) cat > {directory}/post.json ;; esac\n')
+                (directory / "bin" / "gh").chmod(0o755)
+                environment = {**os.environ, "PATH": f"{directory / 'bin'}:{os.environ['PATH']}", "GH_TOKEN": "x",
+                               "REPO": "o/r", "PR": "8", "COMMENT": "<!-- oss-verify-triage -->\n### Triage\n",
+                               "POST_TO_PR": value, "GITHUB_STEP_SUMMARY": str(directory / "summary")}
+                run = subprocess.run(["bash", "-e", "-c", matches[0]["run"]], env=environment, capture_output=True,
+                                     text=True)
+                self.assertEqual(run.returncode, 0, run.stderr)
+                self.assertEqual((directory / "post.json").exists(), posts, value)
+                if not posts:
+                    self.assertFalse((directory / "calls").exists(), value)
+                    self.assertIn("\n    ### Triage\n", (directory / "summary").read_text())
+
     def status(self, body):
         return review_comment.META.match(body.split("\n")[1]).group("status")
 

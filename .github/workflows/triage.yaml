@@ -203,7 +203,22 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number || inputs.pr }}
           COMMENT: ${{ needs.gather.outputs.comment }}
+          # The comment is posted only while the repository variable OSSV_POST_TRIAGE is `post`. Otherwise this step
+          # writes it to the job's summary as a draft, and posts and edits nothing: a person approves each message to a
+          # maintainer before it is posted.
+          POST_TO_PR: ${{ vars.OSSV_POST_TRIAGE }}
         run: |
+          if [ "${POST_TO_PR:-}" != post ]; then
+            {
+              echo "### Draft of the triage comment (not posted)"
+              echo
+              echo "OSSV_POST_TRIAGE is not \`post\`, so nothing was posted or edited on the pull request. The draft, as Markdown:"
+              echo
+              printf '%s\n' "$COMMENT" | sed 's/^/    /'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "Not posted: OSSV_POST_TRIAGE is not post. The draft is in the job summary."
+            exit 0
+          fi
           # Ours is the oss-verify App's comment that starts with the marker.
           existing=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
             --jq '.[] | select(.user.login == "oss-verify[bot]" and (.body | startswith("<!-- oss-verify-triage -->"))) | .id')
