@@ -397,8 +397,9 @@ jobs:
     needs: project-builds
     if: ${{ !cancelled() && needs.project-builds.outputs.name != '' }}
     runs-on: ubuntu-latest
-    # The gather step's 15 minutes, the Review step's 45 and the triage check's 12, with room for the other steps.
-    timeout-minutes: 75
+    # The step limits add up to 77 minutes: take-project's 5, the gather step's 15, the Review step's 45 and the
+    # triage check's 12. The rest is room for the other steps.
+    timeout-minutes: 90
     # Restores the last review's session; the keep job saves this one (the top of this file).
     cache-mode: read
     # enroll-review is the only environment from which a job can act as ossv-ci, the collector token's reader and

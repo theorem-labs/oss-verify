@@ -80,13 +80,46 @@ class Visible(unittest.TestCase):
     def test_a_details_block_that_nothing_closes_runs_to_the_end(self):
         self.assertEqual(self.chars(f"{DECISION}\n<details>\n{LONG}\n"), len(DECISION))
 
-    def test_fenced_code_is_hidden_and_tags_in_it_do_nothing(self):
+    def test_an_open_details_block_counts(self):
+        text = f"{DECISION}\n<details open><summary>Details</summary>\n\n{LONG}\n</details>\n"
+        self.assertEqual(self.chars(text), len(f"{DECISION} Details {LONG}"))
+        self.assertEqual(measure.measure(text, "review")["broken"],
+                         [f"visible text is {len(f'{DECISION} Details {LONG}')} characters; the limit is under 1500"])
+        self.assertEqual(self.items("<details open>\n" + "".join(f"{n}. item\n" for n in range(1, 7))), 6)
+        # A closed block inside an open one is hidden, all but its summary.
+        text = "<details open>\nA\n<details><summary>B</summary>\nhidden\n</details>\nC\n</details>\nD"
+        self.assertEqual(" ".join(measure.visible(text).split()), "A B C D")
+        # An open block inside a closed one is hidden with it, its summary too.
+        text = "<details><summary>A</summary>\n<details open><summary>B</summary>\nhidden\n</details>\n</details>\nD"
+        self.assertEqual(" ".join(measure.visible(text).split()), "A D")
+
+    def test_fenced_code_outside_a_closed_details_block_counts(self):
+        text = f"{DECISION}\n\n```\n{LONG}\n```\n"
+        self.assertEqual(self.chars(text), len(f"{DECISION} {LONG}"))
+        self.assertEqual(measure.measure(text, "review")["broken"],
+                         [f"visible text is {len(f'{DECISION} {LONG}')} characters; the limit is under 1500"])
+        hidden = f"{DECISION}\n<details><summary>Details</summary>\n\n```\n{LONG}\n```\n</details>\n"
+        self.assertEqual(self.chars(hidden), len(f"{DECISION} Details"))
+
+    def test_fenced_code_shows_tags_as_text_and_holds_no_items(self):
         text = "a\n```\n<details>\n<!--\n1. x\n```\nb\n~~~~\nc\n~~~\nd\n~~~~\ne\n"
-        self.assertEqual(" ".join(measure.visible(text).split()), "a b e")
+        self.assertEqual(" ".join(measure.visible(text).split()), "a <details> <!-- 1. x b c ~~~ d e")
         self.assertEqual(self.items(text), 0)
 
-    def test_a_fence_that_nothing_closes_runs_to_the_end(self):
-        self.assertEqual(self.chars(f"{DECISION}\n```\n{LONG}\n"), len(DECISION))
+    def test_a_fence_that_nothing_closes_runs_to_the_end_and_counts(self):
+        self.assertEqual(self.chars(f"{DECISION}\n```\n<details>\n{LONG}\n"), len(f"{DECISION} <details> {LONG}"))
+
+    def test_a_code_span_runs_onto_the_next_lines_of_its_paragraph(self):
+        text = f"{DECISION}\n\n1. The target treats `x\n<!-- as` a comment start.\n\n{LONG}\n"
+        self.assertGreater(self.chars(text), 1500)
+        self.assertIn("x <!-- as a comment start.", " ".join(measure.visible(text).split()))
+        # A blank line ends the paragraph: a backtick with no close before it is text.
+        self.assertEqual(" ".join(measure.visible("a `b\n\nc <!-- d --> e`").split()), "a `b c e`")
+
+    def test_items_inside_a_blockquote_count(self):
+        text = f"{DECISION}\n\n" + "".join(f"> {n}. item\n" for n in range(1, 7))
+        self.assertEqual(self.items(text), 6)
+        self.assertEqual(self.items("".join(f">> {n}) item\n" for n in range(1, 4))), 3)
 
     def test_crlf_and_cr_line_ends_count_as_line_feeds(self):
         text = f"{DECISION}\r\n\r\n" + "".join(f"   {n}. item\r\n" for n in range(1, 7)) + "<!-- x\r\n-->\rEnd."

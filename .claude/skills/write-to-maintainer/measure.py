@@ -9,13 +9,14 @@ Reads the message from FILE, or from standard input. Prints one JSON object: the
 words, the numbered items, and each limit the message breaks. Exits 0 when it keeps every limit, 1 when it breaks
 one, 2 on a usage error.
 
-Visible text is what a reader sees on GitHub without opening anything. Left out: fenced code blocks (a fence that
-nothing closes runs to the end, as in CommonMark), HTML comments (from <!-- to the --> that closes it, or to the end),
-and each <details> block from its <details> tag to the </details> that closes it, nested blocks counted once, except
-the text of the outer block's <summary>, which GitHub shows. Inside an inline code span, GitHub shows <!--, <details>
-and <summary> as text, so they count as text there and hide nothing. A code span ends on its own line here. Runs of
-whitespace count as one character. Items are the lines of the visible text that start with at most 3 spaces, a number
-and a dot or a closing parenthesis, as a CommonMark ordered list item does.
+Visible text is all the text that GitHub shows without a click, code included. Only two things are left out: HTML
+comments (from <!-- to the --> that closes it, or to the end), and each closed <details> block, from its <details>
+tag to the </details> that closes it, except the text of its <summary>, which GitHub shows. A <details open> block is
+shown, so it counts. A block inside a closed block is hidden with it, its summary too. Fenced code counts line by line,
+without its fence lines; GitHub shows a tag or a comment start inside it, or inside an inline code span (which can
+run onto the next lines of its paragraph), as text, so there it hides nothing. Runs of whitespace count as one
+character. Items are the lines that start outside fenced code, a comment and a code span, with at most 3 spaces, a
+number and a dot or a closing parenthesis, as a CommonMark ordered list item does, also inside a blockquote (> 1.).
 """
 import argparse
 import json
@@ -25,63 +26,108 @@ import sys
 # triage, the triage comment, has the review comment's limits: build.yaml posts both on the pull request.
 LIMITS = {"review": {"chars": 1500, "items": 5}, "triage": {"chars": 1500, "items": 5}, "reply": {"words": 80}}
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
-TAG = re.compile(r"<(/?)(details|summary)\b[^>]*>", re.I)
+TAG = re.compile(r"<(/?)(details|summary)\b([^>]*)>", re.I)
+OPEN = re.compile(r"(?:^|\s)open(?:[\s=]|$)", re.I)
 TICKS = re.compile(r"`+")
-ITEM = re.compile(r"^ {0,3}\d{1,9}[.)](?:[ \t]|$)")
+ITEM = re.compile(r"^(?: {0,3}> ?)* {0,3}\d{1,9}[.)](?:[ \t]|$)")
 
 
-def visible(text):
-    """The visible text of a message (the top of this file says what that is), line by line."""
-    out, fence, comment, depth, summary = [], None, False, 0, False
-    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        found = None if comment else FENCE.match(line)
+def closer(run):
+    """The backtick run that closes a code span opened by `run`: the same length, no backtick beside it."""
+    return re.compile(f"(?<!`){run}(?!`)")
+
+
+def shown_lines(text):
+    """Each line of the message as GitHub shows it (the top of this file says what is left out), with whether a list
+    item can start it."""
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    out, fence, comment, span, summary = [], None, False, None, False
+    stack = []  # one entry for each <details> block that the text is in: True when it is open
+
+    def seen():
+        closed = [depth for depth, opened in enumerate(stack) if not opened]
+        return not closed or (closed == [len(stack) - 1] and summary)
+
+    def span_closes(run, number, at):
+        """Whether the code span that `run` opens at `at` on line `number` closes in its paragraph."""
+        if closer(run).search(lines[number], at + len(run)):
+            return True
+        for line in lines[number + 1:]:
+            if not line.strip() or FENCE.match(line):
+                return False
+            if closer(run).search(line):
+                return True
+        return False
+
+    for number, line in enumerate(lines):
+        free = fence is None and not comment and span is None
+        found = FENCE.match(line) if fence is not None or free else None
         if fence is not None:
             if found and found.group(1)[0] == fence[0] and len(found.group(1)) >= len(fence):
-                fence = None
+                fence, line = None, ""
+            out.append((line if seen() else "", False))
             continue
         if found:
             fence = found.group(1)
+            out.append(("", False))
             continue
         shown, at = [], 0
         while at < len(line):
+            if span is not None:
+                close = closer(span).search(line, at)
+                if seen():
+                    shown.append(line[at:close.start() if close else len(line)])
+                span, at = (None, close.end()) if close else (span, len(line))
+                continue
             if comment:
                 end = line.find("-->", at)
                 if end < 0:
                     break
                 comment, at = False, end + 3
                 continue
-            seen = depth == 0 or (depth == 1 and summary)
             if line.startswith("<!--", at):
                 comment, at = True, at + 4
                 continue
             if line[at] == "`":
                 run = TICKS.match(line, at).group(0)
-                close = re.compile(f"(?<!`){run}(?!`)").search(line, at + len(run))
-                end = close.start() if close else at + len(run)
-                if seen:
-                    shown.append(line[at + len(run):end] if close else run)
-                at = close.end() if close else end
+                if span_closes(run, number, at):
+                    span = run
+                elif seen():
+                    shown.append(run)
+                at += len(run)
                 continue
             tag = TAG.match(line, at)
             if tag:
-                if tag.group(2).lower() == "details":
-                    depth, summary = (max(depth - 1, 0) if tag.group(1) else depth + 1), False
+                ending, name, attributes = tag.groups()
+                if name.lower() == "details":
+                    if ending:
+                        stack = stack[:-1]
+                    else:
+                        stack.append(bool(OPEN.search(attributes)))
+                    summary = False
                 else:
-                    summary = not tag.group(1) and depth == 1
+                    summary = not ending
                 at = tag.end()
                 continue
-            if seen:
+            if seen():
                 shown.append(line[at])
             at += 1
-        out.append("".join(shown))
-    return "\n".join(out)
+        if span is not None and seen():
+            shown.append(" ")
+        out.append(("".join(shown), free))
+    return out
+
+
+def visible(text):
+    """The visible text of a message, line by line."""
+    return "\n".join(shown for shown, _ in shown_lines(text))
 
 
 def measure(text, kind):
-    shown = visible(text)
-    flat = " ".join(shown.split())
+    lines = shown_lines(text)
+    flat = " ".join(" ".join(shown for shown, _ in lines).split())
     found = {"visible_chars": len(flat), "visible_words": len(flat.split()),
-             "items": sum(1 for line in shown.split("\n") if ITEM.match(line))}
+             "items": sum(1 for shown, free in lines if free and ITEM.match(shown))}
     broken = []
     limits = LIMITS[kind]
     if "chars" in limits and found["visible_chars"] >= limits["chars"]:
