@@ -1,6 +1,6 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the routed workflows (validate.yaml, tests.yaml, triage.yaml) and their collector,
+"""Tests for the routed workflows (build.yaml, validate.yaml, tests.yaml, triage.yaml) and their collector,
 .github/scripts/collect:  python3 -m pytest tools/tests
 
 Each workflow has a route job that decides which jobs the run needs, and a job named required that always runs last,
@@ -23,9 +23,9 @@ from test_take_project import git, isolated_git_env
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 COLLECT = ROOT / ".github" / "scripts" / "collect"
 WORKFLOWS = ROOT / ".github" / "workflows"
-# Each routed workflow, and the check its required job reports (the default branch's ruleset requires enrollment and
-# tests; triage is required by none).
-REQUIRED = {"validate.yaml": "enrollment", "tests.yaml": "tests", "triage.yaml": "triage"}
+# Each routed workflow, and the check its required job reports (the default branch's ruleset requires project-builds,
+# enrollment and tests; triage is required by none).
+REQUIRED = {"build.yaml": "project-builds", "validate.yaml": "enrollment", "tests.yaml": "tests", "triage.yaml": "triage"}
 # The checks the default branch's ruleset requires.
 RULESET = {"enrollment", "project-builds", "terms-accepted", "tests"}
 
@@ -65,18 +65,18 @@ def test_the_collector_passes_when_route_passed_and_each_job_did_as_route_asked(
 
 @pytest.mark.parametrize("arguments, error", [
     # A job route asked for that failed, was cancelled, or was skipped: a skipped job is never a pass of one asked for.
-    (("success", "build:failure:true", "review:success:true"), "build: failure, where route asks for success"),
-    (("success", "build:cancelled:true"), "build: cancelled, where route asks for success"),
-    (("success", "build:skipped:true"), "build: skipped, where route asks for success"),
-    (("success", "suite:skipped:false", "docs:failure:true"), "docs: failure, where route asks for success"),
+    (("success", "build:failure:true", "review:success:true"), "build: failure, where the run asks for success"),
+    (("success", "build:cancelled:true"), "build: cancelled, where the run asks for success"),
+    (("success", "build:skipped:true"), "build: skipped, where the run asks for success"),
+    (("success", "suite:skipped:false", "docs:failure:true"), "docs: failure, where the run asks for success"),
     # A job route did not ask for that ran, even one that passed.
-    (("success", "build:success:false"), "build: success, where route asks for skipped"),
-    (("success", "build:failure:false"), "build: failure, where route asks for skipped"),
+    (("success", "build:success:false"), "build: success, where the run asks for skipped"),
+    (("success", "build:failure:false"), "build: failure, where the run asks for skipped"),
     # route itself did not pass: its jobs are then skipped, which must not read as nothing to do.
     (("failure", "build:skipped:false"), "route: failure"),
     (("cancelled", "validate:skipped:false"), "route: cancelled"),
     (("", "validate:skipped:false"), "route: no result"),
-    (("success", "validate::true"), "validate: no result, where route asks for success"),
+    (("success", "validate::true"), "validate: no result, where the run asks for success"),
 ])
 def test_the_collector_fails_on_every_job_that_did_not_do_as_route_asked(tmp_path, arguments, error):
     code, out, summary = collect(tmp_path, *arguments)
@@ -105,12 +105,35 @@ def test_the_required_job_waits_for_every_job_and_always_runs(name):
     run = step(required, "Every job route asked for passed, and no other ran")["run"]
     assert run.startswith('.github/scripts/collect "$ROUTE" ')
     collected = re.findall(r'"(\w[\w-]*):\$\w+:\$\w+"', run)
-    assert sorted(collected) == sorted(set(jobs) - {"route", "required"})
+    # build.yaml's build job keeps the id project-builds, which the other jobs read its outputs by.
+    named = {"project-builds": "build"}
+    assert sorted(collected) == sorted(named.get(job, job) for job in set(jobs) - {"route", "required"})
     assert step(required, "Every job route asked for passed, and no other ran")["env"]["ROUTE"] == \
         "${{ needs.route.result }}"
     # It holds no credential: a read of .github/scripts at most.
     assert required["permissions"] == {"contents": "read"}
     assert not [s for s in required["steps"] if "secrets." in str(s)]
+
+
+def bare(expression):
+    """An expression without its ${{ }} and without a leading !cancelled() && (the collector runs on always())."""
+    text = str(expression).strip()
+    if text.startswith("${{") and text.endswith("}}"):
+        text = text[3:-2].strip()
+    return text.removeprefix("!cancelled() && ").strip()
+
+
+@pytest.mark.parametrize("name", sorted(REQUIRED))
+def test_the_collector_reads_each_jobs_own_result_and_asks_on_that_jobs_own_condition(name):
+    # The collector is given each job's own result, and whether the run asked for it as the same expression as the
+    # job's if:, so that it never wants a job to pass that did not run, nor wants one skipped that ran.
+    jobs = workflow(name)["jobs"]
+    collector = step(jobs["required"], "Every job route asked for passed, and no other ran")
+    by_name = {job.get("name", job_id): job_id for job_id, job in jobs.items()}
+    for collected, result, asked in re.findall(r'"(\w[\w-]*):\$(\w+):\$(\w+)"', collector["run"]):
+        job_id = by_name.get(collected, collected)
+        assert collector["env"][result] == f"${{{{ needs.{job_id}.result }}}}", (name, collected)
+        assert bare(collector["env"][asked]) == bare(jobs[job_id]["if"]), (name, collected)
 
 
 @pytest.mark.parametrize("name", sorted(REQUIRED))
@@ -128,13 +151,15 @@ def test_only_the_required_job_reports_the_required_check(name):
             assert "if" in job, f"{name}: {job_id} runs whatever route decides"
 
 
-@pytest.mark.parametrize("name", ["validate.yaml", "tests.yaml"])
-def test_tests_and_validate_never_run_on_an_edit(name):
+@pytest.mark.parametrize("name", ["build.yaml", "validate.yaml", "tests.yaml"])
+def test_build_tests_and_validate_never_run_on_an_edit(name):
     # An edit of the title or description changes nothing these judge. (A change of base does, and is sent as edited
     # too; a push runs them again after one.)
     on = workflow(name)[True]  # YAML 1.1 reads the key `on` as True
     event = "pull_request" if name == "tests.yaml" else "pull_request_target"
-    assert on[event]["types"] == ["opened", "reopened", "synchronize"]
+    # build.yaml also runs on ready_for_review, which enroll-dispatch.yml waits for to start a draft's statements.
+    extra = ["ready_for_review"] if name == "build.yaml" else []
+    assert on[event]["types"] == ["opened", "reopened", "synchronize", *extra]
 
 
 def test_every_required_check_has_a_static_name():
@@ -182,19 +207,26 @@ def test_a_forks_tests_collector_runs_the_default_branchs_script():
     assert all(s.get("if", "").count("env.FORK != 'true'") for s in route if "uses" in s or s.get("id") == "paths")
 
 
-def test_validate_route_asks_for_validate(tmp_path):
-    jobs = workflow("validate.yaml")["jobs"]
-    decide = step(jobs["route"], "Every event here asks for validate")
-    output = tmp_path / "output"
+@pytest.mark.parametrize("name, job, output, step_name, take", [
+    ("build.yaml", "project-builds", "build", "Every event here asks for the build", "build"),
+    ("validate.yaml", "validate", "validate", "Every event here asks for validate", "validate"),
+])
+def test_route_asks_for_the_job_that_takes_the_project(tmp_path, name, job, output, step_name, take):
+    jobs = workflow(name)["jobs"]
+    decide = step(jobs["route"], step_name)
+    written = tmp_path / "output"
     run = subprocess.run(["bash", "-e", "-c", decide["run"]], capture_output=True, text=True,
-                         env={**os.environ, "GITHUB_OUTPUT": str(output),
+                         env={**os.environ, "GITHUB_OUTPUT": str(written),
                               "GITHUB_STEP_SUMMARY": str(tmp_path / "summary")})
     assert run.returncode == 0, run.stderr
-    assert output.read_text() == "validate=true\n"
-    # validate takes the project once, itself, and runs only when route asks for it.
-    assert jobs["validate"]["needs"] == "route"
-    assert jobs["validate"]["if"] == "needs.route.outputs.validate == 'true'"
-    assert sum(s.get("run") == ".github/scripts/take-project validate" for job in jobs.values() for s in job["steps"]) == 1
+    assert written.read_text() == f"{output}=true\n"
+    # The job takes the project itself, once, and runs only when route asks for it; route takes nothing.
+    assert jobs[job]["needs"] == "route"
+    assert jobs[job]["if"] == f"needs.route.outputs.{output} == 'true'"
+    command = f".github/scripts/take-project {take}"
+    assert [s.get("run") for s in jobs[job]["steps"]].count(command) == 1
+    call = re.compile(r"^\s*(\w+=\S*\s+)*\S*\.github/scripts/take-project\b", re.M)
+    assert not [s for s in jobs["route"]["steps"] if call.search(s.get("run", ""))]
 
 
 # --- tests.yaml's route, run on made-up commits ---

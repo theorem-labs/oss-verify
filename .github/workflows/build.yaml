@@ -10,7 +10,13 @@ name: "Build"
 # its system calls against the process model of the published proofs, its quiet twin, and the code it links
 # uninstrumented (docs/build-contract.md, "The checks of the binaries"). The step summary has both reports too.
 #
-# Then five more jobs:
+# The jobs, each run:
+#   route    asks for the build on every event this workflow takes, since each is a commit to judge. It reads nothing
+#            of the pull request.
+#   project-builds
+#            the build above, under the check name build, when route asks for it; it passes with nothing to build
+#            when the pull request enrolls no project (below). Its job id stays project-builds, the name the other jobs
+#            read its outputs by.
 #   record   writes the build's record, the artifact enrollment-record: the pull request, the project, the commit
 #            project-builds built, and each binary's .text and executable bytes, for enroll-dispatch.yml, which starts
 #            the theorem statements once every required check has passed.
@@ -26,9 +32,14 @@ name: "Build"
 #   keep     saves that review's session in the Actions cache, for the next push's review.
 #   comment  posts that comment, with the checks' report folded under it, or replaces the one already there. The
 #            comment starts with <!-- oss-verify-review -->, as the triage comment starts with its own marker.
+#   required always runs, last, and reports the required check (below).
 #
-# project-builds is a required check: it runs on every pull request (.github/scripts/take-project says which project
-# it takes):
+# project-builds is the required check, and the job required reports it (.github/scripts/collect). required runs on
+# every run, after all the other jobs whatever their results, and passes only if route passed and every job route asked
+# for passed: the build when route asked for it, and the record, review, hold, keep and comment jobs when their own
+# conditions call for them (the review when the build took a project); every other job must be skipped. A skipped job
+# counts as a pass where a check is required, so the build job is never the required check itself. The build takes the
+# project with .github/scripts/take-project, for each commit on its own:
 #   - A pull request from a fork is judged on the files GitHub lists for it: it fails if it changes anything but one
 #     project, which is built as it is at the fork's head. A pull request from a branch of this repository is judged
 #     on what merging it into the base branch changes (git merge-tree): it fails if the merge conflicts, and the one
@@ -42,11 +53,12 @@ name: "Build"
 #   - It fails for a pull request into any branch but the default one. The ruleset that requires the check guards only
 #     the default branch, so this failure blocks nothing, and it keeps a result judged against another branch from
 #     ever standing as a pass on the head commit if the base is then changed to the default branch.
-#   - It fails if the pull request's head or base moves while the step reads it; the run for the newest commit or
-#     base checks it again.
-# It runs on edited too, so that changing the base runs it again against the new base. edited is also sent when the
-# title or description is edited, and the project is then built again in full: a run that skipped its build would
-# replace an earlier result with a pass.
+#   - It fails if the pull request's head or base moves while the step reads it; the next run (for a newer commit, or
+#     after a change of base) checks it again.
+# It does not run on edited, which GitHub sends for an edit of the title or description (nothing the build judges
+# changes; before, such an edit built the project again in full) and for a change of base. After a change of base, a
+# push or closing and reopening the pull request runs it again; until then a pull request into another branch keeps
+# its failed check. The review is of a commit too: an edit of the description alone is reviewed with the next push.
 # It runs on ready_for_review too: enroll-dispatch.yml starts no statements for a draft pull request, and the
 # completion of this run, when the draft is marked ready, is what has it decide again.
 # A failure is usually the project's, but it can be the runner's: GitHub's runner may run out of disk or time on a
@@ -158,7 +170,7 @@ run-name: ${{ github.event.pull_request.title || format('Pull request {0}', inpu
 
 on:
   pull_request_target:
-    types: [opened, reopened, synchronize, edited, ready_for_review]
+    types: [opened, reopened, synchronize, ready_for_review]
   workflow_dispatch:
     inputs:
       pr:
@@ -176,9 +188,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  route:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+    steps:
+      - name: Every event here asks for the build
+        id: decide
+        run: |
+          echo "build=true" >> "$GITHUB_OUTPUT"
+          message="build runs: it takes the pull request's project, if it has one (.github/scripts/take-project)."
+          echo "$message"
+          echo "$message" >> "$GITHUB_STEP_SUMMARY"
+
   project-builds:
-    # A static name: GitHub reports the check under it on every run, and a required job has no job-level if:.
-    name: project-builds
+    # Not the required check, which the job required reports (the top of this file).
+    name: build
+    needs: route
+    if: needs.route.outputs.build == 'true'
     runs-on: ubuntu-24.04
     # tools/check has no time limit of its own: this one is the runner's, the most it allows, for two builds and
     # --checks (at most 30 minutes of runs for the checks of the binaries, 2 x 20 minutes of seed runs on the unchanged
@@ -710,8 +739,13 @@ jobs:
           persist-credentials: false
           sparse-checkout: .github/scripts
 
+      # Every step below fails this job only for this run's own finding (review-hold's own rule): when this review
+      # held none, a failure here is about another run's stored finding, which stays in the bucket for the next run,
+      # and it must not fail this run's required check (project-builds collects this job). The step still shows as
+      # failed, with its annotation.
       - name: Sign in to Google Cloud
         id: gcp
+        continue-on-error: ${{ needs.review.outputs.held_object == '' }}
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0 (sha-pinned)
         with:
           workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
@@ -724,6 +758,7 @@ jobs:
       # Whether the bucket holds any finding at all: most runs end here.
       - name: Look for stored held findings
         id: list
+        continue-on-error: ${{ needs.review.outputs.held_object == '' }}
         env:
           GCP_ACCESS_TOKEN: ${{ steps.gcp.outputs.access_token }}
         run: |
@@ -737,6 +772,7 @@ jobs:
       # The App's private key, as the comment job reads it (that job's comment says how it is masked).
       - name: Read the oss-verify App's key
         id: key
+        continue-on-error: ${{ needs.review.outputs.held_object == '' }}
         if: ${{ steps.list.outputs.any == 'true' }}
         env:
           GCP_ACCESS_TOKEN: ${{ steps.gcp.outputs.access_token }}
@@ -759,6 +795,7 @@ jobs:
       # it unless GitHub says it is private.
       - name: Where the held findings go
         id: where
+        continue-on-error: ${{ needs.review.outputs.held_object == '' }}
         if: ${{ steps.list.outputs.any == 'true' }}
         env:
           GCP_ACCESS_TOKEN: ${{ steps.gcp.outputs.access_token }}
@@ -776,7 +813,10 @@ jobs:
 
       - name: Get the oss-verify App's token for the held findings' repository
         id: app
-        if: ${{ steps.list.outputs.any == 'true' }}
+        continue-on-error: ${{ needs.review.outputs.held_object == '' }}
+        # Only with the key and the one repository read: an empty repository list would give a token for every
+        # repository of the App's installation.
+        if: ${{ steps.list.outputs.any == 'true' && steps.key.outputs.key != '' && steps.where.outputs.name != '' }}
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0 (sha-pinned)
         with:
           client-id: Iv23liAWPMahJZYsw3un
@@ -787,7 +827,8 @@ jobs:
 
       # Each stored finding, read, sent and then deleted; one that is not sent stays for the next run.
       - name: Send every stored held finding to the disclosure route
-        if: ${{ steps.list.outputs.any == 'true' }}
+        if: ${{ steps.list.outputs.any == 'true' && steps.app.outputs.token != '' }}
+        continue-on-error: ${{ needs.review.outputs.held_object == '' }}
         env:
           GCP_ACCESS_TOKEN: ${{ steps.gcp.outputs.access_token }}
           GH_TOKEN: ${{ steps.app.outputs.token }}
@@ -951,3 +992,43 @@ jobs:
             jq -n --rawfile body "$RUNNER_TEMP/comment.md" '{body: $body}' \
               | gh api --method POST "repos/$REPO/issues/$PR/comments" --input - > /dev/null
           fi
+
+  required:
+    # The required check project-builds (the top of this file), with .github/scripts/collect. A static name: GitHub
+    # reports the check under it on every run.
+    name: project-builds
+    needs: [route, project-builds, record, review, hold, keep, comment]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      # Only for the checkout of .github/scripts.
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - name: Every job route asked for passed, and no other ran
+        env:
+          ROUTE: ${{ needs.route.result }}
+          BUILD: ${{ needs.project-builds.result }}
+          ASKED_BUILD: ${{ needs.route.outputs.build == 'true' }}
+          # Each of the others is asked for on its own job's condition: the record when the build passed and took a
+          # project, the review when the build took a project, hold when the review ran, keep when the review kept its
+          # session, comment when the build took a project and the review wrote a comment or did not pass.
+          RECORD: ${{ needs.record.result }}
+          ASKED_RECORD: ${{ needs.project-builds.result == 'success' && needs.project-builds.outputs.name != '' }}
+          REVIEW: ${{ needs.review.result }}
+          ASKED_REVIEW: ${{ needs.project-builds.outputs.name != '' }}
+          HOLD: ${{ needs.hold.result }}
+          ASKED_HOLD: ${{ needs.review.result != 'skipped' }}
+          KEEP: ${{ needs.keep.result }}
+          ASKED_KEEP: ${{ needs.review.outputs.session == 'kept' }}
+          COMMENT: ${{ needs.comment.result }}
+          ASKED_COMMENT: ${{ needs.project-builds.outputs.name != '' && (needs.review.result != 'success' || needs.review.outputs.comment != '') }}
+        run: >-
+          .github/scripts/collect "$ROUTE" "build:$BUILD:$ASKED_BUILD" "record:$RECORD:$ASKED_RECORD"
+          "review:$REVIEW:$ASKED_REVIEW" "hold:$HOLD:$ASKED_HOLD" "keep:$KEEP:$ASKED_KEEP"
+          "comment:$COMMENT:$ASKED_COMMENT"
