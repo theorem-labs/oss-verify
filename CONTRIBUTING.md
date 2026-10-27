@@ -37,3 +37,4 @@ A finding id has these parts, in this order:
 4. 8 random characters from Crockford's base32 alphabet, in capitals. This alphabet has the digits 0 to 9, and the letters A to Z but not I, L, O and U.
 
 As a regular expression, an id is `THM-[0-9]{4}-[0-9A-HJKMNP-TV-Z]{8}`. Each finding gets one id, when we first report it. We never use an id again. A duplicate of a finding keeps the id of that finding.
+
