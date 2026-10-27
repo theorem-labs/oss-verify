@@ -3,6 +3,5 @@
 repo: https://github.com/DaveGamble/cJSON#v1.7.18
 primary_contact: n/a
 homepage: https://github.com/DaveGamble/cJSON
-language: c
 sanitizers: [address, undefined]
 fuzz_targets: [cjson_read_fuzzer]
