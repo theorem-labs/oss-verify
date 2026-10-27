@@ -23,21 +23,21 @@ A maintainer gets a message from us at four points only. Each point is one comme
 - A failed review job is not a message. Run it again. The review comment, when it posts, is the only text about the review. A maintainer's question about the failure is answered by the new run and the current decision, not by an account of what went wrong.
 - Answer each question or request from a maintainer once. When the message also gives a decision, the decision is the first sentence and the answer the second. Otherwise the first sentence gives the answer and its reason, for example "No: `libfoo` 1.2 is not built yet, because its build fails at `configure`." An unanswered question is how threads grow.
 - If an earlier request of ours was wrong, put the corrected request in the current comment for that point: what to change now, with its evidence. Do not apologise or tell the history.
-- After a merge, post only the decision `Merged.` and, later, results. A merged enrollment changes only through a new pull request.
+- After a merge, post only the decision comment and, later, results. The decision comment is `Merged.`, with any finding that did not block, and any corrected request, in its collapsed block. A merged enrollment changes only through a new pull request.
 - On a project's own repository, keep at most 3 of our issues and pull requests open with no answer from its maintainers. The rest wait until they answer, because a burst of them buries the maintainer.
 
 ## The shape
 
 Write these parts in this order, and stop after the last one:
 
-1. The decision, as the first sentence: `2 changes are needed before the merge.`, `No changes are needed.`, `Merged.`, `Statements for libfoo: <link>.` The maintainer must know the outcome without reading further.
+1. The decision, as the first sentence: `2 changes are needed before the merge.` or `No changes are needed.` (the review comment), `Nothing blocks the merge.`, `Merged.`, `Statements for libfoo: <link>.` The maintainer must know the outcome without reading further.
 2. One numbered item for each change that blocks the merge: what is wrong, the evidence (a file and line, the input that shows it, or a link to the comment that gives that input), and the exact change to make. One to three sentences each, because the details block holds the rest.
 3. One collapsed block for facts that the maintainer needs only while making a fix: inputs, steps, long lists, and findings that do not block. Start it with `<details><summary>Details</summary>` and end it with `</details>`. Name every failed check in the facts here, even when no rule says whether it blocks; then say that it does not block. A failure that the message leaves out comes back as a second message.
 4. Only when the maintainer's pull request is a draft, because GitHub does not merge a draft, the last line: `When it is ready, mark the pull request ready for review.`
 
 Count these limits on everything outside a closed `<details>` block and outside HTML comments, code included. The summary of a closed block counts, and so does a `<details open>` block, because GitHub shows both:
 
-- The review comment: at most 5 blocking items, and under 1,500 characters. Put each further blocking item in the details block, under `More blocking items`.
+- The review comment: at most 5 blocking items, and under 1,500 characters. Put each further blocking item in the details block, under `More changes`.
 - Every other message: under 80 words, because it carries one decision or one answer.
 
 ## Leave out
@@ -48,7 +48,7 @@ Each of these made our messages long, and none of them helps the maintainer act:
 - What passed, and anything that the diff or the checks already show. The maintainer can read those.
 - Apologies, and the story of a mistake. Edit the wrong text, and state what is true now.
 - Promises, dates, queue order, offers of future work, and "we will". A commitment needs a person's approval, and the writer cannot check that it will hold.
-- Sentences about our tools, our review, our model or our team, except the reason that holds the merge (for example, a language that our tools do not write statements for yet).
+- Sentences about our tools, our review, our criteria, our model or our team. When a limit of our tools holds the merge, state it as a fact about the project in one sentence, for example "Go projects get no theorem statements yet."
 - Filler and hedges: "please note", "just", "feel free", "happy to", "it seems", "I hope", "great".
 
 ## Write plainly
