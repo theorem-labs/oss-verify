@@ -262,7 +262,7 @@ class ReviewComment(unittest.TestCase):
         # Its text may even start with a forged "Answered by" line (before the gate, the model could write one), with
         # or without a checks block, in either older layout: only metadata version 3 makes a review recorded.
         answered = review_comment.ANSWERED.format(ANSWERED_OK)
-        footer = review_comment.FOOTER.format(of='It is the review of `aaaaaaa`. ')
+        footer = review_comment.FOOTER.format(of=' of `aaaaaaa`')
         meta = review_comment.meta_line('a' * 40, 'review', 2)
         old = f"{review_comment.MARKER}\n{meta}\n\n{review_comment.HEADING}\n\n{footer}\n\nThanks.\n\n1. Fix X.\n"
         forged = f"{review_comment.MARKER}\n{meta}\n\n{review_comment.HEADING}\n\n{footer}\n\n{answered}\n\n1. Fix X.\n"
@@ -333,13 +333,41 @@ class ReviewComment(unittest.TestCase):
         self.assertIn("What answered it, as Claude Code reported it: `it asked for anthropic/claude-opus-5-5, which "
                       "the tool calls firstParty/claude-opus-5-5, but bedrock/claude-opus-5-5 (2 turns) answered",
                       notice)
-        self.assertTrue(notice.endswith("A person at Theorem reviews the enrollment."))
+        self.assertTrue(notice.endswith("names bedrock/claude-opus-5-5`."), notice)
+        self.assertNotIn("person at Theorem", second)
         # The kept review keeps what answered it; a second keep writes the notice afresh, and nothing stacks.
         self.assertIn(f"<sub>Answered by `{ANSWERED_OK}`, as Claude Code reported it.</sub>", second)
         third = self.kept(second, "c" * 40)
         self.assertEqual(third.count("What answered it"), 1)
         self.assertEqual(third.count("<sub>Answered by"), 1)
         self.assertIn(f"What answered it, as Claude Code reported it: `{ANSWERED_OK}`.", third)
+
+    def test_no_comment_says_that_a_person_reviews_the_enrollment(self):
+        # The merge follows written criteria; no comment this script writes claims a person's review.
+        texts = [self.comment("1. Fix X.\n", "### report\n", "--head", "a" * 40),
+                 self.comment("", "### report\n", "--head", "a" * 40),
+                 self.comment("", "### report\n", "--head", "a" * 40, served=SERVED_OTHER)]
+        texts.append(self.kept(texts[0], "b" * 40))
+        for text in texts:
+            self.assertNotIn("person at Theorem", text)
+
+    def test_a_kept_comment_loses_every_old_footer_at_its_front(self):
+        # A comment that an earlier version kept: its own footer of that version, then the footer of the version
+        # before it (the review's original one), then what answered. Keeping it again writes this version's footer
+        # once, and neither old footer, with its sentence about a person, survives.
+        of = f"It is the review of `{'a' * 7}`. "
+        old_footers = [footer.format(of=of) for footer in review_comment.OLD_FOOTERS]
+        answered = review_comment.ANSWERED.format(ANSWERED_OK)
+        meta = review_comment.meta_line('a' * 40, 'stale')
+        notice = "**Not current:** this is the review of `aaaaaaa`. The review of `ccccccc` did not finish."
+        old = (f"{review_comment.MARKER}\n{meta}\n\n{review_comment.HEADING}\n\n{notice}\n\n"
+               + "\n\n".join(old_footers) + f"\n\n{answered}\n\n1. Fix X.\n")
+        kept = self.kept(old, "b" * 40)
+        self.assertEqual(kept.count("<sub>Claude wrote this review"), 1)
+        self.assertIn(review_comment.FOOTER.format(of=f" of `{'a' * 7}`"), kept)
+        self.assertNotIn("person at Theorem", kept)
+        self.assertIn("1. Fix X.", kept)
+        self.assertEqual(kept.count("<sub>Answered by"), 1)
 
     def test_a_review_with_details_is_posted_whole(self):
         text = self.comment("Thanks.\n\n<details><summary>x</summary>y</details>\n\n1. Fix X.\n\n2. Fix Y.\n")
@@ -357,7 +385,7 @@ class ReviewComment(unittest.TestCase):
     def test_the_commit_is_in_the_metadata_and_the_footer(self):
         text = self.comment("Thanks.\n", "### report\n", "--head", "abc1234" + "0" * 33)
         self.assertEqual(self.meta(text).group("head"), "abc1234" + "0" * 33)
-        self.assertIn("It is the review of `abc1234`.", text)
+        self.assertIn("Claude wrote this review of `abc1234` from", text)
 
     def test_a_review_that_did_not_finish_keeps_the_last_one_as_not_current(self):
         first = self.comment("Thanks.\n\n1. Fix X.\n", "### report\n", "--head", "a" * 40)
@@ -382,7 +410,7 @@ class ReviewComment(unittest.TestCase):
     def test_a_kept_comment_gets_its_footer_written_before_the_old_text(self):
         # The footer is written again above the kept comment, where nothing in the old text can hide it, and the old
         # comment's own footer, first as this script writes it, is not kept as well.
-        footer = review_comment.FOOTER.format(of=f"It is the review of `{'a' * 7}`. ")
+        footer = review_comment.FOOTER.format(of=f" of `{'a' * 7}`")
         first = self.comment("Thanks.\n\n1. Fix X.\n", "### report\n", "--head", "a" * 40)
         second = self.kept(first, "b" * 40)
         blocks = second.split("\n\n")
@@ -417,7 +445,7 @@ class ReviewComment(unittest.TestCase):
         self.assertEqual(self.kept(first, "a" * 40), first)
         # A comment of an older renderer (review first, footer last) names nothing that answered it: it is kept as
         # not current, with its text, and not sent back as the review.
-        footer = review_comment.FOOTER.format(of=f"It is the review of `{'a' * 7}`. ")
+        footer = review_comment.FOOTER.format(of=f" of `{'a' * 7}`")
         base = (f"{review_comment.MARKER}\n<!-- oss-verify-meta v=1 head={'a' * 40} status=review -->\n\n"
                 f"{review_comment.HEADING}\n\nThanks.\n\n{review_comment.CHECKS_SUMMARY}\n\n### report\n\n"
                 f"</details>\n\n{footer}\n")
@@ -438,7 +466,7 @@ class ReviewComment(unittest.TestCase):
         # the old text, and only one footer is taken off, the one in the place this script writes it: a review that
         # opens with the cut sentence (with a number too long to read, too) or with the footer is kept whole however
         # often it is kept, a keep for the same push gives the same comment, and keeping it never fails.
-        footer = review_comment.FOOTER.format(of=f"It is the review of `{'a' * 7}`. ")
+        footer = review_comment.FOOTER.format(of=f" of `{'a' * 7}`")
         for opening in (f"The review is cut at 7 characters: {review_comment.KEPT_WHERE}.",
                         f"The review is cut at 1{',111' * 1_500} characters: {review_comment.KEPT_WHERE}.",
                         f" The review is cut at 9 characters: {review_comment.KEPT_WHERE}.", footer,
@@ -606,8 +634,9 @@ class WorkflowArguments(unittest.TestCase):
     the files; it does not run them, so it proves nothing about what a called script does with what it is given."""
 
     # The jobs of each workflow that read the App's key, in the GitHub Environment `comment`: build.yaml's hold job
-    # sends held findings with the App's token.
-    KEY_JOBS = {"build.yaml": ("comment", "hold"), "triage.yaml": ("comment",), "enroll-dispatch.yml": ("dispatch",)}
+    # sends held findings with the App's token. triage.yaml holds no credential: build.yaml's comment job posts its
+    # comment.
+    KEY_JOBS = {"build.yaml": ("comment", "hold"), "enroll-dispatch.yml": ("dispatch",)}
 
     def workflow(self, name):
         return yaml.safe_load((ROOT / ".github" / "workflows" / name).read_text())
@@ -651,7 +680,6 @@ class WorkflowArguments(unittest.TestCase):
         # by those names, beside the environment variables.
         for workflow, names in (("build.yaml", ("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "OTEL_COLLECTOR_TOKEN",
                                                 "GCP_ACCESS_TOKEN", "key", "payload")),
-                                ("triage.yaml", ("GCP_ACCESS_TOKEN", "key", "payload")),
                                 ("enroll-dispatch.yml", ("GCP_ACCESS_TOKEN", "key", "payload"))):
             steps = self.steps(workflow)
             for name in names:
@@ -682,7 +710,7 @@ class WorkflowArguments(unittest.TestCase):
         # to its job, and these files must also keep id-token: write off every other job. project-builds builds the
         # pull request's code and triage's gather reads its text, so neither may ever ask for one. A job with no permissions of its own inherits the workflow's, so the effective
         # permission is what is read here: a workflow-level id-token: write would reach every job.
-        for workflow, want in (("build.yaml", {"review", "comment", "hold"}), ("triage.yaml", {"comment"}),
+        for workflow, want in (("build.yaml", {"review", "comment", "hold"}), ("triage.yaml", set()),
                                ("enroll-dispatch.yml", {"dispatch"})):
             parsed = self.workflow(workflow)
             default = parsed.get("permissions") or {}
@@ -693,12 +721,23 @@ class WorkflowArguments(unittest.TestCase):
                     got.add(name)
             self.assertEqual(got, want, f"{workflow}: the jobs whose effective permissions hold id-token: write")
 
+    def test_triage_yaml_holds_no_identity_token_and_no_environment(self):
+        # Its comment moved to build.yaml, whose review job checks it: no job of triage.yaml signs in to anything.
+        parsed = self.workflow("triage.yaml")
+        self.assertNotEqual((parsed.get("permissions") or {}).get("id-token"), "write")
+        for name, job in parsed["jobs"].items():
+            self.assertNotEqual((job.get("permissions") or {}).get("id-token"), "write", name)
+            self.assertNotIn("environment", job, name)
+            self.assertNotIn("comment", name)
+        self.assertNotIn("ossv-app-comment", json.dumps(parsed))
+        self.assertNotIn("google-github-actions/auth", json.dumps(parsed))
+
     def test_the_helpers_use_no_argv_form_for_the_github_token(self):
         gather = (ROOT / ".github" / "scripts" / "review-gather").read_text()
         take = (ROOT / ".github" / "scripts" / "take-project").read_text()
         # env NAME=value puts the value in env's argument vector; -c http.extraheader= puts the header in git's.
         self.assertNotIn("env GITHUB_TOKEN=", gather)
-        self.assertIn('GITHUB_TOKEN="${GH_TOKEN:-}" keep', gather)
+        self.assertIn('GITHUB_TOKEN="${GH_TOKEN:-}" python3 .github/scripts/triage.py', gather)
         self.assertNotIn("-c http.extraheader=", take)
         self.assertIn("--config-env=http.extraheader=", take)
 
@@ -780,7 +819,7 @@ class WorkflowArguments(unittest.TestCase):
         gather = (ROOT / ".github" / "scripts" / "review-gather").read_text()
         take = (ROOT / ".github" / "scripts" / "take-project").read_text()
         keep = re.search(r"^keep\(\) \{.*\}$", gather, re.M).group(0)
-        call = re.search(r"^.*\bkeep triage-today\.md .*$", gather, re.M).group(0)
+        call = re.search(r"^triage\(\) \{\n.*?^\}$", gather, re.M | re.S).group(0) + "\ntriage"
         fetch = re.search(r"^fetch_head\(\) \{\n.*?^\}$", take, re.M | re.S).group(0)
         with tempfile.TemporaryDirectory() as directory:
             directory = pathlib.Path(directory)
@@ -908,9 +947,9 @@ class WorkflowArguments(unittest.TestCase):
 
     def test_every_google_sign_in_keeps_its_token_to_one_step(self):
         # Each auth step writes no credentials file, exports no variable, and mints a five-minute access token: its
-        # output is all that holds it. Six steps: build.yaml's review job signs in before the review and again, for a
-        # held finding, after it (the first token has expired by then); its hold and comment jobs, triage's comment job
-        # and enroll-dispatch's dispatch job sign in once each.
+        # output is all that holds it. Five steps: build.yaml's review job signs in before the review and again, for a
+        # held finding, after it (the first token has expired by then); its hold and comment jobs and enroll-dispatch's
+        # dispatch job sign in once each.
         found = 0
         for workflow in self.KEY_JOBS:
             for name, job in self.workflow(workflow)["jobs"].items():
@@ -922,7 +961,7 @@ class WorkflowArguments(unittest.TestCase):
                                          {"token_format": "access_token", "access_token_lifetime": "300s",
                                           "create_credentials_file": False, "export_environment_variables": False},
                                          f"{workflow} {name}")
-        self.assertEqual(found, 6)
+        self.assertEqual(found, 5)
 
     def test_another_job_in_the_comment_environment_is_refused_in_every_shape(self):
         # The shapes GitHub takes for `environment` (workflow syntax, jobs.<job_id>.environment), each put on the
@@ -947,7 +986,7 @@ class PostingStep(unittest.TestCase):
     OLD = "Thanks.\n\n1. Fix X.\n"
 
     def post(self, review, existing=True, previous=None, head="b" * 40, pr_head=None, served=SERVED_OK, refused="",
-             post_to_pr="post", summary=None):
+             post_to_pr="post", summary=None, state="open"):
         workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
         name = "Post the comment, or update the one already there"
         matches = [s for s in workflow["jobs"]["comment"]["steps"] if s.get("name") == name]
@@ -965,7 +1004,7 @@ class PostingStep(unittest.TestCase):
             (bin / "gh").write_text(
                 "#!/bin/bash\n"
                 f'case "$*" in\n'
-                f'  *"pulls/8 "*) echo {pr_head or head} ;;\n'
+                f'  *"pulls/8 "*) echo {pr_head or head} {state} ;;\n'
                 f'  *"--method PATCH"*) cat > {directory}/patch.json ;;\n'
                 f'  *"--method POST"*) cat > {directory}/post.json ;;\n'
                 f'  *"--paginate"*) {"echo 4242" if existing else "true"} ;;\n'
@@ -1003,32 +1042,77 @@ class PostingStep(unittest.TestCase):
                 self.assertIn("\n    Fix Y.\n", summary[0])
                 self.assertIn(f"\n    {review_comment.MARKER}\n", summary[0])
 
-    def test_the_triage_comment_is_a_draft_without_its_variable(self):
-        # triage.yaml's own posting step: with OSSV_POST_TRIAGE anything but post, it calls gh not at all and writes the
-        # draft to the summary; with post, it posts.
-        workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "triage.yaml").read_text())
-        name = "Post the comment, or update the one already there"
+    TRIAGE = "<!-- oss-verify-triage -->\n### Triage\n\n| Check | Result |\n"
+
+    def post_triage(self, post_to_pr, passed, state="open", existing=False, pr_head="b" * 40, comment=TRIAGE):
+        """build.yaml's own triage posting step, run with a fake gh: (gh calls, the body sent and how, summary)."""
+        workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
+        name = "Post the triage comment, or update the one already there"
         matches = [s for s in workflow["jobs"]["comment"]["steps"] if s.get("name") == name]
         self.assertEqual(len(matches), 1)
-        self.assertEqual(matches[0]["env"]["POST_TO_PR"], "${{ vars.OSSV_POST_TRIAGE }}")
-        for value, posts in (("", False), ("draft", False), ("Post", False), ("post", True)):
-            with tempfile.TemporaryDirectory() as directory:
-                directory = pathlib.Path(directory)
-                (directory / "bin").mkdir()
-                (directory / "bin" / "gh").write_text(
-                    f'#!/bin/bash\necho "$*" >> {directory}/calls\n'
-                    f'case "$*" in *"--method POST"*) cat > {directory}/post.json ;; esac\n')
-                (directory / "bin" / "gh").chmod(0o755)
-                environment = {**os.environ, "PATH": f"{directory / 'bin'}:{os.environ['PATH']}", "GH_TOKEN": "x",
-                               "REPO": "o/r", "PR": "8", "COMMENT": "<!-- oss-verify-triage -->\n### Triage\n",
-                               "POST_TO_PR": value, "GITHUB_STEP_SUMMARY": str(directory / "summary")}
-                run = subprocess.run(["bash", "-e", "-c", matches[0]["run"]], env=environment, capture_output=True,
-                                     text=True)
-                self.assertEqual(run.returncode, 0, run.stderr)
-                self.assertEqual((directory / "post.json").exists(), posts, value)
-                if not posts:
-                    self.assertFalse((directory / "calls").exists(), value)
-                    self.assertIn("\n    ### Triage\n", (directory / "summary").read_text())
+        step = matches[0]
+        self.assertEqual(step["env"]["POST_TO_PR"], "${{ vars.OSSV_POST_TRIAGE }}")
+        self.assertEqual(step["env"]["TRIAGE_PASS"], "${{ needs.review.outputs.triage_pass }}")
+        self.assertEqual(step["env"]["COMMENT"], "${{ needs.review.outputs.triage_comment }}")
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            (directory / "bin").mkdir()
+            (directory / "bin" / "gh").write_text(
+                f'#!/bin/bash\necho "$*" >> {directory}/calls\n'
+                'case "$*" in\n'
+                f'  *"pulls/8 "*) echo {pr_head} {state} ;;\n'
+                f'  *"--method PATCH"*) cat > {directory}/patch.json ;;\n'
+                f'  *"--method POST"*) cat > {directory}/post.json ;;\n'
+                f'  *"--paginate"*) {"echo 4242" if existing else "true"} ;;\n'
+                '  *) echo "unexpected gh $*" >&2; exit 1 ;;\n'
+                'esac\n')
+            (directory / "bin" / "gh").chmod(0o755)
+            environment = {**os.environ, "PATH": f"{directory / 'bin'}:{os.environ['PATH']}", "GH_TOKEN": "x",
+                           "REPO": "o/r", "PR": "8", "COMMENT": comment, "TRIAGE_PASS": "true" if passed else "",
+                           "HEAD_SHA": "b" * 40, "POST_TO_PR": post_to_pr,
+                           "GITHUB_STEP_SUMMARY": str(directory / "summary")}
+            run = subprocess.run(["bash", "-e", "-c", step["run"]], env=environment, capture_output=True, text=True)
+            # The comment job succeeds in every case.
+            self.assertEqual(run.returncode, 0, run.stderr)
+            calls = (directory / "calls").read_text() if (directory / "calls").exists() else ""
+            sent = [(name, json.loads((directory / f"{name}.json").read_text())["body"])
+                    for name in ("patch", "post") if (directory / f"{name}.json").exists()]
+            summary = (directory / "summary").read_text() if (directory / "summary").exists() else ""
+            return calls, sent, summary
+
+    def test_the_triage_comment_is_posted_only_when_post_pass_open_and_current(self):
+        for value in ("", "draft", "Post", "post"):
+            for passed in (True, False):
+                for state in ("open", "closed"):
+                    with self.subTest(value=value, passed=passed, state=state):
+                        calls, sent, summary = self.post_triage(value, passed, state)
+                        if value == "post" and passed and state == "open":
+                            self.assertEqual(sent, [("post", self.TRIAGE)])
+                            self.assertEqual(summary, "")
+                            continue
+                        self.assertEqual(sent, [])
+                        # gh is not called at all unless the variable is post and the comment passed its check.
+                        if not (value == "post" and passed):
+                            self.assertEqual(calls, "")
+                        else:
+                            self.assertNotIn("--method", calls)
+                        self.assertIn("Draft of the triage comment (not posted)", summary)
+                        self.assertIn("\n    ### Triage\n", summary)
+                        self.assertIn(f"The check of the triage comment: {'pass' if passed else 'fail'}.", summary)
+
+    def test_the_triage_comment_already_there_is_updated(self):
+        calls, sent, _ = self.post_triage("post", True, existing=True)
+        self.assertEqual(sent, [("patch", self.TRIAGE)])
+        self.assertIn("issues/comments/4242", calls)
+
+    def test_a_run_of_an_older_head_posts_no_triage_comment(self):
+        calls, sent, summary = self.post_triage("post", True, pr_head="c" * 40)
+        self.assertEqual(sent, [])
+        self.assertIn("the run of that head posts", summary)
+
+    def test_no_triage_comment_posts_nothing_and_writes_no_draft(self):
+        calls, sent, summary = self.post_triage("post", True, comment="")
+        self.assertEqual((calls, sent, summary), ("", [], ""))
 
     def status(self, body):
         return review_comment.META.match(body.split("\n")[1]).group("status")
@@ -1063,9 +1147,18 @@ class PostingStep(unittest.TestCase):
         self.assertEqual(once, stored)
         self.assertEqual(self.post("", previous=once), stored)
 
-    def test_a_review_another_provider_answered_is_posted_as_not_published(self):
-        # The review job passes on no review text when another provider or model answered, only the record.
-        body = self.post("", existing=False, served=SERVED_OTHER)
+    def draft(self, review, **options):
+        """The comment the step would send, read from the job summary of a draft run."""
+        summary = []
+        self.assertIsNone(self.post(review, post_to_pr="draft", summary=summary, **options))
+        lines = summary[0].split("\n")
+        return "\n".join(line[4:] for line in lines[lines.index("") + 3:] if line.startswith("    ") or not line)
+
+    def test_a_review_another_provider_answered_is_not_published(self):
+        # The review job passes on no review text when another provider or model answered, only the record. With no
+        # comment to mark not current, that is not a message: nothing is posted, and the draft says why.
+        self.assertIsNone(self.post("", existing=False, served=SERVED_OTHER))
+        body = self.draft("", existing=False, served=SERVED_OTHER)
         self.assertEqual(self.status(body), "none")
         self.assertIn("is not published ([the run](https://github.com/o/r/actions/runs/7)). What answered it, as "
                       "Claude Code reported it: `it asked for", body)
@@ -1073,15 +1166,22 @@ class PostingStep(unittest.TestCase):
         self.assertEqual(self.status(kept), "stale")
         self.assertIn("but bedrock/claude-opus-5-5 (2 turns) answered", kept)
 
-    def test_a_refused_review_is_posted_as_not_published(self):
+    def test_a_refused_review_is_not_published(self):
         record = "asked anthropic/claude-opus-5-5\nendpoint api.anthropic.com\nnone/claude-opus-5-5 4\n"
-        body = self.post("", existing=False, served=record, refused="true")
-        self.assertIn("is not published ([the run]", body)
-        body = self.post("", existing=False, served=record)
-        self.assertIn("did not run on this push", body)
+        self.assertIsNone(self.post("", existing=False, served=record, refused="true"))
+        self.assertIn("is not published ([the run]", self.draft("", existing=False, served=record, refused="true"))
+        self.assertIsNone(self.post("", existing=False, served=record))
+        self.assertIn("did not run on this push", self.draft("", existing=False, served=record))
 
-    def test_without_a_posted_comment_it_posts_one(self):
-        self.assertEqual(self.status(self.post(" \n", existing=False)), "none")
+    def test_without_a_review_or_a_posted_comment_it_posts_nothing(self):
+        self.assertIsNone(self.post(" \n", existing=False))
+        self.assertEqual(self.status(self.draft(" \n", existing=False)), "none")
+
+    def test_a_merged_or_closed_pull_request_gets_nothing(self):
+        for existing in (True, False):
+            self.assertIsNone(self.post("Fix Y.\n", existing=existing, state="closed"), existing)
+            self.assertIsNone(self.post("", existing=existing, state="closed"), existing)
+            self.assertIn("Fix Y.", self.draft("Fix Y.\n", existing=existing, state="closed"))
 
     def test_keeping_the_same_comment_again_and_again_changes_nothing(self):
         # A posted review just under GitHub's limit, kept by three runs of the step for the same push: the first keep
@@ -1390,10 +1490,13 @@ class ReviewRun(unittest.TestCase):
             (bin / command).write_text(f"#!/bin/bash\nprintf '%s\\0' {command} \"$@\" >> {self.directory}/argv\n"
                                        f"exec {real} \"$@\"\n")
         (self.directory / "stream").write_text(stream({"type": "result", "is_error": False, "result": "Thanks."}))
+        (self.directory / "judge.pass").write_text(stream({"type": "result", "is_error": False,
+                                                            "result": '{"verdict": "pass", "findings": []}'}))
         # claude also keeps its conversation as the real one does, in $HOME/.claude/projects/<folder>/<id>.jsonl, and
-        # refuses to resume one that is not there, or any one at all when the file fail-resume exists.
+        # refuses to resume one that is not there, or any one at all when the file fail-resume exists. On its call N it
+        # prints stream.N when there is one, else stream.
         (bin / "claude").write_text(
-            f"#!/bin/bash\nprintf '%s\\0' claude \"$@\" >> {self.directory}/argv\n"
+            f"#!/bin/bash\n{self.judge_branch()}printf '%s\\0' claude \"$@\" >> {self.directory}/argv\n"
             f"{{ printf '%s\\0' \"$@\"; printf '\\0'; }} >> {self.directory}/calls\n"
             f"cat /proc/$$/environ > {self.directory}/environ\n"
             'id="" resume=""\n'
@@ -1410,13 +1513,43 @@ class ReviewRun(unittest.TestCase):
             f'  {{ echo "{{\\"resumed\\": \\"$resume\\"}}"; cat {self.directory}/said 2> /dev/null; }} \\\n'
             f'    >> "$HOME/.claude/projects/{self.FOLDER}/$id.jsonl"\n'
             'fi\n'
-            f"cat {self.directory}/stream\n")
+            f"n=$(( $(cat {self.directory}/review-calls 2> /dev/null || echo 0) + 1 ))\n"
+            f"echo $n > {self.directory}/review-calls\n"
+            f"if [ -f {self.directory}/stream.$n ]; then cat {self.directory}/stream.$n\n"
+            f"else cat {self.directory}/stream; fi\n")
         for script in bin.iterdir():
             script.chmod(0o755)
         (self.directory / "review").mkdir()
         (self.directory / "home").mkdir()
         self.session = pathlib.Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.session)
+
+    def judge_branch(self):
+        """The start of each stand-in claude: a call with `--tools ""` is the reader of the comment's check. It records
+        its arguments, in argv as claude-judge and in judge-calls, and prints the stream of judge.K on its call K, or of
+        a pass."""
+        d = self.directory
+        return ('judge="" prev=""\n'
+                'for a in "$@"; do if [ "$prev" = --tools ] && [ -z "$a" ]; then judge=yes; fi; prev=$a; done\n'
+                'if [ -n "$judge" ]; then\n'
+                f"  printf '%s\\0' claude-judge \"$@\" >> {d}/argv\n"
+                f"  {{ printf '%s\\0' \"$@\"; printf '\\036'; }} >> {d}/judge-calls\n"
+                f'  k=$(( $(cat {d}/judges 2> /dev/null || echo 0) + 1 )); echo $k > {d}/judges\n'
+                f'  if [ -f {d}/judge.$k ]; then cat {d}/judge.$k; else cat {d}/judge.pass; fi\n'
+                '  exit 0\n'
+                'fi\n')
+
+    def judge(self, *answers, model="claude-opus-5-5"):
+        """The reader's answer on its call K: the text answers[K-1], from `model`."""
+        for k, answer in enumerate(answers, 1):
+            (self.directory / f"judge.{k}").write_text(stream({"type": "result", "is_error": False,
+                                                                "result": answer}, model))
+
+    def judge_calls(self):
+        """The reader's calls, each its arguments. Each call ends with a record separator, not a second NUL: its
+        `--tools ""` is a NUL after a NUL."""
+        path = self.directory / "judge-calls"
+        return [call.split("\0")[:-1] for call in path.read_text().split("\x1e")[:-1]] if path.exists() else []
 
     def fake_claude(self, *calls, until_new=0):
         """A claude that, on its call N, appends the identity token file's text to `tokens` (and, with `until_new`,
@@ -1433,7 +1566,7 @@ class ReviewRun(unittest.TestCase):
                 f'  [ "$(cat "$ANTHROPIC_IDENTITY_TOKEN_FILE")" != "$first" ] && break; sleep 0.1\n'
                 f'done\nread_token\n') if until_new else ""
         (self.directory / "bin" / "claude").write_text(
-            "#!/bin/bash\n"
+            f"#!/bin/bash\n{self.judge_branch()}"
             f"cd {self.directory}\n"
             "n=$(( $(cat calls 2> /dev/null || echo 0) + 1 )); echo $n > calls\n"
             'read_token() { { cat "$ANTHROPIC_IDENTITY_TOKEN_FILE"; echo; } >> tokens; }\n'
@@ -1898,7 +2031,8 @@ class ReviewRun(unittest.TestCase):
         out = self.run_review(**self.identity(RUNNER_TEMP=str(temp)))
         self.assertEqual(out.returncode, 0, out.stderr)
         argv = (self.directory / "argv").read_text().split("\0")
-        claude = argv[len(argv) - 1 - argv[::-1].index("claude"):]
+        # The review's Claude Code is the first in argv: the reader of its comment runs after it, with no tool.
+        claude = argv[argv.index("claude"):]
         at = claude.index("--disallowedTools")
         rules = [f"{tool}(/{directory}/**)" for directory in (temp, self.directory / "oidc")
                  for tool in ("Read", "Grep", "Glob")]
@@ -1922,7 +2056,7 @@ class ReviewRun(unittest.TestCase):
                          "asked anthropic/claude-opus-5-5\nendpoint api.anthropic.com\n"
                          "usage firstParty/claude-opus-5-5\nfirstParty/claude-opus-5-5 1\n")
         argv = (self.directory / "argv").read_text().split("\0")
-        claude = argv[len(argv) - 1 - argv[::-1].index("claude"):]
+        claude = argv[argv.index("claude"):]
         self.assertEqual(claude[claude.index("--output-format") + 1], "stream-json")
         self.assertIn("--verbose", claude)
 
@@ -2026,6 +2160,218 @@ class ReviewRun(unittest.TestCase):
             (self.directory / name).unlink(missing_ok=True)
         self.fake_claude(*calls)
         return self.run_review(**self.identity())
+
+    # The check of the comment against .claude/skills/write-to-maintainer: measure.py, then a fresh reader.
+    SKILL = ROOT / ".claude" / "skills" / "write-to-maintainer"
+    LONG = "Six changes block the merge.\n\n" + "".join(f"{n}. Change f{n}.c line {n}.\n" for n in range(1, 7))
+    SHORT = "Nothing blocks the merge."
+    FAIL = json.dumps({"verdict": "fail", "findings": [
+        {"rule": "llm-phrasing", "quote": "Thanks QUOTE-NOT-SHOWN.", "fix": "Delete it. Start with the decision."},
+        {"rule": "verbose", "quote": "QUOTE-TWO", "fix": "Delete the sentence."}]})
+
+    def failure_pattern(self):
+        """The line build.yaml shows from failure.txt after review-run exits 1."""
+        return re.compile(re.search(r"grep -m1 -xE '([^']+)' \.review/failure\.txt", review_step()["run"]).group(1))
+
+    def test_a_comment_the_reader_passes_is_kept_and_the_reader_is_a_new_session_with_no_tools(self):
+        out = self.run_review(**self.resume())
+        self.assertEqual(out.returncode, 0, out.stderr)
+        review = self.directory / "review"
+        self.assertEqual((review / "comment.md").read_text(), "Thanks.\n")
+        self.assertEqual(json.loads((review / "judge.json").read_text()), {"verdict": "pass", "findings": []})
+        self.assertIn("review-run: measure.py: 7 visible characters and 0 numbered items, within the limits",
+                      out.stdout)
+        self.assertRegex(out.stdout, r"the reader \(session [0-9a-f-]{36}, answered by firstParty/claude-opus-5-5 "
+                                     r"\(1 turn\)\): pass")
+        [review_call] = self.claude_calls()
+        [reader] = self.judge_calls()
+        # A new session, kept nowhere, never the review's.
+        self.assertNotIn("--resume", reader)
+        self.assertIn("--no-session-persistence", reader)
+        new = reader[reader.index("--session-id") + 1]
+        self.assertRegex(new, r"\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
+        self.assertNotEqual(new, review_call[review_call.index("--session-id") + 1])
+        # No tool, one turn, the review's model, and no rule that names a tool.
+        self.assertEqual(reader[reader.index("--tools") + 1], "")
+        self.assertEqual(reader[reader.index("--max-turns") + 1], "1")
+        self.assertEqual(reader[reader.index("--model") + 1], "claude-opus-5-5")
+        self.assertIn("--restricted", reader)
+        self.assertFalse({"Read", "Glob", "Grep", "Bash", "Read,Glob,Grep"} & set(reader))
+        # The prompt that the skill's route builds.
+        prompt = ((self.SKILL / "judge.md").read_text() + "\n\n" + (self.SKILL / "SKILL.md").read_text()
+                  + "\n\nKind: review\n\n<<<MESSAGE\nThanks.\n\nMESSAGE>>>\n")
+        self.assertEqual(reader[reader.index("-p") + 1], prompt)
+        # It ran under review-served, which recorded what answered it beside the review's own record.
+        self.assertEqual((review / "judge" / "served").read_text(),
+                         "asked anthropic/claude-opus-5-5\nendpoint api.anthropic.com\n"
+                         "usage firstParty/claude-opus-5-5\nfirstParty/claude-opus-5-5 1\n")
+        # The kept session is the review's.
+        self.assertEqual(self.kept()[0]["id"], review_call[review_call.index("--session-id") + 1])
+
+    def test_a_comment_over_a_limit_is_written_again_in_the_review_session_and_then_posted(self):
+        (self.directory / "stream.1").write_text(stream({"type": "result", "is_error": False, "result": self.LONG}))
+        (self.directory / "stream.2").write_text(stream({"type": "result", "is_error": False, "result": self.SHORT}))
+        out = self.run_review(**self.resume())
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual((self.directory / "review" / "comment.md").read_text(), self.SHORT + "\n")
+        self.assertIn("6 numbered items, over a limit", out.stdout)
+        review_call, rewrite = self.claude_calls()
+        review_id = review_call[review_call.index("--session-id") + 1]
+        self.assertEqual(rewrite[rewrite.index("--resume") + 1], review_id)
+        self.assertNotIn("--session-id", rewrite)
+        fix = rewrite[rewrite.index("-p") + 1]
+        self.assertIn("6 numbered items are visible; the limit is 5", fix)
+        self.assertIn(".claude/skills/write-to-maintainer/SKILL.md", fix)
+        # measure.py failed the first comment, so no reader read it: the one reader read the rewrite.
+        [reader] = self.judge_calls()
+        self.assertIn(f"<<<MESSAGE\n{self.SHORT}\n", reader[reader.index("-p") + 1])
+        self.assertNotIn("Change f1.c", out.stdout + out.stderr)
+        # The kept session is the review's, with the rewrite's turn.
+        fields, conversation = self.kept()
+        self.assertEqual(fields["id"], review_id)
+        self.assertEqual(conversation, f'{{"resumed": ""}}\n{{"resumed": "{review_id}"}}\n')
+        self.assertEqual(self.failure(), (None, None))
+
+    def test_a_comment_the_reader_fails_twice_is_refused_with_the_rules(self):
+        (self.directory / "stream").write_text(stream({"type": "result", "is_error": False,
+                                                        "result": "Thanks QUOTE-NOT-SHOWN.\n\n" + self.SHORT}))
+        self.judge(self.FAIL, json.dumps({"verdict": "fail", "findings": [
+            {"rule": "llm-phrasing", "quote": "Thanks QUOTE-NOT-SHOWN.", "fix": "Delete it."}]}))
+        out = self.run_review(**self.resume())
+        self.assertEqual(out.returncode, 1, out.stderr)
+        why = self.failure()[0]
+        self.assertEqual(why, "the comment failed the maintainer-text check after one rewrite (first the reader found "
+                              "llm-phrasing, verbose, then the reader found llm-phrasing)\n")
+        self.assertTrue(self.failure_pattern().fullmatch(why.rstrip("\n")), why)
+        review = self.directory / "review"
+        self.assertFalse((review / "comment.md").exists())
+        self.assertTrue((review / "comment.refused.md").exists())
+        self.assertIn("fail, rules llm-phrasing, verbose", out.stdout)
+        # The reader's quotes go to the review's session for the rewrite, and never to the log.
+        review_call, rewrite = self.claude_calls()
+        fix = rewrite[rewrite.index("-p") + 1]
+        self.assertIn('- llm-phrasing: "Thanks QUOTE-NOT-SHOWN." Fix: Delete it. Start with the decision.', fix)
+        self.assertIn('- verbose: "QUOTE-TWO" Fix: Delete the sentence.', fix)
+        self.assertEqual(rewrite[rewrite.index("--resume") + 1], review_call[review_call.index("--session-id") + 1])
+        self.assertNotIn("QUOTE", out.stdout + out.stderr)
+        self.assertEqual(len(self.judge_calls()), 2)
+        self.assertEqual(list(self.session.iterdir()), [])
+
+    def test_a_reader_answer_that_is_not_json_fails(self):
+        # Prose, then an object that does not parse: each is a fail, so the comment is refused after its rewrite.
+        self.judge("It reads well. Pass.", '{"verdict": "pass", "findings": [')
+        out = self.run_review()
+        self.assertEqual(out.returncode, 1, out.stderr)
+        self.assertEqual(self.failure()[0], "the comment failed the maintainer-text check after one rewrite (first the "
+                                            "reader answer held no verdict, then the reader answer held no verdict)\n")
+        self.assertEqual(json.loads((self.directory / "review" / "judge.json").read_text()),
+                         {"verdict": "unreadable", "findings": []})
+        # An answer in a code fence is read from its first "{".
+        for name in ("judges", "judge-calls"):
+            (self.directory / name).unlink()
+        self.judge("Prose.", '```json\n{"verdict": "pass", "findings": []}\n```')
+        out = self.run_review()
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("its answer holds no verdict", out.stdout)
+        self.assertEqual(len(self.judge_calls()), 2)
+
+    def test_a_reader_that_another_model_answered_fails(self):
+        self.judge('{"verdict": "pass", "findings": []}', model="gpt-5.6-terra")
+        out = self.run_review()
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertRegex(out.stderr, r"the reader \(session [0-9a-f-]{36}\) fails: Claude Code ended with exit status 4")
+        self.assertEqual(len(self.judge_calls()), 2)
+        self.assertEqual(len(self.claude_calls()), 2)
+
+    # The triage comment, which review-gather wrote: the same check, of the kind triage, pass or fail, no rewrite.
+    TRIAGE = "<!-- oss-verify-triage -->\n### Triage\n\n| Check | Result |\n|---|---|\n| License | MIT |\n"
+    PASS = '{"verdict": "pass", "findings": []}'
+
+    def triage(self, text=TRIAGE):
+        (self.directory / "review" / "triage-comment.md").write_text(text)
+
+    def assert_review_unaffected(self, out):
+        self.assertEqual(out.returncode, 0, out.stderr)
+        review = self.directory / "review"
+        self.assertEqual((review / "comment.md").read_text(), "Thanks.\n")
+        self.assertEqual(json.loads((review / "judge.json").read_text()), {"verdict": "pass", "findings": []})
+        self.assertEqual(self.failure(), (None, None))
+        # One review call: a triage comment is never written again.
+        self.assertEqual(len(self.claude_calls()), 1)
+
+    def verdict(self):
+        return (self.directory / "review" / "triage-verdict").read_text()
+
+    def test_a_triage_comment_the_reader_passes_has_the_verdict_pass(self):
+        self.triage()
+        out = self.run_review()
+        self.assert_review_unaffected(out)
+        self.assertEqual(self.verdict(), "pass\n")
+        self.assertIn("review-run: the triage comment: pass\n", out.stdout)
+        review_reader, triage_reader = self.judge_calls()
+        prompt = ((self.SKILL / "judge.md").read_text() + "\n\n" + (self.SKILL / "SKILL.md").read_text()
+                  + f"\n\nKind: triage\n\n<<<MESSAGE\n{self.TRIAGE}\nMESSAGE>>>\n")
+        self.assertEqual(triage_reader[triage_reader.index("-p") + 1], prompt)
+        self.assertEqual(triage_reader[triage_reader.index("--tools") + 1], "")
+        self.assertIn("--no-session-persistence", triage_reader)
+        self.assertTrue((self.directory / "review" / "judge-triage" / "served").exists())
+        self.assertNotIn("| License |", out.stdout + out.stderr)
+
+    def test_a_triage_comment_over_a_limit_fails_with_no_reader(self):
+        self.triage(self.TRIAGE + "".join(f"{n}. Row {n}.\n" for n in range(1, 7)))
+        out = self.run_review()
+        self.assert_review_unaffected(out)
+        self.assertEqual(self.verdict(), "fail\n")
+        self.assertIn("review-run: the triage comment: fail (", out.stdout)
+        self.assertEqual(len(self.judge_calls()), 1)
+
+    def test_a_triage_comment_measure_cannot_measure_fails(self):
+        # A checkout whose measure.py exits 2 on the kind triage alone, so the review's own check still passes.
+        checkout = self.directory / "checkout"
+        shutil.copytree(ROOT / ".github" / "scripts", checkout / ".github" / "scripts")
+        skill = checkout / ".claude" / "skills" / "write-to-maintainer"
+        shutil.copytree(self.SKILL, skill)
+        (skill / "measure.py").write_text("import sys\nif 'triage' in sys.argv: sys.exit(2)\n"
+                                          + (self.SKILL / "measure.py").read_text())
+        (checkout / "review").mkdir()
+        (checkout / "review" / "triage-comment.md").write_text(self.TRIAGE)
+        out = subprocess.run([str(checkout / ".github" / "scripts" / "review-run"), "review"], cwd=checkout,
+                             env={"PATH": f"{self.directory / 'bin'}:{os.environ['PATH']}",
+                                  "HOME": str(self.directory / "home"), "PR": "8", "NAME": "libreac",
+                                  "ANTHROPIC_API_KEY": "sk-ant-oat01-notasecret"},
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual((checkout / "review" / "comment.md").read_text(), "Thanks.\n")
+        self.assertEqual((checkout / "review" / "triage-verdict").read_text(), "fail\n")
+        self.assertIn("review-run: the triage comment: fail (measure.py could not measure it)", out.stdout)
+        self.assertEqual(len(self.judge_calls()), 1)
+
+    def test_a_triage_comment_the_reader_fails_has_the_verdict_fail_and_no_quote(self):
+        self.triage()
+        self.judge(self.PASS, self.FAIL)
+        out = self.run_review()
+        self.assert_review_unaffected(out)
+        self.assertEqual(self.verdict(), "fail\n")
+        self.assertIn("review-run: the triage comment: fail (the reader found llm-phrasing, verbose)", out.stdout)
+        self.assertNotIn("QUOTE", out.stdout + out.stderr)
+        self.assertEqual(len(self.judge_calls()), 2)
+
+    def test_a_triage_reader_answer_that_is_not_json_fails(self):
+        self.triage()
+        self.judge(self.PASS, "It reads well. Pass.")
+        out = self.run_review()
+        self.assert_review_unaffected(out)
+        self.assertEqual(self.verdict(), "fail\n")
+        self.assertIn("review-run: the triage comment: fail (the reader answer held no verdict)", out.stdout)
+        self.assertEqual(json.loads((self.directory / "review" / "triage-judge.json").read_text()),
+                         {"verdict": "unreadable", "findings": []})
+
+    def test_without_a_triage_comment_the_verdict_is_fail_and_no_reader_reads_it(self):
+        out = self.run_review()
+        self.assert_review_unaffected(out)
+        self.assertEqual(self.verdict(), "fail\n")
+        self.assertIn("review-run: the triage comment: fail (review-gather wrote no triage comment)", out.stdout)
+        self.assertEqual(len(self.judge_calls()), 1)
 
 
 def stream(result, model="claude-opus-5-5"):
@@ -2350,7 +2696,9 @@ else:
         self.assertEqual(send["env"]["CURRENT_OBJECT"], "${{ needs.review.outputs.held_object }}")
         # The comment job posts no review unless the review job succeeded and, if it held a finding, hold sent it.
         self.assertIn("hold", jobs["comment"]["needs"])
-        self.assertEqual(jobs["comment"]["steps"][-1]["env"]["REVIEW"],
+        [posting] = [s for s in jobs["comment"]["steps"]
+                     if s.get("name") == "Post the comment, or update the one already there"]
+        self.assertEqual(posting["env"]["REVIEW"],
                          "${{ needs.review.result == 'success' && (needs.review.outputs.held_object == '' || "
                          "needs.hold.result == 'success') && needs.review.outputs.comment || '' }}")
 
@@ -2548,12 +2896,14 @@ class ReviewSessionStore(unittest.TestCase):
         self.assertNotIn("REVIEW_CONVERSATION_KEY", text)
         self.assertFalse((ROOT / ".github" / "scripts" / "review-session").exists())
 
-    def test_review_md_and_codeowners_are_the_only_files_with_an_owner_and_the_last_patterns(self):
+    def test_only_the_review_rules_and_codeowners_have_an_owner_and_are_the_last_patterns(self):
         lines = [line.split() for line in (ROOT / ".github" / "CODEOWNERS").read_text().splitlines()
                  if line.strip() and not line.lstrip().startswith("#")]
-        owned = [["/review.md", "@theorem-labs/engineering"], ["/.github/CODEOWNERS", "@theorem-labs/engineering"]]
+        owned = [["/review.md", "@theorem-labs/engineering"],
+                 ["/.claude/skills/write-to-maintainer/", "@theorem-labs/engineering"],
+                 ["/.github/CODEOWNERS", "@theorem-labs/engineering"]]
         self.assertEqual([line for line in lines if len(line) > 1], owned)
-        self.assertEqual(lines[-2:], owned)
+        self.assertEqual(lines[-3:], owned)
         self.assertTrue((ROOT / "review.md").is_file())
 
 

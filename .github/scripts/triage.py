@@ -11,16 +11,16 @@ reviewers, as Markdown.
     GITHUB_TOKEN=... python3 .github/scripts/triage.py --repo theorem-labs/oss-verify --pr 123 [--summary <file>] [--full]
     python3 .github/scripts/triage.py --repo theorem-labs/oss-verify --local projects/<name> --login <you> [--body <file>]
 
-Run by .github/workflows/triage.yaml, or by hand to see what it would say. Prints nothing when the pull request
-does not touch projects/. With --local, it writes the comment for a projects/<name>/ on this machine before any pull
-request exists, as opened by --login with the description in --body (default: .github/PULL_REQUEST_TEMPLATE.md,
-unticked). Without GITHUB_TOKEN, GitHub limits anonymous requests, and the rows that need GraphQL say "could not be
-checked".
+Run by .github/workflows/triage.yaml and .github/scripts/review-gather, or by hand to see what it would say. Prints
+nothing when the pull request does not touch projects/. With --local, it writes the comment for a projects/<name>/ on
+this machine before any pull request exists, as opened by --login with the description in --body (default:
+.github/PULL_REQUEST_TEMPLATE.md, unticked). Without GITHUB_TOKEN, GitHub limits anonymous requests, and the rows that
+need GraphQL say "could not be checked".
 
 The comment on the pull request is public, and carries only the rows in PUBLIC_ROWS: the license, whether an active
 maintainer opened it, its scope, tools/validate.py and the checklist. The full table has every row, and is for
-Theorem's reviewers: --summary appends it to a file (the workflow's job summary) in the same run, so that no API
-request is made twice, and --full prints it instead of the comment (the review reads it).
+Theorem's reviewers: --summary appends it to a file (triage.yaml's job summary, and the review's triage-today.md) in
+the same run, so that no API request is made twice, and --full prints it instead of the comment, for a person to read.
 
 The pull request is read as data through the GitHub API: nothing from it is checked out or executed, and a read-only
 token is enough. The token goes to api.github.com alone, and no other host is contacted. Text from the pull request,

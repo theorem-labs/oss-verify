@@ -192,15 +192,24 @@ def read_previous(previous):
     return status, head, version, trim(body)
 
 
-FOOTER = ("<sub>Claude wrote this review, following `review.md`, and "
-          "`tools/check --checks` measured the checks. It can be wrong. {of}Each push replaces it, or marks it not "
-          "current if the push's review does not finish. It decides nothing: a person at Theorem reviews the "
-          "enrollment.</sub>")
-# The footer as this script writes it, for any commit: a kept comment loses it from its front, and gets it again.
-FOOTER_WRITTEN = re.compile(r"(?:It is the review of `[0-9a-f]{7}`\. )?".join(map(re.escape, FOOTER.split("{of}"))))
+FOOTER = "<sub>Claude wrote this review{of} from `review.md`. It can be wrong. Each push replaces it.</sub>"
+# What FOOTER's {of} holds, for the commit a review is of; empty when it is not known.
+FOOTER_OF = " of `{}`"
+# The footers that earlier versions of this script wrote, in the same place: a kept comment written by one of them loses
+# it too, so an old footer, and its false sentence that a person reviews the enrollment, is never kept below a new one.
+OLD_FOOTERS = tuple(
+    f"<sub>Claude wrote this review, following `{rules}`, and `tools/check --checks` measured the checks. It can be "
+    "wrong. {of}Each push replaces it, or marks it not current if the push's review does not finish. It decides "
+    "nothing: a person at Theorem reviews the enrollment.</sub>"
+    for rules in ("review.md", ".claude/skills/review-enrollment/SKILL.md"))
+# The footer as this script writes it, or wrote it, for any commit: a kept comment loses it from its front, and gets
+# this script's footer again.
+FOOTER_WRITTEN = re.compile("|".join(
+    of.join(map(re.escape, footer.split("{of}")))
+    for footer, of in ((FOOTER, r"(?: of `[0-9a-f]{7}`)?"),
+                       *((old, r"(?:It is the review of `[0-9a-f]{7}`\. )?") for old in OLD_FOOTERS))))
 # The footer of a comment with no review: no AI review is there, so it says nothing of who wrote one.
-NO_REVIEW_FOOTER = ("<sub>`tools/check --checks` measured the checks. No AI review of this push is posted. A person at "
-                    "Theorem reviews the enrollment.</sub>")
+NO_REVIEW_FOOTER = "<sub>`tools/check --checks` measured the checks. No AI review of this push is posted.</sub>"
 # What answered the review: after the footer of a review that is posted, and in the notice when there is none.
 ANSWERED = "<sub>Answered by `{}`, as Claude Code reported it.</sub>"
 ANSWERED_NOTICE = "What answered it, as Claude Code reported it: `{}`."
@@ -285,13 +294,15 @@ def not_current(previous, head, run, answered=""):
         cut_at = int(cut.group("at").replace(",", "")) if cut else None
         paragraphs = paragraphs[1:]
     # The footer, first after the notice in a comment of this layout (version 2), is written again below too. A review
-    # that a keep had cut and that is current again carries the cut sentence at the end of its footer instead. In an
-    # older layout the first paragraph is the review's, so nothing is read from it.
-    if version in ("2", "3") and paragraphs:
+    # that a keep had cut and that is current again carries the cut sentence at the end of its footer instead. A keep by
+    # an earlier version of this script could leave an old footer below its own: each footer in a row goes. In an older
+    # layout the first paragraph is the review's, so nothing is read from it.
+    while version in ("2", "3") and paragraphs:
         cut = KEPT_CUT.search(paragraphs[0])
-        if FOOTER_WRITTEN.fullmatch(paragraphs[0][:cut.start()] if cut else paragraphs[0]):
-            cut_at = int(cut.group("at").replace(",", "")) if cut else cut_at
-            paragraphs = paragraphs[1:]
+        if not FOOTER_WRITTEN.fullmatch(paragraphs[0][:cut.start()] if cut else paragraphs[0]):
+            break
+        cut_at = int(cut.group("at").replace(",", "")) if cut else cut_at
+        paragraphs = paragraphs[1:]
     body = trim("\n\n".join(paragraphs))
     if status == "none" or not body:
         return None
@@ -302,7 +313,7 @@ def not_current(previous, head, run, answered=""):
             return None
         of_head = None
     of = f"`{of_head[:7]}`" if of_head else "an earlier commit"
-    footer = FOOTER.format(of=f"It is the review of {of}. " if of_head else "")
+    footer = FOOTER.format(of=FOOTER_OF.format(of_head[:7]) if of_head else "")
     if current:
         # A kept review of this very commit (the pull request went back to it): it is current again.
         return assemble(of_head, "review", [footer], review=body, where=KEPT_WHERE, review_limit=MAX_COMMENT,
@@ -311,8 +322,7 @@ def not_current(previous, head, run, answered=""):
     where = f" ([the run]({run}))" if run else ""
     unrecorded = "" if recorded else " What answered that review was not recorded."
     note = (f"**Not current:** this is the review of {of}.{unrecorded} The review of {this} did not finish with a "
-            f"review that can be posted{where}. {answered + ' ' if answered else ''}A person at Theorem reviews the "
-            "enrollment.")
+            f"review that can be posted{where}.{' ' + answered if answered else ''}")
     # The old comment, its checks and review as they were posted, goes last and unchanged, so the notice and the footer
     # above it stay visible whatever it holds; only its length is cut, if it must be.
     return assemble(of_head, "stale", [note, footer], review=body, where=KEPT_WHERE, review_limit=MAX_COMMENT,
@@ -367,7 +377,7 @@ def main():
             if kept is not None:
                 sys.stdout.write(kept)
                 return 0
-    of = f"It is the review of `{head[:7]}`. " if head else ""
+    of = FOOTER_OF.format(head[:7]) if head else ""
     if review:
         notes, status = [FOOTER.format(of=of), ANSWERED.format(answered)], "review"
     else:
@@ -379,7 +389,7 @@ def main():
                                                                          f": {why}" if why else "")
         else:
             first = f"The review agent did not run on this push{this}: {why or 'it wrote no comment'}"
-        notes = [f"{first}{where}. {notice} A person at Theorem reviews the enrollment.", NO_REVIEW_FOOTER]
+        notes = [f"{first}{where}. {notice}", NO_REVIEW_FOOTER]
         status = "none"
     checks = options.checks.read_text(encoding="utf-8", errors="replace") if options.checks else ""
     if credential(checks):
