@@ -7,9 +7,12 @@ name: "Triage"
 # forks, outside participants, criticality score, OSS-Fuzz, .oss-verify/ in its repository and its status in the proofs
 # index. It informs the review and decides nothing. A pull request that touches nothing under projects/ gets none.
 #
-# This workflow posts nothing. The public triage comment (the first five rows of that table) is posted by build.yaml's
-# comment job, after its review job checks it as it checks every message to a maintainer
-# (.claude/skills/write-to-maintainer): that check needs Claude, and the Anthropic federation admits only build.yaml.
+# This workflow posts nothing. The public triage comment (five rows of that table: the license, whether whoever opened
+# it looks like an active maintainer, the scope, tools/validate.py and the checklist; triage.py's PUBLIC_ROWS) is
+# written by build.yaml's review job, which checks it as it checks every message to a maintainer
+# (.claude/skills/write-to-maintainer), and posted by build.yaml's comment job. That check needs Claude, and the
+# Anthropic federation admits only build.yaml. build.yaml does not run on an edit of the description, so the comment's
+# Checklist row changes on the next push; this workflow's table changes on the edit.
 #
 # pull_request_target, not pull_request, so that the table is of the base branch's triage.py. gather reads the pull
 # request through the GitHub API, as data, with a read-only token. Its checkout is the base branch (the default for
@@ -36,7 +39,7 @@ run-name: ${{ github.event.pull_request.title || format('Pull request {0}', inpu
 
 on:
   pull_request_target:
-    # edited: the comment reports on the checklist in the description.
+    # edited: the table reports on the checklist in the description.
     types: [opened, edited, reopened, synchronize]
   workflow_dispatch:
     inputs:
@@ -61,7 +64,7 @@ jobs:
     outputs:
       gather: ${{ steps.paths.outputs.gather }}
     steps:
-      - name: Whether the comment can change
+      - name: Whether the table can change
         id: paths
         env:
           GH_TOKEN: ${{ github.token }}
@@ -78,7 +81,7 @@ jobs:
             exit 0
           fi
           if [ "$TITLE_ONLY" = true ]; then
-            say "Nothing runs: an edit of the pull request's title, which the comment does not show."
+            say "Nothing runs: an edit of the pull request's title, which the table does not show."
             exit 0
           fi
           # A failed read fails this job, and so the check: it never reads as "touches nothing".
@@ -88,7 +91,7 @@ jobs:
             echo "gather=true" >> "$GITHUB_OUTPUT"
             say "gather runs: the pull request touches projects/."
           else
-            say "Nothing runs: the pull request touches nothing under projects/, so it gets no comment."
+            say "Nothing runs: the pull request touches nothing under projects/, so it gets no table."
           fi
 
   gather:

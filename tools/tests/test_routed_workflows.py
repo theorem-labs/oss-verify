@@ -183,7 +183,7 @@ def test_triage_skips_only_an_edit_of_the_title_alone():
     flow = workflow("triage.yaml")
     title_only = "github.event.action == 'edited' && !github.event.changes.body && !github.event.changes.base"
     assert flow["concurrency"]["group"].startswith(f"${{{{ {title_only} && format('triage-edited-{{0}}', github.run_id)")
-    route = step(flow["jobs"]["route"], "Whether the comment can change")
+    route = step(flow["jobs"]["route"], "Whether the table can change")
     assert route["env"]["TITLE_ONLY"] == f"${{{{ {title_only} }}}}"
 
 
@@ -318,7 +318,7 @@ def route_triage(tmp_path, files, event="pull_request_target", title_only="false
     (tmp_path / "files").write_text("".join(f"{path}\n" for path in files))
     (bin / "gh").write_text("#!/bin/bash\n" + ("exit 1\n" if fail else f"cat {tmp_path / 'files'}\n"))
     (bin / "gh").chmod(0o755)
-    route = step(workflow("triage.yaml")["jobs"]["route"], "Whether the comment can change")
+    route = step(workflow("triage.yaml")["jobs"]["route"], "Whether the table can change")
     output = tmp_path / "output"
     environment = {**os.environ, "PATH": f"{bin}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r", "PR": "8",
                    "EVENT": event, "TITLE_ONLY": title_only, "GITHUB_OUTPUT": str(output),
@@ -352,7 +352,7 @@ def test_triage_route_asks_for_gather_whenever_triage_py_would_comment():
     spec = importlib.util.spec_from_file_location("triage", ROOT / ".github" / "scripts" / "triage.py")
     triage = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(triage)
-    run = step(workflow("triage.yaml")["jobs"]["route"], "Whether the comment can change")["run"]
+    run = step(workflow("triage.yaml")["jobs"]["route"], "Whether the table can change")["run"]
     patterns = re.findall(r"grep -q '([^']+)' \"\$RUNNER_TEMP/paths\"", run)
     assert len(patterns) == 1, patterns
     asks = re.compile(patterns[0])

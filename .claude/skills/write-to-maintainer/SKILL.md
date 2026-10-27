@@ -30,15 +30,15 @@ A maintainer gets a message from us at four points only. Each point is one comme
 
 Write these parts in this order, and stop after the last one:
 
-1. The decision, as the first sentence: `Two changes block the merge.`, `Nothing blocks the merge.`, `Merged.`, `Statements for libfoo: <link>.` The maintainer must know the outcome without reading further.
-2. One numbered item for each change that blocks the merge: what is wrong, the evidence (a file and line, the input that shows it, or a link to the comment that gives that input), and the exact change to make. One to three sentences each.
-3. One collapsed block for facts that the maintainer needs only while making a fix: inputs, steps, long lists, and findings that do not block. Start it with `<details><summary>Details</summary>` and end it with `</details>`. Name every failed check in the facts here, even when no rule says whether it blocks; then say that it does not block yet. A failure that the message leaves out comes back as a second message.
-4. Only when the maintainer's pull request is a draft, the last line: `When it is ready, mark the pull request ready for review.`
+1. The decision, as the first sentence: `2 changes are needed before the merge.`, `No changes are needed.`, `Merged.`, `Statements for libfoo: <link>.` The maintainer must know the outcome without reading further.
+2. One numbered item for each change that blocks the merge: what is wrong, the evidence (a file and line, the input that shows it, or a link to the comment that gives that input), and the exact change to make. One to three sentences each, because the details block holds the rest.
+3. One collapsed block for facts that the maintainer needs only while making a fix: inputs, steps, long lists, and findings that do not block. Start it with `<details><summary>Details</summary>` and end it with `</details>`. Name every failed check in the facts here, even when no rule says whether it blocks; then say that it does not block. A failure that the message leaves out comes back as a second message.
+4. Only when the maintainer's pull request is a draft, because GitHub does not merge a draft, the last line: `When it is ready, mark the pull request ready for review.`
 
-Count these limits outside code and outside the `<details>` block:
+Count these limits outside code blocks and HTML comments, and outside the `<details>` block except its summary, as GitHub shows the message:
 
 - The review comment: at most 5 blocking items, and under 1,500 characters. Put each further blocking item in the details block, under `More blocking items`.
-- Every other message: under 80 words.
+- Every other message: under 80 words, because it carries one decision or one answer.
 
 ## Leave out
 

@@ -9,10 +9,13 @@ Reads the message from FILE, or from standard input. Prints one JSON object: the
 words, the numbered items, and each limit the message breaks. Exits 0 when it keeps every limit, 1 when it breaks
 one, 2 on a usage error.
 
-Visible text is what a reader sees without opening anything: the message without HTML comments, without each
-<details> block (from its <details> tag to the </details> that closes it), and without fenced code blocks. Runs of
-whitespace count as one character. Items are the lines of the visible text that start with a number and a dot or a
-closing parenthesis, at the start of the line.
+Visible text is what a reader sees on GitHub without opening anything. Left out: fenced code blocks (a fence that
+nothing closes runs to the end, as in CommonMark), HTML comments (from <!-- to the --> that closes it, or to the end),
+and each <details> block from its <details> tag to the </details> that closes it, nested blocks counted once, except
+the text of the outer block's <summary>, which GitHub shows. Inside an inline code span, GitHub shows <!--, <details>
+and <summary> as text, so they count as text there and hide nothing. A code span ends on its own line here. Runs of
+whitespace count as one character. Items are the lines of the visible text that start with at most 3 spaces, a number
+and a dot or a closing parenthesis, as a CommonMark ordered list item does.
 """
 import argparse
 import json
@@ -21,49 +24,57 @@ import sys
 
 # triage, the triage comment, has the review comment's limits: build.yaml posts both on the pull request.
 LIMITS = {"review": {"chars": 1500, "items": 5}, "triage": {"chars": 1500, "items": 5}, "reply": {"words": 80}}
-COMMENT = re.compile(r"<!--.*?(?:-->|\Z)", re.S)
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
-DETAILS_OPEN = re.compile(r"<details\b", re.I)
-DETAILS_CLOSE = re.compile(r"</details\s*>", re.I)
-ITEM = re.compile(r"^\d{1,3}[.)]\s")
-
-
-def without_fences(text):
-    """text without its fenced code blocks; a fence that nothing closes runs to the end, as in CommonMark."""
-    out, fence = [], None
-    for line in text.split("\n"):
-        found = FENCE.match(line)
-        if fence is None and found:
-            fence = found.group(1)
-        elif fence is not None and found and found.group(1)[0] == fence[0] and len(found.group(1)) >= len(fence):
-            fence = None
-        elif fence is None:
-            out.append(line)
-    return "\n".join(out)
-
-
-def without_details(text):
-    """text without each <details> block. Nested blocks count once; a block that nothing closes runs to the end."""
-    out, depth, at = [], 0, 0
-    while True:
-        opened, closed = DETAILS_OPEN.search(text, at), DETAILS_CLOSE.search(text, at)
-        if depth == 0:
-            if not opened:
-                out.append(text[at:])
-                return "".join(out)
-            out.append(text[at:opened.start()])
-            depth, at = 1, opened.end()
-        elif closed and (not opened or closed.start() < opened.start()):
-            depth, at = depth - 1, closed.end()
-        elif opened:
-            depth, at = depth + 1, opened.end()
-        else:
-            return "".join(out)
+TAG = re.compile(r"<(/?)(details|summary)\b[^>]*>", re.I)
+TICKS = re.compile(r"`+")
+ITEM = re.compile(r"^ {0,3}\d{1,9}[.)](?:[ \t]|$)")
 
 
 def visible(text):
-    text = COMMENT.sub("", text.replace("\r\n", "\n").replace("\r", "\n"))
-    return without_details(without_fences(text))
+    """The visible text of a message (the top of this file says what that is), line by line."""
+    out, fence, comment, depth, summary = [], None, False, 0, False
+    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        found = None if comment else FENCE.match(line)
+        if fence is not None:
+            if found and found.group(1)[0] == fence[0] and len(found.group(1)) >= len(fence):
+                fence = None
+            continue
+        if found:
+            fence = found.group(1)
+            continue
+        shown, at = [], 0
+        while at < len(line):
+            if comment:
+                end = line.find("-->", at)
+                if end < 0:
+                    break
+                comment, at = False, end + 3
+                continue
+            seen = depth == 0 or (depth == 1 and summary)
+            if line.startswith("<!--", at):
+                comment, at = True, at + 4
+                continue
+            if line[at] == "`":
+                run = TICKS.match(line, at).group(0)
+                close = re.compile(f"(?<!`){run}(?!`)").search(line, at + len(run))
+                end = close.start() if close else at + len(run)
+                if seen:
+                    shown.append(line[at + len(run):end] if close else run)
+                at = close.end() if close else end
+                continue
+            tag = TAG.match(line, at)
+            if tag:
+                if tag.group(2).lower() == "details":
+                    depth, summary = (max(depth - 1, 0) if tag.group(1) else depth + 1), False
+                else:
+                    summary = not tag.group(1) and depth == 1
+                at = tag.end()
+                continue
+            if seen:
+                shown.append(line[at])
+            at += 1
+        out.append("".join(shown))
+    return "\n".join(out)
 
 
 def measure(text, kind):
