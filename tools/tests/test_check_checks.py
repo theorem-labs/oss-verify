@@ -1459,12 +1459,14 @@ class ReviewRun(unittest.TestCase):
 
     def reader(self):
         """The reader call (the one with --no-session-persistence): it records its arguments, environment and identity
-        token, and answers `reader-answer`, by default pass."""
+        token, writes `reader-err` to its standard error, prints `reader-json` if it exists and else answers
+        `reader-answer` (by default pass), and exits with `reader-status` (by default 0)."""
         return (f'if [[ " $* " == *" --no-session-persistence "* ]]; then\n'
                 f'  cd {self.directory}; printf "%s\\0" "$@" > reader-args; cat /proc/$$/environ > reader-environ\n'
-                '  cat "$ANTHROPIC_IDENTITY_TOKEN_FILE" > reader-token 2> /dev/null\n'
-                '  python3 -c \'import json, sys; print(json.dumps({"is_error": False, "result": sys.argv[1]}))\' '
-                '"$(cat reader-answer 2> /dev/null || echo pass)"; exit 0\nfi\n')
+                '  cat "$ANTHROPIC_IDENTITY_TOKEN_FILE" > reader-token 2> /dev/null; cat reader-err >&2 2> /dev/null\n'
+                '  cat reader-json 2> /dev/null || python3 -c \'import json, sys; print(json.dumps({"is_error": False, '
+                '"result": sys.argv[1]}))\' "$(cat reader-answer 2> /dev/null || echo pass)"\n'
+                '  exit "$(cat reader-status 2> /dev/null || echo 0)"\nfi\n')
 
     def test_the_reader_is_a_new_process_with_a_new_token_and_passes(self):
         self.last_review()
@@ -1494,6 +1496,23 @@ class ReviewRun(unittest.TestCase):
             self.assertRegex(failure.strip(), f"^{regex}$")
             self.assertNotIn("READER_WORDS", out.stdout + out.stderr)
             self.assertNotIn("Thanks.", out.stdout + out.stderr)
+            self.assertFalse((self.directory / "review" / "comment.md").exists())
+
+    def test_a_reader_that_did_not_run_says_so(self):
+        key = "sk-ant-api03-notasecretnotasecret"
+        for files, failure, shown in (({"reader-status": "2", "reader-err": "READER_BROKE"}, "exit 2", True),
+                                      ({"reader-json": '{"is_error": true, "result": "Invalid API key"}'}, "exit 0",
+                                       False),
+                                      ({"reader-status": "1", "reader-err": f"READER_BROKE {key}"}, "exit 1", False)):
+            for name in ("reader-status", "reader-err", "reader-json"):
+                (self.directory / name).unlink(missing_ok=True)
+            for name, text in files.items():
+                (self.directory / name).write_text(text)
+            out = self.run_review()
+            self.assertEqual(out.returncode, 1, out.stderr)
+            self.assertEqual(self.failure()[0], f"the reader did not run ({failure})\n")
+            self.assertEqual("READER_BROKE" in out.stderr, shown)
+            self.assertNotIn(key, out.stdout + out.stderr)
             self.assertFalse((self.directory / "review" / "comment.md").exists())
 
     def identity(self, **environment):
@@ -2571,7 +2590,7 @@ class SinceLastReview(unittest.TestCase):
 
 class ReviewSessionStore(unittest.TestCase):
     """build.yaml keeps the review's session in the Actions cache: the review job reads it, the keep job alone writes
-    it, and only review.md has an owner in CODEOWNERS."""
+    it, and only review.md, the write-to-maintainer skill and CODEOWNERS have an owner."""
 
     def setUp(self):
         self.workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
@@ -2602,7 +2621,7 @@ class ReviewSessionStore(unittest.TestCase):
         self.assertNotIn("REVIEW_CONVERSATION_KEY", text)
         self.assertFalse((ROOT / ".github" / "scripts" / "review-session").exists())
 
-    def test_review_md_and_codeowners_are_the_only_files_with_an_owner_and_the_last_patterns(self):
+    def test_only_review_md_the_skill_and_codeowners_have_an_owner_and_are_the_last_patterns(self):
         lines = [line.split() for line in (ROOT / ".github" / "CODEOWNERS").read_text().splitlines()
                  if line.strip() and not line.lstrip().startswith("#")]
         owned = [["/review.md", "@theorem-labs/engineering"],

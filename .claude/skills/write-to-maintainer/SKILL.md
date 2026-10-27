@@ -9,7 +9,7 @@ If this skill disagrees with the code, a command's output or its `--help`, follo
 
 1. Post one comment per decision. When the decision changes, edit that comment instead of posting a new one.
 2. Put the decision in the first sentence.
-3. List at most 5 blocking items. Give each one its file and line, and the change to make.
+3. List at most 5 blocking items. Give each one its file and line, and the change to make. Put any further blocking items in the collapsed block.
 4. Do not restate what passed, or what the diff or the checks already show.
 5. Write no thanks, no apology, no promise and no date.
 6. Keep the visible text under 1,500 characters. Put everything else in one collapsed `<details>` block.
