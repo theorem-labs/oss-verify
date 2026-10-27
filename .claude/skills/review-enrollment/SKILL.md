@@ -43,7 +43,7 @@ The review job of `.github/workflows/build.yaml` runs this skill with Claude Cod
 | `DIR` | `projects/<name>/` in the checkout: the pull request's files, as `take-project` takes them |
 | the fuzz targets in the project's repository | `$IN/source/`: the repository at the built commit, without `.git` and symbolic links. If it is missing, `$IN/source.txt` says why |
 | `pr.json`, `pr.diff`, the description | `$IN/pr.json`, `$IN/pr.diff`, `$IN/description.md` |
-| the triage today (A1, A2, E, G2) | `$IN/triage-today.md`. No posted triage comment is an input, so in CI check G2 has nothing to compare |
+| the triage today (A1, A2, E, G2), and the posted triage comment (G2) | `$IN/triage-today.md`; the posted triage comment, when there is one, is the comment in `$IN/pr.json` by `oss-verify` that starts with `<!-- oss-verify-triage -->` |
 | check B's comparison, and the template's history | `$IN/checklist.txt`, `$IN/template-history.txt` |
 | `tools/validate.py "$DIR"` (C2) | `$IN/validate.txt` |
 | the checks of the pull request | `$IN/checks.json` |
