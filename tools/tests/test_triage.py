@@ -1,12 +1,17 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 """Tests for .github/scripts/triage.py, offline, with a fake GitHub API:  python3 -m pytest tools/tests"""
+import contextlib
 import importlib.util
+import io
+import os
 import pathlib
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import validate  # noqa: E402
@@ -45,6 +50,16 @@ class FakeGitHub:
 
     def text(self, path, whole=False, **params):
         return self.texts.get(path)
+
+    # The criticality score's and the GraphQL rows' requests: unanswered, as a token without access would see them.
+    def graphql(self, query, **variables):
+        raise triage.ApiError("fake", 404, "graphql")
+
+    def count(self, path, **params):
+        raise triage.ApiError("fake", 404, path)
+
+    def total(self, kind, query):
+        raise triage.ApiError("fake", 404, f"search/{kind}")
 
 
 def entry(name, kind="file", size=None, data=b""):
@@ -244,8 +259,25 @@ class FetchProject(unittest.TestCase):
         self.assertFalse(triage.fetch_project(FakeGitHub(), REPO, "0" * 40, "example", self.directory))
 
 
+# A project.yaml whose repository is on github.com, so that every row of the full table is there.
+ON_GITHUB = "repo: https://github.com/someone/libexample\nprimary_contact: n/a\nlanguage: c\n"
+META = {"full_name": "someone/libexample", "html_url": "https://github.com/someone/libexample",
+        "created_at": "2020-01-01T00:00:00Z", "pushed_at": "2020-01-02T00:00:00Z", "archived": False, "fork": False,
+        "stargazers_count": 5, "forks_count": 1, "subscribers_count": 1, "license": {"spdx_id": "MIT"},
+        "owner": {"login": "someone"}}
+EVERY_ROW = ["Repository", "Stars / forks", "Outside participants", "Criticality score", "License",
+             "Opened by an active maintainer", "OSS-Fuzz", "`.oss-verify/` in the repository", "Seeded contact",
+             "Proofs index", "Pull request scope", "`tools/validate.py`", "Checklist"]
+
+
+def checks(text):
+    """The names of the table's rows, in order."""
+    return [line.split(" | ")[1] for line in text.splitlines() if line.startswith("| ") and " | Check | " not in line]
+
+
 class Comment(unittest.TestCase):
-    def pull(self, yaml_text, association, files=None, changed=None, body=""):
+    @staticmethod
+    def pull(yaml_text, association, files=None, changed=None, body=""):
         files = files if files is not None else {"Dockerfile": b"FROM x\n", "build.sh": b"#!/bin/bash\n"}
         listing, entries, raw = listing_for({"project.yaml": yaml_text.encode(), **files})
         changed = changed or [f"projects/example/{name}" for name in ["project.yaml", *files]]
@@ -254,22 +286,41 @@ class Comment(unittest.TestCase):
                                      "changed_files": len(changed), "body": body, "author_association": association},
             f"repos/{REPO}/pulls/7/files": [{"filename": path} for path in changed],
             listing: entries,
+            "repos/someone/libexample": META,
         }
         return FakeGitHub(responses, files=raw)
 
-    def test_a_seeded_project_from_outside(self):
-        comment = triage.triage(self.pull(SEEDED, "NONE"), REPO, 7)
-        self.assertTrue(comment.startswith(triage.MARKER + "\n"))
-        self.assertIn("| ⚠️ | Seeded contact |", comment)
-        self.assertIn("| ℹ️ | Proofs index | no proofs index yet", comment)
-        self.assertIn("| ✅ | Pull request scope |", comment)
-        self.assertIn("| ⚠️ | `tools/validate.py` | passes, with warnings", comment)
-        self.assertIn("not a github.com repository", comment)
-        self.assertIn(f"https://github.com/{REPO}#enroll-a-project", comment)
+    def test_the_comment_has_the_five_public_rows_and_the_full_table_every_row(self):
+        result = triage.triage(self.pull(ON_GITHUB, "NONE"), REPO, 7)
+        self.assertEqual(checks(result.comment), list(triage.PUBLIC_ROWS))
+        self.assertEqual(checks(result.full), EVERY_ROW)
+        self.assertTrue(result.comment.startswith(triage.MARKER + "\n### Enrollment triage: `projects/example`\n\n"))
+        self.assertIn("Repository: [someone/libexample](https://github.com/someone/libexample) · opened by `someone`",
+                      result.comment)
+        self.assertTrue(result.comment.endswith("\n\n<sub>Automated, from public data. It decides nothing.</sub>\n"))
+        self.assertIn("| ✅ | License | `MIT` |", result.comment)
+        # The full table is never taken for the comment: the workflow finds the comment to update by the marker.
+        self.assertNotIn(triage.MARKER, result.full)
+        self.assertIn("Repository: [someone/libexample]", result.full)
+        self.assertIn("| ℹ️ | Stars / forks | 5 stars · 1 forks · 1 watching |", result.full)
 
-    def test_the_comment_links_a_readme_heading(self):
-        comment = triage.triage(self.pull(SEEDED, "NONE"), REPO, 7)
-        anchor = re.search(rf"https://github\.com/{re.escape(REPO)}#([a-z0-9-]+)", comment)[1]
+    def test_a_seeded_project_from_outside(self):
+        result = triage.triage(self.pull(SEEDED, "NONE"), REPO, 7)
+        self.assertTrue(result.comment.startswith(triage.MARKER + "\n"))
+        self.assertEqual(checks(result.comment), ["Pull request scope", "`tools/validate.py`", "Checklist"])
+        self.assertIn("| ✅ | Pull request scope |", result.comment)
+        self.assertIn("| ⚠️ | `tools/validate.py` | passes, with warnings", result.comment)
+        self.assertNotIn("Seeded contact", result.comment)
+        self.assertIn("| ⚠️ | Seeded contact |", result.full)
+        self.assertIn("| ℹ️ | Proofs index | no proofs index yet", result.full)
+        self.assertIn("| ✅ | Pull request scope |", result.full)
+        self.assertIn("| ⚠️ | `tools/validate.py` | passes, with warnings", result.full)
+        self.assertIn("not a github.com repository", result.full)
+        self.assertIn(f"https://github.com/{REPO}#enroll-a-project", result.full)
+
+    def test_the_full_table_links_a_readme_heading(self):
+        full = triage.triage(self.pull(SEEDED, "NONE"), REPO, 7).full
+        anchor = re.search(rf"https://github\.com/{re.escape(REPO)}#([a-z0-9-]+)", full)[1]
         headings, fenced = [], False
         for line in (ROOT / "README.md").read_text(encoding="utf-8").splitlines():
             if line.startswith("```"):
@@ -279,18 +330,27 @@ class Comment(unittest.TestCase):
         self.assertIn(anchor, headings)
 
     def test_an_enrolled_project(self):
-        comment = triage.triage(self.pull(ENROLLED, "NONE"), REPO, 7)
-        self.assertNotIn("Seeded contact", comment)
-        self.assertIn("| ✅ | `tools/validate.py` | passes |", comment)
-        comment = triage.triage(self.pull(ENROLLED, "NONE", files={}), REPO, 7)
-        self.assertIn("| ❌ | `tools/validate.py` | `a Dockerfile is required", comment)
+        result = triage.triage(self.pull(ENROLLED, "NONE"), REPO, 7)
+        self.assertNotIn("Seeded contact", result.full)
+        self.assertIn("| ✅ | `tools/validate.py` | passes |", result.comment)
+        result = triage.triage(self.pull(ENROLLED, "NONE", files={}), REPO, 7)
+        self.assertIn("| ❌ | `tools/validate.py` | `a Dockerfile is required", result.comment)
 
     def test_a_seeded_project_from_a_maintainer(self):
-        self.assertIn("| ℹ️ | Seeded contact |", triage.triage(self.pull(SEEDED, "MEMBER"), REPO, 7))
+        self.assertIn("| ℹ️ | Seeded contact |", triage.triage(self.pull(SEEDED, "MEMBER"), REPO, 7).full)
 
     def test_nothing_under_projects(self):
         gh = self.pull(SEEDED, "NONE", changed=["README.md"])
-        self.assertEqual(triage.triage(gh, REPO, 7), "")
+        self.assertEqual(triage.triage(gh, REPO, 7), ("", ""))
+
+    def test_a_withdrawal(self):
+        gh = self.pull(SEEDED, "NONE")
+        del gh.responses[f"repos/{REPO}/contents/projects/example"]
+        result = triage.triage(gh, REPO, 7)
+        self.assertTrue(result.comment.startswith(triage.MARKER + "\n"))
+        self.assertIn("a withdrawal, nothing to triage", result.comment)
+        self.assertIn("a withdrawal, nothing to triage", result.full)
+        self.assertNotIn(triage.MARKER, result.full)
 
     def test_a_local_directory_before_the_pull_request(self):
         # No pull request exists yet: nothing about one is asked of GitHub, and the directory is read as it is here.
@@ -301,13 +361,88 @@ class Comment(unittest.TestCase):
                 (directory / name).write_text(text)
             template = (ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md").read_text(encoding="utf-8")
             gh = FakeGitHub()
-            comment = triage.triage_local(gh, REPO, directory, "someone", template)
+            comment = triage.triage_local(gh, REPO, directory, "someone", template).comment
         self.assertTrue(comment.startswith(triage.MARKER + "\n"))
         self.assertIn("opened by `someone`", comment)
         self.assertIn("| ✅ | Pull request scope | only this project's directory |", comment)
         self.assertIn("| ✅ | `tools/validate.py` | passes |", comment)
         self.assertIn("| ⚠️ | Checklist | ", comment)
         self.assertFalse([path for path in gh.fetched if "/pulls/" in path], gh.fetched)
+
+
+class CommandLine(unittest.TestCase):
+    """main(): the comment on standard output; --summary appends the full table to a file in the same run; --full
+    prints the full table instead."""
+
+    def run_main(self, *arguments, gh=None):
+        gh = gh or Comment.pull(ON_GITHUB, "NONE")
+        stdout = io.StringIO()
+        argv = ["triage.py", "--repo", REPO, "--pr", "7", *arguments]
+        with mock.patch.object(triage, "GitHub", lambda token: gh), mock.patch.object(sys, "argv", argv), \
+                contextlib.redirect_stdout(stdout):
+            self.assertEqual(triage.main(), 0)
+        return stdout.getvalue(), gh
+
+    def test_the_comment_by_default_and_the_full_table_in_the_summary(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            summary = pathlib.Path(scratch) / "summary"
+            summary.write_text("before\n")
+            printed, gh = self.run_main("--summary", str(summary))
+            written = summary.read_text()
+        self.assertEqual(checks(printed), list(triage.PUBLIC_ROWS))
+        self.assertTrue(written.startswith("before\n### Enrollment triage:"), written)
+        self.assertEqual(checks(written), EVERY_ROW)
+        # One run: the pull request is read once for both.
+        self.assertEqual(gh.fetched.count(f"repos/{REPO}/contents/projects/example/project.yaml"), 1)
+
+    def test_full_prints_every_row(self):
+        printed, _ = self.run_main("--full")
+        self.assertEqual(checks(printed), EVERY_ROW)
+        self.assertNotIn(triage.MARKER, printed)
+
+    def test_no_summary_for_a_pull_request_outside_projects(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            summary = pathlib.Path(scratch) / "summary"
+            gh = Comment.pull(SEEDED, "NONE", changed=["README.md"])
+            printed, _ = self.run_main("--summary", str(summary), gh=gh)
+            self.assertFalse(summary.exists())
+        self.assertEqual(printed, "")
+
+
+class Callers(unittest.TestCase):
+    def test_the_workflow_puts_the_full_table_in_the_job_summary_and_the_comment_in_the_output(self):
+        # The gather step's own script, run with stand-ins for dpkg and python3: the stand-in python3 prints a comment and
+        # writes a table to the file after --summary, as triage.py does.
+        jobs = validate.yaml.safe_load((ROOT / ".github" / "workflows" / "triage.yaml").read_text())["jobs"]
+        [script] = [s["run"] for s in jobs["gather"]["steps"] if s.get("name") == "Write the comment"]
+        with tempfile.TemporaryDirectory() as scratch:
+            scratch = pathlib.Path(scratch)
+            bin = scratch / "bin"
+            bin.mkdir()
+            (bin / "dpkg").write_text("#!/bin/sh\nexit 0\n")
+            (bin / "python3").write_text(
+                '#!/bin/bash\nprintf "%s\\n" "$@" > "$ARGV"\n'
+                'while [ $# -gt 0 ]; do [ "$1" = --summary ] && echo FULL >> "$2"; shift; done\necho COMMENT\n')
+            for name in ("dpkg", "python3"):
+                (bin / name).chmod(0o755)
+            env = {**os.environ, "PATH": f"{bin}:{os.environ['PATH']}", "ARGV": str(scratch / "argv"),
+                   "GITHUB_OUTPUT": str(scratch / "output"), "GITHUB_STEP_SUMMARY": str(scratch / "summary"),
+                   "REPO": REPO, "PR": "7"}
+            run = subprocess.run(["bash", "-e", "-c", script], env=env, capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            argv = (scratch / "argv").read_text().split("\n")
+            self.assertEqual(argv[:6], [".github/scripts/triage.py", "--repo", REPO, "--pr", "7", "--summary"])
+            self.assertEqual(argv[6], str(scratch / "summary"))
+            self.assertEqual((scratch / "summary").read_text(), "FULL\n")
+            output = (scratch / "output").read_text().split("\n")
+        self.assertTrue(output[0].startswith("comment<<triage-"), output)
+        self.assertEqual(output[1:3], ["COMMENT", output[0].removeprefix("comment<<")])
+
+    def test_the_review_reads_the_full_table(self):
+        gather = (ROOT / ".github" / "scripts" / "review-gather").read_text()
+        call = re.search(r"^.*\bkeep triage-today\.md (.*)$", gather, re.M)[1]
+        self.assertEqual(call.split(), ["python3", ".github/scripts/triage.py", "--repo", '"$REPO"', "--pr", '"$PR"',
+                                        "--full"])
 
 
 if __name__ == "__main__":

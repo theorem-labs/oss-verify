@@ -1,11 +1,12 @@
 # Adapted from OSS Scanner's .github/workflows/triage.yaml (https://github.com/anthropics/oss-scanner), Copyright 2026
 # Anthropic PBC, Apache-2.0. Modified 2026 by Theorem Labs, PBC: OSS Verify's comment (its marker and checks).
 name: "Triage"
-# Comments on an enrollment pull request with what a reviewer would otherwise look up by hand: the project's stars,
-# forks, license and criticality score, whether whoever opened it looks like an active maintainer, whether it is
-# in OSS-Fuzz, whether it has set up .oss-verify/ in its repository, its status in the proofs index, and whether
-# projects/<name>/ follows the rules. The comment informs the review and decides nothing. A pull request that
-# touches nothing under projects/ gets no comment.
+# Triages an enrollment pull request with what a reviewer would otherwise look up by hand. The comment on the pull
+# request is public and carries only the license, whether whoever opened it looks like an active maintainer, the pull
+# request's scope, tools/validate.py and the checklist. The full table, for Theorem's reviewers, is gather's job summary:
+# it adds the project's standing, stars and forks, outside participants, criticality score, OSS-Fuzz, .oss-verify/ in
+# its repository and its status in the proofs index. Both inform the review and decide nothing. A pull request that
+# touches nothing under projects/ gets neither.
 #
 # pull_request_target, not pull_request: a pull request from a fork gets a read-only token, which cannot comment.
 # That makes this workflow run with the base repository's token on input from anyone, so it is split in two:
@@ -124,9 +125,10 @@ jobs:
           dpkg -s python3-yaml > /dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
           # A random delimiter, so that no text in the comment can end the output early.
           delimiter="triage-$(openssl rand -hex 16)"
+          # The public comment is the job's output; the full table, every row, is this job's summary, from the same run.
           {
             echo "comment<<$delimiter"
-            python3 .github/scripts/triage.py --repo "$REPO" --pr "$PR"
+            python3 .github/scripts/triage.py --repo "$REPO" --pr "$PR" --summary "$GITHUB_STEP_SUMMARY"
             echo "$delimiter"
           } >> "$GITHUB_OUTPUT"
 

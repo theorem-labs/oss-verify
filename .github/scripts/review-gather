@@ -36,9 +36,11 @@ keep review-comments.txt gh api --paginate "repos/$REPO/pulls/$PR/comments" \
 jq -r '[.comments[]? | select(.author.login == "oss-verify")]
        | map(.body | select(startswith("<!-- oss-verify-triage -->"))) | .[0] // ""' "$out/pr.json" \
   > "$out/triage-comment.md" 2>/dev/null || true
+# --full: the review reads every row of the triage (its standing, stars, outside participants, criticality score and
+# OSS-Fuzz rows too), not only the five that the public comment carries.
 # triage.py reads GITHUB_TOKEN from the environment; the assignment prefix exports it to python3 without it becoming an
 # argument of any process (env put it in the argument vector, which another user on the machine can read).
-GITHUB_TOKEN="${GH_TOKEN:-}" keep triage-today.md python3 .github/scripts/triage.py --repo "$REPO" --pr "$PR"
+GITHUB_TOKEN="${GH_TOKEN:-}" keep triage-today.md python3 .github/scripts/triage.py --repo "$REPO" --pr "$PR" --full
 keep validate.txt python3 tools/validate.py "$dir"
 # Claude Code reads a CLAUDE.md beside a file that it reads as instructions. The pull request's are data, so they go
 # from the checkout once the validator has reported them (rule 1 of review.md).

@@ -5,9 +5,10 @@
 # patches beside project.yaml; .oss-verify/ in the project's repository), validation warnings, two new rows (the
 # n/a contact of a seeded project on an outside pull request; the project's status in the proofs index), and no
 # package-rank row.
-"""Write the triage comment for an enrollment pull request, as Markdown on standard output.
+"""Write the triage of an enrollment pull request: the comment for the pull request, and the full table for Theorem's
+reviewers, as Markdown.
 
-    GITHUB_TOKEN=... python3 .github/scripts/triage.py --repo theorem-labs/oss-verify --pr 123
+    GITHUB_TOKEN=... python3 .github/scripts/triage.py --repo theorem-labs/oss-verify --pr 123 [--summary <file>] [--full]
     python3 .github/scripts/triage.py --repo theorem-labs/oss-verify --local projects/<name> --login <you> [--body <file>]
 
 Run by .github/workflows/triage.yaml, or by hand to see what it would say. Prints nothing when the pull request
@@ -16,9 +17,14 @@ request exists, as opened by --login with the description in --body (default: .g
 unticked). Without GITHUB_TOKEN, GitHub limits anonymous requests, and the rows that need GraphQL say "could not be
 checked".
 
+The comment on the pull request is public, and carries only the rows in PUBLIC_ROWS: the license, whether an active
+maintainer opened it, its scope, tools/validate.py and the checklist. The full table has every row, and is for
+Theorem's reviewers: --summary appends it to a file (the workflow's job summary) in the same run, so that no API
+request is made twice, and --full prints it instead of the comment (the review reads it).
+
 The pull request is read as data through the GitHub API: nothing from it is checked out or executed, and a read-only
 token is enough. The token goes to api.github.com alone, and no other host is contacted. Text from the pull request,
-the enrolled repository or the proofs index reaches the comment only through code(), so it cannot inject Markdown.
+the enrolled repository or the proofs index reaches the output only through code(), so it cannot inject Markdown.
 
 Not ported from OSS Scanner's triage: the row that ranks the repository's packages among the most downloaded on
 PyPI, npm and crates.io. The builder builds only the languages docs/project-yaml.md lists, whose libraries those
@@ -42,6 +48,7 @@ import traceback
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from typing import NamedTuple
 from urllib.parse import quote, urlencode
 
 # tools/validate.py holds the enrollment rules (and imports PyYAML).
@@ -56,6 +63,10 @@ MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 MAX_TEXT_BYTES = 256 * 1024
 # The workflow finds the comment to update by this first line.
 MARKER = "<!-- oss-verify-triage -->"
+# The rows the public comment carries, by their check's name, in the order of the full table. The full table has every
+# row, and goes to Theorem's reviewers alone (--summary, --full).
+PUBLIC_ROWS = ("License", "Opened by an active maintainer", "Pull request scope", "`tools/validate.py`", "Checklist")
+COMMENT_FOOTER = "<sub>Automated, from public data. It decides nothing.</sub>\n"
 
 OK, WARN, FAIL, INFO = "✅", "⚠️", "❌", "ℹ️"
 NOW = datetime.now(timezone.utc)
@@ -421,7 +432,7 @@ def top_contributors(gh: GitHub, slug: str, count: int) -> list[dict]:
         return []
 
 
-# --- the checks: each returns the mark and the text of one row of the comment ---
+# --- the checks: each returns the mark and the text of one row of the table ---
 
 
 def scope_row(names: list[str], outside: list[str], changed_files: int) -> tuple[str, str]:
@@ -783,7 +794,7 @@ def criticality_row(gh: GitHub, slug: str, meta: dict) -> tuple[str, str]:
     return (WARN if low else INFO), f"{result}<details><summary>signals</summary>{details}</details>"
 
 
-# --- putting the comment together ---
+# --- putting the comment and the full table together ---
 
 
 def row(check: str, function, *arguments) -> tuple[str, str, str]:
@@ -829,11 +840,24 @@ def repository_rows(gh: GitHub, config: dict, beside: set[str], login: str) -> t
     ]
 
 
-def comment(gh: GitHub, repo: str, name: str, directory: pathlib.Path, login: str, association: str, body: str,
-            paths: list[str], changed_files: int) -> str:
-    """The comment for projects/<name>/ as it is in `directory`, in a pull request by `login` that changes `paths`."""
+class Triage(NamedTuple):
+    """The public comment for the pull request, and the full table for Theorem's reviewers. Both are "" for a pull
+    request that touches nothing under projects/. Only the comment starts with MARKER: the workflow finds the comment
+    to update by it, and the full table must never be taken for that comment."""
+    comment: str
+    full: str
+
+
+def table(rows: list[tuple]) -> str:
+    lines = "\n".join(f"| {mark} | {check} | {result} |" for mark, check, result in rows)
+    return f"| | Check | Result |\n|:-:|---|---|\n{lines}\n\n"
+
+
+def report(gh: GitHub, repo: str, name: str, directory: pathlib.Path, login: str, association: str, body: str,
+           paths: list[str], changed_files: int) -> Triage:
+    """The triage of projects/<name>/ as it is in `directory`, in a pull request by `login` that changes `paths`."""
     names, outside = split_paths(paths)
-    heading = f"{MARKER}\n### Enrollment triage: {code('projects/' + name)}\n\n"
+    heading = f"### Enrollment triage: {code('projects/' + name)}\n\n"
     problems, warnings, _ = validate.check_project(directory)
     config = read_config(directory)
     beside = {path.name for path in directory.glob("*")}
@@ -847,40 +871,42 @@ def comment(gh: GitHub, repo: str, name: str, directory: pathlib.Path, login: st
         row("`tools/validate.py`", validate_row, problems, warnings),
         row("Checklist", checklist_row, body),
     ]
-    table = "\n".join(f"| {mark} | {check} | {result} |" for mark, check, result in rows)
-    return (
-        f"{heading}Repository: {described} · opened by {code(login)}\n\n"
-        f"| | Check | Result |\n|:-:|---|---|\n{table}\n\n"
-        f"<sub>Automated, from public data, to help reviewers. Enrollment is decided case by case "
-        f"([how to enroll a project](https://github.com/{repo}#enroll-a-project)). If you think we got something wrong, please "
-        f"tell us in a reply.</sub>\n"
+    opened = f"Repository: {described} · opened by {code(login)}\n\n"
+    public = [each for each in rows if each[1] in PUBLIC_ROWS]
+    return Triage(
+        f"{MARKER}\n{heading}{opened}{table(public)}{COMMENT_FOOTER}",
+        f"{heading}{opened}{table(rows)}"
+        f"<sub>Every check, for Theorem's reviewers: the comment on the pull request carries only the rows "
+        f"{', '.join(PUBLIC_ROWS)}. Automated, from public data. It decides nothing: enrollment is decided case by case "
+        f"([how to enroll a project](https://github.com/{repo}#enroll-a-project)).</sub>\n",
     )
 
 
-def triage(gh: GitHub, repo: str, number: int) -> str:
-    """Return the comment for a pull request, or "" if it does not touch projects/."""
+def triage(gh: GitHub, repo: str, number: int) -> Triage:
+    """Return the triage of a pull request; both texts are "" if it does not touch projects/."""
     pull = gh.get(f"repos/{repo}/pulls/{number}")
     paths = changed_paths(gh, repo, number)
     names, _ = split_paths(paths)
     if not names:
-        return ""
+        return Triage("", "")
     name = names[0]
     with tempfile.TemporaryDirectory() as scratch:
         directory = pathlib.Path(scratch) / name
         # A name validate.py would refuse is not fetched; check_project() reports it without reading the directory.
         if validate.NAME.fullmatch(name) and not fetch_project(gh, repo, pull["head"]["sha"], name, directory):
-            return (f"{MARKER}\n### Enrollment triage: {code('projects/' + name)}\n\n"
-                    "This pull request removes the project's directory: a withdrawal, nothing to triage.\n")
-        return comment(gh, repo, name, directory, pull["user"]["login"], pull.get("author_association") or "",
-                       pull.get("body") or "", paths, pull["changed_files"])
+            withdrawal = (f"### Enrollment triage: {code('projects/' + name)}\n\n"
+                          "This pull request removes the project's directory: a withdrawal, nothing to triage.\n")
+            return Triage(f"{MARKER}\n{withdrawal}", withdrawal)
+        return report(gh, repo, name, directory, pull["user"]["login"], pull.get("author_association") or "",
+                      pull.get("body") or "", paths, pull["changed_files"])
 
 
-def triage_local(gh: GitHub, repo: str, directory: pathlib.Path, login: str, body: str) -> str:
-    """Return the comment that a pull request adding `directory` as projects/<its name>/ would get, from a fork, as
+def triage_local(gh: GitHub, repo: str, directory: pathlib.Path, login: str, body: str) -> Triage:
+    """Return the triage that a pull request adding `directory` as projects/<its name>/ would get, from a fork, as
     opened by `login` with the description `body`."""
     name = directory.name
     paths = [f"projects/{name}/{path.name}" for path in sorted(directory.glob("*"))]
-    return comment(gh, repo, name, directory, login, "NONE", body, paths, len(paths))
+    return report(gh, repo, name, directory, login, "NONE", body, paths, len(paths))
 
 
 def main() -> int:
@@ -891,18 +917,25 @@ def main() -> int:
     which.add_argument("--local", type=pathlib.Path, help="a projects/<name> directory on this machine")
     parser.add_argument("--login", help="with --local: the GitHub account that will open the pull request")
     parser.add_argument("--body", type=pathlib.Path, help="with --local: a file with the pull request's description")
+    parser.add_argument("--summary", type=pathlib.Path,
+                        help="also append the full table, every row, to this file (the job summary)")
+    parser.add_argument("--full", action="store_true", help="print the full table, every row, instead of the comment")
     options = parser.parse_args()
     gh = GitHub(os.environ.get("GITHUB_TOKEN"))
     if options.pr is not None:
         if options.login or options.body:
             parser.error("--login and --body go with --local")
-        sys.stdout.write(triage(gh, options.repo, options.pr))
-        return 0
-    if not options.login:
-        parser.error("--local needs --login, the account that will open the pull request")
-    template = pathlib.Path(__file__).resolve().parents[1] / "PULL_REQUEST_TEMPLATE.md"
-    body = (options.body or template).read_text(encoding="utf-8")
-    sys.stdout.write(triage_local(gh, options.repo, options.local.resolve(), options.login, body))
+        result = triage(gh, options.repo, options.pr)
+    else:
+        if not options.login:
+            parser.error("--local needs --login, the account that will open the pull request")
+        template = pathlib.Path(__file__).resolve().parents[1] / "PULL_REQUEST_TEMPLATE.md"
+        body = (options.body or template).read_text(encoding="utf-8")
+        result = triage_local(gh, options.repo, options.local.resolve(), options.login, body)
+    if options.summary and result.full:
+        with options.summary.open("a", encoding="utf-8") as summary:
+            summary.write(result.full)
+    sys.stdout.write(result.full if options.full else result.comment)
     return 0
 
 

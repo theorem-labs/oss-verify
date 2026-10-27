@@ -208,7 +208,7 @@ For `ubsan_checks`, suggest the default: it is the list of OSS-Fuzz for the proj
 1. Make a branch that changes only `projects/<name>/`.
 2. Write the pull request description from `.github/PULL_REQUEST_TEMPLATE.md`.
 3. In the context note, give a summary of what each fuzz target checks, in a few lines, and say which files came from where (3.8).
-4. Optional: show the triage comment that the pull request will get: `python3 .github/scripts/triage.py --repo theorem-labs/oss-verify --local projects/<name> --login <maintainer's GitHub account> --body <a file holding the description>`. Without `GITHUB_TOKEN`, its GraphQL rows say "could not be checked".
+4. Optional: show the triage comment that the pull request will get: `python3 .github/scripts/triage.py --repo theorem-labs/oss-verify --local projects/<name> --login <maintainer's GitHub account> --body <a file holding the description>`. It has five rows: the licence, whether an active maintainer opened the pull request, the scope of the pull request, `tools/validate.py` and the checklist. Without `GITHUB_TOKEN`, its GraphQL rows say "could not be checked".
 5. Show the branch and the description to the maintainer.
 6. Let the maintainer open the pull request. Only the maintainer can confirm "I am a core maintainer" and "I accept the OSS Verify terms".
 
