@@ -10,7 +10,6 @@ a required check), and the routes' own steps, run on made-up changes.
 """
 import importlib.util
 import itertools
-import json
 import os
 import pathlib
 import re
@@ -208,35 +207,19 @@ def test_a_forks_tests_collector_runs_the_default_branchs_script():
     assert all(s.get("if", "").count("env.FORK != 'true'") for s in route if "uses" in s or s.get("id") == "paths")
 
 
-def route_build(tmp_path, files, changed=None, step_name="An enrollment or a change", name="build.yaml", base="main"):
-    """Run a route step with a fake gh whose pull request into `base` lists `files` (changed_files: `changed`, by
-    default their number). Return its outputs, one line each."""
-    bin = tmp_path / "bin"
-    bin.mkdir()
-    (tmp_path / "pull.json").write_text(json.dumps({"head": {"sha": "a" * 40},
-                                                    "base": {"ref": base, "repo": {"default_branch": "main"}},
-                                                    "changed_files": len(files) if changed is None else changed}))
-    (tmp_path / "files").write_text("".join(f"{path}\n" for path in files))
-    (bin / "gh").write_text(f'#!/bin/bash\ncase "$*" in *"/files"*) cat {tmp_path}/files ;; '
-                            f'*) cat {tmp_path}/pull.json ;; esac\n')
-    (bin / "gh").chmod(0o755)
-    written = tmp_path / "output"
-    decide = step(workflow(name)["jobs"]["route"], step_name)
-    run = subprocess.run(["bash", "-e", "-c", decide["run"]], capture_output=True, text=True,
-                         env={**os.environ, "PATH": f"{bin}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r",
-                              "PR": "8", "HEAD_SHA": "", "GITHUB_OUTPUT": str(written),
-                              "GITHUB_STEP_SUMMARY": str(tmp_path / "summary")})
-    assert run.returncode == 0, run.stderr
-    return written.read_text().splitlines()
-
-
 @pytest.mark.parametrize("name, job, output, step_name, take", [
-    ("build.yaml", "project-builds", "build", "An enrollment or a change", "build"),
+    ("build.yaml", "project-builds", "build", "Every event here asks for the build", "build"),
     ("validate.yaml", "validate", "validate", "Every event here asks for validate", "validate"),
 ])
 def test_route_asks_for_the_job_that_takes_the_project(tmp_path, name, job, output, step_name, take):
     jobs = workflow(name)["jobs"]
-    assert f"{output}=true" in route_build(tmp_path, ["projects/p/project.yaml"], step_name=step_name, name=name)
+    decide = step(jobs["route"], step_name)
+    written = tmp_path / "output"
+    run = subprocess.run(["bash", "-e", "-c", decide["run"]], capture_output=True, text=True,
+                         env={**os.environ, "GITHUB_OUTPUT": str(written),
+                              "GITHUB_STEP_SUMMARY": str(tmp_path / "summary")})
+    assert run.returncode == 0, run.stderr
+    assert written.read_text() == f"{output}=true\n"
     # The job takes the project itself, once, and runs only when route asks for it; route takes nothing.
     assert jobs[job]["needs"] == "route"
     assert jobs[job]["if"] == f"needs.route.outputs.{output} == 'true'"
@@ -244,34 +227,6 @@ def test_route_asks_for_the_job_that_takes_the_project(tmp_path, name, job, outp
     assert [s.get("run") for s in jobs[job]["steps"]].count(command) == 1
     call = re.compile(r"^\s*(\w+=\S*\s+)*\S*\.github/scripts/take-project\b", re.M)
     assert not [s for s in jobs["route"]["steps"] if call.search(s.get("run", ""))]
-
-
-@pytest.mark.parametrize("files, changed, base, want", [
-    # Tooling and documentation only, as from a fork: a change review, and no build.
-    (["tools/check", "docs/build-contract.md", "tools/tests/test_check.py"], None, "main", "change=true"),
-    (["README.md"], None, "main", "change=true"),
-    # Into another branch: the build, where take-project refuses it, as before.
-    (["README.md"], None, "ci/other", "build=true"),
-    # A file under projects/, alone or beside others (a fork's mixed change then fails in take-project, as before),
-    # or a rename out of projects/ (both names are listed): an enrollment, built.
-    (["projects/p/project.yaml"], None, "main", "build=true"),
-    (["projects/p/project.yaml", "tools/check"], None, "main", "build=true"),
-    (["tools/x.yaml", "projects/p/x.yaml"], None, "main", "build=true"),
-    # No file, or more files than the API lists: the list decides nothing, and take-project judges it.
-    ([], None, "main", "build=true"),
-    (["tools/check"], 3001, "main", "build=true"),
-])
-def test_builds_route_reviews_a_pull_request_with_no_file_under_projects_as_a_change(tmp_path, files, changed, base,
-                                                                                     want):
-    assert route_build(tmp_path, files, changed, base=base) == [f"sha={'a' * 40}", want]
-    jobs = workflow("build.yaml")["jobs"]
-    change = "needs.route.outputs.change == 'true'"
-    # A change gets the review and the comment, and no build, record or session.
-    assert change in jobs["review"]["if"] and change in jobs["comment"]["if"]
-    assert all(change not in str(jobs[job]["if"]) for job in ("project-builds", "record", "keep"))
-    review = {s.get("name"): s for s in jobs["review"]["steps"]}
-    for name in ("Take projects/<name>/ from the pull request, as the build did", "Restore the last review's session"):
-        assert review[name]["if"] == "needs.project-builds.outputs.name != ''"
 
 
 # --- tests.yaml's route, run on made-up commits ---

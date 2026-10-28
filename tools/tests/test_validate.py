@@ -253,12 +253,14 @@ class UbsanChecks(unittest.TestCase):
         """OSS-Fuzz's -fno-sanitize-recover list, less vptr (trap mode cannot make it); C and Python drop function,
         as OSS-Fuzz drops it from C compiles and from a Python project's native code."""
         default = validate.DEFAULT_UBSAN_CHECKS
-        self.assertEqual(len(default["c++"]), 14)
-        self.assertEqual(default["c"], [check for check in default["c++"] if check != "function"])
+        self.assertEqual(len(default["c++"]), 16)
+        self.assertEqual(default["c++"][-2:], ["vptr", "libcxx-hardening"])
+        self.assertEqual(default["c"], [check for check in default["c++"]
+                                        if check not in ("function", "vptr", "libcxx-hardening")])
         self.assertEqual(default["python"], default["c"])
         self.assertEqual(set(validate.TRAP_EXCEPTIONS), {"vptr"})
         for checks in default.values():
-            self.assertFalse({"vptr", "unsigned-integer-overflow"} & set(checks))
+            self.assertNotIn("unsigned-integer-overflow", checks)
 
     def test_bad_changes(self):
         def problems(text):
@@ -275,10 +277,20 @@ class UbsanChecks(unittest.TestCase):
         self.has("must say why", problems("ubsan_checks: {add: [alignment], reason: ' '}\n"))
         self.has("sanitizers must contain undefined",
                  problems("sanitizers: [address]\nubsan_checks: {add: [alignment], reason: x}\n"))
+        self.has("libcxx-hardening applies only to a c++ project",
+                 problems("ubsan_checks: {add: [libcxx-hardening], reason: x}\n"))
+
+    def test_cxx_opts_out_of_vptr_and_hardening(self):
+        cxx = MINIMAL.replace("language: c\n", "language: c++\n")
+        self.assertNotEqual(cxx, MINIMAL)
+        out = cxx + "ubsan_checks: {remove: [vptr, libcxx-hardening], reason: the library is built without RTTI}\n"
+        self.assertEqual(check(out)[0], [])
+        self.assertEqual(validate.ubsan_checks_in_effect(yaml_of(out)),
+                         [c for c in validate.DEFAULT_UBSAN_CHECKS["c++"] if c not in ("vptr", "libcxx-hardening")])
 
     def test_warnings(self):
         warnings = check(MINIMAL + "ubsan_checks: {add: [vptr, enum], remove: [alignment], reason: x}\n")[1]
-        self.has("the trapping builds leave out vptr", warnings)
+        self.has("vptr: only the ubsan build makes it, through the toolchain's trap-only handler", warnings)
         self.has("enum is in the default already", warnings)
         self.has("alignment is not in the default", warnings)
         with mock.patch.object(validate, "newest_toolchain_applies_ubsan_checks", return_value=True):

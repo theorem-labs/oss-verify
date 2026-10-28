@@ -16,11 +16,17 @@ label, pr, project and sha, and one line, reason, that says why. The decision is
                                loader maps no executable byte of is one)
               language-paused  the project's language is one whose projects are paused for now
               name-review      the project's name has a dot, which the statements repository's names cannot have
-              review-blocking  the review of the commit failed check F2 (a fuzz target ends the run by itself) or F7
-                               (it reads more than its input), as build.yaml's artifact enrollment-verdict says
-              review-pending   the Build run has no review verdict for the commit (the review failed, was refused or
-                               did not run). A later Build run of the commit, a re-run included, completes and
-                               runs this again, which sends it once its review has a verdict that does not block
+              maintainer-review  the pull request's author is not shown to maintain the repository that `repo`
+                               names, by triage.py's maintainer check (the author, not primary_contact), or that
+                               repository is not on github.com, or the check could not read it
+                               (not when someone other than the author who can label, a member of theorem-labs
+                               or one of its Apps, put maintainer-confirmed on after the head commit was pushed:
+                               then the check is skipped)
+              review-blocking  the review of the commit gave review.md's check F2 (return values and exits) or F7
+                               (suitable for a proof) the verdict fail
+              review-pending   the Build run has no review verdicts for the commit, or F2 or F7 is not pass or fail
+                               (person: the review could not decide). A later Build run of the commit, a re-run
+                               included, completes and runs this again, and sends it once neither holds
   none      anything else, a project.yaml whose language cannot be read included; `reason` says what
 
 Which commit, whose pull request, and whose record. A run of a pull request (pull_request_target or pull_request) is
@@ -47,8 +53,9 @@ build.yaml runs again on ready_for_review, and that run's completion decides for
 A pull request that changes a project already enrolled is sent too: its facts are made again at the new commit.
 
 The sizes are read from the ELF headers of the files the project's own build wrote, so a build that rewrites its
-program headers can make them small. The statements repository measures its own build again, its daily limit caps
-what any enrollment can start, and a person reviews each facts pull request.
+program headers can make them small. The statements repository measures its own build again, and its daily limit caps
+what any enrollment can start. Its facts pull request merges after its checks pass and an agent reviews it; no person
+reviews it.
 """
 from __future__ import annotations
 
@@ -61,6 +68,10 @@ import sys
 import zipfile
 
 import yaml
+
+# triage.py's maintainer check, the one the triage table shows as "Opened by an active maintainer".
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import triage  # noqa: E402
 
 # The size line for statements that start with no person's decision, "Up to 1 MB" of a plain binary
 # (dispatch://OSSV-141/ask/7c73eb21), the README's "less than 1 MB of code": 1 MB is 1,000,000 bytes here. It is
@@ -83,13 +94,15 @@ ACTIONS_APP = 15368  # GitHub Actions, the app of every check run above
 BUILD_WORKFLOW = ".github/workflows/build.yaml"
 RECORD_ARTIFACT = "enrollment-record"
 RECORD_SCHEMA = "oss-verify enrollment record v1"
-# The review's verdict for the commit, which build.yaml's review job uploads: {"head", "fail_checks"}. A check id is
-# review.md's, for example F2; only F2 (a fuzz target ends the run by itself) and F7 (it reads more than its input)
-# keep statements from starting.
-VERDICT_ARTIFACT = "enrollment-verdict"
-# A check id exactly as review.md names it: a letter A to G, and a number for an item of a lettered section. An id in
-# any other form is not read as "not F2 or F7": the verdict cannot be read, and the enrollment waits (review-pending).
-CHECK_ID = re.compile(r"[A-G][1-9]?")
+# The review job's artifact: the draft comment and the verdict of each check of review.md, as the action's structured
+# output gives them (verdicts.json, {"A1": "pass", ..., "F2": "fail", ...}). F2 and F7 keep statements from starting.
+REVIEW_ARTIFACT = "enroll-review-draft"
+REVIEW_FILES = frozenset({"comment.md", "verdicts.json"})
+# The label that someone other than the author, who can label (a member of theorem-labs, or one of its Apps), puts on an enrollment whose author the maintainer check does not show (a
+# pull request that our bot opened at a maintainer's request, for one): with it, the check is skipped. Putting it on
+# runs .github/workflows/maintainer-confirmed.yml, whose completion runs this again.
+CONFIRMED_LABEL = "maintainer-confirmed"
+CONFIRMED_WORKFLOW = ".github/workflows/maintainer-confirmed.yml"
 DEFAULT_BRANCH = "main"
 # The API lists at most 3,000 files of a pull request; above that, the list is not the whole change.
 MAX_LISTED_FILES = 3000
@@ -193,8 +206,9 @@ def bound_checks(api: Api, runs: Runs, repo: str, sha: str, head: tuple) -> tupl
     return waiting, build_run
 
 
-def artifact_json(api: Api, repo: str, run_id: int, name: str, file: str) -> tuple[object | None, str]:
-    """The JSON file `file`, alone in the artifact `name` of this run, or None and why not."""
+def artifact_json(api: Api, repo: str, run_id: int, name: str, file: str, allowed: frozenset) -> tuple[object, str]:
+    """The JSON file `file` of the artifact `name` of this run, which holds no file outside `allowed`, or None and
+    why not."""
     artifacts = [a for page in api.pages(f"repos/{repo}/actions/runs/{run_id}/artifacts?name={name}&per_page=100")
                  for a in page.get("artifacts") or [] if a.get("name") == name and not a.get("expired")]
     if len(artifacts) != 1:
@@ -205,8 +219,9 @@ def artifact_json(api: Api, repo: str, run_id: int, name: str, file: str) -> tup
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             names = archive.namelist()
-            if names != [file] or archive.getinfo(file).file_size > MAX_ARTIFACT_BYTES:
-                return None, f"Build run {run_id}'s {name} holds {names}, not {file} alone"
+            if file not in names or not set(names) <= allowed \
+                    or archive.getinfo(file).file_size > MAX_ARTIFACT_BYTES:
+                return None, f"Build run {run_id}'s {name} holds {names}, not {file} with {sorted(allowed)} only"
             return json.loads(archive.read(file)), ""
     except (zipfile.BadZipFile, ValueError) as error:
         return None, f"Build run {run_id}'s {name} cannot be read: {error}"
@@ -214,24 +229,24 @@ def artifact_json(api: Api, repo: str, run_id: int, name: str, file: str) -> tup
 
 def build_record(api: Api, repo: str, run_id: int) -> tuple[dict | None, str]:
     """The record build.yaml's record job uploaded in this run, or None and why not."""
-    return artifact_json(api, repo, run_id, RECORD_ARTIFACT, "record.json")
+    return artifact_json(api, repo, run_id, RECORD_ARTIFACT, "record.json", frozenset({"record.json"}))
 
 
-def review_problem(api: Api, repo: str, run_id: int, sha: str) -> tuple[str, str]:
-    """(label, why) when the review of `sha` in this Build run blocks the statements, or ('', ''). It blocks when a
-    fuzz target ends the run by itself (check F2) or reads more than its input (check F7), and when the run has no
-    verdict for `sha` (the review failed, was refused, or did not run): review-blocking or review-pending."""
-    verdict, why = artifact_json(api, repo, run_id, VERDICT_ARTIFACT, "verdict.json")
+def review_problem(api: Api, repo: str, run_id: int) -> tuple[str, str]:
+    """(label, why) when the review in this Build run, the run whose record names the commit, keeps statements from
+    starting, else ('', ''): F2 or F7 fail gives review-blocking; no verdicts, or F2 or F7 not pass or fail, gives
+    review-pending."""
+    verdicts, why = artifact_json(api, repo, run_id, REVIEW_ARTIFACT, "verdicts.json", REVIEW_FILES)
     if why:
-        return "review-pending", f"no review verdict: {why}"
-    if not isinstance(verdict, dict) or verdict.get("head") != sha or not isinstance(verdict.get("fail_checks"), list):
-        return "review-pending", f"Build run {run_id}'s review verdict is not one of {sha[:7]}"
-    checks = verdict["fail_checks"]
-    if not all(isinstance(check, str) and CHECK_ID.fullmatch(check) for check in checks):
-        return "review-pending", f"Build run {run_id}'s review verdict names a check id in another form: {checks!r:.200}"
-    blocking = sorted(set(checks) & {"F2", "F7"})
-    if blocking:
-        return "review-blocking", f"the review failed {', '.join(blocking)}"
+        return "review-pending", f"no review verdicts: {why}"
+    if not isinstance(verdicts, dict):
+        return "review-pending", f"Build run {run_id}'s review verdicts are not a table of checks"
+    failed = [check for check in ("F2", "F7") if verdicts.get(check) == "fail"]
+    if failed:
+        return "review-blocking", f"the review gave {' and '.join(failed)} the verdict fail"
+    other = [f"{check} is {verdicts.get(check)!r:.20}" for check in ("F2", "F7") if verdicts.get(check) != "pass"]
+    if other:
+        return "review-pending", f"the review did not pass {', '.join(other)}"
     return "", ""
 
 
@@ -315,16 +330,64 @@ def open_at(pull: dict, repo: str, sha: str, head: tuple | None) -> str:
     return ""
 
 
-def language(api: Api, repo: str, project: str, sha: str) -> str | None:
-    """The language projects/<project>/project.yaml gives at `sha`, lower case, or None if it cannot be read."""
+def project_yaml(api: Api, repo: str, project: str, sha: str) -> dict | None:
+    """projects/<project>/project.yaml at `sha`, or None if it cannot be read."""
     try:
         data = api.raw(f"repos/{repo}/contents/projects/{project}/project.yaml?ref={sha}")
         if len(data) > MAX_PROJECT_YAML_BYTES:
             return None
-        value = (yaml.safe_load(data) or {}).get("language")
-    except (subprocess.CalledProcessError, yaml.YAMLError, AttributeError, RecursionError):
+        config = yaml.safe_load(data)
+    except (subprocess.CalledProcessError, yaml.YAMLError, RecursionError):
         return None
+    return config if isinstance(config, dict) else None
+
+
+def language(config: dict | None) -> str | None:
+    """The language project.yaml gives, lower case, or None."""
+    value = (config or {}).get("language")
     return value.lower() if isinstance(value, str) else None
+
+
+def standing(config: dict, login: str) -> str:
+    """'' when triage.py's maintainer check passes for `login` on the repository `repo` names, else why not. It checks
+    the pull request's author, not primary_contact. A repository not on github.com, a fork (whose owner is anyone who
+    forked it), or a read that fails, does not pass."""
+    match = triage.GITHUB_REPO.fullmatch(config.get("repo") or "") if isinstance(config.get("repo"), str) else None
+    if not match:
+        return "its repo is not a github.com repository, so the author's role there cannot be read"
+    owner, name, _ = match.groups()
+    try:
+        gh = triage.GitHub(os.environ.get("GH_TOKEN"))
+        meta = gh.find(f"repos/{triage.quote(owner, safe='')}/{triage.quote(name, safe='')}")
+        if meta is None:
+            return f"{owner}/{name} is not found on GitHub, or not public"
+        if meta.get("fork") is not False:
+            parent = (meta.get("parent") or {}).get("full_name") or "another repository"
+            return f"{meta['full_name']} is a fork of {parent}, so owning it shows nothing"
+        mark, evidence = triage.maintainer_row(gh, meta["full_name"], meta, login)
+    except Exception as error:  # noqa: BLE001 - any failed read holds the enrollment for a person
+        return f"the author's role on {owner}/{name} could not be read: {type(error).__name__}"
+    if mark != triage.OK:
+        return f"{login or 'the author'} is not shown to maintain {meta['full_name']}: {evidence}"
+    return ""
+
+
+def confirmed_by(api: Api, repo: str, number: int, pull: dict, author: str, since: str) -> str:
+    """Who put CONFIRMED_LABEL on the pull request, when it carries it, that was someone other than its author, and it
+    was put on after `since` (when the Build run of the head commit was created, so after that commit was pushed: a
+    confirmation covers the commits it saw, not a later change of `repo`); else ''. Only an account with at least triage
+    access to this repository can add a label (GitHub's permission model): a member of the organisation, or one of its
+    Apps. The pull request's own author does not count."""
+    if CONFIRMED_LABEL not in {(label or {}).get("name") for label in pull.get("labels") or []}:
+        return ""
+    try:
+        events = [e for page in api.pages(f"repos/{repo}/issues/{number}/events?per_page=100") for e in page]
+    except subprocess.CalledProcessError:
+        return ""
+    added = [e for e in events if e.get("event") == "labeled" and (e.get("label") or {}).get("name") == CONFIRMED_LABEL
+             and isinstance(e.get("created_at"), str) and e["created_at"] > since]
+    actor = ((added[-1].get("actor") or {}).get("login") or "") if added else ""
+    return actor if actor and actor.lower() != author.lower() else ""
 
 
 def decide(api: Api, repo: str, run_id: int, run_event: str, head_sha: str) -> dict:
@@ -333,6 +396,8 @@ def decide(api: Api, repo: str, run_id: int, run_event: str, head_sha: str) -> d
         if not SHA.fullmatch(head_sha):
             return outcome("none", f"{head_sha!r} is not a commit id")
         trigger = runs.get(run_id)
+        if trigger.get("path") == CONFIRMED_WORKFLOW and trigger.get("conclusion") != "success":
+            return outcome("none", f"run {run_id} is a label other than {CONFIRMED_LABEL}")
         if trigger.get("head_sha") != head_sha:
             return outcome("none", f"run {run_id} is of {trigger.get('head_sha')}, not {head_sha}")
         sha, record, head = head_sha, None, head_of(trigger)
@@ -353,8 +418,8 @@ def decide(api: Api, repo: str, run_id: int, run_event: str, head_sha: str) -> d
     waiting, build_run = bound_checks(api, runs, repo, sha, head)
     if waiting:
         return outcome("none", f"required checks not passed at {sha[:7]}: {', '.join(waiting)}", sha=sha)
-    # The Build run whose record decides: the run started by hand, or the run of the bound project-builds check. Its
-    # review's verdict is read from the same run.
+    # The Build run whose record decides (the run started by hand, or the bound project-builds check's run) holds the
+    # review of that same commit.
     record_run = run_id if record is not None else build_run
     if record is None:
         record, why = build_record(api, repo, build_run)
@@ -371,11 +436,13 @@ def decide(api: Api, repo: str, run_id: int, run_event: str, head_sha: str) -> d
         why = why or f"it changes projects/{changed}/, the record's project is {project}"
         return outcome("none", f"pull request {number} is not one enrollment: {why}", number, project, sha)
     # The files were listed for whatever the head was when they were asked for: the head must still be `sha`.
-    why = open_at(api.get(f"repos/{repo}/pulls/{number}"), repo, sha, head)
+    pull = api.get(f"repos/{repo}/pulls/{number}")
+    why = open_at(pull, repo, sha, head)
     if why:
         return outcome("none", f"pull request {number}: {why}", number, project, sha)
     where = f"pull request {number}: projects/{project}/ at {sha[:7]}"
-    lang = language(api, repo, project, sha)
+    config = project_yaml(api, repo, project, sha)
+    lang = language(config)
     if lang is None:
         return outcome("none", f"{where}: its project.yaml cannot be read for its language; the next run decides",
                        number, project, sha)
@@ -388,11 +455,19 @@ def decide(api: Api, repo: str, run_id: int, run_event: str, head_sha: str) -> d
     if over:
         return outcome("label", f"{where} has a plain binary above {SIZE_LIMIT:,} bytes: {', '.join(over)}", number,
                        project, sha, "size-review")
-    label, why = review_problem(api, repo, record_run, sha)
+    label, why = review_problem(api, repo, record_run)
     if label:
         return outcome("label", f"{where}: {why}", number, project, sha, label)
-    return outcome("dispatch", f"{where} passed every required check, and each plain binary has at most "
-                   f"{SIZE_LIMIT:,} bytes of .text and of executable segments", number, project, sha)
+    author = (pull.get("user") or {}).get("login") or ""
+    since = runs.get(build_run).get("created_at") if build_run is not None else None
+    confirmed = confirmed_by(api, repo, number, pull, author, since) if isinstance(since, str) else ""
+    why = "" if confirmed else standing(config, author)
+    if why:
+        return outcome("label", f"{where}: {why}", number, project, sha, "maintainer-review")
+    return outcome("dispatch", f"{where} passed every required check, each plain binary has at most "
+                   f"{SIZE_LIMIT:,} bytes of .text and of executable segments, and "
+                   + (f"{confirmed} labelled it {CONFIRMED_LABEL}" if confirmed else "its author maintains its repository"),
+                   number, project, sha)
 
 
 def main() -> int:

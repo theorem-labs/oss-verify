@@ -1,0 +1,19 @@
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+name: "Maintainer confirmed"
+# Runs when a label is put on a pull request. Its only work is to complete: enroll-dispatch.yml runs on its completion
+# (workflow_run) and decides again for the pull request's head. With the label maintainer-confirmed, put by someone
+# other than the author after the head commit was pushed, enroll-dispatch skips its maintainer check (.github/scripts/enroll-dispatch).
+# Only an account with at least triage access to this repository can put a label on. This workflow holds no
+# permission, checks out nothing, and runs no code of the pull request.
+on:
+  pull_request_target:
+    types: [labeled]
+permissions: {}
+jobs:
+  confirmed:
+    if: github.event.label.name == 'maintainer-confirmed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - run: echo "maintainer-confirmed was put on this pull request; enroll-dispatch.yml decides again when this run completes."
