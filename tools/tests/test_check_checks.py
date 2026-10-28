@@ -1449,7 +1449,7 @@ class MergeDecide(unittest.TestCase):
             subprocess.run(["git", "init", "-q", "-b", "main"], cwd=origin, env=git, check=True)
             base = commit({"tools/a.py": "a\n", "review.md": "r\n"})
             subprocess.run(["git", "checkout", "-q", "-b", "change"], cwd=origin, env=git, check=True)
-            head = commit(head_files if head_files is not None else {"tools/a.py": "b\n"}, remove)
+            head = commit(head_files if head_files is not None else {"docs/notes.md": "b\n"}, remove)
             subprocess.run(["git", "checkout", "-q", "main"], cwd=origin, env=git, check=True)
             commit(main_after or {})
             (work / ".github" / "scripts").mkdir(parents=True)
@@ -1513,6 +1513,15 @@ class MergeDecide(unittest.TestCase):
                 ({"head_files": {".claude/skills/x/SKILL.md": "x\n"}}, "trust"),
                 ({"head_files": {"docs/x.md": "r\n"}, "remove": ("review.md",)}, "trust"),
                 ({"head_files": {"docs/CODEOWNERS": "x\n"}}, "trust"),
+                # Only docs merge by themselves: code that CI runs, a rule that the reviews read, or a project holds.
+                ({"head_files": {"tools/a.py": "b\n"}}, "trust"),
+                ({"head_files": {"tools/validate.py": "x\n"}}, "trust"),
+                ({"head_files": {"infra/x.sh": "x\n"}}, "trust"),
+                ({"head_files": {"projects/x/build.sh": "x\n"}}, "trust"),
+                ({"head_files": {"README.md": "x\n"}}, "trust"),
+                ({"head_files": {"docs/project-yaml.md": "x\n"}}, "trust"),
+                ({"head_files": {"docs/notes.md": "x\n", "tools/a.py": "b\n"}}, "trust"),
+                ({"head_files": {}}, "trust"),
                 ({"runs": {"tests": [self.check_run("tests", "failure")]}}, "checks"),
                 ({"runs": {"terms-accepted": []}}, "checks"),
                 ({"runs": {"enrollment": [self.check_run("enrollment", app=1)]}}, "checks"),
