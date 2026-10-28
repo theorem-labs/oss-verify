@@ -20,9 +20,12 @@
 #   moved     the pull request's head is no longer HEAD_SHA.
 #   blocking  the verdict lists a blocking item: a failed check of review-change.md.
 #   person    the verdict lists an item that a person decides: a change of behaviour or a new affordance, say.
-#   trust     the change touches a file that decides what CI trusts (.github/, .claude/, the review*.md files at the
-#             root, a CODEOWNERS anywhere), as the carry step reads it: git's own diff from the merge base with the
-#             base branch to HEAD_SHA, from git's object store, never GitHub's file list.
+#   trust     the change touches a path outside docs/, one of the docs that review.md reads as its rules
+#             (project-yaml.md, build-contract.md, what-gets-proven.md), or a CODEOWNERS: only those docs merge by
+#             themselves, since every other path is code that CI runs (tools/, infra/, .github/), a rule that the
+#             reviews read (the review*.md files, the agent skills, README.md and CONTRIBUTING.md), or a project.
+#             The paths are git's own diff from the merge base with the base branch to HEAD_SHA, from git's object
+#             store, never GitHub's file list.
 #   checks    a required check of the base branch's rules failed, or has no run at the head. Each is read from its
 #             newest run at the head. A check still running does not hold: auto-merge waits for it. project-builds,
 #             which this run reports after the comment job, counts as running.
@@ -43,7 +46,10 @@ merge_base=$(gh api "repos/$REPO/compare/$base...$HEAD_SHA" --jq .merge_base_com
 [[ $merge_base =~ ^[0-9a-f]{40}$ ]] || { echo "merge-decide: could not read the merge base" >&2; exit 1; }
 git fetch -q --no-tags --depth=1 origin "$HEAD_SHA" "$merge_base"
 paths=$(git diff --name-only --no-renames "$merge_base" "$HEAD_SHA")
-if grep -qE '^(\.github/|\.claude/|review[^/]*\.md$)|(^|/)CODEOWNERS$' <<< "$paths"; then hold trust; fi
+if grep -qvE '^docs/' <<< "$paths" \
+  || grep -qE '^docs/(project-yaml|build-contract|what-gets-proven)\.md$|(^|/)CODEOWNERS$' <<< "$paths"; then
+  hold trust
+fi
 
 required=$(gh api "repos/$REPO/rules/branches/$base" \
   --jq '.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]
