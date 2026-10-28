@@ -485,17 +485,20 @@ class Review(unittest.TestCase):
         return world.decide()
 
     def test_a_verdict_that_fails_f2_or_f7_is_labelled_review_blocking(self):
-        for checks in (["F2"], ["F7"], ["F5", " f7 "], ["F.2"], ["F2 fuzz_x"]):
+        for checks in (["F2"], ["F7"], ["F5", "F7"], ["A2", "F2", "F7"]):
             got = self.decide({"head": SHA, "fail_checks": checks})
             self.assertEqual((got["decision"], got["label"]), ("label", "review-blocking"), checks)
 
     def test_other_failed_checks_do_not_block(self):
-        for checks in ([], ["F1", "F3", "F4", "F5", "F8", "G1", "B"], ["F27"], ["F70"], [7], ["A2"]):
+        for checks in ([], ["F1", "F3", "F4", "F5", "F8", "G1", "B"], ["A2"], ["E"]):
             self.assertEqual(self.decide({"head": SHA, "fail_checks": checks})["decision"], "dispatch", checks)
 
     def test_no_verdict_or_one_of_another_commit_is_labelled_review_pending(self):
         for verdict in (None, {"head": NEWER, "fail_checks": []}, {"head": SHA}, ["x"], b"not a zip",
-                        {"head": SHA, "fail_checks": "F2"}):
+                        {"head": SHA, "fail_checks": "F2"},
+                        # an id in another form is not read as "not F2 or F7"
+                        *({"head": SHA, "fail_checks": [check]} for check in
+                          ("F-2", "Check F2", "F#7", "f2", " F2", "F2 fuzz_x", "F.2", "F27", "F70", "H1", 7, None))):
             got = self.decide(verdict)
             self.assertEqual((got["decision"], got["label"]), ("label", "review-pending"), verdict)
 

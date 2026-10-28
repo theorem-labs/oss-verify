@@ -87,7 +87,9 @@ RECORD_SCHEMA = "oss-verify enrollment record v1"
 # review.md's, for example F2; only F2 (a fuzz target ends the run by itself) and F7 (it reads more than its input)
 # keep statements from starting.
 VERDICT_ARTIFACT = "enrollment-verdict"
-BLOCKING_CHECK = re.compile(r"F\.?\s*([0-9]+)(?![0-9])", re.IGNORECASE)
+# A check id exactly as review.md names it: a letter A to G, and a number for an item of a lettered section. An id in
+# any other form is not read as "not F2 or F7": the verdict cannot be read, and the enrollment waits (review-pending).
+CHECK_ID = re.compile(r"[A-G][1-9]?")
 DEFAULT_BRANCH = "main"
 # The API lists at most 3,000 files of a pull request; above that, the list is not the whole change.
 MAX_LISTED_FILES = 3000
@@ -224,8 +226,10 @@ def review_problem(api: Api, repo: str, run_id: int, sha: str) -> tuple[str, str
         return "review-pending", f"no review verdict: {why}"
     if not isinstance(verdict, dict) or verdict.get("head") != sha or not isinstance(verdict.get("fail_checks"), list):
         return "review-pending", f"Build run {run_id}'s review verdict is not one of {sha[:7]}"
-    blocking = sorted({check.strip() for check in verdict["fail_checks"] if isinstance(check, str)
-                       and (m := BLOCKING_CHECK.match(check.strip())) and m.group(1) in ("2", "7")})
+    checks = verdict["fail_checks"]
+    if not all(isinstance(check, str) and CHECK_ID.fullmatch(check) for check in checks):
+        return "review-pending", f"Build run {run_id}'s review verdict names a check id in another form: {checks!r:.200}"
+    blocking = sorted(set(checks) & {"F2", "F7"})
     if blocking:
         return "review-blocking", f"the review failed {', '.join(blocking)}"
     return "", ""

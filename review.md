@@ -157,7 +157,7 @@ End your last message with one line, after everything else, a held finding too:
 <!-- oss-verify-verdict {"head": "<the head commit that the prompt names>", "blocking": [<item>, ...], "person": [<item>, ...]} -->
 ```
 
-`blocking` has one item for each **fail** verdict, and `person` one for each **person** verdict. An item is `{"check": "<the check, for example F5>", "text": "<one line>"}`. Write `oss-verify-verdict` nowhere else. The workflow takes the line out of the comment and passes it on: a review without that line as its last line, with valid JSON and the head that the prompt names, is not posted. The line is public. It never describes a held finding.
+`blocking` has one item for each **fail** verdict, and `person` one for each **person** verdict. An item is `{"check": "<the check>", "text": "<one line>"}`, where the check is its id exactly as this file names it, with nothing else: `A1`, `B`, `C3`, `F5`, `G1`. Write `oss-verify-verdict` nowhere else. The workflow takes the line out of the comment and passes it on: a review without that line as its last line, with valid JSON and the head that the prompt names, is not posted. The line is public. It never describes a held finding.
 
 ## Finish
 
