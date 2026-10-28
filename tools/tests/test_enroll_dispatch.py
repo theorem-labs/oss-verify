@@ -556,12 +556,14 @@ class Maintainer(unittest.TestCase):
         why, _ = self.standing(self.GITHUB, dispatch.triage.OK, meta={**self.META, "fork": None})
         self.assertIn("is a fork of another repository", why)
 
-    def confirmed(self, labeller, label="maintainer-confirmed", events=True):
+    def confirmed(self, labeller, label="maintainer-confirmed", events=True, at="2026-10-28T05:00:00Z"):
         world = World()
+        world.runs[101]["created_at"] = "2026-10-28T04:00:00Z"  # the Build run of the head commit, made at its push
         world.pulls = [dict(world.pull(), user={"login": "someone"}, labels=[{"name": label}])]
         api = world.api()
         api.table[f"repos/{REPO}/issues/{PR}/events?per_page=100"] = [[
-            {"event": "labeled", "label": {"name": label}, "actor": {"login": labeller}}] if events else []]
+            {"event": "labeled", "label": {"name": label}, "actor": {"login": labeller}, "created_at": at}]
+            if events else []]
         old = dispatch.standing
         dispatch.standing = lambda config, login: f"{login} is not shown to maintain it"
         try:
@@ -576,9 +578,21 @@ class Maintainer(unittest.TestCase):
 
     def test_the_label_put_by_the_author_or_with_no_record_or_another_label_does_not(self):
         for case in ({"labeller": "someone"}, {"labeller": "SomeOne"}, {"labeller": "a-member", "events": False},
-                     {"labeller": "a-member", "label": "other"}):
+                     {"labeller": "a-member", "label": "other"},
+                     # put on before the head commit was pushed: it saw another commit, maybe another `repo`
+                     {"labeller": "a-member", "at": "2026-10-28T03:59:59Z"}, {"labeller": "a-member", "at": None}):
             got = self.confirmed(**case)
             self.assertEqual((got["decision"], got["label"]), ("label", "maintainer-review"), case)
+
+    def test_a_label_run_that_was_skipped_decides_nothing(self):
+        world = World()
+        world.run(700, dispatch.CONFIRMED_WORKFLOW, "pull_request_target")
+        world.runs[700]["conclusion"] = "skipped"
+        got = world.decide(run_id=700)
+        self.assertEqual(got["decision"], "none")
+        self.assertIn("a label other than maintainer-confirmed", got["reason"])
+        world.runs[700]["conclusion"] = "success"
+        self.assertEqual(world.decide(run_id=700)["decision"], "dispatch")
 
     def test_putting_the_label_on_runs_the_decision_again(self):
         confirmed = yaml.safe_load((ROOT / ".github" / "workflows" / "maintainer-confirmed.yml").read_text())

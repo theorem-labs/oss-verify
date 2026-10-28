@@ -19,8 +19,9 @@ label, pr, project and sha, and one line, reason, that says why. The decision is
               maintainer-review  the pull request's author is not shown to maintain the repository that `repo`
                                names, by triage.py's maintainer check (the author, not primary_contact), or that
                                repository is not on github.com, or the check could not read it
-                               (not when a member of theorem-labs, other than the author, put the label
-                               maintainer-confirmed on the pull request: then the check is skipped)
+                               (not when someone other than the author who can label, a member of theorem-labs
+                               or one of its Apps, put maintainer-confirmed on after the head commit was pushed:
+                               then the check is skipped)
   none      anything else, a project.yaml whose language cannot be read included; `reason` says what
 
 Which commit, whose pull request, and whose record. A run of a pull request (pull_request_target or pull_request) is
@@ -88,10 +89,11 @@ ACTIONS_APP = 15368  # GitHub Actions, the app of every check run above
 BUILD_WORKFLOW = ".github/workflows/build.yaml"
 RECORD_ARTIFACT = "enrollment-record"
 RECORD_SCHEMA = "oss-verify enrollment record v1"
-# The label that a member of theorem-labs puts on an enrollment whose author the maintainer check does not show (a
+# The label that someone other than the author, who can label (a member of theorem-labs, or one of its Apps), puts on an enrollment whose author the maintainer check does not show (a
 # pull request that our bot opened at a maintainer's request, for one): with it, the check is skipped. Putting it on
 # runs .github/workflows/maintainer-confirmed.yml, whose completion runs this again.
 CONFIRMED_LABEL = "maintainer-confirmed"
+CONFIRMED_WORKFLOW = ".github/workflows/maintainer-confirmed.yml"
 DEFAULT_BRANCH = "main"
 # The API lists at most 3,000 files of a pull request; above that, the list is not the whole change.
 MAX_LISTED_FILES = 3000
@@ -337,17 +339,20 @@ def standing(config: dict, login: str) -> str:
     return ""
 
 
-def confirmed_by(api: Api, repo: str, number: int, pull: dict, author: str) -> str:
-    """Who put CONFIRMED_LABEL on the pull request, when it carries it and that was someone other than its author; else
-    ''. Only an account with at least triage access to this repository can add a label (GitHub's permission model):
-    a member of the organisation, or one of its Apps. The pull request's own author does not count."""
+def confirmed_by(api: Api, repo: str, number: int, pull: dict, author: str, since: str) -> str:
+    """Who put CONFIRMED_LABEL on the pull request, when it carries it, that was someone other than its author, and it
+    was put on after `since` (when the Build run of the head commit was created, so after that commit was pushed: a
+    confirmation covers the commits it saw, not a later change of `repo`); else ''. Only an account with at least triage
+    access to this repository can add a label (GitHub's permission model): a member of the organisation, or one of its
+    Apps. The pull request's own author does not count."""
     if CONFIRMED_LABEL not in {(label or {}).get("name") for label in pull.get("labels") or []}:
         return ""
     try:
         events = [e for page in api.pages(f"repos/{repo}/issues/{number}/events?per_page=100") for e in page]
     except subprocess.CalledProcessError:
         return ""
-    added = [e for e in events if e.get("event") == "labeled" and (e.get("label") or {}).get("name") == CONFIRMED_LABEL]
+    added = [e for e in events if e.get("event") == "labeled" and (e.get("label") or {}).get("name") == CONFIRMED_LABEL
+             and isinstance(e.get("created_at"), str) and e["created_at"] > since]
     actor = ((added[-1].get("actor") or {}).get("login") or "") if added else ""
     return actor if actor and actor.lower() != author.lower() else ""
 
@@ -358,6 +363,8 @@ def decide(api: Api, repo: str, run_id: int, run_event: str, head_sha: str) -> d
         if not SHA.fullmatch(head_sha):
             return outcome("none", f"{head_sha!r} is not a commit id")
         trigger = runs.get(run_id)
+        if trigger.get("path") == CONFIRMED_WORKFLOW and trigger.get("conclusion") != "success":
+            return outcome("none", f"run {run_id} is a label other than {CONFIRMED_LABEL}")
         if trigger.get("head_sha") != head_sha:
             return outcome("none", f"run {run_id} is of {trigger.get('head_sha')}, not {head_sha}")
         sha, record, head = head_sha, None, head_of(trigger)
@@ -413,7 +420,8 @@ def decide(api: Api, repo: str, run_id: int, run_event: str, head_sha: str) -> d
         return outcome("label", f"{where} has a plain binary above {SIZE_LIMIT:,} bytes: {', '.join(over)}", number,
                        project, sha, "size-review")
     author = (pull.get("user") or {}).get("login") or ""
-    confirmed = confirmed_by(api, repo, number, pull, author)
+    since = runs.get(build_run).get("created_at") if build_run is not None else None
+    confirmed = confirmed_by(api, repo, number, pull, author, since) if isinstance(since, str) else ""
     why = "" if confirmed else standing(config, author)
     if why:
         return outcome("label", f"{where}: {why}", number, project, sha, "maintainer-review")
