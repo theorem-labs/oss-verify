@@ -148,6 +148,8 @@ def toolchain_for(project):
 
 def ubsan_settings(job, toolchain):
     """(checks, left out, left out of C compiles) for the UBSan builds on this toolchain, or None for its fixed flags.
+    The checks keep those of validate.TRAP_EXCEPTIONS that they name, which the toolchain makes through its trap-only
+    handler in the ubsan build (infra/base-builder/toolchain.sh); those they do not name are left out.
     Exit with code 2 if the project sets ubsan_checks and the toolchain keeps the release's fixed flags."""
     if check_build.ubsan_mode(toolchain) == "fixed":
         if job.ubsan_checks is not None:
@@ -160,8 +162,7 @@ def ubsan_settings(job, toolchain):
     checks = job.ubsan_checks or validate.default_ubsan_checks(job.language)
     # As OSS-Fuzz does, a c++ project's C compiles leave out function (those of a c or python project do not have it).
     c_left_out = [check for check in validate.C_COMPILE_EXCLUDED if check in checks] if job.language == "c++" else []
-    return ([check for check in checks if check not in validate.TRAP_EXCEPTIONS], sorted(validate.TRAP_EXCEPTIONS),
-            c_left_out)
+    return (list(checks), sorted(set(validate.TRAP_EXCEPTIONS) - set(checks)), c_left_out)
 
 
 def build_all(job, commit, work, toolchain, home, suffix="", no_cache=False, record=False):

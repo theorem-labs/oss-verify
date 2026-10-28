@@ -109,14 +109,15 @@ Change the UndefinedBehaviorSanitizer checks of the `ubsan` and `asan-ubsan` bui
 
 > **WARNING:** Today's toolchain vintage does not apply this field. Its builds keep the fixed UBSan flags of the release ([build-contract.md](build-contract.md#the-builds)), so that its binaries are the release's. With this vintage, `tools/check` refuses a project that sets the field. The field applies with the next toolchain version.
 
-If you leave out the field, the builds make the checks that OSS-Fuzz makes fatal, which are those of its `-fno-sanitize-recover` list, less `vptr`. For a `c++` project, these are the checks:
+If you leave out the field, the builds make the checks that OSS-Fuzz makes fatal, which are those of its `-fno-sanitize-recover` list, and for a `c++` project also libc++'s hardening. For a `c++` project, these are the checks:
 
     array-bounds bool builtin enum function integer-divide-by-zero null object-size return
-    returns-nonnull-attribute shift signed-integer-overflow unreachable vla-bound
+    returns-nonnull-attribute shift signed-integer-overflow unreachable vla-bound vptr libcxx-hardening
 
-OSS-Fuzz leaves out `function` when it compiles C code, and when it compiles a Python project's native code. Thus a `c` or `python` project's default does not have `function`, and the C files of a `c++` project are compiled without it.
+OSS-Fuzz leaves out `function` when it compiles C code, and when it compiles a Python project's native code. Thus a `c` or `python` project's default does not have `function`, and the C files of a `c++` project are compiled without it. `vptr` and `libcxx-hardening` are about C++ code, so a `c` or `python` project's default does not have them either.
 
-* `vptr` needs the UBSan runtime, which trap mode does not have. Thus no default has it, and `tools/validate.py` warns if you add it.
+* `vptr` needs the UBSan runtime, which trap mode does not have. The `ubsan` build makes it through the toolchain image's trap-only handler (`/opt/ubsan-vptr-trap/libclang_rt.ubsan_vptr_trap.a`), which traps on a mismatch as the other checks do. A compile with `-fno-rtti` has no vptr check: the compiler shim adds `-fno-sanitize=vptr` to it, so a project built without RTTI needs no change. The `asan-ubsan` build leaves `vptr` out.
+* `libcxx-hardening` is not a clang check. It is libc++'s extensive hardening mode: the `ubsan` build compiles and links the project's C++ against the toolchain image's hardened libc++ (`/opt/asan-static/musl-hardened.cfg`). libc++ then checks its preconditions, for example an index past the end of a `std::span`, `std::string_view` or `std::vector`, or `*` of an empty `std::optional`, in the headers and in `libc++.a`, and a failed check traps with no output. The other builds keep the default libc++. To leave it out, write `remove: [libcxx-hardening]`, as for any check.
 * OSS-Fuzz also instruments `unsigned-integer-overflow`, but it silences the reports (`silence_unsigned_overflow=1`). Trap mode cannot silence a check. Thus the default does not contain it.
 
 The field changes the default, and tells why:
@@ -211,7 +212,7 @@ Tell us when to publish the proofs:
 | `eager` | while we work on them |
 | `never` | never outside Theorem |
 
-With each value, we hold back each statement that shows a finding that is not public yet ([what-gets-proven.md](what-gets-proven.md#publishing)).
+With `never`, we publish neither the proofs nor the theorem statements. With each other value, we publish the theorem statements after the enrollment's checks pass. We hold back each statement that shows a finding that is not public yet. When we have a patch for a finding, or we reported it, we hold back all the statements of the project until the finding is public. A project that was private stays private, also if you change `publish` ([what-gets-proven.md](what-gets-proven.md#publishing)).
 
 ## Seeded projects
 

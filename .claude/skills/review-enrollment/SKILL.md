@@ -10,7 +10,7 @@ This skill is for the agent that the enrollment check runs in CI on a pull reque
 1. **The comment**: one comment on the pull request, to the maintainer, written as `.claude/skills/write-to-maintainer/SKILL.md` says. It asks for each fix.
 2. **The summary**: a report for the people at Theorem who decide. It gives the facts, the verdict of each check and what a person must decide.
 
-The review decides nothing. A person at Theorem accepts or declines the project, and a member of @theorem-labs/engineering merges it.
+The review decides nothing. We merge an enrollment when we intend to prove the project.
 
 ## Inputs
 
@@ -95,10 +95,10 @@ Language: <language>. Reproducible: <yes or no>. `publish`: <value, or after_fix
 
 ## For a person
 - <each person verdict: the question, the facts, a recommendation and its reason>
-- Acceptance of the enrollment.
+- Whether we intend to prove the project. A merge means that we intend to prove it.
 
 ## Asked of the maintainer
 <the numbered requests of the comment, one line each>
 ```
 
-"For a person" always ends with the acceptance itself: the review never accepts a project.
+"For a person" always ends with that merge decision: the review never merges a project.

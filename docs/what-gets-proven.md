@@ -38,7 +38,7 @@ The statements catch each failure that the fuzz target would catch in OSS-Fuzz: 
 There are exceptions, and this is the full list. Each exception is a limit of how we run the fuzz target, which these builds cannot remove. No exception is a choice that a project makes.
 
 * **Leaks.** Leak detection is off in the AddressSanitizer builds (`detect_leaks=0`). The leak check of LeakSanitizer at exit cannot run in the sealed static runtime. Thus a leak, which OSS-Fuzz reports, is not an error here.
-* **A UBSan check that trap mode cannot make.** The UBSan builds trap, with no runtime. Thus they leave out `vptr`, which needs a runtime. OSS-Fuzz makes it ([below](#ubsan-checks)).
+* **A UBSan check that trap mode cannot make.** The UBSan builds trap, with no runtime. Thus today's builds leave out `vptr`, which needs a runtime. OSS-Fuzz makes it ([below](#ubsan-checks)). With the next toolchain version, the `ubsan` build of a `c++` project makes it through a trap-only handler, in code compiled with RTTI; the `asan-ubsan` build still leaves it out.
 * **No MemorySanitizer.** There is no MemorySanitizer build, so we do not check reads of uninitialized memory. OSS-Fuzz runs MemorySanitizer for some projects. MemorySanitizer needs each library in the program built with it, the C and C++ libraries included. This static riscv64 toolchain does not supply them.
 * **One thread.** A process in LPS runs one thread. LPS does not cover a fuzz target that starts a thread. We cannot prove the statements of such a fuzz target until LPS includes threads.
 * **Inputs smaller than 64 MiB.** The driver refuses an input file of 64 MiB or more, with status 2. Thus no statement is about a larger input.
@@ -56,9 +56,9 @@ A statement about a `ubsan` or `asan-ubsan` binary names the UBSan checks in eff
 These are the default checks of a `c++` project:
 
     array-bounds bool builtin enum function integer-divide-by-zero null object-size return
-    returns-nonnull-attribute shift signed-integer-overflow unreachable vla-bound
+    returns-nonnull-attribute shift signed-integer-overflow unreachable vla-bound vptr libcxx-hardening
 
-The default of a `c` or `python` project is the same, less `function`, and so are the checks of a `c++` project's C files. OSS-Fuzz leaves `function` out of those compiles too. Trap mode leaves out `vptr`, which OSS-Fuzz makes. OSS-Fuzz also instruments `unsigned-integer-overflow`, but it silences the reports, so its default does not catch an unsigned overflow either. An unsigned overflow is not undefined behaviour, and correct code uses it.
+`libcxx-hardening` is libc++'s extensive hardening mode, which OSS-Fuzz does not turn on: a failed libc++ precondition traps, as a UBSan check does. It and `vptr` are made in the `ubsan` build only. The default of a `c` or `python` project is the same, less `function`, `vptr` and `libcxx-hardening`, and the checks of a `c++` project's C files are the same less `function`. OSS-Fuzz leaves `function` out of those compiles too. OSS-Fuzz also instruments `unsigned-integer-overflow`, but it silences the reports, so its default does not catch an unsigned overflow either. An unsigned overflow is not undefined behaviour, and correct code uses it.
 
 ## Memory budgets
 
