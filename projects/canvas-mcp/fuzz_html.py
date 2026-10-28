@@ -9,8 +9,8 @@ model with three functions: iter_html_tags, remove_html_tags and strip_html_tags
 same text and checks the properties below. A failed property raises PropertyFailed, which the host reports as an
 uncaught exception (status 79). The target catches no exception: html.py documents no exception for any str input.
 
-Each check computes its expected value from the text with this file's own code. No check reads a value of html.py
-to decide what html.py must give: a check that does could not see a change to that value.
+Names, closing flags and text transformations have reference checks below. Span completeness is independently
+checked only on the restricted P1 inputs; full span and attribute reference parsers remain review follow-ups.
 
 The input is decoded in one of two ways (the decoding is total, and the text has at most MAX_CHARS characters):
   * first byte 0xFF: the rest goes through atheris.FuzzedDataProvider.ConsumeUnicodeNoSurrogates, which reaches
@@ -128,7 +128,15 @@ def _plain_text(text, tags, heads):
     # A script or style tag with no closing tag drops the text to the end.
     if hidden is None:
         parts.append(text[cursor:])
-    return _normalize(html.unescape("".join(parts)))
+    # The reference decoder must accept long decimal entities independently of unescape_html's implementation.
+    # Lift the limit only for the oracle, and restore it even on failure. The library runs with CPython's limit.
+    digit_limit = sys.get_int_max_str_digits()
+    try:
+        sys.set_int_max_str_digits(0)
+        decoded = html.unescape("".join(parts))
+    finally:
+        sys.set_int_max_str_digits(digit_limit)
+    return _normalize(decoded)
 
 
 def TestOneInput(data):
@@ -140,7 +148,7 @@ def TestOneInput(data):
     # (remove_html_tags, strip_html_tags), so a span outside the text or behind the previous one loses or repeats
     # text.
     # The record's input has two closing tags at the same place, so the spans overlap.
-    # mutant: upstream/canvas-mcp/src/canvas_mcp/core/html.py:90 `cursor = closing.end()` -> `cursor = closing.start()`
+    # mutant: upstream/canvas-mcp/src/canvas_mcp/core/html.py:108 `cursor = closing.end()` -> `cursor = closing.start()`
     # input: 13-mutant-P1
     previous_end = 0
     heads = []
@@ -153,7 +161,7 @@ def TestOneInput(data):
         # P1. Each span ends where its tag ends. A comment ends just after the first "-->" that starts after its
         # "<!--", or at the end of the text if there is none. Each other tag ends with ">".
         # The record's input has a closed comment, whose span then leaves its last ">" in the text.
-        # mutant: upstream/canvas-mcp/src/canvas_mcp/core/html.py:98 `end + 3` -> `end + 2`
+        # mutant: upstream/canvas-mcp/src/canvas_mcp/core/html.py:116 `end + 3` -> `end + 2`
         # input: 04-comments
         if text.startswith("<!--", tag.start):
             close = text.find("-->", tag.start + 4)
@@ -166,10 +174,10 @@ def TestOneInput(data):
         # with a match of _HEAD: its name is group 2 in lower case, and it is a closing tag when group 1 is "/".
         # tools/accessibility.py finds the th and img tags by name, and skips closing tags.
         # The record's input has named tags, which then have no name (and so no attributes).
-        # mutant: upstream/canvas-mcp/src/canvas_mcp/core/html.py:107 `head.group(2).lower() if head else ""` -> `""`
+        # mutant: upstream/canvas-mcp/src/canvas_mcp/core/html.py:125 `head.group(2).lower() if head else ""` -> `""`
         # input: 01-attributes
         # The record's input has a closing tag, which then counts as an opening tag.
-        # mutant: upstream/canvas-mcp/src/canvas_mcp/core/html.py:122 `bool(head and head.group(1))` -> `False`
+        # mutant: upstream/canvas-mcp/src/canvas_mcp/core/html.py:140 `bool(head and head.group(1))` -> `False`
         # input: 01-attributes
         if text.startswith(("<!", "<?"), tag.start):
             name, closing = "", False
@@ -184,7 +192,7 @@ def TestOneInput(data):
             # P2. The name of an opening tag ends where its head ends. tools/accessibility.py inserts a scope
             # attribute at name_end, so an early or late name_end writes the attribute into the name.
             # The record's input has opening tags, whose name_end is then one character early.
-            # mutant: upstream/canvas-mcp/src/canvas_mcp/core/html.py:108 `head.end() if head` -> `head.end() - 1 if head`
+            # mutant: upstream/canvas-mcp/src/canvas_mcp/core/html.py:126 `head.end() if head` -> `head.end() - 1 if head`
             # input: 01-attributes
             if not closing:
                 _check(tag.name_end == head.end(), "P2: name_end is not the end of the tag name")
@@ -198,7 +206,7 @@ def TestOneInput(data):
         # corrupts the page that it writes back to Canvas. P2 does not check that each value is found: with no
         # reference parser, a quoted value that the tokenizer reads as empty passes it.
         # The record's input has a quoted value, which then holds its closing quote.
-        # mutant: upstream/canvas-mcp/src/canvas_mcp/core/html.py:63 `value_end = cursor` -> `value_end = cursor + 1`
+        # mutant: upstream/canvas-mcp/src/canvas_mcp/core/html.py:81 `value_end = cursor` -> `value_end = cursor + 1`
         # input: 13-mutant-P2
         _check(not tag.attributes or (name and not closing), "P2: attributes on a closing or nameless tag")
         for attribute in tag.attributes.values():
@@ -217,7 +225,7 @@ def TestOneInput(data):
     # its tags are exactly the matches of _PLAIN_TAG, in order. A tokenizer that finds no tag passes each check
     # above, and fails this one.
     # The record's input has one tag, which the tokenizer then does not find.
-    # mutant: upstream/canvas-mcp/src/canvas_mcp/core/html.py:93 `text.find("<", cursor)` -> `-1`
+    # mutant: upstream/canvas-mcp/src/canvas_mcp/core/html.py:111 `text.find("<", cursor)` -> `-1`
     # input: 13-mutant-P3
     if _NOT_PLAIN.search(text) is None:
         found = [(tag.start, tag.end) for tag in tags]
@@ -227,7 +235,7 @@ def TestOneInput(data):
     # text outside the tag spans, in order and unchanged. P1 makes the spans ordered and disjoint, so this text is
     # well defined.
     # The record's input gives "<c", which has the length of "ac" but not its text.
-    # mutant: upstream/canvas-mcp/src/canvas_mcp/core/html.py:138 `parts.append(text[cursor:token.start])` -> `parts.append(text[cursor + 1:token.start + 1])`
+    # mutant: upstream/canvas-mcp/src/canvas_mcp/core/html.py:156 `parts.append(text[cursor:token.start])` -> `parts.append(text[cursor + 1:token.start + 1])`
     # input: 13-mutant-P3
     expected = []
     cursor = 0
@@ -242,7 +250,7 @@ def TestOneInput(data):
     # no space beside a line break, and at most one blank line in a row. The model reads this text, and the
     # truncation and length checks (student_feed.py) count its characters.
     # The record's input has a tab (FRAGMENTS[9]), which then stays in the output.
-    # mutant: upstream/canvas-mcp/src/canvas_mcp/core/html.py:178 `re.sub(r"[ \t\xa0]+", " ", text)` -> `re.sub(r"[ \xa0]+", " ", text)`
+    # mutant: upstream/canvas-mcp/src/canvas_mcp/core/html.py:196 `re.sub(r"[ \t\xa0]+", " ", text)` -> `re.sub(r"[ \xa0]+", " ", text)`
     # input: 13-mutant-P4
     stripped = cm_html.strip_html_tags(text)
     _check(isinstance(stripped, str), "P4: strip_html_tags did not return str")
@@ -257,11 +265,14 @@ def TestOneInput(data):
     # tag; then the entities decode and the white space is normalized. _plain_text computes it from the spans and
     # names that P1 and P2 check.
     # The record's input has an entity (&amp;), which then does not decode.
-    # mutant: upstream/canvas-mcp/src/canvas_mcp/core/html.py:177 `html.unescape("".join(parts))` -> `"".join(parts)`
+    # mutant: upstream/canvas-mcp/src/canvas_mcp/core/html.py:195 `unescape_html("".join(parts))` -> `"".join(parts)`
     # input: 01-attributes
     # The record's input has tags, which then stay in the text.
-    # mutant: upstream/canvas-mcp/src/canvas_mcp/core/html.py:159 `html_content[cursor:token.start]` -> `html_content[cursor:token.end]`
+    # mutant: upstream/canvas-mcp/src/canvas_mcp/core/html.py:177 `html_content[cursor:token.start]` -> `html_content[cursor:token.end]`
     # input: 01-attributes
+    # Calling the limited decoder in the library again raises on this seed; the oracle must not hide that failure.
+    # mutant: upstream/canvas-mcp/src/canvas_mcp/core/html.py:195 `unescape_html("".join(parts))` -> `html.unescape("".join(parts))`
+    # input: 19-decimal-4301
     _check(stripped == _plain_text(text, tags, heads), "P4: strip_html_tags is not the plain text of the HTML")
     return 0
 
