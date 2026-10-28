@@ -20,6 +20,8 @@ cd "$build/cmk"
 cmake "$build/src" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
   -DENABLE_CJSON_TEST=OFF -DENABLE_CUSTOM_COMPILER_FLAGS=OFF
 make -j"$(nproc)"
+# The harness links libcjson.a alone, not cJSON_Utils.c. At v1.7.18, cJSON_Utils.c's decode_array_index_from_pointer
+# reads an index of a JSON pointer past the end of an array (CVE-2025-57052, fixed after v1.7.18).
 
 # The harness is C: compiled with $CC, not with $CXX as OSS-Fuzz's build does.
 $CC $CFLAGS -c "$build/src/fuzzing/cjson_read_fuzzer.c" -o "$WORK/cjson_read_fuzzer.o"
