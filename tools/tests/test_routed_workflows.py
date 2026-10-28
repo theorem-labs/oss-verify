@@ -208,12 +208,13 @@ def test_a_forks_tests_collector_runs_the_default_branchs_script():
     assert all(s.get("if", "").count("env.FORK != 'true'") for s in route if "uses" in s or s.get("id") == "paths")
 
 
-def route_build(tmp_path, files, changed=None, step_name="An enrollment or a change", name="build.yaml"):
-    """Run a route step with a fake gh whose pull request lists `files` (changed_files: `changed`, by default their
-    number). Return its outputs, one line each."""
+def route_build(tmp_path, files, changed=None, step_name="An enrollment or a change", name="build.yaml", base="main"):
+    """Run a route step with a fake gh whose pull request into `base` lists `files` (changed_files: `changed`, by
+    default their number). Return its outputs, one line each."""
     bin = tmp_path / "bin"
     bin.mkdir()
     (tmp_path / "pull.json").write_text(json.dumps({"head": {"sha": "a" * 40},
+                                                    "base": {"ref": base, "repo": {"default_branch": "main"}},
                                                     "changed_files": len(files) if changed is None else changed}))
     (tmp_path / "files").write_text("".join(f"{path}\n" for path in files))
     (bin / "gh").write_text(f'#!/bin/bash\ncase "$*" in *"/files"*) cat {tmp_path}/files ;; '
@@ -245,21 +246,24 @@ def test_route_asks_for_the_job_that_takes_the_project(tmp_path, name, job, outp
     assert not [s for s in jobs["route"]["steps"] if call.search(s.get("run", ""))]
 
 
-@pytest.mark.parametrize("files, changed, want", [
+@pytest.mark.parametrize("files, changed, base, want", [
     # Tooling and documentation only, as from a fork: a change review, and no build.
-    (["tools/check", "docs/build-contract.md", "tools/tests/test_check.py"], None, "change=true"),
-    (["README.md"], None, "change=true"),
+    (["tools/check", "docs/build-contract.md", "tools/tests/test_check.py"], None, "main", "change=true"),
+    (["README.md"], None, "main", "change=true"),
+    # Into another branch: the build, where take-project refuses it, as before.
+    (["README.md"], None, "ci/other", "build=true"),
     # A file under projects/, alone or beside others (a fork's mixed change then fails in take-project, as before),
     # or a rename out of projects/ (both names are listed): an enrollment, built.
-    (["projects/p/project.yaml"], None, "build=true"),
-    (["projects/p/project.yaml", "tools/check"], None, "build=true"),
-    (["tools/x.yaml", "projects/p/x.yaml"], None, "build=true"),
+    (["projects/p/project.yaml"], None, "main", "build=true"),
+    (["projects/p/project.yaml", "tools/check"], None, "main", "build=true"),
+    (["tools/x.yaml", "projects/p/x.yaml"], None, "main", "build=true"),
     # No file, or more files than the API lists: the list decides nothing, and take-project judges it.
-    ([], None, "build=true"),
-    (["tools/check"], 3001, "build=true"),
+    ([], None, "main", "build=true"),
+    (["tools/check"], 3001, "main", "build=true"),
 ])
-def test_builds_route_reviews_a_pull_request_with_no_file_under_projects_as_a_change(tmp_path, files, changed, want):
-    assert route_build(tmp_path, files, changed) == [f"sha={'a' * 40}", want]
+def test_builds_route_reviews_a_pull_request_with_no_file_under_projects_as_a_change(tmp_path, files, changed, base,
+                                                                                     want):
+    assert route_build(tmp_path, files, changed, base=base) == [f"sha={'a' * 40}", want]
     jobs = workflow("build.yaml")["jobs"]
     change = "needs.route.outputs.change == 'true'"
     # A change gets the review and the comment, and no build, record or session.

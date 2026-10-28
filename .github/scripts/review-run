@@ -383,7 +383,7 @@ if [ -z "$NAME" ]; then
     { p = 1; next } p { print > patches; next } { print }' "$in/comment.raw" > "$in/comment.cut"
   mv "$in/comment.cut" "$in/comment.raw"
   [ ! -s "$in/patches.md" ] \
-    || echo "review-run: the review wrote patches ($(wc -c < "$in/patches.md") bytes); no log shows them"
+    || echo "review-run: the review wrote patches ($(wc -c < "$in/patches.md") bytes), cut from the comment"
 fi
 if grep -qiE "$held_mention" "$in/comment.raw"; then
   {

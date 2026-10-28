@@ -49,7 +49,8 @@ import sys
 MARKER = "<!-- oss-verify-review -->"
 HEADING = "## Enrollment review"
 # A change review's (--kind change, review-change.md): main() puts these in place of HEADING, FOOTER and
-# NO_REVIEW_FOOTER. A posted comment is read under either heading.
+# NO_REVIEW_FOOTER. A posted comment is read under either heading; kept, it gets the heading of this run's kind and
+# the footer of its own (FOOTERS), which names the file it was written from.
 CHANGE_HEADING = "## Change review"
 HEADINGS = (HEADING, CHANGE_HEADING)
 # GitHub refuses a comment over 65,536 characters; stay below with a margin for the pieces this script adds.
@@ -184,8 +185,8 @@ def trim(text):
 
 
 def read_previous(previous):
-    """The posted comment's (status, head, version, body): status/head/version from the metadata line only, None when
-    it is legacy."""
+    """The posted comment's (status, head, version, body, heading): status/head/version from the metadata line only,
+    None when it is legacy; heading is the one it was posted under, enrollment's when it has none."""
     lines = previous.replace("\r\n", "\n").split("\n")
     status = head = version = None
     if len(lines) >= 2 and lines[0].strip() == MARKER:
@@ -195,12 +196,13 @@ def read_previous(previous):
     for heading in HEADINGS:
         start = previous.find("\n" + heading + "\n")
         if start != -1:
-            return status, head, version, trim(previous[start + len(heading) + 2:])
-    return status, head, version, trim(previous.replace(MARKER, ""))
+            return status, head, version, trim(previous[start + len(heading) + 2:]), heading
+    return status, head, version, trim(previous.replace(MARKER, "")), HEADINGS[0]
 
 
 FOOTER = "<sub>Claude wrote this review{of} from `review.md`. It can be wrong. Each push replaces it.</sub>"
 CHANGE_FOOTER = FOOTER.replace("`review.md`", "`review-change.md`")
+FOOTERS = dict(zip(HEADINGS, (FOOTER, CHANGE_FOOTER)))
 OLD_FOOTER = ("<sub>Claude wrote this review, following `{doc}`, and `tools/check --checks` measured the checks. It can "
               "be wrong. {of}Each push replaces it, or marks it not current if the push's review does not finish. It "
               "decides nothing: a person at Theorem reviews the enrollment.</sub>")
@@ -277,7 +279,7 @@ def served(record):
 def not_current(previous, head, run, answered=""):
     """The comment already posted, kept: as the review of head when it is that, else marked not the review of head;
     None when it holds no review to keep. answered: what answered head's review, a sentence of the notice."""
-    status, of_head, version, body = read_previous(previous)
+    status, of_head, version, body, posted_under = read_previous(previous)
     # A review is the review of head only when it names what answered it (version 3): one posted before review-served
     # existed names nothing, and is kept as not current rather than posted again as the review.
     recorded = version == "3"
@@ -314,7 +316,7 @@ def not_current(previous, head, run, answered=""):
             return None
         of_head = None
     of = f"`{of_head[:7]}`" if of_head else "an earlier commit"
-    footer = FOOTER.format(of=f" of `{of_head[:7]}`" if of_head else "")
+    footer = FOOTERS[posted_under].format(of=f" of `{of_head[:7]}`" if of_head else "")
     if current:
         # A kept review of this very commit (the pull request went back to it): it is current again.
         return assemble(of_head, "review", [footer], review=body, where=KEPT_WHERE, review_limit=MAX_COMMENT,
