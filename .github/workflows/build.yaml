@@ -20,23 +20,25 @@ name: "Build"
 #   record   writes the build's record, the artifact enrollment-record: the pull request, the project, the commit
 #            project-builds built, and each binary's .text and executable bytes, for enroll-dispatch.yml, which starts
 #            the theorem statements once every required check has passed.
-#   review   Claude Code checks what review.md says (main's copy, at the root of the checkout) on what the workflow
-#            gathered: the pull request, the project's source at the built commit, and the build's results, with
-#            .claude/skills/review-enrollment/SKILL.md for where those are. It writes a comment that asks the
-#            maintainer for each fix. On a later push it resumes the same Claude Code session as the last review, so it
+#   review   Claude Code, through anthropics/claude-code-action, checks what review.md says (main's copy, at the root of
+#            the checkout) on what .github/scripts/review-gather gathered: the pull request, the project's source at
+#            the built commit, and the build's results, with .claude/skills/review-enrollment/SKILL.md for where those
+#            are. It gives a structured output: the comment that asks the maintainer for each fix, any finding held
+#            back (review.md, rule 6), and a verdict for each check. The comment and the verdicts are the artifact
+#            enroll-review-draft. On a later push it resumes the same Claude Code session as the last review, so it
 #            knows what it asked for and why, and reviews only the diff since the commit it reviewed then.
 #   hold     sends each real bug in a project's own code that a review held back from its comment (review.md, rule 6)
 #            to the disclosure route as a private issue (.github/scripts/review-hold): the review job stores it in a
 #            private bucket that only this job can read, and this job sends every finding stored there, a cancelled
 #            run's too. A finding never reaches a log, an output or an artifact.
-#   keep     saves that review's session in the Actions cache, for the next push's review.
-#   comment  posts that comment, with the checks' report folded under it, or replaces the one already there. The
-#            comment starts with <!-- oss-verify-review -->, as the triage comment starts with its own marker.
+#   comment  while OSSV_POST_REVIEW is `post`, posts that comment, with the checks' report folded under it, or replaces
+#            the one already there. The comment starts with <!-- oss-verify-review -->, as the triage comment starts
+#            with its own marker.
 #   required always runs, last, and reports the required check (below).
 #
 # project-builds is the required check, and the job required reports it (.github/scripts/collect). required runs on
 # every run, after all the other jobs whatever their results, and passes only if route passed and every job route asked
-# for passed: the build when route asked for it, and the record, review, hold, keep and comment jobs when their own
+# for passed: the build when route asked for it, and the record, review, hold and comment jobs when their own
 # conditions call for them (the review when the build took a project); every other job must be skipped. A skipped job
 # counts as a pass where a check is required, so the build job is never the required check itself. The build takes the
 # project with .github/scripts/take-project, for each commit on its own:
@@ -81,16 +83,14 @@ name: "Build"
 # The review job runs no code of the pull request or the project. It and the comment job hold identity tokens
 # (id-token: write), which they trade for short-lived tokens: the review's for an Anthropic token by workload identity
 # federation, so no API key is stored, and both jobs' for a Google access token by Google workload identity
-# federation (Theorem's infrastructure code). Claude
-# gets three tools only, Read, Glob and Grep, inside the checkout (.github/scripts/review-run), and an environment
-# without the runner's tokens. Its review is posted only when the provider and model it asked for, at that provider's
-# own API, answered every turn, as Claude Code reported each turn (.github/scripts/review-served);
-# every comment names the providers and models that answered, with their turns, or says why nothing shows which.
-# The comment job alone writes: it posts text, refused if it holds what looks like a
-# credential (.github/scripts/review-comment), as the oss-verify GitHub App (oss-verify[bot]), with an installation
-# token that can write pull requests in this repository only. It makes that token from the App's client id below and
-# its private key, which it reads at run time from Secret Manager (oss-verify-github-app-key), and runs no code of the
-# pull request or the project.
+# federation (Theorem's infrastructure code). Claude gets three tools only, Read, Glob and Grep (`--tools`): no shell,
+# no network and no tool that writes, so the text of the pull request, which it reads as data (review.md, rule 1),
+# cannot make it run anything or reach the job's tokens. The action keeps the GitHub identity token's request
+# variables out of Claude Code's environment, and with allowed_non_write_users it keeps the GitHub token out of the
+# checkout's git config. The comment job alone writes: it posts the comment as the oss-verify GitHub App
+# (oss-verify[bot]), with an installation token that can write pull requests in this repository only. It makes that
+# token from the App's client id below and its private key, which it reads at run time from Secret Manager
+# (oss-verify-github-app-key), and runs no code of the pull request or the project.
 #
 # This repository stores no long-lived credential for any of that. Google's provider admits this file, triage.yaml
 # and the enrollment workflow enroll-dispatch.yml, each on refs/heads/main and only from its own events (here
@@ -121,39 +121,33 @@ name: "Build"
 # file ask for an identity token; no other job of it does.
 # A review runs only on main: the Anthropic rule above admits refs/heads/main alone, so a run on another branch gets
 # no Anthropic token (and Google's provider, which also admits main alone, gives it no collector token). So a change to
-# the review is tried for real only once it is on main: run `gh workflow run build.yaml -f pr=<n>` against a pull
-# request opened by this repository, never a maintainer's open enrollment, because the run posts its comment there.
-# Before the merge, tools/tests runs the review's steps with stand-ins.
+# the review is tried for real only once it is on main: run `gh workflow run build.yaml -f pr=<n>`; while
+# OSSV_POST_REVIEW is not `post`, that posts nothing, and the draft is the run's artifact enroll-review-draft.
+# Before the merge, tools/tests runs the review's own steps with stand-ins.
 #
 # The review's Claude Code exports its usage by OpenTelemetry to Theorem's cost collector, at the public URL below
-# (a literal here because it is public), with the collector's bearer token, which the Review step reads at run time
+# (a literal here because it is public), with the collector's bearer token, which the review job reads at run time
 # from Secret Manager (agent-spend-otel-token, whose readers Theorem's infrastructure code names). The export is
 # tagged theorem.project=oss-verify, theorem.subproject=<name>, theorem.lane=enroll-review-ci and
-# theorem.credential=oss-verify-ci (.github/scripts/review-run sets them). The export is a measurement and never
-# decides whether an enrollment gets its review: if the sign-in or the read fails, or the collector refuses the token
-# or does not answer (before the review, or after a review that wrote its comment), the run's page carries a warning
-# saying that this review's usage is not exported (a failed sign-in also shows the sign-in step's own error), and the
-# review runs to its end and its comment is posted. A lost export is read from that warning, never from the job's
-# result.
+# theorem.credential=oss-verify-ci. The export is a measurement and never decides whether an enrollment gets its
+# review: if the sign-in or the read fails, the run's page carries a warning saying that this review's usage is not
+# exported, and the review runs without it.
 #
 # The review's session goes from one push to the next in the Actions cache, under the key
-# enroll-review/<pull request>/<project>/<run id>-<attempt>. The review job restores the newest entry of the pull
-# request and project, review-run resumes that session (claude --resume <id>, which keeps its id) and tells the model
-# to review only the diff since the commit that session reviewed, and the keep job saves the session once the review
-# has written a comment. The log of the Review step says which it did: "review-run: resuming the session <id> (the
-# review of <commit>), to review only <commit>..<commit>", or "a fresh review".
-# Which run writes an entry, and which reads it: the keep job of this workflow's run for the pull request writes it
-# (cache-mode: write-only; it has no permissions, checks out nothing and runs no script: it saves the directory that
-# the review job handed it as an artifact), and the review job of the next run for that pull request reads it
-# (cache-mode: read). Both are main's copy of this file, whatever the pull request changes. A run on main restores
-# only entries that a run on main saved: a pull request's own runs (pull_request, or a push to its branch) save only
-# in the scope of refs/pull/<n>/merge or of their branch, which a run on main does not restore. So the code of a pull
-# request cannot write the session that its review resumes. Every other job has cache-mode: none (below).
-# A session holds the public inputs the review read and the review's own reasoning, and no token: review-run keeps
-# none that looks like a credential. As with every cache entry of main, a pull request's own run can read it. GitHub
-# drops an entry that no run has read for 7 days, and the next review is then fresh. A review that holds back a
-# finding (review.md, rule 6) keeps no session, because the session would hold the finding: the next push resumes the
-# last session kept before it, or starts fresh.
+# enroll-review/<pull request>/<project>/<run id>-<attempt>: ~/.claude/projects, where Claude Code keeps its sessions,
+# and ~/.claude/ossv-last-review, one line `session=<id> head=<commit>`. The review job restores the newest entry of
+# the pull request and project; when the head descends from the commit that session reviewed, review-gather writes the
+# diff since then and the review resumes that session (claude --resume <id>, which keeps its id) to review only that
+# diff. The log of the gather step says which: "the review resumes the session <id>", or "the review is fresh". The
+# review job saves the session after the review (cache-mode: write); it runs no code of the pull request, and its
+# Claude can write nothing. Both are main's copy of this file, whatever the pull request changes. A run on main
+# restores only entries that a run on main saved: a pull request's own runs (pull_request, or a push to its branch)
+# save only in the scope of refs/pull/<n>/merge or of their branch, which a run on main does not restore. So the code
+# of a pull request cannot write the session that its review resumes. Every other job has cache-mode: none (below).
+# A session holds the public inputs the review read and the review's own reasoning. As with every cache entry of main,
+# a pull request's own run can read it. GitHub drops an entry that no run has read for 7 days, and the next review is
+# then fresh. A review that holds back a finding (review.md, rule 6) keeps no session, because the session would hold
+# the finding: the next push resumes the last session kept before it, or starts fresh.
 # Only the review job can act as ossv-ci: that comes with the environment enroll-review. Its deployment branch rule,
 # declared in Theorem's infrastructure code, allows main alone; GitHub checks it against the run's ref, which is main
 # for pull_request_target and refs/pull/<n>/merge for a pull request's own run
@@ -179,7 +173,7 @@ on:
         type: number
 
 permissions: {}
-# No job reads or writes the Actions cache unless it says so: only the review job reads it and the keep job writes it.
+# No job reads or writes the Actions cache unless it says so: only the review job does, for its session.
 cache-mode: none
 
 concurrency:
@@ -386,322 +380,122 @@ jobs:
           overwrite: true
 
   review:
-    # Claude reviews the enrollment against review.md, main's copy. It runs after the build, whatever its result, so
-    # that the review can ask for the build's fixes too. It runs no code of the pull request.
+    # Claude Code, through anthropics/claude-code-action, checks the enrollment against review.md (the top of this file).
     needs: project-builds
     if: ${{ !cancelled() && needs.project-builds.outputs.name != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    # Restores the last review's session; the keep job saves this one (the top of this file).
-    cache-mode: read
-    # enroll-review is the only environment from which a job can act as ossv-ci, the collector token's reader and
-    # the writer of held findings (the top of this file). No deployment: the pull request shows none, and the
-    # environment claim is in the token either way.
-    environment:
-      name: enroll-review
-      deployment: false
-    permissions:
-      contents: read
-      pull-requests: read
-      # For the pull request's checks, which the review reads.
-      checks: read
-      statuses: read
-      # Only for the GitHub identity tokens that federation trades for an Anthropic token and for a Google access
-      # token of ossv-ci@theorem-agent-infra. This job runs no code of the pull request.
-      id-token: write
+    cache-mode: write
+    environment: {name: enroll-review, deployment: false}
+    permissions: {contents: read, pull-requests: read, checks: read, statuses: read, id-token: write}
     env:
-      # Theorem's Google project, as Theorem's infrastructure code declares them. Public identifiers, not
-      # credentials: the provider admits this file, triage.yaml and enroll-dispatch.yml on refs/heads/main, and only
-      # a job in the environment enroll-review can act as this account.
+      PR: ${{ github.event.pull_request.number || inputs.pr }}
+      NAME: ${{ needs.project-builds.outputs.name }}
+      HEAD_SHA: ${{ needs.project-builds.outputs.sha }}
+      SESSION_KEY: enroll-review/${{ github.event.pull_request.number || inputs.pr }}/${{ needs.project-builds.outputs.name }}/
       GCP_WORKLOAD_IDENTITY_PROVIDER: projects/805240912354/locations/global/workloadIdentityPools/github/providers/github-ossv
       GCP_SERVICE_ACCOUNT: ossv-ci@theorem-agent-infra.iam.gserviceaccount.com
     outputs:
-      comment: ${{ steps.review.outputs.comment }}
-      # What answered the review, as .github/scripts/review-served recorded it, for the comment job to check.
-      served: ${{ steps.review.outputs.served }}
-      # true when review-run refused the review (exit 4): another provider or model answered, or nothing shows which.
-      refused: ${{ steps.review.outputs.refused }}
-      # kept when the review kept its session, which the keep job saves; the artifact it is in, from this attempt, so
-      # that a re-run of the keep job alone reads it.
-      session: ${{ steps.review.outputs.session }}
-      artifact: enroll-review-session-${{ github.run_attempt }}
-      # The name of the object that holds a finding this review held back (review.md, rule 6): a name only, for the hold
-      # job, which must send it, and the comment job's check that it did. Never the finding: another job's log would
-      # show it.
+      comment: ${{ steps.review.outputs.structured_output && fromJSON(steps.review.outputs.structured_output).comment }}
       held_object: ${{ steps.held.outputs.object }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
-        with:
-          persist-credentials: false
-          # The history of .github/PULL_REQUEST_TEMPLATE.md, for check B of review.md.
-          fetch-depth: 0
-
+        with: {persist-credentials: false, fetch-depth: 0}
       - name: Take projects/<name>/ from the pull request, as the build did
-        timeout-minutes: 5
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number || inputs.pr }}
-          # The head that the build took, also on a run started by hand.
-          HEAD_SHA: ${{ needs.project-builds.outputs.sha }}
+        env: {GH_TOKEN: "${{ github.token }}", REPO: "${{ github.repository }}"}
         run: GITHUB_STEP_SUMMARY=/dev/null .github/scripts/take-project build
-
-      # The session of the last review of this pull request and project, which the review resumes (the top of this
-      # file). None on its first review, or once the cache has dropped it: a fresh review. review-run resumes only a
-      # directory whose `session` file names a whole session.
-      - name: Restore the last review's session
+      - name: Restore the last review's session and the head it reviewed
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
-        with:
-          path: ${{ runner.temp }}/review-session
-          key: enroll-review/${{ github.event.pull_request.number || inputs.pr }}/${{ needs.project-builds.outputs.name }}/${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: enroll-review/${{ github.event.pull_request.number || inputs.pr }}/${{ needs.project-builds.outputs.name }}/
-
-      - name: Gather what the review reads
+        with: {path: "~/.claude/projects\n~/.claude/ossv-last-review", key: "${{ env.SESSION_KEY }}${{ github.run_id }}-${{ github.run_attempt }}", restore-keys: "${{ env.SESSION_KEY }}"}
+      - name: Gather what the review reads, and the diff since the last review
+        id: gather
         timeout-minutes: 15
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number || inputs.pr }}
-          NAME: ${{ needs.project-builds.outputs.name }}
           COMMIT: ${{ needs.project-builds.outputs.commit }}
-          RESULT: ${{ needs.project-builds.outputs.result }}
+          BUILD: "The Build check ${{ needs.project-builds.result }}: ${{ needs.project-builds.outputs.result || 'no result' }}."
           BINARIES: ${{ needs.project-builds.outputs.binaries }}
           CHECKS: ${{ needs.project-builds.outputs.checks }}
-          BUILD_CONCLUSION: ${{ needs.project-builds.result }}
-          # For the changes since the last review's commit, when there is one.
-          HEAD_SHA: ${{ needs.project-builds.outputs.sha }}
-          REVIEW_SESSION: ${{ runner.temp }}/review-session
         run: |
-          dpkg -s python3-yaml unzip > /dev/null 2>&1 \
-            || sudo apt-get install -y -qq python3-yaml unzip \
-            || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml unzip; }
-          mkdir -p .review/build
-          printf 'The Build check %s: %s.\n' "$BUILD_CONCLUSION" "${RESULT:-no result}" > .review/build/result.md
-          printf '%s\n' "$BINARIES" > .review/build/binaries.md
-          printf '%s\n' "$CHECKS" > .review/build/checks.md
-          # Until the token is printed again, the runner reads none of the gathered text as a workflow command.
-          resume="$(openssl rand -hex 16)"
-          echo "::stop-commands::$resume"
-          .github/scripts/review-gather .review
-          echo "::$resume::"
-
-      - name: Install Claude Code
-        run: npm install --global @anthropic-ai/claude-code@2.1.310
-
-      # Theorem's Google project trusts this workflow's identity token (Theorem's infrastructure code), so the
-      # collector's token is read at run time instead of being stored here. Nothing is written to the workspace and
-      # nothing is exported: the Google access token is this step's output alone, and it lives five minutes. The
-      # token only feeds the usage export, so a failed sign-in must not stop the review: continue-on-error, and the
-      # Review step warns and runs without the export when the output is empty. The run's page then shows this
-      # step's own error annotation beside that warning; the job's result is the review's.
-      - name: Sign in to Google Cloud
+          dpkg -s python3-yaml unzip > /dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml unzip; }
+          LAST_REVIEW=~/.claude/ossv-last-review .github/scripts/review-gather .review
+      - name: Sign in to Google Cloud, for the cost collector's token
         id: gcp
         continue-on-error: true
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0 (sha-pinned)
-        with:
-          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
-          token_format: access_token
-          access_token_lifetime: 300s
-          create_credentials_file: false
-          export_environment_variables: false
-
-      - name: Get the GitHub identity token for Anthropic
+        with: {workload_identity_provider: "${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}", service_account: "${{ env.GCP_SERVICE_ACCOUNT }}", token_format: access_token, access_token_lifetime: 300s, create_credentials_file: false, export_environment_variables: false}
+      - name: Export the review's usage to the cost collector
+        env: {GCP_ACCESS_TOKEN: "${{ steps.gcp.outputs.access_token }}"}
         run: |
-          set -euo pipefail
-          mkdir -m 700 "$RUNNER_TEMP/oidc"
-          # The request token reaches curl through a pipe, not an argument, which other processes can read.
-          curl -q -sSf -H @<(printf 'Authorization: Bearer %s\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN") \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://api.anthropic.com" | jq -r .value > "$RUNNER_TEMP/oidc/jwt"
-          echo "::add-mask::$(cat "$RUNNER_TEMP/oidc/jwt")"
-
+          OTEL_COLLECTOR_TOKEN=$(curl -q -sSf -H @<(builtin printf 'Authorization: Bearer %s\n' "$GCP_ACCESS_TOKEN") \
+            https://secretmanager.googleapis.com/v1/projects/theorem-agent-infra/secrets/agent-spend-otel-token/versions/latest:access \
+            | jq -er '.payload.data | select(type == "string" and length > 0)' | base64 -d | tr -d '[:space:]') || OTEL_COLLECTOR_TOKEN=""
+          if [ -z "$OTEL_COLLECTOR_TOKEN" ]; then echo "::warning::No cost collector token: this review's usage is not exported."; exit 0; fi
+          builtin printf '::add-mask::%s\n' "$OTEL_COLLECTOR_TOKEN"
+          { builtin printf '%s\n' CLAUDE_CODE_ENABLE_TELEMETRY=1 OTEL_LOGS_EXPORTER=otlp OTEL_METRICS_EXPORTER=none \
+              OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf OTEL_EXPORTER_OTLP_ENDPOINT=https://agent-otel-public-6acxmql5za-uw.a.run.app \
+              "OTEL_RESOURCE_ATTRIBUTES=theorem.project=oss-verify,theorem.subproject=$NAME,theorem.lane=enroll-review-ci,theorem.credential=oss-verify-ci"
+            builtin printf 'OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer %s\n' "$OTEL_COLLECTOR_TOKEN"; } >> "$GITHUB_ENV"
       - name: Review
         id: review
         timeout-minutes: 45
-        env:
-          PR: ${{ github.event.pull_request.number || inputs.pr }}
-          NAME: ${{ needs.project-builds.outputs.name }}
-          # Claude Code trades the identity token for an Anthropic token, which lives at most twice the five minutes a
-          # GitHub identity token has, and reads this file again for each new one. review-run writes a new identity
-          # token into it every minute, through the request URL and token the runner gives this step, so that each
-          # exchange reads one that is not expired and not used before.
-          ANTHROPIC_IDENTITY_TOKEN_FILE: ${{ runner.temp }}/oidc/jwt
-          # The federation rule above, in Anthropic's organization "Theorem - HDO".
-          ANTHROPIC_FEDERATION_RULE_ID: fdrl_019restxFx3PhpLhbziQoQKf
-          ANTHROPIC_ORGANIZATION_ID: 5fd73c3e-8a2c-4166-b80d-fb5ce0c1b4a6
-          ANTHROPIC_SERVICE_ACCOUNT_ID: svac_01WdHTLcJPEfiPttcuLK1hGT
-          ANTHROPIC_WORKSPACE_ID: wrkspc_01Qr1iUVcow4jdgQM7Amfks5
-          # Usage, to Theorem's cost collector. review-run checks that the collector takes the token, and runs the
-          # review without the export if it does not. The collector's public URL.
-          OTEL_EXPORTER_OTLP_ENDPOINT: https://agent-otel-public-6acxmql5za-uw.a.run.app
-          GCP_ACCESS_TOKEN: ${{ steps.gcp.outputs.access_token }}
-          # The session of the last review, which review-run resumes, and the commit this review is of. After a
-          # review, the directory holds this review's session, which the keep job saves for the next push.
-          HEAD_SHA: ${{ needs.project-builds.outputs.sha }}
-          REVIEW_SESSION: ${{ runner.temp }}/review-session
+        uses: anthropics/claude-code-action@d70510b174a1244958df0b03166a54912811f3e6 # v1 (v1.0.264, sha-pinned)
+        with:
+          anthropic_federation_rule_id: fdrl_019restxFx3PhpLhbziQoQKf
+          anthropic_organization_id: 5fd73c3e-8a2c-4166-b80d-fb5ce0c1b4a6
+          anthropic_service_account_id: svac_01WdHTLcJPEfiPttcuLK1hGT
+          anthropic_workspace_id: wrkspc_01Qr1iUVcow4jdgQM7Amfks5
+          github_token: ${{ github.token }}
+          allowed_non_write_users: "*"
+          allowed_bots: "*"
+          prompt: >-
+            Read review.md at the root of this checkout: it says what OSS Verify's enrollment check of pull request
+            #${{ env.PR }}, projects/${{ env.NAME }}/, checks. ${{ steps.gather.outputs.session && format('Earlier in this
+            session you reviewed {0}: read only review.md and .review/since-last-review.diff, the diff from it to {1}, and
+            review', steps.gather.outputs.last, env.HEAD_SHA) || 'Then review' }} as the section "In CI" of
+            .claude/skills/review-enrollment/SKILL.md says. Give the result as the structured output.
+          claude_args: >-
+            --tools Read,Glob,Grep --model claude-opus-5-5 --effort xhigh --max-turns 300
+            ${{ steps.gather.outputs.session && format('--resume {0}', steps.gather.outputs.session) || '' }}
+            --json-schema '{"type":"object","additionalProperties":false,"required":["comment","held","verdicts"],"properties":{"comment":{"type":"string","description":"The comment to the maintainer, in Markdown. Never a held finding."},"held":{"type":"string","description":"Each finding held back under rule 6 of review.md, as the skill section A held finding says, or empty."},"verdicts":{"type":"object","description":"The verdict of each check of review.md by its id, A1 to G5, and for an F check the worst over the fuzz targets.","required":["F2","F7"],"additionalProperties":{"enum":["pass","fail","person"]}}}}'
+      - name: Keep the draft, and the held finding apart from it
+        id: result
+        env: {RESULT: "${{ steps.review.outputs.execution_file }}", SESSION: "${{ steps.review.outputs.session_id }}"}
         run: |
-          # The collector's bearer token: Secret Manager agent-spend-otel-token, which Theorem's infrastructure code
-          # declares and grants this job's account. It stays a variable of this shell, masked in the log and no
-          # process's argument. The export is a measurement and never decides whether the review runs: if the sign-in
-          # failed, or the read fails, or the value is blank, this is one warning and review-run exports nothing.
-          # The select() refuses a response with no payload, which would otherwise decode "null" into bytes that
-          # look like a token; jq then prints nothing, so the value is empty and the blank check below warns.
-          OTEL_COLLECTOR_TOKEN=""
-          if [ -n "$GCP_ACCESS_TOKEN" ]; then
-            OTEL_COLLECTOR_TOKEN=$(curl -q -sSf -H @<(builtin printf 'Authorization: Bearer %s\n' "$GCP_ACCESS_TOKEN") \
-              'https://secretmanager.googleapis.com/v1/projects/theorem-agent-infra/secrets/agent-spend-otel-token/versions/latest:access' \
-              | jq -er '.payload.data | select(type == "string" and length > 0)' | base64 -d) || OTEL_COLLECTOR_TOKEN=""
-          fi
-          # The Google access token is needed for nothing else, so review-run and Claude Code never inherit it.
-          unset GCP_ACCESS_TOKEN
-          # One mask command covers one line, so each line of the value is masked: the declared token is one line of
-          # 48 characters, and a replacement that is not stays out of the log this way too.
-          while IFS= read -r line; do
-            if [[ $line == *[![:space:]]* ]]; then builtin printf '::add-mask::%s\n' "$line"; fi
-          done <<< "$OTEL_COLLECTOR_TOKEN"
-          # A value of whitespace alone is no token: without this, review-run would skip the export with no warning.
-          if [ -z "${OTEL_COLLECTOR_TOKEN//[[:space:]]/}" ]; then
-            OTEL_COLLECTOR_TOKEN=""
-            echo "::warning::Could not read the cost collector's token (Secret Manager agent-spend-otel-token in theorem-agent-infra), so this review's usage does not reach Theorem's cost collector. The review runs."
-          fi
-          export OTEL_COLLECTOR_TOKEN
-          # Until the token is printed again, the runner reads none of the review's output as a workflow command.
-          resume="$(openssl rand -hex 16)"
-          echo "::stop-commands::$resume"
-          code=0
-          .github/scripts/review-run .review || code=$?
-          # A finding held back for private review (review.md, rule 6) stays in .review/held-finding.md on this disk,
-          # also when the comment is not to be posted: the steps below store it where only the hold job can read it.
-          if [ -s .review/held-finding.md ]; then echo "held=yes" >> "$GITHUB_OUTPUT"; fi
-          rm -f "$ANTHROPIC_IDENTITY_TOKEN_FILE" "$ANTHROPIC_IDENTITY_TOKEN_FILE".new.*
-          # The record of what answered, also when the review is not to be posted or did not finish: the comment job
-          # checks it, and names what answered. Its names are ones review-served cleaned, so it holds no command.
-          if [ -f .review/served ]; then
-            delimiter="served-$(openssl rand -hex 16)"
-            { echo "served<<$delimiter"; cat .review/served; echo; echo "$delimiter"; } >> "$GITHUB_OUTPUT"
-          fi
-          echo "::$resume::"
-          # A lost export, on the run's page: review-run's own line, shown only if it is plain words, so it holds no
-          # command. It never changes the step's result.
-          lost=$(grep -m1 -xE '[A-Za-z0-9 ,.()-]{1,200}' .review/export-lost.txt 2> /dev/null) || lost=""
-          if [ -n "$lost" ]; then echo "::warning::Usage export: $lost."; fi
-          if [ "$code" = 4 ]; then
-            echo "refused=true" >> "$GITHUB_OUTPUT"
-            # 4: another provider or model answered, or nothing shows which (review-served). The comment job posts
-            # none of the review, and says what answered. review-run's line names only what review-served cleaned.
-            failure=$(grep -m1 -xE "the review is not published: [][A-Za-z0-9 ,.:;@+?/*()'_-]{1,2100}" \
-              .review/failure.txt 2> /dev/null) \
-              || failure="the review is not published: review-run gave no reason"
-            echo "::error::${failure^}"
-            { echo "### The review is not published"; echo; echo "    $failure"; } >> "$GITHUB_STEP_SUMMARY"
-            exit "$code"
-          elif [ "$code" != 0 ]; then
-            # Why, on the run's page and in the job's summary, not only in the log above: review-run's own line of
-            # plain words from failure.txt, and Claude Code's message from failure-detail.txt with no backtick, so
-            # that it stays inside its code block. The summary is public: a message that holds what looks like a
-            # credential (review-comment's scan, over the whole file; an error of the scan counts as one) or the
-            # collector's token is not shown.
-            failure=$(grep -m1 -xE '[A-Za-z0-9 ,._()-]{1,200}' .review/failure.txt 2> /dev/null) || failure=""
-            failure=${failure:-review-run ended with exit status $code before Claude Code wrote a result}
-            detail=$(head -c 1000 .review/failure-detail.txt 2> /dev/null | tr -d '`' | tr '[:cntrl:]' ' ') || true
-            scan=0
-            [ -z "$detail" ] || python3 .github/scripts/review-comment --holds-credential < .review/failure-detail.txt \
-              || scan=$?
-            if [ "$scan" != 3 ]; then detail=""; fi
-            if [ -n "$OTEL_COLLECTOR_TOKEN" ] && [[ $detail == *"$OTEL_COLLECTOR_TOKEN"* ]]; then detail=""; fi
-            echo "::error::The review did not finish: $failure"
-            {
-              echo "### The review did not finish"
-              echo
-              echo "$failure."
-              if [ -n "$detail" ]; then
-                echo
-                echo "Claude Code's message:"
-                echo
-                echo '```'
-                echo "$detail"
-                echo '```'
-              fi
-              echo
-              echo "The log of the Review step has each try's ending."
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit "$code"
-          fi
-          # The collector's token never leaves this job (review-comment refuses the other credentials). Compared in
-          # this shell, so that the token is no process's argument.
-          if [ -n "$OTEL_COLLECTOR_TOKEN" ] && [[ $(< .review/comment.md) == *"$OTEL_COLLECTOR_TOKEN"* ]]; then
-            echo "::error::The review's comment holds the collector's token; it is not posted."
-            exit 1
-          fi
-          delimiter="review-$(openssl rand -hex 16)"
-          { echo "comment<<$delimiter"; head -c 60000 .review/comment.md; echo; echo "$delimiter"; } >> "$GITHUB_OUTPUT"
-          if [ -s "$REVIEW_SESSION/session" ]; then echo "session=kept" >> "$GITHUB_OUTPUT"; fi
-
-      # The Google access token from before the review has expired: it lives five minutes, and a review takes longer.
-      # A held finding needs a new one. ossv-ci may only create objects in the held-findings bucket: it cannot read,
-      # list or delete them.
+          out=$(jq -ce 'map(select(.type == "result")) | last | .structured_output | objects' "$RESULT")
+          mkdir -p "$RUNNER_TEMP/draft" && jq -r .comment <<< "$out" > "$RUNNER_TEMP/draft/comment.md"
+          jq .verdicts <<< "$out" > "$RUNNER_TEMP/draft/verdicts.json"
+          { echo '<!-- held finding -->'; jq -r .held <<< "$out"; } > "$RUNNER_TEMP/held-finding.md"
+          if jq -e '.held | test("\\S")' <<< "$out" > /dev/null; then echo "held=yes" >> "$GITHUB_OUTPUT"
+          else mkdir -p ~/.claude && printf 'session=%s head=%s\n' "$SESSION" "$HEAD_SHA" > ~/.claude/ossv-last-review; fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (sha-pinned)
+        with: {name: enroll-review-draft, path: "${{ runner.temp }}/draft", if-no-files-found: error}
+      # A session that holds a held finding is not kept: any run of a pull request can read main's cache.
+      - name: Keep this review's session for the next push's review
+        if: ${{ steps.result.outputs.held != 'yes' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
+        with: {path: "~/.claude/projects\n~/.claude/ossv-last-review", key: "${{ env.SESSION_KEY }}${{ github.run_id }}-${{ github.run_attempt }}"}
       - name: Sign in to Google Cloud to store the held finding
         id: gcp-held
-        if: ${{ always() && steps.review.outputs.held == 'yes' }}
+        if: ${{ steps.result.outputs.held == 'yes' }}
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0 (sha-pinned)
-        with:
-          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
-          token_format: access_token
-          access_token_lifetime: 300s
-          create_credentials_file: false
-          export_environment_variables: false
-
-      # The finding goes to the private bucket theorem-agent-infra-oss-verify-held-findings (Theorem's infrastructure
-      # code), as held/<this run>/<32 random hex digits>, created only when no object has that name (ifGenerationMatch
-      # = 0). Its first lines, written here and not by the model, say which pull request, head, project and run it is of,
-      # for the hold job of this run or of a later one (.github/scripts/review-held reads them). Only ossv-app-comment,
-      # which the hold job acts as, can read it; the hold job deletes it once it is sent, and the bucket after 7 days.
-      # Any failure fails this job, and the comment job then posts no review that says a finding was sent.
+        with: {workload_identity_provider: "${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}", service_account: "${{ env.GCP_SERVICE_ACCOUNT }}", token_format: access_token, access_token_lifetime: 300s, create_credentials_file: false, export_environment_variables: false}
+      # Into the private bucket only the hold job reads (the top of this file); never a log, an output or an artifact.
       - name: Store the held finding for the hold job
         id: held
-        if: ${{ always() && steps.review.outputs.held == 'yes' }}
-        env:
-          GCP_ACCESS_TOKEN: ${{ steps.gcp-held.outputs.access_token }}
-          RUN_ID: ${{ github.run_id }}
-          PR: ${{ github.event.pull_request.number || inputs.pr }}
-          NAME: ${{ needs.project-builds.outputs.name }}
-          HEAD_SHA: ${{ needs.project-builds.outputs.sha }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        if: ${{ steps.result.outputs.held == 'yes' }}
+        env: {GCP_ACCESS_TOKEN: "${{ steps.gcp-held.outputs.access_token }}", RUN_ID: "${{ github.run_id }}", RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}
         run: |
           set -euo pipefail
-          object="$RUNNER_TEMP/held-object"
-          printf 'oss-verify held finding v1\npr: %s\nhead: %s\nproject: %s\nrun: %s\n---\n' \
-            "$PR" "$HEAD_SHA" "$NAME" "$RUN_URL" > "$object"
-          cat .review/held-finding.md >> "$object"
-          # At most 1 MiB, within what the hold job reads.
-          [ "$(wc -c < "$object")" -le 1048576 ] \
-            || { echo "::error::The held finding is larger than 1 MiB, so it is not stored and the review is not posted."; exit 1; }
-          name="held/$RUN_ID/$(openssl rand -hex 16)"
-          # The token reaches curl through a pipe that the builtin printf writes, not an argument.
-          generation=$(curl -q -sSf --max-time 60 -X POST \
-            -H @<(builtin printf 'Authorization: Bearer %s\n' "$GCP_ACCESS_TOKEN") \
+          object="$RUNNER_TEMP/held-object" name="held/$RUN_ID/$(openssl rand -hex 16)"
+          printf 'oss-verify held finding v1\npr: %s\nhead: %s\nproject: %s\nrun: %s\n---\n' "$PR" "$HEAD_SHA" "$NAME" "$RUN_URL" > "$object"
+          head -c 1048000 "$RUNNER_TEMP/held-finding.md" >> "$object"
+          generation=$(curl -q -sSf --max-time 60 -X POST -H @<(builtin printf 'Authorization: Bearer %s\n' "$GCP_ACCESS_TOKEN") \
             -H 'Content-Type: text/plain; charset=utf-8' --data-binary @"$object" \
             "https://storage.googleapis.com/upload/storage/v1/b/theorem-agent-infra-oss-verify-held-findings/o?uploadType=media&ifGenerationMatch=0&name=${name//\//%2F}" \
             | jq -er '.generation | select(type == "string" and test("^[0-9]{1,20}$"))')
-          echo "object=$name" >> "$GITHUB_OUTPUT"
-          echo "Stored the held finding as $name, generation $generation, for the hold job."
-
-      # For the keep job, the only job that writes the cache (the top of this file).
-      - name: Hand this review's session to the keep job
-        if: ${{ steps.review.outputs.session == 'kept' }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (sha-pinned)
-        with:
-          name: enroll-review-session-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/review-session
-          if-no-files-found: error
-          retention-days: 1
-
-      # Whatever happened above, the Anthropic identity token does not outlive this job: a step that exits before its
-      # own `rm` (a failed `openssl rand`, for one) leaves the file, and this removes it.
-      - name: Remove the Anthropic identity token
-        if: ${{ always() }}
-        run: rm -f "$RUNNER_TEMP/oidc/jwt"
+          echo "object=$name" >> "$GITHUB_OUTPUT" && echo "Stored the held finding as $name, generation $generation."
 
   hold:
     # Sends every finding stored in the held-findings bucket to the disclosure route as a private issue
@@ -839,32 +633,15 @@ jobs:
           CURRENT_OBJECT: ${{ needs.review.outputs.held_object }}
         run: .github/scripts/review-hold "$RUNNER_TEMP/held"
 
-  keep:
-    # Saves this review's session for the next push's review (the top of this file).
-    needs: [project-builds, review]
-    if: ${{ !cancelled() && needs.review.outputs.session == 'kept' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions: {}
-    cache-mode: write-only
-    steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (sha-pinned)
-        with:
-          name: ${{ needs.review.outputs.artifact }}
-          path: ${{ runner.temp }}/review-session
-
-      - name: Keep this review's session for the next push's review
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
-        with:
-          path: ${{ runner.temp }}/review-session
-          key: enroll-review/${{ github.event.pull_request.number || inputs.pr }}/${{ needs.project-builds.outputs.name }}/${{ github.run_id }}-${{ github.run_attempt }}
-
   comment:
+    # Posts the review's comment as oss-verify[bot], or updates the one already there: only while the repository
+    # variable OSSV_POST_REVIEW is `post`, because a person approves each message to a maintainer before it is posted
+    # (until then the comment is the review job's artifact enroll-review-draft), and, when the review held a finding
+    # back, only once the hold job sent it, because the comment says that it was sent.
     needs: [project-builds, review, hold]
-    # After a review that wrote a comment, it posts it, whatever happened to the usage export.
-    # After a review that wrote none, it marks the comment already there as not current, naming the commit it is of,
-    # or posts that the review did not run if there is none.
-    if: ${{ !cancelled() && needs.project-builds.outputs.name != '' && (needs.review.result != 'success' || needs.review.outputs.comment != '') }}
+    if: >-
+      ${{ !cancelled() && vars.OSSV_POST_REVIEW == 'post' && needs.review.result == 'success' && needs.review.outputs.comment != ''
+      && (needs.review.outputs.held_object == '' || needs.hold.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # The GitHub Environment is what gets this job the App's key and keeps it from every other job: its identity
@@ -884,11 +661,9 @@ jobs:
       group: build-comment-${{ github.event.pull_request.number || inputs.pr }}
       cancel-in-progress: false
     permissions:
-      # contents: read only for the checkout of .github/scripts, which a job with no contents permission cannot make.
-      # It writes with the oss-verify App's token, not this job's.
-      contents: read
       # Only for the GitHub identity token that Google's federation trades for an access token of
-      # ossv-app-comment@theorem-agent-infra, which reads the App's key. This job runs no code of the pull request.
+      # ossv-app-comment@theorem-agent-infra, which reads the App's key. It writes with the oss-verify App's token, not
+      # this job's, and runs no code of the pull request.
       id-token: write
     env:
       # The review job's provider, and the account only a job in this environment can act as
@@ -896,11 +671,6 @@ jobs:
       GCP_WORKLOAD_IDENTITY_PROVIDER: projects/805240912354/locations/global/workloadIdentityPools/github/providers/github-ossv
       GCP_SERVICE_ACCOUNT: ossv-app-comment@theorem-agent-infra.iam.gserviceaccount.com
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
-        with:
-          persist-credentials: false
-          sparse-checkout: .github/scripts
-
       - name: Sign in to Google Cloud
         id: gcp
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0 (sha-pinned)
@@ -946,60 +716,30 @@ jobs:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number || inputs.pr }}
-          # Only from a review job that succeeded, and, when it held a finding back, a hold job that sent it: a comment
-          # that says a finding was sent is posted only once it was.
-          REVIEW: ${{ needs.review.result == 'success' && (needs.review.outputs.held_object == '' || needs.hold.result == 'success') && needs.review.outputs.comment || '' }}
-          # The record of what answered the review: review-comment posts the review only if it shows the provider
-          # asked for, and otherwise says that it is not published, and why.
-          SERVED: ${{ needs.review.outputs.served }}
-          REFUSED: ${{ needs.review.outputs.refused }}
+          REVIEW: ${{ needs.review.outputs.comment }}
           CHECKS: ${{ needs.project-builds.outputs.checks }}
           HEAD_SHA: ${{ needs.project-builds.outputs.sha }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          # The comment is posted only while the repository variable OSSV_POST_REVIEW is `post`. Otherwise this step
-          # writes it to the job's summary as a draft, and posts and edits nothing: a person approves each message to a
-          # maintainer before it is posted.
-          POST_TO_PR: ${{ vars.OSSV_POST_REVIEW }}
         run: |
           set -euo pipefail
-          printf '%s' "$REVIEW" > "$RUNNER_TEMP/review.md"
-          printf '%s' "$CHECKS" > "$RUNNER_TEMP/checks.md"
-          printf '%s' "$SERVED" > "$RUNNER_TEMP/served"
           # Only a run of the pull request's current head posts: a run of an older head that finished later would
-          # replace the newer head's review, or mark it not current. The current head's own run posts.
+          # replace the newer head's review. The current head's own run posts.
           current=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)
           if [ "$current" != "$HEAD_SHA" ]; then
             echo "The pull request's head is now $current, not $HEAD_SHA: the run of $current posts the comment."
             exit 0
           fi
+          # The marker first, which finds the comment again; GitHub refuses a comment over 65,536 characters.
+          {
+            printf '<!-- oss-verify-review -->\n<sub>Claude wrote this review of `%s` from `review.md`. It can be wrong. Each push replaces it.</sub>\n\n%s\n' \
+              "${HEAD_SHA:0:7}" "${REVIEW:0:50000}"
+            if [ -n "$CHECKS" ]; then
+              printf '\n<details><summary>What the breakage and coverage checks measured</summary>\n\n%s\n\n</details>\n' "${CHECKS:0:12000}"
+            fi
+          } > "$RUNNER_TEMP/comment.md"
           # Ours is the oss-verify App's comment that starts with the marker.
           existing=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
             --jq '.[] | select(.user.login == "oss-verify[bot]" and (.body | startswith("<!-- oss-verify-review -->"))) | .id')
           existing=${existing%%$'\n'*}
-          # The comment already posted, whenever there is one: review-comment keeps it, marked not current (or as it
-          # was, when it is the review of this same commit), if this push's review is empty, blank or refused once it
-          # has screened it.
-          previous=()
-          if [ -n "$existing" ]; then
-            gh api "repos/$REPO/issues/comments/$existing" --jq .body > "$RUNNER_TEMP/previous.md"
-            previous=(--previous "$RUNNER_TEMP/previous.md")
-          fi
-          refused=()
-          [ "${REFUSED:-}" != true ] || refused=(--refused)
-          python3 .github/scripts/review-comment --review "$RUNNER_TEMP/review.md" --checks "$RUNNER_TEMP/checks.md" \
-            --head "$HEAD_SHA" --run "$RUN_URL" --served "$RUNNER_TEMP/served" "${refused[@]}" "${previous[@]}" \
-            > "$RUNNER_TEMP/comment.md"
-          if [ "${POST_TO_PR:-}" != post ]; then
-            {
-              echo "### Draft of the review comment (not posted)"
-              echo
-              echo "OSSV_POST_REVIEW is not \`post\`, so nothing was posted or edited on the pull request. The draft, as Markdown:"
-              echo
-              sed 's/^/    /' "$RUNNER_TEMP/comment.md"
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "Not posted: OSSV_POST_REVIEW is not post. The draft is in the job summary."
-            exit 0
-          fi
           if [ -n "$existing" ]; then
             jq -n --rawfile body "$RUNNER_TEMP/comment.md" '{body: $body}' \
               | gh api --method PATCH "repos/$REPO/issues/comments/$existing" --input - > /dev/null
@@ -1012,7 +752,7 @@ jobs:
     # The required check project-builds (the top of this file), with .github/scripts/collect. A static name: GitHub
     # reports the check under it on every run.
     name: project-builds
-    needs: [route, project-builds, record, review, hold, keep, comment]
+    needs: [route, project-builds, record, review, hold, comment]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -1031,19 +771,18 @@ jobs:
           BUILD: ${{ needs.project-builds.result }}
           ASKED_BUILD: ${{ needs.route.outputs.build == 'true' }}
           # Each of the others is asked for on its own job's condition: the record when the build passed and took a
-          # project, the review when the build took a project, hold when the review ran, keep when the review kept its
-          # session, comment when the build took a project and the review wrote a comment or did not pass.
+          # project, the review when the build took a project, hold when the review ran, comment when posting is on and
+          # the review wrote a comment (and, if it held a finding back, the hold job sent it).
           RECORD: ${{ needs.record.result }}
           ASKED_RECORD: ${{ needs.project-builds.result == 'success' && needs.project-builds.outputs.name != '' }}
           REVIEW: ${{ needs.review.result }}
           ASKED_REVIEW: ${{ needs.project-builds.outputs.name != '' }}
           HOLD: ${{ needs.hold.result }}
           ASKED_HOLD: ${{ needs.review.result != 'skipped' }}
-          KEEP: ${{ needs.keep.result }}
-          ASKED_KEEP: ${{ needs.review.outputs.session == 'kept' }}
           COMMENT: ${{ needs.comment.result }}
-          ASKED_COMMENT: ${{ needs.project-builds.outputs.name != '' && (needs.review.result != 'success' || needs.review.outputs.comment != '') }}
+          ASKED_COMMENT: >-
+            ${{ vars.OSSV_POST_REVIEW == 'post' && needs.review.result == 'success' && needs.review.outputs.comment != ''
+            && (needs.review.outputs.held_object == '' || needs.hold.result == 'success') }}
         run: >-
           .github/scripts/collect "$ROUTE" "build:$BUILD:$ASKED_BUILD" "record:$RECORD:$ASKED_RECORD"
-          "review:$REVIEW:$ASKED_REVIEW" "hold:$HOLD:$ASKED_HOLD" "keep:$KEEP:$ASKED_KEEP"
-          "comment:$COMMENT:$ASKED_COMMENT"
+          "review:$REVIEW:$ASKED_REVIEW" "hold:$HOLD:$ASKED_HOLD" "comment:$COMMENT:$ASKED_COMMENT"
