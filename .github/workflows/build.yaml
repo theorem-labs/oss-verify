@@ -11,8 +11,9 @@ name: "Build"
 # uninstrumented (docs/build-contract.md, "The checks of the binaries"). The step summary has both reports too.
 #
 # The jobs, each run:
-#   route    asks for the build on every event this workflow takes, since each is a commit to judge. It reads nothing
-#            of the pull request.
+#   route    reads the pull request's list of files. A pull request that changes at least one file and none under
+#            projects/ is a change: route asks for no build, and the review checks it against review-change.md. Any
+#            other asks for the build, as an enrollment (a fork that mixes projects/ with other files fails there).
 #   project-builds
 #            the build above, under the check name build, when route asks for it; it passes with nothing to build
 #            when the pull request enrolls no project (below). Its job id stays project-builds, the name the other jobs
@@ -24,22 +25,30 @@ name: "Build"
 #            gathered: the pull request, the project's source at the built commit, and the build's results, with
 #            .claude/skills/review-enrollment/SKILL.md for where those are. It writes a comment that asks the
 #            maintainer for each fix. On a later push it resumes the same Claude Code session as the last review, so it
-#            knows what it asked for and why, and reviews only the diff since the commit it reviewed then.
+#            knows what it asked for and why, and reviews only the diff since the commit it reviewed then. For a
+#            change, it checks what review-change.md says on the pull request's diff and files, read as data, and
+#            writes each fix as a patch after its comment (review-run cuts them out; no log shows them).
 #   hold     sends each real bug in a project's own code that a review held back from its comment (review.md, rule 6)
 #            to the disclosure route as a private issue (.github/scripts/review-hold): the review job stores it in a
 #            private bucket that only this job can read, and this job sends every finding stored there, a cancelled
 #            run's too. A finding never reaches a log, an output or an artifact.
 #   keep     saves that review's session in the Actions cache, for the next push's review.
 #   comment  posts that comment, with the checks' report folded under it, or replaces the one already there. The
-#            comment starts with <!-- oss-verify-review -->, as the triage comment starts with its own marker.
+#            comment starts with <!-- oss-verify-review -->, as the triage comment starts with its own marker. For a
+#            change from a fork that changes no file that decides what CI trusts (the carry step lists them), it first
+#            carries the patches: the branch outside/<n> from refs/pull/<n>/head, one commit for each patch through the
+#            API, and our pull request from it, which credits the author; the comment links it. Otherwise the comment
+#            folds the patches under it.
 #   required always runs, last, and reports the required check (below).
 #
 # project-builds is the required check, and the job required reports it (.github/scripts/collect). required runs on
 # every run, after all the other jobs whatever their results, and passes only if route passed and every job route asked
 # for passed: the build when route asked for it, and the record, review, hold, keep and comment jobs when their own
-# conditions call for them (the review when the build took a project); every other job must be skipped. A skipped job
-# counts as a pass where a check is required, so the build job is never the required check itself. The build takes the
-# project with .github/scripts/take-project, for each commit on its own:
+# conditions call for them (the review when the build took a project or route found a change); every other job must
+# be skipped. A skipped job counts as a pass where a check is required, so the build job is never the required check
+# itself. For a change nothing is built, and project-builds reports the review and comment; a fork's change still fails
+# the required check enrollment (validate.yaml), so it does not merge as it is. The build takes the project with
+# .github/scripts/take-project, for each commit on its own:
 #   - A pull request from a fork is judged on the files GitHub lists for it: it fails if it changes anything but one
 #     project, which is built as it is at the fork's head. A pull request from a branch of this repository is judged
 #     on what merging it into the base branch changes (git merge-tree): it fails if the merge conflicts, and the one
@@ -88,7 +97,8 @@ name: "Build"
 # every comment names the providers and models that answered, with their turns, or says why nothing shows which.
 # The comment job alone writes: it posts text, refused if it holds what looks like a
 # credential (.github/scripts/review-comment), as the oss-verify GitHub App (oss-verify[bot]), with an installation
-# token that can write pull requests in this repository only. It makes that token from the App's client id below and
+# token that can write pull requests and contents (for the carry's branch and commits) in this repository only. It
+# makes that token from the App's client id below and
 # its private key, which it reads at run time from Secret Manager (oss-verify-github-app-key), and runs no code of the
 # pull request or the project.
 #
@@ -191,15 +201,37 @@ jobs:
   route:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      pull-requests: read
     outputs:
       build: ${{ steps.decide.outputs.build }}
+      change: ${{ steps.decide.outputs.change }}
+      sha: ${{ steps.decide.outputs.sha }}
     steps:
-      - name: Every event here asks for the build
+      - name: An enrollment or a change
         id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          echo "build=true" >> "$GITHUB_OUTPUT"
-          message="build runs: it takes the pull request's project, if it has one (.github/scripts/take-project)."
+          set -euo pipefail
+          [[ $PR =~ ^[0-9]+$ ]] || { echo "::error::Not a pull request number."; exit 1; }
+          pull=$(gh api "repos/$REPO/pulls/$PR")
+          sha=${HEAD_SHA:-$(jq -r .head.sha <<< "$pull")}
+          [[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Could not read the pull request's head commit."; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          # Every path, a renamed file under both names. Over the 3000 files the API lists, the list decides nothing.
+          paths=$(gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" \
+            --jq '.[] | .filename, (.previous_filename // empty)')
+          if [ -n "$paths" ] && ! grep -q '^projects/' <<< "$paths" && (( $(jq .changed_files <<< "$pull") <= 3000 )); then
+            echo "change=true" >> "$GITHUB_OUTPUT"
+            message="change review: the pull request changes no file under projects/, so nothing is built (review-change.md)."
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            message="build runs: it takes the pull request's project, if it has one (.github/scripts/take-project)."
+          fi
           echo "$message"
           echo "$message" >> "$GITHUB_STEP_SUMMARY"
 
@@ -386,10 +418,11 @@ jobs:
           overwrite: true
 
   review:
-    # Claude reviews the enrollment against review.md, main's copy. It runs after the build, whatever its result, so
-    # that the review can ask for the build's fixes too. It runs no code of the pull request.
-    needs: project-builds
-    if: ${{ !cancelled() && needs.project-builds.outputs.name != '' }}
+    # Claude reviews the enrollment against review.md, main's copy, or a change against review-change.md. It runs after
+    # the build, whatever its result, so that the review can ask for the build's fixes too. It runs no code of the pull
+    # request.
+    needs: [route, project-builds]
+    if: ${{ !cancelled() && (needs.project-builds.outputs.name != '' || needs.route.outputs.change == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     # Restores the last review's session; the keep job saves this one (the top of this file).
@@ -429,6 +462,8 @@ jobs:
       # job, which must send it, and the comment job's check that it did. Never the finding: another job's log would
       # show it.
       held_object: ${{ steps.held.outputs.object }}
+      # A change review's patches, for the comment job to carry: text, never run.
+      patches: ${{ steps.review.outputs.patches }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with:
@@ -437,6 +472,7 @@ jobs:
           fetch-depth: 0
 
       - name: Take projects/<name>/ from the pull request, as the build did
+        if: needs.project-builds.outputs.name != ''
         timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
@@ -450,6 +486,7 @@ jobs:
       # file). None on its first review, or once the cache has dropped it: a fresh review. review-run resumes only a
       # directory whose `session` file names a whole session.
       - name: Restore the last review's session
+        if: needs.project-builds.outputs.name != ''
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
         with:
           path: ${{ runner.temp }}/review-session
@@ -469,7 +506,7 @@ jobs:
           CHECKS: ${{ needs.project-builds.outputs.checks }}
           BUILD_CONCLUSION: ${{ needs.project-builds.result }}
           # For the changes since the last review's commit, when there is one.
-          HEAD_SHA: ${{ needs.project-builds.outputs.sha }}
+          HEAD_SHA: ${{ needs.project-builds.outputs.sha || needs.route.outputs.sha }}
           REVIEW_SESSION: ${{ runner.temp }}/review-session
         run: |
           dpkg -s python3-yaml unzip > /dev/null 2>&1 \
@@ -537,7 +574,7 @@ jobs:
           GCP_ACCESS_TOKEN: ${{ steps.gcp.outputs.access_token }}
           # The session of the last review, which review-run resumes, and the commit this review is of. After a
           # review, the directory holds this review's session, which the keep job saves for the next push.
-          HEAD_SHA: ${{ needs.project-builds.outputs.sha }}
+          HEAD_SHA: ${{ needs.project-builds.outputs.sha || needs.route.outputs.sha }}
           REVIEW_SESSION: ${{ runner.temp }}/review-session
         run: |
           # The collector's bearer token: Secret Manager agent-spend-otel-token, which Theorem's infrastructure code
@@ -636,6 +673,14 @@ jobs:
           delimiter="review-$(openssl rand -hex 16)"
           { echo "comment<<$delimiter"; head -c 60000 .review/comment.md; echo; echo "$delimiter"; } >> "$GITHUB_OUTPUT"
           if [ -s "$REVIEW_SESSION/session" ]; then echo "session=kept" >> "$GITHUB_OUTPUT"; fi
+          if [ -s .review/patches.md ]; then
+            if [ -n "$OTEL_COLLECTOR_TOKEN" ] && [[ $(< .review/patches.md) == *"$OTEL_COLLECTOR_TOKEN"* ]]; then
+              echo "::error::The review's patches hold the collector's token; they are not carried."
+              exit 1
+            fi
+            delimiter="patches-$(openssl rand -hex 16)"
+            { echo "patches<<$delimiter"; cat .review/patches.md; echo; echo "$delimiter"; } >> "$GITHUB_OUTPUT"
+          fi
 
       # The Google access token from before the review has expired: it lives five minutes, and a review takes longer.
       # A held finding needs a new one. ossv-ci may only create objects in the held-findings bucket: it cannot read,
@@ -860,11 +905,11 @@ jobs:
           key: enroll-review/${{ github.event.pull_request.number || inputs.pr }}/${{ needs.project-builds.outputs.name }}/${{ github.run_id }}-${{ github.run_attempt }}
 
   comment:
-    needs: [project-builds, review, hold]
+    needs: [route, project-builds, review, hold]
     # After a review that wrote a comment, it posts it, whatever happened to the usage export.
     # After a review that wrote none, it marks the comment already there as not current, naming the commit it is of,
     # or posts that the review did not run if there is none.
-    if: ${{ !cancelled() && needs.project-builds.outputs.name != '' && (needs.review.result != 'success' || needs.review.outputs.comment != '') }}
+    if: ${{ !cancelled() && (needs.project-builds.outputs.name != '' || needs.route.outputs.change == 'true') && (needs.review.result != 'success' || needs.review.outputs.comment != '') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # The GitHub Environment is what gets this job the App's key and keeps it from every other job: its identity
@@ -940,6 +985,126 @@ jobs:
           client-id: Iv23liAWPMahJZYsw3un
           private-key: ${{ steps.key.outputs.key }}
           permission-pull-requests: write
+          # Only for the carry below: the branch outside/<n> and its commits.
+          permission-contents: write
+
+      # A change review's patches (review-change.md). From a fork whose change touches no file that decides what CI
+      # trusts (.github/, .claude/, the review*.md files at the root, a CODEOWNERS anywhere), they are
+      # carried: the branch outside/<n> at the pull request's head (GitHub keeps it as refs/pull/<n>/head here), one
+      # commit for each patch through the API (createCommitOnBranch, so GitHub signs them), and our pull request from
+      # that branch, which credits the author and links theirs; the comment then links it. A branch of this repository
+      # runs its own workflow files with this repository's secrets, so a change to those files, the pull request's or a
+      # patch's, is never carried. Otherwise the comment folds the patches under it. The patches are applied to an index
+      # of their own, from git's object store: nothing of the pull request is checked out or run. With OSSV_POST_REVIEW
+      # not `post`, the job summary says what the carry would create, and nothing is created.
+      - name: Carry the review's patches
+        if: needs.review.result == 'success' && needs.review.outputs.patches != ''
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
+          PATCHES: ${{ needs.review.outputs.patches }}
+          HEAD_SHA: ${{ needs.route.outputs.sha }}
+          POST_TO_PR: ${{ vars.OSSV_POST_REVIEW }}
+        run: |
+          set -euo pipefail
+          temp=$RUNNER_TEMP/carry
+          mkdir -p "$temp"
+          printf '%s\n' "$PATCHES" > "$temp/patches"
+          scan=0
+          python3 .github/scripts/review-comment --holds-credential < "$temp/patches" || scan=$?
+          if [ "$scan" != 3 ]; then echo "::warning::The patches hold what looks like a credential: not carried."; exit 0; fi
+          pull=$(gh api "repos/$REPO/pulls/$PR")
+          if [ "$(jq -r .head.sha <<< "$pull")" != "$HEAD_SHA" ]; then
+            echo "The pull request's head moved: the run of its new head carries the patches."
+            exit 0
+          fi
+          git fetch -q --no-tags --depth=1 origin "$HEAD_SHA"
+          export GIT_INDEX_FILE=$temp/index
+          git -c core.sparseCheckout=false read-tree "$HEAD_SHA"
+          count=$(awk -v out="$temp/patch." '/^Subject: / { close(file); file = out (++n) } n { print > file }
+            END { print n + 0 }' "$temp/patches")
+          trees=("$(git write-tree)") applies=true
+          for n in $(seq "$count"); do
+            tail -n +2 "$temp/patch.$n" | git -c core.sparseCheckout=false apply --cached - 2> /dev/null \
+              || { applies=false; break; }
+            trees+=("$(git write-tree)")
+          done
+          files=$(gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" \
+            --jq '.[] | .filename, (.previous_filename // empty)')
+          patched=$(git diff-tree -r --no-renames --name-only "${trees[0]}" "${trees[-1]}")
+          login=$(jq -r .user.login <<< "$pull") id=$(jq -r .user.id <<< "$pull")
+          # Carried only from a fork, with every patch applied, nothing under .github/, and an author named plainly.
+          carry=false why=""
+          if [ "$(jq -r '.head.repo.full_name // ""' <<< "$pull")" = "$REPO" ]; then :
+          elif ! $applies || (( count == 0 )); then why="The fixes do not apply to the head of this pull request."
+          elif grep -qE '^(\.github/|\.claude/|review[^/]*\.md$)|(^|/)CODEOWNERS$' <<< "$files"$'\n'"$patched"; then
+            why="This pull request changes a file that decides what CI trusts, so a person at Theorem reviews it and the fixes."
+          elif [[ $login =~ ^[A-Za-z0-9-]{1,39}$ && $id =~ ^[0-9]+$ ]]; then carry=true
+          fi
+          if ! $carry; then
+            {
+              [ -z "$why" ] || { echo "$why"; echo; }
+              echo "<details><summary>The fixes for the items above, as a patch for git apply</summary>"
+              echo
+              sed 's/^/    /' "$temp/patches"
+              echo
+              echo "</details>"
+            } > "$RUNNER_TEMP/carry.md"
+            echo "Not carried: the comment folds the patches under it."
+            exit 0
+          fi
+          branch=outside/$PR base=$(jq -r .base.ref <<< "$pull")
+          title="$(jq -r .title <<< "$pull" | tr -d '[:cntrl:]' | cut -c 1-200) (from #$PR)"
+          body="This pull request carries #$PR by @$login: its commits, and one commit for each fix that the review of #$PR wrote.
+
+          Co-authored-by: $login <$id+$login@users.noreply.github.com>"
+          if [ "${POST_TO_PR:-}" != post ]; then
+            {
+              echo "### What the carry would create (not created)"
+              echo
+              echo "OSSV_POST_REVIEW is not \`post\`, so nothing was created. With it, this job makes the branch \`$branch\` at \`$HEAD_SHA\`, adds $count commits through the API, and opens a pull request into \`$base\`:"
+              echo
+              for n in $(seq "$count"); do echo "    commit: $(head -n 1 "$temp/patch.$n" | cut -c 10-)"; done
+              echo "    title: $title"
+              echo "    body: ${body//$'\n'/$'\n'    body: }"
+            } >> "$GITHUB_STEP_SUMMARY"
+            number="(the pull request this run would open)"
+          else
+            if gh api "repos/$REPO/git/ref/heads/$branch" > /dev/null 2>&1; then
+              gh api --method PATCH "repos/$REPO/git/refs/heads/$branch" -f sha="$HEAD_SHA" -F force=true > /dev/null
+            else
+              gh api --method POST "repos/$REPO/git/refs" -f ref="refs/heads/$branch" -f sha="$HEAD_SHA" > /dev/null
+            fi
+            oid=$HEAD_SHA
+            for n in $(seq "$count"); do
+              : > "$temp/additions" ; : > "$temp/deletions"
+              while IFS= read -r -d '' status && IFS= read -r -d '' path; do
+                if [ "$status" = D ]; then
+                  jq -n --arg path "$path" '{path: $path}' >> "$temp/deletions"
+                else
+                  git cat-file blob "${trees[n]}:$path" | base64 -w0 > "$temp/contents"
+                  jq -n --arg path "$path" --rawfile contents "$temp/contents" '{path: $path, contents: $contents}' \
+                    >> "$temp/additions"
+                fi
+              done < <(git diff-tree -r -z --no-renames --name-status "${trees[n-1]}" "${trees[n]}")
+              subject=$(head -n 1 "$temp/patch.$n" | cut -c 10- | tr -d '[:cntrl:]' | cut -c 1-200)
+              oid=$(jq -n --arg repo "$REPO" --arg branch "$branch" --arg oid "$oid" --arg subject "$subject" \
+                  --slurpfile additions "$temp/additions" --slurpfile deletions "$temp/deletions" \
+                  '{query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }",
+                    variables: {input: {branch: {repositoryNameWithOwner: $repo, branchName: $branch}, expectedHeadOid: $oid,
+                      message: {headline: $subject}, fileChanges: {additions: $additions, deletions: $deletions}}}}' \
+                | gh api graphql --input - --jq .data.createCommitOnBranch.commit.oid)
+              [[ $oid =~ ^[0-9a-f]{40}$ ]] || { echo "::error::GitHub made no commit for patch $n."; exit 1; }
+            done
+            number=$(gh api "repos/$REPO/pulls?head=${REPO%%/*}:$branch&state=open" --jq '.[0].number // empty')
+            [ -n "$number" ] || number=$(gh api --method POST "repos/$REPO/pulls" -f title="$title" -f head="$branch" \
+              -f base="$base" -f body="$body" --jq .number)
+            number="#$number"
+            echo "Carried the patches as $count commits on $branch, in $number."
+          fi
+          echo "The fixes for the items above are in $number, our pull request with your commits and these fixes, which credits you as a co-author. You need not change this pull request." \
+            > "$RUNNER_TEMP/carry.md"
 
       - name: Post the comment, or update the one already there
         env:
@@ -954,7 +1119,8 @@ jobs:
           SERVED: ${{ needs.review.outputs.served }}
           REFUSED: ${{ needs.review.outputs.refused }}
           CHECKS: ${{ needs.project-builds.outputs.checks }}
-          HEAD_SHA: ${{ needs.project-builds.outputs.sha }}
+          HEAD_SHA: ${{ needs.project-builds.outputs.sha || needs.route.outputs.sha }}
+          KIND: ${{ needs.route.outputs.change == 'true' && 'change' || 'enrollment' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           # The comment is posted only while the repository variable OSSV_POST_REVIEW is `post`. Otherwise this step
           # writes it to the job's summary as a draft, and posts and edits nothing: a person approves each message to a
@@ -963,6 +1129,10 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s' "$REVIEW" > "$RUNNER_TEMP/review.md"
+          # Where the carry step put a change review's fixes, after the review's own text.
+          if [ -n "$REVIEW" ] && [ -s "$RUNNER_TEMP/carry.md" ]; then
+            { printf '\n\n'; cat "$RUNNER_TEMP/carry.md"; } >> "$RUNNER_TEMP/review.md"
+          fi
           printf '%s' "$CHECKS" > "$RUNNER_TEMP/checks.md"
           printf '%s' "$SERVED" > "$RUNNER_TEMP/served"
           # Only a run of the pull request's current head posts: a run of an older head that finished later would
@@ -988,6 +1158,7 @@ jobs:
           [ "${REFUSED:-}" != true ] || refused=(--refused)
           python3 .github/scripts/review-comment --review "$RUNNER_TEMP/review.md" --checks "$RUNNER_TEMP/checks.md" \
             --head "$HEAD_SHA" --run "$RUN_URL" --served "$RUNNER_TEMP/served" "${refused[@]}" "${previous[@]}" \
+            --kind "${KIND:-enrollment}" \
             > "$RUNNER_TEMP/comment.md"
           if [ "${POST_TO_PR:-}" != post ]; then
             {
@@ -1031,18 +1202,18 @@ jobs:
           BUILD: ${{ needs.project-builds.result }}
           ASKED_BUILD: ${{ needs.route.outputs.build == 'true' }}
           # Each of the others is asked for on its own job's condition: the record when the build passed and took a
-          # project, the review when the build took a project, hold when the review ran, keep when the review kept its
-          # session, comment when the build took a project and the review wrote a comment or did not pass.
+          # project, the review when the build took a project or route found a change, hold when the review ran, keep
+          # when the review kept its session, comment as the review and when the review wrote a comment or did not pass.
           RECORD: ${{ needs.record.result }}
           ASKED_RECORD: ${{ needs.project-builds.result == 'success' && needs.project-builds.outputs.name != '' }}
           REVIEW: ${{ needs.review.result }}
-          ASKED_REVIEW: ${{ needs.project-builds.outputs.name != '' }}
+          ASKED_REVIEW: ${{ (needs.project-builds.outputs.name != '' || needs.route.outputs.change == 'true') }}
           HOLD: ${{ needs.hold.result }}
           ASKED_HOLD: ${{ needs.review.result != 'skipped' }}
           KEEP: ${{ needs.keep.result }}
           ASKED_KEEP: ${{ needs.review.outputs.session == 'kept' }}
           COMMENT: ${{ needs.comment.result }}
-          ASKED_COMMENT: ${{ needs.project-builds.outputs.name != '' && (needs.review.result != 'success' || needs.review.outputs.comment != '') }}
+          ASKED_COMMENT: ${{ (needs.project-builds.outputs.name != '' || needs.route.outputs.change == 'true') && (needs.review.result != 'success' || needs.review.outputs.comment != '') }}
         run: >-
           .github/scripts/collect "$ROUTE" "build:$BUILD:$ASKED_BUILD" "record:$RECORD:$ASKED_RECORD"
           "review:$REVIEW:$ASKED_REVIEW" "hold:$HOLD:$ASKED_HOLD" "keep:$KEEP:$ASKED_KEEP"

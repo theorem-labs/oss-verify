@@ -952,12 +952,170 @@ class WorkflowArguments(unittest.TestCase):
                             f"comment with environment {shape!r} was not refused")
 
 
+@unittest.skipUnless(shutil.which("git") and shutil.which("jq"), "the carry step needs git and jq")
+class CarryStep(unittest.TestCase):
+    """build.yaml's own "Carry the review's patches" step, with a real git and a fake gh: what it creates."""
+    FIX = ("Subject: say what the check does\n"
+           "diff --git a/tools/a.txt b/tools/a.txt\n--- a/tools/a.txt\n+++ b/tools/a.txt\n@@ -1 +1,2 @@\n one\n+two\n")
+    DROP = ("Subject: drop b\n"
+            "diff --git a/tools/b.txt b/tools/b.txt\ndeleted file mode 100644\n--- a/tools/b.txt\n+++ /dev/null\n"
+            "@@ -1 +0,0 @@\n-b\n")
+    WORKFLOW = ("Subject: run more\n"
+                "diff --git a/.github/x b/.github/x\nnew file mode 100644\n--- /dev/null\n+++ b/.github/x\n"
+                "@@ -0,0 +1 @@\n+x\n")
+    AUTHOR = "Co-authored-by: alice <42+alice@users.noreply.github.com>"
+
+    def carry(self, patches, files=("tools/a.txt",), fork=True, post_to_pr=""):
+        steps = [s for s in yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["jobs"]
+                 ["comment"]["steps"] if s.get("name") == "Carry the review's patches"]
+        self.assertEqual(len(steps), 1)
+        with tempfile.TemporaryDirectory() as directory:
+            d = pathlib.Path(directory)
+            git = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "t",
+                   "GIT_AUTHOR_EMAIL": "t@example.invalid", "GIT_COMMITTER_NAME": "t",
+                   "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+            origin, work = d / "origin", d / "work"
+            (origin / "tools").mkdir(parents=True)
+            (origin / "tools" / "a.txt").write_text("one\n")
+            (origin / "tools" / "b.txt").write_text("b\n")
+            for command in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "head"]):
+                subprocess.run(["git", *command], cwd=origin, env=git, check=True)
+            head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=origin, env=git, check=True, capture_output=True,
+                                  text=True).stdout.strip()
+            (work / ".github" / "scripts").mkdir(parents=True)
+            for script in ("review-comment", "review-served"):
+                shutil.copy(ROOT / ".github" / "scripts" / script, work / ".github" / "scripts" / script)
+            subprocess.run(["git", "init", "-q"], cwd=work, env=git, check=True)
+            subprocess.run(["git", "remote", "add", "origin", f"file://{origin}"], cwd=work, env=git, check=True)
+            (d / "pull.json").write_text(json.dumps({
+                "head": {"sha": head, "repo": {"full_name": "fork/r" if fork else "o/r"}},
+                "user": {"login": "alice", "id": 42}, "base": {"ref": "main"}, "title": "Check: say more"}))
+            (d / "files").write_text("".join(f"{f}\n" for f in files))
+            bin = d / "bin"
+            bin.mkdir()
+            # Each call's arguments, one line each; each commit's GraphQL request, and a new commit id for it.
+            (bin / "gh").write_text(
+                "#!/bin/bash\n"
+                'args="$*"; args=${args#api }\n'
+                f'printf "%s\\0" "$args" >> {d}/calls\n'
+                'case "$args" in\n'
+                f'  graphql*) n=$(ls {d} | grep -c "^graphql\\.");'
+                f' cat > {d}/graphql.$n; printf "%040d\\n" $((n + 1)) ;;\n'
+                f'  *"pulls/8/files"*) cat {d}/files ;;\n'
+                f'  "repos/o/r/pulls/8") cat {d}/pull.json ;;\n'
+                '  "repos/o/r/git/ref/heads/outside/8") exit 1 ;;\n'
+                '  "--method POST repos/o/r/git/refs "*) ;;\n'
+                '  "repos/o/r/pulls?head=o:outside/8&state=open "*) ;;\n'
+                '  "--method POST repos/o/r/pulls "*) echo 99 ;;\n'
+                '  *) echo "unexpected gh $*" >&2; exit 1 ;;\n'
+                "esac\n")
+            (bin / "gh").chmod(0o755)
+            (d / "temp").mkdir()
+            run = subprocess.run(["bash", "-e", "-c", steps[0]["run"]], cwd=work, capture_output=True, text=True,
+                                 env={**git, "PATH": f"{bin}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r",
+                                      "PR": "8", "PATCHES": patches, "HEAD_SHA": head, "POST_TO_PR": post_to_pr,
+                                      "RUNNER_TEMP": str(d / "temp"), "GITHUB_STEP_SUMMARY": str(d / "summary")})
+            self.assertEqual(run.returncode, 0, run.stderr)
+            read = lambda path: path.read_text() if path.exists() else ""  # noqa: E731
+            calls = read(d / "calls").split("\0")[:-1]
+            requests = [json.loads(read(d / f"graphql.{n}")) for n in range(len(list(d.glob("graphql.*"))))]
+            return head, calls, requests, read(d / "summary"), read(d / "temp" / "carry.md")
+
+    def test_without_the_variable_the_summary_says_what_would_be_created_and_nothing_is(self):
+        head, calls, requests, summary, note = self.carry(self.FIX)
+        self.assertEqual([c for c in calls if "--method" in c or c.startswith("graphql")], [])
+        self.assertEqual(requests, [])
+        self.assertIn("What the carry would create (not created)", summary)
+        self.assertIn(f"the branch `outside/8` at `{head}`, adds 1 commits", summary)
+        self.assertIn("    commit: say what the check does\n", summary)
+        self.assertIn("    title: Check: say more (from #8)\n", summary)
+        self.assertIn(f"    body: {self.AUTHOR}\n", summary)
+        self.assertIn("(the pull request this run would open)", note)
+
+    def test_with_the_variable_it_makes_the_branch_the_commits_and_our_pull_request(self):
+        head, calls, requests, summary, note = self.carry(self.FIX + self.DROP, post_to_pr="post")
+        self.assertIn(f"--method POST repos/o/r/git/refs -f ref=refs/heads/outside/8 -f sha={head}", calls)
+        first, second = (request["variables"]["input"] for request in requests)
+        self.assertEqual(first["branch"], {"repositoryNameWithOwner": "o/r", "branchName": "outside/8"})
+        self.assertEqual(first["expectedHeadOid"], head)
+        self.assertEqual(first["message"], {"headline": "say what the check does"})
+        self.assertEqual(first["fileChanges"], {"additions": [{"path": "tools/a.txt", "contents": base64.b64encode(
+            b"one\ntwo\n").decode()}], "deletions": []})
+        # Each commit on the one before it.
+        self.assertEqual(second["expectedHeadOid"], "0" * 39 + "1")
+        self.assertEqual(second["fileChanges"], {"additions": [], "deletions": [{"path": "tools/b.txt"}]})
+        opened = [c for c in calls if c.startswith("--method POST repos/o/r/pulls ")]
+        self.assertEqual(len(opened), 1)
+        self.assertIn("-f head=outside/8 -f base=main", opened[0])
+        self.assertIn("carries #8 by @alice", opened[0])
+        self.assertTrue(opened[0].rstrip().endswith(f"{self.AUTHOR} --jq .number"), opened[0])
+        self.assertIn("are in #99, our pull request", note)
+        self.assertEqual(summary, "")
+
+    def test_a_change_to_a_file_ci_trusts_or_a_branch_of_this_repository_is_not_carried(self):
+        trusted = "decides what CI trusts"
+        for patches, files, fork, why in (
+                (self.FIX, ("tools/a.txt", ".github/workflows/build.yaml"), True, trusted),
+                (self.FIX, ("tools/a.txt", ".claude/skills/write-to-maintainer/SKILL.md"), True, trusted),
+                (self.FIX, ("review-change.md",), True, trusted),
+                (self.FIX, ("review-issue.md",), True, trusted),
+                (self.FIX, ("docs/CODEOWNERS",), True, trusted),
+                (self.FIX + self.WORKFLOW, ("tools/a.txt",), True, trusted),
+                ("Subject: x\ndiff --git a/tools/a.txt b/tools/a.txt\n--- a/tools/a.txt\n+++ b/tools/a.txt\n"
+                 "@@ -1 +1 @@\n-zero\n+two\n", ("tools/a.txt",), True, "do not apply"),
+                (self.FIX, ("tools/a.txt",), False, None)):
+            with self.subTest(files=files, fork=fork, why=why):
+                _, calls, requests, _, note = self.carry(patches, files, fork, post_to_pr="post")
+                self.assertEqual([c for c in calls if "--method" in c or c.startswith("graphql")], [])
+                self.assertEqual(requests, [])
+                self.assertIn("<details><summary>The fixes for the items above, as a patch for git apply", note)
+                self.assertIn("\n    +two\n", note)
+                if why:
+                    self.assertIn(why, note.split("\n", 1)[0])
+                else:
+                    self.assertTrue(note.startswith("<details>"))
+
+
+class ChangeComment(unittest.TestCase):
+    """review-comment --kind change: the heading and footers of a change review, and a kept one read again."""
+
+    def comment(self, review):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            (directory / "review.md").write_text(review)
+            (directory / "served").write_text(SERVED_OK)
+            return subprocess.run([sys.executable, str(REVIEW_COMMENT), "--kind", "change", "--review",
+                                   str(directory / "review.md"), "--served", str(directory / "served"), "--head",
+                                   "a" * 40], capture_output=True, text=True, check=True).stdout
+
+    def test_a_change_review_names_its_own_rules_and_no_checks(self):
+        first = self.comment("Fix Y.\n")
+        self.assertIn("\n## Change review\n", first)
+        self.assertNotIn("Enrollment review", first)
+        self.assertIn("from `review-change.md`", first)
+        self.assertNotIn("`review.md`", first)
+        # A later push with no review keeps it, marked not current, under its own heading, once.
+        kept = subprocess.run([sys.executable, str(REVIEW_COMMENT), "--kind", "change", "--head", "b" * 40],
+                              capture_output=True, text=True, check=True).stdout
+        self.assertNotIn("tools/check", kept)
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "previous"
+            path.write_text(first)
+            stale = subprocess.run([sys.executable, str(REVIEW_COMMENT), "--kind", "change", "--head", "b" * 40,
+                                    "--previous", str(path)], capture_output=True, text=True, check=True).stdout
+        self.assertIn("**Not current:** this is the review of `aaaaaaa`", stale)
+        self.assertEqual(stale.count("## Change review"), 1)
+        self.assertEqual(stale.count("from `review-change.md`"), 1)
+        self.assertIn("Fix Y.", stale)
+
+
+
 class PostingStep(unittest.TestCase):
     """build.yaml's own "Post the comment" step, run with a fake gh: what it sends GitHub."""
     OLD = "Thanks.\n\n1. Fix X.\n"
 
     def post(self, review, existing=True, previous=None, head="b" * 40, pr_head=None, served=SERVED_OK, refused="",
-             post_to_pr="post", summary=None):
+             post_to_pr="post", summary=None, carry=None):
         workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
         name = "Post the comment, or update the one already there"
         matches = [s for s in workflow["jobs"]["comment"]["steps"] if s.get("name") == name]
@@ -984,6 +1142,8 @@ class PostingStep(unittest.TestCase):
                 "esac\n")
             (bin / "gh").chmod(0o755)
             (directory / "temp").mkdir()
+            if carry is not None:
+                (directory / "temp" / "carry.md").write_text(carry)
             environment = {**os.environ, "PATH": f"{bin}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r",
                            "PR": "8", "REVIEW": review, "CHECKS": "### new report\n", "HEAD_SHA": head,
                            "SERVED": served, "REFUSED": refused, "POST_TO_PR": post_to_pr,
@@ -1012,6 +1172,12 @@ class PostingStep(unittest.TestCase):
                 self.assertIn("Draft of the review comment (not posted)", summary[0])
                 self.assertIn("\n    Fix Y.\n", summary[0])
                 self.assertIn(f"\n    {review_comment.MARKER}\n", summary[0])
+
+    def test_the_carry_steps_note_follows_the_review_and_never_stands_alone(self):
+        note = "The fixes for the items above are in #99."
+        self.assertRegex(self.post("Fix Y.\n", carry=note), r"Fix Y\.\n\n+The fixes for the items above are in #99\.\s*\Z")
+        # With no review to post, the note is no review: the comment already there is kept as not current.
+        self.assertNotIn(note, self.post("", carry=note))
 
     def test_the_triage_comment_is_a_draft_without_its_variable(self):
         # triage.yaml's own posting step: with OSSV_POST_TRIAGE anything but post, it calls gh not at all and writes the
@@ -1822,6 +1988,40 @@ class ReviewRun(unittest.TestCase):
         self.assertEqual((self.directory / "review" / "comment.md").read_text(), result + "\n")
         self.assertFalse((self.directory / "review" / "held-finding.md").exists())
 
+    PATCH = "<!-- oss-verify-patch -->\nSubject: fix the check\ndiff --git a/tools/x b/tools/x\n+SECRETPATCH\n"
+
+    def test_a_change_review_reads_review_change_md_and_keeps_no_session(self):
+        self.last_review()
+        out = self.run_review(**self.resume(NAME=""))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        call = self.claude_calls()[0]
+        self.assertNotIn("--resume", call)
+        prompt = call[call.index("-p") + 1]
+        self.assertIn("change review", prompt)
+        self.assertIn("Read review-change.md, at the root of this checkout", prompt)
+        self.assertNotIn("Read review.md", prompt)
+        # The last session is neither resumed nor replaced.
+        self.assertEqual(sorted(p.name for p in self.session.iterdir()), sorted(["session", f"{self.OLD}.jsonl"]))
+        self.assertEqual((self.session / "session").read_text(), f"id={self.OLD}\nhead={self.LAST}\ndir={self.FOLDER}\n")
+
+    def test_a_change_reviews_patches_are_cut_from_the_comment_and_never_shown(self):
+        (self.directory / "stream").write_text(stream({"type": "result", "is_error": False,
+                                                        "result": "One fix is ready.\n\n" + self.PATCH}))
+        out = self.run_review(NAME="")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        review = self.directory / "review"
+        self.assertEqual((review / "comment.md").read_text(), "One fix is ready.\n\n")
+        self.assertEqual((review / "patches.md").read_text().rstrip("\n"), self.PATCH.split("\n", 1)[1].rstrip("\n"))
+        self.assertIn("the review wrote patches", out.stdout)
+        self.assertNotIn("SECRETPATCH", out.stdout + out.stderr)
+        # The reader reads the comment without them.
+        self.assertNotIn("SECRETPATCH", (self.directory / "reader-args").read_text())
+        # An enrollment's review cuts nothing: review.md asks for no patch.
+        out = self.run_review()
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("SECRETPATCH", (review / "comment.md").read_text())
+        self.assertFalse((review / "patches.md").exists())
+
     def test_a_session_file_that_is_not_whole_gives_a_fresh_review(self):
         (self.session / "session").write_text(f"id=../../x\nhead={self.LAST}\ndir={self.FOLDER}\n")
         out = self.run_review(**self.resume())
@@ -2553,7 +2753,7 @@ class SinceLastReview(unittest.TestCase):
     def gathered(self, status):
         gather = (ROOT / ".github" / "scripts" / "review-gather").read_text()
         keep = re.search(r"^keep\(\) \{.*\}$", gather, re.M).group(0)
-        block = gather[gather.index("since=$(sed"):gather.index('ls -la "$out"')]
+        block = gather[gather.index("since=$(sed"):gather.rindex('ls -la "$out"')]
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             for sub in ("bin", "out", "session"):
@@ -2621,15 +2821,17 @@ class ReviewSessionStore(unittest.TestCase):
         self.assertNotIn("REVIEW_CONVERSATION_KEY", text)
         self.assertFalse((ROOT / ".github" / "scripts" / "review-session").exists())
 
-    def test_only_review_md_the_skill_and_codeowners_have_an_owner_and_are_the_last_patterns(self):
+    def test_only_the_two_reviews_the_skill_and_codeowners_have_an_owner_and_are_the_last_patterns(self):
         lines = [line.split() for line in (ROOT / ".github" / "CODEOWNERS").read_text().splitlines()
                  if line.strip() and not line.lstrip().startswith("#")]
         owned = [["/review.md", "@theorem-labs/engineering"],
+                 ["/review-change.md", "@theorem-labs/engineering"],
                  ["/.claude/skills/write-to-maintainer/", "@theorem-labs/engineering"],
                  ["/.github/CODEOWNERS", "@theorem-labs/engineering"]]
         self.assertEqual([line for line in lines if len(line) > 1], owned)
-        self.assertEqual(lines[-3:], owned)
+        self.assertEqual(lines[-4:], owned)
         self.assertTrue((ROOT / "review.md").is_file())
+        self.assertTrue((ROOT / "review-change.md").is_file())
 
 
 @unittest.skipUnless(shutil.which("openssl"), "the review step needs openssl")

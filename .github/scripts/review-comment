@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
-"""Write the review comment of an enrollment pull request, as build.yaml's comment job posts it.
+"""Write the review comment of an enrollment pull request, or with --kind change of a change (review-change.md), as
+build.yaml's comment job posts it.
 
     review-comment [--review <comment.md>] [--checks <checks.md>] [--head <sha>] [--run <url>] [--previous <comment>]
-                   [--served <served>] [--refused]
+                   [--served <served>] [--refused] [--kind enrollment|change]
 
 It prints the comment: the marker that build.yaml's comment job finds it by, a metadata line, what this script writes
 (the footer, a notice when the review is not current or did not run, a note where a text was cut), the report of
@@ -47,6 +48,10 @@ import sys
 
 MARKER = "<!-- oss-verify-review -->"
 HEADING = "## Enrollment review"
+# A change review's (--kind change, review-change.md): main() puts these in place of HEADING, FOOTER and
+# NO_REVIEW_FOOTER. A posted comment is read under either heading.
+CHANGE_HEADING = "## Change review"
+HEADINGS = (HEADING, CHANGE_HEADING)
 # GitHub refuses a comment over 65,536 characters; stay below with a margin for the pieces this script adds.
 MAX_COMMENT = 65_000
 MAX_REVIEW = 40_000
@@ -187,22 +192,26 @@ def read_previous(previous):
         match = META.match(lines[1].strip())
         if match:
             status, head, version = match.group("status"), match.group("head"), match.group("version")
-    start = previous.find("\n" + HEADING + "\n")
-    body = previous[start + len(HEADING) + 2:] if start != -1 else previous.replace(MARKER, "")
-    return status, head, version, trim(body)
+    for heading in HEADINGS:
+        start = previous.find("\n" + heading + "\n")
+        if start != -1:
+            return status, head, version, trim(previous[start + len(heading) + 2:])
+    return status, head, version, trim(previous.replace(MARKER, ""))
 
 
 FOOTER = "<sub>Claude wrote this review{of} from `review.md`. It can be wrong. Each push replaces it.</sub>"
+CHANGE_FOOTER = FOOTER.replace("`review.md`", "`review-change.md`")
 OLD_FOOTER = ("<sub>Claude wrote this review, following `{doc}`, and `tools/check --checks` measured the checks. It can "
               "be wrong. {of}Each push replaces it, or marks it not current if the push's review does not finish. It "
               "decides nothing: a person at Theorem reviews the enrollment.</sub>")
 # The footer as this script writes it, or wrote it before, for any commit: a kept comment loses it from its front, and
 # gets this one again.
 FOOTER_WRITTEN = re.compile("|".join(r"(?:(?: of |It is the review of )`[0-9a-f]{7}`(?:\. )?)?".join(
-    map(re.escape, footer.split("{of}"))) for footer in (FOOTER, OLD_FOOTER.replace("{doc}", "review.md"),
-    OLD_FOOTER.replace("{doc}", ".claude/skills/review-enrollment/SKILL.md"))))
+    map(re.escape, footer.split("{of}"))) for footer in (FOOTER, CHANGE_FOOTER,
+    OLD_FOOTER.replace("{doc}", "review.md"), OLD_FOOTER.replace("{doc}", ".claude/skills/review-enrollment/SKILL.md"))))
 # The footer of a comment with no review: no AI review is there, so it says nothing of who wrote one.
 NO_REVIEW_FOOTER = "<sub>`tools/check --checks` measured the checks. No AI review of this push is posted.</sub>"
+CHANGE_NO_REVIEW_FOOTER = "<sub>No AI review of this push is posted.</sub>"
 # What answered the review: after the footer of a review that is posted, and in the notice when there is none.
 ANSWERED = "<sub>Answered by `{}`, as Claude Code reported it.</sub>"
 ANSWERED_NOTICE = "What answered it, as Claude Code reported it: `{}`."
@@ -335,9 +344,14 @@ def main():
                         help="the record of what answered the review; without one that passes, it is not posted")
     parser.add_argument("--refused", action="store_true",
                         help="the review job refused the review (review-run's exit 4): it is not published")
+    parser.add_argument("--kind", choices=("enrollment", "change"), default="enrollment",
+                        help="change: a change review, from review-change.md, with no checks report")
     options = parser.parse_args()
     if options.holds_credential:
         return 0 if credential(sys.stdin.buffer.read().decode("utf-8", errors="replace")) else 3
+    if options.kind == "change":
+        global HEADING, FOOTER, NO_REVIEW_FOOTER
+        HEADING, FOOTER, NO_REVIEW_FOOTER = CHANGE_HEADING, CHANGE_FOOTER, CHANGE_NO_REVIEW_FOOTER
     head = options.head if re.fullmatch(r"[0-9a-f]{7,40}", options.head) else ""
     run = options.run if re.fullmatch(r"https://[A-Za-z0-9./_-]+", options.run) else ""
 

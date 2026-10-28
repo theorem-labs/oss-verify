@@ -24,7 +24,7 @@
 # project say as data (rule 1 of review.md). Its environment holds only what it needs: PATH, HOME, the locale, the
 # ANTHROPIC_* variables of its credential (in CI, those of workload identity federation), and, when
 # both OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_COLLECTOR_TOKEN are set, the OpenTelemetry settings that send its usage to
-# Theorem's cost collector, tagged theorem.project=oss-verify, theorem.subproject=<name> and
+# Theorem's cost collector, tagged theorem.project=oss-verify, theorem.subproject=<name> (change for a change review) and
 # theorem.lane=enroll-review-ci, and theorem.credential=oss-verify-ci when the run trades an identity token for that
 # service account (build.yaml's review job does; a person's own login does not). Before the review it sends the
 # collector an export of no records with the token. If the collector does not answer 200, it says so, writes the
@@ -55,7 +55,10 @@ set -euo pipefail
 
 in=${1:?usage: review-run <directory>}
 [[ $PR =~ ^[0-9]+$ ]] || { echo "review-run: PR is not a number" >&2; exit 2; }
-[[ $NAME =~ ^[a-z0-9][a-z0-9._-]{0,62}$ ]] || { echo "review-run: NAME is not a project name" >&2; exit 2; }
+# NAME empty: a change review, of a pull request that changes no file under projects/. The review reads
+# review-change.md, keeps no session, and the patches it writes after its comment go to <directory>/patches.md, which
+# nothing here prints (build.yaml's comment job carries them).
+[[ -z $NAME || $NAME =~ ^[a-z0-9][a-z0-9._-]{0,62}$ ]] || { echo "review-run: NAME is not a project name" >&2; exit 2; }
 case $(realpath "$in")/ in "$(pwd -P)"/*) ;; *) echo "review-run: $in is not inside this checkout" >&2; exit 2 ;; esac
 # This run's record of a lost export only: a file left by an earlier run in the same directory is not this run's.
 rm -f "$in/export-lost.txt"
@@ -65,6 +68,7 @@ every=${REVIEW_TOKEN_EVERY:-60}
 [[ $every =~ ^[1-9][0-9]{0,3}$ ]] || { echo "review-run: REVIEW_TOKEN_EVERY is not a number of seconds" >&2; exit 2; }
 rm -f "$in/failure.txt" "$in/failure-detail.txt"
 session_dir=${REVIEW_SESSION:-}
+[ -n "$NAME" ] || session_dir=""
 if [ -n "$session_dir" ]; then
   case $(realpath -m "$session_dir")/ in
     "$(pwd -P)"/*) echo "review-run: REVIEW_SESSION is inside this checkout" >&2; exit 2 ;;
@@ -85,6 +89,13 @@ you write the comment. Read .claude/skills/review-enrollment/SKILL.md for where 
 its section \"In CI\" says. The workflow gathered the inputs into $in/, and the pull request's projects/$NAME/ is in \
 this checkout. Your last message is the comment to the maintainer, in Markdown, and nothing else: it follows \
 .claude/skills/write-to-maintainer/SKILL.md, with no line before it about you or your review."
+if [ -z "$NAME" ]; then
+  prompt="You are the agent of OSS Verify's change review, in CI, on pull request #$PR of theorem-labs/oss-verify, \
+which changes no file under projects/. Read review-change.md, at the root of this checkout: it says what you check, \
+how you write the comment and its patches. The workflow gathered the pull request into $in/; this checkout is main. \
+Your last message is the comment to the contributor, in Markdown, then the patches, and nothing else: the comment \
+follows .claude/skills/write-to-maintainer/SKILL.md, with no line before it about you or your review."
+fi
 
 # The session of the last review, when REVIEW_SESSION holds one that is whole and review-gather wrote the diff since
 # its commit (keep's last line is the command's exit status). The diff can be empty, when the push changed nothing in
@@ -153,7 +164,7 @@ if [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ] && [ -n "${OTEL_COLLECTOR_TOKEN:-}"
     telemetry=(CLAUDE_CODE_ENABLE_TELEMETRY=1 OTEL_LOGS_EXPORTER=otlp OTEL_METRICS_EXPORTER=none
                OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf "OTEL_EXPORTER_OTLP_ENDPOINT=$OTEL_EXPORTER_OTLP_ENDPOINT"
                "OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer $OTEL_COLLECTOR_TOKEN"
-               "OTEL_RESOURCE_ATTRIBUTES=theorem.project=oss-verify,theorem.subproject=$NAME,theorem.lane=enroll-review-ci$credential")
+               "OTEL_RESOURCE_ATTRIBUTES=theorem.project=oss-verify,theorem.subproject=${NAME:-change},theorem.lane=enroll-review-ci$credential")
     echo "review-run: the collector took the token; exporting usage to $OTEL_EXPORTER_OTLP_ENDPOINT"
   fi
 else
@@ -363,6 +374,16 @@ jq -r 'if .is_error then error("the review ended with an error") else .result en
       '!h && tolower($0) ~ marker { h = 1 } h { print > held; next } { print }' > "$in/comment.raw"
 if [ -s "$in/held-finding.md" ]; then
   echo "review-run: the review holds back a finding for private review; no log shows it"
+fi
+# A change review's patches (review-change.md) come out next, from the patch marker line on, into patches.md, which
+# nothing here prints: the comment job carries them, and the reader below reads the comment without them.
+rm -f "$in/patches.md"
+if [ -z "$NAME" ]; then
+  awk -v patches="$in/patches.md" '!p && /^[[:space:]]*<!--[[:space:]]*oss-verify-patch[[:space:]]*-->[[:space:]]*$/ \
+    { p = 1; next } p { print > patches; next } { print }' "$in/comment.raw" > "$in/comment.cut"
+  mv "$in/comment.cut" "$in/comment.raw"
+  [ ! -s "$in/patches.md" ] \
+    || echo "review-run: the review wrote patches ($(wc -c < "$in/patches.md") bytes); no log shows them"
 fi
 if grep -qiE "$held_mention" "$in/comment.raw"; then
   {
