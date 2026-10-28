@@ -212,7 +212,7 @@ Tell us when to publish the proofs:
 | `eager` | while we work on them |
 | `never` | never outside Theorem |
 
-With each value, we hold back each statement that shows a finding that is not public yet ([what-gets-proven.md](what-gets-proven.md#publishing)).
+With `never`, we publish neither the proofs nor the theorem statements. With each other value, we publish the theorem statements after the enrollment's checks pass, and hold back each statement that shows a finding that is not public yet ([what-gets-proven.md](what-gets-proven.md#publishing)).
 
 ## Seeded projects
 
