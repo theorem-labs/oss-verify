@@ -148,24 +148,34 @@ UBSAN_NAMES = (
     "signed-integer-overflow", "undefined", "unreachable", "unsigned-integer-overflow", "unsigned-shift-base",
     "vla-bound", "vptr",
 )
-# Without ubsan_checks, the checks that OSS-Fuzz makes fatal (its -fno-sanitize-recover list), less vptr, which trap
-# mode cannot make (TRAP_EXCEPTIONS). OSS-Fuzz drops function from each C compile, and from a Python project's native
-# code, so a c or python project's default does not have it, and a c++ project's C compiles do not either
-# (C_COMPILE_EXCLUDED). OSS-Fuzz also instruments unsigned-integer-overflow, but silences it with
+# libc++'s extensive hardening mode, named in ubsan_checks as if it were a check: a failed libc++ precondition traps,
+# as a UBSan check does. It is not a clang check name; the ubsan build of a c++ project compiles and links its C++
+# against the toolchain image's hardened libc++ (infra/base-builder/toolchain.sh).
+LIBCXX_HARDENING = "libcxx-hardening"
+# Without ubsan_checks, the checks that OSS-Fuzz makes fatal (its -fno-sanitize-recover list), and for a c++ project
+# also libc++'s hardening, which OSS-Fuzz does not turn on. vptr is one of OSS-Fuzz's checks that trap mode cannot make
+# (TRAP_EXCEPTIONS): the ubsan build makes it through the toolchain's trap-only handler. OSS-Fuzz drops function from
+# each C compile, and from a Python project's native code, so a c or python project's default does not have it, and a
+# c++ project's C compiles do not either (C_COMPILE_EXCLUDED); vptr and the hardening are about C++ code, so those
+# defaults do not have them either. OSS-Fuzz also instruments unsigned-integer-overflow, but silences it with
 # silence_unsigned_overflow=1, which trap mode cannot do, so no default has it.
 CXX_UBSAN_CHECKS = [
     "array-bounds", "bool", "builtin", "enum", "function", "integer-divide-by-zero", "null", "object-size", "return",
-    "returns-nonnull-attribute", "shift", "signed-integer-overflow", "unreachable", "vla-bound",
+    "returns-nonnull-attribute", "shift", "signed-integer-overflow", "unreachable", "vla-bound", "vptr",
+    LIBCXX_HARDENING,
 ]
 C_COMPILE_EXCLUDED = ("function",)
+CXX_ONLY = ("function", "vptr", LIBCXX_HARDENING)
 DEFAULT_UBSAN_CHECKS = {
     "c++": CXX_UBSAN_CHECKS,
-    "c": [check for check in CXX_UBSAN_CHECKS if check not in C_COMPILE_EXCLUDED],
-    "python": [check for check in CXX_UBSAN_CHECKS if check not in C_COMPILE_EXCLUDED],
+    "c": [check for check in CXX_UBSAN_CHECKS if check not in CXX_ONLY],
+    "python": [check for check in CXX_UBSAN_CHECKS if check not in CXX_ONLY],
 }
-# The checks that the trapping builds leave out of any list, and why.
+# The checks that trap mode cannot make, and how the builds make them: through a trap-only handler of the toolchain
+# image in the ubsan build. The asan-ubsan build leaves them out, and so does any build whose checks do not name them.
 TRAP_EXCEPTIONS = {
-    "vptr": "it needs the UBSan runtime, which trap mode does not have",
+    "vptr": "only the ubsan build makes it, through the toolchain's trap-only handler, and only in code compiled with "
+            "RTTI; the asan-ubsan build leaves it out",
 }
 # The keys of ubsan_checks: changes to the default, and the reason for them. Provisional, until the format is agreed.
 UBSAN_CHANGES = ("add", "remove", "reason")
@@ -518,7 +528,7 @@ def check_ubsan_changes(config, changes):
             yield f"ubsan_checks.{key} must be a list of UBSan check names"
             continue
         for item in checks:
-            if item not in UBSAN_NAMES:
+            if item not in UBSAN_NAMES and item != LIBCXX_HARDENING:
                 yield printable(f"ubsan_checks.{key}: {item!r} is not a UBSan check that clang knows")
         if len(set(checks)) != len(checks):
             yield f"ubsan_checks.{key} names a check twice"
@@ -531,6 +541,8 @@ def check_ubsan_changes(config, changes):
     reason = changes.get("reason")
     if not (isinstance(reason, str) and reason.strip()):
         yield "ubsan_checks.reason must say why the project's checks differ from the default"
+    if isinstance(added, list) and LIBCXX_HARDENING in added and config.get("language") != "c++":
+        yield f"ubsan_checks.add: {LIBCXX_HARDENING} applies only to a c++ project"
     if "undefined" not in sanitizers_of(config):
         yield "ubsan_checks applies only to the UBSan builds: sanitizers must contain undefined"
     language = config.get("language")
@@ -555,7 +567,7 @@ def config_warnings(config, files):
         added = changes.get("add") if isinstance(changes.get("add"), list) else []
         removed = changes.get("remove") if isinstance(changes.get("remove"), list) else []
         for item in sorted(set(map(str, added)) & set(TRAP_EXCEPTIONS)):
-            warnings.append(f"ubsan_checks: the trapping builds leave out {item}: {TRAP_EXCEPTIONS[item]}")
+            warnings.append(f"ubsan_checks: {item}: {TRAP_EXCEPTIONS[item]}")
         default = default_ubsan_checks(config.get("language"))
         for item in sorted(set(map(str, added)) & set(default)):
             warnings.append(f"ubsan_checks.add: {item} is in the default already")

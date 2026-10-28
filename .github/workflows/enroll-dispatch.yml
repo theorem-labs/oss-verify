@@ -16,8 +16,12 @@
 #             project's archives wait for the next release. On label: puts
 #             the label on the pull request and sends nothing, so that a person decides: size-review (a plain binary
 #             above 1,000,000 bytes, the line "Up to 1 MB", dispatch://OSSV-141/ask/7c73eb21), language-paused (a
-#             language whose projects are paused for now) or name-review (a name the statements repository cannot
-#             take). The daily limit and the statements-queued label are the receiving workflow's, not this file's.
+#             language whose projects are paused for now), name-review (a name the statements repository cannot
+#             take) or maintainer-review (the pull request's author is not shown to maintain the repository that
+#             `repo` names, by triage.py's maintainer check; someone other than the author who can label, a member
+#             of theorem-labs or one of its Apps, lifts it with the label maintainer-confirmed put on after the head
+#             commit, which runs maintainer-confirmed.yml, whose completion runs this again). The daily limit and the
+#             statements-queued label are the receiving workflow's, not this file's.
 #
 # Each required check's run starts this workflow, so the run of the last one to pass is the one that dispatches; a run
 # that sees a check not passed yet does nothing, and so does a run for a draft pull request: build.yaml runs again on
@@ -30,7 +34,8 @@
 # request again and updates its review comment, as each Build run of it does.
 #
 # It runs on workflow_run, so this file and the script are main's, whatever the pull request holds, and it runs no
-# code of the pull request: decide reads the API as data with a read-only token. dispatch alone holds a credential:
+# code of the pull request: decide reads the API as data with a read-only token, this repository's and, for the
+# maintainer check, the public repository that the project's `repo` names. dispatch alone holds a credential:
 # the OSS Verify App's installation token, made from the App's key, which it reads at run time from Secret Manager by
 # Google workload identity federation, as build.yaml's and triage.yaml's comment jobs do. It declares the GitHub
 # Environment `comment`, whose claim is the only way to act as the account that reads the key; decide must never
@@ -41,7 +46,8 @@
 name: Enroll dispatch
 on:
   workflow_run:
-    workflows: [Build, Validate, Terms, Tests]
+    # Maintainer confirmed: a member put the label maintainer-confirmed on a pull request; the decision runs again.
+    workflows: [Build, Validate, Terms, Tests, Maintainer confirmed]
     types: [completed]
 permissions: {}
 concurrency:
@@ -67,7 +73,7 @@ jobs:
     permissions:
       actions: read        # the runs behind the check runs, and the Build run's artifact enrollment-record
       checks: read         # the check runs at the commit
-      contents: read       # the checkout of .github/scripts, main's rules (rules/branches/main), the project.yaml
+      contents: read       # the checkout of .github/scripts and tools, main's rules (rules/branches/main), the project.yaml
       pull-requests: read  # the pull request and its files
     outputs:
       decision: ${{ steps.decide.outputs.decision }}
@@ -79,7 +85,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with:
           persist-credentials: false
-          sparse-checkout: .github/scripts
+          # tools: triage.py, which the maintainer check comes from, imports tools/validate.py. Main's copy, read as
+          # code of this repository; nothing of the pull request is checked out.
+          sparse-checkout: |
+            .github/scripts
+            tools
 
       - name: Install PyYAML
         run: dpkg -s python3-yaml > /dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
@@ -87,6 +97,8 @@ jobs:
       - name: Decide
         id: decide
         env:
+          # Read-only, for this repository's API and for the public repository that the project's `repo` names
+          # (triage.py's maintainer check).
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.event.workflow_run.id }}
@@ -140,7 +152,7 @@ jobs:
           [[ $SHA =~ ^[0-9a-f]{40}$ ]] || { echo "::error::not a commit id: '$SHA'"; exit 1; }
           case $DECISION/$LABEL in
             dispatch/) ;;
-            label/size-review|label/language-paused|label/name-review) ;;
+            label/size-review|label/language-paused|label/name-review|label/maintainer-review) ;;
             *) echo "::error::not a decision: '$DECISION' '$LABEL'"; exit 1 ;;
           esac
 
@@ -233,7 +245,7 @@ jobs:
           set -euo pipefail
           for old in $(gh api "repos/$REPO/issues/$PR/labels" --jq '.[].name'); do
             case $old in
-              size-review|language-paused|name-review)
+              size-review|language-paused|name-review|maintainer-review)
                 gh api --method DELETE "repos/$REPO/issues/$PR/labels/$old" > /dev/null
                 echo "pull request $PR: $old taken off, since $SHA is sent" | tee -a "$GITHUB_STEP_SUMMARY" ;;
             esac

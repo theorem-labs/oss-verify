@@ -266,12 +266,16 @@ def test_builds_route_reviews_a_pull_request_with_no_file_under_projects_as_a_ch
     assert route_build(tmp_path, files, changed, base=base) == [f"sha={'a' * 40}", want]
     jobs = workflow("build.yaml")["jobs"]
     change = "needs.route.outputs.change == 'true'"
-    # A change gets the review and the comment, and no build, record or session.
-    assert change in jobs["review"]["if"] and change in jobs["comment"]["if"]
-    assert all(change not in str(jobs[job]["if"]) for job in ("project-builds", "record", "keep"))
+    # A change gets the review (and so the required job asks for it), and no build, record or session.
+    assert change in jobs["review"]["if"]
+    assert change in step(jobs["required"], "Every job route asked for passed, and no other ran")["env"]["ASKED_REVIEW"]
+    assert all(change not in str(jobs[job]["if"]) for job in ("project-builds", "record"))
     review = {s.get("name"): s for s in jobs["review"]["steps"]}
-    for name in ("Take projects/<name>/ from the pull request, as the build did", "Restore the last review's session"):
-        assert review[name]["if"] == "needs.project-builds.outputs.name != ''"
+    for name in ("Take projects/<name>/ from the pull request, as the build did",
+                 "Restore the last review's session and the head it reviewed", "Review"):
+        assert review[name]["if"] == "env.NAME != ''"
+    assert review["Review the change"]["if"] == "env.NAME == ''"
+    assert "env.NAME != ''" in review["Keep this review's session for the next push's review"]["if"]
 
 
 # --- tests.yaml's route, run on made-up commits ---

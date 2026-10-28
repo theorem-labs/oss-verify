@@ -2,45 +2,39 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 #
-# Whether build.yaml's comment job arms auto-merge for a change pull request (one that changes no file under
-# projects/, review-change.md) that its run reviewed. An enrollment is never merged by automation: build.yaml never
-# runs this for one. It prints `merge` or `hold:<reason>` on its first line, and after `merge` each required check run
-# it counted, one per line (`<name> <state> <url>`), for the approval and the squash text. It writes nothing on GitHub.
-# Any other ending (a read that fails) is no decision, and the caller holds. Run it from a checkout of this repository:
+# Whether build.yaml's merge job arms auto-merge for a change pull request (one that changes no file under projects/,
+# review-change.md) that its run reviewed. An enrollment is never merged by automation: build.yaml never runs this for
+# one. It prints `merge` or `hold:<reason>` on its first line, and after `merge` each required check run it counted,
+# one per line (`<name> <state> <url>`), for the approval and the squash text. It writes nothing on GitHub. Any other
+# ending (a read that fails) is no decision, and the caller holds. Run it from a checkout of this repository:
 #
-#   REPO=<owner/name> PR=<number> HEAD_SHA=<reviewed head> VERDICT=<the review job's verdict output> \
-#     REFUSED=<true when review-run refused the review> SERVED=<the record of what answered> \
+#   REPO=<owner/name> PR=<number> HEAD_SHA=<reviewed head> VERDICTS=<the change review's verdicts, JSON> \
 #     .github/scripts/merge-decide
 #
 # The reasons, in the order it checks them:
-#   refused   review-run refused the review (exit 4).
-#   not-run   no verdict: the review did not finish, or review-run refused its verdict line.
-#   served    `review-served check` does not pass the record: the model asked for did not answer every turn.
-#   head      the verdict is of another commit than HEAD_SHA.
-#   moved     the pull request's head is no longer HEAD_SHA.
-#   blocking  the verdict lists a blocking item: a failed check of review-change.md.
-#   person    the verdict lists an item that a person decides: a change of behaviour or a new affordance, say.
-#   trust     the change touches a path outside docs/, one of the docs that review.md reads as its rules
-#             (project-yaml.md, build-contract.md, what-gets-proven.md, dsl.md), or a CODEOWNERS: only those docs merge by
-#             themselves, since every other path is code that CI runs (tools/, infra/, .github/), a rule that the
-#             reviews read (the review*.md files, the agent skills, README.md and CONTRIBUTING.md), or a project.
-#             A new file, under docs/ too, holds: a new public document can make a promise, and a person decides
-#             what adds one. The paths are git's own diff from the merge base with the base branch to HEAD_SHA, from
-#             git's object store, never GitHub's file list.
+#   not-run   no verdict for each check of review-change.md (1 to 5): the review did not finish.
+#   moved     the pull request's head is no longer HEAD_SHA, the commit the review read.
+#   blocking  a check has the verdict fail.
+#   person    a check has any other verdict than pass: a change of behaviour or a new affordance, say (check 5).
+#   trust     the change adds or deletes a file, or touches a path outside docs/, one of the docs that review.md reads
+#             as its rules (project-yaml.md, build-contract.md, what-gets-proven.md, dsl.md), or a CODEOWNERS: only
+#             edits of the other docs merge by themselves. Every other path is code that CI runs (tools/, infra/,
+#             .github/), a rule that the reviews read (the review*.md files, the agent skills, README.md and
+#             CONTRIBUTING.md), or a project; a new document can make a promise, and a deleted one can take a caveat
+#             away, so a person decides both. The paths are git's own diff from the merge base with the base branch to
+#             HEAD_SHA, from git's object store, never GitHub's file list.
 #   checks    a required check of the base branch's rules failed, or has no run at the head. Each is read from its
 #             newest run at the head. A check still running does not hold: auto-merge waits for it. project-builds,
-#             which this run reports after the comment job, counts as running.
+#             which this run reports after the merge job, counts as running.
 set -euo pipefail
 
 hold() { echo "hold:$1"; exit 0; }
-[ "${REFUSED:-}" != true ] || hold refused
-[ -n "${VERDICT:-}" ] || hold not-run
-"$(dirname "$0")/review-served" check <<< "${SERVED:-}" > /dev/null 2>&1 || hold served
-[ "$(jq -r .head <<< "$VERDICT")" = "$HEAD_SHA" ] || hold head
+jq -e 'type == "object" and ([.["1", "2", "3", "4", "5"]] | all(. != null))' <<< "${VERDICTS:-null}" > /dev/null \
+  2>&1 || hold not-run
 pull=$(gh api "repos/$REPO/pulls/$PR")
 [ "$(jq -r .head.sha <<< "$pull")" = "$HEAD_SHA" ] || hold moved
-[ "$(jq '.blocking | length' <<< "$VERDICT")" = 0 ] || hold blocking
-[ "$(jq '.person | length' <<< "$VERDICT")" = 0 ] || hold person
+jq -e 'all(.[]; . != "fail")' <<< "$VERDICTS" > /dev/null || hold blocking
+jq -e 'all(.[]; . == "pass")' <<< "$VERDICTS" > /dev/null || hold person
 
 base=$(jq -r .base.ref <<< "$pull")
 merge_base=$(gh api "repos/$REPO/compare/$base...$HEAD_SHA" --jq .merge_base_commit.sha)
@@ -49,7 +43,7 @@ git fetch -q --no-tags --depth=1 origin "$HEAD_SHA" "$merge_base"
 paths=$(git diff --name-only --no-renames "$merge_base" "$HEAD_SHA")
 if grep -qvE '^docs/' <<< "$paths" \
   || grep -qE '^docs/(project-yaml|build-contract|what-gets-proven|dsl)\.md$|(^|/)CODEOWNERS$' <<< "$paths" \
-  || [ -n "$(git diff --name-only --no-renames --diff-filter=A "$merge_base" "$HEAD_SHA")" ]; then
+  || [ -n "$(git diff --name-only --no-renames --diff-filter=AD "$merge_base" "$HEAD_SHA")" ]; then
   hold trust
 fi
 

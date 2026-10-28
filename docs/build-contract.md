@@ -94,10 +94,10 @@ The UBSan builds trap, with no runtime. oss-fuzz-theorems measured the checks th
 The UBSan builds do not make these checks:
 
 * `function`, which is off;
-* `vptr`, which needs a runtime;
+* `vptr`, which needs a runtime. With the next toolchain version, the `ubsan` build of a `c++` project makes it, through the toolchain image's trap-only handler ([project-yaml.md](project-yaml.md#ubsan_checks));
 * the checks that clang leaves out of `undefined` by default: unsigned overflow, implicit conversions, `local-bounds`, float division by zero and nullability.
 
-With today's toolchain vintage, these flags are fixed, so that the ported builds make the release's binaries again. With the next toolchain version, a list replaces them: the checks that OSS-Fuzz makes fatal for the project's language, changed by the project's `ubsan_checks` ([project-yaml.md](project-yaml.md#ubsan_checks)). `tools/check` then gives `compile` the checks, and `compile` builds the library and the fuzz targets with `-fsanitize=<checks> -fsanitize-trap=<checks>`. As in OSS-Fuzz, the C files of a `c++` project are compiled without `function`. The driver never gets these flags. The `ubsan` column of `infra/toolchains.tsv` tells which way each toolchain image works: `fixed` or `checks`.
+With today's toolchain vintage, these flags are fixed, so that the ported builds make the release's binaries again. With the next toolchain version, a list replaces them: the checks that OSS-Fuzz makes fatal for the project's language, changed by the project's `ubsan_checks` ([project-yaml.md](project-yaml.md#ubsan_checks)). `tools/check` then gives `compile` the checks, and `compile` builds the library and the fuzz targets with `-fsanitize=<checks> -fsanitize-trap=<checks>`. As in OSS-Fuzz, the C files of a `c++` project are compiled without `function`. In the `ubsan` build, `vptr` is compiled with `-fsanitize=vptr -fno-sanitize-link-runtime`, the links get the toolchain image's trap-only handler, and a compile with `-fno-rtti` gets `-fno-sanitize=vptr`; the `asan-ubsan` build leaves `vptr` out. `libcxx-hardening` compiles and links the `ubsan` build's C++ with `/opt/asan-static/musl-hardened.cfg`. The driver never gets these flags. The `ubsan` column of `infra/toolchains.tsv` tells which way each toolchain image works: `fixed` or `checks`.
 
 The sealed AddressSanitizer runtime has these properties, as the documentation of that release describes:
 
