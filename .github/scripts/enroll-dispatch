@@ -16,6 +16,9 @@ label, pr, project and sha, and one line, reason, that says why. The decision is
                                loader maps no executable byte of is one)
               language-paused  the project's language is one whose projects are paused for now
               name-review      the project's name has a dot, which the statements repository's names cannot have
+              maintainer-review  the pull request's author is not shown to maintain the repository that `repo`
+                               names, by triage.py's maintainer check (the author, not primary_contact), or that
+                               repository is not on github.com, or the check could not read it
   none      anything else, a project.yaml whose language cannot be read included; `reason` says what
 
 Which commit, whose pull request, and whose record. A run of a pull request (pull_request_target or pull_request) is
@@ -42,8 +45,8 @@ build.yaml runs again on ready_for_review, and that run's completion decides for
 A pull request that changes a project already enrolled is sent too: its facts are made again at the new commit.
 
 The sizes are read from the ELF headers of the files the project's own build wrote, so a build that rewrites its
-program headers can make them small. The statements repository measures its own build again, its daily limit caps
-what any enrollment can start, and a person reviews each facts pull request.
+program headers can make them small. The statements repository measures its own build again, and its daily limit caps
+what any enrollment can start. Its facts pull request merges when its own checks pass; no person reviews it.
 """
 from __future__ import annotations
 
@@ -56,6 +59,10 @@ import sys
 import zipfile
 
 import yaml
+
+# triage.py's maintainer check, the one the triage table shows as "Opened by an active maintainer".
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import triage  # noqa: E402
 
 # The size line for statements that start with no person's decision, "Up to 1 MB" of a plain binary
 # (dispatch://OSSV-141/ask/7c73eb21), the README's "less than 1 MB of code": 1 MB is 1,000,000 bytes here. It is
@@ -281,16 +288,44 @@ def open_at(pull: dict, repo: str, sha: str, head: tuple | None) -> str:
     return ""
 
 
-def language(api: Api, repo: str, project: str, sha: str) -> str | None:
-    """The language projects/<project>/project.yaml gives at `sha`, lower case, or None if it cannot be read."""
+def project_yaml(api: Api, repo: str, project: str, sha: str) -> dict | None:
+    """projects/<project>/project.yaml at `sha`, or None if it cannot be read."""
     try:
         data = api.raw(f"repos/{repo}/contents/projects/{project}/project.yaml?ref={sha}")
         if len(data) > MAX_PROJECT_YAML_BYTES:
             return None
-        value = (yaml.safe_load(data) or {}).get("language")
-    except (subprocess.CalledProcessError, yaml.YAMLError, AttributeError, RecursionError):
+        config = yaml.safe_load(data)
+    except (subprocess.CalledProcessError, yaml.YAMLError, RecursionError):
         return None
+    return config if isinstance(config, dict) else None
+
+
+def language(config: dict | None) -> str | None:
+    """The language project.yaml gives, lower case, or None."""
+    value = (config or {}).get("language")
     return value.lower() if isinstance(value, str) else None
+
+
+def standing(config: dict, login: str) -> str:
+    """'' when triage.py's maintainer check passes for `login` on the repository `repo` names, else why not. It checks
+    the pull request's author, not primary_contact. A repository not on github.com, or a read that fails, does not
+    pass."""
+    match = triage.GITHUB_REPO.fullmatch(config.get("repo") or "") if isinstance(config.get("repo"), str) else None
+    if not match:
+        return "its repo is not a github.com repository, so the author's role there cannot be read"
+    owner, name, _ = match.groups()
+    try:
+        gh = triage.GitHub(os.environ.get("GH_TOKEN"))
+        meta = gh.find(f"repos/{triage.quote(owner, safe='')}/{triage.quote(name, safe='')}")
+        if meta is None:
+            return f"{owner}/{name} is not found on GitHub, or not public"
+        mark, evidence = triage.maintainer_row(gh, meta["full_name"], meta, login)
+    except Exception as error:  # noqa: BLE001 - any failed read holds the enrollment for a person
+        return f"the author's role on {owner}/{name} could not be read: {type(error).__name__}"
+    if mark != triage.OK:
+        return f"{login or 'the author'} is not shown to maintain {meta['full_name']}: {evidence}"
+    return ""
+
 
 
 def decide(api: Api, repo: str, run_id: int, run_event: str, head_sha: str) -> dict:
@@ -334,11 +369,13 @@ def decide(api: Api, repo: str, run_id: int, run_event: str, head_sha: str) -> d
         why = why or f"it changes projects/{changed}/, the record's project is {project}"
         return outcome("none", f"pull request {number} is not one enrollment: {why}", number, project, sha)
     # The files were listed for whatever the head was when they were asked for: the head must still be `sha`.
-    why = open_at(api.get(f"repos/{repo}/pulls/{number}"), repo, sha, head)
+    pull = api.get(f"repos/{repo}/pulls/{number}")
+    why = open_at(pull, repo, sha, head)
     if why:
         return outcome("none", f"pull request {number}: {why}", number, project, sha)
     where = f"pull request {number}: projects/{project}/ at {sha[:7]}"
-    lang = language(api, repo, project, sha)
+    config = project_yaml(api, repo, project, sha)
+    lang = language(config)
     if lang is None:
         return outcome("none", f"{where}: its project.yaml cannot be read for its language; the next run decides",
                        number, project, sha)
@@ -351,8 +388,12 @@ def decide(api: Api, repo: str, run_id: int, run_event: str, head_sha: str) -> d
     if over:
         return outcome("label", f"{where} has a plain binary above {SIZE_LIMIT:,} bytes: {', '.join(over)}", number,
                        project, sha, "size-review")
-    return outcome("dispatch", f"{where} passed every required check, and each plain binary has at most "
-                   f"{SIZE_LIMIT:,} bytes of .text and of executable segments", number, project, sha)
+    why = standing(config, (pull.get("user") or {}).get("login") or "")
+    if why:
+        return outcome("label", f"{where}: {why}", number, project, sha, "maintainer-review")
+    return outcome("dispatch", f"{where} passed every required check, each plain binary has at most "
+                   f"{SIZE_LIMIT:,} bytes of .text and of executable segments, and its author maintains its repository",
+                   number, project, sha)
 
 
 def main() -> int:

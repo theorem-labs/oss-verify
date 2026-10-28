@@ -24,6 +24,11 @@ LOADER = importlib.machinery.SourceFileLoader("enroll_dispatch", str(ROOT / ".gi
 SPEC = importlib.util.spec_from_loader("enroll_dispatch", LOADER)
 dispatch = importlib.util.module_from_spec(SPEC)
 LOADER.exec_module(dispatch)
+# The maintainer check reads the network; every test but those of the class Maintainer sees it pass, and Maintainer
+# tests the real one with a stand-in API.
+REAL_STANDING = dispatch.standing
+STANDING_CALLS = []
+dispatch.standing = lambda config, login: STANDING_CALLS.append((config, login)) or ""
 
 REPO = "theorem-labs/oss-verify"
 SHA = "7e8e28d95389c7261efeb48e4114cd1186bf8e7e"
@@ -464,6 +469,84 @@ class Labels(unittest.TestCase):
         api.table[f"repos/{REPO}/contents/projects/{name}/project.yaml?ref={SHA}"] = b"language: c\n"
         got = dispatch.decide(api, REPO, 104, "pull_request_target", SHA)
         self.assertEqual((got["decision"], got["label"], got["project"]), ("label", "name-review", name))
+
+
+class Maintainer(unittest.TestCase):
+    """The author must be shown to maintain the repository `repo` names, by triage.py's maintainer check; anything
+    else labels the pull request maintainer-review and sends nothing."""
+    GITHUB = {"repo": "https://github.com/FreeREAC/plugin-hostd", "language": "c"}
+    META = {"full_name": "FreeREAC/plugin-hostd", "owner": {"login": "FreeREAC"}}
+
+    def standing(self, config, mark=None, error=None, meta=META):
+        seen = {}
+
+        class Fake:
+            def __init__(self, token):
+                seen["token"] = token
+
+            def find(self, path):
+                if error:
+                    raise error
+                seen["find"] = path
+                return meta
+
+        def row(gh, slug, meta_, login):
+            seen["row"] = (slug, login)
+            return mark, "evidence"
+        old = dispatch.triage.GitHub, dispatch.triage.maintainer_row
+        dispatch.triage.GitHub, dispatch.triage.maintainer_row = Fake, row
+        try:
+            return REAL_STANDING(config, "linuxnow"), seen
+        finally:
+            dispatch.triage.GitHub, dispatch.triage.maintainer_row = old
+
+    def test_ok_passes_and_reads_the_authors_role_on_the_upstream(self):
+        why, seen = self.standing(self.GITHUB, dispatch.triage.OK)
+        self.assertEqual(why, "")
+        self.assertEqual(seen["find"], "repos/FreeREAC/plugin-hostd")
+        self.assertEqual(seen["row"], ("FreeREAC/plugin-hostd", "linuxnow"))
+
+    def test_warn_and_fail_do_not_pass(self):
+        for mark in (dispatch.triage.WARN, dispatch.triage.FAIL):
+            why, _ = self.standing(self.GITHUB, mark)
+            self.assertIn("is not shown to maintain FreeREAC/plugin-hostd", why, mark)
+
+    def test_a_repository_not_on_github_does_not_pass(self):
+        for repo in ("https://gitlab.com/x/y", "https://example.invalid/x", None, 7):
+            why, seen = self.standing({"repo": repo}, dispatch.triage.OK)
+            self.assertIn("not a github.com repository", why, repo)
+            self.assertNotIn("row", seen)
+
+    def test_a_read_that_fails_or_finds_nothing_does_not_pass(self):
+        why, _ = self.standing(self.GITHUB, dispatch.triage.OK, error=dispatch.triage.ApiError("x", 403, "p"))
+        self.assertIn("could not be read", why)
+        why, _ = self.standing(self.GITHUB, dispatch.triage.OK, meta=None)
+        self.assertIn("not found on GitHub", why)
+
+    def test_decide_labels_maintainer_review_and_sends_nothing(self):
+        world = World()
+        world.pulls = [dict(world.pull(), user={"login": "someone"})]
+        old = dispatch.standing
+        dispatch.standing = lambda config, login: f"{login} is not shown to maintain it"
+        try:
+            got = world.decide()
+        finally:
+            dispatch.standing = old
+        self.assertEqual((got["decision"], got["label"]), ("label", "maintainer-review"))
+        self.assertIn("someone is not shown to maintain it", got["reason"])
+
+    def test_decide_asks_about_the_author_and_the_project_yaml(self):
+        world = World()
+        world.pulls = [dict(world.pull(), user={"login": "linuxnow"})]
+        STANDING_CALLS.clear()
+        self.assertEqual(world.decide()["decision"], "dispatch")
+        self.assertEqual(STANDING_CALLS, [({"repo": "https://example.invalid/x", "language": "c"}, "linuxnow")])
+
+    def test_the_workflow_takes_the_label_and_takes_it_off_when_sent(self):
+        text = (ROOT / ".github" / "workflows" / "enroll-dispatch.yml").read_text()
+        self.assertIn("label/maintainer-review)", text)
+        self.assertIn("size-review|language-paused|name-review|maintainer-review)", text)
+
 
 
 class TheRecord(unittest.TestCase):
