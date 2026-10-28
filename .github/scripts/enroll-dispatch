@@ -16,6 +16,11 @@ label, pr, project and sha, and one line, reason, that says why. The decision is
                                loader maps no executable byte of is one)
               language-paused  the project's language is one whose projects are paused for now
               name-review      the project's name has a dot, which the statements repository's names cannot have
+              review-blocking  the review of the commit failed check F2 (a fuzz target ends the run by itself) or F7
+                               (it reads more than its input), as build.yaml's artifact enrollment-verdict says
+              review-pending   the Build run has no review verdict for the commit (the review failed, was refused or
+                               did not run). A later Build run of the commit, a re-run included, completes and
+                               runs this again, which sends it once its review has a verdict that does not block
   none      anything else, a project.yaml whose language cannot be read included; `reason` says what
 
 Which commit, whose pull request, and whose record. A run of a pull request (pull_request_target or pull_request) is
@@ -78,6 +83,11 @@ ACTIONS_APP = 15368  # GitHub Actions, the app of every check run above
 BUILD_WORKFLOW = ".github/workflows/build.yaml"
 RECORD_ARTIFACT = "enrollment-record"
 RECORD_SCHEMA = "oss-verify enrollment record v1"
+# The review's verdict for the commit, which build.yaml's review job uploads: {"head", "fail_checks"}. A check id is
+# review.md's, for example F2; only F2 (a fuzz target ends the run by itself) and F7 (it reads more than its input)
+# keep statements from starting.
+VERDICT_ARTIFACT = "enrollment-verdict"
+BLOCKING_CHECK = re.compile(r"F\.?\s*([0-9]+)(?![0-9])", re.IGNORECASE)
 DEFAULT_BRANCH = "main"
 # The API lists at most 3,000 files of a pull request; above that, the list is not the whole change.
 MAX_LISTED_FILES = 3000
@@ -181,24 +191,44 @@ def bound_checks(api: Api, runs: Runs, repo: str, sha: str, head: tuple) -> tupl
     return waiting, build_run
 
 
-def build_record(api: Api, repo: str, run_id: int) -> tuple[dict | None, str]:
-    """The record build.yaml's record job uploaded in this run, or None and why not."""
-    artifacts = [a for page in api.pages(f"repos/{repo}/actions/runs/{run_id}/artifacts?name={RECORD_ARTIFACT}"
-                                         "&per_page=100")
-                 for a in page.get("artifacts") or [] if a.get("name") == RECORD_ARTIFACT and not a.get("expired")]
+def artifact_json(api: Api, repo: str, run_id: int, name: str, file: str) -> tuple[object | None, str]:
+    """The JSON file `file`, alone in the artifact `name` of this run, or None and why not."""
+    artifacts = [a for page in api.pages(f"repos/{repo}/actions/runs/{run_id}/artifacts?name={name}&per_page=100")
+                 for a in page.get("artifacts") or [] if a.get("name") == name and not a.get("expired")]
     if len(artifacts) != 1:
-        return None, f"Build run {run_id} has {len(artifacts)} unexpired {RECORD_ARTIFACT} artifacts, not one"
+        return None, f"Build run {run_id} has {len(artifacts)} unexpired {name} artifacts, not one"
     if int(artifacts[0].get("size_in_bytes") or 0) > MAX_ARTIFACT_BYTES:
-        return None, f"Build run {run_id}'s {RECORD_ARTIFACT} is larger than {MAX_ARTIFACT_BYTES} bytes"
+        return None, f"Build run {run_id}'s {name} is larger than {MAX_ARTIFACT_BYTES} bytes"
     data = api.raw(f"repos/{repo}/actions/artifacts/{artifacts[0]['id']}/zip")
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             names = archive.namelist()
-            if names != ["record.json"] or archive.getinfo("record.json").file_size > MAX_ARTIFACT_BYTES:
-                return None, f"Build run {run_id}'s {RECORD_ARTIFACT} holds {names}, not record.json alone"
-            return json.loads(archive.read("record.json")), ""
+            if names != [file] or archive.getinfo(file).file_size > MAX_ARTIFACT_BYTES:
+                return None, f"Build run {run_id}'s {name} holds {names}, not {file} alone"
+            return json.loads(archive.read(file)), ""
     except (zipfile.BadZipFile, ValueError) as error:
-        return None, f"Build run {run_id}'s {RECORD_ARTIFACT} cannot be read: {error}"
+        return None, f"Build run {run_id}'s {name} cannot be read: {error}"
+
+
+def build_record(api: Api, repo: str, run_id: int) -> tuple[dict | None, str]:
+    """The record build.yaml's record job uploaded in this run, or None and why not."""
+    return artifact_json(api, repo, run_id, RECORD_ARTIFACT, "record.json")
+
+
+def review_problem(api: Api, repo: str, run_id: int, sha: str) -> tuple[str, str]:
+    """(label, why) when the review of `sha` in this Build run blocks the statements, or ('', ''). It blocks when a
+    fuzz target ends the run by itself (check F2) or reads more than its input (check F7), and when the run has no
+    verdict for `sha` (the review failed, was refused, or did not run): review-blocking or review-pending."""
+    verdict, why = artifact_json(api, repo, run_id, VERDICT_ARTIFACT, "verdict.json")
+    if why:
+        return "review-pending", f"no review verdict: {why}"
+    if not isinstance(verdict, dict) or verdict.get("head") != sha or not isinstance(verdict.get("fail_checks"), list):
+        return "review-pending", f"Build run {run_id}'s review verdict is not one of {sha[:7]}"
+    blocking = sorted({check.strip() for check in verdict["fail_checks"] if isinstance(check, str)
+                       and (m := BLOCKING_CHECK.match(check.strip())) and m.group(1) in ("2", "7")})
+    if blocking:
+        return "review-blocking", f"the review failed {', '.join(blocking)}"
+    return "", ""
 
 
 def size(value: object) -> bool:
@@ -319,6 +349,9 @@ def decide(api: Api, repo: str, run_id: int, run_event: str, head_sha: str) -> d
     waiting, build_run = bound_checks(api, runs, repo, sha, head)
     if waiting:
         return outcome("none", f"required checks not passed at {sha[:7]}: {', '.join(waiting)}", sha=sha)
+    # The Build run whose record decides: the run started by hand, or the run of the bound project-builds check. Its
+    # review's verdict is read from the same run.
+    record_run = run_id if record is not None else build_run
     if record is None:
         record, why = build_record(api, repo, build_run)
         why = why or record_problem(record, sha)
@@ -351,6 +384,9 @@ def decide(api: Api, repo: str, run_id: int, run_event: str, head_sha: str) -> d
     if over:
         return outcome("label", f"{where} has a plain binary above {SIZE_LIMIT:,} bytes: {', '.join(over)}", number,
                        project, sha, "size-review")
+    label, why = review_problem(api, repo, record_run, sha)
+    if label:
+        return outcome("label", f"{where}: {why}", number, project, sha, label)
     return outcome("dispatch", f"{where} passed every required check, and each plain binary has at most "
                    f"{SIZE_LIMIT:,} bytes of .text and of executable segments", number, project, sha)
 

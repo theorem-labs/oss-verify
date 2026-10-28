@@ -785,6 +785,28 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      # For enroll-dispatch.yml: the commit and the checks this review failed. enroll-dispatch starts no statements
+      # when they name F2 or F7, or when the run has no such artifact (review-blocking, review-pending). Only for an
+      # enrollment: a change starts no statements. A re-run replaces it, so the run keeps one.
+      - name: Write the review's verdict for enroll-dispatch
+        if: ${{ steps.review.outputs.verdict != '' && needs.project-builds.outputs.name != '' }}
+        env:
+          VERDICT: ${{ steps.review.outputs.verdict }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/verdict"
+          printf '%s' "$VERDICT" | jq -ce '{head: .head, fail_checks: [.blocking[].check]}' \
+            > "$RUNNER_TEMP/verdict/verdict.json"
+
+      - if: ${{ steps.review.outputs.verdict != '' && needs.project-builds.outputs.name != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (sha-pinned)
+        with:
+          name: enrollment-verdict
+          path: ${{ runner.temp }}/verdict/verdict.json
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+
       # Whatever happened above, the Anthropic identity token does not outlive this job: a step that exits before its
       # own `rm` (a failed `openssl rand`, for one) leaves the file, and this removes it.
       - name: Remove the Anthropic identity token

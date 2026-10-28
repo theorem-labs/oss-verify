@@ -16,8 +16,10 @@
 #             project's archives wait for the next release. On label: puts
 #             the label on the pull request and sends nothing, so that a person decides: size-review (a plain binary
 #             above 1,000,000 bytes, the line "Up to 1 MB", dispatch://OSSV-141/ask/7c73eb21), language-paused (a
-#             language whose projects are paused for now) or name-review (a name the statements repository cannot
-#             take). The daily limit and the statements-queued label are the receiving workflow's, not this file's.
+#             language whose projects are paused for now), name-review (a name the statements repository cannot
+#             take), review-blocking (the review failed F2 or F7) or review-pending (no review verdict for the
+#             commit; the next Build run of it, a re-run included, decides again). The daily limit and the
+#             statements-queued label are the receiving workflow's, not this file's.
 #
 # Each required check's run starts this workflow, so the run of the last one to pass is the one that dispatches; a run
 # that sees a check not passed yet does nothing, and so does a run for a draft pull request: build.yaml runs again on
@@ -140,7 +142,7 @@ jobs:
           [[ $SHA =~ ^[0-9a-f]{40}$ ]] || { echo "::error::not a commit id: '$SHA'"; exit 1; }
           case $DECISION/$LABEL in
             dispatch/) ;;
-            label/size-review|label/language-paused|label/name-review) ;;
+            label/size-review|label/language-paused|label/name-review|label/review-blocking|label/review-pending) ;;
             *) echo "::error::not a decision: '$DECISION' '$LABEL'"; exit 1 ;;
           esac
 
@@ -233,7 +235,7 @@ jobs:
           set -euo pipefail
           for old in $(gh api "repos/$REPO/issues/$PR/labels" --jq '.[].name'); do
             case $old in
-              size-review|language-paused|name-review)
+              size-review|language-paused|name-review|review-blocking|review-pending)
                 gh api --method DELETE "repos/$REPO/issues/$PR/labels/$old" > /dev/null
                 echo "pull request $PR: $old taken off, since $SHA is sent" | tee -a "$GITHUB_STEP_SUMMARY" ;;
             esac

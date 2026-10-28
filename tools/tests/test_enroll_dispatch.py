@@ -97,6 +97,9 @@ class World:
             self.check(500 + i, name, run_id)
             self.run(run_id, path, event)
         self.artifacts[101] = record()
+        # The review verdict of each Build run: by default, for each run with a record, a verdict of SHA that blocks
+        # nothing; a value here replaces it, and None means the run has none.
+        self.verdicts = {}
         self.files = [{"filename": "projects/plugin-hostd/project.yaml", "status": "added"},
                       {"filename": "projects/plugin-hostd/build.sh", "status": "added"}]
         self.pulls = [self.pull()]
@@ -140,6 +143,13 @@ class World:
             if rec is not None:
                 table[f"repos/{REPO}/actions/artifacts/{run_id * 10}/zip"] = \
                     rec if isinstance(rec, bytes) else zipped({"record.json": json.dumps(rec)})
+            verdict = self.verdicts.get(run_id, {"head": SHA, "fail_checks": []} if rec is not None else None)
+            path = f"repos/{REPO}/actions/runs/{run_id}/artifacts?name={dispatch.VERDICT_ARTIFACT}&per_page=100"
+            table[path] = [{"artifacts": [] if verdict is None else [
+                {"id": run_id * 10 + 1, "name": dispatch.VERDICT_ARTIFACT, "expired": False, "size_in_bytes": 100}]}]
+            if verdict is not None:
+                table[f"repos/{REPO}/actions/artifacts/{run_id * 10 + 1}/zip"] = \
+                    verdict if isinstance(verdict, bytes) else zipped({"verdict.json": json.dumps(verdict)})
         return FakeApi(table)
 
     def decide(self, event="pull_request_target", run_id=104, sha=SHA):
@@ -464,6 +474,65 @@ class Labels(unittest.TestCase):
         api.table[f"repos/{REPO}/contents/projects/{name}/project.yaml?ref={SHA}"] = b"language: c\n"
         got = dispatch.decide(api, REPO, 104, "pull_request_target", SHA)
         self.assertEqual((got["decision"], got["label"], got["project"]), ("label", "name-review", name))
+
+
+class Review(unittest.TestCase):
+    """The review's verdict in the Build run that holds the record: F2 or F7 failed, or no verdict, starts nothing."""
+
+    def decide(self, verdict):
+        world = World()
+        world.verdicts[101] = verdict
+        return world.decide()
+
+    def test_a_verdict_that_fails_f2_or_f7_is_labelled_review_blocking(self):
+        for checks in (["F2"], ["F7"], ["F5", " f7 "], ["F.2"], ["F2 fuzz_x"]):
+            got = self.decide({"head": SHA, "fail_checks": checks})
+            self.assertEqual((got["decision"], got["label"]), ("label", "review-blocking"), checks)
+
+    def test_other_failed_checks_do_not_block(self):
+        for checks in ([], ["F1", "F3", "F4", "F5", "F8", "G1", "B"], ["F27"], ["F70"], [7], ["A2"]):
+            self.assertEqual(self.decide({"head": SHA, "fail_checks": checks})["decision"], "dispatch", checks)
+
+    def test_no_verdict_or_one_of_another_commit_is_labelled_review_pending(self):
+        for verdict in (None, {"head": NEWER, "fail_checks": []}, {"head": SHA}, ["x"], b"not a zip",
+                        {"head": SHA, "fail_checks": "F2"}):
+            got = self.decide(verdict)
+            self.assertEqual((got["decision"], got["label"]), ("label", "review-pending"), verdict)
+
+    def test_a_run_by_hand_reads_its_own_verdict(self):
+        world = World()
+        world.run(HAND_RUN, ".github/workflows/build.yaml", "workflow_dispatch", head_sha=MAIN, branch="main",
+                  head_repo=REPO)
+        world.artifacts[HAND_RUN] = record()
+        world.verdicts[101] = {"head": SHA, "fail_checks": ["F2"]}
+        self.assertEqual(world.decide(event="workflow_dispatch", run_id=HAND_RUN, sha=MAIN)["decision"], "dispatch")
+        world.verdicts[HAND_RUN] = {"head": SHA, "fail_checks": ["F7"]}
+        self.assertEqual(world.decide(event="workflow_dispatch", run_id=HAND_RUN, sha=MAIN)["label"], "review-blocking")
+
+    def test_the_workflows_upload_take_and_clear_the_labels(self):
+        flow = (ROOT / ".github" / "workflows" / "enroll-dispatch.yml").read_text()
+        self.assertIn("label/review-blocking|label/review-pending) ;;", flow)
+        self.assertIn("name-review|review-blocking|review-pending)", flow)
+        build = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
+        uploads = [s for s in build["jobs"]["review"]["steps"]
+                   if (s.get("with") or {}).get("name") == dispatch.VERDICT_ARTIFACT]
+        self.assertEqual(len(uploads), 1)
+        self.assertTrue(uploads[0]["with"]["overwrite"])
+
+    def test_the_review_jobs_jq_writes_head_and_the_blocking_checks(self):
+        if not shutil.which("jq"):
+            self.skipTest("jq is not installed")
+        build = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
+        step = next(s for s in build["jobs"]["review"]["steps"]
+                    if s.get("name") == "Write the review's verdict for enroll-dispatch")
+        with tempfile.TemporaryDirectory() as directory:
+            verdict = {"head": SHA, "blocking": [{"check": "F2", "text": "x"}, {"check": "F5", "text": "y"}],
+                       "person": [{"check": "E", "text": "z"}]}
+            run = subprocess.run(["bash", "-c", step["run"]], capture_output=True, text=True,
+                                 env={**os.environ, "VERDICT": json.dumps(verdict), "RUNNER_TEMP": directory})
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(json.loads(pathlib.Path(directory, "verdict", "verdict.json").read_text()),
+                             {"head": SHA, "fail_checks": ["F2", "F5"]})
 
 
 class TheRecord(unittest.TestCase):
