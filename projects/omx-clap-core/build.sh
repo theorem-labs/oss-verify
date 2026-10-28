@@ -1,6 +1,7 @@
 #!/bin/bash -eu
 # Copyright 2026 Pau Aliagas <linuxnow@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
+# Modified 2026 by Theorem Labs, PBC: builds fuzz_preset from the fuzz_preset.c and alloc.c the Dockerfile copies in.
 #
 # Builds omx-clap-core's three fuzz targets (fuzz/fuzz_*.c in the omx-clap-core repository) into $OUT.
 # omx-clap-core's own Makefile builds them with a native clang and libFuzzer; this script makes the same
@@ -25,7 +26,16 @@ $AR rcs "$WORK/libomx-clap-readers.a" "${objs[@]}"
 $CC $CFLAGS -std=gnu99 -D_GNU_SOURCE -Isrc -Ifuzz -c fuzz/alloc.c -o "$WORK/alloc.o"
 
 # The fuzz targets.
-for h in preset state manifest; do
+for h in state manifest; do
   $CC $CFLAGS -std=gnu99 -D_GNU_SOURCE -Isrc -Ifuzz -c "fuzz/fuzz_$h.c" -o "$WORK/fuzz_$h.o"
   $CC $CFLAGS "$WORK/fuzz_$h.o" "$WORK/alloc.o" -o "$OUT/fuzz_$h" $LIB_FUZZING_ENGINE "$WORK/libomx-clap-readers.a" -lm
 done
+
+# fuzz_preset, from $SRC/fuzz_preset/ (the Dockerfile copies them in): fuzz/fuzz_preset.c and fuzz/alloc.c with one
+# change. alloc.c also notes when the C library's allocator returns NULL, and fuzz_preset.c compares its three
+# readings only when none of them ran out of memory, so that a correct refusal for lack of memory is not an abort.
+# The other fuzz targets keep fuzz/alloc.c as it is.
+$CC $CFLAGS -std=gnu99 -D_GNU_SOURCE -Isrc -Ifuzz -c "$SRC/fuzz_preset/alloc.c" -o "$WORK/alloc_preset.o"
+$CC $CFLAGS -std=gnu99 -D_GNU_SOURCE -Isrc -Ifuzz -c "$SRC/fuzz_preset/fuzz_preset.c" -o "$WORK/fuzz_preset.o"
+$CC $CFLAGS "$WORK/fuzz_preset.o" "$WORK/alloc_preset.o" -o "$OUT/fuzz_preset" $LIB_FUZZING_ENGINE \
+  "$WORK/libomx-clap-readers.a" -lm
