@@ -446,6 +446,10 @@ def decide(api: Api, repo: str, run_id: int, run_event: str, head_sha: str) -> d
     if lang is None:
         return outcome("none", f"{where}: its project.yaml cannot be read for its language; the next run decides",
                        number, project, sha)
+    # First of the labels: one that a person lifts by hand (size-review, say) must never hide a review that holds.
+    label, why = review_problem(api, repo, record_run)
+    if label:
+        return outcome("label", f"{where}: {why}", number, project, sha, label)
     if lang in PAUSED_LANGUAGES:
         return outcome("label", f"{where} is in {lang}, which is paused", number, project, sha, "language-paused")
     if not STATEMENTS_NAME.fullmatch(project):
@@ -455,9 +459,6 @@ def decide(api: Api, repo: str, run_id: int, run_event: str, head_sha: str) -> d
     if over:
         return outcome("label", f"{where} has a plain binary above {SIZE_LIMIT:,} bytes: {', '.join(over)}", number,
                        project, sha, "size-review")
-    label, why = review_problem(api, repo, record_run)
-    if label:
-        return outcome("label", f"{where}: {why}", number, project, sha, label)
     author = (pull.get("user") or {}).get("login") or ""
     since = runs.get(build_run).get("created_at") if build_run is not None else None
     confirmed = confirmed_by(api, repo, number, pull, author, since) if isinstance(since, str) else ""

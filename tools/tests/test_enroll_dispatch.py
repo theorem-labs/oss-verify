@@ -513,6 +513,14 @@ class Review(unittest.TestCase):
             got = self.decide(review)
             self.assertEqual((got["decision"], got["label"]), ("label", "review-pending"), review)
 
+    def test_a_review_that_holds_comes_before_every_other_label(self):
+        world = World()
+        world.reviews[101] = {"F2": "fail", "F7": "pass"}
+        world.artifacts[101] = record(sizes=sizes(plain_text=2_000_000))
+        world.project_yaml = b"repo: https://example.invalid/x\nlanguage: go\n"
+        got = world.decide()
+        self.assertEqual((got["decision"], got["label"]), ("label", "review-blocking"), got["reason"])
+
     def test_f2_and_f7_pass_send_whatever_the_other_checks_say(self):
         got = self.decide({"F2": "pass", "F7": "pass", "A1": "fail", "G5": "person"})
         self.assertEqual(got["decision"], "dispatch", got["reason"])
