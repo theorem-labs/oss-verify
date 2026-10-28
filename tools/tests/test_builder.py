@@ -53,6 +53,10 @@ EXPECTED = {
     "n": (139, 132, 139, 132),
     "o": (0, 132, 0, 132),
     "h": (0, 0, 134, 134),
+    # The fixed flags have no -fstrict-flex-arrays=3, so array-bounds does not check a trailing array, and the write
+    # stays inside the allocation, where AddressSanitizer sees nothing.
+    "f": (0, 0, 0, 0),
+    "l": (0, 0, 0, 0),
 }
 CXX_ONLY = {"t": (134, 134, 134, 134)}  # an uncaught C++ exception
 
@@ -228,6 +232,42 @@ class UbsanChecks(unittest.TestCase):
                 subprocess.run(["docker", "image", "rm", tag], capture_output=True)
         results = dict(line.split() for line in done.stdout.splitlines())
         self.assertEqual(results, {"case-n": "132", "case-o": "0"})
+
+    @unittest.skipUnless(QEMU, "no qemu-riscv64 on this machine")
+    def test_strict_flex_arrays_checks_a_trailing_array(self):
+        """array-bounds traps on an index past a struct's trailing char[16] only with strict-flex-arrays, in the ubsan
+        and the asan-ubsan build. The legacy [1] flexible array, used as intended, and a correct input exit 0."""
+        tag = "oss-verify-test/example-flex:latest"
+        with tempfile.TemporaryDirectory(prefix="ov-test-flex.") as scratch:
+            work = pathlib.Path(scratch)
+            job = check_build.Job(name="example", directory=FIXTURE, repo="https://example.invalid/example", ref="",
+                                  dockerfile="", builds=["ubsan", "asan-ubsan"], fuzz_targets=None)
+            inputs = work / "in"
+            inputs.mkdir()
+            for case in "flm":
+                (inputs / f"case-{case}").write_bytes(b"\0" * 6 + case.encode())
+            results = {}
+            try:
+                check_build.build_project(job, "0" * 40, check_build.build_builder(), tag, work)
+                for build, sanitizer in (("ubsan", "undefined"), ("asan-ubsan", "address-undefined")):
+                    for checks in (["array-bounds"], ["array-bounds", "strict-flex-arrays"]):
+                        raw = work / f"raw-{build}-{len(checks)}"
+                        check_build.compile_build(tag, build, sanitizer, raw, (checks, ["vptr"], []),
+                                                  labels=check_build.work_label(work))
+                        runner = ('for c in /in/*; do timeout 600 /qemu /raw/example_fuzzer "$c" > /dev/null 2>&1; '
+                                  'echo "${c#/in/} $?"; done')
+                        done = subprocess.run(
+                            ["docker", "run", "--rm", "--network=none", "--ulimit", "core=0", "-v", f"{QEMU}:/qemu:ro",
+                             "-v", f"{inputs}:/in:ro", "-v", f"{raw}:/raw:ro", "--entrypoint", "sh", tag, "-c", runner],
+                            capture_output=True, text=True, check=True,
+                        )
+                        results[build, checks[-1]] = dict(line.split() for line in done.stdout.splitlines())
+            finally:
+                subprocess.run(["docker", "image", "rm", tag], capture_output=True)
+        for build in ("ubsan", "asan-ubsan"):
+            self.assertEqual(results[build, "array-bounds"], {"case-f": "0", "case-l": "0", "case-m": "0"}, build)
+            self.assertEqual(results[build, "strict-flex-arrays"], {"case-f": "132", "case-l": "0", "case-m": "0"},
+                             build)
 
 
 PYTHON_FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "python-example"
