@@ -46,7 +46,8 @@ A pull request that changes a project already enrolled is sent too: its facts ar
 
 The sizes are read from the ELF headers of the files the project's own build wrote, so a build that rewrites its
 program headers can make them small. The statements repository measures its own build again, and its daily limit caps
-what any enrollment can start. Its facts pull request merges when its own checks pass; no person reviews it.
+what any enrollment can start. Its facts pull request merges after its checks pass and an agent reviews it; no person
+reviews it.
 """
 from __future__ import annotations
 
@@ -308,8 +309,8 @@ def language(config: dict | None) -> str | None:
 
 def standing(config: dict, login: str) -> str:
     """'' when triage.py's maintainer check passes for `login` on the repository `repo` names, else why not. It checks
-    the pull request's author, not primary_contact. A repository not on github.com, or a read that fails, does not
-    pass."""
+    the pull request's author, not primary_contact. A repository not on github.com, a fork (whose owner is anyone who
+    forked it), or a read that fails, does not pass."""
     match = triage.GITHUB_REPO.fullmatch(config.get("repo") or "") if isinstance(config.get("repo"), str) else None
     if not match:
         return "its repo is not a github.com repository, so the author's role there cannot be read"
@@ -319,13 +320,15 @@ def standing(config: dict, login: str) -> str:
         meta = gh.find(f"repos/{triage.quote(owner, safe='')}/{triage.quote(name, safe='')}")
         if meta is None:
             return f"{owner}/{name} is not found on GitHub, or not public"
+        if meta.get("fork") is not False:
+            parent = (meta.get("parent") or {}).get("full_name") or "another repository"
+            return f"{meta['full_name']} is a fork of {parent}, so owning it shows nothing"
         mark, evidence = triage.maintainer_row(gh, meta["full_name"], meta, login)
     except Exception as error:  # noqa: BLE001 - any failed read holds the enrollment for a person
         return f"the author's role on {owner}/{name} could not be read: {type(error).__name__}"
     if mark != triage.OK:
         return f"{login or 'the author'} is not shown to maintain {meta['full_name']}: {evidence}"
     return ""
-
 
 
 def decide(api: Api, repo: str, run_id: int, run_event: str, head_sha: str) -> dict:

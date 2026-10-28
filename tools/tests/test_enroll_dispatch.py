@@ -475,7 +475,7 @@ class Maintainer(unittest.TestCase):
     """The author must be shown to maintain the repository `repo` names, by triage.py's maintainer check; anything
     else labels the pull request maintainer-review and sends nothing."""
     GITHUB = {"repo": "https://github.com/FreeREAC/plugin-hostd", "language": "c"}
-    META = {"full_name": "FreeREAC/plugin-hostd", "owner": {"login": "FreeREAC"}}
+    META = {"full_name": "FreeREAC/plugin-hostd", "owner": {"login": "FreeREAC"}, "fork": False}
 
     def standing(self, config, mark=None, error=None, meta=META):
         seen = {}
@@ -546,6 +546,15 @@ class Maintainer(unittest.TestCase):
         text = (ROOT / ".github" / "workflows" / "enroll-dispatch.yml").read_text()
         self.assertIn("label/maintainer-review)", text)
         self.assertIn("size-review|language-paused|name-review|maintainer-review)", text)
+
+    def test_a_fork_does_not_pass_whoever_owns_it(self):
+        fork = {"full_name": "someone/plugin-hostd", "owner": {"login": "someone"}, "fork": True,
+                "parent": {"full_name": "FreeREAC/plugin-hostd"}}
+        why, seen = self.standing(self.GITHUB, dispatch.triage.OK, meta=fork)
+        self.assertEqual(why, "someone/plugin-hostd is a fork of FreeREAC/plugin-hostd, so owning it shows nothing")
+        self.assertNotIn("row", seen)
+        why, _ = self.standing(self.GITHUB, dispatch.triage.OK, meta={**self.META, "fork": None})
+        self.assertIn("is a fork of another repository", why)
 
 
 
