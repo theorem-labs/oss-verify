@@ -556,6 +556,37 @@ class Maintainer(unittest.TestCase):
         why, _ = self.standing(self.GITHUB, dispatch.triage.OK, meta={**self.META, "fork": None})
         self.assertIn("is a fork of another repository", why)
 
+    def confirmed(self, labeller, label="maintainer-confirmed", events=True):
+        world = World()
+        world.pulls = [dict(world.pull(), user={"login": "someone"}, labels=[{"name": label}])]
+        api = world.api()
+        api.table[f"repos/{REPO}/issues/{PR}/events?per_page=100"] = [[
+            {"event": "labeled", "label": {"name": label}, "actor": {"login": labeller}}] if events else []]
+        old = dispatch.standing
+        dispatch.standing = lambda config, login: f"{login} is not shown to maintain it"
+        try:
+            return dispatch.decide(api, REPO, 104, "pull_request_target", SHA)
+        finally:
+            dispatch.standing = old
+
+    def test_the_label_put_by_someone_else_lifts_the_hold(self):
+        got = self.confirmed("a-member")
+        self.assertEqual(got["decision"], "dispatch", got["reason"])
+        self.assertIn("a-member labelled it maintainer-confirmed", got["reason"])
+
+    def test_the_label_put_by_the_author_or_with_no_record_or_another_label_does_not(self):
+        for case in ({"labeller": "someone"}, {"labeller": "SomeOne"}, {"labeller": "a-member", "events": False},
+                     {"labeller": "a-member", "label": "other"}):
+            got = self.confirmed(**case)
+            self.assertEqual((got["decision"], got["label"]), ("label", "maintainer-review"), case)
+
+    def test_putting_the_label_on_runs_the_decision_again(self):
+        confirmed = yaml.safe_load((ROOT / ".github" / "workflows" / "maintainer-confirmed.yml").read_text())
+        self.assertEqual(confirmed[True], {"pull_request_target": {"types": ["labeled"]}})
+        self.assertEqual(confirmed["permissions"], {})
+        self.assertEqual(confirmed["name"], "Maintainer confirmed")
+        dispatch_flow = yaml.safe_load((ROOT / ".github" / "workflows" / "enroll-dispatch.yml").read_text())
+        self.assertIn("Maintainer confirmed", dispatch_flow[True]["workflow_run"]["workflows"])
 
 
 class TheRecord(unittest.TestCase):
