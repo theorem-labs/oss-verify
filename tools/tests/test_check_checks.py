@@ -1520,6 +1520,7 @@ class MergeDecide(unittest.TestCase):
                 ({"head_files": {"projects/x/build.sh": "x\n"}}, "trust"),
                 ({"head_files": {"README.md": "x\n"}}, "trust"),
                 ({"head_files": {"docs/project-yaml.md": "x\n"}}, "trust"),
+                ({"head_files": {"docs/dsl.md": "x\n"}}, "trust"),
                 ({"head_files": {"docs/notes.md": "x\n", "tools/a.py": "b\n"}}, "trust"),
                 ({"head_files": {}}, "trust"),
                 ({"runs": {"tests": [self.check_run("tests", "failure")]}}, "checks"),
