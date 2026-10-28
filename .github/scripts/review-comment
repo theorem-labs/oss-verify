@@ -193,10 +193,11 @@ def read_previous(previous):
         match = META.match(lines[1].strip())
         if match:
             status, head, version = match.group("status"), match.group("head"), match.group("version")
-    for heading in HEADINGS:
-        start = previous.find("\n" + heading + "\n")
-        if start != -1:
-            return status, head, version, trim(previous[start + len(heading) + 2:]), heading
+    # The earliest heading in the text is this script's: a review's own text can hold the other one further down.
+    found = [(at, heading) for heading in HEADINGS if (at := previous.find("\n" + heading + "\n")) != -1]
+    if found:
+        start, heading = min(found)
+        return status, head, version, trim(previous[start + len(heading) + 2:]), heading
     return status, head, version, trim(previous.replace(MARKER, "")), HEADINGS[0]
 
 

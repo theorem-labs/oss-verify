@@ -998,12 +998,12 @@ jobs:
       # commit for each patch through the API (createCommitOnBranch, so GitHub signs them), and our pull request from
       # that branch, which credits the author and links theirs; the comment then links it. A branch of this repository
       # runs its own workflow files with this repository's secrets, so a change to those files is never carried: what
-      # decides is git's own diff of the default branch and the very commit the branch is made at, and every path a
-      # patch touches, never GitHub's file list, which can describe a newer push. Otherwise the comment folds the
-      # patches under it, and it does also when this step fails: it never stops the comment or fails the job. The
-      # patches are applied to an index of their own, from git's object store: nothing of the pull request is checked
-      # out or run. With OSSV_POST_REVIEW not `post`, the job summary says what the carry would create, and nothing is
-      # created.
+      # decides is git's own diff from the merge base with the default branch to the very commit the branch is made
+      # at, and every path a patch touches, never GitHub's file list, which can describe a newer push. Otherwise the
+      # comment folds the patches under it, and it does also when this step fails: it never stops the comment or fails
+      # the job. The patches are applied to an index of their own, from git's object store: nothing of the pull request
+      # is checked out or run. With OSSV_POST_REVIEW not `post`, the job summary says what the carry would create, and
+      # nothing is created.
       - name: Carry the review's patches
         if: needs.review.result == 'success' && needs.review.outputs.patches != ''
         continue-on-error: true
@@ -1041,14 +1041,18 @@ jobs:
           fi
           base=$(jq -r '.base.repo.default_branch // empty' <<< "$pull")
           [[ $base =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "::error::Could not read the default branch."; exit 1; }
-          git fetch -q --no-tags --depth=1 origin "$HEAD_SHA" "+refs/heads/$base:refs/remotes/origin/$base"
+          # The merge base of the default branch and the very commit carried, as take-project reads it: what the pull
+          # request changes, not what the default branch changed since it branched.
+          merge_base=$(gh api "repos/$REPO/compare/$base...$HEAD_SHA" --jq .merge_base_commit.sha)
+          [[ $merge_base =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Could not read the merge base."; exit 1; }
+          git fetch -q --no-tags --depth=1 origin "$HEAD_SHA" "$merge_base"
           export GIT_INDEX_FILE=$temp/index
           git -c core.sparseCheckout=false read-tree "$HEAD_SHA"
           count=$(awk -v out="$temp/patch." '/^Subject: / { close(file); file = out (++n) } n { print > file }
             END { print n + 0 }' "$temp/patches")
-          # Every path the pull request's commit changes against the default branch, and every path each patch
-          # touches, under both names of a rename.
-          git diff --name-only --no-renames "refs/remotes/origin/$base" "$HEAD_SHA" > "$temp/paths"
+          # Every path the pull request's commit changes from that merge base, and every path each patch touches,
+          # under both names of a rename.
+          git diff --name-only --no-renames "$merge_base" "$HEAD_SHA" > "$temp/paths"
           trees=("$(git write-tree)") applies=true
           for n in $(seq "$count"); do
             tail -n +2 "$temp/patch.$n" | git -c core.sparseCheckout=false apply --cached - 2> /dev/null \

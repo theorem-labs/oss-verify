@@ -968,9 +968,11 @@ class CarryStep(unittest.TestCase):
                   "@@ -1 +0,0 @@\n-x\n")
     AUTHOR = "Co-authored-by: alice <42+alice@users.noreply.github.com>"
 
-    def carry(self, patches, head_files=None, fork=True, post_to_pr="", base="main", refuse_ref=False):
+    def carry(self, patches, head_files=None, fork=True, post_to_pr="", base="main", refuse_ref=False,
+              main_after=None):
         """Run the step on a fork whose head commit adds head_files to the default branch's tree (tools/a.txt and
-        tools/b.txt). GitHub's file list is never served: the step must not read it."""
+        tools/b.txt), after which the default branch adds main_after. GitHub's file list is never served: the step
+        must not read it."""
         steps = [s for s in yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["jobs"]
                  ["comment"]["steps"] if s.get("name") == "Carry the review's patches"]
         self.assertEqual(len(steps), 1)
@@ -993,6 +995,14 @@ class CarryStep(unittest.TestCase):
                 subprocess.run(["git", *command], cwd=origin, env=git, check=True)
             head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=origin, env=git, check=True, capture_output=True,
                                   text=True).stdout.strip()
+            subprocess.run(["git", "checkout", "-q", "main"], cwd=origin, env=git, check=True)
+            for path, text in (main_after or {}).items():
+                (origin / path).parent.mkdir(parents=True, exist_ok=True)
+                (origin / path).write_text(text)
+            for command in (["add", "-A"], ["commit", "-q", "--allow-empty", "-m", "main after"]):
+                subprocess.run(["git", *command], cwd=origin, env=git, check=True)
+            (d / "merge-base").write_text(subprocess.run(["git", "merge-base", "main", head], cwd=origin, env=git,
+                                                         check=True, capture_output=True, text=True).stdout)
             (work / ".github" / "scripts").mkdir(parents=True)
             for script in ("review-comment", "review-served"):
                 shutil.copy(ROOT / ".github" / "scripts" / script, work / ".github" / "scripts" / script)
@@ -1014,6 +1024,7 @@ class CarryStep(unittest.TestCase):
                 f'  graphql*) n=$(ls {d} | grep -c "^graphql\\.");'
                 f' cat > {d}/graphql.$n; printf "%040d\\n" $((n + 1)) ;;\n'
                 f'  "repos/o/r/pulls/8") cat {d}/pull.json ;;\n'
+                f'  "repos/o/r/compare/main...{head} --jq .merge_base_commit.sha") cat {d}/merge-base ;;\n'
                 '  "repos/o/r/git/ref/heads/outside/8") exit 1 ;;\n'
                 f'  "--method POST repos/o/r/git/refs "*) {refs} ;;\n'
                 '  "repos/o/r/pulls?head=o:outside/8&state=open "*) ;;\n'
@@ -1031,6 +1042,14 @@ class CarryStep(unittest.TestCase):
             calls = read(d / "calls").split("\0")[:-1]
             requests = [json.loads(read(d / f"graphql.{n}")) for n in range(len(list(d.glob("graphql.*"))))]
             return head, calls, requests, read(d / "summary"), read(d / "temp" / "carry.md")
+
+    def test_a_fork_behind_the_default_branch_is_judged_on_its_own_change(self):
+        # The default branch changed trusted files after the fork branched: the fork's tree has their old text, and
+        # the diff from the merge base, not from the default branch's tip, shows that the fork changed none of them.
+        _, _, _, summary, note = self.carry(self.FIX, main_after={".github/workflows/new.yml": "x\n",
+                                                                  "review.md": "new\n", "CODEOWNERS": "x\n"})
+        self.assertIn("What the carry would create (not created)", summary)
+        self.assertIn("(the pull request this run would open)", note)
 
     def test_without_the_variable_the_summary_says_what_would_be_created_and_nothing_is(self):
         head, calls, requests, summary, note = self.carry(self.FIX)
@@ -1140,6 +1159,18 @@ class ChangeComment(unittest.TestCase):
             self.assertEqual(stale.count("from `review-change.md`"), 1)
             self.assertNotIn("from `review.md`", stale)
             self.assertIn("Fix Y.", stale)
+
+    def test_a_kept_review_that_quotes_the_other_heading_is_kept_whole(self):
+        # The review's own text holds "## Enrollment review" below the script's "## Change review": the comment is read
+        # from the earliest heading, so none of the review is lost and the footer is the change review's.
+        first = self.comment("Fix Y.\n\n## Enrollment review\n\nQuoted.\n")
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "previous"
+            path.write_text(first)
+            stale = subprocess.run([sys.executable, str(REVIEW_COMMENT), "--kind", "change", "--head", "b" * 40,
+                                    "--previous", str(path)], capture_output=True, text=True, check=True).stdout
+        self.assertIn("Fix Y.\n\n## Enrollment review\n\nQuoted.", stale)
+        self.assertEqual(stale.count("from `review-change.md`"), 1)
 
 
 class PostingStep(unittest.TestCase):
