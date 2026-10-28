@@ -31,10 +31,11 @@ for h in state manifest; do
   $CC $CFLAGS "$WORK/fuzz_$h.o" "$WORK/alloc.o" -o "$OUT/fuzz_$h" $LIB_FUZZING_ENGINE "$WORK/libomx-clap-readers.a" -lm
 done
 
-# fuzz_preset, from $SRC/fuzz_preset/ (the Dockerfile copies them in): fuzz/fuzz_preset.c and fuzz/alloc.c with one
-# change. alloc.c also notes when the C library's allocator returns NULL, and fuzz_preset.c compares its three
-# readings only when none of them ran out of memory, so that a correct refusal for lack of memory is not an abort.
-# The other fuzz targets keep fuzz/alloc.c as it is.
+# fuzz_preset, from $SRC/fuzz_preset/ (the Dockerfile copies them in): fuzz/fuzz_preset.c and fuzz/alloc.c, each with one
+# change. alloc.c also notes when the C library's allocator returns NULL on a request of at most the call's bound, and
+# fuzz_preset.c ends a call, with no abort, once memory has run out, for the reader or for the harness, so that a correct
+# refusal for lack of memory is not an abort; a NULL on a request past the bound is still judged by the checks. The
+# other fuzz targets keep fuzz/alloc.c as it is. fuzz_preset_oom.c tests this; it is not built here.
 $CC $CFLAGS -std=gnu99 -D_GNU_SOURCE -Isrc -Ifuzz -c "$SRC/fuzz_preset/alloc.c" -o "$WORK/alloc_preset.o"
 $CC $CFLAGS -std=gnu99 -D_GNU_SOURCE -Isrc -Ifuzz -c "$SRC/fuzz_preset/fuzz_preset.c" -o "$WORK/fuzz_preset.o"
 $CC $CFLAGS "$WORK/fuzz_preset.o" "$WORK/alloc_preset.o" -o "$OUT/fuzz_preset" $LIB_FUZZING_ENGINE \

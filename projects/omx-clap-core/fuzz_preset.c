@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 Pau Aliagas <linuxnow@gmail.com> */
-/* Modified 2026 by Theorem Labs, PBC: check_no_overread compares the three readings only when none ran out of
- * memory; a reading that ran out is checked to be refused cleanly instead. */
+/* Modified 2026 by Theorem Labs, PBC: a call of the fuzz target ends, with no abort, once memory has run out (see
+ * "Memory running out" below); a reading that ran out is checked to be refused cleanly first. */
 
 /* fuzz_preset: the preset file reader, pj_parse of src/preset_file.c, over the bytes of a file as pj_read_file hands
  * them to it, and the writer, pj_write, over what it accepts. pj_parse is the one JSON reader of the tree.
@@ -10,9 +10,7 @@
  *
  * Properties, each in a check_ function of its own, `if (!cond) abort();`:
  *   no_overread    the tree is the one the file's own bytes give: the input parsed with a digit after it, with another
- *                  digit after it and with a NUL after it is one answer, and the same tree whenever two of them accept;
- *                  when memory runs out in one of the three readings, that one is refused cleanly instead (reject_clean)
- *                  and the three are not compared.
+ *                  digit after it and with a NUL after it is one answer, and the same tree whenever two of them accept.
  *                  The parse that follows reads the input from a buffer of exactly its size, so a read past it is
  *                  AddressSanitizer's to report.
  *   as_written     the answer is the one the grammar below gives, read by the harness and not by the reader: a file is
@@ -26,6 +24,11 @@
  *                  the writer's format below, and parses to the same tree; a rewrite that sets one member, as a save
  *                  sets modifiedAt, keeps every other member and its place.
  *   bounded_alloc  for a file of n bytes the reader holds at most PJ_ALLOC_BOUND(n) bytes at once.
+ *
+ * Memory running out: malloc or realloc returns NULL to the harness, or to the reader on an allocation that
+ * fuzz_alloc_fail did not choose (fuzz/alloc.c). A reading during which that happens is refused cleanly (reject_clean),
+ * then the call ends and returns 0. A NULL on one request of more than PJ_ALLOC_BOUND(n) bytes, in a call on a file of
+ * n bytes, is not memory running out: no correct reader or writer asks for that much at once, so the checks judge it.
  *
  * The grammar, as the reader reads a file: one JSON value (RFC 8259) and whitespace around it, with three differences.
  * Arrays and objects nest JSON_DEPTH_MAX (32) deep at most. A string holds no \u0000, and a \u escape of a surrogate
@@ -61,6 +64,30 @@
 
 /* the member a save rewrites */
 #define REWRITTEN "modifiedAt"
+
+/* fuzz/alloc.c: whether memory has run out since the last fuzz_alloc_ran_out_reset(): the C library's allocator
+ * returned NULL on one of the reader's allocations that fuzz_alloc_fail did not choose, of at most fuzz_alloc_most(n)'s
+ * n bytes (SIZE_MAX until it is called) */
+int fuzz_alloc_ran_out(void);
+void fuzz_alloc_ran_out_reset(void);
+void fuzz_alloc_most(size_t n);
+
+/* whether one of the harness's own allocations returned NULL in this call of the fuzz target */
+static int g_own_ran_out;
+
+/* whether memory has run out in this call, for the reader or for the harness: the call then ends */
+static int out_of_memory(void)
+{
+    return g_own_ran_out || fuzz_alloc_ran_out();
+}
+
+/* one of the harness's own allocations, a NULL noted as memory running out */
+static void *noted(void *p)
+{
+    if (!p)
+        g_own_ran_out = 1;
+    return p;
+}
 
 static int same(const struct pj *a, const struct pj *b)
 {
@@ -329,15 +356,14 @@ static int ex_value(struct ex *in, const struct pj *v)
 }
 
 /* What the grammar reads in `size` bytes of `text`: -1 when it refuses them; 0 when it reads `doc` (NULL: no tree to
- * compare), 1 when it reads another tree. */
+ * compare), 1 when it reads another tree. -1 too when memory ran out for its scratch (out_of_memory then says so). */
 static int expected(const char *text, size_t size, const struct pj *doc)
 {
-    struct ex in = { text, text + size, 0, malloc(size + 1), 0 };
+    struct ex in = { text, text + size, 0, noted(malloc(size + 1)), 0 };
     int rc;
 
-    /* not a property: the harness's own allocation failed */
     if (!in.scratch)
-        abort();
+        return -1;
     rc = ex_value(&in, doc);
     if (rc == 0)
     {
@@ -354,17 +380,25 @@ struct text
 {
     char *b;
     size_t n, cap;
+    int failed;         // memory ran out: the text is cut, and no more is added
 };
 
 static void tx_put(struct text *t, const char *s, size_t n)
 {
+    char *b;
+
+    if (t->failed)
+        return;
     if (t->n + n + 1 > t->cap)
     {
+        b = noted(realloc(t->b, (t->n + n + 1) * 2));
+        if (!b)
+        {
+            t->failed = 1;
+            return;
+        }
+        t->b = b;
         t->cap = (t->n + n + 1) * 2;
-        t->b = realloc(t->b, t->cap);
-        /* not a property: the harness's own allocation failed */
-        if (!t->b)
-            abort();
     }
     memcpy(t->b + t->n, s, n);
     t->n += n;
@@ -440,53 +474,68 @@ static void tx_value(struct text *t, const struct pj *v, int pretty, int depth)
     }
 }
 
-/* the text of `doc` in the writer's format, malloc'd */
+/* the text of `doc` in the writer's format, malloc'd; NULL when memory ran out */
 static char *rendered(const struct pj *doc, int pretty)
 {
-    struct text t = { NULL, 0, 0 };
+    struct text t = { NULL, 0, 0, 0 };
 
     tx_put(&t, "", 0);
     tx_value(&t, doc, pretty, 0);
     if (pretty)
         tx_put(&t, "\n", 1);
+    if (t.failed)
+    {
+        free(t.b);
+        return NULL;
+    }
     return t.b;
 }
 
 /* ---------------------------------------------------------------- the properties */
 
-/* fuzz/alloc.c: whether memory has run out since the last fuzz_alloc_ran_out_reset(): the C library's allocator
- * returned NULL on one of the reader's allocations that fuzz_alloc_fail did not choose */
-int fuzz_alloc_ran_out(void);
-void fuzz_alloc_ran_out_reset(void);
-
 static __attribute__((noinline)) void check_reject_clean(int rc, const struct pj *doc, size_t live_before);
 
-/* pj_parse of `text`, and whether memory ran out while it read; a reading that ran out is refused cleanly */
-static int parse_noting(const char *text, size_t size, struct pj *doc, int *ran_out)
+/* pj_parse of `text`; a reading during which memory ran out is refused cleanly */
+static int parse_noting(const char *text, size_t size, struct pj *doc)
 {
     const size_t live = fuzz_alloc_live();
-    int rc;
+    const int rc = pj_parse(text, size, doc);
 
-    fuzz_alloc_ran_out_reset();
-    rc = pj_parse(text, size, doc);
-    *ran_out = fuzz_alloc_ran_out();
-    if (*ran_out)
+    if (fuzz_alloc_ran_out())
         check_reject_clean(rc, doc, live);
     return rc;
 }
 
-static __attribute__((noinline)) void check_no_overread(const uint8_t *data, size_t size)
+/* fuzz_copy's padded copy of the input (fuzz.h), but NULL when memory runs out */
+static char *padded(const uint8_t *data, size_t size, char fill)
 {
-    char *one = fuzz_copy(data, size, 0, FUZZ_PAD, '1'), *two = fuzz_copy(data, size, 0, FUZZ_PAD, '2');
-    char *nul = fuzz_copy(data, size, 0, FUZZ_PAD, '\0');
-    struct pj a1, a2, a0;
-    int o1, o2, o0;
-    const int r1 = parse_noting(one, size, &a1, &o1), r2 = parse_noting(two, size, &a2, &o2),
-              r0 = parse_noting(nul, size, &a0, &o0);
+    char *b = noted(malloc(size + FUZZ_PAD));
 
-    /* A reading that ran out of memory is refused whatever follows the file, so its answer is not compared: the
-     * three are compared only when no reading ran out. */
-    if (!o1 && !o2 && !o0)
+    if (b)
+    {
+        if (size)
+            memcpy(b, data, size);
+        memset(b + size, fill, FUZZ_PAD);
+    }
+    return b;
+}
+
+/* 1 when memory ran out, and the call ends */
+static __attribute__((noinline)) int check_no_overread(const uint8_t *data, size_t size)
+{
+    static const struct pj empty;
+    char *one = padded(data, size, '1'), *two = padded(data, size, '2'), *nul = padded(data, size, '\0');
+    struct pj a1 = empty, a2 = empty, a0 = empty;
+    int r1 = -1, r2 = -1, r0 = -1, ran_out;
+
+    if (!out_of_memory())
+        r1 = parse_noting(one, size, &a1);
+    if (!out_of_memory())
+        r2 = parse_noting(two, size, &a2);
+    if (!out_of_memory())
+        r0 = parse_noting(nul, size, &a0);
+    ran_out = out_of_memory();
+    if (!ran_out)
     {
         /* The same tree, whatever follows the file: a number that runs on into the bytes past it reads differently
          * after a 1 and after a 2.
@@ -506,6 +555,7 @@ static __attribute__((noinline)) void check_no_overread(const uint8_t *data, siz
     free(one);
     free(two);
     free(nul);
+    return ran_out;
 }
 
 static __attribute__((noinline)) void check_bounded_alloc(size_t held, size_t size)
@@ -516,10 +566,13 @@ static __attribute__((noinline)) void check_bounded_alloc(size_t held, size_t si
         abort();
 }
 
-static __attribute__((noinline)) void check_as_written(const uint8_t *data, size_t size, int rc, const struct pj *doc)
+/* 1 when memory ran out for the harness's own reading, and the call ends */
+static __attribute__((noinline)) int check_as_written(const uint8_t *data, size_t size, int rc, const struct pj *doc)
 {
     const int want = expected((const char *)data, size, rc == 0 ? doc : NULL);
 
+    if (out_of_memory())
+        return 1;
     /* The reader refuses a file the grammar reads, or reads one it refuses.
      * mutant: src/preset_file.c:155 `cp == 0` -> `cp == 1`
      * input: refuse-u0000
@@ -533,6 +586,7 @@ static __attribute__((noinline)) void check_as_written(const uint8_t *data, size
      * input: escapes */
     if (rc == 0 && want != 0)
         abort();
+    return 0;
 }
 
 static __attribute__((noinline)) void check_reject_clean(int rc, const struct pj *doc, size_t live_before)
@@ -556,7 +610,7 @@ static __attribute__((noinline)) void check_reject_clean(int rc, const struct pj
 
 /* The file again with one of the allocations its reading took failing, as when memory runs out: refused like any
  * refusal. And a tree written, pretty and compact, with one of the writer's failing: no text, and its buffer given
- * back. */
+ * back. A reading or a write during which memory ran out as well ends the call. */
 static __attribute__((noinline)) void check_reject_clean_starved(const uint8_t *data, size_t size, size_t took,
                                                                  const struct pj *doc)
 {
@@ -572,15 +626,20 @@ static __attribute__((noinline)) void check_reject_clean_starved(const uint8_t *
         fuzz_alloc_fail(SIZE_MAX);
         check_reject_clean(rc, &starved, live);
     }
-    if (!doc)
+    if (!doc || out_of_memory())
         return;
     before = fuzz_alloc_count();
     fuzz_free(pj_write(doc, 1));
-    if (fuzz_alloc_count() == before)
+    if (fuzz_alloc_count() == before || out_of_memory())
         return;
     fuzz_alloc_fail(fuzz_pick(data, size, fuzz_alloc_count() - before));
     text = pj_write(doc, 1);
     fuzz_alloc_fail(SIZE_MAX);
+    if (out_of_memory())
+    {
+        fuzz_free(text);
+        return;
+    }
     /* mutant: src/preset_file.c:465 `buf = realloc(o->buf, cap);` -> `buf = realloc(o->buf, cap) ?: realloc(o->buf, cap);`
      * input: string-alone */
     if (text || fuzz_alloc_live() != live)
@@ -589,23 +648,36 @@ static __attribute__((noinline)) void check_reject_clean_starved(const uint8_t *
      * first still holds the text up to where it failed: a cut text, not none. */
     before = fuzz_alloc_count();
     fuzz_free(pj_write(doc, 0));
-    if (fuzz_alloc_count() == before)
+    if (fuzz_alloc_count() == before || out_of_memory())
         return;
     fuzz_alloc_fail(fuzz_pick(data, size, fuzz_alloc_count() - before));
     text = pj_write(doc, 0);
     fuzz_alloc_fail(SIZE_MAX);
+    if (out_of_memory())
+    {
+        fuzz_free(text);
+        return;
+    }
     /* mutant: src/preset_file.c:565 `if (o.failed)` -> `if (o.failed && pretty)`
      * input: compact-second-allocation */
     if (text || fuzz_alloc_live() != live)
         abort();
 }
 
-/* written in the writer's format, and read back to the same tree; the compact reading is handed back in `copy` */
-static void round_trip_text(const struct pj *doc, int pretty, struct pj *copy)
+/* written in the writer's format, and read back to the same tree; the compact reading is handed back in `copy`. 1 when
+ * memory ran out, and the call ends. */
+static int round_trip_text(const struct pj *doc, int pretty, struct pj *copy)
 {
     char *text = pj_write(doc, pretty), *want = rendered(doc, pretty);
     struct pj back;
+    int rc;
 
+    if (out_of_memory())
+    {
+        free(want);
+        fuzz_free(text);
+        return 1;
+    }
     /* A tree is written while memory lasts.
      * mutant: src/preset_file.c:565 `if (o.failed)` -> `if (!o.failed)`
      * input: string-alone */
@@ -616,41 +688,56 @@ static void round_trip_text(const struct pj *doc, int pretty, struct pj *copy)
      * input: no-modified-at */
     if (strcmp(text, want) != 0)
         abort();
+    rc = parse_noting(text, strlen(text), &back);
+    free(want);
+    fuzz_free(text);
+    if (out_of_memory())
+        return 1;
     /* The reader reads what the writer writes: a pretty text has the newlines a compact file need not.
      * mutant: src/preset_file.c:38 `*in->p == '\n'` -> `*in->p == '\v'`
      * input: string-alone */
-    if (pj_parse(text, strlen(text), &back) != 0)
+    if (rc != 0)
         abort();
     /* And reads it to the same tree: an escape the writer uses that the file did not.
      * mutant: src/preset_file.c:153 `'\t'` -> `'x'`
      * input: escape-tab-as-u */
     if (!same(doc, &back))
         abort();
-    free(want);
-    fuzz_free(text);
     if (copy)
         *copy = back;
     else
         pj_free(&back);
+    return 0;
 }
 
-/* a save's rewrite of an object: REWRITTEN set, in place when the file has it (its first), appended when not */
-static void round_trip_rewrite(const struct pj *doc, struct pj *copy)
+/* a save's rewrite of an object: REWRITTEN set, in place when the file has it (its first), appended when not. 1 when
+ * memory ran out, and the call ends. */
+static int round_trip_rewrite(const struct pj *doc, struct pj *copy)
 {
     char *saved;
     struct pj back, v;
     size_t i, at = doc->n;
+    int set, rc;
 
+    set = pj_string(&v, "2026-10-25T00:00:00Z") == 0 && pj_set(copy, REWRITTEN, &v) == 0;
+    if (out_of_memory())
+        return 1;
     /* A member is set while memory lasts.
      * mutant: src/preset_file.c:384 `grow(obj) != 0` -> `grow(obj) == 0`
      * input: no-modified-at */
-    if (pj_string(&v, "2026-10-25T00:00:00Z") != 0 || pj_set(copy, REWRITTEN, &v) != 0)
+    if (!set)
         abort();
     saved = pj_write(copy, 1);
+    rc = saved && !out_of_memory() ? parse_noting(saved, strlen(saved), &back) : -1;
+    if (out_of_memory())
+    {
+        fuzz_free(saved);
+        return 1;
+    }
     /* The rewrite is written and read back: a file of no strings has written none until the save adds one.
      * mutant: src/preset_file.c:511 `put(o, "\"", 1);` -> ``
      * input: empty-object */
-    if (!saved || pj_parse(saved, strlen(saved), &back) != 0)
+    if (!saved || rc != 0)
         abort();
     for (i = 0; i < doc->n && at == doc->n; i++)
         if (strcmp(doc->keys[i], REWRITTEN) == 0)
@@ -678,17 +765,19 @@ static void round_trip_rewrite(const struct pj *doc, struct pj *copy)
         abort();
     fuzz_free(saved);
     pj_free(&back);
+    return 0;
 }
 
-static __attribute__((noinline)) void check_round_trip(const struct pj *doc)
+/* 1 when memory ran out, and the call ends */
+static __attribute__((noinline)) int check_round_trip(const struct pj *doc)
 {
-    struct pj copy;
+    static const struct pj empty;
+    struct pj copy = empty;
+    const int ran_out = round_trip_text(doc, 0, &copy) || round_trip_text(doc, 1, NULL)
+                        || (doc->type == PJ_OBJECT && round_trip_rewrite(doc, &copy));
 
-    round_trip_text(doc, 0, &copy);
-    round_trip_text(doc, 1, NULL);
-    if (doc->type == PJ_OBJECT)
-        round_trip_rewrite(doc, &copy);
     pj_free(&copy);
+    return ran_out;
 }
 
 /* the members docs/presets.md names, looked up as a consumer looks them up; what they say is not this reader's */
@@ -716,15 +805,23 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
     if (size > PRESET_FILE_MAX_BYTES)
         return 0;
-    check_no_overread(data, size);
+    g_own_ran_out = 0;
+    fuzz_alloc_ran_out_reset();
+    fuzz_alloc_most(PJ_ALLOC_BOUND(size));
+    if (check_no_overread(data, size))
+        return 0;
 
     live = fuzz_alloc_live();
     count = fuzz_alloc_count();
     fuzz_alloc_peak_reset();
-    rc = pj_parse((const char *)data, size, &doc);
+    rc = parse_noting((const char *)data, size, &doc);
     check_bounded_alloc(fuzz_alloc_peak() - live, size);
     count = fuzz_alloc_count() - count;
-    check_as_written(data, size, rc, &doc);
+    if (out_of_memory() || check_as_written(data, size, rc, &doc))
+    {
+        pj_free(&doc);
+        return 0;
+    }
     if (rc != 0)
     {
         check_reject_clean(rc, &doc, live);
@@ -732,8 +829,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         return 0;
     }
     read_members(&doc);
-    check_round_trip(&doc);
-    check_reject_clean_starved(data, size, count, &doc);
+    if (!check_round_trip(&doc))
+        check_reject_clean_starved(data, size, count, &doc);
     pj_free(&doc);
     return 0;
 }
