@@ -765,6 +765,7 @@ class WorkflowArguments(unittest.TestCase):
                 (directory / ".github" / "scripts" / "review-run").chmod(0o755)
                 (directory / ".review").mkdir()
                 (directory / ".review" / "comment.md").write_text("Thanks.\n")
+                (directory / ".review" / "verdict.json").write_text(json.dumps(VERDICT) + "\n")
                 (directory / ".review" / "held-finding.md").write_text("<!-- held finding -->\ntitle: x\n")
                 trace = directory / "trace"
                 env = {**os.environ, "PATH": f"{bin}:{os.environ['PATH']}", "RUNNER_TEMP": str(directory / "tmp"),
@@ -1178,7 +1179,7 @@ class PostingStep(unittest.TestCase):
     OLD = "Thanks.\n\n1. Fix X.\n"
 
     def post(self, review, existing=True, previous=None, head="b" * 40, pr_head=None, served=SERVED_OK, refused="",
-             post_to_pr="post", summary=None, carry=None, patched=""):
+             post_to_pr="post", summary=None, carry=None, patched="", verdict=""):
         workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
         name = "Post the comment, or update the one already there"
         matches = [s for s in workflow["jobs"]["comment"]["steps"] if s.get("name") == name]
@@ -1211,7 +1212,7 @@ class PostingStep(unittest.TestCase):
                            "PR": "8", "REVIEW": review, "CHECKS": "### new report\n", "HEAD_SHA": head,
                            "SERVED": served, "REFUSED": refused, "POST_TO_PR": post_to_pr, "PATCHED": patched,
                            "RUN_URL": "https://github.com/o/r/actions/runs/7", "RUNNER_TEMP": str(directory / "temp"),
-                           "GITHUB_OUTPUT": str(directory / "output"),
+                           "GITHUB_OUTPUT": str(directory / "output"), "VERDICT": verdict,
                            "GITHUB_STEP_SUMMARY": str(directory / "summary")}
             run = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=ROOT, env=environment, capture_output=True,
                                  text=True)
@@ -1359,6 +1360,308 @@ class PostingStep(unittest.TestCase):
             self.assertEqual(body.count("Claude wrote this review"), 1, head)
             kept.append(body.count("R"))
         self.assertEqual(len(set(kept)), 1, kept)
+
+    def test_the_verdict_goes_on_the_third_line(self):
+        line = json.dumps({"head": "b" * 40, "blocking": [], "person": []})
+        self.assertEqual(self.post("Thanks again.\n", verdict=line).split("\n")[2],
+                         f"<!-- oss-verify-verdict {line} -->")
+        self.assertNotIn("oss-verify-verdict", self.post("Thanks again.\n"))
+
+
+class VerdictComment(unittest.TestCase):
+    """review-comment --verdict: the review's verdict line on the comment's third line, and nowhere else."""
+    LINE = json.dumps({"head": "b" * 40, "blocking": [], "person": [{"check": "E", "text": "young"}]})
+    QUOTED = "<!-- oss-verify-verdict " + json.dumps({"head": "c" * 40, "blocking": [], "person": []}) + " -->"
+
+    def comment(self, review, verdict, *extra, checks="### report\n"):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            for name, text in (("review.md", review), ("checks.md", checks), ("served", SERVED_OK),
+                               ("verdict", verdict)):
+                (directory / name).write_text(text)
+            return subprocess.run([sys.executable, str(REVIEW_COMMENT), "--review", str(directory / "review.md"),
+                                   "--checks", str(directory / "checks.md"), "--served", str(directory / "served"),
+                                   "--head", "b" * 40, "--verdict", str(directory / "verdict"), *extra],
+                                  capture_output=True, text=True, check=True).stdout
+
+    def test_a_posted_review_has_its_verdict_on_line_3_and_a_quoted_one_is_not_read(self):
+        text = self.comment(f"Thanks.\n\n{self.QUOTED}\n", self.LINE + "\n", checks=self.QUOTED)
+        lines = text.split("\n")
+        self.assertEqual(review_comment.META.match(lines[1]).group("status"), "review")
+        self.assertEqual(lines[2], f"<!-- oss-verify-verdict {self.LINE} -->")
+        self.assertEqual(lines[3:5], ["", review_comment.HEADING])
+        # The copies in the checks report and in the review's text are posted as written, and never on line 3.
+        self.assertEqual(text.count("oss-verify-verdict"), 3)
+        self.assertEqual(self.comment(f"Thanks.\n\n{self.QUOTED}\n", "", checks=self.QUOTED).split("\n")[2], "")
+
+    def test_no_verdict_line_without_a_posted_review(self):
+        secret = json.dumps({"head": "b" * 40, "blocking": [{"check": "A", "text": "ghs_" + "b" * 36}], "person": []})
+        for review, verdict, extra in (("", self.LINE, ()), ("Thanks.\n", self.LINE, ("--refused",)),
+                                       ("Thanks.\n", secret, ()), ("Thanks.\n", '{"text": "a --> b"}', ())):
+            with self.subTest(review=review, verdict=verdict, extra=extra):
+                text = self.comment(review, verdict, *extra)
+                self.assertNotIn("oss-verify-verdict", text)
+                self.assertNotIn("ghs_", text)
+        # A review kept as not current carries no verdict line: line 3 is read only of the head it names.
+        with tempfile.TemporaryDirectory() as directory:
+            previous = pathlib.Path(directory) / "previous.md"
+            previous.write_text(self.comment("Thanks.\n", self.LINE))
+            kept = self.comment("", "", "--previous", str(previous), "--head", "c" * 40)
+        self.assertEqual(review_comment.META.match(kept.split("\n")[1]).group("status"), "stale")
+        self.assertNotIn("oss-verify-verdict", kept)
+
+
+@unittest.skipUnless(shutil.which("git") and shutil.which("jq"), "merge-decide needs git and jq")
+class MergeDecide(unittest.TestCase):
+    """.github/scripts/merge-decide on a change, with a real git and a fake gh: each reason to hold, and merge."""
+    CHECKS = ("enrollment", "project-builds", "terms-accepted", "tests")
+
+    @staticmethod
+    def check_run(name, conclusion="success", status="completed", started="2026-10-28T10:00:00Z", app=15368):
+        return {"status": status, "conclusion": conclusion if status == "completed" else None, "started_at": started,
+                "html_url": f"https://github.com/o/r/runs/{name}-{started[11:13]}", "app": {"id": app}}
+
+    def decide(self, head_files=None, remove=(), main_after=None, verdict_head=None, blocking=(), person=(),
+               refused="", served=SERVED_OK, moved=False, runs=None, rules=True, verdict=True):
+        """merge-decide on a pull request whose head commit changes head_files and removes `remove` from the default
+        branch's tree (tools/a.py and review.md), after which the default branch adds main_after."""
+        all_runs = {name: [self.check_run(name)] for name in self.CHECKS if name != "project-builds"}
+        all_runs.update(runs or {})
+        with tempfile.TemporaryDirectory() as directory:
+            d = pathlib.Path(directory)
+            git = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "t",
+                   "GIT_AUTHOR_EMAIL": "t@example.invalid", "GIT_COMMITTER_NAME": "t",
+                   "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+            origin, work = d / "origin", d / "work"
+
+            def commit(files, gone=(), message="x"):
+                for path, text in files.items():
+                    (origin / path).parent.mkdir(parents=True, exist_ok=True)
+                    (origin / path).write_text(text)
+                for path in gone:
+                    (origin / path).unlink()
+                for command in (["add", "-A"], ["commit", "-q", "--allow-empty", "-m", message]):
+                    subprocess.run(["git", *command], cwd=origin, env=git, check=True)
+                return subprocess.run(["git", "rev-parse", "HEAD"], cwd=origin, env=git, check=True,
+                                      capture_output=True, text=True).stdout.strip()
+
+            origin.mkdir()
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=origin, env=git, check=True)
+            base = commit({"tools/a.py": "a\n", "review.md": "r\n"})
+            subprocess.run(["git", "checkout", "-q", "-b", "change"], cwd=origin, env=git, check=True)
+            head = commit(head_files if head_files is not None else {"tools/a.py": "b\n"}, remove)
+            subprocess.run(["git", "checkout", "-q", "main"], cwd=origin, env=git, check=True)
+            commit(main_after or {})
+            (work / ".github" / "scripts").mkdir(parents=True)
+            for script in ("merge-decide", "review-served"):
+                shutil.copy(ROOT / ".github" / "scripts" / script, work / ".github" / "scripts" / script)
+            subprocess.run(["git", "init", "-q"], cwd=work, env=git, check=True)
+            subprocess.run(["git", "remote", "add", "origin", f"file://{origin}"], cwd=work, env=git, check=True)
+            pull = {"head": {"sha": "c" * 40 if moved else head, "repo": {"full_name": "o/r"}}, "base": {"ref": "main"}}
+            (d / "pull.json").write_text(json.dumps(pull))
+            (d / "compare.json").write_text(json.dumps({"merge_base_commit": {"sha": base}}))
+            if rules:
+                (d / "rules.json").write_text(json.dumps([{"type": "pull_request"}, {
+                    "type": "required_status_checks", "parameters": {"required_status_checks": [
+                        {"context": name, "integration_id": 15368} for name in self.CHECKS]}}]))
+            for name, listed in all_runs.items():
+                (d / f"runs-{name}.json").write_text(json.dumps({"check_runs": listed}))
+            (d / "bin").mkdir()
+            (d / "bin" / "gh").write_text(
+                "#!/bin/bash\n"
+                f'echo "$*" >> {d}/calls; all="$*"; filter="" path="" name=""\n'
+                'while [ $# -gt 0 ]; do\n'
+                '  case $1 in --jq) filter=$2; shift ;; check_name=*) name=${1#check_name=} ;; repos/*) path=$1 ;; esac\n'
+                '  shift\n'
+                'done\n'
+                'case $path in\n'
+                '  repos/o/r/pulls/8) file=pull.json ;;\n'
+                '  repos/o/r/rules/branches/main) file=rules.json ;;\n'
+                f'  repos/o/r/commits/{head}/check-runs) file=runs-$name.json ;;\n'
+                f'  repos/o/r/compare/main...{head}) file=compare.json ;;\n'
+                '  *) echo "unexpected gh $all" >&2; exit 1 ;;\n'
+                'esac\n'
+                f'[ -f {d}/$file ] || {{ echo "gh: Not Found (HTTP 404)" >&2; exit 1; }}\n'
+                f'if [ -n "$filter" ]; then jq -r "$filter" {d}/$file; else cat {d}/$file; fi\n')
+            (d / "bin" / "gh").chmod(0o755)
+            line = {"head": verdict_head or head, "blocking": list(blocking), "person": list(person)}
+            environment = {**git, "PATH": f"{d / 'bin'}:{os.environ['PATH']}", "REPO": "o/r", "PR": "8",
+                           "HEAD_SHA": head, "VERDICT": json.dumps(line) if verdict else "", "REFUSED": refused,
+                           "SERVED": served}
+            run = subprocess.run([str(work / ".github" / "scripts" / "merge-decide")], cwd=work, env=environment,
+                                 capture_output=True, text=True)
+            self.calls = (d / "calls").read_text() if (d / "calls").exists() else ""
+            return run
+
+    def decision(self, **arguments):
+        run = self.decide(**arguments)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        return run.stdout.split("\n")[0]
+
+    def test_each_reason_to_hold(self):
+        item = [{"check": "5", "text": "a new option"}]
+        for arguments, reason in (
+                ({"refused": "true"}, "refused"),
+                ({"verdict": False}, "not-run"),
+                ({"served": SERVED_OTHER}, "served"),
+                ({"served": ""}, "served"),
+                ({"verdict_head": "c" * 40}, "head"),
+                ({"moved": True}, "moved"),
+                ({"blocking": item}, "blocking"),
+                ({"person": item}, "person"),
+                ({"head_files": {"tools/a.py": "b\n", ".github/workflows/x.yml": "x\n"}}, "trust"),
+                ({"head_files": {".claude/skills/x/SKILL.md": "x\n"}}, "trust"),
+                ({"head_files": {"docs/x.md": "r\n"}, "remove": ("review.md",)}, "trust"),
+                ({"head_files": {"docs/CODEOWNERS": "x\n"}}, "trust"),
+                ({"runs": {"tests": [self.check_run("tests", "failure")]}}, "checks"),
+                ({"runs": {"terms-accepted": []}}, "checks"),
+                ({"runs": {"enrollment": [self.check_run("enrollment", app=1)]}}, "checks"),
+                # The newest run decides: a failure after a success holds.
+                ({"runs": {"tests": [self.check_run("tests", "success"),
+                                     self.check_run("tests", "failure", started="2026-10-28T11:00:00Z")]}}, "checks")):
+            with self.subTest(arguments=arguments):
+                self.assertEqual(self.decision(**arguments), f"hold:{reason}")
+
+    def test_merge_names_the_runs_it_counted_and_a_running_check_does_not_hold(self):
+        run = self.decide(runs={"tests": [self.check_run("tests", "failure"),
+                                          self.check_run("tests", status="in_progress",
+                                                         started="2026-10-28T11:00:00Z")]})
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(run.stdout.split("\n"), [
+            "merge", "enrollment success https://github.com/o/r/runs/enrollment-10",
+            "project-builds running (this run)", "terms-accepted success https://github.com/o/r/runs/terms-accepted-10",
+            "tests running https://github.com/o/r/runs/tests-11", ""])
+        # project-builds is this run's own check, reported after the comment job: it is never read.
+        self.assertNotIn("check_name=project-builds", self.calls)
+        # Trusted files that the default branch changed after the change branched are not the change's.
+        self.assertEqual(self.decision(main_after={".github/workflows/x.yml": "x\n", "review.md": "new\n"}), "merge")
+
+    def test_a_read_that_fails_is_no_decision(self):
+        run = self.decide(rules=False)
+        self.assertNotEqual(run.returncode, 0)
+        self.assertNotIn("merge", run.stdout)
+
+
+class MergeStep(unittest.TestCase):
+    """build.yaml's own "Merge when the review allows it" step, over a stand-in merge-decide and a fake gh."""
+    HEAD = "b" * 40
+    DECISION = "merge\nenrollment success https://x/1\nproject-builds running (this run)\n"
+
+    def merge(self, decision=DECISION, auto_merge="on", author="someone", clean=False, decides=True):
+        steps = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["jobs"]["comment"]["steps"]
+        matches = [s for s in steps if s.get("name") == "Merge when the review allows it"]
+        self.assertEqual(len(matches), 1)
+        step = matches[0]
+        self.assertIs(step["continue-on-error"], True)
+        # An enrollment is never merged by automation: the step runs for a change only.
+        self.assertEqual(step["if"], "needs.route.outputs.change == 'true'")
+        self.assertEqual(step["env"]["AUTO_MERGE"], "${{ vars.OSSV_AUTO_MERGE }}")
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            (directory / ".github" / "scripts").mkdir(parents=True)
+            (directory / ".github" / "scripts" / "merge-decide").write_text(
+                f"#!/bin/bash\nprintf '%s' {shlex.quote(decision)}\nexit {0 if decides else 1}\n")
+            (directory / "bin").mkdir()
+            (directory / "bin" / "gh").write_text(
+                f"#!/bin/bash\n{{ printf '%s\\0' \"$@\"; printf '\\0'; }} >> {directory}/calls\n"
+                'case "$*" in\n'
+                f'  *"pulls/8 --jq .user.login"*) echo {shlex.quote(author)} ;;\n'
+                + ('  "pr merge"*"--auto") echo "GraphQL: Pull request is in clean status (enablePullRequestAutoMerge)"'
+                   ' >&2; exit 1 ;;\n' if clean else "") +
+                "esac\n")
+            for script in (directory / ".github" / "scripts" / "merge-decide", directory / "bin" / "gh"):
+                script.chmod(0o755)
+            environment = {**os.environ, "PATH": f"{directory / 'bin'}:{os.environ['PATH']}", "GH_TOKEN": "x",
+                           "REPO": "o/r", "PR": "8", "VERDICT": "", "SERVED": "", "REFUSED": "", "HEAD_SHA": self.HEAD,
+                           "RUN_URL": "https://github.com/o/r/actions/runs/7", "AUTO_MERGE": auto_merge,
+                           "GITHUB_STEP_SUMMARY": str(directory / "summary")}
+            run = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=directory, env=environment,
+                                 capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            calls = (directory / "calls").read_text().split("\0\0")[:-1] if (directory / "calls").exists() else []
+            return [call.split("\0") for call in calls], (directory / "summary").read_text()
+
+    def test_without_the_variable_it_only_writes_what_it_would_do(self):
+        for value in ("", "off", "On", "true"):
+            with self.subTest(value=value):
+                calls, summary = self.merge(auto_merge=value)
+                self.assertEqual(calls, [])
+                self.assertIn("OSSV_AUTO_MERGE is not `on`, so nothing was approved or merged.", summary)
+                self.assertIn(f"gh pr merge 8 --auto --squash --match-head-commit {self.HEAD}", summary)
+                self.assertIn("    - enrollment success https://x/1\n", summary)
+
+    def test_with_the_variable_it_approves_the_head_and_arms_auto_merge(self):
+        calls, summary = self.merge()
+        self.assertEqual([call[:3] for call in calls], [["api", "repos/o/r/pulls/8", "--jq"],
+                                                        ["api", "--method", "POST"], ["pr", "merge", "8"]])
+        text = calls[1][-1].removeprefix("body=")
+        self.assertEqual(calls[1][3:-1], ["repos/o/r/pulls/8/reviews", "-f", f"commit_id={self.HEAD}", "-f",
+                                          "event=APPROVE", "-f"])
+        self.assertIn("- enrollment success https://x/1\n- project-builds running (this run)", text)
+        self.assertIn("https://github.com/o/r/actions/runs/7", text)
+        self.assertEqual(calls[2], ["pr", "merge", "8", "--repo", "o/r", "--squash", "--match-head-commit", self.HEAD,
+                                    "--body", text, "--auto"])
+        self.assertIn("Armed", summary)
+
+    def test_a_pull_request_that_can_merge_at_once_is_merged_without_auto(self):
+        calls, _ = self.merge(clean=True)
+        self.assertEqual(calls[-2][-1], "--auto")
+        self.assertEqual(calls[-1][:8], ["pr", "merge", "8", "--repo", "o/r", "--squash", "--match-head-commit",
+                                         self.HEAD])
+        self.assertNotIn("--auto", calls[-1])
+
+    def test_the_apps_own_pull_request_is_armed_without_an_approval(self):
+        calls, _ = self.merge(author="oss-verify[bot]")
+        self.assertEqual([call[:2] for call in calls], [["api", "repos/o/r/pulls/8"], ["pr", "merge"]])
+
+    def test_a_hold_or_no_decision_writes_nothing(self):
+        for decision, decides, said in (("hold:moved\n", True, "hold:moved"), ("hold:blocking\n", True, "hold:blocking"),
+                                        ("merge\n", False, "hold:no-decision")):
+            with self.subTest(decision=decision, decides=decides):
+                calls, summary = self.merge(decision=decision, decides=decides)
+                self.assertEqual(calls, [])
+                self.assertIn(f"Merge decision for {self.HEAD}: {said}", summary)
+
+
+class Disarm(unittest.TestCase):
+    """build.yaml's disarm job: auto-merge off on each push, with GITHUB_TOKEN and nothing else."""
+
+    def setUp(self):
+        self.job = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["jobs"]["disarm"]
+
+    def test_it_runs_on_a_push_only_and_holds_no_other_permission(self):
+        self.assertEqual(self.job["if"], "github.event_name == 'pull_request_target' && github.event.action == 'synchronize'")
+        self.assertEqual(self.job["permissions"], {"pull-requests": "write"})
+        self.assertNotIn("needs", self.job)
+        self.assertNotIn("environment", self.job)
+        [step] = self.job["steps"]
+        self.assertNotIn("uses", step)
+        self.assertEqual(step["env"]["GH_TOKEN"], "${{ github.token }}")
+        self.assertNotIn("secrets.", json.dumps(self.job))
+
+    def disarm(self, armed, auto_merge):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            (directory / "gh").write_text(
+                f'#!/bin/bash\necho "$*" >> {directory}/calls\n'
+                f'case "$*" in "pr view"*) echo {"true" if armed else "false"} ;; esac\n')
+            (directory / "gh").chmod(0o755)
+            environment = {**os.environ, "PATH": f"{directory}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r",
+                           "PR": "8", "AUTO_MERGE": auto_merge, "GITHUB_STEP_SUMMARY": str(directory / "summary")}
+            run = subprocess.run(["bash", "-e", "-c", self.job["steps"][0]["run"]], env=environment,
+                                 capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            read = lambda path: path.read_text() if path.exists() else ""  # noqa: E731
+            return read(directory / "calls").splitlines(), read(directory / "summary")
+
+    def test_it_turns_auto_merge_off_only_with_the_variable(self):
+        calls, _ = self.disarm(armed=True, auto_merge="on")
+        self.assertEqual(calls[-1], "pr merge 8 --repo o/r --disable-auto")
+        calls, _ = self.disarm(armed=False, auto_merge="on")
+        self.assertEqual([call for call in calls if call.startswith("pr merge")], [])
+        calls, summary = self.disarm(armed=True, auto_merge="")
+        self.assertEqual([call for call in calls if call.startswith("pr merge")], [])
+        self.assertIn("would turn it off", summary)
 
 
 class Screening(unittest.TestCase):
@@ -1768,7 +2071,7 @@ class ReviewRun(unittest.TestCase):
 
     def run_review(self, **environment):
         base = {"PATH": f"{self.directory / 'bin'}:{os.environ['PATH']}", "HOME": str(self.directory / "home"),
-                "PR": "8", "NAME": "libreac", "GH_TOKEN": "ghs_notasecretnotasecret",
+                "PR": "8", "NAME": "libreac", "HEAD_SHA": self.HEAD, "GH_TOKEN": "ghs_notasecretnotasecret",
                 "ANTHROPIC_API_KEY": "sk-ant-oat01-notasecret", "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "1000",
                 "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://elsewhere", "A.B": "dotted-not-a-secret",
                 "BASH_FUNC_f%%": "() { echo dotted-not-a-secret; }"}
@@ -2090,6 +2393,64 @@ class ReviewRun(unittest.TestCase):
         self.assertIn("SECRETPATCH", (review / "comment.md").read_text())
         self.assertFalse((review / "patches.md").exists())
 
+    def verdict_review(self, result, **environment):
+        """review-run on a review whose result is exactly `result`, with no verdict line added."""
+        for name in ("comment.md", "verdict.json", "held-finding.md", "failure.txt"):
+            (self.directory / "review" / name).unlink(missing_ok=True)
+        (self.directory / "stream").write_text(stream({"type": "result", "is_error": False, "result": result},
+                                                      verdict=None))
+        return self.run_review(**environment)
+
+    def test_a_review_without_one_verdict_line_of_its_head_did_not_run(self):
+        good = verdict_line(VERDICT)
+        regex = re.search(r"failure=\$\(grep -m1 -xE '([^']+)' \.review/failure\.txt",
+                          (ROOT / ".github" / "workflows" / "build.yaml").read_text()).group(1)
+        for result in ("Thanks.\n", f"Thanks.\n\n{good}\n{good}\n", f"Thanks.\n\n{good}\n\nMore.\n",
+                       f"It says {good}, quoted.\n\nThanks.\n\n{good}\n",
+                       'Thanks.\n\n<!-- oss-verify-verdict {"head": "' + "1" * 40 + '", -->\n',
+                       "Thanks.\n\n" + verdict_line({**VERDICT, "head": "2" * 40}) + "\n",
+                       "Thanks.\n\n" + verdict_line({**VERDICT, "blocking": "F5"}) + "\n",
+                       "Thanks.\n\n" + verdict_line({**VERDICT, "person": [{"check": "E"}]}) + "\n"):
+            with self.subTest(result=result):
+                out = self.verdict_review(result)
+                self.assertEqual(out.returncode, 1, out.stderr)
+                self.assertEqual(self.failure()[0], "the review did not end with one verdict line of this head\n")
+                self.assertRegex(self.failure()[0].strip(), f"^{regex}$")
+                self.assertFalse((self.directory / "review" / "comment.md").exists())
+                self.assertFalse((self.directory / "review" / "verdict.json").exists())
+        # Without HEAD_SHA, no verdict is of the head.
+        self.assertEqual(self.verdict_review(f"Thanks.\n\n{good}\n", HEAD_SHA="").returncode, 1)
+
+    def test_one_verdict_line_comes_out_of_the_comment_into_verdict_json(self):
+        verdict = {"head": self.HEAD, "blocking": [{"check": "F5", "text": "a --> b"}],
+                   "person": [{"check": "E", "text": "young"}]}
+        held = "<!-- held finding -->\ntitle: x\n"
+        out = self.verdict_review(f"Thanks.\n\n1. Fix F5.\n\n{held}\n  {verdict_line(verdict)}  \n\n")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        review = self.directory / "review"
+        written = (review / "verdict.json").read_text()
+        self.assertEqual(json.loads(written), verdict)
+        # One line, and nothing in it can end the HTML comment that review-comment writes it in.
+        self.assertEqual(written.count("\n"), 1)
+        self.assertNotIn(">", written)
+        self.assertNotIn("oss-verify-verdict", (review / "comment.md").read_text())
+        self.assertNotIn("oss-verify-verdict", (review / "held-finding.md").read_text())
+        self.assertEqual((review / "held-finding.md").read_text().strip(), held.strip())
+        self.assertNotIn("oss-verify-verdict", (self.directory / "reader-args").read_text())
+
+    def test_a_held_finding_is_kept_when_the_verdict_line_is_refused(self):
+        out = self.verdict_review("Thanks.\n\n<!-- held finding -->\ntitle: x\n")
+        self.assertEqual(out.returncode, 1, out.stderr)
+        self.assertEqual((self.directory / "review" / "held-finding.md").read_text().rstrip(),
+                         "<!-- held finding -->\ntitle: x")
+
+    def test_a_verdict_line_that_names_a_held_finding_is_held_and_not_published(self):
+        verdict = {**VERDICT, "blocking": [{"check": "F1", "text": "the held finding in parse_SECRETBUG"}]}
+        out = self.verdict_review(f"Thanks.\n\n{verdict_line(verdict)}\n")
+        self.assertEqual(out.returncode, 1, out.stderr)
+        self.assertIn("SECRETBUG", (self.directory / "review" / "held-finding.md").read_text())
+        self.assertNotIn("SECRETBUG", out.stdout + out.stderr)
+
     def test_a_session_file_that_is_not_whole_gives_a_fresh_review(self):
         (self.session / "session").write_text(f"id=../../x\nhead={self.LAST}\ndir={self.FOLDER}\n")
         out = self.run_review(**self.resume())
@@ -2369,12 +2730,25 @@ class ReviewRun(unittest.TestCase):
         return self.run_review(**self.identity())
 
 
-def stream(result, model="claude-opus-5-5"):
+# The verdict line that a review ends with (review.md, "The verdict line"), of ReviewRun's HEAD.
+VERDICT = {"head": "1" * 40, "blocking": [], "person": []}
+
+
+def verdict_line(verdict):
+    return f"<!-- oss-verify-verdict {json.dumps(verdict)} -->"
+
+
+def stream(result, model="claude-opus-5-5", verdict=VERDICT):
     """What Claude Code prints with --output-format stream-json --verbose for a review that ends in `result`: a turn
     that `model` answered, then the result, whose modelUsage names the provider unless `result` has its own. For a
-    result that is not an object (a stand-in for no result), nothing: Claude Code writes only JSON objects."""
+    result that is not an object (a stand-in for no result), nothing: Claude Code writes only JSON objects. A review's
+    text (is_error false) that names no verdict line ends with the line of `verdict`, unless that is None."""
     if not isinstance(result, dict):
         return ""
+    text = result.get("result")
+    if verdict is not None and result.get("is_error") is False and isinstance(text, str) \
+            and "oss-verify-verdict" not in text:
+        result = {**result, "result": text.rstrip("\n") + "\n" + verdict_line(verdict)}
     turn = {"type": "assistant", "message": {"id": "msg_01", "model": model, "role": "assistant", "content": []}}
     usage = {"claude-opus-5-5": {"provider": "firstParty", "canonicalModel": "claude-opus-5-5"}}
     return json.dumps(turn) + "\n" + json.dumps({"type": "result", "modelUsage": usage, **result}) + "\n"
@@ -2691,9 +3065,13 @@ else:
         self.assertEqual(send["env"]["CURRENT_OBJECT"], "${{ needs.review.outputs.held_object }}")
         # The comment job posts no review unless the review job succeeded and, if it held a finding, hold sent it.
         self.assertIn("hold", jobs["comment"]["needs"])
-        self.assertEqual(jobs["comment"]["steps"][-1]["env"]["REVIEW"],
-                         "${{ needs.review.result == 'success' && (needs.review.outputs.held_object == '' || "
-                         "needs.hold.result == 'success') && needs.review.outputs.comment || '' }}")
+        # The verdict, which decides the merge, comes under the same condition.
+        gate = ("${{ needs.review.result == 'success' && (needs.review.outputs.held_object == '' || "
+                "needs.hold.result == 'success') && needs.review.outputs.%s || '' }}")
+        comment = {s.get("name"): s for s in jobs["comment"]["steps"]}
+        post = comment["Post the comment, or update the one already there"]["env"]
+        self.assertEqual((post["REVIEW"], post["VERDICT"]), (gate % "comment", gate % "verdict"))
+        self.assertEqual(comment["Merge when the review allows it"]["env"]["VERDICT"], gate % "verdict")
 
 
 class ReviewHold(unittest.TestCase):
@@ -2918,6 +3296,7 @@ class ReviewStep(unittest.TestCase):
             (directory / ".review").mkdir()
             # What review-run leaves when the review is written.
             (directory / ".review" / "comment.md").write_text("Thanks.\n")
+            (directory / ".review" / "verdict.json").write_text(json.dumps(VERDICT) + "\n")
             if lost is not None:
                 (directory / ".review" / "export-lost.txt").write_text(lost)
             script = directory / ".github" / "scripts" / "review-run"

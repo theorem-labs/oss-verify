@@ -15,6 +15,9 @@ name: "Build"
 #            file and none under projects/ is a change: route asks for no build, and the review checks it against
 #            review-change.md. Any other asks for the build, as an enrollment (a fork that mixes projects/ with other
 #            files, or a pull request into another branch, fails there).
+#   disarm   on each push (synchronize), turns the pull request's auto-merge off, so that a head no review has passed
+#            never merges on an older head's decision. Every push, not only a change's: a push can turn a change
+#            into an enrollment. GITHUB_TOKEN with pull-requests: write only; no checkout.
 #   project-builds
 #            the build above, under the check name build, when route asks for it; it passes with nothing to build
 #            when the pull request enrolls no project (below). Its job id stays project-builds, the name the other jobs
@@ -29,7 +32,8 @@ name: "Build"
 #            knows what it asked for and why, and reviews only the diff since the commit it reviewed then. For a
 #            change, it checks what review-change.md says on the pull request's diff and files, read as data, and
 #            writes each fix as a patch after its comment (review-run cuts them out of the comment; they are public
-#            text, and the comment job's log shows them).
+#            text, and the comment job's log shows them). Either review ends with a verdict line, which review-run
+#            takes out and passes on as the job output verdict: the head, the blocking items and the person items.
 #   hold     sends each real bug in a project's own code that a review held back from its comment (review.md, rule 6)
 #            to the disclosure route as a private issue (.github/scripts/review-hold): the review job stores it in a
 #            private bucket that only this job can read, and this job sends every finding stored there, a cancelled
@@ -40,13 +44,18 @@ name: "Build"
 #            change from a fork that changes no file that decides what CI trusts (the carry step lists them), it first
 #            carries the patches: the branch outside/<n> from refs/pull/<n>/head, one commit for each patch through the
 #            API, and our pull request from it, which credits the author; the comment links it. Otherwise the comment
-#            folds the patches under it.
+#            folds the patches under it. Then, for a change only, .github/scripts/merge-decide decides from the
+#            verdict and what it reads of GitHub and git: on `merge`, while the head is still the one reviewed, the
+#            App approves that head and arms auto-merge (squash, --match-head-commit), or merges at once when GitHub
+#            can. An enrollment is never merged by automation. Every write of disarm and of the merge happens only
+#            while the repository variable OSSV_AUTO_MERGE is `on`; otherwise each job writes what it would do to
+#            its summary, and does nothing.
 #   required always runs, last, and reports the required check (below).
 #
 # project-builds is the required check, and the job required reports it (.github/scripts/collect). required runs on
 # every run, after all the other jobs whatever their results, and passes only if route passed and every job route asked
-# for passed: the build when route asked for it, and the record, review, hold, keep and comment jobs when their own
-# conditions call for them (the review when the build took a project or route found a change); every other job must
+# for passed: the build when route asked for it, and the disarm, record, review, hold, keep and comment jobs when their
+# own conditions call for them (the review when the build took a project or route found a change); every other job must
 # be skipped. A skipped job counts as a pass where a check is required, so the build job is never the required check
 # itself. For a change nothing is built, and project-builds reports the review and comment; a fork's change still fails
 # the required check enrollment (validate.yaml), so it does not merge as it is. The build takes the project with
@@ -97,10 +106,10 @@ name: "Build"
 # without the runner's tokens. Its review is posted only when the provider and model it asked for, at that provider's
 # own API, answered every turn, as Claude Code reported each turn (.github/scripts/review-served);
 # every comment names the providers and models that answered, with their turns, or says why nothing shows which.
-# The comment job alone writes: it posts text, refused if it holds what looks like a
-# credential (.github/scripts/review-comment), as the oss-verify GitHub App (oss-verify[bot]), with an installation
-# token that can write pull requests and contents (for the carry's branch and commits) in this repository only. It
-# makes that token from the App's client id below and
+# Besides the disarm job, which only turns auto-merge off, the comment job alone writes: it posts text, refused if it
+# holds what looks like a credential (.github/scripts/review-comment), as the oss-verify GitHub App (oss-verify[bot]),
+# with an installation token that can write pull requests and contents (for the carry's branch and commits, and the
+# merge) in this repository only. It makes that token from the App's client id below and
 # its private key, which it reads at run time from Secret Manager (oss-verify-github-app-key), and runs no code of the
 # pull request or the project.
 #
@@ -238,6 +247,33 @@ jobs:
           fi
           echo "$message"
           echo "$message" >> "$GITHUB_STEP_SUMMARY"
+
+  disarm:
+    # On each push, auto-merge goes off: the comment job arms it only for the change head its review passed, so a new
+    # head never merges on that decision. Every push, a change's or not: a push can turn a change into an enrollment,
+    # which nothing arms. Its own job, so that this write sits beside no pull request code; it checks out nothing.
+    # While OSSV_AUTO_MERGE is not `on`, it writes to its summary what it would do, and changes nothing.
+    if: github.event_name == 'pull_request_target' && github.event.action == 'synchronize'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Turn auto-merge off
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          AUTO_MERGE: ${{ vars.OSSV_AUTO_MERGE }}
+        run: |
+          set -euo pipefail
+          if [ "$(gh pr view "$PR" --repo "$REPO" --json autoMergeRequest --jq '.autoMergeRequest != null')" != true ]; then
+            echo "Auto-merge is off."
+          elif [ "${AUTO_MERGE:-}" != on ]; then
+            echo "OSSV_AUTO_MERGE is not \`on\`: auto-merge is on, and this job would turn it off (gh pr merge $PR --disable-auto)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            gh pr merge "$PR" --repo "$REPO" --disable-auto
+          fi
 
   project-builds:
     # Not the required check, which the job required reports (the top of this file).
@@ -454,6 +490,8 @@ jobs:
       GCP_SERVICE_ACCOUNT: ossv-ci@theorem-agent-infra.iam.gserviceaccount.com
     outputs:
       comment: ${{ steps.review.outputs.comment }}
+      # The verdict line's JSON (review.md, "The verdict line"), one line, for the comment job's decision and comment.
+      verdict: ${{ steps.review.outputs.verdict }}
       # What answered the review, as .github/scripts/review-served recorded it, for the comment job to check.
       served: ${{ steps.review.outputs.served }}
       # true when review-run refused the review (exit 4): another provider or model answered, or nothing shows which.
@@ -670,12 +708,13 @@ jobs:
           fi
           # The collector's token never leaves this job (review-comment refuses the other credentials). Compared in
           # this shell, so that the token is no process's argument.
-          if [ -n "$OTEL_COLLECTOR_TOKEN" ] && [[ $(< .review/comment.md) == *"$OTEL_COLLECTOR_TOKEN"* ]]; then
+          if [ -n "$OTEL_COLLECTOR_TOKEN" ] && [[ $(< .review/comment.md)$(< .review/verdict.json) == *"$OTEL_COLLECTOR_TOKEN"* ]]; then
             echo "::error::The review's comment holds the collector's token; it is not posted."
             exit 1
           fi
           delimiter="review-$(openssl rand -hex 16)"
           { echo "comment<<$delimiter"; head -c 60000 .review/comment.md; echo; echo "$delimiter"; } >> "$GITHUB_OUTPUT"
+          echo "verdict=$(< .review/verdict.json)" >> "$GITHUB_OUTPUT"
           if [ -s "$REVIEW_SESSION/session" ]; then echo "session=kept" >> "$GITHUB_OUTPUT"; fi
           if [ -s .review/patches.md ]; then
             if [ -n "$OTEL_COLLECTOR_TOKEN" ] && [[ $(< .review/patches.md) == *"$OTEL_COLLECTOR_TOKEN"* ]]; then
@@ -989,7 +1028,7 @@ jobs:
           client-id: Iv23liAWPMahJZYsw3un
           private-key: ${{ steps.key.outputs.key }}
           permission-pull-requests: write
-          # Only for the carry below: the branch outside/<n> and its commits.
+          # For the carry below (the branch outside/<n> and its commits), and for the merge of a change.
           permission-contents: write
 
       # A change review's patches (review-change.md). From a fork into the default branch, whose change touches no file
@@ -1133,6 +1172,8 @@ jobs:
           # Only from a review job that succeeded, and, when it held a finding back, a hold job that sent it: a comment
           # that says a finding was sent is posted only once it was.
           REVIEW: ${{ needs.review.result == 'success' && (needs.review.outputs.held_object == '' || needs.hold.result == 'success') && needs.review.outputs.comment || '' }}
+          # The review's verdict line, under the same condition: review-comment writes it on the comment's third line.
+          VERDICT: ${{ needs.review.result == 'success' && (needs.review.outputs.held_object == '' || needs.hold.result == 'success') && needs.review.outputs.verdict || '' }}
           # The record of what answered the review: review-comment posts the review only if it shows the provider
           # asked for, and otherwise says that it is not published, and why.
           SERVED: ${{ needs.review.outputs.served }}
@@ -1158,6 +1199,7 @@ jobs:
           fi
           printf '%s' "$CHECKS" > "$RUNNER_TEMP/checks.md"
           printf '%s' "$SERVED" > "$RUNNER_TEMP/served"
+          printf '%s' "${VERDICT:-}" > "$RUNNER_TEMP/verdict"
           # Only a run of the pull request's current head posts: a run of an older head that finished later would
           # replace the newer head's review, or mark it not current. The current head's own run posts.
           current=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)
@@ -1181,7 +1223,7 @@ jobs:
           [ "${REFUSED:-}" != true ] || refused=(--refused)
           python3 .github/scripts/review-comment --review "$RUNNER_TEMP/review.md" --checks "$RUNNER_TEMP/checks.md" \
             --head "$HEAD_SHA" --run "$RUN_URL" --served "$RUNNER_TEMP/served" "${refused[@]}" "${previous[@]}" \
-            --kind "${KIND:-enrollment}" \
+            --kind "${KIND:-enrollment}" --verdict "$RUNNER_TEMP/verdict" \
             > "$RUNNER_TEMP/comment.md"
           if [ "${POST_TO_PR:-}" != post ]; then
             {
@@ -1202,11 +1244,62 @@ jobs:
               | gh api --method POST "repos/$REPO/issues/$PR/comments" --input - > /dev/null
           fi
 
+      # The merge of a change, after the comment; an enrollment is never merged by automation, so this step does not
+      # run for one. .github/scripts/merge-decide decides from the verdict and what it reads of GitHub and git (it
+      # fetches two commits into this checkout's object store, and checks none out).
+      # On `merge`, the App approves the reviewed head, with the required check runs it counted in its text,
+      # and arms auto-merge: squash, and only while the head is that commit (--match-head-commit); GitHub merges once
+      # the required checks pass. When GitHub answers that the pull request can merge at once, and so refuses
+      # auto-merge, it merges without --auto. GitHub refuses an author's own approval, so a pull request the App opened
+      # (the carry's) is armed without one. A hold, or a decision that did not finish, writes nothing. While the
+      # repository variable OSSV_AUTO_MERGE is not `on`, the summary says what it would do, and nothing is written. The
+      # disarm job turns auto-merge off again on the next push. A failure here never stops the job.
+      - name: Merge when the review allows it
+        if: needs.route.outputs.change == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
+          VERDICT: ${{ needs.review.result == 'success' && (needs.review.outputs.held_object == '' || needs.hold.result == 'success') && needs.review.outputs.verdict || '' }}
+          SERVED: ${{ needs.review.outputs.served }}
+          REFUSED: ${{ needs.review.outputs.refused }}
+          HEAD_SHA: ${{ needs.project-builds.outputs.sha || needs.route.outputs.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          AUTO_MERGE: ${{ vars.OSSV_AUTO_MERGE }}
+        run: |
+          set -euo pipefail
+          decision=$(.github/scripts/merge-decide) || decision="hold:no-decision"
+          echo "Merge decision for $HEAD_SHA: ${decision%%$'\n'*}" | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "${decision%%$'\n'*}" = merge ] || exit 0
+          runs=$(sed 1d <<< "$decision")
+          text="The OSS Verify review of $HEAD_SHA lists no blocking item and nothing for a person ($RUN_URL). The required check runs counted:
+          - ${runs//$'\n'/$'\n'- }"
+          merge=(gh pr merge "$PR" --repo "$REPO" --squash --match-head-commit "$HEAD_SHA" --body "$text")
+          if [ "${AUTO_MERGE:-}" != on ]; then
+            {
+              echo
+              echo "OSSV_AUTO_MERGE is not \`on\`, so nothing was approved or merged. With it, this job approves $HEAD_SHA and runs \`gh pr merge $PR --auto --squash --match-head-commit $HEAD_SHA\`, each with this text:"
+              echo
+              echo "    ${text//$'\n'/$'\n'    }"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$(gh api "repos/$REPO/pulls/$PR" --jq .user.login)" != "oss-verify[bot]" ]; then
+            gh api --method POST "repos/$REPO/pulls/$PR/reviews" -f commit_id="$HEAD_SHA" -f event=APPROVE -f body="$text" \
+              > /dev/null
+          fi
+          if ! answer=$("${merge[@]}" --auto 2>&1); then
+            if [[ ${answer,,} != *"clean status"* ]]; then echo "::error::Auto-merge was not armed: $answer"; exit 1; fi
+            "${merge[@]}"
+          fi
+          echo "Armed: GitHub merges $HEAD_SHA once the required checks pass, or merged it now." | tee -a "$GITHUB_STEP_SUMMARY"
+
   required:
     # The required check project-builds (the top of this file), with .github/scripts/collect. A static name: GitHub
     # reports the check under it on every run.
     name: project-builds
-    needs: [route, project-builds, record, review, hold, keep, comment]
+    needs: [route, disarm, project-builds, record, review, hold, keep, comment]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -1224,9 +1317,12 @@ jobs:
           ROUTE: ${{ needs.route.result }}
           BUILD: ${{ needs.project-builds.result }}
           ASKED_BUILD: ${{ needs.route.outputs.build == 'true' }}
-          # Each of the others is asked for on its own job's condition: the record when the build passed and took a
-          # project, the review when the build took a project or route found a change, hold when the review ran, keep
-          # when the review kept its session, comment as the review and when the review wrote a comment or did not pass.
+          # Each of the others is asked for on its own job's condition: disarm on a push, the record when the build
+          # passed and took a project, the review when the build took a project or route found a change, hold when the
+          # review ran, keep when the review kept its session, comment as the review and when the review wrote a
+          # comment or did not pass.
+          DISARM: ${{ needs.disarm.result }}
+          ASKED_DISARM: ${{ github.event_name == 'pull_request_target' && github.event.action == 'synchronize' }}
           RECORD: ${{ needs.record.result }}
           ASKED_RECORD: ${{ needs.project-builds.result == 'success' && needs.project-builds.outputs.name != '' }}
           REVIEW: ${{ needs.review.result }}
@@ -1238,6 +1334,6 @@ jobs:
           COMMENT: ${{ needs.comment.result }}
           ASKED_COMMENT: ${{ (needs.project-builds.outputs.name != '' || needs.route.outputs.change == 'true') && (needs.review.result != 'success' || needs.review.outputs.comment != '') }}
         run: >-
-          .github/scripts/collect "$ROUTE" "build:$BUILD:$ASKED_BUILD" "record:$RECORD:$ASKED_RECORD"
-          "review:$REVIEW:$ASKED_REVIEW" "hold:$HOLD:$ASKED_HOLD" "keep:$KEEP:$ASKED_KEEP"
+          .github/scripts/collect "$ROUTE" "disarm:$DISARM:$ASKED_DISARM" "build:$BUILD:$ASKED_BUILD"
+          "record:$RECORD:$ASKED_RECORD" "review:$REVIEW:$ASKED_REVIEW" "hold:$HOLD:$ASKED_HOLD" "keep:$KEEP:$ASKED_KEEP"
           "comment:$COMMENT:$ASKED_COMMENT"

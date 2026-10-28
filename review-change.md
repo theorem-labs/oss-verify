@@ -20,6 +20,9 @@ directory that the prompt names: `pr.json` (description, files, commits, comment
 4. **It widens nothing that runs with secrets.** A change to `.github/` or to a script that a workflow runs must not
    give a job more permissions, secrets, identity tokens or environments, and must not run code of a pull request in a
    job that holds any of them. Such an item is blocking, and you write no patch for it.
+5. **A person decides a new behaviour.** A change that alters behaviour or adds an affordance (a new option, command,
+   input, permission or workflow trigger) is a **person** item, which keeps the pull request from merging by itself. A
+   clear bug fix is not.
 
 ## Write the comment
 
@@ -29,7 +32,7 @@ Do not ask the contributor to make a change. For each item that you can fix, wri
 comment say what the fix changes. The workflow adds where the fixes are. For an item that you cannot fix, say what a
 person at Theorem must decide.
 
-After the comment, put the patches, and nothing after them:
+After the comment, put the patches:
 
 ```
 <!-- oss-verify-patch -->
@@ -42,3 +45,14 @@ diff --git a/<path> b/<path>
 
 Write one `Subject:` line and one diff for each fix, in order. Each diff applies, with `git apply`, to the files at the
 head (`head/<path>`) after the fixes before it. Write no patch when there is nothing to fix.
+
+Last, after the patches, write one line, and nothing after it:
+
+```
+<!-- oss-verify-verdict {"head": "<the head commit that the prompt names>", "blocking": [<item>, ...], "person": [<item>, ...]} -->
+```
+
+`blocking` has one item for each failed check, and `person` one for each item of check 5. An item is
+`{"check": "<the check's number>", "text": "<one line>"}`. Write `oss-verify-verdict` nowhere else. A program reads
+the line to decide whether the pull request merges by itself: a review without it as its last line, with valid JSON
+and the head that the prompt names, is not posted. The line is public.

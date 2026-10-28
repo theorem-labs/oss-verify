@@ -149,6 +149,16 @@ Write `$WORK/comment.md` as `.claude/skills/write-to-maintainer/SKILL.md` says. 
 
 Post it only if the workflow sets `REVIEW_POST=1`: `gh pr comment "$PR" --body-file "$WORK/comment.md"`. Post it once. In CI, do not post: your last message is the comment ("In CI" in the skill).
 
+## The verdict line
+
+End your last message with one line, after everything else, a held finding too:
+
+```
+<!-- oss-verify-verdict {"head": "<the head commit that the prompt names>", "blocking": [<item>, ...], "person": [<item>, ...]} -->
+```
+
+`blocking` has one item for each **fail** verdict, and `person` one for each **person** verdict. An item is `{"check": "<the check, for example F5>", "text": "<one line>"}`. Write `oss-verify-verdict` nowhere else. The workflow takes the line out of the comment and passes it on: a review without that line as its last line, with valid JSON and the head that the prompt names, is not posted. The line is public. It never describes a held finding.
+
 ## Finish
 
 Before you stop, make sure of each point:
@@ -157,3 +167,4 @@ Before you stop, make sure of each point:
 - Each **fail** is one request in the comment, and each request comes from a **fail**.
 - The comment has no size, rubric or **person** item in it.
 - You ran no code of the project, and you posted at most one comment.
+- Your last line is the verdict line, with each **fail** and each **person** verdict in it.

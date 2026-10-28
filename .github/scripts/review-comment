@@ -5,7 +5,7 @@
 build.yaml's comment job posts it.
 
     review-comment [--review <comment.md>] [--checks <checks.md>] [--head <sha>] [--run <url>] [--previous <comment>]
-                   [--served <served>] [--refused] [--kind enrollment|change]
+                   [--served <served>] [--refused] [--kind enrollment|change] [--verdict <verdict.json>]
 
 It prints the comment: the marker that build.yaml's comment job finds it by, a metadata line, what this script writes
 (the footer, a notice when the review is not current or did not run, a note where a text was cut), the report of
@@ -29,6 +29,11 @@ again gives the same comment: what this script wrote above the old one is writte
 comment that is the review of this same commit stays the review: as it was posted, or, if it was kept as not current,
 written again as the review; but only when it names what answered it (metadata version 3). One posted before the
 record existed is kept as not current, with a notice that says what answered it was not recorded.
+
+--verdict is the review's verdict line as review-run took it out of the review (review.md, "The verdict line"): with a
+review that is posted, this script writes it on the third line, `<!-- oss-verify-verdict {...} -->`, right after the
+metadata line. Only that line is ever read as the verdict; one in the checks report or the review's text is inert. A
+comment with no review, or a kept one, has none there.
 
 --served is the record of what answered the review, which .github/scripts/review-served wrote beside it as Claude Code
 reported it. The review is posted only when `review-served check` passes that record: the provider and model asked
@@ -173,6 +178,11 @@ def meta_line(head, status, version=3):
     return f"<!-- oss-verify-meta v={version}{f' head={head}' if head else ''} status={status} -->"
 
 
+# The verdict as review-run writes it: one JSON object on one line, with no > (written \u003e), so that it cannot end
+# the HTML comment around it.
+VERDICT = re.compile(r"\{[^\r\n>]*\}")
+
+
 # Blank lines, as CommonMark has them: nothing but spaces and tabs.
 LEADING_BLANK = re.compile(r"(?:[ \t]*\n)+")
 
@@ -232,15 +242,16 @@ KEPT_CUT = re.compile(r" The review is cut at (?P<at>[0-9]{1,3}(?:,[0-9]{3})?) c
 
 
 def assemble(head, status, notes, checks="", review="", where="the rest is in the review job's log",
-             review_limit=MAX_REVIEW, cut_at=None, cut_in_notice=False, version=3):
+             review_limit=MAX_REVIEW, cut_at=None, cut_in_notice=False, version=3, verdict=""):
     """The comment, at most MAX_COMMENT characters: the marker and metadata, the heading, the notes (what this script
     writes), the checks report as a code block, and the review last. Only the checks and the review are cut, by
     slicing, and a note before them says where; nothing else in them changes. cut_at: where an earlier run cut the
     review, said again if this run need not cut it further. cut_in_notice: that note ends the first note, rather than
-    being a paragraph of its own."""
+    being a paragraph of its own. verdict: the verdict line's JSON, on the third line."""
     notes = list(notes)
     checks, review = trim(checks), trim(review)
-    blocks = [f"{MARKER}\n{meta_line(head, status, version)}", HEADING, *notes]
+    blocks = [f"{MARKER}\n{meta_line(head, status, version)}" + (f"\n<!-- oss-verify-verdict {verdict} -->" if verdict
+                                                                  else ""), HEADING, *notes]
     if checks:
         block, whole = code_block(checks, MAX_CHECKS)
         if not whole:
@@ -349,6 +360,7 @@ def main():
                         help="the review job refused the review (review-run's exit 4): it is not published")
     parser.add_argument("--kind", choices=("enrollment", "change"), default="enrollment",
                         help="change: a change review, from review-change.md, with no checks report")
+    parser.add_argument("--verdict", type=pathlib.Path, help="the review's verdict line, for the third line")
     options = parser.parse_args()
     if options.holds_credential:
         return 0 if credential(sys.stdin.buffer.read().decode("utf-8", errors="replace")) else 3
@@ -359,8 +371,10 @@ def main():
     run = options.run if re.fullmatch(r"https://[A-Za-z0-9./_-]+", options.run) else ""
 
     review = options.review.read_text(encoding="utf-8", errors="replace") if options.review else ""
+    verdict = options.verdict.read_text(encoding="utf-8", errors="replace").strip() if options.verdict else ""
+    verdict = verdict if VERDICT.fullmatch(verdict) else ""
     why = ""
-    if credential(review):
+    if credential(review + "\n" + verdict):
         review, why = "", "its text held what looks like a credential, so it was not posted"
     review = trim(review)
     if not neutralize(review).strip():
@@ -405,7 +419,8 @@ def main():
         # The checks text comes from the project's source: refused on its own, so a safe review is still posted.
         checks = ("The report held what looks like a credential, so it was not posted. It is in the Build check's "
                   "summary.")
-    sys.stdout.write(assemble(head, status, notes, checks=checks, review=review))
+    sys.stdout.write(assemble(head, status, notes, checks=checks, review=review,
+                              verdict=verdict if status == "review" else ""))
     return 0
 
 

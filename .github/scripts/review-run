@@ -6,7 +6,7 @@
 # files that review-gather wrote, with .claude/skills/review-enrollment/SKILL.md for where they are, and its last
 # message, the comment to the maintainer, is written to <directory>/comment.md.
 #
-#   PR=<number> NAME=<project> [HEAD_SHA=<head commit> REVIEW_SESSION=<directory>] \
+#   PR=<number> NAME=<project> HEAD_SHA=<head commit> [REVIEW_SESSION=<directory>] \
 #     .github/scripts/review-run <directory inside this checkout>
 #
 # Run it from the root of the base branch's checkout. build.yaml's review job runs it in CI. A person can run it on
@@ -51,6 +51,9 @@
 # The log says which: "resuming the session <id> (the review of <commit>), to review only <commit>..<commit>", or "a
 # fresh review". After a review that wrote a comment, the directory holds the session of that review, unless its
 # conversation holds what looks like a credential.
+# The review ends with one verdict line, which a program reads (review.md, "The verdict line"): review-run takes it out
+# of the comment into <directory>/verdict.json, and a review without exactly one, as its last line, with JSON of the
+# shape below and of HEAD_SHA, counts as a review that did not run.
 set -euo pipefail
 
 in=${1:?usage: review-run <directory>}
@@ -66,7 +69,7 @@ model=${REVIEW_MODEL:-claude-opus-5-5}
 # The seconds between two new identity tokens (below); a test makes it shorter.
 every=${REVIEW_TOKEN_EVERY:-60}
 [[ $every =~ ^[1-9][0-9]{0,3}$ ]] || { echo "review-run: REVIEW_TOKEN_EVERY is not a number of seconds" >&2; exit 2; }
-rm -f "$in/failure.txt" "$in/failure-detail.txt"
+rm -f "$in/failure.txt" "$in/failure-detail.txt" "$in/verdict.json"
 session_dir=${REVIEW_SESSION:-}
 [ -n "$NAME" ] || session_dir=""
 if [ -n "$session_dir" ]; then
@@ -88,13 +91,15 @@ which adds or changes projects/$NAME/. Read review.md, at the root of this check
 you write the comment. Read .claude/skills/review-enrollment/SKILL.md for where your inputs are, and do the review as \
 its section \"In CI\" says. The workflow gathered the inputs into $in/, and the pull request's projects/$NAME/ is in \
 this checkout. Your last message is the comment to the maintainer, in Markdown, and nothing else: it follows \
-.claude/skills/write-to-maintainer/SKILL.md, with no line before it about you or your review."
+.claude/skills/write-to-maintainer/SKILL.md, with no line before it about you or your review, and it ends with the \
+verdict line that review.md asks for, of the head ${HEAD_SHA:-}."
 if [ -z "$NAME" ]; then
   prompt="You are the agent of OSS Verify's change review, in CI, on pull request #$PR of theorem-labs/oss-verify, \
 which changes no file under projects/. Read review-change.md, at the root of this checkout: it says what you check, \
 how you write the comment and its patches. The workflow gathered the pull request into $in/; this checkout is main. \
-Your last message is the comment to the contributor, in Markdown, then the patches, and nothing else: the comment \
-follows .claude/skills/write-to-maintainer/SKILL.md, with no line before it about you or your review."
+Your last message is the comment to the contributor, in Markdown, then the patches, then the verdict line that \
+review-change.md asks for, of the head ${HEAD_SHA:-}, and nothing else: the comment follows \
+.claude/skills/write-to-maintainer/SKILL.md, with no line before it about you or your review."
 fi
 
 # The session of the last review, when REVIEW_SESSION holds one that is whole and review-gather wrote the diff since
@@ -131,7 +136,8 @@ $in/, and put the pull request's projects/$NAME/ in this checkout again. Your ne
 it must be complete without it. Do the review as the section \"In CI\" of .claude/skills/review-enrollment/SKILL.md \
 says for a later push. Your last message is the new comment to the maintainer, in Markdown, and nothing else: it \
 lists what still blocks at this head and nothing about what changed. It follows \
-.claude/skills/write-to-maintainer/SKILL.md, with no line before it about you or your review."
+.claude/skills/write-to-maintainer/SKILL.md, with no line before it about you or your review, and it ends with the \
+verdict line that review.md asks for, of the head ${HEAD_SHA:-}."
 
 # The HTTP status that the collector answers to an export of no records with the token (000 when it did not answer in
 # time). The header reaches curl through a pipe that the builtin printf writes, not an argument; -q, first, keeps a
@@ -363,18 +369,43 @@ os.execve(sys.executable, [sys.executable, *sys.argv[1:]], environment)' \
   fi
   first_why=$why
 done
-# A held finding comes out of the result first, before anything else is cut from it: from the first held_marker line
-# on, the result goes to held-finding.md, which nothing here prints and build.yaml stores for its hold job, which sends
-# it to the disclosure route (.github/scripts/review-held). If anything that names a held finding is still in the rest,
-# nothing is published, and the rest is held too, as one more finding (a marker the cut did not know, say), so that the
-# review job stores it all the same and nothing of it is lost.
+# The verdict line comes off the end of the result first (review.md, "The verdict line"): the last line that is not
+# blank, when it is `<!-- oss-verify-verdict {...} -->`. Then a held finding comes out of the rest, before anything else
+# is cut from it: from the first held_marker line on, the rest goes to held-finding.md, which nothing here prints and
+# build.yaml stores for its hold job, which sends it to the disclosure route (.github/scripts/review-held), also when
+# the review is not posted. If anything that names a held finding is still in the rest, nothing is published, and the
+# rest is held too, as one more finding (a marker the cut did not know, say), so that the review job stores it all the
+# same and nothing of it is lost.
+# The review counts as not run unless that line is there, no other text names oss-verify-verdict, and its JSON is an
+# object whose head is HEAD_SHA and whose blocking and person are lists of {"check": "...", "text": "..."}.
+# verdict.json holds it on one line with each > written \u003e, so that it can never end the HTML comment that
+# review-comment writes it in.
 rm -f "$in/held-finding.md"
-jq -r 'if .is_error then error("the review ended with an error") else .result end' "$in/claude.json" \
-  | awk -v held="$in/held-finding.md" -v marker="$held_marker" \
-      '!h && tolower($0) ~ marker { h = 1 } h { print > held; next } { print }' > "$in/comment.raw"
+jq -r 'if .is_error then error("the review ended with an error") else .result end' "$in/claude.json" > "$in/result.md"
+last=$(grep -n -v '^[[:space:]]*$' "$in/result.md" | tail -n 1) || last=""
+verdict_line='^[[:space:]]*<!--[[:space:]]*oss-verify-verdict[[:space:]]+(\{.*\})[[:space:]]*-->[[:space:]]*$'
+verdict="" keep=$(wc -l < "$in/result.md")
+if [[ ${last#*:} =~ $verdict_line ]]; then
+  json=${BASH_REMATCH[1]} keep=$(( ${last%%:*} - 1 ))
+  if [[ ${HEAD_SHA:-} =~ ^[0-9a-f]{40}$ ]] && [ "$(grep -o -i oss-verify-verdict "$in/result.md" | wc -l)" = 1 ]; then
+    verdict=$(jq -ec --arg head "$HEAD_SHA" 'select(type == "object" and .head == $head
+        and ([.blocking, .person] | all(type == "array"))
+        and ([.blocking[], .person[]] | all(type == "object" and (.check | type) == "string"
+                                            and (.text | type) == "string")))
+      | {head, blocking, person}' <<< "$json" 2> /dev/null) || verdict=""
+  fi
+fi
+head -n "$keep" "$in/result.md" | awk -v held="$in/held-finding.md" -v marker="$held_marker" \
+  '!h && tolower($0) ~ marker { h = 1 } h { print > held; next } { print }' > "$in/comment.raw"
 if [ -s "$in/held-finding.md" ]; then
   echo "review-run: the review holds back a finding for private review; no log shows it"
 fi
+if [ -z "$verdict" ]; then
+  echo "review-run: the review did not end with one verdict line of the head ${HEAD_SHA:-(none)}" >&2
+  echo "the review did not end with one verdict line of this head" > "$in/failure.txt"
+  exit 1
+fi
+printf '%s\n' "${verdict//>/\\u003e}" > "$in/verdict.json"
 # A change review's patches (review-change.md) come out next, from the patch marker line on, into patches.md, which
 # nothing here prints: the comment job carries them, and the reader below reads the comment without them.
 rm -f "$in/patches.md"
@@ -385,13 +416,13 @@ if [ -z "$NAME" ]; then
   [ ! -s "$in/patches.md" ] \
     || echo "review-run: the review wrote patches ($(wc -c < "$in/patches.md") bytes), cut from the comment"
 fi
-if grep -qiE "$held_mention" "$in/comment.raw"; then
+if grep -qiE "$held_mention" "$in/comment.raw" "$in/verdict.json"; then
   {
     echo "<!-- held finding -->"
     echo "title: [held] $NAME/not known: a review whose comment named a held finding outside its marker"
     echo "why held: the workflow could not tell the finding from the comment, so it holds the whole comment"
     echo
-    cat "$in/comment.raw"
+    cat "$in/comment.raw" "$in/verdict.json"
   } >> "$in/held-finding.md"
   echo "review-run: the comment still names a held finding outside its own part, so nothing of it is published" >&2
   echo "the comment named a held finding outside its own part, so it is not posted" > "$in/failure.txt"
