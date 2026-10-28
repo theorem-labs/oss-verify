@@ -1447,7 +1447,7 @@ class MergeDecide(unittest.TestCase):
 
             origin.mkdir()
             subprocess.run(["git", "init", "-q", "-b", "main"], cwd=origin, env=git, check=True)
-            base = commit({"tools/a.py": "a\n", "review.md": "r\n"})
+            base = commit({"tools/a.py": "a\n", "review.md": "r\n", "docs/notes.md": "a\n"})
             subprocess.run(["git", "checkout", "-q", "-b", "change"], cwd=origin, env=git, check=True)
             head = commit(head_files if head_files is not None else {"docs/notes.md": "b\n"}, remove)
             subprocess.run(["git", "checkout", "-q", "main"], cwd=origin, env=git, check=True)
@@ -1521,6 +1521,8 @@ class MergeDecide(unittest.TestCase):
                 ({"head_files": {"README.md": "x\n"}}, "trust"),
                 ({"head_files": {"docs/project-yaml.md": "x\n"}}, "trust"),
                 ({"head_files": {"docs/dsl.md": "x\n"}}, "trust"),
+                # a new document, even under docs/, holds
+                ({"head_files": {"docs/new.md": "x\n"}}, "trust"),
                 ({"head_files": {"docs/notes.md": "x\n", "tools/a.py": "b\n"}}, "trust"),
                 ({"head_files": {}}, "trust"),
                 ({"runs": {"tests": [self.check_run("tests", "failure")]}}, "checks"),
