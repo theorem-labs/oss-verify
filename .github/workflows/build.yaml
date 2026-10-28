@@ -83,14 +83,16 @@ name: "Build"
 # The review job runs no code of the pull request or the project. It and the comment job hold identity tokens
 # (id-token: write), which they trade for short-lived tokens: the review's for an Anthropic token by workload identity
 # federation, so no API key is stored, and both jobs' for a Google access token by Google workload identity
-# federation (Theorem's infrastructure code). Claude gets three tools only, Read, Glob and Grep (`--tools`): no shell,
-# no network and no tool that writes, so the text of the pull request, which it reads as data (review.md, rule 1),
+# federation (Theorem's infrastructure code). Claude gets three tools only, Read, Glob and Grep (`--tools`), in the
+# default permission mode (`--permission-mode default`, which refuses a read outside the checkout): no shell, no
+# network and no tool that writes, so the text of the pull request, which it reads as data (review.md, rule 1),
 # cannot make it run anything or reach the job's tokens. The action keeps the GitHub identity token's request
 # variables out of Claude Code's environment, and with allowed_non_write_users it keeps the GitHub token out of the
-# checkout's git config. The comment job alone writes: it posts the comment as the oss-verify GitHub App
-# (oss-verify[bot]), with an installation token that can write pull requests in this repository only. It makes that
-# token from the App's client id below and its private key, which it reads at run time from Secret Manager
-# (oss-verify-github-app-key), and runs no code of the pull request or the project.
+# checkout's git config. Never re-run the review job with debug logging (ACTIONS_STEP_DEBUG): the action then prints
+# the whole conversation, a held finding too, to the public log. The comment job alone writes: it posts the comment as
+# the oss-verify GitHub App (oss-verify[bot]), with an installation token that can write pull requests in this
+# repository only. It makes that token from the App's client id below and its private key, which it reads at run time
+# from Secret Manager (oss-verify-github-app-key), and runs no code of the pull request or the project.
 #
 # This repository stores no long-lived credential for any of that. Google's provider admits this file, triage.yaml
 # and the enrollment workflow enroll-dispatch.yml, each on refs/heads/main and only from its own events (here
@@ -138,7 +140,8 @@ name: "Build"
 # and ~/.claude/ossv-last-review, one line `session=<id> head=<commit>`. The review job restores the newest entry of
 # the pull request and project; when the head descends from the commit that session reviewed, review-gather writes the
 # diff since then and the review resumes that session (claude --resume <id>, which keeps its id) to review only that
-# diff. The log of the gather step says which: "the review resumes the session <id>", or "the review is fresh". The
+# diff. When a session is kept, the log of the gather step says which: "the review resumes the session <id>", or "the
+# review is fresh"; it says neither on a first review. The
 # review job saves the session after the review (cache-mode: write); it runs no code of the pull request, and its
 # Claude can write nothing. Both are main's copy of this file, whatever the pull request changes. A run on main
 # restores only entries that a run on main saved: a pull request's own runs (pull_request, or a push to its branch)
@@ -448,15 +451,19 @@ jobs:
           anthropic_workspace_id: wrkspc_01Qr1iUVcow4jdgQM7Amfks5
           github_token: ${{ github.token }}
           allowed_non_write_users: "*"
-          allowed_bots: "*"
+          # Only these Apps' runs get a review (the action refuses any other App): our automation's, which opens
+          # enrollments and starts this file by hand, and the oss-verify App's.
+          allowed_bots: sjawhar-agent[bot],oss-verify[bot]
           prompt: >-
             Read review.md at the root of this checkout: it says what OSS Verify's enrollment check of pull request
             #${{ env.PR }}, projects/${{ env.NAME }}/, checks. ${{ steps.gather.outputs.session && format('Earlier in this
-            session you reviewed {0}: read only review.md and .review/since-last-review.diff, the diff from it to {1}, and
-            review', steps.gather.outputs.last, env.HEAD_SHA) || 'Then review' }} as the section "In CI" of
-            .claude/skills/review-enrollment/SKILL.md says. Give the result as the structured output.
+            session you reviewed {0}. A new request comes only from .review/since-last-review.diff, the diff from {0} to
+            {1}: read it and review.md, and before you keep a request of your last comment, read again the input in
+            .review/ that it is about, and drop it if that input shows it met. Review', steps.gather.outputs.last,
+            env.HEAD_SHA) || 'Then review' }} as the section "In CI" of .claude/skills/review-enrollment/SKILL.md says.
+            Give the result as the structured output.
           claude_args: >-
-            --tools Read,Glob,Grep --model claude-opus-5-5 --effort xhigh --max-turns 300
+            --tools Read,Glob,Grep --permission-mode default --model claude-opus-5-5 --effort xhigh --max-turns 300
             ${{ steps.gather.outputs.session && format('--resume {0}', steps.gather.outputs.session) || '' }}
             --json-schema '{"type":"object","additionalProperties":false,"required":["comment","held","verdicts"],"properties":{"comment":{"type":"string","description":"The comment to the maintainer, in Markdown. Never a held finding."},"held":{"type":"string","description":"Each finding held back under rule 6 of review.md, as the skill section A held finding says, or empty."},"verdicts":{"type":"object","description":"The verdict of each check of review.md by its id, A1 to G5, and for an F check the worst over the fuzz targets.","required":["F2","F7"],"additionalProperties":{"enum":["pass","fail","person"]}}}}'
       - name: Keep the draft, and the held finding apart from it

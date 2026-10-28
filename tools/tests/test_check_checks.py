@@ -1089,11 +1089,14 @@ class ReviewJob(unittest.TestCase):
         self.assertEqual((settings["allowed_non_write_users"], settings["github_token"]), ("*", "${{ github.token }}"))
         self.assertEqual(settings["anthropic_federation_rule_id"], "fdrl_019restxFx3PhpLhbziQoQKf")
         self.assertNotIn("anthropic_api_key", settings)
+        # Only our own Apps' runs start a review: the action matches each name (src/github/validation/actor.ts).
+        self.assertEqual(settings["allowed_bots"], "sjawhar-agent[bot],oss-verify[bot]")
         args = settings["claude_args"]
-        self.assertTrue(args.startswith("--tools Read,Glob,Grep --model claude-opus-5-5 --effort xhigh --max-turns 300 "))
+        self.assertTrue(args.startswith("--tools Read,Glob,Grep --permission-mode default --model claude-opus-5-5 "
+                                        "--effort xhigh --max-turns 300 "))
         self.assertIn("${{ steps.gather.outputs.session && format('--resume {0}', steps.gather.outputs.session) || '' }}",
                       args)
-        for word in ("Bash", "Write", "Edit", "WebFetch", "mcp", "allowedTools", "permission-mode"):
+        for word in ("Bash", "Write", "Edit", "WebFetch", "mcp", "allowedTools", "bypass", "acceptEdits", "auto"):
             self.assertNotIn(word, args)
         schema = json.loads(re.search(r"--json-schema '([^']*)'$", args).group(1))
         self.assertEqual(schema["required"], ["comment", "held", "verdicts"])
@@ -1101,7 +1104,8 @@ class ReviewJob(unittest.TestCase):
         self.assertEqual(schema["properties"]["verdicts"]["additionalProperties"], {"enum": ["pass", "fail", "person"]})
         prompt = settings["prompt"]
         self.assertIn("Read review.md at the root of this checkout", prompt)
-        self.assertIn("read only review.md and .review/since-last-review.diff", prompt)
+        self.assertIn("A new request comes only from .review/since-last-review.diff", prompt)
+        self.assertIn("before you keep a request of your last comment, read again the input in .review/", prompt)
 
     def test_the_session_is_kept_by_the_review_job_and_not_when_it_holds_a_finding(self):
         self.assertEqual(self.workflow["cache-mode"], "none")
