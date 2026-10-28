@@ -95,7 +95,7 @@ Language: <language>. Reproducible: <yes or no>. `publish`: <value, or after_fix
 
 ## For a person
 - <each person verdict: the question, the facts, a recommendation and its reason>
-- Whether we intend to prove the project, which is what a merge means.
+- Whether we intend to prove the project. A merge means that we intend to prove it.
 
 ## Asked of the maintainer
 <the numbered requests of the comment, one line each>
