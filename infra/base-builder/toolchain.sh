@@ -52,13 +52,13 @@ cat > "$SHIM/include/asm/hwprobe.h" <<'POISON'
 #error "asm/hwprobe.h: riscv_hwprobe is not part of the modeled platform; use getauxval(AT_HWCAP)"
 POISON
 
-# write_cc_shim <path> <compiler and its config> [<extra link inputs>]: a compiler that pins the ISA, adds the
-# poisoned headers, and on a link step (no -c, -E, -S, ...) starts from -Wl,--no-gc-sections, which the final link
-# of a fuzz target overrides with -Wl,--gc-sections.
+# write_cc_shim <path> <compiler and its config> [<extra link inputs> [<words after the arguments>]]: a compiler that
+# pins the ISA, adds the poisoned headers, and on a link step (no -c, -E, -S, ...) starts from -Wl,--no-gc-sections,
+# which the final link of a fuzz target overrides with -Wl,--gc-sections.
 write_cc_shim() {
   { printf '#!/bin/sh\n%s\n' "$OFT_ARCH_PIN"
     printf 'nogc="-Wl,--no-gc-sections%s"; for a in "$@"; do case "$a" in -c|-E|-S|-fsyntax-only|-M|-MM|--version|-dumpmachine|-print-*) nogc=;; esac; done\n' "${3:-}"
-    printf 'exec %s $nogc -isystem %s/include "$@"\n' "$2" "$SHIM"
+    printf 'exec %s $nogc -isystem %s/include "$@"%s\n' "$2" "$SHIM" "${4:-}"
   } > "$1"
   chmod +x "$1"
 }
@@ -94,9 +94,52 @@ DRVCXX=$SHIM/$CHOST-clang++-plain
 # those that trap mode leaves out in OV_UBSAN_EXCLUDE; compile leaves OV_UBSAN_C_EXCLUDE out of the C compiles of a
 # c++ project), which it does only on a toolchain whose infra/toolchains.tsv
 # row says so (docs/project-yaml.md#ubsan_checks).
+#
+# Two names in the checks are not made by trap flags, and only the ubsan build makes them; each needs a file of the
+# toolchain image, and the build fails without it. vptr: clang cannot make a vptr check a trap, so the ubsan build
+# compiles with -fsanitize=vptr -fno-sanitize-link-runtime and links the image's trap-only handler, which traps on a
+# mismatch as the other checks do. A compile with -fno-rtti (the last of -frtti and -fno-rtti wins) gets
+# -fno-sanitize=vptr after its arguments, since clang refuses vptr without RTTI. The asan-ubsan build leaves vptr out:
+# -fno-sanitize-link-runtime would drop the AddressSanitizer runtime. libcxx-hardening: the ubsan build compiles and
+# links C++ against the image's hardened libc++ (musl-hardened.cfg), whose failed checks trap too.
+VPTR_TRAP=/opt/ubsan-vptr-trap/libclang_rt.ubsan_vptr_trap.a
+HARDENED_CFG=/opt/asan-static/musl-hardened.cfg
+UBSAN_LINK=""
+UBSAN_TAIL=""
+UBSAN_CXX_CFG=/opt/asan-static/musl.cfg
+ub_without() { printf '%s' "$1" | tr ',' '\n' | { grep -vx -- "$2" || true; } | paste -sd, -; }
+ub_need() {
+  if [ ! -f "$1" ]; then
+    echo "toolchain.sh: the checks name $2, and this toolchain image has no $1" >&2
+    exit 1
+  fi
+}
 if [ -n "${OV_UBSAN_CHECKS:-}" ]; then
-  UBSAN="-fsanitize=$OV_UBSAN_CHECKS${OV_UBSAN_EXCLUDE:+ -fno-sanitize=$OV_UBSAN_EXCLUDE}"
-  UBSAN="$UBSAN -fsanitize-trap=$OV_UBSAN_CHECKS -fno-sanitize-recover=all"
+  ub_checks=$OV_UBSAN_CHECKS
+  ub_exclude=${OV_UBSAN_EXCLUDE:-}
+  ub_vptr=""
+  case ",$ub_checks," in
+    *,libcxx-hardening,*)
+      ub_checks=$(ub_without "$ub_checks" libcxx-hardening)
+      if [ "$FLAV" = ubsan ]; then
+        ub_need "$HARDENED_CFG" libcxx-hardening
+        UBSAN_CXX_CFG=$HARDENED_CFG
+      fi ;;
+  esac
+  case ",$ub_checks," in
+    *,vptr,*)
+      ub_checks=$(ub_without "$ub_checks" vptr)
+      if [ "$FLAV" = ubsan ]; then
+        ub_need "$VPTR_TRAP" vptr
+        ub_vptr=" -fsanitize=vptr -fno-sanitize-link-runtime"
+        UBSAN_LINK=" $VPTR_TRAP"
+        UBSAN_TAIL=' $(r=; for a in "$@"; do case "$a" in -fno-rtti) r=-fno-sanitize=vptr ;; -frtti) r= ;; esac; done; echo $r)'
+      else
+        ub_exclude=${ub_exclude:+$ub_exclude,}vptr
+      fi ;;
+  esac
+  UBSAN="${ub_checks:+-fsanitize=$ub_checks }${ub_exclude:+-fno-sanitize=$ub_exclude }"
+  UBSAN="$UBSAN${ub_checks:+-fsanitize-trap=$ub_checks }-fno-sanitize-recover=all$ub_vptr"
 else
   UBSAN="-fsanitize=undefined -fno-sanitize-recover=all -fsanitize-trap=all -fno-sanitize=function"
 fi
@@ -112,6 +155,13 @@ case "$FLAV" in
   ubsan)
     CC=$DRVCC
     CXX=$DRVCXX
+    if [ -n "$UBSAN_LINK" ] || [ "$UBSAN_CXX_CFG" != /opt/asan-static/musl.cfg ]; then
+      write_cc_shim "$SHIM/$CHOST-clang-ubsan" 'clang --config=/opt/asan-static/musl.cfg' "$UBSAN_LINK" "$UBSAN_TAIL"
+      write_cc_shim "$SHIM/$CHOST-clang++-ubsan" "clang++ --config=$UBSAN_CXX_CFG -stdlib=libc++" "$UBSAN_LINK" \
+        "$UBSAN_TAIL"
+      CC=$SHIM/$CHOST-clang-ubsan
+      CXX=$SHIM/$CHOST-clang++-ubsan
+    fi
     SAN="$UBSAN" ;;
   plain)
     CC=$DRVCC

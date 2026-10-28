@@ -250,13 +250,16 @@ class UbsanSettings(unittest.TestCase):
             # C's default has no function; C++'s has it, but its C compiles leave it out, as OSS-Fuzz's do.
             self.assertEqual(check_tool.ubsan_settings(self.job(), TOOLCHAIN), (validate.DEFAULT_UBSAN_CHECKS["c"],
                                                                                 ["vptr"], []))
+            # C++'s default has vptr, which the toolchain makes through its handler, so nothing is left out.
             self.assertEqual(check_tool.ubsan_settings(self.job(language="c++"), TOOLCHAIN),
-                             (validate.DEFAULT_UBSAN_CHECKS["c++"], ["vptr"], ["function"]))
+                             (validate.DEFAULT_UBSAN_CHECKS["c++"], [], ["function"]))
             self.assertEqual(check_tool.ubsan_settings(self.job(language="python"), TOOLCHAIN)[0],
                              validate.DEFAULT_UBSAN_CHECKS["c"])
-            # A project's checks in effect (the default, changed): less those that trap mode leaves out.
-            self.assertEqual(check_tool.ubsan_settings(self.job(["null", "alignment", "vptr"]), TOOLCHAIN)[0],
-                             ["null", "alignment"])
+            # A project's checks in effect (the default, changed). vptr stays when they name it.
+            self.assertEqual(check_tool.ubsan_settings(self.job(["null", "alignment", "vptr"]), TOOLCHAIN),
+                             (["null", "alignment", "vptr"], [], []))
+            self.assertEqual(check_tool.ubsan_settings(self.job(["null", "libcxx-hardening"], "c++"), TOOLCHAIN),
+                             (["null", "libcxx-hardening"], ["vptr"], []))
 
     def test_today_s_toolchains_keep_the_fixed_flags(self):
         self.assertEqual(check_build.ubsan_mode(check_build.newest_toolchain()), "fixed")

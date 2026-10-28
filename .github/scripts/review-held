@@ -16,9 +16,9 @@
 #     READ_TOKEN=<token that can read REPO's issues> HELD_OBJECT=<name> .github/scripts/review-held <directory>
 #
 # It reads <directory>/object, as build.yaml's review job stored it: six lines that the workflow wrote, not the model
-# (`oss-verify held finding v1`, then `pr:`, `head:`, `project:` and `run:`, then `---`), and then the held part of
-# the review, as review-run cut it: each finding starts with a marker line (`<!-- held finding -->`, matched as
-# review-run matches it), then `key: value` lines (`title:` is the issue's title), then free text. It prints only how
+# (`oss-verify held finding v1`, then `pr:`, `head:`, `project:` and `run:`, then `---`), and then the `held` field of
+# the review's structured output: each finding starts with a marker line (`<!-- held finding -->`, in any case and
+# spacing), then `key: value` lines (`title:` is the issue's title), then free text. It prints only how
 # many findings it sent, never a finding or the repository: the job's log is public.
 #
 # .github/scripts/review-hold runs it, in build.yaml's hold job, with a token of the oss-verify App for
