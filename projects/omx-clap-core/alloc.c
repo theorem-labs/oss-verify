@@ -10,7 +10,7 @@
  * library's allocator itself returns NULL, on an allocation that was not made to fail, memory has run out: that is
  * noted until the next fuzz_alloc_ran_out_reset(). A NULL on a request of more bytes than fuzz_alloc_most() allows is
  * not noted: a correct reader never asks for that much at once, so the harness's checks still judge it. A refused
- * request counts in the peak, as the bytes the reader asked to hold. */
+ * malloc or realloc request counts in the peak, as the bytes the reader asked to hold. */
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -65,7 +65,8 @@ static size_t disown(unsigned char *b)
     return n;
 }
 
-/* the reader asked for `n` bytes and got NULL from the C library, or none at all for a size past SIZE_MAX */
+/* the reader asked malloc or realloc for `n` bytes and got NULL from the C library, or none at all for a size the head
+ * does not fit beside */
 static void refused(size_t n)
 {
     const size_t held = n > SIZE_MAX - g_live ? SIZE_MAX : g_live + n;
