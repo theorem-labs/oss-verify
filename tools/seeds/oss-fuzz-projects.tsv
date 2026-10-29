@@ -1,0 +1,1388 @@
+# Each project of OSS-Fuzz at the commit of the oss-fuzz-theorems 2026.10 release (docs/project-yaml.md, "Seeded
+# projects"), and what the release's data says of it: for a project that we did not seed, why not; for one that we
+# seeded, notes on what we took. The release's data is not public, and this file keeps what docs/seeded-projects.tsv
+# needs of it. A project that tools/seeds/languages.tsv seeds, as one project or one for each of its repositories, has
+# - here: its notes come from that file. tools/seeds/seeded_projects.py writes docs/seeded-projects.tsv from this
+# file, languages.tsv and builds.tsv.
+project	reason or notes
+abseil-cpp	string_escape_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; string_utilities_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+abseil-py	the release did not build it (status language-pending: python)
+ada-url	-
+adal	the release did not build it (status language-pending: python)
+aiohttp	the release did not build it (status language-pending: python)
+airflow	the release did not build it (status language-pending: python)
+alembic	the release did not build it (status held: held)
+ampproject	the release did not build it (status not-yet-built: not-attempted)
+angle	the release did not build it (status held: held)
+angular	the release did not build it (status language-pending: javascript)
+angus-mail	the release did not build it (status language-pending: jvm)
+anise	the release did not build it (status language-pending: rust)
+aniso8601	the release did not build it (status language-pending: python)
+ansible	the release did not build it (status language-pending: python)
+antlr3-java	the release did not build it (status language-pending: jvm)
+antlr4-java	the release did not build it (status language-pending: jvm)
+apache-axis2	the release did not build it (status language-pending: jvm)
+apache-commons-bcel	the release did not build it (status language-pending: jvm)
+apache-commons-beanutils	the release did not build it (status language-pending: jvm)
+apache-commons-cli	the release did not build it (status language-pending: jvm)
+apache-commons-codec	the release did not build it (status language-pending: jvm)
+apache-commons-collections	the release did not build it (status language-pending: jvm)
+apache-commons-compress	the release did not build it (status language-pending: jvm)
+apache-commons-configuration	the release did not build it (status language-pending: jvm)
+apache-commons-csv	the release did not build it (status language-pending: jvm)
+apache-commons-fileupload	the release did not build it (status language-pending: jvm)
+apache-commons-geometry	the release did not build it (status language-pending: jvm)
+apache-commons-imaging	the release did not build it (status language-pending: jvm)
+apache-commons-io	the release did not build it (status language-pending: jvm)
+apache-commons-jxpath	the release did not build it (status language-pending: jvm)
+apache-commons-lang	the release did not build it (status language-pending: jvm)
+apache-commons-logging	the release did not build it (status language-pending: jvm)
+apache-commons-math	the release did not build it (status language-pending: jvm)
+apache-commons-net	the release did not build it (status language-pending: jvm)
+apache-commons-text	the release did not build it (status language-pending: jvm)
+apache-commons-validator	the release did not build it (status language-pending: jvm)
+apache-cxf	the release did not build it (status language-pending: jvm)
+apache-doris	the release did not build it (status no-harness: none-at-commit)
+apache-felix-dev	the release did not build it (status language-pending: jvm)
+apache-httpd	the release did not build it (status not-yet-built: not-attempted)
+apache-logging-log4cxx	the release did not build it (status too-large: size-unmeasured)
+apache-poi	the release did not build it (status language-pending: jvm)
+apache-shiro	the release did not build it (status language-pending: jvm)
+apache-tika	the release did not build it (status language-pending: jvm)
+aptos-core	the release did not build it (status language-pending: rust)
+archaius-core	the release did not build it (status language-pending: jvm)
+arduinojson	-
+argcomplete	the release did not build it (status language-pending: python)
+argo	the release did not build it (status language-pending: go)
+args	-
+args4j	the release did not build it (status language-pending: jvm)
+arrow	-
+arrow-java	the release did not build it (status language-pending: jvm)
+arrow-py	the release did not build it (status language-pending: python)
+askama	the release did not build it (status language-pending: rust)
+asn1crypto	-
+aspectj	the release did not build it (status language-pending: jvm)
+aspell	aspell_fuzzer: the release modified this harness
+assimp	the release did not build it (status too-large: size)
+astc-encoder	-
+asteval	the release did not build it (status language-pending: python)
+astro-compiler	-
+astroid	the release did not build it (status language-pending: python)
+asttokens	the release did not build it (status language-pending: python)
+async-http-client	the release did not build it (status language-pending: jvm)
+atomic	-
+attrs	the release did not build it (status language-pending: python)
+augeas	augeas_api_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+autoflake	the release did not build it (status language-pending: python)
+autopep8	the release did not build it (status language-pending: python)
+avahi	-
+avm	the release did not build it (status not-yet-built: not-attempted)
+avro	the release did not build it (status language-pending: jvm)
+azure-sdk-for-python	the release did not build it (status language-pending: python)
+babel	the release did not build it (status language-pending: python)
+bad_example	the release did not build it (status held: held)
+bazel-rules-fuzzing-test	-
+bazel-rules-fuzzing-test-java	the release did not build it (status language-pending: jvm)
+bc-gh	the release did not build it (status held: held)
+bc-java	the release did not build it (status language-pending: jvm)
+bearssl	the release did not build it (status too-large: size-unmeasured)
+behaviortreecpp	-
+bignum-fuzzer	the release did not build it (status too-large: size-unmeasured)
+bincode	-
+bind9	the release did not build it (status too-large: size-unmeasured)
+binutils	fuzz_bfd: the harness is in OSS-Fuzz's repository, not the project's; fuzz_disassemble: the harness is in OSS-Fuzz's repository, not the project's; fuzz_objdump: the harness is in OSS-Fuzz's repository, not the project's
+bios-bmc-smm-error-logger	the release did not build it (status needs-model: features)
+bitcoin-core	the release did not build it (status not-yet-built: target-from-environment)
+black	the release did not build it (status language-pending: python)
+blackfriday	-
+bleach	the release did not build it (status language-pending: python)
+bloaty	the release did not build it (status too-large: size-unmeasured)
+bls-signatures	the release did not build it (status too-large: size-unmeasured)
+bluez	fuzz_hci: the harness is in OSS-Fuzz's repository, not the project's
+bmcweb	the release did not build it (status too-large: size)
+boost	the release did not build it (status not-yet-built: not-attempted)
+boost-beast	http_request: the release modified this harness; its copy is not published yet
+boost-json	fuzz_parse: the release modified this harness; its copy is not published yet
+boringssl	bn_div: the release applied 1 patch(es) to the library's tree (build adaptation), none to its own source
+botan	-
+botocore	the release did not build it (status language-pending: python)
+bottleneck	the release did not build it (status language-pending: python)
+brotli	-
+brotli-java	the release did not build it (status language-pending: jvm)
+brpc	no harness to seed: fuzz_http_parser (the release's patch 0002-ubshm-musl-dlopen.patch edits src/brpc/ubshm/shm/shm_ubs.cpp, the library's own source)
+brunsli	fuzz_decode: the release applied 1 patch(es) to the library's tree (reproducible build), none to its own source; fuzz_decode_streaming: the release applied 1 patch(es) to the library's tree (reproducible build), none to its own source
+bs4	the release did not build it (status language-pending: python)
+bson-rust	the release did not build it (status language-pending: rust)
+burntsushi-toml	-
+bz2file	the release did not build it (status language-pending: python)
+bzip2	bzip2_compress_target: the harness is in OSS-Fuzz's repository, not the project's; bzip2_decompress_target: the harness is in OSS-Fuzz's repository, not the project's; bzip2_fd: the harness is in OSS-Fuzz's repository, not the project's
+c-ares	-
+c-blosc	-
+c-blosc2	the release did not build it (status too-large: size)
+cachetools	the release did not build it (status language-pending: python)
+caddy	the release did not build it (status language-pending: go)
+caffeine	the release did not build it (status language-pending: jvm)
+cairo	the release did not build it (status too-large: size)
+calcite	the release did not build it (status language-pending: jvm)
+calcite-avatica	the release did not build it (status language-pending: jvm)
+canvg	the release did not build it (status language-pending: javascript)
+capnproto	the release did not build it (status too-large: size)
+capstone	the release did not build it (status too-large: size-unmeasured)
+cascadia	-
+casync	no harness to seed: fuzz-compress (the release's patch 0004-util-musl-strndupa.patch edits src/util.h, the library's own source)
+catapult	the release did not build it (status no-harness: none-at-commit)
+cbor-java	the release did not build it (status language-pending: jvm)
+cbor2	the release did not build it (status language-pending: python)
+cctz	fuzz_cctz: the harness is in OSS-Fuzz's repository, not the project's
+cel-cpp	the release did not build it (status not-yet-built: not-attempted)
+cel-go	the release did not build it (status language-pending: go)
+cert-manager	the release did not build it (status language-pending: go)
+cfengine	string_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+cffi	the release did not build it (status language-pending: python)
+cgif	-
+cglib	the release did not build it (status language-pending: jvm)
+chardet	-
+charset_normalizer	the release did not build it (status language-pending: python)
+checker-framework	the release did not build it (status language-pending: jvm)
+checkstyle	the release did not build it (status language-pending: jvm)
+chrono	-
+cifuzz-example	the release did not build it (status held: held)
+cilium	the release did not build it (status language-pending: go)
+circl	the release did not build it (status language-pending: go)
+cirq	the release did not build it (status language-pending: python)
+civetweb	the release did not build it (status needs-model: features)
+cjson	-
+clamav	the release did not build it (status too-large: size-unmeasured)
+clib	-
+click	the release did not build it (status language-pending: python)
+clickhouse	the release did not build it (status not-yet-built: not-attempted)
+clock	the release did not build it (status language-pending: go)
+closure-compiler	the release did not build it (status language-pending: jvm)
+closure-library	the release did not build it (status language-pending: javascript)
+cloud-custodian	the release did not build it (status language-pending: python)
+cloud-hypervisor	the release did not build it (status language-pending: rust)
+cmake	cmCMakePathFuzzer: the release applied 2 patch(es) to the library's tree (build adaptation), none to its own source
+cmark	-
+cockroachdb	the release did not build it (status language-pending: go)
+compress	the release did not build it (status language-pending: go)
+config-validator	the release did not build it (status language-pending: go)
+configparser	the release did not build it (status language-pending: python)
+connectedhomeip	the release did not build it (status not-yet-built: not-attempted)
+connexion	the release did not build it (status language-pending: python)
+containerd	the release did not build it (status language-pending: go)
+coreutils	the release did not build it (status no-harness: none-at-commit)
+cosign	the release did not build it (status language-pending: go)
+cosmos-sdk	the release did not build it (status language-pending: go)
+coturn	-
+coveragepy	the release did not build it (status language-pending: python)
+cpp-httplib	-
+cppcheck	-
+cppitertools	fuzz_cppitertools: the harness is in OSS-Fuzz's repository, not the project's
+cpuinfo	fuzz_cpuinfo: the release applied 1 patch(es) to the library's tree (fuzz harness), none to its own source; fuzz_cpuinfo: the release modified this harness
+cpython3	the release did not build it (status too-large: size-unmeasured)
+cras	the release did not build it (status language-pending: rust)
+cri-o	the release did not build it (status language-pending: go)
+croaring	croaring_fuzzer: the release applied 1 patch(es) to the library's tree (harness reporting), none to its own source; croaring_fuzzer: the release modified this harness; croaring_fuzzer_cc: the release applied 1 patch(es) to the library's tree (harness reporting), none to its own source
+cron-utils	the release did not build it (status language-pending: jvm)
+croniter	the release did not build it (status language-pending: python)
+crossplane	the release did not build it (status language-pending: go)
+crosvm	the release did not build it (status language-pending: rust)
+crow	-
+cryptofuzz	the release did not build it (status too-large: size-unmeasured)
+cryptography	the release did not build it (status language-pending: python)
+cryptsetup	the release did not build it (status too-large: size-unmeasured)
+cssselect	-
+cubefs	the release did not build it (status language-pending: go)
+cups	the release did not build it (status too-large: size)
+cups-filters	no harness to seed: fuzz_cupsfilters_image_png_decoder (the release's patch 0001-ppdgenerator-private-cups-symbol-clash.patch edits cupsfilters/ppdgenerator.c, the library's own source)
+cura-engine	the release did not build it (status no-harness: none-at-commit)
+curl	fuzz_bufq: the release modified this harness; its copy is not published yet; fuzz_fnmatch: the release modified this harness; its copy is not published yet
+curvesapi	the release did not build it (status language-pending: jvm)
+cxxopts	-
+cyclonedds	the release did not build it (status held: held)
+d3	the release did not build it (status language-pending: javascript)
+dapr	the release did not build it (status language-pending: go)
+dart	the release did not build it (status not-yet-built: not-attempted)
+dask	the release did not build it (status language-pending: python)
+data-encoding	-
+date	the release did not build it (status no-harness: none-at-commit)
+dateparser	the release did not build it (status language-pending: python)
+dav1d	dav1d_fuzzer: the release applied 1 patch(es) to the library's tree (reproducible build), none to its own source
+dbus-broker	fuzz-message: the harness is in OSS-Fuzz's repository, not the project's
+dbus-sensors	utils_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+dcmtk	the release did not build it (status too-large: size-unmeasured)
+decorator	the release did not build it (status language-pending: python)
+defusedxml	-
+demangle	-
+deno	the release did not build it (status language-pending: rust)
+dgraph	the release did not build it (status language-pending: go)
+digest	the release did not build it (status language-pending: python)
+dill	the release did not build it (status language-pending: python)
+distlib	the release did not build it (status language-pending: python)
+distribution	the release did not build it (status language-pending: go)
+django	the release did not build it (status language-pending: python)
+dlplibs	-
+dng_sdk	no harness to seed: dng_parser_fuzzer (the release's patch 0001-mutex-holder-no-exit-time-key-delete.patch edits source/dng_mutex.cpp, the library's own source)
+dnsmasq	repo: the release names https://thekelleys.org.uk/dnsmasq, from which git cannot fetch the commit over https; https://thekelleys.org.uk/git/dnsmasq serves it; fuzz_util: the harness is in OSS-Fuzz's repository, not the project's
+dnspython	the release did not build it (status language-pending: python)
+docker-client	the release did not build it (status language-pending: jvm)
+docutils	the release did not build it (status language-pending: python)
+dom4j	the release did not build it (status language-pending: jvm)
+double-conversion	string_to_double_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+dovecot	fuzz-message-parser: the release applied 1 patch(es) to the library's tree (reproducible build), none to its own source
+dpp	the release did not build it (status no-harness: none-at-commit)
+dr_libs	the release did not build it (status not-yet-built: not-attempted)
+draco	the release did not build it (status too-large: size-unmeasured)
+dragonfly	the release did not build it (status language-pending: go)
+dropbear	no harness to seed: fuzzer-cliconf (the release's patch 0004-cli-own-user-fixed-under-fuzzing.patch edits src/cli-runopts.c, the library's own source)
+dropwizard	the release did not build it (status language-pending: jvm)
+duckdb	the release did not build it (status too-large: size-unmeasured)
+dulwich	the release did not build it (status language-pending: python)
+e2fsprogs	the release did not build it (status held: held)
+easywsclient	easyws_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+ecc-diff-fuzzer	the release did not build it (status too-large: size-unmeasured)
+ecdsa-python	the release did not build it (status language-pending: python)
+eclipse-equinox	the release did not build it (status language-pending: jvm)
+edk2	the release did not build it (status not-yet-built: not-attempted)
+eigen	basicstuff_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; geometry_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; solver_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; sparse_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; tensor_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+elfutils	the release did not build it (status not-yet-built: not-attempted)
+envoy	the release did not build it (status not-yet-built: build-system)
+erigon	the release did not build it (status language-pending: go)
+esp-v2	the release did not build it (status not-yet-built: not-attempted)
+espeak-ng	-
+estoraged	estoraged_fuzzer: the release modified this harness; its copy is not published yet; estoraged_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+et-xmlfile	the release did not build it (status language-pending: python)
+etcd	the release did not build it (status language-pending: go)
+evo-inflector	the release did not build it (status language-pending: jvm)
+example	the release did not build it (status no-harness: none-at-commit)
+exiv2	-
+exp4j	the release did not build it (status language-pending: jvm)
+expat	xml_parse_fuzzer_UTF-8: the release applied 1 patch(es) to the library's tree (build adaptation), none to its own source; xml_parse_fuzzer_UTF-8: the release modified this harness; xml_parsebuffer_fuzzer_UTF-8: the release applied 1 patch(es) to the library's tree (build adaptation), none to its own source; xml_parsebuffer_fuzzer_UTF-8: the release modified this harness
+expr	-
+exprtk	the release did not build it (status too-large: size-unmeasured)
+faad2	-
+fabric	the release did not build it (status language-pending: go)
+face	the release did not build it (status language-pending: python)
+fast-dds	the release did not build it (status too-large: size-unmeasured)
+fast-xml-parser	the release did not build it (status language-pending: javascript)
+fast_float	-
+fastcsv	the release did not build it (status language-pending: jvm)
+fasthttp	the release did not build it (status language-pending: go)
+fastify	the release did not build it (status language-pending: javascript)
+fastjson	-
+fastjson2	the release did not build it (status language-pending: jvm)
+feign	the release did not build it (status language-pending: jvm)
+ffmpeg	the release did not build it (status too-large: size-unmeasured)
+ffms2	ffms2_fuzzer: the release modified this harness; its copy is not published yet; ffms2_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+fftw3	no harness to seed: fftw3_fuzzer (the release's patch 0001-apiplan-clock-only-under-timelimit.patch edits api/apiplan.c, the library's own source)
+file	the release did not build it (status too-large: size-unmeasured)
+filelock	the release did not build it (status language-pending: python)
+filesystem_spec	the release did not build it (status language-pending: python)
+fio	the release did not build it (status too-large: size)
+fips203	-
+firefox	the release did not build it (status held: held)
+firestore	firestore_fieldpath_fuzzer: the release applied 3 patch(es) to the library's tree (reproducible build), none to its own source
+flac	fuzzer_decoder: the release applied 1 patch(es) to the library's tree (reproducible build), none to its own source; fuzzer_encoder: the release applied 1 patch(es) to the library's tree (reproducible build), none to its own source; fuzzer_encoder_v2: the release applied 1 patch(es) to the library's tree (reproducible build), none to its own source; fuzzer_metadata: the release applied 1 patch(es) to the library's tree (reproducible build), none to its own source; fuzzer_reencoder: the release applied 1 patch(es) to the library's tree (reproducible build), none to its own source; fuzzer_seek: the release applied 1 patch(es) to the library's tree (reproducible build), none to its own source
+flask	the release did not build it (status language-pending: python)
+flask-jwt-extended	the release did not build it (status language-pending: python)
+flask-restx	the release did not build it (status language-pending: python)
+flask-wtf	the release did not build it (status language-pending: python)
+flatbuffers	64bit_fuzzer: the release applied 1 patch(es) to the library's tree (build adaptation), none to its own source
+flate2-rs	-
+flex	fuzz-scanopt: the harness is in OSS-Fuzz's repository, not the project's
+fluent-bit	-
+fluxcd	the release did not build it (status language-pending: go)
+flyway	the release did not build it (status language-pending: jvm)
+fmt	-
+fontations	the release did not build it (status language-pending: rust)
+freeimage	the release did not build it (status not-yet-built: not-attempted)
+freeradius	the release did not build it (status not-yet-built: not-attempted)
+freerdp	-
+freetype2	-
+fribidi	-
+frr	the release did not build it (status too-large: size)
+fsnotify	the release did not build it (status language-pending: go)
+ftfy	the release did not build it (status language-pending: python)
+fuzzing-puzzles	the release did not build it (status no-harness: none-at-commit)
+fuzztest-example	the release did not build it (status not-yet-built: harness-framework)
+fuzztest-raksha	the release did not build it (status not-yet-built: harness-framework)
+fuzzywuzzy	the release did not build it (status language-pending: jvm)
+fwupd	the release did not build it (status too-large: size-unmeasured)
+g-api-auth-httplib2	the release did not build it (status language-pending: python)
+g-api-auth-library-python	the release did not build it (status language-pending: python)
+g-api-pubsub	the release did not build it (status language-pending: python)
+g-api-py-api-common-protos	the release did not build it (status language-pending: python)
+g-api-py-oauthlib	the release did not build it (status language-pending: python)
+g-api-python-bigquery-storage	the release did not build it (status language-pending: python)
+g-api-python-client	the release did not build it (status language-pending: python)
+g-api-python-cloud-core	the release did not build it (status language-pending: python)
+g-api-python-firestore	the release did not build it (status language-pending: python)
+g-api-python-tasks	the release did not build it (status language-pending: python)
+g-api-resource-manager	the release did not build it (status language-pending: python)
+g-api-resumable-media-python	the release did not build it (status language-pending: python)
+g-api-secret-manager	the release did not build it (status language-pending: python)
+g-apis-py-api-core	the release did not build it (status language-pending: python)
+g-auth-library-java	the release did not build it (status language-pending: jvm)
+g-cloud-logging-py	the release did not build it (status language-pending: python)
+g-http-java-client	the release did not build it (status language-pending: jvm)
+g-oauth-java-client	the release did not build it (status language-pending: jvm)
+g-py-bigquery	the release did not build it (status language-pending: python)
+g-py-crc32c	the release did not build it (status language-pending: python)
+gast	the release did not build it (status language-pending: python)
+gateway	the release did not build it (status language-pending: go)
+gbmc-pacemaker	pacemaker_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+gc-iam	the release did not build it (status language-pending: python)
+gcloud-error-py	the release did not build it (status language-pending: python)
+gcloud-go	the release did not build it (status language-pending: go)
+gcp-python-cloud-storage	the release did not build it (status language-pending: python)
+gdal	the release did not build it (status too-large: size-unmeasured)
+gdbm	the release did not build it (status not-yet-built: reads-stdin)
+gdk-pixbuf	pixbuf_cons_fuzzer: the release applied 1 patch(es) to the library's tree (build adaptation), none to its own source; pixbuf_cons_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+genshi	the release did not build it (status language-pending: python)
+geos	-
+gfwx	the release did not build it (status no-harness: upstream-gone)
+ghostscript	repo: the release names https://git.ghostscript.com/ghostpdl, from which git cannot fetch the commit over https; https://github.com/ArtifexSoftware/ghostpdl serves it
+giflib	dgif_target: the harness is in OSS-Fuzz's repository, not the project's
+gimli	the release did not build it (status language-pending: rust)
+git	the release did not build it (status language-pending: rust)
+gitdb	the release did not build it (status language-pending: python)
+gitea	the release did not build it (status language-pending: go)
+github_scarecrow	the release did not build it (status language-pending: python)
+gitoxide	the release did not build it (status language-pending: rust)
+gitpython	the release did not build it (status language-pending: python)
+glaze	-
+glib	-
+globaleaks-whistleblowing-software	the release did not build it (status language-pending: python)
+glog	fuzz_demangle: the release applied 1 patch(es) to the library's tree (build adaptation), none to its own source; fuzz_demangle: the release modified this harness
+glom	the release did not build it (status language-pending: python)
+glslang	the release did not build it (status too-large: size)
+gluon	the release did not build it (status language-pending: go)
+gnucobol	the release did not build it (status no-harness: none-at-commit)
+gnupg	the release did not build it (status too-large: size-unmeasured)
+gnutls	the release did not build it (status too-large: size-unmeasured)
+go-attestation	the release did not build it (status language-pending: go)
+go-cmp	-
+go-coap	the release did not build it (status language-pending: go)
+go-containerregistry	the release did not build it (status language-pending: go)
+go-coredns	-
+go-dhcp	the release did not build it (status language-pending: go)
+go-dns	-
+go-ethereum	the release did not build it (status language-pending: go)
+go-git	the release did not build it (status language-pending: go)
+go-humanize	-
+go-json-iterator	the release did not build it (status language-pending: go)
+go-ldap	the release did not build it (status language-pending: go)
+go-ole	the release did not build it (status language-pending: go)
+go-pprof	the release did not build it (status language-pending: go)
+go-readline	the release did not build it (status language-pending: go)
+go-redis	the release did not build it (status language-pending: go)
+go-sftp	the release did not build it (status language-pending: go)
+go-shlex	the release did not build it (status language-pending: go)
+go-snappy	the release did not build it (status language-pending: go)
+go-sqlite3	the release did not build it (status language-pending: go)
+go-toml	-
+go-yaml	-
+gobgp	-
+gogo-protobuf	-
+goipp	the release did not build it (status language-pending: go)
+golang	the release did not build it (status language-pending: go)
+golang-appengine	the release did not build it (status language-pending: go)
+golang-protobuf	the release did not build it (status language-pending: go)
+gonids	the release did not build it (status language-pending: go)
+gopacket	the release did not build it (status language-pending: go)
+gopsutil	the release did not build it (status language-pending: go)
+gosnmp	the release did not build it (status language-pending: go)
+gpac	the release did not build it (status too-large: size-unmeasured)
+gpowerd	the release did not build it (status too-large: size)
+gprof2dot	the release did not build it (status language-pending: python)
+gpsd	FuzzClient: the release modified this harness; FuzzDrivers: the release modified this harness; FuzzDriversStructured: the release modified this harness; FuzzJson: the release modified this harness; FuzzPacket: the release modified this harness
+graphicsmagick	the release did not build it (status too-large: size-unmeasured)
+graphql-java	the release did not build it (status language-pending: jvm)
+greenmail	the release did not build it (status language-pending: jvm)
+grok	the release did not build it (status too-large: size)
+groovy	the release did not build it (status language-pending: jvm)
+grpc-gateway	the release did not build it (status language-pending: go)
+grpc-go	the release did not build it (status language-pending: go)
+grpc-httpjson-transcoding	-
+grpc-py	the release did not build it (status language-pending: python)
+grpc-swift	the release did not build it (status no-compiler: language)
+gson	the release did not build it (status language-pending: jvm)
+gss-ntlmssp	the release did not build it (status too-large: size)
+gstreamer	the release did not build it (status too-large: size)
+guava	the release did not build it (status language-pending: jvm)
+guetzli	the release did not build it (status held: held)
+guice	the release did not build it (status language-pending: jvm)
+gunicorn	the release did not build it (status language-pending: python)
+gwt	the release did not build it (status language-pending: jvm)
+h11	the release did not build it (status language-pending: python)
+h2database	the release did not build it (status language-pending: jvm)
+h2o	-
+h3	the release did not build it (status not-yet-built: not-attempted)
+h5py	the release did not build it (status language-pending: python)
+hadoop	the release did not build it (status language-pending: jvm)
+halide	the release did not build it (status not-yet-built: not-attempted)
+hamcrest	the release did not build it (status language-pending: jvm)
+haproxy	no harness to seed: fuzz_cfg_parser (the release's patch 0001-main-renamed-for-the-fuzz-driver.patch edits src/haproxy.c, the library's own source); fuzz_h1_htx (the release's patch 0001-main-renamed-for-the-fuzz-driver.patch edits src/haproxy.c, the library's own source); fuzz_h1_parse (the release's patch 0001-main-renamed-for-the-fuzz-driver.patch edits src/haproxy.c, the library's own source); fuzz_hpack_decode (the release's patch 0001-main-renamed-for-the-fuzz-driver.patch edits src/haproxy.c, the library's own source); fuzz_http (the release's patch 0001-main-renamed-for-the-fuzz-driver.patch edits src/haproxy.c, the library's own source)
+harfbuzz	left out: hb-repacker-fuzzer (built from another commit of the library, 485df9d5751b)
+harfrust	-
+hcl	the release did not build it (status language-pending: go)
+hdf5	the release did not build it (status too-large: size)
+hdrhistogram	the release did not build it (status language-pending: jvm)
+helm	the release did not build it (status language-pending: go)
+hermes	the release did not build it (status too-large: size-unmeasured)
+hibernate-orm	the release did not build it (status language-pending: jvm)
+hibernate-validator	the release did not build it (status language-pending: jvm)
+highwayhash	-
+hikaricp	the release did not build it (status language-pending: jvm)
+hiredis	the release did not build it (status not-yet-built: not-attempted)
+hiredis-py	the release did not build it (status language-pending: python)
+hive	the release did not build it (status language-pending: jvm)
+hobbes	the release did not build it (status too-large: size-unmeasured)
+hoextdown	-
+hostap	the release did not build it (status held: held)
+hothd	hothd_payload_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+hpn-ssh	the release did not build it (status too-large: size-unmeasured)
+hsqldb	the release did not build it (status language-pending: jvm)
+html2text	the release did not build it (status language-pending: python)
+html5lib-python	the release did not build it (status language-pending: python)
+htmlunit	the release did not build it (status language-pending: jvm)
+htslib	the release did not build it (status held: held)
+http-parser	the release did not build it (status not-yet-built: not-attempted)
+http-pattern-matcher	the release did not build it (status excluded: duplicate)
+httparse	-
+httpcomponents-client	the release did not build it (status language-pending: jvm)
+httpcomponents-core	the release did not build it (status language-pending: jvm)
+httpcore	the release did not build it (status language-pending: python)
+httplib2	the release did not build it (status language-pending: python)
+httpretty	the release did not build it (status language-pending: python)
+httpx	the release did not build it (status language-pending: python)
+httrack	-
+hugo	the release did not build it (status language-pending: go)
+hunspell	-
+hwloc	hwloc_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+hyperium	-
+ibmswtpm2	the release did not build it (status too-large: size)
+ical4j	the release did not build it (status language-pending: jvm)
+icalendar	the release did not build it (status language-pending: python)
+icu	the release did not build it (status too-large: size-unmeasured)
+idna	-
+igraph	basic_properties_directed: the release applied 1 patch(es) to the library's tree (reproducible build), none to its own source
+ijson	the release did not build it (status language-pending: python)
+image-png	-
+image-rs	the release did not build it (status language-pending: rust)
+imageio	the release did not build it (status language-pending: python)
+imagemagick	the release did not build it (status too-large: size-unmeasured)
+immer	the release did not build it (status not-yet-built: not-attempted)
+importlib_metadata	the release did not build it (status language-pending: python)
+inchi	molfile_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+influxdb	the release did not build it (status language-pending: go)
+iniconfig	-
+inih	inihfuzz: the harness is in OSS-Fuzz's repository, not the project's
+iniparser	the release did not build it (status no-harness: none-at-commit)
+ion-java	the release did not build it (status language-pending: jvm)
+ipaddress	the release did not build it (status language-pending: python)
+iperf	cjson_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+ipfs	the release did not build it (status language-pending: go)
+ipmi-fru-parser	the release did not build it (status too-large: size)
+ipp-usb	the release did not build it (status language-pending: go)
+ipykernel	the release did not build it (status language-pending: python)
+ipython	the release did not build it (status language-pending: python)
+iroha	the release did not build it (status language-pending: rust)
+irssi	the release did not build it (status too-large: size)
+isodate	-
+istio	the release did not build it (status language-pending: go)
+istio-ztunnel	the release did not build it (status language-pending: rust)
+itext7	the release did not build it (status language-pending: jvm)
+itoa	-
+itsdangerous	the release did not build it (status language-pending: python)
+iverilog	the release did not build it (status no-harness: none-at-commit)
+ja3	the release did not build it (status language-pending: python)
+jackson-core	the release did not build it (status language-pending: jvm)
+jackson-databind	the release did not build it (status language-pending: jvm)
+jackson-dataformat-xml	the release did not build it (status language-pending: jvm)
+jackson-dataformats-binary	the release did not build it (status language-pending: jvm)
+jackson-dataformats-text	the release did not build it (status language-pending: jvm)
+jackson-datatype-joda	the release did not build it (status language-pending: jvm)
+jackson-datatypes-collections	the release did not build it (status language-pending: jvm)
+jackson-modules-java8	the release did not build it (status language-pending: jvm)
+jakarta-mail-api	the release did not build it (status language-pending: jvm)
+janet	-
+janino	the release did not build it (status language-pending: jvm)
+jansi	the release did not build it (status language-pending: jvm)
+jansson	-
+janus-gateway	-
+java-diff-utils	the release did not build it (status language-pending: jvm)
+java-example	the release did not build it (status language-pending: jvm)
+java-jwt	the release did not build it (status language-pending: jvm)
+java-uuid-generator	the release did not build it (status language-pending: jvm)
+java-xmlbuilder	the release did not build it (status language-pending: jvm)
+javacpp	the release did not build it (status language-pending: jvm)
+javaparser	the release did not build it (status language-pending: jvm)
+javapoet	the release did not build it (status language-pending: jvm)
+javascript-example	the release did not build it (status language-pending: javascript)
+javassist	the release did not build it (status language-pending: jvm)
+javy	the release did not build it (status language-pending: rust)
+jaxb	the release did not build it (status language-pending: jvm)
+jbig2dec	repo: the release names https://git.ghostscript.com/jbig2dec, from which git cannot fetch the commit over https; https://github.com/ArtifexSoftware/jbig2dec serves it; jbig2_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+jboss-logging	the release did not build it (status language-pending: jvm)
+jc	the release did not build it (status language-pending: python)
+jdom	the release did not build it (status language-pending: jvm)
+jedi	the release did not build it (status language-pending: python)
+jedis	the release did not build it (status language-pending: jvm)
+jerryscript	the release did not build it (status no-harness: none-at-commit)
+jersey	the release did not build it (status language-pending: jvm)
+jettison	the release did not build it (status language-pending: jvm)
+jetty	the release did not build it (status language-pending: jvm)
+jflex	the release did not build it (status language-pending: jvm)
+jfreechart	the release did not build it (status language-pending: jvm)
+jimfs	the release did not build it (status language-pending: jvm)
+jimp	the release did not build it (status language-pending: javascript)
+jinja2	the release did not build it (status language-pending: python)
+jline3	the release did not build it (status language-pending: jvm)
+jmespathpy	-
+jmh	the release did not build it (status language-pending: jvm)
+joblib	the release did not build it (status language-pending: python)
+joda-convert	the release did not build it (status language-pending: jvm)
+joda-time	the release did not build it (status language-pending: jvm)
+jolt	the release did not build it (status language-pending: jvm)
+joni	the release did not build it (status language-pending: jvm)
+jooq	the release did not build it (status language-pending: jvm)
+jopt-simple	the release did not build it (status language-pending: jvm)
+jose4j	the release did not build it (status language-pending: jvm)
+jpeg-js	the release did not build it (status language-pending: javascript)
+jpegoptim	-
+jq	-
+js-yaml	the release did not build it (status language-pending: javascript)
+jsc	the release did not build it (status excluded: vendored-copies)
+jsch	the release did not build it (status language-pending: jvm)
+jsemver	the release did not build it (status language-pending: jvm)
+jsign	the release did not build it (status language-pending: jvm)
+jsmin	the release did not build it (status language-pending: python)
+json	-
+json-c	-
+json-flattener	the release did not build it (status language-pending: jvm)
+json-java	the release did not build it (status language-pending: jvm)
+json-patch	-
+json-sanitizer	the release did not build it (status language-pending: jvm)
+json-simple	the release did not build it (status language-pending: jvm)
+json-smart-v2	the release did not build it (status language-pending: jvm)
+json2avro	the release did not build it (status language-pending: jvm)
+json5format	-
+jsoncons	-
+jsoncpp	-
+jsonnet	the release did not build it (status too-large: size-unmeasured)
+jsonp-api	the release did not build it (status language-pending: jvm)
+jsonparser	the release did not build it (status language-pending: go)
+jsonpath	the release did not build it (status language-pending: jvm)
+jsonpickle	the release did not build it (status language-pending: python)
+jsonschema	the release did not build it (status language-pending: python)
+jsoup	the release did not build it (status language-pending: jvm)
+jsqlparser	the release did not build it (status language-pending: jvm)
+jstl-api	the release did not build it (status language-pending: jvm)
+jts	the release did not build it (status language-pending: jvm)
+juju	the release did not build it (status language-pending: go)
+jul-to-slf4j	the release did not build it (status language-pending: jvm)
+junrar	the release did not build it (status language-pending: jvm)
+jupyter-nbconvert	the release did not build it (status language-pending: python)
+jupyter_server	the release did not build it (status language-pending: python)
+jupytext	the release did not build it (status language-pending: python)
+jwt-verify-lib	the release did not build it (status not-yet-built: not-attempted)
+jxls	the release did not build it (status language-pending: jvm)
+kafka	the release did not build it (status language-pending: python)
+kamailio	-
+karchive	the release did not build it (status not-yet-built: dependency)
+kcodecs	the release did not build it (status not-yet-built: dependency)
+kconfig	the release did not build it (status not-yet-built: dependency)
+kde-thumbnailers	the release did not build it (status not-yet-built: dependency)
+kea	-
+keras	the release did not build it (status language-pending: python)
+keycloak	the release did not build it (status language-pending: jvm)
+keystone	the release did not build it (status too-large: size)
+kfilemetadata	the release did not build it (status not-yet-built: dependency)
+kie-soup	the release did not build it (status language-pending: jvm)
+kimageformats	the release did not build it (status not-yet-built: dependency)
+kiwisolver	the release did not build it (status language-pending: python)
+kmime	the release did not build it (status not-yet-built: dependency)
+knative	the release did not build it (status language-pending: go)
+knot-dns	-
+krb5	-
+kryo	the release did not build it (status language-pending: jvm)
+kubearmor	the release did not build it (status language-pending: go)
+kubeedge	the release did not build it (status language-pending: go)
+kubeflow-katib	the release did not build it (status language-pending: go)
+kubeflow-model-registry	the release did not build it (status language-pending: go)
+kubeflow-pipelines	the release did not build it (status language-pending: go)
+kubeflow-spark-operator	the release did not build it (status language-pending: go)
+kubernetes	the release did not build it (status language-pending: go)
+kubernetes-cluster-api	the release did not build it (status language-pending: go)
+kubevirt	the release did not build it (status language-pending: go)
+kyverno	the release did not build it (status language-pending: go)
+lame	the release did not build it (status no-harness: upstream-gone)
+lark-parser	the release did not build it (status language-pending: python)
+lcms	-
+leptonica	-
+leveldb	the release did not build it (status too-large: size-unmeasured)
+libaom	the release did not build it (status too-large: size)
+libarchive	-
+libass	the release did not build it (status too-large: size-unmeasured)
+libavc	-
+libavif	the release did not build it (status not-yet-built: not-attempted)
+libbpf	-
+libcacard	-
+libcbor	-
+libcoap	-
+libconfig	-
+libcst	the release did not build it (status language-pending: python)
+libcue	-
+libcups	fuzzhttp: the release modified this harness
+libdwarf	-
+libecc	the release did not build it (status too-large: size-unmeasured)
+libevent	evtag_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+libexif	exif_from_data_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; exif_loader_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+libfdk-aac	-
+libfido2	the release did not build it (status too-large: size)
+libfuse	fuzz_optparse: the harness is in OSS-Fuzz's repository, not the project's
+libgd	-
+libgit2	config_file_fuzzer: the release applied 1 patch(es) to the library's tree (reproducible build), none to its own source; objects_fuzzer: the release applied 1 patch(es) to the library's tree (reproducible build), none to its own source; packfile_fuzzer: the release applied 1 patch(es) to the library's tree (reproducible build), none to its own source; patch_parse_fuzzer: the release applied 1 patch(es) to the library's tree (reproducible build), none to its own source
+libheif	-
+libhevc	-
+libhtp	fuzz_htp_c: the release applied 1 patch(es) to the library's tree (build adaptation), none to its own source
+libical	libical_extended_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; libical_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; libicalvcard_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+libidn	-
+libidn2	-
+libiec61850	-
+libigl	igl_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+libjpeg-turbo	-
+libjxl	-
+libldac	libldac_encode_fuzzer: the release modified this harness; its copy is not published yet
+liblouis	-
+libmicrohttpd	the release did not build it (status no-harness: none-at-commit)
+libmicrohttpd2	the release did not build it (status too-large: size)
+libmodbus	the release did not build it (status needs-model: features)
+libmpeg2	-
+libnfs	the release did not build it (status not-yet-built: not-attempted)
+liboqs	-
+libpcap	-
+libpg_query	-
+libphonenumber	the release did not build it (status too-large: size)
+libplist	-
+libpng	-
+libpng-proto	-
+libprotobuf-mutator	the release did not build it (status too-large: size-unmeasured)
+libproxy	the release did not build it (status no-harness: none-at-commit)
+libpsl	libpsl_load_fuzzer: the release applied 2 patch(es) to the library's tree (reproducible build), none to its own source
+libra	the release did not build it (status language-pending: rust)
+libraw	the release did not build it (status too-large: size)
+librawspeed	-
+librdkafka	-
+libredwg	the release did not build it (status too-large: size)
+libreoffice	the release did not build it (status not-yet-built: not-attempted)
+libressl	asn1parse: the release applied 1 patch(es) to the library's tree (reproducible build), none to its own source; asn1parse: the release modified this harness
+librosa	the release did not build it (status language-pending: python)
+librsvg	the release did not build it (status language-pending: rust)
+libsass	the release did not build it (status held: held)
+libsndfile	-
+libsodium	crypto_aead_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; crypto_box_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; crypto_generichash_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; crypto_kdf_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; crypto_kx_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; crypto_sign_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; secret_key_auth_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; secretbox_easy_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+libsoup	-
+libspdm	-
+libspectre	the release did not build it (status too-large: size-unmeasured)
+libspng	-
+libsrtp	-
+libssh	the release did not build it (status too-large: size-unmeasured)
+libssh2	the release did not build it (status too-large: size)
+libstdcpp	the release did not build it (status not-yet-built: not-attempted)
+libtasn1	-
+libteken	the release did not build it (status not-yet-built: not-attempted)
+libtheora	the release did not build it (status not-yet-built: not-attempted)
+libtiff	the release did not build it (status too-large: size)
+libtorrent	-
+libtpms	-
+libtsm	repo: the release names https://people.freedesktop.org/~dvdhrm/libtsm, from which git cannot fetch the commit over https; https://github.com/Aetf/libtsm serves it; libtsm_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+libucl	-
+libultrahdr	the release did not build it (status too-large: size)
+libunwind	fuzz_libunwind: the harness is in OSS-Fuzz's repository, not the project's
+libusb	-
+libvips	the release did not build it (status too-large: size-unmeasured)
+libvnc	the release did not build it (status too-large: size-unmeasured)
+libvpx	-
+libwebp	the release did not build it (status not-yet-built: not-attempted)
+libwebsockets	-
+libxaac	the release did not build it (status too-large: size)
+libxls	-
+libxlsxwriter	-
+libxml2	-
+libxslt	-
+libyal	the release did not build it (status too-large: size-unmeasured)
+libyaml	libyaml_deconstructor_alt_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; libyaml_deconstructor_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; libyaml_dumper_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; libyaml_emitter_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; libyaml_loader_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; libyaml_parser_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; libyaml_reformatter_alt_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; libyaml_reformatter_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; libyaml_scanner_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+libyang	the release did not build it (status too-large: size)
+libyuv	the release did not build it (status no-harness: none-at-commit)
+libzip	-
+libzmq	-
+lighttpd	fuzz_burl: the harness is in OSS-Fuzz's repository, not the project's; fuzz_utils: the release modified this harness; fuzz_utils: the harness is in OSS-Fuzz's repository, not the project's
+lima	the release did not build it (status language-pending: go)
+linkerd2	the release did not build it (status language-pending: go)
+linkerd2-proxy	the release did not build it (status language-pending: rust)
+lit	the release did not build it (status language-pending: javascript)
+litmuschaos	the release did not build it (status language-pending: go)
+llamacpp	the release did not build it (status too-large: size-unmeasured)
+lldb-eval	the release did not build it (status excluded: second-process)
+lldpd	-
+llhttp	fuzz_parser: the release applied 1 patch(es) to the library's tree (fuzz harness), none to its own source; fuzz_parser: the release modified this harness
+llvm	the release did not build it (status not-yet-built: not-attempted)
+llvm_libcxx	the release did not build it (status not-yet-built: not-attempted)
+llvm_libcxxabi	the release did not build it (status not-yet-built: not-attempted)
+lodash	the release did not build it (status language-pending: javascript)
+lodepng	-
+log4j2	the release did not build it (status language-pending: jvm)
+logback	the release did not build it (status language-pending: jvm)
+loki	the release did not build it (status language-pending: go)
+looker-sdk	the release did not build it (status language-pending: python)
+lotus	the release did not build it (status language-pending: go)
+lua	luaL_dostring_test: the release applied 3 patch(es) to the library's tree (build adaptation, reproducible build), none to its own source; lua_stringtonumber_test: the release applied 3 patch(es) to the library's tree (build adaptation, reproducible build), none to its own source
+lua-example	the release did not build it (status not-yet-built: not-attempted)
+lucene	the release did not build it (status language-pending: jvm)
+lwan	the release did not build it (status held: held)
+lxc	the release did not build it (status too-large: size-unmeasured)
+lxml	the release did not build it (status language-pending: python)
+lz4	-
+lz4_flex	-
+lzma	no harness to seed: lzma2dec_fuzzer (the release's patch 0001-7ztypes-posix-single-thread-default.patch edits sdk/C/7zTypes.h, the library's own source)
+lzo	the release records no full commit for its library
+magic-enum	magic_enum_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+magic-modules	the release did not build it (status language-pending: go)
+mako	the release did not build it (status language-pending: python)
+mandelbulber	the release did not build it (status no-harness: none-at-commit)
+mapserver	the release did not build it (status too-large: size-unmeasured)
+mariadb	fuzz_json: the release modified this harness
+mariadb-connector-j	the release did not build it (status language-pending: jvm)
+markdown-it-py	the release did not build it (status language-pending: python)
+markupsafe	the release did not build it (status language-pending: python)
+matio	-
+matplotlib	the release did not build it (status language-pending: python)
+maven	the release did not build it (status language-pending: jvm)
+maven-model	the release did not build it (status language-pending: jvm)
+mbedtls	-
+mccabe	the release did not build it (status language-pending: python)
+md4c	-
+mdbook-i18n-helpers	the release did not build it (status language-pending: rust)
+mdbtools	-
+mdit-py-plugins	the release did not build it (status language-pending: python)
+mdurl	-
+memcached	fuzzer_proxy: the harness is in OSS-Fuzz's repository, not the project's
+mercurial	the release did not build it (status not-yet-built: not-attempted)
+meshoptimizer	-
+metadata-extractor	the release did not build it (status language-pending: jvm)
+metallb	the release did not build it (status language-pending: go)
+mfcmapi	the release did not build it (status no-harness: none-at-commit)
+micronaut	the release did not build it (status language-pending: jvm)
+migtd	the release did not build it (status language-pending: rust)
+minify	the release did not build it (status language-pending: go)
+miniz	-
+miniz_oxide	the release did not build it (status language-pending: rust)
+minizip	the release did not build it (status too-large: size)
+moby	the release did not build it (status language-pending: go)
+mod-auth-openidc	the release did not build it (status not-yet-built: not-attempted)
+model-transparency	the release did not build it (status language-pending: python)
+monero	the release did not build it (status too-large: size-unmeasured)
+mongo-go-driver	the release did not build it (status language-pending: go)
+mongoose	the release did not build it (status not-yet-built: not-attempted)
+more-itertools	-
+mosh	-
+mosquitto	the release did not build it (status held: held)
+mp4parse-rust	-
+mp4san	the release did not build it (status language-pending: rust)
+mpg123	the release records no full commit for its library
+mpv	-
+mrab-regex	the release did not build it (status language-pending: python)
+mruby	the release did not build it (status too-large: size-unmeasured)
+ms-tpm-20-ref	the release did not build it (status not-yet-built: not-attempted)
+msal	the release did not build it (status language-pending: python)
+msgpack-c	-
+msgpack-python	the release did not build it (status language-pending: python)
+msquic	the release did not build it (status not-yet-built: not-attempted)
+mtail	the release did not build it (status language-pending: go)
+muduo	no harness to seed: muduo_http_fuzzer (the release's patch 0002-currentthread-no-execinfo-off-glibc.patch edits muduo/base/CurrentThread.cc, the library's own source)
+multidict	the release did not build it (status language-pending: python)
+multierr	-
+muparser	c_api_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; set_eval_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+mupdf	-
+mutagen	the release did not build it (status language-pending: python)
+mvel	the release did not build it (status language-pending: jvm)
+mxj	-
+myanmar-tools	zawgyi_detector_fuzz_target: the release applied 3 patch(es) to the library's tree (build adaptation), none to its own source
+mybatis-3	the release did not build it (status language-pending: jvm)
+mysql-connector-j	the release did not build it (status language-pending: jvm)
+mysql-server	cbor_load_fuzzer: the release applied 1 patch(es) to the library's tree (build adaptation), none to its own source
+naga	the release did not build it (status language-pending: rust)
+nanopb	fuzztest_io_errors: the release applied 1 patch(es) to the library's tree (build adaptation), none to its own source
+nats	the release did not build it (status language-pending: go)
+nbclassic	the release did not build it (status language-pending: python)
+nbformat	the release did not build it (status language-pending: python)
+nccl	fuzz_xml: the harness is in OSS-Fuzz's repository, not the project's
+ndpi	-
+neomutt	-
+neqo	the release did not build it (status language-pending: rust)
+nestegg	-
+net-snmp	the release did not build it (status too-large: size-unmeasured)
+netaddr-py	-
+netcdf	-
+netdata	the release did not build it (status no-harness: none-at-commit)
+nettle	fuzz_dsa_openssl_private_key_from_der: the harness is in OSS-Fuzz's repository, not the project's; fuzz_dsa_sha1_keypair_from_sexp: the harness is in OSS-Fuzz's repository, not the project's; fuzz_dsa_sha256_keypair_from_sexp: the harness is in OSS-Fuzz's repository, not the project's; fuzz_dsa_signature_from_sexp: the harness is in OSS-Fuzz's repository, not the project's; fuzz_rsa_keypair_from_der: the harness is in OSS-Fuzz's repository, not the project's; fuzz_rsa_keypair_from_sexp: the harness is in OSS-Fuzz's repository, not the project's; fuzz_rsa_public_key_from_der: the harness is in OSS-Fuzz's repository, not the project's
+netty	the release did not build it (status language-pending: jvm)
+netty-tcnative	the release did not build it (status language-pending: jvm)
+networkmanager	the release did not build it (status no-harness: none-at-commit)
+networkx	the release did not build it (status language-pending: python)
+nfstream	the release did not build it (status language-pending: python)
+nghttp2	-
+nginx	the release did not build it (status not-yet-built: not-attempted)
+ngolo-fuzzing	the release did not build it (status language-pending: go)
+ngolo-fuzzing-x	the release did not build it (status language-pending: go)
+nimbus-jwt	the release did not build it (status language-pending: jvm)
+ninja	-
+njs	-
+node-xml2js	the release did not build it (status language-pending: javascript)
+nodejs	the release did not build it (status not-yet-built: not-attempted)
+nokogiri	-
+nom	-
+notary	the release did not build it (status language-pending: go)
+nsmd	decode_nsm_disable_tokens_req_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+nss	the release did not build it (status too-large: size-unmeasured)
+ntlm-auth	the release did not build it (status language-pending: python)
+ntlm2	the release did not build it (status language-pending: python)
+ntopng	no harness to seed: tokener_parse_ex_fuzzer (the release's patch 0001-json-c-urandom-probe-without-stat.patch edits third-party/json-c/random_seed.c, the library's own source)
+ntp	the release did not build it (status not-yet-built: not-attempted)
+ntpsec	FuzzClient: the harness is in OSS-Fuzz's repository, not the project's
+num-bigint	the release did not build it (status language-pending: rust)
+numactl	fuzz_parse_str: the release applied 2 patch(es) to the library's tree (build adaptation), none to its own source; fuzz_parse_str: the release modified this harness
+numexpr	the release did not build it (status language-pending: python)
+numpy	the release did not build it (status language-pending: python)
+oak	the release did not build it (status language-pending: rust)
+oatpp	-
+oauth2	the release did not build it (status language-pending: python)
+oauthlib	the release did not build it (status language-pending: python)
+ocudu	-
+ogre	the release did not build it (status too-large: size-unmeasured)
+ohc	the release did not build it (status language-pending: jvm)
+okhttp	the release did not build it (status language-pending: jvm)
+olefile	the release did not build it (status language-pending: python)
+onednn	the release did not build it (status not-yet-built: reads-stdin)
+onnx	the release did not build it (status language-pending: python)
+open-json	the release did not build it (status language-pending: jvm)
+open5gs	gtp_message_fuzz: the release applied 1 patch(es) to the library's tree (build adaptation), none to its own source
+open62541	-
+openapi-schema-validator	the release did not build it (status language-pending: python)
+openbabel	the release did not build it (status too-large: size)
+opencensus-cpp	b3_fuzzer: the release applied 1 patch(es) to the library's tree (portability), none to its own source; cloud_trace_context_fuzzer: the release applied 1 patch(es) to the library's tree (portability), none to its own source; grpc_tags_bin_fuzzer: the release applied 1 patch(es) to the library's tree (portability), none to its own source; grpc_trace_bin_fuzzer: the release applied 1 patch(es) to the library's tree (portability), none to its own source; trace_context_fuzzer: the release applied 1 patch(es) to the library's tree (portability), none to its own source
+opencensus-go	the release did not build it (status language-pending: go)
+opencensus-java	the release did not build it (status language-pending: jvm)
+opencensus-python	the release did not build it (status language-pending: python)
+opencsv	the release did not build it (status language-pending: jvm)
+opencv	the release did not build it (status too-large: size-unmeasured)
+opendal	the release did not build it (status language-pending: rust)
+opendds	the release did not build it (status no-harness: none-at-commit)
+opendnp3	-
+openexr	the release did not build it (status held: held)
+openfga	the release did not build it (status language-pending: go)
+openh264	decoder_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+openjpeg	-
+openjph	-
+openkruise	the release did not build it (status language-pending: go)
+opennavsurf-bag	the release did not build it (status too-large: size-unmeasured)
+openpyxl	the release did not build it (status language-pending: python)
+opensc	-
+opensips	no harness to seed: fuzz_uri_parser (the release's patch 0001-proxy-protocol-include-timer.patch edits net/proxy_protocol.c, the library's own source)
+opensk	the release did not build it (status language-pending: rust)
+openslide	the release did not build it (status no-harness: none-at-commit)
+openssh	-
+openssl	-
+opentelemetry	the release did not build it (status language-pending: go)
+opentelemetry-go	the release did not build it (status language-pending: go)
+opentelemetry-go-contrib	the release did not build it (status language-pending: go)
+openthread	the release did not build it (status too-large: size-unmeasured)
+openvpn	fuzz_base64: the release applied 3 patch(es) to the library's tree (build adaptation), none to its own source; fuzz_base64: the harness is in OSS-Fuzz's repository, not the project's
+openvswitch	-
+openweave	no harness to seed: FuzzCertificateConversion (the release's patch 0000-standalone-harness-build.patch edits src/test-apps/ToolCommon.h, the library's own source)
+openyurt	the release did not build it (status language-pending: go)
+opt_einsum	the release did not build it (status language-pending: python)
+opus	-
+opusfile	opusfile_fuzzer: the release applied 2 patch(es) to the library's tree (reproducible build), none to its own source; opusfile_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+oracle-py-cx	the release did not build it (status language-pending: python)
+orjson	the release did not build it (status language-pending: python)
+oscrypto	the release did not build it (status language-pending: python)
+osgi	the release did not build it (status language-pending: jvm)
+osquery	the release did not build it (status not-yet-built: not-attempted)
+oss-fuzz-example	-
+ossf-scorecard	the release did not build it (status language-pending: go)
+ostree	fuzz-bootconfig: the harness is in OSS-Fuzz's repository, not the project's; fuzz-bsdiff: the harness is in OSS-Fuzz's repository, not the project's; fuzz-content-stream: the harness is in OSS-Fuzz's repository, not the project's; fuzz-repo: the harness is in OSS-Fuzz's repository, not the project's; fuzz-rfc2616-date: the harness is in OSS-Fuzz's repository, not the project's
+ots	-
+ox-ruby	the release did not build it (status language-pending: ruby)
+oxia	the release did not build it (status language-pending: go)
+p11-kit	conf_fuzzer: the release applied 2 patch(es) to the library's tree (build adaptation, harness output), none to its own source; conf_fuzzer: the release modified this harness
+p9	the release did not build it (status language-pending: go)
+pacemaker	the release did not build it (status too-large: size-unmeasured)
+packaging	-
+pako	the release did not build it (status language-pending: javascript)
+pam-ipmi	the release did not build it (status too-large: size)
+pandas	the release did not build it (status language-pending: python)
+paramiko	the release did not build it (status language-pending: python)
+parse	-
+parsimonious	the release did not build it (status language-pending: python)
+parso	the release did not build it (status language-pending: python)
+pasta	the release did not build it (status language-pending: python)
+pathlib2	the release did not build it (status language-pending: python)
+pborman-uuid	-
+pcapplusplus	no harness to seed: FuzzWriter (the release's patch 0001-pcap-reader-without-stdio-readv.patch edits Pcap++/header/PcapFileDevice.h, the library's own source)
+pcl	the release did not build it (status too-large: size)
+pcre2	-
+pdf-js	the release did not build it (status language-pending: javascript)
+pdfbox	the release did not build it (status language-pending: jvm)
+pdfminersix	the release did not build it (status language-pending: python)
+pdfplumber	the release did not build it (status language-pending: python)
+pdoc	the release did not build it (status language-pending: python)
+pem	the release did not build it (status language-pending: python)
+pendulum	the release did not build it (status language-pending: python)
+perfetto	the release did not build it (status too-large: size)
+pest	the release did not build it (status language-pending: rust)
+pffft	pffft_real_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+phmap	phashmap_fuzz: the harness is in OSS-Fuzz's repository, not the project's
+phosphor-certificate-manager	parse_cert_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+phosphor-host-ipmid	no harness to seed: fuzz_fru_area (the release's patch 0001-utils-include-charconv.patch edits include/ipmid/utils.hpp, the library's own source); fuzz_payload_unpack (the release's patch 0001-utils-include-charconv.patch edits include/ipmid/utils.hpp, the library's own source); fuzz_sensor_utils (the release's patch 0001-utils-include-charconv.patch edits include/ipmid/utils.hpp, the library's own source)
+phosphor-networkd	config_parser_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; util_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+phosphor-state-manager	target_parser_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+php	the release did not build it (status too-large: size-unmeasured)
+picotls	-
+pidgin	the release did not build it (status not-yet-built: not-attempted)
+piex	fuzzer-piex: the harness is in OSS-Fuzz's repository, not the project's
+pigweed	the release did not build it (status not-yet-built: not-attempted)
+pikepdf	the release did not build it (status language-pending: python)
+pillow	the release did not build it (status language-pending: python)
+pip	the release did not build it (status language-pending: python)
+pistache	the release did not build it (status too-large: size)
+pjsip	no harness to seed: fuzz-audio (the release's patch 0001-riscv-arch-detection.patch edits pjlib/include/pj/config.h, the library's own source)
+plan9port	fuzz_libsec: the harness is in OSS-Fuzz's repository, not the project's
+pldm	the release did not build it (status not-yet-built: not-attempted)
+plexus-utils	the release did not build it (status language-pending: jvm)
+ply	the release did not build it (status language-pending: python)
+pngquant	no harness to seed: fuzzer (the release's patch 0001-read-image-external-linkage.patch edits pngquant.c, the library's own source)
+poco	-
+poppler	the release did not build it (status too-large: size-unmeasured)
+postcss	the release did not build it (status language-pending: javascript)
+postfix	no harness to seed: fuzz_mime (the release's patch 0001-sys-defs-linux-honours-no-db.patch edits postfix/src/util/sys_defs.h, the library's own source); fuzz_tok822 (the release's patch 0001-sys-defs-linux-honours-no-db.patch edits postfix/src/util/sys_defs.h, the library's own source)
+postgis	-
+postgresql	the release did not build it (status too-large: size)
+powerdns	fuzz_target_dnslabeltext_parseRFC1035CharString: the release applied 2 patch(es) to the library's tree (build adaptation), none to its own source
+powsybl-java	the release did not build it (status language-pending: jvm)
+presidio	the release did not build it (status language-pending: python)
+presto	the release did not build it (status language-pending: jvm)
+proftpd	-
+proj4	the release did not build it (status too-large: size)
+prometheus	the release did not build it (status language-pending: go)
+promise-polyfill	the release did not build it (status language-pending: javascript)
+prost	the release did not build it (status language-pending: rust)
+proto-plus-python	the release did not build it (status language-pending: python)
+protobuf-c	unpack_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+protobuf-java	the release did not build it (status language-pending: jvm)
+protobuf-js	the release did not build it (status language-pending: javascript)
+protobuf-python	the release did not build it (status language-pending: python)
+protoc-gen-validate	the release did not build it (status language-pending: go)
+protocompile	-
+proton-bridge	the release did not build it (status language-pending: go)
+proxygen	the release did not build it (status not-yet-built: not-attempted)
+psqlparse	the release did not build it (status language-pending: python)
+psutil	the release did not build it (status language-pending: python)
+psycopg2	the release did not build it (status language-pending: python)
+publicsuffix-list	the release did not build it (status language-pending: go)
+pugixml	-
+pulldown-cmark	the release did not build it (status language-pending: rust)
+pulumi	the release did not build it (status language-pending: go)
+pupnp	-
+py-serde	the release did not build it (status language-pending: python)
+pyasn1	-
+pyasn1-modules	the release did not build it (status language-pending: python)
+pybind11	the release did not build it (status not-yet-built: not-attempted)
+pycparser	-
+pycrypto	the release did not build it (status language-pending: python)
+pycryptodome	aes_fuzzer: the release modified this harness; its copy is not published yet
+pycups	the release did not build it (status language-pending: python)
+pydantic	the release did not build it (status language-pending: python)
+pydateutil	the release did not build it (status language-pending: python)
+pygments	the release did not build it (status language-pending: python)
+pyjson5	-
+pyjwt	the release did not build it (status language-pending: python)
+pymysql	the release did not build it (status language-pending: python)
+pynacl	the release did not build it (status language-pending: python)
+pyodbc	the release did not build it (status language-pending: python)
+pyparsing	-
+pypy3	the release did not build it (status not-yet-built: not-attempted)
+pyrsistent	the release did not build it (status language-pending: python)
+pytables	the release did not build it (status language-pending: python)
+pytest-py	the release did not build it (status language-pending: python)
+python-ecdsa	the release did not build it (status language-pending: python)
+python-email-validator	the release did not build it (status language-pending: python)
+python-fastjsonschema	the release did not build it (status language-pending: python)
+python-future	the release did not build it (status language-pending: python)
+python-graphviz	the release did not build it (status language-pending: python)
+python-hyperlink	the release did not build it (status language-pending: python)
+python-jose	the release did not build it (status language-pending: python)
+python-lz4	the release did not build it (status language-pending: python)
+python-markdown	-
+python-markdownify	the release did not build it (status language-pending: python)
+python-multipart	the release did not build it (status language-pending: python)
+python-nameparser	the release did not build it (status language-pending: python)
+python-nvd3	the release did not build it (status language-pending: python)
+python-pathspec	-
+python-phonenumbers	the release did not build it (status language-pending: python)
+python-prompt-toolkit	the release did not build it (status language-pending: python)
+python-pypdf	the release did not build it (status language-pending: python)
+python-rison	-
+python-rsa	the release did not build it (status language-pending: python)
+python-tabulate	-
+python3-libraries	the release did not build it (status too-large: size-unmeasured)
+python3-openid	the release did not build it (status language-pending: python)
+pytz	the release did not build it (status language-pending: python)
+pyvex	the release did not build it (status language-pending: python)
+pyxdg	the release did not build it (status language-pending: python)
+pyyaml	the release did not build it (status language-pending: python)
+pyzmq	the release did not build it (status language-pending: python)
+qcms	the release did not build it (status language-pending: rust)
+qdox	the release did not build it (status language-pending: jvm)
+qemu	the release did not build it (status not-yet-built: not-attempted)
+qpdf	-
+qpid-proton	-
+qs	the release did not build it (status no-harness: none-at-commit)
+qt	the release did not build it (status not-yet-built: not-attempted)
+quantlib	-
+quartz	the release did not build it (status language-pending: jvm)
+qubes-os	-
+quic-go	the release did not build it (status language-pending: go)
+quiche	the release did not build it (status not-yet-built: not-attempted)
+quiche-cloudflare	the release did not build it (status language-pending: rust)
+quick-xml	-
+quickjs	-
+r	the release did not build it (status not-yet-built: toolchain)
+rabbitmq-c	-
+racket	the release did not build it (status no-harness: none-at-commit)
+radare2	the release did not build it (status held: held)
+radon	-
+radvd	fuzz_config: the harness is in OSS-Fuzz's repository, not the project's; fuzz_process: the harness is in OSS-Fuzz's repository, not the project's
+rapidjson	fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+rauc	the release did not build it (status too-large: size-unmeasured)
+rdf4j	the release did not build it (status language-pending: jvm)
+rdkit	the release did not build it (status too-large: size)
+re2	-
+readstat	-
+realm-core	the release did not build it (status no-harness: none-at-commit)
+redis-py	the release did not build it (status language-pending: python)
+redis-rs	the release did not build it (status language-pending: rust)
+redux	the release did not build it (status language-pending: javascript)
+reflections	the release did not build it (status language-pending: jvm)
+rekor	the release did not build it (status language-pending: go)
+relic	the release did not build it (status too-large: size-unmeasured)
+reload4j	the release did not build it (status language-pending: jvm)
+requests	the release did not build it (status language-pending: python)
+resiprocate	no harness to seed: fuzzUtil (the release's patch 0003-log-no-exit-time-tls-key-delete.patch edits rutil/Log.cxx, the library's own source)
+retrofit	the release did not build it (status language-pending: jvm)
+retry	the release did not build it (status language-pending: python)
+rfc3967	the release did not build it (status language-pending: python)
+rhai	the release did not build it (status language-pending: rust)
+rhino	the release did not build it (status language-pending: jvm)
+rich	the release did not build it (status language-pending: python)
+ring	the release did not build it (status no-harness: none-at-commit)
+rnp	the release did not build it (status too-large: size)
+roaring-bitmap	the release did not build it (status language-pending: jvm)
+rocksdb	the release did not build it (status too-large: size-unmeasured)
+rome	the release did not build it (status language-pending: jvm)
+ron	-
+roughtime	the release did not build it (status language-pending: go)
+rtpproxy	-
+ruby	the release did not build it (status too-large: size-unmeasured)
+runc	the release did not build it (status language-pending: go)
+rust-brotli	the release did not build it (status language-pending: rust)
+rust-coreutils	the release did not build it (status language-pending: rust)
+rust-lexical	the release did not build it (status language-pending: rust)
+rust-regex	-
+rust-semver-parser	-
+rustls	-
+rxjava	the release did not build it (status language-pending: jvm)
+ryu	-
+s2geometry	the release did not build it (status too-large: size-unmeasured)
+s2opc	-
+sacremoses	the release did not build it (status language-pending: python)
+samba	fuzz_lzxpress: the release applied 2 patch(es) to the library's tree (build adaptation), none to its own source; fuzz_lzxpress: the release modified this harness
+scapy	the release did not build it (status language-pending: python)
+scikit-learn	the release did not build it (status language-pending: python)
+scipy	the release did not build it (status language-pending: python)
+scorecard-web	the release did not build it (status language-pending: go)
+scrypt	the release did not build it (status language-pending: rust)
+selinux	-
+sentencepiece	the release did not build it (status too-large: size-unmeasured)
+serde-yaml	the release did not build it (status language-pending: rust)
+serde_json	-
+serde_urlencoded	the release did not build it (status language-pending: rust)
+serenity	FuzzASN1: the release applied 1 patch(es) to the library's tree (build adaptation), none to its own source
+servo	the release did not build it (status language-pending: rust)
+servo-core	the release did not build it (status language-pending: jvm)
+setuptools	the release did not build it (status language-pending: python)
+shaderc	the release did not build it (status too-large: size-unmeasured)
+sharp	the release did not build it (status language-pending: javascript)
+sigstore	the release did not build it (status language-pending: go)
+sigstore-go	the release did not build it (status language-pending: go)
+sigstore-java	the release did not build it (status language-pending: jvm)
+sigstore-python	the release did not build it (status language-pending: python)
+simd	the release did not build it (status too-large: size-unmeasured)
+simdjson	fuzz_atpointer: the release applied 1 patch(es) to the library's tree (harness reporting), none to its own source; fuzz_dump: the release applied 1 patch(es) to the library's tree (harness reporting), none to its own source; fuzz_dump_raw_tape: the release applied 1 patch(es) to the library's tree (harness reporting), none to its own source; fuzz_element: the release applied 1 patch(es) to the library's tree (harness reporting), none to its own source; fuzz_implementations: the release applied 1 patch(es) to the library's tree (harness reporting), none to its own source; fuzz_minify: the release applied 1 patch(es) to the library's tree (harness reporting), none to its own source; fuzz_minifyimpl: the release applied 1 patch(es) to the library's tree (harness reporting), none to its own source; fuzz_ndjson: the release applied 1 patch(es) to the library's tree (harness reporting), none to its own source; fuzz_ndjson: the release modified this harness; fuzz_ondemand: the release applied 1 patch(es) to the library's tree (harness reporting), none to its own source; fuzz_padded: the release applied 1 patch(es) to the library's tree (harness reporting), none to its own source; fuzz_parser: the release applied 1 patch(es) to the library's tree (harness reporting), none to its own source; fuzz_print_json: the release applied 1 patch(es) to the library's tree (harness reporting), none to its own source; fuzz_utf8: the release applied 1 patch(es) to the library's tree (harness reporting), none to its own source
+simdutf	no harness to seed: base64 (the release's patch 0001-no-riscv-hwprobe-on-rv64g.patch edits include/simdutf/internal/isadetection.h, the library's own source)
+simplejson	the release did not build it (status language-pending: python)
+six	-
+skcms	iccprofile_atf: the release applied 1 patch(es) to the library's tree (harness reporting), none to its own source; iccprofile_info: the release applied 1 patch(es) to the library's tree (harness reporting), none to its own source; iccprofile_transform: the release applied 1 patch(es) to the library's tree (harness reporting), none to its own source; iccprofile_transform: the release modified this harness
+sketches-core	the release did not build it (status language-pending: jvm)
+skia	parse_path: the release applied 1 patch(es) to the library's tree (build adaptation), none to its own source; parse_path: the release modified this harness; skjson: the release applied 1 patch(es) to the library's tree (build adaptation), none to its own source; skjson: the release modified this harness
+skipper	the release did not build it (status language-pending: go)
+sleuthkit	-
+slf4j-api	the release did not build it (status language-pending: jvm)
+smart_open	the release did not build it (status language-pending: python)
+smt	the release did not build it (status language-pending: go)
+snakeyaml	the release did not build it (status language-pending: jvm)
+snappy	-
+snappy-java	the release did not build it (status language-pending: jvm)
+snort3	the release did not build it (status no-harness: none-at-commit)
+solidity	the release did not build it (status too-large: size)
+sonic	the release did not build it (status language-pending: go)
+sound-open-firmware	the release did not build it (status not-yet-built: not-attempted)
+soupsieve	the release did not build it (status language-pending: python)
+spatial4j	the release did not build it (status language-pending: jvm)
+spdk	-
+spdlog	backtrace_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; format_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; levels_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; log_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; pattern_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+spdm-rs	the release did not build it (status language-pending: rust)
+speex	-
+spice-usbredir	-
+spicy	no harness to seed: utf8proc_fuzzer (the release's patch 0001-hilti-fiber-riscv-arch-whitelist.patch edits hilti/runtime/src/fiber.cc, the library's own source)
+spidermonkey	the release did not build it (status excluded: duplicate)
+spidermonkey-ufi	the release did not build it (status not-yet-built: not-attempted)
+spirv-cross	parser_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+spirv-tools	-
+spotify-json	-
+spring-amqp	the release did not build it (status language-pending: jvm)
+spring-boot	the release did not build it (status language-pending: jvm)
+spring-cloud-commons	the release did not build it (status language-pending: jvm)
+spring-cloud-config	the release did not build it (status language-pending: jvm)
+spring-cloud-netflix	the release did not build it (status language-pending: jvm)
+spring-cloud-sleuth-brave	the release did not build it (status language-pending: jvm)
+spring-cloud-stream	the release did not build it (status language-pending: jvm)
+spring-data-jpa	the release did not build it (status language-pending: jvm)
+spring-data-keyvalue	the release did not build it (status language-pending: jvm)
+spring-data-mongodb	the release did not build it (status language-pending: jvm)
+spring-data-redis	the release did not build it (status language-pending: jvm)
+spring-framework	the release did not build it (status language-pending: jvm)
+spring-integration	the release did not build it (status language-pending: jvm)
+spring-ldap	the release did not build it (status language-pending: jvm)
+spring-retry	the release did not build it (status language-pending: jvm)
+spring-security	the release did not build it (status language-pending: jvm)
+spring-shell	the release did not build it (status language-pending: jvm)
+spring-webflow	the release did not build it (status language-pending: jvm)
+sql-parser	no harness to seed: fuzz_sql_parse (the release's patch 0001-lexer-strbuf-not-thread-local.patch edits src/parser/flex_lexer.l, the library's own source)
+sqlalchemy	the release did not build it (status language-pending: python)
+sqlalchemy-utils	the release did not build it (status language-pending: python)
+sqlalchemy_jsonfield	the release did not build it (status language-pending: python)
+sqlite-jdbc	the release did not build it (status language-pending: jvm)
+sqlite3	the release records no full commit for its library
+sqlparse	-
+stack_data	the release did not build it (status language-pending: python)
+starlark-rust	the release did not build it (status language-pending: rust)
+starnix-netlink	the release did not build it (status language-pending: rust)
+stax	the release did not build it (status language-pending: jvm)
+stb	-
+stringtemplate4	the release did not build it (status language-pending: jvm)
+strongswan	the release did not build it (status too-large: size-unmeasured)
+struts	the release did not build it (status language-pending: jvm)
+sudoers	-
+suricata	the release did not build it (status language-pending: rust)
+surrealdb	the release did not build it (status language-pending: rust)
+swagger-core	the release did not build it (status language-pending: jvm)
+swc	the release did not build it (status language-pending: rust)
+swift-nio	the release did not build it (status no-compiler: language)
+swift-protobuf	the release did not build it (status no-compiler: language)
+symphonia	the release did not build it (status language-pending: rust)
+systemd	fuzz-bus-label: the release applied 2 patch(es) to the library's tree (build adaptation, platform adaptation), none to its own source
+syzkaller	the release did not build it (status language-pending: go)
+tablesaw	the release did not build it (status language-pending: jvm)
+taglib	-
+tailscale	the release did not build it (status language-pending: go)
+tar-rs	-
+tarantool	no harness to seed: csv_fuzzer (the release's patch 0001-trivia-util-illegal-instruction-riscv.patch edits src/trivia/util.h, the library's own source); http_parser_fuzzer (the release's patch 0001-trivia-util-illegal-instruction-riscv.patch edits src/trivia/util.h, the library's own source)
+tcmalloc	the release did not build it (status excluded: allocator)
+tcpreplay	-
+td-shim	the release did not build it (status language-pending: rust)
+tdengine	the release did not build it (status not-yet-built: not-attempted)
+teleport	the release did not build it (status language-pending: go)
+tendermint	the release did not build it (status language-pending: go)
+tensorflow	the release did not build it (status not-yet-built: not-attempted)
+tensorflow-addons	the release did not build it (status language-pending: python)
+tensorflow-py	the release did not build it (status language-pending: python)
+tensorflow-serving	the release did not build it (status not-yet-built: not-attempted)
+tesseract-ocr	the release did not build it (status too-large: size-unmeasured)
+textdistance	the release did not build it (status language-pending: python)
+textwrap	the release did not build it (status language-pending: rust)
+threetenbp	the release did not build it (status language-pending: jvm)
+thrift-c_glib	-
+thrift-cpp	-
+thrift-go	the release did not build it (status language-pending: go)
+thrift-java	the release did not build it (status language-pending: jvm)
+thrift-js	the release did not build it (status language-pending: javascript)
+thrift-py	the release did not build it (status language-pending: python)
+thrift-rb	the release did not build it (status language-pending: ruby)
+thrift-rust	the release did not build it (status language-pending: rust)
+tidb	the release did not build it (status language-pending: go)
+tidy-html5	tidy_config_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; tidy_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; tidy_parse_string_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; tidy_xml_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+time	the release did not build it (status language-pending: go)
+timestamp-authority	the release did not build it (status language-pending: go)
+tink-cc	tink_encrypt_fuzzer: the release applied 1 patch(es) to the library's tree (build adaptation), none to its own source; tink_encrypt_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+tinycss2	-
+tinygltf	-
+tinyobjloader	-
+tinysparql	the release did not build it (status too-large: size-unmeasured)
+tinyusb	the release did not build it (status not-yet-built: not-attempted)
+tinyxml2	xmltest: the harness is in OSS-Fuzz's repository, not the project's; xmltest2: the harness is in OSS-Fuzz's repository, not the project's
+tmux	-
+tokio	-
+tomcat	the release did not build it (status language-pending: jvm)
+toml	the release did not build it (status language-pending: python)
+toml_edit	-
+tomli	the release did not build it (status language-pending: python)
+tomlkit	-
+tomlplusplus	the release did not build it (status not-yet-built: not-attempted)
+toolbelt	the release did not build it (status language-pending: python)
+toolz	-
+tor	the release did not build it (status too-large: size-unmeasured)
+tpm2	the release did not build it (status too-large: size-unmeasured)
+tpm2-tss	the release did not build it (status not-yet-built: setup-fails)
+tqdm	the release did not build it (status language-pending: python)
+trafficserver	the release did not build it (status too-large: size-unmeasured)
+tremor	decode_fuzzer: the release applied 1 patch(es) to the library's tree (build adaptation), none to its own source; decode_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; vorbis_synthesis_fuzzer: the release applied 1 patch(es) to the library's tree (build adaptation), none to its own source; vorbis_synthesis_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+trust-dns	-
+tslib	the release did not build it (status language-pending: javascript)
+ttf-parser	the release did not build it (status language-pending: rust)
+tungstenite-rs	-
+turf	the release did not build it (status language-pending: javascript)
+twelve-monkeys	the release did not build it (status language-pending: jvm)
+twitter4j	the release did not build it (status language-pending: jvm)
+typescript	the release did not build it (status language-pending: javascript)
+typescript-example	the release did not build it (status language-pending: javascript)
+typing_extensions	-
+typst	the release did not build it (status language-pending: rust)
+tyrus	the release did not build it (status language-pending: jvm)
+u-boot	the release did not build it (status not-yet-built: not-attempted)
+u-root	the release did not build it (status language-pending: go)
+ua-parser-js	the release did not build it (status language-pending: javascript)
+uint256	the release did not build it (status language-pending: go)
+ujson	the release did not build it (status language-pending: python)
+unblob	the release did not build it (status language-pending: python)
+unbound	the release did not build it (status not-yet-built: reads-stdin)
+underscore	the release did not build it (status language-pending: python)
+undertow	the release did not build it (status language-pending: jvm)
+unicode-rs	-
+unicorn	the release did not build it (status too-large: size-unmeasured)
+unirest-java	the release did not build it (status language-pending: jvm)
+unit	fuzz_basic: the release applied 1 patch(es) to the library's tree (reproducible build), none to its own source
+univocity-parsers	the release did not build it (status language-pending: jvm)
+unsafe-libyaml	-
+upx	the release did not build it (status too-large: size-unmeasured)
+uriparser	-
+uritemplate	-
+urlextract	the release did not build it (status language-pending: python)
+urllib3	the release did not build it (status language-pending: python)
+usbguard	the release did not build it (status too-large: size-unmeasured)
+userver	the release did not build it (status excluded: stub-harness)
+usrsctp	fuzzer_connect: the release applied 1 patch(es) to the library's tree (platform adaptation), none to its own source; fuzzer_connect: the release modified this harness; fuzzer_fragment: the release applied 1 patch(es) to the library's tree (platform adaptation), none to its own source; fuzzer_fragment: the release modified this harness; fuzzer_listen: the release applied 1 patch(es) to the library's tree (platform adaptation), none to its own source; fuzzer_listen: the release modified this harness
+utf8parse	the release did not build it (status language-pending: rust)
+utf8proc	-
+util-linux	the release did not build it (status not-yet-built: not-attempted)
+uwebsockets	the release did not build it (status not-yet-built: not-attempted)
+v8	the release did not build it (status not-yet-built: not-attempted)
+validators	-
+valijson	-
+varnish	-
+vitess	the release did not build it (status language-pending: go)
+vlc	the release did not build it (status too-large: size-unmeasured)
+volcano	the release did not build it (status language-pending: go)
+vorbis	-
+vtpm-td	the release did not build it (status language-pending: rust)
+vulkan-loader	json_load_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+vulnerable-project	the release did not build it (status no-harness: none-at-commit)
+w3lib	-
+w3m	-
+wabt	left out: read_binary_interp_fuzzer (built from another commit of the library, c886b0a74290)
+wamr	the release did not build it (status too-large: size)
+wasm3	-
+wasmedge	no harness to seed: wasmedge-fuzzpo (the release's patch 0000-fuzz-tool-standalone-build.patch edits lib/host/wasi/inode-linux.cpp, the library's own source)
+wasmer	the release did not build it (status language-pending: rust)
+wasmi	the release did not build it (status language-pending: rust)
+wasmtime	the release did not build it (status language-pending: rust)
+wavpack	-
+wazuh	fuzz_xml: the harness is in OSS-Fuzz's repository, not the project's
+websocket-client	the release did not build it (status language-pending: python)
+websockets	the release did not build it (status language-pending: python)
+weechat	the release did not build it (status no-harness: none-at-commit)
+wget	wget_cookie_fuzzer: the release applied 1 patch(es) to the library's tree (platform adaptation), none to its own source; wget_cookie_fuzzer: the release modified this harness
+wget2	-
+wheel	the release did not build it (status language-pending: python)
+wireshark	the release did not build it (status too-large: size-unmeasured)
+woff2	-
+wolfboot	fuzz_gzip: the release modified this harness; its copy is not published yet
+wolfmqtt	-
+wolfssh	fuzz_server: the release modified this harness
+wolfssl	pem_cert: the release modified this harness
+wolftpm	-
+woodstox	the release did not build it (status language-pending: jvm)
+wpantund	the release did not build it (status too-large: size-unmeasured)
+wt	the release did not build it (status too-large: size)
+wtforms	the release did not build it (status language-pending: python)
+wuffs	-
+wxwidgets	xml_parse_fuzzer: the release applied 1 patch(es) to the library's tree (portability), none to its own source
+xbps	the release did not build it (status no-harness: none-at-commit)
+xen	no harness to seed: libelf-fuzzer (the release's patch 0001-libelf-riscv-endianness.patch edits xen/include/xen/libelf.h, the library's own source)
+xerces	the release did not build it (status language-pending: jvm)
+xerces-c	the release did not build it (status too-large: size-unmeasured)
+xlrd	the release did not build it (status language-pending: python)
+xlsxwriter	the release did not build it (status language-pending: python)
+xmlbeans	the release did not build it (status language-pending: jvm)
+xmldom	the release did not build it (status language-pending: javascript)
+xmlpull	the release did not build it (status language-pending: jvm)
+xmlsec	the release did not build it (status too-large: size-unmeasured)
+xmltodict	the release did not build it (status language-pending: python)
+xmlunit	the release did not build it (status language-pending: jvm)
+xnio-api	the release did not build it (status language-pending: jvm)
+xnnpack	no harness to seed: fuzz_model (the release's patch 0003-hardware-config-no-cpuinfo-on-riscv.patch edits src/configs/hardware-config.c, the library's own source)
+xnu	the release did not build it (status not-yet-built: not-attempted)
+xpdf	the release records no full commit for its library
+xs	the release did not build it (status too-large: size-unmeasured)
+xstream	the release did not build it (status language-pending: jvm)
+xvid	the release did not build it (status no-harness: upstream-gone)
+xz	-
+xz-java	the release did not build it (status language-pending: jvm)
+yajl-ruby	json_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+yaml-cpp	load_fuzzer: the release modified this harness
+yamlbeans	the release did not build it (status language-pending: jvm)
+yara	-
+yarl	the release did not build it (status language-pending: python)
+ygot	the release did not build it (status language-pending: go)
+yoga	-
+yyjson	-
+zebra	the release did not build it (status language-pending: rust)
+zeek	the release did not build it (status not-yet-built: not-attempted)
+zenoh	the release did not build it (status language-pending: rust)
+zip	-
+zip-rs	the release did not build it (status language-pending: rust)
+zip4j	the release did not build it (status language-pending: jvm)
+zipp	-
+zlib	checksum_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; compress_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; example_dict_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; example_flush_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; example_large_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; example_small_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; gzio_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; zlib_uncompress2_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; zlib_uncompress3_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; zlib_uncompress_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+zlib-ng	-
+znc	the release did not build it (status held: held)
+zookeeper	the release did not build it (status language-pending: jvm)
+zopfli	zopfli_compress_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; zopfli_deflate_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
+zstd	-
+zstd-safe	-
+zt-zip	the release did not build it (status language-pending: jvm)
+zxc	-
+zxing	the release did not build it (status language-pending: jvm)
+zydis	-

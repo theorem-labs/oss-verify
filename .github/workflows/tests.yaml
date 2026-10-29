@@ -11,14 +11,15 @@ name: "Tests"
 #   route     decides which of the two jobs below the changes need, from the paths they change (git diff, renames as
 #             both names):
 #               - only documentation (docs/, and the Markdown files at the top but README.md, which a test reads):
-#                 docs, which runs the one test that reads those files;
+#                 docs, which runs the tests that read those files;
 #               - anything else: suite;
 #               - nothing: neither.
 #             A run started by hand, or a push whose earlier commit cannot be read, runs suite.
 #   suite     the tests in tools/tests, and tools/validate.py on every project.
-#   docs      tools/tests/test_check.py's test that no tracked file but infra/toolchains.tsv names a toolchain digest:
-#             it reads every file git tracks, the documentation too. A new test that reads the documentation goes here
-#             as well.
+#   docs      the tests that read the documentation: tools/tests/test_check.py's test that no tracked file but
+#             infra/toolchains.tsv names a toolchain digest, which reads every file git tracks, the documentation too;
+#             and tools/tests/test_seeded_projects.py's test that docs/seeded-projects.tsv is what
+#             tools/seeds/seeded_projects.py writes. A new test that reads the documentation goes here as well.
 #   required  always runs, after the others, and reports the required check tests (.github/scripts/collect): it passes
 #             only if route passed, each job route asked for passed, and the other was skipped. A skipped job counts as
 #             a pass where a check is required, so neither suite nor docs is the required check.
@@ -214,6 +215,7 @@ jobs:
           set -o pipefail
           python3 -m pytest -q -p no:cacheprovider -rs \
             "tools/tests/test_check.py::Toolchains::test_infra_toolchains_tsv_is_the_one_file_that_names_a_toolchain_digest" \
+            "tools/tests/test_seeded_projects.py::Committed::test_docs_seeded_projects_tsv_is_what_the_generator_writes" \
             | tee "$RUNNER_TEMP/pytest"
           # Each test here must run and pass: one skips itself outside a git checkout.
           if ! grep -qE '^[0-9]+ passed' "$RUNNER_TEMP/pytest" || grep -qE '[0-9]+ skipped' "$RUNNER_TEMP/pytest"; then

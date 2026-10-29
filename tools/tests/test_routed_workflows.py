@@ -268,7 +268,7 @@ def route_tests(tmp_path, change, event="pull_request", before=None):
 
 
 @pytest.mark.parametrize("change, outputs", [
-    # Documentation only: the one test that reads it.
+    # Documentation only: the tests that read it.
     ({"docs/a.md": "y\n"}, {"docs": "true"}),
     ({"docs/new/b.txt": "y\n", "AGENTS.md": "y\n", "CONTRIBUTING.md": "y\n"}, {"docs": "true"}),
     ({"docs/a.md": None}, {"docs": "true"}),
@@ -301,12 +301,14 @@ def test_tests_route_runs_everything_with_nothing_to_compare_with(tmp_path, even
     assert route_tests(tmp_path, {"docs/a.md": "y\n"}, event=event, before=before) == {"suite": "true"}
 
 
-def test_the_docs_job_runs_the_test_it_names(tmp_path):
+def test_the_docs_job_runs_the_tests_it_names(tmp_path):
     run = step(workflow("tests.yaml")["jobs"]["docs"], "The tests that read the documentation")["run"]
-    node = re.search(r'"(tools/tests/[^"]+)"', run).group(1)
-    file, cls, test = node.split("::")
-    source = (ROOT / file).read_text()
-    assert re.search(rf"^class {cls}\b", source, re.M) and re.search(rf"^    def {test}\(", source, re.M), node
+    nodes = re.findall(r'"(tools/tests/[^"]+)"', run)
+    assert nodes
+    for node in nodes:
+        file, cls, test = node.split("::")
+        source = (ROOT / file).read_text()
+        assert re.search(rf"^class {cls}\b", source, re.M) and re.search(rf"^    def {test}\(", source, re.M), node
 
 
 # --- triage.yaml's route, run with a made-up gh ---

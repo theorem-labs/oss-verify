@@ -499,7 +499,7 @@ We ported the build of each project that we seeded from the oss-fuzz-theorems 20
 
 The internal paths matter too. The source locations of the UBSan checks keep the internal path. In an `asan-ubsan` build, a header that uses `__FILE__` and holds a UBSan check thus makes one more string literal, which AddressSanitizer instruments. With the release's layout, a ported build makes the release's binaries again.
 
-We checked each port with `tools/check --lock`, against each `harness.yaml` of the release for its fuzz targets. [tools/seeds/builds.tsv](../tools/seeds/builds.tsv) holds the result for each project, and [seeded-projects.tsv](seeded-projects.tsv) repeats it. A seeded project gets the port in `tools/seeds/<name>/` only if each binary is the release's.
+We checked each port with `tools/check --lock`, against each `harness.yaml` of the release for its fuzz targets. [tools/seeds/builds.tsv](../tools/seeds/builds.tsv) holds the result for each project, and [tools/seeds/seeded_projects.py](../tools/seeds/seeded_projects.py) writes it into [seeded-projects.tsv](seeded-projects.tsv). A seeded project gets the port in `tools/seeds/<name>/` only if each binary is the release's.
 
 ## Build patches
 
