@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+#
+# The hourly cap on the model runs that issues' own events start (build.yaml, the review job's step "Hold the draft
+# at the hourly cap"):
+#
+#   GH_TOKEN=<token with actions: read> REPO=<owner>/<name> RUN_ID=<this run's id> CAP=<runs an hour> \
+#     .github/scripts/issue-draft-cap
+#
+# This repository is public: anyone with a GitHub account can open an issue, and each issue's event starts a model
+# run. This counts this workflow's other runs for an issue's own event (event issues) made in the last hour whose
+# review job reached the model: its review job ran, in any state but skipped, and neither of the two steps that stop it
+# before the model failed, this step or "Stop before the model when the draft cannot be stored" (a refused Google
+# sign-in). A run that either step stopped called no model and is not counted; a run whose steps have not finished yet
+# is. Under CAP it exits 0, and the draft is made. At CAP or over, and when any read fails, it holds the draft: it
+# prints a `::error::HELD: ...` annotation and exits 1, so the review job fails before its Review step and the run is
+# red. A held run is never skipped as a pass. The CI/CD lane's inbound watch pages for each run whose step of this
+# name failed (ISSUE CAP HELD), and a person re-runs the job to make the draft.
+#
+set -uo pipefail
+cap=${CAP:-6}
+held() {
+  echo "::error::HELD: $1 This issue's draft waits for a person, who re-runs this job to make it."
+  exit 1
+}
+[[ $cap =~ ^[1-9][0-9]*$ ]] || held "the cap is not a number."
+since=$(date -u -d '-1 hour' +%Y-%m-%dT%H:%M:%SZ) || held "the time an hour ago could not be read."
+if ! runs=$(gh api --method GET --paginate "repos/$REPO/actions/workflows/build.yaml/runs" -f event=issues \
+    -f created=">=$since" -F per_page=100 --jq '.workflow_runs[].id'); then
+  held "the runs of the last hour could not be read."
+fi
+count=0
+for id in $runs; do
+  [[ $id =~ ^[0-9]+$ ]] || held "the runs API gave a run id that is not a number."
+  [ "$id" = "${RUN_ID:-}" ] && continue
+  # Its own assignment, so that a failed read holds instead of reading as no review. A run stopped before the model is
+  # found by the names of build.yaml's two steps that stop it, which build.yaml keeps for that reason.
+  if ! ran=$(gh api "repos/$REPO/actions/runs/$id/jobs?per_page=100" \
+      --jq '[.jobs[] | select(.name == "review" and .conclusion != "skipped")
+             | select(any(.steps[]?; (.name == "Hold the draft at the hourly cap"
+                                      or .name == "Stop before the model when the draft cannot be stored")
+                                     and .conclusion == "failure") | not)]
+            | length'); then
+    held "the jobs of run $id could not be read."
+  fi
+  [[ $ran =~ ^[0-9]+$ ]] || held "the jobs of run $id could not be read."
+  if (( ran > 0 )); then
+    count=$((count + 1))
+  fi
+  if (( count >= cap )); then
+    held "$count issue drafts ran the model in the last hour, at the cap of $cap."
+  fi
+done
+echo "$count issue drafts ran the model in the last hour, under the cap of $cap: this draft is made."

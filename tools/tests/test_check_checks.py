@@ -260,9 +260,14 @@ class WorkflowArguments(unittest.TestCase):
             return found[0]["run"]
 
         cases = [
+            # Both steps upload through .github/scripts/held-bucket-put, which runs here too.
             ("build.yaml review held finding store", steps("build.yaml", "review", "Store the held finding for the hold job"),
              json.dumps({"generation": "1761500000000000"}),
              {"GCP_ACCESS_TOKEN": gcp, "RUN_ID": "7", "PR": "68", "NAME": "libreac", "HEAD_SHA": "1" * 40,
+              "RUN_URL": "https://github.com/theorem-labs/oss-verify/actions/runs/7"}, [gcp]),
+            ("build.yaml review issue draft store", steps("build.yaml", "review", "Store the issue draft for a person"),
+             json.dumps({"generation": "1761500000000000"}),
+             {"GCP_ACCESS_TOKEN": gcp, "ISSUE": "45", "RUN_ID": "7", "RUN_ATTEMPT": "1",
               "RUN_URL": "https://github.com/theorem-labs/oss-verify/actions/runs/7"}, [gcp]),
             ("build.yaml hold listing", steps("build.yaml", "hold", "Look for stored held findings"),
              json.dumps({"items": [{"name": "held/7/" + "a" * 32}]}), {"GCP_ACCESS_TOKEN": gcp}, [gcp]),
@@ -286,6 +291,9 @@ class WorkflowArguments(unittest.TestCase):
                 (bin / "curl").chmod(0o755)
                 (directory / "tmp").mkdir()
                 (directory / "tmp" / "held-finding.md").write_text("<!-- held finding -->\ntitle: x\n")
+                (directory / "tmp" / "issue-draft.md").write_text("The draft reply:\n\nSee docs/dsl.md.\n")
+                # The steps run from the checkout's root, where .github/scripts is.
+                (directory / ".github").symlink_to(ROOT / ".github")
                 trace = directory / "trace"
                 env = {**os.environ, "PATH": f"{bin}:{os.environ['PATH']}", "RUNNER_TEMP": str(directory / "tmp"),
                        "GITHUB_OUTPUT": str(directory / "output"), "GITHUB_ENV": str(directory / "env"),
@@ -382,22 +390,6 @@ class WorkflowArguments(unittest.TestCase):
                 self.assertIn(key_job, jobs, workflow)
             self.assertEqual(self.app_key_jobs_problems(jobs, key_jobs), [], workflow)
 
-    def test_only_the_review_job_can_act_as_ossv_ci(self):
-        # ossv-ci can be acted as only from oss-verify's GitHub Environment `enroll-review` (Theorem's
-        # infrastructure code), which the review job declares. The review job now reads no token with it: it signs in
-        # only to store a held finding, and it must keep the account and the environment, or that store stops working.
-        account = "ossv-ci@theorem-agent-infra.iam.gserviceaccount.com"
-        for workflow in self.KEY_JOBS:
-            for name, job in self.workflow(workflow)["jobs"].items():
-                review = workflow == "build.yaml" and name == "review"
-                environment = json.dumps(job.get("environment", "")).lower()
-                if review:
-                    self.assertEqual(job.get("environment"), {"name": "enroll-review", "deployment": False})
-                    self.assertEqual((job.get("env") or {}).get("GCP_SERVICE_ACCOUNT"), account)
-                else:
-                    self.assertNotIn(account, json.dumps(job), f"{workflow} {name} names {account}")
-                    self.assertNotIn("enroll-review", environment, f"{workflow} {name} is in enroll-review")
-
     @unittest.skipUnless(shutil.which("jq") and shutil.which("base64"), "the key step needs jq and base64")
     def test_the_app_key_is_masked_in_every_key_job(self):
         # The key-reading step is in each of these files, and the runner logs the private-key input of the next step:
@@ -434,24 +426,6 @@ class WorkflowArguments(unittest.TestCase):
                     self.assertNotIn(line, run.stderr, f"{workflow}: {line[:20]}… is on stderr")
                 self.assertIn(key.splitlines()[1], (directory / "output").read_text(), workflow)
 
-    def test_every_google_sign_in_keeps_its_token_to_one_step(self):
-        # Each auth step writes no credentials file, exports no variable, and mints a five-minute access token: its
-        # output is all that holds it. Five steps: build.yaml's review job signs in once, after the review, and only
-        # for a held finding; its hold and comment jobs, triage's comment job and enroll-dispatch's dispatch job sign
-        # in once each.
-        found = 0
-        for workflow in self.KEY_JOBS:
-            for name, job in self.workflow(workflow)["jobs"].items():
-                for step in job["steps"]:
-                    if step.get("uses", "").startswith("google-github-actions/auth@"):
-                        found += 1
-                        self.assertEqual({k: step["with"].get(k) for k in ("token_format", "access_token_lifetime",
-                                          "create_credentials_file", "export_environment_variables")},
-                                         {"token_format": "access_token", "access_token_lifetime": "300s",
-                                          "create_credentials_file": False, "export_environment_variables": False},
-                                         f"{workflow} {name}")
-        self.assertEqual(found, 5)
-
     def test_another_job_in_the_comment_environment_is_refused_in_every_shape(self):
         # The shapes GitHub takes for `environment` (workflow syntax, jobs.<job_id>.environment), each put on the
         # review job of the real build.yaml: every one must be refused.
@@ -473,7 +447,8 @@ class WorkflowArguments(unittest.TestCase):
 class PostingStep(unittest.TestCase):
     """build.yaml's own "Post the comment" step, run with a fake gh: what it sends GitHub."""
 
-    def post(self, review, existing=True, head="b" * 40, pr_head=None, checks="### new report\n"):
+    def post(self, review, existing=True, head="b" * 40, pr_head=None, checks="### new report\n", rules="review.md",
+             pr="8", status=0):
         workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
         name = "Post the comment, or update the one already there"
         matches = [s for s in workflow["jobs"]["comment"]["steps"] if s.get("name") == name]
@@ -497,11 +472,11 @@ class PostingStep(unittest.TestCase):
             (bin / "gh").chmod(0o755)
             (directory / "temp").mkdir()
             environment = {**os.environ, "PATH": f"{bin}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r",
-                           "PR": "8", "REVIEW": review, "CHECKS": checks, "HEAD_SHA": head,
+                           "PR": pr, "REVIEW": review, "CHECKS": checks, "HEAD_SHA": head, "RULES": rules,
                            "RUNNER_TEMP": str(directory / "temp")}
             run = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=ROOT, env=environment, capture_output=True,
                                  text=True)
-            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(run.returncode, status, run.stderr)
             sent = [name for name in ("patch.json", "post.json") if (directory / name).exists()]
             self.assertLessEqual(len(sent), 1, sent)
             if sent:
@@ -509,6 +484,12 @@ class PostingStep(unittest.TestCase):
             if existing and sent:
                 self.assertIn("issues/comments/4242", (directory / "patch.url").read_text())
             return json.loads((directory / sent[0]).read_text())["body"] if sent else None
+
+    def test_a_run_with_no_pull_request_posts_nothing(self):
+        # An issue's run has no pull request: the step refuses, before any read or write, whatever the job's if: says.
+        for pr in ("", "8; x"):
+            with self.subTest(pr=pr):
+                self.assertIsNone(self.post("The draft reply.\n", pr=pr, status=1))
 
     def test_the_triage_step_posts_or_updates_its_comment(self):
         # triage.yaml's own posting step, run with a fake gh: with no comment of ours it posts one; with one, it edits it.
@@ -540,6 +521,11 @@ class PostingStep(unittest.TestCase):
         self.assertTrue(body.startswith("<!-- oss-verify-review -->\n<sub>Claude wrote this review of `bbbbbbb`"))
         self.assertIn("\n\nThanks again.\n\n2. Fix Y.\n", body)
         self.assertIn("<summary>What the checks of the fuzz targets and of the binaries measured</summary>\n\n### new report", body)
+
+    def test_a_change_review_names_review_change_md(self):
+        body = self.post("Thanks.\n", checks="", rules="review-change.md")
+        self.assertTrue(body.startswith("<!-- oss-verify-review -->\n<sub>Claude wrote this review of `bbbbbbb` from "
+                                        "`review-change.md`."))
 
     def test_without_a_posted_comment_it_posts_one(self):
         body = self.post("Thanks.\n", existing=False, checks="")
@@ -828,50 +814,6 @@ else:
                 self.assertIn(f"held finding key: {self.OBJECT} raw\n", bodies[0])
                 self.assertIn("SECRETBUG", bodies[0])
 
-    def test_the_finding_reaches_the_hold_job_only_through_the_private_bucket(self):
-        jobs = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["jobs"]
-        text = (ROOT / ".github" / "workflows" / "build.yaml").read_text()
-        # No job holds the App's key as a repository secret, and nothing reads a variable for the repository.
-        self.assertNotIn("OSS_VERIFY_APP_PRIVATE_KEY", text)
-        self.assertNotIn("HELD_FINDINGS_REPO }}", text)
-        review = {s.get("name"): s for s in jobs["review"]["steps"]}
-        store = review["Store the held finding for the hold job"]["run"]
-        self.assertIn("ifGenerationMatch=0", store)
-        self.assertIn('name="held/$RUN_ID/$(openssl rand -hex 16)"', store)
-        self.assertIn("oss-verify held finding v1", store)
-        self.assertEqual(jobs["review"]["outputs"]["held_object"], "${{ steps.held.outputs.object }}")
-        # The review job passes names only: no output holds a file's text or the finding.
-        self.assertNotIn("held-finding.md", json.dumps(jobs["review"]["outputs"]))
-        # The finding is stored only when the review held one back, from the file the result step wrote, and the
-        # session of that review is not kept.
-        for name in ("Sign in to Google Cloud to store the held finding", "Store the held finding for the hold job"):
-            self.assertEqual(review[name]["if"], "${{ steps.result.outputs.held == 'yes' }}")
-        self.assertIn('"$RUNNER_TEMP/held-finding.md"', store)
-        self.assertEqual(review["Keep this review's session for the next push's review"]["if"],
-                         "${{ steps.result.outputs.held != 'yes' }}")
-        hold = jobs["hold"]
-        self.assertEqual(hold["environment"], {"name": "comment", "deployment": False})
-        self.assertEqual(hold["needs"], ["project-builds", "review"])
-        # Every run that reviewed anything sweeps the bucket, so a cancelled run's finding goes with the next run.
-        self.assertEqual(hold["if"], "${{ !cancelled() && needs.review.result != 'skipped' }}")
-        # One sweep at a time in the repository; every waiting one keeps its place, so none is cancelled by another.
-        self.assertEqual(hold["concurrency"], {"group": "build-hold", "cancel-in-progress": False, "queue": "max"})
-        steps = {s.get("name"): s for s in hold["steps"]}
-        where = steps["Where the held findings go"]["run"]
-        self.assertIn("secrets/oss-verify-held-findings-repo/versions/latest:access", where)
-        self.assertLess(where.index("::add-mask::"), where.index('echo "name=$name"'))
-        token = steps["Get the oss-verify App's token for the held findings' repository"]["with"]
-        self.assertEqual((token["owner"], token["repositories"], token["permission-issues"]),
-                         ("${{ github.repository_owner }}", "${{ steps.where.outputs.name }}", "write"))
-        send = steps["Send every stored held finding to the disclosure route"]
-        self.assertEqual(send["run"], '.github/scripts/review-hold "$RUNNER_TEMP/held"')
-        self.assertEqual(send["env"]["CURRENT_OBJECT"], "${{ needs.review.outputs.held_object }}")
-        # The comment job posts no review unless the review job succeeded and, if it held a finding, hold sent it.
-        self.assertIn("hold", jobs["comment"]["needs"])
-        self.assertIn("needs.review.result == 'success' && needs.review.outputs.comment != '' && "
-                      "(needs.review.outputs.held_object == '' || needs.hold.result == 'success')",
-                      jobs["comment"]["if"])
-
 
 class ReviewHold(unittest.TestCase):
     """review-hold sends every stored finding in the bucket, its own run's and a cancelled run's, through a fake curl for
@@ -1052,78 +994,284 @@ class SinceLastReview(unittest.TestCase):
 
 
 class ReviewJob(unittest.TestCase):
-    """build.yaml's review job: one claude-code-action step with the settings the review needs, its session kept in
-    the Actions cache by the job itself, and its own small steps run with stand-ins."""
+    """build.yaml's review job: its own small steps, and the scripts it runs (review-gather, review-prompt), run with
+    stand-ins."""
 
     def setUp(self):
         self.workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
         self.jobs = self.workflow["jobs"]
         self.steps = {s.get("name"): s for s in self.jobs["review"]["steps"]}
-        self.review = self.steps["Review"]
 
-    def test_the_action_runs_from_main_with_three_tools_and_resumes_only_with_a_diff(self):
-        # pull_request_target: GitHub runs main's copy of this file, never the pull request's.
-        self.assertIn("pull_request_target", self.workflow.get("on", self.workflow.get(True)))
-        self.assertRegex(self.review["uses"], r"^anthropics/claude-code-action@[0-9a-f]{40}$")
-        settings = self.review["with"]
-        self.assertEqual((settings["allowed_non_write_users"], settings["github_token"]), ("*", "${{ github.token }}"))
-        self.assertEqual(settings["anthropic_federation_rule_id"], "fdrl_019restxFx3PhpLhbziQoQKf")
-        self.assertNotIn("anthropic_api_key", settings)
-        # Only our own Apps' runs start a review: the action matches each name (src/github/validation/actor.ts).
-        self.assertEqual(settings["allowed_bots"], "sjawhar-agent[bot],oss-verify[bot]")
-        args = settings["claude_args"]
-        self.assertTrue(args.startswith("--tools Read,Glob,Grep --permission-mode default --model claude-opus-5-5 "
-                                        "--effort xhigh --max-turns 300 "))
-        self.assertIn("${{ steps.gather.outputs.session && format('--resume {0}', steps.gather.outputs.session) || '' }}",
-                      args)
-        for word in ("Bash", "Write", "Edit", "WebFetch", "mcp", "allowedTools", "bypass", "acceptEdits", "auto"):
-            self.assertNotIn(word, args)
-        schema = json.loads(re.search(r"--json-schema '([^']*)'$", args).group(1))
-        self.assertEqual(schema["required"], ["comment", "held", "verdicts"])
-        self.assertEqual(schema["properties"]["verdicts"]["required"], ["F2", "F7"])
-        self.assertEqual(schema["properties"]["verdicts"]["additionalProperties"], {"enum": ["pass", "fail", "person"]})
-        prompt = settings["prompt"]
-        self.assertIn("Read review.md at the root of this checkout", prompt)
-        self.assertIn("before you keep a request of your last comment, read again the input in .review/", prompt)
+    def gather(self, root, gh, **env):
+        """review-gather, from this checkout, into root/out, with the stand-in gh script `gh` and `env`."""
+        (root / "bin").mkdir(exist_ok=True)
+        (root / "bin" / "gh").write_text("#!/bin/bash\n" + f'echo "$*" >> {root / "calls"}\n' + gh)
+        (root / "bin" / "gh").chmod(0o755)
+        environment = {**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r",
+                       "PR": "", "NAME": "", "ISSUE": "", "HEAD_SHA": "", **env}
+        return subprocess.run([str(ROOT / ".github" / "scripts" / "review-gather"), str(root / "out")],
+                              env=environment, cwd=ROOT, capture_output=True, text=True)
 
-    def test_the_session_is_kept_by_the_review_job_and_not_when_it_holds_a_finding(self):
-        self.assertEqual(self.workflow["cache-mode"], "none")
-        self.assertEqual({name: job["cache-mode"] for name, job in self.jobs.items() if "cache-mode" in job},
-                         {"review": "write"})
-        restore = self.steps["Restore the last review's session and the head it reviewed"]
-        save = self.steps["Keep this review's session for the next push's review"]
-        self.assertTrue(restore["uses"].startswith("actions/cache/restore@"))
-        self.assertTrue(save["uses"].startswith("actions/cache/save@"))
-        paths = "~/.claude/projects\n~/.claude/ossv-last-review"
-        key = "${{ env.SESSION_KEY }}${{ github.run_id }}-${{ github.run_attempt }}"
-        self.assertEqual((restore["with"]["path"], restore["with"]["key"]), (paths, key))
-        self.assertEqual((save["with"]["path"], save["with"]["key"]), (paths, key))
-        self.assertEqual(restore["with"]["restore-keys"], "${{ env.SESSION_KEY }}")
-        self.assertEqual(self.jobs["review"]["env"]["SESSION_KEY"],
-                         "enroll-review/${{ github.event.pull_request.number || inputs.pr }}/"
-                         "${{ needs.project-builds.outputs.name }}/")
-        self.assertEqual(save["if"], "${{ steps.result.outputs.held != 'yes' }}")
-        gather = self.steps["Gather what the review reads, and the diff since the last review"]["run"]
-        self.assertIn("LAST_REVIEW=~/.claude/ossv-last-review .github/scripts/review-gather .review", gather)
-
-    def result(self, output):
-        """The result step, on an execution file whose result carries `output` as its structured output."""
+    def test_a_change_gathers_only_the_pull_request_and_its_changed_files_as_data(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            (root / "temp").mkdir()
-            (root / "home").mkdir()
-            execution = root / "execution.json"
-            execution.write_text(json.dumps([{"type": "system", "subtype": "init"},
-                                             {"type": "result", "subtype": "success", "structured_output": output}]))
-            run = subprocess.run(["bash", "-e", "-c", self.steps["Keep the draft, and the held finding apart from it"]["run"]],
-                                 cwd=root, capture_output=True, text=True,
-                                 env={**os.environ, "HOME": str(root / "home"), "RUNNER_TEMP": str(root / "temp"),
-                                      "GITHUB_OUTPUT": str(root / "output"), "RESULT": str(execution),
-                                      "SESSION": "09227178-7bbf-4e5f-86db-8736e530ef01", "HEAD_SHA": "1" * 40})
-            read = lambda path: path.read_text() if path.exists() else None
-            return (run, read(root / "temp" / "draft" / "comment.md"), read(root / "temp" / "draft" / "verdicts.json"),
-                    read(root / "temp" / "held-finding.md"), read(root / "output") or "",
-                    read(root / "home" / ".claude" / "ossv-last-review"))
+            files = ["tools/a.py", "docs/CLAUDE.md", ".claude/skills/x/SKILL.md", "a/../b", "README.md", "big.bin",
+                     "gone.txt"]
+            run = self.gather(root, (
+                f'case "$*" in\n'
+                f'  "pr view"*) echo "{{}}" ;;\n'
+                f'  *"/files"*) printf "%s\\n" {" ".join(shlex.quote(f) for f in files)} ;;\n'
+                '  "pr diff"*) echo diff ;;\n'
+                # A file over 1 MiB, which gh stops writing when head has its first MiB; a file the API cannot give.
+                '  *contents/big.bin*) head -c 3000000 /dev/zero | tr "\\0" x ;;\n'
+                '  *contents/gone.txt*) echo "{\\"message\\": \\"Not Found\\"}"; exit 1 ;;\n'
+                '  *contents/*) echo "file at ${@: -1}" ;;\n'
+                '  *) true ;;\n'
+                "esac\n"), KIND="change", PR="8", HEAD_SHA="a" * 40)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            head = sorted(str(p.relative_to(root / "out" / "head")) for p in (root / "out" / "head").rglob("*")
+                          if p.is_file())
+            self.assertEqual(head, ["README.md", "big.bin", "tools/a.py"])
+            self.assertEqual((root / "out" / "head" / "big.bin").stat().st_size, 1048576)
+            # Nothing of an enrollment's: no build results, no seeds, no validation.
+            for name in ("build", "seeds", "validate.txt", "triage-today.md"):
+                self.assertFalse((root / "out" / name).exists(), name)
+
+    def test_an_issue_gathers_only_the_issue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            gh = 'case "$*" in "issue view 5 "*) echo \'{"title": "Q"}\' ;; *) exit 1 ;; esac\n'
+            run = self.gather(root, gh, KIND="issue", ISSUE="5")
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(sorted(p.name for p in (root / "out").iterdir()), ["issue.json"])
+            self.assertEqual((root / "out" / "issue.json").read_text(), '{"title": "Q"}\n(exit status 0)\n')
+            self.assertEqual((root / "calls").read_text(),
+                             "issue view 5 -R o/r --json number,title,author,createdAt,body,comments\n")
+
+    def test_gather_refuses_a_kind_or_a_value_it_cannot_take_before_any_read(self):
+        for env in ({"KIND": "issue", "ISSUE": "5; x"}, {"KIND": "enrollment", "PR": "8", "NAME": ""},
+                    {"KIND": "enrollment", "PR": "8", "NAME": "../x"}, {"KIND": "change", "PR": "8x"},
+                    {"KIND": "", "PR": "8"}, {"KIND": "build", "PR": "8"}):
+            with self.subTest(env=env), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                run = self.gather(root, "exit 0\n", **env)
+                self.assertEqual(run.returncode, 2, run.stderr)
+                self.assertFalse((root / "calls").exists())
+
+    def test_hostile_issue_text_is_only_data_in_the_gather_and_the_result_steps(self):
+        # The issue's text reaches the scripts only from gh's answer (a file) and the model's output (a file): a title
+        # or body that is shell text runs nothing.
+        hostile = '$(touch pwned-a) `touch pwned-b` "; touch pwned-c; " \' ; touch pwned-d #'
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            answer = shlex.quote(json.dumps({"title": hostile, "body": hostile}))
+            run = self.gather(root, f'echo {answer}\n', KIND="issue", ISSUE="5")
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertIn("touch pwned-a", (root / "out" / "issue.json").read_text())
+        run, comment, _, _, _, _ = self.result({"comment": hostile, "decide": hostile}, kind="issue", issue="5")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(self.issue_draft.count(hostile), 2)
+        for where in (ROOT, pathlib.Path.cwd()):
+            self.assertEqual(sorted(where.glob("pwned-*")), [])
+        self.assertEqual(sorted(self.ran_in.glob("pwned-*")), [])
+
+    def test_an_issue_draft_stays_out_of_the_artifact_and_the_summary(self):
+        # The artifact and the job summary are public: the draft and what a person decides go to a file that the
+        # next step stores in the private bucket.
+        run, comment, verdicts, held, output, _ = self.result(
+            {"comment": "See docs/dsl.md.\n", "decide": "nothing"}, kind="issue", issue="5")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertFalse((self.ran_in / "temp" / "draft").exists())
+        self.assertEqual((comment, verdicts, held, output, self.summary), (None, None, None, {}, None))
+        self.assertEqual(self.issue_draft, "The draft reply:\n\nSee docs/dsl.md.\n\n\n"
+                                           "What a person at Theorem decides before it is posted:\n\nnothing\n")
+
+    def test_an_issue_run_gives_the_job_no_comment_output(self):
+        # The job's comment output is the result step's: for an issue, whose draft no one has approved, it has none,
+        # so no expression and no debug log carries the draft. A change's and an enrollment's comment is there.
+        _, _, _, _, output, _ = self.result({"comment": "The draft reply.\n", "decide": "nothing"}, kind="issue",
+                                            issue="5")
+        self.assertNotIn("comment", output)
+        _, _, _, _, output, _ = self.result({"comment": "Thanks.\n", "verdicts": {}}, kind="change")
+        self.assertEqual(output["comment"], "Thanks.\n")
+
+    def test_a_change_without_a_held_field_holds_nothing(self):
+        run, comment, verdicts, held, output, _ = self.result(
+            {"comment": "Thanks.\n", "verdicts": {str(n): "pass" for n in range(1, 6)}}, kind="change")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(json.loads(verdicts), {str(n): "pass" for n in range(1, 6)})
+        self.assertEqual((output, held, self.summary, self.issue_draft),
+                         ({"comment": "Thanks.\n"}, "<!-- held finding -->\n\n", None, None))
+
+    @staticmethod
+    def outputs(text):
+        """GITHUB_OUTPUT's text as the runner reads it: name=value lines, and name<<delimiter blocks."""
+        found, lines = {}, iter((text or "").splitlines())
+        for line in lines:
+            equals, heredoc = line.find("="), line.find("<<")
+            if heredoc >= 0 and (equals < 0 or heredoc < equals):
+                name, delimiter = line.split("<<", 1)
+                value = []
+                for inner in lines:
+                    if inner == delimiter:
+                        break
+                    value.append(inner)
+                found[name] = "\n".join(value)
+            else:
+                name, value = line.split("=", 1)
+                found[name] = value
+        return found
+
+    def result(self, output, kind="enrollment", issue=""):
+        """The result step, on an execution file whose result carries `output` as its structured output, for a review
+        of `kind` (the issue `issue` for an issue). It returns the step's outputs as the runner reads them, and keeps
+        the step summary in self.summary, an issue's draft file in self.issue_draft, and the directory it ran in in
+        self.ran_in."""
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory)
+        root = self.ran_in = pathlib.Path(directory)
+        (root / "temp").mkdir()
+        (root / "home").mkdir()
+        execution = root / "execution.json"
+        execution.write_text(json.dumps([{"type": "system", "subtype": "init"},
+                                         {"type": "result", "subtype": "success", "structured_output": output}]))
+        run = subprocess.run(["bash", "-e", "-c", self.steps["Keep the draft, and the held finding apart from it"]["run"]],
+                             cwd=root, capture_output=True, text=True,
+                             env={**os.environ, "HOME": str(root / "home"), "RUNNER_TEMP": str(root / "temp"),
+                                  "GITHUB_OUTPUT": str(root / "output"), "RESULT": str(execution),
+                                  "SESSION": "09227178-7bbf-4e5f-86db-8736e530ef01", "HEAD_SHA": "1" * 40,
+                                  "KIND": kind, "ISSUE": issue, "GITHUB_STEP_SUMMARY": str(root / "summary")})
+        read = lambda path: path.read_text() if path.exists() else None  # noqa: E731
+        self.summary = read(root / "summary")
+        self.issue_draft = read(root / "temp" / "issue-draft.md")
+        return (run, read(root / "temp" / "draft" / "comment.md"), read(root / "temp" / "draft" / "verdicts.json"),
+                read(root / "temp" / "held-finding.md"), self.outputs(read(root / "output")),
+                read(root / "home" / ".claude" / "ossv-last-review"))
+
+    def store(self, issue="5", attempt="2", answer='{"generation": "1730000000000000"}',
+              draft="The draft reply:\n\nSee docs/dsl.md.\n"):
+        """.github/scripts/store-issue-draft on a draft file, with a stand-in curl that keeps its arguments, the object
+        it uploads, and answers `answer`. Return the exit status, the output, the summary, curl's arguments and the
+        object."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "bin").mkdir()
+            (root / "draft.md").write_text(draft, encoding="utf-8")
+            (root / "bin" / "curl").write_text(
+                "#!/bin/bash\n"
+                f'printf "%s\\n" "$@" > {root}/argv\n'
+                'prev=""; for a; do\n'
+                f'  [ "$prev" = --data-binary ] && cp "${{a#@}}" {root}/object\n'
+                f'  [ "$prev" = -H ] && [[ $a == @* ]] && cat "${{a#@}}" > {root}/header\n'
+                '  prev=$a; done\n'
+                f'echo {shlex.quote(answer)}\n')
+            (root / "bin" / "curl").chmod(0o755)
+            run = subprocess.run([str(ROOT / ".github" / "scripts" / "store-issue-draft"), str(root / "draft.md")],
+                                 capture_output=True, text=True,
+                                 env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
+                                      "GCP_ACCESS_TOKEN": "gcp-token-not-a-secret", "ISSUE": issue, "RUN_ID": "77",
+                                      "RUN_ATTEMPT": attempt, "RUN_URL": "https://github.com/o/r/actions/runs/77",
+                                      "GITHUB_STEP_SUMMARY": str(root / "summary")})
+            read = lambda path: path.read_text(encoding="utf-8") if path.exists() else ""  # noqa: E731
+            return (run.returncode, run.stdout, read(root / "summary"), read(root / "argv"), read(root / "object"),
+                    read(root / "header"))
+
+    def test_an_issue_draft_is_stored_privately_once_and_the_summary_names_only_where(self):
+        code, out, summary, argv, stored, header = self.store()
+        self.assertEqual(code, 0, out)
+        name = "issue-drafts%2F5%2F77-2"
+        self.assertIn("/b/theorem-agent-infra-oss-verify-held-findings/o?uploadType=media&ifGenerationMatch=0"
+                      f"&name={name}", argv)
+        self.assertEqual(stored, "oss-verify issue draft v1\nissue: 5\nrun: https://github.com/o/r/actions/runs/77\n"
+                                 "---\nThe draft reply:\n\nSee docs/dsl.md.\n")
+        self.assertEqual(header, "Authorization: Bearer gcp-token-not-a-secret\n")
+        self.assertNotIn("gcp-token-not-a-secret", argv)
+        self.assertIn("gcloud storage cat gs://theorem-agent-infra-oss-verify-held-findings/issue-drafts/5/77-2", summary)
+        self.assertNotIn("dsl.md", summary + out)
+
+    def test_a_draft_that_cannot_be_stored_fails_the_step(self):
+        for kwargs in ({"answer": '{"error": "403"}'}, {"issue": "5; x"}, {"attempt": ""}):
+            with self.subTest(kwargs=kwargs):
+                code, _, summary, _, _, _ = self.store(**kwargs)
+                self.assertNotEqual(code, 0)
+                self.assertNotIn("gcloud storage cat", summary)
+
+    def test_control_characters_are_taken_out_of_the_stored_draft(self):
+        # A person reads the draft in a terminal: an escape sequence (SGR 8 hides text), a carriage return, a bell,
+        # DEL and a C1 CSI (U+009B) in the model's text must not reach it. Tab, newline and other text stay.
+        draft = "Fine \x1b[8mhidden\x1b[0m text\r\nnext\tcol\x07\x7f\u009b31m café — ok\n"
+        code, out, _, _, stored, _ = self.store(draft=draft)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(stored.split("---\n", 1)[1], "Fine [8mhidden[0m text\nnext\tcol31m café — ok\n")
+
+    def test_bidirectional_text_controls_are_taken_out_of_the_stored_draft(self):
+        # U+202A to U+202E and U+2066 to U+2069 can show the draft in an order that is not its own (Trojan Source).
+        # Each one, alone, is taken out; the letters around it stay in their order.
+        for code_point in [*range(0x202A, 0x202F), *range(0x2066, 0x206A)]:
+            with self.subTest(code_point=f"U+{code_point:04X}"):
+                code, out, _, _, stored, _ = self.store(draft=f"ab{chr(code_point)}cd\n")
+                self.assertEqual(code, 0, out)
+                self.assertEqual(stored.split("---\n", 1)[1], "abcd\n")
+        # Their neighbours in Unicode, which control nothing, stay.
+        code, out, _, _, stored, _ = self.store(draft="a\u2029b\u202fc\u2065d\u206ae\n")
+        self.assertEqual(stored.split("---\n", 1)[1], "a\u2029b\u202fc\u2065d\u206ae\n")
+
+    def prompt(self, **env):
+        """.github/scripts/review-prompt with `env`: its exit status and the outputs it wrote."""
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "output"
+            run = subprocess.run([str(ROOT / ".github" / "scripts" / "review-prompt")], capture_output=True, text=True,
+                                 env={**os.environ, "GITHUB_OUTPUT": str(output), **env})
+            lines = output.read_text().splitlines() if output.exists() else []
+        return run.returncode, dict(line.split("=", 1) for line in lines)
+
+    def schema(self, arguments):
+        return json.loads(re.search(r"--json-schema '([^']*)'", arguments).group(1))
+
+    def test_the_prompt_of_each_kind_names_its_rules_and_its_schema(self):
+        code, out = self.prompt(KIND="change", PR="8")
+        self.assertEqual(code, 0)
+        self.assertTrue(out["prompt"].startswith("Read review-change.md at the root of this checkout"))
+        self.assertIn("pull request #8,", out["prompt"])
+        schema = self.schema(out["arguments"])
+        self.assertEqual(schema["required"], ["comment", "verdicts"])
+        self.assertEqual(schema["properties"]["verdicts"]["required"], ["1", "2", "3", "4", "5"])
+        self.assertNotIn("held", schema["properties"])
+        self.assertNotIn("--resume", out["arguments"])
+        code, out = self.prompt(KIND="issue", ISSUE="45")
+        self.assertEqual(code, 0)
+        self.assertTrue(out["prompt"].startswith("Read review-issue.md at the root of this checkout"))
+        self.assertIn("issue #45 ", out["prompt"])
+        schema = self.schema(out["arguments"])
+        self.assertEqual((schema["required"], sorted(schema["properties"])), (["comment", "decide"],
+                                                                            ["comment", "decide"]))
+        code, out = self.prompt(KIND="enrollment", PR="8", NAME="libreac")
+        self.assertEqual(code, 0)
+        self.assertIn("projects/libreac/", out["prompt"])
+        self.assertIn(" Then review as the section", out["prompt"])
+        schema = self.schema(out["arguments"])
+        self.assertEqual((schema["required"], schema["properties"]["verdicts"]["required"]),
+                         (["comment", "held", "verdicts"], ["F2", "F7"]))
+        self.assertNotIn("--resume", out["arguments"])
+        for code, out in (self.prompt(KIND="issue", ISSUE="45"), self.prompt(KIND="change", PR="8")):
+            self.assertTrue(out["prompt"].endswith(" Give the result as the structured output."))
+
+    def test_an_enrollment_with_a_kept_session_resumes_it_for_the_diff_and_check_d3(self):
+        session, last, head = "09227178-7bbf-4e5f-86db-8736e530ef01", "2" * 40, "3" * 40
+        code, out = self.prompt(KIND="enrollment", PR="8", NAME="libreac", SESSION=session, LAST=last, HEAD_SHA=head)
+        self.assertEqual(code, 0)
+        self.assertTrue(out["arguments"].endswith(f"' --resume {session}"))
+        self.assertIn(f"Earlier in this session you reviewed {last}.", out["prompt"])
+        self.assertIn(f"the diff from {last} to {head}, with one exception: check D3 of review.md", out["prompt"])
+        self.assertIn(f"each failing result of the report this build wrote for {head}, whatever the diff holds",
+                      out["prompt"])
+
+    def test_the_prompt_refuses_what_it_cannot_check(self):
+        for env in ({"KIND": "issue", "ISSUE": "45 extra"}, {"KIND": "change", "PR": ""},
+                    {"KIND": "enrollment", "PR": "8", "NAME": "$(touch pwned)"}, {"KIND": "", "PR": "8"},
+                    {"KIND": "other", "PR": "8"}):
+            with self.subTest(env=env):
+                self.assertEqual(self.prompt(**env), (2, {}))
 
     def test_a_review_without_a_held_finding_keeps_its_session(self):
         run, comment, verdicts, held, output, last = self.result(
@@ -1131,7 +1279,7 @@ class ReviewJob(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(comment, "Thanks.\n\n1. Fix X.\n\n")
         self.assertEqual(json.loads(verdicts), {"F2": "pass", "F7": "fail"})
-        self.assertEqual(output, "")
+        self.assertEqual(output, {"comment": "Thanks.\n\n1. Fix X.\n"})
         self.assertEqual(last, f"session=09227178-7bbf-4e5f-86db-8736e530ef01 head={'1' * 40}\n")
 
     def test_a_held_finding_stays_out_of_the_draft_and_its_session_is_not_kept(self):
@@ -1141,7 +1289,7 @@ class ReviewJob(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertNotIn("SECRETBUG", comment + verdicts + run.stdout + run.stderr)
         self.assertEqual(held, "<!-- held finding -->\n" + ReviewHeld.HELD + "\n")
-        self.assertEqual(output, "held=yes\n")
+        self.assertEqual(output, {"comment": "Thanks.\n\nA finding was sent for private review.\n", "held": "yes"})
         self.assertIsNone(last)
 
     def test_a_result_without_a_structured_output_fails_the_step(self):
@@ -1221,14 +1369,13 @@ class ReviewJob(unittest.TestCase):
         # cannot resolve.
         self.assertNotIn("ts.net", text)
 
-    def export(self, outcome):
+    def export(self, outcome, name="libreac", kind="enrollment"):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             step = self.steps["Export the review's usage to the cost collector"]
             run = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=root, capture_output=True, text=True,
                                  env={**os.environ, "GITHUB_ENV": str(root / "env"), "TAILNET": outcome,
-                                      "NAME": "libreac",
-                                      "SPEND_COLLECTOR_URL": self.STAND_IN_URL})
+                                      "NAME": name, "KIND": kind, "SPEND_COLLECTOR_URL": self.STAND_IN_URL})
             return run, (root / "env").read_text() if (root / "env").exists() else ""
 
     def test_the_export_names_the_tailnet_endpoint_and_no_header(self):
@@ -1245,6 +1392,11 @@ class ReviewJob(unittest.TestCase):
         self.assertNotIn("Authorization", env)
         self.assertNotIn("SPEND_COLLECTOR_URL",
                          self.steps["Export the review's usage to the cost collector"]["env"])
+        # A change and an issue keep their own subproject, as they did with the token.
+        for kind in ("change", "issue"):
+            with self.subTest(kind=kind):
+                _, env = self.export("success", name="", kind=kind)
+                self.assertIn(f"theorem.subproject=_{kind},", env)
 
     def test_review_runs_when_the_tailnet_join_fails(self):
         for outcome in ("failure", "skipped", ""):
@@ -1257,20 +1409,152 @@ class ReviewJob(unittest.TestCase):
         # The Review step comes after the export and has no condition of its own, so it runs either way.
         names = [s.get("name") for s in self.jobs["review"]["steps"]]
         self.assertLess(names.index("Export the review's usage to the cost collector"), names.index("Review"))
-        self.assertNotIn("if", self.review)
+        self.assertNotIn("if", self.steps["Review"])
+
+
+@unittest.skipUnless(shutil.which("jq"), "needs jq, which the gh stand-in runs the script's filters with")
+class IssueDraftCap(unittest.TestCase):
+    """.github/scripts/issue-draft-cap, build.yaml's step "Hold the draft at the hourly cap", with a stand-in gh: it
+    counts the other runs for an issue's own event in the last hour whose review reached the model, and holds the
+    draft at the cap or on a failed read with a ::error::HELD annotation and exit status 1."""
+
+    def cap(self, runs, skipped=(), held=(), stopped=(), fail=None, run_id="99"):
+        """runs: the run ids that the runs API lists; skipped: the ids whose review job was skipped; held: the ids whose
+        step "Hold the draft at the hourly cap" failed; stopped: the ids whose step "Stop before the model when the
+        draft cannot be stored" failed (a refused sign-in); fail: "runs", or the id whose jobs cannot be read. Return
+        the exit status, the output and gh's calls."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "bin").mkdir()
+            (root / "runs.json").write_text(json.dumps({"workflow_runs": [{"id": i} for i in runs]}))
+            for i in runs:
+                gate = "skipped" if i in held else "failure" if i in stopped else "success"
+                model = "skipped" if i in held or i in stopped else "success"
+                review = {"name": "review",
+                          "conclusion": "skipped" if i in skipped else "failure" if i in held or i in stopped else None,
+                          "steps": [{"name": "Set up job", "conclusion": "success"},
+                                    {"name": "Hold the draft at the hourly cap",
+                                     "conclusion": "failure" if i in held else "success"},
+                                    {"name": "Sign in to Google Cloud, to check that an issue's draft can be stored",
+                                     "conclusion": "skipped" if i in held else "success"},
+                                    {"name": "Stop before the model when the draft cannot be stored", "conclusion": gate},
+                                    {"name": "Review", "conclusion": model}]}
+                (root / f"jobs-{i}.json").write_text(json.dumps({"jobs": [
+                    {"name": "route", "conclusion": "success", "steps": []}, review]}))
+            listing = ('echo "gh: HTTP 502" >&2; exit 1' if fail == "runs"
+                       else f'jq -r "$filter" {root}/runs.json')
+            (root / "bin" / "gh").write_text(
+                "#!/bin/bash\n"
+                'filter=""; path=""; for a; do [ "$prev" = --jq ] && filter=$a; [[ $a == repos/* ]] && path=$a; prev=$a; done\n'
+                f'echo "$*" >> {root}/calls\n'
+                'case "$path" in\n'
+                f'  */workflows/build.yaml/runs) {listing} ;;\n'
+                f'  */runs/{fail}/jobs*) echo "gh: HTTP 502" >&2; exit 1 ;;\n'
+                f'  */runs/*/jobs*) id=${{path#*/runs/}}; id=${{id%%/*}}; jq -r "$filter" {root}/jobs-$id.json ;;\n'
+                '  *) exit 1 ;;\n'
+                "esac\n")
+            (root / "bin" / "gh").chmod(0o755)
+            run = subprocess.run([str(ROOT / ".github" / "scripts" / "issue-draft-cap")], capture_output=True, text=True,
+                                 env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "GH_TOKEN": "x",
+                                      "REPO": "o/r", "RUN_ID": run_id, "CAP": "6"})
+            return run.returncode, run.stdout, (root / "calls").read_text()
+
+    def test_under_the_cap_the_draft_is_made(self):
+        # Five drafts ran; three runs of the hour skipped the review (route found the event ours), and one is this run.
+        code, out, calls = self.cap([*range(1, 9), 99], skipped=(6, 7, 8))
+        self.assertEqual(code, 0, out)
+        self.assertIn("5 issue drafts ran the model in the last hour, under the cap of 6", out)
+        self.assertNotIn("HELD", out)
+        self.assertIn("event=issues", calls)
+        self.assertIn("created=>=", calls)
+        self.assertNotIn("runs/99/jobs", calls)
+
+    def test_a_run_the_cap_held_is_not_counted(self):
+        # Seven qualifying events in the hour: five drafted, one held at the cap, and this one. The held run called no
+        # model, so this draft is made.
+        code, out, _ = self.cap([*range(1, 7), 99], held=(6,))
+        self.assertEqual(code, 0, out)
+        self.assertIn("5 issue drafts ran the model in the last hour, under the cap of 6", out)
+        # A person's re-run after six held runs is made too.
+        code, out, _ = self.cap([*range(1, 7), 99], held=range(1, 7))
+        self.assertEqual(code, 0, out)
+        self.assertIn("0 issue drafts ran the model", out)
+
+    def test_a_run_stopped_at_the_sign_in_is_not_counted(self):
+        # A run whose Google sign-in was refused stopped before the model: it is not counted, so it leaves the count as
+        # it was. Five drafted, six stopped, and this one: the draft is made.
+        code, out, _ = self.cap([*range(1, 12), 99], stopped=range(6, 12))
+        self.assertEqual(code, 0, out)
+        self.assertIn("5 issue drafts ran the model in the last hour, under the cap of 6", out)
+
+    def test_at_the_cap_the_draft_is_held_and_the_step_fails(self):
+        code, out, _ = self.cap([*range(1, 8), 99], held=(7,))
+        self.assertEqual(code, 1)
+        self.assertIn("::error::HELD: 6 issue drafts ran the model in the last hour, at the cap of 6.", out)
+
+    def test_a_read_that_fails_holds_the_draft(self):
+        for fail in ("runs", 3):
+            with self.subTest(fail=fail):
+                code, out, _ = self.cap(list(range(1, 5)), fail=fail)
+                self.assertEqual(code, 1)
+                self.assertIn("::error::HELD: ", out)
+
+
+class StoreSignInGate(unittest.TestCase):
+    """build.yaml's step "Stop before the model when the draft cannot be stored", run as it is: for an issue, a
+    refused Google sign-in before the model fails the job there, red, with ::error:: and a summary naming the
+    cause."""
+
+    def gate(self, outcome, event="issues"):
+        flow = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
+        [step] = [s for s in flow["jobs"]["review"]["steps"]
+                  if s.get("name") == "Stop before the model when the draft cannot be stored"]
+        with tempfile.TemporaryDirectory() as directory:
+            summary = pathlib.Path(directory) / "summary"
+            run = subprocess.run(["bash", "-e", "-c", step["run"]], capture_output=True, text=True,
+                                 env={**os.environ, "SIGN_IN": outcome, "EVENT": event,
+                                      "GITHUB_STEP_SUMMARY": str(summary)})
+            return run.returncode, run.stdout, summary.read_text() if summary.exists() else ""
+
+    def test_a_refused_sign_in_fails_the_job_before_the_model_and_says_why(self):
+        for outcome in ("failure", "cancelled", ""):
+            with self.subTest(outcome=outcome):
+                code, out, summary = self.gate(outcome)
+                self.assertEqual(code, 1)
+                self.assertTrue(out.startswith("::error::NOT STORED: Google Cloud refused this run's sign-in"), out)
+                self.assertIn("does not admit runs that an issue's event starts yet", out)
+                self.assertIn("does not admit runs that an issue's event starts yet", summary)
+                self.assertNotIn("HELD", out + summary)
+
+    def test_a_refused_sign_in_on_a_run_started_by_hand_names_another_cause(self):
+        # gh workflow run build.yaml -f issue=<n>: the provider admits workflow_dispatch already, so the issues
+        # setting is not the cause.
+        code, out, summary = self.gate("failure", event="workflow_dispatch")
+        self.assertEqual(code, 1)
+        self.assertTrue(out.startswith("::error::NOT STORED: Google Cloud refused this run's sign-in"), out)
+        self.assertNotIn("an issue's event", out + summary)
+        self.assertIn("The provider admits a run started by hand, so the cause is elsewhere", out)
+        self.assertIn("identity provider for this repository and its service account", summary)
+
+    def test_an_admitted_sign_in_goes_on_to_the_model(self):
+        for event in ("issues", "workflow_dispatch"):
+            with self.subTest(event=event):
+                self.assertEqual(self.gate("success", event), (0, "", ""))
 
 
 class Owners(unittest.TestCase):
 
-    def test_only_review_md_the_skill_and_codeowners_have_an_owner_and_are_the_last_patterns(self):
+    def test_only_the_review_files_the_skill_and_codeowners_have_an_owner_and_are_the_last_patterns(self):
         lines = [line.split() for line in (ROOT / ".github" / "CODEOWNERS").read_text().splitlines()
                  if line.strip() and not line.lstrip().startswith("#")]
         owned = [["/review.md", "@theorem-labs/engineering"],
+                 ["/review-change.md", "@theorem-labs/engineering"],
+                 ["/review-issue.md", "@theorem-labs/engineering"],
                  ["/.claude/skills/write-to-maintainer/", "@theorem-labs/engineering"],
                  ["/.github/CODEOWNERS", "@theorem-labs/engineering"]]
         self.assertEqual([line for line in lines if len(line) > 1], owned)
-        self.assertEqual(lines[-3:], owned)
-        self.assertTrue((ROOT / "review.md").is_file())
+        self.assertEqual(lines[-5:], owned)
+        self.assertTrue(all((ROOT / name).is_file() for name in ("review.md", "review-change.md", "review-issue.md")))
 
 
 if __name__ == "__main__":

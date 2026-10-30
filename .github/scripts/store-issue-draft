@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+#
+# Stores an issue's draft reply, which no one has approved, where only Theorem can read it:
+#
+#   GCP_ACCESS_TOKEN=<ossv-ci's access token> ISSUE=<number> RUN_ID=<id> RUN_ATTEMPT=<n> RUN_URL=<url> \
+#     .github/scripts/store-issue-draft <draft file>
+#
+# build.yaml's review job runs it for an issue (the step "Store the issue draft for a person"). This repository is
+# public: its job summaries are public, and any signed-in GitHub account can download its artifacts, so the draft and
+# what a person decides on it go to neither. They go to the private bucket where the review job leaves a held finding,
+# as the object issue-drafts/<issue>/<run id>-<attempt>, written once by .github/scripts/held-bucket-put. The hold job
+# reads only held/, and the bucket deletes every object 7 days after it is written. The draft is the model's text, which
+# an issue's author can steer, and a person reads it in a terminal: every control character but tab and newline (an
+# escape sequence, a carriage return, a C1 control such as U+009B) and every bidirectional-text control (U+202A to
+# U+202E, U+2066 to U+2069, which can show text in an order that is not its own) is taken out before it is stored. The
+# job summary gets the command a person at Theorem with read access to the bucket reads the draft with, and no text of
+# the draft. A failed write fails the step.
+set -euo pipefail
+draft=${1:?usage: store-issue-draft <draft file>}
+[[ ${ISSUE:-} =~ ^[0-9]+$ && ${RUN_ID:-} =~ ^[0-9]+$ && ${RUN_ATTEMPT:-} =~ ^[0-9]+$ ]] \
+  || { echo "store-issue-draft: ISSUE, RUN_ID or RUN_ATTEMPT is not a number" >&2; exit 2; }
+name="issue-drafts/$ISSUE/$RUN_ID-$RUN_ATTEMPT"
+clean=$(mktemp)
+trap 'rm -f "$clean"' EXIT
+# C0 controls but tab and newline, DEL, the C1 controls as UTF-8 writes them (0xC2 0x80 to 0xC2 0x9F), and the
+# bidirectional-text controls U+202A to U+202E (0xE2 0x80 0xAA to 0xAE) and U+2066 to U+2069 (0xE2 0x81 0xA6 to 0xA9).
+LC_ALL=C tr -d '\000-\010\013-\037\177' < "$draft" \
+  | LC_ALL=C sed 's/\xc2[\x80-\x9f]//g; s/\xe2\x80[\xaa-\xae]//g; s/\xe2\x81[\xa6-\xa9]//g' > "$clean"
+header=$(printf 'oss-verify issue draft v1\nissue: %s\nrun: %s\n---' "$ISSUE" "${RUN_URL:-}")
+generation=$("$(dirname "$0")/held-bucket-put" "$name" "$header" "$clean")
+bucket=theorem-agent-infra-oss-verify-held-findings
+echo "Stored the draft reply to issue #$ISSUE as gs://$bucket/$name, generation $generation."
+{
+  echo "The draft reply to issue #$ISSUE, which no one has approved, is stored where only Theorem can read it:"
+  echo
+  echo "    gcloud storage cat gs://$bucket/$name"
+  echo
+  echo "No job posts it. The bucket deletes it 7 days after this run."
+} >> "${GITHUB_STEP_SUMMARY:-/dev/null}"

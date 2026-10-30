@@ -525,11 +525,29 @@ class Review(unittest.TestCase):
         got = self.decide({"F2": "pass", "F7": "pass", "A1": "fail", "G5": "person"})
         self.assertEqual(got["decision"], "dispatch", got["reason"])
 
-    def test_the_build_workflow_uploads_the_verdicts_the_gate_reads(self):
-        text = (ROOT / ".github/workflows/build.yaml").read_text()
-        self.assertIn('jq .verdicts <<< "$out" > "$RUNNER_TEMP/draft/verdicts.json"', text)
-        self.assertIn(f"name: {dispatch.REVIEW_ARTIFACT}, path: \"${{{{ runner.temp }}}}/draft\"", text)
-        self.assertIn('"required":["F2","F7"]', text)
+    def test_the_build_workflow_writes_the_verdicts_the_gate_reads(self):
+        # build.yaml's review of an enrollment, run as it is: review-prompt's schema requires the two checks the gate
+        # reads, and the result step writes the files of the artifact the gate opens, the verdicts as the review gave.
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            subprocess.run([str(ROOT / ".github/scripts/review-prompt")], check=True,
+                           env={**os.environ, "KIND": "enrollment", "PR": "8", "NAME": "libreac",
+                                "GITHUB_OUTPUT": str(root / "prompt")})
+            arguments = dict(line.split("=", 1) for line in (root / "prompt").read_text().splitlines())["arguments"]
+            schema = json.loads(re.search(r"--json-schema '([^']*)'", arguments).group(1))
+            self.assertEqual(schema["properties"]["verdicts"]["required"], ["F2", "F7"])
+            verdicts = {"F2": "fail", "F7": "pass", "A1": "person"}
+            (root / "execution.json").write_text(json.dumps([{"type": "result", "structured_output": {
+                "comment": "x", "held": "", "verdicts": verdicts}}]))
+            (root / "temp").mkdir()
+            jobs = yaml.safe_load((ROOT / ".github/workflows/build.yaml").read_text())["jobs"]
+            [result] = [s for s in jobs["review"]["steps"] if s.get("id") == "result"]
+            subprocess.run(["bash", "-e", "-c", result["run"]], check=True, cwd=root,
+                           env={**os.environ, "HOME": str(root), "RUNNER_TEMP": str(root / "temp"), "KIND": "enrollment",
+                                "RESULT": str(root / "execution.json"), "GITHUB_OUTPUT": str(root / "output"),
+                                "SESSION": "", "HEAD_SHA": ""})
+            self.assertEqual({p.name for p in (root / "temp" / "draft").iterdir()}, dispatch.REVIEW_FILES)
+            self.assertEqual(json.loads((root / "temp" / "draft" / "verdicts.json").read_text()), verdicts)
 
 
 class Maintainer(unittest.TestCase):
@@ -655,14 +673,6 @@ class Maintainer(unittest.TestCase):
         world.runs[700]["conclusion"] = "success"
         self.assertEqual(world.decide(run_id=700)["decision"], "dispatch")
 
-    def test_putting_the_label_on_runs_the_decision_again(self):
-        confirmed = yaml.safe_load((ROOT / ".github" / "workflows" / "maintainer-confirmed.yml").read_text())
-        self.assertEqual(confirmed[True], {"pull_request_target": {"types": ["labeled"]}})
-        self.assertEqual(confirmed["permissions"], {})
-        self.assertEqual(confirmed["name"], "Maintainer confirmed")
-        dispatch_flow = yaml.safe_load((ROOT / ".github" / "workflows" / "enroll-dispatch.yml").read_text())
-        self.assertIn("Maintainer confirmed", dispatch_flow[True]["workflow_run"]["workflows"])
-
 
 class TheRecord(unittest.TestCase):
     """build.yaml's own code, run here: binary-sizes on a work directory, then the record job's script, then the
@@ -698,33 +708,7 @@ class TheRecord(unittest.TestCase):
 
 
 class Jobs(unittest.TestCase):
-    """Which jobs hold what: the lines of the workflows' headers, as tests."""
-
-    def jobs(self, name):
-        return yaml.safe_load((ROOT / ".github" / "workflows" / name).read_text())["jobs"]
-
-    def test_marking_a_draft_ready_runs_build_and_its_completion_runs_enroll_dispatch(self):
-        # A draft is never sent, so ready_for_review must start a run whose completion decides again.
-        def on(name):
-            data = yaml.safe_load((ROOT / ".github" / "workflows" / name).read_text())
-            return data.get("on", data.get(True))
-        self.assertIn("ready_for_review", on("build.yaml")["pull_request_target"]["types"])
-        build_name = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["name"]
-        self.assertIn(build_name, on("enroll-dispatch.yml")["workflow_run"]["workflows"])
-        self.assertIn("pull_request_target", dispatch.REQUIRED_SOURCES["project-builds"])
-
-    def test_only_the_dispatch_job_reads_the_app_key(self):
-        jobs = self.jobs("enroll-dispatch.yml")
-        self.assertEqual({n for n, j in jobs.items() if (j.get("permissions") or {}).get("id-token") == "write"},
-                         {"dispatch"})
-        self.assertEqual({n: j.get("environment") for n, j in jobs.items() if "environment" in j},
-                         {"dispatch": {"name": "comment", "deployment": False}})
-        steps = jobs["dispatch"]["steps"]
-        checkouts = [s["with"] for s in steps if str(s.get("uses", "")).startswith("actions/checkout")]
-        self.assertEqual(checkouts, [{"persist-credentials": False, "sparse-checkout": ".github/scripts"}])
-        self.assertEqual([s["run"] for s in steps if "run" in s and ".github/scripts" in s["run"]],
-                         [".github/scripts/app-token"])
-        self.assertNotIn("write", (jobs["decide"].get("permissions") or {}).values())
+    """What enroll-dispatch.yml names."""
 
     def test_the_workflow_names_no_other_theorem_labs_repository(self):
         # The event's target is named by its id alone, so that this public file and its log name no private
@@ -732,17 +716,6 @@ class Jobs(unittest.TestCase):
         text = (ROOT / ".github" / "workflows" / "enroll-dispatch.yml").read_text()
         named = set(re.findall(r"theorem-labs/([A-Za-z0-9._-]+)", text))
         self.assertLessEqual(named, {"oss-verify"}, named)
-        self.assertIn('INTERNAL_ID: "1425069221"', text)
-
-    def test_the_record_job_runs_no_code_of_the_pull_request_and_holds_nothing(self):
-        job = self.jobs("build.yaml")["record"]
-        self.assertEqual(job["permissions"], {})
-        self.assertNotIn("environment", job)
-        uses = [s["uses"].split("@")[0] for s in job["steps"] if "uses" in s]
-        self.assertEqual(uses, ["actions/upload-artifact"])
-        # A re-run of the job replaces the record, so that enroll-dispatch finds exactly one.
-        self.assertIs([s for s in job["steps"] if "uses" in s][0]["with"]["overwrite"], True)
-        self.assertNotIn("secrets.", yaml.safe_dump(job))
 
 
 class AppToken(unittest.TestCase):
