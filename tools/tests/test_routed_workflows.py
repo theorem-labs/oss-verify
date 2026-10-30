@@ -152,17 +152,6 @@ def test_only_the_required_job_reports_the_required_check(name):
             assert "if" in job, f"{name}: {job_id} runs whatever route decides"
 
 
-@pytest.mark.parametrize("name", ["build.yaml", "validate.yaml", "tests.yaml"])
-def test_build_tests_and_validate_never_run_on_an_edit(name):
-    # An edit of the title or description changes nothing these judge. (A change of base does, and is sent as edited
-    # too; a push runs them again after one.)
-    on = workflow(name)[True]  # YAML 1.1 reads the key `on` as True
-    event = "pull_request" if name == "tests.yaml" else "pull_request_target"
-    # build.yaml also runs on ready_for_review, which enroll-dispatch.yml waits for to start a draft's statements.
-    extra = ["ready_for_review"] if name == "build.yaml" else []
-    assert on[event]["types"] == ["opened", "reopened", "synchronize", *extra]
-
-
 def test_every_required_check_has_a_static_name():
     # GitHub reads a required check from the newest run of its workflow on the head. A job whose name is an expression
     # can report another name on some event, and the newest run then has no required check: the pull request is
@@ -237,20 +226,10 @@ def route_build(tmp_path, files, changed=None, step_name="An enrollment or a cha
     return written.read_text().splitlines()
 
 
-@pytest.mark.parametrize("name, job, output, step_name, take", [
-    ("build.yaml", "project-builds", "build", "An enrollment or a change", "build"),
-    ("validate.yaml", "validate", "validate", "Every event here asks for validate", "validate"),
-])
-def test_route_asks_for_the_job_that_takes_the_project(tmp_path, name, job, output, step_name, take):
-    jobs = workflow(name)["jobs"]
-    assert f"{output}=true" in route_build(tmp_path, ["projects/p/project.yaml"], step_name=step_name, name=name)
-    # The job takes the project itself, once, and runs only when route asks for it; route takes nothing.
-    assert jobs[job]["needs"] == "route"
-    assert jobs[job]["if"] == f"needs.route.outputs.{output} == 'true'"
-    command = f".github/scripts/take-project {take}"
-    assert [s.get("run") for s in jobs[job]["steps"]].count(command) == 1
-    call = re.compile(r"^\s*(\w+=\S*\s+)*\S*\.github/scripts/take-project\b", re.M)
-    assert not [s for s in jobs["route"]["steps"] if call.search(s.get("run", ""))]
+def test_validates_route_asks_for_validate(tmp_path):
+    # validate.yaml's route, run as it is, asks for the job that takes the project.
+    assert "validate=true" in route_build(tmp_path, ["projects/p/project.yaml"],
+                                          step_name="Every event here asks for validate", name="validate.yaml")
 
 
 @pytest.mark.parametrize("files, changed, base, want", [

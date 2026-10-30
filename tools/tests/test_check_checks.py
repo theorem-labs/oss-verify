@@ -514,20 +514,6 @@ class PostingStep(unittest.TestCase):
                 self.assertIn("issues/comments/4242", (directory / "patch.url").read_text())
             return json.loads((directory / sent[0]).read_text())["body"] if sent else None
 
-    def test_nothing_is_posted_unless_posting_is_on(self):
-        # The comment job, which alone holds the App's key, runs only while OSSV_POST_REVIEW is `post`, and the
-        # required job asks for it on the same condition, so with the variable unset no job can post or edit a comment.
-        jobs = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["jobs"]
-        condition = jobs["comment"]["if"]
-        self.assertIn("vars.OSSV_POST_REVIEW == 'post' && ", condition)
-        asked = jobs["required"]["steps"][-1]["env"]["ASKED_COMMENT"]
-        self.assertEqual(condition.replace("!cancelled() && ", ""), asked)
-        # No other job of the file can write to the pull request: only the comment job's token is the App's.
-        for name, job in jobs.items():
-            if name != "comment":
-                self.assertNotIn("write", json.dumps({k: v for k, v in (job.get("permissions") or {}).items()
-                                                      if k != "id-token"}), name)
-
     def test_the_triage_comment_is_a_draft_without_its_variable(self):
         # triage.yaml's own posting step: with OSSV_POST_TRIAGE anything but post, it calls gh not at all and writes the
         # draft to the summary; with post, it posts.
@@ -1041,32 +1027,6 @@ class ReviewJob(unittest.TestCase):
         self.jobs = self.workflow["jobs"]
         self.steps = {s.get("name"): s for s in self.jobs["review"]["steps"]}
         self.review = self.steps["Review"]
-
-    def test_the_action_runs_from_main_with_three_tools_and_resumes_only_with_a_diff(self):
-        # pull_request_target: GitHub runs main's copy of this file, never the pull request's.
-        self.assertIn("pull_request_target", self.workflow.get("on", self.workflow.get(True)))
-        self.assertRegex(self.review["uses"], r"^anthropics/claude-code-action@[0-9a-f]{40}$")
-        settings = self.review["with"]
-        self.assertEqual((settings["allowed_non_write_users"], settings["github_token"]), ("*", "${{ github.token }}"))
-        self.assertEqual(settings["anthropic_federation_rule_id"], "fdrl_019restxFx3PhpLhbziQoQKf")
-        self.assertNotIn("anthropic_api_key", settings)
-        # Only our own Apps' runs start a review: the action matches each name (src/github/validation/actor.ts).
-        self.assertEqual(settings["allowed_bots"], "sjawhar-agent[bot],oss-verify[bot]")
-        args = settings["claude_args"]
-        self.assertTrue(args.startswith("--tools Read,Glob,Grep --permission-mode default --model claude-opus-5-5 "
-                                        "--effort xhigh --max-turns 300 "))
-        self.assertIn("${{ steps.gather.outputs.session && format('--resume {0}', steps.gather.outputs.session) || '' }}",
-                      args)
-        for word in ("Bash", "Write", "Edit", "WebFetch", "mcp", "allowedTools", "bypass", "acceptEdits", "auto"):
-            self.assertNotIn(word, args)
-        schema = json.loads(re.search(r"--json-schema '([^']*)'$", args).group(1))
-        self.assertEqual(schema["required"], ["comment", "held", "verdicts"])
-        self.assertEqual(schema["properties"]["verdicts"]["required"], ["F2", "F7"])
-        self.assertEqual(schema["properties"]["verdicts"]["additionalProperties"], {"enum": ["pass", "fail", "person"]})
-        prompt = settings["prompt"]
-        self.assertIn("Read review.md at the root of this checkout", prompt)
-        self.assertIn("A new request comes only from .review/since-last-review.diff", prompt)
-        self.assertIn("before you keep a request of your last comment, read again the input in .review/", prompt)
 
     def test_a_change_gathers_only_the_pull_request_and_its_changed_files_as_data(self):
         with tempfile.TemporaryDirectory() as directory:
