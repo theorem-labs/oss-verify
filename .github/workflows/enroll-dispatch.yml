@@ -13,7 +13,9 @@
 #   dispatch  on dispatch: sends the repository_dispatch event enrollment-checked, with the pull request's number,
 #             its head commit and the project, to Theorem's private statements repository (repository id INTERNAL_ID
 #             below; its name is not published), whose enrollment workflow builds the project, writes its facts and
-#             statements, and opens their pull request there, or updates the one open for the project. On label:
+#             statements, and opens their pull request there, or updates the one open for the project; that workflow
+#             puts the label checks-failing on the pull request when a check of its binaries fails, and takes it off
+#             when a later commit's binaries pass their checks; this file does neither. On label:
 #             puts the label on the pull request and sends nothing, so that a person decides: size-review (a plain
 #             binary above 1,000,000 bytes, the line "Up to 1 MB", dispatch://OSSV-141/ask/7c73eb21), language-paused (a
 #             language whose projects are paused for now), name-review (a name the statements repository cannot
