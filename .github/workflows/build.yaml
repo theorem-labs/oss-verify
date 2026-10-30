@@ -51,10 +51,11 @@ name: "Build"
 #            to the disclosure route as a private issue (.github/scripts/review-hold): the review job stores it in a
 #            private bucket that only this job can read, and this job sends every finding stored there, a cancelled
 #            run's too. A finding never reaches a log, an output or an artifact.
-#   comment  while posting is on for the pull request's repository (OSSV_POST_REVIEW is `post` for this one,
-#            OSSV_POST_REVIEW_REPOS names it for another), posts that comment, with the checks' report folded under
-#            it, or replaces the one already there. The comment starts with <!-- oss-verify-review -->, as the triage
-#            comment starts with its own marker, and its second line is the verdict line that the inbound watcher reads:
+#   comment  while posting is on for the pull request's repository (OSSV_POST_REVIEW is `post` for this one, and
+#            route's list post_review_repos names it for another), posts that comment, with the checks' report
+#            folded under it, or replaces the one already there. The comment starts with <!-- oss-verify-review -->,
+#            as the triage comment starts with its own marker, and its second line is the verdict line that the inbound
+#            watcher reads:
 #            <!-- oss-verify-verdict {"head":"<commit>","blocking":[...],"person":[...]} -->, the checks whose verdict
 #            is fail and those left to a person (.github/scripts/review-body; none when the review gave no verdicts).
 #            It never runs for an issue: a person approves the exact text of each reply to an issue before anyone
@@ -201,7 +202,7 @@ name: "Build"
 #   gh workflow run build.yaml -f repo=oss-verify-proofs -f issue=3
 # Such a run reviews that head only while it is the pull request's head, and its title, "Review <repo>#<n> at <head>",
 # is what the next review of that pull request reads (the whole head: an expression cannot cut a string).
-# Its comment is posted only while the variable OSSV_POST_REVIEW_REPOS, comma-separated names, names the repository;
+# Its comment is posted only while route's list post_review_repos names the repository; that list is empty, and
 # OSSV_POST_REVIEW is not read for it. The comment job's token is the oss-verify App's, for that repository alone.
 # Such a run reports a check named project-builds too, but a check from a workflow_dispatch run never satisfies a
 # ruleset's required check (https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks#checks-from-some-workflow-jobs-are-not-evaluated).
@@ -256,6 +257,12 @@ jobs:
       change: ${{ steps.decide.outputs.change }}
       issue: ${{ steps.decide.outputs.issue }}
       sha: ${{ steps.decide.outputs.sha }}
+      # The other repositories whose reviews post a comment, by name, comma-separated. Empty: their reviews are drafts
+      # only (the artifact enroll-review-draft). A name is added by a reviewed pull request, after the stream owner's
+      # yes to posting there: a literal, not a variable, so that only a reviewed pull request changes it. It is a job
+      # output because a job's if: cannot read env; the comment job's if:, its post step's if: and the required job
+      # read it.
+      post_review_repos: ""
     steps:
       - name: An enrollment or a change
         id: decide
@@ -886,12 +893,12 @@ jobs:
     # back, only once the hold job sent it, because the comment says that it was sent. Never for an issue, whatever
     # any variable says: a person approves the exact text of each reply to an issue before anyone posts it.
     # Posting is on for this repository while the variable OSSV_POST_REVIEW is `post`, and for another repository
-    # (build.yaml -f repo=<name>) while OSSV_POST_REVIEW_REPOS, comma-separated names, names it; neither reads the other.
+    # (build.yaml -f repo=<name>) while route's list post_review_repos names it; neither reads the other.
     needs: [route, project-builds, review, hold]
     if: >-
       ${{ !cancelled() && ((!inputs.repo || inputs.repo == 'oss-verify') && vars.OSSV_POST_REVIEW == 'post'
       || inputs.repo && inputs.repo != 'oss-verify'
-      && contains(format(',{0},', vars.OSSV_POST_REVIEW_REPOS), format(',{0},', inputs.repo)))
+      && contains(format(',{0},', needs.route.outputs.post_review_repos), format(',{0},', inputs.repo)))
       && needs.route.outputs.issue != 'true'
       && needs.review.result == 'success' && needs.review.outputs.comment != ''
       && (needs.review.outputs.held_object == '' || needs.hold.result == 'success') }}
@@ -980,7 +987,7 @@ jobs:
         if: >-
           ${{ (!inputs.repo || inputs.repo == 'oss-verify') && vars.OSSV_POST_REVIEW == 'post'
           || inputs.repo && inputs.repo != 'oss-verify'
-          && contains(format(',{0},', vars.OSSV_POST_REVIEW_REPOS), format(',{0},', inputs.repo)) }}
+          && contains(format(',{0},', needs.route.outputs.post_review_repos), format(',{0},', inputs.repo)) }}
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           REPO: ${{ inputs.repo && inputs.repo != 'oss-verify' && format('theorem-labs/{0}', inputs.repo) || github.repository }}
@@ -1050,7 +1057,7 @@ jobs:
           ASKED_COMMENT: >-
             ${{ ((!inputs.repo || inputs.repo == 'oss-verify') && vars.OSSV_POST_REVIEW == 'post'
             || inputs.repo && inputs.repo != 'oss-verify'
-            && contains(format(',{0},', vars.OSSV_POST_REVIEW_REPOS), format(',{0},', inputs.repo)))
+            && contains(format(',{0},', needs.route.outputs.post_review_repos), format(',{0},', inputs.repo)))
             && needs.route.outputs.issue != 'true'
             && needs.review.result == 'success' && needs.review.outputs.comment != ''
             && (needs.review.outputs.held_object == '' || needs.hold.result == 'success') }}
