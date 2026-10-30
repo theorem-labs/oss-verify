@@ -28,7 +28,8 @@
 # it is the head of the newest Build run before RUN_ID whose review job succeeded, of this pull request. For another
 # repository's pull request that is a run started on main and titled `Review <name>#<number> at <head>` (build.yaml's
 # run-name: only someone who can start workflows starts one); for this repository's, a run of its own event
-# (pull_request_target) on its head branch in its head repository. LAST_REVIEW gives the session's id alone.
+# (pull_request_target) on its head branch in its head repository. LAST_REVIEW gives the session's id, which is resumed
+# only when the head LAST_REVIEW names is that head; it is never the source of the head.
 # With ISSUE set, the draft reply to an issue (review-issue.md): only the issue's title, body, author and comments, in
 # issue.json, and nothing else.
 # The runner reads none of its output as a workflow command: the gathered text is the pull request's or the issue's.
@@ -41,7 +42,9 @@ out=${1:?usage: review-gather <directory>}
 # Run a command, and keep its standard output and error in a file, whatever its status.
 keep() { local file=$1; shift; { "$@"; echo "(exit status $?)"; } > "$out/$file" 2>&1; }
 # The head that the newest earlier Build run of this change's pull request reviewed, its review job a success, from the
-# runs API alone (the header above); nothing when there is none. At most 10 runs are looked at.
+# runs API alone (the header above); nothing when there is none. It reads one page, the 100 newest Build runs of the
+# event (and of the head branch, for this repository's pull request), and looks at 10 of them at most: a pull request
+# whose last review is older than that gets a fresh review.
 reviewed_head() {
   local runs id head tried=0 ref="" fork="" title
   [[ ${RUNS_REPO:-} =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ && ${RUN_ID:-} =~ ^[0-9]+$
@@ -101,9 +104,13 @@ if [ -z "$NAME" ]; then
       2> /dev/null || rm -f "$out/head/$path"
   done
   reviewed=$(reviewed_head)
-  session=$(sed -n 's/^session=\([0-9a-f-]\{36\}\) head=[0-9a-f]\{40\}$/\1/p' "${LAST_REVIEW:-/nonexistent}" \
-    2> /dev/null | head -n 1)
-  if [[ -n $reviewed && -n $session && ${HEAD_SHA:-} =~ ^[0-9a-f]{40}$ ]]; then
+  # The cache's file gives the session's id, and its head must be the one the runs API gave: a session kept for
+  # another head (a review whose save did not happen, an older run's entry) is not the session of that review.
+  read -r session kept < <(sed -n 's/^session=\([0-9a-f-]\{36\}\) head=\([0-9a-f]\{40\}\)$/\1 \2/p' \
+    "${LAST_REVIEW:-/nonexistent}" 2> /dev/null | head -n 1)
+  if [[ -n $reviewed && -n ${session:-} && ${kept:-} != "$reviewed" ]]; then
+    echo "review-gather: the session in the cache was kept for $kept, not $reviewed: the review is fresh"
+  elif [[ -n $reviewed && -n ${session:-} && ${HEAD_SHA:-} =~ ^[0-9a-f]{40}$ ]]; then
     status=$(gh api "repos/$REPO/compare/$reviewed...$HEAD_SHA" --jq .status 2> /dev/null) || status=""
     if [ "$status" = ahead ]; then
       keep since-last-review.diff gh api -H 'Accept: application/vnd.github.diff' "repos/$REPO/compare/$reviewed...$HEAD_SHA"

@@ -175,7 +175,8 @@ name: "Build"
 # A change review keeps its session the same way under review-<repo>-<number>-<run id>-<attempt> (repo oss-verify on
 # this repository's pull requests), for context only: review-gather takes the commit its last review reviewed from the
 # runs API, never from ossv-last-review, and the review judges checks 4 and 5 on the whole diff again
-# (.github/scripts/review-gather). Of the cached file it reads the session's id alone.
+# (.github/scripts/review-gather). Of the cached file it takes the session's id, and resumes that session only when
+# the head the file names is the commit the runs API gave.
 # Only the review job can act as ossv-ci: that comes with the environment enroll-review. Its deployment branch rule,
 # declared in Theorem's infrastructure code, allows main alone; GitHub checks it against the run's ref, which is main
 # for pull_request_target and refs/pull/<n>/merge for a pull request's own run

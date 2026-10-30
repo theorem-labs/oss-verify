@@ -51,14 +51,18 @@ jobs:
         run: |
           set -euo pipefail
           owner=${REPO%%/*}
-          # waits <repository> <issue> <title of its Build run>: whether the issue waits for us, or why not.
+          # waits <repository> <issue> <title of its Build run>: whether the issue waits for us, or why not. It is
+          # called as `waits ... || continue`, where bash ignores set -e in its body, so each read that fails exits
+          # the step itself: a read that GitHub does not answer never reads as an issue that waits.
           waits() {
             local message at login association runs
             # The last message: the last comment, or the issue's text when it has none. Time, author, association.
             message=$(gh api --paginate "repos/$1/issues/$2/comments?per_page=100" \
-              --jq '.[] | "\(.created_at)\t\(.user.login)\t\(.author_association)"' | tail -n 1)
-            [ -n "$message" ] || message=$(gh api "repos/$1/issues/$2" \
-              --jq '"\(.created_at)\t\(.user.login)\t\(.author_association)"')
+              --jq '.[] | "\(.created_at)\t\(.user.login)\t\(.author_association)"' | tail -n 1) || exit 1
+            if [ -z "$message" ]; then
+              message=$(gh api "repos/$1/issues/$2" --jq '"\(.created_at)\t\(.user.login)\t\(.author_association)"') \
+                || exit 1
+            fi
             IFS=$'\t' read -r at login association <<< "$message"
             case "$login:$association" in
               "oss-verify[bot]:"* | "sjawhar-agent[bot]:"* | *:MEMBER | *:OWNER)
@@ -68,7 +72,7 @@ jobs:
             runs=$(gh api --method GET --paginate "repos/$REPO/actions/workflows/build.yaml/runs" \
               -f event=workflow_dispatch -f created=">=$at" -F per_page=100 \
               --jq ".workflow_runs[] | select(.event == \"workflow_dispatch\" and .display_title == \"$3\"
-                and .created_at > \"$at\") | .id")
+                and .created_at > \"$at\") | .id") || exit 1
             if [ -n "$runs" ]; then echo "$3: a Build run was made after its last message."; return 1; fi
           }
           # start <title> <inputs>...: one Build run, on main.
@@ -77,13 +81,15 @@ jobs:
             started=$((started + 1))
             echo "$1: started a Build run." | tee -a "$GITHUB_STEP_SUMMARY"
           }
-          # This repository's open issues; GitHub lists pull requests as issues too.
+          # A repository's open issues, without its pull requests, which GitHub lists as issues too.
           open_issues() {
             gh api --paginate "repos/$1/issues?state=open&per_page=100" --jq '.[] | select(.pull_request == null) | .number'
           }
 
           started=0
-          for number in $(open_issues "$REPO"); do
+          # Each list is read whole before its loop, so a listing that fails fails the step and never reads as none.
+          issues=$(open_issues "$REPO")
+          for number in $issues; do
             [[ $number =~ ^[0-9]+$ ]] || continue
             if (( started >= CAP )); then echo "The cap of $CAP runs for each sweep is reached."; break; fi
             waits "$REPO" "$number" "Issue $number" || continue
@@ -92,7 +98,11 @@ jobs:
 
           [ -n "${OTHERS:-}" ] || exit 0
           # The titles of the Build runs started by hand in the last 30 days: a head with a review among them waits no
-          # more. A pull request of this repository can take any title, so only runs started by hand count.
+          # more. A pull request of this repository can take any title, so only runs started by hand count. Two limits
+          # bound this look back: the 30 days, and the runs API, which gives at most 1,000 runs for a query with
+          # `created` or `event` (https://docs.github.com/en/rest/actions/workflow-runs, "List workflow runs for a
+          # workflow"; waits' read above has the same limit). Past either, a head that was reviewed, or an issue with a
+          # run after its last message, is started again, at most CAP runs for each repository and sweep.
           since=$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%SZ)
           reviewed=$(gh api --method GET --paginate "repos/$REPO/actions/workflows/build.yaml/runs" \
             -f event=workflow_dispatch -f created=">=$since" -F per_page=100 \
@@ -102,6 +112,7 @@ jobs:
             started=0 capped=false
             pulls=$(gh api --paginate "repos/$owner/$name/pulls?state=open&per_page=100" \
               --jq '.[] | "\(.number)\t\(.head.sha)"')
+            issues=$(open_issues "$owner/$name")
             while IFS=$'\t' read -r number head; do
               [[ $number =~ ^[0-9]+$ && $head =~ ^[0-9a-f]{40}$ ]] || continue
               if (( started >= CAP )); then capped=true; break; fi
@@ -110,7 +121,7 @@ jobs:
               start "$title" -f repo="$name" -f pr="$number" -f head="$head"
             done <<< "$pulls"
             if [ "$capped" = false ]; then
-              for number in $(open_issues "$owner/$name"); do
+              for number in $issues; do
                 [[ $number =~ ^[0-9]+$ ]] || continue
                 if (( started >= CAP )); then capped=true; break; fi
                 waits "$owner/$name" "$number" "Issue $name#$number" || continue

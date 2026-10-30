@@ -21,6 +21,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import check_checks  # noqa: E402
 import check_records  # noqa: E402
 import validate  # noqa: E402
+from workflow_expressions import evaluate  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -1223,7 +1224,6 @@ class ReviewJob(unittest.TestCase):
         same = ("anthropic_federation_rule_id", "anthropic_organization_id", "anthropic_service_account_id",
                 "anthropic_workspace_id", "github_token", "allowed_non_write_users")
         self.assertEqual({k: change["with"][k] for k in same}, {k: self.review["with"][k] for k in same})
-        from test_routed_workflows import evaluate
         for inputs in ({}, {"repo": "oss-verify", "pr": 7}):
             self.assertEqual(evaluate(change["with"]["allowed_bots"], {"inputs": inputs}),
                              self.review["with"]["allowed_bots"])
@@ -1280,7 +1280,6 @@ class ReviewJob(unittest.TestCase):
         self.assertEqual({k: issue["with"][k] for k in same}, {k: self.review["with"][k] for k in same})
         # The sweep's runs are github-actions[bot]'s: the issue step admits it; on this repository's runs, no other.
         self.assertEqual(issue["with"]["allowed_bots"], self.review["with"]["allowed_bots"] + ",github-actions[bot]")
-        from test_routed_workflows import evaluate
         for inputs in ({}, {"repo": "oss-verify", "pr": 7}):
             self.assertNotIn("github-actions", evaluate(self.steps["Review the change"]["with"]["allowed_bots"],
                                                         {"inputs": inputs}))
@@ -1513,7 +1512,6 @@ else:
                 "display_title": title, "head_sha": "9" * 40, "head_repository": {"full_name": "theorem-labs/oss-verify"}}
 
     def test_a_change_review_restores_its_session_by_repository_and_number(self):
-        from test_routed_workflows import evaluate
         key = self.jobs["review"]["env"]["CHANGE_KEY"]
         self.assertEqual(key, "review-${{ inputs.repo || 'oss-verify' }}-"
                               "${{ github.event.pull_request.number || inputs.pr }}-")
@@ -1546,7 +1544,7 @@ else:
 
     def test_last_comes_from_the_runs_api_not_the_cache(self):
         name = "rocq-linux-process-semantics"
-        cached = f"session={self.SESSION} head={self.CACHED}\n"
+        cached = f"session={self.SESSION} head={self.LAST}\n"
         runs = [self.dispatched(950, f"Review {name}#34 at {'3' * 40}"),  # made after this run
                 self.dispatched(900, f"Review {name}#34 at {self.HEAD}"),  # this run
                 self.dispatched(890, f"Review {name}#34 at {self.FAILED}"),  # its review failed
@@ -1564,8 +1562,6 @@ else:
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(output, f"session={self.SESSION}\nlast={self.LAST}\n")
         self.assertEqual(since, f"diff from {self.LAST} to {self.HEAD}\n(exit status 0)\n")
-        # The head the cache names is never read.
-        self.assertFalse([c for c in calls if self.CACHED in json.dumps(c)])
         # The session itself comes from the cache: with no cache entry, the review is fresh.
         self.assertEqual(self.gather_change(f"theorem-labs/{name}", runs, reviews, None, ahead=(self.LAST,))[1], "")
         # No earlier review that succeeded: fresh, whatever head the cache names.
@@ -1584,8 +1580,22 @@ else:
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(output, f"session={self.SESSION}\nlast={self.LAST}\n")
 
+    def test_a_session_kept_for_another_head_is_not_resumed(self):
+        # The runs API names the head the last review reviewed; the session in the cache was kept for another head (the
+        # save of that review did not happen, or the cache holds an older run's session). It is not resumed, and the
+        # head the cache names is never read.
+        name = "rocq-linux-process-semantics"
+        runs = [self.dispatched(860, f"Review {name}#34 at {self.LAST}")]
+        run, output, since, _, calls = self.gather_change(
+            f"theorem-labs/{name}", runs, {860: "success"}, f"session={self.SESSION} head={self.CACHED}\n",
+            ahead=(self.LAST, self.CACHED))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual((output, since), ("", None))
+        self.assertIn(f"the session in the cache was kept for {self.CACHED}, not {self.LAST}: the review is fresh",
+                      run.stdout)
+        self.assertFalse([c for c in calls if self.CACHED in json.dumps(c) or "/compare/" in json.dumps(c)])
+
     def test_checks_4_and_5_read_the_whole_diff_against_main(self):
-        from test_routed_workflows import evaluate
         prompt = self.steps["Review the change"]["with"]["prompt"]
         self.assertIn("Read review-change.md at the root of this checkout", prompt)
         env = {"PR": "34", "REPO": "theorem-labs/rocq-linux-process-semantics", "HEAD_SHA": self.HEAD}
@@ -1637,10 +1647,11 @@ class Sweep(unittest.TestCase):
         self.assertFalse([s for s in self.job["steps"] if "uses" in s])
         self.assertEqual(self.job["steps"][0]["env"]["CAP"], 3)
 
-    def sweep(self, issues, comments, runs):
+    def sweep(self, issues, comments, runs, fail=""):
         """issues: {number: (created_at, login, association)} for the issue's text, None for a pull request;
-        comments: {number: [(created_at, login, association)]}; runs: [(display_title, created_at)]. Return the issues
-        it started a run for, and its output."""
+        comments: {number: [(created_at, login, association)]}; runs: [(display_title, created_at)]; fail: a bash
+        pattern of the API paths that GitHub does not answer, when the step must fail. Return the issues it started a
+        run for, and its output."""
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             (root / "bin").mkdir()
@@ -1661,6 +1672,7 @@ class Sweep(unittest.TestCase):
                 'filter=""; path=""; for a; do [ "$prev" = --jq ] && filter=$a\n'
                 '  [[ $a == repos/* ]] && path=${path:-$a}; prev=$a; done\n'
                 f'cd {root}\n'
+                + (f'case "$path" in {fail}) echo "gh: HTTP 502" >&2; exit 1 ;; esac\n' if fail else "") +
                 'case "$path" in\n'
                 '  "") [ "$1 $2" = "workflow run" ] && echo "$*" >> started ;;\n'
                 '  repos/o/r/issues\\?*) jq -r "$filter" issues.json ;;\n'
@@ -1676,7 +1688,10 @@ class Sweep(unittest.TestCase):
                                  env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "GH_TOKEN": "x",
                                       "REPO": "o/r", "CAP": str(step["env"]["CAP"]),
                                       "GITHUB_STEP_SUMMARY": str(root / "summary")})
-            self.assertEqual(run.returncode, 0, run.stderr)
+            if fail:
+                self.assertNotEqual(run.returncode, 0, run.stdout)
+            else:
+                self.assertEqual(run.returncode, 0, run.stderr)
             started = (root / "started").read_text().splitlines() if (root / "started").exists() else []
             prefix = "workflow run build.yaml --repo o/r --ref main -f issue="
             self.assertTrue(all(s.startswith(prefix) for s in started))
@@ -1707,6 +1722,18 @@ class Sweep(unittest.TestCase):
         self.assertEqual(started, [1, 2, 3])
         self.assertIn("The cap of 3 runs for each sweep is reached.", out)
 
+    def test_a_failed_read_stops_the_sweep_and_starts_nothing(self):
+        # A read that GitHub does not answer (a 5xx, a rate limit) fails the step: it never reads as an issue that
+        # waits, nor as no open issue. The comments' read does not fall back to the issue's text, which would hide our
+        # newer reply. Issue 1's last message is ours; issue 2 has no comment.
+        someone = ("2026-10-01T10:00:00Z", "alice", "NONE")
+        ours = {1: [("2026-10-01T11:00:00Z", "oss-verify[bot]", "NONE")]}
+        for fail in ("repos/o/r/actions/workflows/build.yaml/runs", "repos/o/r/issues/*/comments*",
+                     "repos/o/r/issues\\?*"):
+            with self.subTest(fail=fail):
+                started, _ = self.sweep({1: someone, 2: someone}, ours, [], fail=fail)
+                self.assertEqual(started, [])
+
     # A stand-in for gh: `gh workflow run` is recorded; `gh api` is answered from state.json by its path without the
     # query, with the script's own --jq filter applied by the real jq.
     GH = r'''#!@@PYTHON@@
@@ -1719,6 +1746,8 @@ if a[:2] == ["workflow", "run"]:
     sys.exit(0)
 state = json.loads((root / "state.json").read_text())
 path = next(x for x in a if x.startswith("repos/")).split("?")[0]
+if path in state["fail"]:
+    sys.exit("gh: HTTP 502")
 if path not in state:
     sys.exit(f"unexpected gh {' '.join(a)}")
 sys.stdout.flush()
@@ -1726,18 +1755,20 @@ sys.stdout.buffer.write(subprocess.run(["jq", "-r", a[a.index("--jq") + 1]], inp
                                        capture_output=True, check=True).stdout)
 '''
 
-    def sweep_others(self, pulls, issues, runs):
+    def sweep_others(self, pulls, issues, runs, fail=()):
         """The other repositories' sweep: pulls {name: [(number, head)]}, issues {name: {number: (created_at, login,
         association)}}, each with no comment, runs [(display_title, created_at, event)]; this repository has no open
-        issue. Return the inputs of each run it started, and its output."""
+        issue; fail: the API paths that GitHub does not answer, when the step must fail. Return the inputs of each run
+        it started, and its output."""
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             (root / "bin").mkdir()
             message = lambda at, login, association: {"created_at": at, "user": {"login": login},
                                                        "author_association": association}
-            state = {"repos/o/r/issues": [], "repos/o/r/actions/workflows/build.yaml/runs": {"workflow_runs": [
-                {"id": i, "event": event, "display_title": title, "created_at": at}
-                for i, (title, at, event) in enumerate(runs)]}}
+            state = {"fail": list(fail), "repos/o/r/issues": [],
+                     "repos/o/r/actions/workflows/build.yaml/runs": {"workflow_runs": [
+                         {"id": i, "event": event, "display_title": title, "created_at": at}
+                         for i, (title, at, event) in enumerate(runs)]}}
             for name in ("oss-verify-proofs", "rocq-linux-process-semantics"):
                 state[f"repos/o/{name}/pulls"] = [{"number": n, "head": {"sha": sha}} for n, sha in pulls.get(name, [])]
                 state[f"repos/o/{name}/issues"] = [{"number": n, "pull_request": {"url": "x"}}
@@ -1755,7 +1786,10 @@ sys.stdout.buffer.write(subprocess.run(["jq", "-r", a[a.index("--jq") + 1]], inp
                                  env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "GH_TOKEN": "x",
                                       "REPO": "o/r", "CAP": str(step["env"]["CAP"]), "OTHERS": step["env"]["OTHERS"],
                                       "GITHUB_STEP_SUMMARY": str(root / "summary")})
-            self.assertEqual(run.returncode, 0, run.stderr)
+            if fail:
+                self.assertNotEqual(run.returncode, 0, run.stdout)
+            else:
+                self.assertEqual(run.returncode, 0, run.stderr)
             started = (root / "started").read_text().splitlines() if (root / "started").exists() else []
             prefix = "workflow run build.yaml --repo o/r --ref main "
             self.assertTrue(all(s.startswith(prefix) for s in started), started)
@@ -1783,6 +1817,18 @@ sys.stdout.buffer.write(subprocess.run(["jq", "-r", a[a.index("--jq") + 1]], inp
         self.assertIn(f"{proofs}: the cap of 3 runs for each sweep is reached.", out)
         self.assertIn(f"Issue {semantics}#41: the last message is ours.", out)
         self.assertNotIn(f"{semantics}: the cap", out)
+
+    def test_a_failed_read_of_another_repository_fails_the_sweep(self):
+        # The pull requests, the issues or an issue's comments of rocq-linux-process-semantics cannot be read: the step
+        # fails, and nothing of that repository is started. oss-verify-proofs, swept first, keeps its run.
+        proofs, semantics = "oss-verify-proofs", "rocq-linux-process-semantics"
+        for fail in (f"repos/o/{semantics}/pulls", f"repos/o/{semantics}/issues",
+                     f"repos/o/{semantics}/issues/40/comments"):
+            with self.subTest(fail=fail):
+                started, _ = self.sweep_others({proofs: [(1, "1" * 40)]},
+                                               {semantics: {40: ("2026-10-01T10:00:00Z", "alice", "NONE")}}, [],
+                                               fail=(fail,))
+                self.assertEqual(started, [f"-f repo={proofs} -f pr=1 -f head={'1' * 40}"])
 
 
 if __name__ == "__main__":
