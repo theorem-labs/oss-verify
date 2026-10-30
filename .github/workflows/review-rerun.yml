@@ -38,6 +38,9 @@ name: "Review re-run"
 # https://docs.github.com/en/actions/reference/workflows-and-actions/contexts).
 # The cost in GitHub Actions: one job of a few seconds for each failed Build run of a pull request, and for each re-run
 # one more review and the jobs after it, at most two for one Build run. Nothing runs on a schedule.
+# So nothing would try this again but the job itself: the jobs read and the re-run are each tried up to four
+# times in their job, 15, 30 and 60 s apart. After the fourth failed try the job fails, and its summary names the Build
+# run that is not re-run.
 # No job checks out anything or runs code of a pull request. Only the run's id and attempt reach a shell.
 on:
   workflow_call:
@@ -53,7 +56,8 @@ jobs:
       && github.event.workflow_run.event == 'pull_request_target'
       && github.event.workflow_run.conclusion == 'failure'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Four tries of the jobs read at most, with 105 s of waits.
+    timeout-minutes: 10
     permissions:
       actions: read   # the jobs of the attempt that completed
     outputs:
@@ -70,10 +74,29 @@ jobs:
           set -euo pipefail
           [[ $RUN_ID =~ ^[0-9]+$ && $RUN_ATTEMPT =~ ^[0-9]+$ ]] \
             || { echo "::error::The completed run's id or attempt is not a number."; exit 1; }
+          # A call to GitHub that fails (a fault of its API) is tried again: four tries, 15, 30 and 60 s apart. Only a
+          # try that succeeds gives its output. After the fourth try the job fails, and its summary names the Build run.
+          try() {
+            local wait out n=1
+            for wait in 15 30 60; do
+              if out=$("$@"); then [ -z "$out" ] || printf '%s\n' "$out"; return 0; fi
+              echo "Try $n of 4 failed; the next in $wait s." >&2
+              sleep "$wait"
+              n=$((n + 1))
+            done
+            out=$("$@") || return 1
+            [ -z "$out" ] || printf '%s\n' "$out"
+          }
+          fail() {
+            echo "::error::Build run $RUN_ID: could not $1 after 4 tries, so it is not re-run."
+            echo "Build run $RUN_ID: could not $1 after 4 tries, so it is not re-run." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
           # The jobs of the attempt that completed: GitHub lists each job of the run, a job this attempt did not run
           # again with its earlier result. The review job has no name of its own; project-builds' job is named build.
-          conclusions=$(gh api "repos/$REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs?per_page=100" \
-            --jq '[.jobs[] | {(.name): .conclusion}] | add // {} | "\(.review // "none") \(.build // "none")"')
+          conclusions=$(try gh api "repos/$REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs?per_page=100" \
+            --jq '[.jobs[] | {(.name): .conclusion}] | add // {} | "\(.review // "none") \(.build // "none")"') \
+            || fail "read the jobs of attempt $RUN_ATTEMPT"
           read -r review build <<< "$conclusions"
           case $review in
             failure | cancelled | timed_out) ;;
@@ -96,7 +119,8 @@ jobs:
     needs: decide
     if: needs.decide.outputs.rerun == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Four tries of the re-run at most, with 105 s of waits, after the sign-in and the token.
+    timeout-minutes: 10
     # Gets this job, and no other of this file, the App's key: only a token with this environment's claim may act as
     # the account that reads it, as for enroll-dispatch's dispatch job. deployment: false, so that a run posts no
     # deployment; the claim is in the token either way.
@@ -167,6 +191,23 @@ jobs:
           set -euo pipefail
           [[ $RUN_ID =~ ^[0-9]+$ && $RUN_ATTEMPT =~ ^[0-9]+$ ]] \
             || { echo "::error::The completed run's id or attempt is not a number."; exit 1; }
-          gh run rerun "$RUN_ID" --failed -R "$REPO"
+          # As in the decide job: four tries, 15, 30 and 60 s apart; after the fourth the job fails and says so.
+          try() {
+            local wait out n=1
+            for wait in 15 30 60; do
+              if out=$("$@"); then [ -z "$out" ] || printf '%s\n' "$out"; return 0; fi
+              echo "Try $n of 4 failed; the next in $wait s." >&2
+              sleep "$wait"
+              n=$((n + 1))
+            done
+            out=$("$@") || return 1
+            [ -z "$out" ] || printf '%s\n' "$out"
+          }
+          if ! try gh run rerun "$RUN_ID" --failed -R "$REPO"; then
+            echo "::error::Build run $RUN_ID: could not re-run its failed jobs after 4 tries, so it is not re-run."
+            echo "Build run $RUN_ID: could not re-run its failed jobs after 4 tries, so it is not re-run." \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
           echo "Build run $RUN_ID: its review job failed at attempt $RUN_ATTEMPT; its failed jobs run again, with the" \
             "oss-verify App's token." | tee -a "$GITHUB_STEP_SUMMARY"

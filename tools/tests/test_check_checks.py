@@ -1365,10 +1365,11 @@ class ReviewRerun(unittest.TestCase):
                 "comment": "skipped", "project-builds": "success" if review == "success" else "failure"}
         return {**jobs, **others}
 
-    def decision(self, attempt, jobs, run_id=40, event=None):
+    def decision(self, attempt, jobs, run_id=40, event=None, fails=0, ok=True):
         """Run the decide step for the completion of attempt `attempt` of Build run `run_id`. jobs: {name: conclusion}
-        of that attempt. event: the workflow_run event the runner gives in GITHUB_EVENT_PATH. Return whether it asks
-        for the re-run, its output, its summary and its gh calls."""
+        of that attempt. event: the workflow_run event the runner gives in GITHUB_EVENT_PATH. fails: the first tries of
+        the jobs read that fail, after printing a cut answer. ok: whether the step must succeed. Return whether it asks
+        for the re-run, its output, its summary and its gh calls; self.waits holds the waits it asked sleep for."""
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             (root / "bin").mkdir()
@@ -1382,12 +1383,16 @@ class ReviewRerun(unittest.TestCase):
                 '  [[ $a == repos/* ]] && path=${path:-$a}; prev=$a; done\n'
                 f'cd {root}\n'
                 'echo "gh $*" >> calls\n'
+                'try=$(( $(cat tries 2>/dev/null || echo 0) + 1 )); echo "$try" > tries\n'
+                f'if (( try <= {fails} )); then echo "failure success"; echo "HTTP 502" >&2; exit 1; fi\n'
                 'case "$path" in\n'
                 '  repos/o/r/actions/runs/*/attempts/*/jobs\\?per_page=100) r=${path#repos/o/r/actions/runs/}\n'
                 '    a=${r#*/attempts/}; jq -r "$filter" "jobs-${r%%/*}-${a%%/*}.json" ;;\n'
                 '  *) echo "unexpected gh $*" >&2; exit 1 ;;\n'
                 "esac\n")
             (root / "bin" / "gh").chmod(0o755)
+            (root / "bin" / "sleep").write_text(f'#!/bin/bash\necho "$1" >> {root}/waits\n')
+            (root / "bin" / "sleep").chmod(0o755)
             run = subprocess.run(["bash", "-e", "-c", self.decide_step["run"]], cwd=root, capture_output=True,
                                  text=True, env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
                                                  "GH_TOKEN": "x", "REPO": "o/r", "RUN_ID": str(run_id),
@@ -1395,7 +1400,11 @@ class ReviewRerun(unittest.TestCase):
                                                  "GITHUB_EVENT_PATH": str(root / "event.json"),
                                                  "GITHUB_OUTPUT": str(root / "output"),
                                                  "GITHUB_STEP_SUMMARY": str(root / "summary")})
-            self.assertEqual(run.returncode, 0, run.stderr)
+            if ok:
+                self.assertEqual(run.returncode, 0, run.stderr)
+            else:
+                self.assertNotEqual(run.returncode, 0, run.stdout)
+            self.waits = [int(w) for w in (root / "waits").read_text().split()] if (root / "waits").exists() else []
             self.assertFalse((root / "pwned").exists())
             output = (root / "output").read_text().splitlines() if (root / "output").exists() else []
             self.assertIn(output, ([], ["rerun=true"]))
@@ -1494,6 +1503,63 @@ class ReviewRerun(unittest.TestCase):
                     self.assertNotEqual(run.returncode, 0)
                     self.assertFalse((root / "argv").exists())
                     self.assertFalse((root / "pwned").exists())
+
+    def re_run_step(self, fails, ok=True):
+        """Run the re-run step with a stand-in gh whose first `fails` tries fail. Return its result, the gh calls, the
+        waits it asked sleep for, and its summary."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "bin").mkdir()
+            (root / "bin" / "gh").write_text(
+                f'#!/bin/bash\ncd {root}\necho "$*" >> calls\n'
+                'try=$(( $(cat tries 2>/dev/null || echo 0) + 1 )); echo "$try" > tries\n'
+                f'if (( try <= {fails} )); then echo "HTTP 502" >&2; exit 1; fi\n')
+            (root / "bin" / "gh").chmod(0o755)
+            (root / "bin" / "sleep").write_text(f'#!/bin/bash\necho "$1" >> {root}/waits\n')
+            (root / "bin" / "sleep").chmod(0o755)
+            run = subprocess.run(["bash", "-e", "-c", self.rerun_step["run"]], cwd=root, capture_output=True,
+                                 text=True, env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
+                                                 "GH_TOKEN": "x", "REPO": "o/r", "RUN_ID": "40", "RUN_ATTEMPT": "1",
+                                                 "GITHUB_STEP_SUMMARY": str(root / "summary")})
+            if ok:
+                self.assertEqual(run.returncode, 0, run.stderr)
+            else:
+                self.assertNotEqual(run.returncode, 0, run.stdout)
+            read = lambda name: (root / name).read_text() if (root / name).exists() else ""
+            return run, read("calls").splitlines(), [int(w) for w in read("waits").split()], read("summary")
+
+    def test_a_failed_call_is_tried_again_and_the_review_is_re_run(self):
+        # A fault of GitHub's API on the jobs read or on the re-run: one or three failed tries, 15, 30 and 60 s apart,
+        # then the call succeeds.
+        for failed in (1, 3):
+            with self.subTest(call="jobs", failed=failed):
+                rerun, out, summary, calls = self.decision(1, self.jobs(), fails=failed)
+                self.assertTrue(rerun)
+                self.assertEqual(self.waits, [15, 30, 60][:failed])
+                self.assertEqual(len(calls.splitlines()), failed + 1)
+            with self.subTest(call="rerun", failed=failed):
+                run, calls, waits, summary = self.re_run_step(failed)
+                self.assertEqual(calls, ["run rerun 40 --failed -R o/r"] * (failed + 1))
+                self.assertEqual(waits, [15, 30, 60][:failed])
+                self.assertEqual(summary.splitlines(), [
+                    "Build run 40: its review job failed at attempt 1; its failed jobs run again, with the oss-verify "
+                    "App's token."])
+        # A failed try's output (here a cut answer that reads as a failed review) is never used.
+        rerun, out, summary, calls = self.decision(1, self.jobs("success"), fails=1)
+        self.assertEqual((rerun, self.waits), (False, [15]))
+
+    def test_four_failed_tries_fail_the_job_and_name_the_build_run(self):
+        # Nothing runs on a schedule, so nothing else would try again: the job fails, and its summary says which Build
+        # run is not re-run.
+        rerun, out, summary, calls = self.decision(1, self.jobs(), fails=4, ok=False)
+        self.assertEqual((rerun, self.waits, len(calls.splitlines())), (False, [15, 30, 60], 4))
+        self.assertEqual(summary.splitlines(),
+                         ["Build run 40: could not read the jobs of attempt 1 after 4 tries, so it is not re-run."])
+        run, calls, waits, summary = self.re_run_step(4, ok=False)
+        self.assertEqual((len(calls), waits), (4, [15, 30, 60]))
+        self.assertEqual(summary.splitlines(),
+                         ["Build run 40: could not re-run its failed jobs after 4 tries, so it is not re-run."])
+        self.assertIn("::error::Build run 40: could not re-run its failed jobs after 4 tries", run.stdout)
 
 
 if __name__ == "__main__":
