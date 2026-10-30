@@ -47,6 +47,13 @@
 # the event (.github/scripts/app-token, which names it by id, so that the public log does not name it; GitHub's
 # repository_dispatch endpoint takes contents: write). It checks out .github/scripts alone and runs app-token alone.
 name: Enroll dispatch
+# Each run is named after the run whose completion started it, by that run's id and attempt, because the run's own
+# head_sha and head_branch are main's and name no pull request. So a watcher that reads the run lists can find, for
+# each completed Build run, the Enroll dispatch run that its completion started, and see when GitHub started none.
+# This workflow runs only on workflow_run, so both values are always set; they are numbers, and run-name is a title,
+# not a shell command.
+run-name: >-
+  Enroll dispatch for run ${{ github.event.workflow_run.id }} attempt ${{ github.event.workflow_run.run_attempt }}
 on:
   workflow_run:
     # Maintainer confirmed: a member put the label maintainer-confirmed on a pull request; the decision runs again.
