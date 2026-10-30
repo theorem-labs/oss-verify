@@ -1261,6 +1261,68 @@ class ReviewJob(unittest.TestCase):
         self.assertIs(self.steps["Sign in to Google Cloud, for the cost collector's token"]["continue-on-error"], True)
 
 
+@unittest.skipUnless(shutil.which("jq"), "needs jq, which the gh stand-in runs the script's filters with")
+class IssueDraftCap(unittest.TestCase):
+    """.github/scripts/issue-draft-cap, build.yaml's step "Hold the draft at the hourly cap", with a stand-in gh: it
+    counts the other runs for an issue's own event whose review ran in the last hour, and holds the draft at the cap
+    or on a failed read with a ::error::HELD annotation and exit status 1."""
+
+    def cap(self, runs, skipped=(), fail=None, run_id="99"):
+        """runs: [(id, display title)] that the runs API lists; skipped: the ids whose review job was skipped; fail:
+        "runs", or the id whose jobs cannot be read. Return the exit status, the output and gh's calls."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "bin").mkdir()
+            (root / "runs.json").write_text(json.dumps(
+                {"workflow_runs": [{"id": i, "display_title": title} for i, title in runs]}))
+            for i, _ in runs:
+                (root / f"jobs-{i}.json").write_text(json.dumps({"jobs": [
+                    {"name": "route", "conclusion": "success"},
+                    {"name": "review", "conclusion": "skipped" if i in skipped else None}]}))
+            listing = ('echo "gh: HTTP 502" >&2; exit 1' if fail == "runs"
+                       else f'jq -r "$filter" {root}/runs.json')
+            (root / "bin" / "gh").write_text(
+                "#!/bin/bash\n"
+                'filter=""; path=""; for a; do [ "$prev" = --jq ] && filter=$a; [[ $a == repos/* ]] && path=$a; prev=$a; done\n'
+                f'echo "$*" >> {root}/calls\n'
+                'case "$path" in\n'
+                f'  */workflows/build.yaml/runs) {listing} ;;\n'
+                f'  */runs/{fail}/jobs*) echo "gh: HTTP 502" >&2; exit 1 ;;\n'
+                f'  */runs/*/jobs*) id=${{path#*/runs/}}; id=${{id%%/*}}; jq -r "$filter" {root}/jobs-$id.json ;;\n'
+                '  *) exit 1 ;;\n'
+                "esac\n")
+            (root / "bin" / "gh").chmod(0o755)
+            run = subprocess.run([str(ROOT / ".github" / "scripts" / "issue-draft-cap")], capture_output=True, text=True,
+                                 env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "GH_TOKEN": "x",
+                                      "REPO": "o/r", "RUN_ID": run_id, "CAP": "6"})
+            return run.returncode, run.stdout, (root / "calls").read_text()
+
+    def test_under_the_cap_the_draft_is_made(self):
+        # Five drafts ran; three runs of the hour skipped the review (route found the event ours), one is not an issue
+        # draft's title, and one is this run.
+        runs = [(n, f"Issue {n}") for n in range(1, 9)] + [(20, "Pull request 3"), (99, "Issue 7")]
+        code, out, calls = self.cap(runs, skipped=(6, 7, 8))
+        self.assertEqual(code, 0, out)
+        self.assertIn("5 issue drafts started in the last hour, under the cap of 6", out)
+        self.assertNotIn("HELD", out)
+        self.assertIn("event=issues", calls)
+        self.assertIn("created=>=", calls)
+        self.assertNotIn("runs/20/jobs", calls)
+        self.assertNotIn("runs/99/jobs", calls)
+
+    def test_at_the_cap_the_draft_is_held_and_the_step_fails(self):
+        code, out, _ = self.cap([(n, f"Issue {n}") for n in range(1, 8)] + [(99, "Issue 1")])
+        self.assertEqual(code, 1)
+        self.assertIn("::error::HELD: 6 issue drafts started in the last hour, at the cap of 6.", out)
+
+    def test_a_read_that_fails_holds_the_draft(self):
+        for fail in ("runs", 3):
+            with self.subTest(fail=fail):
+                code, out, _ = self.cap([(n, f"Issue {n}") for n in range(1, 5)], fail=fail)
+                self.assertEqual(code, 1)
+                self.assertIn("::error::HELD: ", out)
+
+
 class Owners(unittest.TestCase):
 
     def test_only_the_review_files_the_skill_and_codeowners_have_an_owner_and_are_the_last_patterns(self):

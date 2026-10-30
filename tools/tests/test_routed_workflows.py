@@ -387,6 +387,21 @@ def test_an_issues_event_that_is_ours_starts_nothing(tmp_path, sender, author, a
     assert "nothing runs" in (tmp_path / "summary").read_text()
 
 
+@pytest.mark.parametrize("sender, author, association", [
+    ("alice", "$(touch pwned-a)", "NONE"),
+    ("`touch pwned-b`", "`touch pwned-b`", "NONE"),
+    ("alice", "alice", '"; touch pwned-c; "'),
+])
+def test_an_issues_event_reaches_route_only_as_data(tmp_path, sender, author, association):
+    # route takes the event's sender, author and association from env, never inline in its script: shell text there
+    # runs nothing.
+    code, outputs = route_issue(tmp_path, "", "5", event="issues", sender=sender, author=author,
+                                association=association)
+    assert code == 0
+    for where in (tmp_path, ROOT):
+        assert sorted(where.glob("pwned-*")) == []
+
+
 # --- tests.yaml's route, run on made-up commits ---
 
 
