@@ -19,5 +19,4 @@ its exact text before anyone does.
 Give the result as the structured output:
 
 - `comment`: the draft reply, in Markdown.
-- `verdicts`: `person`, what a person at Theorem must decide before the reply is posted, or `nothing`.
-- `held`: empty.
+- `decide`: what a person at Theorem must decide before the reply is posted, or `nothing`.

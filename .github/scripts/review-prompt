@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+#
+# The prompt and the arguments of build.yaml's one Review step, for the kind of review that route decided:
+#
+#   KIND=enrollment PR=<number> NAME=<project> [SESSION=<id> LAST=<commit> HEAD_SHA=<commit>] review-prompt
+#   KIND=change PR=<number> review-prompt
+#   KIND=issue ISSUE=<number> review-prompt
+#
+# It writes two lines to GITHUB_OUTPUT. `prompt`: which rules file to read (review.md, review-change.md or
+# review-issue.md) for which pull request or issue. `arguments`: the --json-schema of that kind's structured output,
+# and, for an enrollment whose last session review-gather kept (SESSION and LAST, its gather step's outputs),
+# --resume <id>, so that the review reads only the diff since the commit it reviewed then. Each value it writes is a
+# number, a project name, or a commit or session id, each checked here: no text of a pull request or of an issue.
+set -euo pipefail
+die() { echo "review-prompt: $1" >&2; exit 2; }
+number='^[0-9]+$' commit='^[0-9a-f]{40}$'
+resume=""
+case ${KIND:-} in
+  enrollment)
+    [[ ${PR:-} =~ $number ]] || die "PR is not a number"
+    [[ ${NAME:-} =~ ^[a-z0-9][a-z0-9._-]{0,62}$ ]] || die "NAME is not a project name"
+    prompt="Read review.md at the root of this checkout: it says what OSS Verify's enrollment check of pull request"
+    prompt+=" #$PR, projects/$NAME/, checks."
+    if [[ ${SESSION:-} =~ ^[0-9a-f-]{36}$ && ${LAST:-} =~ $commit && ${HEAD_SHA:-} =~ $commit ]]; then
+      prompt+=" Earlier in this session you reviewed $LAST. A new request comes only from"
+      prompt+=" .review/since-last-review.diff, the diff from $LAST to $HEAD_SHA: read it and review.md, and before you"
+      prompt+=" keep a request of your last comment, read again the input in .review/ that it is about, and drop it if"
+      prompt+=" that input shows it met. Review"
+      resume=" --resume $SESSION"
+    else
+      prompt+=" Then review"
+    fi
+    prompt+=' as the section "In CI" of .claude/skills/review-enrollment/SKILL.md says.'
+    schema=$(jq -cn '{type: "object", additionalProperties: false, required: ["comment", "held", "verdicts"],
+      properties: {
+        comment: {type: "string", description: "The comment to the maintainer, in Markdown. Never a held finding."},
+        held: {type: "string", description: "Each finding held back under rule 6 of review.md, as the skill section A held finding says, or empty."},
+        verdicts: {type: "object", description: "The verdict of each check of review.md by its id, A1 to G5, and for an F check the worst over the fuzz targets.",
+                   required: ["F2", "F7"], additionalProperties: {enum: ["pass", "fail", "person"]}}}}')
+    ;;
+  change)
+    [[ ${PR:-} =~ $number ]] || die "PR is not a number"
+    prompt="Read review-change.md at the root of this checkout: it says what OSS Verify's change review of pull request"
+    prompt+=" #$PR, which changes no file under projects/, checks, on what the workflow gathered into .review/."
+    schema=$(jq -cn '{type: "object", additionalProperties: false, required: ["comment", "verdicts"],
+      properties: {
+        comment: {type: "string", description: "The comment to the contributor, in Markdown."},
+        verdicts: {type: "object", description: "The verdict of each check of review-change.md by its number.",
+                   required: ["1", "2", "3", "4", "5"], additionalProperties: {enum: ["pass", "fail", "person"]}}}}')
+    ;;
+  issue)
+    [[ ${ISSUE:-} =~ $number ]] || die "ISSUE is not a number"
+    prompt="Read review-issue.md at the root of this checkout: it says what OSS Verify's draft reply to issue #$ISSUE"
+    prompt+=" of this repository says, from what the workflow gathered into .review/issue.json."
+    schema=$(jq -cn '{type: "object", additionalProperties: false, required: ["comment", "decide"],
+      properties: {
+        comment: {type: "string", description: "The draft reply to the issue, in Markdown, under 80 words."},
+        decide: {type: "string", description: "What a person at Theorem decides before the reply is posted, or nothing."}}}')
+    ;;
+  *)
+    die "KIND is not enrollment, change or issue"
+    ;;
+esac
+prompt+=" Give the result as the structured output."
+# claude_args takes the schema between single quotes.
+[[ $schema != *"'"* ]] || die "a schema holds a single quote"
+{ echo "prompt=$prompt"; echo "arguments=--json-schema '$schema'$resume"; } >> "$GITHUB_OUTPUT"

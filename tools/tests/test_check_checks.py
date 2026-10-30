@@ -1028,84 +1028,177 @@ class ReviewJob(unittest.TestCase):
         self.steps = {s.get("name"): s for s in self.jobs["review"]["steps"]}
         self.review = self.steps["Review"]
 
+    def gather(self, root, gh, **env):
+        """review-gather, from this checkout, into root/out, with the stand-in gh script `gh` and `env`."""
+        (root / "bin").mkdir(exist_ok=True)
+        (root / "bin" / "gh").write_text("#!/bin/bash\n" + f'echo "$*" >> {root / "calls"}\n' + gh)
+        (root / "bin" / "gh").chmod(0o755)
+        environment = {**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r",
+                       "PR": "", "NAME": "", "ISSUE": "", "HEAD_SHA": "", **env}
+        return subprocess.run([str(ROOT / ".github" / "scripts" / "review-gather"), str(root / "out")],
+                              env=environment, cwd=ROOT, capture_output=True, text=True)
+
     def test_a_change_gathers_only_the_pull_request_and_its_changed_files_as_data(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            (root / "bin").mkdir()
-            files = ["tools/a.py", "docs/CLAUDE.md", ".claude/skills/x/SKILL.md", "a/../b", "README.md"]
-            (root / "bin" / "gh").write_text(
-                "#!/bin/bash\n"
+            files = ["tools/a.py", "docs/CLAUDE.md", ".claude/skills/x/SKILL.md", "a/../b", "README.md", "big.bin",
+                     "gone.txt"]
+            run = self.gather(root, (
                 f'case "$*" in\n'
                 f'  "pr view"*) echo "{{}}" ;;\n'
                 f'  *"/files"*) printf "%s\\n" {" ".join(shlex.quote(f) for f in files)} ;;\n'
                 '  "pr diff"*) echo diff ;;\n'
+                # A file over 1 MiB, which gh stops writing when head has its first MiB; a file the API cannot give.
+                '  *contents/big.bin*) head -c 3000000 /dev/zero | tr "\\0" x ;;\n'
+                '  *contents/gone.txt*) echo "{\\"message\\": \\"Not Found\\"}"; exit 1 ;;\n'
                 '  *contents/*) echo "file at ${@: -1}" ;;\n'
                 '  *) true ;;\n'
-                "esac\n")
-            (root / "bin" / "gh").chmod(0o755)
-            env = {**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r",
-                   "PR": "8", "NAME": "", "HEAD_SHA": "a" * 40}
-            run = subprocess.run([str(ROOT / ".github" / "scripts" / "review-gather"), str(root / "out")], env=env,
-                                 cwd=ROOT, capture_output=True, text=True)
+                "esac\n"), KIND="change", PR="8", HEAD_SHA="a" * 40)
             self.assertEqual(run.returncode, 0, run.stderr)
             head = sorted(str(p.relative_to(root / "out" / "head")) for p in (root / "out" / "head").rglob("*")
                           if p.is_file())
-            self.assertEqual(head, ["README.md", "tools/a.py"])
-            self.assertFalse((root / "out" / "validate.txt").exists())
+            self.assertEqual(head, ["README.md", "big.bin", "tools/a.py"])
+            self.assertEqual((root / "out" / "head" / "big.bin").stat().st_size, 1048576)
+            # Nothing of an enrollment's: no build results, no seeds, no validation.
+            for name in ("build", "seeds", "validate.txt", "triage-today.md"):
+                self.assertFalse((root / "out" / name).exists(), name)
 
     def test_an_issue_gathers_only_the_issue(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            (root / "bin").mkdir()
-            (root / "bin" / "gh").write_text(
-                "#!/bin/bash\n"
-                f'echo "$*" >> {root / "calls"}\n'
-                'case "$*" in "issue view 5 "*) echo \'{"title": "Q"}\' ;; *) exit 1 ;; esac\n')
-            (root / "bin" / "gh").chmod(0o755)
-            env = {**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r",
-                   "ISSUE": "5", "PR": "", "NAME": "", "HEAD_SHA": ""}
-            run = subprocess.run([str(ROOT / ".github" / "scripts" / "review-gather"), str(root / "out")], env=env,
-                                 cwd=ROOT, capture_output=True, text=True)
+            gh = 'case "$*" in "issue view 5 "*) echo \'{"title": "Q"}\' ;; *) exit 1 ;; esac\n'
+            run = self.gather(root, gh, KIND="issue", ISSUE="5")
             self.assertEqual(run.returncode, 0, run.stderr)
             self.assertEqual(sorted(p.name for p in (root / "out").iterdir()), ["issue.json"])
             self.assertEqual((root / "out" / "issue.json").read_text(), '{"title": "Q"}\n(exit status 0)\n')
             self.assertEqual((root / "calls").read_text(),
                              "issue view 5 -R o/r --json number,title,author,createdAt,body,comments\n")
-            env["ISSUE"] = "5; x"
-            run = subprocess.run([str(ROOT / ".github" / "scripts" / "review-gather"), str(root / "out2")], env=env,
-                                 cwd=ROOT, capture_output=True, text=True)
-            self.assertEqual(run.returncode, 2)
 
-    def test_an_issue_draft_goes_to_the_artifact_and_the_summary(self):
-        run, comment, verdicts, held, output, _ = self.result(
-            {"comment": "See docs/dsl.md.\n", "held": "", "verdicts": {"person": "nothing"}}, issue="5")
-        self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual((comment, json.loads(verdicts)), ("See docs/dsl.md.\n\n", {"person": "nothing"}))
-        self.assertEqual(output, "")
-        self.assertEqual(self.summary, "Draft reply to issue #5. No job posts it: a person approves its exact text "
-                                       "first.\n\nA person decides: nothing\n\n---\n\nSee docs/dsl.md.\n\n")
+    def test_gather_refuses_a_kind_or_a_value_it_cannot_take_before_any_read(self):
+        for env in ({"KIND": "issue", "ISSUE": "5; x"}, {"KIND": "enrollment", "PR": "8", "NAME": ""},
+                    {"KIND": "enrollment", "PR": "8", "NAME": "../x"}, {"KIND": "change", "PR": "8x"},
+                    {"KIND": "", "PR": "8"}, {"KIND": "build", "PR": "8"}):
+            with self.subTest(env=env), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                run = self.gather(root, "exit 0\n", **env)
+                self.assertEqual(run.returncode, 2, run.stderr)
+                self.assertFalse((root / "calls").exists())
 
-    def result(self, output, issue=""):
-        """The result step, on an execution file whose result carries `output` as its structured output, for the issue
-        `issue` if any. It keeps the step summary in self.summary."""
+    def test_hostile_issue_text_is_only_data_in_the_gather_and_the_result_steps(self):
+        # The issue's text reaches the scripts only from gh's answer (a file) and the model's output (a file): a title
+        # or body that is shell text runs nothing.
+        hostile = '$(touch pwned-a) `touch pwned-b` "; touch pwned-c; " \' ; touch pwned-d #'
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            (root / "temp").mkdir()
-            (root / "home").mkdir()
-            execution = root / "execution.json"
-            execution.write_text(json.dumps([{"type": "system", "subtype": "init"},
-                                             {"type": "result", "subtype": "success", "structured_output": output}]))
-            run = subprocess.run(["bash", "-e", "-c", self.steps["Keep the draft, and the held finding apart from it"]["run"]],
-                                 cwd=root, capture_output=True, text=True,
-                                 env={**os.environ, "HOME": str(root / "home"), "RUNNER_TEMP": str(root / "temp"),
-                                      "GITHUB_OUTPUT": str(root / "output"), "RESULT": str(execution),
-                                      "SESSION": "09227178-7bbf-4e5f-86db-8736e530ef01", "HEAD_SHA": "1" * 40,
-                                      "ISSUE": issue, "GITHUB_STEP_SUMMARY": str(root / "summary")})
-            read = lambda path: path.read_text() if path.exists() else None
-            self.summary = read(root / "summary")
-            return (run, read(root / "temp" / "draft" / "comment.md"), read(root / "temp" / "draft" / "verdicts.json"),
-                    read(root / "temp" / "held-finding.md"), read(root / "output") or "",
-                    read(root / "home" / ".claude" / "ossv-last-review"))
+            answer = shlex.quote(json.dumps({"title": hostile, "body": hostile}))
+            run = self.gather(root, f'echo {answer}\n', KIND="issue", ISSUE="5")
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertIn("touch pwned-a", (root / "out" / "issue.json").read_text())
+        run, comment, _, _, _, _ = self.result({"comment": hostile, "decide": hostile}, kind="issue", issue="5")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(comment, hostile + "\n")
+        self.assertEqual(self.decide, hostile + "\n")
+        for where in (ROOT, pathlib.Path.cwd()):
+            self.assertEqual(sorted(where.glob("pwned-*")), [])
+        self.assertEqual(sorted(self.ran_in.glob("pwned-*")), [])
+
+    def test_an_issue_draft_goes_to_the_artifact_and_not_to_the_summary(self):
+        run, comment, verdicts, held, output, _ = self.result(
+            {"comment": "See docs/dsl.md.\n", "decide": "nothing"}, kind="issue", issue="5")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual((comment, json.loads(verdicts), self.decide), ("See docs/dsl.md.\n\n", None, "nothing\n"))
+        self.assertEqual((output, held), ("", "<!-- held finding -->\n\n"))
+        # The public summary says where the draft is, and holds none of its text.
+        self.assertIn("is in the artifact enroll-review-draft", self.summary)
+        self.assertNotIn("dsl.md", self.summary)
+        self.assertNotIn("nothing", self.summary)
+
+    def test_a_change_without_a_held_field_holds_nothing(self):
+        run, comment, verdicts, held, output, _ = self.result(
+            {"comment": "Thanks.\n", "verdicts": {str(n): "pass" for n in range(1, 6)}}, kind="change")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(json.loads(verdicts), {str(n): "pass" for n in range(1, 6)})
+        self.assertEqual((output, held, self.summary, self.decide), ("", "<!-- held finding -->\n\n", None, None))
+
+    def result(self, output, kind="enrollment", issue=""):
+        """The result step, on an execution file whose result carries `output` as its structured output, for a review
+        of `kind` (the issue `issue` for an issue). It keeps the step summary in self.summary, the draft's decide.md
+        in self.decide, and the directory it ran in in self.ran_in."""
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory)
+        root = self.ran_in = pathlib.Path(directory)
+        (root / "temp").mkdir()
+        (root / "home").mkdir()
+        execution = root / "execution.json"
+        execution.write_text(json.dumps([{"type": "system", "subtype": "init"},
+                                         {"type": "result", "subtype": "success", "structured_output": output}]))
+        run = subprocess.run(["bash", "-e", "-c", self.steps["Keep the draft, and the held finding apart from it"]["run"]],
+                             cwd=root, capture_output=True, text=True,
+                             env={**os.environ, "HOME": str(root / "home"), "RUNNER_TEMP": str(root / "temp"),
+                                  "GITHUB_OUTPUT": str(root / "output"), "RESULT": str(execution),
+                                  "SESSION": "09227178-7bbf-4e5f-86db-8736e530ef01", "HEAD_SHA": "1" * 40,
+                                  "KIND": kind, "ISSUE": issue, "GITHUB_STEP_SUMMARY": str(root / "summary")})
+        read = lambda path: path.read_text() if path.exists() else None  # noqa: E731
+        self.summary = read(root / "summary")
+        self.decide = read(root / "temp" / "draft" / "decide.md")
+        return (run, read(root / "temp" / "draft" / "comment.md"), read(root / "temp" / "draft" / "verdicts.json"),
+                read(root / "temp" / "held-finding.md"), read(root / "output") or "",
+                read(root / "home" / ".claude" / "ossv-last-review"))
+
+    def prompt(self, **env):
+        """.github/scripts/review-prompt with `env`: its exit status and the outputs it wrote."""
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "output"
+            run = subprocess.run([str(ROOT / ".github" / "scripts" / "review-prompt")], capture_output=True, text=True,
+                                 env={**os.environ, "GITHUB_OUTPUT": str(output), **env})
+            lines = output.read_text().splitlines() if output.exists() else []
+        return run.returncode, dict(line.split("=", 1) for line in lines)
+
+    def schema(self, arguments):
+        return json.loads(re.search(r"--json-schema '([^']*)'", arguments).group(1))
+
+    def test_the_prompt_of_each_kind_names_its_rules_and_its_schema(self):
+        code, out = self.prompt(KIND="change", PR="8")
+        self.assertEqual(code, 0)
+        self.assertTrue(out["prompt"].startswith("Read review-change.md at the root of this checkout"))
+        self.assertIn("pull request #8,", out["prompt"])
+        schema = self.schema(out["arguments"])
+        self.assertEqual(schema["required"], ["comment", "verdicts"])
+        self.assertEqual(schema["properties"]["verdicts"]["required"], ["1", "2", "3", "4", "5"])
+        self.assertNotIn("held", schema["properties"])
+        self.assertNotIn("--resume", out["arguments"])
+        code, out = self.prompt(KIND="issue", ISSUE="45")
+        self.assertEqual(code, 0)
+        self.assertTrue(out["prompt"].startswith("Read review-issue.md at the root of this checkout"))
+        self.assertIn("issue #45 ", out["prompt"])
+        schema = self.schema(out["arguments"])
+        self.assertEqual((schema["required"], sorted(schema["properties"])), (["comment", "decide"],
+                                                                            ["comment", "decide"]))
+        code, out = self.prompt(KIND="enrollment", PR="8", NAME="libreac")
+        self.assertEqual(code, 0)
+        self.assertIn("projects/libreac/", out["prompt"])
+        self.assertIn(" Then review as the section", out["prompt"])
+        schema = self.schema(out["arguments"])
+        self.assertEqual((schema["required"], schema["properties"]["verdicts"]["required"]),
+                         (["comment", "held", "verdicts"], ["F2", "F7"]))
+        self.assertNotIn("--resume", out["arguments"])
+        for code, out in (self.prompt(KIND="issue", ISSUE="45"), self.prompt(KIND="change", PR="8")):
+            self.assertTrue(out["prompt"].endswith(" Give the result as the structured output."))
+
+    def test_an_enrollment_with_a_kept_session_resumes_it_for_the_diff_alone(self):
+        session, last, head = "09227178-7bbf-4e5f-86db-8736e530ef01", "2" * 40, "3" * 40
+        code, out = self.prompt(KIND="enrollment", PR="8", NAME="libreac", SESSION=session, LAST=last, HEAD_SHA=head)
+        self.assertEqual(code, 0)
+        self.assertTrue(out["arguments"].endswith(f"' --resume {session}"))
+        self.assertIn(f"Earlier in this session you reviewed {last}.", out["prompt"])
+        self.assertIn(f"the diff from {last} to {head}", out["prompt"])
+
+    def test_the_prompt_refuses_what_it_cannot_check(self):
+        for env in ({"KIND": "issue", "ISSUE": "45 extra"}, {"KIND": "change", "PR": ""},
+                    {"KIND": "enrollment", "PR": "8", "NAME": "$(touch pwned)"}, {"KIND": "", "PR": "8"},
+                    {"KIND": "other", "PR": "8"}):
+            with self.subTest(env=env):
+                self.assertEqual(self.prompt(**env), (2, {}))
 
     def test_a_review_without_a_held_finding_keeps_its_session(self):
         run, comment, verdicts, held, output, last = self.result(
