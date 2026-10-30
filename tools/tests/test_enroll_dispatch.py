@@ -715,8 +715,9 @@ class Jobs(unittest.TestCase):
 
     def test_only_the_dispatch_job_reads_the_app_key(self):
         jobs = self.jobs("enroll-dispatch.yml")
+        # review-rerun runs no step: it calls review-rerun.yml and grants it id-token: write, for that file's rerun job.
         self.assertEqual({n for n, j in jobs.items() if (j.get("permissions") or {}).get("id-token") == "write"},
-                         {"dispatch"})
+                         {"dispatch", "review-rerun"})
         self.assertEqual({n: j.get("environment") for n, j in jobs.items() if "environment" in j},
                          {"dispatch": {"name": "comment", "deployment": False}})
         steps = jobs["dispatch"]["steps"]

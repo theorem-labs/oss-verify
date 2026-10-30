@@ -148,14 +148,16 @@ class WorkflowArguments(unittest.TestCase):
     the files; it does not run them, so it proves nothing about what a called script does with what it is given."""
 
     # The jobs of each workflow that read the App's key, in the GitHub Environment `comment`: build.yaml's hold job
-    # sends held findings with the App's token.
-    KEY_JOBS = {"build.yaml": ("comment", "hold"), "triage.yaml": ("comment",), "enroll-dispatch.yml": ("dispatch",)}
+    # sends held findings with the App's token; review-rerun.yml, which enroll-dispatch.yml calls, re-runs with it.
+    KEY_JOBS = {"build.yaml": ("comment", "hold"), "triage.yaml": ("comment",), "enroll-dispatch.yml": ("dispatch",),
+                "review-rerun.yml": ("rerun",)}
 
     def workflow(self, name):
         return yaml.safe_load((ROOT / ".github" / "workflows" / name).read_text())
 
     def steps(self, workflow):
-        return [step for job in self.workflow(workflow)["jobs"].values() for step in job["steps"] if "run" in step]
+        return [step for job in self.workflow(workflow)["jobs"].values() for step in job.get("steps", [])
+                if "run" in step]
 
     def argument_problems(self, run, name):
         """Where `run` gives $name to a process as an argument, as far as this test can read: [] if nowhere.
@@ -224,8 +226,10 @@ class WorkflowArguments(unittest.TestCase):
         # to its job, and these files must also keep id-token: write off every other job. project-builds builds the
         # pull request's code and triage's gather reads its text, so neither may ever ask for one. A job with no permissions of its own inherits the workflow's, so the effective
         # permission is what is read here: a workflow-level id-token: write would reach every job.
+        # enroll-dispatch.yml's review-rerun job runs no step: it calls review-rerun.yml and grants it id-token: write,
+        # which only review-rerun.yml's rerun job asks for.
         for workflow, want in (("build.yaml", {"review", "comment", "hold"}), ("triage.yaml", {"comment"}),
-                               ("enroll-dispatch.yml", {"dispatch"})):
+                               ("enroll-dispatch.yml", {"dispatch", "review-rerun"}), ("review-rerun.yml", {"rerun"})):
             parsed = self.workflow(workflow)
             default = parsed.get("permissions") or {}
             got = set()
@@ -440,13 +444,13 @@ class WorkflowArguments(unittest.TestCase):
 
     def test_every_google_sign_in_keeps_its_token_to_one_step(self):
         # Each auth step writes no credentials file, exports no variable, and mints a five-minute access token: its
-        # output is all that holds it. Six steps: build.yaml's review job signs in before the review and again, for a
-        # held finding, after it (the first token has expired by then); its hold and comment jobs, triage's comment job
-        # and enroll-dispatch's dispatch job sign in once each.
+        # output is all that holds it. Seven steps: build.yaml's review job signs in before the review and again, for a
+        # held finding, after it (the first token has expired by then); its hold and comment jobs, triage's comment job,
+        # enroll-dispatch's dispatch job and review-rerun's rerun job sign in once each.
         found = 0
         for workflow in self.KEY_JOBS:
             for name, job in self.workflow(workflow)["jobs"].items():
-                for step in job["steps"]:
+                for step in job.get("steps", []):
                     if step.get("uses", "").startswith("google-github-actions/auth@"):
                         found += 1
                         self.assertEqual({k: step["with"].get(k) for k in ("token_format", "access_token_lifetime",
@@ -454,7 +458,7 @@ class WorkflowArguments(unittest.TestCase):
                                          {"token_format": "access_token", "access_token_lifetime": "300s",
                                           "create_credentials_file": False, "export_environment_variables": False},
                                          f"{workflow} {name}")
-        self.assertEqual(found, 6)
+        self.assertEqual(found, 7)
 
     def test_another_job_in_the_comment_environment_is_refused_in_every_shape(self):
         # The shapes GitHub takes for `environment` (workflow syntax, jobs.<job_id>.environment), each put on the
@@ -1343,15 +1347,15 @@ class Owners(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("jq"), "needs jq, which the gh stand-in runs the step's filters with")
 class ReviewRerun(unittest.TestCase):
-    """review-rerun.yml, on each completed Build run: its one step, run with a stand-in gh, re-runs the failed jobs of
-    a failed run of an enrollment pull request whose review job failed, up to the run's third attempt."""
-
-    HEAD = "c" * 40
-    ENROLLMENT = ["projects/zlib/project.yaml", "projects/zlib/build.sh"]
+    """review-rerun.yml, which enroll-dispatch.yml calls on each completed Build run. Its decide step, run with a
+    stand-in gh, asks for a re-run of a failed run whose review job failed and whose build passed, up to the run's third
+    attempt, from the run's own id and attempt and the jobs of that attempt alone. Its re-run step re-runs the failed
+    jobs with the oss-verify App's token, so that the re-run's completion starts Enroll dispatch again."""
 
     def setUp(self):
-        self.workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "review-rerun.yml").read_text())
-        (self.job,) = self.workflow["jobs"].values()
+        workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "review-rerun.yml").read_text())
+        (self.decide_step,) = workflow["jobs"]["decide"]["steps"]
+        self.rerun_step = workflow["jobs"]["rerun"]["steps"][-1]
 
     @staticmethod
     def jobs(review="failure", **others):
@@ -1361,25 +1365,17 @@ class ReviewRerun(unittest.TestCase):
                 "comment": "skipped", "project-builds": "success" if review == "success" else "failure"}
         return {**jobs, **others}
 
-    def rerun(self, attempt, jobs, pulls=None, run_id=40):
-        """Run the step for the completion of attempt `attempt` of Build run `run_id` at HEAD. jobs: {name: conclusion}
-        of that attempt. pulls: {number: (head, paths)} or {number: (head, paths, draft)} of the open pull requests
-        into main, the path "new<-old" for a rename (default: one enrollment at HEAD, ready for review). Return the
-        re-runs it asked for, its output and its summary."""
-        pulls = {5: (self.HEAD, self.ENROLLMENT)} if pulls is None else pulls
-        pulls = {n: (p + (False,))[:3] for n, p in pulls.items()}
+    def decision(self, attempt, jobs, run_id=40, event=None):
+        """Run the decide step for the completion of attempt `attempt` of Build run `run_id`. jobs: {name: conclusion}
+        of that attempt. event: the workflow_run event the runner gives in GITHUB_EVENT_PATH. Return whether it asks
+        for the re-run, its output, its summary and its gh calls."""
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             (root / "bin").mkdir()
             (root / f"jobs-{run_id}-{attempt}.json").write_text(json.dumps({"total_count": len(jobs), "jobs": [
                 {"name": name, "status": "completed", "conclusion": conclusion, "run_attempt": attempt,
                  "head_branch": "$(touch pwned)"} for name, conclusion in jobs.items()]}))
-            (root / "pulls.json").write_text(json.dumps(
-                [{"number": n, "head": {"sha": head, "ref": "`touch pwned`"}, "base": {"ref": "main"}, "draft": draft}
-                 for n, (head, paths, draft) in pulls.items()]))
-            for number, (head, paths, draft) in pulls.items():
-                (root / f"files-{number}.json").write_text(json.dumps(
-                    [dict(zip(("filename", "previous_filename"), path.split("<-"))) for path in paths]))
+            (root / "event.json").write_text(json.dumps(event or {"workflow_run": {"id": run_id}}))
             (root / "bin" / "gh").write_text(
                 "#!/bin/bash\n"
                 'filter=""; path=""; for a; do [ "$prev" = --jq ] && filter=$a\n'
@@ -1387,81 +1383,117 @@ class ReviewRerun(unittest.TestCase):
                 f'cd {root}\n'
                 'echo "gh $*" >> calls\n'
                 'case "$path" in\n'
-                '  "") [ "$1 $2" = "run rerun" ] || { echo "unexpected gh $*" >&2; exit 1; }; echo "$*" >> reruns ;;\n'
                 '  repos/o/r/actions/runs/*/attempts/*/jobs\\?per_page=100) r=${path#repos/o/r/actions/runs/}\n'
                 '    a=${r#*/attempts/}; jq -r "$filter" "jobs-${r%%/*}-${a%%/*}.json" ;;\n'
-                '  "repos/o/r/pulls?state=open&base=main&per_page=100") jq -r "$filter" pulls.json ;;\n'
-                '  repos/o/r/pulls/*/files\\?per_page=100) n=${path#repos/o/r/pulls/}\n'
-                '    jq -r "$filter" "files-${n%%/*}.json" ;;\n'
                 '  *) echo "unexpected gh $*" >&2; exit 1 ;;\n'
                 "esac\n")
             (root / "bin" / "gh").chmod(0o755)
-            (step,) = self.job["steps"]
-            run = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=root, capture_output=True, text=True,
-                                 env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "GH_TOKEN": "x",
-                                      "REPO": "o/r", "RUN_ID": str(run_id), "RUN_ATTEMPT": str(attempt),
-                                      "HEAD_SHA": self.HEAD, "GITHUB_STEP_SUMMARY": str(root / "summary")})
+            run = subprocess.run(["bash", "-e", "-c", self.decide_step["run"]], cwd=root, capture_output=True,
+                                 text=True, env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
+                                                 "GH_TOKEN": "x", "REPO": "o/r", "RUN_ID": str(run_id),
+                                                 "RUN_ATTEMPT": str(attempt),
+                                                 "GITHUB_EVENT_PATH": str(root / "event.json"),
+                                                 "GITHUB_OUTPUT": str(root / "output"),
+                                                 "GITHUB_STEP_SUMMARY": str(root / "summary")})
             self.assertEqual(run.returncode, 0, run.stderr)
             self.assertFalse((root / "pwned").exists())
-            reruns = (root / "reruns").read_text().splitlines() if (root / "reruns").exists() else []
+            output = (root / "output").read_text().splitlines() if (root / "output").exists() else []
+            self.assertIn(output, ([], ["rerun=true"]))
             summary = (root / "summary").read_text() if (root / "summary").exists() else ""
-            return reruns, run.stdout, summary
+            return output == ["rerun=true"], run.stdout, summary, (root / "calls").read_text()
 
     def test_a_failed_enrollment_review_is_re_run_at_attempt_1_and_2(self):
         # A review that fails for a short fault: a 401 of the model's API (2026-10-26), a 429 of its rate limit (pull
-        # request 59, Build run 40523715526), or a job cancelled or out of time. A label from an earlier commit, or
-        # none, changes nothing: the step reads none. A renamed file counts under both names.
-        enrollment = self.ENROLLMENT + ["projects/zlib/fuzz.c<-projects/zlib/old_fuzz.c"]
+        # request 59, Build run 40523715526), or a job cancelled or out of time.
         for attempt in (1, 2):
             for review in ("failure", "cancelled", "timed_out"):
                 with self.subTest(attempt=attempt, review=review):
-                    reruns, out, summary = self.rerun(attempt, self.jobs(review), {5: (self.HEAD, enrollment)})
-                    self.assertEqual(reruns, ["run rerun 40 --failed -R o/r"])
-                    self.assertEqual(summary.splitlines(), [
-                        f"Pull request 5: the review job of Build run 40 ended {review} at attempt {attempt}; its "
-                        "failed jobs run again."])
+                    rerun, out, summary, calls = self.decision(attempt, self.jobs(review))
+                    self.assertTrue(rerun)
+                    self.assertEqual(summary, "")
+                    self.assertIn(f"Build run 40: its review job ended {review} at attempt {attempt}", out)
 
     def test_a_review_is_re_run_at_most_two_times_for_one_build_run(self):
         # Attempt 3 is the second re-run's; a fourth is a person's re-run by hand.
         for attempt in (3, 4):
             with self.subTest(attempt=attempt):
-                reruns, out, summary = self.rerun(attempt, self.jobs())
-                self.assertEqual(reruns, [])
+                rerun, out, summary, calls = self.decision(attempt, self.jobs())
+                self.assertFalse(rerun)
                 self.assertEqual(summary.splitlines(), [
-                    f"Pull request 5: the review job of Build run 40 ended failure at attempt {attempt}. At most two "
-                    "re-runs for one Build run: it is not run again."])
+                    f"Build run 40: its review job ended failure at attempt {attempt}. At most two re-runs for one "
+                    "Build run: it is not run again."])
 
     def test_a_successful_run_re_runs_nothing(self):
-        # The step re-runs nothing whose review passed, whatever its verdicts (`person` too: a person decides, not a
-        # re-run).
-        reruns, out, summary = self.rerun(1, self.jobs("success"))
-        self.assertEqual((reruns, summary), ([], ""))
+        # Nothing whose review passed, whatever its verdicts (`person` too: a person decides, not a re-run).
+        rerun, out, summary, calls = self.decision(1, self.jobs("success"))
+        self.assertEqual((rerun, summary), (False, ""))
 
     def test_a_failure_of_another_job_alone_re_runs_nothing(self):
         # Another job failed and the review passed or did not run; or the build failed too, which is the project's or
-        # the runner's, and a maintainer re-runs it (build.yaml): the step re-runs no build of up to six hours.
+        # the runner's, and a maintainer re-runs it (build.yaml): no build of up to six hours is re-run.
         for jobs in (self.jobs("success", build="failure"), self.jobs("success", record="failure"),
                      self.jobs("skipped", build="failure"), self.jobs("success", hold="failure"),
                      self.jobs("failure", build="failure"), self.jobs("failure", build="cancelled")):
             with self.subTest(jobs=jobs):
-                reruns, out, summary = self.rerun(1, jobs)
-                self.assertEqual((reruns, summary), ([], ""))
+                rerun, out, summary, calls = self.decision(1, jobs)
+                self.assertEqual((rerun, summary), (False, ""))
 
-    def test_a_change_or_a_pull_request_that_moved_on_is_not_re_run(self):
-        # Not one enrollment: a change, a project and another file, two projects, a file renamed into a project, a file
-        # directly in projects/. Or no open pull request into main is at the run's head any more: a later push, a
-        # close, a merge (its review decides nothing, and a re-run could cancel the newer head's Build run). Or the
-        # pull request at the head is a draft: enroll-dispatch's decide refuses it, and marking it ready runs Build.
-        cases = [{5: (self.HEAD, ["tools/check"])}, {5: (self.HEAD, ["projects/zlib/build.sh", "README.md"])},
-                 {5: (self.HEAD, ["projects/zlib/build.sh", "projects/curl/build.sh"])},
-                 {5: (self.HEAD, ["projects/zlib/build.sh<-tools/x"])}, {5: (self.HEAD, ["projects/zlib"])},
-                 {5: ("d" * 40, self.ENROLLMENT)}, {}, {5: (self.HEAD, self.ENROLLMENT, True)},
-                 # Two pull requests at the head: each must be one enrollment.
-                 {5: (self.HEAD, self.ENROLLMENT), 6: (self.HEAD, ["tools/check"])}]
-        for pulls in cases:
-            with self.subTest(pulls=pulls):
-                reruns, out, summary = self.rerun(1, self.jobs(), pulls)
-                self.assertEqual((reruns, summary), ([], ""))
+    def test_the_decision_reads_no_pull_request_field(self):
+        # The run's own id and attempt and the jobs API of that attempt, nothing else: one gh call, to the jobs of the
+        # attempt (the stand-in refuses any other, the pulls API too), and the same decision whatever the event says of
+        # pull requests or of the head. A re-run of a stale head's review is accepted: it decides nothing new.
+        events = [None, {"workflow_run": {"id": 40, "pull_requests": [{"number": 5}], "head_sha": "d" * 40,
+                                          "head_branch": "`touch pwned`"}},
+                  {"workflow_run": {"id": 40, "pull_requests": [], "head_sha": "e" * 40}}]
+        for event in events:
+            with self.subTest(event=event):
+                rerun, out, summary, calls = self.decision(1, self.jobs(), event=event)
+                self.assertTrue(rerun)
+                self.assertEqual(calls.splitlines(), [
+                    "gh api repos/o/r/actions/runs/40/attempts/1/jobs?per_page=100 --jq "
+                    '[.jobs[] | {(.name): .conclusion}] | add // {} | "\\(.review // "none") \\(.build // "none")"'])
+
+    def test_the_re_run_step_gives_the_token_to_gh_alone(self):
+        # The App's token reaches gh in GH_TOKEN alone: in no argument, no output and no file.
+        token = "ghs_" + "T" * 36
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "bin").mkdir()
+            (root / "bin" / "gh").write_text(
+                f'#!/bin/bash\nprintf "%s\\n" "$@" >> {root}/argv\n'
+                f'[ "$GH_TOKEN" = {token} ] && echo yes > {root}/token-in-env\n')
+            (root / "bin" / "gh").chmod(0o755)
+            run = subprocess.run(["bash", "-e", "-c", self.rerun_step["run"]], cwd=root, capture_output=True,
+                                 text=True, env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
+                                                 "GH_TOKEN": token, "REPO": "o/r", "RUN_ID": "40", "RUN_ATTEMPT": "1",
+                                                 "GITHUB_STEP_SUMMARY": str(root / "summary")})
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual((root / "argv").read_text().splitlines(), ["run", "rerun", "40", "--failed", "-R", "o/r"])
+            self.assertTrue((root / "token-in-env").exists())
+            self.assertEqual((root / "summary").read_text().splitlines(), [
+                "Build run 40: its review job failed at attempt 1; its failed jobs run again, with the oss-verify "
+                "App's token."])
+            for path in root.rglob("*"):
+                if path.is_file() and path.name != "gh":
+                    self.assertNotIn(token, path.read_text(), path.name)
+            self.assertNotIn(token, run.stdout + run.stderr)
+
+    def test_the_re_run_step_refuses_a_run_id_that_is_not_a_number(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "bin").mkdir()
+            (root / "bin" / "gh").write_text(f'#!/bin/bash\necho "$*" >> {root}/argv\n')
+            (root / "bin" / "gh").chmod(0o755)
+            for run_id, attempt in (("40; touch pwned", "1"), ("", "1"), ("40", "x")):
+                with self.subTest(run_id=run_id, attempt=attempt):
+                    run = subprocess.run(["bash", "-e", "-c", self.rerun_step["run"]], cwd=root, capture_output=True,
+                                         text=True, env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
+                                                         "GH_TOKEN": "x", "REPO": "o/r", "RUN_ID": run_id,
+                                                         "RUN_ATTEMPT": attempt,
+                                                         "GITHUB_STEP_SUMMARY": str(root / "summary")})
+                    self.assertNotEqual(run.returncode, 0)
+                    self.assertFalse((root / "argv").exists())
+                    self.assertFalse((root / "pwned").exists())
 
 
 if __name__ == "__main__":

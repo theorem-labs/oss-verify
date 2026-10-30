@@ -7,61 +7,69 @@ name: "Review re-run"
 # project-builds, so enroll-dispatch's decide stops at "required checks not passed" and puts no label on the pull
 # request: no label can select these runs, and until this re-run a person had to start it.
 #
-# It starts on the completion of each Build run (workflow_run), and its job runs only for a failed run of a pull
-# request's own event (pull_request_target): a run started by hand or for an issue, and a run that a newer push
-# cancelled, are left alone. The step reads the jobs of the attempt that completed. It re-runs nothing unless all of
-# these hold:
-#   - the review job ended failure, cancelled or timed_out, and the build job (project-builds) passed: a build that
-#     failed is the project's or the runner's, and a maintainer re-runs it (build.yaml); a re-run here would build it
-#     again for up to six hours;
-#   - an open pull request into main, ready for review, still has the run's head commit, and each such pull request
-#     changes files under one projects/<name>/ only (enroll-dispatch's rule): a change's, a draft's or a moved-on pull
-#     request's run is left alone. enroll-dispatch's decide refuses a draft, and marking it ready starts a new Build
-#     run. The review of an older head decides nothing, and its re-run could cancel the newer head's Build run, which
-#     shares its concurrency group;
-#   - the run is at attempt 1 or 2. At attempt 3 or more it is left alone: a review that fails each time runs at most
-#     three times in one Build run. A new Build run of the same head commit (a person reopens the pull request, or
-#     marks it ready for review) starts again at attempt 1.
-# The re-run is `gh run rerun <id> --failed`: GitHub runs again the failed and cancelled jobs and the jobs that need
-# them, with the run's own event and head commit, and with the workflow file of the run's first attempt, the build.yaml
-# of that event's GITHUB_SHA, not main's of now. The re-run's completion starts this workflow and enroll-dispatch.yml
-# again. The step summary names each re-run and each run left at the cap.
+# enroll-dispatch.yml calls this file (workflow_call) on the completion of each Build run, from its job review-rerun,
+# with the same guard as the decide job below. Why there: the re-run uses the oss-verify App's token, so that the
+# re-run's completion starts enroll-dispatch.yml again; the App's key is read through Google's provider github-ossv,
+# which admits, on workflow_run, enroll-dispatch.yml on main alone (Theorem's infrastructure code), and a workflow
+# that a workflow calls signs in under its caller's workflow_ref.
+#
+#   decide  runs only for a failed run of this repository's Build (build.yaml), of a pull request's own event
+#           (pull_request_target), on main: a run started by hand or for an issue, and a run that a newer push
+#           cancelled, are left alone. It reads only the run's id and attempt and the jobs of that attempt (the jobs
+#           API), with a GITHUB_TOKEN that reads Actions and writes nothing. It asks for the re-run when the review job
+#           ended failure, cancelled or timed_out, the build job (project-builds) passed, and the run is at attempt 1
+#           or 2. A build that failed is the project's or the runner's, and a maintainer re-runs it (build.yaml): a
+#           re-run here would build it again for up to six hours. At attempt 3 or more it asks for nothing and says so
+#           in the step summary: a review that fails each time runs at most three times in one Build run. A new Build
+#           run of the same head commit (a person reopens the pull request, or marks it ready for review) starts again
+#           at attempt 1. It reads no pull request: a change has no build job that passed, and a re-run of a stale
+#           head's review is accepted. It decides nothing new (enroll-dispatch's decide refuses a pull request whose
+#           head moved), and Build's concurrency group for the pull request orders it with the pull request's other
+#           runs.
+#   rerun   in the GitHub Environment comment, whose deployments are main's alone, reads the App's key from Secret
+#           Manager as enroll-dispatch's dispatch job does, makes the App's installation token for this repository
+#           alone with actions: write alone (actions/create-github-app-token, which revokes it when the job ends), and
+#           gives it, in GH_TOKEN, to the one step that runs `gh run rerun <id> --failed`. The job's GITHUB_TOKEN has no
+#           permission but the identity token.
+# The re-run runs again the failed and cancelled jobs and the jobs that need them, with the run's own event and head
+# commit, and with the workflow file of the run's first attempt, the build.yaml of that event's GITHUB_SHA, not main's
+# of now. It keeps the privileges of the actor of the run's first attempt (github.actor); GitHub shows the App as the
+# actor that started it (github.triggering_actor;
+# https://docs.github.com/en/actions/reference/workflows-and-actions/contexts).
 # The cost in GitHub Actions: one job of a few seconds for each failed Build run of a pull request, and for each re-run
 # one more review and the jobs after it, at most two for one Build run. Nothing runs on a schedule.
-# A re-run keeps the privileges of the actor of the run's first attempt (github.actor); GitHub shows github-actions[bot]
-# as the actor that started it (github.triggering_actor;
-# https://docs.github.com/en/actions/reference/workflows-and-actions/contexts).
-# The job holds no secret, checks out nothing and runs no code of a pull request. Only numbers of the completed run
-# reach its shell (its id, attempt and head commit); a pull request's file names reach it only as a project name that
-# the API answer's filter has matched to enroll-dispatch's pattern, or as "-".
+# No job checks out anything or runs code of a pull request. Only the run's id and attempt reach a shell.
 on:
-  workflow_run:
-    workflows: [Build]
-    types: [completed]
+  workflow_call:
 
 permissions: {}
 
 jobs:
-  rerun:
-    if: github.event.workflow_run.event == 'pull_request_target' && github.event.workflow_run.conclusion == 'failure'
+  decide:
+    if: >-
+      github.event_name == 'workflow_run' && github.ref == 'refs/heads/main'
+      && github.event.workflow_run.repository.full_name == github.repository
+      && github.event.workflow_run.path == '.github/workflows/build.yaml'
+      && github.event.workflow_run.event == 'pull_request_target'
+      && github.event.workflow_run.conclusion == 'failure'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      actions: write        # to read the run's jobs, and to re-run its failed jobs
-      pull-requests: read   # the open pull requests at the run's head commit, and their files
+      actions: read   # the jobs of the attempt that completed
+    outputs:
+      rerun: ${{ steps.decide.outputs.rerun }}
     steps:
-      - name: Re-run a failed enrollment review
+      - name: Whether the review job alone failed, below the third attempt
+        id: decide
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.event.workflow_run.id }}
           RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
-          say() { echo "$1"; echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
-          [[ $RUN_ID =~ ^[0-9]+$ && $RUN_ATTEMPT =~ ^[0-9]+$ && $HEAD_SHA =~ ^[0-9a-f]{40}$ ]] \
-            || { echo "::error::The completed run's id, attempt or head commit is not one."; exit 1; }
+          [[ $RUN_ID =~ ^[0-9]+$ && $RUN_ATTEMPT =~ ^[0-9]+$ ]] \
+            || { echo "::error::The completed run's id or attempt is not a number."; exit 1; }
           # The jobs of the attempt that completed: GitHub lists each job of the run, a job this attempt did not run
           # again with its earlier result. The review job has no name of its own; project-builds' job is named build.
           conclusions=$(gh api "repos/$REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs?per_page=100" \
@@ -76,28 +84,89 @@ jobs:
             echo "Build run $RUN_ID: its build job is $build, so the failure is not the review's alone: no re-run."
             exit 0
           fi
-          # The open pull requests into main, ready for review, whose head is still the run's head commit.
-          numbers=$(gh api --paginate "repos/$REPO/pulls?state=open&base=main&per_page=100" \
-            --jq ".[] | select(.head.sha == \"$HEAD_SHA\" and .draft == false) | .number")
-          if [ -z "$numbers" ]; then
-            echo "Build run $RUN_ID: no open pull request into main, ready for review, is at ${HEAD_SHA:0:7}."
+          ended="Build run $RUN_ID: its review job ended $review at attempt $RUN_ATTEMPT"
+          if (( RUN_ATTEMPT >= 3 )); then
+            echo "$ended. At most two re-runs for one Build run: it is not run again." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          for number in $numbers; do
-            [[ $number =~ ^[0-9]+$ ]] || { echo "::error::Not a pull request number."; exit 1; }
-            # The project of each path, a renamed file under both names, or "-" for a path not under projects/<name>/.
-            # The pattern of a name is enroll-dispatch's NAME.
-            projects=$(gh api --paginate "repos/$REPO/pulls/$number/files?per_page=100" \
-              --jq '.[] | .filename, (.previous_filename // empty)
-                | (capture("^projects/(?<name>[a-z0-9][a-z0-9._-]{0,62})/.") | .name) // "-"' | sort -u)
-            if ! [[ $projects =~ ^[a-z0-9][a-z0-9._-]{0,62}$ ]]; then
-              echo "Pull request $number: not one enrollment: nothing is re-run."; exit 0
-            fi
-          done
-          pulls=${numbers//$'\n'/, }
-          ended="Pull request $pulls: the review job of Build run $RUN_ID ended $review at attempt $RUN_ATTEMPT"
-          if (( RUN_ATTEMPT >= 3 )); then
-            say "$ended. At most two re-runs for one Build run: it is not run again."; exit 0
-          fi
+          echo "$ended: the rerun job re-runs its failed jobs."
+          echo "rerun=true" >> "$GITHUB_OUTPUT"
+
+  rerun:
+    needs: decide
+    if: needs.decide.outputs.rerun == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Gets this job, and no other of this file, the App's key: only a token with this environment's claim may act as
+    # the account that reads it, as for enroll-dispatch's dispatch job. deployment: false, so that a run posts no
+    # deployment; the claim is in the token either way.
+    environment:
+      name: comment
+      deployment: false
+    permissions:
+      # Only for the GitHub identity token that Google's federation trades for an access token of the account that
+      # reads the App's key. The re-run itself is the App's token's.
+      id-token: write
+    env:
+      # Public identifiers, not credentials, as in enroll-dispatch's dispatch job.
+      GCP_WORKLOAD_IDENTITY_PROVIDER: projects/805240912354/locations/global/workloadIdentityPools/github/providers/github-ossv
+      GCP_SERVICE_ACCOUNT: ossv-app-comment@theorem-agent-infra.iam.gserviceaccount.com
+    steps:
+      - name: Sign in to Google Cloud
+        id: gcp
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0 (sha-pinned)
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+          token_format: access_token
+          access_token_lifetime: 300s
+          # Nothing is written to the workspace and nothing is exported: the token is this step's output alone.
+          create_credentials_file: false
+          export_environment_variables: false
+
+      # The App's private key, from Secret Manager, as enroll-dispatch's dispatch job reads it. Each non-blank line of
+      # the key is masked, and so is its base64 form. It reaches only the next step's private-key input.
+      - name: Read the oss-verify App's key
+        id: key
+        env:
+          GCP_ACCESS_TOKEN: ${{ steps.gcp.outputs.access_token }}
+        run: |
+          set -euo pipefail
+          payload=$(curl -q -sSf -H @<(builtin printf 'Authorization: Bearer %s\n' "$GCP_ACCESS_TOKEN") \
+            'https://secretmanager.googleapis.com/v1/projects/theorem-agent-infra/secrets/oss-verify-github-app-key/versions/latest:access' \
+            | jq -er '.payload.data | select(type == "string" and length > 0)')
+          builtin printf '::add-mask::%s\n' "$payload"
+          key=$(builtin printf '%s' "$payload" | base64 -d)
+          while IFS= read -r line; do
+            if [[ $line == *[![:space:]]* ]]; then builtin printf '::add-mask::%s\n' "$line"; fi
+          done <<< "$key"
+          delimiter="key-$(openssl rand -hex 16)"
+          { echo "key<<$delimiter"; builtin printf '%s\n' "$key"; echo "$delimiter"; } >> "$GITHUB_OUTPUT"
+
+      # actions: write is the narrowest permission that re-runs a run. In this repository it also allows deleting runs,
+      # logs, artifacts and caches, cancelling runs, disabling workflows and approving a fork's held run (GitHub's
+      # "Permissions required for GitHub Apps", Actions); the token reaches only the next step, which runs no code of a
+      # pull request, and the action revokes it when the job ends.
+      - name: Get the App's token to re-run this repository's runs
+        id: token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0 (sha-pinned)
+        with:
+          client-id: Iv23liAWPMahJZYsw3un
+          private-key: ${{ steps.key.outputs.key }}
+          owner: theorem-labs
+          repositories: oss-verify
+          permission-actions: write
+
+      - name: Re-run the failed jobs
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: |
+          set -euo pipefail
+          [[ $RUN_ID =~ ^[0-9]+$ && $RUN_ATTEMPT =~ ^[0-9]+$ ]] \
+            || { echo "::error::The completed run's id or attempt is not a number."; exit 1; }
           gh run rerun "$RUN_ID" --failed -R "$REPO"
-          say "$ended; its failed jobs run again."
+          echo "Build run $RUN_ID: its review job failed at attempt $RUN_ATTEMPT; its failed jobs run again, with the" \
+            "oss-verify App's token." | tee -a "$GITHUB_STEP_SUMMARY"

@@ -46,6 +46,12 @@
 # requests of this repository for the label (actions/create-github-app-token), contents of the private repository for
 # the event (.github/scripts/app-token, which names it by id, so that the public log does not name it; GitHub's
 # repository_dispatch endpoint takes contents: write). It checks out .github/scripts alone and runs app-token alone.
+#
+# review-rerun calls .github/workflows/review-rerun.yml, which re-runs a failed run of Build whose review job failed
+# and whose build passed, up to the run's third attempt, with the App's token, so that the re-run's completion runs this
+# file again (the top of that file). It is a job of this file because Google's provider admits, on workflow_run, this
+# file alone, and a workflow this file calls signs in under this file's workflow_ref. It runs no step here: it grants
+# the called file actions: read for its decide job and id-token: write for its rerun job, which declares `comment`.
 name: Enroll dispatch
 on:
   workflow_run:
@@ -259,3 +265,17 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.dispatch-token.outputs.token }}
         run: gh api --method DELETE installation/token
+
+  review-rerun:
+    # The same guard as review-rerun.yml's decide job: this repository's Build on main, a pull request's own event, and
+    # the run failed.
+    if: >-
+      github.event_name == 'workflow_run' && github.ref == 'refs/heads/main'
+      && github.event.workflow_run.repository.full_name == github.repository
+      && github.event.workflow_run.path == '.github/workflows/build.yaml'
+      && github.event.workflow_run.event == 'pull_request_target'
+      && github.event.workflow_run.conclusion == 'failure'
+    uses: ./.github/workflows/review-rerun.yml
+    permissions:
+      actions: read
+      id-token: write
