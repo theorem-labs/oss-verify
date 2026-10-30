@@ -651,9 +651,11 @@ jobs:
     # public comment (review.md, rule 6), and any that an earlier run stored but did not send (a newer push cancelled
     # it). It reads the findings from the bucket, never from an output, and the App's key and the repository's name from
     # Secret Manager, as the comment job reads the key: so it runs in the environment comment, the only one whose jobs
-    # can act as ossv-app-comment. It runs no code of the pull request.
-    needs: [project-builds, review]
-    if: ${{ !cancelled() && needs.review.result != 'skipped' }}
+    # can act as ossv-app-comment. It runs no code of the pull request. Only after an enrollment's review: a change's or
+    # an issue's schema has no held finding, so their runs store none, and the next enrollment's run sends what any
+    # earlier run left (so a flood of issues cannot fill this job's one queue below).
+    needs: [route, project-builds, review]
+    if: ${{ !cancelled() && needs.review.result != 'skipped' && needs.route.outputs.kind == 'enrollment' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # One hold job at a time in the repository, whatever pull request: two sweeps at once could each send the same
@@ -922,15 +924,15 @@ jobs:
           BUILD: ${{ needs.project-builds.result }}
           ASKED_BUILD: ${{ needs.route.outputs.kind == 'enrollment' }}
           # Each of the others is asked for on its own job's condition: the record when the build passed and took a
-          # project, the review when the build took a project or the kind is change or issue, hold when the review
-          # ran, comment when the review wrote a comment (and, if it held a finding back, the hold job sent it), never
-          # for an issue.
+          # project, the review when the build took a project or the kind is change or issue, hold when an
+          # enrollment's review ran, comment when the review wrote a comment (and, if it held a finding back, the hold
+          # job sent it), never for an issue.
           RECORD: ${{ needs.record.result }}
           ASKED_RECORD: ${{ needs.project-builds.result == 'success' && needs.project-builds.outputs.name != '' }}
           REVIEW: ${{ needs.review.result }}
           ASKED_REVIEW: ${{ (needs.project-builds.outputs.name != '' || needs.route.outputs.kind == 'change' || needs.route.outputs.kind == 'issue') }}
           HOLD: ${{ needs.hold.result }}
-          ASKED_HOLD: ${{ needs.review.result != 'skipped' }}
+          ASKED_HOLD: ${{ needs.review.result != 'skipped' && needs.route.outputs.kind == 'enrollment' }}
           COMMENT: ${{ needs.comment.result }}
           ASKED_COMMENT: >-
             ${{ needs.route.outputs.kind != 'issue'
