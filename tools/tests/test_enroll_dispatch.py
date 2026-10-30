@@ -525,11 +525,29 @@ class Review(unittest.TestCase):
         got = self.decide({"F2": "pass", "F7": "pass", "A1": "fail", "G5": "person"})
         self.assertEqual(got["decision"], "dispatch", got["reason"])
 
-    def test_the_build_workflow_uploads_the_verdicts_the_gate_reads(self):
-        text = (ROOT / ".github/workflows/build.yaml").read_text()
-        self.assertIn('jq .verdicts <<< "$out" > "$RUNNER_TEMP/draft/verdicts.json"', text)
-        self.assertIn(f"name: {dispatch.REVIEW_ARTIFACT}, path: \"${{{{ runner.temp }}}}/draft\"", text)
-        self.assertIn('"required":["F2","F7"]', text)
+    def test_the_build_workflow_writes_the_verdicts_the_gate_reads(self):
+        # build.yaml's review of an enrollment, run as it is: review-prompt's schema requires the two checks the gate
+        # reads, and the result step writes the files of the artifact the gate opens, the verdicts as the review gave.
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            subprocess.run([str(ROOT / ".github/scripts/review-prompt")], check=True,
+                           env={**os.environ, "KIND": "enrollment", "PR": "8", "NAME": "libreac",
+                                "GITHUB_OUTPUT": str(root / "prompt")})
+            arguments = dict(line.split("=", 1) for line in (root / "prompt").read_text().splitlines())["arguments"]
+            schema = json.loads(re.search(r"--json-schema '([^']*)'", arguments).group(1))
+            self.assertEqual(schema["properties"]["verdicts"]["required"], ["F2", "F7"])
+            verdicts = {"F2": "fail", "F7": "pass", "A1": "person"}
+            (root / "execution.json").write_text(json.dumps([{"type": "result", "structured_output": {
+                "comment": "x", "held": "", "verdicts": verdicts}}]))
+            (root / "temp").mkdir()
+            jobs = yaml.safe_load((ROOT / ".github/workflows/build.yaml").read_text())["jobs"]
+            [result] = [s for s in jobs["review"]["steps"] if s.get("id") == "result"]
+            subprocess.run(["bash", "-e", "-c", result["run"]], check=True, cwd=root,
+                           env={**os.environ, "HOME": str(root), "RUNNER_TEMP": str(root / "temp"), "KIND": "enrollment",
+                                "RESULT": str(root / "execution.json"), "GITHUB_OUTPUT": str(root / "output"),
+                                "SESSION": "", "HEAD_SHA": ""})
+            self.assertEqual({p.name for p in (root / "temp" / "draft").iterdir()}, dispatch.REVIEW_FILES)
+            self.assertEqual(json.loads((root / "temp" / "draft" / "verdicts.json").read_text()), verdicts)
 
 
 class Maintainer(unittest.TestCase):
