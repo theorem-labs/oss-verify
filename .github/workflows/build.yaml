@@ -26,7 +26,8 @@ name: "Build"
 #            are. It gives a structured output: the comment that asks the maintainer for each fix, any finding held
 #            back (review.md, rule 6), and a verdict for each check. The comment and the verdicts are the artifact
 #            enroll-review-draft. On a later push it resumes the same Claude Code session as the last review, so it
-#            knows what it asked for and why, and reviews only the diff since the commit it reviewed then.
+#            knows what it asked for and why, and reviews only the diff since the commit it reviewed then, with one
+#            exception: check D3 of review.md answers each failing result of this build's report of the new head.
 #   hold     sends each real bug in a project's own code that a review held back from its comment (review.md, rule 6)
 #            to the disclosure route as a private issue (.github/scripts/review-hold): the review job stores it in a
 #            private bucket that only this job can read, and this job sends every finding stored there, a cancelled
@@ -458,8 +459,10 @@ jobs:
             Read review.md at the root of this checkout: it says what OSS Verify's enrollment check of pull request
             #${{ env.PR }}, projects/${{ env.NAME }}/, checks. ${{ steps.gather.outputs.session && format('Earlier in this
             session you reviewed {0}. A new request comes only from .review/since-last-review.diff, the diff from {0} to
-            {1}: read it and review.md, and before you keep a request of your last comment, read again the input in
-            .review/ that it is about, and drop it if that input shows it met. Review', steps.gather.outputs.last,
+            {1}, with one exception: check D3 of review.md, which answers each failing result of the report this build
+            wrote for {1}, whatever the diff holds. Read the diff and review.md, and before you keep a request of your last
+            comment, read again the input in .review/ that it is about, and drop it if that input shows it met.
+            Review', steps.gather.outputs.last,
             env.HEAD_SHA) || 'Then review' }} as the section "In CI" of .claude/skills/review-enrollment/SKILL.md says.
             Give the result as the structured output.
           claude_args: >-
@@ -740,7 +743,7 @@ jobs:
             printf '<!-- oss-verify-review -->\n<sub>Claude wrote this review of `%s` from `review.md`. It can be wrong. Each push replaces it.</sub>\n\n%s\n' \
               "${HEAD_SHA:0:7}" "${REVIEW:0:50000}"
             if [ -n "$CHECKS" ]; then
-              printf '\n<details><summary>What the breakage and coverage checks measured</summary>\n\n%s\n\n</details>\n' "${CHECKS:0:12000}"
+              printf '\n<details><summary>What the checks of the fuzz targets and of the binaries measured</summary>\n\n%s\n\n</details>\n' "${CHECKS:0:12000}"
             fi
           } > "$RUNNER_TEMP/comment.md"
           # Ours is the oss-verify App's comment that starts with the marker.

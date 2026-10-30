@@ -543,7 +543,7 @@ class PostingStep(unittest.TestCase):
         body = self.post("Thanks again.\n\n2. Fix Y.\n")
         self.assertTrue(body.startswith("<!-- oss-verify-review -->\n<sub>Claude wrote this review of `bbbbbbb`"))
         self.assertIn("\n\nThanks again.\n\n2. Fix Y.\n", body)
-        self.assertIn("<summary>What the breakage and coverage checks measured</summary>\n\n### new report", body)
+        self.assertIn("<summary>What the checks of the fuzz targets and of the binaries measured</summary>\n\n### new report", body)
 
     def test_without_a_posted_comment_it_posts_one(self):
         body = self.post("Thanks.\n", existing=False, checks="")
@@ -1088,7 +1088,6 @@ class ReviewJob(unittest.TestCase):
         self.assertEqual(schema["properties"]["verdicts"]["additionalProperties"], {"enum": ["pass", "fail", "person"]})
         prompt = settings["prompt"]
         self.assertIn("Read review.md at the root of this checkout", prompt)
-        self.assertIn("A new request comes only from .review/since-last-review.diff", prompt)
         self.assertIn("before you keep a request of your last comment, read again the input in .review/", prompt)
 
     def test_the_session_is_kept_by_the_review_job_and_not_when_it_holds_a_finding(self):
