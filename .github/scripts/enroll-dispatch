@@ -53,9 +53,8 @@ build.yaml runs again on ready_for_review, and that run's completion decides for
 A pull request that changes a project already enrolled is sent too: its facts are made again at the new commit.
 
 The sizes are read from the ELF headers of the files the project's own build wrote, so a build that rewrites its
-program headers can make them small. The statements repository measures its own build again, and its daily limit caps
-what any enrollment can start. Its facts pull request merges after its checks pass and an agent reviews it; no person
-reviews it.
+program headers can make them small. The statements repository measures its own build again. Its facts pull request
+merges after its checks pass and an agent reviews it; no person reviews it.
 """
 from __future__ import annotations
 
