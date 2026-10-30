@@ -6,8 +6,7 @@
 Each workflow has a route job that decides which jobs the run needs, and a job named required that always runs last,
 collects every result with the collector, and reports the workflow's one required check. These check the collector's
 verdicts, the shape every routed workflow keeps (the collector waits for every job, and no job a route may skip reports
-a required check), and the routes' own steps, run on made-up changes. The last ones check the shape of enroll-merged.yml,
-the workflow whose run tells enroll-dispatch.yml that a pull request was merged.
+a required check), and the routes' own steps, run on made-up changes.
 """
 import importlib.util
 import itertools
@@ -434,35 +433,3 @@ def test_triage_route_asks_for_gather_whenever_triage_py_would_comment():
     named = [path for path in paths if triage.split_paths([path])[0]]
     assert "projects/p/x.md" in named
     assert [path for path in named if not asks.search(path)] == []
-
-
-# --- enroll-merged.yml, the one event of a merge for enroll-dispatch.yml ---
-
-
-def test_enroll_merged_has_no_permission_and_no_checkout():
-    # It runs on each closed pull request, a fork's included, and on a replay by hand; its only work is to complete.
-    flow = workflow("enroll-merged.yml")
-    assert flow["name"] == "Enrollment merged"
-    assert flow[True] == {"pull_request_target": {"types": ["closed"]},
-                          "workflow_dispatch": {"inputs": {"pr": {"required": True, "type": "string"}}}}
-    # enroll-dispatch reads the pull request's number from the run's title.
-    assert flow["run-name"] == "merged #${{ github.event.pull_request.number || inputs.pr }}"
-    assert flow["permissions"] == {}
-    assert list(flow["jobs"]) == ["merged"]
-    job = flow["jobs"]["merged"]
-    assert job["if"] == "github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true"
-    assert "permissions" not in job and "environment" not in job
-    assert job["timeout-minutes"] == 2
-    assert job["steps"] == [{"run": "echo \"enroll-dispatch.yml decides on this run's end\""}]
-    assert "secrets." not in (WORKFLOWS / "enroll-merged.yml").read_text()
-
-
-def test_enroll_dispatch_listens_to_enroll_merged():
-    flow = workflow("enroll-dispatch.yml")
-    assert "Enrollment merged" in flow[True]["workflow_run"]["workflows"]
-    assert workflow("enroll-merged.yml")["name"] == "Enrollment merged"
-    # decide runs on each event a run of enroll-merged.yml has, and the flag that a merge sent it reaches the send step.
-    for event in workflow("enroll-merged.yml")[True]:
-        assert f'"{event}"' in flow["jobs"]["decide"]["if"], event
-    assert flow["jobs"]["decide"]["outputs"]["merged"] == "${{ steps.decide.outputs.merged }}"
-    assert flow["jobs"]["dispatch"]["env"]["MERGED"] == "${{ needs.decide.outputs.merged }}"

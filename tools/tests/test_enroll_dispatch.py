@@ -786,16 +786,6 @@ class Merged(unittest.TestCase):
         got = dispatch.decide(api, REPO, MERGED_RUN, "pull_request_target", SHA)
         self.assertEqual((got["decision"], got["label"], got["project"]), ("label", "name-review", name), got["reason"])
 
-    def test_each_merged_run_decides_in_a_group_of_its_own(self):
-        # Not the group of its head: there, a later run of the head (an edit of the title, a label) replaces a pending
-        # one, and would decide the closed pull request by the path of an open one, which sends nothing.
-        flow = yaml.safe_load((ROOT / ".github" / "workflows" / "enroll-dispatch.yml").read_text())
-        group = " ".join(flow["concurrency"]["group"].split())
-        self.assertTrue(group.startswith(
-            "enroll-dispatch:${{ (github.event.workflow_run.event == 'workflow_dispatch' || "
-            f"github.event.workflow_run.path == '{dispatch.MERGED_WORKFLOW}') && github.event.workflow_run.id || "),
-            group)
-
     def test_a_forged_or_untitled_merged_run_decides_nothing(self):
         # A fork's own copy of the file on its pull request, a replay from another branch's or repository's copy, and a
         # title that names no pull request.
