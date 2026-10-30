@@ -13,9 +13,16 @@ name: "OSS Verify review"
 # The job:
 #   - runs in the environment oss-verify-starter, which holds the OSS Verify App's private key (the environment secret
 #     OSS_VERIFY_APP_PRIVATE_KEY) and whose deployment branches are the default branch alone; no other job names it. A
-#     run of pull_request_target or issues has the default branch as its ref, whatever a pull request holds.
-#   - gets the App's token for theorem-labs/oss-verify alone, with actions: write alone: it can start a workflow run
-#     there and nothing else.
+#     run of pull_request_target or issues has the default branch as its ref, whatever a pull request holds. That
+#     keeps the key from other code only while the default branch takes reviewed changes alone: a ruleset on it
+#     requires a pull request with an approving review, and no writer can bypass it.
+#   - gets the App's token for theorem-labs/oss-verify alone, with actions: write alone. That is the narrowest
+#     permission that can start a workflow run (POST .../actions/workflows/{id}/dispatches). There it also allows
+#     deleting runs, their logs, artifacts and caches, cancelling and re-running runs, disabling and enabling
+#     workflows, approving a held run of a fork's pull request, and setting the OIDC subject claim template
+#     (https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps, "Actions"). That is
+#     accepted because the token reaches only the one step that starts the run, no code of the pull request runs in
+#     this job, and actions/create-github-app-token revokes the token when the job ends.
 #   - checks out nothing and runs no code of the pull request; each action is pinned by its commit.
 #   - reads the pull request's number and head commit, or the issue's number, from the event, never from the text of
 #     the pull request or the issue: a number must match ^[0-9]+$ and a head ^[0-9a-f]{40}$, and the repository is this
