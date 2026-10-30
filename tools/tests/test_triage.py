@@ -315,6 +315,13 @@ class Comment(unittest.TestCase):
                       "/blob/main/CONTRIBUTING.md#review-of-an-enrollment)). A person at Theorem decides |",
                       result.comment)
 
+    def test_a_fork_whose_parent_the_answer_does_not_give(self):
+        """GitHub leaves out parent for a fork whose upstream repository is gone or private."""
+        with mock.patch.dict(META, {**META, "fork": True}, clear=True):
+            result = triage.triage(self.pull(ON_GITHUB, "NONE"), REPO, 7)
+        self.assertIn("| ⚠️ | Fork | a fork of another repository. We usually do not accept a fork",
+                      result.comment)
+
     def test_a_seeded_project_from_outside(self):
         result = triage.triage(self.pull(SEEDED, "NONE"), REPO, 7)
         self.assertTrue(result.comment.startswith(triage.MARKER + "\n"))
