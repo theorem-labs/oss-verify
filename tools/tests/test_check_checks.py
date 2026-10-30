@@ -191,8 +191,7 @@ class WorkflowArguments(unittest.TestCase):
     def test_no_credential_is_an_argument(self):
         # The App's key and the base64 it is decoded from are shell variables of their step, so they are named here
         # by those names, beside the environment variables.
-        for workflow, names in (("build.yaml", ("OTEL_COLLECTOR_TOKEN",
-                                                "GCP_ACCESS_TOKEN", "key", "payload")),
+        for workflow, names in (("build.yaml", ("GCP_ACCESS_TOKEN", "key", "payload")),
                                 ("triage.yaml", ("GCP_ACCESS_TOKEN", "key", "payload")),
                                 ("enroll-dispatch.yml", ("GCP_ACCESS_TOKEN", "key", "payload"))):
             steps = self.steps(workflow)
@@ -250,7 +249,7 @@ class WorkflowArguments(unittest.TestCase):
         # credential's value must be absent from every program's arguments.
         if not shutil.which("strace"):
             self.skipTest("strace is not installed (the tests workflow installs it)")
-        token, gcp = "collector-token-not-a-secret", "gcp-not-a-secret"
+        gcp = "gcp-not-a-secret"
         key_lines = ["-----BEGIN RSA PRIVATE KEY-----", "MIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4",
                      "KUpRKfFLfRYC9AIKjbJTWit+CqvjWYzvQwECAwEAAQ==", "-----END RSA PRIVATE KEY-----"]
         key = "\n".join(key_lines) + "\n"
@@ -261,9 +260,6 @@ class WorkflowArguments(unittest.TestCase):
             return found[0]["run"]
 
         cases = [
-            ("build.yaml review usage export", steps("build.yaml", "review", "Export the review's usage to the cost collector"),
-             json.dumps({"payload": {"data": base64.b64encode(token.encode()).decode()}}),
-             {"GCP_ACCESS_TOKEN": gcp}, [token, base64.b64encode(token.encode()).decode(), gcp]),
             ("build.yaml review held finding store", steps("build.yaml", "review", "Store the held finding for the hold job"),
              json.dumps({"generation": "1761500000000000"}),
              {"GCP_ACCESS_TOKEN": gcp, "RUN_ID": "7", "PR": "68", "NAME": "libreac", "HEAD_SHA": "1" * 40,
@@ -386,10 +382,10 @@ class WorkflowArguments(unittest.TestCase):
                 self.assertIn(key_job, jobs, workflow)
             self.assertEqual(self.app_key_jobs_problems(jobs, key_jobs), [], workflow)
 
-    def test_only_the_review_job_can_read_the_collector_token(self):
+    def test_only_the_review_job_can_act_as_ossv_ci(self):
         # ossv-ci can be acted as only from oss-verify's GitHub Environment `enroll-review` (Theorem's
-        # infrastructure code), which the review job declares; no other job of either file may name that account or
-        # that environment, and the review job must keep it, or its sign-in stops working.
+        # infrastructure code), which the review job declares. The review job now reads no token with it: it signs in
+        # only to store a held finding, and it must keep the account and the environment, or that store stops working.
         account = "ossv-ci@theorem-agent-infra.iam.gserviceaccount.com"
         for workflow in self.KEY_JOBS:
             for name, job in self.workflow(workflow)["jobs"].items():
@@ -440,9 +436,9 @@ class WorkflowArguments(unittest.TestCase):
 
     def test_every_google_sign_in_keeps_its_token_to_one_step(self):
         # Each auth step writes no credentials file, exports no variable, and mints a five-minute access token: its
-        # output is all that holds it. Six steps: build.yaml's review job signs in before the review and again, for a
-        # held finding, after it (the first token has expired by then); its hold and comment jobs, triage's comment job
-        # and enroll-dispatch's dispatch job sign in once each.
+        # output is all that holds it. Five steps: build.yaml's review job signs in once, after the review, and only
+        # for a held finding; its hold and comment jobs, triage's comment job and enroll-dispatch's dispatch job sign
+        # in once each.
         found = 0
         for workflow in self.KEY_JOBS:
             for name, job in self.workflow(workflow)["jobs"].items():
@@ -454,7 +450,7 @@ class WorkflowArguments(unittest.TestCase):
                                          {"token_format": "access_token", "access_token_lifetime": "300s",
                                           "create_credentials_file": False, "export_environment_variables": False},
                                          f"{workflow} {name}")
-        self.assertEqual(found, 6)
+        self.assertEqual(found, 5)
 
     def test_another_job_in_the_comment_environment_is_refused_in_every_shape(self):
         # The shapes GitHub takes for `environment` (workflow syntax, jobs.<job_id>.environment), each put on the
@@ -1154,41 +1150,80 @@ class ReviewJob(unittest.TestCase):
         self.assertNotEqual(run.returncode, 0)
         self.assertIsNone(last)
 
-    def export(self, answer):
+    # Tailscale's client ids look like TWbBfz7fqc11CNTRL-k46A6PQMc421CNTRL (agent-infra .github/actions/tailnet/tailnet.sh).
+    CLIENT_ID = re.compile(r"^[A-Za-z0-9]{8,}(-[A-Za-z0-9]+)*$")
+
+    def test_the_job_joins_the_tailnet_as_ossv_review(self):
+        join = self.steps["Join Theorem's tailnet, to export this review's usage"]
+        self.assertEqual(join["uses"],
+                         "tailscale/github-action@99a8333667fff04fdd6cffb46dfd409f8329a7bf")
+        self.assertEqual(join["id"], "tailnet")
+        # The join never decides whether a review runs.
+        self.assertIs(join["continue-on-error"], True)
+        self.assertEqual(join["with"]["oauth-client-id"], "${{ env.TAILNET_CLIENT_ID }}")
+        self.assertEqual(join["with"]["audience"], "theorem.dev/tailnet/ossv-review")
+        self.assertEqual(join["with"]["tags"], "tag:ossv-review")
+        # One review job runs in a run attempt, so the run id and the attempt name the node.
+        self.assertEqual(join["with"]["hostname"],
+                         "ossv-review-${{ github.run_id }}-${{ github.run_attempt }}")
+        self.assertEqual(join["timeout-minutes"], 3)
+        # The node is ephemeral: the logout deletes it at once, whatever the review did. Neither the join nor the
+        # logout may stop the steps that keep the draft, the verdicts and a held finding.
+        leave = self.steps["Leave the tailnet"]
+        self.assertEqual(leave["if"], "${{ always() && steps.tailnet.outcome == 'success' }}")
+        self.assertIs(leave["continue-on-error"], True)
+        self.assertEqual(leave["timeout-minutes"], 2)
+        self.assertIn("tailscale logout", leave["run"])
+        names = [s.get("name") for s in self.jobs["review"]["steps"]]
+        self.assertLess(names.index("Review"), names.index("Leave the tailnet"))
+        self.assertLess(names.index("Leave the tailnet"),
+                        names.index("Keep the draft, and the held finding apart from it"))
+
+    def test_the_tailnet_client_id_is_a_client_id_tailscale_gave(self):
+        # bootstrap/'s stack output ossvReviewTailnetClientId, which exists only after that apply (INFRA-832 S1a).
+        # This test is red until the value is in the workflow, so the pull request cannot merge before the apply.
+        client_id = self.jobs["review"]["env"]["TAILNET_CLIENT_ID"]
+        self.assertRegex(client_id, self.CLIENT_ID)
+
+    def test_no_step_reads_the_collector_token(self):
+        text = (ROOT / ".github" / "workflows" / "build.yaml").read_text()
+        self.assertNotIn("agent-spend-otel-token", text)
+        self.assertNotIn("agent-otel-public", text)
+        self.assertNotIn("OTEL_EXPORTER_OTLP_HEADERS", text)
+        self.assertNotIn("Sign in to Google Cloud, for the cost collector's token", text)
+
+    def export(self, outcome):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            (root / "bin").mkdir()
-            (root / "bin" / "curl").write_text(f"#!/bin/bash\nprintf '%s' {shlex.quote(answer)}\n" if answer is not None
-                                               else "#!/bin/bash\nexit 22\n")
-            (root / "bin" / "curl").chmod(0o755)
-            run = subprocess.run(["bash", "-e", "-c", self.steps["Export the review's usage to the cost collector"]["run"]],
-                                 cwd=root, capture_output=True, text=True,
-                                 env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
-                                      "GCP_ACCESS_TOKEN": "gcp-not-a-secret", "GITHUB_ENV": str(root / "env"),
+            step = self.steps["Export the review's usage to the cost collector"]
+            run = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=root, capture_output=True, text=True,
+                                 env={**os.environ, "GITHUB_ENV": str(root / "env"), "TAILNET": outcome,
                                       "NAME": "libreac"})
             return run, (root / "env").read_text() if (root / "env").exists() else ""
 
-    def test_the_collector_token_is_masked_and_reaches_the_action_by_the_environment(self):
-        token = "collector-token-not-a-secret"
-        run, env = self.export(json.dumps({"payload": {"data": base64.b64encode((token + "\n").encode()).decode()}}))
+    def test_the_export_names_the_tailnet_endpoint_and_no_header(self):
+        run, env = self.export("success")
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(run.stdout, f"::add-mask::{token}\n")
+        self.assertEqual(run.stdout, "")
         self.assertEqual(env, "CLAUDE_CODE_ENABLE_TELEMETRY=1\nOTEL_LOGS_EXPORTER=otlp\nOTEL_METRICS_EXPORTER=none\n"
                          "OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf\n"
-                         "OTEL_EXPORTER_OTLP_ENDPOINT=https://agent-otel-public-6acxmql5za-uw.a.run.app\n"
+                         "OTEL_EXPORTER_OTLP_ENDPOINT=http://spend.tail12ec1c.ts.net\n"
                          "OTEL_RESOURCE_ATTRIBUTES=theorem.project=oss-verify,theorem.subproject=libreac,"
-                         "theorem.lane=enroll-review-ci,theorem.credential=oss-verify-ci\n"
-                         f"OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer {token}\n")
+                         "theorem.lane=enroll-review-ci,theorem.credential=oss-verify-ci\n")
+        self.assertNotIn("Authorization", env)
 
-    def test_a_token_that_cannot_be_read_does_not_stop_the_review(self):
-        for answer in (None, "{}", '{"payload": {"data": null}}', json.dumps({"payload": {"data": "IAoJ"}})):
-            with self.subTest(answer=answer):
-                run, env = self.export(answer)
+    def test_review_runs_when_the_tailnet_join_fails(self):
+        for outcome in ("failure", "skipped", ""):
+            with self.subTest(outcome=outcome):
+                run, env = self.export(outcome)
                 self.assertEqual(run.returncode, 0, run.stderr)
-                self.assertIn("::warning::No cost collector token", run.stdout)
-                self.assertNotIn("::add-mask::", run.stdout)
+                self.assertIn("::warning::", run.stdout)
+                self.assertIn("tailnet", run.stdout)
                 self.assertEqual(env, "")
-        self.assertIs(self.steps["Sign in to Google Cloud, for the cost collector's token"]["continue-on-error"], True)
+        # The Review step comes after the export and has no condition of its own, so it runs either way.
+        names = [s.get("name") for s in self.jobs["review"]["steps"]]
+        self.assertLess(names.index("Export the review's usage to the cost collector"), names.index("Review"))
+        self.assertNotIn("if", self.review)
 
 
 class Owners(unittest.TestCase):

@@ -82,8 +82,10 @@ name: "Build"
 # job. Its results reach the other jobs only as job outputs, which this repository's tools write: text, never code.
 # The review job runs no code of the pull request or the project. It and the comment job hold identity tokens
 # (id-token: write), which they trade for short-lived tokens: the review's for an Anthropic token by workload identity
-# federation, so no API key is stored, and both jobs' for a Google access token by Google workload identity
-# federation (Theorem's infrastructure code). Claude gets three tools only, Read, Glob and Grep (`--tools`), in the
+# federation, so no API key is stored, for an ephemeral tailnet node that exports the review's usage (below), and,
+# when the review holds a finding back, for a Google access token that stores that finding; the comment job's for a
+# Google access token too, each by Google workload identity federation (Theorem's infrastructure code). Claude gets
+# three tools only, Read, Glob and Grep (`--tools`), in the
 # default permission mode (`--permission-mode default`, which refuses a read outside the checkout): no shell, no
 # network and no tool that writes, so the text of the pull request, which it reads as data (review.md, rule 1),
 # cannot make it run anything or reach the job's tokens. The action keeps the GitHub identity token's request
@@ -97,8 +99,8 @@ name: "Build"
 # This repository stores no long-lived credential for any of that. Google's provider admits this file, triage.yaml
 # and the enrollment workflow enroll-dispatch.yml, each on refs/heads/main and only from its own events (here
 # pull_request_target and workflow_dispatch). A token carries no job name, so what keeps each Google account to the
-# job that needs it is the job's GitHub Environment, which the token carries a claim for: `ossv-ci`, which reads the
-# cost collector's token and nothing else, can be acted as only from the environment `enroll-review`, which the
+# job that needs it is the job's GitHub Environment, which the token carries a claim for: `ossv-ci`, the account this
+# job stores a held finding with, can be acted as only from the environment `enroll-review`, which the
 # review job declares; `ossv-app-comment`, the account these jobs read the App's key as, only from `comment`, which
 # the comment job declares. A job that declares no environment, project-builds among them, reaches neither account, and
 # project-builds, which builds the pull request's code, must never be given id-token: write.
@@ -127,12 +129,19 @@ name: "Build"
 # comment on that pull request; the draft is also the review job's artifact enroll-review-draft.
 # Before the merge, tools/tests runs the review's own steps with stand-ins.
 #
-# The review's Claude Code exports its usage by OpenTelemetry to Theorem's cost collector, at the public URL below
-# (a literal here because it is public), with the collector's bearer token, which the review job reads at run time
-# from Secret Manager (agent-spend-otel-token, whose readers Theorem's infrastructure code names). The export is
-# tagged theorem.project=oss-verify, theorem.subproject=<name>, theorem.lane=enroll-review-ci and
+# The review's Claude Code exports its usage by OpenTelemetry to Theorem's cost collector, over Theorem's tailnet, at
+# http://spend.tail12ec1c.ts.net (a literal here: it is an address on the tailnet, not a secret). The collector keeps
+# a public endpoint with a bearer token until INFRA-832 deletes it; this job uses neither. The review job joins the
+# tailnet as an ephemeral node with the tag tag:ossv-review, and holds no token for the collector: Tailscale makes
+# the node from this job's GitHub identity token, and WireGuard authenticates and encrypts each connection. The tag,
+# the federated identity that trades the token for the node, the grant that gives the tag the collector's Tailscale
+# Service svc:spend on tcp:80 and nothing else beyond the two read-only pages every node of the tailnet may read
+# (Dispatch and the results dashboard, on tcp:443), and the policy test that fails if the tag reaches anything else,
+# are declared by INFRA-832 S1a in agent-infra. That change is not merged yet; its apply runs before this file
+# carries a client id, so all of it is live before this job first joins. The export is tagged
+# theorem.project=oss-verify, theorem.subproject=<name>, theorem.lane=enroll-review-ci and
 # theorem.credential=oss-verify-ci. The export is a measurement and never decides whether an enrollment gets its
-# review: if the sign-in or the read fails, the run's page carries a warning saying that this review's usage is not
+# review: if the job cannot join the tailnet, the run's page carries a warning saying that this review's usage is not
 # exported, and the review runs without it.
 #
 # The review's session goes from one push to the next in the Actions cache, under the key
@@ -151,7 +160,9 @@ name: "Build"
 # a pull request's own run can read it. GitHub drops an entry that no run has read for 7 days, and the next review is
 # then fresh. A review that holds back a finding (review.md, rule 6) keeps no session, because the session would hold
 # the finding: the next push resumes the last session kept before it, or starts fresh.
-# Only the review job can act as ossv-ci: that comes with the environment enroll-review. Its deployment branch rule,
+# Only the review job can act as ossv-ci: that comes with the environment enroll-review. The review job reads no
+# Secret Manager secret with that account; it signs in only to store a held finding, so a review that holds none
+# never signs in to Google. Its deployment branch rule,
 # declared in Theorem's infrastructure code, allows main alone; GitHub checks it against the run's ref, which is main
 # for pull_request_target and refs/pull/<n>/merge for a pull request's own run
 # (https://github.blog/changelog/2025-11-07-actions-pull_request_target-and-environment-branch-protections-changes).
@@ -398,6 +409,11 @@ jobs:
       SESSION_KEY: enroll-review/${{ github.event.pull_request.number || inputs.pr }}/${{ needs.project-builds.outputs.name }}/
       GCP_WORKLOAD_IDENTITY_PROVIDER: projects/805240912354/locations/global/workloadIdentityPools/github/providers/github-ossv
       GCP_SERVICE_ACCOUNT: ossv-ci@theorem-agent-infra.iam.gserviceaccount.com
+      # The client id Tailscale gave the federated identity ossv-review-github: bootstrap/'s stack output
+      # ossvReviewTailnetClientId, which INFRA-832 S1a in agent-infra declares and its apply makes. That change is
+      # not merged yet. The id is public, not a secret, and this is the one place this file names it. It is empty
+      # until that apply has run; tools/tests refuses an empty value, so this file cannot merge before then.
+      TAILNET_CLIENT_ID: ""
     outputs:
       comment: ${{ steps.review.outputs.structured_output && fromJSON(steps.review.outputs.structured_output).comment }}
       held_object: ${{ steps.held.outputs.object }}
@@ -423,23 +439,33 @@ jobs:
         run: |
           dpkg -s python3-yaml unzip > /dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml unzip; }
           LAST_REVIEW=~/.claude/ossv-last-review .github/scripts/review-gather .review
-      - name: Sign in to Google Cloud, for the cost collector's token
-        id: gcp
+      # The node is ephemeral and preauthorized, and it carries tag:ossv-review. INFRA-832 S1a in agent-infra, which
+      # is not merged yet, declares that tag, the grant that gives it the cost collector's Tailscale Service
+      # svc:spend on tcp:80 and nothing else beyond the two read-only pages every node of the tailnet may read, and
+      # the federated identity ossv-review-github, whose claims admit only this workflow of this repository, on
+      # refs/heads/main, in the environment enroll-review, on a GitHub-hosted runner. Its apply runs before the
+      # client id above is filled in. The job joins with its GitHub identity token, so no key is stored. One review
+      # job runs in a run attempt, so the run id and the attempt name the node. The join is capped at 3 minutes: the
+      # review itself takes up to 45 of the job's 60.
+      - name: Join Theorem's tailnet, to export this review's usage
+        id: tailnet
         continue-on-error: true
-        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0 (sha-pinned)
-        with: {workload_identity_provider: "${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}", service_account: "${{ env.GCP_SERVICE_ACCOUNT }}", token_format: access_token, access_token_lifetime: 300s, create_credentials_file: false, export_environment_variables: false}
+        timeout-minutes: 3
+        uses: tailscale/github-action@99a8333667fff04fdd6cffb46dfd409f8329a7bf # v4.3.0 (sha-pinned)
+        with:
+          oauth-client-id: ${{ env.TAILNET_CLIENT_ID }}
+          audience: theorem.dev/tailnet/ossv-review
+          tags: tag:ossv-review
+          hostname: ossv-review-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Export the review's usage to the cost collector
-        env: {GCP_ACCESS_TOKEN: "${{ steps.gcp.outputs.access_token }}"}
+        env: {TAILNET: "${{ steps.tailnet.outcome }}"}
         run: |
-          OTEL_COLLECTOR_TOKEN=$(curl -q -sSf -H @<(builtin printf 'Authorization: Bearer %s\n' "$GCP_ACCESS_TOKEN") \
-            https://secretmanager.googleapis.com/v1/projects/theorem-agent-infra/secrets/agent-spend-otel-token/versions/latest:access \
-            | jq -er '.payload.data | select(type == "string" and length > 0)' | base64 -d | tr -d '[:space:]') || OTEL_COLLECTOR_TOKEN=""
-          if [ -z "$OTEL_COLLECTOR_TOKEN" ]; then echo "::warning::No cost collector token: this review's usage is not exported."; exit 0; fi
-          builtin printf '::add-mask::%s\n' "$OTEL_COLLECTOR_TOKEN"
-          { builtin printf '%s\n' CLAUDE_CODE_ENABLE_TELEMETRY=1 OTEL_LOGS_EXPORTER=otlp OTEL_METRICS_EXPORTER=none \
-              OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf OTEL_EXPORTER_OTLP_ENDPOINT=https://agent-otel-public-6acxmql5za-uw.a.run.app \
-              "OTEL_RESOURCE_ATTRIBUTES=theorem.project=oss-verify,theorem.subproject=$NAME,theorem.lane=enroll-review-ci,theorem.credential=oss-verify-ci"
-            builtin printf 'OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer %s\n' "$OTEL_COLLECTOR_TOKEN"; } >> "$GITHUB_ENV"
+          if [ "$TAILNET" != success ]; then
+            echo "::warning::This job did not join the tailnet: this review's usage is not exported."; exit 0; fi
+          builtin printf '%s\n' CLAUDE_CODE_ENABLE_TELEMETRY=1 OTEL_LOGS_EXPORTER=otlp OTEL_METRICS_EXPORTER=none \
+            OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf OTEL_EXPORTER_OTLP_ENDPOINT=http://spend.tail12ec1c.ts.net \
+            "OTEL_RESOURCE_ATTRIBUTES=theorem.project=oss-verify,theorem.subproject=$NAME,theorem.lane=enroll-review-ci,theorem.credential=oss-verify-ci" \
+            >> "$GITHUB_ENV"
       - name: Review
         id: review
         timeout-minutes: 45
@@ -466,6 +492,15 @@ jobs:
             --tools Read,Glob,Grep --permission-mode default --model claude-opus-5-5 --effort xhigh --max-turns 300
             ${{ steps.gather.outputs.session && format('--resume {0}', steps.gather.outputs.session) || '' }}
             --json-schema '{"type":"object","additionalProperties":false,"required":["comment","held","verdicts"],"properties":{"comment":{"type":"string","description":"The comment to the maintainer, in Markdown. Never a held finding."},"held":{"type":"string","description":"Each finding held back under rule 6 of review.md, as the skill section A held finding says, or empty."},"verdicts":{"type":"object","description":"The verdict of each check of review.md by its id, A1 to G5, and for an F check the worst over the fuzz targets.","required":["F2","F7"],"additionalProperties":{"enum":["pass","fail","person"]}}}}'
+      # The logout deletes the ephemeral node at once, whatever the review did. When the runner itself is lost,
+      # Tailscale deletes the node 30 to 60 minutes after its last activity. The step takes continue-on-error, as the
+      # join does: this is the measurement's own cleanup, and a failed logout must not skip the steps below it, which
+      # keep the draft, the verdicts and a held finding. The action's post step logs out again at the end of the job.
+      - name: Leave the tailnet
+        if: ${{ always() && steps.tailnet.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        run: sudo tailscale logout
       - name: Keep the draft, and the held finding apart from it
         id: result
         env: {RESULT: "${{ steps.review.outputs.execution_file }}", SESSION: "${{ steps.review.outputs.session_id }}"}
