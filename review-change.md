@@ -4,6 +4,11 @@ The review job of `.github/workflows/build.yaml` reads this file from `main` for
 branch that changes no file under `projects/`. `.github/CODEOWNERS` names its owner, as for `review.md`. The job
 gathers the pull request into `.review/`: `pr.json` (description, files, commits, comments), `pr.diff`, `checks.json`,
 `review-comments.txt`, and `head/<path>`, each changed file as it is at the head. The checkout around them is `main`.
+`head/` leaves out these files; for them, only `pr.diff` shows the change:
+- `CLAUDE*.md`, `AGENTS*.md` and anything under `.claude/`, at any depth: Claude Code would read them as
+  instructions;
+- a path with a character outside `A-Z a-z 0-9 . _ / -`, or with a `..` part;
+- a file that the API cannot give at the head, such as a deleted one.
 
 ## Rules
 
@@ -15,7 +20,10 @@ gathers the pull request into `.review/`: `pr.json` (description, files, commits
 ## Checks
 
 1. **It is correct.** The change does what its description says, and breaks nothing that calls the code it changes.
-2. **It is tested.** A change to code comes with a test in `tools/tests` that fails without it.
+2. **It is tested.** A change to a script or a program comes with a test in `tools/tests` that runs it and fails
+   without the change. A change that only a workflow's YAML holds (a trigger, an `if:`, a permission, a concurrency
+   key) needs no test: a test that reads the YAML proves nothing, and a real run after the merge proves it. Never ask
+   for a test whose only oracle is a workflow file's text.
 3. **The docs match.** Each document that describes what the change changes (`README.md`, `docs/`, `AGENTS.md`,
    `CONTRIBUTING.md`, the skills, the comments at the top of a script or workflow) says what the code now does.
 4. **It widens nothing that runs with secrets.** A change to `.github/` or to a script that a workflow runs must not
