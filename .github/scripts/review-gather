@@ -8,6 +8,7 @@
 #     [BUILD=<result line> BINARIES=<table> CHECKS=<report>] [HEAD_SHA=<head commit> LAST_REVIEW=<file>] \
 #     .github/scripts/review-gather <directory>
 #   GH_TOKEN=... REPO=... PR=<number> NAME= HEAD_SHA=<head commit> .github/scripts/review-gather <directory>
+#   GH_TOKEN=... REPO=... ISSUE=<number> .github/scripts/review-gather <directory>
 #
 # build.yaml's review job runs it from the base branch's checkout, after take-project has put the pull request's
 # projects/<name>/ into that checkout. It runs no code of the pull request or of the project: it reads the pull request
@@ -20,21 +21,29 @@
 # GITHUB_OUTPUT, `session` and `last`, so that the review resumes that session for the diff alone.
 # With NAME empty, a change review (review-change.md): only the pull request, its diff, its checks and review comments,
 # and each changed file as it is at HEAD_SHA, as data under head/.
-# The runner reads none of its output as a workflow command: the gathered text is the pull request's.
+# With ISSUE set, the draft reply to an issue (review-issue.md): only the issue's title, body, author and comments, in
+# issue.json, and nothing else.
+# The runner reads none of its output as a workflow command: the gathered text is the pull request's or the issue's.
 resume=$(openssl rand -hex 16) && echo "::stop-commands::$resume"
 trap 'echo "::$resume::"' EXIT
 set -uo pipefail
 export LC_ALL=C
 
 out=${1:?usage: review-gather <directory>}
+# Run a command, and keep its standard output and error in a file, whatever its status.
+keep() { local file=$1; shift; { "$@"; echo "(exit status $?)"; } > "$out/$file" 2>&1; }
+if [ -n "${ISSUE:-}" ]; then
+  [[ $ISSUE =~ ^[0-9]+$ ]] || { echo "review-gather: ISSUE is not a number" >&2; exit 2; }
+  mkdir -p "$out"
+  keep issue.json gh issue view "$ISSUE" -R "$REPO" --json number,title,author,createdAt,body,comments
+  exit 0
+fi
 mkdir -p "$out/build" "$out/seeds"
 printf '%s\n' "${BUILD:-}" > "$out/build/result.md"
 printf '%s\n' "${BINARIES:-}" > "$out/build/binaries.md"
 printf '%s\n' "${CHECKS:-}" > "$out/build/checks.md"
 [[ $PR =~ ^[0-9]+$ ]] || { echo "review-gather: PR is not a number" >&2; exit 2; }
 dir="projects/$NAME"
-# Run a command, and keep its standard output and error in a file, whatever its status.
-keep() { local file=$1; shift; { "$@"; echo "(exit status $?)"; } > "$out/$file" 2>&1; }
 
 keep pr.json gh pr view "$PR" -R "$REPO" --json \
   number,title,author,isDraft,createdAt,body,headRefOid,files,commits,comments,reviews

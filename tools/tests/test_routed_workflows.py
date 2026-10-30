@@ -282,7 +282,7 @@ def test_builds_route_reviews_a_pull_request_with_no_file_under_projects_as_a_ch
     for name in ("Take projects/<name>/ from the pull request, as the build did",
                  "Restore the last review's session and the head it reviewed", "Review"):
         assert review[name]["if"] == "env.NAME != ''"
-    assert review["Review the change"]["if"] == "env.NAME == ''"
+    assert review["Review the change"]["if"] == "env.NAME == '' && env.ISSUE == ''"
     assert "env.NAME != ''" in review["Keep this review's session for the next push's review"]["if"]
 
 
@@ -297,6 +297,58 @@ def test_a_change_that_an_app_the_review_refuses_started_is_built_as_before(tmp_
     allowed = step(jobs["route"], "An enrollment or a change")["env"]["ALLOWED_BOTS"]
     review = {s.get("name"): s for s in jobs["review"]["steps"]}
     assert review["Review"]["with"]["allowed_bots"] == review["Review the change"]["with"]["allowed_bots"] == allowed
+
+
+def route_issue(tmp_path, pr, issue, is_pull=False):
+    """Run build.yaml's route step on a run started by hand with the inputs `pr` and `issue` ("" when not given), with
+    a fake gh whose number is an issue, or a pull request when `is_pull`. Return its exit status and outputs."""
+    bin = tmp_path / "bin"
+    bin.mkdir()
+    pull = {"pull_request": {"url": "x"}} if is_pull else {}
+    (tmp_path / "issue.json").write_text(json.dumps({"number": 5, **pull}))
+    (bin / "gh").write_text('#!/bin/bash\nfilter=""; for a; do [ "$prev" = --jq ] && filter=$a; prev=$a; done\n'
+                            f'echo "$*" >> {tmp_path}/calls\n'
+                            f'case "$*" in *"repos/o/r/issues/5"*) jq -r "$filter" {tmp_path}/issue.json ;; '
+                            '*) exit 1 ;; esac\n')
+    (bin / "gh").chmod(0o755)
+    written = tmp_path / "output"
+    decide = step(workflow("build.yaml")["jobs"]["route"], "An enrollment or a change")
+    run = subprocess.run(["bash", "-e", "-c", decide["run"]], capture_output=True, text=True,
+                         env={**os.environ, "PATH": f"{bin}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r",
+                              "PR": pr, "ISSUE": issue, "HEAD_SHA": "", "ACTOR": "someone",
+                              "ALLOWED_BOTS": decide["env"]["ALLOWED_BOTS"], "GITHUB_OUTPUT": str(written),
+                              "GITHUB_STEP_SUMMARY": str(tmp_path / "summary")})
+    return run.returncode, written.read_text().splitlines() if written.exists() else []
+
+
+def test_a_run_for_an_issue_asks_for_the_review_alone(tmp_path):
+    assert route_issue(tmp_path, "", "5") == (0, ["issue=true"])
+    flow = workflow("build.yaml")
+    jobs = flow["jobs"]
+    inputs = flow[True]["workflow_dispatch"]["inputs"]
+    assert (inputs["pr"]["required"], inputs["issue"]["required"]) == (False, False)
+    assert "(inputs.issue && format('Issue {0}', inputs.issue))" in flow["run-name"]
+    issue = "needs.route.outputs.issue == 'true'"
+    assert issue in jobs["review"]["if"]
+    assert issue in step(jobs["required"], "Every job route asked for passed, and no other ran")["env"]["ASKED_REVIEW"]
+    assert all("issue" not in str(jobs[job]["if"]) for job in ("project-builds", "record"))
+    review = {s.get("name"): s for s in jobs["review"]["steps"]}
+    assert review["Draft the issue reply"]["if"] == "env.ISSUE != ''"
+    # The comment job, which alone posts, never runs for an issue (its ASKED_COMMENT is the same condition: the test of
+    # the collector above).
+    assert jobs["comment"]["if"].startswith(
+        "${{ !cancelled() && vars.OSSV_POST_REVIEW == 'post' && needs.route.outputs.issue != 'true' && ")
+
+
+@pytest.mark.parametrize("pr, issue, is_pull", [
+    ("8", "5", False),  # both
+    ("", "", False),  # neither
+    ("", "5", True),  # a pull request given as an issue
+    ("", "5x", False),
+])
+def test_route_refuses_both_inputs_neither_or_a_pull_request_as_an_issue(tmp_path, pr, issue, is_pull):
+    code, outputs = route_issue(tmp_path, pr, issue, is_pull)
+    assert code != 0 and outputs == []
 
 
 # --- tests.yaml's route, run on made-up commits ---
