@@ -28,7 +28,9 @@ name: "Review re-run"
 # again. The step summary names each re-run and each run left at the cap.
 # Nothing runs on a schedule, so nothing would try this again: each call to GitHub (the jobs, the pull requests, their
 # files, the re-run) is tried up to four times in the job, 15, 30 and 60 s apart. After the fourth failed try the job
-# fails, and its summary names the Build run that is not re-run.
+# fails, and its summary names the Build run that is not re-run. A failed try of the re-run may still have been taken
+# (its answer lost): before each later try, and after the last, the run's attempt is read, and a later attempt counts
+# the re-run as done.
 # The cost in GitHub Actions: one job of a few seconds for each failed Build run of a pull request, and for each re-run
 # one more review and the jobs after it, at most two for one Build run. Nothing runs on a schedule.
 # A re-run keeps the privileges of the actor of the run's first attempt (github.actor); GitHub shows github-actions[bot]
@@ -126,5 +128,25 @@ jobs:
           if (( RUN_ATTEMPT >= 3 )); then
             say "$ended. At most two re-runs for one Build run: it is not run again."; exit 0
           fi
-          try gh run rerun "$RUN_ID" --failed -R "$REPO" || fail "re-run its failed jobs"
+          # The re-run, with the same four tries. A try whose answer is lost may still have been taken: before each
+          # later try, and after the last, the run's attempt is read again. Above RUN_ATTEMPT, GitHub took a try, so
+          # the re-run is done: it is not asked for twice, and the job does not fail.
+          taken() {
+            local now
+            now=$(gh api "repos/$REPO/actions/runs/$RUN_ID" --jq .run_attempt) || return 1
+            [[ $now =~ ^[0-9]+$ ]] && (( now > RUN_ATTEMPT )) || return 1
+            echo "Build run $RUN_ID is at attempt $now: a try was taken, though its answer was lost."
+          }
+          rerun() {
+            local wait n=1
+            for wait in 15 30 60; do
+              gh run rerun "$RUN_ID" --failed -R "$REPO" && return 0
+              echo "Try $n of 4 failed; the next in $wait s." >&2
+              sleep "$wait"
+              taken && return 0
+              n=$((n + 1))
+            done
+            gh run rerun "$RUN_ID" --failed -R "$REPO" || taken
+          }
+          rerun || fail "re-run its failed jobs"
           say "$ended; its failed jobs run again."
