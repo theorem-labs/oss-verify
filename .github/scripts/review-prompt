@@ -25,9 +25,10 @@ case ${KIND:-} in
     prompt+=" #$PR, projects/$NAME/, checks."
     if [[ ${SESSION:-} =~ ^[0-9a-f-]{36}$ && ${LAST:-} =~ $commit && ${HEAD_SHA:-} =~ $commit ]]; then
       prompt+=" Earlier in this session you reviewed $LAST. A new request comes only from"
-      prompt+=" .review/since-last-review.diff, the diff from $LAST to $HEAD_SHA: read it and review.md, and before you"
-      prompt+=" keep a request of your last comment, read again the input in .review/ that it is about, and drop it if"
-      prompt+=" that input shows it met. Review"
+      prompt+=" .review/since-last-review.diff, the diff from $LAST to $HEAD_SHA, with one exception: check D3 of"
+      prompt+=" review.md, which answers each failing result of the report this build wrote for $HEAD_SHA, whatever the"
+      prompt+=" diff holds. Read the diff and review.md, and before you keep a request of your last comment, read again"
+      prompt+=" the input in .review/ that it is about, and drop it if that input shows it met. Review"
       resume=" --resume $SESSION"
     else
       prompt+=" Then review"

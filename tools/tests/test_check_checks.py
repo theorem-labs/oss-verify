@@ -552,7 +552,7 @@ class PostingStep(unittest.TestCase):
         body = self.post("Thanks again.\n\n2. Fix Y.\n")
         self.assertTrue(body.startswith("<!-- oss-verify-review -->\n<sub>Claude wrote this review of `bbbbbbb`"))
         self.assertIn("\n\nThanks again.\n\n2. Fix Y.\n", body)
-        self.assertIn("<summary>What the breakage and coverage checks measured</summary>\n\n### new report", body)
+        self.assertIn("<summary>What the checks of the fuzz targets and of the binaries measured</summary>\n\n### new report", body)
 
     def test_a_change_review_names_review_change_md(self):
         body = self.post("Thanks.\n", checks="", rules="review-change.md")
@@ -1276,13 +1276,15 @@ class ReviewJob(unittest.TestCase):
         for code, out in (self.prompt(KIND="issue", ISSUE="45"), self.prompt(KIND="change", PR="8")):
             self.assertTrue(out["prompt"].endswith(" Give the result as the structured output."))
 
-    def test_an_enrollment_with_a_kept_session_resumes_it_for_the_diff_alone(self):
+    def test_an_enrollment_with_a_kept_session_resumes_it_for_the_diff_and_check_d3(self):
         session, last, head = "09227178-7bbf-4e5f-86db-8736e530ef01", "2" * 40, "3" * 40
         code, out = self.prompt(KIND="enrollment", PR="8", NAME="libreac", SESSION=session, LAST=last, HEAD_SHA=head)
         self.assertEqual(code, 0)
         self.assertTrue(out["arguments"].endswith(f"' --resume {session}"))
         self.assertIn(f"Earlier in this session you reviewed {last}.", out["prompt"])
-        self.assertIn(f"the diff from {last} to {head}", out["prompt"])
+        self.assertIn(f"the diff from {last} to {head}, with one exception: check D3 of review.md", out["prompt"])
+        self.assertIn(f"each failing result of the report this build wrote for {head}, whatever the diff holds",
+                      out["prompt"])
 
     def test_the_prompt_refuses_what_it_cannot_check(self):
         for env in ({"KIND": "issue", "ISSUE": "45 extra"}, {"KIND": "change", "PR": ""},

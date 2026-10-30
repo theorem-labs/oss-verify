@@ -38,9 +38,10 @@ name: "Build"
 #            structured output: the comment that asks the maintainer for each fix, any finding held back (review.md,
 #            rule 6), and a verdict for each check. The comment and the verdicts are the artifact enroll-review-draft.
 #            On a later push it resumes the same Claude Code session as the last review, so it knows what it asked
-#            for and why, and reviews only the diff since the commit it reviewed then. For a change it checks what
-#            review-change.md says, on the pull request's diff and files read as data, with no session kept. For an
-#            issue it drafts the reply as review-issue.md says, from the issue's title, body and comments, read as
+#            for and why, and reviews only the diff since the commit it reviewed then, with one exception: check D3 of
+#            review.md answers each failing result of this build's report of the new head. For a change it checks
+#            what review-change.md says, on the pull request's diff and files read as data, with no session kept. For
+#            an issue it drafts the reply as review-issue.md says, from the issue's title, body and comments, read as
 #            data, with no session kept. No job posts the draft, and it is never the public artifact or job summary:
 #            it and what a person decides on it go to the private held-findings bucket
 #            (.github/scripts/store-issue-draft), and the job summary says how a person at Theorem reads them. This
@@ -922,7 +923,7 @@ jobs:
             printf '<!-- oss-verify-review -->\n<sub>Claude wrote this review of `%s` from `%s`. It can be wrong. Each push replaces it.</sub>\n\n%s\n' \
               "${HEAD_SHA:0:7}" "$RULES" "${REVIEW:0:50000}"
             if [ -n "$CHECKS" ]; then
-              printf '\n<details><summary>What the breakage and coverage checks measured</summary>\n\n%s\n\n</details>\n' "${CHECKS:0:12000}"
+              printf '\n<details><summary>What the checks of the fuzz targets and of the binaries measured</summary>\n\n%s\n\n</details>\n' "${CHECKS:0:12000}"
             fi
           } > "$RUNNER_TEMP/comment.md"
           # Ours is the oss-verify App's comment that starts with the marker.
