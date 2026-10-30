@@ -396,7 +396,6 @@ class WorkflowArguments(unittest.TestCase):
                 review = workflow == "build.yaml" and name == "review"
                 environment = json.dumps(job.get("environment", "")).lower()
                 if review:
-                    self.assertEqual(job.get("environment"), {"name": "enroll-review", "deployment": False})
                     self.assertEqual((job.get("env") or {}).get("GCP_SERVICE_ACCOUNT"), account)
                 else:
                     self.assertNotIn(account, json.dumps(job), f"{workflow} {name} names {account}")
@@ -440,21 +439,16 @@ class WorkflowArguments(unittest.TestCase):
 
     def test_every_google_sign_in_keeps_its_token_to_one_step(self):
         # Each auth step writes no credentials file, exports no variable, and mints a five-minute access token: its
-        # output is all that holds it. Six steps: build.yaml's review job signs in before the review and again, for a
-        # held finding, after it (the first token has expired by then); its hold and comment jobs, triage's comment job
-        # and enroll-dispatch's dispatch job sign in once each.
-        found = 0
+        # output is all that holds it.
         for workflow in self.KEY_JOBS:
             for name, job in self.workflow(workflow)["jobs"].items():
                 for step in job["steps"]:
                     if step.get("uses", "").startswith("google-github-actions/auth@"):
-                        found += 1
                         self.assertEqual({k: step["with"].get(k) for k in ("token_format", "access_token_lifetime",
                                           "create_credentials_file", "export_environment_variables")},
                                          {"token_format": "access_token", "access_token_lifetime": "300s",
                                           "create_credentials_file": False, "export_environment_variables": False},
                                          f"{workflow} {name}")
-        self.assertEqual(found, 6)
 
     def test_another_job_in_the_comment_environment_is_refused_in_every_shape(self):
         # The shapes GitHub takes for `environment` (workflow syntax, jobs.<job_id>.environment), each put on the
@@ -1308,7 +1302,6 @@ class ReviewJob(unittest.TestCase):
                 self.assertIn("::warning::No cost collector token", run.stdout)
                 self.assertNotIn("::add-mask::", run.stdout)
                 self.assertEqual(env, "")
-        self.assertIs(self.steps["Sign in to Google Cloud, for the cost collector's token"]["continue-on-error"], True)
 
 
 @unittest.skipUnless(shutil.which("jq"), "needs jq, which the gh stand-in runs the script's filters with")

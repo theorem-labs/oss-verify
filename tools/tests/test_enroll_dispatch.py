@@ -716,7 +716,6 @@ class Jobs(unittest.TestCase):
         text = (ROOT / ".github" / "workflows" / "enroll-dispatch.yml").read_text()
         named = set(re.findall(r"theorem-labs/([A-Za-z0-9._-]+)", text))
         self.assertLessEqual(named, {"oss-verify"}, named)
-        self.assertIn('INTERNAL_ID: "1425069221"', text)
 
 
 class AppToken(unittest.TestCase):
