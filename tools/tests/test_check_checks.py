@@ -264,9 +264,14 @@ class WorkflowArguments(unittest.TestCase):
             ("build.yaml review usage export", steps("build.yaml", "review", "Export the review's usage to the cost collector"),
              json.dumps({"payload": {"data": base64.b64encode(token.encode()).decode()}}),
              {"GCP_ACCESS_TOKEN": gcp}, [token, base64.b64encode(token.encode()).decode(), gcp]),
+            # Both steps upload through .github/scripts/held-bucket-put, which runs here too.
             ("build.yaml review held finding store", steps("build.yaml", "review", "Store the held finding for the hold job"),
              json.dumps({"generation": "1761500000000000"}),
              {"GCP_ACCESS_TOKEN": gcp, "RUN_ID": "7", "PR": "68", "NAME": "libreac", "HEAD_SHA": "1" * 40,
+              "RUN_URL": "https://github.com/theorem-labs/oss-verify/actions/runs/7"}, [gcp]),
+            ("build.yaml review issue draft store", steps("build.yaml", "review", "Store the issue draft for a person"),
+             json.dumps({"generation": "1761500000000000"}),
+             {"GCP_ACCESS_TOKEN": gcp, "ISSUE": "45", "RUN_ID": "7", "RUN_ATTEMPT": "1",
               "RUN_URL": "https://github.com/theorem-labs/oss-verify/actions/runs/7"}, [gcp]),
             ("build.yaml hold listing", steps("build.yaml", "hold", "Look for stored held findings"),
              json.dumps({"items": [{"name": "held/7/" + "a" * 32}]}), {"GCP_ACCESS_TOKEN": gcp}, [gcp]),
@@ -290,6 +295,9 @@ class WorkflowArguments(unittest.TestCase):
                 (bin / "curl").chmod(0o755)
                 (directory / "tmp").mkdir()
                 (directory / "tmp" / "held-finding.md").write_text("<!-- held finding -->\ntitle: x\n")
+                (directory / "tmp" / "issue-draft.md").write_text("The draft reply:\n\nSee docs/dsl.md.\n")
+                # The steps run from the checkout's root, where .github/scripts is.
+                (directory / ".github").symlink_to(ROOT / ".github")
                 trace = directory / "trace"
                 env = {**os.environ, "PATH": f"{bin}:{os.environ['PATH']}", "RUNNER_TEMP": str(directory / "tmp"),
                        "GITHUB_OUTPUT": str(directory / "output"), "GITHUB_ENV": str(directory / "env"),
@@ -1106,21 +1114,51 @@ class ReviewJob(unittest.TestCase):
             {"comment": "See docs/dsl.md.\n", "decide": "nothing"}, kind="issue", issue="5")
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertFalse((self.ran_in / "temp" / "draft").exists())
-        self.assertEqual((comment, verdicts, held, output, self.summary), (None, None, None, "", None))
+        self.assertEqual((comment, verdicts, held, output, self.summary), (None, None, None, {}, None))
         self.assertEqual(self.issue_draft, "The draft reply:\n\nSee docs/dsl.md.\n\n\n"
                                            "What a person at Theorem decides before it is posted:\n\nnothing\n")
+
+    def test_an_issue_run_gives_the_job_no_comment_output(self):
+        # The job's comment output is the result step's: for an issue, whose draft no one has approved, it has none,
+        # so no expression and no debug log carries the draft. A change's and an enrollment's comment is there.
+        _, _, _, _, output, _ = self.result({"comment": "The draft reply.\n", "decide": "nothing"}, kind="issue",
+                                            issue="5")
+        self.assertNotIn("comment", output)
+        _, _, _, _, output, _ = self.result({"comment": "Thanks.\n", "verdicts": {}}, kind="change")
+        self.assertEqual(output["comment"], "Thanks.\n")
 
     def test_a_change_without_a_held_field_holds_nothing(self):
         run, comment, verdicts, held, output, _ = self.result(
             {"comment": "Thanks.\n", "verdicts": {str(n): "pass" for n in range(1, 6)}}, kind="change")
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(json.loads(verdicts), {str(n): "pass" for n in range(1, 6)})
-        self.assertEqual((output, held, self.summary, self.issue_draft), ("", "<!-- held finding -->\n\n", None, None))
+        self.assertEqual((output, held, self.summary, self.issue_draft),
+                         ({"comment": "Thanks.\n"}, "<!-- held finding -->\n\n", None, None))
+
+    @staticmethod
+    def outputs(text):
+        """GITHUB_OUTPUT's text as the runner reads it: name=value lines, and name<<delimiter blocks."""
+        found, lines = {}, iter((text or "").splitlines())
+        for line in lines:
+            equals, heredoc = line.find("="), line.find("<<")
+            if heredoc >= 0 and (equals < 0 or heredoc < equals):
+                name, delimiter = line.split("<<", 1)
+                value = []
+                for inner in lines:
+                    if inner == delimiter:
+                        break
+                    value.append(inner)
+                found[name] = "\n".join(value)
+            else:
+                name, value = line.split("=", 1)
+                found[name] = value
+        return found
 
     def result(self, output, kind="enrollment", issue=""):
         """The result step, on an execution file whose result carries `output` as its structured output, for a review
-        of `kind` (the issue `issue` for an issue). It keeps the step summary in self.summary, an issue's draft file in
-        self.issue_draft, and the directory it ran in in self.ran_in."""
+        of `kind` (the issue `issue` for an issue). It returns the step's outputs as the runner reads them, and keeps
+        the step summary in self.summary, an issue's draft file in self.issue_draft, and the directory it ran in in
+        self.ran_in."""
         directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, directory)
         root = self.ran_in = pathlib.Path(directory)
@@ -1139,17 +1177,18 @@ class ReviewJob(unittest.TestCase):
         self.summary = read(root / "summary")
         self.issue_draft = read(root / "temp" / "issue-draft.md")
         return (run, read(root / "temp" / "draft" / "comment.md"), read(root / "temp" / "draft" / "verdicts.json"),
-                read(root / "temp" / "held-finding.md"), read(root / "output") or "",
+                read(root / "temp" / "held-finding.md"), self.outputs(read(root / "output")),
                 read(root / "home" / ".claude" / "ossv-last-review"))
 
-    def store(self, issue="5", attempt="2", answer='{"generation": "1730000000000000"}'):
+    def store(self, issue="5", attempt="2", answer='{"generation": "1730000000000000"}',
+              draft="The draft reply:\n\nSee docs/dsl.md.\n"):
         """.github/scripts/store-issue-draft on a draft file, with a stand-in curl that keeps its arguments, the object
         it uploads, and answers `answer`. Return the exit status, the output, the summary, curl's arguments and the
         object."""
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             (root / "bin").mkdir()
-            (root / "draft.md").write_text("The draft reply:\n\nSee docs/dsl.md.\n")
+            (root / "draft.md").write_text(draft, encoding="utf-8")
             (root / "bin" / "curl").write_text(
                 "#!/bin/bash\n"
                 f'printf "%s\\n" "$@" > {root}/argv\n'
@@ -1165,7 +1204,7 @@ class ReviewJob(unittest.TestCase):
                                       "GCP_ACCESS_TOKEN": "gcp-token-not-a-secret", "ISSUE": issue, "RUN_ID": "77",
                                       "RUN_ATTEMPT": attempt, "RUN_URL": "https://github.com/o/r/actions/runs/77",
                                       "GITHUB_STEP_SUMMARY": str(root / "summary")})
-            read = lambda path: path.read_text() if path.exists() else ""  # noqa: E731
+            read = lambda path: path.read_text(encoding="utf-8") if path.exists() else ""  # noqa: E731
             return (run.returncode, run.stdout, read(root / "summary"), read(root / "argv"), read(root / "object"),
                     read(root / "header"))
 
@@ -1188,6 +1227,14 @@ class ReviewJob(unittest.TestCase):
                 code, _, summary, _, _, _ = self.store(**kwargs)
                 self.assertNotEqual(code, 0)
                 self.assertNotIn("gcloud storage cat", summary)
+
+    def test_control_characters_are_taken_out_of_the_stored_draft(self):
+        # A person reads the draft in a terminal: an escape sequence (SGR 8 hides text), a carriage return, a bell,
+        # DEL and a C1 CSI (U+009B) in the model's text must not reach it. Tab, newline and other text stay.
+        draft = "Fine \x1b[8mhidden\x1b[0m text\r\nnext\tcol\x07\x7f\u009b31m café — ok\n"
+        code, out, _, _, stored, _ = self.store(draft=draft)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(stored.split("---\n", 1)[1], "Fine [8mhidden[0m text\nnext\tcol31m café — ok\n")
 
     def prompt(self, **env):
         """.github/scripts/review-prompt with `env`: its exit status and the outputs it wrote."""
@@ -1250,7 +1297,7 @@ class ReviewJob(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(comment, "Thanks.\n\n1. Fix X.\n\n")
         self.assertEqual(json.loads(verdicts), {"F2": "pass", "F7": "fail"})
-        self.assertEqual(output, "")
+        self.assertEqual(output, {"comment": "Thanks.\n\n1. Fix X.\n"})
         self.assertEqual(last, f"session=09227178-7bbf-4e5f-86db-8736e530ef01 head={'1' * 40}\n")
 
     def test_a_held_finding_stays_out_of_the_draft_and_its_session_is_not_kept(self):
@@ -1260,7 +1307,7 @@ class ReviewJob(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertNotIn("SECRETBUG", comment + verdicts + run.stdout + run.stderr)
         self.assertEqual(held, "<!-- held finding -->\n" + ReviewHeld.HELD + "\n")
-        self.assertEqual(output, "held=yes\n")
+        self.assertEqual(output, {"comment": "Thanks.\n\nA finding was sent for private review.\n", "held": "yes"})
         self.assertIsNone(last)
 
     def test_a_result_without_a_structured_output_fails_the_step(self):
@@ -1307,22 +1354,30 @@ class ReviewJob(unittest.TestCase):
 @unittest.skipUnless(shutil.which("jq"), "needs jq, which the gh stand-in runs the script's filters with")
 class IssueDraftCap(unittest.TestCase):
     """.github/scripts/issue-draft-cap, build.yaml's step "Hold the draft at the hourly cap", with a stand-in gh: it
-    counts the other runs for an issue's own event in the last hour whose review went past this step, and holds the
+    counts the other runs for an issue's own event in the last hour whose review reached the model, and holds the
     draft at the cap or on a failed read with a ::error::HELD annotation and exit status 1."""
 
-    def cap(self, runs, skipped=(), held=(), fail=None, run_id="99"):
+    def cap(self, runs, skipped=(), held=(), stopped=(), fail=None, run_id="99"):
         """runs: the run ids that the runs API lists; skipped: the ids whose review job was skipped; held: the ids whose
-        step "Hold the draft at the hourly cap" failed; fail: "runs", or the id whose jobs cannot be read. Return the
-        exit status, the output and gh's calls."""
+        step "Hold the draft at the hourly cap" failed; stopped: the ids whose step "Stop before the model when the
+        draft cannot be stored" failed (a refused sign-in); fail: "runs", or the id whose jobs cannot be read. Return
+        the exit status, the output and gh's calls."""
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             (root / "bin").mkdir()
             (root / "runs.json").write_text(json.dumps({"workflow_runs": [{"id": i} for i in runs]}))
             for i in runs:
-                review = {"name": "review", "conclusion": "skipped" if i in skipped else "failure" if i in held else None,
+                gate = "skipped" if i in held else "failure" if i in stopped else "success"
+                model = "skipped" if i in held or i in stopped else "success"
+                review = {"name": "review",
+                          "conclusion": "skipped" if i in skipped else "failure" if i in held or i in stopped else None,
                           "steps": [{"name": "Set up job", "conclusion": "success"},
                                     {"name": "Hold the draft at the hourly cap",
-                                     "conclusion": "failure" if i in held else "success"}]}
+                                     "conclusion": "failure" if i in held else "success"},
+                                    {"name": "Sign in to Google Cloud, for the cost collector's token",
+                                     "conclusion": "skipped" if i in held else "success"},
+                                    {"name": "Stop before the model when the draft cannot be stored", "conclusion": gate},
+                                    {"name": "Review", "conclusion": model}]}
                 (root / f"jobs-{i}.json").write_text(json.dumps({"jobs": [
                     {"name": "route", "conclusion": "success", "steps": []}, review]}))
             listing = ('echo "gh: HTTP 502" >&2; exit 1' if fail == "runs"
@@ -1364,6 +1419,13 @@ class IssueDraftCap(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("0 issue drafts ran the model", out)
 
+    def test_a_run_stopped_at_the_sign_in_is_not_counted(self):
+        # A run whose Google sign-in was refused stopped before the model: it is not counted, so it leaves the count as
+        # it was. Five drafted, six stopped, and this one: the draft is made.
+        code, out, _ = self.cap([*range(1, 12), 99], stopped=range(6, 12))
+        self.assertEqual(code, 0, out)
+        self.assertIn("5 issue drafts ran the model in the last hour, under the cap of 6", out)
+
     def test_at_the_cap_the_draft_is_held_and_the_step_fails(self):
         code, out, _ = self.cap([*range(1, 8), 99], held=(7,))
         self.assertEqual(code, 1)
@@ -1375,6 +1437,35 @@ class IssueDraftCap(unittest.TestCase):
                 code, out, _ = self.cap(list(range(1, 5)), fail=fail)
                 self.assertEqual(code, 1)
                 self.assertIn("::error::HELD: ", out)
+
+
+class StoreSignInGate(unittest.TestCase):
+    """build.yaml's step "Stop before the model when the draft cannot be stored", run as it is: for an issue, a
+    refused Google sign-in before the model fails the job there, red, with ::error:: and a summary naming the
+    cause."""
+
+    def gate(self, outcome):
+        flow = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
+        [step] = [s for s in flow["jobs"]["review"]["steps"]
+                  if s.get("name") == "Stop before the model when the draft cannot be stored"]
+        with tempfile.TemporaryDirectory() as directory:
+            summary = pathlib.Path(directory) / "summary"
+            run = subprocess.run(["bash", "-e", "-c", step["run"]], capture_output=True, text=True,
+                                 env={**os.environ, "SIGN_IN": outcome, "GITHUB_STEP_SUMMARY": str(summary)})
+            return run.returncode, run.stdout, summary.read_text() if summary.exists() else ""
+
+    def test_a_refused_sign_in_fails_the_job_before_the_model_and_says_why(self):
+        for outcome in ("failure", "cancelled", ""):
+            with self.subTest(outcome=outcome):
+                code, out, summary = self.gate(outcome)
+                self.assertEqual(code, 1)
+                self.assertTrue(out.startswith("::error::NOT STORED: Google Cloud refused this run's sign-in"), out)
+                self.assertIn("does not admit runs that an issue's event starts yet", out)
+                self.assertIn("does not admit runs that an issue's event starts yet", summary)
+                self.assertNotIn("HELD", out + summary)
+
+    def test_an_admitted_sign_in_goes_on_to_the_model(self):
+        self.assertEqual(self.gate("success"), (0, "", ""))
 
 
 class Owners(unittest.TestCase):

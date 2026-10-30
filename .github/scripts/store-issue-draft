@@ -10,24 +10,24 @@
 # build.yaml's review job runs it for an issue (the step "Store the issue draft for a person"). This repository is
 # public: its job summaries are public, and any signed-in GitHub account can download its artifacts, so the draft and
 # what a person decides on it go to neither. They go to the private bucket where the review job leaves a held finding,
-# as the object issue-drafts/<issue>/<run id>-<attempt>, written once (ifGenerationMatch=0). The hold job reads only
-# held/, and the bucket deletes every object 7 days after it is written. The job summary gets the command a person at
-# Theorem with read access to the bucket reads the draft with, and no text of the draft. A failed write fails the step.
+# as the object issue-drafts/<issue>/<run id>-<attempt>, written once by .github/scripts/held-bucket-put. The hold job
+# reads only held/, and the bucket deletes every object 7 days after it is written. The draft is the model's text, which
+# an issue's author can steer, and a person reads it in a terminal: every control character but tab and newline (an
+# escape sequence, a carriage return, a C1 control such as U+009B) is taken out before it is stored. The job summary
+# gets the command a person at Theorem with read access to the bucket reads the draft with, and no text of the draft.
+# A failed write fails the step.
 set -euo pipefail
 draft=${1:?usage: store-issue-draft <draft file>}
 [[ ${ISSUE:-} =~ ^[0-9]+$ && ${RUN_ID:-} =~ ^[0-9]+$ && ${RUN_ATTEMPT:-} =~ ^[0-9]+$ ]] \
   || { echo "store-issue-draft: ISSUE, RUN_ID or RUN_ATTEMPT is not a number" >&2; exit 2; }
-bucket=theorem-agent-infra-oss-verify-held-findings
 name="issue-drafts/$ISSUE/$RUN_ID-$RUN_ATTEMPT"
-object=$(mktemp)
-trap 'rm -f "$object"' EXIT
-printf 'oss-verify issue draft v1\nissue: %s\nrun: %s\n---\n' "$ISSUE" "${RUN_URL:-}" > "$object"
-head -c 1048000 "$draft" >> "$object"
-# The token reaches curl as a header file, never as an argument (which another user on the machine could read).
-generation=$(curl -q -sSf --max-time 60 -X POST -H @<(builtin printf 'Authorization: Bearer %s\n' "$GCP_ACCESS_TOKEN") \
-  -H 'Content-Type: text/plain; charset=utf-8' --data-binary @"$object" \
-  "https://storage.googleapis.com/upload/storage/v1/b/$bucket/o?uploadType=media&ifGenerationMatch=0&name=${name//\//%2F}" \
-  | jq -er '.generation | select(type == "string" and test("^[0-9]{1,20}$"))')
+clean=$(mktemp)
+trap 'rm -f "$clean"' EXIT
+# C0 controls but tab and newline, DEL, and the C1 controls as UTF-8 writes them (0xC2 0x80 to 0xC2 0x9F).
+LC_ALL=C tr -d '\000-\010\013-\037\177' < "$draft" | LC_ALL=C sed 's/\xc2[\x80-\x9f]//g' > "$clean"
+header=$(printf 'oss-verify issue draft v1\nissue: %s\nrun: %s\n---' "$ISSUE" "${RUN_URL:-}")
+generation=$("$(dirname "$0")/held-bucket-put" "$name" "$header" "$clean")
+bucket=theorem-agent-infra-oss-verify-held-findings
 echo "Stored the draft reply to issue #$ISSUE as gs://$bucket/$name, generation $generation."
 {
   echo "The draft reply to issue #$ISSUE, which no one has approved, is stored where only Theorem can read it:"

@@ -48,7 +48,11 @@ name: "Build"
 #            issue's own event the step "Hold the draft at the hourly cap" (.github/scripts/issue-draft-cap) runs
 #            first, and at 6 drafts that ran the model in the last hour, or when it cannot read the runs, it fails the
 #            job with `::error::HELD: ...`: no draft is made and the run is red, and the CI/CD lane's inbound watch
-#            pages for each such run (ISSUE CAP HELD). A person re-runs the job to make the draft.
+#            pages for each such run (ISSUE CAP HELD). A person re-runs the job to make the draft. The draft can be
+#            stored only when Google's identity provider for this repository admits the run's event: when the sign-in
+#            before the model is refused for an issue, the step "Stop before the model when the draft cannot be
+#            stored" fails the job with `::error::NOT STORED: ...` before the model runs, and the cap does not count
+#            that run.
 #   hold     sends each real bug in a project's own code that a review held back from its comment (review.md, rule 6)
 #            to the disclosure route as a private issue (.github/scripts/review-hold): the review job stores it in a
 #            private bucket that only this job can read, and this job sends every finding stored there, a cancelled
@@ -512,16 +516,19 @@ jobs:
       GCP_WORKLOAD_IDENTITY_PROVIDER: projects/805240912354/locations/global/workloadIdentityPools/github/providers/github-ossv
       GCP_SERVICE_ACCOUNT: ossv-ci@theorem-agent-infra.iam.gserviceaccount.com
     outputs:
-      # For an issue too, its draft: the comment job, which alone posts, never runs for an issue.
-      comment: ${{ steps.review.outputs.structured_output && fromJSON(steps.review.outputs.structured_output).comment }}
+      # The result step writes it for an enrollment or a change, never for an issue: an issue's draft, which no one has
+      # approved, is in no output (a re-run with debug logging prints outputs to the public log).
+      comment: ${{ steps.result.outputs.comment }}
       held_object: ${{ steps.held.outputs.object }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with: {persist-credentials: false, fetch-depth: 0}
       # The cap on the model runs of the issue path: this repository is public, so anyone with a GitHub account can open
       # an issue and start one. At the cap (6 drafts that ran the model in the last hour), or when it cannot read the
-      # runs, the step fails with a `::error::HELD: ...` annotation: no draft, a red run, never a pass. Keep this step's
-      # name: the CI/CD lane's inbound watch pages (ISSUE CAP HELD) for each Build run whose step of this name failed.
+      # runs, the step fails with a `::error::HELD: ...` annotation: no draft, a red run, never a pass. The CI/CD lane's
+      # inbound watch pages the CI/CD role once for each run and attempt whose step of this name failed (ISSUE CAP
+      # HELD); a run stopped by the later step "Stop before the model when the draft cannot be stored" is not paged as
+      # held. Keep this step's name: issue-draft-cap's count and the inbound watch both find a held run by it.
       - name: Hold the draft at the hourly cap
         if: github.event_name == 'issues'
         env:
@@ -558,6 +565,25 @@ jobs:
         continue-on-error: true
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0 (sha-pinned)
         with: {workload_identity_provider: "${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}", service_account: "${{ env.GCP_SERVICE_ACCOUNT }}", token_format: access_token, access_token_lifetime: 300s, create_credentials_file: false, export_environment_variables: false}
+      # An issue's draft is stored after the model, with a sign-in that Google's identity provider for this repository
+      # must admit for the run's event. The sign-in above asks the same provider for the same account, so when it was
+      # refused for an issue, the store would be refused too, and the model's work lost: stop here, before the model
+      # runs, with a red run. Its token (300 s) is not the store's: the store signs in again after the model, so its
+      # token is never older than that step. issue-draft-cap does not count a run this step stopped, and the inbound
+      # watch pages only for the cap step's failure, not for this one. Keep this step's name: issue-draft-cap finds such
+      # a run by it.
+      - name: Stop before the model when the draft cannot be stored
+        if: env.KIND == 'issue'
+        env: {SIGN_IN: "${{ steps.gcp.outcome }}"}
+        run: |
+          [ "$SIGN_IN" = success ] && exit 0
+          message="Google Cloud refused this run's sign-in, so its draft could not be stored,"
+          message+=" and the model was not run."
+          message+=" The usual cause: Theorem's Google identity provider for this repository does not admit runs that"
+          message+=" an issue's event starts yet. A person at Theorem applies that setting, then re-runs this job."
+          echo "::error::NOT STORED: $message"
+          echo "$message" >> "$GITHUB_STEP_SUMMARY"
+          exit 1
       - name: Export the review's usage to the cost collector
         env: {GCP_ACCESS_TOKEN: "${{ steps.gcp.outputs.access_token }}"}
         run: |
@@ -613,6 +639,9 @@ jobs:
             exit 0
           fi
           mkdir -p "$RUNNER_TEMP/draft" && jq -r .comment <<< "$out" > "$RUNNER_TEMP/draft/comment.md"
+          # The job's comment output, which the comment job posts.
+          delimiter="comment_$(openssl rand -hex 16)"
+          { echo "comment<<$delimiter"; cat "$RUNNER_TEMP/draft/comment.md"; echo "$delimiter"; } >> "$GITHUB_OUTPUT"
           jq .verdicts <<< "$out" > "$RUNNER_TEMP/draft/verdicts.json"
           # Only an enrollment's schema has a held finding.
           { echo '<!-- held finding -->'; jq -r '.held // ""' <<< "$out"; } > "$RUNNER_TEMP/held-finding.md"
@@ -628,6 +657,7 @@ jobs:
         if: ${{ steps.result.outputs.held != 'yes' && env.KIND == 'enrollment' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
         with: {path: "~/.claude/projects\n~/.claude/ossv-last-review", key: "${{ env.SESSION_KEY }}${{ github.run_id }}-${{ github.run_attempt }}"}
+      # A sign-in of its own, after the model: its 300 s token is minted for the store step that follows, never older.
       - name: Sign in to Google Cloud to store the held finding, or an issue's draft
         id: gcp-held
         if: ${{ steps.result.outputs.held == 'yes' || env.KIND == 'issue' }}
@@ -646,13 +676,9 @@ jobs:
         env: {GCP_ACCESS_TOKEN: "${{ steps.gcp-held.outputs.access_token }}", RUN_ID: "${{ github.run_id }}", RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}
         run: |
           set -euo pipefail
-          object="$RUNNER_TEMP/held-object" name="held/$RUN_ID/$(openssl rand -hex 16)"
-          printf 'oss-verify held finding v1\npr: %s\nhead: %s\nproject: %s\nrun: %s\n---\n' "$PR" "$HEAD_SHA" "$NAME" "$RUN_URL" > "$object"
-          head -c 1048000 "$RUNNER_TEMP/held-finding.md" >> "$object"
-          generation=$(curl -q -sSf --max-time 60 -X POST -H @<(builtin printf 'Authorization: Bearer %s\n' "$GCP_ACCESS_TOKEN") \
-            -H 'Content-Type: text/plain; charset=utf-8' --data-binary @"$object" \
-            "https://storage.googleapis.com/upload/storage/v1/b/theorem-agent-infra-oss-verify-held-findings/o?uploadType=media&ifGenerationMatch=0&name=${name//\//%2F}" \
-            | jq -er '.generation | select(type == "string" and test("^[0-9]{1,20}$"))')
+          name="held/$RUN_ID/$(openssl rand -hex 16)"
+          header=$(printf 'oss-verify held finding v1\npr: %s\nhead: %s\nproject: %s\nrun: %s\n---' "$PR" "$HEAD_SHA" "$NAME" "$RUN_URL")
+          generation=$(.github/scripts/held-bucket-put "$name" "$header" "$RUNNER_TEMP/held-finding.md")
           echo "object=$name" >> "$GITHUB_OUTPUT" && echo "Stored the held finding as $name, generation $generation."
 
   hold:

@@ -12,13 +12,15 @@
 #     [CURRENT_OBJECT=<this run's object>] .github/scripts/review-hold <work directory>
 #
 # The bucket is theorem-agent-infra-oss-verify-held-findings (Theorem's infrastructure code): build.yaml's review job,
-# as ossv-ci, can only create objects in it, named held/<run id>/<32 random hex digits>; the hold job, as
-# ossv-app-comment, can list, read and delete them. It reads at most 20 objects in one run, this run's first, each of
-# at most 1.1 MB, and only their bytes, never their metadata. An object another hold job deleted meanwhile (404) is
-# gone, not a failure. It fails only when CURRENT_OBJECT, this run's own finding, is not sent: the comment job then
-# posts no review that says it was. Another run's object that is not sent is a warning, and stays for the next run;
-# review-held settles every object that cannot ever be split (it sends it whole), so none fails on every run. The
-# bucket deletes any object after 7 days. It prints object names and counts, never a finding or the repository.
+# as ossv-ci, creates objects in it: held/<run id>/<32 random hex digits> for a held finding, and
+# issue-drafts/<issue>/<run id>-<attempt> for an issue's draft, which this script never reads. The hold job, as
+# ossv-app-comment, can list, read and delete them; this script lists only held/. It reads at most 20 objects in one
+# run, this run's first, each of at most 1.1 MB, and only their bytes, never their metadata. An object another hold job
+# deleted meanwhile (404) is gone, not a failure. It fails only when CURRENT_OBJECT, this run's own finding, is not
+# sent: the comment job then posts no review that says it was. Another run's object that is not sent is a warning, and
+# stays for the next run; review-held settles every object that cannot ever be split (it sends it whole), so none
+# fails on every run. The bucket deletes any object after 7 days. It prints object names and counts, never a finding
+# or the repository.
 set -euo pipefail
 
 work=${1:?usage: review-hold <work directory>}
