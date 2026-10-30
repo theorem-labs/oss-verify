@@ -265,7 +265,7 @@ META = {"full_name": "someone/libexample", "html_url": "https://github.com/someo
         "created_at": "2020-01-01T00:00:00Z", "pushed_at": "2020-01-02T00:00:00Z", "archived": False, "fork": False,
         "stargazers_count": 5, "forks_count": 1, "subscribers_count": 1, "license": {"spdx_id": "MIT"},
         "owner": {"login": "someone"}}
-EVERY_ROW = ["Repository", "Stars / forks", "Outside participants", "Criticality score", "License",
+EVERY_ROW = ["Repository", "Stars / forks", "Fork", "Outside participants", "Criticality score", "License",
              "Opened by an active maintainer", "OSS-Fuzz", "`.oss-verify/` in the repository", "Seeded contact",
              "Proofs index", "Pull request scope", "`tools/validate.py`", "Checklist"]
 
@@ -290,7 +290,7 @@ class Comment(unittest.TestCase):
         }
         return FakeGitHub(responses, files=raw)
 
-    def test_the_comment_has_the_five_public_rows_and_the_full_table_every_row(self):
+    def test_the_comment_has_the_public_rows_and_the_full_table_every_row(self):
         result = triage.triage(self.pull(ON_GITHUB, "NONE"), REPO, 7)
         self.assertEqual(checks(result.comment), list(triage.PUBLIC_ROWS))
         self.assertEqual(checks(result.full), EVERY_ROW)
@@ -303,6 +303,17 @@ class Comment(unittest.TestCase):
         self.assertNotIn(triage.MARKER, result.full)
         self.assertIn("Repository: [someone/libexample]", result.full)
         self.assertIn("| ℹ️ | Stars / forks | 5 stars · 1 forks · 1 watching |", result.full)
+        self.assertIn("| ✅ | Fork | not a fork |", result.comment)
+
+    def test_a_fork_is_in_the_public_comment(self):
+        """CONTRIBUTING.md says that we usually do not accept a fork, so the maintainer reads this row too."""
+        forked = {**META, "fork": True, "parent": {"full_name": "upstream/libexample"}}
+        with mock.patch.dict(META, forked, clear=True):
+            result = triage.triage(self.pull(ON_GITHUB, "NONE"), REPO, 7)
+        self.assertIn("| ⚠️ | Fork | a fork of [upstream/libexample](https://github.com/upstream/libexample). "
+                      "We usually do not accept a fork ([CONTRIBUTING.md](https://github.com/theorem-labs/oss-verify"
+                      "/blob/main/CONTRIBUTING.md#review-of-an-enrollment)). A person at Theorem decides |",
+                      result.comment)
 
     def test_a_seeded_project_from_outside(self):
         result = triage.triage(self.pull(SEEDED, "NONE"), REPO, 7)
