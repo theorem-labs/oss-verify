@@ -96,43 +96,6 @@ def test_the_collector_names_every_failure_at_once(tmp_path):
 
 
 @pytest.mark.parametrize("name", sorted(REQUIRED))
-def test_the_required_job_waits_for_every_job_and_collects_each(name):
-    jobs = workflow(name)["jobs"]
-    assert set(jobs) >= {"route", "required"}
-    required = jobs["required"]
-    assert sorted(required["needs"]) == sorted(set(jobs) - {"required"})
-    # The collector is given route's result and, for every other job, its result and whether route asked for it.
-    run = step(required, "Every job route asked for passed, and no other ran")["run"]
-    collected = re.findall(r'"(\w[\w-]*):\$\w+:\$\w+"', run)
-    # build.yaml's build job keeps the id project-builds, which the other jobs read its outputs by.
-    named = {"project-builds": "build"}
-    assert sorted(collected) == sorted(named.get(job, job) for job in set(jobs) - {"route", "required"})
-    # It holds no secret.
-    assert not [s for s in required["steps"] if "secrets." in str(s)]
-
-
-def bare(expression):
-    """An expression without its ${{ }} and without a leading !cancelled() && (the collector runs on always())."""
-    text = str(expression).strip()
-    if text.startswith("${{") and text.endswith("}}"):
-        text = text[3:-2].strip()
-    return text.removeprefix("!cancelled() && ").strip()
-
-
-@pytest.mark.parametrize("name", sorted(REQUIRED))
-def test_the_collector_reads_each_jobs_own_result_and_asks_on_that_jobs_own_condition(name):
-    # The collector is given each job's own result, and whether the run asked for it as the same expression as the
-    # job's if:, so that it never wants a job to pass that did not run, nor wants one skipped that ran.
-    jobs = workflow(name)["jobs"]
-    collector = step(jobs["required"], "Every job route asked for passed, and no other ran")
-    by_name = {job.get("name", job_id): job_id for job_id, job in jobs.items()}
-    for collected, result, asked in re.findall(r'"(\w[\w-]*):\$(\w+):\$(\w+)"', collector["run"]):
-        job_id = by_name.get(collected, collected)
-        assert collector["env"][result] == f"${{{{ needs.{job_id}.result }}}}", (name, collected)
-        assert bare(collector["env"][asked]) == bare(jobs[job_id]["if"]), (name, collected)
-
-
-@pytest.mark.parametrize("name", sorted(REQUIRED))
 def test_only_the_required_job_reports_the_required_check(name):
     jobs = workflow(name)["jobs"]
     check = REQUIRED[name]

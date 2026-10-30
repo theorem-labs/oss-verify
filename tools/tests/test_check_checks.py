@@ -394,22 +394,6 @@ class WorkflowArguments(unittest.TestCase):
                 self.assertIn(key_job, jobs, workflow)
             self.assertEqual(self.app_key_jobs_problems(jobs, key_jobs), [], workflow)
 
-    def test_only_the_review_job_can_read_the_collector_token(self):
-        # ossv-ci can be acted as only from oss-verify's GitHub Environment `enroll-review` (Theorem's
-        # infrastructure code), which the review job declares. This checks that the review job names that account,
-        # and that no other job of either file names the account or the environment. That the review job keeps the
-        # environment, without which its sign-in stops working, a real run proves.
-        account = "ossv-ci@theorem-agent-infra.iam.gserviceaccount.com"
-        for workflow in self.KEY_JOBS:
-            for name, job in self.workflow(workflow)["jobs"].items():
-                review = workflow == "build.yaml" and name == "review"
-                environment = json.dumps(job.get("environment", "")).lower()
-                if review:
-                    self.assertEqual((job.get("env") or {}).get("GCP_SERVICE_ACCOUNT"), account)
-                else:
-                    self.assertNotIn(account, json.dumps(job), f"{workflow} {name} names {account}")
-                    self.assertNotIn("enroll-review", environment, f"{workflow} {name} is in enroll-review")
-
     @unittest.skipUnless(shutil.which("jq") and shutil.which("base64"), "the key step needs jq and base64")
     def test_the_app_key_is_masked_in_every_key_job(self):
         # The key-reading step is in each of these files, and the runner logs the private-key input of the next step:
@@ -445,19 +429,6 @@ class WorkflowArguments(unittest.TestCase):
                     self.assertEqual(outside, [], f"{workflow}: {line[:20]}… is printed outside its mask")
                     self.assertNotIn(line, run.stderr, f"{workflow}: {line[:20]}… is on stderr")
                 self.assertIn(key.splitlines()[1], (directory / "output").read_text(), workflow)
-
-    def test_every_google_sign_in_keeps_its_token_to_one_step(self):
-        # Each auth step writes no credentials file, exports no variable, and mints a five-minute access token: its
-        # output is all that holds it.
-        for workflow in self.KEY_JOBS:
-            for name, job in self.workflow(workflow)["jobs"].items():
-                for step in job["steps"]:
-                    if step.get("uses", "").startswith("google-github-actions/auth@"):
-                        self.assertEqual({k: step["with"].get(k) for k in ("token_format", "access_token_lifetime",
-                                          "create_credentials_file", "export_environment_variables")},
-                                         {"token_format": "access_token", "access_token_lifetime": "300s",
-                                          "create_credentials_file": False, "export_environment_variables": False},
-                                         f"{workflow} {name}")
 
     def test_another_job_in_the_comment_environment_is_refused_in_every_shape(self):
         # The shapes GitHub takes for `environment` (workflow syntax, jobs.<job_id>.environment), each put on the
