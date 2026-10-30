@@ -14,9 +14,9 @@
 # that this step held called no model and is not counted; a run whose step has not finished yet is. Under CAP it exits
 # 0, and the draft is made. At CAP or over, and when any read fails, it holds the draft: it prints a
 # `::error::HELD: ...` annotation and exits 1, so the review job fails before its Review step and the run is red. A
-# held run is never skipped as a pass. The CI/CD lane's inbound watch is to page for each run whose step of that name
-# failed (ISSUE CAP HELD), once it is installed; until then the red run is the only signal. A person re-runs the job
-# to make the draft.
+# held run is never skipped as a pass. The CI/CD lane's inbound watch pages for each run whose step of that name
+# failed (ISSUE CAP HELD), and a person re-runs the job to make the draft.
+#
 set -uo pipefail
 cap=${CAP:-6}
 held() {
