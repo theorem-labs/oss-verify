@@ -48,10 +48,10 @@
 # repository_dispatch endpoint takes contents: write). It checks out .github/scripts alone and runs app-token alone.
 name: Enroll dispatch
 # Each run is named after the run whose completion started it, by that run's id and attempt, because the run's own
-# head_sha and head_branch are main's and name no pull request. The CI/CD role's inbound watch pairs each completed
-# Build run with the Enroll dispatch run whose whole title is this text with that run's id and attempt, and pages
-# when GitHub started none. It counts a run with any other title as no run's and stops paging, with no error here:
-# change this text only together with that watch.
+# head_sha and head_branch are main's and name no pull request. This title is the pairing key of the CI/CD lane's
+# inbound run-pairing watch, which lands separately: it pairs each completed Build run with its Enroll dispatch run by
+# this whole title. A run with any other title counts as no run's, and the pairing stops with no error here. Change
+# these words only together with that watch.
 # This workflow runs only on workflow_run, so both values are always set; they are numbers, and run-name is a title,
 # not a shell command.
 run-name: >-
