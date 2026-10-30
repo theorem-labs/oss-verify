@@ -41,13 +41,15 @@ name: "Build"
 #            for and why, and reviews only the diff since the commit it reviewed then. For a change it checks what
 #            review-change.md says, on the pull request's diff and files read as data, with no session kept. For an
 #            issue it drafts the reply as review-issue.md says, from the issue's title, body and comments, read as
-#            data, with no session kept: the draft and what a person decides on it are the artifact
-#            enroll-review-draft, and no job posts them. This repository is public, so anyone with a GitHub account
-#            can open an issue and start that path: on an issue's own event the step "Hold the draft at the hourly
-#            cap" (.github/scripts/issue-draft-cap) runs first, and at 6 drafts that ran the model in the last hour,
-#            or when it cannot read the runs, it fails the job with `::error::HELD: ...`: no draft is made and the run
-#            is red. The CI/CD lane's inbound watch is to page for each such run (ISSUE CAP HELD) once it is
-#            installed; until then the red run is the only signal. A person re-runs the job to make the draft.
+#            data, with no session kept. No job posts the draft, and it is never the public artifact or job summary:
+#            it and what a person decides on it go to the private held-findings bucket
+#            (.github/scripts/store-issue-draft), and the job summary says how a person at Theorem reads them. This
+#            repository is public, so anyone with a GitHub account can open an issue and start that path: on an
+#            issue's own event the step "Hold the draft at the hourly cap" (.github/scripts/issue-draft-cap) runs
+#            first, and at 6 drafts that ran the model in the last hour, or when it cannot read the runs, it fails the
+#            job with `::error::HELD: ...`: no draft is made and the run is red. The CI/CD lane's inbound watch is to
+#            page for each such run (ISSUE CAP HELD) once it is installed; until then the red run is the only signal.
+#            A person re-runs the job to make the draft.
 #   hold     sends each real bug in a project's own code that a review held back from its comment (review.md, rule 6)
 #            to the disclosure route as a private issue (.github/scripts/review-hold): the review job stores it in a
 #            private bucket that only this job can read, and this job sends every finding stored there, a cancelled
@@ -147,8 +149,8 @@ name: "Build"
 # A review runs only on main: the Anthropic rule above admits refs/heads/main alone, so a run on another branch gets
 # no Anthropic token (and Google's provider, which also admits main alone, gives it no collector token). So a change to
 # the review is tried for real only once it is on main: run `gh workflow run build.yaml -f pr=<n>`, which posts the
-# comment on that pull request, or `-f issue=<n>` for the reply to an issue, which posts nothing; the draft is also the
-# review job's artifact enroll-review-draft.
+# comment on that pull request (its draft is also the review job's artifact enroll-review-draft), or `-f issue=<n>`
+# for the reply to an issue, which posts nothing and stores the draft in the private bucket.
 # Before the merge, tools/tests runs the review's own steps with stand-ins.
 #
 # The review's Claude Code exports its usage by OpenTelemetry to Theorem's cost collector, at the public URL below
@@ -497,7 +499,9 @@ jobs:
     timeout-minutes: 60
     cache-mode: write
     environment: {name: enroll-review, deployment: false}
-    # actions: read only for the hourly cap of issue drafts (its step below), which reads this workflow's runs.
+    # actions: read only for the hourly cap of issue drafts (its step below), which reads this workflow's runs. A job's
+    # permissions cannot change with route's kind, so the job holds it for every kind, and the Review step's token has
+    # it too: read-only, on the runs of a public repository.
     permissions: {contents: read, pull-requests: read, issues: read, checks: read, statuses: read, actions: read, id-token: write}
     env:
       KIND: ${{ needs.route.outputs.kind }}
@@ -601,34 +605,42 @@ jobs:
           SESSION: ${{ steps.review.outputs.session_id }}
         run: |
           out=$(jq -ce 'map(select(.type == "result")) | last | .structured_output | objects' "$RESULT")
+          # An issue's draft, which no one has approved, and what a person decides on it: never the artifact, which any
+          # signed-in GitHub account can download from this public repository, nor the public job summary. A file
+          # here, which the step "Store the issue draft for a person" puts in the private bucket.
+          if [ "$KIND" = issue ]; then
+            { echo "The draft reply:"; echo; jq -r .comment <<< "$out"; echo
+              echo "What a person at Theorem decides before it is posted:"; echo; jq -r .decide <<< "$out"; } \
+              > "$RUNNER_TEMP/issue-draft.md"
+            exit 0
+          fi
           mkdir -p "$RUNNER_TEMP/draft" && jq -r .comment <<< "$out" > "$RUNNER_TEMP/draft/comment.md"
-          # The verdict of each check; an issue has none (null).
           jq .verdicts <<< "$out" > "$RUNNER_TEMP/draft/verdicts.json"
           # Only an enrollment's schema has a held finding.
           { echo '<!-- held finding -->'; jq -r '.held // ""' <<< "$out"; } > "$RUNNER_TEMP/held-finding.md"
           if jq -e '(.held // "") | test("\\S")' <<< "$out" > /dev/null; then echo "held=yes" >> "$GITHUB_OUTPUT"
           else mkdir -p ~/.claude && printf 'session=%s head=%s\n' "$SESSION" "$HEAD_SHA" > ~/.claude/ossv-last-review; fi
-          # An issue's draft and what a person decides on it stay in the artifact: the job summary is public, and no
-          # one has approved the draft.
-          if [ "$KIND" = issue ]; then
-            jq -r .decide <<< "$out" > "$RUNNER_TEMP/draft/decide.md"
-            { echo "The draft reply to issue #$ISSUE is in the artifact enroll-review-draft: comment.md, and decide.md"
-              echo "for what a person decides. No job posts it: a person approves its exact text first."; } >> "$GITHUB_STEP_SUMMARY"
-          fi
       # enroll-dispatch.yml reads verdicts.json from this run: F2 or F7 fail, or no verdicts, starts no statements. A
-      # re-run replaces it, which is how a held enrollment is decided again.
+      # re-run replaces it, which is how a held enrollment is decided again. Never for an issue (the step above).
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (sha-pinned)
+        if: env.KIND != 'issue'
         with: {name: enroll-review-draft, path: "${{ runner.temp }}/draft", if-no-files-found: error, overwrite: true}
       # A session that holds a held finding is not kept: any run of a pull request can read main's cache.
       - name: Keep this review's session for the next push's review
         if: ${{ steps.result.outputs.held != 'yes' && env.KIND == 'enrollment' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
         with: {path: "~/.claude/projects\n~/.claude/ossv-last-review", key: "${{ env.SESSION_KEY }}${{ github.run_id }}-${{ github.run_attempt }}"}
-      - name: Sign in to Google Cloud to store the held finding
+      - name: Sign in to Google Cloud to store the held finding, or an issue's draft
         id: gcp-held
-        if: ${{ steps.result.outputs.held == 'yes' }}
+        if: ${{ steps.result.outputs.held == 'yes' || env.KIND == 'issue' }}
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0 (sha-pinned)
         with: {workload_identity_provider: "${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}", service_account: "${{ env.GCP_SERVICE_ACCOUNT }}", token_format: access_token, access_token_lifetime: 300s, create_credentials_file: false, export_environment_variables: false}
+      # An issue's draft, into the private bucket under issue-drafts/, which the hold job does not read; the job
+      # summary names the command a person at Theorem reads it with (.github/scripts/store-issue-draft).
+      - name: Store the issue draft for a person
+        if: env.KIND == 'issue'
+        env: {GCP_ACCESS_TOKEN: "${{ steps.gcp-held.outputs.access_token }}", RUN_ID: "${{ github.run_id }}", RUN_ATTEMPT: "${{ github.run_attempt }}", RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}
+        run: .github/scripts/store-issue-draft "$RUNNER_TEMP/issue-draft.md"
       # Into the private bucket only the hold job reads (the top of this file); never a log, an output or an artifact.
       - name: Store the held finding for the hold job
         id: held

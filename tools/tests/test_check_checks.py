@@ -1100,34 +1100,33 @@ class ReviewJob(unittest.TestCase):
             self.assertIn("touch pwned-a", (root / "out" / "issue.json").read_text())
         run, comment, _, _, _, _ = self.result({"comment": hostile, "decide": hostile}, kind="issue", issue="5")
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(comment, hostile + "\n")
-        self.assertEqual(self.decide, hostile + "\n")
+        self.assertEqual(self.issue_draft.count(hostile), 2)
         for where in (ROOT, pathlib.Path.cwd()):
             self.assertEqual(sorted(where.glob("pwned-*")), [])
         self.assertEqual(sorted(self.ran_in.glob("pwned-*")), [])
 
-    def test_an_issue_draft_goes_to_the_artifact_and_not_to_the_summary(self):
+    def test_an_issue_draft_stays_out_of_the_artifact_and_the_summary(self):
+        # The artifact and the job summary are public: the draft and what a person decides go to a file that the
+        # next step stores in the private bucket.
         run, comment, verdicts, held, output, _ = self.result(
             {"comment": "See docs/dsl.md.\n", "decide": "nothing"}, kind="issue", issue="5")
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual((comment, json.loads(verdicts), self.decide), ("See docs/dsl.md.\n\n", None, "nothing\n"))
-        self.assertEqual((output, held), ("", "<!-- held finding -->\n\n"))
-        # The public summary says where the draft is, and holds none of its text.
-        self.assertIn("is in the artifact enroll-review-draft", self.summary)
-        self.assertNotIn("dsl.md", self.summary)
-        self.assertNotIn("nothing", self.summary)
+        self.assertFalse((self.ran_in / "temp" / "draft").exists())
+        self.assertEqual((comment, verdicts, held, output, self.summary), (None, None, None, "", None))
+        self.assertEqual(self.issue_draft, "The draft reply:\n\nSee docs/dsl.md.\n\n\n"
+                                           "What a person at Theorem decides before it is posted:\n\nnothing\n")
 
     def test_a_change_without_a_held_field_holds_nothing(self):
         run, comment, verdicts, held, output, _ = self.result(
             {"comment": "Thanks.\n", "verdicts": {str(n): "pass" for n in range(1, 6)}}, kind="change")
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(json.loads(verdicts), {str(n): "pass" for n in range(1, 6)})
-        self.assertEqual((output, held, self.summary, self.decide), ("", "<!-- held finding -->\n\n", None, None))
+        self.assertEqual((output, held, self.summary, self.issue_draft), ("", "<!-- held finding -->\n\n", None, None))
 
     def result(self, output, kind="enrollment", issue=""):
         """The result step, on an execution file whose result carries `output` as its structured output, for a review
-        of `kind` (the issue `issue` for an issue). It keeps the step summary in self.summary, the draft's decide.md
-        in self.decide, and the directory it ran in in self.ran_in."""
+        of `kind` (the issue `issue` for an issue). It keeps the step summary in self.summary, an issue's draft file in
+        self.issue_draft, and the directory it ran in in self.ran_in."""
         directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, directory)
         root = self.ran_in = pathlib.Path(directory)
@@ -1144,10 +1143,57 @@ class ReviewJob(unittest.TestCase):
                                   "KIND": kind, "ISSUE": issue, "GITHUB_STEP_SUMMARY": str(root / "summary")})
         read = lambda path: path.read_text() if path.exists() else None  # noqa: E731
         self.summary = read(root / "summary")
-        self.decide = read(root / "temp" / "draft" / "decide.md")
+        self.issue_draft = read(root / "temp" / "issue-draft.md")
         return (run, read(root / "temp" / "draft" / "comment.md"), read(root / "temp" / "draft" / "verdicts.json"),
                 read(root / "temp" / "held-finding.md"), read(root / "output") or "",
                 read(root / "home" / ".claude" / "ossv-last-review"))
+
+    def store(self, issue="5", attempt="2", answer='{"generation": "1730000000000000"}'):
+        """.github/scripts/store-issue-draft on a draft file, with a stand-in curl that keeps its arguments, the object
+        it uploads, and answers `answer`. Return the exit status, the output, the summary, curl's arguments and the
+        object."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "bin").mkdir()
+            (root / "draft.md").write_text("The draft reply:\n\nSee docs/dsl.md.\n")
+            (root / "bin" / "curl").write_text(
+                "#!/bin/bash\n"
+                f'printf "%s\\n" "$@" > {root}/argv\n'
+                'prev=""; for a; do\n'
+                f'  [ "$prev" = --data-binary ] && cp "${{a#@}}" {root}/object\n'
+                f'  [ "$prev" = -H ] && [[ $a == @* ]] && cat "${{a#@}}" > {root}/header\n'
+                '  prev=$a; done\n'
+                f'echo {shlex.quote(answer)}\n')
+            (root / "bin" / "curl").chmod(0o755)
+            run = subprocess.run([str(ROOT / ".github" / "scripts" / "store-issue-draft"), str(root / "draft.md")],
+                                 capture_output=True, text=True,
+                                 env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
+                                      "GCP_ACCESS_TOKEN": "gcp-token-not-a-secret", "ISSUE": issue, "RUN_ID": "77",
+                                      "RUN_ATTEMPT": attempt, "RUN_URL": "https://github.com/o/r/actions/runs/77",
+                                      "GITHUB_STEP_SUMMARY": str(root / "summary")})
+            read = lambda path: path.read_text() if path.exists() else ""  # noqa: E731
+            return (run.returncode, run.stdout, read(root / "summary"), read(root / "argv"), read(root / "object"),
+                    read(root / "header"))
+
+    def test_an_issue_draft_is_stored_privately_once_and_the_summary_names_only_where(self):
+        code, out, summary, argv, stored, header = self.store()
+        self.assertEqual(code, 0, out)
+        name = "issue-drafts%2F5%2F77-2"
+        self.assertIn("/b/theorem-agent-infra-oss-verify-held-findings/o?uploadType=media&ifGenerationMatch=0"
+                      f"&name={name}", argv)
+        self.assertEqual(stored, "oss-verify issue draft v1\nissue: 5\nrun: https://github.com/o/r/actions/runs/77\n"
+                                 "---\nThe draft reply:\n\nSee docs/dsl.md.\n")
+        self.assertEqual(header, "Authorization: Bearer gcp-token-not-a-secret\n")
+        self.assertNotIn("gcp-token-not-a-secret", argv)
+        self.assertIn("gcloud storage cat gs://theorem-agent-infra-oss-verify-held-findings/issue-drafts/5/77-2", summary)
+        self.assertNotIn("dsl.md", summary + out)
+
+    def test_a_draft_that_cannot_be_stored_fails_the_step(self):
+        for kwargs in ({"answer": '{"error": "403"}'}, {"issue": "5; x"}, {"attempt": ""}):
+            with self.subTest(kwargs=kwargs):
+                code, _, summary, _, _, _ = self.store(**kwargs)
+                self.assertNotEqual(code, 0)
+                self.assertNotIn("gcloud storage cat", summary)
 
     def prompt(self, **env):
         """.github/scripts/review-prompt with `env`: its exit status and the outputs it wrote."""
