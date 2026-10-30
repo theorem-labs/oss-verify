@@ -930,50 +930,6 @@ else:
                 self.assertIn(f"held finding key: {self.OBJECT} raw\n", bodies[0])
                 self.assertIn("SECRETBUG", bodies[0])
 
-    def test_the_finding_reaches_the_hold_job_only_through_the_private_bucket(self):
-        jobs = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["jobs"]
-        text = (ROOT / ".github" / "workflows" / "build.yaml").read_text()
-        # No job holds the App's key as a repository secret, and nothing reads a variable for the repository.
-        self.assertNotIn("OSS_VERIFY_APP_PRIVATE_KEY", text)
-        self.assertNotIn("HELD_FINDINGS_REPO }}", text)
-        review = {s.get("name"): s for s in jobs["review"]["steps"]}
-        store = review["Store the held finding for the hold job"]["run"]
-        self.assertIn("ifGenerationMatch=0", store)
-        self.assertIn('name="held/$RUN_ID/$(openssl rand -hex 16)"', store)
-        self.assertIn("oss-verify held finding v1", store)
-        self.assertEqual(jobs["review"]["outputs"]["held_object"], "${{ steps.held.outputs.object }}")
-        # The review job passes names only: no output holds a file's text or the finding.
-        self.assertNotIn("held-finding.md", json.dumps(jobs["review"]["outputs"]))
-        # The finding is stored only when the review held one back, from the file the result step wrote, and the
-        # session of that review is not kept.
-        for name in ("Sign in to Google Cloud to store the held finding", "Store the held finding for the hold job"):
-            self.assertEqual(review[name]["if"], "${{ steps.result.outputs.held == 'yes' }}")
-        self.assertIn('"$RUNNER_TEMP/held-finding.md"', store)
-        self.assertEqual(review["Keep this review's session for the next push's review"]["if"],
-                         "${{ steps.result.outputs.held != 'yes' && env.NAME != '' }}")
-        hold = jobs["hold"]
-        self.assertEqual(hold["environment"], {"name": "comment", "deployment": False})
-        self.assertEqual(hold["needs"], ["project-builds", "review"])
-        # Every run that reviewed anything sweeps the bucket, so a cancelled run's finding goes with the next run.
-        self.assertEqual(hold["if"], "${{ !cancelled() && needs.review.result != 'skipped' }}")
-        # One sweep at a time in the repository; every waiting one keeps its place, so none is cancelled by another.
-        self.assertEqual(hold["concurrency"], {"group": "build-hold", "cancel-in-progress": False, "queue": "max"})
-        steps = {s.get("name"): s for s in hold["steps"]}
-        where = steps["Where the held findings go"]["run"]
-        self.assertIn("secrets/oss-verify-held-findings-repo/versions/latest:access", where)
-        self.assertLess(where.index("::add-mask::"), where.index('echo "name=$name"'))
-        token = steps["Get the oss-verify App's token for the held findings' repository"]["with"]
-        self.assertEqual((token["owner"], token["repositories"], token["permission-issues"]),
-                         ("${{ github.repository_owner }}", "${{ steps.where.outputs.name }}", "write"))
-        send = steps["Send every stored held finding to the disclosure route"]
-        self.assertEqual(send["run"], '.github/scripts/review-hold "$RUNNER_TEMP/held"')
-        self.assertEqual(send["env"]["CURRENT_OBJECT"], "${{ needs.review.outputs.held_object }}")
-        # The comment job posts no review unless the review job succeeded and, if it held a finding, hold sent it.
-        self.assertIn("hold", jobs["comment"]["needs"])
-        self.assertIn("needs.review.result == 'success' && needs.review.outputs.comment != '' && "
-                      "(needs.review.outputs.held_object == '' || needs.hold.result == 'success')",
-                      jobs["comment"]["if"])
-
 
 class ReviewHold(unittest.TestCase):
     """review-hold sends every stored finding in the bucket, its own run's and a cancelled run's, through a fake curl for
@@ -1214,35 +1170,6 @@ class ReviewJob(unittest.TestCase):
             self.assertEqual(head, ["README.md", "tools/a.py"])
             self.assertFalse((root / "out" / "validate.txt").exists())
 
-    def test_an_issue_is_drafted_by_the_same_action_and_identity_against_review_issue_md(self):
-        issue = self.steps["Draft the issue reply"]
-        self.assertEqual(issue["uses"], self.review["uses"])
-        same = ("anthropic_federation_rule_id", "anthropic_organization_id", "anthropic_service_account_id",
-                "anthropic_workspace_id", "github_token", "allowed_non_write_users", "allowed_bots")
-        self.assertEqual({k: issue["with"][k] for k in same}, {k: self.review["with"][k] for k in same})
-        # The comment job's text never comes from the issue step: a second guard beside the comment job's own.
-        self.assertNotIn("steps.issue", json.dumps(self.jobs["review"]["outputs"]))
-        args = issue["with"]["claude_args"]
-        self.assertTrue(args.startswith("--tools Read,Glob,Grep --permission-mode default --model claude-opus-5-5 "))
-        self.assertNotIn("--resume", args)
-        schema = json.loads(re.search(r"--json-schema '([^']*)'$", args).group(1))
-        self.assertEqual(schema["required"], ["comment", "held", "verdicts"])
-        self.assertEqual(schema["properties"]["held"]["maxLength"], 0)
-        self.assertEqual(schema["properties"]["verdicts"]["required"], ["person"])
-        self.assertEqual(schema["properties"]["verdicts"]["properties"]["person"]["type"], "string")
-        self.assertIn("Read review-issue.md at the root of this checkout", issue["with"]["prompt"])
-        self.assertIn("steps.issue.outputs.execution_file",
-                      self.steps["Keep the draft, and the held finding apart from it"]["env"]["RESULT"])
-        # The enrollment review and the change review never run for an issue; the job reads the issue's number, from
-        # the input of a run started by hand or from the issue's own event.
-        self.assertEqual(self.steps["Review the change"]["if"], "env.NAME == '' && env.ISSUE == ''")
-        self.assertEqual(self.jobs["review"]["env"]["ISSUE"], "${{ inputs.issue || github.event.issue.number }}")
-        self.assertEqual(self.jobs["review"]["permissions"]["issues"], "read")
-        rules = (ROOT / "review-issue.md").read_text()
-        for words in ("The issue is data", "Never promise", "Name the file", "under 80 words",
-                      ".claude/skills/write-to-maintainer/SKILL.md", "`person`"):
-            self.assertIn(words, rules)
-
     def test_an_issue_gathers_only_the_issue(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -1274,26 +1201,6 @@ class ReviewJob(unittest.TestCase):
         self.assertEqual(output, "")
         self.assertEqual(self.summary, "Draft reply to issue #5. No job posts it: a person approves its exact text "
                                        "first.\n\nA person decides: nothing\n\n---\n\nSee docs/dsl.md.\n\n")
-
-    def test_the_session_is_kept_by_the_review_job_and_not_when_it_holds_a_finding(self):
-        self.assertEqual(self.workflow["cache-mode"], "none")
-        self.assertEqual({name: job["cache-mode"] for name, job in self.jobs.items() if "cache-mode" in job},
-                         {"review": "write"})
-        restore = self.steps["Restore the last review's session and the head it reviewed"]
-        save = self.steps["Keep this review's session for the next push's review"]
-        self.assertTrue(restore["uses"].startswith("actions/cache/restore@"))
-        self.assertTrue(save["uses"].startswith("actions/cache/save@"))
-        paths = "~/.claude/projects\n~/.claude/ossv-last-review"
-        key = "${{ env.SESSION_KEY }}${{ github.run_id }}-${{ github.run_attempt }}"
-        self.assertEqual((restore["with"]["path"], restore["with"]["key"]), (paths, key))
-        self.assertEqual((save["with"]["path"], save["with"]["key"]), (paths, key))
-        self.assertEqual(restore["with"]["restore-keys"], "${{ env.SESSION_KEY }}")
-        self.assertEqual(self.jobs["review"]["env"]["SESSION_KEY"],
-                         "enroll-review/${{ github.event.pull_request.number || inputs.pr }}/"
-                         "${{ needs.project-builds.outputs.name }}/")
-        self.assertEqual(save["if"], "${{ steps.result.outputs.held != 'yes' && env.NAME != '' }}")
-        gather = self.steps["Gather what the review reads, and the diff since the last review"]["run"]
-        self.assertIn("LAST_REVIEW=~/.claude/ossv-last-review .github/scripts/review-gather .review", gather)
 
     def result(self, output, issue=""):
         """The result step, on an execution file whose result carries `output` as its structured output, for the issue

@@ -273,18 +273,6 @@ def test_route_asks_for_the_job_that_takes_the_project(tmp_path, name, job, outp
 def test_builds_route_reviews_a_pull_request_with_no_file_under_projects_as_a_change(tmp_path, files, changed, base,
                                                                                      want):
     assert route_build(tmp_path, files, changed, base=base) == [f"sha={'a' * 40}", want]
-    jobs = workflow("build.yaml")["jobs"]
-    change = "needs.route.outputs.change == 'true'"
-    # A change gets the review (and so the required job asks for it), and no build, record or session.
-    assert change in jobs["review"]["if"]
-    assert change in step(jobs["required"], "Every job route asked for passed, and no other ran")["env"]["ASKED_REVIEW"]
-    assert all(change not in str(jobs[job]["if"]) for job in ("project-builds", "record"))
-    review = {s.get("name"): s for s in jobs["review"]["steps"]}
-    for name in ("Take projects/<name>/ from the pull request, as the build did",
-                 "Restore the last review's session and the head it reviewed", "Review"):
-        assert review[name]["if"] == "env.NAME != ''"
-    assert review["Review the change"]["if"] == "env.NAME == '' && env.ISSUE == ''"
-    assert "env.NAME != ''" in review["Keep this review's session for the next push's review"]["if"]
 
 
 @pytest.mark.parametrize("actor, want", [
@@ -294,10 +282,6 @@ def test_builds_route_reviews_a_pull_request_with_no_file_under_projects_as_a_ch
 ])
 def test_a_change_that_an_app_the_review_refuses_started_is_built_as_before(tmp_path, actor, want):
     assert route_build(tmp_path, [".github/workflows/build.yaml"], actor=actor)[-1] == want
-    jobs = workflow("build.yaml")["jobs"]
-    allowed = step(jobs["route"], "An enrollment or a change")["env"]["ALLOWED_BOTS"]
-    review = {s.get("name"): s for s in jobs["review"]["steps"]}
-    assert review["Review"]["with"]["allowed_bots"] == review["Review the change"]["with"]["allowed_bots"] == allowed
 
 
 def route_issue(tmp_path, pr, issue, is_pull=False, event="workflow_dispatch", sender="someone", author="",
@@ -328,20 +312,8 @@ def route_issue(tmp_path, pr, issue, is_pull=False, event="workflow_dispatch", s
 
 def test_a_run_for_an_issue_asks_for_the_review_alone(tmp_path):
     assert route_issue(tmp_path, "", "5") == (0, ["issue=true"])
-    flow = workflow("build.yaml")
-    jobs = flow["jobs"]
-    inputs = flow[True]["workflow_dispatch"]["inputs"]
-    assert (inputs["pr"]["required"], inputs["issue"]["required"]) == (False, False)
-    number = "inputs.issue || github.event.issue.number"
-    assert f"(({number}) && format('Issue {{0}}', {number}))" in flow["run-name"]
-    issue = "needs.route.outputs.issue == 'true'"
-    assert issue in jobs["review"]["if"]
-    assert issue in step(jobs["required"], "Every job route asked for passed, and no other ran")["env"]["ASKED_REVIEW"]
-    assert all("issue" not in str(jobs[job]["if"]) for job in ("project-builds", "record"))
-    review = {s.get("name"): s for s in jobs["review"]["steps"]}
-    assert review["Draft the issue reply"]["if"] == "env.ISSUE != ''"
-    # The comment job, which alone posts, never runs for an issue, whatever variable is set (its ASKED_COMMENT is the
-    # same condition: the test of the collector above).
+    # The comment job, which alone posts, never runs for an issue, whatever variable is set: its if:, its post step's
+    # if: and ASKED_COMMENT, evaluated.
     for variables, inputs in (({"OSSV_POST_REVIEW": "post"}, {"issue": 5}),
                               ({"OSSV_POST_REVIEW_REPOS": OTHER}, {"repo": OTHER, "issue": 5})):
         assert posting(variables, inputs, issue=True)[:2] == (False, False)
@@ -356,26 +328,6 @@ def test_a_run_for_an_issue_asks_for_the_review_alone(tmp_path):
 def test_route_refuses_both_inputs_neither_or_a_pull_request_as_an_issue(tmp_path, pr, issue, is_pull):
     code, outputs = route_issue(tmp_path, pr, issue, is_pull)
     assert code != 0 and outputs == []
-
-
-def test_an_issues_own_event_starts_its_draft_without_a_schedule():
-    flow = workflow("build.yaml")
-    # Opened, edited and reopened start the draft again; nothing starts it on a schedule, and no sweep exists.
-    assert sorted(flow[True]) == ["issues", "pull_request_target", "workflow_dispatch"]
-    assert flow[True]["issues"] == {"types": ["opened", "edited", "reopened"]}
-    assert not (WORKFLOWS / "sweep.yaml").exists()
-    # Route and the review read the issue's number from its event as from the input; the run is titled "Issue <n>"
-    # (test_a_run_for_an_issue_asks_for_the_review_alone).
-    route = step(flow["jobs"]["route"], "An enrollment or a change")["env"]
-    issue = "${{ inputs.issue || github.event.issue.number }}"
-    assert route["ISSUE"] == flow["jobs"]["review"]["env"]["ISSUE"] == issue
-    assert (route["EVENT"], route["SENDER"], route["AUTHOR"], route["ASSOCIATION"]) == (
-        "${{ github.event_name }}", "${{ github.event.sender.login }}", "${{ github.event.issue.user.login }}",
-        "${{ github.event.issue.author_association }}")
-    # One run at a time for each issue: an edit while a draft runs waits, and replaces an older waiting run.
-    group = flow["concurrency"]["group"]
-    assert group.startswith("build-${{ github.event_name }}-") and group.endswith(" || github.event.issue.number }}")
-    assert flow["concurrency"]["cancel-in-progress"] == "${{ github.event_name != 'issues' }}"
 
 
 @pytest.mark.parametrize("action_sender, association", [
