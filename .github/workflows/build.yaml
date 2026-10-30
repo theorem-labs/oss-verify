@@ -868,6 +868,8 @@ jobs:
           RULES: ${{ needs.route.outputs.kind == 'change' && 'review-change.md' || 'review.md' }}
         run: |
           set -euo pipefail
+          # A pull request's comment only: a run for an issue has no pull request, and an issue's draft is never posted.
+          [[ ${PR:-} =~ ^[0-9]+$ ]] || { echo "::error::This run has no pull request, so nothing is posted."; exit 1; }
           # Only a run of the pull request's current head posts: a run of an older head that finished later would
           # replace the newer head's review. The current head's own run posts.
           current=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)

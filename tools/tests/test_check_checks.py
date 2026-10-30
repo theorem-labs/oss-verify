@@ -477,7 +477,8 @@ class WorkflowArguments(unittest.TestCase):
 class PostingStep(unittest.TestCase):
     """build.yaml's own "Post the comment" step, run with a fake gh: what it sends GitHub."""
 
-    def post(self, review, existing=True, head="b" * 40, pr_head=None, checks="### new report\n", rules="review.md"):
+    def post(self, review, existing=True, head="b" * 40, pr_head=None, checks="### new report\n", rules="review.md",
+             pr="8", status=0):
         workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
         name = "Post the comment, or update the one already there"
         matches = [s for s in workflow["jobs"]["comment"]["steps"] if s.get("name") == name]
@@ -501,11 +502,11 @@ class PostingStep(unittest.TestCase):
             (bin / "gh").chmod(0o755)
             (directory / "temp").mkdir()
             environment = {**os.environ, "PATH": f"{bin}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r",
-                           "PR": "8", "REVIEW": review, "CHECKS": checks, "HEAD_SHA": head, "RULES": rules,
+                           "PR": pr, "REVIEW": review, "CHECKS": checks, "HEAD_SHA": head, "RULES": rules,
                            "RUNNER_TEMP": str(directory / "temp")}
             run = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=ROOT, env=environment, capture_output=True,
                                  text=True)
-            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(run.returncode, status, run.stderr)
             sent = [name for name in ("patch.json", "post.json") if (directory / name).exists()]
             self.assertLessEqual(len(sent), 1, sent)
             if sent:
@@ -513,6 +514,12 @@ class PostingStep(unittest.TestCase):
             if existing and sent:
                 self.assertIn("issues/comments/4242", (directory / "patch.url").read_text())
             return json.loads((directory / sent[0]).read_text())["body"] if sent else None
+
+    def test_a_run_with_no_pull_request_posts_nothing(self):
+        # An issue's run has no pull request: the step refuses, before any read or write, whatever the job's if: says.
+        for pr in ("", "8; x"):
+            with self.subTest(pr=pr):
+                self.assertIsNone(self.post("The draft reply.\n", pr=pr, status=1))
 
     def test_the_triage_step_posts_or_updates_its_comment(self):
         # triage.yaml's own posting step, run with a fake gh: with no comment of ours it posts one; with one, it edits it.
