@@ -13,8 +13,7 @@
 #   dispatch  on dispatch: sends the repository_dispatch event enrollment-checked, with the pull request's number,
 #             its head commit and the project, to Theorem's private statements repository (repository id INTERNAL_ID
 #             below; its name is not published), whose enrollment workflow builds the project, writes its facts and
-#             statements, and opens their pull request there, or updates the one open for the project; that workflow
-#             labels a pull request statements-queued when the project's archives wait for the next release. On label:
+#             statements, and opens their pull request there, or updates the one open for the project. On label:
 #             puts the label on the pull request and sends nothing, so that a person decides: size-review (a plain
 #             binary above 1,000,000 bytes, the line "Up to 1 MB", dispatch://OSSV-141/ask/7c73eb21), language-paused (a
 #             language whose projects are paused for now), name-review (a name the statements repository cannot
@@ -24,8 +23,7 @@
 #             commit, which runs maintainer-confirmed.yml, whose completion runs this again), review-blocking (the
 #             review of the commit, in the Build run whose record names it, gave F2 or F7 the verdict fail) or
 #             review-pending (that run has no verdicts.json in its artifact enroll-review-draft, or F2 or F7 is
-#             neither pass nor fail; a re-run of the review job completes Build again, which runs this again). The
-#             statements-queued label is the receiving workflow's, not this file's.
+#             neither pass nor fail; a re-run of the review job completes Build again, which runs this again).
 #
 # Each required check's run starts this workflow, so the run of the last one to pass is the one that dispatches; a run
 # that sees a check not passed yet does nothing, and so does a run for a draft pull request: build.yaml runs again on
