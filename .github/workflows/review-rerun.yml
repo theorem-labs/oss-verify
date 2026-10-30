@@ -26,6 +26,9 @@ name: "Review re-run"
 # them, with the run's own event and head commit, and with the workflow file of the run's first attempt, the build.yaml
 # of that event's GITHUB_SHA, not main's of now. The re-run's completion starts this workflow and enroll-dispatch.yml
 # again. The step summary names each re-run and each run left at the cap.
+# Nothing runs on a schedule, so nothing would try this again: each call to GitHub (the jobs, the pull requests, their
+# files, the re-run) is tried up to four times in the job, 15, 30 and 60 s apart. After the fourth failed try the job
+# fails, and its summary names the Build run that is not re-run.
 # The cost in GitHub Actions: one job of a few seconds for each failed Build run of a pull request, and for each re-run
 # one more review and the jobs after it, at most two for one Build run. Nothing runs on a schedule.
 # A re-run keeps the privileges of the actor of the run's first attempt (github.actor); GitHub shows github-actions[bot]
@@ -45,7 +48,8 @@ jobs:
   rerun:
     if: github.event.workflow_run.event == 'pull_request_target' && github.event.workflow_run.conclusion == 'failure'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Four tries of each call at most, 105 s of waits each (below), and the few calls of one pull request.
+    timeout-minutes: 15
     permissions:
       actions: write        # to read the run's jobs, and to re-run its failed jobs
       pull-requests: read   # the open pull requests at the run's head commit, and their files
@@ -60,12 +64,32 @@ jobs:
         run: |
           set -euo pipefail
           say() { echo "$1"; echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
+          # A call to GitHub that fails (a fault of its API) is tried again: four tries, 15, 30 and 60 s apart. Only a
+          # try that succeeds gives its output, so a page list cut short is never used. After the fourth try the job
+          # fails, and its summary names the Build run that is not re-run: nothing else would re-run it.
+          try() {
+            local wait out n=1
+            for wait in 15 30 60; do
+              if out=$("$@"); then [ -z "$out" ] || printf '%s\n' "$out"; return 0; fi
+              echo "Try $n of 4 failed; the next in $wait s." >&2
+              sleep "$wait"
+              n=$((n + 1))
+            done
+            out=$("$@") || return 1
+            [ -z "$out" ] || printf '%s\n' "$out"
+          }
+          fail() {
+            echo "::error::Build run $RUN_ID: could not $1 after 4 tries, so it is not re-run."
+            echo "Build run $RUN_ID: could not $1 after 4 tries, so it is not re-run." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
           [[ $RUN_ID =~ ^[0-9]+$ && $RUN_ATTEMPT =~ ^[0-9]+$ && $HEAD_SHA =~ ^[0-9a-f]{40}$ ]] \
             || { echo "::error::The completed run's id, attempt or head commit is not one."; exit 1; }
           # The jobs of the attempt that completed: GitHub lists each job of the run, a job this attempt did not run
           # again with its earlier result. The review job has no name of its own; project-builds' job is named build.
-          conclusions=$(gh api "repos/$REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs?per_page=100" \
-            --jq '[.jobs[] | {(.name): .conclusion}] | add // {} | "\(.review // "none") \(.build // "none")"')
+          conclusions=$(try gh api "repos/$REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs?per_page=100" \
+            --jq '[.jobs[] | {(.name): .conclusion}] | add // {} | "\(.review // "none") \(.build // "none")"') \
+            || fail "read the jobs of attempt $RUN_ATTEMPT"
           read -r review build <<< "$conclusions"
           case $review in
             failure | cancelled | timed_out) ;;
@@ -77,8 +101,9 @@ jobs:
             exit 0
           fi
           # The open pull requests into main, ready for review, whose head is still the run's head commit.
-          numbers=$(gh api --paginate "repos/$REPO/pulls?state=open&base=main&per_page=100" \
-            --jq ".[] | select(.head.sha == \"$HEAD_SHA\" and .draft == false) | .number")
+          numbers=$(try gh api --paginate "repos/$REPO/pulls?state=open&base=main&per_page=100" \
+            --jq ".[] | select(.head.sha == \"$HEAD_SHA\" and .draft == false) | .number") \
+            || fail "list the open pull requests"
           if [ -z "$numbers" ]; then
             echo "Build run $RUN_ID: no open pull request into main, ready for review, is at ${HEAD_SHA:0:7}."
             exit 0
@@ -87,9 +112,11 @@ jobs:
             [[ $number =~ ^[0-9]+$ ]] || { echo "::error::Not a pull request number."; exit 1; }
             # The project of each path, a renamed file under both names, or "-" for a path not under projects/<name>/.
             # The pattern of a name is enroll-dispatch's NAME.
-            projects=$(gh api --paginate "repos/$REPO/pulls/$number/files?per_page=100" \
+            paths=$(try gh api --paginate "repos/$REPO/pulls/$number/files?per_page=100" \
               --jq '.[] | .filename, (.previous_filename // empty)
-                | (capture("^projects/(?<name>[a-z0-9][a-z0-9._-]{0,62})/.") | .name) // "-"' | sort -u)
+                | (capture("^projects/(?<name>[a-z0-9][a-z0-9._-]{0,62})/.") | .name) // "-"') \
+              || fail "list the files of pull request $number"
+            projects=$(sort -u <<< "$paths")
             if ! [[ $projects =~ ^[a-z0-9][a-z0-9._-]{0,62}$ ]]; then
               echo "Pull request $number: not one enrollment: nothing is re-run."; exit 0
             fi
@@ -99,5 +126,5 @@ jobs:
           if (( RUN_ATTEMPT >= 3 )); then
             say "$ended. At most two re-runs for one Build run: it is not run again."; exit 0
           fi
-          gh run rerun "$RUN_ID" --failed -R "$REPO"
+          try gh run rerun "$RUN_ID" --failed -R "$REPO" || fail "re-run its failed jobs"
           say "$ended; its failed jobs run again."
