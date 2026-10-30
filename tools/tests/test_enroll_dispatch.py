@@ -43,6 +43,7 @@ RUNS = {"project-builds": (101, ".github/workflows/build.yaml", "pull_request_ta
         "terms-accepted": (103, ".github/workflows/terms.yaml", "pull_request_target"),
         "tests": (104, ".github/workflows/tests.yaml", "pull_request")}
 HAND_RUN = 900
+MERGED_RUN = 800
 
 
 def zipped(files):
@@ -662,6 +663,180 @@ class Maintainer(unittest.TestCase):
         self.assertEqual(confirmed["name"], "Maintainer confirmed")
         dispatch_flow = yaml.safe_load((ROOT / ".github" / "workflows" / "enroll-dispatch.yml").read_text())
         self.assertIn("Maintainer confirmed", dispatch_flow[True]["workflow_run"]["workflows"])
+
+
+class Merged(unittest.TestCase):
+    """A merge of an enrollment pull request: Enrollment merged's run completes, and the pull request's head is sent
+    when its required checks passed and the size line, the language and the name allow statements. The review and the
+    maintainer check are not asked: the person who merged decided them."""
+
+    def world(self, event="pull_request_target", conclusion="success", title=f"merged #{PR}", branch=None, repo=None):
+        world = World()
+        if event == "workflow_dispatch":   # the replay of a merge: gh workflow run enroll-merged.yml -f pr=<n>, on main
+            world.run(MERGED_RUN, ".github/workflows/enroll-merged.yml", event, head_sha=MAIN, branch=branch or "main",
+                      head_repo=repo or REPO)
+        else:
+            world.run(MERGED_RUN, ".github/workflows/enroll-merged.yml", event)
+        world.runs[MERGED_RUN].update(conclusion=conclusion, display_title=title)
+        world.pulls = [dict(World.pull(state="closed"), merged=True, merged_by={"login": "a-member"},
+                            user={"login": "someone"})]
+        return world
+
+    def decide(self, world):
+        run = world.runs[MERGED_RUN]
+        return world.decide(event=run["event"], run_id=MERGED_RUN, sha=run["head_sha"])
+
+    def test_a_merged_enrollment_is_sent_for_its_head(self):
+        for event in ("pull_request_target", "workflow_dispatch"):
+            got = self.decide(self.world(event))
+            self.assertEqual((got["decision"], got["pr"], got["project"], got["sha"], got.get("merged")),
+                             ("dispatch", "32", "plugin-hostd", SHA, "true"), (event, got["reason"]))
+            self.assertEqual(got["reason"], "pull request 32 was merged by a-member: the merge decides the review and "
+                                            "the maintainer check")
+
+    def test_a_pull_request_closed_without_a_merge_decides_nothing(self):
+        # Its job skips (the run does not succeed); and a replay of a pull request that was closed without a merge.
+        got = self.decide(self.world(conclusion="skipped"))
+        self.assertEqual((got["decision"], got["label"]), ("none", ""), got["reason"])
+        self.assertIn("not success", got["reason"])
+        world = self.world("workflow_dispatch")
+        world.pulls = [dict(World.pull(state="closed"), merged=False, merged_by=None)]
+        got = self.decide(world)
+        self.assertEqual((got["decision"], got["label"]), ("none", ""), got["reason"])
+        self.assertIn("pull request 32 is not merged", got["reason"])
+
+    def test_a_merge_does_not_wait_for_the_review(self):
+        for review in ({"F2": "person", "F7": "pass"}, {"F2": "fail", "F7": "fail"}, None):
+            world = self.world()
+            if review is None:
+                del world.reviews[101]
+            else:
+                world.reviews[101] = review
+            got = self.decide(world)
+            self.assertEqual((got["decision"], got["label"]), ("dispatch", ""), (review, got["reason"]))
+
+    def test_a_merge_does_not_wait_for_the_maintainer_check(self):
+        asked = []
+        old = dispatch.standing
+        dispatch.standing = lambda config, login: asked.append(login) or f"{login} is not shown to maintain it"
+        try:
+            got = self.decide(self.world())
+        finally:
+            dispatch.standing = old
+        self.assertEqual((got["decision"], got["label"]), ("dispatch", ""), got["reason"])
+        self.assertEqual(asked, [])
+
+    def test_a_merged_enrollment_over_the_size_line_is_labelled(self):
+        world = self.world()
+        world.artifacts[101] = record(sizes=sizes(plain_text=2_000_000))
+        got = self.decide(world)
+        self.assertEqual((got["decision"], got["label"], got["pr"], got["sha"]), ("label", "size-review", "32", SHA),
+                         got["reason"])
+        self.assertIn("fuzz_command.plain", got["reason"])
+
+    def test_a_merged_python_enrollment_is_paused(self):
+        world = self.world()
+        world.project_yaml = b"repo: https://example.invalid/x\nlanguage: python\n"
+        got = self.decide(world)
+        self.assertEqual((got["decision"], got["label"]), ("label", "language-paused"), got["reason"])
+
+    def test_a_merged_change_that_is_no_enrollment_decides_nothing(self):
+        for files in ([{"filename": "README.md", "status": "modified"}],
+                      [{"filename": "projects/plugin-hostd/build.sh", "status": "added"},
+                       {"filename": ".github/workflows/build.yaml", "status": "modified"}]):
+            world = self.world()
+            world.files = files
+            got = self.decide(world)
+            self.assertEqual((got["decision"], got["label"]), ("none", ""), files)
+            self.assertIn("pull request 32 is not one enrollment", got["reason"])
+
+    def test_a_merge_whose_checks_did_not_pass_decides_nothing(self):
+        # The replay binds the checks to the pull request's head, not to the main commit it ran on.
+        for event in ("pull_request_target", "workflow_dispatch"):
+            world = self.world(event)
+            world.checks[1]["conclusion"] = "failure"   # project-builds
+            got = self.decide(world)
+            self.assertEqual((got["decision"], got["label"]), ("none", ""), event)
+            self.assertIn(f"required checks not passed at {SHA[:7]}: project-builds (failure)", got["reason"])
+
+    def test_a_pull_request_merged_into_another_branch_decides_nothing(self):
+        world = self.world()
+        world.pulls = [dict(World.pull(state="closed", base="release"), merged=True, merged_by={"login": "a-member"})]
+        got = self.decide(world)
+        self.assertEqual((got["decision"], got["label"]), ("none", ""), got["reason"])
+        self.assertIn("pull request 32 was merged into 'release', not main", got["reason"])
+
+    def test_a_merged_record_of_another_pull_request_or_project_decides_nothing(self):
+        # The bound project-builds run's record must be this pull request's, of the project its files change.
+        for change, why in (({"pr": 77}, "of pull request 77 and projects/plugin-hostd/"),
+                            ({"project": "libreac"}, "of pull request 32 and projects/libreac/")):
+            world = self.world()
+            world.artifacts[101] = record(**change)
+            got = self.decide(world)
+            self.assertEqual((got["decision"], got["label"]), ("none", ""), change)
+            self.assertIn(f"pull request 32: the build record is {why}", got["reason"], change)
+
+    def test_a_merged_name_with_a_dot_is_labelled(self):
+        name = "pdf.js"
+        world = self.world()
+        world.files = [{"filename": f"projects/{name}/build.sh", "status": "added"}]
+        world.artifacts[101] = record(project=name)
+        api = world.api()
+        api.table[f"repos/{REPO}/contents/projects/{name}/project.yaml?ref={SHA}"] = b"language: c\n"
+        got = dispatch.decide(api, REPO, MERGED_RUN, "pull_request_target", SHA)
+        self.assertEqual((got["decision"], got["label"], got["project"]), ("label", "name-review", name), got["reason"])
+
+    def test_each_merged_run_decides_in_a_group_of_its_own(self):
+        # Not the group of its head: there, a later run of the head (an edit of the title, a label) replaces a pending
+        # one, and would decide the closed pull request by the path of an open one, which sends nothing.
+        flow = yaml.safe_load((ROOT / ".github" / "workflows" / "enroll-dispatch.yml").read_text())
+        group = " ".join(flow["concurrency"]["group"].split())
+        self.assertTrue(group.startswith(
+            "enroll-dispatch:${{ (github.event.workflow_run.event == 'workflow_dispatch' || "
+            f"github.event.workflow_run.path == '{dispatch.MERGED_WORKFLOW}') && github.event.workflow_run.id || "),
+            group)
+
+    def test_a_forged_or_untitled_merged_run_decides_nothing(self):
+        # A fork's own copy of the file on its pull request, a replay from another branch's or repository's copy, and a
+        # title that names no pull request.
+        neither = "is neither the base branch's"
+        for case, why in (({"event": "pull_request"}, neither),
+                          ({"event": "workflow_dispatch", "branch": "ci/x"}, neither),
+                          ({"event": "workflow_dispatch", "repo": "someone/oss-verify"}, neither),
+                          ({"title": "merged #0"}, "names no pull request"),
+                          ({"title": f"merged #{PR} again"}, "names no pull request"),
+                          ({"title": f"Merged #{PR}"}, "names no pull request"),
+                          ({"title": None}, "names no pull request")):
+            got = self.decide(self.world(**case))
+            self.assertEqual((got["decision"], got["label"]), ("none", ""), case)
+            self.assertIn(why, got["reason"], case)
+
+    def test_the_send_step_says_merged_only_for_a_merge(self):
+        if not shutil.which("jq"):
+            self.skipTest("jq is not installed")
+        steps = yaml.safe_load((ROOT / ".github" / "workflows" / "enroll-dispatch.yml").read_text())["jobs"][
+            "dispatch"]["steps"]
+        script = [s for s in steps if s.get("name") == "Send enrollment-checked to the private repository"][0]["run"]
+        sent = {}
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            bin = directory / "bin"
+            bin.mkdir()
+            (bin / "gh").write_text(f'#!/bin/bash\nprintf "%s\\n" "$*" > {directory}/argv\ncat > {directory}/body\n')
+            (bin / "gh").chmod(0o755)
+            for merged in ("", "true"):
+                env = dict(os.environ, PATH=f"{bin}:{os.environ['PATH']}", PROJECT="plugin-hostd", SHA=SHA,
+                           PR=str(PR), MERGED=merged, INTERNAL_ID="1425069221",
+                           GITHUB_STEP_SUMMARY=str(directory / "summary"))
+                run = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+                self.assertEqual(run.returncode, 0, run.stderr)
+                self.assertEqual((directory / "argv").read_text(),
+                                 "api --method POST repositories/1425069221/dispatches --input -\n")
+                sent[merged] = json.loads((directory / "body").read_text())
+        payload = {"pr": PR, "sha": SHA, "project": "plugin-hostd"}
+        self.assertEqual(sent[""], {"event_type": "enrollment-checked", "client_payload": payload})
+        self.assertEqual(sent["true"], {"event_type": "enrollment-checked",
+                                        "client_payload": {**payload, "merged": True}})
 
 
 class TheRecord(unittest.TestCase):

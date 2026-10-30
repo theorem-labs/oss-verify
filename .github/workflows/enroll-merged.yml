@@ -1,0 +1,30 @@
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+name: Enrollment merged
+# Runs when a pull request is closed. Its only work is to complete: enroll-dispatch.yml runs on its completion
+# (workflow_run), so that enroll-dispatch.yml keeps one event, as it does for maintainer-confirmed.yml's label. Its job
+# runs for a merge or a replay alone. The run's title names the pull request, and .github/scripts/enroll-dispatch
+# (decide_merged) reads it: when the pull request is an enrollment merged into main whose required checks passed at its
+# head commit, that commit is sent for its theorem statements; a pull request closed without a merge decides nothing.
+#
+# workflow_dispatch replays a merge made before this file existed:
+#   gh workflow run enroll-merged.yml -R theorem-labs/oss-verify -f pr=<n>
+#
+# This workflow holds no permission, checks out nothing, and runs no code of the pull request.
+on:
+  pull_request_target:
+    types: [closed]
+  workflow_dispatch:
+    inputs:
+      pr:
+        required: true
+        type: string
+run-name: "merged #${{ github.event.pull_request.number || inputs.pr }}"
+permissions: {}
+jobs:
+  merged:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - run: echo "enroll-dispatch.yml decides on this run's end"

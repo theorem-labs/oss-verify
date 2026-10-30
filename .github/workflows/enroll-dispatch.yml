@@ -26,6 +26,13 @@
 #             neither pass nor fail; a re-run of the review job completes Build again, which runs this again). The
 #             daily limit and the statements-queued label are the receiving workflow's, not this file's.
 #
+# A merge sends too. Enrollment merged (enroll-merged.yml) runs on each closed pull request and does nothing else; its
+# completion runs this. When a person merged an enrollment into main and its required checks passed at its head
+# commit, decide gives dispatch for that commit, and dispatch adds merged: true to the event's client_payload. The
+# review (F2, F7) and the maintainer check are not asked, since the merge decided them; the size line, a paused language
+# and the name rule still label. A merge made before enroll-merged.yml existed is replayed with
+# `gh workflow run enroll-merged.yml -R theorem-labs/oss-verify -f pr=<n>`.
+#
 # Each required check's run starts this workflow, so the run of the last one to pass is the one that dispatches; a run
 # that sees a check not passed yet does nothing, and so does a run for a draft pull request: build.yaml runs again on
 # ready_for_review, and that run's completion decides once the pull request is ready. A later run for the same commit
@@ -50,7 +57,8 @@ name: Enroll dispatch
 on:
   workflow_run:
     # Maintainer confirmed: a member put the label maintainer-confirmed on a pull request; the decision runs again.
-    workflows: [Build, Validate, Terms, Tests, Maintainer confirmed]
+    # Enrollment merged: a pull request was closed; a merged enrollment is sent for its head commit.
+    workflows: [Build, Validate, Terms, Tests, Maintainer confirmed, Enrollment merged]
     types: [completed]
 permissions: {}
 concurrency:
@@ -60,9 +68,14 @@ concurrency:
   # decides on the same commit and branch); `:`, which neither a repository's name nor a branch's can hold (git
   # check-ref-format refuses it in a ref, and a GitHub repository name is letters, digits, `.`, `_` and `-`), keeps the
   # parts apart. A Build run started by hand is about the pull request its record names, not the main commit it ran
-  # on: each has a group of its own.
+  # on: each has a group of its own. So has each run of Enrollment merged (enroll-merged.yml, by its path): in its
+  # head's group, a later run of that head (an edited title, a label) would replace it while it waits, and decide the
+  # closed pull request by the path of an open one, which sends nothing. A merge's run and an open pull request's run
+  # for the same head can then both send it; the statements repository skips the second (a build of that commit
+  # started in the last 24 hours).
   group: >-
-    enroll-dispatch:${{ github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.id
+    enroll-dispatch:${{ (github.event.workflow_run.event == 'workflow_dispatch'
+    || github.event.workflow_run.path == '.github/workflows/enroll-merged.yml') && github.event.workflow_run.id
     || format('{0}:{1}:{2}', github.event.workflow_run.head_sha,
     github.event.workflow_run.head_repository.full_name, github.event.workflow_run.head_branch) }}
   cancel-in-progress: false
@@ -84,6 +97,7 @@ jobs:
       pr: ${{ steps.decide.outputs.pr }}
       project: ${{ steps.decide.outputs.project }}
       sha: ${{ steps.decide.outputs.sha }}
+      merged: ${{ steps.decide.outputs.merged }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with:
@@ -146,6 +160,7 @@ jobs:
       PR: ${{ needs.decide.outputs.pr }}
       PROJECT: ${{ needs.decide.outputs.project }}
       SHA: ${{ needs.decide.outputs.sha }}
+      MERGED: ${{ needs.decide.outputs.merged }}
     steps:
       - name: Check the decision's values
         run: |
@@ -233,10 +248,13 @@ jobs:
           GH_TOKEN: ${{ steps.dispatch-token.outputs.token }}
         run: |
           set -euo pipefail
-          jq -n --arg project "$PROJECT" --arg sha "$SHA" --argjson pr "$PR" \
-            '{event_type: "enrollment-checked", client_payload: {pr: $pr, sha: $sha, project: $project}}' \
+          # merged: true says only that a merge sent the event; a reader that needs the merge reads it from GitHub.
+          jq -n --arg project "$PROJECT" --arg sha "$SHA" --argjson pr "$PR" --arg merged "$MERGED" \
+            '{event_type: "enrollment-checked", client_payload: ({pr: $pr, sha: $sha, project: $project}
+              + if $merged == "true" then {merged: true} else {} end)}' \
             | gh api --method POST "repositories/$INTERNAL_ID/dispatches" --input -
-          echo "pull request $PR: sent enrollment-checked for $PROJECT at $SHA" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "pull request $PR: sent enrollment-checked for $PROJECT at $SHA${MERGED:+, merged}" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
 
       # Only after the send: a send that fails leaves the labels, so that the pull request still says where it stands.
       - name: Take off the labels an earlier commit got
