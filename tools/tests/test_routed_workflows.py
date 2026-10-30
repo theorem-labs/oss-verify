@@ -270,10 +270,11 @@ def route_issue(tmp_path, pr, issue, is_pull=False, event="workflow_dispatch", s
 
 def test_a_run_for_an_issue_asks_for_the_review_alone(tmp_path):
     assert route_issue(tmp_path, "", "5") == (0, ["kind=issue"])
-    # The comment job, which alone posts, never runs for an issue, of this repository or of another, whatever the
-    # variable names: its if: and the required job's ASKED_COMMENT, evaluated.
-    for variables, inputs in (({}, {"issue": 5}), ({"OSSV_POST_REVIEW_REPOS": OTHER}, {"repo": OTHER, "issue": 5})):
-        assert posting(variables, inputs, issue=True)[:2] == (False, False)
+    # The comment job, which alone posts, never runs for an issue, whatever variable is set and even when the literal
+    # list names the repository: its if: and the required job's ASKED_COMMENT, evaluated.
+    for variables, inputs, repos in (({"OSSV_POST_REVIEW": "post"}, {"issue": 5}, None),
+                                     ({}, {"repo": OTHER, "issue": 5}, OTHER)):
+        assert posting(variables, inputs, issue=True, repos=repos)[:2] == (False, False)
 
 
 @pytest.mark.parametrize("pr, issue, is_pull", [
@@ -392,6 +393,16 @@ def test_another_repository_routes_to_a_change_review(tmp_path, repo):
     assert evaluate(group, run) != evaluate(group, ours)
 
 
+@pytest.mark.parametrize("repo", ["oss-verify-proofs", OTHER])
+def test_another_repository_issue_runs_its_hourly_cap(repo):
+    cap = step(workflow("build.yaml")["jobs"]["review"], "Hold the draft at the hourly cap")
+    context = {"github": {"event_name": "workflow_dispatch", "repository": "theorem-labs/oss-verify", "run_id": 99},
+               "inputs": {"repo": repo, "issue": 5}, "needs": {"route": {"outputs": {"kind": "issue"}}}}
+    assert bool(evaluate(cap["if"], context))
+    assert evaluate(cap["env"]["RUNS_REPO"], context) == "theorem-labs/oss-verify"
+    assert evaluate(cap["env"]["SOURCE_REPO"], context) == repo
+
+
 @pytest.mark.parametrize("head, pr_head", [
     (HEAD, "d" * 40),  # the pull request moved on after its starter read it
     ("", HEAD),  # no head given
@@ -435,12 +446,18 @@ def test_the_token_names_the_target_repository():
             assert evaluate(where, context) == f"theorem-labs/{name}"
 
 
-def posting(variables, inputs, issue=False):
+def posting(variables, inputs, issue=False, repos=None):
     """(the comment job runs, the required job asks for it, the post step runs) for a successful review on a run with
-    `inputs` (none on a pull request's own event) and the repository variables `variables`."""
+    `inputs` (none on a pull request's own event), the repository variables `variables`, and the list of other
+    repositories whose reviews post: `repos`, or by default the workflow's own (route's output post_review_repos)."""
     jobs = workflow("build.yaml")["jobs"]
+    if repos is None:
+        # A value with no ${{ }} is the literal itself, as GitHub reads it.
+        listed = str(jobs["route"]["outputs"]["post_review_repos"])
+        repos = as_text(evaluate(listed, {})) if "${{" in listed else listed
     context = {"inputs": inputs, "vars": variables, "github": {"repository": "theorem-labs/oss-verify"},
-               "needs": {"route": {"outputs": {"kind": "issue" if issue else "change"}},
+               "needs": {"route": {"outputs": {"kind": "issue" if issue else "change",
+                                               "post_review_repos": repos}},
                          "review": {"result": "success", "outputs": {"comment": "Thanks.\n", "held_object": ""}},
                          "hold": {"result": "success"}}}
     asked = step(jobs["required"], "Every job route asked for passed, and no other ran")["env"]["ASKED_COMMENT"]
@@ -448,9 +465,11 @@ def posting(variables, inputs, issue=False):
     return bool(evaluate(jobs["comment"]["if"], context)), bool(evaluate(asked, context)), bool(evaluate(post, context))
 
 
-def test_another_repository_posts_nothing_unless_the_variable_names_it():
+def test_post_review_alone_posts_nothing_on_another_repository():
+    # With the workflow's own list (empty for now), another repository's review posts nothing, whatever variable is
+    # set: OSSV_POST_REVIEW is not read for it, and no variable names the repositories.
     for repo in ("oss-verify-proofs", OTHER):
-        for variables in ({}, {"OSSV_POST_REVIEW_REPOS": ""}):
+        for variables in ({"OSSV_POST_REVIEW": "post"}, {"OSSV_POST_REVIEW": "post", "OSSV_POST_REVIEW_REPOS": repo}):
             assert posting(variables, {"repo": repo, "pr": 34, "head": HEAD}) == (False, False, False), (repo, variables)
     # This repository's pull requests post, from their own events or by hand, with no variable.
     for inputs in ({}, {"repo": "oss-verify", "pr": 7}):
@@ -458,25 +477,27 @@ def test_another_repository_posts_nothing_unless_the_variable_names_it():
 
 
 def test_the_repos_switch_posts_only_the_repository_it_names():
+    # The list as a reviewed pull request would set it: each name posts its own repository's reviews alone.
     proofs = {"repo": "oss-verify-proofs", "pr": 7, "head": HEAD}
     other = {"repo": OTHER, "pr": 34, "head": HEAD}
-    named = {"OSSV_POST_REVIEW_REPOS": "oss-verify-proofs"}
-    assert posting(named, proofs) == (True, True, True)
-    assert posting(named, other) == (False, False, False)
-    both = {"OSSV_POST_REVIEW_REPOS": f"{OTHER},oss-verify-proofs"}
-    assert posting(both, proofs) == posting(both, other) == (True, True, True)
+    assert posting({}, proofs, repos="oss-verify-proofs") == (True, True, True)
+    assert posting({}, other, repos="oss-verify-proofs") == (False, False, False)
+    both = f"{OTHER},oss-verify-proofs"
+    assert posting({}, proofs, repos=both) == posting({}, other, repos=both) == (True, True, True)
     # A name counts whole: not a longer name, nor a part of one.
     for value in ("oss-verify-proofs-internal", "verify-proofs", "oss-verify-proof", "OSS-VERIFY-PROOFS-x"):
-        assert posting({"OSSV_POST_REVIEW_REPOS": value}, proofs) == (False, False, False), value
+        assert posting({}, proofs, repos=value) == (False, False, False), value
     # Never for an issue: a person approves each reply to an issue before anyone posts it.
-    assert posting(named, {"repo": "oss-verify-proofs", "issue": 3}, issue=True)[:2] == (False, False)
+    assert posting({}, {"repo": "oss-verify-proofs", "issue": 3}, issue=True, repos="oss-verify-proofs")[:2] == (
+        False, False)
 
 
-def test_the_repos_switch_does_not_change_oss_verify():
-    every = {"OSSV_POST_REVIEW_REPOS": f"oss-verify,oss-verify-proofs,{OTHER}"}
-    for variables in (every, {"OSSV_POST_REVIEW_REPOS": "oss-verify-proofs"}):
+def test_the_repos_list_does_not_change_oss_verify():
+    every = f"oss-verify,oss-verify-proofs,{OTHER}"
+    for variables in ({"OSSV_POST_REVIEW": "draft"},
+                      {"OSSV_POST_REVIEW_REPOS": "oss-verify-proofs"}):
         for inputs in ({}, {"repo": "oss-verify", "pr": 7}):
-            assert posting(variables, inputs) == (True, True, True), (variables, inputs)
+            assert posting(variables, inputs, repos=every) == (True, True, True), (variables, inputs)
 
 
 # --- tests.yaml's route, run on made-up commits ---

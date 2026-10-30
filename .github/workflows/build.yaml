@@ -51,24 +51,26 @@ name: "Build"
 #            an issue it drafts the reply as review-issue.md says, from the issue's title, body and comments, read as
 #            data, with no session kept. No job posts the draft, and it is never the public artifact or job summary:
 #            it and what a person decides on it go to the private held-findings bucket
-#            (.github/scripts/store-issue-draft), and the job summary says how a person at Theorem reads them. This
-#            repository is public, so anyone with a GitHub account can open an issue and start that path: on an
-#            issue's own event the step "Hold the draft at the hourly cap" (.github/scripts/issue-draft-cap) runs
-#            first, and at 6 drafts that ran the model in the last hour, or when it cannot read the runs, it fails the
-#            job with `::error::HELD: ...`: no draft is made and the run is red, and the CI/CD lane's inbound watch
-#            pages for each such run (ISSUE CAP HELD). A person re-runs the job to make the draft. The draft can be
-#            stored only when Google's identity provider for this repository admits the run's event: when the sign-in
-#            before the model is refused for an issue, the step "Stop before the model when the draft cannot be
-#            stored" fails the job with `::error::NOT STORED: ...` before the model runs, and the cap does not count
-#            that run.
+#            (.github/scripts/store-issue-draft), and the job summary says how a person at Theorem reads them.
+#            Each reviewed repository is public, so anyone with a GitHub account can open an issue and start that
+#            path. The step "Hold the draft at the hourly cap" (.github/scripts/issue-draft-cap) runs first for every
+#            issue, including an issue that another repository's starter starts here. At 6 drafts for that source
+#            repository that ran the model in the last hour, or when it cannot read the runs, it fails the job with
+#            `::error::HELD: ...`: no draft is made and the run is red, and the CI/CD lane's inbound watch pages for
+#            each such run (ISSUE CAP HELD). A person re-runs the job to make the draft. The draft is stored in the
+#            private bucket under the source repository's name. It can be stored only when Google's identity provider
+#            for this repository admits the run's event: when the sign-in before the model is refused for an issue,
+#            the step "Stop before the model when the draft cannot be stored" fails the job with `::error::NOT STORED:
+#            ...` before the model runs, and the cap does not count that run.
 #   hold     sends each real bug in a project's own code that a review held back from its comment (review.md, rule 6)
 #            to the disclosure route as a private issue (.github/scripts/review-hold): the review job stores it in a
 #            private bucket that only this job can read, and this job sends every finding stored there, a cancelled
 #            run's too. A finding never reaches a log, an output or an artifact.
 #   comment  posts that comment, with the checks' report folded under it, or replaces the one already there: for
-#            each pull request of this repository, and for another repository's only while OSSV_POST_REVIEW_REPOS
-#            names that repository. The comment starts with <!-- oss-verify-review -->, as the triage comment starts
-#            with its own marker, and its second line is the verdict line that the inbound watcher reads:
+#            each pull request of this repository, and for another repository's only while route's list
+#            post_review_repos names that repository. The comment starts with <!-- oss-verify-review -->, as the
+#            triage comment starts with its own marker, and its second line is the verdict line that the inbound
+#            watcher reads:
 #            <!-- oss-verify-verdict {"head":"<commit>","blocking":[...],"person":[...]} -->, the checks whose verdict
 #            is fail and those left to a person (.github/scripts/review-body; none when the review gave no verdicts).
 #            It never runs for an issue: a person approves the exact text of each reply to an issue before anyone
@@ -225,8 +227,8 @@ name: "Build"
 #   gh workflow run build.yaml -f repo=oss-verify-proofs -f issue=3
 # Such a run reviews that head only while it is the pull request's head, and its title, "Review <repo>#<n> at <head>",
 # is what the next review of that pull request reads (the whole head: an expression cannot cut a string).
-# Its comment is posted only while the variable OSSV_POST_REVIEW_REPOS, comma-separated names, names the repository.
-# The comment job's token is the oss-verify App's, for that repository alone.
+# Its comment is posted only while route's list post_review_repos names the repository; that list is empty. The
+# comment job's token is the oss-verify App's, for that repository alone.
 # Such a run reports a check named project-builds too, but a check from a workflow_dispatch run never satisfies a
 # ruleset's required check (https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks#checks-from-some-workflow-jobs-are-not-evaluated).
 
@@ -288,6 +290,12 @@ jobs:
     outputs:
       kind: ${{ steps.decide.outputs.kind }}
       sha: ${{ steps.decide.outputs.sha }}
+      # The other repositories whose reviews post a comment, by name, comma-separated. Empty: their reviews are drafts
+      # only (the artifact enroll-review-draft). A name is added by a reviewed pull request, after the stream owner's
+      # yes to posting there: a literal, not a variable, so that only a reviewed pull request changes it. It is a job
+      # output because a job's if: cannot read env; the comment job's if:, its post step's if: and the required job
+      # read it.
+      post_review_repos: ""
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with:
@@ -610,17 +618,19 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with: {persist-credentials: false, fetch-depth: 0}
-      # The cap on the model runs of the issue path: this repository is public, so anyone with a GitHub account can open
-      # an issue and start one. At the cap (6 drafts that ran the model in the last hour), or when it cannot read the
-      # runs, the step fails with a `::error::HELD: ...` annotation: no draft, a red run, never a pass. The CI/CD lane's
-      # inbound watch pages the CI/CD role once for each run and attempt whose step of this name failed (ISSUE CAP
-      # HELD); a run stopped by the later step "Stop before the model when the draft cannot be stored" is not paged as
-      # held. Keep this step's name: issue-draft-cap's count and the inbound watch both find a held run by it.
+      # The cap on the model runs of the issue path: each reviewed repository is public, so anyone with a GitHub
+      # account can open an issue and start one. The source repository identifies the drafts that share its cap of 6
+      # in the last hour. At the cap, or when it cannot read the runs, the step fails with a `::error::HELD: ...`
+      # annotation: no draft, a red run, never a pass. The CI/CD lane's inbound watch pages the CI/CD role once for
+      # each run and attempt whose step of this name failed (ISSUE CAP HELD); a run stopped by the later step "Stop
+      # before the model when the draft cannot be stored" is not paged as held. Keep this step's name:
+      # issue-draft-cap's count and the inbound watch both find a held run by it.
       - name: Hold the draft at the hourly cap
-        if: github.event_name == 'issues'
+        if: needs.route.outputs.kind == 'issue'
         env:
           GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
+          RUNS_REPO: ${{ github.repository }}
+          SOURCE_REPO: ${{ inputs.repo || 'oss-verify' }}
           RUN_ID: ${{ github.run_id }}
           CAP: 6
         run: .github/scripts/issue-draft-cap
@@ -984,13 +994,13 @@ jobs:
     # Posts the review's comment as oss-verify[bot], or updates the one already there; when the review held a finding
     # back, only once the hold job sent it, because the comment says that it was sent. Never for an issue: a person
     # approves the exact text of each reply to an issue before anyone posts it. For a pull request of another
-    # repository (build.yaml -f repo=<name>), only while the variable OSSV_POST_REVIEW_REPOS, comma-separated names,
-    # names that repository: a person approves each message to its maintainers before the first is posted there, and
-    # until then the comment is the review job's artifact enroll-review-draft.
+    # repository (build.yaml -f repo=<name>), only while route's list post_review_repos names that repository: a person
+    # approves each message to its maintainers before the first is posted there, and until then the comment is the
+    # review job's artifact enroll-review-draft.
     needs: [route, project-builds, review, hold]
     if: >-
       ${{ !cancelled() && (!inputs.repo || inputs.repo == 'oss-verify'
-      || contains(format(',{0},', vars.OSSV_POST_REVIEW_REPOS), format(',{0},', inputs.repo)))
+      || contains(format(',{0},', needs.route.outputs.post_review_repos), format(',{0},', inputs.repo)))
       && needs.route.outputs.kind != 'issue'
       && needs.review.result == 'success' && needs.review.outputs.comment != ''
       && (needs.review.outputs.held_object == '' || needs.hold.result == 'success') }}
@@ -1071,7 +1081,7 @@ jobs:
       - name: Post the comment, or update the one already there
         if: >-
           ${{ !inputs.repo || inputs.repo == 'oss-verify'
-          || contains(format(',{0},', vars.OSSV_POST_REVIEW_REPOS), format(',{0},', inputs.repo)) }}
+          || contains(format(',{0},', needs.route.outputs.post_review_repos), format(',{0},', inputs.repo)) }}
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           REPO: ${{ inputs.repo && inputs.repo != 'oss-verify' && format('theorem-labs/{0}', inputs.repo) || github.repository }}
@@ -1146,7 +1156,7 @@ jobs:
           COMMENT: ${{ needs.comment.result }}
           ASKED_COMMENT: >-
             ${{ (!inputs.repo || inputs.repo == 'oss-verify'
-            || contains(format(',{0},', vars.OSSV_POST_REVIEW_REPOS), format(',{0},', inputs.repo)))
+            || contains(format(',{0},', needs.route.outputs.post_review_repos), format(',{0},', inputs.repo)))
             && needs.route.outputs.kind != 'issue'
             && needs.review.result == 'success' && needs.review.outputs.comment != ''
             && (needs.review.outputs.held_object == '' || needs.hold.result == 'success') }}

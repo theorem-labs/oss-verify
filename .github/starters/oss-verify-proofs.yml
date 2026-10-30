@@ -7,8 +7,8 @@
 name: "OSS Verify review"
 # Starts OSS Verify's review of each pull request of this repository at each new head, and the draft reply to each
 # issue that waits for us. The review runs in theorem-labs/oss-verify's Build workflow (.github/workflows/build.yaml,
-# with -f repo=oss-verify-proofs), which posts nothing here unless that repository's variable
-# OSSV_POST_REVIEW_REPOS names this one. Nothing here runs on a schedule.
+# with -f repo=oss-verify-proofs), which posts nothing here unless its list of the repositories
+# whose reviews post (post_review_repos, empty for now) names this one. Nothing here runs on a schedule.
 #
 # The job:
 #   - runs in the environment oss-verify-starter, which holds the OSS Verify App's private key (the environment secret
