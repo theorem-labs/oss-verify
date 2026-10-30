@@ -716,9 +716,11 @@ elif path.endswith("/issues"):
 else:
     answer = {}
 if "--jq" in a:
-    out = subprocess.run(["jq", "-r", a[a.index("--jq") + 1]], input=json.dumps(answer), capture_output=True, text=True,
+    # Bytes, as gh prints them: text mode would turn a CR that jq prints into a line end.
+    out = subprocess.run(["jq", "-r", a[a.index("--jq") + 1]], input=json.dumps(answer).encode(), capture_output=True,
                          check=True).stdout
-    sys.stdout.write(out)
+    sys.stdout.flush()
+    sys.stdout.buffer.write(out)
 else:
     print(json.dumps(answer))
 '''
@@ -792,6 +794,24 @@ else:
         self.assertEqual(len(bodies), 1)
         self.assertIn(f"held finding key: {self.OBJECT} 2\n", bodies[0])
         self.assertIn("second", bodies[0])
+
+    def test_an_issue_body_with_crlf_line_ends_still_names_its_key(self):
+        # github.com saves a body that a person edits there with CRLF line ends: its fifth line is still the key, and
+        # the finding is not filed again.
+        run, _, bodies = self.run_held(self.HELD, bodies_on_github=[
+            self.body(f"held finding key: {self.OBJECT} 1").replace("\n", "\r\n")])
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn(f"1 of {self.OBJECT} was already sent", run.stdout)
+        self.assertEqual(bodies, [])
+
+    def test_a_part_comment_with_crlf_line_ends_is_not_posted_again(self):
+        long = "".join(f"{i:05d}" + "x" * 994 + "\n" for i in range(130))
+        run, _, bodies = self.run_held("<!-- held finding -->\ntitle: big\n" + long + "END-OF-FINDING\n",
+                                       bodies_on_github=[self.body(f"held finding key: {self.OBJECT} 1")],
+                                       comments=[f"held finding part: {self.OBJECT} 1 2/3\r\n\r\n..."])
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(len(bodies), 1)
+        self.assertTrue(bodies[0].startswith(f"held finding part: {self.OBJECT} 1 3/3\n"))
 
     def test_a_finding_with_only_a_title_is_sent(self):
         run, _, bodies = self.run_held("<!-- held finding -->\ntitle: [held] libreac/x: crash in f\n")

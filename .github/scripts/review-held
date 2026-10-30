@@ -46,10 +46,11 @@ if ! gh api "repos/$HELD_FINDINGS_REPO/labels/$label" > /dev/null 2>&1; then
     -f description="A finding held back from a public review, for the disclosure route" > /dev/null
 fi
 # The findings already sent: each issue of the label, open or closed, with its key, read only from the fifth line of
-# its body, the line this script writes there.
+# its body, the line this script writes there. A body that a person edits on github.com comes back with CRLF line
+# ends, so lines are read with those normalized, as is the first line of each part comment below.
 sent_keys=$(gh api "repos/$HELD_FINDINGS_REPO/issues?labels=$label&state=all&per_page=100" --paginate \
-  --jq '.[] | [.number, ((.body // "") | split("\n") | .[4] // "")] | select(.[1] | startswith("held finding key: "))
-        | @tsv')
+  --jq '.[] | [.number, ((.body // "") | gsub("\r\n"; "\n") | split("\n") | .[4] // "")]
+        | select(.[1] | startswith("held finding key: ")) | @tsv')
 parts="$in/held-findings"
 rm -rf "$parts" && mkdir -p "$parts"
 sent=0
@@ -105,7 +106,7 @@ EOF
     echo "review-held: $1 of $HELD_OBJECT was already sent"
     [ "$total" -gt 1 ] || return 0
     posted=$(gh api "repos/$HELD_FINDINGS_REPO/issues/$number/comments" --paginate \
-      --jq '.[] | (.body // "") | split("\n") | .[0]')
+      --jq '.[] | (.body // "") | gsub("\r\n"; "\n") | split("\n") | .[0]')
   fi
   for ((k = 2; k <= total; k++)); do
     if grep -qxF "held finding part: $id $k/$total" <<< "$posted"; then continue; fi
