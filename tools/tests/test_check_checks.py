@@ -1268,21 +1268,24 @@ class ReviewJob(unittest.TestCase):
 @unittest.skipUnless(shutil.which("jq"), "needs jq, which the gh stand-in runs the script's filters with")
 class IssueDraftCap(unittest.TestCase):
     """.github/scripts/issue-draft-cap, build.yaml's step "Hold the draft at the hourly cap", with a stand-in gh: it
-    counts the other runs for an issue's own event whose review ran in the last hour, and holds the draft at the cap
-    or on a failed read with a ::error::HELD annotation and exit status 1."""
+    counts the other runs for an issue's own event in the last hour whose review went past this step, and holds the
+    draft at the cap or on a failed read with a ::error::HELD annotation and exit status 1."""
 
-    def cap(self, runs, skipped=(), fail=None, run_id="99"):
-        """runs: [(id, display title)] that the runs API lists; skipped: the ids whose review job was skipped; fail:
-        "runs", or the id whose jobs cannot be read. Return the exit status, the output and gh's calls."""
+    def cap(self, runs, skipped=(), held=(), fail=None, run_id="99"):
+        """runs: the run ids that the runs API lists; skipped: the ids whose review job was skipped; held: the ids whose
+        step "Hold the draft at the hourly cap" failed; fail: "runs", or the id whose jobs cannot be read. Return the
+        exit status, the output and gh's calls."""
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             (root / "bin").mkdir()
-            (root / "runs.json").write_text(json.dumps(
-                {"workflow_runs": [{"id": i, "display_title": title} for i, title in runs]}))
-            for i, _ in runs:
+            (root / "runs.json").write_text(json.dumps({"workflow_runs": [{"id": i} for i in runs]}))
+            for i in runs:
+                review = {"name": "review", "conclusion": "skipped" if i in skipped else "failure" if i in held else None,
+                          "steps": [{"name": "Set up job", "conclusion": "success"},
+                                    {"name": "Hold the draft at the hourly cap",
+                                     "conclusion": "failure" if i in held else "success"}]}
                 (root / f"jobs-{i}.json").write_text(json.dumps({"jobs": [
-                    {"name": "route", "conclusion": "success"},
-                    {"name": "review", "conclusion": "skipped" if i in skipped else None}]}))
+                    {"name": "route", "conclusion": "success", "steps": []}, review]}))
             listing = ('echo "gh: HTTP 502" >&2; exit 1' if fail == "runs"
                        else f'jq -r "$filter" {root}/runs.json')
             (root / "bin" / "gh").write_text(
@@ -1302,27 +1305,35 @@ class IssueDraftCap(unittest.TestCase):
             return run.returncode, run.stdout, (root / "calls").read_text()
 
     def test_under_the_cap_the_draft_is_made(self):
-        # Five drafts ran; three runs of the hour skipped the review (route found the event ours), one is not an issue
-        # draft's title, and one is this run.
-        runs = [(n, f"Issue {n}") for n in range(1, 9)] + [(20, "Pull request 3"), (99, "Issue 7")]
-        code, out, calls = self.cap(runs, skipped=(6, 7, 8))
+        # Five drafts ran; three runs of the hour skipped the review (route found the event ours), and one is this run.
+        code, out, calls = self.cap([*range(1, 9), 99], skipped=(6, 7, 8))
         self.assertEqual(code, 0, out)
-        self.assertIn("5 issue drafts started in the last hour, under the cap of 6", out)
+        self.assertIn("5 issue drafts ran the model in the last hour, under the cap of 6", out)
         self.assertNotIn("HELD", out)
         self.assertIn("event=issues", calls)
         self.assertIn("created=>=", calls)
-        self.assertNotIn("runs/20/jobs", calls)
         self.assertNotIn("runs/99/jobs", calls)
 
+    def test_a_run_the_cap_held_is_not_counted(self):
+        # Seven qualifying events in the hour: five drafted, one held at the cap, and this one. The held run called no
+        # model, so this draft is made.
+        code, out, _ = self.cap([*range(1, 7), 99], held=(6,))
+        self.assertEqual(code, 0, out)
+        self.assertIn("5 issue drafts ran the model in the last hour, under the cap of 6", out)
+        # A person's re-run after six held runs is made too.
+        code, out, _ = self.cap([*range(1, 7), 99], held=range(1, 7))
+        self.assertEqual(code, 0, out)
+        self.assertIn("0 issue drafts ran the model", out)
+
     def test_at_the_cap_the_draft_is_held_and_the_step_fails(self):
-        code, out, _ = self.cap([(n, f"Issue {n}") for n in range(1, 8)] + [(99, "Issue 1")])
+        code, out, _ = self.cap([*range(1, 8), 99], held=(7,))
         self.assertEqual(code, 1)
-        self.assertIn("::error::HELD: 6 issue drafts started in the last hour, at the cap of 6.", out)
+        self.assertIn("::error::HELD: 6 issue drafts ran the model in the last hour, at the cap of 6.", out)
 
     def test_a_read_that_fails_holds_the_draft(self):
         for fail in ("runs", 3):
             with self.subTest(fail=fail):
-                code, out, _ = self.cap([(n, f"Issue {n}") for n in range(1, 5)], fail=fail)
+                code, out, _ = self.cap(list(range(1, 5)), fail=fail)
                 self.assertEqual(code, 1)
                 self.assertIn("::error::HELD: ", out)
 

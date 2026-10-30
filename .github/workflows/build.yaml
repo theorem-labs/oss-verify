@@ -44,9 +44,10 @@ name: "Build"
 #            data, with no session kept: the draft and what a person decides on it are the artifact
 #            enroll-review-draft, and no job posts them. This repository is public, so anyone with a GitHub account
 #            can open an issue and start that path: on an issue's own event the step "Hold the draft at the hourly
-#            cap" (.github/scripts/issue-draft-cap) runs first, and at 6 drafts in an hour, or when it cannot read the
-#            runs, it fails the job with `::error::HELD: ...`, so no draft is made and the run is red; the inbound
-#            watch pages the CI/CD role for it, and a person re-runs the job.
+#            cap" (.github/scripts/issue-draft-cap) runs first, and at 6 drafts that ran the model in the last hour,
+#            or when it cannot read the runs, it fails the job with `::error::HELD: ...`: no draft is made and the run
+#            is red. The CI/CD lane's inbound watch is to page for each such run (ISSUE CAP HELD) once it is
+#            installed; until then the red run is the only signal. A person re-runs the job to make the draft.
 #   hold     sends each real bug in a project's own code that a review held back from its comment (review.md, rule 6)
 #            to the disclosure route as a private issue (.github/scripts/review-hold): the review job stores it in a
 #            private bucket that only this job can read, and this job sends every finding stored there, a cancelled
@@ -515,9 +516,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with: {persist-credentials: false, fetch-depth: 0}
       # The cap on the model runs of the issue path: this repository is public, so anyone with a GitHub account can open
-      # an issue and start one. At the cap (6 drafts in an hour), or when it cannot read the runs, the step fails with a
-      # `::error::HELD: ...` annotation: no draft, a red run, never a pass. Keep this step's name: the inbound watch
-      # pages the CI/CD role (HELD RUN NOT DECIDED) for each Build run whose step of this name failed.
+      # an issue and start one. At the cap (6 drafts that ran the model in the last hour), or when it cannot read the
+      # runs, the step fails with a `::error::HELD: ...` annotation: no draft, a red run, never a pass. Keep this step's
+      # name: the CI/CD lane's inbound watch is to page (ISSUE CAP HELD) for each Build run whose step of this name
+      # failed, once it is installed; until then the red run is the only signal.
       - name: Hold the draft at the hourly cap
         if: github.event_name == 'issues'
         env:

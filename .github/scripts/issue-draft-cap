@@ -9,11 +9,14 @@
 #     .github/scripts/issue-draft-cap
 #
 # This repository is public: anyone with a GitHub account can open an issue, and each issue's event starts a model
-# run. This counts this workflow's other runs for an issue's own event (event issues, run name "Issue <n>") made in
-# the last hour whose review job ran, in any state but skipped. Under CAP it exits 0, and the draft is made. At CAP or
-# over, and when any read fails, it holds the draft: it prints a `::error::HELD: ...` annotation and exits 1, so the
-# review job fails before its Review step and the run is red. A held run is never skipped as a pass. The inbound watch
-# pages the CI/CD role for each run whose step of that name failed, and a person re-runs the job to make the draft.
+# run. This counts this workflow's other runs for an issue's own event (event issues) made in the last hour whose
+# review job went past this step: its review job ran, in any state but skipped, and this step of it did not fail. A run
+# that this step held called no model and is not counted; a run whose step has not finished yet is. Under CAP it exits
+# 0, and the draft is made. At CAP or over, and when any read fails, it holds the draft: it prints a
+# `::error::HELD: ...` annotation and exits 1, so the review job fails before its Review step and the run is red. A
+# held run is never skipped as a pass. The CI/CD lane's inbound watch is to page for each run whose step of that name
+# failed (ISSUE CAP HELD), once it is installed; until then the red run is the only signal. A person re-runs the job
+# to make the draft.
 set -uo pipefail
 cap=${CAP:-6}
 held() {
@@ -23,8 +26,7 @@ held() {
 [[ $cap =~ ^[1-9][0-9]*$ ]] || held "the cap is not a number."
 since=$(date -u -d '-1 hour' +%Y-%m-%dT%H:%M:%SZ) || held "the time an hour ago could not be read."
 if ! runs=$(gh api --method GET --paginate "repos/$REPO/actions/workflows/build.yaml/runs" -f event=issues \
-    -f created=">=$since" -F per_page=100 \
-    --jq '.workflow_runs[] | select(.display_title | test("^Issue [0-9]+$")) | .id'); then
+    -f created=">=$since" -F per_page=100 --jq '.workflow_runs[].id'); then
   held "the runs of the last hour could not be read."
 fi
 count=0
@@ -33,7 +35,9 @@ for id in $runs; do
   [ "$id" = "${RUN_ID:-}" ] && continue
   # Its own assignment, so that a failed read holds instead of reading as no review.
   if ! ran=$(gh api "repos/$REPO/actions/runs/$id/jobs?per_page=100" \
-      --jq '[.jobs[] | select(.name == "review" and .conclusion != "skipped")] | length'); then
+      --jq '[.jobs[] | select(.name == "review" and .conclusion != "skipped")
+             | select(any(.steps[]?; .name == "Hold the draft at the hourly cap" and .conclusion == "failure") | not)]
+            | length'); then
     held "the jobs of run $id could not be read."
   fi
   [[ $ran =~ ^[0-9]+$ ]] || held "the jobs of run $id could not be read."
@@ -41,7 +45,7 @@ for id in $runs; do
     count=$((count + 1))
   fi
   if (( count >= cap )); then
-    held "$count issue drafts started in the last hour, at the cap of $cap."
+    held "$count issue drafts ran the model in the last hour, at the cap of $cap."
   fi
 done
-echo "$count issue drafts started in the last hour, under the cap of $cap: this draft is made."
+echo "$count issue drafts ran the model in the last hour, under the cap of $cap: this draft is made."
