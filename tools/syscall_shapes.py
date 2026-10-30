@@ -42,9 +42,9 @@ which pages the run has touched (Sys/Mm/Mremap.v mremap_backing_uniform_b), the 
 (mmap_noreserve_backed_ok, mmap_fixed_rw_budget_ok, mprotect_budget_ok, brk_budget_ok), the run's RLIMIT_NOFILE
 (Sys/Fs/File.v dup3_newfd_under_limit), and the number the model would give a new descriptor (Sys/Fs/File.v
 lowest_fd: the trace does not show qemu's own descriptors, so the run's numbers are shifted from the model's). A call
-whose only gate is one of those passes on its name. One struct field does not: the handler word of an rt_sigaction of
-SIGABRT, which is SIG_DFL for the one install the model answers there (Sys/Kernel/Signal.v sigabrt_dfl_install). A
-pass on its name would admit the handler and the SIG_IGN the model declines, so such an install is undecided.
+whose only gate is one of those passes on its name. The handler word of an rt_sigaction of SIGABRT does not pass on its
+name: it is SIG_DFL for the one install the model answers there (Sys/Kernel/Signal.v sigabrt_dfl_install). A pass on
+its name would admit the handler and the SIG_IGN that the model declines, so such an install is undecided.
 
 Facts about the run that the trace does not carry, and what the checker takes for them:
 
