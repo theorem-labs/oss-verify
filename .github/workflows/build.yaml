@@ -14,9 +14,14 @@ name: "Build"
 #   route    reads the pull request's list of files. A pull request into the default branch that changes at least one
 #            file and none under projects/ is a change: route asks for no build, and the review checks it against
 #            review-change.md. Any other asks for the build, as an enrollment, and so does a run that an App outside
-#            the review's allowed_bots started (Dependabot's, say), which the action refuses to review. A run started
-#            for an issue of this repository (gh workflow run build.yaml -f issue=<n>) asks for the review alone, once
-#            route has read that the number is an issue and not a pull request.
+#            the review's allowed_bots started (Dependabot's, say), which the action refuses to review. An issue of this
+#            repository asks for the review alone: on its own event (opened, edited, reopened) when the issue waits for
+#            us, and on a run started for it (gh workflow run build.yaml -f issue=<n>), once route has read that the
+#            number is an issue and not a pull request. An issue's event is ours, and route asks for nothing, when an
+#            App sent it (our two bots, or one the action refuses), when an owner or a member of the organization sent
+#            it (GitHub's author_association OWNER or MEMBER), or when someone who is not the issue's author sent it,
+#            which only a person with access to this repository can be: GitHub lets no one else edit or reopen another
+#            person's issue.
 #   project-builds
 #            the build above, under the check name build, when route asks for it; it passes with nothing to build
 #            when the pull request enrolls no project (below). Its job id stays project-builds, the name the other jobs
@@ -175,16 +180,18 @@ name: "Build"
 #
 # To build a pull request by number:
 #   gh workflow run build.yaml -f pr=123
-# To draft the reply to an issue of this repository (.github/workflows/sweep.yaml starts such runs every hour):
+# To draft the reply to an issue of this repository (its own events start such runs too):
 #   gh workflow run build.yaml -f issue=45
 # Such a run reports a check named project-builds too, but a check from a workflow_dispatch run never satisfies a
 # ruleset's required check (https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks#checks-from-some-workflow-jobs-are-not-evaluated).
 
-run-name: ${{ github.event.pull_request.title || (inputs.issue && format('Issue {0}', inputs.issue)) || format('Pull request {0}', inputs.pr) }}
+run-name: ${{ github.event.pull_request.title || ((inputs.issue || github.event.issue.number) && format('Issue {0}', inputs.issue || github.event.issue.number)) || format('Pull request {0}', inputs.pr) }}
 
 on:
   pull_request_target:
     types: [opened, reopened, synchronize, ready_for_review]
+  issues:
+    types: [opened, edited, reopened]
   workflow_dispatch:
     inputs:
       pr:
@@ -201,9 +208,11 @@ permissions: {}
 cache-mode: none
 
 concurrency:
-  # By event too, so that a run started by hand never cancels the pull request's own run of the required check.
-  group: build-${{ github.event_name }}-${{ github.event.pull_request.number || inputs.pr || inputs.issue }}
-  cancel-in-progress: true
+  # By event too, so that a run started by hand never cancels the pull request's own run of the required check. For an
+  # issue's events, one run at a time for each issue, and the newest waiting run replaces an older waiting one: an
+  # edit while a draft runs waits for it, so a later event that route skips never cancels a draft.
+  group: build-${{ github.event_name }}-${{ github.event.pull_request.number || inputs.pr || inputs.issue || github.event.issue.number }}
+  cancel-in-progress: ${{ github.event_name != 'issues' }}
 
 jobs:
   route:
@@ -222,13 +231,26 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number || inputs.pr }}
-          ISSUE: ${{ inputs.issue }}
+          ISSUE: ${{ inputs.issue || github.event.issue.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           ACTOR: ${{ github.actor }}
           # The Review steps' allowed_bots: the action refuses a run that any other App started.
           ALLOWED_BOTS: sjawhar-agent[bot],oss-verify[bot]
+          # An issue's own event: who sent it, the issue's author, and how GitHub relates the author to this repository.
+          EVENT: ${{ github.event_name }}
+          SENDER: ${{ github.event.sender.login }}
+          AUTHOR: ${{ github.event.issue.user.login }}
+          ASSOCIATION: ${{ github.event.issue.author_association }}
         run: |
           set -euo pipefail
+          # An issue's event that is ours (the top of this file) asks for nothing: the issue does not wait for us.
+          if [ "${EVENT:-}" = issues ] && [[ $SENDER == *"[bot]" || $SENDER != "$AUTHOR" ||
+                $ASSOCIATION == OWNER || $ASSOCIATION == MEMBER ]]; then
+            message="issue $ISSUE: the event is ours (sent by $SENDER), so nothing runs."
+            echo "$message"
+            echo "$message" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           if [ -n "${ISSUE:-}" ]; then
             # An issue of this repository, not a pull request (GitHub lists both as issues), and never both inputs.
             [[ $ISSUE =~ ^[0-9]+$ && -z ${PR:-} ]] \
@@ -456,7 +478,7 @@ jobs:
     permissions: {contents: read, pull-requests: read, issues: read, checks: read, statuses: read, id-token: write}
     env:
       PR: ${{ github.event.pull_request.number || inputs.pr }}
-      ISSUE: ${{ inputs.issue }}
+      ISSUE: ${{ inputs.issue || github.event.issue.number }}
       NAME: ${{ needs.project-builds.outputs.name }}
       HEAD_SHA: ${{ needs.project-builds.outputs.sha || needs.route.outputs.sha }}
       SESSION_KEY: enroll-review/${{ github.event.pull_request.number || inputs.pr }}/${{ needs.project-builds.outputs.name }}/
@@ -571,8 +593,7 @@ jobs:
           anthropic_workspace_id: wrkspc_01Qr1iUVcow4jdgQM7Amfks5
           github_token: ${{ github.token }}
           allowed_non_write_users: "*"
-          # sweep.yaml starts these runs with GITHUB_TOKEN, as github-actions[bot]; only this step admits it.
-          allowed_bots: sjawhar-agent[bot],oss-verify[bot],github-actions[bot]
+          allowed_bots: sjawhar-agent[bot],oss-verify[bot]
           prompt: >-
             Read review-issue.md at the root of this checkout: it says what OSS Verify's draft reply to issue
             #${{ env.ISSUE }} of this repository says, from what the workflow gathered into .review/issue.json.

@@ -299,9 +299,12 @@ def test_a_change_that_an_app_the_review_refuses_started_is_built_as_before(tmp_
     assert review["Review"]["with"]["allowed_bots"] == review["Review the change"]["with"]["allowed_bots"] == allowed
 
 
-def route_issue(tmp_path, pr, issue, is_pull=False):
-    """Run build.yaml's route step on a run started by hand with the inputs `pr` and `issue` ("" when not given), with
-    a fake gh whose number is an issue, or a pull request when `is_pull`. Return its exit status and outputs."""
+def route_issue(tmp_path, pr, issue, is_pull=False, event="workflow_dispatch", sender="someone", author="",
+                association=""):
+    """Run build.yaml's route step on an `event`: a run started by hand with the inputs `pr` and `issue` ("" when not
+    given), or an issue's own event for issue `issue`, sent by `sender`, whose author is `author` with GitHub's
+    `association`. Its fake gh's number is an issue, or a pull request when `is_pull`. Return its exit status and
+    outputs."""
     bin = tmp_path / "bin"
     bin.mkdir()
     pull = {"pull_request": {"url": "x"}} if is_pull else {}
@@ -315,8 +318,9 @@ def route_issue(tmp_path, pr, issue, is_pull=False):
     decide = step(workflow("build.yaml")["jobs"]["route"], "An enrollment or a change")
     run = subprocess.run(["bash", "-e", "-c", decide["run"]], capture_output=True, text=True,
                          env={**os.environ, "PATH": f"{bin}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r",
-                              "PR": pr, "ISSUE": issue, "HEAD_SHA": "", "ACTOR": "someone",
-                              "ALLOWED_BOTS": decide["env"]["ALLOWED_BOTS"], "GITHUB_OUTPUT": str(written),
+                              "PR": pr, "ISSUE": issue, "HEAD_SHA": "", "ACTOR": sender,
+                              "ALLOWED_BOTS": decide["env"]["ALLOWED_BOTS"], "EVENT": event, "SENDER": sender,
+                              "AUTHOR": author, "ASSOCIATION": association, "GITHUB_OUTPUT": str(written),
                               "GITHUB_STEP_SUMMARY": str(tmp_path / "summary")})
     return run.returncode, written.read_text().splitlines() if written.exists() else []
 
@@ -327,7 +331,8 @@ def test_a_run_for_an_issue_asks_for_the_review_alone(tmp_path):
     jobs = flow["jobs"]
     inputs = flow[True]["workflow_dispatch"]["inputs"]
     assert (inputs["pr"]["required"], inputs["issue"]["required"]) == (False, False)
-    assert "(inputs.issue && format('Issue {0}', inputs.issue))" in flow["run-name"]
+    number = "inputs.issue || github.event.issue.number"
+    assert f"(({number}) && format('Issue {{0}}', {number}))" in flow["run-name"]
     issue = "needs.route.outputs.issue == 'true'"
     assert issue in jobs["review"]["if"]
     assert issue in step(jobs["required"], "Every job route asked for passed, and no other ran")["env"]["ASKED_REVIEW"]
@@ -349,6 +354,52 @@ def test_a_run_for_an_issue_asks_for_the_review_alone(tmp_path):
 def test_route_refuses_both_inputs_neither_or_a_pull_request_as_an_issue(tmp_path, pr, issue, is_pull):
     code, outputs = route_issue(tmp_path, pr, issue, is_pull)
     assert code != 0 and outputs == []
+
+
+def test_an_issues_own_event_starts_its_draft_without_a_schedule():
+    flow = workflow("build.yaml")
+    # Opened, edited and reopened start the draft again; nothing starts it on a schedule, and no sweep exists.
+    assert sorted(flow[True]) == ["issues", "pull_request_target", "workflow_dispatch"]
+    assert flow[True]["issues"] == {"types": ["opened", "edited", "reopened"]}
+    assert not (WORKFLOWS / "sweep.yaml").exists()
+    # Route and the review read the issue's number from its event as from the input; the run is titled "Issue <n>"
+    # (test_a_run_for_an_issue_asks_for_the_review_alone).
+    route = step(flow["jobs"]["route"], "An enrollment or a change")["env"]
+    issue = "${{ inputs.issue || github.event.issue.number }}"
+    assert route["ISSUE"] == flow["jobs"]["review"]["env"]["ISSUE"] == issue
+    assert (route["EVENT"], route["SENDER"], route["AUTHOR"], route["ASSOCIATION"]) == (
+        "${{ github.event_name }}", "${{ github.event.sender.login }}", "${{ github.event.issue.user.login }}",
+        "${{ github.event.issue.author_association }}")
+    # One run at a time for each issue: an edit while a draft runs waits, and replaces an older waiting run.
+    group = flow["concurrency"]["group"]
+    assert group.startswith("build-${{ github.event_name }}-") and group.endswith(" || github.event.issue.number }}")
+    assert flow["concurrency"]["cancel-in-progress"] == "${{ github.event_name != 'issues' }}"
+
+
+@pytest.mark.parametrize("action_sender, association", [
+    ("alice", "NONE"),  # opened, or edited by its author
+    ("alice", "CONTRIBUTOR"),
+    ("alice", "COLLABORATOR"),
+])
+def test_an_issue_that_waits_for_us_starts_one_review_on_its_event(tmp_path, action_sender, association):
+    assert route_issue(tmp_path, "", "5", event="issues", sender=action_sender, author="alice",
+                       association=association) == (0, ["issue=true"])
+    assert "repos/o/r/issues/5" in (tmp_path / "calls").read_text()
+
+
+@pytest.mark.parametrize("sender, author, association", [
+    ("carol", "carol", "MEMBER"),  # an issue a member of the organization opened or edited
+    ("o", "o", "OWNER"),
+    ("oss-verify[bot]", "oss-verify[bot]", "NONE"),  # our two bots
+    ("sjawhar-agent[bot]", "sjawhar-agent[bot]", "NONE"),
+    ("renovate[bot]", "renovate[bot]", "NONE"),  # an App the review action refuses
+    ("carol", "alice", "NONE"),  # someone else edited or reopened alice's issue: only a person with access can
+])
+def test_an_issues_event_that_is_ours_starts_nothing(tmp_path, sender, author, association):
+    assert route_issue(tmp_path, "", "5", event="issues", sender=sender, author=author,
+                       association=association) == (0, [])
+    assert not (tmp_path / "calls").exists()
+    assert "the event is ours" in (tmp_path / "summary").read_text()
 
 
 # --- tests.yaml's route, run on made-up commits ---
