@@ -396,8 +396,9 @@ class WorkflowArguments(unittest.TestCase):
 
     def test_only_the_review_job_can_read_the_collector_token(self):
         # ossv-ci can be acted as only from oss-verify's GitHub Environment `enroll-review` (Theorem's
-        # infrastructure code), which the review job declares; no other job of either file may name that account or
-        # that environment, and the review job must keep it, or its sign-in stops working.
+        # infrastructure code), which the review job declares. This checks that the review job names that account,
+        # and that no other job of either file names the account or the environment. That the review job keeps the
+        # environment, without which its sign-in stops working, a real run proves.
         account = "ossv-ci@theorem-agent-infra.iam.gserviceaccount.com"
         for workflow in self.KEY_JOBS:
             for name, job in self.workflow(workflow)["jobs"].items():
@@ -1236,6 +1237,18 @@ class ReviewJob(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(stored.split("---\n", 1)[1], "Fine [8mhidden[0m text\nnext\tcol31m café — ok\n")
 
+    def test_bidirectional_text_controls_are_taken_out_of_the_stored_draft(self):
+        # U+202A to U+202E and U+2066 to U+2069 can show the draft in an order that is not its own (Trojan Source).
+        # Each one, alone, is taken out; the letters around it stay in their order.
+        for code_point in [*range(0x202A, 0x202F), *range(0x2066, 0x206A)]:
+            with self.subTest(code_point=f"U+{code_point:04X}"):
+                code, out, _, _, stored, _ = self.store(draft=f"ab{chr(code_point)}cd\n")
+                self.assertEqual(code, 0, out)
+                self.assertEqual(stored.split("---\n", 1)[1], "abcd\n")
+        # Their neighbours in Unicode, which control nothing, stay.
+        code, out, _, _, stored, _ = self.store(draft="a\u2029b\u202fc\u2065d\u206ae\n")
+        self.assertEqual(stored.split("---\n", 1)[1], "a\u2029b\u202fc\u2065d\u206ae\n")
+
     def prompt(self, **env):
         """.github/scripts/review-prompt with `env`: its exit status and the outputs it wrote."""
         with tempfile.TemporaryDirectory() as directory:
@@ -1446,14 +1459,15 @@ class StoreSignInGate(unittest.TestCase):
     refused Google sign-in before the model fails the job there, red, with ::error:: and a summary naming the
     cause."""
 
-    def gate(self, outcome):
+    def gate(self, outcome, event="issues"):
         flow = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
         [step] = [s for s in flow["jobs"]["review"]["steps"]
                   if s.get("name") == "Stop before the model when the draft cannot be stored"]
         with tempfile.TemporaryDirectory() as directory:
             summary = pathlib.Path(directory) / "summary"
             run = subprocess.run(["bash", "-e", "-c", step["run"]], capture_output=True, text=True,
-                                 env={**os.environ, "SIGN_IN": outcome, "GITHUB_STEP_SUMMARY": str(summary)})
+                                 env={**os.environ, "SIGN_IN": outcome, "EVENT": event,
+                                      "GITHUB_STEP_SUMMARY": str(summary)})
             return run.returncode, run.stdout, summary.read_text() if summary.exists() else ""
 
     def test_a_refused_sign_in_fails_the_job_before_the_model_and_says_why(self):
@@ -1466,8 +1480,20 @@ class StoreSignInGate(unittest.TestCase):
                 self.assertIn("does not admit runs that an issue's event starts yet", summary)
                 self.assertNotIn("HELD", out + summary)
 
+    def test_a_refused_sign_in_on_a_run_started_by_hand_names_another_cause(self):
+        # gh workflow run build.yaml -f issue=<n>: the provider admits workflow_dispatch already, so the issues
+        # setting is not the cause.
+        code, out, summary = self.gate("failure", event="workflow_dispatch")
+        self.assertEqual(code, 1)
+        self.assertTrue(out.startswith("::error::NOT STORED: Google Cloud refused this run's sign-in"), out)
+        self.assertNotIn("an issue's event", out + summary)
+        self.assertIn("The provider admits a run started by hand, so the cause is elsewhere", out)
+        self.assertIn("identity provider for this repository and its service account", summary)
+
     def test_an_admitted_sign_in_goes_on_to_the_model(self):
-        self.assertEqual(self.gate("success"), (0, "", ""))
+        for event in ("issues", "workflow_dispatch"):
+            with self.subTest(event=event):
+                self.assertEqual(self.gate("success", event), (0, "", ""))
 
 
 class Owners(unittest.TestCase):

@@ -575,13 +575,20 @@ jobs:
       # a run by it.
       - name: Stop before the model when the draft cannot be stored
         if: env.KIND == 'issue'
-        env: {SIGN_IN: "${{ steps.gcp.outcome }}"}
+        env: {SIGN_IN: "${{ steps.gcp.outcome }}", EVENT: "${{ github.event_name }}"}
         run: |
           [ "$SIGN_IN" = success ] && exit 0
           message="Google Cloud refused this run's sign-in, so its draft could not be stored,"
           message+=" and the model was not run."
-          message+=" The usual cause: Theorem's Google identity provider for this repository does not admit runs that"
-          message+=" an issue's event starts yet. A person at Theorem applies that setting, then re-runs this job."
+          if [ "$EVENT" = issues ]; then
+            message+=" The usual cause: Theorem's Google identity provider for this repository does not admit runs"
+            message+=" that an issue's event starts yet. A person at Theorem applies that setting, then re-runs this"
+            message+=" job."
+          else
+            # A run started by hand: the provider admits this event already, so the cause is another one.
+            message+=" The provider admits a run started by hand, so the cause is elsewhere: a person at Theorem checks"
+            message+=" Google's identity provider for this repository and its service account, then re-runs this job."
+          fi
           echo "::error::NOT STORED: $message"
           echo "$message" >> "$GITHUB_STEP_SUMMARY"
           exit 1

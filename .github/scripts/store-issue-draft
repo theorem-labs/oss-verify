@@ -13,9 +13,10 @@
 # as the object issue-drafts/<issue>/<run id>-<attempt>, written once by .github/scripts/held-bucket-put. The hold job
 # reads only held/, and the bucket deletes every object 7 days after it is written. The draft is the model's text, which
 # an issue's author can steer, and a person reads it in a terminal: every control character but tab and newline (an
-# escape sequence, a carriage return, a C1 control such as U+009B) is taken out before it is stored. The job summary
-# gets the command a person at Theorem with read access to the bucket reads the draft with, and no text of the draft.
-# A failed write fails the step.
+# escape sequence, a carriage return, a C1 control such as U+009B) and every bidirectional-text control (U+202A to
+# U+202E, U+2066 to U+2069, which can show text in an order that is not its own) is taken out before it is stored. The
+# job summary gets the command a person at Theorem with read access to the bucket reads the draft with, and no text of
+# the draft. A failed write fails the step.
 set -euo pipefail
 draft=${1:?usage: store-issue-draft <draft file>}
 [[ ${ISSUE:-} =~ ^[0-9]+$ && ${RUN_ID:-} =~ ^[0-9]+$ && ${RUN_ATTEMPT:-} =~ ^[0-9]+$ ]] \
@@ -23,8 +24,10 @@ draft=${1:?usage: store-issue-draft <draft file>}
 name="issue-drafts/$ISSUE/$RUN_ID-$RUN_ATTEMPT"
 clean=$(mktemp)
 trap 'rm -f "$clean"' EXIT
-# C0 controls but tab and newline, DEL, and the C1 controls as UTF-8 writes them (0xC2 0x80 to 0xC2 0x9F).
-LC_ALL=C tr -d '\000-\010\013-\037\177' < "$draft" | LC_ALL=C sed 's/\xc2[\x80-\x9f]//g' > "$clean"
+# C0 controls but tab and newline, DEL, the C1 controls as UTF-8 writes them (0xC2 0x80 to 0xC2 0x9F), and the
+# bidirectional-text controls U+202A to U+202E (0xE2 0x80 0xAA to 0xAE) and U+2066 to U+2069 (0xE2 0x81 0xA6 to 0xA9).
+LC_ALL=C tr -d '\000-\010\013-\037\177' < "$draft" \
+  | LC_ALL=C sed 's/\xc2[\x80-\x9f]//g; s/\xe2\x80[\xaa-\xae]//g; s/\xe2\x81[\xa6-\xa9]//g' > "$clean"
 header=$(printf 'oss-verify issue draft v1\nissue: %s\nrun: %s\n---' "$ISSUE" "${RUN_URL:-}")
 generation=$("$(dirname "$0")/held-bucket-put" "$name" "$header" "$clean")
 bucket=theorem-agent-infra-oss-verify-held-findings
