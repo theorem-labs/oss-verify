@@ -1024,14 +1024,13 @@ class SinceLastReview(unittest.TestCase):
 
 
 class ReviewJob(unittest.TestCase):
-    """build.yaml's review job: one claude-code-action step with the settings the review needs, its session kept in
-    the Actions cache by the job itself, and its own small steps run with stand-ins."""
+    """build.yaml's review job: its own small steps, and the scripts it runs (review-gather, review-prompt), run with
+    stand-ins."""
 
     def setUp(self):
         self.workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
         self.jobs = self.workflow["jobs"]
         self.steps = {s.get("name"): s for s in self.jobs["review"]["steps"]}
-        self.review = self.steps["Review"]
 
     def gather(self, root, gh, **env):
         """review-gather, from this checkout, into root/out, with the stand-in gh script `gh` and `env`."""

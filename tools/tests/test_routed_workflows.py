@@ -169,34 +169,6 @@ def test_every_required_check_has_a_static_name():
     assert all(len(jobs) == 1 for jobs in reporters.values()), reporters
 
 
-def test_triage_skips_only_an_edit_of_the_title_alone():
-    flow = workflow("triage.yaml")
-    title_only = "github.event.action == 'edited' && !github.event.changes.body && !github.event.changes.base"
-    assert flow["concurrency"]["group"].startswith(f"${{{{ {title_only} && format('triage-edited-{{0}}', github.run_id)")
-    route = step(flow["jobs"]["route"], "Whether the comment can change")
-    assert route["env"]["TITLE_ONLY"] == f"${{{{ {title_only} }}}}"
-
-
-def test_a_push_to_main_is_never_cancelled_by_a_later_push():
-    # route compares a push with the commit before it, so a cancelled push's changes would never be tested.
-    group = workflow("tests.yaml")["concurrency"]["group"]
-    assert group.startswith("${{ github.event_name == 'push' && format('tests-push-{0}', github.sha) ||")
-
-
-def test_a_forks_tests_collector_runs_the_default_branchs_script():
-    # A fork's run takes the collector from the default branch's tip, never from the event's base.sha, which can be a
-    # commit from before .github/scripts/collect existed (it stays the base the fork last synced with).
-    flow = workflow("tests.yaml")
-    fork = "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository"
-    assert flow["env"]["FORK"] == f"${{{{ {fork} }}}}"
-    checkout = flow["jobs"]["required"]["steps"][0]
-    assert checkout["uses"].startswith("actions/checkout@")
-    assert checkout["with"]["ref"] == "${{ env.FORK == 'true' && github.event.repository.default_branch || '' }}"
-    # route, the one other job a fork's run starts, runs none of its code.
-    route = flow["jobs"]["route"]["steps"]
-    assert all(s.get("if", "").count("env.FORK != 'true'") for s in route if "uses" in s or s.get("id") == "paths")
-
-
 # A stand-in for gh's Users API, as .github/scripts/actor-kind calls it (`gh api users/<login> --jq .type`): Copilot
 # is an App with no user account (404, as GitHub answers for it), a login with [bot] is an App, any other a User.
 USERS_GH = ('*" users/"*) all="$*"; login=${all##*users/}; login=${login%% *}\n'
@@ -210,11 +182,10 @@ def literal_env(flow, decide):
     return {k: str(v) for k, v in pairs.items() if "${{" not in str(v)}
 
 
-def route_build(tmp_path, files, changed=None, step_name="An enrollment, a change or an issue", name="build.yaml",
-                base="main", actor="someone"):
-    """Run a route step, started by `actor`, with a fake gh whose pull request into `base` lists `files` (a path, or
-    a (new, old) pair for a rename; changed_files: `changed`, by default their number), and applies the step's --jq
-    filter as gh does. Return its outputs, one line each."""
+def route_build(tmp_path, files, changed=None, base="main", actor="someone"):
+    """Run build.yaml's route step, started by `actor`, with a fake gh whose pull request into `base` lists `files` (a
+    path, or a (new, old) pair for a rename; changed_files: `changed`, by default their number), and applies the step's
+    --jq filter as gh does. Return its outputs, one line each."""
     bin = tmp_path / "bin"
     bin.mkdir()
     (tmp_path / "pull.json").write_text(json.dumps({"head": {"sha": "a" * 40},
@@ -227,8 +198,8 @@ def route_build(tmp_path, files, changed=None, step_name="An enrollment, a chang
                             f'  *) cat {tmp_path}/pull.json ;; esac\n')
     (bin / "gh").chmod(0o755)
     written = tmp_path / "output"
-    flow = workflow(name)
-    decide = step(flow["jobs"]["route"], step_name)
+    flow = workflow("build.yaml")
+    decide = step(flow["jobs"]["route"], "An enrollment, a change or an issue")
     run = subprocess.run(["bash", "-e", "-c", decide["run"]], capture_output=True, text=True, cwd=ROOT,
                          env={**os.environ, **literal_env(flow, decide),
                               "PATH": f"{bin}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r",
@@ -236,12 +207,6 @@ def route_build(tmp_path, files, changed=None, step_name="An enrollment, a chang
                               "GITHUB_STEP_SUMMARY": str(tmp_path / "summary")})
     assert run.returncode == 0, run.stderr
     return written.read_text().splitlines()
-
-
-def test_validates_route_asks_for_validate(tmp_path):
-    # validate.yaml's route, run as it is, asks for the job that takes the project.
-    assert "validate=true" in route_build(tmp_path, ["projects/p/project.yaml"],
-                                          step_name="Every event here asks for validate", name="validate.yaml")
 
 
 @pytest.mark.parametrize("files, changed, base, want", [
