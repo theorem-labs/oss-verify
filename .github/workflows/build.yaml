@@ -644,9 +644,10 @@ jobs:
 
   comment:
     # Posts the review's comment as oss-verify[bot], or updates the one already there: only while the repository
-    # variable OSSV_POST_REVIEW is `post`, because a person approves each message to a maintainer before it is posted
-    # (until then the comment is the review job's artifact enroll-review-draft), and, when the review held a finding
-    # back, only once the hold job sent it, because the comment says that it was sent.
+    # variable OSSV_POST_REVIEW is `post` (the stream owner allowed automatic posting once review.md's rules for the
+    # comment were in place, oss-verify #114; while it is not `post`, the comment is the review job's artifact
+    # enroll-review-draft), and, when the review held a finding back, only once the hold job sent it, because the
+    # comment says that it was sent.
     needs: [project-builds, review, hold]
     if: >-
       ${{ !cancelled() && vars.OSSV_POST_REVIEW == 'post' && needs.review.result == 'success' && needs.review.outputs.comment != ''
