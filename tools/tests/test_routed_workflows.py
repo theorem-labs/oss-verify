@@ -199,7 +199,7 @@ def test_a_forks_tests_collector_runs_the_default_branchs_script():
 
 # A stand-in for gh's Users API, as .github/scripts/actor-kind calls it (`gh api users/<login> --jq .type`): Copilot
 # is an App with no user account (404, as GitHub answers for it), a login with [bot] is an App, any other a User.
-USERS_GH = ('*" users/"*) login=${*##*users/}; login=${login%% *}\n'
+USERS_GH = ('*" users/"*) all="$*"; login=${all##*users/}; login=${login%% *}\n'
             '  case $login in Copilot) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;; *"[bot]") echo Bot ;; '
             '*) echo User ;; esac ;;\n')
 
