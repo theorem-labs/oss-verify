@@ -271,7 +271,7 @@ def route_issue(tmp_path, pr, issue, is_pull=False, event="workflow_dispatch", s
 def test_a_run_for_an_issue_asks_for_the_review_alone(tmp_path):
     assert route_issue(tmp_path, "", "5") == (0, ["kind=issue"])
     # The comment job, which alone posts, never runs for an issue, of this repository or of another, whatever the
-    # variable names (its ASKED_COMMENT is the same condition: the test of the collector above).
+    # variable names: its if: and the required job's ASKED_COMMENT, evaluated.
     for variables, inputs in (({}, {"issue": 5}), ({"OSSV_POST_REVIEW_REPOS": OTHER}, {"repo": OTHER, "issue": 5})):
         assert posting(variables, inputs, issue=True)[:2] == (False, False)
 
