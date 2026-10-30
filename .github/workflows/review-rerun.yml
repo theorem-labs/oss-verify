@@ -191,19 +191,28 @@ jobs:
           set -euo pipefail
           [[ $RUN_ID =~ ^[0-9]+$ && $RUN_ATTEMPT =~ ^[0-9]+$ ]] \
             || { echo "::error::The completed run's id or attempt is not a number."; exit 1; }
-          # As in the decide job: four tries, 15, 30 and 60 s apart; after the fourth the job fails and says so.
-          try() {
-            local wait out n=1
+          # As in the decide job: four tries, 15, 30 and 60 s apart; after the fourth the job fails and says so. A try
+          # whose answer is lost may still have been taken: before each later try, and after the last, the run's attempt
+          # is read again. Above RUN_ATTEMPT, GitHub took a try, so the re-run is done: it is not asked for twice, and
+          # the job does not fail.
+          taken() {
+            local now
+            now=$(gh api "repos/$REPO/actions/runs/$RUN_ID" --jq .run_attempt) || return 1
+            [[ $now =~ ^[0-9]+$ ]] && (( now > RUN_ATTEMPT )) || return 1
+            echo "Build run $RUN_ID is at attempt $now: a try was taken, though its answer was lost."
+          }
+          rerun() {
+            local wait n=1
             for wait in 15 30 60; do
-              if out=$("$@"); then [ -z "$out" ] || printf '%s\n' "$out"; return 0; fi
+              gh run rerun "$RUN_ID" --failed -R "$REPO" && return 0
               echo "Try $n of 4 failed; the next in $wait s." >&2
               sleep "$wait"
+              taken && return 0
               n=$((n + 1))
             done
-            out=$("$@") || return 1
-            [ -z "$out" ] || printf '%s\n' "$out"
+            gh run rerun "$RUN_ID" --failed -R "$REPO" || taken
           }
-          if ! try gh run rerun "$RUN_ID" --failed -R "$REPO"; then
+          if ! rerun; then
             echo "::error::Build run $RUN_ID: could not re-run its failed jobs after 4 tries, so it is not re-run."
             echo "Build run $RUN_ID: could not re-run its failed jobs after 4 tries, so it is not re-run." \
               >> "$GITHUB_STEP_SUMMARY"

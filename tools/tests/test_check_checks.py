@@ -1504,15 +1504,22 @@ class ReviewRerun(unittest.TestCase):
                     self.assertFalse((root / "argv").exists())
                     self.assertFalse((root / "pwned").exists())
 
-    def re_run_step(self, fails, ok=True):
-        """Run the re-run step with a stand-in gh whose first `fails` tries fail. Return its result, the gh calls, the
-        waits it asked sleep for, and its summary."""
+    def re_run_step(self, fails, ok=True, lost=False):
+        """Run the re-run step with a stand-in gh whose first `fails` re-run tries fail. lost: GitHub takes the first
+        try (the run moves to attempt 2) but its answer is lost. A read of the run gives its attempt. Return its result,
+        the re-run tries, the waits it asked sleep for, and its summary."""
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             (root / "bin").mkdir()
+            (root / "attempt-now").write_text("1")
             (root / "bin" / "gh").write_text(
-                f'#!/bin/bash\ncd {root}\necho "$*" >> calls\n'
+                f'#!/bin/bash\ncd {root}\n'
+                '[ "$1 $2" = "api repos/o/r/actions/runs/40" ] && { cat attempt-now; exit; }\n'
+                'echo "$*" >> calls\n'
                 'try=$(( $(cat tries 2>/dev/null || echo 0) + 1 )); echo "$try" > tries\n'
+                f'if {"true" if lost else "false"} && (( try == 1 )); then\n'
+                '  echo 2 > attempt-now; echo "connection reset" >&2; exit 1\n'
+                'fi\n'
                 f'if (( try <= {fails} )); then echo "HTTP 502" >&2; exit 1; fi\n')
             (root / "bin" / "gh").chmod(0o755)
             (root / "bin" / "sleep").write_text(f'#!/bin/bash\necho "$1" >> {root}/waits\n')
@@ -1560,6 +1567,16 @@ class ReviewRerun(unittest.TestCase):
         self.assertEqual(summary.splitlines(),
                          ["Build run 40: could not re-run its failed jobs after 4 tries, so it is not re-run."])
         self.assertIn("::error::Build run 40: could not re-run its failed jobs after 4 tries", run.stdout)
+
+    def test_a_re_run_whose_answer_is_lost_is_not_asked_for_twice(self):
+        # GitHub takes the first try of the re-run, but its answer is lost. Before the next try the run is already at
+        # attempt 2, so the step asks for no second re-run, and it does not fail.
+        run, calls, waits, summary = self.re_run_step(0, lost=True)
+        self.assertEqual((calls, waits), (["run rerun 40 --failed -R o/r"], [15]))
+        self.assertIn("Build run 40 is at attempt 2: a try was taken, though its answer was lost.", run.stdout)
+        self.assertEqual(summary.splitlines(), [
+            "Build run 40: its review job failed at attempt 1; its failed jobs run again, with the oss-verify App's "
+            "token."])
 
 
 if __name__ == "__main__":
