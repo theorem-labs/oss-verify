@@ -1151,6 +1151,12 @@ class ReviewJob(unittest.TestCase):
 
     # Tailscale's client ids look like TWbBfz7fqc11CNTRL-k46A6PQMc421CNTRL (agent-infra .github/actions/tailnet/tailnet.sh).
     CLIENT_ID = re.compile(r"^[A-Za-z0-9]{8,}(-[A-Za-z0-9]+)*$")
+    # The Service's IPv4 address on the tailnet: Tailscale's own range, 100.64.0.0/10. \A and \Z, because $ would
+    # also take a value that ends in a newline.
+    COLLECTOR_URL = re.compile(r"\Ahttp://100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])"
+                               r"(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){2}\Z")
+    # An address of that range for the export step's stand-in run; it reaches no network.
+    STAND_IN_URL = "http://100.64.0.1"
 
     def test_the_job_joins_the_tailnet_as_ossv_review(self):
         join = self.steps["Join Theorem's tailnet, to export this review's usage"]
@@ -1159,8 +1165,8 @@ class ReviewJob(unittest.TestCase):
         self.assertEqual(join["id"], "tailnet")
         # The join never decides whether a review runs.
         self.assertIs(join["continue-on-error"], True)
-        # Exactly these settings: another one, `args: --accept-dns=false` for example, would turn MagicDNS off and
-        # lose every record while the join still passed.
+        # Exactly these settings: another one, `args:` for example, would change how the node joins while the join
+        # still passed.
         self.assertEqual(set(join["with"]),
                          {"oauth-client-id", "audience", "tags", "hostname", "use-cache"})
         self.assertEqual(join["with"]["oauth-client-id"], "${{ env.TAILNET_CLIENT_ID }}")
@@ -1196,12 +1202,24 @@ class ReviewJob(unittest.TestCase):
         client_id = self.jobs["review"]["env"]["TAILNET_CLIENT_ID"]
         self.assertRegex(client_id, self.CLIENT_ID)
 
+    def test_the_collector_url_is_a_tailnet_address(self):
+        # http://<the IPv4 address of Tailscale Service svc:spend>, which is in Tailscale's range 100.64.0.0/10.
+        # One URL for every sender, and it holds the address, because linux28-agents-1 joins the tailnet with
+        # --accept-dns=false and resolves no MagicDNS name (INFRA-832). The address is read after the S1a apply,
+        # so this test is red until someone fills the value in, and the pull request cannot merge before then.
+        url = self.jobs["review"]["env"]["SPEND_COLLECTOR_URL"]
+        self.assertRegex(url, self.COLLECTOR_URL)
+
     def test_no_step_reads_the_collector_token(self):
         text = (ROOT / ".github" / "workflows" / "build.yaml").read_text()
         self.assertNotIn("agent-spend-otel-token", text)
         self.assertNotIn("agent-otel-public", text)
         self.assertNotIn("OTEL_EXPORTER_OTLP_HEADERS", text)
         self.assertNotIn("Sign in to Google Cloud, for the cost collector's token", text)
+        # One URL for every sender, the address in SPEND_COLLECTOR_URL: no step and no comment of the file names
+        # the tailnet's MagicDNS domain, which linux28-agents-1, a sender that joins with --accept-dns=false,
+        # cannot resolve.
+        self.assertNotIn("ts.net", text)
 
     def export(self, outcome):
         with tempfile.TemporaryDirectory() as directory:
@@ -1209,19 +1227,24 @@ class ReviewJob(unittest.TestCase):
             step = self.steps["Export the review's usage to the cost collector"]
             run = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=root, capture_output=True, text=True,
                                  env={**os.environ, "GITHUB_ENV": str(root / "env"), "TAILNET": outcome,
-                                      "NAME": "libreac"})
+                                      "NAME": "libreac",
+                                      "SPEND_COLLECTOR_URL": self.STAND_IN_URL})
             return run, (root / "env").read_text() if (root / "env").exists() else ""
 
     def test_the_export_names_the_tailnet_endpoint_and_no_header(self):
+        # The endpoint the step writes is the job's SPEND_COLLECTOR_URL, read with a stand-in value, so a step that
+        # drops the variable or sets one of its own fails here whatever the job value is.
         run, env = self.export("success")
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(run.stdout, "")
         self.assertEqual(env, "CLAUDE_CODE_ENABLE_TELEMETRY=1\nOTEL_LOGS_EXPORTER=otlp\nOTEL_METRICS_EXPORTER=none\n"
                          "OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf\n"
-                         "OTEL_EXPORTER_OTLP_ENDPOINT=http://spend.tail12ec1c.ts.net\n"
+                         f"OTEL_EXPORTER_OTLP_ENDPOINT={self.STAND_IN_URL}\n"
                          "OTEL_RESOURCE_ATTRIBUTES=theorem.project=oss-verify,theorem.subproject=libreac,"
                          "theorem.lane=enroll-review-ci,theorem.credential=oss-verify-ci\n")
         self.assertNotIn("Authorization", env)
+        self.assertNotIn("SPEND_COLLECTOR_URL",
+                         self.steps["Export the review's usage to the cost collector"]["env"])
 
     def test_review_runs_when_the_tailnet_join_fails(self):
         for outcome in ("failure", "skipped", ""):

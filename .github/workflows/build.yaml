@@ -131,14 +131,14 @@ name: "Build"
 # Before the merge, tools/tests runs the review's own steps with stand-ins.
 #
 # The review's Claude Code exports its usage by OpenTelemetry to Theorem's cost collector, over Theorem's tailnet, at
-# http://spend.tail12ec1c.ts.net (a literal here: it is an address on the tailnet, not a secret). The collector keeps
+# the collector's tailnet address on port 80 (SPEND_COLLECTOR_URL below; an address, not a secret). The collector keeps
 # a public endpoint with a bearer token until INFRA-832 deletes it; this job uses neither. The review job joins the
 # tailnet as an ephemeral node with the tag tag:ossv-review, and holds no token for the collector: Tailscale makes
 # the node from this job's GitHub identity token, and WireGuard authenticates and encrypts each connection. The tag,
 # the federated identity that trades the token for the node, the grant that gives the tag the collector's Tailscale
 # Service svc:spend on tcp:80 and nothing else beyond the two read-only pages every node of the tailnet may read
 # (Dispatch and the results dashboard, on tcp:443), and the policy test that fails if the tag reaches anything else,
-# are declared by INFRA-832 S1a in agent-infra. That change is not merged yet; its apply runs before this file
+# are declared by INFRA-832 S1a in agent-infra, merged on 2026-10-30 as 99d1b5d. Its apply runs before this file
 # carries a client id, so all of it is live before this job first joins. The export is tagged
 # theorem.project=oss-verify, theorem.subproject=<name>, theorem.lane=enroll-review-ci and
 # theorem.credential=oss-verify-ci. The export is a measurement and never decides whether an enrollment gets its
@@ -411,10 +411,18 @@ jobs:
       GCP_WORKLOAD_IDENTITY_PROVIDER: projects/805240912354/locations/global/workloadIdentityPools/github/providers/github-ossv
       GCP_SERVICE_ACCOUNT: ossv-ci@theorem-agent-infra.iam.gserviceaccount.com
       # The client id Tailscale gave the federated identity ossv-review-github: bootstrap/'s stack output
-      # ossvReviewTailnetClientId, which INFRA-832 S1a in agent-infra declares and its apply makes. That change is
-      # not merged yet. The id is public, not a secret, and this is the one place this file names it. It is empty
+      # ossvReviewTailnetClientId, which INFRA-832 S1a in agent-infra declares (merged as 99d1b5d) and its apply
+      # makes. The id is public, not a secret, and this is the one place this file names it. It is empty
       # until that apply has run; tools/tests refuses an empty value, so this file cannot merge before then.
       TAILNET_CLIENT_ID: ""
+      # The cost collector's address on the tailnet, http://<IPv4 address> on port 80. Every sender of spend
+      # records takes this one URL, and it holds the address, not the Service's MagicDNS name, because
+      # linux28-agents-1 joins the tailnet with --accept-dns=false and resolves no MagicDNS name; tailscaled
+      # routes a Tailscale Service by the destination address. The address is the one Tailscale gives the Service
+      # svc:spend, read after the INFRA-832 S1a apply; bootstrap on agent-infra main 99d1b5d exports the
+      # collector's client id and audience but no URL. It is empty until someone fills it in, and tools/tests
+      # refuses an empty value.
+      SPEND_COLLECTOR_URL: ""
     outputs:
       comment: ${{ steps.review.outputs.structured_output && fromJSON(steps.review.outputs.structured_output).comment }}
       held_object: ${{ steps.held.outputs.object }}
@@ -440,8 +448,8 @@ jobs:
         run: |
           dpkg -s python3-yaml unzip > /dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml unzip; }
           LAST_REVIEW=~/.claude/ossv-last-review .github/scripts/review-gather .review
-      # The node is ephemeral and preauthorized, and it carries tag:ossv-review. INFRA-832 S1a in agent-infra, which
-      # is not merged yet, declares that tag, the grant that gives it the cost collector's Tailscale Service
+      # The node is ephemeral and preauthorized, and it carries tag:ossv-review. INFRA-832 S1a in agent-infra,
+      # merged as 99d1b5d, declares that tag, the grant that gives it the cost collector's Tailscale Service
       # svc:spend on tcp:80 and nothing else beyond the two read-only pages every node of the tailnet may read, and
       # the federated identity ossv-review-github, whose claims admit only this workflow of this repository, on
       # refs/heads/main, in the environment enroll-review, on a GitHub-hosted runner. Its apply runs before the
@@ -467,7 +475,7 @@ jobs:
           if [ "$TAILNET" != success ]; then
             echo "::warning::This job did not join the tailnet: this review's usage is not exported."; exit 0; fi
           builtin printf '%s\n' CLAUDE_CODE_ENABLE_TELEMETRY=1 OTEL_LOGS_EXPORTER=otlp OTEL_METRICS_EXPORTER=none \
-            OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf OTEL_EXPORTER_OTLP_ENDPOINT=http://spend.tail12ec1c.ts.net \
+            OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf "OTEL_EXPORTER_OTLP_ENDPOINT=$SPEND_COLLECTOR_URL" \
             "OTEL_RESOURCE_ATTRIBUTES=theorem.project=oss-verify,theorem.subproject=$NAME,theorem.lane=enroll-review-ci,theorem.credential=oss-verify-ci" \
             >> "$GITHUB_ENV"
       - name: Review
