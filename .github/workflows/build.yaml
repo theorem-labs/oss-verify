@@ -16,7 +16,10 @@ name: "Build"
 #            review-change.md. Any other asks for the build, as an enrollment, and so does a run that an App outside
 #            the review's allowed_bots started (Dependabot's, say), which the action refuses to review. A run started
 #            for an issue of this repository (gh workflow run build.yaml -f issue=<n>) asks for the review alone, once
-#            route has read that the number is an issue and not a pull request.
+#            route has read that the number is an issue and not a pull request. A run for a pull request of
+#            oss-verify-proofs or rocq-linux-process-semantics (-f repo=<name> -f pr=<n> -f head=<commit>) is a
+#            change whatever it changes, and route refuses it unless that commit is the pull request's head; one for an
+#            issue there (-f repo=<name> -f issue=<n>) asks for the review alone, as here.
 #   project-builds
 #            the build above, under the check name build, when route asks for it; it passes with nothing to build
 #            when the pull request enrolls no project (below). Its job id stays project-builds, the name the other jobs
@@ -32,17 +35,20 @@ name: "Build"
 #            comment as the comment job would post it (.github/scripts/review-body), are the artifact
 #            enroll-review-draft. On a later push it resumes the same Claude Code session as the last review, so it
 #            knows what it asked for and why, and reviews only the diff since the commit it reviewed then. For a
-#            change it checks what review-change.md says, on the pull request's diff and files read as data, with no
-#            session kept. For an issue it drafts the reply as review-issue.md says, from the issue's title, body and
+#            change it checks what review-change.md says, on the pull request's diff and files read as data; on a
+#            later push it resumes the last change review's session for context (key review-<repo>-<number>), with
+#            the head that review reviewed taken from the runs API only, and judges checks 4 and 5 on the whole diff
+#            again. For an issue it drafts the reply as review-issue.md says, from the issue's title, body and
 #            comments, read as data, with no session kept: the draft is the artifact enroll-review-draft and the job
 #            summary, and no job posts it.
 #   hold     sends each real bug in a project's own code that a review held back from its comment (review.md, rule 6)
 #            to the disclosure route as a private issue (.github/scripts/review-hold): the review job stores it in a
 #            private bucket that only this job can read, and this job sends every finding stored there, a cancelled
 #            run's too. A finding never reaches a log, an output or an artifact.
-#   comment  while OSSV_POST_REVIEW is `post`, posts that comment, with the checks' report folded under it, or replaces
-#            the one already there. The comment starts with <!-- oss-verify-review -->, as the triage comment starts
-#            with its own marker, and its second line is the verdict line that the inbound watcher reads:
+#   comment  while posting is on for the pull request's repository (OSSV_POST_REVIEW is `post` for this one,
+#            OSSV_POST_REVIEW_REPOS names it for another), posts that comment, with the checks' report folded under
+#            it, or replaces the one already there. The comment starts with <!-- oss-verify-review -->, as the triage
+#            comment starts with its own marker, and its second line is the verdict line that the inbound watcher reads:
 #            <!-- oss-verify-verdict {"head":"<commit>","blocking":[...],"person":[...]} -->, the checks whose verdict
 #            is fail and those left to a person (.github/scripts/review-body; none when the review gave no verdicts).
 #            It never runs for an issue: a person approves the exact text of each reply to an issue before anyone
@@ -166,6 +172,10 @@ name: "Build"
 # a pull request's own run can read it. GitHub drops an entry that no run has read for 7 days, and the next review is
 # then fresh. A review that holds back a finding (review.md, rule 6) keeps no session, because the session would hold
 # the finding: the next push resumes the last session kept before it, or starts fresh.
+# A change review keeps its session the same way under review-<repo>-<number>-<run id>-<attempt> (repo oss-verify on
+# this repository's pull requests), for context only: review-gather takes the commit its last review reviewed from the
+# runs API, never from ossv-last-review, and the review judges checks 4 and 5 on the whole diff again
+# (.github/scripts/review-gather). Of the cached file it reads the session's id alone.
 # Only the review job can act as ossv-ci: that comes with the environment enroll-review. Its deployment branch rule,
 # declared in Theorem's infrastructure code, allows main alone; GitHub checks it against the run's ref, which is main
 # for pull_request_target and refs/pull/<n>/merge for a pull request's own run
@@ -177,10 +187,18 @@ name: "Build"
 #   gh workflow run build.yaml -f pr=123
 # To draft the reply to an issue of this repository (.github/workflows/sweep.yaml starts such runs every hour):
 #   gh workflow run build.yaml -f issue=45
+# To review a pull request or draft the reply to an issue of theorem-labs/oss-verify-proofs or
+# theorem-labs/rocq-linux-process-semantics (sweep.yaml starts these too), as a change, against review-change.md:
+#   gh workflow run build.yaml -f repo=rocq-linux-process-semantics -f pr=34 -f head=<the pull request's head commit>
+#   gh workflow run build.yaml -f repo=oss-verify-proofs -f issue=3
+# Such a run reviews that head only while it is the pull request's head, and its title, "Review <repo>#<n> at <head>",
+# is what the sweep and the next review of that pull request read (the whole head: an expression cannot cut a string).
+# Its comment is posted only while the variable OSSV_POST_REVIEW_REPOS, comma-separated names, names the repository;
+# OSSV_POST_REVIEW is not read for it. The comment job's token is the oss-verify App's, for that repository alone.
 # Such a run reports a check named project-builds too, but a check from a workflow_dispatch run never satisfies a
 # ruleset's required check (https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks#checks-from-some-workflow-jobs-are-not-evaluated).
 
-run-name: ${{ github.event.pull_request.title || (inputs.issue && format('Issue {0}', inputs.issue)) || format('Pull request {0}', inputs.pr) }}
+run-name: ${{ github.event.pull_request.title || (inputs.repo && inputs.repo != 'oss-verify' && (inputs.issue && format('Issue {0}#{1}', inputs.repo, inputs.issue) || format('Review {0}#{1} at {2}', inputs.repo, inputs.pr, inputs.head))) || (inputs.issue && format('Issue {0}', inputs.issue)) || format('Pull request {0}', inputs.pr) }}
 
 on:
   pull_request_target:
@@ -195,14 +213,25 @@ on:
         description: "Number of the issue of this repository to draft a reply to (give pr or issue, not both)"
         required: false
         type: number
+      repo:
+        description: "The repository of the pull request or issue, in theorem-labs"
+        required: false
+        type: choice
+        default: oss-verify
+        options: [oss-verify, oss-verify-proofs, rocq-linux-process-semantics]
+      head:
+        description: "With pr, for another repository than oss-verify: the pull request's head commit (40 hex digits)"
+        required: false
+        type: string
 
 permissions: {}
 # No job reads or writes the Actions cache unless it says so: only the review job does, for its session.
 cache-mode: none
 
 concurrency:
-  # By event too, so that a run started by hand never cancels the pull request's own run of the required check.
-  group: build-${{ github.event_name }}-${{ github.event.pull_request.number || inputs.pr || inputs.issue }}
+  # By event too, so that a run started by hand never cancels the pull request's own run of the required check; by
+  # repository, so that a run for pull request 7 of another repository never cancels this repository's.
+  group: build-${{ github.event_name }}-${{ inputs.repo || 'oss-verify' }}-${{ github.event.pull_request.number || inputs.pr || inputs.issue }}
   cancel-in-progress: true
 
 jobs:
@@ -220,7 +249,10 @@ jobs:
         id: decide
         env:
           GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
+          # The repository of the pull request or issue: this one, or the one the run names.
+          REPO: ${{ inputs.repo && inputs.repo != 'oss-verify' && format('theorem-labs/{0}', inputs.repo) || github.repository }}
+          OTHER: ${{ inputs.repo && inputs.repo != 'oss-verify' }}
+          WANT_HEAD: ${{ inputs.head }}
           PR: ${{ github.event.pull_request.number || inputs.pr }}
           ISSUE: ${{ inputs.issue }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -230,7 +262,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "${ISSUE:-}" ]; then
-            # An issue of this repository, not a pull request (GitHub lists both as issues), and never both inputs.
+            # An issue of the repository, not a pull request (GitHub lists both as issues), and never both inputs.
             [[ $ISSUE =~ ^[0-9]+$ && -z ${PR:-} ]] \
               || { echo "::error::Give the number of a pull request or of an issue, not both."; exit 1; }
             [ "$(gh api "repos/$REPO/issues/$ISSUE" --jq '.pull_request == null')" = true ] \
@@ -243,6 +275,20 @@ jobs:
           fi
           [[ ${PR:-} =~ ^[0-9]+$ ]] || { echo "::error::Give the number of a pull request or of an issue."; exit 1; }
           pull=$(gh api "repos/$REPO/pulls/$PR")
+          if [ "${OTHER:-}" = true ]; then
+            # Another repository's pull request: a change review (review-change.md) of the head the run names, only
+            # while it is the head, whatever the pull request changes and whoever started the run. Nothing is built.
+            [[ ${WANT_HEAD:-} =~ ^[0-9a-f]{40}$ ]] \
+              || { echo "::error::Give head, the head commit of $REPO#$PR, as 40 hexadecimal digits."; exit 1; }
+            current=$(jq -r .head.sha <<< "$pull")
+            [ "$current" = "$WANT_HEAD" ] \
+              || { echo "::error::The head of $REPO#$PR is $current, not $WANT_HEAD: the run of its head reviews it."; exit 1; }
+            { echo "sha=$WANT_HEAD"; echo "change=true"; } >> "$GITHUB_OUTPUT"
+            message="change review of $REPO#$PR at ${WANT_HEAD:0:7}: nothing is built (review-change.md)."
+            echo "$message"
+            echo "$message" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           sha=${HEAD_SHA:-$(jq -r .head.sha <<< "$pull")}
           [[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Could not read the pull request's head commit."; exit 1; }
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
@@ -453,13 +499,19 @@ jobs:
     timeout-minutes: 60
     cache-mode: write
     environment: {name: enroll-review, deployment: false}
-    permissions: {contents: read, pull-requests: read, issues: read, checks: read, statuses: read, id-token: write}
+    # actions: read for the runs API, which gives a change review the head its last review reviewed.
+    permissions: {contents: read, pull-requests: read, issues: read, checks: read, statuses: read, actions: read, id-token: write}
     env:
       PR: ${{ github.event.pull_request.number || inputs.pr }}
       ISSUE: ${{ inputs.issue }}
       NAME: ${{ needs.project-builds.outputs.name }}
       HEAD_SHA: ${{ needs.project-builds.outputs.sha || needs.route.outputs.sha }}
+      # The repository of the pull request or issue: this one, or the one the run names.
+      REPO: ${{ inputs.repo && inputs.repo != 'oss-verify' && format('theorem-labs/{0}', inputs.repo) || github.repository }}
       SESSION_KEY: enroll-review/${{ github.event.pull_request.number || inputs.pr }}/${{ needs.project-builds.outputs.name }}/
+      # A change review's session, by repository and number; the last `-` keeps one pull request's key from being the
+      # start of another's (pull request 1 and pull request 10), which restore-keys would match.
+      CHANGE_KEY: review-${{ inputs.repo || 'oss-verify' }}-${{ github.event.pull_request.number || inputs.pr }}-
       GCP_WORKLOAD_IDENTITY_PROVIDER: projects/805240912354/locations/global/workloadIdentityPools/github/providers/github-ossv
       GCP_SERVICE_ACCOUNT: ossv-ci@theorem-agent-infra.iam.gserviceaccount.com
     outputs:
@@ -478,12 +530,19 @@ jobs:
         if: env.NAME != ''
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
         with: {path: "~/.claude/projects\n~/.claude/ossv-last-review", key: "${{ env.SESSION_KEY }}${{ github.run_id }}-${{ github.run_attempt }}", restore-keys: "${{ env.SESSION_KEY }}"}
+      # A change review resumes its last session for context only: review-gather takes the head that session reviewed
+      # from the runs API, never from this cache, which the runs of outside pull requests can write too (main's scope).
+      - name: Restore the last change review's session
+        if: env.NAME == '' && env.ISSUE == ''
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
+        with: {path: "~/.claude/projects\n~/.claude/ossv-last-review", key: "${{ env.CHANGE_KEY }}${{ github.run_id }}-${{ github.run_attempt }}", restore-keys: "${{ env.CHANGE_KEY }}"}
       - name: Gather what the review reads, and the diff since the last review
         id: gather
         timeout-minutes: 15
         env:
           GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
+          RUNS_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
           COMMIT: ${{ needs.project-builds.outputs.commit }}
           BUILD: "The Build check ${{ needs.project-builds.result }}: ${{ needs.project-builds.outputs.result || 'no result' }}."
           BINARIES: ${{ needs.project-builds.outputs.binaries }}
@@ -536,7 +595,9 @@ jobs:
             --tools Read,Glob,Grep --permission-mode default --model claude-opus-5-5 --effort xhigh --max-turns 300
             ${{ steps.gather.outputs.session && format('--resume {0}', steps.gather.outputs.session) || '' }}
             --json-schema '{"type":"object","additionalProperties":false,"required":["comment","held","verdicts"],"properties":{"comment":{"type":"string","description":"The comment to the maintainer, in Markdown. Never a held finding."},"held":{"type":"string","description":"Each finding held back under rule 6 of review.md, as the skill section A held finding says, or empty."},"verdicts":{"type":"object","description":"The verdict of each check of review.md by its id, A1 to G5, and for an F check the worst over the fuzz targets.","required":["F2","F7"],"additionalProperties":{"enum":["pass","fail","person"]}}}}'
-      # A change: the same action and identity, review-change.md, a fresh session each push, nothing held.
+      # A change: the same action and identity, review-change.md, nothing held. It resumes the session of the last
+      # review of the pull request, for context, when review-gather found the head that review reviewed (from the runs
+      # API) and the diff since it; checks 4 and 5 it still judges on the whole diff, as a first review does.
       - name: Review the change
         id: change
         if: env.NAME == '' && env.ISSUE == ''
@@ -549,13 +610,20 @@ jobs:
           anthropic_workspace_id: wrkspc_01Qr1iUVcow4jdgQM7Amfks5
           github_token: ${{ github.token }}
           allowed_non_write_users: "*"
-          allowed_bots: sjawhar-agent[bot],oss-verify[bot]
+          # sweep.yaml starts the runs of another repository's pull requests with GITHUB_TOKEN, as github-actions[bot]:
+          # only those runs admit it here.
+          allowed_bots: ${{ inputs.repo && inputs.repo != 'oss-verify' && 'sjawhar-agent[bot],oss-verify[bot],github-actions[bot]' || 'sjawhar-agent[bot],oss-verify[bot]' }}
           prompt: >-
             Read review-change.md at the root of this checkout: it says what OSS Verify's change review of pull request
-            #${{ env.PR }}, which changes no file under projects/, checks, on what the workflow gathered into .review/.
+            #${{ env.PR }} of ${{ env.REPO }} checks, on what the workflow gathered into .review/.
+            ${{ steps.gather.outputs.session && format('Earlier in this session you reviewed {0}.
+            .review/since-last-review.diff, the diff from {0} to {1}, is an aid for checks 1 to 3 only. Judge checks 4
+            and 5 on the whole diff of the pull request against its base, .review/pr.diff, as on a first review.',
+            steps.gather.outputs.last, env.HEAD_SHA) || '' }}
             Give the result as the structured output.
           claude_args: >-
             --tools Read,Glob,Grep --permission-mode default --model claude-opus-5-5 --effort xhigh --max-turns 300
+            ${{ steps.gather.outputs.session && format('--resume {0}', steps.gather.outputs.session) || '' }}
             --json-schema '{"type":"object","additionalProperties":false,"required":["comment","held","verdicts"],"properties":{"comment":{"type":"string","description":"The comment to the contributor, in Markdown."},"held":{"type":"string","maxLength":0,"description":"Empty."},"verdicts":{"type":"object","description":"The verdict of each check of review-change.md by its number.","required":["1","2","3","4","5"],"additionalProperties":{"enum":["pass","fail","person"]}}}}'
       # An issue: the same action and identity, review-issue.md, the issue alone as data, no session, nothing held. The
       # draft is never posted: a person approves its exact text first.
@@ -571,11 +639,12 @@ jobs:
           anthropic_workspace_id: wrkspc_01Qr1iUVcow4jdgQM7Amfks5
           github_token: ${{ github.token }}
           allowed_non_write_users: "*"
-          # sweep.yaml starts these runs with GITHUB_TOKEN, as github-actions[bot]; only this step admits it.
+          # sweep.yaml starts these runs with GITHUB_TOKEN, as github-actions[bot]; only this step admits it always,
+          # the change step for another repository's pull request alone.
           allowed_bots: sjawhar-agent[bot],oss-verify[bot],github-actions[bot]
           prompt: >-
             Read review-issue.md at the root of this checkout: it says what OSS Verify's draft reply to issue
-            #${{ env.ISSUE }} of this repository says, from what the workflow gathered into .review/issue.json.
+            #${{ env.ISSUE }} of ${{ env.REPO }} says, from what the workflow gathered into .review/issue.json.
             Give the result as the structured output.
           claude_args: >-
             --tools Read,Glob,Grep --permission-mode default --model claude-opus-5-5 --effort xhigh --max-turns 300
@@ -584,7 +653,7 @@ jobs:
         id: result
         env:
           RESULT: ${{ steps.review.outputs.execution_file || steps.change.outputs.execution_file || steps.issue.outputs.execution_file }}
-          SESSION: ${{ steps.review.outputs.session_id }}
+          SESSION: ${{ steps.review.outputs.session_id || steps.change.outputs.session_id }}
         run: |
           out=$(jq -ce 'map(select(.type == "result")) | last | .structured_output | objects' "$RESULT")
           mkdir -p "$RUNNER_TEMP/draft" && jq -r .comment <<< "$out" > "$RUNNER_TEMP/draft/comment.md"
@@ -619,6 +688,10 @@ jobs:
         if: ${{ steps.result.outputs.held != 'yes' && env.NAME != '' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
         with: {path: "~/.claude/projects\n~/.claude/ossv-last-review", key: "${{ env.SESSION_KEY }}${{ github.run_id }}-${{ github.run_attempt }}"}
+      - name: Keep this change review's session for the next push's review
+        if: ${{ steps.result.outputs.held != 'yes' && env.NAME == '' && env.ISSUE == '' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
+        with: {path: "~/.claude/projects\n~/.claude/ossv-last-review", key: "${{ env.CHANGE_KEY }}${{ github.run_id }}-${{ github.run_attempt }}"}
       - name: Sign in to Google Cloud to store the held finding
         id: gcp-held
         if: ${{ steps.result.outputs.held == 'yes' }}
@@ -777,14 +850,19 @@ jobs:
         run: .github/scripts/review-hold "$RUNNER_TEMP/held"
 
   comment:
-    # Posts the review's comment as oss-verify[bot], or updates the one already there: only while the repository
-    # variable OSSV_POST_REVIEW is `post`, because a person approves each message to a maintainer before it is posted
+    # Posts the review's comment as oss-verify[bot], or updates the one already there: only while posting is on for the
+    # repository of the pull request, because a person approves each message to a maintainer before it is posted
     # (until then the comment is the review job's artifact enroll-review-draft), and, when the review held a finding
     # back, only once the hold job sent it, because the comment says that it was sent. Never for an issue, whatever
     # any variable says: a person approves the exact text of each reply to an issue before anyone posts it.
+    # Posting is on for this repository while the variable OSSV_POST_REVIEW is `post`, and for another repository
+    # (build.yaml -f repo=<name>) while OSSV_POST_REVIEW_REPOS, comma-separated names, names it; neither reads the other.
     needs: [route, project-builds, review, hold]
     if: >-
-      ${{ !cancelled() && vars.OSSV_POST_REVIEW == 'post' && needs.route.outputs.issue != 'true'
+      ${{ !cancelled() && ((!inputs.repo || inputs.repo == 'oss-verify') && vars.OSSV_POST_REVIEW == 'post'
+      || inputs.repo && inputs.repo != 'oss-verify'
+      && contains(format(',{0},', vars.OSSV_POST_REVIEW_REPOS), format(',{0},', inputs.repo)))
+      && needs.route.outputs.issue != 'true'
       && needs.review.result == 'success' && needs.review.outputs.comment != ''
       && (needs.review.outputs.held_object == '' || needs.hold.result == 'success') }}
     runs-on: ubuntu-latest
@@ -803,7 +881,7 @@ jobs:
     # One comment job at a time for a pull request, whatever event started its run (the run's own group is by event):
     # two at once could each find no comment, each post one, and only the first would ever be updated after.
     concurrency:
-      group: build-comment-${{ github.event.pull_request.number || inputs.pr }}
+      group: build-comment-${{ inputs.repo || 'oss-verify' }}-${{ github.event.pull_request.number || inputs.pr }}
       cancel-in-progress: false
     permissions:
       # contents: read only for the checkout of .github/scripts, for review-body.
@@ -855,18 +933,27 @@ jobs:
           delimiter="key-$(openssl rand -hex 16)"
           { echo "key<<$delimiter"; builtin printf '%s\n' "$key"; echo "$delimiter"; } >> "$GITHUB_OUTPUT"
 
+      # For the repository of the pull request alone: a token with no repository named would reach every repository
+      # of the App's installation.
       - name: Get the oss-verify App's token
         id: app
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0 (sha-pinned)
         with:
           client-id: Iv23liAWPMahJZYsw3un
           private-key: ${{ steps.key.outputs.key }}
+          owner: theorem-labs
+          repositories: ${{ inputs.repo || 'oss-verify' }}
           permission-pull-requests: write
 
+      # The job's posting switch again, so that the step that writes cannot outlive a change to the job's condition.
       - name: Post the comment, or update the one already there
+        if: >-
+          ${{ (!inputs.repo || inputs.repo == 'oss-verify') && vars.OSSV_POST_REVIEW == 'post'
+          || inputs.repo && inputs.repo != 'oss-verify'
+          && contains(format(',{0},', vars.OSSV_POST_REVIEW_REPOS), format(',{0},', inputs.repo)) }}
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
-          REPO: ${{ github.repository }}
+          REPO: ${{ inputs.repo && inputs.repo != 'oss-verify' && format('theorem-labs/{0}', inputs.repo) || github.repository }}
           PR: ${{ github.event.pull_request.number || inputs.pr }}
           REVIEW: ${{ needs.review.outputs.comment }}
           CHECKS: ${{ needs.project-builds.outputs.checks }}
@@ -921,8 +1008,8 @@ jobs:
           ASKED_BUILD: ${{ needs.route.outputs.build == 'true' }}
           # Each of the others is asked for on its own job's condition: the record when the build passed and took a
           # project, the review when the build took a project, route found a change or the run is for an issue, hold
-          # when the review ran, comment when posting is on and the review wrote a comment (and, if it held a finding
-          # back, the hold job sent it), never for an issue.
+          # when the review ran, comment when posting is on for the pull request's repository and the review wrote a
+          # comment (and, if it held a finding back, the hold job sent it), never for an issue.
           RECORD: ${{ needs.record.result }}
           ASKED_RECORD: ${{ needs.project-builds.result == 'success' && needs.project-builds.outputs.name != '' }}
           REVIEW: ${{ needs.review.result }}
@@ -931,7 +1018,10 @@ jobs:
           ASKED_HOLD: ${{ needs.review.result != 'skipped' }}
           COMMENT: ${{ needs.comment.result }}
           ASKED_COMMENT: >-
-            ${{ vars.OSSV_POST_REVIEW == 'post' && needs.route.outputs.issue != 'true'
+            ${{ ((!inputs.repo || inputs.repo == 'oss-verify') && vars.OSSV_POST_REVIEW == 'post'
+            || inputs.repo && inputs.repo != 'oss-verify'
+            && contains(format(',{0},', vars.OSSV_POST_REVIEW_REPOS), format(',{0},', inputs.repo)))
+            && needs.route.outputs.issue != 'true'
             && needs.review.result == 'success' && needs.review.outputs.comment != ''
             && (needs.review.outputs.held_object == '' || needs.hold.result == 'success') }}
         run: >-

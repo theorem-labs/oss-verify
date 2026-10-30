@@ -4,16 +4,23 @@ name: "Sweep"
 # Every hour, starts the draft reply to each open issue of this repository that waits for us
 # (gh workflow run build.yaml -f issue=<n>, on main), at most CAP (3) for each sweep. An issue waits when its last
 # message, its text or its last comment, is not ours, and no Build run titled "Issue <n>" (build.yaml's run-name) was
-# made after that message. Ours: oss-verify[bot], sjawhar-agent[bot], and an author that GitHub relates to this
-# repository as MEMBER or OWNER. Pull requests are not swept: their own events run Build.
+# made after that message. Ours: oss-verify[bot], sjawhar-agent[bot], and an author that GitHub relates to the
+# issue's repository as MEMBER or OWNER. This repository's pull requests are not swept: their own events run Build.
 # A Build run for an issue only drafts the reply, into its artifact enroll-review-draft and its summary, and posts
 # nothing: a person approves the exact text of each reply first.
+# Then the same for each repository in OTHERS (theorem-labs/oss-verify-proofs and
+# theorem-labs/rocq-linux-process-semantics), at most CAP runs for each repository: the review of each open pull
+# request whose head has no Build run titled "Review <name>#<n> at <head>" (build.yaml's run-name; one started by hand
+# in the last 30 days, as the sweep starts them), with gh workflow run build.yaml -f repo=<name> -f pr=<n>
+# -f head=<head>, and the draft reply to each of its open issues that waits, titled "Issue <name>#<n>", with
+# -f repo=<name> -f issue=<n>. Their events cannot start this repository's Build, so the sweep does.
 # The cost in GitHub Actions: each run that a sweep starts is one Build run (route and review, on ubuntu-latest, then
 # hold and required, a few seconds each), and that run's completion starts enroll-dispatch.yml once, which ends at once
 # with no record. The sweep itself is one short job each hour.
 # The job holds no secret, checks out nothing and runs no code of a pull request. It starts the runs with GITHUB_TOKEN,
 # whose events start no workflow run, except workflow_dispatch and repository_dispatch, which always do
-# (https://docs.github.com/en/actions/concepts/security/github_token).
+# (https://docs.github.com/en/actions/concepts/security/github_token). The other repositories are public: the token
+# reads their pull requests and issues as anyone can.
 on:
   schedule:
     - cron: "17 * * * *"
@@ -34,36 +41,81 @@ jobs:
       issues: read
       pull-requests: read
     steps:
-      - name: Start the draft reply to each issue that waits
+      - name: Start the review of each issue and pull request that waits
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          # The other repositories, in this repository's organisation: build.yaml's input repo.
+          OTHERS: oss-verify-proofs rocq-linux-process-semantics
           CAP: 3
         run: |
           set -euo pipefail
-          started=0
-          issues=$(gh api --paginate "repos/$REPO/issues?state=open&per_page=100" \
-            --jq '.[] | select(.pull_request == null) | .number')
-          for number in $issues; do
-            [[ $number =~ ^[0-9]+$ ]] || continue
-            if (( started >= CAP )); then echo "The cap of $CAP runs for each sweep is reached."; break; fi
+          owner=${REPO%%/*}
+          # waits <repository> <issue> <title of its Build run>: whether the issue waits for us, or why not.
+          waits() {
+            local message at login association runs
             # The last message: the last comment, or the issue's text when it has none. Time, author, association.
-            message=$(gh api --paginate "repos/$REPO/issues/$number/comments?per_page=100" \
+            message=$(gh api --paginate "repos/$1/issues/$2/comments?per_page=100" \
               --jq '.[] | "\(.created_at)\t\(.user.login)\t\(.author_association)"' | tail -n 1)
-            [ -n "$message" ] || message=$(gh api "repos/$REPO/issues/$number" \
+            [ -n "$message" ] || message=$(gh api "repos/$1/issues/$2" \
               --jq '"\(.created_at)\t\(.user.login)\t\(.author_association)"')
             IFS=$'\t' read -r at login association <<< "$message"
             case "$login:$association" in
               "oss-verify[bot]:"* | "sjawhar-agent[bot]:"* | *:MEMBER | *:OWNER)
-                echo "Issue $number: the last message is ours."; continue ;;
+                echo "$3: the last message is ours."; return 1 ;;
             esac
-            [[ $at =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
-              || { echo "Issue $number: no time."; continue; }
+            [[ $at =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || { echo "$3: no time."; return 1; }
             runs=$(gh api --method GET --paginate "repos/$REPO/actions/workflows/build.yaml/runs" \
               -f event=workflow_dispatch -f created=">=$at" -F per_page=100 \
-              --jq ".workflow_runs[] | select(.display_title == \"Issue $number\" and .created_at > \"$at\") | .id")
-            if [ -n "$runs" ]; then echo "Issue $number: a Build run was made after its last message."; continue; fi
-            gh workflow run build.yaml --repo "$REPO" --ref main -f issue="$number"
+              --jq ".workflow_runs[] | select(.event == \"workflow_dispatch\" and .display_title == \"$3\"
+                and .created_at > \"$at\") | .id")
+            if [ -n "$runs" ]; then echo "$3: a Build run was made after its last message."; return 1; fi
+          }
+          # start <title> <inputs>...: one Build run, on main.
+          start() {
+            gh workflow run build.yaml --repo "$REPO" --ref main "${@:2}"
             started=$((started + 1))
-            echo "Issue $number: started a Build run." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "$1: started a Build run." | tee -a "$GITHUB_STEP_SUMMARY"
+          }
+          # This repository's open issues; GitHub lists pull requests as issues too.
+          open_issues() {
+            gh api --paginate "repos/$1/issues?state=open&per_page=100" --jq '.[] | select(.pull_request == null) | .number'
+          }
+
+          started=0
+          for number in $(open_issues "$REPO"); do
+            [[ $number =~ ^[0-9]+$ ]] || continue
+            if (( started >= CAP )); then echo "The cap of $CAP runs for each sweep is reached."; break; fi
+            waits "$REPO" "$number" "Issue $number" || continue
+            start "Issue $number" -f issue="$number"
+          done
+
+          [ -n "${OTHERS:-}" ] || exit 0
+          # The titles of the Build runs started by hand in the last 30 days: a head with a review among them waits no
+          # more. A pull request of this repository can take any title, so only runs started by hand count.
+          since=$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%SZ)
+          reviewed=$(gh api --method GET --paginate "repos/$REPO/actions/workflows/build.yaml/runs" \
+            -f event=workflow_dispatch -f created=">=$since" -F per_page=100 \
+            --jq '.workflow_runs[] | select(.event == "workflow_dispatch") | .display_title')
+          for name in $OTHERS; do
+            [[ $name =~ ^[A-Za-z0-9_.-]+$ ]] || continue
+            started=0 capped=false
+            pulls=$(gh api --paginate "repos/$owner/$name/pulls?state=open&per_page=100" \
+              --jq '.[] | "\(.number)\t\(.head.sha)"')
+            while IFS=$'\t' read -r number head; do
+              [[ $number =~ ^[0-9]+$ && $head =~ ^[0-9a-f]{40}$ ]] || continue
+              if (( started >= CAP )); then capped=true; break; fi
+              title="Review $name#$number at $head"
+              if grep -qxF "$title" <<< "$reviewed"; then echo "$title: reviewed."; continue; fi
+              start "$title" -f repo="$name" -f pr="$number" -f head="$head"
+            done <<< "$pulls"
+            if [ "$capped" = false ]; then
+              for number in $(open_issues "$owner/$name"); do
+                [[ $number =~ ^[0-9]+$ ]] || continue
+                if (( started >= CAP )); then capped=true; break; fi
+                waits "$owner/$name" "$number" "Issue $name#$number" || continue
+                start "Issue $name#$number" -f repo="$name" -f issue="$number"
+              done
+            fi
+            if [ "$capped" = true ]; then echo "$name: the cap of $CAP runs for each sweep is reached."; fi
           done
