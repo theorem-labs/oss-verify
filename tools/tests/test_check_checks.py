@@ -564,16 +564,23 @@ class PostingStep(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("jq"), "needs jq, which the gh stand-in runs the script's filters with")
 class ReviewHeld(unittest.TestCase):
-    """review-held opens one private issue for each held finding, through a fake gh, and prints none of it."""
+    """review-held opens one private issue for each held finding, keyed by what the finding is, through a fake gh,
+    and prints none of it."""
 
     RUN = "https://github.com/theorem-labs/oss-verify/actions/runs/7"
     OBJECT = "held/7/" + "a" * 32
     HEADER = f"oss-verify held finding v1\npr: 68\nhead: {'1' * 40}\nproject: libreac\nrun: {RUN}\n---\n"
 
     @staticmethod
-    def body(key):
-        """An issue body as review-held writes it: its key on the fifth line."""
-        return f"enrollment PR: x\nenrollment PR head: y\npublic PR comment: z\nreview run: r\n{key}\n"
+    def body(key, texthash="0" * 12):
+        """An issue body as review-held writes it: its key on the fifth line, its text's hash on the sixth."""
+        return (f"enrollment PR: x\nenrollment PR head: y\npublic PR comment: z\nreview run: r\n"
+                f"held finding key: {key}\nheld finding text: {texthash}\n")
+
+    @staticmethod
+    def key_of(body):
+        """The key of an issue body this script wrote."""
+        return body.split("\n")[4].removeprefix("held finding key: ")
 
     # A stand-in for `gh api`: it answers each call with the JSON GitHub would (from state.json), applies the script's
     # own --jq filter to it with the real jq, and records each call and each body it is sent. So the tests check the
@@ -601,8 +608,14 @@ if path.endswith("/labels/held-finding"):
 if path == "repos/" + state["variable"]:
     answer = {"visibility": state["visibility"]}
 elif "/issues?" in path:
-    answer = [{"number": i, "body": b} for i, b in enumerate(state["issues"], 1)]
+    if state["listing_fails"]:
+        sys.stderr.write("gh: the stand-in refuses the listing\n")
+        sys.exit(1)
+    answer = [{"number": i, "body": b[0], "state": b[1]} for i, b in enumerate(state["issues"], 1)]
 elif path.endswith("/comments") and not fields:
+    if state["comments_fail"] and private:
+        sys.stderr.write("gh: the stand-in refuses the comments\n")
+        sys.exit(1)
     answer = state["comments"] if private else state["public_comments"]
 elif path.endswith("/comments"):
     answer = {"id": 7, "html_url": "https://example.test/comment"}
@@ -619,20 +632,25 @@ else:
 '''
     # A held finding as the review writes it in the `held` field of its structured output.
     HELD = ("<!-- held finding -->\ntitle: [held] libreac/fuzz: heap-buffer-overflow in parse_SECRETBUG\n"
-            "project: libreac\nwhy held: memory safety\n\nparse_SECRETBUG reads past the end.\n")
+            "project: libreac\nharness: fuzz_one\nupstream repository: https://github.com/example/libreac\n"
+            "upstream commit: " + "c" * 40 + "\nwhy held: memory safety: a read past the end\n\n"
+            "src/parse.c:40-80, parse_SECRETBUG reads past the end.\n")
 
     def run_held(self, held, bodies_on_github=(), label=True, variable="theorem-labs/private", visibility="private",
-                 header=None, comments=(), public_comments=()):
-        """bodies_on_github: the bodies of the label's issues already there, open or closed, numbered from 1. comments:
-        the bodies of comments already on a private issue. public_comments: the pull request's comments, as
-        (login, body, html_url). held follows the six lines the review job writes (header, by default HEADER)."""
+                 header=None, comments=(), public_comments=(), obj=None, listing_fails=False, comments_fail=False):
+        """bodies_on_github: the issues of the label already there, each a body or a (body, state) pair, numbered from
+        1. comments: the bodies of comments already on a private issue. public_comments: the pull request's comments,
+        as (login, body, html_url). held follows the six lines the review job writes (header, by default HEADER).
+        obj: the stored object's name, which is a new one for every run of a review."""
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             (root / "bin").mkdir()
             (root / "review").mkdir()
             (root / "review" / "object").write_text((self.HEADER if header is None else header) + held)
             (root / "state.json").write_text(json.dumps({
-                "variable": variable, "visibility": visibility, "label": label, "issues": list(bodies_on_github),
+                "variable": variable, "visibility": visibility, "label": label,
+                "issues": [b if isinstance(b, (list, tuple)) else (b, "open") for b in bodies_on_github],
+                "listing_fails": listing_fails, "comments_fail": comments_fail,
                 "comments": [{"id": i, "body": c} for i, c in enumerate(comments)],
                 "public_comments": [{"user": {"login": login}, "body": b, "html_url": u}
                                     for login, b, u in public_comments]}))
@@ -643,23 +661,30 @@ else:
                                  env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
                                       "HELD_FINDINGS_REPO": variable, "REPO": "theorem-labs/oss-verify",
                                       "GH_TOKEN": "app-not-a-secret", "READ_TOKEN": "read-not-a-secret",
-                                      "HELD_OBJECT": self.OBJECT},
+                                      "GITHUB_STEP_SUMMARY": str(root / "summary"),
+                                      "HELD_OBJECT": obj or self.OBJECT},
                                  capture_output=True, text=True)
             # The token of each call, in the order of calls.
             run.tokens = (root / "tokens").read_text().splitlines() if (root / "tokens").exists() else []
+            run.summary = (root / "summary").read_text() if (root / "summary").exists() else ""
             calls = [json.loads(line) for line in (root / "calls").read_text().splitlines()] \
                 if (root / "calls").exists() else []
             bodies = (root / "bodies").read_text().split("\0")[:-1] if (root / "bodies").exists() else []
             return run, calls, bodies
 
+    @staticmethod
+    def opened(calls):
+        """The issues opened in this run."""
+        return [c for c in calls if c[1] == "repos/theorem-labs/private/issues"]
+
     def test_each_finding_is_one_labelled_issue_with_the_pull_request_and_nothing_is_printed(self):
         two = self.HELD + self.HELD.replace("parse_SECRETBUG", "other_SECRETBUG")
         run, calls, bodies = self.run_held(two, label=False)
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertNotIn("SECRETBUG", run.stdout + run.stderr)
+        self.assertNotIn("SECRETBUG", run.stdout + run.stderr + run.summary)
         self.assertIn(["api", "repos/theorem-labs/private/labels", "-f", "name=held-finding", "-f", "color=b60205",
                        "-f", "description=A finding held back from a public review, for the disclosure route"], calls)
-        created = [c for c in calls if c[1] == "repos/theorem-labs/private/issues"]
+        created = self.opened(calls)
         self.assertEqual([c[c.index("-f") + 1] for c in created],
                          ["title=[held] libreac/fuzz: heap-buffer-overflow in parse_SECRETBUG",
                           "title=[held] libreac/fuzz: heap-buffer-overflow in other_SECRETBUG"])
@@ -668,25 +693,122 @@ else:
         self.assertTrue(bodies[0].startswith(f"enrollment PR: theorem-labs/oss-verify#68\nenrollment PR head: {'1' * 40}\n"
                                              "public PR comment: not posted yet: the review comment on "
                                              "theorem-labs/oss-verify#68\n"
-                                             f"review run: {self.RUN}\nheld finding key: {self.OBJECT} 1\n"))
-        self.assertIn(f"held finding key: {self.OBJECT} 2\n", bodies[1])
-        self.assertNotIn("theorem-labs/private", run.stdout + run.stderr)
-        self.assertIn("project: libreac\nwhy held: memory safety\n", bodies[0])
+                                             f"review run: {self.RUN}\nheld finding key: libreac/fuzz_one/"))
+        self.assertNotEqual(self.key_of(bodies[0]), self.key_of(bodies[1]))
+        self.assertRegex(bodies[0].split("\n")[5], r"^held finding text: [0-9a-f]{12}$")
+        self.assertNotIn("theorem-labs/private", run.stdout + run.stderr + run.summary)
+        self.assertIn("project: libreac\n", bodies[0])
         self.assertNotIn("title:", bodies[0])
+        self.assertEqual(run.summary.count("was sent to the disclosure route"), 2)
+
+    def test_the_key_holds_nothing_of_the_run_that_found_the_finding(self):
+        # The defect of oss-verify-proofs-internal#450: the key was the stored object's name, so each re-run of a
+        # review filed the same finding again.
+        run, _, bodies = self.run_held(self.HELD)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        key = self.key_of(bodies[0])
+        self.assertNotIn("a" * 32, key)
+        self.assertNotIn(self.OBJECT, bodies[0])
+        self.assertRegex(key, r"^libreac/fuzz_one/c{12}/[0-9a-f]{12}$")
+
+    def test_the_same_finding_of_another_run_of_the_review_is_not_filed_again(self):
+        # Two runs of the same review: a new stored object, a new run id, and the model's own words around the
+        # finding written afresh. The second run opens nothing and says so in the job summary.
+        first, _, bodies = self.run_held(self.HELD)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        again = self.HELD.replace("a read past the end", "it reads past the end of the buffer") \
+                         .replace("src/parse.c:40-80, parse_SECRETBUG reads past the end.",
+                                  "src/parse.c:40-80, parse_SECRETBUG. The call at line 51 is the one.")
+        run, calls, sent = self.run_held(again, bodies_on_github=[bodies[0]], obj="held/9/" + "b" * 32,
+                                         header=self.HEADER.replace("runs/7", "runs/9"))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(self.opened(calls), [])
+        self.assertIn("is already filed", run.stdout)
+        self.assertIn("was already filed", run.summary)
+        # The text changed, so it goes on the issue that is there, as a comment, and no new issue is opened.
+        self.assertEqual([c[1] for c in calls if "-F" in c], ["repos/theorem-labs/private/issues/1/comments"])
+        self.assertTrue(sent[0].startswith(f"held finding update: {self.key_of(bodies[0])} "), sent[0])
+        self.assertIn("found again in run: https://github.com/theorem-labs/oss-verify/actions/runs/9\n", sent[0])
+        self.assertIn("The call at line 51 is the one.", sent[0])
+        self.assertNotIn("SECRETBUG", run.stdout + run.stderr + run.summary)
+
+    def test_the_same_finding_with_the_same_text_sends_nothing_at_all(self):
+        _, _, bodies = self.run_held(self.HELD)
+        run, calls, sent = self.run_held(self.HELD, bodies_on_github=[bodies[0]], obj="held/9/" + "b" * 32,
+                                         header=self.HEADER.replace("runs/7", "runs/9"))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual((self.opened(calls), sent), ([], []))
+        self.assertIn("was not filed again", run.summary)
+
+    def test_a_body_a_person_edited_with_windows_line_ends_is_still_the_key_that_is_there(self):
+        _, _, bodies = self.run_held(self.HELD)
+        run, calls, sent = self.run_held(self.HELD, bodies_on_github=[bodies[0].replace("\n", "\r\n")],
+                                         obj="held/9/" + "b" * 32, header=self.HEADER.replace("runs/7", "runs/9"))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual((self.opened(calls), sent), ([], []))
+
+    def test_another_finding_of_the_same_project_is_filed(self):
+        _, _, bodies = self.run_held(self.HELD)
+        other = self.HELD.replace("heap-buffer-overflow in parse_SECRETBUG", "crash in other_SECRETBUG") \
+                         .replace("why held: memory safety: a read past the end", "why held: crash: it aborts") \
+                         .replace("src/parse.c:40-80, parse_SECRETBUG reads past the end.", "src/other.c:3, it aborts.")
+        run, calls, sent = self.run_held(other, bodies_on_github=[bodies[0]], obj="held/9/" + "b" * 32,
+                                         header=self.HEADER.replace("runs/7", "runs/9"))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(len(self.opened(calls)), 1)
+        self.assertNotEqual(self.key_of(sent[0]), self.key_of(bodies[0]))
+
+    def test_a_closed_issue_of_the_same_key_is_neither_reopened_nor_filed_again(self):
+        # The disclosure route closed it (oss-verify-proofs-internal#450 was closed as a duplicate). A re-run of a
+        # review is no new evidence: reopening would undo that decision, and a new issue is the duplicate the key
+        # exists to stop.
+        _, _, bodies = self.run_held(self.HELD)
+        run, calls, sent = self.run_held(self.HELD, bodies_on_github=[(bodies[0], "closed")],
+                                         obj="held/9/" + "b" * 32, header=self.HEADER.replace("runs/7", "runs/9"))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual((self.opened(calls), sent), ([], []))
+        self.assertFalse([c for c in calls if any(x in ("-X", "PATCH", "state=open") for x in c)], calls)
+        self.assertIn("in an issue that is closed", run.stdout)
+        self.assertIn("in an issue that is closed", run.summary)
+
+    def test_a_lookup_that_fails_files_nothing_and_fails_the_step(self):
+        run, calls, sent = self.run_held(self.HELD, listing_fails=True)
+        self.assertEqual(run.returncode, 1)
+        self.assertEqual((self.opened(calls), sent), ([], []))
+        self.assertIn("could not read the issues already filed", run.stderr)
+        # And a lookup of the comments of the issue that is there, for the parts it already holds.
+        _, _, bodies = self.run_held(self.HELD)
+        run, calls, sent = self.run_held(self.HELD, bodies_on_github=[bodies[0]], comments_fail=True,
+                                         obj="held/9/" + "b" * 32, header=self.HEADER.replace("runs/7", "runs/9"))
+        self.assertNotEqual(run.returncode, 0)
+        self.assertEqual((self.opened(calls), sent), ([], []))
+
+    def test_an_open_issue_of_the_key_is_the_one_a_closed_one_does_not_hide(self):
+        _, _, bodies = self.run_held(self.HELD)
+        run, calls, sent = self.run_held(self.HELD, obj="held/9/" + "b" * 32,
+                                         header=self.HEADER.replace("runs/7", "runs/9"),
+                                         bodies_on_github=[(bodies[0], "closed"), (bodies[0], "open")])
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(self.opened(calls), [])
+        self.assertIn("in an issue that is open", run.stdout)
 
     def test_a_re_run_sends_only_what_its_run_did_not_send_and_the_title_routes_nothing(self):
-        # The first of two untitled findings was sent before the run failed; a closed issue counts too. Another run's
-        # issue with the same title does not stop either.
+        # The first of two untitled findings was sent before the run failed; a closed issue counts too. Another
+        # project's issue does not stop either.
         two = "<!-- held finding -->\nproject: libreac\n<!-- held finding -->\nproject: libreac\nsecond\n"
-        run, calls, bodies = self.run_held(two, bodies_on_github=[
-            self.body(f"held finding key: {self.OBJECT} 1"), self.body(f"held finding key: held/1/{'b' * 32} 2"),
-            # A key anywhere but the fifth line is no key.
-            f"held finding key: {self.OBJECT} 2\n"])
+        run, calls, bodies = self.run_held(two)
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertIn(f"1 of {self.OBJECT} was already sent", run.stdout)
-        self.assertEqual(len(bodies), 1)
-        self.assertIn(f"held finding key: {self.OBJECT} 2\n", bodies[0])
-        self.assertIn("second", bodies[0])
+        self.assertEqual(len(bodies), 2)
+        run, calls, sent = self.run_held(two, obj="held/9/" + "b" * 32,
+                                         header=self.HEADER.replace("runs/7", "runs/9"),
+                                         bodies_on_github=[(bodies[0], "closed"),
+                                                           self.body(f"other/none/none/{'d' * 12}"),
+                                                           # A key anywhere but the fifth line is no key.
+                                                           f"held finding key: {self.key_of(bodies[1])}\n"])
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(len(self.opened(calls)), 1)
+        self.assertEqual(self.key_of(sent[0]), self.key_of(bodies[1]))
+        self.assertIn("second", sent[0])
 
     def test_a_finding_with_only_a_title_is_sent(self):
         run, _, bodies = self.run_held("<!-- held finding -->\ntitle: [held] libreac/x: crash in f\n")
@@ -704,36 +826,41 @@ else:
         run, calls, bodies = self.run_held(eleven)
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(len(bodies), 1)
-        self.assertIn(f"held finding key: {self.OBJECT} all\n", bodies[0])
+        self.assertRegex(self.key_of(bodies[0]), r"^libreac/all/[0-9a-f]{12}$")
         self.assertIn("SECRET10", bodies[0])
+        # The same eleven findings of another run of the review are the same set: one issue, not twelve.
+        run, calls, sent = self.run_held(eleven, bodies_on_github=[bodies[0]], obj="held/9/" + "b" * 32,
+                                         header=self.HEADER.replace("runs/7", "runs/9"))
+        self.assertEqual((run.returncode, self.opened(calls), sent), (0, [], []))
 
     def test_a_long_finding_goes_whole_in_parts_and_a_re_run_posts_only_the_missing_ones(self):
         # 130,000 bytes in lines of 1,000: the issue and two comments, each at most 60,000 bytes, which hold it all.
         long = "".join(f"{i:05d}" + "x" * 994 + "\n" for i in range(130))
-        run, calls, bodies = self.run_held("<!-- held finding -->\ntitle: big\n" + long + "END-OF-FINDING\n")
+        held = "<!-- held finding -->\ntitle: big in f\n" + long + "END-OF-FINDING\n"
+        run, calls, bodies = self.run_held(held)
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(len(bodies), 3)
+        key = self.key_of(bodies[0])
         self.assertTrue(all(len(b.encode()) <= 60500 for b in bodies))
         self.assertIn("(Part 1 of 3: the rest follows in the comments.)", bodies[0])
-        self.assertTrue(bodies[1].startswith(f"held finding part: {self.OBJECT} 1 2/3\n"))
+        self.assertTrue(bodies[1].startswith(f"held finding part: {key} 2/3\n"))
         self.assertIn("END-OF-FINDING", bodies[2])
         joined = "".join(bodies)
         self.assertTrue(all(f"{i:05d}" in joined for i in range(130)))
         self.assertEqual([c[1] for c in calls if "-F" in c][1:], ["repos/theorem-labs/private/issues/42/comments"] * 2)
         # A run that stopped after part 2: the next posts only part 3, on the issue that is there.
-        run, calls, bodies = self.run_held("<!-- held finding -->\ntitle: big\n" + long + "END-OF-FINDING\n",
-                                           bodies_on_github=[self.body(f"held finding key: {self.OBJECT} 1")],
-                                           comments=[f"held finding part: {self.OBJECT} 1 2/3\n\n..."])
+        run, calls, sent = self.run_held(held, bodies_on_github=[bodies[0]],
+                                         comments=[f"held finding part: {key} 2/3\n\n..."])
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(len(bodies), 1)
-        self.assertTrue(bodies[0].startswith(f"held finding part: {self.OBJECT} 1 3/3\n"))
+        self.assertEqual(len(sent), 1)
+        self.assertTrue(sent[0].startswith(f"held finding part: {key} 3/3\n"))
         self.assertEqual([c[1] for c in calls if "-F" in c], ["repos/theorem-labs/private/issues/1/comments"])
 
     @staticmethod
     def finding_of(issue_body, comment_bodies):
-        """The finding as the disclosure route reads it back: the issue after its five lines, without the part note,
+        """The finding as the disclosure route reads it back: the issue after its six lines, without the part note,
         then each comment after its part line and the blank line."""
-        text = issue_body.split("\n", 5)[5]
+        text = issue_body.split("\n", 6)[6]
         text = re.sub(r"\n\n\(Part 1 of \d+: the rest follows in the comments\.\)\n$", "", text)
         return text + "".join(c.split("\n", 2)[2] for c in comment_bodies)
 
@@ -743,7 +870,7 @@ else:
         # Short lines, so that a change of a few bytes in the lines the script adds would move where a part ends.
         lines = [f"{i:05d} " + "é" * (i % 7) + "y" * (30 + i % 13) + "\n" for i in range(2800)]
         finding = "".join(lines) + "END-OF-FINDING\n"
-        held = "<!-- held finding -->\ntitle: big\n" + finding
+        held = "<!-- held finding -->\ntitle: big in f\n" + finding
         run, _, first = self.run_held(held)
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertGreater(len(first), 2)
@@ -769,7 +896,7 @@ else:
             for prefix in range(4):
                 with self.subTest(char=char, prefix=prefix):
                     finding = "x" * prefix + char * (130000 // len(char.encode())) + "\n"
-                    run, _, bodies = self.run_held("<!-- held finding -->\ntitle: big\n" + finding)
+                    run, _, bodies = self.run_held("<!-- held finding -->\ntitle: big in f\n" + finding)
                     self.assertEqual(run.returncode, 0, run.stderr)
                     self.assertEqual(len(bodies), 3)
                     self.assertNotIn("\ufffd", "".join(bodies))
@@ -777,10 +904,10 @@ else:
 
     def test_a_part_ends_at_a_line_end_when_the_line_fits(self):
         finding = "".join(f"{i:05d} " + "y" * 994 + "\n" for i in range(130))
-        run, _, bodies = self.run_held("<!-- held finding -->\ntitle: big\n" + finding)
+        run, _, bodies = self.run_held("<!-- held finding -->\ntitle: big in f\n" + finding)
         self.assertEqual(run.returncode, 0, run.stderr)
         texts = [re.sub(r"\n\n\(Part 1 of \d+: the rest follows in the comments\.\)\n$", "",
-                        bodies[0].split("\n", 5)[5])] + [b.split("\n", 2)[2] for b in bodies[1:]]
+                        bodies[0].split("\n", 6)[6])] + [b.split("\n", 2)[2] for b in bodies[1:]]
         self.assertTrue(all(t.endswith("\n") and t.split("\n")[0][:5].isdigit() for t in texts), texts[1][:20])
 
     def test_the_public_comment_is_the_bots_review_comment_of_the_pull_request(self):
@@ -818,19 +945,22 @@ else:
                 self.assertEqual(run.returncode, 2)
                 self.assertIn("names is not private, so nothing is sent", run.stderr)
                 self.assertFalse([c for c in calls if "-F" in c or "-f" in c])
-        self.OBJECT = "held/7/short"
-        run, calls, _ = self.run_held(self.HELD)
+        run, calls, _ = self.run_held(self.HELD, obj="held/7/short")
         self.assertEqual((run.returncode, calls), (2, []))
 
-    def test_an_object_that_does_not_start_with_the_workflows_lines_is_sent_whole(self):
+    def test_an_object_that_does_not_start_with_the_workflows_lines_is_sent_whole_once(self):
         for header in ("", "oss-verify held finding v1\npr: 68\nhead: x\nproject: libreac\nrun: r\n---\n",
                        self.HEADER.replace("runs/7", "runs/8")):
             with self.subTest(header=header):
                 run, calls, bodies = self.run_held(self.HELD, header=header)
                 self.assertEqual(run.returncode, 0, run.stderr)
                 self.assertEqual(len(bodies), 1)
-                self.assertIn(f"held finding key: {self.OBJECT} raw\n", bodies[0])
+                self.assertRegex(self.key_of(bodies[0]), r"^raw/[0-9a-f]{12}$")
                 self.assertIn("SECRETBUG", bodies[0])
+                # The same broken object, stored again by another run, is the same key: one issue.
+                run, calls, sent = self.run_held(self.HELD, header=header, bodies_on_github=[bodies[0]],
+                                                 obj="held/9/" + "b" * 32)
+                self.assertEqual((run.returncode, self.opened(calls), sent), (0, [], []))
 
     def test_the_finding_reaches_the_hold_job_only_through_the_private_bucket(self):
         jobs = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["jobs"]
