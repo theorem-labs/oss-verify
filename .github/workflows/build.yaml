@@ -51,7 +51,7 @@ name: "Build"
 #            to the disclosure route as a private issue (.github/scripts/review-hold): the review job stores it in a
 #            private bucket that only this job can read, and this job sends every finding stored there, a cancelled
 #            run's too. A finding never reaches a log, an output or an artifact.
-#   comment  while OSSV_POST_REVIEW is `post`, posts that comment, with the checks' report folded under it, or replaces
+#   comment  posts that comment, with the checks' report folded under it, or replaces
 #            the one already there. The comment starts with <!-- oss-verify-review -->, as the triage comment starts
 #            with its own marker. It never runs for an issue: a person approves the exact text of each reply to an
 #            issue before anyone posts it.
@@ -145,9 +145,9 @@ name: "Build"
 # file ask for an identity token; no other job of it does.
 # A review runs only on main: the Anthropic rule above admits refs/heads/main alone, so a run on another branch gets
 # no Anthropic token (and Google's provider, which also admits main alone, gives it no collector token). So a change to
-# the review is tried for real only once it is on main: run `gh workflow run build.yaml -f pr=<n>`, or `-f issue=<n>`
-# for the reply to an issue; while OSSV_POST_REVIEW is not `post`, that posts nothing, and the draft is the run's
-# artifact enroll-review-draft.
+# the review is tried for real only once it is on main: run `gh workflow run build.yaml -f pr=<n>`, which posts the
+# comment on that pull request, or `-f issue=<n>` for the reply to an issue, which posts nothing; the draft is also the
+# review job's artifact enroll-review-draft.
 # Before the merge, tools/tests runs the review's own steps with stand-ins.
 #
 # The review's Claude Code exports its usage by OpenTelemetry to Theorem's cost collector, at the public URL below
@@ -780,14 +780,12 @@ jobs:
         run: .github/scripts/review-hold "$RUNNER_TEMP/held"
 
   comment:
-    # Posts the review's comment as oss-verify[bot], or updates the one already there: only while the repository
-    # variable OSSV_POST_REVIEW is `post`, because a person approves each message to a maintainer before it is posted
-    # (until then the comment is the review job's artifact enroll-review-draft), and, when the review held a finding
-    # back, only once the hold job sent it, because the comment says that it was sent. Never for an issue, whatever
-    # any variable says: a person approves the exact text of each reply to an issue before anyone posts it.
+    # Posts the review's comment as oss-verify[bot], or updates the one already there; when the review held a finding
+    # back, only once the hold job sent it, because the comment says that it was sent. Never for an issue: a person
+    # approves the exact text of each reply to an issue before anyone posts it.
     needs: [route, project-builds, review, hold]
     if: >-
-      ${{ !cancelled() && vars.OSSV_POST_REVIEW == 'post' && needs.route.outputs.kind != 'issue'
+      ${{ !cancelled() && needs.route.outputs.kind != 'issue'
       && needs.review.result == 'success' && needs.review.outputs.comment != ''
       && (needs.review.outputs.held_object == '' || needs.hold.result == 'success') }}
     runs-on: ubuntu-latest
@@ -920,9 +918,9 @@ jobs:
           BUILD: ${{ needs.project-builds.result }}
           ASKED_BUILD: ${{ needs.route.outputs.kind == 'enrollment' }}
           # Each of the others is asked for on its own job's condition: the record when the build passed and took a
-          # project, the review when the build took a project or the kind is change or issue, hold
-          # when the review ran, comment when posting is on and the review wrote a comment (and, if it held a finding
-          # back, the hold job sent it), never for an issue.
+          # project, the review when the build took a project or the kind is change or issue, hold when the review
+          # ran, comment when the review wrote a comment (and, if it held a finding back, the hold job sent it), never
+          # for an issue.
           RECORD: ${{ needs.record.result }}
           ASKED_RECORD: ${{ needs.project-builds.result == 'success' && needs.project-builds.outputs.name != '' }}
           REVIEW: ${{ needs.review.result }}
@@ -931,7 +929,7 @@ jobs:
           ASKED_HOLD: ${{ needs.review.result != 'skipped' }}
           COMMENT: ${{ needs.comment.result }}
           ASKED_COMMENT: >-
-            ${{ vars.OSSV_POST_REVIEW == 'post' && needs.route.outputs.kind != 'issue'
+            ${{ needs.route.outputs.kind != 'issue'
             && needs.review.result == 'success' && needs.review.outputs.comment != ''
             && (needs.review.outputs.held_object == '' || needs.hold.result == 'success') }}
         run: >-
