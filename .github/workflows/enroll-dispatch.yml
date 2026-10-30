@@ -38,7 +38,8 @@
 #
 # It runs on workflow_run, so this file and the script are main's, whatever the pull request holds, and it runs no
 # code of the pull request: decide reads the API as data with a read-only token, this repository's and, for the
-# maintainer check, the public repository that the project's `repo` names. dispatch alone holds a credential:
+# maintainer check, the public repository that the project's `repo` names. Of this file's own jobs, dispatch alone holds
+# a credential (review-rerun.yml's rerun job, which the job review-rerun below calls, holds one too: the same key):
 # the OSS Verify App's installation token, made from the App's key, which it reads at run time from Secret Manager by
 # Google workload identity federation, as build.yaml's and triage.yaml's comment jobs do. It declares the GitHub
 # Environment `comment`, whose claim is the only way to act as the account that reads the key; decide must never
@@ -62,16 +63,19 @@ permissions: {}
 concurrency:
   # The runs for one pull request's head wait for each other, so that they read the checks one after another. The
   # group names the head's repository and branch too, so that another pull request at the same commit from another head
-  # cancels no run of this one (one from the same head shares the group, and the run that replaces a pending one
-  # decides on the same commit and branch); `:`, which neither a repository's name nor a branch's can hold (git
-  # check-ref-format refuses it in a ref, and a GitHub repository name is letters, digits, `.`, `_` and `-`), keeps the
-  # parts apart. A Build run started by hand is about the pull request its record names, not the main commit it ran
-  # on: each has a group of its own.
+  # cancels no run of this one (one from the same head shares the group); `:`, which neither a repository's name nor a
+  # branch's can hold (git check-ref-format refuses it in a ref, and a GitHub repository name is letters, digits, `.`,
+  # `_` and `-`), keeps the parts apart. A Build run started by hand is about the pull request its record names, not the
+  # main commit it ran on: each has a group of its own. Every waiting run keeps its place (queue: max, up to 100), so
+  # none replaces another: a later run of decide would decide on the same commit, but review-rerun acts on the Build
+  # run that started this run alone, and a replaced run would lose that re-run
+  # (https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).
   group: >-
     enroll-dispatch:${{ github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.id
     || format('{0}:{1}:{2}', github.event.workflow_run.head_sha,
     github.event.workflow_run.head_repository.full_name, github.event.workflow_run.head_branch) }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
   decide:
@@ -128,7 +132,8 @@ jobs:
     if: needs.decide.outputs.decision == 'dispatch' || needs.decide.outputs.decision == 'label'
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # Gets this job, and no other, the App's key: only a token with this environment's claim may act as the account
+    # Gets this job, and no other job of this file, the App's key (review-rerun.yml's rerun job, which the job
+    # review-rerun calls, declares `comment` too): only a token with this environment's claim may act as the account
     # that reads it, as for build.yaml's and triage.yaml's comment jobs. Removing this line does not weaken the job; it
     # stops it working. deployment: false, as there, so that a run posts no deployment; the claim is in the token
     # either way.
