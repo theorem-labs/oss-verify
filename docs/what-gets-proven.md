@@ -17,6 +17,20 @@ There are two main statements:
 * **Halts.** On each input that stays in the build's memory budget, each run exits with a status that the statement accepts, usually 0 or 2 ([below](#what-a-statement-accepts)). Thus the binary does not crash, fail an assertion, hang, or fail a sanitizer check on such an input.
 * **Agrees.** On each input on which the plain build stays in its budget, the plain build and a sanitizer build both reach no error. They also have the same behaviour: they write the same bytes and exit with the same status. A sanitizer detection stops the program, so this statement excludes each error that the sanitizer checks.
 
+For some fuzz targets in C or C++, the `plain` build and the `ubsan` build each have a third statement:
+
+* **No crash.** On each input, and whatever LPS refuses, no run crashes. Any system call can fail at any time, and memory requests too. Here a crash is an invalid memory access or a trap, for example a failed UBSan check. A run can stop with `abort()`, exit with any status, or loop forever.
+
+These runs also make a no-crash statement false:
+
+* a run that touches reserved memory that the 16 GiB budget cannot back, for example in a `MAP_NORESERVE` mapping;
+* a run that makes a call that would wait forever;
+* a run that does anything else that LPS does not cover.
+
+A no-crash statement does not catch three failures that OSS-Fuzz reports: an `abort()` (for example a failed assertion), a run that loops forever, and status 77. The driver gives status 77 when the program calls `exit()` during a call of the fuzz target ([build-contract.md](build-contract.md#exit-statuses)).
+
+No AddressSanitizer build, and no fuzz target in Rust or Python, has a no-crash statement. An AddressSanitizer detection stops the program with `abort()`. A failed check in Rust or Python exits. A no-crash statement permits both, so it would not catch these errors.
+
 The project's directory in the proofs repository, `projects/<name>/`, lists the statements of each fuzz target and build, and the proofs that are done.
 
 ## What a statement accepts
@@ -33,7 +47,7 @@ Thus each expected outcome must end as `return 0`. Examples of expected outcomes
 
 ## What the statements catch
 
-The statements catch each failure that the fuzz target would catch in OSS-Fuzz: a crash, a hang, a failed assertion or a sanitizer detection. They catch it on each input, not only on the inputs that a fuzzer tries.
+Together, the statements catch each failure that the fuzz target would catch in OSS-Fuzz: a crash, a hang, a failed assertion or a sanitizer detection. They catch it on each input, not only on the inputs that a fuzzer tries.
 
 There are exceptions, and this is the full list. Each exception is a limit of how we run the fuzz target, which these builds cannot remove. No exception is a choice that a project makes.
 
@@ -67,13 +81,14 @@ A program can run out of memory, and a statement must tell what happens then. Th
 * **Each statement has a reading.** The reading is a field of the statement. It tells which calls LPS can refuse.
   * `budget` (halts statements): a call fails only where the process's own state forces it to. Thus LPS refuses a memory request only when the build has used its budget or no address range is free.
   * `alloc-forced-only` (agrees, bound and decidability statements): any other system call can fail, but memory is refused as in `budget`.
-  * `may-fail` (halts, agrees, bound and decidability statements): any system call can fail at any time, and memory requests too.
+  * `may-fail` (halts, agrees, bound, decidability and no-crash statements): any system call can fail at any time, and memory requests too.
 * **A `budget` halts statement permits exhaustion.** On each input in the budget, each run exits with a status that the statement accepts (usually 0 or 2). A run that stops because it has no memory must exit with such a status too, or the statement is false. Refusals at start do not count: the statement is not about a program that gets no memory before it gets to the fuzz target.
 * **A `may-fail` halts statement covers each refusal.** Each run must halt, whatever LPS refuses, but it can exit with any status. A refusal at start counts: a build that waits forever when a refusal at start occurs makes the statement false.
+* **A no-crash statement covers each refusal and permits an abort.** After a refused allocation, the program can stop with `abort()`, for example in a failed assertion. A program that then accesses memory through the NULL pointer makes the statement false.
 * **An agrees statement compares behaviour.** It does not claim that a run halts. An input on which the plain build is refused memory for its budget is not in the statement. In an `alloc-forced-only` agrees statement, a memory refusal that only the sanitizer build gets, because it used its budget or found no free address range, can make the two builds write different bytes, and that makes the statement false. In a `may-fail` agrees statement, either build can get any refusal. So each output of one build, under some refusals, must also be an output of the other build, under some refusals.
 * **Only a `may-fail` statement lets an allocation fail at random.** No other statement lets an allocation fail without a cause. There is no setting in `project.yaml` for out-of-memory behaviour.
 
-A budget is a quantity of memory that a build can allocate. It is a condition of the statement: an input that needs more memory is not in the statement. It is not a failure. These are the defaults, which the oss-fuzz-theorems 2026.10 release uses:
+A budget is a quantity of memory that a build can allocate. It is a condition of most statements: an input that needs more memory is not in the statement. It is not a failure. A `may-fail` halts statement and a no-crash statement have no such condition. They cover each input, and LPS refuses memory past the budget. These are the defaults, which the oss-fuzz-theorems 2026.10 release uses:
 
 ```yaml
 budgets:
@@ -96,11 +111,11 @@ A statement made under a project's own budgets names both of them. A smaller pla
 
 ## Allocation failure
 
-A `budget` halts statement does not ask a program to survive a refused allocation. A `may-fail` statement does: in it, any allocation can fail. A project that wants its library to survive refused allocations adds an allocation-failure fuzz target. In this fuzz target, allocations fail as the input tells them to ([build-contract.md](build-contract.md#allocation-failure-fuzz-targets)). In the other fuzz targets, the driver makes no allocation fail.
+A `budget` halts statement does not ask a program to survive a refused allocation. A `may-fail` halts statement does: in it, any allocation can fail. A no-crash statement asks less: after a refused allocation, the program can stop with `abort()`, but it must not crash. A project that wants its library to survive refused allocations adds an allocation-failure fuzz target. In this fuzz target, allocations fail as the input tells them to ([build-contract.md](build-contract.md#allocation-failure-fuzz-targets)). In the other fuzz targets, the driver makes no allocation fail.
 
 ## Write "correct" into the fuzz target
 
-A statement covers what the fuzz target checks. Thus the fuzz target is the place to say what "correct" means.
+A statement covers what the fuzz target checks. Thus the fuzz target is the place to say what "correct" means. A no-crash statement is the exception: it permits `abort()`, so it does not cover a check that calls `abort()`.
 
 * A fuzz target that only gives its input to the library shows only that the library does not crash, hang or fail a sanitizer check.
 * A fuzz target that checks a property, and aborts when it is false, makes the halts proof a proof of that property for each input. An example is `if (decompress(compress(x)) != x) abort();`. Do not use `assert()`: a build that defines `NDEBUG` removes it.
@@ -128,7 +143,7 @@ A proof does not cover these items:
 * the source of the library in general: another compiler, other flags, another architecture, or the x86-64 builds of OSS-Fuzz;
 * the exceptions above, and errors that no sanitizer checks, here or in OSS-Fuzz, for example an access through another live object;
 * code that no sanitizer instruments: the C library, the compiler's runtime libraries and the sanitizer runtime. OSS-Fuzz does not instrument them either;
-* inputs that need more memory than the budget;
+* inputs that need more memory than the budget, except in a `may-fail` halts statement or a no-crash statement;
 * what LPS leaves out. The documentation of LPS tells where it is narrower than Linux.
 
 ## Findings
