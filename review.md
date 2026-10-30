@@ -24,6 +24,8 @@ Give each check one verdict:
 
 - **pass**: the evidence shows that the rule is met.
 - **fail**: the evidence shows that the rule is not met, and the maintainer can fix it. Each **fail** becomes one request in the comment.
+  - **Optional**: a **fail** of F5 or F8 whose check still ends the run on some wrong value. The check is weak, not empty, so it does not stop the enrollment and is not a condition of the merge.
+  - **Blocking**: each other **fail**.
 - **person**: a person at Theorem must decide, or you could not get the evidence. Each **person** goes in the summary only.
 
 ## Checklist
@@ -145,7 +147,13 @@ Read each fuzz target's source: in `DIR`, or in the project's repository at the 
 
 ## Write the comment
 
-Write `$WORK/comment.md` as `.claude/skills/write-to-maintainer/SKILL.md` says. Its blocking items are the **fail** verdicts, each with the facts that the maintainer needs (the file, the line, the commit, the limit) and the fix. Do not put these in the comment: the size, the rubric, a **person** verdict, the verdict table, or a guess about whether we will accept the project.
+Write `$WORK/comment.md` as `.claude/skills/write-to-maintainer/SKILL.md` says. Its items are the **fail** verdicts, each with the facts that the maintainer needs (the file, the line, the commit, the limit) and the fix. Do not put these in the comment: the size, the rubric, a **person** verdict, the verdict table, or a guess about whether we will accept the project.
+
+- The first sentence gives only the number of blocking items, for example "Three changes are needed in the fuzz targets of `<owner>/<repo>`." It never uses the words merge, publish or prove.
+- The optional items go in the collapsed block, under one line that says that they are optional and not a condition of the merge.
+- An item that comes from a rule of the build contract names that rule and links https://github.com/theorem-labs/oss-verify/blob/main/docs/build-contract.md, for example "`/tmp` is empty in each run".
+- When check F2 or F7 is **fail**, one sentence says that the pull request gets the label `review-blocking` because of that check, and that no statements start until it passes.
+- The visible text ends with this offer: "We can write these changes for you. Reply here if you want that." Only the sentence of check G4 can come after it.
 
 Post it only if the workflow sets `REVIEW_POST=1`: `gh pr comment "$PR" --body-file "$WORK/comment.md"`. Post it once. In CI, do not post: your last message is the comment ("In CI" in the skill).
 

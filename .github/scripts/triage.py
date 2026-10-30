@@ -17,10 +17,10 @@ request exists, as opened by --login with the description in --body (default: .g
 unticked). Without GITHUB_TOKEN, GitHub limits anonymous requests, and the rows that need GraphQL say "could not be
 checked".
 
-The comment on the pull request is public, and carries only the rows in PUBLIC_ROWS: the license, whether an active
-maintainer opened it, its scope, tools/validate.py and the checklist. The full table has every row, and is for
-Theorem's reviewers: --summary appends it to a file (the workflow's job summary) in the same run, so that no API
-request is made twice, and --full prints it instead of the comment (the review reads it).
+The comment on the pull request is public, and carries only the rows in PUBLIC_ROWS: whether the repository is a fork,
+the license, whether an active maintainer opened it, its scope, tools/validate.py and the checklist. The full table
+has every row, and is for Theorem's reviewers: --summary appends it to a file (the workflow's job summary) in the
+same run, so that no API request is made twice, and --full prints it instead of the comment (the review reads it).
 
 The pull request is read as data through the GitHub API: nothing from it is checked out or executed, and a read-only
 token is enough. The token goes to api.github.com alone, and no other host is contacted. Text from the pull request,
@@ -65,7 +65,8 @@ MAX_TEXT_BYTES = 256 * 1024
 MARKER = "<!-- oss-verify-triage -->"
 # The rows the public comment carries, by their check's name, in the order of the full table. The full table has every
 # row, and goes to Theorem's reviewers alone (--summary, --full).
-PUBLIC_ROWS = ("License", "Opened by an active maintainer", "Pull request scope", "`tools/validate.py`", "Checklist")
+PUBLIC_ROWS = ("Fork", "License", "Opened by an active maintainer", "Pull request scope", "`tools/validate.py`",
+               "Checklist")
 COMMENT_FOOTER = "<sub>Automated, from public data. It decides nothing.</sub>\n"
 
 OK, WARN, FAIL, INFO = "✅", "⚠️", "❌", "ℹ️"
@@ -483,6 +484,18 @@ def seeded_contact_row(config: dict, association: str) -> tuple[str, str]:
     )
 
 
+def fork_row(meta: dict) -> tuple[str, str]:
+    """Is the repository a fork? CONTRIBUTING.md, "Review of an enrollment", says that we usually do not accept one,
+    so the maintainer sees this row and not only our reviewers."""
+    parent = (meta.get("parent") or {}).get("full_name")
+    if not meta["fork"]:
+        return OK, "not a fork"
+    of = f"a fork of [{parent}](https://github.com/{parent})" if parent else "a fork of another repository"
+    return WARN, (f"{of}. We usually do not accept a fork ([CONTRIBUTING.md]"
+                  "(https://github.com/theorem-labs/oss-verify/blob/main/CONTRIBUTING.md#review-of-an-enrollment))."
+                  " A person at Theorem decides")
+
+
 def standing_row(meta: dict) -> tuple[str, str]:
     created, pushed = parse_time(meta["created_at"]), parse_time(meta["pushed_at"])
     result = f"created {ago(created)}, last push {ago(pushed)}"
@@ -831,6 +844,7 @@ def repository_rows(gh: GitHub, config: dict, beside: set[str], login: str) -> t
     return f"[{slug}]({meta['html_url']})" + (f" at {code(ref)}" if ref else ""), [
         row("Repository", standing_row, meta),
         row("Stars / forks", popularity_row, meta),
+        row("Fork", fork_row, meta),
         row("Outside participants", outsiders_row, gh, slug, meta, login),
         row("Criticality score", criticality_row, gh, slug, meta),
         row("License", license_row, gh, slug, meta),

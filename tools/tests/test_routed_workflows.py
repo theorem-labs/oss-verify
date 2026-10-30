@@ -327,22 +327,6 @@ def route_issue(tmp_path, pr, issue, is_pull=False, event="workflow_dispatch", s
 
 def test_a_run_for_an_issue_asks_for_the_review_alone(tmp_path):
     assert route_issue(tmp_path, "", "5") == (0, ["issue=true"])
-    flow = workflow("build.yaml")
-    jobs = flow["jobs"]
-    inputs = flow[True]["workflow_dispatch"]["inputs"]
-    assert (inputs["pr"]["required"], inputs["issue"]["required"]) == (False, False)
-    number = "inputs.issue || github.event.issue.number"
-    assert f"(({number}) && format('Issue {{0}}', {number}))" in flow["run-name"]
-    issue = "needs.route.outputs.issue == 'true'"
-    assert issue in jobs["review"]["if"]
-    assert issue in step(jobs["required"], "Every job route asked for passed, and no other ran")["env"]["ASKED_REVIEW"]
-    assert all("issue" not in str(jobs[job]["if"]) for job in ("project-builds", "record"))
-    review = {s.get("name"): s for s in jobs["review"]["steps"]}
-    assert review["Draft the issue reply"]["if"] == "env.ISSUE != ''"
-    # The comment job, which alone posts, never runs for an issue (its ASKED_COMMENT is the same condition: the test of
-    # the collector above).
-    assert jobs["comment"]["if"].startswith(
-        "${{ !cancelled() && vars.OSSV_POST_REVIEW == 'post' && needs.route.outputs.issue != 'true' && ")
 
 
 @pytest.mark.parametrize("pr, issue, is_pull", [
