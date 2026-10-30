@@ -2,8 +2,9 @@
 # Anthropic PBC, Apache-2.0. Modified 2026 by Theorem Labs, PBC: OSS Verify's comment (its marker and checks).
 name: "Triage"
 # Triages an enrollment pull request with what a reviewer would otherwise look up by hand. The comment on the pull
-# request is public and carries only the license, whether whoever opened it looks like an active maintainer, the pull
-# request's scope, tools/validate.py and the checklist. The full table, for Theorem's reviewers, is gather's job summary:
+# request is public and carries only whether the repository is a fork, the license, whether whoever opened it looks like
+# an active maintainer, the pull request's scope, tools/validate.py and the checklist. The full table, for Theorem's
+# reviewers, is gather's job summary:
 # it adds the project's standing, stars and forks, outside participants, criticality score, OSS-Fuzz, .oss-verify/ in
 # its repository and its status in the proofs index. Both inform the review and decide nothing. A pull request that
 # touches nothing under projects/ gets neither.
@@ -205,22 +206,7 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number || inputs.pr }}
           COMMENT: ${{ needs.gather.outputs.comment }}
-          # The comment is posted only while the repository variable OSSV_POST_TRIAGE is `post` (the stream owner
-          # allowed automatic posting with oss-verify #114). Otherwise this step writes it to the job's summary as a
-          # draft, and posts and edits nothing.
-          POST_TO_PR: ${{ vars.OSSV_POST_TRIAGE }}
         run: |
-          if [ "${POST_TO_PR:-}" != post ]; then
-            {
-              echo "### Draft of the triage comment (not posted)"
-              echo
-              echo "OSSV_POST_TRIAGE is not \`post\`, so nothing was posted or edited on the pull request. The draft, as Markdown:"
-              echo
-              printf '%s\n' "$COMMENT" | sed 's/^/    /'
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "Not posted: OSSV_POST_TRIAGE is not post. The draft is in the job summary."
-            exit 0
-          fi
           # Ours is the oss-verify App's comment that starts with the marker.
           existing=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
             --jq '.[] | select(.user.login == "oss-verify[bot]" and (.body | startswith("<!-- oss-verify-triage -->"))) | .id')

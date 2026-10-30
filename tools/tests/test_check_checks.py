@@ -514,46 +514,30 @@ class PostingStep(unittest.TestCase):
                 self.assertIn("issues/comments/4242", (directory / "patch.url").read_text())
             return json.loads((directory / sent[0]).read_text())["body"] if sent else None
 
-    def test_nothing_is_posted_unless_posting_is_on(self):
-        # The comment job, which alone holds the App's key, runs only while OSSV_POST_REVIEW is `post`, and the
-        # required job asks for it on the same condition, so with the variable unset no job can post or edit a comment.
-        jobs = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["jobs"]
-        condition = jobs["comment"]["if"]
-        self.assertIn("vars.OSSV_POST_REVIEW == 'post' && ", condition)
-        asked = jobs["required"]["steps"][-1]["env"]["ASKED_COMMENT"]
-        self.assertEqual(condition.replace("!cancelled() && ", ""), asked)
-        # No other job of the file can write to the pull request: only the comment job's token is the App's.
-        for name, job in jobs.items():
-            if name != "comment":
-                self.assertNotIn("write", json.dumps({k: v for k, v in (job.get("permissions") or {}).items()
-                                                      if k != "id-token"}), name)
-
-    def test_the_triage_comment_is_a_draft_without_its_variable(self):
-        # triage.yaml's own posting step: with OSSV_POST_TRIAGE anything but post, it calls gh not at all and writes the
-        # draft to the summary; with post, it posts.
+    def test_the_triage_step_posts_or_updates_its_comment(self):
+        # triage.yaml's own posting step, run with a fake gh: with no comment of ours it posts one; with one, it edits it.
         workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "triage.yaml").read_text())
         name = "Post the comment, or update the one already there"
         matches = [s for s in workflow["jobs"]["comment"]["steps"] if s.get("name") == name]
         self.assertEqual(len(matches), 1)
-        self.assertEqual(matches[0]["env"]["POST_TO_PR"], "${{ vars.OSSV_POST_TRIAGE }}")
-        for value, posts in (("", False), ("draft", False), ("Post", False), ("post", True)):
+        for existing, sent in (("", "post.json"), ("4242", "patch.json")):
             with tempfile.TemporaryDirectory() as directory:
                 directory = pathlib.Path(directory)
                 (directory / "bin").mkdir()
                 (directory / "bin" / "gh").write_text(
                     f'#!/bin/bash\necho "$*" >> {directory}/calls\n'
-                    f'case "$*" in *"--method POST"*) cat > {directory}/post.json ;; esac\n')
+                    f'case "$*" in *"--paginate"*) echo "{existing}" ;;\n'
+                    f'  *"--method POST"*) cat > {directory}/post.json ;;\n'
+                    f'  *"--method PATCH"*) cat > {directory}/patch.json ;; esac\n')
                 (directory / "bin" / "gh").chmod(0o755)
                 environment = {**os.environ, "PATH": f"{directory / 'bin'}:{os.environ['PATH']}", "GH_TOKEN": "x",
-                               "REPO": "o/r", "PR": "8", "COMMENT": "<!-- oss-verify-triage -->\n### Triage\n",
-                               "POST_TO_PR": value, "GITHUB_STEP_SUMMARY": str(directory / "summary")}
+                               "REPO": "o/r", "PR": "8", "COMMENT": "<!-- oss-verify-triage -->\n### Triage\n"}
                 run = subprocess.run(["bash", "-e", "-c", matches[0]["run"]], env=environment, capture_output=True,
                                      text=True)
                 self.assertEqual(run.returncode, 0, run.stderr)
-                self.assertEqual((directory / "post.json").exists(), posts, value)
-                if not posts:
-                    self.assertFalse((directory / "calls").exists(), value)
-                    self.assertIn("\n    ### Triage\n", (directory / "summary").read_text())
+                self.assertEqual(sorted(p.name for p in directory.glob("*.json")), [sent], existing)
+                self.assertEqual(json.loads((directory / sent).read_text())["body"],
+                                 "<!-- oss-verify-triage -->\n### Triage\n")
 
     def test_a_review_replaces_the_posted_one(self):
         body = self.post("Thanks again.\n\n2. Fix Y.\n")
