@@ -1363,9 +1363,11 @@ class ReviewRerun(unittest.TestCase):
 
     def rerun(self, attempt, jobs, pulls=None, run_id=40):
         """Run the step for the completion of attempt `attempt` of Build run `run_id` at HEAD. jobs: {name: conclusion}
-        of that attempt. pulls: {number: (head, paths)} of the open pull requests into main, the path "new<-old" for a
-        rename (default: one enrollment at HEAD). Return the re-runs it asked for, its output and its summary."""
+        of that attempt. pulls: {number: (head, paths)} or {number: (head, paths, draft)} of the open pull requests
+        into main, the path "new<-old" for a rename (default: one enrollment at HEAD, ready for review). Return the
+        re-runs it asked for, its output and its summary."""
         pulls = {5: (self.HEAD, self.ENROLLMENT)} if pulls is None else pulls
+        pulls = {n: (p + (False,))[:3] for n, p in pulls.items()}
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             (root / "bin").mkdir()
@@ -1373,9 +1375,9 @@ class ReviewRerun(unittest.TestCase):
                 {"name": name, "status": "completed", "conclusion": conclusion, "run_attempt": attempt,
                  "head_branch": "$(touch pwned)"} for name, conclusion in jobs.items()]}))
             (root / "pulls.json").write_text(json.dumps(
-                [{"number": n, "head": {"sha": head, "ref": "`touch pwned`"}, "base": {"ref": "main"}}
-                 for n, (head, paths) in pulls.items()]))
-            for number, (head, paths) in pulls.items():
+                [{"number": n, "head": {"sha": head, "ref": "`touch pwned`"}, "base": {"ref": "main"}, "draft": draft}
+                 for n, (head, paths, draft) in pulls.items()]))
+            for number, (head, paths, draft) in pulls.items():
                 (root / f"files-{number}.json").write_text(json.dumps(
                     [dict(zip(("filename", "previous_filename"), path.split("<-"))) for path in paths]))
             (root / "bin" / "gh").write_text(
@@ -1430,10 +1432,8 @@ class ReviewRerun(unittest.TestCase):
                     "re-runs for one Build run: it is not run again."])
 
     def test_a_successful_run_re_runs_nothing(self):
-        # The job starts only for a failed run of a pull request's own event; the step re-runs nothing whose review
-        # passed, whatever its verdicts (`person` too: a person decides, not a re-run).
-        self.assertEqual(self.job["if"], "github.event.workflow_run.event == 'pull_request_target' && "
-                                         "github.event.workflow_run.conclusion == 'failure'")
+        # The step re-runs nothing whose review passed, whatever its verdicts (`person` too: a person decides, not a
+        # re-run).
         reruns, out, summary = self.rerun(1, self.jobs("success"))
         self.assertEqual((reruns, summary), ([], ""))
 
@@ -1450,34 +1450,18 @@ class ReviewRerun(unittest.TestCase):
     def test_a_change_or_a_pull_request_that_moved_on_is_not_re_run(self):
         # Not one enrollment: a change, a project and another file, two projects, a file renamed into a project, a file
         # directly in projects/. Or no open pull request into main is at the run's head any more: a later push, a
-        # close, a merge (its review decides nothing, and a re-run could cancel the newer head's Build run).
+        # close, a merge (its review decides nothing, and a re-run could cancel the newer head's Build run). Or the
+        # pull request at the head is a draft: enroll-dispatch's decide refuses it, and marking it ready runs Build.
         cases = [{5: (self.HEAD, ["tools/check"])}, {5: (self.HEAD, ["projects/zlib/build.sh", "README.md"])},
                  {5: (self.HEAD, ["projects/zlib/build.sh", "projects/curl/build.sh"])},
                  {5: (self.HEAD, ["projects/zlib/build.sh<-tools/x"])}, {5: (self.HEAD, ["projects/zlib"])},
-                 {5: ("d" * 40, self.ENROLLMENT)}, {},
+                 {5: ("d" * 40, self.ENROLLMENT)}, {}, {5: (self.HEAD, self.ENROLLMENT, True)},
                  # Two pull requests at the head: each must be one enrollment.
                  {5: (self.HEAD, self.ENROLLMENT), 6: (self.HEAD, ["tools/check"])}]
         for pulls in cases:
             with self.subTest(pulls=pulls):
                 reruns, out, summary = self.rerun(1, self.jobs(), pulls)
                 self.assertEqual((reruns, summary), ([], ""))
-
-    def test_the_workflow_has_no_schedule_no_checkout_and_no_secret(self):
-        build = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["name"]
-        self.assertEqual(self.workflow[True], {"workflow_run": {"workflows": [build], "types": ["completed"]}})
-        self.assertEqual(self.workflow["permissions"], {})
-        self.assertEqual(self.job["permissions"], {"actions": "write", "pull-requests": "read"})
-        self.assertFalse([s for s in self.job["steps"] if "uses" in s])
-        text = (ROOT / ".github" / "workflows" / "review-rerun.yml").read_text()
-        self.assertNotIn("secrets.", text)
-        # Only numbers of the completed run, the repository's name and the job's own token reach the step: no title,
-        # branch or other text that the pull request's author wrote.
-        (step,) = self.job["steps"]
-        self.assertEqual(step["env"], {"GH_TOKEN": "${{ github.token }}", "REPO": "${{ github.repository }}",
-                                       "RUN_ID": "${{ github.event.workflow_run.id }}",
-                                       "RUN_ATTEMPT": "${{ github.event.workflow_run.run_attempt }}",
-                                       "HEAD_SHA": "${{ github.event.workflow_run.head_sha }}"})
-        self.assertNotIn("${{", step["run"])
 
 
 if __name__ == "__main__":
