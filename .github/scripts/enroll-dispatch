@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
-"""Decide what enroll-dispatch.yml does after a run of Build, Validate, Terms or Tests completes.
+"""Decide what enroll-dispatch.yml does after a run of Build, Validate, Terms, Tests, Maintainer confirmed or Enrollment
+merged completes.
 
     GH_TOKEN=... REPO=theorem-labs/oss-verify RUN_ID=<run> RUN_EVENT=<event> HEAD_SHA=<commit> \
       .github/scripts/enroll-dispatch
 
 RUN_ID, RUN_EVENT and HEAD_SHA are the completed run's. It reads GitHub's API only, with a read-only token: nothing of
 the pull request is checked out or run. It writes five lines to $GITHUB_OUTPUT (and to standard output): decision,
-label, pr, project and sha, and one line, reason, that says why. The decision is:
+label, pr, project and sha, and one line, reason, that says why; a dispatch for a merge writes one more, merged=true,
+which enroll-dispatch.yml adds to the event's client_payload. The decision is:
 
   dispatch  the workflow sends the event enrollment-checked for pr, project and sha
   label     the workflow puts `label` on the pull request, and sends nothing:
@@ -33,7 +35,18 @@ Which commit, whose pull request, and whose record. A run of a pull request (pul
 about its head commit, and about the head it came from (the repository and branch of that run). A run of Build
 started by hand on main (gh workflow run build.yaml -f pr=<n>) is about the commit its record names, and the head of
 the pull request it names: that is how a maintainer has this look again at a pull request whose checks passed before
-its Build wrote a record. Any other run is none.
+its Build wrote a record. Any other run, but a merge's (below), is none.
+
+A merge. A run of Enrollment merged (MERGED_WORKFLOW: on pull_request_target, the base branch's copy, which is main's
+for a pull request into main; or a replay by hand on main, gh workflow run enroll-merged.yml -f pr=<n>) is about the
+pull request its title names ("merged #<n>"), and is decided by decide_merged: that pull request must be merged into
+main and its files all under one projects/<name>/; every required check must have passed at its head commit, bound as
+below to the head it came from; and the record of the bound project-builds run must be of that commit, pull request and
+project. Then the size line, a paused language and the name rule label as above, and else the head commit is sent, with
+merged=true. The review (review-blocking, review-pending) and the maintainer check (maintainer-review) are not asked:
+the person who merged decided them. A run that did not succeed (its job runs for a merge or a replay alone), of another
+file, event or branch, or whose title names no pull request, is none. A merge after the statements started is sent
+too: the statements repository skips a commit whose facts it made or whose build started in the last 24 hours.
 
 Every required check is bound to its source: each check of REQUIRED_SOURCES, and any other the ruleset of main
 requires (rules/branches/main), must have passed at that commit in a run of the workflow file and event
@@ -45,10 +58,11 @@ holds, so project-builds, enrollment and terms-accepted cannot be made by the pu
 enrollment-record of the Build run whose project-builds check is the bound one (or of the run started by hand), which
 build.yaml's record job wrote from project-builds' outputs; every value of it is checked against its shape.
 
-The pull request is the one the record names. It must be open, into main, from that head, with that commit as its head
-commit, and its files must all be under one projects/<name>/, the record's project; it is read again after its files,
-and a pull request whose head moved meanwhile is none (the run for the new head decides). A draft pull request is none:
-build.yaml runs again on ready_for_review, and that run's completion decides for the pull request once it is ready.
+The pull request of any other run is the one the record names. It must be open, into main, from that head, with that
+commit as its head commit, and its files must all be under one projects/<name>/, the record's project; it is read again
+after its files, and a pull request whose head moved meanwhile is none (the run for the new head decides). A draft pull
+request is none: build.yaml runs again on ready_for_review, and that run's completion decides for the pull request once
+it is ready.
 
 A pull request that changes a project already enrolled is sent too: its facts are made again at the new commit.
 
@@ -103,6 +117,10 @@ REVIEW_FILES = frozenset({"comment.md", "verdicts.json"})
 # runs .github/workflows/maintainer-confirmed.yml, whose completion runs this again.
 CONFIRMED_LABEL = "maintainer-confirmed"
 CONFIRMED_WORKFLOW = ".github/workflows/maintainer-confirmed.yml"
+# The workflow whose run says that a pull request was closed, and, in its title, which: its job runs for a merge (or a
+# replay of one by hand) alone. Its completion runs this, which sends a merged enrollment (decide_merged).
+MERGED_WORKFLOW = ".github/workflows/enroll-merged.yml"
+MERGED_TITLE = re.compile(r"merged #([1-9][0-9]*)")
 DEFAULT_BRANCH = "main"
 # The API lists at most 3,000 files of a pull request; above that, the list is not the whole change.
 MAX_LISTED_FILES = 3000
@@ -390,8 +408,83 @@ def confirmed_by(api: Api, repo: str, number: int, pull: dict, author: str, sinc
     return actor if actor and actor.lower() != author.lower() else ""
 
 
+def label_for_a_person(where: str, lang: str, record: dict, number: int, project: str, sha: str) -> dict | None:
+    """The label of the first thing a person decides by hand: a paused language, a name the statements repository
+    cannot take, or a plain binary above SIZE_LIMIT (or of unknown size); else None."""
+    if lang in PAUSED_LANGUAGES:
+        return outcome("label", f"{where} is in {lang}, which is paused", number, project, sha, "language-paused")
+    if not STATEMENTS_NAME.fullmatch(project):
+        return outcome("label", f"{where}: the statements repository's project names have no dot", number, project,
+                       sha, "name-review")
+    over = oversized(record)
+    if over:
+        return outcome("label", f"{where} has a plain binary above {SIZE_LIMIT:,} bytes: {', '.join(over)}", number,
+                       project, sha, "size-review")
+    return None
+
+
+def decide_merged(api: Api, repo: str, runs: Runs, run: dict) -> dict:
+    """What a completed run of MERGED_WORKFLOW decides: dispatch, with merged=true, for the head commit of the pull
+    request its title names, when that pull request is an enrollment merged into main whose required checks passed at
+    that commit. The size line, a paused language and the name rule label as in decide; the review and the maintainer
+    check are not asked, since the person who merged decided them."""
+    run_id, event = run.get("id"), run.get("event")
+    # pull_request_target runs the base branch's copy of the file, whatever the pull request holds; a replay by hand must
+    # be main's. A fork's own copy, run on its pull request, is not counted.
+    if event != "pull_request_target" and (event, head_of(run)) != ("workflow_dispatch", (repo, DEFAULT_BRANCH)):
+        name, branch = head_of(run)
+        return outcome("none", f"run {run_id} is neither the base branch's {MERGED_WORKFLOW} on pull_request_target nor "
+                       f"a replay of main's: it ran on {event} from {name}:{branch}")
+    if run.get("conclusion") != "success":
+        return outcome("none", f"run {run_id} of {MERGED_WORKFLOW} is {run.get('conclusion')}, not success: its job "
+                       "runs for a merge or a replay alone")
+    title = MERGED_TITLE.fullmatch(str(run.get("display_title") or ""))
+    if title is None:
+        return outcome("none", f"run {run_id}'s title {run.get('display_title')!r:.40} names no pull request")
+    number = int(title.group(1))
+    replay = f"gh workflow run {os.path.basename(MERGED_WORKFLOW)} -f pr={number}"
+    pull = api.get(f"repos/{repo}/pulls/{number}")
+    base, at = pull.get("base") or {}, pull.get("head") or {}
+    if pull.get("merged") is not True:
+        return outcome("none", f"pull request {number} is not merged", number)
+    if base.get("ref") != DEFAULT_BRANCH or (base.get("repo") or {}).get("full_name") != repo:
+        return outcome("none", f"pull request {number} was merged into {base.get('ref')!r}, not {DEFAULT_BRANCH}",
+                       number)
+    sha, head = at.get("sha"), ((at.get("repo") or {}).get("full_name"), at.get("ref"))
+    if not isinstance(sha, str) or not SHA.fullmatch(sha):
+        return outcome("none", f"pull request {number}'s head {sha!r:.50} is not a commit id", number)
+    files = [f for page in api.pages(f"repos/{repo}/pulls/{number}/files?per_page=100") for f in page]
+    project, why = the_project(files)
+    if project is None:
+        return outcome("none", f"pull request {number} is not one enrollment: {why}", number, sha=sha)
+    waiting, build_run = bound_checks(api, runs, repo, sha, head)
+    if waiting:
+        return outcome("none", f"required checks not passed at {sha[:7]}: {', '.join(waiting)}; once they pass, "
+                       f"{replay} decides again", number, project, sha)
+    record, why = build_record(api, repo, build_run)
+    why = why or record_problem(record, sha)
+    if not why and (record["pr"], record["project"]) != (number, project):
+        why = f"the build record is of pull request {record['pr']} and projects/{record['project']}/"
+    if why:
+        return outcome("none", f"pull request {number}: {why}", number, project, sha)
+    where = f"pull request {number}: projects/{project}/ at {sha[:7]}"
+    lang = language(project_yaml(api, repo, project, sha))
+    if lang is None:
+        return outcome("none", f"{where}: its project.yaml cannot be read for its language; {replay} decides again",
+                       number, project, sha)
+    label = label_for_a_person(where, lang, record, number, project, sha)
+    if label:
+        return label
+    merged_by = (pull.get("merged_by") or {}).get("login") or "unknown"
+    return dict(outcome("dispatch", f"pull request {number} was merged by {merged_by}: the merge decides the review "
+                        "and the maintainer check", number, project, sha), merged="true")
+
+
 def decide(api: Api, repo: str, run_id: int, run_event: str, head_sha: str) -> dict:
     runs = Runs(api, repo)
+    if run_event in ("pull_request_target", "pull_request", "workflow_dispatch") \
+            and runs.get(run_id).get("path") == MERGED_WORKFLOW:
+        return decide_merged(api, repo, runs, runs.get(run_id))
     if run_event in ("pull_request_target", "pull_request"):
         if not SHA.fullmatch(head_sha):
             return outcome("none", f"{head_sha!r} is not a commit id")
@@ -450,15 +543,9 @@ def decide(api: Api, repo: str, run_id: int, run_event: str, head_sha: str) -> d
     label, why = review_problem(api, repo, record_run)
     if label:
         return outcome("label", f"{where}: {why}", number, project, sha, label)
-    if lang in PAUSED_LANGUAGES:
-        return outcome("label", f"{where} is in {lang}, which is paused", number, project, sha, "language-paused")
-    if not STATEMENTS_NAME.fullmatch(project):
-        return outcome("label", f"{where}: the statements repository's project names have no dot", number, project,
-                       sha, "name-review")
-    over = oversized(record)
-    if over:
-        return outcome("label", f"{where} has a plain binary above {SIZE_LIMIT:,} bytes: {', '.join(over)}", number,
-                       project, sha, "size-review")
+    label = label_for_a_person(where, lang, record, number, project, sha)
+    if label:
+        return label
     author = (pull.get("user") or {}).get("login") or ""
     since = runs.get(build_run).get("created_at") if build_run is not None else None
     confirmed = confirmed_by(api, repo, number, pull, author, since) if isinstance(since, str) else ""
