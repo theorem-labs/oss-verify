@@ -14,10 +14,11 @@ name: "Review re-run"
 #   - the review job ended failure, cancelled or timed_out, and the build job (project-builds) passed: a build that
 #     failed is the project's or the runner's, and a maintainer re-runs it (build.yaml); a re-run here would build it
 #     again for up to six hours;
-#   - an open pull request into main still has the run's head commit, and each such pull request changes files under
-#     one projects/<name>/ only (enroll-dispatch's rule): a change's or a moved-on pull request's run is left alone. The
-#     review of an older head decides nothing, and its re-run could cancel the newer head's Build run, which shares
-#     its concurrency group;
+#   - an open pull request into main, ready for review, still has the run's head commit, and each such pull request
+#     changes files under one projects/<name>/ only (enroll-dispatch's rule): a change's, a draft's or a moved-on pull
+#     request's run is left alone. enroll-dispatch's decide refuses a draft, and marking it ready starts a new Build
+#     run. The review of an older head decides nothing, and its re-run could cancel the newer head's Build run, which
+#     shares its concurrency group;
 #   - the run is at attempt 1 or 2. At attempt 3 or more it is left alone: a review that fails each time runs at most
 #     three times in one Build run. A new Build run of the same head commit (a person reopens the pull request, or
 #     marks it ready for review) starts again at attempt 1.
@@ -75,11 +76,11 @@ jobs:
             echo "Build run $RUN_ID: its build job is $build, so the failure is not the review's alone: no re-run."
             exit 0
           fi
-          # The open pull requests into main whose head is still the run's head commit.
+          # The open pull requests into main, ready for review, whose head is still the run's head commit.
           numbers=$(gh api --paginate "repos/$REPO/pulls?state=open&base=main&per_page=100" \
-            --jq ".[] | select(.head.sha == \"$HEAD_SHA\") | .number")
+            --jq ".[] | select(.head.sha == \"$HEAD_SHA\" and .draft == false) | .number")
           if [ -z "$numbers" ]; then
-            echo "Build run $RUN_ID: no open pull request into main is at ${HEAD_SHA:0:7} any more: nothing is re-run."
+            echo "Build run $RUN_ID: no open pull request into main, ready for review, is at ${HEAD_SHA:0:7}."
             exit 0
           fi
           for number in $numbers; do
