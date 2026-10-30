@@ -1314,7 +1314,8 @@ class ReviewJob(unittest.TestCase):
         # The join never decides whether a review runs.
         self.assertIs(join["continue-on-error"], True)
         # Exactly these settings: another one, `args:` for example, would change how the node joins while the join
-        # still passed.
+        # still passed. `version:` is forbidden here too, so the action keeps its own default, 1.104.2, which is
+        # above the 1.94 a Linux device needs to reach a Tailscale Service's address.
         self.assertEqual(set(join["with"]),
                          {"oauth-client-id", "audience", "tags", "hostname", "use-cache"})
         self.assertEqual(join["with"]["oauth-client-id"], "${{ env.TAILNET_CLIENT_ID }}")

@@ -534,9 +534,9 @@ jobs:
       # records takes this one URL, and it holds the address, not the Service's MagicDNS name, because
       # linux28-agents-1 joins the tailnet with --accept-dns=false and resolves no MagicDNS name; tailscaled
       # routes a Tailscale Service by the destination address. The address is the one Tailscale gives the Service
-      # svc:spend, read after the INFRA-832 S1a apply; bootstrap on agent-infra main 99d1b5d exports the
-      # collector's client id and audience but no URL. It is empty until someone fills it in, and tools/tests
-      # refuses an empty value.
+      # svc:spend: theorem-labs/agent-infra#1059, which is open, adds the bootstrap output
+      # spendCollectorTailnetUrl, and this value is filled from that output after #1059 merges and the bootstrap
+      # apply runs. It is empty until then, and tools/tests refuses an empty value.
       SPEND_COLLECTOR_URL: ""
     outputs:
       # The result step writes it for an enrollment or a change, never for an issue: an issue's draft, which no one has
@@ -623,7 +623,12 @@ jobs:
       # the federated identity ossv-review-github, whose claims admit only this workflow of this repository, on
       # refs/heads/main, in the environment enroll-review, on a GitHub-hosted runner. Its apply runs before the
       # client id above is filled in. The job joins with its GitHub identity token, so no key is stored. One review
-      # job runs in a run attempt, so the run id and the attempt name the node. use-cache is off: the action would
+      # job runs in a run attempt, so the run id and the attempt name the node. A Linux device reaches a Tailscale
+      # Service's address only with Tailscale 1.94 or later, or with --accept-routes
+      # (https://tailscale.com/kb/1552, "Access Tailscale Services from other devices"): this action meets both at
+      # the pinned commit. Its action.yml gives the version input the default 1.104.2, and its src/main.ts puts
+      # --accept-routes in every `tailscale up`. The test of this step pins the exact set of its settings, so no
+      # version input can be given at all. use-cache is off: the action would
       # otherwise keep the tailscale binary in this repository's Actions cache and run it as root from there, and
       # the review job's cache holds its review session alone (above). The job's 70 minutes hold every step's cap:
       # gather 15, join 3, review 45 and logout 2.
