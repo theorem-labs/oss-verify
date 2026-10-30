@@ -194,13 +194,15 @@ A statement made under a project's own budgets names both of them. A smaller pla
 
 ### proofs
 
-Give the place where we publish the proofs: `repo`, an `https://` URL, with `#<branch>` if it is not the repository's default branch, and `path`, a directory in that repository. Most projects do not use this field. By default, we publish to the main branch of [oss-verify-proofs](https://github.com/theorem-labs/oss-verify-proofs), with the project's statements in `projects/<name>/` and its proofs in `proofs/<name>/`:
+Give the place where we publish the proofs: `repo`, an `https://` URL, with `#<branch>` if it is not the repository's default branch, and `path`, a directory in that repository. Most projects do not use this field. By default, we publish to the main branch of [oss-verify-proofs](https://github.com/theorem-labs/oss-verify-proofs), in `projects/<name>/`:
 
 ```yaml
 proofs:
   repo: https://github.com/theorem-labs/oss-verify-proofs
   path: projects/<name>
 ```
+
+The statements and the lock of a fuzz target are in `projects/<name>/<target>/`, and its proofs are in `projects/<name>/<target>/proofs/`.
 
 ### publish
 
