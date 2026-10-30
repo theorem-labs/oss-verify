@@ -1361,13 +1361,14 @@ class ReviewRerun(unittest.TestCase):
                 "comment": "skipped", "project-builds": "success" if review == "success" else "failure"}
         return {**jobs, **others}
 
-    def rerun(self, attempt, jobs, pulls=None, run_id=40, fails=None, ok=True):
+    def rerun(self, attempt, jobs, pulls=None, run_id=40, fails=None, ok=True, lost=False):
         """Run the step for the completion of attempt `attempt` of Build run `run_id` at HEAD. jobs: {name: conclusion}
         of that attempt. pulls: {number: (head, paths)} or {number: (head, paths, draft)} of the open pull requests
         into main, the path "new<-old" for a rename (default: one enrollment at HEAD, ready for review). fails: {call:
-        n}, the first n tries of that call ("jobs", "pulls", "files" or "rerun") fail, after printing a cut page. ok:
-        whether the step must succeed. Return the re-runs it asked for, its output and its summary; self.waits holds
-        the waits it asked sleep for, and self.tries the tries of each call."""
+        n}, the first n tries of that call ("jobs", "pulls", "files" or "rerun") fail, after printing a cut page. lost:
+        GitHub takes the first re-run (the run moves to the next attempt) but its answer is lost. ok: whether the step
+        must succeed. Return the re-runs GitHub took, the output and the summary; self.waits holds the waits it asked
+        sleep for, and self.tries the tries of each call."""
         pulls = {5: (self.HEAD, self.ENROLLMENT)} if pulls is None else pulls
         pulls = {n: (p + (False,))[:3] for n, p in pulls.items()}
         with tempfile.TemporaryDirectory() as directory:
@@ -1384,6 +1385,9 @@ class ReviewRerun(unittest.TestCase):
                     [dict(zip(("filename", "previous_filename"), path.split("<-"))) for path in paths]))
             for call, n in (fails or {}).items():
                 (root / f"fails-{call}").write_text(str(n))
+            (root / "attempt-now").write_text(str(attempt))
+            if lost:
+                (root / "lose-first-rerun").write_text("")
             (root / "bin" / "gh").write_text(
                 "#!/bin/bash\n"
                 'filter=""; path=""; for a; do [ "$prev" = --jq ] && filter=$a\n'
@@ -1393,11 +1397,17 @@ class ReviewRerun(unittest.TestCase):
                 'case "$path" in\n'
                 '  "") call=rerun ;;\n'
                 '  repos/o/r/actions/runs/*/attempts/*/jobs\\?per_page=100) call=jobs ;;\n'
+                '  repos/o/r/actions/runs/*) echo "{\\"run_attempt\\": $(cat attempt-now)}" | jq -r "$filter"\n'
+                '    exit ;;\n'
                 '  "repos/o/r/pulls?state=open&base=main&per_page=100") call=pulls ;;\n'
                 '  repos/o/r/pulls/*/files\\?per_page=100) call=files ;;\n'
                 '  *) echo "unexpected gh $*" >&2; exit 1 ;;\n'
                 "esac\n"
                 'try=$(( $(cat "tries-$call" 2>/dev/null || echo 0) + 1 )); echo "$try" > "tries-$call"\n'
+                'if [ "$call" = rerun ] && [ -f lose-first-rerun ] && (( try == 1 )); then\n'
+                '  echo "$*" >> reruns; echo $(( $(cat attempt-now) + 1 )) > attempt-now\n'
+                '  echo "connection reset" >&2; exit 1\n'
+                'fi\n'
                 'if (( try <= $(cat "fails-$call" 2>/dev/null || echo 0) )); then\n'
                 '  echo 99; echo "HTTP 502" >&2; exit 1\n'
                 'fi\n'
@@ -1512,6 +1522,16 @@ class ReviewRerun(unittest.TestCase):
                 self.assertEqual(summary.splitlines(),
                                  [f"Build run 40: could not {what} after 4 tries, so it is not re-run."])
                 self.assertIn(f"::error::Build run 40: could not {what} after 4 tries", out)
+
+    def test_a_re_run_whose_answer_is_lost_is_not_asked_for_twice(self):
+        # GitHub takes the first try of the re-run, but its answer is lost. Before the next try the run is already at
+        # attempt 2, so the step asks for no second re-run, and it does not fail.
+        reruns, out, summary = self.rerun(1, self.jobs(), lost=True)
+        self.assertEqual(reruns, ["run rerun 40 --failed -R o/r"])
+        self.assertEqual((self.tries["rerun"], self.waits), (1, [15]))
+        self.assertIn("Build run 40 is at attempt 2: a try was taken, though its answer was lost.", out)
+        self.assertEqual(summary.splitlines(), [
+            "Pull request 5: the review job of Build run 40 ended failure at attempt 1; its failed jobs run again."])
 
 
 if __name__ == "__main__":
