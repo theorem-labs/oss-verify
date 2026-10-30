@@ -117,12 +117,13 @@ name: "Build"
 #
 # This repository stores no long-lived credential for any of that. Google's provider admits this file, triage.yaml
 # and the enrollment workflow enroll-dispatch.yml, each on refs/heads/main and only from its own events (here
-# pull_request_target and workflow_dispatch). A token carries no job name, so what keeps each Google account to the
-# job that needs it is the job's GitHub Environment, which the token carries a claim for: `ossv-ci`, which reads the
-# cost collector's token and nothing else, can be acted as only from the environment `enroll-review`, which the
-# review job declares; `ossv-app-comment`, the account these jobs read the App's key as, only from `comment`, which
-# the comment job declares. A job that declares no environment, project-builds among them, reaches neither account, and
-# project-builds, which builds the pull request's code, must never be given id-token: write.
+# pull_request_target, issues and workflow_dispatch; Theorem's infrastructure code lists them). A token carries no job
+# name, so what keeps each Google account to the job that needs it is the job's GitHub Environment, which the token
+# carries a claim for: `ossv-ci`, which reads the cost collector's token and nothing else, can be acted as only from
+# the environment `enroll-review`, which the review job declares; `ossv-app-comment`, the account these jobs read the
+# App's key as, only from `comment`, which the comment job declares. A job that declares no environment,
+# project-builds among them, reaches neither account, and project-builds, which builds the pull request's code, must
+# never be given id-token: write.
 # A pull request from a fork gets the same identity tokens in the review and comment jobs: pull_request_target runs
 # this file from the base branch, never the fork's, so the fork's code never holds them.
 # Runs do not wait for a maintainer's approval. To build only on request, remove pull_request_target below.
@@ -218,8 +219,11 @@ env:
 concurrency:
   # By event too, so that a run started by hand never cancels the pull request's own run of the required check. For an
   # issue's events, one run at a time for each issue, and the newest waiting run replaces an older waiting one: an
-  # edit while a draft runs waits for it, so a later event that route skips never cancels a draft.
-  group: build-${{ github.event_name }}-${{ github.event.pull_request.number || inputs.pr || inputs.issue || github.event.issue.number }}
+  # edit while a draft runs waits for it. Only the events that the issue's author sent share that group: route skips
+  # every other (the top of this file), and each of those gets a group of its own run, so it never replaces a waiting
+  # run of the author's own edit. An event that the author sent and route still skips (an owner, a member or an App
+  # wrote the issue) is of an issue that never gets a draft.
+  group: build-${{ github.event_name }}-${{ github.event.pull_request.number || inputs.pr || inputs.issue || (github.event.sender.login == github.event.issue.user.login && github.event.issue.number || format('{0}-run-{1}', github.event.issue.number, github.run_id)) }}
   cancel-in-progress: ${{ github.event_name != 'issues' }}
 
 jobs:
