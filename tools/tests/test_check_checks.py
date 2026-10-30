@@ -1344,14 +1344,16 @@ class Owners(unittest.TestCase):
 
 
 class Sweep(unittest.TestCase):
-    """sweep.yaml's one step, run with a stand-in gh: it starts the draft reply to each open issue whose last message is
-    not ours and that has no Build run titled "Issue <n>" made after that message, at most CAP each sweep."""
+    """sweep.yaml's steps, each run with a stand-in gh. The first starts the draft reply to each open issue whose last
+    message is not ours and that has no Build run titled "Issue <n>" made after that message, at most CAP each sweep.
+    The second re-runs the failed jobs of an enrollment's newest Build run whose review job failed, at most two times
+    for one Build run."""
 
     def setUp(self):
         self.workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "sweep.yaml").read_text())
         self.job = self.workflow["jobs"]["sweep"]
 
-    def test_it_runs_hourly_with_a_token_that_can_only_start_and_read_runs(self):
+    def test_it_runs_hourly_with_a_token_that_can_only_start_read_and_re_run_runs(self):
         self.assertEqual(self.workflow[True], {"schedule": [{"cron": "17 * * * *"}]})
         self.assertEqual(self.workflow["permissions"], {})
         self.assertEqual(self.job["permissions"], {"actions": "write", "issues": "read", "pull-requests": "read"})
@@ -1426,6 +1428,161 @@ class Sweep(unittest.TestCase):
         started, out = self.sweep({n: someone for n in range(1, 7)}, {}, [])
         self.assertEqual(started, [1, 2, 3])
         self.assertIn("The cap of 3 runs for each sweep is reached.", out)
+
+    RERUN = "Re-run failed enrollment reviews"
+    ENROLLMENT = ["projects/zlib/project.yaml", "projects/zlib/build.sh"]
+
+    @staticmethod
+    def head(number):
+        return f"{number:040x}"
+
+    @staticmethod
+    def jobs(review_status, review_conclusion):
+        """A Build run's jobs by the names the API gives them: project-builds' job is "build" and the required job is
+        "project-builds" (build.yaml); the review job has no name of its own."""
+        failed = review_conclusion not in ("success", None)
+        return {"route": ("completed", "success"), "build": ("completed", "success"),
+                "review": (review_status, review_conclusion),
+                "project-builds": ("completed", "failure") if failed else ("queued", None)}
+
+    def rerun(self, pulls, runs, jobs, rerun_fails=()):
+        """The step that re-runs failed enrollment reviews. pulls: {number: (head, paths, labels)}, the path "new<-old"
+        for a rename; runs: {head: [(id, run_attempt, status)]}, oldest first; jobs: {run id: {job name: (status,
+        conclusion)}}; rerun_fails: run ids whose re-run gh refuses. Return the runs it re-ran, its output and its
+        summary."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "bin").mkdir()
+            (root / "pulls.json").write_text(json.dumps(
+                [{"number": n, "head": {"sha": head}, "base": {"ref": "main"},
+                  "labels": [{"name": label} for label in labels]} for n, (head, paths, labels) in pulls.items()]))
+            for number, (head, paths, labels) in pulls.items():
+                (root / f"files-{number}.json").write_text(json.dumps(
+                    [dict(zip(("filename", "previous_filename"), path.split("<-"))) for path in paths]))
+            for head, listed in runs.items():
+                # The API lists the newest first.
+                (root / f"runs-{head}.json").write_text(json.dumps({"workflow_runs": [
+                    {"id": i, "run_attempt": attempt, "status": status, "head_sha": head,
+                     "created_at": f"2026-10-01T{10 + k:02}:00:00Z"}
+                    for k, (i, attempt, status) in reversed(list(enumerate(listed)))]}))
+            for run_id, named in jobs.items():
+                (root / f"jobs-{run_id}.json").write_text(json.dumps({"jobs": [
+                    {"name": name, "status": status, "conclusion": conclusion}
+                    for name, (status, conclusion) in named.items()]}))
+            (root / "bin" / "gh").write_text(
+                "#!/bin/bash\n"
+                'filter=""; path=""; for a; do [ "$prev" = --jq ] && filter=$a\n'
+                '  [[ $a == repos/* ]] && path=${path:-$a}; prev=$a; done\n'
+                f'cd {root}\n'
+                'case "$path" in\n'
+                '  "") [ "$1 $2" = "run rerun" ] || { echo "unexpected gh $*" >&2; exit 1; }\n'
+                '    echo "$*" >> reruns\n'
+                f'    case " {" ".join(map(str, rerun_fails))} " in *" $3 "*) exit 1 ;; esac ;;\n'
+                '  "repos/o/r/pulls?state=open&base=main&per_page=100") jq -r "$filter" pulls.json ;;\n'
+                '  repos/o/r/pulls/*/files\\?per_page=100) n=${path#repos/o/r/pulls/}\n'
+                '    jq -r "$filter" "files-${n%%/*}.json" ;;\n'
+                '  repos/o/r/actions/workflows/build.yaml/runs\\?head_sha=*) h=${path#*head_sha=}\n'
+                '    [ -f "runs-$h.json" ] || echo \'{"workflow_runs": []}\' > "runs-$h.json"\n'
+                '    jq -r "$filter" "runs-$h.json" ;;\n'
+                '  repos/o/r/actions/runs/*/jobs) n=${path#repos/o/r/actions/runs/}\n'
+                '    jq -r "$filter" "jobs-${n%%/*}.json" ;;\n'
+                '  *) echo "unexpected gh $*" >&2; exit 1 ;;\n'
+                "esac\n")
+            (root / "bin" / "gh").chmod(0o755)
+            step = {s.get("name"): s for s in self.job["steps"]}[self.RERUN]
+            run = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=root, capture_output=True, text=True,
+                                 env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "GH_TOKEN": "x",
+                                      "REPO": "o/r", "GITHUB_STEP_SUMMARY": str(root / "summary")})
+            self.assertEqual(run.returncode, 0, run.stderr)
+            reruns = (root / "reruns").read_text().splitlines() if (root / "reruns").exists() else []
+            self.assertTrue(all(re.fullmatch(r"run rerun [0-9]+ --failed -R o/r", s) for s in reruns), reruns)
+            summary = (root / "summary").read_text() if (root / "summary").exists() else ""
+            return [int(s.split()[2]) for s in reruns], run.stdout, summary
+
+    def test_the_sweep_re_runs_a_failed_enrollment_review(self):
+        step = {s.get("name"): s for s in self.job["steps"]}[self.RERUN]
+        # The issue step's failure does not stop it; the job's token can re-run a run (actions: write).
+        self.assertEqual(step["if"], "${{ !cancelled() }}")
+        self.assertEqual(self.job["permissions"]["actions"], "write")
+        # A review fails (a 401 of the model's API, as on 2026-10-26), is cancelled or times out, at attempt 1 or 2. A
+        # renamed file counts under both names; a label from an earlier head commit changes nothing.
+        enrollment = self.ENROLLMENT + ["projects/zlib/fuzz.c<-projects/zlib/old_fuzz.c"]
+        pulls = {n: (self.head(n), enrollment, ["review-pending"]) for n in (1, 2, 3)}
+        runs = {self.head(1): [(11, 1, "completed")], self.head(2): [(21, 2, "completed")],
+                self.head(3): [(31, 1, "completed")]}
+        jobs = {11: self.jobs("completed", "failure"), 21: self.jobs("completed", "cancelled"),
+                31: self.jobs("completed", "timed_out")}
+        reran, out, summary = self.rerun(pulls, runs, jobs)
+        self.assertEqual(reran, [11, 21, 31])
+        self.assertEqual(summary.splitlines(), [
+            "Pull request 1: the review job of Build run 11 ended failure at attempt 1; its failed jobs run again.",
+            "Pull request 2: the review job of Build run 21 ended cancelled at attempt 2; its failed jobs run again.",
+            "Pull request 3: the review job of Build run 31 ended timed_out at attempt 1; its failed jobs run again."])
+
+    def test_the_sweep_re_runs_a_failed_review_of_a_pull_request_with_no_label(self):
+        # A failed review fails the required check project-builds, so enroll-dispatch's decide puts no label on it.
+        reran, out, summary = self.rerun({7: (self.head(7), self.ENROLLMENT, [])},
+                                         {self.head(7): [(70, 1, "completed")]},
+                                         {70: self.jobs("completed", "failure")})
+        self.assertEqual(reran, [70])
+        self.assertIn("Pull request 7: the review job of Build run 70 ended failure at attempt 1", summary)
+
+    def test_the_sweep_stops_after_two_restarts_for_one_head(self):
+        # Attempt 3 is the second re-run's; a fourth is a person's re-run by hand.
+        for attempt in (3, 4):
+            with self.subTest(attempt=attempt):
+                reran, out, summary = self.rerun({4: (self.head(4), self.ENROLLMENT, [])},
+                                                 {self.head(4): [(40, attempt, "completed")]},
+                                                 {40: self.jobs("completed", "failure")})
+                self.assertEqual(reran, [])
+                self.assertEqual(summary.splitlines(), [
+                    f"Pull request 4: the review job of Build run 40 ended failure at attempt {attempt}. At most two "
+                    "re-runs for one Build run: it is not run again."])
+
+    def test_the_sweep_leaves_a_review_that_gave_person_verdicts(self):
+        # The review succeeded and its verdicts gave F2 person: a person decides, not a re-run. An older run of the
+        # same head whose review failed is not the newest.
+        reran, out, summary = self.rerun({5: (self.head(5), self.ENROLLMENT, ["review-pending"])},
+                                         {self.head(5): [(50, 1, "completed"), (51, 1, "completed")]},
+                                         {50: self.jobs("completed", "failure"), 51: self.jobs("completed", "success")})
+        self.assertEqual(reran, [])
+        self.assertEqual(summary, "")
+
+    def test_the_sweep_leaves_a_review_that_is_still_running(self):
+        # A review that runs, a re-run that waits for a runner, and a run whose review failed but whose later jobs run.
+        for attempt, status, review in ((1, "in_progress", ("in_progress", None)), (2, "queued", ("queued", None)),
+                                        (1, "in_progress", ("completed", "failure"))):
+            with self.subTest(status=status, review=review):
+                jobs = self.jobs(*review)
+                reran, out, summary = self.rerun({6: (self.head(6), self.ENROLLMENT, [])},
+                                                 {self.head(6): [(60, attempt, status)]}, {60: jobs})
+                self.assertEqual(reran, [])
+                self.assertEqual(summary, "")
+
+    def test_the_sweep_leaves_a_change_pull_request(self):
+        # Not one enrollment: a change, a project and another file, two projects, a file renamed into a project, a file
+        # directly in projects/, and a path that looks like a project's name. Each has a failed review.
+        paths = {8: ["tools/check"], 9: ["projects/zlib/build.sh", "README.md"],
+                 10: ["projects/zlib/build.sh", "projects/curl/build.sh"], 11: ["projects/zlib/build.sh<-tools/x"],
+                 12: ["projects/zlib"], 13: ["zlib"]}
+        reran, out, summary = self.rerun({n: (self.head(n), p, []) for n, p in paths.items()},
+                                         {self.head(n): [(n * 10, 1, "completed")] for n in paths},
+                                         {n * 10: self.jobs("completed", "failure") for n in paths})
+        self.assertEqual(reran, [])
+        self.assertEqual(summary, "")
+
+    def test_a_re_run_that_gh_refuses_is_a_warning_and_the_sweep_goes_on(self):
+        # GitHub refuses to re-run a run made more than 30 days ago: that pull request must not stop the others.
+        pulls = {n: (self.head(n), self.ENROLLMENT, []) for n in (1, 2)}
+        runs = {self.head(1): [(11, 1, "completed")], self.head(2): [(21, 1, "completed")]}
+        reran, out, summary = self.rerun(pulls, runs,
+                                         {11: self.jobs("completed", "failure"), 21: self.jobs("completed", "failure")},
+                                         rerun_fails=(11,))
+        self.assertEqual(reran, [11, 21])
+        self.assertIn("::warning::Pull request 1: could not re-run the failed jobs of Build run 11.", out)
+        self.assertEqual(summary.splitlines(), [
+            "Pull request 1: could not re-run the failed jobs of Build run 11.",
+            "Pull request 2: the review job of Build run 21 ended failure at attempt 1; its failed jobs run again."])
 
 
 if __name__ == "__main__":

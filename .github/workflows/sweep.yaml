@@ -1,19 +1,36 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 name: "Sweep"
-# Every hour, starts the draft reply to each open issue of this repository that waits for us
-# (gh workflow run build.yaml -f issue=<n>, on main), at most CAP (3) for each sweep. An issue waits when its last
-# message, its text or its last comment, is not ours, and no Build run titled "Issue <n>" (build.yaml's run-name) was
-# made after that message. Ours: oss-verify[bot], sjawhar-agent[bot], and an author that GitHub relates to this
-# repository as MEMBER or OWNER. Pull requests are not swept: their own events run Build.
-# A Build run for an issue only drafts the reply, into its artifact enroll-review-draft and its summary, and posts
-# nothing: a person approves the exact text of each reply first.
-# The cost in GitHub Actions: each run that a sweep starts is one Build run (route and review, on ubuntu-latest, then
+# Every hour, two steps.
+# 1. Starts the draft reply to each open issue of this repository that waits for us
+#    (gh workflow run build.yaml -f issue=<n>, on main), at most CAP (3) for each sweep. An issue waits when its last
+#    message, its text or its last comment, is not ours, and no Build run titled "Issue <n>" (build.yaml's run-name)
+#    was made after that message. Ours: oss-verify[bot], sjawhar-agent[bot], and an author that GitHub relates to this
+#    repository as MEMBER or OWNER. This step sweeps no pull request: their own events run Build.
+#    A Build run for an issue only drafts the reply, into its artifact enroll-review-draft and its summary, and posts
+#    nothing: a person approves the exact text of each reply first.
+# 2. Re-runs a failed enrollment review, so a review that fails for a short fault (a 401 of the model's API, as on
+#    2026-10-26) runs again with no person or agent. For each open pull request into main whose files are all under
+#    one projects/<name>/, whatever its labels, it reads the newest Build run of the pull request's head commit. When
+#    that run is complete, at attempt 1 or 2, and its review job ended failure, cancelled or timed_out, it re-runs the
+#    run's failed jobs (gh run rerun <id> --failed: GitHub runs again the failed and cancelled jobs and the jobs that
+#    need them, with the run's own event and head commit, and with the workflow file of the run's first attempt, the
+#    build.yaml of that event's GITHUB_SHA, not main's of now). The completion of the re-run starts enroll-dispatch.yml
+#    again. A failed review fails the required check project-builds, so enroll-dispatch's decide stops at "required
+#    checks not passed" and puts no label on the pull request: a label cannot select these pull requests. A review
+#    that succeeded (whatever its verdicts, `person` too), a run that is not complete, and a run at attempt 3 or more
+#    are left alone: a review that fails each time runs at most three times in one Build run. A new Build run of the
+#    same head commit (a person reopens the pull request, or marks it ready for review) starts again at attempt 1. The
+#    step summary lists each re-run and each enrollment at that cap.
+# The cost in GitHub Actions: each run that step 1 starts is one Build run (route and review, on ubuntu-latest, then
 # hold and required, a few seconds each), and that run's completion starts enroll-dispatch.yml once, which ends at once
-# with no record. The sweep itself is one short job each hour.
-# The job holds no secret, checks out nothing and runs no code of a pull request. It starts the runs with GITHUB_TOKEN,
-# whose events start no workflow run, except workflow_dispatch and repository_dispatch, which always do
-# (https://docs.github.com/en/actions/concepts/security/github_token).
+# with no record. Each re-run of step 2 is one more review of the enrollment and the jobs after it, at most two for one
+# Build run. The sweep itself is one short job each hour.
+# The job holds no secret, checks out nothing and runs no code of a pull request. It starts and re-runs the runs with
+# GITHUB_TOKEN, whose events start no workflow run, except workflow_dispatch and repository_dispatch, which always do
+# (https://docs.github.com/en/actions/concepts/security/github_token). A re-run keeps the privileges of the actor of
+# the run's first attempt (github.actor); GitHub shows github-actions[bot] as the actor that started the re-run
+# (github.triggering_actor; https://docs.github.com/en/actions/reference/workflows-and-actions/contexts).
 on:
   schedule:
     - cron: "17 * * * *"
@@ -29,7 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      # To start Build runs, and to read the recent ones.
+      # To start Build runs, to read the recent ones, and to re-run their failed jobs.
       actions: write
       issues: read
       pull-requests: read
@@ -66,4 +83,55 @@ jobs:
             gh workflow run build.yaml --repo "$REPO" --ref main -f issue="$number"
             started=$((started + 1))
             echo "Issue $number: started a Build run." | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Re-run failed enrollment reviews
+        # A failure of the step above does not stop this one.
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          say() { echo "$1"; echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
+          pulls=$(gh api --paginate "repos/$REPO/pulls?state=open&base=main&per_page=100" \
+            --jq '.[] | "\(.number):\(.head.sha)"')
+          for pull in $pulls; do
+            number=${pull%%:*} head=${pull#*:}
+            [[ $number =~ ^[0-9]+$ && $head =~ ^[0-9a-f]{40}$ ]] || continue
+            # The project of each path, a renamed file under both names, or "-" for a path not under projects/<name>/.
+            # The pattern of a name is enroll-dispatch's NAME.
+            projects=$(gh api --paginate "repos/$REPO/pulls/$number/files?per_page=100" \
+              --jq '.[] | .filename, (.previous_filename // empty)
+                | (capture("^projects/(?<name>[a-z0-9][a-z0-9._-]{0,62})/.") | .name) // "-"' | sort -u)
+            if ! [[ $projects =~ ^[a-z0-9][a-z0-9._-]{0,62}$ ]]; then
+              echo "Pull request $number: not one enrollment."; continue
+            fi
+            run=$(gh api "repos/$REPO/actions/workflows/build.yaml/runs?head_sha=$head" \
+              --jq '.workflow_runs | max_by(.created_at) // empty | "\(.id) \(.run_attempt) \(.status)"')
+            read -r id attempt status <<< "$run" || true
+            if ! [[ ${id:-} =~ ^[0-9]+$ && ${attempt:-} =~ ^[0-9]+$ ]]; then
+              echo "Pull request $number: no Build run of its head commit."; continue
+            fi
+            if [ "$status" != completed ]; then echo "Pull request $number: Build run $id is $status."; continue; fi
+            # The jobs of the run's latest attempt; the review job has no name of its own.
+            review=$(gh api "repos/$REPO/actions/runs/$id/jobs" \
+              --jq '.jobs[] | select(.name == "review") | .conclusion')
+            case $review in
+              failure | cancelled | timed_out) ;;
+              *) echo "Pull request $number: the review job of Build run $id is ${review:-missing}: nothing to re-run."
+                 continue ;;
+            esac
+            ended="Pull request $number: the review job of Build run $id ended $review at attempt $attempt"
+            if (( attempt >= 3 )); then
+              say "$ended. At most two re-runs for one Build run: it is not run again."; continue
+            fi
+            # One pull request that GitHub refuses (a run made more than 30 days ago) does not stop the others.
+            if gh run rerun "$id" --failed -R "$REPO"; then
+              say "$ended; its failed jobs run again."
+            else
+              refused="Pull request $number: could not re-run the failed jobs of Build run $id."
+              echo "::warning::$refused"
+              echo "$refused" >> "$GITHUB_STEP_SUMMARY"
+            fi
           done
