@@ -1361,11 +1361,13 @@ class ReviewRerun(unittest.TestCase):
                 "comment": "skipped", "project-builds": "success" if review == "success" else "failure"}
         return {**jobs, **others}
 
-    def rerun(self, attempt, jobs, pulls=None, run_id=40):
+    def rerun(self, attempt, jobs, pulls=None, run_id=40, fails=None, ok=True):
         """Run the step for the completion of attempt `attempt` of Build run `run_id` at HEAD. jobs: {name: conclusion}
         of that attempt. pulls: {number: (head, paths)} or {number: (head, paths, draft)} of the open pull requests
-        into main, the path "new<-old" for a rename (default: one enrollment at HEAD, ready for review). Return the
-        re-runs it asked for, its output and its summary."""
+        into main, the path "new<-old" for a rename (default: one enrollment at HEAD, ready for review). fails: {call:
+        n}, the first n tries of that call ("jobs", "pulls", "files" or "rerun") fail, after printing a cut page. ok:
+        whether the step must succeed. Return the re-runs it asked for, its output and its summary; self.waits holds
+        the waits it asked sleep for, and self.tries the tries of each call."""
         pulls = {5: (self.HEAD, self.ENROLLMENT)} if pulls is None else pulls
         pulls = {n: (p + (False,))[:3] for n, p in pulls.items()}
         with tempfile.TemporaryDirectory() as directory:
@@ -1380,6 +1382,8 @@ class ReviewRerun(unittest.TestCase):
             for number, (head, paths, draft) in pulls.items():
                 (root / f"files-{number}.json").write_text(json.dumps(
                     [dict(zip(("filename", "previous_filename"), path.split("<-"))) for path in paths]))
+            for call, n in (fails or {}).items():
+                (root / f"fails-{call}").write_text(str(n))
             (root / "bin" / "gh").write_text(
                 "#!/bin/bash\n"
                 'filter=""; path=""; for a; do [ "$prev" = --jq ] && filter=$a\n'
@@ -1387,24 +1391,41 @@ class ReviewRerun(unittest.TestCase):
                 f'cd {root}\n'
                 'echo "gh $*" >> calls\n'
                 'case "$path" in\n'
-                '  "") [ "$1 $2" = "run rerun" ] || { echo "unexpected gh $*" >&2; exit 1; }; echo "$*" >> reruns ;;\n'
-                '  repos/o/r/actions/runs/*/attempts/*/jobs\\?per_page=100) r=${path#repos/o/r/actions/runs/}\n'
-                '    a=${r#*/attempts/}; jq -r "$filter" "jobs-${r%%/*}-${a%%/*}.json" ;;\n'
-                '  "repos/o/r/pulls?state=open&base=main&per_page=100") jq -r "$filter" pulls.json ;;\n'
-                '  repos/o/r/pulls/*/files\\?per_page=100) n=${path#repos/o/r/pulls/}\n'
-                '    jq -r "$filter" "files-${n%%/*}.json" ;;\n'
+                '  "") call=rerun ;;\n'
+                '  repos/o/r/actions/runs/*/attempts/*/jobs\\?per_page=100) call=jobs ;;\n'
+                '  "repos/o/r/pulls?state=open&base=main&per_page=100") call=pulls ;;\n'
+                '  repos/o/r/pulls/*/files\\?per_page=100) call=files ;;\n'
                 '  *) echo "unexpected gh $*" >&2; exit 1 ;;\n'
+                "esac\n"
+                'try=$(( $(cat "tries-$call" 2>/dev/null || echo 0) + 1 )); echo "$try" > "tries-$call"\n'
+                'if (( try <= $(cat "fails-$call" 2>/dev/null || echo 0) )); then\n'
+                '  echo 99; echo "HTTP 502" >&2; exit 1\n'
+                'fi\n'
+                'case $call in\n'
+                '  rerun) [ "$1 $2" = "run rerun" ] || { echo "unexpected gh $*" >&2; exit 1; }\n'
+                '    echo "$*" >> reruns ;;\n'
+                '  jobs) r=${path#repos/o/r/actions/runs/}; a=${r#*/attempts/}\n'
+                '    jq -r "$filter" "jobs-${r%%/*}-${a%%/*}.json" ;;\n'
+                '  pulls) jq -r "$filter" pulls.json ;;\n'
+                '  files) n=${path#repos/o/r/pulls/}; jq -r "$filter" "files-${n%%/*}.json" ;;\n'
                 "esac\n")
             (root / "bin" / "gh").chmod(0o755)
+            (root / "bin" / "sleep").write_text(f'#!/bin/bash\necho "$1" >> {root}/waits\n')
+            (root / "bin" / "sleep").chmod(0o755)
             (step,) = self.job["steps"]
             run = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=root, capture_output=True, text=True,
                                  env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "GH_TOKEN": "x",
                                       "REPO": "o/r", "RUN_ID": str(run_id), "RUN_ATTEMPT": str(attempt),
                                       "HEAD_SHA": self.HEAD, "GITHUB_STEP_SUMMARY": str(root / "summary")})
-            self.assertEqual(run.returncode, 0, run.stderr)
+            if ok:
+                self.assertEqual(run.returncode, 0, run.stderr)
+            else:
+                self.assertNotEqual(run.returncode, 0, run.stdout)
             self.assertFalse((root / "pwned").exists())
             reruns = (root / "reruns").read_text().splitlines() if (root / "reruns").exists() else []
             summary = (root / "summary").read_text() if (root / "summary").exists() else ""
+            self.waits = [int(w) for w in (root / "waits").read_text().split()] if (root / "waits").exists() else []
+            self.tries = {p.name[len("tries-"):]: int(p.read_text()) for p in root.glob("tries-*")}
             return reruns, run.stdout, summary
 
     def test_a_failed_enrollment_review_is_re_run_at_attempt_1_and_2(self):
@@ -1462,6 +1483,35 @@ class ReviewRerun(unittest.TestCase):
             with self.subTest(pulls=pulls):
                 reruns, out, summary = self.rerun(1, self.jobs(), pulls)
                 self.assertEqual((reruns, summary), ([], ""))
+
+    def test_a_failed_call_is_tried_again_and_the_review_is_re_run(self):
+        # A fault of GitHub's API on any call: the jobs, the pull requests, their files, the re-run. One or three
+        # failed tries, 15, 30 and 60 s apart, then the call succeeds. A failed try's output (here a cut page that
+        # names pull request 99) is never used.
+        for call in ("jobs", "pulls", "files", "rerun"):
+            for failed in (1, 3):
+                with self.subTest(call=call, failed=failed):
+                    reruns, out, summary = self.rerun(1, self.jobs(), fails={call: failed})
+                    self.assertEqual(reruns, ["run rerun 40 --failed -R o/r"])
+                    self.assertEqual(self.waits, [15, 30, 60][:failed])
+                    self.assertEqual(self.tries[call], failed + 1)
+                    self.assertEqual(summary.splitlines(), [
+                        "Pull request 5: the review job of Build run 40 ended failure at attempt 1; its failed jobs "
+                        "run again."])
+
+    def test_four_failed_tries_fail_the_job_and_name_the_build_run(self):
+        # Nothing runs on a schedule, so nothing else would try again: the job fails, and its summary says which Build
+        # run is not re-run.
+        for call, what in (("jobs", "read the jobs of attempt 1"), ("pulls", "list the open pull requests"),
+                           ("files", "list the files of pull request 5"), ("rerun", "re-run its failed jobs")):
+            with self.subTest(call=call):
+                reruns, out, summary = self.rerun(1, self.jobs(), fails={call: 4}, ok=False)
+                self.assertEqual(reruns, [])
+                self.assertEqual(self.waits, [15, 30, 60])
+                self.assertEqual(self.tries[call], 4)
+                self.assertEqual(summary.splitlines(),
+                                 [f"Build run 40: could not {what} after 4 tries, so it is not re-run."])
+                self.assertIn(f"::error::Build run 40: could not {what} after 4 tries", out)
 
 
 if __name__ == "__main__":
