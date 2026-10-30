@@ -609,9 +609,15 @@ if path == "repos/" + state["variable"]:
     answer = {"visibility": state["visibility"]}
 elif "/issues?" in path:
     if state["listing_fails"]:
-        sys.stderr.write("gh: the stand-in refuses the listing\n")
+        # gh writes the request it failed on, which holds the private repository's name.
+        sys.stderr.write("gh: HTTP 500 on " + path + "\n")
         sys.exit(1)
     answer = [{"number": i, "body": b[0], "state": b[1]} for i, b in enumerate(state["issues"], 1)]
+    # As GitHub answers it: open issues only, unless the query asks for every state.
+    if "state=all" not in path:
+        answer = [i for i in answer if i["state"] == "open"]
+    if "labels=held-finding" not in path:
+        answer = []
 elif path.endswith("/comments") and not fields:
     if state["comments_fail"] and private:
         sys.stderr.write("gh: the stand-in refuses the comments\n")
@@ -776,12 +782,77 @@ else:
         self.assertEqual(run.returncode, 1)
         self.assertEqual((self.opened(calls), sent), ([], []))
         self.assertIn("could not read the issues already filed", run.stderr)
+        # gh's own words, which hold the private repository's name, reach neither the log nor the job summary.
+        self.assertNotIn("private", run.stdout + run.stderr + run.summary)
         # And a lookup of the comments of the issue that is there, for the parts it already holds.
         _, _, bodies = self.run_held(self.HELD)
         run, calls, sent = self.run_held(self.HELD, bodies_on_github=[bodies[0]], comments_fail=True,
                                          obj="held/9/" + "b" * 32, header=self.HEADER.replace("runs/7", "runs/9"))
         self.assertNotEqual(run.returncode, 0)
         self.assertEqual((self.opened(calls), sent), ([], []))
+
+    def test_the_words_a_review_writes_differently_each_run_are_not_in_the_key(self):
+        # Each of these is the same finding, written as a model writes it on another run. None of them files again.
+        _, _, bodies = self.run_held(self.HELD)
+        same = {
+            "the function in code quotes": ("in parse_SECRETBUG", "in `parse_SECRETBUG`"),
+            "the function with its brackets": ("in parse_SECRETBUG", "in parse_SECRETBUG()"),
+            "the kind with a hyphen": ("why held: memory safety:", "why held: memory-safety:"),
+            "the repository over ssh": ("https://github.com/example/libreac",
+                                        "ssh://git@github.com/example/libreac.git"),
+            "the commit in capitals": ("upstream commit: " + "c" * 40, "upstream commit: " + "C" * 40),
+            "a line that moved": ("src/parse.c:40-80", "src/parse.c:41-81"),
+        }
+        for what, (before, after) in same.items():
+            with self.subTest(what=what):
+                run, calls, _ = self.run_held(self.HELD.replace(before, after), bodies_on_github=[bodies[0]],
+                                               obj="held/9/" + "b" * 32,
+                                               header=self.HEADER.replace("runs/7", "runs/9"))
+                self.assertEqual(run.returncode, 0, run.stderr)
+                self.assertEqual(self.opened(calls), [])
+
+    def test_a_text_the_issue_already_holds_is_not_added_again_or_reported_as_added(self):
+        _, _, bodies = self.run_held(self.HELD)
+        again = self.HELD.replace("a read past the end", "it reads past the end of the buffer")
+        run, _, update = self.run_held(again, bodies_on_github=[bodies[0]], obj="held/9/" + "b" * 32,
+                                        header=self.HEADER.replace("runs/7", "runs/9"))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(len(update), 1)
+        run, calls, sent = self.run_held(again, bodies_on_github=[bodies[0]], comments=[update[0]],
+                                          obj="held/11/" + "c" * 32,
+                                          header=self.HEADER.replace("runs/7", "runs/11"))
+        self.assertEqual((run.returncode, self.opened(calls), sent), (0, [], []))
+        self.assertIn("was not filed again", run.summary)
+        self.assertNotIn("was added", run.summary)
+
+    def test_findings_of_an_issue_that_holds_several_are_never_filed_on_their_own(self):
+        # Eleven findings go as one issue. The next run holds ten of them: each is already filed, in that issue.
+        findings = [f"<!-- held finding -->\ntitle: t{i} in f{i}\nproject: libreac\nharness: fuzz_one\n"
+                    f"why held: crash: SECRET{i}\n\nsrc/f{i}.c, it aborts.\n" for i in range(11)]
+        run, _, bodies = self.run_held("".join(findings))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(len(bodies), 1)
+        self.assertEqual(len(bodies[0].split("\n")[6].removeprefix("held finding set: ").split()), 11)
+        run, calls, sent = self.run_held("".join(findings[:10]), bodies_on_github=[bodies[0]],
+                                          obj="held/9/" + "b" * 32,
+                                          header=self.HEADER.replace("runs/7", "runs/9"))
+        self.assertEqual((run.returncode, self.opened(calls), sent), (0, [], []))
+        self.assertEqual(run.summary.count("with the other findings of its review"), 10)
+
+    def test_an_issue_that_holds_several_takes_only_the_findings_that_are_not_filed_yet(self):
+        # Ten findings file one issue each; a re-run that holds eleven files only the one that is new.
+        findings = [f"<!-- held finding -->\ntitle: t{i} in f{i}\nproject: libreac\nharness: fuzz_one\n"
+                    f"why held: crash: SECRET{i}\n\nsrc/f{i}.c, it aborts.\n" for i in range(11)]
+        run, _, bodies = self.run_held("".join(findings[:10]))
+        self.assertEqual((run.returncode, len(bodies)), (0, 10))
+        run, calls, sent = self.run_held("".join(findings), bodies_on_github=list(bodies),
+                                          obj="held/9/" + "b" * 32,
+                                          header=self.HEADER.replace("runs/7", "runs/9"))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("SECRET10", sent[0])
+        for i in range(10):
+            self.assertNotIn(f"SECRET{i}\n", sent[0])
 
     def test_an_open_issue_of_the_key_is_the_one_a_closed_one_does_not_hide(self):
         _, _, bodies = self.run_held(self.HELD)
