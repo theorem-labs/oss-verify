@@ -1033,49 +1033,43 @@ else:
                                                  obj="held/9/" + "b" * 32)
                 self.assertEqual((run.returncode, self.opened(calls), sent), (0, [], []))
 
-    def test_the_finding_reaches_the_hold_job_only_through_the_private_bucket(self):
-        jobs = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["jobs"]
-        text = (ROOT / ".github" / "workflows" / "build.yaml").read_text()
-        # No job holds the App's key as a repository secret, and nothing reads a variable for the repository.
-        self.assertNotIn("OSS_VERIFY_APP_PRIVATE_KEY", text)
-        self.assertNotIn("HELD_FINDINGS_REPO }}", text)
-        review = {s.get("name"): s for s in jobs["review"]["steps"]}
-        store = review["Store the held finding for the hold job"]["run"]
-        self.assertIn("ifGenerationMatch=0", store)
-        self.assertIn('name="held/$RUN_ID/$(openssl rand -hex 16)"', store)
-        self.assertIn("oss-verify held finding v1", store)
-        self.assertEqual(jobs["review"]["outputs"]["held_object"], "${{ steps.held.outputs.object }}")
-        # The review job passes names only: no output holds a file's text or the finding.
-        self.assertNotIn("held-finding.md", json.dumps(jobs["review"]["outputs"]))
-        # The finding is stored only when the review held one back, from the file the result step wrote, and the
-        # session of that review is not kept.
-        for name in ("Sign in to Google Cloud to store the held finding", "Store the held finding for the hold job"):
-            self.assertEqual(review[name]["if"], "${{ steps.result.outputs.held == 'yes' }}")
-        self.assertIn('"$RUNNER_TEMP/held-finding.md"', store)
-        self.assertEqual(review["Keep this review's session for the next push's review"]["if"],
-                         "${{ steps.result.outputs.held != 'yes' }}")
-        hold = jobs["hold"]
-        self.assertEqual(hold["environment"], {"name": "comment", "deployment": False})
-        self.assertEqual(hold["needs"], ["project-builds", "review"])
-        # Every run that reviewed anything sweeps the bucket, so a cancelled run's finding goes with the next run.
-        self.assertEqual(hold["if"], "${{ !cancelled() && needs.review.result != 'skipped' }}")
-        # One sweep at a time in the repository; every waiting one keeps its place, so none is cancelled by another.
-        self.assertEqual(hold["concurrency"], {"group": "build-hold", "cancel-in-progress": False, "queue": "max"})
-        steps = {s.get("name"): s for s in hold["steps"]}
-        where = steps["Where the held findings go"]["run"]
-        self.assertIn("secrets/oss-verify-held-findings-repo/versions/latest:access", where)
-        self.assertLess(where.index("::add-mask::"), where.index('echo "name=$name"'))
-        token = steps["Get the oss-verify App's token for the held findings' repository"]["with"]
-        self.assertEqual((token["owner"], token["repositories"], token["permission-issues"]),
-                         ("${{ github.repository_owner }}", "${{ steps.where.outputs.name }}", "write"))
-        send = steps["Send every stored held finding to the disclosure route"]
-        self.assertEqual(send["run"], '.github/scripts/review-hold "$RUNNER_TEMP/held"')
-        self.assertEqual(send["env"]["CURRENT_OBJECT"], "${{ needs.review.outputs.held_object }}")
-        # The comment job posts no review unless the review job succeeded and, if it held a finding, hold sent it.
-        self.assertIn("hold", jobs["comment"]["needs"])
-        self.assertIn("needs.review.result == 'success' && needs.review.outputs.comment != '' && "
-                      "(needs.review.outputs.held_object == '' || needs.hold.result == 'success')",
-                      jobs["comment"]["if"])
+    def test_the_review_jobs_own_step_puts_no_finding_in_the_output_the_log_or_the_summary(self):
+        # The review job's step, run as the runner runs it, with a stand-in curl for the bucket: of the finding it
+        # stores, the job's output, the log and the job summary of this public repository hold nothing but the
+        # object's name, and that name is what the hold job reads the finding by.
+        [script] = [s["run"] for s in
+                    yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["jobs"]["review"]
+                    ["steps"] if s.get("name") == "Store the held finding for the hold job"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "bin").mkdir()
+            (root / "tmp").mkdir()
+            (root / "tmp" / "held-finding.md").write_text(self.HELD)
+            # curl answers as the bucket does, and keeps the bytes it was sent.
+            (root / "bin" / "curl").write_text(
+                "#!/bin/bash\nfor a in \"$@\"; do case $a in --data-binary) ;; @*) cp \"${a#@}\" "
+                f"{root}/uploaded ;; esac; done\n" + 'printf \'{"generation": "1761500000000000"}\'\n')
+            (root / "bin" / "curl").chmod(0o755)
+            run = subprocess.run(["bash", "--noprofile", "--norc", "-e", "-c", script], cwd=root, text=True,
+                                 capture_output=True,
+                                 env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
+                                      "RUNNER_TEMP": str(root / "tmp"), "GITHUB_OUTPUT": str(root / "output"),
+                                      "GITHUB_STEP_SUMMARY": str(root / "summary"),
+                                      "GCP_ACCESS_TOKEN": "gcp-not-a-secret", "RUN_ID": "7", "PR": "68",
+                                      "NAME": "libreac", "HEAD_SHA": "1" * 40,
+                                      "RUN_URL": "https://github.com/theorem-labs/oss-verify/actions/runs/7"})
+            self.assertEqual(run.returncode, 0, run.stderr)
+            output = (root / "output").read_text()
+            summary = (root / "summary").read_text() if (root / "summary").exists() else ""
+            uploaded = (root / "uploaded").read_text()
+        # The output is the object's name and nothing else, and the finding went to the bucket, whole.
+        self.assertRegex(output, r"^object=held/7/[0-9a-f]{32}\n$")
+        self.assertTrue(uploaded.startswith(self.HEADER), uploaded[:100])
+        self.assertIn("SECRETBUG", uploaded)
+        for public in (output, summary, run.stdout, run.stderr):
+            self.assertNotIn("SECRETBUG", public)
+            self.assertNotIn("parse_SECRETBUG", public)
+            self.assertNotIn("memory safety", public)
 
 
 class ReviewHold(unittest.TestCase):
