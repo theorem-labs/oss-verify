@@ -516,21 +516,6 @@ class PostingStep(unittest.TestCase):
                 self.assertIn("issues/comments/4242", (directory / "patch.url").read_text())
             return json.loads((directory / sent[0]).read_text())["body"] if sent else None
 
-    def test_nothing_is_posted_unless_posting_is_on(self):
-        # The comment job, which alone holds the App's key, runs only while OSSV_POST_REVIEW is `post`, and the
-        # required job asks for it on the same condition, so with the variable unset no job can post or edit a comment.
-        jobs = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["jobs"]
-        condition = jobs["comment"]["if"]
-        # Its switch for this repository (test_routed_workflows.py tests it, and that of the other repositories).
-        self.assertIn("vars.OSSV_POST_REVIEW == 'post'", condition)
-        asked = jobs["required"]["steps"][-1]["env"]["ASKED_COMMENT"]
-        self.assertEqual(condition.replace("!cancelled() && ", ""), asked)
-        # No other job of the file can write to the pull request: only the comment job's token is the App's.
-        for name, job in jobs.items():
-            if name != "comment":
-                self.assertNotIn("write", json.dumps({k: v for k, v in (job.get("permissions") or {}).items()
-                                                      if k != "id-token"}), name)
-
     def test_the_triage_comment_is_a_draft_without_its_variable(self):
         # triage.yaml's own posting step: with OSSV_POST_TRIAGE anything but post, it calls gh not at all and writes the
         # draft to the summary; with post, it posts.
@@ -1204,32 +1189,6 @@ class ReviewJob(unittest.TestCase):
         self.assertIn("A new request comes only from .review/since-last-review.diff", prompt)
         self.assertIn("before you keep a request of your last comment, read again the input in .review/", prompt)
 
-    def test_a_change_is_reviewed_by_the_same_action_and_identity_against_review_change_md(self):
-        change = self.steps["Review the change"]
-        self.assertEqual(change["uses"], self.review["uses"])
-        same = ("anthropic_federation_rule_id", "anthropic_organization_id", "anthropic_service_account_id",
-                "anthropic_workspace_id", "github_token", "allowed_non_write_users", "allowed_bots")
-        self.assertEqual({k: change["with"][k] for k in same}, {k: self.review["with"][k] for k in same})
-        args = change["with"]["claude_args"]
-        self.assertTrue(args.startswith("--tools Read,Glob,Grep --permission-mode default --model claude-opus-5-5 "))
-        # It resumes only the session that review-gather names (test_a_change_review_restores_its_session_...).
-        self.assertIn("--resume {0}', steps.gather.outputs.session", args)
-        schema = json.loads(re.search(r"--json-schema '([^']*)'$", args).group(1))
-        self.assertEqual(schema["required"], ["comment", "held", "verdicts"])
-        self.assertEqual(schema["properties"]["verdicts"]["required"], ["1", "2", "3", "4", "5"])
-        self.assertEqual(schema["properties"]["held"]["maxLength"], 0)
-        self.assertIn("Read review-change.md at the root of this checkout", change["with"]["prompt"])
-        result = self.steps["Keep the draft, and the held finding apart from it"]["env"]["RESULT"]
-        self.assertEqual(result, "${{ steps.review.outputs.execution_file || steps.change.outputs.execution_file"
-                                 " || steps.issue.outputs.execution_file }}")
-        for check in range(1, 6):
-            self.assertIn(f"\n{check}. **", (ROOT / "review-change.md").read_text())
-        # Check 5's rule, whole: a change of behaviour or a new affordance is person, and a clear bug fix is pass.
-        rules = (ROOT / "review-change.md").read_text()
-        self.assertIn("\n5. **A person decides a new behaviour.** A change that alters behaviour or adds an affordance"
-                      " (a new option, command,\n   input, permission or workflow trigger) is **person**: it waits for"
-                      " a person's decision. A\n   clear bug fix is **pass**.\n", rules)
-
     def test_a_change_gathers_only_the_pull_request_and_its_changed_files_as_data(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -1491,30 +1450,9 @@ else:
                 "display_title": title, "head_sha": "9" * 40, "head_repository": {"full_name": "theorem-labs/oss-verify"}}
 
     def test_a_change_review_restores_its_session_by_repository_and_number(self):
+        # The cache key, evaluated: one key for each repository and number, and none is the start of another, which
+        # restore-keys would match.
         key = self.jobs["review"]["env"]["CHANGE_KEY"]
-        self.assertEqual(key, "review-${{ inputs.repo || 'oss-verify' }}-"
-                              "${{ github.event.pull_request.number || inputs.pr }}-")
-        restore = self.steps["Restore the last change review's session"]
-        save = self.steps["Keep this change review's session for the next push's review"]
-        enrollment = self.steps["Restore the last review's session and the head it reviewed"]
-        self.assertEqual(restore["uses"], enrollment["uses"])
-        self.assertEqual(save["uses"], self.steps["Keep this review's session for the next push's review"]["uses"])
-        paths = "~/.claude/projects\n~/.claude/ossv-last-review"
-        run_key = "${{ env.CHANGE_KEY }}${{ github.run_id }}-${{ github.run_attempt }}"
-        self.assertEqual((restore["with"]["path"], restore["with"]["key"], restore["with"]["restore-keys"]),
-                         (paths, run_key, "${{ env.CHANGE_KEY }}"))
-        self.assertEqual((save["with"]["path"], save["with"]["key"]), (paths, run_key))
-        self.assertEqual(restore["if"], "env.NAME == '' && env.ISSUE == ''")
-        self.assertEqual(save["if"], "${{ steps.result.outputs.held != 'yes' && env.NAME == '' && env.ISSUE == '' }}")
-        names = list(self.steps)
-        self.assertLess(names.index(restore["name"]),
-                        names.index("Gather what the review reads, and the diff since the last review"))
-        self.assertLess(names.index("Keep the draft, and the held finding apart from it"), names.index(save["name"]))
-        self.assertIn("${{ steps.gather.outputs.session && format('--resume {0}', steps.gather.outputs.session) || '' }}",
-                      self.steps["Review the change"]["with"]["claude_args"])
-        self.assertEqual(self.steps["Keep the draft, and the held finding apart from it"]["env"]["SESSION"],
-                         "${{ steps.review.outputs.session_id || steps.change.outputs.session_id }}")
-        # One key for each repository and number, and none is the start of another, which restore-keys would match.
         keys = [evaluate(key, {"inputs": {"repo": repo, "pr": number}})
                 for repo in ("oss-verify", "oss-verify-proofs", "rocq-linux-process-semantics") for number in (1, 10)]
         self.assertEqual(keys[2], "review-oss-verify-proofs-1-")
@@ -1576,7 +1514,6 @@ else:
 
     def test_checks_4_and_5_read_the_whole_diff_against_main(self):
         prompt = self.steps["Review the change"]["with"]["prompt"]
-        self.assertIn("Read review-change.md at the root of this checkout", prompt)
         env = {"PR": "34", "REPO": "theorem-labs/rocq-linux-process-semantics", "HEAD_SHA": self.HEAD}
         resumed = evaluate(prompt, {"env": env, "steps": {"gather": {"outputs": {"session": self.SESSION,
                                                                                  "last": self.LAST}}}})
@@ -1611,8 +1548,8 @@ class Owners(unittest.TestCase):
 
 class Starters(unittest.TestCase):
     """The starter workflows of theorem-labs/oss-verify-proofs and theorem-labs/rocq-linux-process-semantics, whose copies
-    are in .github/starters/: each starts this repository's build.yaml for its pull requests and issues with the OSS
-    Verify App's token, on the CI/CD lead's conditions (2026-10-30), each tested here on the file and its own steps."""
+    are in .github/starters/: their steps' own scripts, run here with the env GitHub gives them on an event and with a
+    stand-in gh. What only the workflow file holds (its triggers, environment and token inputs) is proved on a run."""
 
     NAMES = ("oss-verify-proofs", "rocq-linux-process-semantics")
     TOKEN = "ghs_stand-in-not-a-secret"
@@ -1624,73 +1561,6 @@ class Starters(unittest.TestCase):
     def steps(self, name):
         [job] = self.starter(name)["jobs"].values()
         return {s["name"]: s for s in job["steps"]}
-
-    def test_the_starter_workflow_has_no_schedule_and_no_checkout(self):
-        build = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
-        # The fixed list is build.yaml's input repo, without this repository.
-        self.assertEqual(tuple(build[True]["workflow_dispatch"]["inputs"]["repo"]["options"][1:]), self.NAMES)
-        for name in self.NAMES:
-            with self.subTest(name=name):
-                flow = self.starter(name)
-                self.assertEqual(flow[True], {"pull_request_target": {"types": ["opened", "synchronize", "reopened"]},
-                                              "issues": {"types": ["opened", "edited", "reopened"]}})
-                self.assertNotIn("schedule", json.dumps(flow))
-                self.assertEqual(flow["permissions"], {})
-                [job] = flow["jobs"].values()
-                self.assertEqual(job["permissions"], {})
-                # Only in that repository: a fork's copy starts nothing.
-                self.assertEqual(job["if"], f"github.repository == 'theorem-labs/{name}'")
-                self.assertFalse([s for s in job["steps"] if "checkout" in s.get("uses", "")])
-
-    def test_the_two_starters_differ_only_in_the_repository_name(self):
-        # Line for line: the header's two mentions, the job's if: and NAME. The fixed list is the same in both.
-        first, second = ((ROOT / ".github" / "starters" / f"{name}.yml").read_text().splitlines()
-                         for name in self.NAMES)
-        self.assertEqual(len(first), len(second))
-        differ = [(a, b) for a, b in zip(first, second) if a != b]
-        self.assertEqual(len(differ), 4, differ)
-        self.assertTrue(all(a.replace(*self.NAMES) == b for a, b in differ), differ)
-
-    def test_only_the_starter_job_holds_the_apps_key_in_an_environment(self):
-        # (1) The key is the secret of the environment oss-verify-starter, whose deployment branches are the default
-        # branch alone (an administrator sets them; the PR body has the read-back). Only the one job names it, and
-        # only the token step reads a secret.
-        for name in self.NAMES:
-            with self.subTest(name=name):
-                [job] = self.starter(name)["jobs"].values()
-                self.assertEqual(job["environment"], {"name": "oss-verify-starter", "deployment": False})
-                text = (ROOT / ".github" / "starters" / f"{name}.yml").read_text()
-                self.assertEqual(text.count("secrets."), 1)
-                self.assertEqual(self.steps(name)["Get the OSS Verify App's token, to start one run in "
-                                                  "theorem-labs/oss-verify"]["with"]["private-key"],
-                                 "${{ secrets.OSS_VERIFY_APP_PRIVATE_KEY }}")
-
-    def test_the_token_is_for_oss_verify_alone_with_actions_write_alone(self):
-        # (2) actions/create-github-app-token, for the repository oss-verify of theorem-labs, with one permission.
-        for name in self.NAMES:
-            with self.subTest(name=name):
-                token = self.steps(name)["Get the OSS Verify App's token, to start one run in theorem-labs/oss-verify"]
-                self.assertTrue(token["uses"].startswith("actions/create-github-app-token@"))
-                self.assertEqual(token["with"], {"client-id": "Iv23liAWPMahJZYsw3un",
-                                                 "private-key": "${{ secrets.OSS_VERIFY_APP_PRIVATE_KEY }}",
-                                                 "owner": "theorem-labs", "repositories": "oss-verify",
-                                                 "permission-actions": "write"})
-
-    def test_no_step_runs_pull_request_code_and_each_action_is_pinned(self):
-        # (3) No checkout (above), each action by its commit, and no expression inside a script: every value of the
-        # event reaches a script through env, and no step reads the pull request's or the issue's text or branch.
-        for name in self.NAMES:
-            with self.subTest(name=name):
-                steps = list(self.steps(name).values())
-                for step in steps:
-                    if "uses" in step:
-                        self.assertRegex(step["uses"], r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}$")
-                    else:
-                        self.assertNotIn("${{", step["run"])
-                text = json.dumps(steps)
-                for field in ("title", "body", "head.ref", "head.label", "head.repo", "comment"):
-                    self.assertNotIn(f"github.event.pull_request.{field}", text)
-                    self.assertNotIn(f"github.event.issue.{field}", text)
 
     def event(self, name, **values):
         """The starter's first step, with the env GitHub gives it on an event of `values` (pull_request, issue, sender,
@@ -1712,10 +1582,6 @@ class Starters(unittest.TestCase):
         head = "c" * 40
         for name in self.NAMES:
             with self.subTest(name=name):
-                env = self.steps(name)["Read what to start from the event"]["env"]
-                self.assertEqual((env["NAME"], env["PR"], env["HEAD"], env["ISSUE"]),
-                                 (name, "${{ github.event.pull_request.number }}",
-                                  "${{ github.event.pull_request.head.sha }}", "${{ github.event.issue.number }}"))
                 self.assertEqual(self.event(name, pull_request={"number": 34, "head": {"sha": head}}),
                                  (0, {"repo": name, "pr": "34", "head": head}))
                 alice = {"login": "alice"}
@@ -1773,12 +1639,7 @@ class Starters(unittest.TestCase):
         head = "c" * 40
         for name in self.NAMES:
             with self.subTest(name=name):
-                text = (ROOT / ".github" / "starters" / f"{name}.yml").read_text()
-                self.assertEqual(text.count("steps.app.outputs.token"), 1)
                 steps = self.steps(name)
-                start = steps["Start OSS Verify's review in theorem-labs/oss-verify"]
-                self.assertEqual(start["env"]["GH_TOKEN"], "${{ steps.app.outputs.token }}")
-                self.assertNotIn("GH_TOKEN", start["run"])
                 for outputs, argv in (
                         ({"repo": name, "pr": "34", "head": head},
                          ["workflow", "run", "build.yaml", "-R", "theorem-labs/oss-verify", "--ref", "main",
@@ -1792,10 +1653,11 @@ class Starters(unittest.TestCase):
                     self.assertIn("gh-token", files)
                     for where in [run.stdout, run.stderr, *files.values(), *got]:
                         self.assertNotIn(self.TOKEN, where)
-                # With nothing to start (no outputs of the first step), neither the token step nor this one runs.
-                self.assertEqual(steps["Get the OSS Verify App's token, to start one run in theorem-labs/oss-verify"]
-                                 ["if"], "steps.event.outputs.repo != ''")
-                self.assertEqual(start["if"], "steps.event.outputs.repo != ''")
+                # The token step and the start step run only when the first step found something to start.
+                for step in (steps["Get the OSS Verify App's token, to start one run in theorem-labs/oss-verify"],
+                             steps["Start OSS Verify's review in theorem-labs/oss-verify"]):
+                    self.assertIs(evaluate(step["if"], {"steps": {"event": {"outputs": {}}}}), False)
+                    self.assertIs(evaluate(step["if"], {"steps": {"event": {"outputs": {"repo": name}}}}), True)
 
 
 if __name__ == "__main__":

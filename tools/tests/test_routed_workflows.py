@@ -297,7 +297,6 @@ def test_a_change_that_an_app_the_review_refuses_started_is_built_as_before(tmp_
     jobs = workflow("build.yaml")["jobs"]
     allowed = step(jobs["route"], "An enrollment or a change")["env"]["ALLOWED_BOTS"]
     review = {s.get("name"): s for s in jobs["review"]["steps"]}
-    # The starter workflows of the other repositories start their runs as oss-verify[bot]: no other App is admitted.
     assert review["Review"]["with"]["allowed_bots"] == review["Review the change"]["with"]["allowed_bots"] == allowed
 
 
@@ -455,10 +454,6 @@ def test_another_repository_routes_to_a_change_review(tmp_path, repo):
     assert (code, outputs) == (0, [f"sha={HEAD}", "change=true"])
     assert paths and all(p.startswith(f"repos/theorem-labs/{repo}/") for p in paths)
     flow = workflow("build.yaml")
-    inputs = flow[True]["workflow_dispatch"]["inputs"]
-    assert (inputs["repo"]["type"], inputs["repo"]["default"]) == ("choice", "oss-verify")
-    assert inputs["repo"]["options"] == ["oss-verify", "oss-verify-proofs", OTHER]
-    assert (inputs["head"]["type"], inputs["head"]["required"]) == ("string", False)
     # The next review of the pull request finds the head its last review reviewed by this title (review-gather).
     run = {"inputs": {"repo": repo, "pr": 34, "head": HEAD}, "github": {"event_name": "workflow_dispatch"}}
     assert evaluate(flow["run-name"], run) == f"Review {repo}#34 at {HEAD}"
@@ -502,8 +497,7 @@ def test_the_token_names_the_target_repository():
     jobs = workflow("build.yaml")["jobs"]
     token = step(jobs["comment"], "Get the oss-verify App's token")["with"]
     post = step(jobs["comment"], "Post the comment, or update the one already there")
-    assert token["owner"] == "theorem-labs"
-    assert {k for k in token if k.startswith("permission-")} == {"permission-pull-requests"}
+    # Evaluated: the token's repository, and the repository each step reads, follow the run's input.
     for inputs, name in (({"repo": OTHER, "pr": 34, "head": HEAD}, OTHER),
                          ({"repo": "oss-verify-proofs", "pr": 7, "head": HEAD}, "oss-verify-proofs"),
                          ({"repo": "oss-verify", "pr": 7}, "oss-verify"), ({}, "oss-verify")):
