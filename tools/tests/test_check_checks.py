@@ -477,7 +477,8 @@ class WorkflowArguments(unittest.TestCase):
 class PostingStep(unittest.TestCase):
     """build.yaml's own "Post the comment" step, run with a fake gh: what it sends GitHub."""
 
-    def post(self, review, existing=True, head="b" * 40, pr_head=None, checks="### new report\n", rules="review.md"):
+    def post(self, review, existing=True, head="b" * 40, pr_head=None, checks="### new report\n", rules="review.md",
+             verdicts=""):
         workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
         name = "Post the comment, or update the one already there"
         matches = [s for s in workflow["jobs"]["comment"]["steps"] if s.get("name") == name]
@@ -502,7 +503,7 @@ class PostingStep(unittest.TestCase):
             (directory / "temp").mkdir()
             environment = {**os.environ, "PATH": f"{bin}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r",
                            "PR": "8", "REVIEW": review, "CHECKS": checks, "HEAD_SHA": head, "RULES": rules,
-                           "RUNNER_TEMP": str(directory / "temp")}
+                           "VERDICTS": verdicts, "RUNNER_TEMP": str(directory / "temp")}
             run = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=ROOT, env=environment, capture_output=True,
                                  text=True)
             self.assertEqual(run.returncode, 0, run.stderr)
@@ -581,6 +582,89 @@ class PostingStep(unittest.TestCase):
         body = self.post("R" * 70_000, checks="C" * 20_000)
         self.assertLess(len(body), 65_536)
         self.assertIn("R" * 50_000, body)
+
+    def test_the_draft_body_md_is_what_the_comment_job_posts(self):
+        # The review job writes body.md with .github/scripts/review-body before the draft goes up, and gives the
+        # verdicts it read to the comment job as its output `verdicts`; the post step runs review-body on the same
+        # values. Both jobs' own steps, run here on one review, give the same text.
+        jobs = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["jobs"]
+        steps = jobs["review"]["steps"]
+        names = [s.get("name") for s in steps]
+        write = steps[names.index("Write the comment as the comment job posts it")]
+        upload = next(i for i, s in enumerate(steps) if s.get("uses", "").startswith("actions/upload-artifact@"))
+        self.assertLess(steps.index(write), upload)
+        # Never for an issue: no job posts its reply.
+        self.assertEqual(write["if"], "env.ISSUE == ''")
+        [post] = [s for s in jobs["comment"]["steps"]
+                  if s.get("name") == "Post the comment, or update the one already there"]
+        self.assertEqual(write["env"]["REVIEW"], jobs["review"]["outputs"]["comment"])
+        self.assertEqual(post["env"]["REVIEW"], "${{ needs.review.outputs.comment }}")
+        for name in ("CHECKS", "RULES"):
+            self.assertEqual(write["env"][name], post["env"][name], name)
+        self.assertEqual(jobs["review"]["env"]["HEAD_SHA"], post["env"]["HEAD_SHA"])
+        self.assertEqual(jobs["review"]["outputs"]["verdicts"], "${{ steps.body.outputs.verdicts }}")
+        self.assertEqual(post["env"]["VERDICTS"], "${{ needs.review.outputs.verdicts }}")
+        review = "Thanks.\n\n1. Fix X.\n"
+        with tempfile.TemporaryDirectory() as directory:
+            temp = pathlib.Path(directory)
+            (temp / "draft").mkdir()
+            # As the result step writes it (jq .verdicts): over several lines.
+            (temp / "draft" / "verdicts.json").write_text(
+                json.dumps({"F2": "fail", "F7": "pass", "C4": "person"}, indent=2) + "\n")
+            run = subprocess.run(["bash", "-e", "-c", write["run"]], cwd=ROOT, capture_output=True, text=True,
+                                 env={**os.environ, "RUNNER_TEMP": str(temp), "GITHUB_OUTPUT": str(temp / "output"),
+                                      "HEAD_SHA": "b" * 40, "REVIEW": review, "CHECKS": "### new report\n",
+                                      "RULES": "review.md"})
+            self.assertEqual(run.returncode, 0, run.stderr)
+            output = (temp / "output").read_text()
+            draft = (temp / "draft" / "body.md").read_text()
+        self.assertRegex(output, r"\Averdicts=\{[^\n]*\}\n\Z")
+        self.assertEqual(self.post(review, verdicts=output[len("verdicts="):-1]), draft)
+        self.assertEqual(draft.split("\n")[1],
+                         '<!-- oss-verify-verdict {"head":"%s","blocking":["F2"],"person":["C4"]} -->' % ("b" * 40))
+
+
+HEAD40 = "0123456789abcdef0123456789abcdef01234567"
+
+
+def body(verdicts, head, review="Thanks.\n", checks="", rules="review.md"):
+    """The comment that .github/scripts/review-body prints from this environment, as both of build.yaml's jobs run it."""
+    run = subprocess.run([str(ROOT / ".github" / "scripts" / "review-body")], capture_output=True, text=True,
+                         env={**os.environ, "HEAD_SHA": head, "REVIEW": review, "CHECKS": checks,
+                              "VERDICTS": verdicts, "RULES": rules})
+    assert run.returncode == 0, run.stderr
+    return run.stdout
+
+
+class VerdictLine(unittest.TestCase):
+    """Line 2 of the review comment: the checks whose verdict is fail, and those left to a person, at the reviewed
+    commit, for the inbound watcher (the stream's bin/ossv-pr-watch, verdict_line)."""
+
+    def test_the_comment_has_the_verdict_line_second(self):
+        lines = body(verdicts='{"A1":"pass","F2":"fail","C4":"person","F7":"pass"}', head=HEAD40).split("\n")
+        self.assertEqual(lines[0], "<!-- oss-verify-review -->")
+        self.assertEqual(lines[1], '<!-- oss-verify-verdict {"head":"%s","blocking":["F2"],"person":["C4"]} -->' % HEAD40)
+
+    def test_no_verdicts_writes_no_verdict_line(self):
+        for v in ("", "null", "{}", "[]"):
+            self.assertNotIn("oss-verify-verdict", body(verdicts=v, head=HEAD40))
+
+    def test_a_long_review_keeps_the_verdict_line_second(self):
+        self.assertTrue(body(verdicts='{"F2":"pass","F7":"pass"}', head=HEAD40, review="x" * 60000)
+                        .split("\n")[1].startswith("<!-- oss-verify-verdict "))
+
+    def test_a_change_review_uses_its_own_ids(self):
+        self.assertIn('"blocking":["2"],"person":["5"]',
+                      body(verdicts='{"1":"pass","2":"fail","5":"person"}', head=HEAD40).split("\n")[1])
+
+    def test_the_rest_of_the_body_is_unchanged(self):
+        b = body(verdicts='{"F2":"pass","F7":"pass"}', head=HEAD40, review="r" * 50001, checks="c", rules="review.md")
+        lines = b.split("\n")
+        self.assertEqual(lines[2], "<sub>Claude wrote this review of `%s` from `review.md`. It can be wrong. "
+                                   "Each push replaces it.</sub>" % HEAD40[:7])
+        self.assertIn("r" * 50000 + "\n", b)
+        self.assertNotIn("r" * 50001, b)
+        self.assertIn("<details><summary>What the breakage and coverage checks measured</summary>", b)
 
 
 @unittest.skipUnless(shutil.which("jq"), "needs jq, which the gh stand-in runs the script's filters with")

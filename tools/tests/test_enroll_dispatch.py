@@ -525,6 +525,13 @@ class Review(unittest.TestCase):
         got = self.decide({"F2": "pass", "F7": "pass", "A1": "fail", "G5": "person"})
         self.assertEqual(got["decision"], "dispatch", got["reason"])
 
+    def test_a_draft_with_body_md_is_read(self):
+        # build.yaml's review job also uploads body.md, the comment as the comment job would post it.
+        world = World()
+        world.reviews[101] = zipped({"comment.md": "x", "verdicts.json": '{"F2":"pass","F7":"pass"}',
+                                     "body.md": "<!-- oss-verify-review -->\n"})
+        self.assertEqual(dispatch.review_problem(world.api(), REPO, 101), ("", ""))
+
     def test_the_build_workflow_uploads_the_verdicts_the_gate_reads(self):
         text = (ROOT / ".github/workflows/build.yaml").read_text()
         self.assertIn('jq .verdicts <<< "$out" > "$RUNNER_TEMP/draft/verdicts.json"', text)

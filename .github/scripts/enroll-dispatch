@@ -95,9 +95,10 @@ BUILD_WORKFLOW = ".github/workflows/build.yaml"
 RECORD_ARTIFACT = "enrollment-record"
 RECORD_SCHEMA = "oss-verify enrollment record v1"
 # The review job's artifact: the draft comment and the verdict of each check of review.md, as the action's structured
-# output gives them (verdicts.json, {"A1": "pass", ..., "F2": "fail", ...}). F2 and F7 keep statements from starting.
+# output gives them (verdicts.json, {"A1": "pass", ..., "F2": "fail", ...}), and body.md, the comment as build.yaml's
+# comment job would post it. F2 and F7 keep statements from starting.
 REVIEW_ARTIFACT = "enroll-review-draft"
-REVIEW_FILES = frozenset({"comment.md", "verdicts.json"})
+REVIEW_FILES = frozenset({"body.md", "comment.md", "verdicts.json"})
 # The label that someone other than the author, who can label (a member of theorem-labs, or one of its Apps), puts on an enrollment whose author the maintainer check does not show (a
 # pull request that our bot opened at a maintainer's request, for one): with it, the check is skipped. Putting it on
 # runs .github/workflows/maintainer-confirmed.yml, whose completion runs this again.
