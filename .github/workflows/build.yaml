@@ -398,7 +398,7 @@ jobs:
     needs: project-builds
     if: ${{ !cancelled() && needs.project-builds.outputs.name != '' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 70
     cache-mode: write
     environment: {name: enroll-review, deployment: false}
     permissions: {contents: read, pull-requests: read, checks: read, statuses: read, id-token: write}
@@ -445,8 +445,10 @@ jobs:
       # the federated identity ossv-review-github, whose claims admit only this workflow of this repository, on
       # refs/heads/main, in the environment enroll-review, on a GitHub-hosted runner. Its apply runs before the
       # client id above is filled in. The job joins with its GitHub identity token, so no key is stored. One review
-      # job runs in a run attempt, so the run id and the attempt name the node. The join is capped at 3 minutes: the
-      # review itself takes up to 45 of the job's 60.
+      # job runs in a run attempt, so the run id and the attempt name the node. use-cache is off: the action would
+      # otherwise keep the tailscale binary in this repository's Actions cache and run it as root from there, and
+      # the review job's cache holds its review session alone (above). The join is capped at 3 minutes, and the
+      # job's 70 holds every step's cap: gather 15, join 3, review 45 and logout 2.
       - name: Join Theorem's tailnet, to export this review's usage
         id: tailnet
         continue-on-error: true
@@ -457,6 +459,7 @@ jobs:
           audience: theorem.dev/tailnet/ossv-review
           tags: tag:ossv-review
           hostname: ossv-review-${{ github.run_id }}-${{ github.run_attempt }}
+          use-cache: false
       - name: Export the review's usage to the cost collector
         env: {TAILNET: "${{ steps.tailnet.outcome }}"}
         run: |

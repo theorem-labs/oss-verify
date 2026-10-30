@@ -1160,12 +1160,18 @@ class ReviewJob(unittest.TestCase):
         self.assertEqual(join["id"], "tailnet")
         # The join never decides whether a review runs.
         self.assertIs(join["continue-on-error"], True)
+        # Exactly these settings: another one, `args: --accept-dns=false` for example, would turn MagicDNS off and
+        # lose every record while the join still passed.
+        self.assertEqual(set(join["with"]),
+                         {"oauth-client-id", "audience", "tags", "hostname", "use-cache"})
         self.assertEqual(join["with"]["oauth-client-id"], "${{ env.TAILNET_CLIENT_ID }}")
         self.assertEqual(join["with"]["audience"], "theorem.dev/tailnet/ossv-review")
         self.assertEqual(join["with"]["tags"], "tag:ossv-review")
         # One review job runs in a run attempt, so the run id and the attempt name the node.
         self.assertEqual(join["with"]["hostname"],
                          "ossv-review-${{ github.run_id }}-${{ github.run_attempt }}")
+        # The Actions cache of this job holds the review's session alone, so the action keeps no binary in it.
+        self.assertIs(join["with"]["use-cache"], False)
         self.assertEqual(join["timeout-minutes"], 3)
         # The node is ephemeral: the logout deletes it at once, whatever the review did. Neither the join nor the
         # logout may stop the steps that keep the draft, the verdicts and a held finding.
@@ -1178,6 +1184,12 @@ class ReviewJob(unittest.TestCase):
         self.assertLess(names.index("Review"), names.index("Leave the tailnet"))
         self.assertLess(names.index("Leave the tailnet"),
                         names.index("Keep the draft, and the held finding apart from it"))
+
+    def test_the_review_job_outlives_the_caps_of_its_steps(self):
+        # A job cancelled at its own cap keeps no draft and no verdicts, so the job's cap holds every step's.
+        job = self.jobs["review"]
+        steps = sum(step["timeout-minutes"] for step in job["steps"] if "timeout-minutes" in step)
+        self.assertGreater(job["timeout-minutes"], steps)
 
     def test_the_tailnet_client_id_is_a_client_id_tailscale_gave(self):
         # bootstrap/'s stack output ossvReviewTailnetClientId, which exists only after that apply (INFRA-832 S1a).
