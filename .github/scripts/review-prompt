@@ -5,17 +5,20 @@
 # The prompt and the arguments of build.yaml's one Review step, for the kind of review that route decided:
 #
 #   KIND=enrollment PR=<number> NAME=<project> [SESSION=<id> LAST=<commit> HEAD_SHA=<commit>] review-prompt
-#   KIND=change PR=<number> review-prompt
-#   KIND=issue ISSUE=<number> review-prompt
+#   KIND=change PR=<number> REPO=<owner>/<name> [SESSION=<id> LAST=<commit> HEAD_SHA=<commit>] review-prompt
+#   KIND=issue ISSUE=<number> REPO=<owner>/<name> review-prompt
 #
 # It writes two lines to GITHUB_OUTPUT. `prompt`: which rules file to read (review.md, review-change.md or
 # review-issue.md) for which pull request or issue. `arguments`: the --json-schema of that kind's structured output,
-# and, for an enrollment whose last session review-gather kept (SESSION and LAST, its gather step's outputs),
-# --resume <id>, so that the review reads only the diff since the commit it reviewed then. Each value it writes is a
-# number, a project name, or a commit or session id, each checked here: no text of a pull request or of an issue.
+# and, for an enrollment or a change whose last session review-gather kept (SESSION and LAST, its gather step's
+# outputs), --resume <id>: an enrollment's review then reads only the diff since the commit it reviewed then, and a
+# change's reads that diff as an aid and judges checks 4 and 5 on the whole diff again. REPO is the repository of the
+# pull request or issue: this one, or another that build.yaml's input repo names. Each value it writes is a number, a
+# repository's owner/name, a project name, or a commit or session id, each checked here: no text of a pull request or
+# of an issue.
 set -euo pipefail
 die() { echo "review-prompt: $1" >&2; exit 2; }
-number='^[0-9]+$' commit='^[0-9a-f]{40}$'
+number='^[0-9]+$' commit='^[0-9a-f]{40}$' repo='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
 resume=""
 case ${KIND:-} in
   enrollment)
@@ -43,8 +46,15 @@ case ${KIND:-} in
     ;;
   change)
     [[ ${PR:-} =~ $number ]] || die "PR is not a number"
+    [[ ${REPO:-} =~ $repo ]] || die "REPO is not a repository"
     prompt="Read review-change.md at the root of this checkout: it says what OSS Verify's change review of pull request"
-    prompt+=" #$PR, which changes no file under projects/, checks, on what the workflow gathered into .review/."
+    prompt+=" #$PR of $REPO checks, on what the workflow gathered into .review/."
+    if [[ ${SESSION:-} =~ ^[0-9a-f-]{36}$ && ${LAST:-} =~ $commit && ${HEAD_SHA:-} =~ $commit ]]; then
+      prompt+=" Earlier in this session you reviewed $LAST. .review/since-last-review.diff, the diff from $LAST to"
+      prompt+=" $HEAD_SHA, is an aid for checks 1 to 3 only. Judge checks 4 and 5 on the whole diff of the pull request"
+      prompt+=" against its base, .review/pr.diff, as on a first review."
+      resume=" --resume $SESSION"
+    fi
     schema=$(jq -cn '{type: "object", additionalProperties: false, required: ["comment", "verdicts"],
       properties: {
         comment: {type: "string", description: "The comment to the contributor, in Markdown."},
@@ -53,8 +63,9 @@ case ${KIND:-} in
     ;;
   issue)
     [[ ${ISSUE:-} =~ $number ]] || die "ISSUE is not a number"
+    [[ ${REPO:-} =~ $repo ]] || die "REPO is not a repository"
     prompt="Read review-issue.md at the root of this checkout: it says what OSS Verify's draft reply to issue #$ISSUE"
-    prompt+=" of this repository says, from what the workflow gathered into .review/issue.json."
+    prompt+=" of $REPO says, from what the workflow gathered into .review/issue.json."
     schema=$(jq -cn '{type: "object", additionalProperties: false, required: ["comment", "decide"],
       properties: {
         comment: {type: "string", description: "The draft reply to the issue, in Markdown, under 80 words."},

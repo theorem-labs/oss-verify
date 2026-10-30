@@ -1,0 +1,102 @@
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+#
+# A copy of .github/workflows/oss-verify-review.yml of theorem-labs/oss-verify-proofs.
+# theorem-labs/oss-verify keeps it in .github/starters/, where no workflow runs, so that its tests read it
+# (tools/tests/test_check_checks.py, class Starters). A change to it is made in both repositories.
+name: "OSS Verify review"
+# Starts OSS Verify's review of each pull request of this repository at each new head, and the draft reply to each
+# issue that waits for us. The review runs in theorem-labs/oss-verify's Build workflow (.github/workflows/build.yaml,
+# with -f repo=oss-verify-proofs), which posts nothing here unless that repository's variable
+# OSSV_POST_REVIEW_REPOS names this one. Nothing here runs on a schedule.
+#
+# The job:
+#   - runs in the environment oss-verify-starter, which holds the OSS Verify App's private key (the environment secret
+#     OSS_VERIFY_APP_PRIVATE_KEY) and whose deployment branches are the default branch alone; no other job names it. A
+#     run of pull_request_target or issues has the default branch as its ref, whatever a pull request holds.
+#   - gets the App's token for theorem-labs/oss-verify alone, with actions: write alone: it can start a workflow run
+#     there and nothing else.
+#   - checks out nothing and runs no code of the pull request; each action is pinned by its commit.
+#   - reads the pull request's number and head commit, or the issue's number, from the event, never from the text of
+#     the pull request or the issue: a number must match ^[0-9]+$ and a head ^[0-9a-f]{40}$, and the repository is this
+#     file's own name, one of a fixed list. theorem-labs/oss-verify's build.yaml checks the same three again.
+#   - passes the token to gh in GH_TOKEN, in the one step that starts the run, and never prints or writes it.
+# An issue's event that is ours starts nothing, as for theorem-labs/oss-verify's own issues: one that an App sent, one
+# that an owner or a member of the organization sent, or one that someone other than the issue's author sent.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  issues:
+    types: [opened, edited, reopened]
+
+permissions: {}
+
+jobs:
+  start:
+    # Only in this repository: a fork's copy of this file starts nothing.
+    if: github.repository == 'theorem-labs/oss-verify-proofs'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: {name: oss-verify-starter, deployment: false}
+    permissions: {}
+    steps:
+      - name: Read what to start from the event
+        id: event
+        env:
+          NAME: oss-verify-proofs
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          ISSUE: ${{ github.event.issue.number }}
+          SENDER: ${{ github.event.sender.login }}
+          AUTHOR: ${{ github.event.issue.user.login }}
+          ASSOCIATION: ${{ github.event.issue.author_association }}
+        run: |
+          set -euo pipefail
+          # The repositories whose pull requests and issues theorem-labs/oss-verify reviews (build.yaml's input repo).
+          case "$NAME" in
+            oss-verify-proofs | rocq-linux-process-semantics) ;;
+            *) echo "::error::$NAME is not a repository that OSS Verify reviews."; exit 1 ;;
+          esac
+          if [ "$EVENT" = issues ]; then
+            [[ $ISSUE =~ ^[0-9]+$ ]] || { echo "::error::The issue's number is not a number."; exit 1; }
+            if [[ $SENDER == *"[bot]" || $SENDER != "$AUTHOR" ||
+                  $ASSOCIATION == OWNER || $ASSOCIATION == MEMBER ]]; then
+              echo "Issue $ISSUE: the event is ours (sent by $SENDER), so nothing starts."
+              exit 0
+            fi
+            { echo "repo=$NAME"; echo "issue=$ISSUE"; } >> "$GITHUB_OUTPUT"
+          else
+            [[ $PR =~ ^[0-9]+$ && $HEAD =~ ^[0-9a-f]{40}$ ]] \
+              || { echo "::error::The pull request's number or head commit does not have its shape."; exit 1; }
+            { echo "repo=$NAME"; echo "pr=$PR"; echo "head=$HEAD"; } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Get the OSS Verify App's token, to start one run in theorem-labs/oss-verify
+        id: app
+        if: steps.event.outputs.repo != ''
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0 (sha-pinned)
+        with:
+          client-id: Iv23liAWPMahJZYsw3un
+          private-key: ${{ secrets.OSS_VERIFY_APP_PRIVATE_KEY }}
+          owner: theorem-labs
+          repositories: oss-verify
+          permission-actions: write
+
+      - name: Start OSS Verify's review in theorem-labs/oss-verify
+        if: steps.event.outputs.repo != ''
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REPO: ${{ steps.event.outputs.repo }}
+          PR: ${{ steps.event.outputs.pr }}
+          HEAD: ${{ steps.event.outputs.head }}
+          ISSUE: ${{ steps.event.outputs.issue }}
+        run: |
+          set -euo pipefail
+          if [ -n "$ISSUE" ]; then
+            gh workflow run build.yaml -R theorem-labs/oss-verify --ref main -f repo="$REPO" -f issue="$ISSUE"
+            echo "Started the draft reply to issue #$ISSUE in theorem-labs/oss-verify." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            gh workflow run build.yaml -R theorem-labs/oss-verify --ref main -f repo="$REPO" -f pr="$PR" -f head="$HEAD"
+            echo "Started the review of #$PR at $HEAD in theorem-labs/oss-verify." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi

@@ -425,6 +425,17 @@ class ByHand(unittest.TestCase):
         world.checks[1]["conclusion"] = "failure"
         self.assertEqual(world.decide(event="workflow_dispatch", run_id=HAND_RUN, sha=MAIN)["decision"], "none")
 
+    def test_a_build_run_for_another_repository_decides_nothing(self):
+        # build.yaml -f repo=<another> reviews that repository's pull request: a run by hand on main that builds
+        # nothing, so it has the review's draft and no record.
+        world = World()
+        world.run(HAND_RUN, ".github/workflows/build.yaml", "workflow_dispatch", head_sha=MAIN, branch="main",
+                  head_repo=REPO)
+        world.runs[HAND_RUN]["display_title"] = f"Review rocq-linux-process-semantics#34 at {'c' * 40}"
+        world.reviews[HAND_RUN] = {str(check): "pass" for check in range(1, 6)}
+        got = world.decide(event="workflow_dispatch", run_id=HAND_RUN, sha=MAIN)
+        self.assertEqual((got["decision"], got["label"], got["pr"], got["sha"]), ("none", "", "", ""), got["reason"])
+
 
 class Labels(unittest.TestCase):
     """What a person decides: the size line, a paused language, a name the statements repository cannot take."""
