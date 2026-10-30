@@ -527,7 +527,8 @@ class Review(unittest.TestCase):
 
     def test_the_build_workflow_writes_the_verdicts_the_gate_reads(self):
         # build.yaml's review of an enrollment, run as it is: review-prompt's schema requires the two checks the gate
-        # reads, and the result step writes the files of the artifact the gate opens, the verdicts as the review gave.
+        # reads, and the result step and the body step write the files of the artifact the gate opens, the verdicts as
+        # the review gave.
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             subprocess.run([str(ROOT / ".github/scripts/review-prompt")], check=True,
@@ -546,8 +547,19 @@ class Review(unittest.TestCase):
                            env={**os.environ, "HOME": str(root), "RUNNER_TEMP": str(root / "temp"), "KIND": "enrollment",
                                 "RESULT": str(root / "execution.json"), "GITHUB_OUTPUT": str(root / "output"),
                                 "SESSION": "", "HEAD_SHA": ""})
+            [body] = [s for s in jobs["review"]["steps"] if s.get("id") == "body"]
+            subprocess.run(["bash", "-e", "-c", body["run"]], check=True, cwd=ROOT,
+                           env={**os.environ, "RUNNER_TEMP": str(root / "temp"), "GITHUB_OUTPUT": str(root / "output"),
+                                "HEAD_SHA": "b" * 40, "REVIEW": "x", "CHECKS": "", "RULES": "review.md"})
             self.assertEqual({p.name for p in (root / "temp" / "draft").iterdir()}, dispatch.REVIEW_FILES)
             self.assertEqual(json.loads((root / "temp" / "draft" / "verdicts.json").read_text()), verdicts)
+
+    def test_a_draft_with_body_md_is_read(self):
+        # build.yaml's review job also uploads body.md, the comment as the comment job would post it.
+        world = World()
+        world.reviews[101] = zipped({"comment.md": "x", "verdicts.json": '{"F2":"pass","F7":"pass"}',
+                                     "body.md": "<!-- oss-verify-review -->\n"})
+        self.assertEqual(dispatch.review_problem(world.api(), REPO, 101), ("", ""))
 
 
 class Maintainer(unittest.TestCase):
