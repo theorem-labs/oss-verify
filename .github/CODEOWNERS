@@ -1,9 +1,10 @@
-# review.md says what the enrollment review checks (.github/workflows/build.yaml reads main's copy), and
-# .claude/skills/write-to-maintainer/ says how every message to a maintainer is written and checked. The ruleset of
-# main requires a code owner's approval, so a change to either, or to this file, which says who owns them, needs the
-# approval of a member of @theorem-labs/engineering, a team of people. No other file has an owner, so no other pull
-# request needs a code owner. These lines stay the last patterns of the file: the last pattern that matches a file
-# decides its owner.
+# review.md and review-change.md say what the enrollment review and the change review check
+# (.github/workflows/build.yaml reads main's copies), and .claude/skills/write-to-maintainer/ says how every message to
+# a maintainer is written and checked. The ruleset of main requires a code owner's approval, so a change to any of
+# them, or to this file, which says who owns them, needs the approval of a member of @theorem-labs/engineering, a team
+# of people. No other file has an owner, so no other pull request needs a code owner. These lines stay the last
+# patterns of the file: the last pattern that matches a file decides its owner.
 /review.md @theorem-labs/engineering
+/review-change.md @theorem-labs/engineering
 /.claude/skills/write-to-maintainer/ @theorem-labs/engineering
 /.github/CODEOWNERS @theorem-labs/engineering

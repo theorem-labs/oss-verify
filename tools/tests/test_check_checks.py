@@ -477,7 +477,7 @@ class WorkflowArguments(unittest.TestCase):
 class PostingStep(unittest.TestCase):
     """build.yaml's own "Post the comment" step, run with a fake gh: what it sends GitHub."""
 
-    def post(self, review, existing=True, head="b" * 40, pr_head=None, checks="### new report\n"):
+    def post(self, review, existing=True, head="b" * 40, pr_head=None, checks="### new report\n", rules="review.md"):
         workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
         name = "Post the comment, or update the one already there"
         matches = [s for s in workflow["jobs"]["comment"]["steps"] if s.get("name") == name]
@@ -501,7 +501,7 @@ class PostingStep(unittest.TestCase):
             (bin / "gh").chmod(0o755)
             (directory / "temp").mkdir()
             environment = {**os.environ, "PATH": f"{bin}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r",
-                           "PR": "8", "REVIEW": review, "CHECKS": checks, "HEAD_SHA": head,
+                           "PR": "8", "REVIEW": review, "CHECKS": checks, "HEAD_SHA": head, "RULES": rules,
                            "RUNNER_TEMP": str(directory / "temp")}
             run = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=ROOT, env=environment, capture_output=True,
                                  text=True)
@@ -560,6 +560,11 @@ class PostingStep(unittest.TestCase):
         self.assertTrue(body.startswith("<!-- oss-verify-review -->\n<sub>Claude wrote this review of `bbbbbbb`"))
         self.assertIn("\n\nThanks again.\n\n2. Fix Y.\n", body)
         self.assertIn("<summary>What the breakage and coverage checks measured</summary>\n\n### new report", body)
+
+    def test_a_change_review_names_review_change_md(self):
+        body = self.post("Thanks.\n", checks="", rules="review-change.md")
+        self.assertTrue(body.startswith("<!-- oss-verify-review -->\n<sub>Claude wrote this review of `bbbbbbb` from "
+                                        "`review-change.md`."))
 
     def test_without_a_posted_comment_it_posts_one(self):
         body = self.post("Thanks.\n", existing=False, checks="")
@@ -868,7 +873,7 @@ else:
             self.assertEqual(review[name]["if"], "${{ steps.result.outputs.held == 'yes' }}")
         self.assertIn('"$RUNNER_TEMP/held-finding.md"', store)
         self.assertEqual(review["Keep this review's session for the next push's review"]["if"],
-                         "${{ steps.result.outputs.held != 'yes' }}")
+                         "${{ steps.result.outputs.held != 'yes' && env.NAME != '' }}")
         hold = jobs["hold"]
         self.assertEqual(hold["environment"], {"name": "comment", "deployment": False})
         self.assertEqual(hold["needs"], ["project-builds", "review"])
@@ -1107,6 +1112,55 @@ class ReviewJob(unittest.TestCase):
         self.assertIn("A new request comes only from .review/since-last-review.diff", prompt)
         self.assertIn("before you keep a request of your last comment, read again the input in .review/", prompt)
 
+    def test_a_change_is_reviewed_by_the_same_action_and_identity_against_review_change_md(self):
+        change = self.steps["Review the change"]
+        self.assertEqual(change["uses"], self.review["uses"])
+        same = ("anthropic_federation_rule_id", "anthropic_organization_id", "anthropic_service_account_id",
+                "anthropic_workspace_id", "github_token", "allowed_non_write_users", "allowed_bots")
+        self.assertEqual({k: change["with"][k] for k in same}, {k: self.review["with"][k] for k in same})
+        args = change["with"]["claude_args"]
+        self.assertTrue(args.startswith("--tools Read,Glob,Grep --permission-mode default --model claude-opus-5-5 "))
+        self.assertNotIn("--resume", args)
+        schema = json.loads(re.search(r"--json-schema '([^']*)'$", args).group(1))
+        self.assertEqual(schema["required"], ["comment", "held", "verdicts"])
+        self.assertEqual(schema["properties"]["verdicts"]["required"], ["1", "2", "3", "4", "5"])
+        self.assertEqual(schema["properties"]["held"]["maxLength"], 0)
+        self.assertIn("Read review-change.md at the root of this checkout", change["with"]["prompt"])
+        result = self.steps["Keep the draft, and the held finding apart from it"]["env"]["RESULT"]
+        self.assertEqual(result, "${{ steps.review.outputs.execution_file || steps.change.outputs.execution_file }}")
+        for check in range(1, 6):
+            self.assertIn(f"\n{check}. **", (ROOT / "review-change.md").read_text())
+        # Check 5's rule, whole: a change of behaviour or a new affordance is person, and a clear bug fix is pass.
+        rules = (ROOT / "review-change.md").read_text()
+        self.assertIn("\n5. **A person decides a new behaviour.** A change that alters behaviour or adds an affordance"
+                      " (a new option, command,\n   input, permission or workflow trigger) is **person**: it waits for"
+                      " a person's decision. A\n   clear bug fix is **pass**.\n", rules)
+
+    def test_a_change_gathers_only_the_pull_request_and_its_changed_files_as_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "bin").mkdir()
+            files = ["tools/a.py", "docs/CLAUDE.md", ".claude/skills/x/SKILL.md", "a/../b", "README.md"]
+            (root / "bin" / "gh").write_text(
+                "#!/bin/bash\n"
+                f'case "$*" in\n'
+                f'  "pr view"*) echo "{{}}" ;;\n'
+                f'  *"/files"*) printf "%s\\n" {" ".join(shlex.quote(f) for f in files)} ;;\n'
+                '  "pr diff"*) echo diff ;;\n'
+                '  *contents/*) echo "file at ${@: -1}" ;;\n'
+                '  *) true ;;\n'
+                "esac\n")
+            (root / "bin" / "gh").chmod(0o755)
+            env = {**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r",
+                   "PR": "8", "NAME": "", "HEAD_SHA": "a" * 40}
+            run = subprocess.run([str(ROOT / ".github" / "scripts" / "review-gather"), str(root / "out")], env=env,
+                                 cwd=ROOT, capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            head = sorted(str(p.relative_to(root / "out" / "head")) for p in (root / "out" / "head").rglob("*")
+                          if p.is_file())
+            self.assertEqual(head, ["README.md", "tools/a.py"])
+            self.assertFalse((root / "out" / "validate.txt").exists())
+
     def test_the_session_is_kept_by_the_review_job_and_not_when_it_holds_a_finding(self):
         self.assertEqual(self.workflow["cache-mode"], "none")
         self.assertEqual({name: job["cache-mode"] for name, job in self.jobs.items() if "cache-mode" in job},
@@ -1123,7 +1177,7 @@ class ReviewJob(unittest.TestCase):
         self.assertEqual(self.jobs["review"]["env"]["SESSION_KEY"],
                          "enroll-review/${{ github.event.pull_request.number || inputs.pr }}/"
                          "${{ needs.project-builds.outputs.name }}/")
-        self.assertEqual(save["if"], "${{ steps.result.outputs.held != 'yes' }}")
+        self.assertEqual(save["if"], "${{ steps.result.outputs.held != 'yes' && env.NAME != '' }}")
         gather = self.steps["Gather what the review reads, and the diff since the last review"]["run"]
         self.assertIn("LAST_REVIEW=~/.claude/ossv-last-review .github/scripts/review-gather .review", gather)
 
@@ -1209,15 +1263,16 @@ class ReviewJob(unittest.TestCase):
 
 class Owners(unittest.TestCase):
 
-    def test_only_review_md_the_skill_and_codeowners_have_an_owner_and_are_the_last_patterns(self):
+    def test_only_the_review_files_the_skill_and_codeowners_have_an_owner_and_are_the_last_patterns(self):
         lines = [line.split() for line in (ROOT / ".github" / "CODEOWNERS").read_text().splitlines()
                  if line.strip() and not line.lstrip().startswith("#")]
         owned = [["/review.md", "@theorem-labs/engineering"],
+                 ["/review-change.md", "@theorem-labs/engineering"],
                  ["/.claude/skills/write-to-maintainer/", "@theorem-labs/engineering"],
                  ["/.github/CODEOWNERS", "@theorem-labs/engineering"]]
         self.assertEqual([line for line in lines if len(line) > 1], owned)
-        self.assertEqual(lines[-3:], owned)
-        self.assertTrue((ROOT / "review.md").is_file())
+        self.assertEqual(lines[-4:], owned)
+        self.assertTrue((ROOT / "review.md").is_file() and (ROOT / "review-change.md").is_file())
 
 
 if __name__ == "__main__":

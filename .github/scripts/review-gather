@@ -2,11 +2,12 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 #
-# Gathers what the enrollment review reads, so that the review agent needs no shell, no network and no token:
+# Gathers what the review reads, so that the review agent needs no shell, no network and no token:
 #
 #   GH_TOKEN=<read-only token> REPO=<owner>/<name> PR=<number> NAME=<project> COMMIT=<built commit> \
 #     [BUILD=<result line> BINARIES=<table> CHECKS=<report>] [HEAD_SHA=<head commit> LAST_REVIEW=<file>] \
 #     .github/scripts/review-gather <directory>
+#   GH_TOKEN=... REPO=... PR=<number> NAME= HEAD_SHA=<head commit> .github/scripts/review-gather <directory>
 #
 # build.yaml's review job runs it from the base branch's checkout, after take-project has put the pull request's
 # projects/<name>/ into that checkout. It runs no code of the pull request or of the project: it reads the pull request
@@ -17,6 +18,8 @@
 # not check. LAST_REVIEW is the file the review job keeps beside the last review's session in the Actions cache, one line
 # `session=<id> head=<commit>`: when the head descends from that commit, this writes the diff since it and, to
 # GITHUB_OUTPUT, `session` and `last`, so that the review resumes that session for the diff alone.
+# With NAME empty, a change review (review-change.md): only the pull request, its diff, its checks and review comments,
+# and each changed file as it is at HEAD_SHA, as data under head/.
 # The runner reads none of its output as a workflow command: the gathered text is the pull request's.
 resume=$(openssl rand -hex 16) && echo "::stop-commands::$resume"
 trap 'echo "::$resume::"' EXIT
@@ -29,7 +32,6 @@ printf '%s\n' "${BUILD:-}" > "$out/build/result.md"
 printf '%s\n' "${BINARIES:-}" > "$out/build/binaries.md"
 printf '%s\n' "${CHECKS:-}" > "$out/build/checks.md"
 [[ $PR =~ ^[0-9]+$ ]] || { echo "review-gather: PR is not a number" >&2; exit 2; }
-[[ $NAME =~ ^[a-z0-9][a-z0-9._-]{0,62}$ ]] || { echo "review-gather: NAME is not a project name" >&2; exit 2; }
 dir="projects/$NAME"
 # Run a command, and keep its standard output and error in a file, whatever its status.
 keep() { local file=$1; shift; { "$@"; echo "(exit status $?)"; } > "$out/$file" 2>&1; }
@@ -41,6 +43,20 @@ keep checks.json gh pr view "$PR" -R "$REPO" --json statusCheckRollup
 gh pr diff "$PR" -R "$REPO" > "$out/pr.diff" 2>&1
 keep review-comments.txt gh api --paginate "repos/$REPO/pulls/$PR/comments" \
   --jq '.[] | "\(.user.login) \(.path):\(.line) \(.body)"'
+if [ -z "$NAME" ]; then
+  # Claude Code reads a CLAUDE.md or .claude/ beside a file it reads as instructions: the pull request's are data.
+  # Every file, not only the first 100 that pr.json lists.
+  gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" --jq '.[].filename' 2> /dev/null \
+    | while IFS= read -r path; do
+    [[ $path =~ ^[A-Za-z0-9._/-]+$ && $path != *..* && ${HEAD_SHA:-} =~ ^[0-9a-f]{40}$ ]] || continue
+    [[ ${path,,} =~ (^|/)(claude[^/]*\.md|agents[^/]*\.md|\.claude)(/|$) ]] && continue
+    mkdir -p "$out/head/$(dirname "$path")"
+    gh api -H 'Accept: application/vnd.github.raw' "repos/$REPO/contents/$path?ref=$HEAD_SHA" > "$out/head/$path" \
+      2> /dev/null || rm -f "$out/head/$path"
+  done
+  exit 0
+fi
+[[ $NAME =~ ^[a-z0-9][a-z0-9._-]{0,62}$ ]] || { echo "review-gather: NAME is not a project name" >&2; exit 2; }
 # Any user can comment with the triage marker; take only the oss-verify App's comment, which this repository posts.
 jq -r '[.comments[]? | select(.author.login == "oss-verify")]
        | map(.body | select(startswith("<!-- oss-verify-triage -->"))) | .[0] // ""' "$out/pr.json" \

@@ -11,8 +11,10 @@ name: "Build"
 # uninstrumented (docs/build-contract.md, "The checks of the binaries"). The step summary has both reports too.
 #
 # The jobs, each run:
-#   route    asks for the build on every event this workflow takes, since each is a commit to judge. It reads nothing
-#            of the pull request.
+#   route    reads the pull request's list of files. A pull request into the default branch that changes at least one
+#            file and none under projects/ is a change: route asks for no build, and the review checks it against
+#            review-change.md. Any other asks for the build, as an enrollment, and so does a run that an App outside
+#            the review's allowed_bots started (Dependabot's, say), which the action refuses to review.
 #   project-builds
 #            the build above, under the check name build, when route asks for it; it passes with nothing to build
 #            when the pull request enrolls no project (below). Its job id stays project-builds, the name the other jobs
@@ -26,7 +28,9 @@ name: "Build"
 #            are. It gives a structured output: the comment that asks the maintainer for each fix, any finding held
 #            back (review.md, rule 6), and a verdict for each check. The comment and the verdicts are the artifact
 #            enroll-review-draft. On a later push it resumes the same Claude Code session as the last review, so it
-#            knows what it asked for and why, and reviews only the diff since the commit it reviewed then.
+#            knows what it asked for and why, and reviews only the diff since the commit it reviewed then. For a
+#            change it checks what review-change.md says, on the pull request's diff and files read as data, with no
+#            session kept.
 #   hold     sends each real bug in a project's own code that a review held back from its comment (review.md, rule 6)
 #            to the disclosure route as a private issue (.github/scripts/review-hold): the review job stores it in a
 #            private bucket that only this job can read, and this job sends every finding stored there, a cancelled
@@ -39,9 +43,9 @@ name: "Build"
 # project-builds is the required check, and the job required reports it (.github/scripts/collect). required runs on
 # every run, after all the other jobs whatever their results, and passes only if route passed and every job route asked
 # for passed: the build when route asked for it, and the record, review, hold and comment jobs when their own
-# conditions call for them (the review when the build took a project); every other job must be skipped. A skipped job
-# counts as a pass where a check is required, so the build job is never the required check itself. The build takes the
-# project with .github/scripts/take-project, for each commit on its own:
+# conditions call for them (the review when the build took a project or route found a change); every other job must
+# be skipped. A skipped job counts as a pass where a check is required, so the build job is never the required check
+# itself. The build takes the project with .github/scripts/take-project, for each commit on its own:
 #   - A pull request from a fork is judged on the files GitHub lists for it: it fails if it changes anything but one
 #     project, which is built as it is at the fork's head. A pull request from a branch of this repository is judged
 #     on what merging it into the base branch changes (git merge-tree): it fails if the merge conflicts, and the one
@@ -188,15 +192,42 @@ jobs:
   route:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    permissions: {}
+    permissions: {pull-requests: read}
     outputs:
       build: ${{ steps.decide.outputs.build }}
+      change: ${{ steps.decide.outputs.change }}
+      sha: ${{ steps.decide.outputs.sha }}
     steps:
-      - name: Every event here asks for the build
+      - name: An enrollment or a change
         id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ACTOR: ${{ github.actor }}
+          # The Review steps' allowed_bots: the action refuses a run that any other App started.
+          ALLOWED_BOTS: sjawhar-agent[bot],oss-verify[bot]
         run: |
-          echo "build=true" >> "$GITHUB_OUTPUT"
-          message="build runs: it takes the pull request's project, if it has one (.github/scripts/take-project)."
+          set -euo pipefail
+          [[ $PR =~ ^[0-9]+$ ]] || { echo "::error::Not a pull request number."; exit 1; }
+          pull=$(gh api "repos/$REPO/pulls/$PR")
+          sha=${HEAD_SHA:-$(jq -r .head.sha <<< "$pull")}
+          [[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Could not read the pull request's head commit."; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          # Every path, a renamed file under both names. Over the 3000 files the API lists, the list decides nothing.
+          paths=$(gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" \
+            --jq '.[] | .filename, (.previous_filename // empty)')
+          # A change only into the default branch: take-project refuses a pull request into any other.
+          if [ -n "$paths" ] && ! grep -q '^projects/' <<< "$paths" && (( $(jq .changed_files <<< "$pull") <= 3000 )) \
+              && [ "$(jq -r .base.ref <<< "$pull")" = "$(jq -r .base.repo.default_branch <<< "$pull")" ] \
+              && { [[ $ACTOR != *"[bot]" ]] || [[ ,$ALLOWED_BOTS, == *",$ACTOR,"* ]]; }; then
+            echo "change=true" >> "$GITHUB_OUTPUT"
+            message="change review: the pull request changes no file under projects/, so nothing is built (review-change.md)."
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            message="build runs: it takes the pull request's project, if it has one (.github/scripts/take-project)."
+          fi
           echo "$message"
           echo "$message" >> "$GITHUB_STEP_SUMMARY"
 
@@ -383,9 +414,10 @@ jobs:
           overwrite: true
 
   review:
-    # Claude Code, through anthropics/claude-code-action, checks the enrollment against review.md (the top of this file).
-    needs: project-builds
-    if: ${{ !cancelled() && needs.project-builds.outputs.name != '' }}
+    # Claude Code, through anthropics/claude-code-action, checks the enrollment against review.md, or a change against
+    # review-change.md (the top of this file).
+    needs: [route, project-builds]
+    if: ${{ !cancelled() && (needs.project-builds.outputs.name != '' || needs.route.outputs.change == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     cache-mode: write
@@ -394,20 +426,22 @@ jobs:
     env:
       PR: ${{ github.event.pull_request.number || inputs.pr }}
       NAME: ${{ needs.project-builds.outputs.name }}
-      HEAD_SHA: ${{ needs.project-builds.outputs.sha }}
+      HEAD_SHA: ${{ needs.project-builds.outputs.sha || needs.route.outputs.sha }}
       SESSION_KEY: enroll-review/${{ github.event.pull_request.number || inputs.pr }}/${{ needs.project-builds.outputs.name }}/
       GCP_WORKLOAD_IDENTITY_PROVIDER: projects/805240912354/locations/global/workloadIdentityPools/github/providers/github-ossv
       GCP_SERVICE_ACCOUNT: ossv-ci@theorem-agent-infra.iam.gserviceaccount.com
     outputs:
-      comment: ${{ steps.review.outputs.structured_output && fromJSON(steps.review.outputs.structured_output).comment }}
+      comment: ${{ (steps.review.outputs.structured_output || steps.change.outputs.structured_output) && fromJSON(steps.review.outputs.structured_output || steps.change.outputs.structured_output).comment }}
       held_object: ${{ steps.held.outputs.object }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with: {persist-credentials: false, fetch-depth: 0}
       - name: Take projects/<name>/ from the pull request, as the build did
+        if: env.NAME != ''
         env: {GH_TOKEN: "${{ github.token }}", REPO: "${{ github.repository }}"}
         run: GITHUB_STEP_SUMMARY=/dev/null .github/scripts/take-project build
       - name: Restore the last review's session and the head it reviewed
+        if: env.NAME != ''
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
         with: {path: "~/.claude/projects\n~/.claude/ossv-last-review", key: "${{ env.SESSION_KEY }}${{ github.run_id }}-${{ github.run_attempt }}", restore-keys: "${{ env.SESSION_KEY }}"}
       - name: Gather what the review reads, and the diff since the last review
@@ -438,10 +472,11 @@ jobs:
           builtin printf '::add-mask::%s\n' "$OTEL_COLLECTOR_TOKEN"
           { builtin printf '%s\n' CLAUDE_CODE_ENABLE_TELEMETRY=1 OTEL_LOGS_EXPORTER=otlp OTEL_METRICS_EXPORTER=none \
               OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf OTEL_EXPORTER_OTLP_ENDPOINT=https://agent-otel-public-6acxmql5za-uw.a.run.app \
-              "OTEL_RESOURCE_ATTRIBUTES=theorem.project=oss-verify,theorem.subproject=$NAME,theorem.lane=enroll-review-ci,theorem.credential=oss-verify-ci"
+              "OTEL_RESOURCE_ATTRIBUTES=theorem.project=oss-verify,theorem.subproject=${NAME:-change},theorem.lane=enroll-review-ci,theorem.credential=oss-verify-ci"
             builtin printf 'OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer %s\n' "$OTEL_COLLECTOR_TOKEN"; } >> "$GITHUB_ENV"
       - name: Review
         id: review
+        if: env.NAME != ''
         timeout-minutes: 45
         uses: anthropics/claude-code-action@d70510b174a1244958df0b03166a54912811f3e6 # v1 (v1.0.264, sha-pinned)
         with:
@@ -466,9 +501,32 @@ jobs:
             --tools Read,Glob,Grep --permission-mode default --model claude-opus-5-5 --effort xhigh --max-turns 300
             ${{ steps.gather.outputs.session && format('--resume {0}', steps.gather.outputs.session) || '' }}
             --json-schema '{"type":"object","additionalProperties":false,"required":["comment","held","verdicts"],"properties":{"comment":{"type":"string","description":"The comment to the maintainer, in Markdown. Never a held finding."},"held":{"type":"string","description":"Each finding held back under rule 6 of review.md, as the skill section A held finding says, or empty."},"verdicts":{"type":"object","description":"The verdict of each check of review.md by its id, A1 to G5, and for an F check the worst over the fuzz targets.","required":["F2","F7"],"additionalProperties":{"enum":["pass","fail","person"]}}}}'
+      # A change: the same action and identity, review-change.md, a fresh session each push, nothing held.
+      - name: Review the change
+        id: change
+        if: env.NAME == ''
+        timeout-minutes: 45
+        uses: anthropics/claude-code-action@d70510b174a1244958df0b03166a54912811f3e6 # v1 (v1.0.264, sha-pinned)
+        with:
+          anthropic_federation_rule_id: fdrl_019restxFx3PhpLhbziQoQKf
+          anthropic_organization_id: 5fd73c3e-8a2c-4166-b80d-fb5ce0c1b4a6
+          anthropic_service_account_id: svac_01WdHTLcJPEfiPttcuLK1hGT
+          anthropic_workspace_id: wrkspc_01Qr1iUVcow4jdgQM7Amfks5
+          github_token: ${{ github.token }}
+          allowed_non_write_users: "*"
+          allowed_bots: sjawhar-agent[bot],oss-verify[bot]
+          prompt: >-
+            Read review-change.md at the root of this checkout: it says what OSS Verify's change review of pull request
+            #${{ env.PR }}, which changes no file under projects/, checks, on what the workflow gathered into .review/.
+            Give the result as the structured output.
+          claude_args: >-
+            --tools Read,Glob,Grep --permission-mode default --model claude-opus-5-5 --effort xhigh --max-turns 300
+            --json-schema '{"type":"object","additionalProperties":false,"required":["comment","held","verdicts"],"properties":{"comment":{"type":"string","description":"The comment to the contributor, in Markdown."},"held":{"type":"string","maxLength":0,"description":"Empty."},"verdicts":{"type":"object","description":"The verdict of each check of review-change.md by its number.","required":["1","2","3","4","5"],"additionalProperties":{"enum":["pass","fail","person"]}}}}'
       - name: Keep the draft, and the held finding apart from it
         id: result
-        env: {RESULT: "${{ steps.review.outputs.execution_file }}", SESSION: "${{ steps.review.outputs.session_id }}"}
+        env:
+          RESULT: ${{ steps.review.outputs.execution_file || steps.change.outputs.execution_file }}
+          SESSION: ${{ steps.review.outputs.session_id }}
         run: |
           out=$(jq -ce 'map(select(.type == "result")) | last | .structured_output | objects' "$RESULT")
           mkdir -p "$RUNNER_TEMP/draft" && jq -r .comment <<< "$out" > "$RUNNER_TEMP/draft/comment.md"
@@ -482,7 +540,7 @@ jobs:
         with: {name: enroll-review-draft, path: "${{ runner.temp }}/draft", if-no-files-found: error, overwrite: true}
       # A session that holds a held finding is not kept: any run of a pull request can read main's cache.
       - name: Keep this review's session for the next push's review
-        if: ${{ steps.result.outputs.held != 'yes' }}
+        if: ${{ steps.result.outputs.held != 'yes' && env.NAME != '' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
         with: {path: "~/.claude/projects\n~/.claude/ossv-last-review", key: "${{ env.SESSION_KEY }}${{ github.run_id }}-${{ github.run_attempt }}"}
       - name: Sign in to Google Cloud to store the held finding
@@ -647,7 +705,7 @@ jobs:
     # variable OSSV_POST_REVIEW is `post`, because a person approves each message to a maintainer before it is posted
     # (until then the comment is the review job's artifact enroll-review-draft), and, when the review held a finding
     # back, only once the hold job sent it, because the comment says that it was sent.
-    needs: [project-builds, review, hold]
+    needs: [route, project-builds, review, hold]
     if: >-
       ${{ !cancelled() && vars.OSSV_POST_REVIEW == 'post' && needs.review.result == 'success' && needs.review.outputs.comment != ''
       && (needs.review.outputs.held_object == '' || needs.hold.result == 'success') }}
@@ -727,7 +785,8 @@ jobs:
           PR: ${{ github.event.pull_request.number || inputs.pr }}
           REVIEW: ${{ needs.review.outputs.comment }}
           CHECKS: ${{ needs.project-builds.outputs.checks }}
-          HEAD_SHA: ${{ needs.project-builds.outputs.sha }}
+          HEAD_SHA: ${{ needs.project-builds.outputs.sha || needs.route.outputs.sha }}
+          RULES: ${{ needs.route.outputs.change == 'true' && 'review-change.md' || 'review.md' }}
         run: |
           set -euo pipefail
           # Only a run of the pull request's current head posts: a run of an older head that finished later would
@@ -739,8 +798,8 @@ jobs:
           fi
           # The marker first, which finds the comment again; GitHub refuses a comment over 65,536 characters.
           {
-            printf '<!-- oss-verify-review -->\n<sub>Claude wrote this review of `%s` from `review.md`. It can be wrong. Each push replaces it.</sub>\n\n%s\n' \
-              "${HEAD_SHA:0:7}" "${REVIEW:0:50000}"
+            printf '<!-- oss-verify-review -->\n<sub>Claude wrote this review of `%s` from `%s`. It can be wrong. Each push replaces it.</sub>\n\n%s\n' \
+              "${HEAD_SHA:0:7}" "$RULES" "${REVIEW:0:50000}"
             if [ -n "$CHECKS" ]; then
               printf '\n<details><summary>What the breakage and coverage checks measured</summary>\n\n%s\n\n</details>\n' "${CHECKS:0:12000}"
             fi
@@ -780,12 +839,12 @@ jobs:
           BUILD: ${{ needs.project-builds.result }}
           ASKED_BUILD: ${{ needs.route.outputs.build == 'true' }}
           # Each of the others is asked for on its own job's condition: the record when the build passed and took a
-          # project, the review when the build took a project, hold when the review ran, comment when posting is on and
+          # project, the review when the build took a project or route found a change, hold when the review ran, comment when posting is on and
           # the review wrote a comment (and, if it held a finding back, the hold job sent it).
           RECORD: ${{ needs.record.result }}
           ASKED_RECORD: ${{ needs.project-builds.result == 'success' && needs.project-builds.outputs.name != '' }}
           REVIEW: ${{ needs.review.result }}
-          ASKED_REVIEW: ${{ needs.project-builds.outputs.name != '' }}
+          ASKED_REVIEW: ${{ (needs.project-builds.outputs.name != '' || needs.route.outputs.change == 'true') }}
           HOLD: ${{ needs.hold.result }}
           ASKED_HOLD: ${{ needs.review.result != 'skipped' }}
           COMMENT: ${{ needs.comment.result }}
