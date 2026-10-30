@@ -312,8 +312,8 @@ def route_issue(tmp_path, pr, issue, is_pull=False, event="workflow_dispatch", s
 
 def test_a_run_for_an_issue_asks_for_the_review_alone(tmp_path):
     assert route_issue(tmp_path, "", "5") == (0, ["issue=true"])
-    # The comment job, which alone posts, never runs for an issue, whatever variable is set: its if:, its post step's
-    # if: and ASKED_COMMENT, evaluated.
+    # The comment job, which alone posts, never runs for an issue, whatever variable is set: its if: and the required
+    # job's ASKED_COMMENT, evaluated.
     for variables, inputs in (({"OSSV_POST_REVIEW": "post"}, {"issue": 5}),
                               ({"OSSV_POST_REVIEW_REPOS": OTHER}, {"repo": OTHER, "issue": 5})):
         assert posting(variables, inputs, issue=True)[:2] == (False, False)
