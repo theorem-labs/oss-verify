@@ -7,7 +7,8 @@
 #   GH_TOKEN=<read-only token> REPO=<owner>/<name> PR=<number> NAME=<project> COMMIT=<built commit> \
 #     [BUILD=<result line> BINARIES=<table> CHECKS=<report>] [HEAD_SHA=<head commit> LAST_REVIEW=<file>] \
 #     .github/scripts/review-gather <directory>
-#   GH_TOKEN=... REPO=... PR=<number> NAME= HEAD_SHA=<head commit> .github/scripts/review-gather <directory>
+#   GH_TOKEN=... REPO=... PR=<number> NAME= HEAD_SHA=<head commit> [LAST_REVIEW=<file> RUNS_REPO=<owner>/<name> \
+#     RUN_ID=<this run>] .github/scripts/review-gather <directory>
 #   GH_TOKEN=... REPO=... ISSUE=<number> .github/scripts/review-gather <directory>
 #
 # build.yaml's review job runs it from the base branch's checkout, after take-project has put the pull request's
@@ -19,8 +20,16 @@
 # not check. LAST_REVIEW is the file the review job keeps beside the last review's session in the Actions cache, one line
 # `session=<id> head=<commit>`: when the head descends from that commit, this writes the diff since it and, to
 # GITHUB_OUTPUT, `session` and `last`, so that the review resumes that session for the diff alone.
-# With NAME empty, a change review (review-change.md): only the pull request, its diff, its checks and review comments,
-# and each changed file as it is at HEAD_SHA, as data under head/.
+# With NAME empty, a change review (review-change.md), of this repository's pull request or of another's (REPO): only
+# the pull request, its diff, its checks and review comments, and each changed file as it is at HEAD_SHA, as data under
+# head/. It resumes the session of the last review of the pull request, for context, with the diff from the head that
+# review reviewed. That head comes from the runs API of RUNS_REPO, the repository whose build.yaml runs the reviews,
+# never from LAST_REVIEW, which sits in a cache that the runs of outside pull requests can write too (main's scope):
+# it is the head of the newest Build run before RUN_ID whose review job succeeded, of this pull request. For another
+# repository's pull request that is a run started on main and titled `Review <name>#<number> at <head>` (build.yaml's
+# run-name: only someone who can start workflows starts one); for this repository's, a run of its own event
+# (pull_request_target) on its head branch in its head repository. LAST_REVIEW gives the session's id, which is resumed
+# only when the head LAST_REVIEW names is that head; it is never the source of the head.
 # With ISSUE set, the draft reply to an issue (review-issue.md): only the issue's title, body, author and comments, in
 # issue.json, and nothing else.
 # The runner reads none of its output as a workflow command: the gathered text is the pull request's or the issue's.
@@ -32,6 +41,37 @@ export LC_ALL=C
 out=${1:?usage: review-gather <directory>}
 # Run a command, and keep its standard output and error in a file, whatever its status.
 keep() { local file=$1; shift; { "$@"; echo "(exit status $?)"; } > "$out/$file" 2>&1; }
+# The head that the newest earlier Build run of this change's pull request reviewed, its review job a success, from the
+# runs API alone (the header above); nothing when there is none. It reads one page, the 100 newest Build runs of the
+# event (and of the head branch, for this repository's pull request), and looks at 10 of them at most: a pull request
+# whose last review is older than that gets a fresh review.
+reviewed_head() {
+  local runs id head tried=0 ref="" fork="" title
+  [[ ${RUNS_REPO:-} =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ && ${RUN_ID:-} =~ ^[0-9]+$
+     && $REPO =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 0
+  local list="repos/$RUNS_REPO/actions/workflows/build.yaml/runs" mine=".id < $RUN_ID and .path == \".github/workflows/build.yaml\""
+  if [ "$REPO" = "$RUNS_REPO" ]; then
+    read -r ref fork < <(gh api "repos/$REPO/pulls/$PR" --jq '"\(.head.ref) \(.head.repo.full_name // "")"' 2> /dev/null)
+    [[ $ref =~ ^[A-Za-z0-9._/-]+$ && $fork =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 0
+    runs=$(gh api "$list?event=pull_request_target&branch=$ref&per_page=100" --jq ".workflow_runs[] | select($mine
+      and .event == \"pull_request_target\" and .head_branch == \"$ref\" and .head_repository.full_name == \"$fork\")
+      | \"\(.id) \(.head_sha)\"" 2> /dev/null)
+  else
+    title="Review ${REPO#*/}#$PR at "
+    runs=$(gh api "$list?event=workflow_dispatch&branch=main&per_page=100" --jq ".workflow_runs[] | select($mine
+      and .event == \"workflow_dispatch\" and .head_branch == \"main\" and (.display_title | startswith(\"$title\")))
+      | \"\(.id) \(.display_title | ltrimstr(\"$title\"))\"" 2> /dev/null)
+  fi
+  while read -r id head; do
+    [[ ${id:-} =~ ^[0-9]+$ && ${head:-} =~ ^[0-9a-f]{40}$ ]] || continue
+    tried=$((tried + 1)) && [ "$tried" -le 10 ] || return 0
+    if [ "$(gh api "repos/$RUNS_REPO/actions/runs/$id/jobs?per_page=100" \
+        --jq '[.jobs[] | select(.name == "review")][0].conclusion' 2> /dev/null)" = success ]; then
+      echo "$head"
+      return 0
+    fi
+  done <<< "$runs"
+}
 if [ -n "${ISSUE:-}" ]; then
   [[ $ISSUE =~ ^[0-9]+$ ]] || { echo "review-gather: ISSUE is not a number" >&2; exit 2; }
   mkdir -p "$out"
@@ -63,6 +103,27 @@ if [ -z "$NAME" ]; then
     gh api -H 'Accept: application/vnd.github.raw' "repos/$REPO/contents/$path?ref=$HEAD_SHA" > "$out/head/$path" \
       2> /dev/null || rm -f "$out/head/$path"
   done
+  reviewed=$(reviewed_head)
+  # The cache's file gives the session's id, and its head must be the one the runs API gave: a session kept for
+  # another head (a review whose save did not happen, an older run's entry) is not the session of that review.
+  read -r session kept < <(sed -n 's/^session=\([0-9a-f-]\{36\}\) head=\([0-9a-f]\{40\}\)$/\1 \2/p' \
+    "${LAST_REVIEW:-/nonexistent}" 2> /dev/null | head -n 1)
+  if [[ -n $reviewed && -n ${session:-} && ${kept:-} != "$reviewed" ]]; then
+    echo "review-gather: the session in the cache was kept for $kept, not $reviewed: the review is fresh"
+  elif [[ -n $reviewed && -n ${session:-} && ${HEAD_SHA:-} =~ ^[0-9a-f]{40}$ ]]; then
+    status=$(gh api "repos/$REPO/compare/$reviewed...$HEAD_SHA" --jq .status 2> /dev/null) || status=""
+    if [ "$status" = ahead ]; then
+      keep since-last-review.diff gh api -H 'Accept: application/vnd.github.diff' "repos/$REPO/compare/$reviewed...$HEAD_SHA"
+    fi
+    if [ "$(tail -n 1 "$out/since-last-review.diff" 2> /dev/null)" = "(exit status 0)" ]; then
+      echo "review-gather: the change review resumes the session $session, with the diff from $reviewed, the head its" \
+        "last review reviewed (the runs API), to $HEAD_SHA"
+      { echo "session=$session"; echo "last=$reviewed"; } >> "${GITHUB_OUTPUT:-/dev/null}"
+    else
+      echo "review-gather: no diff from $reviewed, the head the last review reviewed, to $HEAD_SHA (compare status" \
+        "${status:-unknown}): the review is fresh"
+    fi
+  fi
   exit 0
 fi
 [[ $NAME =~ ^[a-z0-9][a-z0-9._-]{0,62}$ ]] || { echo "review-gather: NAME is not a project name" >&2; exit 2; }
