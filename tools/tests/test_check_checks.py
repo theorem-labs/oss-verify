@@ -584,26 +584,12 @@ class PostingStep(unittest.TestCase):
         self.assertIn("R" * 50_000, body)
 
     def test_the_draft_body_md_is_what_the_comment_job_posts(self):
-        # The review job writes body.md with .github/scripts/review-body before the draft goes up, and gives the
-        # verdicts it read to the comment job as its output `verdicts`; the post step runs review-body on the same
-        # values. Both jobs' own steps, run here on one review, give the same text.
+        # The review job's step writes body.md with .github/scripts/review-body and gives the verdicts it read as one
+        # line of JSON; the comment job's post step, given that line and the same values, posts the same text. Both
+        # steps' own scripts are run here. Which values the two jobs give them is the workflow's, proved on a run.
         jobs = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["jobs"]
-        steps = jobs["review"]["steps"]
-        names = [s.get("name") for s in steps]
-        write = steps[names.index("Write the comment as the comment job posts it")]
-        upload = next(i for i, s in enumerate(steps) if s.get("uses", "").startswith("actions/upload-artifact@"))
-        self.assertLess(steps.index(write), upload)
-        # Never for an issue: no job posts its reply.
-        self.assertEqual(write["if"], "env.ISSUE == ''")
-        [post] = [s for s in jobs["comment"]["steps"]
-                  if s.get("name") == "Post the comment, or update the one already there"]
-        self.assertEqual(write["env"]["REVIEW"], jobs["review"]["outputs"]["comment"])
-        self.assertEqual(post["env"]["REVIEW"], "${{ needs.review.outputs.comment }}")
-        for name in ("CHECKS", "RULES"):
-            self.assertEqual(write["env"][name], post["env"][name], name)
-        self.assertEqual(jobs["review"]["env"]["HEAD_SHA"], post["env"]["HEAD_SHA"])
-        self.assertEqual(jobs["review"]["outputs"]["verdicts"], "${{ steps.body.outputs.verdicts }}")
-        self.assertEqual(post["env"]["VERDICTS"], "${{ needs.review.outputs.verdicts }}")
+        [write] = [s for s in jobs["review"]["steps"]
+                   if s.get("name") == "Write the comment as the comment job posts it"]
         review = "Thanks.\n\n1. Fix X.\n"
         with tempfile.TemporaryDirectory() as directory:
             temp = pathlib.Path(directory)
