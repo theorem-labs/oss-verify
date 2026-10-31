@@ -2,8 +2,9 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 #
-# Prints the review comment of a pull request: build.yaml's comment job posts this text, and its review job keeps the
-# same text as body.md in the artifact enroll-review-draft, so the draft is exactly what would be posted.
+# Prints the review comment of a pull request. build.yaml's review job writes it as body.md, into the artifact
+# enroll-review-draft and into its output `body`, and the comment job posts that output as it is, so the draft is
+# exactly what is posted.
 #
 #   HEAD_SHA=<reviewed commit> REVIEW=<the review's comment> CHECKS=<the checks' report, or empty> \
 #     VERDICTS=<the review's verdicts.json> RULES=<review.md or review-change.md> .github/scripts/review-body

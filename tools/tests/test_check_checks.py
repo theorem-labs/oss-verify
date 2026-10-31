@@ -445,10 +445,15 @@ class WorkflowArguments(unittest.TestCase):
 
 
 class PostingStep(unittest.TestCase):
-    """build.yaml's own "Post the comment" step, run with a fake gh: what it sends GitHub."""
+    """build.yaml's own "Post the comment" step, run with a fake gh: what it sends GitHub. Its BODY is the review job's
+    body.md, made here by .github/scripts/review-body from the review, the checks' report and the rules file, as the
+    review job makes it, unless `text` gives it."""
 
     def post(self, review, existing=True, head="b" * 40, pr_head=None, checks="### new report\n", rules="review.md",
-             pr="8", status=0, verdicts=""):
+             pr="8", status=0, verdicts="", text=None):
+        if text is None:
+            # As the job output gives it: without the file's last line end.
+            text = body(verdicts, head, review=review, checks=checks, rules=rules).removesuffix("\n")
         workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
         name = "Post the comment, or update the one already there"
         matches = [s for s in workflow["jobs"]["comment"]["steps"] if s.get("name") == name]
@@ -472,8 +477,7 @@ class PostingStep(unittest.TestCase):
             (bin / "gh").chmod(0o755)
             (directory / "temp").mkdir()
             environment = {**os.environ, "PATH": f"{bin}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r",
-                           "PR": pr, "REVIEW": review, "CHECKS": checks, "HEAD_SHA": head, "RULES": rules,
-                           "VERDICTS": verdicts, "RUNNER_TEMP": str(directory / "temp")}
+                           "PR": pr, "BODY": text, "HEAD_SHA": head, "RUNNER_TEMP": str(directory / "temp")}
             run = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=ROOT, env=environment, capture_output=True,
                                  text=True)
             self.assertEqual(run.returncode, status, run.stderr)
@@ -544,9 +548,9 @@ class PostingStep(unittest.TestCase):
         self.assertIn("R" * 50_000, body)
 
     def test_the_draft_body_md_is_what_the_comment_job_posts(self):
-        # The review job's step writes body.md with .github/scripts/review-body and gives the verdicts it read as one
-        # line of JSON; the comment job's post step, given that line and the same values, posts the same text. Both
-        # steps' own scripts are run here. Which values the two jobs give them is the workflow's, proved on a run.
+        # The review job's step writes body.md with .github/scripts/review-body, and its job output `body`; the comment
+        # job's post step, given that output, posts body.md as it is. Both steps are run here. Which values the job
+        # gives the first step is the workflow's, proved on a run.
         jobs = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["jobs"]
         [write] = [s for s in jobs["review"]["steps"]
                    if s.get("name") == "Write the comment as the comment job posts it"]
@@ -564,8 +568,12 @@ class PostingStep(unittest.TestCase):
             self.assertEqual(run.returncode, 0, run.stderr)
             output = (temp / "output").read_text()
             draft = (temp / "draft" / "body.md").read_text()
-        self.assertRegex(output, r"\Averdicts=\{[^\n]*\}\n\Z")
-        self.assertEqual(self.post(review, verdicts=output[len("verdicts="):-1]), draft)
+        # GITHUB_OUTPUT's form for a value of several lines: body<<delimiter, the lines, the delimiter.
+        first, rest = output.split("\n", 1)
+        self.assertRegex(first, r"\Abody<<body_[0-9a-f]{32}\Z")
+        delimiter = first.split("<<", 1)[1]
+        self.assertTrue(rest.endswith(f"\n{delimiter}\n"))
+        self.assertEqual(self.post(review, text=rest[:-len(delimiter) - 2]), draft)
         self.assertEqual(draft.split("\n")[1],
                          '<!-- oss-verify-verdict {"head":"%s","blocking":["F2"],"person":["C4"]} -->' % ("b" * 40))
 
