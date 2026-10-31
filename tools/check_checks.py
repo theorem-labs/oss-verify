@@ -569,6 +569,11 @@ def catches(breakage, passing, target=None, seed=None):
             and (target is None or run.target == target) and (seed is None or run.seed == seed)]
 
 
+def sanitizer_build(builds):
+    """(build, SANITIZER value) of the most checking sanitizer build among `builds`, or None if there is none."""
+    return next(((build, value) for build, value in SANITIZER_BUILDS if build in builds), None)
+
+
 def checks(job, tag, targets, work, raw, *, labels, ubsan=None, budget=BUDGET_MINUTES):
     """Run the step, and return its report as Markdown."""
     lines = ["### The checks of the fuzz targets", ""]
@@ -608,7 +613,7 @@ def checks(job, tag, targets, work, raw, *, labels, ubsan=None, budget=BUDGET_MI
         for path in files_of(export):
             record_targets.setdefault(path, set()).add(target)
 
-    sanitizer = next(((build, value) for build, value in SANITIZER_BUILDS if build in job.builds), None)
+    sanitizer = sanitizer_build(job.builds)
     sanitizer_base = (run_all(tag, raw / sanitizer[0], inputs, seeds, sanitizer[0], home / "results-sanitizer",
                               labels=labels, total=BASELINE_MINUTES * 60) if sanitizer else [])
     unrun = [run for run in base_runs + sanitizer_base if run.status == NOT_RUN]

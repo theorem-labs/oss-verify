@@ -16,7 +16,7 @@ export SOURCE_DATE_EPOCH
 
 CHOST=riscv64-linux-musl
 
-# Every build compiles with these. The -fno-builtin-* flags keep each allocation an ordinary call in all four builds,
+# Every build compiles with these. The -fno-builtin-* flags keep each allocation an ordinary call in all five builds,
 # so that the optimiser cannot remove or merge an allocation in one build and keep it in another.
 OFT_NO_BUILTIN_ALLOC="-fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-reallocarray -fno-builtin-free -fno-builtin-aligned_alloc -fno-builtin-posix_memalign -fno-builtin-memalign -fno-builtin-valloc -fno-builtin-strdup -fno-builtin-strndup"
 BASE_CFLAGS="-march=rv64g -mabi=lp64d -Os -g -ffunction-sections -fdata-sections -fno-stack-protector -fno-plt -Wdate-time $OFT_NO_BUILTIN_ALLOC"

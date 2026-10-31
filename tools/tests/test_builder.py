@@ -156,6 +156,14 @@ class Builder(unittest.TestCase):
                 self.assertEqual(self.entries[target][build]["sha256"], manifest.sha256_of(path))
                 self.assertTrue(manifest.has_symbol_table(self.raw[build] / target))
 
+    def test_the_msan_build_needs_its_configuration(self):
+        # No published image has MemorySanitizer: toolchain.sh fails the msan build and names the file it needs.
+        done = subprocess.run(["docker", "run", "--rm", "--network=none", "-e", "SANITIZER=memory", TAG, "compile"],
+                              capture_output=True, text=True)
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn("toolchain.sh: the msan build needs /opt/asan-static/msan-musl-sealed.cfg, and this toolchain "
+                      "image has none", done.stderr)
+
     @unittest.skipUnless(QEMU, "no qemu-riscv64 on this machine")
     def test_exit_statuses(self):
         inputs = self.work / "in"
