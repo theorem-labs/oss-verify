@@ -109,15 +109,17 @@ Change the UndefinedBehaviorSanitizer checks of the `ubsan` and `asan-ubsan` bui
 
 > **WARNING:** Today's toolchain vintage does not apply this field. Its builds keep the fixed UBSan flags of the release ([build-contract.md](build-contract.md#the-builds)), so that its binaries are the release's. With this vintage, `tools/check` refuses a project that sets the field. The field applies with the next toolchain version.
 
-If you leave out the field, the builds make the checks that OSS-Fuzz makes fatal, which are those of its `-fno-sanitize-recover` list, and for a `c++` project also libc++'s hardening. For a `c++` project, these are the checks:
+If you leave out the field, the builds make the checks that OSS-Fuzz makes fatal, which are those of its `-fno-sanitize-recover` list, with `strict-flex-arrays`, and for a `c++` project also libc++'s hardening. For a `c++` project, these are the checks:
 
     array-bounds bool builtin enum function integer-divide-by-zero null object-size return
     returns-nonnull-attribute shift signed-integer-overflow unreachable vla-bound vptr libcxx-hardening
+    strict-flex-arrays
 
 OSS-Fuzz leaves out `function` when it compiles C code, and when it compiles a Python project's native code. Thus a `c` or `python` project's default does not have `function`, and the C files of a `c++` project are compiled without it. `vptr` and `libcxx-hardening` are about C++ code, so a `c` or `python` project's default does not have them either.
 
 * `vptr` needs the UBSan runtime, which trap mode does not have. The `ubsan` build makes it through the toolchain image's trap-only handler (`/opt/ubsan-vptr-trap/libclang_rt.ubsan_vptr_trap.a`), which traps on a mismatch as the other checks do. A compile with `-fno-rtti` has no vptr check: the compiler shim adds `-fno-sanitize=vptr` to it, so a project built without RTTI needs no change. The `asan-ubsan` build leaves `vptr` out.
 * `libcxx-hardening` is not a clang check. It is libc++'s extensive hardening mode: the `ubsan` build compiles and links the project's C++ against the toolchain image's hardened libc++ (`/opt/asan-static/musl-hardened.cfg`). libc++ then checks its preconditions, for example an index past the end of a `std::span`, `std::string_view` or `std::vector`, or `*` of an empty `std::optional`, in the headers and in `libc++.a`, and a failed check traps with no output. The other builds keep the default libc++. To leave it out, write `remove: [libcxx-hardening]`, as for any check.
+* `strict-flex-arrays` is not a clang check. It is `-fstrict-flex-arrays=1`, which changes what `array-bounds` checks, in the `ubsan` and `asan-ubsan` builds. Without it, clang takes the last array of a struct to be of unknown size, whatever its declared size, so `array-bounds` does not check an index into it: `p->buf[20]` with `char buf[16]` as the last member is not caught, and AddressSanitizer does not catch it either while it stays inside the allocation. With it, a trailing array whose declared size is 2 or more is checked. A trailing `[1]`, `[0]` or `[]` is not, because that is how C writes a flexible array, allocated with room for more elements: older code writes `[1]`, and indexes past it as intended. If a struct's last array is indexed past its declared size on purpose and that size is 2 or more, write `remove: [strict-flex-arrays]`, as for any check. It does nothing without `array-bounds`.
 * OSS-Fuzz also instruments `unsigned-integer-overflow`, but it silences the reports (`silence_unsigned_overflow=1`). Trap mode cannot silence a check. Thus the default does not contain it.
 
 The field changes the default, and tells why:

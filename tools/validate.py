@@ -152,8 +152,17 @@ UBSAN_NAMES = (
 # as a UBSan check does. It is not a clang check name; the ubsan build of a c++ project compiles and links its C++
 # against the toolchain image's hardened libc++ (infra/base-builder/toolchain.sh).
 LIBCXX_HARDENING = "libcxx-hardening"
+# -fstrict-flex-arrays=1, named in ubsan_checks as if it were a check. It is not a clang check name: it changes what
+# array-bounds checks. clang takes any trailing array of a struct ([N], [1], [0] or []) to be of unknown size unless
+# told otherwise, so array-bounds checks no index into the last array of a struct; with it, a trailing [N] with N of 2
+# or more is checked, and [1], [0] and [], the ways C writes a flexible array, are not. Both UBSan builds get it
+# (infra/base-builder/toolchain.sh).
+STRICT_FLEX_ARRAYS = "strict-flex-arrays"
+# The names that ubsan_checks takes besides clang's.
+NOT_CLANG_CHECKS = (LIBCXX_HARDENING, STRICT_FLEX_ARRAYS)
 # Without ubsan_checks, the checks that OSS-Fuzz makes fatal (its -fno-sanitize-recover list), and for a c++ project
-# also libc++'s hardening, which OSS-Fuzz does not turn on. vptr is one of OSS-Fuzz's checks that trap mode cannot make
+# also libc++'s hardening, which OSS-Fuzz does not turn on, and for each language strict-flex-arrays, which OSS-Fuzz does
+# not turn on either. vptr is one of OSS-Fuzz's checks that trap mode cannot make
 # (TRAP_EXCEPTIONS): the ubsan build makes it through the toolchain's trap-only handler. OSS-Fuzz drops function from
 # each C compile, and from a Python project's native code, so a c or python project's default does not have it, and a
 # c++ project's C compiles do not either (C_COMPILE_EXCLUDED); vptr and the hardening are about C++ code, so those
@@ -162,7 +171,7 @@ LIBCXX_HARDENING = "libcxx-hardening"
 CXX_UBSAN_CHECKS = [
     "array-bounds", "bool", "builtin", "enum", "function", "integer-divide-by-zero", "null", "object-size", "return",
     "returns-nonnull-attribute", "shift", "signed-integer-overflow", "unreachable", "vla-bound", "vptr",
-    LIBCXX_HARDENING,
+    LIBCXX_HARDENING, STRICT_FLEX_ARRAYS,
 ]
 C_COMPILE_EXCLUDED = ("function",)
 CXX_ONLY = ("function", "vptr", LIBCXX_HARDENING)
@@ -528,7 +537,7 @@ def check_ubsan_changes(config, changes):
             yield f"ubsan_checks.{key} must be a list of UBSan check names"
             continue
         for item in checks:
-            if item not in UBSAN_NAMES and item != LIBCXX_HARDENING:
+            if item not in UBSAN_NAMES and item not in NOT_CLANG_CHECKS:
                 yield printable(f"ubsan_checks.{key}: {item!r} is not a UBSan check that clang knows")
         if len(set(checks)) != len(checks):
             yield f"ubsan_checks.{key} names a check twice"
@@ -573,6 +582,11 @@ def config_warnings(config, files):
             warnings.append(f"ubsan_checks.add: {item} is in the default already")
         for item in sorted(set(map(str, removed)) - set(default)):
             warnings.append(f"ubsan_checks.remove: {item} is not in the default, so there is nothing to remove")
+        if not (set(map(str, added)) | set(map(str, removed))) - set(UBSAN_NAMES) - set(NOT_CLANG_CHECKS):
+            in_effect = ubsan_checks_in_effect(config)
+            if STRICT_FLEX_ARRAYS in in_effect and not {"array-bounds", "bounds", "undefined"} & set(in_effect):
+                warnings.append(f"ubsan_checks: {STRICT_FLEX_ARRAYS} does nothing without array-bounds, which the "
+                                "checks leave out")
         if not newest_toolchain_applies_ubsan_checks():
             warnings.append("ubsan_checks has no effect yet: the newest toolchain keeps the release's fixed UBSan flags, "
                             "and tools/check refuses the field with it")

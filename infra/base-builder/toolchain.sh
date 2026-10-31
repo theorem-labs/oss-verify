@@ -102,6 +102,11 @@ DRVCXX=$SHIM/$CHOST-clang++-plain
 # -fno-sanitize=vptr after its arguments, since clang refuses vptr without RTTI. The asan-ubsan build leaves vptr out:
 # -fno-sanitize-link-runtime would drop the AddressSanitizer runtime. libcxx-hardening: the ubsan build compiles and
 # links C++ against the image's hardened libc++ (musl-hardened.cfg), whose failed checks trap too.
+#
+# strict-flex-arrays is not a check either. It is -fstrict-flex-arrays=1, in both UBSan builds. Without it, clang takes
+# the last array of a struct to be of unknown size, whatever its declared size, and array-bounds checks no index into
+# it. With it, only a trailing [], [0] or [1] is of unknown size, so array-bounds checks an index into a trailing [N]
+# with N of 2 or more. [0] and [1] stay unchecked: older C writes a flexible array that way, and indexes past it.
 VPTR_TRAP=/opt/ubsan-vptr-trap/libclang_rt.ubsan_vptr_trap.a
 HARDENED_CFG=/opt/asan-static/musl-hardened.cfg
 UBSAN_LINK=""
@@ -118,6 +123,12 @@ if [ -n "${OV_UBSAN_CHECKS:-}" ]; then
   ub_checks=$OV_UBSAN_CHECKS
   ub_exclude=${OV_UBSAN_EXCLUDE:-}
   ub_vptr=""
+  ub_flex=""
+  case ",$ub_checks," in
+    *,strict-flex-arrays,*)
+      ub_checks=$(ub_without "$ub_checks" strict-flex-arrays)
+      ub_flex=" -fstrict-flex-arrays=1" ;;
+  esac
   case ",$ub_checks," in
     *,libcxx-hardening,*)
       ub_checks=$(ub_without "$ub_checks" libcxx-hardening)
@@ -139,7 +150,7 @@ if [ -n "${OV_UBSAN_CHECKS:-}" ]; then
       fi ;;
   esac
   UBSAN="${ub_checks:+-fsanitize=$ub_checks }${ub_exclude:+-fno-sanitize=$ub_exclude }"
-  UBSAN="$UBSAN${ub_checks:+-fsanitize-trap=$ub_checks }-fno-sanitize-recover=all$ub_vptr"
+  UBSAN="$UBSAN${ub_checks:+-fsanitize-trap=$ub_checks }-fno-sanitize-recover=all$ub_vptr$ub_flex"
 else
   UBSAN="-fsanitize=undefined -fno-sanitize-recover=all -fsanitize-trap=all -fno-sanitize=function"
 fi

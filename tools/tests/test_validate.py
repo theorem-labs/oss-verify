@@ -253,10 +253,13 @@ class UbsanChecks(unittest.TestCase):
         """OSS-Fuzz's -fno-sanitize-recover list, less vptr (trap mode cannot make it); C and Python drop function,
         as OSS-Fuzz drops it from C compiles and from a Python project's native code."""
         default = validate.DEFAULT_UBSAN_CHECKS
-        self.assertEqual(len(default["c++"]), 16)
-        self.assertEqual(default["c++"][-2:], ["vptr", "libcxx-hardening"])
+        self.assertEqual(len(default["c++"]), 17)
+        self.assertEqual(default["c++"][-3:], ["vptr", "libcxx-hardening", "strict-flex-arrays"])
         self.assertEqual(default["c"], [check for check in default["c++"]
                                         if check not in ("function", "vptr", "libcxx-hardening")])
+        # strict-flex-arrays is about C as much as C++: every default has it.
+        for checks in default.values():
+            self.assertIn("strict-flex-arrays", checks)
         self.assertEqual(default["python"], default["c"])
         self.assertEqual(set(validate.TRAP_EXCEPTIONS), {"vptr"})
         for checks in default.values():
@@ -287,6 +290,19 @@ class UbsanChecks(unittest.TestCase):
         self.assertEqual(check(out)[0], [])
         self.assertEqual(validate.ubsan_checks_in_effect(yaml_of(out)),
                          [c for c in validate.DEFAULT_UBSAN_CHECKS["c++"] if c not in ("vptr", "libcxx-hardening")])
+
+    def test_a_project_opts_out_of_strict_flex_arrays(self):
+        out = MINIMAL + ("ubsan_checks: {remove: [strict-flex-arrays], reason: 'the packet header is read past its "
+                         "trailing options[4], into the room allocated for it'}\n")
+        problems, warnings, _ = check(out)
+        self.assertEqual(problems, [])
+        self.assertFalse(any("strict-flex-arrays" in warning for warning in warnings), warnings)
+        self.assertEqual(validate.ubsan_checks_in_effect(yaml_of(out)),
+                         [c for c in validate.DEFAULT_UBSAN_CHECKS["c"] if c != "strict-flex-arrays"])
+        # Without array-bounds it changes nothing, which is worth a warning, not a refusal.
+        alone = MINIMAL + "ubsan_checks: {remove: [array-bounds], reason: x}\n"
+        self.assertEqual(check(alone)[0], [])
+        self.has("strict-flex-arrays does nothing without array-bounds", check(alone)[1])
 
     def test_warnings(self):
         warnings = check(MINIMAL + "ubsan_checks: {add: [vptr, enum], remove: [alignment], reason: x}\n")[1]

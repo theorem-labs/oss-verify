@@ -15,6 +15,12 @@
 static void late_exit_0(void) { _Exit(0); }
 static void late_return(void) { }
 
+/* A struct whose last member is a fixed-size array. clang takes a trailing array to be of unknown size unless it
+ * compiles with -fstrict-flex-arrays=3, so array-bounds checks the index only then. */
+struct record { int kind; char tail[16]; };
+/* The flexible array of older C: a trailing [1], allocated with room for more elements. */
+struct legacy { int count; char data[1]; };
+
 int example_run(const unsigned char *data, size_t size) {
   if (size == 0) return 0;
   switch (data[0]) {
@@ -34,6 +40,20 @@ int example_run(const unsigned char *data, size_t size) {
     case 's': { volatile int *p = 0; return *p; }         /* a segmentation fault: 139 */
     case 'n': { volatile unsigned long zero = 0; int *p = (int *)zero; return *p; }  /* a null load UBSan checks */
     case 'o': { volatile int big = INT_MAX; volatile int sum = big + (int)size; (void)sum; return 0; }  /* signed overflow */
+    case 'f': {                                           /* an index past a trailing char[16], in the allocation */
+      volatile struct record *rec = calloc(1, 4 * sizeof(struct record));
+      if (rec == NULL) return 0;
+      rec->tail[16 + (int)(size & 1)] = 1;                /* 16 or 17: past tail, inside the block */
+      free((void *)rec);
+      return 0;
+    }
+    case 'l': {                                           /* the legacy [1] idiom, used as intended */
+      volatile struct legacy *old = calloc(1, sizeof(struct legacy) + 16);
+      if (old == NULL) return 0;
+      old->data[1 + (int)(size & 1)] = 1;                 /* inside the room it was allocated with */
+      free((void *)old);
+      return 0;
+    }
     case 'h': {                                           /* a heap read one past the end */
       unsigned char *copy = malloc(size);
       if (copy == NULL) return 0;
