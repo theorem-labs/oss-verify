@@ -50,9 +50,14 @@ export SANITIZER FLAV
 
 [ -f "$SRC/build.sh" ] || { echo "compile: there is no $SRC/build.sh" >&2; exit 2; }
 mkdir -p "$OUT" "$WORK"
-if [ -n "${OV_OWNER:-}" ]; then
-  trap 'chown -R "$OV_OWNER" "$OUT" 2>/dev/null || true' EXIT
-fi
+# On the way out: remove a $OUT/.ov-refused that compile did not write (refuse, below), such as one that build.sh left,
+# whether build.sh failed or not; then, with OV_OWNER, hand $OUT to that owner.
+refused=""
+on_exit() {
+  [ -n "$refused" ] || rm -rf -- "$OUT/.ov-refused" 2>/dev/null || true
+  [ -z "${OV_OWNER:-}" ] || chown -R "$OV_OWNER" "$OUT" 2>/dev/null || true
+}
+trap on_exit EXIT
 export -n OV_OWNER
 
 # A rule break of the project's: say why, write the reason to $OUT/.ov-refused, and stop with status 2. tools/check
@@ -60,6 +65,8 @@ export -n OV_OWNER
 # compile_build). Status 2 alone does not say so: `bash -eux build.sh` also stops with make's own status 2.
 refuse() {
   echo "compile: $1" >&2
+  refused=1
+  rm -rf -- "$OUT/.ov-refused"
   printf '%s\n' "$1" > "$OUT/.ov-refused"
   exit 2
 }
@@ -217,8 +224,6 @@ echo "compile: CFLAGS=$CFLAGS"
 echo "compile: CXXFLAGS=$CXXFLAGS"
 echo "compile: OV_PROGRAM_LDFLAGS=$OV_PROGRAM_LDFLAGS"
 bash -eux "$SRC/build.sh"
-# The file is compile's to write: one that build.sh left is not a refusal.
-rm -f "$OUT/.ov-refused"
 
 # Save the stripped twin of each executable build.sh left in $OUT.
 mkdir -p "$OUT/.stripped"

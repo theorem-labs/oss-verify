@@ -346,10 +346,18 @@ class ProgramBuilder(unittest.TestCase):
                 self.assertIsNotNone(refusal)
                 self.assertIn(f"compile: {refusal.strip()}\n", errors)
                 self.assertRegex(refusal, r"^program \S+, which OV_PROGRAMS names, " + re.escape(rule))
-        # A build.sh that leaves the file and builds is not refused.
-        status, _, errors, refusal = self.compile_with(
-            "ov_program", f'{link}\necho "program ov_program is not one" > "$OUT/{check_build.REFUSED}"\n')
-        self.assertEqual((status, refusal), (0, None), errors[-2000:])
+        # A $OUT/.ov-refused that build.sh leaves is not a refusal: compile removes it on the way out, whether build.sh
+        # builds or fails, also with make's own status 2.
+        marker = f'"$OUT/{check_build.REFUSED}"'
+        leftovers = {
+            "a file, and builds": (f"{link}\necho 'program ov_program is not one' > {marker}\n", 0),
+            "a file, and fails with status 2": (f"echo 'program ov_program is not one' > {marker}\nexit 2\n", 2),
+            "a directory, and builds": (f"{link}\nmkdir -p {marker}/x\n", 0),
+        }
+        for case, (build_sh, expected) in leftovers.items():
+            with self.subTest(leftover=case):
+                status, _, errors, refusal = self.compile_with("ov_program", build_sh)
+                self.assertEqual((status, refusal), (expected, None), errors[-2000:])
 
     def test_tools_check_reads_a_refusal_as_a_rule_break(self):
         with self.assertRaises(check_build.Broken) as refused:

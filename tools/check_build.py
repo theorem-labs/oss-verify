@@ -353,7 +353,8 @@ def compile_build(tag, build, sanitizer, out, ubsan=None, *, labels, record=Fals
     if code != 0:
         refused = out / REFUSED
         if code == 2 and refused.is_file() and not refused.is_symlink():
-            reason = refused.read_text(encoding="utf-8", errors="replace").strip()[:2000]
+            with refused.open("rb") as handle:  # at most 2,000 bytes: $OUT is the project's build's to write in
+                reason = handle.read(2000).decode("utf-8", errors="replace").strip()
             raise Broken(f"compile refused the {build} build: {reason}")
         raise Failed(f"compile exited {code} in the {build} build")
 

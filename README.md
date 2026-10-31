@@ -1,7 +1,7 @@
 <!-- Adapted from OSS Scanner (https://github.com/anthropics/oss-scanner), Copyright 2026 Anthropic PBC, under the Apache License 2.0. Modified 2026 by Theorem Labs, PBC: rewritten for OSS Verify, which proves theorems about fuzz targets instead of scanning. -->
 # OSS Verify
 
-OSS Verify is a Theorem program that verifies open-source software. We prove theorems about the compiled fuzz targets of a project. For example, we prove that no input makes a fuzz target crash, hang or fail a sanitizer check. This page tells a maintainer how to enroll a project. A coding agent starts at [AGENTS.md](AGENTS.md).
+OSS Verify is a Theorem program that verifies open-source software. We prove theorems about the compiled fuzz targets of a project, or about the whole programs that it names in `programs`. For example, we prove that no input makes a fuzz target crash, hang or fail a sanitizer check. This page tells a maintainer how to enroll a project. A coding agent starts at [AGENTS.md](AGENTS.md).
 
 ## Who can enroll
 
@@ -41,14 +41,14 @@ You need a Linux x86-64 machine with Docker and its buildx plugin, git, and Pyth
 2. Make `projects/<name>/` from [templates/](templates/): `project.yaml` ([docs/project-yaml.md](docs/project-yaml.md)), a `Dockerfile` and a `build.sh` ([docs/build-contract.md](docs/build-contract.md)).
 3. Optional: write a `patch_style.md`. Tell us which findings, reports and patches you want, and how they must look.
 4. Run `tools/validate.py projects/<name>`. Correct each problem that it shows.
-5. Run `tools/check --no-shell --twice <name>`. Make sure that it builds each fuzz target, and that the second build has the same bytes. Without `--no-shell`, `tools/check` opens a shell in the build image when it finishes.
+5. Run `tools/check --no-shell --twice <name>`. Make sure that it builds each fuzz target and each whole program, and that the second build has the same bytes. Without `--no-shell`, `tools/check` opens a shell in the build image when it finishes.
 6. Open a pull request. Complete its checklist.
 
 ## When the checks pass
 
 When every required check of your pull request passes, and each plain binary has at most 1 MB of code, we start to write the theorem statements for the commit that the pull request is at. The code of a binary is the larger of its `.text` section and its executable segments, which can hold read-only data too. We start a few projects a day, and one commit of each project a day. If your pull request must wait for a later day, or for our next release because statements of an earlier commit of the project are not released yet, it gets the label `statements-queued`. If a plain binary has more than 1 MB of code, or a size that we cannot read, the pull request gets the label `size-review`, and we decide what to do. Python and Go projects are paused for now (our tools do not write theorem statements for Go yet): such a pull request gets the label `language-paused`. A project name with a dot, which the names in our statements repository cannot have, or a name that we already use there for another project, gets the label `name-review`. If GitHub does not show that you maintain the repository that `repo` names by a role there (owner, member, collaborator, public member of its organisation) or by merges of its recent pull requests, together with your commits of the last 12 months or those merges, or that repository is not on GitHub, the pull request gets the label `maintainer-review`, and we decide what to do. If our review of the commit finds that a fuzz target can end the run itself, catch every error or handle a signal (check F2 of `review.md`), or is not fit for a proof (check F7), the pull request gets the label `review-blocking`. If the review could not decide those two checks, it gets the label `review-pending`. With either label, no statements start by themselves. A person at Theorem decides each `review-pending` pull request: they ask for a new review, or start the statements by hand. A new commit on the pull request starts this again, and so does an edit of its title or description; a commit whose statements we already wrote is not written again. A pull request that changes a project that is already enrolled starts it too.
 
-For these statements, we build the fuzz targets two times, and pin the SHA-256 of each binary in a lock.
+For these statements, we build the fuzz targets and the whole programs two times, and pin the SHA-256 of each binary in a lock.
 
 ## After we merge
 
