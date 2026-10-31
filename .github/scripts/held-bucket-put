@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+#
+# Puts one object, once, into the private held-findings bucket, and prints its generation:
+#
+#   GCP_ACCESS_TOKEN=<ossv-ci's access token> .github/scripts/held-bucket-put <object name> <header> <file>
+#
+# The object is <header> and a newline, then the first 1,048,000 bytes of <file>. It is written only if no object of
+# that name exists (ifGenerationMatch=0): ossv-ci can create objects in the bucket and nothing else. build.yaml's
+# review job runs it for a held finding (the step "Store the held finding for the hold job", held/<run id>/<32 hex
+# digits>) and for an issue's draft (.github/scripts/store-issue-draft, issue-drafts/<issue>/<run id>-<attempt>). A
+# write that fails, or an answer with no generation, exits non-zero and prints nothing.
+set -euo pipefail
+name=${1:?usage: held-bucket-put <object name> <header> <file>}
+header=${2?usage: held-bucket-put <object name> <header> <file>}
+file=${3:?usage: held-bucket-put <object name> <header> <file>}
+[[ $name =~ ^[A-Za-z0-9._/-]+$ && $name != *..* ]] \
+  || { echo "held-bucket-put: $name is not an object name this bucket takes" >&2; exit 2; }
+object=$(mktemp)
+trap 'rm -f "$object"' EXIT
+printf '%s\n' "$header" > "$object"
+head -c 1048000 "$file" >> "$object"
+# The token reaches curl as a header file, never as an argument (which another user on the machine could read).
+curl -q -sSf --max-time 60 -X POST -H @<(builtin printf 'Authorization: Bearer %s\n' "$GCP_ACCESS_TOKEN") \
+  -H 'Content-Type: text/plain; charset=utf-8' --data-binary @"$object" \
+  "https://storage.googleapis.com/upload/storage/v1/b/theorem-agent-infra-oss-verify-held-findings/o?uploadType=media&ifGenerationMatch=0&name=${name//\//%2F}" \
+  | jq -er '.generation | select(type == "string" and test("^[0-9]{1,20}$"))'

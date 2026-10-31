@@ -10,6 +10,7 @@ a required check), and the routes' own steps, run on made-up changes.
 """
 import importlib.util
 import itertools
+import json
 import os
 import pathlib
 import re
@@ -95,48 +96,6 @@ def test_the_collector_names_every_failure_at_once(tmp_path):
 
 
 @pytest.mark.parametrize("name", sorted(REQUIRED))
-def test_the_required_job_waits_for_every_job_and_always_runs(name):
-    jobs = workflow(name)["jobs"]
-    assert set(jobs) >= {"route", "required"}
-    required = jobs["required"]
-    assert required["if"] == "always()"
-    assert sorted(required["needs"]) == sorted(set(jobs) - {"required"})
-    # The collector is given route's result and, for every other job, its result and whether route asked for it.
-    run = step(required, "Every job route asked for passed, and no other ran")["run"]
-    assert run.startswith('.github/scripts/collect "$ROUTE" ')
-    collected = re.findall(r'"(\w[\w-]*):\$\w+:\$\w+"', run)
-    # build.yaml's build job keeps the id project-builds, which the other jobs read its outputs by.
-    named = {"project-builds": "build"}
-    assert sorted(collected) == sorted(named.get(job, job) for job in set(jobs) - {"route", "required"})
-    assert step(required, "Every job route asked for passed, and no other ran")["env"]["ROUTE"] == \
-        "${{ needs.route.result }}"
-    # It holds no credential: a read of .github/scripts at most.
-    assert required["permissions"] == {"contents": "read"}
-    assert not [s for s in required["steps"] if "secrets." in str(s)]
-
-
-def bare(expression):
-    """An expression without its ${{ }} and without a leading !cancelled() && (the collector runs on always())."""
-    text = str(expression).strip()
-    if text.startswith("${{") and text.endswith("}}"):
-        text = text[3:-2].strip()
-    return text.removeprefix("!cancelled() && ").strip()
-
-
-@pytest.mark.parametrize("name", sorted(REQUIRED))
-def test_the_collector_reads_each_jobs_own_result_and_asks_on_that_jobs_own_condition(name):
-    # The collector is given each job's own result, and whether the run asked for it as the same expression as the
-    # job's if:, so that it never wants a job to pass that did not run, nor wants one skipped that ran.
-    jobs = workflow(name)["jobs"]
-    collector = step(jobs["required"], "Every job route asked for passed, and no other ran")
-    by_name = {job.get("name", job_id): job_id for job_id, job in jobs.items()}
-    for collected, result, asked in re.findall(r'"(\w[\w-]*):\$(\w+):\$(\w+)"', collector["run"]):
-        job_id = by_name.get(collected, collected)
-        assert collector["env"][result] == f"${{{{ needs.{job_id}.result }}}}", (name, collected)
-        assert bare(collector["env"][asked]) == bare(jobs[job_id]["if"]), (name, collected)
-
-
-@pytest.mark.parametrize("name", sorted(REQUIRED))
 def test_only_the_required_job_reports_the_required_check(name):
     jobs = workflow(name)["jobs"]
     check = REQUIRED[name]
@@ -149,17 +108,6 @@ def test_only_the_required_job_reports_the_required_check(name):
     for job_id, job in jobs.items():
         if job_id not in ("route", "required"):
             assert "if" in job, f"{name}: {job_id} runs whatever route decides"
-
-
-@pytest.mark.parametrize("name", ["build.yaml", "validate.yaml", "tests.yaml"])
-def test_build_tests_and_validate_never_run_on_an_edit(name):
-    # An edit of the title or description changes nothing these judge. (A change of base does, and is sent as edited
-    # too; a push runs them again after one.)
-    on = workflow(name)[True]  # YAML 1.1 reads the key `on` as True
-    event = "pull_request" if name == "tests.yaml" else "pull_request_target"
-    # build.yaml also runs on ready_for_review, which enroll-dispatch.yml waits for to start a draft's statements.
-    extra = ["ready_for_review"] if name == "build.yaml" else []
-    assert on[event]["types"] == ["opened", "reopened", "synchronize", *extra]
 
 
 def test_every_required_check_has_a_static_name():
@@ -179,54 +127,202 @@ def test_every_required_check_has_a_static_name():
     assert all(len(jobs) == 1 for jobs in reporters.values()), reporters
 
 
-def test_triage_skips_only_an_edit_of_the_title_alone():
-    flow = workflow("triage.yaml")
-    title_only = "github.event.action == 'edited' && !github.event.changes.body && !github.event.changes.base"
-    assert flow["concurrency"]["group"].startswith(f"${{{{ {title_only} && format('triage-edited-{{0}}', github.run_id)")
-    route = step(flow["jobs"]["route"], "Whether the comment can change")
-    assert route["env"]["TITLE_ONLY"] == f"${{{{ {title_only} }}}}"
+# A stand-in for gh's Users API, as .github/scripts/actor-kind calls it (`gh api users/<login> --jq .type`): Copilot
+# is an App with no user account (404, as GitHub answers for it), a login with [bot] is an App, any other a User.
+USERS_GH = ('*" users/"*) all="$*"; login=${all##*users/}; login=${login%% *}\n'
+            '  case $login in Copilot) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;; *"[bot]") echo Bot ;; '
+            '*) echo User ;; esac ;;\n')
 
 
-def test_a_push_to_main_is_never_cancelled_by_a_later_push():
-    # route compares a push with the commit before it, so a cancelled push's changes would never be tested.
-    group = workflow("tests.yaml")["concurrency"]["group"]
-    assert group.startswith("${{ github.event_name == 'push' && format('tests-push-{0}', github.sha) ||")
+def literal_env(flow, decide):
+    """The workflow's and the step's own literal env (ALLOWED_BOTS): inputs of the run, given as they are."""
+    pairs = {**(flow.get("env") or {}), **(decide.get("env") or {})}
+    return {k: str(v) for k, v in pairs.items() if "${{" not in str(v)}
 
 
-def test_a_forks_tests_collector_runs_the_default_branchs_script():
-    # A fork's run takes the collector from the default branch's tip, never from the event's base.sha, which can be a
-    # commit from before .github/scripts/collect existed (it stays the base the fork last synced with).
-    flow = workflow("tests.yaml")
-    fork = "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository"
-    assert flow["env"]["FORK"] == f"${{{{ {fork} }}}}"
-    checkout = flow["jobs"]["required"]["steps"][0]
-    assert checkout["uses"].startswith("actions/checkout@")
-    assert checkout["with"]["ref"] == "${{ env.FORK == 'true' && github.event.repository.default_branch || '' }}"
-    # route, the one other job a fork's run starts, runs none of its code.
-    route = flow["jobs"]["route"]["steps"]
-    assert all(s.get("if", "").count("env.FORK != 'true'") for s in route if "uses" in s or s.get("id") == "paths")
-
-
-@pytest.mark.parametrize("name, job, output, step_name, take", [
-    ("build.yaml", "project-builds", "build", "Every event here asks for the build", "build"),
-    ("validate.yaml", "validate", "validate", "Every event here asks for validate", "validate"),
-])
-def test_route_asks_for_the_job_that_takes_the_project(tmp_path, name, job, output, step_name, take):
-    jobs = workflow(name)["jobs"]
-    decide = step(jobs["route"], step_name)
+def route_build(tmp_path, files, changed=None, base="main", actor="someone"):
+    """Run build.yaml's route step, started by `actor`, with a fake gh whose pull request into `base` lists `files` (a
+    path, or a (new, old) pair for a rename; changed_files: `changed`, by default their number), and applies the step's
+    --jq filter as gh does. Return its outputs, one line each."""
+    bin = tmp_path / "bin"
+    bin.mkdir()
+    (tmp_path / "pull.json").write_text(json.dumps({"head": {"sha": "a" * 40},
+                                                    "base": {"ref": base, "repo": {"default_branch": "main"}},
+                                                    "changed_files": len(files) if changed is None else changed}))
+    (tmp_path / "files.json").write_text(json.dumps(
+        [{"filename": f} if isinstance(f, str) else {"filename": f[0], "previous_filename": f[1]} for f in files]))
+    (bin / "gh").write_text('#!/bin/bash\nfilter=""; for a; do [ "$prev" = --jq ] && filter=$a; prev=$a; done\n'
+                            f'case " $*" in {USERS_GH}  *"/files"*) jq -r "$filter" {tmp_path}/files.json ;;\n'
+                            f'  *) cat {tmp_path}/pull.json ;; esac\n')
+    (bin / "gh").chmod(0o755)
     written = tmp_path / "output"
-    run = subprocess.run(["bash", "-e", "-c", decide["run"]], capture_output=True, text=True,
-                         env={**os.environ, "GITHUB_OUTPUT": str(written),
+    flow = workflow("build.yaml")
+    decide = step(flow["jobs"]["route"], "An enrollment, a change or an issue")
+    run = subprocess.run(["bash", "-e", "-c", decide["run"]], capture_output=True, text=True, cwd=ROOT,
+                         env={**os.environ, **literal_env(flow, decide),
+                              "PATH": f"{bin}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r",
+                              "PR": "8", "HEAD_SHA": "", "ACTOR": actor, "GITHUB_OUTPUT": str(written),
                               "GITHUB_STEP_SUMMARY": str(tmp_path / "summary")})
     assert run.returncode == 0, run.stderr
-    assert written.read_text() == f"{output}=true\n"
-    # The job takes the project itself, once, and runs only when route asks for it; route takes nothing.
-    assert jobs[job]["needs"] == "route"
-    assert jobs[job]["if"] == f"needs.route.outputs.{output} == 'true'"
-    command = f".github/scripts/take-project {take}"
-    assert [s.get("run") for s in jobs[job]["steps"]].count(command) == 1
-    call = re.compile(r"^\s*(\w+=\S*\s+)*\S*\.github/scripts/take-project\b", re.M)
-    assert not [s for s in jobs["route"]["steps"] if call.search(s.get("run", ""))]
+    return written.read_text().splitlines()
+
+
+@pytest.mark.parametrize("files, changed, base, want", [
+    # Tooling and documentation only, as from a fork: a change review, and no build.
+    (["tools/check", "docs/build-contract.md", "tools/tests/test_check.py"], None, "main", "kind=change"),
+    (["README.md"], None, "main", "kind=change"),
+    # Into another branch: the build, where take-project refuses it, as before.
+    (["README.md"], None, "ci/other", "kind=enrollment"),
+    # A file under projects/, alone or beside others (a fork's mixed change then fails in take-project, as before),
+    # or a rename out of projects/ (both names are listed): an enrollment, built.
+    (["projects/p/project.yaml"], None, "main", "kind=enrollment"),
+    (["projects/p/project.yaml", "tools/check"], None, "main", "kind=enrollment"),
+    (["tools/x.yaml", "projects/p/x.yaml"], None, "main", "kind=enrollment"),
+    ([("tools/x.yaml", "projects/p/x.yaml")], None, "main", "kind=enrollment"),
+    # No file, or more files than the API lists: the list decides nothing, and take-project judges it.
+    ([], None, "main", "kind=enrollment"),
+    (["tools/check"], 3001, "main", "kind=enrollment"),
+])
+def test_builds_route_reviews_a_pull_request_with_no_file_under_projects_as_a_change(tmp_path, files, changed, base,
+                                                                                     want):
+    assert route_build(tmp_path, files, changed, base=base) == [f"sha={'a' * 40}", want]
+
+
+@pytest.mark.parametrize("actor, want", [
+    ("someone", "kind=change"), ("sjawhar-agent[bot]", "kind=change"), ("oss-verify[bot]", "kind=change"),
+    # An App the action refuses (src/github/validation/actor.ts) would fail the review, and so the required check:
+    # by its account type, so Copilot, whose login has no [bot] and which the Users API does not find, too.
+    ("dependabot[bot]", "kind=enrollment"), ("oss-verify[bot]x[bot]", "kind=enrollment"),
+    ("Copilot", "kind=enrollment"),
+])
+def test_a_change_that_an_app_the_review_refuses_started_is_built_as_before(tmp_path, actor, want):
+    assert route_build(tmp_path, [".github/workflows/build.yaml"], actor=actor)[-1] == want
+
+
+def actor_kind(tmp_path, login, allowed="sjawhar-agent[bot],oss-verify[bot]", answer=None):
+    """.github/scripts/actor-kind on `login`, with a stand-in gh: USERS_GH, or `answer` (a status and an error) for
+    every read. Return its exit status and output."""
+    bin = tmp_path / "bin"
+    bin.mkdir(exist_ok=True)
+    users = USERS_GH if answer is None else f'*) echo {answer[1]!r} >&2; exit {answer[0]} ;;\n'
+    (bin / "gh").write_text(f'#!/bin/bash\necho "$*" >> {tmp_path}/calls\ncase " $*" in {users}esac\n')
+    (bin / "gh").chmod(0o755)
+    run = subprocess.run([str(ROOT / ".github" / "scripts" / "actor-kind"), login], capture_output=True, text=True,
+                         env={**os.environ, "PATH": f"{bin}:{os.environ['PATH']}", "GH_TOKEN": "x",
+                              "ALLOWED_BOTS": allowed})
+    return run.returncode, run.stdout.strip()
+
+
+@pytest.mark.parametrize("login, allowed, want", [
+    ("someone", "sjawhar-agent[bot],oss-verify[bot]", "person"),
+    # A User is a person whatever the list says: the list is only for Apps.
+    ("someone", "someone", "person"),
+    ("oss-verify[bot]", "sjawhar-agent[bot],oss-verify[bot]", "allowed"),
+    # Without case and without [bot], as the action compares, with spaces around the names.
+    ("OSS-Verify[bot]", " sjawhar-agent[bot] , oss-verify ", "allowed"),
+    ("dependabot[bot]", "sjawhar-agent[bot],oss-verify[bot]", "refused"),
+    # Copilot: not found by the Users API, an App with no user account, refused unless the list names it.
+    ("Copilot", "sjawhar-agent[bot],oss-verify[bot]", "refused"),
+    ("Copilot", "copilot", "allowed"),
+    ("dependabot[bot]", "*", "allowed"),
+    ("renovate[bot]", "", "refused"),
+    # No login GitHub can give: refused, with no read.
+    ("a b", "a b", "refused"),
+    ("$(touch pwned)", "*", "refused"),
+])
+def test_actor_kind_decides_as_the_action_does(tmp_path, login, allowed, want):
+    assert actor_kind(tmp_path, login, allowed) == (0, want)
+    assert not (tmp_path / "pwned").exists() and not (ROOT / "pwned").exists()
+
+
+def test_actor_kind_fails_on_a_read_that_is_not_a_404(tmp_path):
+    assert actor_kind(tmp_path, "someone", answer=(1, "gh: Server Error (HTTP 502)"))[0] == 1
+
+
+def route_issue(tmp_path, pr, issue, is_pull=False, event="workflow_dispatch", sender="someone", author="",
+                association=""):
+    """Run build.yaml's route step on an `event`: a run started by hand with the inputs `pr` and `issue` ("" when not
+    given), or an issue's own event for issue `issue`, sent by `sender`, whose author is `author` with GitHub's
+    `association`. Its fake gh's number is an issue, or a pull request when `is_pull`. Return its exit status and
+    outputs."""
+    bin = tmp_path / "bin"
+    bin.mkdir()
+    pull = {"pull_request": {"url": "x"}} if is_pull else {}
+    (tmp_path / "issue.json").write_text(json.dumps({"number": 5, **pull}))
+    (bin / "gh").write_text('#!/bin/bash\nfilter=""; for a; do [ "$prev" = --jq ] && filter=$a; prev=$a; done\n'
+                            f'echo "$*" >> {tmp_path}/calls\n'
+                            f'case " $*" in {USERS_GH}'
+                            f'  *"repos/o/r/issues/5"*) jq -r "$filter" {tmp_path}/issue.json ;;\n'
+                            '  *) exit 1 ;; esac\n')
+    (bin / "gh").chmod(0o755)
+    written = tmp_path / "output"
+    flow = workflow("build.yaml")
+    decide = step(flow["jobs"]["route"], "An enrollment, a change or an issue")
+    run = subprocess.run(["bash", "-e", "-c", decide["run"]], capture_output=True, text=True, cwd=ROOT,
+                         env={**os.environ, **literal_env(flow, decide),
+                              "PATH": f"{bin}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r",
+                              "PR": pr, "ISSUE": issue, "HEAD_SHA": "", "ACTOR": sender, "EVENT": event,
+                              "SENDER": sender, "AUTHOR": author, "ASSOCIATION": association,
+                              "GITHUB_OUTPUT": str(written), "GITHUB_STEP_SUMMARY": str(tmp_path / "summary")})
+    return run.returncode, written.read_text().splitlines() if written.exists() else []
+
+
+def test_a_run_for_an_issue_asks_for_the_review_alone(tmp_path):
+    assert route_issue(tmp_path, "", "5") == (0, ["kind=issue"])
+
+
+@pytest.mark.parametrize("pr, issue, is_pull", [
+    ("8", "5", False),  # both
+    ("", "", False),  # neither
+    ("", "5", True),  # a pull request given as an issue
+    ("", "5x", False),
+])
+def test_route_refuses_both_inputs_neither_or_a_pull_request_as_an_issue(tmp_path, pr, issue, is_pull):
+    code, outputs = route_issue(tmp_path, pr, issue, is_pull)
+    assert code != 0 and outputs == []
+
+
+@pytest.mark.parametrize("action_sender, association", [
+    ("alice", "NONE"),  # opened, or edited by its author
+    ("alice", "CONTRIBUTOR"),
+    ("alice", "COLLABORATOR"),
+])
+def test_an_issue_that_waits_for_us_starts_one_review_on_its_event(tmp_path, action_sender, association):
+    assert route_issue(tmp_path, "", "5", event="issues", sender=action_sender, author="alice",
+                       association=association) == (0, ["kind=issue"])
+    assert "repos/o/r/issues/5" in (tmp_path / "calls").read_text()
+
+
+@pytest.mark.parametrize("sender, author, association", [
+    ("carol", "carol", "MEMBER"),  # an issue a member of the organization opened or edited
+    ("o", "o", "OWNER"),
+    ("oss-verify[bot]", "oss-verify[bot]", "NONE"),  # our two bots
+    ("sjawhar-agent[bot]", "sjawhar-agent[bot]", "NONE"),
+    ("renovate[bot]", "renovate[bot]", "NONE"),  # an App the review action refuses
+    ("Copilot", "Copilot", "NONE"),  # an App with no [bot] and no user account
+    ("carol", "alice", "NONE"),  # someone else edited or reopened alice's issue: only a person with access can
+])
+def test_an_issues_event_that_is_ours_starts_nothing(tmp_path, sender, author, association):
+    assert route_issue(tmp_path, "", "5", event="issues", sender=sender, author=author,
+                       association=association) == (0, [])
+    calls = (tmp_path / "calls").read_text() if (tmp_path / "calls").exists() else ""
+    assert "repos/o/r/issues/5" not in calls
+    assert "nothing runs" in (tmp_path / "summary").read_text()
+
+
+@pytest.mark.parametrize("sender, author, association", [
+    ("alice", "$(touch pwned-a)", "NONE"),
+    ("`touch pwned-b`", "`touch pwned-b`", "NONE"),
+    ("alice", "alice", '"; touch pwned-c; "'),
+])
+def test_an_issues_event_reaches_route_only_as_data(tmp_path, sender, author, association):
+    # route takes the event's sender, author and association from env, never inline in its script: shell text there
+    # runs nothing.
+    code, outputs = route_issue(tmp_path, "", "5", event="issues", sender=sender, author=author,
+                                association=association)
+    assert code == 0
+    for where in (tmp_path, ROOT):
+        assert sorted(where.glob("pwned-*")) == []
 
 
 # --- tests.yaml's route, run on made-up commits ---

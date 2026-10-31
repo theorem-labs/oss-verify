@@ -24,6 +24,8 @@ Give each check one verdict:
 
 - **pass**: the evidence shows that the rule is met.
 - **fail**: the evidence shows that the rule is not met, and the maintainer can fix it. Each **fail** becomes one request in the comment.
+  - **Optional**: a **fail** of F5 or F8 whose check still ends the run on some wrong value. The check is weak, not empty, so it does not stop the enrollment and is not a condition of the merge.
+  - **Blocking**: each other **fail**.
 - **person**: a person at Theorem must decide, or you could not get the evidence. Each **person** goes in the summary only.
 
 ## Checklist
@@ -75,7 +77,7 @@ The triage row "Checklist" counts only the ticked boxes. It does not compare the
 6. **Terms.** The `terms-accepted` check passed. If the description says that an agent accepted the terms for the maintainer, write it in the summary.
 7. **Licence lines (add-project step 3.8).** Each file of code in `DIR` (fuzz targets, `Dockerfile`, `build.sh`, scripts) begins with comment lines that say whose it is and its licence, after only a `#!`, `# syntax=` or `coding:` line. Build patches, `project.yaml`, `sources`, `series`, `patch_style.md`, locks and seed inputs need none. A file of a seeded project that is adopted unchanged, the same bytes as in `tools/seeds/<name>/` or as `projects/<name>/` on the base branch, needs none either: NOTICE gives its licence (step 3.8, case 1). A file copied from elsewhere keeps its licence lines, and a changed copy has a `Modified` line. A file that the maintainer wrote is `Apache-2.0`, or `MIT OR Apache-2.0` for a GPL-2.0-only project. Each file that breaks this is **fail**: name it and the lines to add. A file whose origin you cannot tell is **person**.
 
-### D. Size and static linking
+### D. The binaries
 
 Read the `.text` size and the linkage of each binary from the step summary, the log or `manifest.yaml` (see "Inputs" in the skill). If none of them has the values, but `out/` is there, read them yourself:
 
@@ -88,6 +90,11 @@ done
 
 1. **Size.** Write the file size and the `.text` size of each binary of each build in the summary, or "not available" when the build made none. Size is not a condition of enrollment: its verdict is always **pass**, never **fail** or **person**, and it does not go in the comment.
 2. **Static.** Each binary is `static`: no `PT_INTERP` and no `PT_DYNAMIC` program header. Then the verdict is **pass**. `tools/check` refuses a binary that is `dynamic`, or whose program headers it cannot read, with exit status 2. Thus a passed Build check that lists each binary as `static` is enough. A binary that is `dynamic` is **fail**. If no listing gives the linkage, write **person** and give the reason.
+3. **Each failing result in "The checks of the binaries".** A failing result is a cell that reads `**fail**`, `**not decided**` or `**stale model**`. Every other cell is not one: `pass`, and the plain build's `not instrumented (plain)`, which says that the build has nothing to instrument. The report of `tools/check --checks` ends with that table, and under it "What each failure is". Read it in `$IN/build/checks.md` in CI, or in the Build check's step summary otherwise. Two copies are cut, and the table is last in the report, so a cut takes it first: `$IN/build/checks.md` at 60,000 bytes, which then ends with a line that says so, and the copy folded under your comment at 12,000 characters. When the table is not there, or a failing cell has no item under "What each failure is", the verdict is **person**: write it in the summary, and ask the maintainer nothing about it. Otherwise he reads the folded copy, so a failure that your text never mentions reads as a fault that you did not see. Read every failing cell and its item under "What each failure is". The table has four checks, not one: a failure of "quiet and loud" or of "instrumented" is not a system call. A system-calls item holds one or more calls, so take each call on its own. Each failure ends in one of two places:
+   - A change to the fuzz target, its seed corpus or the build files removes it: **fail**, and one request in the comment with the binary, the check and what the report says. The `socketpair()` that a harness opens for its own replies is this kind. One **fail** can carry several requests, one for each such failure.
+   - No change of this pull request removes it. The verdict is **pass**, and the comment says in one sentence which binaries, which check, what the report says, and that no change of this pull request removes it. Say that our model or our tools have no answer for it only where the report's own words show that, for example "not an arm of spec_table", "is unmodeled" or "the model answers only", and quote them. Where the report instead shows the project's own code or the shape of an argument that it built, give the report's words and name no cause: `faccessat` is an arm of the model, and the report says which path it refused; a **fail** of "quiet and loud" names what the project's code wrote, while a `**not decided** (not run)` of it says only that the build made no quiet twin; "uninstrumented code" is the project's own. Never say that the pull request waits on a failure of this kind: it does not, because no change of his clears it. Only a **fail** of check F2 or F7 gives the pull request the label `review-blocking`. Write no promise and no date, and write only what you checked (`write-to-maintainer`, rules 5 and 8).
+
+   One binary can hold both kinds. D3's verdict is the worst over the failures, as an item of F is the worst over the fuzz targets. When you cannot tell which kind a failure is, it is the second kind: do not ask for a change that you are not sure of. A call of the library under test is the second kind here, although check F7 sends a break of the build contract in the library to the summary: the maintainer reads this failure, so the comment answers it. Do this check on every review, a resumed one too: the build measured the new head's binaries, so the report is new on each push.
 
 ### E. The rubric
 
@@ -130,7 +137,7 @@ Read each fuzz target's source: in `DIR`, or in the project's repository at the 
 
    Do items 5 and 8 for one fuzz target at a time, and for each check of it in turn: read its comment and the code before it, read the library function that it calls, and look for the one-line change. Most fuzz targets have several weak checks. A review that finds one or two in a project with many fuzz targets has stopped too early. Spend most of your effort here. Give each weak check its own numbered item in the comment.
 6. **Coverage against the threat model.** Read the project's `SECURITY.md` and threat model at the built commit. Write which input the target reads, and whether the policy calls it trusted or untrusted. Write which untrusted inputs no target reads. This is for the summary and check E. In the comment, you can invite a target for an untrusted input, but do not make it a condition.
-7. **Suitable for a proof (steps 3.5 and 3.6).** Each count, size, loop and recursion that comes from the input has a bound. The run depends only on the input. It uses no thread, clock, network, environment variable or file other than the input, and no random number that does not come from the input. Search the target for `thread`, `spawn`, `time`, `clock`, `rand`, `getenv`, `environ`, `socket` and `open`. A break of 3.6 in the fuzz target is **fail**. A break in the library is for the summary.
+7. **Suitable for a proof (steps 3.5 and 3.6).** Each count, size, loop and recursion that comes from the input has a bound. The run depends only on the input. It uses no thread, clock, network, environment variable or file other than the input, and no random number that does not come from the input. Search the target for `thread`, `spawn`, `time`, `clock`, `rand`, `getenv`, `environ`, `socket` and `open`. A break of 3.6 in the fuzz target is **fail**. A break in the library is for the summary, and the comment stays silent about it, unless it also made a failing result in "The checks of the binaries": then check D3 says what the comment holds, and it asks for nothing.
 8. **The expected value comes from the fuzz target, not from the library.** A check that takes its expected value from the library under test proves only that the library agrees with itself: one wrong function then breaks both sides, and the check stays true. Examples: the expected checksum from the library's own checksum function, the width rule from the library's own predicate, or a value read from the library's internal state or private header. Find each such check, and the one-line change to the shared function that keeps the check true. Each one is **fail**: ask that the fuzz target compute the expected value itself, from the input and the documented rule. A comparison of two public entry points is a property only when the comment says that they must agree, and they do not share the code that computes the value.
 
 ### G. What the triage does not see
@@ -145,7 +152,14 @@ Read each fuzz target's source: in `DIR`, or in the project's repository at the 
 
 ## Write the comment
 
-Write `$WORK/comment.md` as `.claude/skills/write-to-maintainer/SKILL.md` says. Its blocking items are the **fail** verdicts, each with the facts that the maintainer needs (the file, the line, the commit, the limit) and the fix. Do not put these in the comment: the size, the rubric, a **person** verdict, the verdict table, or a guess about whether we will accept the project.
+Write `$WORK/comment.md` as `.claude/skills/write-to-maintainer/SKILL.md` says. Its items are the **fail** verdicts, each with the facts that the maintainer needs (the file, the line, the commit, the limit) and the fix. The one sentence of check D3 is in the comment too, although it is no request and its verdict is **pass**: that skill's rule 4, which says not to restate what the checks show, does not reach it. Do not put these in the comment: the size, the rubric, a **person** verdict, the verdict table, or a guess about whether we will accept the project.
+
+- The first sentence gives only the number of blocking items, for example "Three changes are needed in the fuzz targets of `<owner>/<repo>`." It never uses the words merge, publish or prove.
+- The optional items go in the collapsed block, under one line that says that they are optional and not a condition of the merge.
+- An item that comes from a rule of the build contract names that rule and links https://github.com/theorem-labs/oss-verify/blob/main/docs/build-contract.md, for example "`/tmp` is empty in each run".
+- When check F2 or F7 is **fail**, one sentence says that the pull request gets the label `review-blocking` because of that check, and that no statements start until it passes.
+- Each failing result of "The checks of the binaries" is in the comment (check D3), as a numbered request or as the one sentence that says no change of this pull request removes it. Without it the folded report shows a failure that the text leaves unanswered.
+- The visible text ends with this offer: "We can write these changes for you. Reply here if you want that." Only the sentence of check G4 can come after it.
 
 Post it only if the workflow sets `REVIEW_POST=1`: `gh pr comment "$PR" --body-file "$WORK/comment.md"`. Post it once. In CI, do not post: your last message is the comment ("In CI" in the skill).
 
@@ -154,6 +168,7 @@ Post it only if the workflow sets `REVIEW_POST=1`: `gh pr comment "$PR" --body-f
 Before you stop, make sure of each point:
 
 - Each check of A to G has a verdict and evidence in the summary.
-- Each **fail** is one request in the comment, and each request comes from a **fail**.
+- Each **fail** is a request in the comment, and each request comes from a **fail**. A **fail** of D3 carries one request for each failure of the first kind.
+- Each failing result of "The checks of the binaries" is answered in the comment (check D3), unless D3 is **person** because the table or an item of it is not there.
 - The comment has no size, rubric or **person** item in it.
 - You ran no code of the project, and you posted at most one comment.

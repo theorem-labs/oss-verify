@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+#
+# How the review's action treats the account that started a run, decided as the action decides:
+#
+#   GH_TOKEN=<read-only token> ALLOWED_BOTS=<the action's allowed_bots> .github/scripts/actor-kind <login>
+#
+# It prints `person` for an account whose type the Users API gives as User; `allowed` for any other account (an App,
+# an organisation) that ALLOWED_BOTS names, or that the API does not find (an App with no user account, as Copilot,
+# whose login has no [bot]) and ALLOWED_BOTS names; and `refused` for every other. That is the rule of
+# anthropics/claude-code-action at the commit build.yaml pins (src/github/validation/actor.ts, checkHumanActor and
+# isAllowedBot): names compared without case and without a [bot] at the end, and `*` admits every App. A read that
+# fails for another reason exits 1, as the action then fails the run.
+# build.yaml's route runs it: a change that an App the action refuses started is built, not reviewed, and an issue's
+# event that any App sent starts nothing.
+set -uo pipefail
+login=${1:?usage: actor-kind <login>}
+# A GitHub login, or an App's login with [bot]; anything else is no account the API can name.
+[[ $login =~ ^[A-Za-z0-9][A-Za-z0-9-]*(\[bot\])?$ ]] || { echo refused; exit 0; }
+if answer=$(gh api "users/$login" --jq .type 2>&1); then
+  type=$answer
+elif [[ $answer == *"Not Found"* || $answer == *"is not a user"* ]]; then
+  type=""
+else
+  echo "actor-kind: could not read the account $login: $answer" >&2
+  exit 1
+fi
+if [ "$type" = User ]; then
+  echo person
+  exit 0
+fi
+bare() { local name=${1,,}; name=${name//[[:space:]]/}; echo "${name%\[bot\]}"; }
+list=${ALLOWED_BOTS:-}
+if [ "$(bare "$list")" = "*" ]; then
+  echo allowed
+  exit 0
+fi
+IFS=, read -ra bots <<< "$list"
+for bot in "${bots[@]}"; do
+  bot=$(bare "$bot")
+  if [ -n "$bot" ] && [ "$bot" = "$(bare "$login")" ]; then
+    echo allowed
+    exit 0
+  fi
+done
+echo refused

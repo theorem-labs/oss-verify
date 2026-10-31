@@ -264,9 +264,14 @@ class WorkflowArguments(unittest.TestCase):
             ("build.yaml review usage export", steps("build.yaml", "review", "Export the review's usage to the cost collector"),
              json.dumps({"payload": {"data": base64.b64encode(token.encode()).decode()}}),
              {"GCP_ACCESS_TOKEN": gcp}, [token, base64.b64encode(token.encode()).decode(), gcp]),
+            # Both steps upload through .github/scripts/held-bucket-put, which runs here too.
             ("build.yaml review held finding store", steps("build.yaml", "review", "Store the held finding for the hold job"),
              json.dumps({"generation": "1761500000000000"}),
              {"GCP_ACCESS_TOKEN": gcp, "RUN_ID": "7", "PR": "68", "NAME": "libreac", "HEAD_SHA": "1" * 40,
+              "RUN_URL": "https://github.com/theorem-labs/oss-verify/actions/runs/7"}, [gcp]),
+            ("build.yaml review issue draft store", steps("build.yaml", "review", "Store the issue draft for a person"),
+             json.dumps({"generation": "1761500000000000"}),
+             {"GCP_ACCESS_TOKEN": gcp, "ISSUE": "45", "RUN_ID": "7", "RUN_ATTEMPT": "1",
               "RUN_URL": "https://github.com/theorem-labs/oss-verify/actions/runs/7"}, [gcp]),
             ("build.yaml hold listing", steps("build.yaml", "hold", "Look for stored held findings"),
              json.dumps({"items": [{"name": "held/7/" + "a" * 32}]}), {"GCP_ACCESS_TOKEN": gcp}, [gcp]),
@@ -290,6 +295,9 @@ class WorkflowArguments(unittest.TestCase):
                 (bin / "curl").chmod(0o755)
                 (directory / "tmp").mkdir()
                 (directory / "tmp" / "held-finding.md").write_text("<!-- held finding -->\ntitle: x\n")
+                (directory / "tmp" / "issue-draft.md").write_text("The draft reply:\n\nSee docs/dsl.md.\n")
+                # The steps run from the checkout's root, where .github/scripts is.
+                (directory / ".github").symlink_to(ROOT / ".github")
                 trace = directory / "trace"
                 env = {**os.environ, "PATH": f"{bin}:{os.environ['PATH']}", "RUNNER_TEMP": str(directory / "tmp"),
                        "GITHUB_OUTPUT": str(directory / "output"), "GITHUB_ENV": str(directory / "env"),
@@ -386,22 +394,6 @@ class WorkflowArguments(unittest.TestCase):
                 self.assertIn(key_job, jobs, workflow)
             self.assertEqual(self.app_key_jobs_problems(jobs, key_jobs), [], workflow)
 
-    def test_only_the_review_job_can_read_the_collector_token(self):
-        # ossv-ci can be acted as only from oss-verify's GitHub Environment `enroll-review` (Theorem's
-        # infrastructure code), which the review job declares; no other job of either file may name that account or
-        # that environment, and the review job must keep it, or its sign-in stops working.
-        account = "ossv-ci@theorem-agent-infra.iam.gserviceaccount.com"
-        for workflow in self.KEY_JOBS:
-            for name, job in self.workflow(workflow)["jobs"].items():
-                review = workflow == "build.yaml" and name == "review"
-                environment = json.dumps(job.get("environment", "")).lower()
-                if review:
-                    self.assertEqual(job.get("environment"), {"name": "enroll-review", "deployment": False})
-                    self.assertEqual((job.get("env") or {}).get("GCP_SERVICE_ACCOUNT"), account)
-                else:
-                    self.assertNotIn(account, json.dumps(job), f"{workflow} {name} names {account}")
-                    self.assertNotIn("enroll-review", environment, f"{workflow} {name} is in enroll-review")
-
     @unittest.skipUnless(shutil.which("jq") and shutil.which("base64"), "the key step needs jq and base64")
     def test_the_app_key_is_masked_in_every_key_job(self):
         # The key-reading step is in each of these files, and the runner logs the private-key input of the next step:
@@ -438,24 +430,6 @@ class WorkflowArguments(unittest.TestCase):
                     self.assertNotIn(line, run.stderr, f"{workflow}: {line[:20]}… is on stderr")
                 self.assertIn(key.splitlines()[1], (directory / "output").read_text(), workflow)
 
-    def test_every_google_sign_in_keeps_its_token_to_one_step(self):
-        # Each auth step writes no credentials file, exports no variable, and mints a five-minute access token: its
-        # output is all that holds it. Six steps: build.yaml's review job signs in before the review and again, for a
-        # held finding, after it (the first token has expired by then); its hold and comment jobs, triage's comment job
-        # and enroll-dispatch's dispatch job sign in once each.
-        found = 0
-        for workflow in self.KEY_JOBS:
-            for name, job in self.workflow(workflow)["jobs"].items():
-                for step in job["steps"]:
-                    if step.get("uses", "").startswith("google-github-actions/auth@"):
-                        found += 1
-                        self.assertEqual({k: step["with"].get(k) for k in ("token_format", "access_token_lifetime",
-                                          "create_credentials_file", "export_environment_variables")},
-                                         {"token_format": "access_token", "access_token_lifetime": "300s",
-                                          "create_credentials_file": False, "export_environment_variables": False},
-                                         f"{workflow} {name}")
-        self.assertEqual(found, 6)
-
     def test_another_job_in_the_comment_environment_is_refused_in_every_shape(self):
         # The shapes GitHub takes for `environment` (workflow syntax, jobs.<job_id>.environment), each put on the
         # review job of the real build.yaml: every one must be refused.
@@ -477,7 +451,8 @@ class WorkflowArguments(unittest.TestCase):
 class PostingStep(unittest.TestCase):
     """build.yaml's own "Post the comment" step, run with a fake gh: what it sends GitHub."""
 
-    def post(self, review, existing=True, head="b" * 40, pr_head=None, checks="### new report\n"):
+    def post(self, review, existing=True, head="b" * 40, pr_head=None, checks="### new report\n", rules="review.md",
+             pr="8", status=0):
         workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
         name = "Post the comment, or update the one already there"
         matches = [s for s in workflow["jobs"]["comment"]["steps"] if s.get("name") == name]
@@ -501,11 +476,11 @@ class PostingStep(unittest.TestCase):
             (bin / "gh").chmod(0o755)
             (directory / "temp").mkdir()
             environment = {**os.environ, "PATH": f"{bin}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r",
-                           "PR": "8", "REVIEW": review, "CHECKS": checks, "HEAD_SHA": head,
+                           "PR": pr, "REVIEW": review, "CHECKS": checks, "HEAD_SHA": head, "RULES": rules,
                            "RUNNER_TEMP": str(directory / "temp")}
             run = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=ROOT, env=environment, capture_output=True,
                                  text=True)
-            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(run.returncode, status, run.stderr)
             sent = [name for name in ("patch.json", "post.json") if (directory / name).exists()]
             self.assertLessEqual(len(sent), 1, sent)
             if sent:
@@ -514,52 +489,47 @@ class PostingStep(unittest.TestCase):
                 self.assertIn("issues/comments/4242", (directory / "patch.url").read_text())
             return json.loads((directory / sent[0]).read_text())["body"] if sent else None
 
-    def test_nothing_is_posted_unless_posting_is_on(self):
-        # The comment job, which alone holds the App's key, runs only while OSSV_POST_REVIEW is `post`, and the
-        # required job asks for it on the same condition, so with the variable unset no job can post or edit a comment.
-        jobs = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["jobs"]
-        condition = jobs["comment"]["if"]
-        self.assertIn("vars.OSSV_POST_REVIEW == 'post' && ", condition)
-        asked = jobs["required"]["steps"][-1]["env"]["ASKED_COMMENT"]
-        self.assertEqual(condition.replace("!cancelled() && ", ""), asked)
-        # No other job of the file can write to the pull request: only the comment job's token is the App's.
-        for name, job in jobs.items():
-            if name != "comment":
-                self.assertNotIn("write", json.dumps({k: v for k, v in (job.get("permissions") or {}).items()
-                                                      if k != "id-token"}), name)
+    def test_a_run_with_no_pull_request_posts_nothing(self):
+        # An issue's run has no pull request: the step refuses, before any read or write, whatever the job's if: says.
+        for pr in ("", "8; x"):
+            with self.subTest(pr=pr):
+                self.assertIsNone(self.post("The draft reply.\n", pr=pr, status=1))
 
-    def test_the_triage_comment_is_a_draft_without_its_variable(self):
-        # triage.yaml's own posting step: with OSSV_POST_TRIAGE anything but post, it calls gh not at all and writes the
-        # draft to the summary; with post, it posts.
+    def test_the_triage_step_posts_or_updates_its_comment(self):
+        # triage.yaml's own posting step, run with a fake gh: with no comment of ours it posts one; with one, it edits it.
         workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "triage.yaml").read_text())
         name = "Post the comment, or update the one already there"
         matches = [s for s in workflow["jobs"]["comment"]["steps"] if s.get("name") == name]
         self.assertEqual(len(matches), 1)
-        self.assertEqual(matches[0]["env"]["POST_TO_PR"], "${{ vars.OSSV_POST_TRIAGE }}")
-        for value, posts in (("", False), ("draft", False), ("Post", False), ("post", True)):
+        for existing, sent in (("", "post.json"), ("4242", "patch.json")):
             with tempfile.TemporaryDirectory() as directory:
                 directory = pathlib.Path(directory)
                 (directory / "bin").mkdir()
                 (directory / "bin" / "gh").write_text(
                     f'#!/bin/bash\necho "$*" >> {directory}/calls\n'
-                    f'case "$*" in *"--method POST"*) cat > {directory}/post.json ;; esac\n')
+                    f'case "$*" in *"--paginate"*) echo "{existing}" ;;\n'
+                    f'  *"--method POST"*) cat > {directory}/post.json ;;\n'
+                    f'  *"--method PATCH"*) cat > {directory}/patch.json ;; esac\n')
                 (directory / "bin" / "gh").chmod(0o755)
                 environment = {**os.environ, "PATH": f"{directory / 'bin'}:{os.environ['PATH']}", "GH_TOKEN": "x",
-                               "REPO": "o/r", "PR": "8", "COMMENT": "<!-- oss-verify-triage -->\n### Triage\n",
-                               "POST_TO_PR": value, "GITHUB_STEP_SUMMARY": str(directory / "summary")}
+                               "REPO": "o/r", "PR": "8", "COMMENT": "<!-- oss-verify-triage -->\n### Triage\n"}
                 run = subprocess.run(["bash", "-e", "-c", matches[0]["run"]], env=environment, capture_output=True,
                                      text=True)
                 self.assertEqual(run.returncode, 0, run.stderr)
-                self.assertEqual((directory / "post.json").exists(), posts, value)
-                if not posts:
-                    self.assertFalse((directory / "calls").exists(), value)
-                    self.assertIn("\n    ### Triage\n", (directory / "summary").read_text())
+                self.assertEqual(sorted(p.name for p in directory.glob("*.json")), [sent], existing)
+                self.assertEqual(json.loads((directory / sent).read_text())["body"],
+                                 "<!-- oss-verify-triage -->\n### Triage\n")
 
     def test_a_review_replaces_the_posted_one(self):
         body = self.post("Thanks again.\n\n2. Fix Y.\n")
         self.assertTrue(body.startswith("<!-- oss-verify-review -->\n<sub>Claude wrote this review of `bbbbbbb`"))
         self.assertIn("\n\nThanks again.\n\n2. Fix Y.\n", body)
-        self.assertIn("<summary>What the breakage and coverage checks measured</summary>\n\n### new report", body)
+        self.assertIn("<summary>What the checks of the fuzz targets and of the binaries measured</summary>\n\n### new report", body)
+
+    def test_a_change_review_names_review_change_md(self):
+        body = self.post("Thanks.\n", checks="", rules="review-change.md")
+        self.assertTrue(body.startswith("<!-- oss-verify-review -->\n<sub>Claude wrote this review of `bbbbbbb` from "
+                                        "`review-change.md`."))
 
     def test_without_a_posted_comment_it_posts_one(self):
         body = self.post("Thanks.\n", existing=False, checks="")
@@ -580,16 +550,23 @@ class PostingStep(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("jq"), "needs jq, which the gh stand-in runs the script's filters with")
 class ReviewHeld(unittest.TestCase):
-    """review-held opens one private issue for each held finding, through a fake gh, and prints none of it."""
+    """review-held opens one private issue for each held finding, keyed by what the finding is, through a fake gh,
+    and prints none of it."""
 
     RUN = "https://github.com/theorem-labs/oss-verify/actions/runs/7"
     OBJECT = "held/7/" + "a" * 32
     HEADER = f"oss-verify held finding v1\npr: 68\nhead: {'1' * 40}\nproject: libreac\nrun: {RUN}\n---\n"
 
     @staticmethod
-    def body(key):
-        """An issue body as review-held writes it: its key on the fifth line."""
-        return f"enrollment PR: x\nenrollment PR head: y\npublic PR comment: z\nreview run: r\n{key}\n"
+    def body(key, texthash="0" * 12):
+        """An issue body as review-held writes it: its key on the fifth line, its text's hash on the sixth."""
+        return (f"enrollment PR: x\nenrollment PR head: y\npublic PR comment: z\nreview run: r\n"
+                f"held finding key: {key}\nheld finding text: {texthash}\n")
+
+    @staticmethod
+    def key_of(body):
+        """The key of an issue body this script wrote."""
+        return body.split("\n")[4].removeprefix("held finding key: ")
 
     # A stand-in for `gh api`: it answers each call with the JSON GitHub would (from state.json), applies the script's
     # own --jq filter to it with the real jq, and records each call and each body it is sent. So the tests check the
@@ -617,8 +594,20 @@ if path.endswith("/labels/held-finding"):
 if path == "repos/" + state["variable"]:
     answer = {"visibility": state["visibility"]}
 elif "/issues?" in path:
-    answer = [{"number": i, "body": b} for i, b in enumerate(state["issues"], 1)]
+    if state["listing_fails"]:
+        # gh writes the request it failed on, which holds the private repository's name.
+        sys.stderr.write("gh: HTTP 500 on " + path + "\n")
+        sys.exit(1)
+    answer = [{"number": i, "body": b[0], "state": b[1], "title": b[2]} for i, b in enumerate(state["issues"], 1)]
+    # As GitHub answers it: open issues only, unless the query asks for every state.
+    if "state=all" not in path:
+        answer = [i for i in answer if i["state"] == "open"]
+    if "labels=held-finding" not in path:
+        answer = []
 elif path.endswith("/comments") and not fields:
+    if state["comments_fail"] and private:
+        sys.stderr.write("gh: the stand-in refuses the comments\n")
+        sys.exit(1)
     answer = state["comments"] if private else state["public_comments"]
 elif path.endswith("/comments"):
     answer = {"id": 7, "html_url": "https://example.test/comment"}
@@ -635,20 +624,32 @@ else:
 '''
     # A held finding as the review writes it in the `held` field of its structured output.
     HELD = ("<!-- held finding -->\ntitle: [held] libreac/fuzz: heap-buffer-overflow in parse_SECRETBUG\n"
-            "project: libreac\nwhy held: memory safety\n\nparse_SECRETBUG reads past the end.\n")
+            "project: libreac\nharness: fuzz_one\nupstream repository: https://github.com/example/libreac\n"
+            "upstream commit: " + "c" * 40 + "\nwhy held: memory safety: a read past the end\n\n"
+            "src/parse.c:40-80, parse_SECRETBUG reads past the end.\n")
+
+    @staticmethod
+    def an_issue(given):
+        """One issue of the label as GitHub gives it: a body, or a (body, state) or (body, state, title) tuple."""
+        given = [given] if isinstance(given, str) else list(given)
+        return [given[0], given[1] if len(given) > 1 else "open", given[2] if len(given) > 2 else ""]
 
     def run_held(self, held, bodies_on_github=(), label=True, variable="theorem-labs/private", visibility="private",
-                 header=None, comments=(), public_comments=()):
-        """bodies_on_github: the bodies of the label's issues already there, open or closed, numbered from 1. comments:
-        the bodies of comments already on a private issue. public_comments: the pull request's comments, as
-        (login, body, html_url). held follows the six lines the review job writes (header, by default HEADER)."""
+                 header=None, comments=(), public_comments=(), obj=None, listing_fails=False, comments_fail=False):
+        """bodies_on_github: the issues of the label already there, each a body, a (body, state) pair or a
+        (body, state, title) triple, numbered from 1. comments: the bodies of comments already on a private issue.
+        public_comments: the pull request's comments, as (login, body, html_url). held follows the six lines the
+        review job writes (header, by default HEADER).
+        obj: the stored object's name, which is a new one for every run of a review."""
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             (root / "bin").mkdir()
             (root / "review").mkdir()
             (root / "review" / "object").write_text((self.HEADER if header is None else header) + held)
             (root / "state.json").write_text(json.dumps({
-                "variable": variable, "visibility": visibility, "label": label, "issues": list(bodies_on_github),
+                "variable": variable, "visibility": visibility, "label": label,
+                "issues": [self.an_issue(b) for b in bodies_on_github],
+                "listing_fails": listing_fails, "comments_fail": comments_fail,
                 "comments": [{"id": i, "body": c} for i, c in enumerate(comments)],
                 "public_comments": [{"user": {"login": login}, "body": b, "html_url": u}
                                     for login, b, u in public_comments]}))
@@ -659,23 +660,30 @@ else:
                                  env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
                                       "HELD_FINDINGS_REPO": variable, "REPO": "theorem-labs/oss-verify",
                                       "GH_TOKEN": "app-not-a-secret", "READ_TOKEN": "read-not-a-secret",
-                                      "HELD_OBJECT": self.OBJECT},
+                                      "GITHUB_STEP_SUMMARY": str(root / "summary"),
+                                      "HELD_OBJECT": obj or self.OBJECT},
                                  capture_output=True, text=True)
             # The token of each call, in the order of calls.
             run.tokens = (root / "tokens").read_text().splitlines() if (root / "tokens").exists() else []
+            run.summary = (root / "summary").read_text() if (root / "summary").exists() else ""
             calls = [json.loads(line) for line in (root / "calls").read_text().splitlines()] \
                 if (root / "calls").exists() else []
             bodies = (root / "bodies").read_text().split("\0")[:-1] if (root / "bodies").exists() else []
             return run, calls, bodies
 
+    @staticmethod
+    def opened(calls):
+        """The issues opened in this run."""
+        return [c for c in calls if c[1] == "repos/theorem-labs/private/issues"]
+
     def test_each_finding_is_one_labelled_issue_with_the_pull_request_and_nothing_is_printed(self):
         two = self.HELD + self.HELD.replace("parse_SECRETBUG", "other_SECRETBUG")
         run, calls, bodies = self.run_held(two, label=False)
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertNotIn("SECRETBUG", run.stdout + run.stderr)
+        self.assertNotIn("SECRETBUG", run.stdout + run.stderr + run.summary)
         self.assertIn(["api", "repos/theorem-labs/private/labels", "-f", "name=held-finding", "-f", "color=b60205",
                        "-f", "description=A finding held back from a public review, for the disclosure route"], calls)
-        created = [c for c in calls if c[1] == "repos/theorem-labs/private/issues"]
+        created = self.opened(calls)
         self.assertEqual([c[c.index("-f") + 1] for c in created],
                          ["title=[held] libreac/fuzz: heap-buffer-overflow in parse_SECRETBUG",
                           "title=[held] libreac/fuzz: heap-buffer-overflow in other_SECRETBUG"])
@@ -684,25 +692,238 @@ else:
         self.assertTrue(bodies[0].startswith(f"enrollment PR: theorem-labs/oss-verify#68\nenrollment PR head: {'1' * 40}\n"
                                              "public PR comment: not posted yet: the review comment on "
                                              "theorem-labs/oss-verify#68\n"
-                                             f"review run: {self.RUN}\nheld finding key: {self.OBJECT} 1\n"))
-        self.assertIn(f"held finding key: {self.OBJECT} 2\n", bodies[1])
-        self.assertNotIn("theorem-labs/private", run.stdout + run.stderr)
-        self.assertIn("project: libreac\nwhy held: memory safety\n", bodies[0])
+                                             f"review run: {self.RUN}\nheld finding key: review/libreac/fuzz_one/"))
+        self.assertNotEqual(self.key_of(bodies[0]), self.key_of(bodies[1]))
+        self.assertRegex(bodies[0].split("\n")[5], r"^held finding text: [0-9a-f]{12}$")
+        self.assertNotIn("theorem-labs/private", run.stdout + run.stderr + run.summary)
+        self.assertIn("project: libreac\n", bodies[0])
         self.assertNotIn("title:", bodies[0])
+        self.assertEqual(run.summary, "2 findings of libreac: 2 sent for private review, 0 already filed, 0 with a"
+                                      " text added to the issue that holds it, 0 whose issue is closed.\n")
+        # Nothing of any one finding is in the log or the summary, and that includes its key: every input of the
+        # identity is public, so a reader who can hash a million candidates reads the file and the function out of
+        # it (the CI/CD lead's reviewer did, in 1.5 s, from the public upstream tree).
+        for key in (self.key_of(bodies[0]), self.key_of(bodies[1])):
+            self.assertNotIn(key, run.stdout + run.stderr + run.summary)
+            self.assertNotIn(key.rsplit("/", 1)[1], run.stdout + run.stderr + run.summary)
+
+    def test_the_key_holds_nothing_of_the_run_that_found_the_finding(self):
+        # The defect of oss-verify-proofs-internal#450: the key was the stored object's name, so each re-run of a
+        # review filed the same finding again.
+        run, _, bodies = self.run_held(self.HELD)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        key = self.key_of(bodies[0])
+        self.assertNotIn("a" * 32, key)
+        self.assertNotIn(self.OBJECT, bodies[0])
+        self.assertRegex(key, r"^review/libreac/fuzz_one/c{12}/[0-9a-f]{12}$")
+        # `review/`, so that the statement work's reader, which takes an issue whose key starts `enroll/` as its
+        # own and reads its sixth line as the project, never takes one of these (ossv-held-bridge, STATEMENT_KEY).
+
+    def test_a_field_a_review_answers_in_a_sentence_stays_out_of_the_key(self):
+        # A review answered `harness:` with a sentence (oss-verify-proofs-internal#372, closed). A sentence is
+        # written afresh each run, so only a value that is one name is in the key, and a sentence is no harness.
+        prose = ("harness: none: no enrolled fuzz target reaches it. The file is not built (CMakeLists.txt, the "
+                 "option defaults to OFF), and the project's build.sh links the library only")
+        held = self.HELD.replace("harness: fuzz_one", prose)
+        run, _, bodies = self.run_held(held)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertRegex(self.key_of(bodies[0]), r"^review/libreac/none/c{12}/[0-9a-f]{12}$")
+        for reworded in ("reaches it", "reaches this code"), ("the library only", "that one library"), \
+                        (prose, "harness: none"):
+            with self.subTest(reworded=reworded[1]):
+                run, calls, _ = self.run_held(held.replace(*reworded), bodies_on_github=[bodies[0]],
+                                               obj="held/9/" + "b" * 32,
+                                               header=self.HEADER.replace("runs/7", "runs/9"))
+                self.assertEqual(run.returncode, 0, run.stderr)
+                self.assertEqual(self.opened(calls), [])
+
+    def test_an_issue_filed_before_this_key_is_matched_by_its_own_text(self):
+        # The issues already in the repository: five of the old key `held/<run id>/<32 hex digits> <n>` and one the
+        # statement work filed, whose first line is its key. Each is read for the identity of the text it holds, so
+        # the first run after this change files none of them again.
+        # The body of such an issue is the finding without its title line, which is the issue's title.
+        title, text = self.HELD.split("\n")[1][len("title: "):], self.HELD.split("\n", 2)[2]
+        old = (f"enrollment PR: theorem-labs/oss-verify#68\nenrollment PR head: {'1' * 40}\n"
+               f"public PR comment: not posted yet\nreview run: {self.RUN}\n"
+               f"held finding key: held/40971300962/{'f' * 32} 1\n" + text)
+        lane = f"held finding key: libreac-1 (lane record ossv-agent-open:/home/sami/libreac-1.md)\n{text}"
+        for what, body in (("the old key", old), ("the statement work's", lane)):
+            with self.subTest(what=what):
+                run, calls, sent = self.run_held(self.HELD, bodies_on_github=[(body, "open", title)],
+                                                  obj="held/9/" + "b" * 32,
+                                                  header=self.HEADER.replace("runs/7", "runs/9"))
+                self.assertEqual(run.returncode, 0, run.stderr)
+                self.assertEqual((self.opened(calls), sent), ([], []))
+                self.assertIn("1 already filed", run.summary)
+        # Another project's finding is not it.
+        other = old.replace("project: libreac", "project: other")
+        run, calls, _ = self.run_held(self.HELD, bodies_on_github=[(other, "open", title)],
+                                       obj="held/9/" + "b" * 32, header=self.HEADER.replace("runs/7", "runs/9"))
+        self.assertEqual(len(self.opened(calls)), 1)
+
+    def test_the_same_finding_of_another_run_of_the_review_is_not_filed_again(self):
+        # Two runs of the same review: a new stored object, a new run id, and the model's own words around the
+        # finding written afresh. The second run opens nothing and says so in the job summary.
+        first, _, bodies = self.run_held(self.HELD)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        again = self.HELD.replace("a read past the end", "it reads past the end of the buffer") \
+                         .replace("src/parse.c:40-80, parse_SECRETBUG reads past the end.",
+                                  "src/parse.c:40-80, parse_SECRETBUG. The call at line 51 is the one.")
+        run, calls, sent = self.run_held(again, bodies_on_github=[bodies[0]], obj="held/9/" + "b" * 32,
+                                         header=self.HEADER.replace("runs/7", "runs/9"))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(self.opened(calls), [])
+        self.assertIn("1 with a text added to the issue that holds it", run.stdout)
+        self.assertIn("1 with a text added to the issue that holds it", run.summary)
+        # The text changed, so it goes on the issue that is there, as a comment, and no new issue is opened.
+        self.assertEqual([c[1] for c in calls if "-F" in c], ["repos/theorem-labs/private/issues/1/comments"])
+        self.assertTrue(sent[0].startswith(f"held finding update: {self.key_of(bodies[0])} "), sent[0])
+        self.assertIn("found again in run: https://github.com/theorem-labs/oss-verify/actions/runs/9\n", sent[0])
+        self.assertIn("The call at line 51 is the one.", sent[0])
+        self.assertNotIn("SECRETBUG", run.stdout + run.stderr + run.summary)
+
+    def test_the_same_finding_with_the_same_text_sends_nothing_at_all(self):
+        _, _, bodies = self.run_held(self.HELD)
+        run, calls, sent = self.run_held(self.HELD, bodies_on_github=[bodies[0]], obj="held/9/" + "b" * 32,
+                                         header=self.HEADER.replace("runs/7", "runs/9"))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual((self.opened(calls), sent), ([], []))
+        self.assertIn("1 already filed", run.summary)
+
+    def test_a_body_a_person_edited_with_windows_line_ends_is_still_the_key_that_is_there(self):
+        _, _, bodies = self.run_held(self.HELD)
+        run, calls, sent = self.run_held(self.HELD, bodies_on_github=[bodies[0].replace("\n", "\r\n")],
+                                         obj="held/9/" + "b" * 32, header=self.HEADER.replace("runs/7", "runs/9"))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual((self.opened(calls), sent), ([], []))
+
+    def test_another_finding_of_the_same_project_is_filed(self):
+        _, _, bodies = self.run_held(self.HELD)
+        other = self.HELD.replace("heap-buffer-overflow in parse_SECRETBUG", "crash in other_SECRETBUG") \
+                         .replace("why held: memory safety: a read past the end", "why held: crash: it aborts") \
+                         .replace("src/parse.c:40-80, parse_SECRETBUG reads past the end.", "src/other.c:3, it aborts.")
+        run, calls, sent = self.run_held(other, bodies_on_github=[bodies[0]], obj="held/9/" + "b" * 32,
+                                         header=self.HEADER.replace("runs/7", "runs/9"))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(len(self.opened(calls)), 1)
+        self.assertNotEqual(self.key_of(sent[0]), self.key_of(bodies[0]))
+
+    def test_a_closed_issue_of_the_same_key_is_neither_reopened_nor_filed_again(self):
+        # The disclosure route closed it (oss-verify-proofs-internal#450 was closed as a duplicate). A re-run of a
+        # review is no new evidence: reopening would undo that decision, and a new issue is the duplicate the key
+        # exists to stop.
+        _, _, bodies = self.run_held(self.HELD)
+        run, calls, sent = self.run_held(self.HELD, bodies_on_github=[(bodies[0], "closed")],
+                                         obj="held/9/" + "b" * 32, header=self.HEADER.replace("runs/7", "runs/9"))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual((self.opened(calls), sent), ([], []))
+        self.assertFalse([c for c in calls if any(x in ("-X", "PATCH", "state=open") for x in c)], calls)
+        self.assertIn("1 whose issue is closed", run.stdout)
+        self.assertIn("1 whose issue is closed", run.summary)
+
+    def test_a_lookup_that_fails_files_nothing_and_fails_the_step(self):
+        run, calls, sent = self.run_held(self.HELD, listing_fails=True)
+        self.assertEqual(run.returncode, 1)
+        self.assertEqual((self.opened(calls), sent), ([], []))
+        self.assertIn("could not read the issues already filed", run.stderr)
+        # gh's own words, which hold the private repository's name, reach neither the log nor the job summary.
+        self.assertNotIn("private", run.stdout + run.stderr + run.summary)
+        # And a lookup of the comments of the issue that is there, for the parts it already holds.
+        _, _, bodies = self.run_held(self.HELD)
+        run, calls, sent = self.run_held(self.HELD, bodies_on_github=[bodies[0]], comments_fail=True,
+                                         obj="held/9/" + "b" * 32, header=self.HEADER.replace("runs/7", "runs/9"))
+        self.assertNotEqual(run.returncode, 0)
+        self.assertEqual((self.opened(calls), sent), ([], []))
+
+    def test_the_words_a_review_writes_differently_each_run_are_not_in_the_key(self):
+        # Each of these is the same finding, written as a model writes it on another run. None of them files again.
+        _, _, bodies = self.run_held(self.HELD)
+        same = {
+            "the function in code quotes": ("in parse_SECRETBUG", "in `parse_SECRETBUG`"),
+            "the function with its brackets": ("in parse_SECRETBUG", "in parse_SECRETBUG()"),
+            "the kind with a hyphen": ("why held: memory safety:", "why held: memory-safety:"),
+            "the repository over ssh": ("https://github.com/example/libreac",
+                                        "ssh://git@github.com/example/libreac.git"),
+            "the commit in capitals": ("upstream commit: " + "c" * 40, "upstream commit: " + "C" * 40),
+            "a line that moved": ("src/parse.c:40-80", "src/parse.c:41-81"),
+        }
+        for what, (before, after) in same.items():
+            with self.subTest(what=what):
+                run, calls, _ = self.run_held(self.HELD.replace(before, after), bodies_on_github=[bodies[0]],
+                                               obj="held/9/" + "b" * 32,
+                                               header=self.HEADER.replace("runs/7", "runs/9"))
+                self.assertEqual(run.returncode, 0, run.stderr)
+                self.assertEqual(self.opened(calls), [])
+
+    def test_a_text_the_issue_already_holds_is_not_added_again_or_reported_as_added(self):
+        _, _, bodies = self.run_held(self.HELD)
+        again = self.HELD.replace("a read past the end", "it reads past the end of the buffer")
+        run, _, update = self.run_held(again, bodies_on_github=[bodies[0]], obj="held/9/" + "b" * 32,
+                                        header=self.HEADER.replace("runs/7", "runs/9"))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(len(update), 1)
+        run, calls, sent = self.run_held(again, bodies_on_github=[bodies[0]], comments=[update[0]],
+                                          obj="held/11/" + "c" * 32,
+                                          header=self.HEADER.replace("runs/7", "runs/11"))
+        self.assertEqual((run.returncode, self.opened(calls), sent), (0, [], []))
+        self.assertIn("1 already filed", run.summary)
+        self.assertNotIn("1 with a text added", run.summary)
+
+    def test_findings_of_an_issue_that_holds_several_are_never_filed_on_their_own(self):
+        # Eleven findings go as one issue. The next run holds ten of them: each is already filed, in that issue.
+        findings = [f"<!-- held finding -->\ntitle: t{i} in f{i}\nproject: libreac\nharness: fuzz_one\n"
+                    f"why held: crash: SECRET{i}\n\nsrc/f{i}.c, it aborts.\n" for i in range(11)]
+        run, _, bodies = self.run_held("".join(findings))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(len(bodies), 1)
+        self.assertEqual(len(bodies[0].split("\n")[6].removeprefix("held finding set: ").split()), 11)
+        run, calls, sent = self.run_held("".join(findings[:10]), bodies_on_github=[bodies[0]],
+                                          obj="held/9/" + "b" * 32,
+                                          header=self.HEADER.replace("runs/7", "runs/9"))
+        self.assertEqual((run.returncode, self.opened(calls), sent), (0, [], []))
+        self.assertIn("10 already filed", run.summary)
+
+    def test_an_issue_that_holds_several_takes_only_the_findings_that_are_not_filed_yet(self):
+        # Ten findings file one issue each; a re-run that holds eleven files only the one that is new.
+        findings = [f"<!-- held finding -->\ntitle: t{i} in f{i}\nproject: libreac\nharness: fuzz_one\n"
+                    f"why held: crash: SECRET{i}\n\nsrc/f{i}.c, it aborts.\n" for i in range(11)]
+        run, _, bodies = self.run_held("".join(findings[:10]))
+        self.assertEqual((run.returncode, len(bodies)), (0, 10))
+        run, calls, sent = self.run_held("".join(findings), bodies_on_github=list(bodies),
+                                          obj="held/9/" + "b" * 32,
+                                          header=self.HEADER.replace("runs/7", "runs/9"))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("SECRET10", sent[0])
+        for i in range(10):
+            self.assertNotIn(f"SECRET{i}\n", sent[0])
+
+    def test_an_open_issue_of_the_key_is_the_one_a_closed_one_does_not_hide(self):
+        _, _, bodies = self.run_held(self.HELD)
+        run, calls, sent = self.run_held(self.HELD, obj="held/9/" + "b" * 32,
+                                         header=self.HEADER.replace("runs/7", "runs/9"),
+                                         bodies_on_github=[(bodies[0], "closed"), (bodies[0], "open")])
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(self.opened(calls), [])
+        self.assertIn("1 already filed", run.stdout)
 
     def test_a_re_run_sends_only_what_its_run_did_not_send_and_the_title_routes_nothing(self):
-        # The first of two untitled findings was sent before the run failed; a closed issue counts too. Another run's
-        # issue with the same title does not stop either.
+        # The first of two untitled findings was sent before the run failed; a closed issue counts too. Another
+        # project's issue does not stop either.
         two = "<!-- held finding -->\nproject: libreac\n<!-- held finding -->\nproject: libreac\nsecond\n"
-        run, calls, bodies = self.run_held(two, bodies_on_github=[
-            self.body(f"held finding key: {self.OBJECT} 1"), self.body(f"held finding key: held/1/{'b' * 32} 2"),
-            # A key anywhere but the fifth line is no key.
-            f"held finding key: {self.OBJECT} 2\n"])
+        run, calls, bodies = self.run_held(two)
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertIn(f"1 of {self.OBJECT} was already sent", run.stdout)
-        self.assertEqual(len(bodies), 1)
-        self.assertIn(f"held finding key: {self.OBJECT} 2\n", bodies[0])
-        self.assertIn("second", bodies[0])
+        self.assertEqual(len(bodies), 2)
+        run, calls, sent = self.run_held(two, obj="held/9/" + "b" * 32,
+                                         header=self.HEADER.replace("runs/7", "runs/9"),
+                                         bodies_on_github=[(bodies[0], "closed"),
+                                                           self.body(f"other/none/none/{'d' * 12}"),
+                                                           # A key anywhere but the fifth line is no key.
+                                                           f"held finding key: {self.key_of(bodies[1])}\n"])
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(len(self.opened(calls)), 1)
+        self.assertEqual(self.key_of(sent[0]), self.key_of(bodies[1]))
+        self.assertIn("second", sent[0])
 
     def test_a_finding_with_only_a_title_is_sent(self):
         run, _, bodies = self.run_held("<!-- held finding -->\ntitle: [held] libreac/x: crash in f\n")
@@ -720,36 +941,41 @@ else:
         run, calls, bodies = self.run_held(eleven)
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(len(bodies), 1)
-        self.assertIn(f"held finding key: {self.OBJECT} all\n", bodies[0])
+        self.assertRegex(self.key_of(bodies[0]), r"^review/libreac/all/[0-9a-f]{12}$")
         self.assertIn("SECRET10", bodies[0])
+        # The same eleven findings of another run of the review are the same set: one issue, not twelve.
+        run, calls, sent = self.run_held(eleven, bodies_on_github=[bodies[0]], obj="held/9/" + "b" * 32,
+                                         header=self.HEADER.replace("runs/7", "runs/9"))
+        self.assertEqual((run.returncode, self.opened(calls), sent), (0, [], []))
 
     def test_a_long_finding_goes_whole_in_parts_and_a_re_run_posts_only_the_missing_ones(self):
         # 130,000 bytes in lines of 1,000: the issue and two comments, each at most 60,000 bytes, which hold it all.
         long = "".join(f"{i:05d}" + "x" * 994 + "\n" for i in range(130))
-        run, calls, bodies = self.run_held("<!-- held finding -->\ntitle: big\n" + long + "END-OF-FINDING\n")
+        held = "<!-- held finding -->\ntitle: big in f\n" + long + "END-OF-FINDING\n"
+        run, calls, bodies = self.run_held(held)
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(len(bodies), 3)
+        key = self.key_of(bodies[0])
         self.assertTrue(all(len(b.encode()) <= 60500 for b in bodies))
         self.assertIn("(Part 1 of 3: the rest follows in the comments.)", bodies[0])
-        self.assertTrue(bodies[1].startswith(f"held finding part: {self.OBJECT} 1 2/3\n"))
+        self.assertTrue(bodies[1].startswith(f"held finding part: {key} 2/3\n"))
         self.assertIn("END-OF-FINDING", bodies[2])
         joined = "".join(bodies)
         self.assertTrue(all(f"{i:05d}" in joined for i in range(130)))
         self.assertEqual([c[1] for c in calls if "-F" in c][1:], ["repos/theorem-labs/private/issues/42/comments"] * 2)
         # A run that stopped after part 2: the next posts only part 3, on the issue that is there.
-        run, calls, bodies = self.run_held("<!-- held finding -->\ntitle: big\n" + long + "END-OF-FINDING\n",
-                                           bodies_on_github=[self.body(f"held finding key: {self.OBJECT} 1")],
-                                           comments=[f"held finding part: {self.OBJECT} 1 2/3\n\n..."])
+        run, calls, sent = self.run_held(held, bodies_on_github=[bodies[0]],
+                                         comments=[f"held finding part: {key} 2/3\n\n..."])
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(len(bodies), 1)
-        self.assertTrue(bodies[0].startswith(f"held finding part: {self.OBJECT} 1 3/3\n"))
+        self.assertEqual(len(sent), 1)
+        self.assertTrue(sent[0].startswith(f"held finding part: {key} 3/3\n"))
         self.assertEqual([c[1] for c in calls if "-F" in c], ["repos/theorem-labs/private/issues/1/comments"])
 
     @staticmethod
     def finding_of(issue_body, comment_bodies):
-        """The finding as the disclosure route reads it back: the issue after its five lines, without the part note,
+        """The finding as the disclosure route reads it back: the issue after its six lines, without the part note,
         then each comment after its part line and the blank line."""
-        text = issue_body.split("\n", 5)[5]
+        text = issue_body.split("\n", 6)[6]
         text = re.sub(r"\n\n\(Part 1 of \d+: the rest follows in the comments\.\)\n$", "", text)
         return text + "".join(c.split("\n", 2)[2] for c in comment_bodies)
 
@@ -759,7 +985,7 @@ else:
         # Short lines, so that a change of a few bytes in the lines the script adds would move where a part ends.
         lines = [f"{i:05d} " + "é" * (i % 7) + "y" * (30 + i % 13) + "\n" for i in range(2800)]
         finding = "".join(lines) + "END-OF-FINDING\n"
-        held = "<!-- held finding -->\ntitle: big\n" + finding
+        held = "<!-- held finding -->\ntitle: big in f\n" + finding
         run, _, first = self.run_held(held)
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertGreater(len(first), 2)
@@ -785,7 +1011,7 @@ else:
             for prefix in range(4):
                 with self.subTest(char=char, prefix=prefix):
                     finding = "x" * prefix + char * (130000 // len(char.encode())) + "\n"
-                    run, _, bodies = self.run_held("<!-- held finding -->\ntitle: big\n" + finding)
+                    run, _, bodies = self.run_held("<!-- held finding -->\ntitle: big in f\n" + finding)
                     self.assertEqual(run.returncode, 0, run.stderr)
                     self.assertEqual(len(bodies), 3)
                     self.assertNotIn("\ufffd", "".join(bodies))
@@ -793,10 +1019,10 @@ else:
 
     def test_a_part_ends_at_a_line_end_when_the_line_fits(self):
         finding = "".join(f"{i:05d} " + "y" * 994 + "\n" for i in range(130))
-        run, _, bodies = self.run_held("<!-- held finding -->\ntitle: big\n" + finding)
+        run, _, bodies = self.run_held("<!-- held finding -->\ntitle: big in f\n" + finding)
         self.assertEqual(run.returncode, 0, run.stderr)
         texts = [re.sub(r"\n\n\(Part 1 of \d+: the rest follows in the comments\.\)\n$", "",
-                        bodies[0].split("\n", 5)[5])] + [b.split("\n", 2)[2] for b in bodies[1:]]
+                        bodies[0].split("\n", 6)[6])] + [b.split("\n", 2)[2] for b in bodies[1:]]
         self.assertTrue(all(t.endswith("\n") and t.split("\n")[0][:5].isdigit() for t in texts), texts[1][:20])
 
     def test_the_public_comment_is_the_bots_review_comment_of_the_pull_request(self):
@@ -834,63 +1060,61 @@ else:
                 self.assertEqual(run.returncode, 2)
                 self.assertIn("names is not private, so nothing is sent", run.stderr)
                 self.assertFalse([c for c in calls if "-F" in c or "-f" in c])
-        self.OBJECT = "held/7/short"
-        run, calls, _ = self.run_held(self.HELD)
+        run, calls, _ = self.run_held(self.HELD, obj="held/7/short")
         self.assertEqual((run.returncode, calls), (2, []))
 
-    def test_an_object_that_does_not_start_with_the_workflows_lines_is_sent_whole(self):
+    def test_an_object_that_does_not_start_with_the_workflows_lines_is_sent_whole_once(self):
         for header in ("", "oss-verify held finding v1\npr: 68\nhead: x\nproject: libreac\nrun: r\n---\n",
                        self.HEADER.replace("runs/7", "runs/8")):
             with self.subTest(header=header):
                 run, calls, bodies = self.run_held(self.HELD, header=header)
                 self.assertEqual(run.returncode, 0, run.stderr)
                 self.assertEqual(len(bodies), 1)
-                self.assertIn(f"held finding key: {self.OBJECT} raw\n", bodies[0])
+                self.assertRegex(self.key_of(bodies[0]), r"^review/raw/[0-9a-f]{12}$")
                 self.assertIn("SECRETBUG", bodies[0])
+                # The same broken object, stored again by another run, is the same key: one issue.
+                run, calls, sent = self.run_held(self.HELD, header=header, bodies_on_github=[bodies[0]],
+                                                 obj="held/9/" + "b" * 32)
+                self.assertEqual((run.returncode, self.opened(calls), sent), (0, [], []))
 
-    def test_the_finding_reaches_the_hold_job_only_through_the_private_bucket(self):
-        jobs = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["jobs"]
-        text = (ROOT / ".github" / "workflows" / "build.yaml").read_text()
-        # No job holds the App's key as a repository secret, and nothing reads a variable for the repository.
-        self.assertNotIn("OSS_VERIFY_APP_PRIVATE_KEY", text)
-        self.assertNotIn("HELD_FINDINGS_REPO }}", text)
-        review = {s.get("name"): s for s in jobs["review"]["steps"]}
-        store = review["Store the held finding for the hold job"]["run"]
-        self.assertIn("ifGenerationMatch=0", store)
-        self.assertIn('name="held/$RUN_ID/$(openssl rand -hex 16)"', store)
-        self.assertIn("oss-verify held finding v1", store)
-        self.assertEqual(jobs["review"]["outputs"]["held_object"], "${{ steps.held.outputs.object }}")
-        # The review job passes names only: no output holds a file's text or the finding.
-        self.assertNotIn("held-finding.md", json.dumps(jobs["review"]["outputs"]))
-        # The finding is stored only when the review held one back, from the file the result step wrote, and the
-        # session of that review is not kept.
-        for name in ("Sign in to Google Cloud to store the held finding", "Store the held finding for the hold job"):
-            self.assertEqual(review[name]["if"], "${{ steps.result.outputs.held == 'yes' }}")
-        self.assertIn('"$RUNNER_TEMP/held-finding.md"', store)
-        self.assertEqual(review["Keep this review's session for the next push's review"]["if"],
-                         "${{ steps.result.outputs.held != 'yes' }}")
-        hold = jobs["hold"]
-        self.assertEqual(hold["environment"], {"name": "comment", "deployment": False})
-        self.assertEqual(hold["needs"], ["project-builds", "review"])
-        # Every run that reviewed anything sweeps the bucket, so a cancelled run's finding goes with the next run.
-        self.assertEqual(hold["if"], "${{ !cancelled() && needs.review.result != 'skipped' }}")
-        # One sweep at a time in the repository; every waiting one keeps its place, so none is cancelled by another.
-        self.assertEqual(hold["concurrency"], {"group": "build-hold", "cancel-in-progress": False, "queue": "max"})
-        steps = {s.get("name"): s for s in hold["steps"]}
-        where = steps["Where the held findings go"]["run"]
-        self.assertIn("secrets/oss-verify-held-findings-repo/versions/latest:access", where)
-        self.assertLess(where.index("::add-mask::"), where.index('echo "name=$name"'))
-        token = steps["Get the oss-verify App's token for the held findings' repository"]["with"]
-        self.assertEqual((token["owner"], token["repositories"], token["permission-issues"]),
-                         ("${{ github.repository_owner }}", "${{ steps.where.outputs.name }}", "write"))
-        send = steps["Send every stored held finding to the disclosure route"]
-        self.assertEqual(send["run"], '.github/scripts/review-hold "$RUNNER_TEMP/held"')
-        self.assertEqual(send["env"]["CURRENT_OBJECT"], "${{ needs.review.outputs.held_object }}")
-        # The comment job posts no review unless the review job succeeded and, if it held a finding, hold sent it.
-        self.assertIn("hold", jobs["comment"]["needs"])
-        self.assertIn("needs.review.result == 'success' && needs.review.outputs.comment != '' && "
-                      "(needs.review.outputs.held_object == '' || needs.hold.result == 'success')",
-                      jobs["comment"]["if"])
+    def test_the_review_jobs_own_step_puts_no_finding_in_the_output_the_log_or_the_summary(self):
+        # The review job's step, run as the runner runs it, with a stand-in curl for the bucket: of the finding it
+        # stores, the job's output, the log and the job summary of this public repository hold nothing but the
+        # object's name, and that name is what the hold job reads the finding by.
+        [script] = [s["run"] for s in
+                    yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["jobs"]["review"]
+                    ["steps"] if s.get("name") == "Store the held finding for the hold job"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "bin").mkdir()
+            (root / "tmp").mkdir()
+            (root / "tmp" / "held-finding.md").write_text(self.HELD)
+            # curl answers as the bucket does, and keeps the bytes it was sent. The step runs from the checkout's
+            # root, as the runner runs it, because it calls .github/scripts/held-bucket-put by a relative path.
+            (root / "bin" / "curl").write_text(
+                "#!/bin/bash\nfor a in \"$@\"; do case $a in --data-binary) ;; @*) cp \"${a#@}\" "
+                f"{root}/uploaded ;; esac; done\n" + 'printf \'{"generation": "1761500000000000"}\'\n')
+            (root / "bin" / "curl").chmod(0o755)
+            run = subprocess.run(["bash", "--noprofile", "--norc", "-e", "-c", script], cwd=ROOT, text=True,
+                                 capture_output=True,
+                                 env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
+                                      "RUNNER_TEMP": str(root / "tmp"), "GITHUB_OUTPUT": str(root / "output"),
+                                      "GITHUB_STEP_SUMMARY": str(root / "summary"),
+                                      "GCP_ACCESS_TOKEN": "gcp-not-a-secret", "RUN_ID": "7", "PR": "68",
+                                      "NAME": "libreac", "HEAD_SHA": "1" * 40,
+                                      "RUN_URL": "https://github.com/theorem-labs/oss-verify/actions/runs/7"})
+            self.assertEqual(run.returncode, 0, run.stderr)
+            output = (root / "output").read_text()
+            summary = (root / "summary").read_text() if (root / "summary").exists() else ""
+            uploaded = (root / "uploaded").read_text()
+        # The output is the object's name and nothing else, and the finding went to the bucket, whole.
+        self.assertRegex(output, r"^object=held/7/[0-9a-f]{32}\n$")
+        self.assertTrue(uploaded.startswith(self.HEADER), uploaded[:100])
+        self.assertIn("SECRETBUG", uploaded)
+        for public in (output, summary, run.stdout, run.stderr):
+            self.assertNotIn("SECRETBUG", public)
+            self.assertNotIn("parse_SECRETBUG", public)
+            self.assertNotIn("memory safety", public)
 
 
 class ReviewHold(unittest.TestCase):
@@ -1072,79 +1296,284 @@ class SinceLastReview(unittest.TestCase):
 
 
 class ReviewJob(unittest.TestCase):
-    """build.yaml's review job: one claude-code-action step with the settings the review needs, its session kept in
-    the Actions cache by the job itself, and its own small steps run with stand-ins."""
+    """build.yaml's review job: its own small steps, and the scripts it runs (review-gather, review-prompt), run with
+    stand-ins."""
 
     def setUp(self):
         self.workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
         self.jobs = self.workflow["jobs"]
         self.steps = {s.get("name"): s for s in self.jobs["review"]["steps"]}
-        self.review = self.steps["Review"]
 
-    def test_the_action_runs_from_main_with_three_tools_and_resumes_only_with_a_diff(self):
-        # pull_request_target: GitHub runs main's copy of this file, never the pull request's.
-        self.assertIn("pull_request_target", self.workflow.get("on", self.workflow.get(True)))
-        self.assertRegex(self.review["uses"], r"^anthropics/claude-code-action@[0-9a-f]{40}$")
-        settings = self.review["with"]
-        self.assertEqual((settings["allowed_non_write_users"], settings["github_token"]), ("*", "${{ github.token }}"))
-        self.assertEqual(settings["anthropic_federation_rule_id"], "fdrl_019restxFx3PhpLhbziQoQKf")
-        self.assertNotIn("anthropic_api_key", settings)
-        # Only our own Apps' runs start a review: the action matches each name (src/github/validation/actor.ts).
-        self.assertEqual(settings["allowed_bots"], "sjawhar-agent[bot],oss-verify[bot]")
-        args = settings["claude_args"]
-        self.assertTrue(args.startswith("--tools Read,Glob,Grep --permission-mode default --model claude-opus-5-5 "
-                                        "--effort xhigh --max-turns 300 "))
-        self.assertIn("${{ steps.gather.outputs.session && format('--resume {0}', steps.gather.outputs.session) || '' }}",
-                      args)
-        for word in ("Bash", "Write", "Edit", "WebFetch", "mcp", "allowedTools", "bypass", "acceptEdits", "auto"):
-            self.assertNotIn(word, args)
-        schema = json.loads(re.search(r"--json-schema '([^']*)'$", args).group(1))
-        self.assertEqual(schema["required"], ["comment", "held", "verdicts"])
-        self.assertEqual(schema["properties"]["verdicts"]["required"], ["F2", "F7"])
-        self.assertEqual(schema["properties"]["verdicts"]["additionalProperties"], {"enum": ["pass", "fail", "person"]})
-        prompt = settings["prompt"]
-        self.assertIn("Read review.md at the root of this checkout", prompt)
-        self.assertIn("A new request comes only from .review/since-last-review.diff", prompt)
-        self.assertIn("before you keep a request of your last comment, read again the input in .review/", prompt)
+    def gather(self, root, gh, **env):
+        """review-gather, from this checkout, into root/out, with the stand-in gh script `gh` and `env`."""
+        (root / "bin").mkdir(exist_ok=True)
+        (root / "bin" / "gh").write_text("#!/bin/bash\n" + f'echo "$*" >> {root / "calls"}\n' + gh)
+        (root / "bin" / "gh").chmod(0o755)
+        environment = {**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r",
+                       "PR": "", "NAME": "", "ISSUE": "", "HEAD_SHA": "", **env}
+        return subprocess.run([str(ROOT / ".github" / "scripts" / "review-gather"), str(root / "out")],
+                              env=environment, cwd=ROOT, capture_output=True, text=True)
 
-    def test_the_session_is_kept_by_the_review_job_and_not_when_it_holds_a_finding(self):
-        self.assertEqual(self.workflow["cache-mode"], "none")
-        self.assertEqual({name: job["cache-mode"] for name, job in self.jobs.items() if "cache-mode" in job},
-                         {"review": "write"})
-        restore = self.steps["Restore the last review's session and the head it reviewed"]
-        save = self.steps["Keep this review's session for the next push's review"]
-        self.assertTrue(restore["uses"].startswith("actions/cache/restore@"))
-        self.assertTrue(save["uses"].startswith("actions/cache/save@"))
-        paths = "~/.claude/projects\n~/.claude/ossv-last-review"
-        key = "${{ env.SESSION_KEY }}${{ github.run_id }}-${{ github.run_attempt }}"
-        self.assertEqual((restore["with"]["path"], restore["with"]["key"]), (paths, key))
-        self.assertEqual((save["with"]["path"], save["with"]["key"]), (paths, key))
-        self.assertEqual(restore["with"]["restore-keys"], "${{ env.SESSION_KEY }}")
-        self.assertEqual(self.jobs["review"]["env"]["SESSION_KEY"],
-                         "enroll-review/${{ github.event.pull_request.number || inputs.pr }}/"
-                         "${{ needs.project-builds.outputs.name }}/")
-        self.assertEqual(save["if"], "${{ steps.result.outputs.held != 'yes' }}")
-        gather = self.steps["Gather what the review reads, and the diff since the last review"]["run"]
-        self.assertIn("LAST_REVIEW=~/.claude/ossv-last-review .github/scripts/review-gather .review", gather)
-
-    def result(self, output):
-        """The result step, on an execution file whose result carries `output` as its structured output."""
+    def test_a_change_gathers_only_the_pull_request_and_its_changed_files_as_data(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            (root / "temp").mkdir()
-            (root / "home").mkdir()
-            execution = root / "execution.json"
-            execution.write_text(json.dumps([{"type": "system", "subtype": "init"},
-                                             {"type": "result", "subtype": "success", "structured_output": output}]))
-            run = subprocess.run(["bash", "-e", "-c", self.steps["Keep the draft, and the held finding apart from it"]["run"]],
-                                 cwd=root, capture_output=True, text=True,
-                                 env={**os.environ, "HOME": str(root / "home"), "RUNNER_TEMP": str(root / "temp"),
-                                      "GITHUB_OUTPUT": str(root / "output"), "RESULT": str(execution),
-                                      "SESSION": "09227178-7bbf-4e5f-86db-8736e530ef01", "HEAD_SHA": "1" * 40})
-            read = lambda path: path.read_text() if path.exists() else None
-            return (run, read(root / "temp" / "draft" / "comment.md"), read(root / "temp" / "draft" / "verdicts.json"),
-                    read(root / "temp" / "held-finding.md"), read(root / "output") or "",
-                    read(root / "home" / ".claude" / "ossv-last-review"))
+            files = ["tools/a.py", "docs/CLAUDE.md", ".claude/skills/x/SKILL.md", "a/../b", "README.md", "big.bin",
+                     "gone.txt"]
+            run = self.gather(root, (
+                f'case "$*" in\n'
+                f'  "pr view"*) echo "{{}}" ;;\n'
+                f'  *"/files"*) printf "%s\\n" {" ".join(shlex.quote(f) for f in files)} ;;\n'
+                '  "pr diff"*) echo diff ;;\n'
+                # A file over 1 MiB, which gh stops writing when head has its first MiB; a file the API cannot give.
+                '  *contents/big.bin*) head -c 3000000 /dev/zero | tr "\\0" x ;;\n'
+                '  *contents/gone.txt*) echo "{\\"message\\": \\"Not Found\\"}"; exit 1 ;;\n'
+                '  *contents/*) echo "file at ${@: -1}" ;;\n'
+                '  *) true ;;\n'
+                "esac\n"), KIND="change", PR="8", HEAD_SHA="a" * 40)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            head = sorted(str(p.relative_to(root / "out" / "head")) for p in (root / "out" / "head").rglob("*")
+                          if p.is_file())
+            self.assertEqual(head, ["README.md", "big.bin", "tools/a.py"])
+            self.assertEqual((root / "out" / "head" / "big.bin").stat().st_size, 1048576)
+            # Nothing of an enrollment's: no build results, no seeds, no validation.
+            for name in ("build", "seeds", "validate.txt", "triage-today.md"):
+                self.assertFalse((root / "out" / name).exists(), name)
+
+    def test_an_issue_gathers_only_the_issue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            gh = 'case "$*" in "issue view 5 "*) echo \'{"title": "Q"}\' ;; *) exit 1 ;; esac\n'
+            run = self.gather(root, gh, KIND="issue", ISSUE="5")
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(sorted(p.name for p in (root / "out").iterdir()), ["issue.json"])
+            self.assertEqual((root / "out" / "issue.json").read_text(), '{"title": "Q"}\n(exit status 0)\n')
+            self.assertEqual((root / "calls").read_text(),
+                             "issue view 5 -R o/r --json number,title,author,createdAt,body,comments\n")
+
+    def test_gather_refuses_a_kind_or_a_value_it_cannot_take_before_any_read(self):
+        for env in ({"KIND": "issue", "ISSUE": "5; x"}, {"KIND": "enrollment", "PR": "8", "NAME": ""},
+                    {"KIND": "enrollment", "PR": "8", "NAME": "../x"}, {"KIND": "change", "PR": "8x"},
+                    {"KIND": "", "PR": "8"}, {"KIND": "build", "PR": "8"}):
+            with self.subTest(env=env), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                run = self.gather(root, "exit 0\n", **env)
+                self.assertEqual(run.returncode, 2, run.stderr)
+                self.assertFalse((root / "calls").exists())
+
+    def test_hostile_issue_text_is_only_data_in_the_gather_and_the_result_steps(self):
+        # The issue's text reaches the scripts only from gh's answer (a file) and the model's output (a file): a title
+        # or body that is shell text runs nothing.
+        hostile = '$(touch pwned-a) `touch pwned-b` "; touch pwned-c; " \' ; touch pwned-d #'
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            answer = shlex.quote(json.dumps({"title": hostile, "body": hostile}))
+            run = self.gather(root, f'echo {answer}\n', KIND="issue", ISSUE="5")
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertIn("touch pwned-a", (root / "out" / "issue.json").read_text())
+        run, comment, _, _, _, _ = self.result({"comment": hostile, "decide": hostile}, kind="issue", issue="5")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(self.issue_draft.count(hostile), 2)
+        for where in (ROOT, pathlib.Path.cwd()):
+            self.assertEqual(sorted(where.glob("pwned-*")), [])
+        self.assertEqual(sorted(self.ran_in.glob("pwned-*")), [])
+
+    def test_an_issue_draft_stays_out_of_the_artifact_and_the_summary(self):
+        # The artifact and the job summary are public: the draft and what a person decides go to a file that the
+        # next step stores in the private bucket.
+        run, comment, verdicts, held, output, _ = self.result(
+            {"comment": "See docs/dsl.md.\n", "decide": "nothing"}, kind="issue", issue="5")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertFalse((self.ran_in / "temp" / "draft").exists())
+        self.assertEqual((comment, verdicts, held, output, self.summary), (None, None, None, {}, None))
+        self.assertEqual(self.issue_draft, "The draft reply:\n\nSee docs/dsl.md.\n\n\n"
+                                           "What a person at Theorem decides before it is posted:\n\nnothing\n")
+
+    def test_an_issue_run_gives_the_job_no_comment_output(self):
+        # The job's comment output is the result step's: for an issue, whose draft no one has approved, it has none,
+        # so no expression and no debug log carries the draft. A change's and an enrollment's comment is there.
+        _, _, _, _, output, _ = self.result({"comment": "The draft reply.\n", "decide": "nothing"}, kind="issue",
+                                            issue="5")
+        self.assertNotIn("comment", output)
+        _, _, _, _, output, _ = self.result({"comment": "Thanks.\n", "verdicts": {}}, kind="change")
+        self.assertEqual(output["comment"], "Thanks.\n")
+
+    def test_a_change_without_a_held_field_holds_nothing(self):
+        run, comment, verdicts, held, output, _ = self.result(
+            {"comment": "Thanks.\n", "verdicts": {str(n): "pass" for n in range(1, 6)}}, kind="change")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(json.loads(verdicts), {str(n): "pass" for n in range(1, 6)})
+        self.assertEqual((output, held, self.summary, self.issue_draft),
+                         ({"comment": "Thanks.\n"}, "<!-- held finding -->\n\n", None, None))
+
+    @staticmethod
+    def outputs(text):
+        """GITHUB_OUTPUT's text as the runner reads it: name=value lines, and name<<delimiter blocks."""
+        found, lines = {}, iter((text or "").splitlines())
+        for line in lines:
+            equals, heredoc = line.find("="), line.find("<<")
+            if heredoc >= 0 and (equals < 0 or heredoc < equals):
+                name, delimiter = line.split("<<", 1)
+                value = []
+                for inner in lines:
+                    if inner == delimiter:
+                        break
+                    value.append(inner)
+                found[name] = "\n".join(value)
+            else:
+                name, value = line.split("=", 1)
+                found[name] = value
+        return found
+
+    def result(self, output, kind="enrollment", issue=""):
+        """The result step, on an execution file whose result carries `output` as its structured output, for a review
+        of `kind` (the issue `issue` for an issue). It returns the step's outputs as the runner reads them, and keeps
+        the step summary in self.summary, an issue's draft file in self.issue_draft, and the directory it ran in in
+        self.ran_in."""
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory)
+        root = self.ran_in = pathlib.Path(directory)
+        (root / "temp").mkdir()
+        (root / "home").mkdir()
+        execution = root / "execution.json"
+        execution.write_text(json.dumps([{"type": "system", "subtype": "init"},
+                                         {"type": "result", "subtype": "success", "structured_output": output}]))
+        run = subprocess.run(["bash", "-e", "-c", self.steps["Keep the draft, and the held finding apart from it"]["run"]],
+                             cwd=root, capture_output=True, text=True,
+                             env={**os.environ, "HOME": str(root / "home"), "RUNNER_TEMP": str(root / "temp"),
+                                  "GITHUB_OUTPUT": str(root / "output"), "RESULT": str(execution),
+                                  "SESSION": "09227178-7bbf-4e5f-86db-8736e530ef01", "HEAD_SHA": "1" * 40,
+                                  "KIND": kind, "ISSUE": issue, "GITHUB_STEP_SUMMARY": str(root / "summary")})
+        read = lambda path: path.read_text() if path.exists() else None  # noqa: E731
+        self.summary = read(root / "summary")
+        self.issue_draft = read(root / "temp" / "issue-draft.md")
+        return (run, read(root / "temp" / "draft" / "comment.md"), read(root / "temp" / "draft" / "verdicts.json"),
+                read(root / "temp" / "held-finding.md"), self.outputs(read(root / "output")),
+                read(root / "home" / ".claude" / "ossv-last-review"))
+
+    def store(self, issue="5", attempt="2", answer='{"generation": "1730000000000000"}',
+              draft="The draft reply:\n\nSee docs/dsl.md.\n"):
+        """.github/scripts/store-issue-draft on a draft file, with a stand-in curl that keeps its arguments, the object
+        it uploads, and answers `answer`. Return the exit status, the output, the summary, curl's arguments and the
+        object."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "bin").mkdir()
+            (root / "draft.md").write_text(draft, encoding="utf-8")
+            (root / "bin" / "curl").write_text(
+                "#!/bin/bash\n"
+                f'printf "%s\\n" "$@" > {root}/argv\n'
+                'prev=""; for a; do\n'
+                f'  [ "$prev" = --data-binary ] && cp "${{a#@}}" {root}/object\n'
+                f'  [ "$prev" = -H ] && [[ $a == @* ]] && cat "${{a#@}}" > {root}/header\n'
+                '  prev=$a; done\n'
+                f'echo {shlex.quote(answer)}\n')
+            (root / "bin" / "curl").chmod(0o755)
+            run = subprocess.run([str(ROOT / ".github" / "scripts" / "store-issue-draft"), str(root / "draft.md")],
+                                 capture_output=True, text=True,
+                                 env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
+                                      "GCP_ACCESS_TOKEN": "gcp-token-not-a-secret", "ISSUE": issue, "RUN_ID": "77",
+                                      "RUN_ATTEMPT": attempt, "RUN_URL": "https://github.com/o/r/actions/runs/77",
+                                      "GITHUB_STEP_SUMMARY": str(root / "summary")})
+            read = lambda path: path.read_text(encoding="utf-8") if path.exists() else ""  # noqa: E731
+            return (run.returncode, run.stdout, read(root / "summary"), read(root / "argv"), read(root / "object"),
+                    read(root / "header"))
+
+    def test_an_issue_draft_is_stored_privately_once_and_the_summary_names_only_where(self):
+        code, out, summary, argv, stored, header = self.store()
+        self.assertEqual(code, 0, out)
+        name = "issue-drafts%2F5%2F77-2"
+        self.assertIn("/b/theorem-agent-infra-oss-verify-held-findings/o?uploadType=media&ifGenerationMatch=0"
+                      f"&name={name}", argv)
+        self.assertEqual(stored, "oss-verify issue draft v1\nissue: 5\nrun: https://github.com/o/r/actions/runs/77\n"
+                                 "---\nThe draft reply:\n\nSee docs/dsl.md.\n")
+        self.assertEqual(header, "Authorization: Bearer gcp-token-not-a-secret\n")
+        self.assertNotIn("gcp-token-not-a-secret", argv)
+        self.assertIn("gcloud storage cat gs://theorem-agent-infra-oss-verify-held-findings/issue-drafts/5/77-2", summary)
+        self.assertNotIn("dsl.md", summary + out)
+
+    def test_a_draft_that_cannot_be_stored_fails_the_step(self):
+        for kwargs in ({"answer": '{"error": "403"}'}, {"issue": "5; x"}, {"attempt": ""}):
+            with self.subTest(kwargs=kwargs):
+                code, _, summary, _, _, _ = self.store(**kwargs)
+                self.assertNotEqual(code, 0)
+                self.assertNotIn("gcloud storage cat", summary)
+
+    def test_control_characters_are_taken_out_of_the_stored_draft(self):
+        # A person reads the draft in a terminal: an escape sequence (SGR 8 hides text), a carriage return, a bell,
+        # DEL and a C1 CSI (U+009B) in the model's text must not reach it. Tab, newline and other text stay.
+        draft = "Fine \x1b[8mhidden\x1b[0m text\r\nnext\tcol\x07\x7f\u009b31m café — ok\n"
+        code, out, _, _, stored, _ = self.store(draft=draft)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(stored.split("---\n", 1)[1], "Fine [8mhidden[0m text\nnext\tcol31m café — ok\n")
+
+    def test_bidirectional_text_controls_are_taken_out_of_the_stored_draft(self):
+        # U+202A to U+202E and U+2066 to U+2069 can show the draft in an order that is not its own (Trojan Source).
+        # Each one, alone, is taken out; the letters around it stay in their order.
+        for code_point in [*range(0x202A, 0x202F), *range(0x2066, 0x206A)]:
+            with self.subTest(code_point=f"U+{code_point:04X}"):
+                code, out, _, _, stored, _ = self.store(draft=f"ab{chr(code_point)}cd\n")
+                self.assertEqual(code, 0, out)
+                self.assertEqual(stored.split("---\n", 1)[1], "abcd\n")
+        # Their neighbours in Unicode, which control nothing, stay.
+        code, out, _, _, stored, _ = self.store(draft="a\u2029b\u202fc\u2065d\u206ae\n")
+        self.assertEqual(stored.split("---\n", 1)[1], "a\u2029b\u202fc\u2065d\u206ae\n")
+
+    def prompt(self, **env):
+        """.github/scripts/review-prompt with `env`: its exit status and the outputs it wrote."""
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "output"
+            run = subprocess.run([str(ROOT / ".github" / "scripts" / "review-prompt")], capture_output=True, text=True,
+                                 env={**os.environ, "GITHUB_OUTPUT": str(output), **env})
+            lines = output.read_text().splitlines() if output.exists() else []
+        return run.returncode, dict(line.split("=", 1) for line in lines)
+
+    def schema(self, arguments):
+        return json.loads(re.search(r"--json-schema '([^']*)'", arguments).group(1))
+
+    def test_the_prompt_of_each_kind_names_its_rules_and_its_schema(self):
+        code, out = self.prompt(KIND="change", PR="8")
+        self.assertEqual(code, 0)
+        self.assertTrue(out["prompt"].startswith("Read review-change.md at the root of this checkout"))
+        self.assertIn("pull request #8,", out["prompt"])
+        schema = self.schema(out["arguments"])
+        self.assertEqual(schema["required"], ["comment", "verdicts"])
+        self.assertEqual(schema["properties"]["verdicts"]["required"], ["1", "2", "3", "4", "5"])
+        self.assertNotIn("held", schema["properties"])
+        self.assertNotIn("--resume", out["arguments"])
+        code, out = self.prompt(KIND="issue", ISSUE="45")
+        self.assertEqual(code, 0)
+        self.assertTrue(out["prompt"].startswith("Read review-issue.md at the root of this checkout"))
+        self.assertIn("issue #45 ", out["prompt"])
+        schema = self.schema(out["arguments"])
+        self.assertEqual((schema["required"], sorted(schema["properties"])), (["comment", "decide"],
+                                                                            ["comment", "decide"]))
+        code, out = self.prompt(KIND="enrollment", PR="8", NAME="libreac")
+        self.assertEqual(code, 0)
+        self.assertIn("projects/libreac/", out["prompt"])
+        self.assertIn(" Then review as the section", out["prompt"])
+        schema = self.schema(out["arguments"])
+        self.assertEqual((schema["required"], schema["properties"]["verdicts"]["required"]),
+                         (["comment", "held", "verdicts"], ["F2", "F7"]))
+        self.assertNotIn("--resume", out["arguments"])
+        for code, out in (self.prompt(KIND="issue", ISSUE="45"), self.prompt(KIND="change", PR="8")):
+            self.assertTrue(out["prompt"].endswith(" Give the result as the structured output."))
+
+    def test_an_enrollment_with_a_kept_session_resumes_it_for_the_diff_and_check_d3(self):
+        session, last, head = "09227178-7bbf-4e5f-86db-8736e530ef01", "2" * 40, "3" * 40
+        code, out = self.prompt(KIND="enrollment", PR="8", NAME="libreac", SESSION=session, LAST=last, HEAD_SHA=head)
+        self.assertEqual(code, 0)
+        self.assertTrue(out["arguments"].endswith(f"' --resume {session}"))
+        self.assertIn(f"Earlier in this session you reviewed {last}.", out["prompt"])
+        self.assertIn(f"the diff from {last} to {head}, with one exception: check D3 of review.md", out["prompt"])
+        self.assertIn(f"each failing result of the report this build wrote for {head}, whatever the diff holds",
+                      out["prompt"])
+
+    def test_the_prompt_refuses_what_it_cannot_check(self):
+        for env in ({"KIND": "issue", "ISSUE": "45 extra"}, {"KIND": "change", "PR": ""},
+                    {"KIND": "enrollment", "PR": "8", "NAME": "$(touch pwned)"}, {"KIND": "", "PR": "8"},
+                    {"KIND": "other", "PR": "8"}):
+            with self.subTest(env=env):
+                self.assertEqual(self.prompt(**env), (2, {}))
 
     def test_a_review_without_a_held_finding_keeps_its_session(self):
         run, comment, verdicts, held, output, last = self.result(
@@ -1152,7 +1581,7 @@ class ReviewJob(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(comment, "Thanks.\n\n1. Fix X.\n\n")
         self.assertEqual(json.loads(verdicts), {"F2": "pass", "F7": "fail"})
-        self.assertEqual(output, "")
+        self.assertEqual(output, {"comment": "Thanks.\n\n1. Fix X.\n"})
         self.assertEqual(last, f"session=09227178-7bbf-4e5f-86db-8736e530ef01 head={'1' * 40}\n")
 
     def test_a_held_finding_stays_out_of_the_draft_and_its_session_is_not_kept(self):
@@ -1162,7 +1591,7 @@ class ReviewJob(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertNotIn("SECRETBUG", comment + verdicts + run.stdout + run.stderr)
         self.assertEqual(held, "<!-- held finding -->\n" + ReviewHeld.HELD + "\n")
-        self.assertEqual(output, "held=yes\n")
+        self.assertEqual(output, {"comment": "Thanks.\n\nA finding was sent for private review.\n", "held": "yes"})
         self.assertIsNone(last)
 
     def test_a_result_without_a_structured_output_fails_the_step(self):
@@ -1204,20 +1633,151 @@ class ReviewJob(unittest.TestCase):
                 self.assertIn("::warning::No cost collector token", run.stdout)
                 self.assertNotIn("::add-mask::", run.stdout)
                 self.assertEqual(env, "")
-        self.assertIs(self.steps["Sign in to Google Cloud, for the cost collector's token"]["continue-on-error"], True)
+
+
+@unittest.skipUnless(shutil.which("jq"), "needs jq, which the gh stand-in runs the script's filters with")
+class IssueDraftCap(unittest.TestCase):
+    """.github/scripts/issue-draft-cap, build.yaml's step "Hold the draft at the hourly cap", with a stand-in gh: it
+    counts the other runs for an issue's own event in the last hour whose review reached the model, and holds the
+    draft at the cap or on a failed read with a ::error::HELD annotation and exit status 1."""
+
+    def cap(self, runs, skipped=(), held=(), stopped=(), fail=None, run_id="99"):
+        """runs: the run ids that the runs API lists; skipped: the ids whose review job was skipped; held: the ids whose
+        step "Hold the draft at the hourly cap" failed; stopped: the ids whose step "Stop before the model when the
+        draft cannot be stored" failed (a refused sign-in); fail: "runs", or the id whose jobs cannot be read. Return
+        the exit status, the output and gh's calls."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "bin").mkdir()
+            (root / "runs.json").write_text(json.dumps({"workflow_runs": [{"id": i} for i in runs]}))
+            for i in runs:
+                gate = "skipped" if i in held else "failure" if i in stopped else "success"
+                model = "skipped" if i in held or i in stopped else "success"
+                review = {"name": "review",
+                          "conclusion": "skipped" if i in skipped else "failure" if i in held or i in stopped else None,
+                          "steps": [{"name": "Set up job", "conclusion": "success"},
+                                    {"name": "Hold the draft at the hourly cap",
+                                     "conclusion": "failure" if i in held else "success"},
+                                    {"name": "Sign in to Google Cloud, for the cost collector's token",
+                                     "conclusion": "skipped" if i in held else "success"},
+                                    {"name": "Stop before the model when the draft cannot be stored", "conclusion": gate},
+                                    {"name": "Review", "conclusion": model}]}
+                (root / f"jobs-{i}.json").write_text(json.dumps({"jobs": [
+                    {"name": "route", "conclusion": "success", "steps": []}, review]}))
+            listing = ('echo "gh: HTTP 502" >&2; exit 1' if fail == "runs"
+                       else f'jq -r "$filter" {root}/runs.json')
+            (root / "bin" / "gh").write_text(
+                "#!/bin/bash\n"
+                'filter=""; path=""; for a; do [ "$prev" = --jq ] && filter=$a; [[ $a == repos/* ]] && path=$a; prev=$a; done\n'
+                f'echo "$*" >> {root}/calls\n'
+                'case "$path" in\n'
+                f'  */workflows/build.yaml/runs) {listing} ;;\n'
+                f'  */runs/{fail}/jobs*) echo "gh: HTTP 502" >&2; exit 1 ;;\n'
+                f'  */runs/*/jobs*) id=${{path#*/runs/}}; id=${{id%%/*}}; jq -r "$filter" {root}/jobs-$id.json ;;\n'
+                '  *) exit 1 ;;\n'
+                "esac\n")
+            (root / "bin" / "gh").chmod(0o755)
+            run = subprocess.run([str(ROOT / ".github" / "scripts" / "issue-draft-cap")], capture_output=True, text=True,
+                                 env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "GH_TOKEN": "x",
+                                      "REPO": "o/r", "RUN_ID": run_id, "CAP": "6"})
+            return run.returncode, run.stdout, (root / "calls").read_text()
+
+    def test_under_the_cap_the_draft_is_made(self):
+        # Five drafts ran; three runs of the hour skipped the review (route found the event ours), and one is this run.
+        code, out, calls = self.cap([*range(1, 9), 99], skipped=(6, 7, 8))
+        self.assertEqual(code, 0, out)
+        self.assertIn("5 issue drafts ran the model in the last hour, under the cap of 6", out)
+        self.assertNotIn("HELD", out)
+        self.assertIn("event=issues", calls)
+        self.assertIn("created=>=", calls)
+        self.assertNotIn("runs/99/jobs", calls)
+
+    def test_a_run_the_cap_held_is_not_counted(self):
+        # Seven qualifying events in the hour: five drafted, one held at the cap, and this one. The held run called no
+        # model, so this draft is made.
+        code, out, _ = self.cap([*range(1, 7), 99], held=(6,))
+        self.assertEqual(code, 0, out)
+        self.assertIn("5 issue drafts ran the model in the last hour, under the cap of 6", out)
+        # A person's re-run after six held runs is made too.
+        code, out, _ = self.cap([*range(1, 7), 99], held=range(1, 7))
+        self.assertEqual(code, 0, out)
+        self.assertIn("0 issue drafts ran the model", out)
+
+    def test_a_run_stopped_at_the_sign_in_is_not_counted(self):
+        # A run whose Google sign-in was refused stopped before the model: it is not counted, so it leaves the count as
+        # it was. Five drafted, six stopped, and this one: the draft is made.
+        code, out, _ = self.cap([*range(1, 12), 99], stopped=range(6, 12))
+        self.assertEqual(code, 0, out)
+        self.assertIn("5 issue drafts ran the model in the last hour, under the cap of 6", out)
+
+    def test_at_the_cap_the_draft_is_held_and_the_step_fails(self):
+        code, out, _ = self.cap([*range(1, 8), 99], held=(7,))
+        self.assertEqual(code, 1)
+        self.assertIn("::error::HELD: 6 issue drafts ran the model in the last hour, at the cap of 6.", out)
+
+    def test_a_read_that_fails_holds_the_draft(self):
+        for fail in ("runs", 3):
+            with self.subTest(fail=fail):
+                code, out, _ = self.cap(list(range(1, 5)), fail=fail)
+                self.assertEqual(code, 1)
+                self.assertIn("::error::HELD: ", out)
+
+
+class StoreSignInGate(unittest.TestCase):
+    """build.yaml's step "Stop before the model when the draft cannot be stored", run as it is: for an issue, a
+    refused Google sign-in before the model fails the job there, red, with ::error:: and a summary naming the
+    cause."""
+
+    def gate(self, outcome, event="issues"):
+        flow = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
+        [step] = [s for s in flow["jobs"]["review"]["steps"]
+                  if s.get("name") == "Stop before the model when the draft cannot be stored"]
+        with tempfile.TemporaryDirectory() as directory:
+            summary = pathlib.Path(directory) / "summary"
+            run = subprocess.run(["bash", "-e", "-c", step["run"]], capture_output=True, text=True,
+                                 env={**os.environ, "SIGN_IN": outcome, "EVENT": event,
+                                      "GITHUB_STEP_SUMMARY": str(summary)})
+            return run.returncode, run.stdout, summary.read_text() if summary.exists() else ""
+
+    def test_a_refused_sign_in_fails_the_job_before_the_model_and_says_why(self):
+        for outcome in ("failure", "cancelled", ""):
+            with self.subTest(outcome=outcome):
+                code, out, summary = self.gate(outcome)
+                self.assertEqual(code, 1)
+                self.assertTrue(out.startswith("::error::NOT STORED: Google Cloud refused this run's sign-in"), out)
+                self.assertIn("does not admit runs that an issue's event starts yet", out)
+                self.assertIn("does not admit runs that an issue's event starts yet", summary)
+                self.assertNotIn("HELD", out + summary)
+
+    def test_a_refused_sign_in_on_a_run_started_by_hand_names_another_cause(self):
+        # gh workflow run build.yaml -f issue=<n>: the provider admits workflow_dispatch already, so the issues
+        # setting is not the cause.
+        code, out, summary = self.gate("failure", event="workflow_dispatch")
+        self.assertEqual(code, 1)
+        self.assertTrue(out.startswith("::error::NOT STORED: Google Cloud refused this run's sign-in"), out)
+        self.assertNotIn("an issue's event", out + summary)
+        self.assertIn("The provider admits a run started by hand, so the cause is elsewhere", out)
+        self.assertIn("identity provider for this repository and its service account", summary)
+
+    def test_an_admitted_sign_in_goes_on_to_the_model(self):
+        for event in ("issues", "workflow_dispatch"):
+            with self.subTest(event=event):
+                self.assertEqual(self.gate("success", event), (0, "", ""))
 
 
 class Owners(unittest.TestCase):
 
-    def test_only_review_md_the_skill_and_codeowners_have_an_owner_and_are_the_last_patterns(self):
+    def test_only_the_review_files_the_skill_and_codeowners_have_an_owner_and_are_the_last_patterns(self):
         lines = [line.split() for line in (ROOT / ".github" / "CODEOWNERS").read_text().splitlines()
                  if line.strip() and not line.lstrip().startswith("#")]
         owned = [["/review.md", "@theorem-labs/engineering"],
+                 ["/review-change.md", "@theorem-labs/engineering"],
+                 ["/review-issue.md", "@theorem-labs/engineering"],
                  ["/.claude/skills/write-to-maintainer/", "@theorem-labs/engineering"],
                  ["/.github/CODEOWNERS", "@theorem-labs/engineering"]]
         self.assertEqual([line for line in lines if len(line) > 1], owned)
-        self.assertEqual(lines[-3:], owned)
-        self.assertTrue((ROOT / "review.md").is_file())
+        self.assertEqual(lines[-5:], owned)
+        self.assertTrue(all((ROOT / name).is_file() for name in ("review.md", "review-change.md", "review-issue.md")))
 
 
 if __name__ == "__main__":

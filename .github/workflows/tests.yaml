@@ -4,7 +4,8 @@ name: "Tests"
 # tests runs this repository's tests and checks every project with tools/validate.py, on main and on pull requests
 # from branches of this repository. It runs that branch's code, so for a pull request from a fork it checks out and
 # runs nothing, and passes with "not run" in its summary: a fork's pull request may change only one projects/<name>/,
-# and enrollment (validate.yaml) and project-builds (build.yaml) are the checks that judge it.
+# which enrollment (validate.yaml) judges, refusing a fork that changes anything else; project-builds (build.yaml)
+# builds a fork's project, and gives a fork's pull request that changes no file under projects/ a change review.
 #
 # Each commit is judged on its own changes: for a pull request, GitHub's merge of it against the base branch; for a push
 # to main, against the commit before the push. The jobs:
@@ -86,7 +87,7 @@ jobs:
       - name: A pull request from a fork runs nothing here
         if: env.FORK == 'true'
         run: |
-          message="Not run: this pull request is from a fork, whose code this workflow does not run. enrollment and project-builds check its projects/<name>/."
+          message="Not run: this pull request is from a fork, whose code this workflow does not run. enrollment checks that it changes only one projects/<name>/."
           echo "$message"
           echo "$message" >> "$GITHUB_STEP_SUMMARY"
 
