@@ -64,8 +64,9 @@ Security note: the project's Dockerfile is built with network access, as `docker
 someone you don't trust on a machine with nothing to lose.
 
 Exit codes: 0 if the project builds (and, with --twice or --lock, every byte matches); 1 if it does not build; 2 if
-projects/<name>/ breaks the enrollment rules, or a fuzz target or program is not statically linked; 3 if it builds but
-the bytes differ (--twice or --lock).
+projects/<name>/ breaks the enrollment rules, a fuzz target or program is not statically linked, or compile refuses a
+program (it writes why to $OUT/.ov-refused: docs/build-contract.md, "Whole programs"); 3 if it builds but the bytes
+differ (--twice or --lock).
 
 Requires git, Docker (with the toolchain image available) and PyYAML (on Ubuntu, apt install python3-yaml).
 """
@@ -175,8 +176,9 @@ def build_all(job, commit, work, toolchain, home, suffix="", no_cache=False, rec
     home/images before the image is built, and every container carries its work_label(). With `record`, each build
     records its links for the checks of the binaries (check_build.compile_build).
 
-    Return (builder tag, project tag, fuzz targets, entries); the entries hold job.programs too. Raise Failed if any
-    step fails.
+    Return (builder tag, project tag, fuzz targets, entries); the entries hold job.programs too. Raise Broken if the
+    project breaks the enrollment rules (compile refuses a build, or a file that programs names is not a whole
+    program), else Failed if any step fails.
     """
     ubsan = ubsan_settings(job, toolchain)
     builder = check_build.build_builder(toolchain, suffix, no_cache)
@@ -192,16 +194,17 @@ def build_all(job, commit, work, toolchain, home, suffix="", no_cache=False, rec
     step("find the fuzz targets" + (" and the programs" if job.programs else ""))
     found = {build: manifest.discover(directory) for build, directory in raw.items()}
     targets, problems = manifest.resolve_targets(found, job.fuzz_targets, programs=job.programs)
-    problems += manifest.find_programs(raw, job.programs)
+    broken = manifest.find_programs(raw, job.programs)
     for build, names in found.items():
         say(f"{build}: {', '.join(name for name in names if name not in job.programs) or 'no fuzz target'}")
         if job.programs:
             present = [name for name in job.programs if manifest.is_executable(raw[build] / name)]
             say(f"{build}: programs: {', '.join(present) or 'none'}")
     entries, missing = manifest.collect(raw, targets, work / "out", job.programs)
-    if problems or missing:
+    if problems or broken or missing:
         what = "the fuzz targets and programs are" if job.programs else "the fuzz targets are"
-        raise Failed("\n  ".join([f"{what} not right:", *problems, *missing]))
+        message = "\n  ".join([f"{what} not right:", *problems, *broken, *missing])
+        raise check_build.Broken(message) if broken else Failed(message)
     return builder, tag, targets, entries
 
 
@@ -316,6 +319,9 @@ def main():
             say(f"{job.ref or 'the default branch'} is {commit}")
         say(f"toolchain: {toolchain} ({why})")
         builder, tag, targets, entries = build_all(job, commit, work, toolchain, work, record=bool(options.checks))
+    except check_build.Broken as failure:
+        say(f"\nTHE PROJECT BREAKS THE ENROLLMENT RULES: {failure}")
+        return 2
     except Failed as failure:
         say(f"\nBUILD FAILED: {failure}")
         return 1
@@ -360,6 +366,9 @@ def main():
                 job, commit, work / "twice", toolchain, work, "-twice", no_cache=True)
             builder_ids = {"toolchain": toolchain, "image": check_build.image_id(builder_again),
                            "project_image": check_build.image_id(tag_again)}
+        except check_build.Broken as failure:
+            say(f"\nTHE SECOND BUILD BREAKS THE ENROLLMENT RULES: {failure}")
+            return 2
         except Failed as failure:
             say(f"\nTHE SECOND BUILD FAILED: {failure}")
             return 1

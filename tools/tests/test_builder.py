@@ -13,6 +13,7 @@ is skipped.
 """
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -241,12 +242,15 @@ PROGRAM_EXPECTED = {
     "huge": ((3, 3, 3, 3), ""),
     "overflow": ((0, 0, 134, 134), ""),
 }
+# Text that only a sanitizer's report holds. When the run aborts, standard error also holds what the shell or qemu
+# says about the signal ("Aborted (core dumped)"), which is not the program's.
+REPORT_TEXT = re.compile(r"Sanitizer|ERROR:|SUMMARY:|==\d+==")
 PROGRAM_RUNNER = r"""
 for b in plain ubsan asan asan-ubsan; do
   for c in none env huge overflow; do
     if [ "$c" = none ]; then set --; else set -- "$c"; fi
     OV_TEST_VALUE=seen q /bin2/ov_program.$b "$@" > /tmp/out 2> /tmp/err; s=$?
-    printf '%s ' "$b $c $s $(wc -c < /tmp/err)"; tr '\n' , < /tmp/out; echo
+    printf '%s ' "$b $c $s"; tr '\n' , < /tmp/out; printf ' '; tr '\n' , < /tmp/err; echo
   done
 done
 """
@@ -300,6 +304,60 @@ class ProgramBuilder(unittest.TestCase):
                 self.assertEqual(manifest.binary_layout(published)["static"], True)
                 self.assertEqual(manifest.read_elf(published)[0]["type"], manifest.ET_EXEC)
 
+    def compile_with(self, programs, build_sh=None):
+        """Run compile for the plain build in the fixture's image, with OV_PROGRAMS `programs` and, if given, this
+        build.sh in place of the fixture's: (status, standard output, standard error, $OUT/.ov-refused or None)."""
+        scratch = pathlib.Path(tempfile.mkdtemp(prefix="compile.", dir=self.work))
+        mounts = ["-v", f"{scratch / 'out'}:/out"]
+        if build_sh is not None:
+            (scratch / "build.sh").write_text(build_sh)
+            mounts += ["-v", f"{scratch / 'build.sh'}:/src/build.sh:ro"]
+        done = subprocess.run(
+            ["docker", "run", "--rm", "--init", "--network=none", *check_build.work_label(self.work),
+             "-e", "SANITIZER=none", "-e", f"OV_OWNER={os.getuid()}:{os.getgid()}", "-e", f"OV_PROGRAMS={programs}",
+             *mounts, PROGRAM_TAG, "compile"],
+            capture_output=True, text=True,
+        )
+        refused = scratch / "out" / check_build.REFUSED
+        return done.returncode, done.stdout, done.stderr, refused.read_text() if refused.exists() else None
+
+    def test_compile_names_each_program_and_refuses_one_that_breaks_a_rule(self):
+        status, out, _, refusal = self.compile_with("ov_program")
+        self.assertEqual((status, refusal), (0, None))
+        self.assertIn("compile: program ov_program\n", out)
+        self.assertIn("compile: OV_PROGRAM_LDFLAGS=-static -no-pie -Wl,--gc-sections\n", out)
+        link = '$CC $CFLAGS program.c -o "$OUT/ov_program" $OV_PROGRAM_LDFLAGS'
+        cases = {
+            "is not a regular file in $OUT": ("ov_program absent", None),
+            "is not a program name": ("ov_program ../ov_program", None),
+            "is not executable": ("ov_program", f'{link}\nchmod -x "$OUT/ov_program"\n'),
+            # Kept by -u, which --gc-sections would otherwise drop.
+            "defines LLVMFuzzerTestOneInput": (
+                "ov_program",
+                "printf 'int LLVMFuzzerTestOneInput(const char *d, unsigned long n) { return 0; }\\n' > \"$WORK/f.c\"\n"
+                f'{link} "$WORK/f.c" -Wl,-u,LLVMFuzzerTestOneInput\n'),
+        }
+        for rule, (programs, build_sh) in cases.items():
+            with self.subTest(rule=rule):
+                status, _, errors, refusal = self.compile_with(programs, build_sh)
+                self.assertEqual(status, 2, errors[-2000:])
+                self.assertRegex(errors, r"compile: program \S+, which OV_PROGRAMS names, " + re.escape(rule))
+                # The same reason, without "compile: ", for tools/check (check_build.compile_build).
+                self.assertIsNotNone(refusal)
+                self.assertIn(f"compile: {refusal.strip()}\n", errors)
+                self.assertRegex(refusal, r"^program \S+, which OV_PROGRAMS names, " + re.escape(rule))
+        # A build.sh that leaves the file and builds is not refused.
+        status, _, errors, refusal = self.compile_with(
+            "ov_program", f'{link}\necho "program ov_program is not one" > "$OUT/{check_build.REFUSED}"\n')
+        self.assertEqual((status, refusal), (0, None), errors[-2000:])
+
+    def test_tools_check_reads_a_refusal_as_a_rule_break(self):
+        with self.assertRaises(check_build.Broken) as refused:
+            check_build.compile_build(PROGRAM_TAG, "plain", "none", self.work / "refused",
+                                      labels=check_build.work_label(self.work), programs=["ov_program", "absent"])
+        self.assertIn("compile refused the plain build: program absent, which OV_PROGRAMS names, is not a regular "
+                      "file in $OUT", str(refused.exception))
+
     @unittest.skipUnless(QEMU, "no qemu-riscv64 on this machine")
     def test_exit_statuses_and_output(self):
         binaries = self.work / "bin"
@@ -314,13 +372,18 @@ class ProgramBuilder(unittest.TestCase):
         )
         results = {}
         for line in done.stdout.splitlines():
-            build, case, status, errors, out = line.split(" ", 4)
-            results[(build, case)] = (status, errors, out)
-        for case, (statuses, out) in PROGRAM_EXPECTED.items():
+            build, case, status, out, errors = line.split(" ", 4)
+            results[(build, case)] = (status, out, errors)
+        for case, (statuses, expected_out) in PROGRAM_EXPECTED.items():
             for build, status in zip(BUILDS, statuses):
                 with self.subTest(build=build, case=case):
-                    # Nothing on standard error in any build: an AddressSanitizer detection aborts with no report.
-                    self.assertEqual(results[(build, case)], (str(status), "0", out))
+                    got_status, out, errors = results[(build, case)]
+                    self.assertEqual((got_status, out), (str(status), expected_out))
+                    # No report in any build: an AddressSanitizer detection aborts silently. A run that ends normally
+                    # writes nothing at all on standard error, the asan twin's included.
+                    self.assertIsNone(REPORT_TEXT.search(errors), errors)
+                    if status != 134:
+                        self.assertEqual(errors, "")
 
     @unittest.skipUnless(shutil.which("qemu-riscv64-static"), "no qemu-riscv64-static on PATH")
     def test_the_binary_checks_run_it_with_no_argument(self):

@@ -243,7 +243,7 @@ class Programs(Project):
         with open(self.project / "project.yaml", "a", encoding="utf-8") as handle:
             handle.write("programs: [tool]\n")
 
-    def run_check(self, options, segments=(PT_LOAD,), second=None):
+    def run_check(self, options, segments=(PT_LOAD,), second=None, data=None):
         summary = self.work.parent / "summary.md"
         first = {**FIRST, "tool": self.PROGRAM}
         calls = []
@@ -251,7 +251,7 @@ class Programs(Project):
         def build_all(*args, **kwargs):
             calls.append(args)
             collected = first if len(calls) == 1 else second
-            binaries(self.work / ("out" if len(calls) == 1 else "twice/out"), collected, segments)
+            binaries(self.work / ("out" if len(calls) == 1 else "twice/out"), collected, segments, data)
             return "builder", "project", ["demo_fuzzer"], collected
 
         code, output, errors = self.main(["--summary", str(summary), *options], build_all)
@@ -275,11 +275,61 @@ class Programs(Project):
         self.assertEqual(data["rebuild"]["targets"]["tool"]["builds"]["asan"]["sha256"], "f" * 64)
         self.assertIn("tool.asan: sha256 " + "f" * 64, output)
 
-    def test_a_dynamic_program_breaks_the_enrollment_rules(self):
-        code, _, errors, _, _ = self.run_check([], segments=(PT_LOAD, PT_INTERP))
+    def test_a_program_whose_headers_tools_check_cannot_read_breaks_the_enrollment_rules(self):
+        # compile reads the program headers with llvm-readelf, tools/check with manifest.read_elf: either refuses.
+        code, _, errors, _, _ = self.run_check([], data=b"\x7fELF")
         self.assertEqual(code, 2)
         self.assertEqual(sum("a whole program must be statically linked" in line for line in errors.splitlines()),
                          len(BUILDS))
+
+    def compile_exits(self, status, refusal=None):
+        """tools/check with its own build_all and compile_build, where each run of `compile` exits `status` and, if
+        `refusal` is given, writes it to $OUT/.ov-refused first: (exit code, output)."""
+        build_all = check_tool.build_all
+
+        def run(*argv, quiet=False):
+            out = pathlib.Path(next(arg for arg in argv if arg.endswith(":/out"))[:-len(":/out")])
+            if refusal is not None:
+                (out / check_build.REFUSED).write_text(refusal + "\n")
+            return status
+
+        with mock.patch.multiple(check_build, build_builder=lambda *args, **kwargs: "builder",
+                                 project_tag=lambda *args, **kwargs: "project", record_image=lambda *args: None,
+                                 build_project=lambda *args, **kwargs: None, run=run):
+            code, output, _ = self.main([], build_all)
+        return code, output
+
+    def test_a_program_that_compile_refuses_breaks_the_enrollment_rules(self):
+        refusal = "program tool, which OV_PROGRAMS names, is not executable (the plain build)"
+        code, output = self.compile_exits(2, refusal)
+        self.assertEqual(code, 2)
+        self.assertIn(f"THE PROJECT BREAKS THE ENROLLMENT RULES: compile refused the plain build: {refusal}\n", output)
+
+    def test_a_compile_that_fails_otherwise_is_a_build_that_fails(self):
+        # Status 2 with no .ov-refused is make's own (bash -eux build.sh), and only status 2 is a refusal.
+        for status, refusal in ((2, None), (1, "program tool, which OV_PROGRAMS names, is not executable")):
+            with self.subTest(status=status, refusal=refusal):
+                code, output = self.compile_exits(status, refusal)
+                self.assertEqual(code, 1)
+                self.assertIn(f"BUILD FAILED: compile exited {status} in the plain build\n", output)
+
+    def test_build_all_refuses_a_program_that_is_a_fuzz_target(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            job = check_tool.load(str(self.project))
+        unstripped = elf([("LLVMFuzzerTestOneInput", 0x12, 1)], segments=[PT_LOAD])
+
+        def compile_build(tag, build, sanitizer, out, ubsan=None, *, labels, record=False, programs=()):
+            (out / ".stripped").mkdir(parents=True)
+            (out / "tool").write_bytes(unstripped)
+            os.chmod(out / "tool", 0o755)
+            (out / ".stripped" / hashlib.sha256(unstripped).hexdigest()).write_bytes(unstripped)
+
+        with mock.patch.multiple(check_build, build_builder=lambda *args, **kwargs: "builder",
+                                 project_tag=lambda *args, **kwargs: "project", record_image=lambda *args: None,
+                                 build_project=lambda *args, **kwargs: None, compile_build=compile_build), \
+                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(check_build.Broken) as refused:
+            check_tool.build_all(job, COMMIT, self.work, TOOLCHAIN, self.work)
+        self.assertIn("program tool in the plain build defines LLVMFuzzerTestOneInput", str(refused.exception))
 
     def test_build_all_gives_compile_the_programs_and_collects_them(self):
         with contextlib.redirect_stdout(io.StringIO()):

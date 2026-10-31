@@ -19,7 +19,7 @@ There are two main statements:
 * **Halts.** On each input that stays in the build's memory budget, each run whose output is read until the program ends exits with a status that the statement accepts, usually 0 or 2 ([below](#what-a-statement-accepts)). Thus the binary does not crash, fail an assertion, hang, or fail a sanitizer check on such an input.
 * **Agrees.** On each input on which the plain build stays in its budget, the plain build and a sanitizer build both reach no error. They also have the same behaviour: they write the same bytes and exit with the same status. A sanitizer detection stops the program, so this statement excludes each error that the sanitizer checks.
 
-The project's directory in the proofs repository, `projects/<name>/`, lists the statements of each fuzz target and build, and the proofs that are done.
+The project's directory in the proofs repository, `projects/<name>/`, lists the statements of each fuzz target or whole program and each build, and the proofs that are done.
 
 ## What a statement accepts
 

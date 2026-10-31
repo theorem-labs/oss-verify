@@ -290,8 +290,10 @@ def resolve_targets(found, wanted=None, *, programs=()):
 
 def find_programs(raw, programs):
     """Check project.yaml's programs in each build's $OUT (raw[<build>]): a whole program comes from that list, not from
-    the symbol table rule. Return the problems: a program file that is not an executable ELF file, or that defines
-    LLVMFuzzerTestOneInput. A program that a build does not have at all is collect()'s problem."""
+    the symbol table rule. Return the problems, which tools/check reports as rule breaks (exit 2): a program file that
+    is not an executable ELF file, or that defines LLVMFuzzerTestOneInput. compile refuses both before tools/check
+    collects anything, so this guards an $OUT that compile did not check. A program that a build does not have at all
+    is collect()'s problem."""
     problems = []
     for name in programs:
         for build, out in raw.items():

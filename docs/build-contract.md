@@ -30,7 +30,7 @@ Each binary is a static riscv64 Linux program for RV64G (`-march=rv64g -mabi=lp6
 
 ## Static riscv64 programs
 
-The statements use [Linux Process Semantics (LPS)](https://github.com/theorem-labs/rocq-linux-process-semantics), a formal model of a riscv64 Linux process ([what-gets-proven.md](what-gets-proven.md#the-statements)). A statement is about each byte of the program. A static program holds all of its code: the library, the fuzz target, the driver and the C library. Thus no code from outside the binary runs.
+The statements use [Linux Process Semantics (LPS)](https://github.com/theorem-labs/rocq-linux-process-semantics), a formal model of a riscv64 Linux process ([what-gets-proven.md](what-gets-proven.md#the-statements)). A statement is about each byte of the program. A static program holds all of its code: the library, the fuzz target, the driver and the C library, or for a whole program ([below](#whole-programs)), the program, its libraries and the C library. Thus no code from outside the binary runs.
 
 ## Toolchains
 
@@ -194,7 +194,7 @@ Thus in the AddressSanitizer builds, `malloc` returns NULL when the runtime refu
 * A statement about a whole program names its input set, as a condition on the arguments, the environment, standard input and the rest of the process's world, and the exit statuses that it accepts.
 * The published bytes are the program, stripped after the link. `compile` runs `$CHOST-strip` (`llvm-strip`, with its default options) on `$OUT/<name>` and keeps the output as `$OUT/.stripped/<sha256 of $OUT/<name>>`. Do not change the program after the link.
 
-After `build.sh`, `compile` makes sure that each program is a regular, executable and statically linked ELF file at fixed addresses (`ET_EXEC`, with no `PT_INTERP` or `PT_DYNAMIC` program header), which does not define `LLVMFuzzerTestOneInput`, and prints `compile: program <name>`. It stops with status 2 when a program breaks one of these rules. `tools/check` copies the published binary of each program to `out/<name>/<name>.<build>` and lists it in the manifest ([below](#the-manifest)). `--twice` and `--lock` compare its bytes as they compare those of a fuzz target. The Go builder builds no whole program. [tools/tests/fixtures/program/](../tools/tests/fixtures/program/) is a test project with one whole program, which `tools/tests/test_builder.py` builds and runs in all four builds.
+After `build.sh`, `compile` makes sure that each program is a regular, executable and statically linked ELF file at fixed addresses (`ET_EXEC`, with no `PT_INTERP` or `PT_DYNAMIC` program header), which does not define `LLVMFuzzerTestOneInput`, and prints `compile: program <name>`. When a program breaks one of these rules, `compile` prints a message that names the program and the rule, writes it to `$OUT/.ov-refused`, and stops with status 2. `tools/check` reads that file and exits with status 2, the status for a project that breaks the enrollment rules. `tools/check` copies the published binary of each program to `out/<name>/<name>.<build>` and lists it in the manifest ([below](#the-manifest)). `--twice` and `--lock` compare its bytes as they compare those of a fuzz target. The Go builder builds no whole program. [tools/tests/fixtures/program/](../tools/tests/fixtures/program/) is a test project with one whole program, which `tools/tests/test_builder.py` builds and runs in all four builds.
 
 ## The driver
 

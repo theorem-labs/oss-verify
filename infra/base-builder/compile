@@ -26,9 +26,10 @@
 # Whole programs: each name in OV_PROGRAMS (space-separated; tools/check passes project.yaml's programs) is a program
 # with its own main that build.sh links into $OUT/<name> itself, with $OV_PROGRAM_LDFLAGS and with no driver and no
 # seals (docs/build-contract.md, "Whole programs"). After build.sh, compile requires each one to be a static
-# executable that does not define LLVMFuzzerTestOneInput, and saves its stripped twin, `$CHOST-strip` of it, as
-# $OUT/.stripped/<sha256 of the executable>. compile exports $OV_PROGRAM_LDFLAGS in every build; a fuzz target's link
-# does not use it, and none of this changes a fuzz target.
+# executable that does not define LLVMFuzzerTestOneInput, else it stops with status 2 and writes why to
+# $OUT/.ov-refused. It saves the stripped twin of each, `$CHOST-strip` of it, as $OUT/.stripped/<sha256 of the
+# executable>. compile exports $OV_PROGRAM_LDFLAGS in every build; a fuzz target's link does not use it, and none of
+# this changes a fuzz target.
 #
 # Set OV_OWNER=<uid>:<gid> to have $OUT handed to that owner at the end.
 #
@@ -54,11 +55,20 @@ if [ -n "${OV_OWNER:-}" ]; then
 fi
 export -n OV_OWNER
 
+# A rule break of the project's: say why, write the reason to $OUT/.ov-refused, and stop with status 2. tools/check
+# reads the file to report that the project breaks the enrollment rules, not that it does not build (check_build.py,
+# compile_build). Status 2 alone does not say so: `bash -eux build.sh` also stops with make's own status 2.
+refuse() {
+  echo "compile: $1" >&2
+  printf '%s\n' "$1" > "$OUT/.ov-refused"
+  exit 2
+}
+
 echo "compile: the $BUILD build (SANITIZER=$SANITIZER)"
 
 # A Go toolchain image (it sets OFTGO) builds a Go project, with OSS-Fuzz's Go helpers: go/compile-go.
 if [ -n "${OFTGO:-}" ]; then
-  [ -z "${OV_PROGRAMS:-}" ] || { echo "compile: the Go builder builds fuzz targets only, not programs" >&2; exit 2; }
+  [ -z "${OV_PROGRAMS:-}" ] || refuse "the Go builder builds fuzz targets only, not programs"
   "$LIB/go/compile-go"
   exit 0
 fi
@@ -207,6 +217,8 @@ echo "compile: CFLAGS=$CFLAGS"
 echo "compile: CXXFLAGS=$CXXFLAGS"
 echo "compile: OV_PROGRAM_LDFLAGS=$OV_PROGRAM_LDFLAGS"
 bash -eux "$SRC/build.sh"
+# The file is compile's to write: one that build.sh left is not a refusal.
+rm -f "$OUT/.ov-refused"
 
 # Save the stripped twin of each executable build.sh left in $OUT.
 mkdir -p "$OUT/.stripped"
@@ -251,10 +263,7 @@ for name in ${program_names[@]+"${program_names[@]}"}; do
   elif llvm-nm --defined-only "$f" 2>/dev/null | grep -E ' [TW] LLVMFuzzerTestOneInput$' >/dev/null; then
     why="defines LLVMFuzzerTestOneInput: it is a fuzz target, so leave it out of programs"
   fi
-  if [ -n "$why" ]; then
-    echo "compile: program $name, which OV_PROGRAMS names, $why (the $BUILD build)" >&2
-    exit 2
-  fi
+  [ -z "$why" ] || refuse "program $name, which OV_PROGRAMS names, $why (the $BUILD build)"
   sum=$(sha256sum "$f" | cut -d' ' -f1)
   "$CHOST-strip" -o "$OUT/.stripped/$sum" "$f"
   echo "compile: program $name"

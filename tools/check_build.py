@@ -42,6 +42,11 @@ class Failed(Exception):
     """The build failed. The message says which step failed and why."""
 
 
+class Broken(Failed):
+    """The project breaks the enrollment rules, which compile or the collection of the binaries found: tools/check
+    exits 2, not 1. The message says which rule."""
+
+
 @dataclasses.dataclass
 class Job:
     """One project's build settings, from its project.yaml and the command line."""
@@ -311,6 +316,8 @@ def empty_directory(path, tag, *, labels):
 
 # The status docker run exits with when it cannot run the container at all.
 DOCKER_FAILED = 125
+# The file in $OUT where compile writes why it refused a build, before it exits 2 (infra/base-builder/compile, refuse).
+REFUSED = ".ov-refused"
 
 
 def compile_build(tag, build, sanitizer, out, ubsan=None, *, labels, record=False, programs=()):
@@ -319,7 +326,8 @@ def compile_build(tag, build, sanitizer, out, ubsan=None, *, labels, record=Fals
     and those that its C compiles leave out. `labels`: docker run arguments for the container, work_label(). With
     `record`, compile records each fuzz target's link in $OUT/.records/ for the checks of the binaries
     (tools/check_links.py); the binaries are the same. `programs`: project.yaml's programs, which compile gets as
-    OV_PROGRAMS, checks, and saves the stripped twin of."""
+    OV_PROGRAMS, checks, and saves the stripped twin of. Raise Broken if compile refuses the build (a program breaks a
+    rule), else Failed if it fails."""
     step(f"compile: the {build} build (SANITIZER={sanitizer}), with no network")
     empty_directory(out, tag, labels=labels)
     owner = f"{os.getuid()}:{os.getgid()}"
@@ -343,6 +351,10 @@ def compile_build(tag, build, sanitizer, out, ubsan=None, *, labels, record=Fals
         empty_directory(out, tag, labels=labels)
         code = run(*command)
     if code != 0:
+        refused = out / REFUSED
+        if code == 2 and refused.is_file() and not refused.is_symlink():
+            reason = refused.read_text(encoding="utf-8", errors="replace").strip()[:2000]
+            raise Broken(f"compile refused the {build} build: {reason}")
         raise Failed(f"compile exited {code} in the {build} build")
 
 
