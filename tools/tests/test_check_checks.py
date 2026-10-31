@@ -1612,7 +1612,7 @@ class ReviewJob(unittest.TestCase):
         # still passed. `version:` is forbidden here too, so the action keeps its own default, 1.104.2, which is
         # above the 1.94 a Linux device needs to reach a Tailscale Service's address.
         self.assertEqual(set(join["with"]),
-                         {"oauth-client-id", "audience", "tags", "hostname", "use-cache"})
+                         {"oauth-client-id", "audience", "tags", "hostname", "use-cache", "log-mode"})
         self.assertEqual(join["with"]["oauth-client-id"], "${{ env.TAILNET_CLIENT_ID }}")
         self.assertEqual(join["with"]["audience"], "theorem.dev/tailnet/ossv-review")
         self.assertEqual(join["with"]["tags"], "tag:ossv-review")
@@ -1621,10 +1621,15 @@ class ReviewJob(unittest.TestCase):
                          "ossv-review-${{ github.run_id }}-${{ github.run_attempt }}")
         # The Actions cache of this job holds the review's session alone, so the action keeps no binary in it.
         self.assertIs(join["with"]["use-cache"], False)
+        # This public repository's log never shows the action's commands, even on a re-run with debug logging: with
+        # another log-mode, the action prints the `tailscale up` command, which carries this job's GitHub identity
+        # token, and the output of `tailscale status --json`, the tailnet's nodes.
+        self.assertEqual(join["with"]["log-mode"], "quiet")
         self.assertEqual(join["timeout-minutes"], 3)
         # The node is ephemeral: the logout deletes it at once, whatever the review did and whatever the join's
-        # outcome. Neither the join nor the logout may stop the steps that keep the draft, the verdicts and a held
-        # finding.
+        # outcome. Neither the join, the export nor the logout may stop the steps that keep the draft, the verdicts
+        # and a held finding.
+        self.assertIs(self.steps["Export the review's usage to the cost collector"]["continue-on-error"], True)
         leave = self.steps["Leave the tailnet"]
         self.assertEqual(leave["if"], "always()")
         self.assertIs(leave["continue-on-error"], True)

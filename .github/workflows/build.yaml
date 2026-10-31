@@ -630,8 +630,12 @@ jobs:
       # --accept-routes in every `tailscale up`. The test of this step pins the exact set of its settings, so no
       # version input can be given at all. use-cache is off: the action would
       # otherwise keep the tailscale binary in this repository's Actions cache and run it as root from there, and
-      # the review job's cache holds its review session alone (above). The job's 70 minutes hold every step's cap:
-      # gather 15, join 3, review 45 and logout 2.
+      # the review job's cache holds its review session alone (above). log-mode is quiet: at the pinned commit
+      # src/logging.ts silences the action's commands only when the run is not in debug, so a re-run with debug logging
+      # would print to this public log the `tailscale up` command with this job's GitHub identity token, which the
+      # action does not mask (src/main.ts), and the output of `tailscale status --json`, the tailnet's nodes. quiet
+      # keeps them silent whatever the debug setting, and a command that fails still writes its error output. The
+      # job's 70 minutes hold every step's cap: gather 15, join 3, review 45 and logout 2.
       - name: Join Theorem's tailnet, to export this review's usage
         id: tailnet
         continue-on-error: true
@@ -643,12 +647,15 @@ jobs:
           tags: tag:ossv-review
           hostname: ossv-review-${{ github.run_id }}-${{ github.run_attempt }}
           use-cache: false
+          log-mode: quiet
       # After a join that passed, the step asks the collector's address for a page, for at most 10 seconds. curl takes
       # any HTTP answer, a 404 too, so only a refused or timed-out connection, or an empty address, fails it. The
       # address stays only while the Service svc:spend does (INFRA-832's spec, D9): a Service made again gets new
       # addresses, and a job that joined would then send every record to an address that answers nothing. So when the
       # collector does not answer, the step writes no exporter variables either, and the warning names the address.
+      # The step takes continue-on-error, as the join and the logout do: the export never decides whether a review runs.
       - name: Export the review's usage to the cost collector
+        continue-on-error: true
         env: {TAILNET: "${{ steps.tailnet.outcome }}"}
         run: |
           if [ "$TAILNET" != success ]; then
