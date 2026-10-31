@@ -14,7 +14,7 @@ A statement is about the exact bytes of one binary: one fuzz target in one build
 
 There are two main statements:
 
-* **Halts.** On each input that stays in the build's memory budget, and whose output is read until the program ends, each run exits with a status that the statement accepts, usually 0 or 2 ([below](#what-a-statement-accepts)). Thus the binary does not crash, fail an assertion, hang, or fail a sanitizer check on such an input.
+* **Halts.** On each input that stays in the build's memory budget, each run whose output is read until the program ends exits with a status that the statement accepts, usually 0 or 2 ([below](#what-a-statement-accepts)). Thus the binary does not crash, fail an assertion, hang, or fail a sanitizer check on such an input.
 * **Agrees.** On each input on which the plain build stays in its budget, the plain build and a sanitizer build both reach no error. They also have the same behaviour: they write the same bytes and exit with the same status. A sanitizer detection stops the program, so this statement excludes each error that the sanitizer checks.
 
 The project's directory in the proofs repository, `projects/<name>/`, lists the statements of each fuzz target and build, and the proofs that are done.
@@ -43,7 +43,7 @@ There are exceptions, and this is the full list. Each exception is a limit of ho
 * **One thread.** A process in LPS runs one thread. LPS does not cover a fuzz target that starts a thread. We cannot prove the statements of such a fuzz target until LPS includes threads.
 * **Inputs smaller than 64 MiB.** The driver refuses an input file of 64 MiB or more, with status 2. Thus no statement is about a larger input.
 * **The size classes of the AddressSanitizer allocator.** On riscv64, this allocator refuses a request when the size class of the request holds 3.5 GiB. The plain build can use up to 16 GiB. Thus an AddressSanitizer build can refuse memory to an input that the plain build accepts. For this cause, their budgets are different ([below](#memory-budgets)).
-* **The output is read until the program ends.** Each statement is about a run whose standard output and standard error are read until the program ends. On Linux, a write to a pipe whose reader has exited kills the program, as in `fuzz_target input | true`. The model does not give that ending, so a halts statement does not cover such a run: the run can die by `SIGPIPE` with a status that the statement does not accept. The cause is how the run is started, not the input.
+* **The output is read until the program ends.** Each statement is about a run whose standard output and standard error are read until the program ends. On Linux, a write to a pipe whose reader has exited kills the program, as in `fuzz_target input | true`. A socket with no reader does the same. The model does not give that ending, so a halts statement does not cover such a run: the run can die by `SIGPIPE` with a status that the statement does not accept. The cause is how the run is started, not the input.
 
 *This list is a draft. We will audit it against the toolchain and LPS.*
 
