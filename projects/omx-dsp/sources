@@ -1,0 +1,4 @@
+# omx-dsp's one dependency, the headers of omx-contract (the limits and the formats the library's definitions name), at
+# the tag v3.4.0. omx-dsp's packaging asks for 3.1.0 or later. Headers only: nothing of it is compiled here.
+# kind	path	arguments: see lay-out-sources
+git	omx-contract	https://github.com/FreeMixer/omx-contract	1169c70127405d720d1307b3b94e57148b681ccd

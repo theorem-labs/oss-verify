@@ -3,14 +3,53 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Sends each finding of one stored object to the disclosure route: one new issue for each finding, labelled
-# held-finding, in the private repository HELD_FINDINGS_REPO. Each issue's body has the line
-# `held finding key: <object> <n>`: HELD_OBJECT, the name the review job gave the object after the review ended (new
-# for each attempt, so the model cannot know it), and the finding's place in it. Run again on the same object, it sends
-# no finding that it already sent, whether that issue is open or closed; a re-run of the review stores a new object,
-# and its findings are sent. The same bug found on a later push is a new issue: the disclosure route merges them.
-# Every object is settled the first time: more than 10 findings go as one issue (key `<object> all`), an object without
-# the review job's first lines goes whole (key `<object> raw`), an object with no finding sends nothing, and a body
-# over what GitHub takes is cut. It fails only when GitHub does not answer, and then the next run tries again.
+# held-finding, in the private repository HELD_FINDINGS_REPO. Each issue's body holds two lines of this script's own,
+# the fifth and the sixth, and an issue that holds several findings a seventh:
+#
+#   held finding key: review/<project>/<harness>/<upstream commit, first 12 digits>/<identity>
+#   held finding text: <the finding's text, sha256, first 12 digits>
+#   held finding set: <the key of each finding in it>
+#
+# The key says what the finding is, never which run found it. <identity> is the first 12 digits of the sha256 of the
+# project (the one the workflow wrote, not the model), the harness, the upstream repository, the upstream commit, the
+# kind of bug (the word before the colon of `why held:`), the first source file the finding's free text names and the
+# function its title ends with. Each of those is a value the model writes, so each is taken only when it is one
+# well-formed value — one name for the harness, one URL or one `host/path` for the repository, one hex sha for the
+# commit — and is `none` otherwise: a field a review answers in a sentence, as one review answered `harness:`, must
+# never put that sentence in the key, or the next review's sentence makes a second issue. Everything else the model
+# writes stays out of the key, so the same bug found again by a re-run has the same key. Before it opens an issue,
+# this script reads every issue of the label, open or closed: a key that is there already opens nothing. Until
+# 2026-10-30 the key was the stored object's name, which held the run id and 16 random bytes, so every re-run of a
+# review filed its findings again: oss-verify-proofs-internal#450 and #451 are #397 and #398 filed a second time, by
+# the review of the same commit in run 41109269829.
+#
+# An issue that carries no key of this form — one filed before this key, or one the statement work filed — is read
+# the same way: its own text gives its identity, so the findings already filed are matched and never filed again.
+#
+# No line number is in the identity, because a re-run writes its own: of the same bug of mod-host, the first review
+# wrote `src/protocol.c:150-207` and the second `src/protocol.c:150-208`. Two findings of one project that agree on
+# the harness, the upstream commit, the kind, the file and the function are therefore one key, and the second is a
+# comment on the first issue, where the disclosure route reads it whole, rather than an issue of its own.
+#
+# An issue that is there is never opened again and never reopened, open or closed. A closed one was closed by the
+# disclosure route, which decides what a finding is worth; a re-run of a review is no new evidence, and reopening
+# would undo that decision, while filing a new issue is the duplicate this key exists to stop. A text that is new
+# under a key that is there goes on that issue as a comment (`held finding update:`), so one issue holds every
+# wording of one bug.
+#
+# Nothing of a finding reaches the log or the job summary, and that includes the key: every one of the identity's
+# inputs is public (the upstream repository and commit are pinned in this repository, the sources are the upstream
+# tree), so a reader who can hash a million candidates reads the file and the function of an embargoed bug out of the
+# hash. The key is in the private issue's body, where the disclosure route reads it; the log and the summary get the
+# count of each outcome and nothing for any one finding.
+#
+# Run again on the same object, it sends no finding that it already sent. The same bug found on a later push, at a
+# new upstream commit, is a new issue: the disclosure route merges them. Every object is settled the first time: more
+# than 10 findings that are not filed yet go as one issue, which names each of their keys in its `held finding set:`
+# line, so that none of them is ever filed again on its own; an object without the review job's first lines goes
+# whole (key `review/raw/<the object's own sha256>`); an object with no finding sends nothing; and a body over what
+# GitHub takes is cut. A lookup or a write that GitHub does not answer fails this script, and the next run tries
+# again: the object stays in the bucket until every finding of it has its issue.
 #
 #   GH_TOKEN=<token that can write issues in HELD_FINDINGS_REPO> HELD_FINDINGS_REPO=<owner/name> REPO=<owner/name> \
 #     READ_TOKEN=<token that can read REPO's issues> HELD_OBJECT=<name> .github/scripts/review-held <directory>
@@ -18,8 +57,7 @@
 # It reads <directory>/object, as build.yaml's review job stored it: six lines that the workflow wrote, not the model
 # (`oss-verify held finding v1`, then `pr:`, `head:`, `project:` and `run:`, then `---`), and then the `held` field of
 # the review's structured output: each finding starts with a marker line (`<!-- held finding -->`, in any case and
-# spacing), then `key: value` lines (`title:` is the issue's title), then free text. It prints only how
-# many findings it sent, never a finding or the repository: the job's log is public.
+# spacing), then `key: value` lines (`title:` is the issue's title), then free text.
 #
 # .github/scripts/review-hold runs it, in build.yaml's hold job, with a token of the oss-verify App for
 # HELD_FINDINGS_REPO only, with issues: write only. The review job, which runs the model, never holds the App's key: it
@@ -34,34 +72,148 @@ in=${1:?usage: review-held <directory>}
 [[ ${HELD_OBJECT:-} =~ ^held/([0-9]+)/[0-9a-f]{32}$ ]] \
   || { echo "review-held: HELD_OBJECT is not the name of a stored held finding" >&2; exit 2; }
 run_id=${BASH_REMATCH[1]}
+# Every call to the private repository. gh writes the request it failed on, which holds that repository's name and,
+# for a new issue, the finding's own title; this job's log and summary are public, so gh's own words go nowhere and
+# this script says what failed in its. The exit status is gh's, so no failure passes for a success.
+private() { gh "$@" 2> /dev/null; }
 # Never a public or internal repository: a held finding must not reach a reader the disclosure route does not choose.
-visibility=$(gh api "repos/$HELD_FINDINGS_REPO" --jq .visibility) || visibility=""
+visibility=$(private api "repos/$HELD_FINDINGS_REPO" --jq .visibility) || visibility=""
 [ "$visibility" = private ] \
   || { echo "review-held: the repository HELD_FINDINGS_REPO names is not private, so nothing is sent" >&2; exit 2; }
 most=10
 label="held-finding"
-# The label, made once (any colour), so the disclosure route's watcher finds the issues.
-if ! gh api "repos/$HELD_FINDINGS_REPO/labels/$label" > /dev/null 2>&1; then
-  gh api "repos/$HELD_FINDINGS_REPO/labels" -f name="$label" -f color=b60205 \
-    -f description="A finding held back from a public review, for the disclosure route" > /dev/null
-fi
-# The findings already sent: each issue of the label, open or closed, with its key, read only from the fifth line of
-# its body, the line this script writes there.
-sent_keys=$(gh api "repos/$HELD_FINDINGS_REPO/issues?labels=$label&state=all&per_page=100" --paginate \
-  --jq '.[] | [.number, ((.body // "") | split("\n") | .[4] // "")] | select(.[1] | startswith("held finding key: "))
-        | @tsv')
 parts="$in/held-findings"
 rm -rf "$parts" && mkdir -p "$parts"
-sent=0
-#   send <key> <title> <file whose text is the finding>
-# One issue, unless one with that key exists. A finding over 60,000 bytes (GitHub takes 65,536 characters in a body)
-# goes in parts: only the finding's own text is split, at line ends, so the parts are the same on every run whatever
-# the lines this script adds. A line over 60,000 bytes is cut before a UTF-8 character, never inside one, since GitHub
-# would store a cut character as U+FFFD. Part 1 is the issue, after this script's five lines; each other part is a
-# comment on it that starts `held finding part: <key> k/n`. Run again, it posts only the parts that are not there
-# yet, so the finding is whole, byte for byte, once any run finishes it.
+sent=0 already=0 commented=0 closed=0
+# What the people at Theorem read in the job summary of this public repository, and what the log says: the project,
+# which the pull request names anyway, and a count for each outcome. Never a key, a title, a function or a file, and
+# never the repository.
+report() {
+  local line="review-held: $1: $sent sent for private review, $already already filed,"
+  line="$line $commented with a text added to the issue that holds it, $closed whose issue is closed."
+  echo "$line"
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then printf '%s\n' "${line#review-held: }" >> "$GITHUB_STEP_SUMMARY"; fi
+}
+
+# The identity of one finding: `review/<project>/<harness>/<commit>/<hash>`, from what the finding is, not from the
+# run that found it or the words the model chose. identity <file of the finding, title line and all> <project>
+identity() {
+  python3 - "$1" "$2" <<'EOF'
+import hashlib
+import re
+import sys
+
+text = open(sys.argv[1], "rb").read().decode("utf-8", "replace")
+project = sys.argv[2]
+
+
+def field(name):
+    found = re.search(r"(?mi)^[ \t]*" + name + r":[ \t]*(.*)$", text)
+    # A model writes a value in `code quotes` as readily as plain, and the two mean one value.
+    return re.sub(r"\s+", " ", found.group(1).replace("`", "").strip().lower()) if found else ""
+
+
+# One name, or none: a review that answers `harness:` in a sentence must not put that sentence in the key.
+harness = field("harness")
+if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", harness) or harness in ("not-known", "none", "-"):
+    harness = "none"
+# The repository, however it is written: https://, ssh://, git@host:path, a trailing .git or /. One word, or none.
+repository = re.sub(r"^(?:[a-z+]+)://", "", field("upstream repository"))
+repository = re.sub(r"^[^/@]*@", "", repository.replace(":", "/", 1) if "@" in repository.split("/")[0] else repository)
+repository = re.sub(r"\.git$", "", repository.rstrip("/"))
+if not re.fullmatch(r"[a-z0-9][\w.-]*(?:/[\w.-]+)+", repository):
+    repository = "none"
+# One sha, or none.
+commit = field("upstream commit")
+commit = commit if re.fullmatch(r"[0-9a-f]{7,40}", commit) else ""
+# "memory safety", "crash" or "other": the kind, never the sentence after it, which is written afresh each run.
+# Any punctuation reads as a space, so that `memory-safety` and `memory safety` are one kind.
+kind = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", field("why held").split(":")[0]).strip())[:40] or "none"
+# The function the title ends with: `... in format_number`, the one part of a title that two runs agree on.
+found = re.search(r"\bin\s+([A-Za-z_][\w:.<>-]*)\s*(?:\(\))?$", field("title").rstrip(" ."))
+function = found.group(1) if found else "none"
+# The first source file the free text names, which starts after the `why held:` line; a URL is not a file, and a
+# line number is not read: a re-run writes its own.
+body = text
+found = re.search(r"(?mi)^[ \t]*why held:.*$", text)
+if found:
+    body = text[found.end():]
+found = re.search(r"(?<![\w./-])((?:[\w.-]+/)*[\w-]+\.(?:c|h|cc|cpp|cxx|hpp|hxx|hh|inc|rs|go|py|java|js|ts|mm|zig))"
+                  r"(?![\w-])", re.sub(r"\w+://\S+", " ", body))
+source = found.group(1).lower().lstrip("./") if found else "none"
+parts = ["oss-verify held finding identity v1", project, harness, repository, commit, kind, source, function]
+print("review/{}/{}/{}/{}".format(project or "not-known", harness, commit[:12] or "none",
+                                  hashlib.sha256("\n".join(parts).encode()).hexdigest()[:12]))
+EOF
+}
+
+# Every finding already filed: each issue of the label, open or closed, with its number, its state, its key, the hash
+# of the text it was filed with and the keys of the findings in it, from the fifth, sixth and seventh lines of its
+# body, the lines this script writes there. An issue that carries no key of this form is read for its own identity
+# below, so that nothing filed before this key existed is filed again. The step fails if GitHub does not answer:
+# without this list the script cannot tell a finding it has already filed from a new one, and a run that guessed
+# would file every one again. A body that a person edited in a browser can hold CRLF line ends, so a carriage return
+# at the end of a line is dropped: a key that is there must never read as a key that is not.
+# A field is a line of the body and may be empty, so the fields are joined by a unit separator, not by a tab: `read`
+# drops an empty field between two tabs, and the fields after it would then be read as the wrong ones.
+listing=$(private api "repos/$HELD_FINDINGS_REPO/issues?labels=$label&state=all&per_page=100" --paginate \
+  --jq '.[] | ((.body // "") | split("\n")) as $lines | [(.number | tostring), .state]
+        + ([$lines[4], $lines[5], $lines[6]] | map((. // "") | rtrimstr("\r")))
+        + [(.title // ""), ((.body // "") | @base64)]
+        | map(gsub("[\u001f\n\r\t]"; " ")) | join("\u001f")') \
+  || { echo "review-held: could not read the issues already filed, so nothing is sent" >&2; exit 1; }
+filed=""
+while IFS=$'\037' read -r number state key text members title body; do
+  [ -n "$number" ] || continue
+  if [[ $key != "held finding key: review/"* ]]; then
+    # An issue of the old key, or of the statement work's: its own body gives its identity. The lines this script
+    # and that one write come off the top, the issue's title goes back where the finding had it, and the rest is the
+    # finding's text, which is what the hash of the text is of.
+    base64 -d <<< "$body" | awk '
+        done { print; next }
+        /^(enrollment PR|enrollment PR head|public PR comment|review run|statements run|held finding key)[:]/ { next }
+        /^(held finding text|held finding set)[:]/ { next }
+        { done = 1; print }' > "$parts/old"
+    project=$(sed -n 's/^project: \([a-z0-9][a-z0-9._-]\{0,62\}\)[[:space:]]*$/\1/p' "$parts/old" | head -n 1)
+    [ -n "$project" ] || continue
+    { echo "title: $title"; cat "$parts/old"; } > "$parts/old-titled"
+    key="held finding key: $(identity "$parts/old-titled" "$project")"
+    text="held finding text: $(sha256sum < "$parts/old" | cut -c1-12)"
+    members=""
+  fi
+  filed="$filed$(printf '%s\037%s\037%s\037%s\037%s' "$number" "$state" "$key" "$text" "$members")"$'\n'
+done <<< "$listing"
+# The label, made once (any colour), so the disclosure route's watcher finds the issues.
+if ! private api "repos/$HELD_FINDINGS_REPO/labels/$label" > /dev/null 2>&1; then
+  private api "repos/$HELD_FINDINGS_REPO/labels" -f name="$label" -f color=b60205 \
+    -f description="A finding held back from a public review, for the disclosure route" > /dev/null \
+    || { echo "review-held: could not make the label the disclosure route watches" >&2; exit 1; }
+fi
+
+# The issue of a key, if there is one: `<number> <state> <the sixth line> <key|set>`, an open issue before a closed
+# one, and the issue of the key itself before one that holds it among its findings. lookup <key>
+lookup() {
+  awk -F '\037' -v line="held finding key: $1" -v key=" $1 " '
+      $3 == line && $2 == "open" { print $1 "\t" $2 "\t" $4 "\tkey"; hit = 1; exit }
+      $3 == line && !any { any = 1; n = $1; s = $2; b = $4; how = "key" }
+      !any && index(" " substr($5, length("held finding set: ") + 1) " ", key) { any = 1
+        n = $1; s = $2; b = $4; how = "set" }
+      END { if (!hit && any) print n "\t" s "\t" b "\t" how }' <<< "$filed"
+}
+
+#   send <key> <title> <file whose text is the finding> [the keys of the findings in it]
+# One issue, unless one with that key is already there: then nothing is opened, whether it is open or closed, and a
+# text that is not on it yet goes on it as a comment. A finding over 60,000 bytes (GitHub takes 65,536 characters in
+# a body) goes in parts: only the finding's own text is split, at line ends, so the parts are the same on every run
+# whatever the lines this script adds. A line over 60,000 bytes is cut before a UTF-8 character, never inside one,
+# since GitHub would store a cut character as U+FFFD. Part 1 is the issue, after this script's lines; each other part
+# is a comment that starts `held finding part: <key> k/n`. A new text goes as comments that start
+# `held finding update: <key> <text hash> k/n`, then the run that found it and a blank line. Run again, it posts only
+# the parts that are not there yet, so the finding is whole, byte for byte, once any run finishes it.
 send() {
-  local id="$HELD_OBJECT $1" key="held finding key: $HELD_OBJECT $1" number chunks total k posted
+  local key="$1" line="held finding key: $1" members=${4:-} texthash number state bodyhash how
+  local chunks total k posted marker first posts=0
+  texthash=$(sha256sum < "$3" | cut -c1-12)
   rm -f "$parts"/chunk.*
   python3 - "$3" "$parts/chunk." <<'EOF'
 import sys
@@ -86,32 +238,59 @@ for k, part in enumerate(parts or [b""]):
 EOF
   mapfile -t chunks < <(find "$parts" -name 'chunk.*' | sort)
   total=${#chunks[@]}
-  number=$(awk -F '\t' -v k="$key" '$2 == k { print $1; exit }' <<< "$sent_keys")
+  IFS=$'\t' read -r number state bodyhash how < <(lookup "$key") || true
   if [ -z "$number" ]; then
     {
       echo "enrollment PR: $REPO#${PR:-not known}"
       echo "enrollment PR head: ${HEAD_SHA:-not known}"
       echo "public PR comment: ${COMMENT_URL:-not known}"
       echo "review run: ${RUN_URL:-not known}"
-      echo "$key"
+      echo "$line"
+      echo "held finding text: $texthash"
+      if [ -n "$members" ]; then echo "held finding set: $members"; fi
       cat "${chunks[0]}"
       if [ "$total" -gt 1 ]; then printf '\n\n(Part 1 of %s: the rest follows in the comments.)\n' "$total"; fi
     } > "$parts/part"
-    number=$(gh api "repos/$HELD_FINDINGS_REPO/issues" -f title="$(tr -d '[:cntrl:]' <<< "$2" | cut -c1-200)" \
-      -F body=@"$parts/part" -f "labels[]=$label" --jq .number)
+    number=$(private api "repos/$HELD_FINDINGS_REPO/issues" \
+      -f title="$(tr -d '[:cntrl:]' <<< "$2" | cut -c1-200)" -F body=@"$parts/part" -f "labels[]=$label" --jq .number) \
+      || { echo "review-held: could not open the issue of a finding" >&2; return 1; }
     sent=$((sent + 1))
-    posted=""
+    posted="" marker="held finding part: $key" first=2
+  elif [ "$how" = set ]; then
+    # It is one of the findings of an issue that holds several: that issue has its whole text already.
+    already=$((already + 1))
+    return 0
   else
-    echo "review-held: $1 of $HELD_OBJECT was already sent"
-    [ "$total" -gt 1 ] || return 0
-    posted=$(gh api "repos/$HELD_FINDINGS_REPO/issues/$number/comments" --paginate \
-      --jq '.[] | (.body // "") | split("\n") | .[0]')
+    posted=$(private api "repos/$HELD_FINDINGS_REPO/issues/$number/comments" --paginate \
+      --jq '.[] | (.body // "") | split("\n") | .[0] | rtrimstr("\r")') \
+      || { echo "review-held: could not read the comments of an issue that is already there" >&2; return 1; }
+    if [ "$bodyhash" = "held finding text: $texthash" ]; then
+      # The same text as the issue was filed with: only a part that an earlier run did not post is missing.
+      marker="held finding part: $key" first=2
+    else
+      # Another text under this key: the same bug written again, or a second finding this key cannot tell from it.
+      marker="held finding update: $key $texthash" first=1
+    fi
   fi
-  for ((k = 2; k <= total; k++)); do
-    if grep -qxF "held finding part: $id $k/$total" <<< "$posted"; then continue; fi
-    { echo "held finding part: $id $k/$total"; echo; cat "${chunks[k - 1]}"; } > "$parts/part"
-    gh api "repos/$HELD_FINDINGS_REPO/issues/$number/comments" -F body=@"$parts/part" > /dev/null
+  for ((k = first; k <= total; k++)); do
+    if grep -qxF "$marker $k/$total" <<< "$posted"; then continue; fi
+    {
+      echo "$marker $k/$total"
+      if [ "$first" = 1 ]; then echo "found again in run: ${RUN_URL:-not known}"; fi
+      echo
+      cat "${chunks[k - 1]}"
+    } > "$parts/part"
+    private api "repos/$HELD_FINDINGS_REPO/issues/$number/comments" -F body=@"$parts/part" > /dev/null \
+      || { echo "review-held: could not add a text to the issue that holds it" >&2; return 1; }
+    posts=$((posts + 1))
   done
+  # What this run did to an issue that was already there, once its parts are posted: nothing, or a text it did not
+  # hold yet.
+  if [ -n "$state" ]; then
+    if [ "$first" = 1 ] && [ "$posts" -gt 0 ]; then commented=$((commented + 1))
+    elif [ "$state" = closed ]; then closed=$((closed + 1))
+    else already=$((already + 1)); fi
+  fi
 }
 
 # The object's six lines of the workflow's own, each checked, and the run it names is the run in its name. An object
@@ -123,11 +302,14 @@ NAME=$(line 4 | sed -n 's/^project: //p') RUN_URL=$(line 5 | sed -n 's/^run: //p
 if [ "$(line 1)" != "oss-verify held finding v1" ] || [ "$(line 6)" != --- ] || ! [[ $PR =~ ^[0-9]+$ \
     && $HEAD_SHA =~ ^[0-9a-f]{40}$ && $NAME =~ ^[a-z0-9][a-z0-9._-]{0,62}$ \
     && $RUN_URL == "https://github.com/$REPO/actions/runs/$run_id" ]]; then
-  PR="" HEAD_SHA="" RUN_URL=""
-  send raw "[held] not known: a stored held finding whose first lines are not the review job's" "$in/object"
-  echo "review-held: $HELD_OBJECT does not start with the lines the review job writes; sent it whole ($sent sent)"
+  PR="" HEAD_SHA="" NAME="" RUN_URL=""
+  # The object's own bytes, so that the same broken object stored twice is one issue.
+  send "review/raw/$(sha256sum < "$in/object" | cut -c1-12)" \
+    "[held] not known: a stored held finding whose first lines are not the review job's" "$in/object"
+  report "a stored object that does not start with the lines the review job writes, sent whole"
   exit 0
 fi
+what="findings of $NAME"
 held="$in/held-finding.md"
 tail -n +7 "$in/object" > "$held"
 # The review comment's address, when there is one already: the comment job keeps it in place.
@@ -144,21 +326,45 @@ awk -v dir="$parts" \
 findings=$(sort -n "$parts/found" 2> /dev/null) || findings=""
 count=$(grep -c . <<< "$findings" || true)
 if [ "$count" = 0 ]; then
-  echo "review-held: $HELD_OBJECT holds no finding after its marker: nothing to send"
+  echo "review-held: the stored object holds no finding after its marker: nothing to send"
   exit 0
 fi
-if [ "$count" -gt "$most" ]; then
-  # More than one review should hold: all of them go as one issue, so that none is lost and the next run has none
-  # left to try again.
-  send all "[held] $NAME/not known: $count findings of the enrollment review of pull request #$PR, in one issue" "$held"
-  echo "review-held: $HELD_OBJECT holds $count findings, more than $most: sent them as one issue ($sent sent)"
-  exit 0
-fi
-n=0
+# Each finding's identity, and which of them is not filed yet, read before anything is sent. Two findings of one
+# object that are alike in every field of the identity (a review that wrote no title and no field, so there is
+# nothing to tell them apart by) keep their order in the object, as the key did before: the second is `<identity>-2`.
+# A re-run that writes those two the other way round gives each the other's key, and each issue then takes the
+# other's text as a comment: noise on two issues, never a new issue.
+declare -A keys=() alike=()
+new=""
 for part in $findings; do
-  n=$((n + 1))
+  key=$(identity "$parts/$part" "$NAME")
+  alike[$key]=$(( ${alike[$key]:-0} + 1 ))
+  if [ "${alike[$key]}" != 1 ]; then key="$key-${alike[$key]}"; fi
+  keys[$part]=$key
+  if [ -z "$(lookup "$key")" ]; then new="$new $part"; fi
+done
+fresh=$(wc -w <<< "$new")
+if [ "$fresh" -gt "$most" ]; then
+  # More than one review should hold: the findings that are not filed yet go as one issue, so that none is lost and
+  # the next run has none left to try again. Its `held finding set:` line names each of their keys, so that no later
+  # run files one of them again on its own, whatever the count of that run's findings.
+  members=""
+  : > "$parts/batch"
+  for part in $new; do
+    members="$members ${keys[$part]}"
+    { echo "<!-- held finding -->"; cat "$parts/$part"; } >> "$parts/batch"
+  done
+  send "review/$NAME/all/$(printf '%s\n' $members | sort | sha256sum | cut -c1-12)" \
+    "[held] $NAME/not known: $fresh findings of the enrollment review of pull request #$PR, in one issue" \
+    "$parts/batch" "${members# }"
+  already=$((already + count - fresh))
+  report "$count $what"
+  exit 0
+fi
+for part in $findings; do
   title=$(sed -n 's/^title:[[:space:]]*//p' "$parts/$part" | head -n 1)
   awk '!t && /^title:/ { t = 1; next } { print }' "$parts/$part" > "$parts/$part.text"
-  send "$n" "${title:-[held] $NAME/not known: a finding of the enrollment review of pull request #$PR}" "$parts/$part.text"
+  send "${keys[$part]}" \
+    "${title:-[held] $NAME/not known: a finding of the enrollment review of pull request #$PR}" "$parts/$part.text"
 done
-echo "review-held: sent $sent of $n findings for private review"
+report "$count $what"
