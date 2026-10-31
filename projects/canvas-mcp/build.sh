@@ -18,14 +18,17 @@ PY_ALLOW_MISSING=""
 # and pydantic-core (a Rust extension), which this builder cannot build for riscv64. The modules under test import
 # only the standard library. Thus cm_stage installs nothing with pip: it copies each module under test, unchanged,
 # to its own package path, below two empty package files. The import path in a report is then the real one.
+# It copies from $SRC/upstream/canvas-mcp, the checkout that fetch-commit made, and not from $SRCDIR: the Dockerfile
+# copied $SRCDIR before the build, so a breakage record, which changes a file under $SRC, would not reach the binary.
 CM_MODULES="html"
+CM_SRC="$SRC/upstream/canvas-mcp/src/canvas_mcp/core"
 cm_stage() {
   site="$OFT_PY_W/site"
   mkdir -p "$site/canvas_mcp/core"
   : > "$site/canvas_mcp/__init__.py"
   : > "$site/canvas_mcp/core/__init__.py"
   for m in $CM_MODULES; do
-    cp "$SRCDIR/src/canvas_mcp/core/$m.py" "$site/canvas_mcp/core/$m.py"
+    cp "$CM_SRC/$m.py" "$site/canvas_mcp/core/$m.py"
   done
   OFT_PY_SITE=$site
 }
