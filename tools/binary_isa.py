@@ -97,7 +97,7 @@ import sys
 # file the rules transcribe, at that commit. LinuxProcessSem/RiscvSemantics.v fetches a word, intercepts ecall and
 # sorts each result into modeled and unmodeled; Riscv/DecodeC.v chooses the decoder and names the zero parcel
 # defined-illegal; Riscv/Decode.v decodes a 32-bit word; Riscv/Sem.v and Riscv/Fpu.v give it its effect.
-MODEL_COMMIT = "f1006fe8178338a499b5e5c41be83006c4edd058"
+MODEL_COMMIT = "505d161e1a2e89273739c0c44675892ed4c671a0"
 MODEL_FILES = {
     "theories/LinuxProcessSem/RiscvSemantics.v": "e10ee5ef3c24003d148fc8fb20a26727e720b45502dc018a10e7c79712c1eaff",
     "theories/Riscv/Decode.v": "b759119d79a63c9c1d68ecdab41f1058d409fbd4d04201d54b3fa63e8dddf9c8",
