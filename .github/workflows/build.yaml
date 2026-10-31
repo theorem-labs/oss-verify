@@ -167,12 +167,13 @@ name: "Build"
 # The tag, the federated identity that trades the token for the node, the grant that gives the tag the collector's
 # Tailscale Service svc:spend on tcp:80 and nothing else beyond the two read-only pages every node of the tailnet
 # may read (Dispatch and the results dashboard, on tcp:443), and the policy test that fails if the tag reaches
-# anything else, are declared by INFRA-832 S1a in agent-infra, merged on 2026-10-30 as 99d1b5d. Its apply runs
-# before this file carries a client id, so all of it is live before this job first joins. The export is
-# tagged theorem.project=oss-verify, theorem.subproject=<name> (or _change, or _issue: a project name never starts with
-# `_`), theorem.lane=enroll-review-ci and theorem.credential=oss-verify-ci. The export is a measurement and never
-# decides whether a review runs: if the job cannot join the tailnet, the run's page carries a warning saying that
-# this review's usage is not exported, and the review runs without it.
+# anything else, are declared by INFRA-832 S1a in agent-infra, merged on 2026-10-30 as 99d1b5d. Its bootstrap apply
+# ran on 2026-10-31 at agent-infra c96f3d672, and the client id and the address below are outputs of that apply. The
+# export is tagged theorem.project=oss-verify, theorem.subproject=<name> (or _change, or _issue: a project name never
+# starts with `_`), theorem.lane=enroll-review-ci and theorem.credential=oss-verify-ci. The export is a measurement and
+# never decides whether a review runs: if the job cannot join the tailnet, or the collector does not answer at its
+# address, the run's page carries a warning saying that this review's usage is not exported, and the review runs
+# without it.
 #
 # The review's session goes from one push to the next in the Actions cache, under the key
 # enroll-review/<pull request>/<project>/<run id>-<attempt>: ~/.claude/projects, where Claude Code keeps its sessions,
@@ -526,18 +527,17 @@ jobs:
       GCP_WORKLOAD_IDENTITY_PROVIDER: projects/805240912354/locations/global/workloadIdentityPools/github/providers/github-ossv
       GCP_SERVICE_ACCOUNT: ossv-ci@theorem-agent-infra.iam.gserviceaccount.com
       # The client id Tailscale gave the federated identity ossv-review-github: bootstrap/'s stack output
-      # ossvReviewTailnetClientId, which INFRA-832 S1a in agent-infra declares (merged as 99d1b5d) and its apply
-      # makes. The id is public, not a secret, and this is the one place this file names it. It is empty
-      # until that apply has run; tools/tests refuses an empty value, so this file cannot merge before then.
-      TAILNET_CLIENT_ID: ""
+      # ossvReviewTailnetClientId in agent-infra (INFRA-832 S1a, merged as 99d1b5d), copied from
+      # `pulumi stack output ossvReviewTailnetClientId --stack prod` after the apply of 2026-10-31 that made the
+      # identity. The id is public, not a secret, and this is the one place this file names it.
+      TAILNET_CLIENT_ID: "TWbBfz7fqc11CNTRL-kwYSkwdwGN11CNTRL"
       # The cost collector's address on the tailnet, http://<IPv4 address> on port 80. Every sender of spend
       # records takes this one URL, and it holds the address, not the Service's MagicDNS name, because
       # linux28-agents-1 joins the tailnet with --accept-dns=false and resolves no MagicDNS name; tailscaled
-      # routes a Tailscale Service by the destination address. The address is the one Tailscale gives the Service
-      # svc:spend: theorem-labs/agent-infra#1059, which is open, adds the bootstrap output
-      # spendCollectorTailnetUrl, and this value is filled from that output after #1059 merges and the bootstrap
-      # apply runs. It is empty until then, and tools/tests refuses an empty value.
-      SPEND_COLLECTOR_URL: ""
+      # routes a Tailscale Service by the destination address. The address is the one Tailscale gave the Service
+      # svc:spend when that same apply made it: bootstrap/'s stack output spendCollectorTailnetUrl
+      # (theorem-labs/agent-infra#1059), copied from `pulumi stack output spendCollectorTailnetUrl --stack prod`.
+      SPEND_COLLECTOR_URL: "http://100.116.58.240"
     outputs:
       # The result step writes it for an enrollment or a change, never for an issue: an issue's draft, which no one has
       # approved, is in no output (a re-run with debug logging prints outputs to the public log).
@@ -621,8 +621,8 @@ jobs:
       # merged as 99d1b5d, declares that tag, the grant that gives it the cost collector's Tailscale Service
       # svc:spend on tcp:80 and nothing else beyond the two read-only pages every node of the tailnet may read, and
       # the federated identity ossv-review-github, whose claims admit only this workflow of this repository, on
-      # refs/heads/main, in the environment enroll-review, on a GitHub-hosted runner. Its apply runs before the
-      # client id above is filled in. The job joins with its GitHub identity token, so no key is stored. One review
+      # refs/heads/main, in the environment enroll-review, on a GitHub-hosted runner. Its apply of 2026-10-31 made
+      # the client id above. The job joins with its GitHub identity token, so no key is stored. One review
       # job runs in a run attempt, so the run id and the attempt name the node. A Linux device reaches a Tailscale
       # Service's address only with Tailscale 1.94 or later, or with --accept-routes
       # (https://tailscale.com/kb/1552, "Access Tailscale Services from other devices"): this action meets both at
@@ -643,11 +643,20 @@ jobs:
           tags: tag:ossv-review
           hostname: ossv-review-${{ github.run_id }}-${{ github.run_attempt }}
           use-cache: false
+      # After a join that passed, the step asks the collector's address for a page, for at most 10 seconds. curl takes
+      # any HTTP answer, a 404 too, so only a refused or timed-out connection, or an empty address, fails it. The
+      # address stays only while the Service svc:spend does (INFRA-832's spec, D9): a Service made again gets new
+      # addresses, and a job that joined would then send every record to an address that answers nothing. So when the
+      # collector does not answer, the step writes no exporter variables either, and the warning names the address.
       - name: Export the review's usage to the cost collector
         env: {TAILNET: "${{ steps.tailnet.outcome }}"}
         run: |
           if [ "$TAILNET" != success ]; then
             echo "::warning::This job did not join the tailnet: this review's usage is not exported."; exit 0; fi
+          if ! curl -q -sS --max-time 10 -o /dev/null "$SPEND_COLLECTOR_URL"; then
+            echo "::warning::The cost collector did not answer at '$SPEND_COLLECTOR_URL' on the tailnet: this review's usage is not exported."
+            exit 0
+          fi
           subproject=${NAME:-_$KIND}
           builtin printf '%s\n' CLAUDE_CODE_ENABLE_TELEMETRY=1 OTEL_LOGS_EXPORTER=otlp OTEL_METRICS_EXPORTER=none \
             OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf "OTEL_EXPORTER_OTLP_ENDPOINT=$SPEND_COLLECTOR_URL" \
@@ -678,15 +687,20 @@ jobs:
           claude_args: >-
             --tools Read,Glob,Grep --permission-mode default --model claude-opus-5-5 --effort xhigh --max-turns 300
             ${{ steps.prompt.outputs.arguments }}
-      # The logout deletes the ephemeral node at once, whatever the review did. When the runner itself is lost,
-      # Tailscale deletes the node 30 to 60 minutes after its last activity. The step takes continue-on-error, as the
-      # join does: this is the measurement's own cleanup, and a failed logout must not skip the steps below it, which
-      # keep the draft, the verdicts and a held finding. The action's post step logs out again at the end of the job.
+      # The logout deletes the ephemeral node at once, whatever the review did and whatever the join's outcome: at
+      # the pinned commit the action stops waiting for `tailscale up` after its 2-minute timeout but does not stop
+      # the command (src/main.ts), so a join that failed can still make the node. When the join never installed
+      # tailscale, the step has nothing to log out and passes. When the runner itself is lost, Tailscale deletes the
+      # node 30 to 60 minutes after its last activity. The step takes
+      # continue-on-error, as the join does: this is the measurement's own cleanup, and a failed logout must not skip
+      # the steps below it, which keep the draft, the verdicts and a held finding. The action's post step logs out
+      # again at the end of the job.
       - name: Leave the tailnet
-        if: ${{ always() && steps.tailnet.outcome == 'success' }}
+        if: always()
         continue-on-error: true
         timeout-minutes: 2
-        run: sudo tailscale logout
+        run: |
+          if command -v tailscale > /dev/null; then sudo tailscale logout; fi
       - name: Keep the draft, and the held finding apart from it
         id: result
         env:

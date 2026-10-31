@@ -1595,14 +1595,11 @@ class ReviewJob(unittest.TestCase):
         self.assertNotEqual(run.returncode, 0)
         self.assertIsNone(last)
 
-    # Tailscale's client ids look like TWbBfz7fqc11CNTRL-k46A6PQMc421CNTRL (agent-infra .github/actions/tailnet/tailnet.sh).
-    CLIENT_ID = re.compile(r"^[A-Za-z0-9]{8,}(-[A-Za-z0-9]+)*$")
-    # The Service's IPv4 address on the tailnet: Tailscale's own range, 100.64.0.0/10. \A and \Z, because $ would
-    # also take a value that ends in a newline.
-    COLLECTOR_URL = re.compile(r"\Ahttp://100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])"
-                               r"(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){2}\Z")
-    # An address of that range for the export step's stand-in run; it reaches no network.
-    STAND_IN_URL = "http://100.64.0.1"
+    # bootstrap/'s stack outputs in agent-infra, read with `pulumi stack output --stack prod` after the apply of
+    # 2026-10-31 that made the federated identity ossv-review-github and the Service svc:spend (INFRA-832 S1a):
+    # ossvReviewTailnetClientId, and spendCollectorTailnetUrl, http:// and the Service's IPv4 address.
+    CLIENT_ID = "TWbBfz7fqc11CNTRL-kwYSkwdwGN11CNTRL"
+    COLLECTOR_URL = "http://100.116.58.240"
 
     def test_the_job_joins_the_tailnet_as_ossv_review(self):
         join = self.steps["Join Theorem's tailnet, to export this review's usage"]
@@ -1625,13 +1622,13 @@ class ReviewJob(unittest.TestCase):
         # The Actions cache of this job holds the review's session alone, so the action keeps no binary in it.
         self.assertIs(join["with"]["use-cache"], False)
         self.assertEqual(join["timeout-minutes"], 3)
-        # The node is ephemeral: the logout deletes it at once, whatever the review did. Neither the join nor the
-        # logout may stop the steps that keep the draft, the verdicts and a held finding.
+        # The node is ephemeral: the logout deletes it at once, whatever the review did and whatever the join's
+        # outcome. Neither the join nor the logout may stop the steps that keep the draft, the verdicts and a held
+        # finding.
         leave = self.steps["Leave the tailnet"]
-        self.assertEqual(leave["if"], "${{ always() && steps.tailnet.outcome == 'success' }}")
+        self.assertEqual(leave["if"], "always()")
         self.assertIs(leave["continue-on-error"], True)
         self.assertEqual(leave["timeout-minutes"], 2)
-        self.assertIn("tailscale logout", leave["run"])
         names = [s.get("name") for s in self.jobs["review"]["steps"]]
         self.assertLess(names.index("Review"), names.index("Leave the tailnet"))
         self.assertLess(names.index("Leave the tailnet"),
@@ -1643,19 +1640,37 @@ class ReviewJob(unittest.TestCase):
         steps = sum(step["timeout-minutes"] for step in job["steps"] if "timeout-minutes" in step)
         self.assertGreater(job["timeout-minutes"], steps)
 
-    def test_the_tailnet_client_id_is_a_client_id_tailscale_gave(self):
-        # bootstrap/'s stack output ossvReviewTailnetClientId, which exists only after that apply (INFRA-832 S1a).
-        # This test is red until the value is in the workflow, so the pull request cannot merge before the apply.
-        client_id = self.jobs["review"]["env"]["TAILNET_CLIENT_ID"]
-        self.assertRegex(client_id, self.CLIENT_ID)
+    def test_the_tailnet_client_id_is_the_one_tailscale_gave(self):
+        self.assertEqual(self.jobs["review"]["env"]["TAILNET_CLIENT_ID"], self.CLIENT_ID)
 
-    def test_the_collector_url_is_a_tailnet_address(self):
-        # http://<the IPv4 address of Tailscale Service svc:spend>, which is in Tailscale's range 100.64.0.0/10.
+    def test_the_collector_url_is_the_collector_tailnet_address(self):
         # One URL for every sender, and it holds the address, because linux28-agents-1 joins the tailnet with
-        # --accept-dns=false and resolves no MagicDNS name (INFRA-832). The address is read after the S1a apply,
-        # so this test is red until someone fills the value in, and the pull request cannot merge before then.
-        url = self.jobs["review"]["env"]["SPEND_COLLECTOR_URL"]
-        self.assertRegex(url, self.COLLECTOR_URL)
+        # --accept-dns=false and resolves no MagicDNS name (INFRA-832).
+        self.assertEqual(self.jobs["review"]["env"]["SPEND_COLLECTOR_URL"], self.COLLECTOR_URL)
+
+    def leave(self, installed):
+        """The logout step, with a stand-in sudo that records its arguments, and a stand-in tailscale or none."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "bin").mkdir()
+            stand_ins = {"sudo": f"#!/bin/bash\nprintf '%s\\n' \"$*\" >> {shlex.quote(str(root / 'sudo'))}\n"}
+            if installed:
+                stand_ins["tailscale"] = "#!/bin/bash\nexit 0\n"
+            for name, text in stand_ins.items():
+                (root / "bin" / name).write_text(text)
+                (root / "bin" / name).chmod(0o755)
+            # PATH holds the stand-ins alone, so a tailscale of the machine that runs the tests is not found.
+            run = subprocess.run([shutil.which("bash"), "-e", "-c", self.steps["Leave the tailnet"]["run"]], cwd=root,
+                                 capture_output=True, text=True, env={"PATH": str(root / "bin")})
+            return run, (root / "sudo").read_text() if (root / "sudo").exists() else ""
+
+    def test_the_logout_passes_when_the_join_installed_no_tailscale(self):
+        run, sudo = self.leave(installed=True)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(sudo, "tailscale logout\n")
+        run, sudo = self.leave(installed=False)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(sudo, "")
 
     def test_no_step_reads_the_collector_token(self):
         text = (ROOT / ".github" / "workflows" / "build.yaml").read_text()
@@ -1668,24 +1683,32 @@ class ReviewJob(unittest.TestCase):
         # cannot resolve.
         self.assertNotIn("ts.net", text)
 
-    def export(self, outcome, name="libreac", kind="enrollment"):
+    def export(self, outcome, name="libreac", kind="enrollment", answers=True):
+        """The export step, with the job's own SPEND_COLLECTOR_URL as Actions gives it, and a stand-in curl that
+        records its arguments and answers, or fails as a refused connection does (exit status 7)."""
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
+            (root / "bin").mkdir()
+            (root / "bin" / "curl").write_text(f"#!/bin/bash\nprintf '%s\\n' \"$@\" >> {shlex.quote(str(root / 'curl'))}\n"
+                                               f"exit {0 if answers else 7}\n")
+            (root / "bin" / "curl").chmod(0o755)
             step = self.steps["Export the review's usage to the cost collector"]
             run = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=root, capture_output=True, text=True,
-                                 env={**os.environ, "GITHUB_ENV": str(root / "env"), "TAILNET": outcome,
-                                      "NAME": name, "KIND": kind, "SPEND_COLLECTOR_URL": self.STAND_IN_URL})
-            return run, (root / "env").read_text() if (root / "env").exists() else ""
+                                 env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
+                                      "GITHUB_ENV": str(root / "env"), "TAILNET": outcome, "NAME": name, "KIND": kind,
+                                      "SPEND_COLLECTOR_URL": self.jobs["review"]["env"]["SPEND_COLLECTOR_URL"]})
+            env, curl = ((root / f).read_text() if (root / f).exists() else "" for f in ("env", "curl"))
+            return run, env, curl
 
     def test_the_export_names_the_tailnet_endpoint_and_no_header(self):
-        # The endpoint the step writes is the job's SPEND_COLLECTOR_URL, read with a stand-in value, so a step that
-        # drops the variable or sets one of its own fails here whatever the job value is.
-        run, env = self.export("success")
+        run, env, curl = self.export("success")
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(run.stdout, "")
+        # The probe: one GET of the collector's address, for at most 10 seconds.
+        self.assertEqual(curl, f"-q\n-sS\n--max-time\n10\n-o\n/dev/null\n{self.COLLECTOR_URL}\n")
         self.assertEqual(env, "CLAUDE_CODE_ENABLE_TELEMETRY=1\nOTEL_LOGS_EXPORTER=otlp\nOTEL_METRICS_EXPORTER=none\n"
                          "OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf\n"
-                         f"OTEL_EXPORTER_OTLP_ENDPOINT={self.STAND_IN_URL}\n"
+                         "OTEL_EXPORTER_OTLP_ENDPOINT=http://100.116.58.240\n"
                          "OTEL_RESOURCE_ATTRIBUTES=theorem.project=oss-verify,theorem.subproject=libreac,"
                          "theorem.lane=enroll-review-ci,theorem.credential=oss-verify-ci\n")
         self.assertNotIn("Authorization", env)
@@ -1694,21 +1717,30 @@ class ReviewJob(unittest.TestCase):
         # A change and an issue keep their own subproject, as they did with the token.
         for kind in ("change", "issue"):
             with self.subTest(kind=kind):
-                _, env = self.export("success", name="", kind=kind)
+                _, env, _ = self.export("success", name="", kind=kind)
                 self.assertIn(f"theorem.subproject=_{kind},", env)
 
     def test_review_runs_when_the_tailnet_join_fails(self):
         for outcome in ("failure", "skipped", ""):
             with self.subTest(outcome=outcome):
-                run, env = self.export(outcome)
+                run, env, curl = self.export(outcome)
                 self.assertEqual(run.returncode, 0, run.stderr)
                 self.assertIn("::warning::", run.stdout)
                 self.assertIn("tailnet", run.stdout)
                 self.assertEqual(env, "")
+                self.assertEqual(curl, "")
         # The Review step comes after the export and has no condition of its own, so it runs either way.
         names = [s.get("name") for s in self.jobs["review"]["steps"]]
         self.assertLess(names.index("Export the review's usage to the cost collector"), names.index("Review"))
         self.assertNotIn("if", self.steps["Review"])
+
+    def test_review_runs_when_the_collector_does_not_answer(self):
+        run, env, curl = self.export("success", answers=False)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn(f"::warning::The cost collector did not answer at '{self.COLLECTOR_URL}' on the tailnet",
+                      run.stdout)
+        self.assertEqual(env, "")
+        self.assertTrue(curl.endswith(f"{self.COLLECTOR_URL}\n"))
 
 
 @unittest.skipUnless(shutil.which("jq"), "needs jq, which the gh stand-in runs the script's filters with")
