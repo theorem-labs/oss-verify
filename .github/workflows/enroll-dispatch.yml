@@ -1,8 +1,10 @@
 # enroll-dispatch.yml: when every required check of an enrollment pull request has passed, start the theorem statements.
 #
-# The decision on dispatch://OSSV-141: once the enrollment check passes, "it would be okay for us to start working on
-# the theorem statements, maybe with some kind of rate limit of a few per day". So, each time a run of Build,
-# Validate, Terms or Tests completes:
+# The decision on dispatch://OSSV-141 starts the theorem statements once the enrollment check passes. The stream owner's
+# answer dispatch://OSSV-202/comment/7354a103 (2026-10-30) sets no limit on them: "I don't really see any need for a
+# limit on statement work if it's just completely automatic. And we're not running into any limits or anything. The only
+# thing I feel the need to limit is proof, but I can do that by controlling how many I merge". So, each time a run of
+# Build, Validate, Terms or Tests completes:
 #
 #   decide    .github/scripts/enroll-dispatch reads GitHub's API: the checks main's ruleset requires, each from the
 #             workflow and event that must make it, at the commit; the record that build.yaml's record job wrote for
@@ -12,10 +14,10 @@
 #             its head commit and the project, to Theorem's private statements repository (repository id INTERNAL_ID
 #             below; its name is not published), whose enrollment workflow builds the project, writes its facts and
 #             statements, and opens their pull request there, or updates the one open for the project; that workflow
-#             keeps the daily limit and labels a pull request statements-queued when it is over it, or when the
-#             project's archives wait for the next release. On label: puts
-#             the label on the pull request and sends nothing, so that a person decides: size-review (a plain binary
-#             above 1,000,000 bytes, the line "Up to 1 MB", dispatch://OSSV-141/ask/7c73eb21), language-paused (a
+#             puts the label checks-failing on the pull request when a check of its binaries fails, and takes it off
+#             when a later commit's binaries pass their checks; this file does neither. On label:
+#             puts the label on the pull request and sends nothing, so that a person decides: size-review (a plain
+#             binary above 1,000,000 bytes, the line "Up to 1 MB", dispatch://OSSV-141/ask/7c73eb21), language-paused (a
 #             language whose projects are paused for now), name-review (a name the statements repository cannot
 #             take) or maintainer-review (the pull request's author is not shown to maintain the repository that
 #             `repo` names, by triage.py's maintainer check; someone other than the author who can label, a member
@@ -23,18 +25,17 @@
 #             commit, which runs maintainer-confirmed.yml, whose completion runs this again), review-blocking (the
 #             review of the commit, in the Build run whose record names it, gave F2 or F7 the verdict fail) or
 #             review-pending (that run has no verdicts.json in its artifact enroll-review-draft, or F2 or F7 is
-#             neither pass nor fail; a re-run of the review job completes Build again, which runs this again). The
-#             daily limit and the statements-queued label are the receiving workflow's, not this file's.
+#             neither pass nor fail; a re-run of the review job completes Build again, which runs this again).
 #
 # Each required check's run starts this workflow, so the run of the last one to pass is the one that dispatches; a run
 # that sees a check not passed yet does nothing, and so does a run for a draft pull request: build.yaml runs again on
 # ready_for_review, and that run's completion decides once the pull request is ready. A later run for the same commit
-# (an edited title, a re-run) sends it again; the enrollment workflow runs one project at a time and skips a commit
-# whose facts it already made. A new
-# commit on the pull request is checked again, and dispatched again. To have a pull request looked at again (one
-# whose checks passed before build.yaml wrote records), a maintainer runs `gh workflow run build.yaml -f pr=<n>`: that
-# Build run's record names the pull request and its head, and its completion runs this. That run also reviews the pull
-# request again and updates its review comment, as each Build run of it does.
+# (an edited title, a re-run) sends it again; the enrollment workflow runs the runs of one project one at a time, and
+# skips a commit whose facts it already made or whose build an event started in the last 24 hours. A new commit on the
+# pull request is checked again, and dispatched again. To have a pull request looked at again (one whose checks passed
+# before build.yaml wrote records), a maintainer runs `gh workflow run build.yaml -f pr=<n>`: that Build run's record
+# names the pull request and its head, and its completion runs this. That run also reviews the pull request again and
+# updates its review comment, as each Build run of it does.
 #
 # It runs on workflow_run, so this file and the script are main's, whatever the pull request holds, and it runs no
 # code of the pull request: decide reads the API as data with a read-only token, this repository's and, for the
