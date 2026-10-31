@@ -6,11 +6,13 @@ This repository tells how to build the fuzz targets of a project. The statements
 
 ## The statements
 
-A statement is about the exact bytes of one binary: one fuzz target in one build, pinned by its SHA-256 in the lock. We state it in [Linux Process Semantics (LPS)](https://github.com/theorem-labs/rocq-linux-process-semantics), a formal model of a riscv64 Linux process. A statement is about each input that the process can get:
+A statement is about the exact bytes of one binary: one fuzz target, or one whole program that `programs` names ([project-yaml.md](project-yaml.md#programs)), in one build, pinned by its SHA-256 in the lock. We state it in [Linux Process Semantics (LPS)](https://github.com/theorem-labs/rocq-linux-process-semantics), a formal model of a riscv64 Linux process. A statement is about each input that the process can get:
 
 * the input file and its contents, or no file;
 * the arguments and the environment;
 * the rest of the process's world, as LPS defines it.
+
+A statement about a whole program names its own input set, a condition on these inputs, and the exit statuses that it accepts, because no driver reads an input file and no seal fixes the environment ([build-contract.md](build-contract.md#whole-programs)).
 
 There are two main statements:
 

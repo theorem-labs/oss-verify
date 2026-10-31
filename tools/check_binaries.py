@@ -1,6 +1,7 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
-"""The checks of the binaries, a step of `tools/check --checks`: four checks on every build of every fuzz target.
+"""The checks of the binaries, a step of `tools/check --checks`: four checks on every build of every fuzz target, and
+the first two on every build of every whole program (project.yaml's programs).
 
 1. ELF and instructions (tools/binary_isa.py): the binary is a 64-bit RISC-V executable at fixed addresses (ET_EXEC),
    it holds no compressed instruction, and every 32-bit word of its code is one that the process model's decoder
@@ -27,9 +28,13 @@ empty working directory with an empty /tmp and an /etc of three fixed files, as 
 no environment, as an unprivileged user, and named by the fuzz target's name. The binary and its quiet twin run in
 the same way. All runs together stop after BUDGET_MINUTES; a run that did not start decides nothing.
 
+A whole program has its own main and reads no input file: it runs once, in the same way, with no argument and no
+input.bin. It links no driver, so it has no quiet twin, and its link does not go through link-fuzz-target, so no record
+says what it took: checks 3 and 4 are not run on it.
+
 Each result is pass, fail, error (the check could not decide), stale (above), plain (check 4 of the plain build), or
-for check 3, not-run (no quiet twin). What the step finds changes no exit status of tools/check. Its results go into
-the build manifest and its report into the --checks file.
+not-run: check 3 with no quiet twin, and checks 3 and 4 of a whole program. What the step finds changes no exit status
+of tools/check. Its results go into the build manifest and its report into the --checks file.
 """
 import concurrent.futures
 import hashlib
@@ -60,6 +65,11 @@ HEADER = check_checks.HEADER
 STOPPED = 137  # run-binaries' status for a run stopped at the time limit (SIGKILL)
 CHECKS_DIR = check_checks.CHECKS_DIR
 MAX_LISTED = 20
+# A whole program's one run: no argument, and no input file (run-binaries' input "-").
+NO_ARGUMENTS = "(no argument)"
+NO_INPUT = "-"
+PROGRAM_NO_QUIET = "a whole program links no driver, so it has no quiet twin"
+PROGRAM_NO_RECORD = "a whole program's link does not go through link-fuzz-target, so no record says what it took"
 STANCE = "off"
 # A trace decides something only with this many calls at least, and with the input opened (system_calls).
 MIN_CALLS = 8
@@ -243,7 +253,8 @@ def system_calls(model, stale, qemu, binary, inputs, results):
     Besides the model's rules (tools/syscall_shapes.py), a trace decides something only when it is a whole run of the
     input: the host-side log shows the run started, the trace ends with the run's exit, it holds at least MIN_CALLS
     calls, and it opens input.bin and reads it. A run that died before it reached its input made few calls, all of
-    them modeled, and says nothing about the input."""
+    them modeled, and says nothing about the input. An input of None is a whole program's run with no input file,
+    which needs no input.bin."""
     if isinstance(model, str):
         return {"result": "error", "detail": model}
     if not QEMU_VERSIONS.match(qemu):
@@ -263,7 +274,8 @@ def system_calls(model, stale, qemu, binary, inputs, results):
         try:
             # The run's input.bin holds the input's bytes (tools/checks/run-binaries), so its reads have one answer.
             verdict = syscall_shapes.check_trace(model, text, stance=STANCE, require_exit=True,
-                                                 binary=str(binary), lengths=log, inputs={"input.bin": data})
+                                                 binary=str(binary), lengths=log,
+                                                 inputs=None if data is None else {"input.bin": data})
         # One trace must not take the step's other results with it.
         except Exception as failure:
             return {"result": "error", "detail": f"{name}: the trace could not be read: "
@@ -279,7 +291,7 @@ def system_calls(model, stale, qemu, binary, inputs, results):
             undecided.append(f"{name}: {describe_status(status)}, and its trace holds no end of the run")
         elif verdict["calls"] < MIN_CALLS:
             undecided.append(f"{name}: its trace holds {verdict['calls']} calls, fewer than {MIN_CALLS}")
-        elif not INPUT_OPEN.search(text) or "read" not in verdict["names"]:
+        elif data is not None and (not INPUT_OPEN.search(text) or "read" not in verdict["names"]):
             undecided.append(f"{name}: {describe_status(status)}, and its trace does not open and read input.bin")
         else:
             whole.add(name)
@@ -367,9 +379,11 @@ def staleness(root, module, release):
 
 
 def binary_checks(job, tag, toolchain, targets, entries, sources, work, *, labels):
-    """Run the four checks on every binary. `tag` is the project image, whose checkouts `sources` names (the
-    manifest's sources); the runs are in the toolchain image. Return (the manifest's binary_checks block, {target:
-    {build: uninstrumented list or None}})."""
+    """Run the four checks on every binary: `targets` are the fuzz targets and the whole programs (job.programs) that
+    tools/check collected. `tag` is the project image, whose checkouts `sources` names (the manifest's sources); the
+    runs are in the toolchain image. Return (the manifest's binary_checks block, {target: {build: uninstrumented list
+    or None}})."""
+    programs = set(job.programs)
     home = work / "binaries"
     check_build.empty_directory(home, toolchain, labels=labels)
 
@@ -391,21 +405,26 @@ def binary_checks(job, tag, toolchain, targets, entries, sources, work, *, label
     records, quiet = {}, {}
     for target in targets:
         for build in job.builds:
-            records[(target, build)], quiet[(target, build)] = record_of(work / "raw" / build, target)
+            records[(target, build)], quiet[(target, build)] = (
+                (PROGRAM_NO_RECORD, None) if target in programs else record_of(work / "raw" / build, target))
     wanted = set()
     for record in records.values():
         if isinstance(record, check_links.Record):
             wanted |= {real for real, _, _ in record.inputs.values() if real.startswith("/opt/")}
             wanted |= {original for original, _ in record.renamed.values() if original.startswith("/opt/")}
     image = image_hashes(toolchain, wanted, labels=labels)
-    links = {target: check_links.analyse({build: records[(target, build)] for build in job.builds}, image,
-                                         dwarf_reader(toolchain, labels), sorted(sources),
-                                         assembly_reader(tag, sorted(sources), labels))
+    not_recorded = {"result": "not-run", "detail": PROGRAM_NO_RECORD}
+    links = {target: ({build: {"uninstrumented": None, "instrumented": dict(not_recorded)} for build in job.builds}
+                      if target in programs else
+                      check_links.analyse({build: records[(target, build)] for build in job.builds}, image,
+                                          dwarf_reader(toolchain, labels), sorted(sources),
+                                          assembly_reader(tag, sorted(sources), labels)))
              for target in targets}
 
     step(f"--checks: each binary on its inputs, under qemu-riscv64 (at most {RUN_SECONDS} seconds a run, "
          f"{BUDGET_MINUTES} minutes in all)")
-    inputs = {target: seed_inputs(job.directory, target) for target in targets}
+    inputs = {target: [(NO_ARGUMENTS, None)] if target in programs else seed_inputs(job.directory, target)
+              for target in targets}
     jobs = {}
     for target in targets:
         for build in job.builds:
@@ -416,6 +435,9 @@ def binary_checks(job, tag, toolchain, targets, entries, sources, work, *, label
             os.chmod(files / "binary", 0o755)
             runs = []
             for n, (_, data) in enumerate(inputs[target]):
+                if data is None:
+                    runs.append(f"l{n} binary {NO_INPUT} {target}")
+                    continue
                 (files / "inputs" / str(n)).write_bytes(data)
                 runs.append(f"l{n} binary inputs/{n} {target}")
             if quiet[(target, build)] is not None:
@@ -463,6 +485,8 @@ def binary_checks(job, tag, toolchain, targets, entries, sources, work, *, label
                 why = failures.get((target, build), "not run")
                 calls = {"result": "error", "detail": why}
                 agreement = {"result": "error", "detail": why}
+            if target in programs:
+                agreement = {"result": "not-run", "detail": f"no quiet twin: {PROGRAM_NO_QUIET}"}
             link = links[target][build]
             uninstrumented[target][build] = link["uninstrumented"]
             block["targets"][target][build] = {
@@ -482,8 +506,9 @@ RESULT_WORDS = {"pass": "pass", "fail": "**fail**", "error": "**not decided**", 
                 "not-run": "**not decided** (not run)", "plain": "not instrumented (plain)"}
 
 
-def report(block, uninstrumented, builds):
-    """The Markdown report of the step."""
+def report(block, uninstrumented, builds, programs=()):
+    """The Markdown report of the step. `programs` are the whole programs among the binaries: their quiet-and-loud and
+    uninstrumented-code checks are not run, which the report says once, and lists as no failure."""
     code = check_checks.code
     lines = ["### The checks of the binaries", ""]
     model = block["model"]
@@ -492,29 +517,40 @@ def report(block, uninstrumented, builds):
                      f"{code(model['commit'][:12])} (release {code(model['release'])}, from its release.yaml).")
     else:
         lines.append(f"The process model could not be read: {code(model.get('error', ''), 300)}.")
-    counts = {target: len(names) for target, names in block["inputs"].items()}
-    lines += [f"Each fuzz target ran on the empty input and up to {MAX_SEEDS} seed inputs ("
-              + ", ".join(f"{code(t)}: {n}" for t, n in counts.items()) + "). docs/build-contract.md, \"The checks of "
-              "the binaries\", says what each check proves.", "",
+    counts = {target: len(names) for target, names in block["inputs"].items() if target not in programs}
+    ran = []
+    if counts:
+        ran.append(f"Each fuzz target ran on the empty input and up to {MAX_SEEDS} seed inputs ("
+                   + ", ".join(f"{code(t)}: {n}" for t, n in counts.items()) + ").")
+    if programs:
+        ran.append(f"Each whole program ({', '.join(map(code, programs))}) ran once, with no argument and no input "
+                   "file; it has no quiet twin and no record of its link, so its quiet-and-loud and "
+                   "uninstrumented-code checks are skipped.")
+    lines += [" ".join(ran) + " docs/build-contract.md, \"The checks of the binaries\", says what each check proves.",
+              "",
               "| binary | ELF and instructions | system calls | quiet and loud | instrumented | uninstrumented code |",
               "|---|---|---|---|---|---|"]
     problems = []
     for target, by_build in block["targets"].items():
+        program = target in programs
         for build in builds:
             results = by_build[build]
             listing = uninstrumented[target][build]
             # A plain result with no list is a Go program (check_links.analyse): it links Go code only.
-            files = ("no list (Go code only)" if listing is None and results["instrumented"]["result"] == "plain"
+            files = ("skipped (program)" if program
+                     else "no list (Go code only)" if listing is None and results["instrumented"]["result"] == "plain"
                      else "not recorded" if listing is None else f"{len(listing)} files" + (
                          f", {sum(1 for u in listing if u['kind'] == 'assembly')} assembly"
                          if any(u["kind"] == "assembly" for u in listing) else ""))
-            cells = [RESULT_WORDS.get(results[key]["result"], results[key]["result"])
+            skipped = ("quiet_loud", "instrumented") if program else ()
+            cells = ["skipped (program)" if key in skipped else RESULT_WORDS.get(results[key]["result"],
+                                                                                 results[key]["result"])
                      for key in ("elf", "system_calls", "quiet_loud", "instrumented")]
             name = f"{target}.{build}"
             lines.append(f"| {check_checks.cell(name)} | {' | '.join(cells)} | {files} |")
             for key, title in (("elf", "ELF and instructions"), ("system_calls", "system calls"),
                                ("quiet_loud", "quiet and loud"), ("instrumented", "instrumented")):
-                if results[key]["result"] not in ("pass", "plain"):
+                if key not in skipped and results[key]["result"] not in ("pass", "plain"):
                     problems.append(f"- {code(name)}, {title}: {code(results[key]['detail'], 600)}")
     lines.append("")
     if problems:

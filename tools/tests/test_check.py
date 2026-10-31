@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for tools/check that need no Docker, with the builds replaced:  python3 -m pytest tools/tests"""
 import contextlib
+import hashlib
 import importlib.machinery
 import importlib.util
 import io
+import os
 import pathlib
 import subprocess
 import sys
@@ -227,6 +229,81 @@ class Binaries(Project):
         self.assertEqual(lines[-1].count("|"), 6)
         self.assertEqual(lines[-1].count("`"), 2)
         self.assertFalse(any(character in lines[-1] for character in "<>@"))
+
+
+class Programs(Project):
+    """A project with a whole program: tools/check passes it to compile, collects it, and lists it in the manifest, the
+    output and the summary, and --twice compares it."""
+
+    PROGRAM = {build: {"file": f"tool.{build}", "bytes": 2000 + i, "sha256": str(i + 5) * 64}
+               for i, build in enumerate(BUILDS)}
+
+    def setUp(self):
+        super().setUp()
+        with open(self.project / "project.yaml", "a", encoding="utf-8") as handle:
+            handle.write("programs: [tool]\n")
+
+    def run_check(self, options, segments=(PT_LOAD,), second=None):
+        summary = self.work.parent / "summary.md"
+        first = {**FIRST, "tool": self.PROGRAM}
+        calls = []
+
+        def build_all(*args, **kwargs):
+            calls.append(args)
+            collected = first if len(calls) == 1 else second
+            binaries(self.work / ("out" if len(calls) == 1 else "twice/out"), collected, segments)
+            return "builder", "project", ["demo_fuzzer"], collected
+
+        code, output, errors = self.main(["--summary", str(summary), *options], build_all)
+        rows = [[cell.strip() for cell in line.split("|")[1:-1]] for line in summary.read_text().splitlines()[2:]]
+        return code, output, errors, rows, yaml.safe_load((self.work / "manifest.yaml").read_text())
+
+    def test_the_manifest_output_and_summary_list_the_program(self):
+        code, output, errors, rows, data = self.run_check([])
+        self.assertEqual((code, errors), (0, ""))
+        self.assertEqual((data["fuzz_targets"], data["programs"]), (["demo_fuzzer"], ["tool"]))
+        self.assertEqual(data["targets"]["tool"], {"builds": self.PROGRAM})
+        self.assertEqual(data["layout"]["tool"]["asan"], {"text_bytes": 1234, "static": True})
+        self.assertEqual([row[:2] for row in rows[len(BUILDS):]], [["`tool` (program)", build] for build in BUILDS])
+        for build in BUILDS:
+            self.assertRegex(output, rf"out/tool/tool\.{build} .*\(program\)")
+
+    def test_twice_compares_the_program(self):
+        changed = {**FIRST, "tool": {**self.PROGRAM, "asan": {**self.PROGRAM["asan"], "sha256": "f" * 64}}}
+        code, output, _, _, data = self.run_check(["--twice"], second=changed)
+        self.assertEqual(code, check_tool.DIFFERENT)
+        self.assertEqual(data["rebuild"]["targets"]["tool"]["builds"]["asan"]["sha256"], "f" * 64)
+        self.assertIn("tool.asan: sha256 " + "f" * 64, output)
+
+    def test_a_dynamic_program_breaks_the_enrollment_rules(self):
+        code, _, errors, _, _ = self.run_check([], segments=(PT_LOAD, PT_INTERP))
+        self.assertEqual(code, 2)
+        self.assertEqual(sum("a whole program must be statically linked" in line for line in errors.splitlines()),
+                         len(BUILDS))
+
+    def test_build_all_gives_compile_the_programs_and_collects_them(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            job = check_tool.load(str(self.project))
+        unstripped = elf([("main", 0x12, 1)], segments=[PT_LOAD])
+        twin = elf(symtab=False, sections=[(".text", 10)], segments=[PT_LOAD])
+        calls = []
+
+        def compile_build(tag, build, sanitizer, out, ubsan=None, *, labels, record=False, programs=()):
+            calls.append((build, tuple(programs)))
+            (out / ".stripped").mkdir(parents=True)
+            (out / "tool").write_bytes(unstripped)
+            os.chmod(out / "tool", 0o755)
+            (out / ".stripped" / hashlib.sha256(unstripped).hexdigest()).write_bytes(twin)
+
+        with mock.patch.multiple(check_build, build_builder=lambda *args, **kwargs: "builder",
+                                 project_tag=lambda *args, **kwargs: "project", record_image=lambda *args: None,
+                                 build_project=lambda *args, **kwargs: None, compile_build=compile_build), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            _, _, targets, entries = check_tool.build_all(job, COMMIT, self.work, TOOLCHAIN, self.work)
+        self.assertEqual(calls, [(build, ("tool",)) for build in BUILDS])
+        self.assertEqual((targets, list(entries)), ([], ["tool"]))
+        self.assertEqual(entries["tool"]["plain"]["sha256"], hashlib.sha256(twin).hexdigest())
+        self.assertIn("plain: no fuzz target\nplain: programs: tool\n", output.getvalue())
 
 
 class UbsanSettings(unittest.TestCase):

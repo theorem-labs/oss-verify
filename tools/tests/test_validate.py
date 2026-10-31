@@ -137,6 +137,43 @@ class Builds(unittest.TestCase):
             self.assertIsNone(validate.size_in_bytes(bad), bad)
 
 
+class Programs(unittest.TestCase):
+    """programs: whole programs, each with its own main, which build.sh writes to $OUT/<program>."""
+
+    def has(self, fragment, problems):
+        self.assertTrue(any(fragment in problem for problem in problems), f"{fragment!r} not in {problems}")
+
+    def test_accepted(self):
+        # With no fuzz target at all, as a whole program's project has.
+        problems, warnings, summary = check(MINIMAL + "programs: [bwrap]\n")
+        self.assertEqual((problems, warnings), ([], []))
+        self.assertIn("fuzz targets: all; programs: bwrap)", summary)
+        problems, _, summary = check(MINIMAL.replace("language: c", "language: c++")
+                                     + "fuzz_targets: [a_fuzzer]\nprograms: [tool, other-tool.x]\n")
+        self.assertEqual(problems, [])
+        self.assertIn("fuzz targets: a_fuzzer; programs: tool, other-tool.x)", summary)
+
+    def test_refused(self):
+        self.has("programs must be a non-empty list", check(MINIMAL + "programs: []\n")[0])
+        self.has("programs must be a non-empty list", check(MINIMAL + "programs: bwrap\n")[0])
+        self.has("programs must be a non-empty list", check(MINIMAL + "programs: [1]\n")[0])
+        self.has("is not a program name", check(MINIMAL + "programs: ['../bwrap']\n")[0])
+        self.has("is not a program name", check(MINIMAL + "programs: ['.hidden']\n")[0])
+        self.has("names a program twice", check(MINIMAL + "programs: [a, a]\n")[0])
+        self.has("'a' is in fuzz_targets too", check(MINIMAL + "fuzz_targets: [a, b]\nprograms: [a]\n")[0])
+        for language in ("rust", "python", "go"):
+            text = MINIMAL.replace("language: c", f"language: {language}") + "programs: [tool]\n"
+            if language == "go":
+                text += "sanitizers: []\n"
+            self.has(f"a {language} project cannot list programs", check(text)[0])
+
+    def test_a_program_takes_no_seed_corpus(self):
+        problems = check(MINIMAL + "programs: [tool]\n",
+                         {"Dockerfile": "FROM x\n", "build.sh": "#!/bin/bash\n",
+                          "tool_seed_corpus.zip": corpus({"x": b"1"})})[0]
+        self.has("is the seed corpus of tool, a whole program", problems)
+
+
 class Languages(unittest.TestCase):
     def test_oss_fuzz_names(self):
         for language in ("c", "c++", "rust", "python", "go", "jvm", "javascript"):

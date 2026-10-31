@@ -56,6 +56,7 @@ class Job:
     ubsan_checks: list | None = None  # the UBSan checks in effect if the project changes them; None: the default
     language: str = "c"  # project.yaml's language, which chooses the toolchain
     mutants: str | None = None  # project.yaml's mutants: the directory of breakage patches, from the image's WORKDIR
+    programs: list = dataclasses.field(default_factory=list)  # project.yaml's programs: the whole programs
 
 
 _UNSAFE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
@@ -312,12 +313,13 @@ def empty_directory(path, tag, *, labels):
 DOCKER_FAILED = 125
 
 
-def compile_build(tag, build, sanitizer, out, ubsan=None, *, labels, record=False):
+def compile_build(tag, build, sanitizer, out, ubsan=None, *, labels, record=False, programs=()):
     """Run `compile` for one build in a fresh container with no network, its $OUT mounted at `out`. `ubsan`, if given,
     is (checks, left out[, left out of C compiles]): the UBSan checks of the build, those that trap mode leaves out,
     and those that its C compiles leave out. `labels`: docker run arguments for the container, work_label(). With
     `record`, compile records each fuzz target's link in $OUT/.records/ for the checks of the binaries
-    (tools/check_links.py); the binaries are the same."""
+    (tools/check_links.py); the binaries are the same. `programs`: project.yaml's programs, which compile gets as
+    OV_PROGRAMS, checks, and saves the stripped twin of."""
     step(f"compile: the {build} build (SANITIZER={sanitizer}), with no network")
     empty_directory(out, tag, labels=labels)
     owner = f"{os.getuid()}:{os.getgid()}"
@@ -330,6 +332,8 @@ def compile_build(tag, build, sanitizer, out, ubsan=None, *, labels, record=Fals
             checks += ["-e", f"OV_UBSAN_C_EXCLUDE={','.join(ubsan[2])}"]
     if record:
         checks += ["-e", "OV_RECORD=1"]
+    if programs:
+        checks += ["-e", f"OV_PROGRAMS={' '.join(programs)}"]
     command = ["docker", "run", "--rm", "--init", "--network=none", *labels, "-e", f"SANITIZER={sanitizer}",
                "-e", f"OV_OWNER={owner}", *jobs, *checks, "-v", f"{out}:/out", tag, "compile"]
     code = run(*command)

@@ -137,6 +137,33 @@ class Discovery(Scratch):
         self.assertEqual(targets, [])
         self.assertTrue(problems and "no fuzz target" in problems[0])
 
+    def test_programs_come_from_the_list(self):
+        program = elf([("main", GLOBAL_FUNC, 1)])
+        for build in ("plain", "asan"):
+            self.write(f"raw/{build}/tool", program)
+            self.write(f"raw/{build}/fuzzer", elf([(ENTRY, GLOBAL_FUNC, 1)]))
+            self.write(f"raw/{build}/helper", program)  # an executable that no list names
+        raw = {build: self.dir / "raw" / build for build in ("plain", "asan")}
+        found = {build: manifest.discover(directory) for build, directory in raw.items()}
+        self.assertEqual(sorted(found["plain"]), ["fuzzer"])
+        self.assertEqual(manifest.find_programs(raw, ["tool"]), [])
+        self.assertEqual(manifest.resolve_targets(found, programs=["tool"]), (["fuzzer"], []))
+        # A program defines no LLVMFuzzerTestOneInput, and is never one of the fuzz targets.
+        self.write("raw/asan/tool", elf([(ENTRY, GLOBAL_FUNC, 1)]))
+        found = {build: manifest.discover(directory) for build, directory in raw.items()}
+        self.assertEqual(manifest.resolve_targets(found, programs=["tool"]), (["fuzzer"], []))
+        self.assertEqual(manifest.find_programs(raw, ["tool"]),
+                         ["program tool in the asan build defines LLVMFuzzerTestOneInput: it is a fuzz target, not a "
+                          "program"])
+        self.write("raw/asan/tool", b"#!/bin/sh\n")
+        self.assertEqual(manifest.find_programs(raw, ["tool"]),
+                         ["program tool in the asan build is not an executable ELF file"])
+
+    def test_with_programs_a_build_may_have_no_fuzz_target(self):
+        self.assertEqual(manifest.resolve_targets({"plain": {}}, programs=["tool"]), ([], []))
+        targets, problems = manifest.resolve_targets({"plain": {}})
+        self.assertTrue(problems and "no fuzz target" in problems[0])
+
 
 class Collection(Scratch):
     def test_collect_takes_the_stripped_twin(self):
@@ -162,6 +189,26 @@ class Collection(Scratch):
         self.assertEqual(len(problems), 2)
         self.assertIn("a in the plain build has no stripped twin", problems[0])
         self.assertIn("the stripped twin of b in the plain build has a symbol table", problems[1])
+
+    def test_collect_takes_each_programs_twin(self):
+        unstripped = elf([("main", GLOBAL_FUNC, 1)])
+        twin = elf(symtab=False) + b"program"
+        for build in ("plain", "asan"):
+            self.write(f"raw/{build}/tool", unstripped)
+            self.write(f"raw/{build}/.stripped/{hashlib.sha256(unstripped).hexdigest()}", twin)
+        raw = {build: self.dir / "raw" / build for build in ("plain", "asan")}
+        entries, problems = manifest.collect(raw, [], self.dir / "out", ["tool"])
+        self.assertEqual(problems, [])
+        self.assertEqual((self.dir / "out/tool/tool.asan").read_bytes(), twin)
+        self.assertEqual(entries["tool"]["plain"]["sha256"], hashlib.sha256(twin).hexdigest())
+        # A program that a build lacks, or whose twin compile did not save.
+        (self.dir / "raw/asan/tool").unlink()
+        self.write("raw/plain/tool", unstripped + b"changed")
+        _, problems = manifest.collect(raw, [], self.dir / "out", ["tool"])
+        self.assertEqual(problems, [
+            "tool in the plain build has no stripped twin: compile saves one for each program that OV_PROGRAMS names",
+            "program tool, which project.yaml lists, is not in the asan build",
+        ])
 
 
 class Layout(Scratch):
@@ -236,6 +283,31 @@ class Locks(Scratch):
         self.assertEqual(toolchain, "example.org/toolchain@sha256:" + "1" * 64)
         self.assertEqual(pins[("fuzzer", "asan")]["sha256"], "bb")
         self.assertEqual(manifest.compare(self.ENTRIES, pins, ["plain", "asan"]), ([], [], 2))
+
+    def test_the_manifest_lists_the_programs(self):
+        program = {"plain": {"file": "tool.plain", "bytes": 5, "sha256": "cc"},
+                   "asan": {"file": "tool.asan", "bytes": 6, "sha256": "dd"}}
+        entries = {**self.ENTRIES, "tool": program}
+        layouts = {name: {build: {"text_bytes": 1, "static": True} for build in ("plain", "asan")} for name in entries}
+        data = manifest.manifest(
+            project="p", repo="https://x/y", ref="", commit="c" * 40, oss_verify=None, builder={}, sources={},
+            builds=["plain", "asan"], targets=["fuzzer"], entries=entries, layouts=layouts, programs=["tool"],
+        )
+        self.assertEqual((data["fuzz_targets"], data["programs"]), (["fuzzer"], ["tool"]))
+        self.assertEqual(list(data["targets"]), ["fuzzer", "tool"])
+        self.assertEqual(list(data["layout"]), ["fuzzer", "tool"])
+        manifest.write_manifest(self.dir / "manifest.yaml", data)
+        _, pins, _ = manifest.load_lock(self.dir / "manifest.yaml")
+        self.assertEqual(pins[("tool", "asan")]["sha256"], "dd")
+        self.assertEqual(manifest.compare(entries, pins, ["plain", "asan"]), ([], [], 4))
+        changed = {**entries, "tool": {**program, "plain": {**program["plain"], "sha256": "ee"}}}
+        differences, _, matched = manifest.compare(changed, pins, ["plain", "asan"])
+        self.assertEqual((len(differences), matched), (1, 3))
+        self.assertIn("tool.plain: sha256 ee", differences[0])
+        # A project without programs lists none.
+        self.assertEqual(manifest.manifest(
+            project="p", repo="https://x/y", ref="", commit="c" * 40, oss_verify=None, builder={}, sources={},
+            builds=["plain"], targets=["fuzzer"], entries=self.ENTRIES, layouts=layouts)["programs"], [])
 
     def test_harness_yaml(self):
         harness = {"schema": "oss-fuzz-theorems/harness/1", "harness": "fuzzer",

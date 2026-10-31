@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # Copyright 2026 Anthropic PBC
 # SPDX-License-Identifier: Apache-2.0
-# Modified 2026 by Theorem Labs, PBC: builds a project's fuzz targets for OSS Verify (each build compiled with no
-# network, the fuzz targets found by their symbol table, a build manifest written), with --twice and --lock; the
-# virtual machine mode (--qemu) is not ported.
+# Modified 2026 by Theorem Labs, PBC: builds a project's fuzz targets and whole programs for OSS Verify (each build
+# compiled with no network, the fuzz targets found by their symbol table, a build manifest written), with --twice and
+# --lock; the virtual machine mode (--qemu) is not ported.
 """
-Build a project's fuzz targets the way we do, collect the binaries, and write the build manifest.
+Build a project's fuzz targets and whole programs the way we do, collect the binaries, and write the build manifest.
 
     tools/check <name>                  build projects/<name>: every build its project.yaml asks for
     tools/check --build asan <name>     only some builds (repeat --build; plain, ubsan, asan, asan-ubsan); out/
@@ -21,7 +21,7 @@ Build a project's fuzz targets the way we do, collect the binaries, and write th
                                         write it as Markdown to <file>: which abort() checks no seed input reaches,
                                         which breakage patches (project.yaml's mutants) no seed input catches
                                         (tools/check_checks.py), and the four checks of each binary
-                                        (tools/check_binaries.py)
+                                        (tools/check_binaries.py); a whole program gets the first two of those four
     tools/check --print-toolchain <name>
                                         print the toolchain image `tools/check <name>` builds FROM, and build nothing
 
@@ -33,25 +33,28 @@ It runs these steps:
        for the project's language in infra/toolchains.tsv (docs/build-contract.md, "Toolchains").
     4. Build the project's Dockerfile on it with --build-arg COMMIT=<commit> (and REPO, BASE_BUILDER). The network
        is available. The build context is projects/<name>/, or your repository at that commit if dockerfile: is set.
-    5. Run `compile` once per build, each in a fresh container with no network (docker run --network=none). With
-       --checks, the first build also records each fuzz target's link (infra/base-builder/link-fuzz-target).
+    5. Run `compile` once per build, each in a fresh container with no network (docker run --network=none), with
+       project.yaml's programs as OV_PROGRAMS. With --checks, the first build also records each fuzz target's link
+       (infra/base-builder/link-fuzz-target).
     6. Find the fuzz targets: executables in $OUT whose symbol table defines LLVMFuzzerTestOneInput, present in every
-       build (or those fuzz_targets lists). Collect each one's published (stripped) bytes as
-       out/<target>/<target>.<build>, and read the size of its .text section and whether it is statically linked (no
+       build (or those fuzz_targets lists). Take the whole programs that project.yaml's programs lists: each an
+       executable in $OUT in every build. Collect each one's published (stripped) bytes as
+       out/<name>/<name>.<build>, and read the size of its .text section and whether it is statically linked (no
        PT_INTERP or PT_DYNAMIC program header).
     7. Write manifest.yaml: the repository, ref and commit, this repository's commit, the builder and the toolchain
-       image it was built FROM, the git checkouts in the image, and the file, size and SHA-256 of every target in
-       every build, with the .text size and linkage of each one. List each binary with these values; stop if one is
-       not statically linked.
+       image it was built FROM, the git checkouts in the image, and the file, size and SHA-256 of every fuzz target and
+       program in every build, with the .text size and linkage of each one. List each binary with these values; stop
+       if one is not statically linked.
     8. With --twice, build everything again from scratch (steps 3 to 6, with docker build --no-cache), compare every
        byte, and only then add the rebuild block to manifest.yaml: this host, the time, the second builder, the file,
        size and SHA-256 of every binary the second build made, and result: identical or differs.
     9. With --checks, check each binary (tools/check_binaries.py; docs/build-contract.md, "The checks of the
        binaries"): its ELF header and instructions, its system calls against the process model of the published
-       proofs, its quiet twin, and the code it links uninstrumented. Write the results into manifest.yaml (each
-       build's uninstrumented list, and the binary_checks block). Then measure the fuzz targets' checks on their seed
-       inputs (tools/check_checks.py; docs/build-contract.md, "The checks of a fuzz target"). What --checks finds
-       changes no exit code.
+       proofs, its quiet twin, and the code it links uninstrumented (a whole program has no quiet twin and no record
+       of its link, so it gets the first two). Write the results into manifest.yaml (each build's uninstrumented
+       list, and the binary_checks block). Then measure the fuzz targets' checks on their seed inputs
+       (tools/check_checks.py; docs/build-contract.md, "The checks of a fuzz target"), which skips the programs. What
+       --checks finds changes no exit code.
    10. Open a shell in the project image with no network and out/ at /out, unless --no-shell.
 
 Everything is kept in ~/.cache/oss-verify-check/<name>, or in --dir if given. Each run replaces out/ there, so the
@@ -61,8 +64,8 @@ Security note: the project's Dockerfile is built with network access, as `docker
 someone you don't trust on a machine with nothing to lose.
 
 Exit codes: 0 if the project builds (and, with --twice or --lock, every byte matches); 1 if it does not build; 2 if
-projects/<name>/ breaks the enrollment rules, or a fuzz target is not statically linked; 3 if it builds but the bytes
-differ (--twice or --lock).
+projects/<name>/ breaks the enrollment rules, or a fuzz target or program is not statically linked; 3 if it builds but
+the bytes differ (--twice or --lock).
 
 Requires git, Docker (with the toolchain image available) and PyYAML (on Ubuntu, apt install python3-yaml).
 """
@@ -127,6 +130,7 @@ def load(project):
         ubsan_checks=validate.ubsan_checks_in_effect(config) if config.get("ubsan_checks") is not None else None,
         language=config["language"],
         mutants=config.get("mutants"),
+        programs=config.get("programs") or [],
     )
 
 
@@ -166,12 +170,13 @@ def ubsan_settings(job, toolchain):
 
 
 def build_all(job, commit, work, toolchain, home, suffix="", no_cache=False, record=False):
-    """Build the images, FROM the toolchain image `toolchain`, compile every build and collect the fuzz targets into
-    work/out. `home` is the run's work directory: the project image's tag names it and is added to home/images before
-    the image is built, and every container carries its work_label(). With `record`, each build records its links for
-    the checks of the binaries (check_build.compile_build).
+    """Build the images, FROM the toolchain image `toolchain`, compile every build and collect the fuzz targets and the
+    programs into work/out. `home` is the run's work directory: the project image's tag names it and is added to
+    home/images before the image is built, and every container carries its work_label(). With `record`, each build
+    records its links for the checks of the binaries (check_build.compile_build).
 
-    Return (builder tag, project tag, targets, entries). Raise Failed if any step fails.
+    Return (builder tag, project tag, fuzz targets, entries); the entries hold job.programs too. Raise Failed if any
+    step fails.
     """
     ubsan = ubsan_settings(job, toolchain)
     builder = check_build.build_builder(toolchain, suffix, no_cache)
@@ -182,16 +187,21 @@ def build_all(job, commit, work, toolchain, home, suffix="", no_cache=False, rec
     for build in job.builds:
         raw[build] = work / "raw" / build
         check_build.compile_build(tag, build, validate.BUILDS[build], raw[build], ubsan,
-                                  labels=check_build.work_label(home), record=record)
+                                  labels=check_build.work_label(home), record=record, programs=job.programs)
 
-    step("find the fuzz targets")
+    step("find the fuzz targets" + (" and the programs" if job.programs else ""))
     found = {build: manifest.discover(directory) for build, directory in raw.items()}
-    targets, problems = manifest.resolve_targets(found, job.fuzz_targets)
+    targets, problems = manifest.resolve_targets(found, job.fuzz_targets, programs=job.programs)
+    problems += manifest.find_programs(raw, job.programs)
     for build, names in found.items():
-        say(f"{build}: {', '.join(names) or 'no fuzz target'}")
-    entries, missing = manifest.collect(raw, targets, work / "out")
+        say(f"{build}: {', '.join(name for name in names if name not in job.programs) or 'no fuzz target'}")
+        if job.programs:
+            present = [name for name in job.programs if manifest.is_executable(raw[build] / name)]
+            say(f"{build}: programs: {', '.join(present) or 'none'}")
+    entries, missing = manifest.collect(raw, targets, work / "out", job.programs)
     if problems or missing:
-        raise Failed("\n  ".join(["the fuzz targets are not right:", *problems, *missing]))
+        what = "the fuzz targets and programs are" if job.programs else "the fuzz targets are"
+        raise Failed("\n  ".join([f"{what} not right:", *problems, *missing]))
     return builder, tag, targets, entries
 
 
@@ -216,14 +226,16 @@ def markdown_name(name):
     return f"`{encoded}`"
 
 
-def summary_table(targets, builds, entries, layouts):
-    """A Markdown table with one row for each binary: target, build, file bytes, .text bytes, and whether it is static."""
+def summary_table(targets, builds, entries, layouts, programs=()):
+    """A Markdown table with one row for each binary of the fuzz targets `targets` and the whole programs `programs`:
+    its name (a program's marked so), build, file bytes, .text bytes, and whether it is static."""
     rows = ["| target | build | file bytes | `.text` bytes | static |", "|---|---|---:|---:|---|"]
-    for target in targets:
+    for target in [*targets, *programs]:
+        name = markdown_name(target) + (" (program)" if target in programs else "")
         for build in builds:
             layout = layouts[target][build]
             static = {True: "yes", False: "no"}.get(layout["static"], "unknown")
-            rows.append(f"| {markdown_name(target)} | {build} | {entries[target][build]['bytes']:,} | "
+            rows.append(f"| {name} | {build} | {entries[target][build]['bytes']:,} | "
                         f"{text_size(layout)} | {static} |")
     return "\n".join(rows) + "\n"
 
@@ -308,30 +320,34 @@ def main():
         say(f"\nBUILD FAILED: {failure}")
         return 1
 
+    # The fuzz targets, then the whole programs: entries and layouts hold both.
+    binaries = [*targets, *job.programs]
     layouts = manifest.layouts(work / "out", entries)
     data = manifest.manifest(
         project=job.name, repo=job.repo, ref=job.ref, commit=commit, oss_verify=check_build.oss_verify_state(job),
         builder={"toolchain": toolchain, "image": check_build.image_id(builder),
                  "project_image": check_build.image_id(tag)},
         sources=check_build.sources(tag, labels=check_build.work_label(work)), builds=job.builds, targets=targets,
-        entries=entries, layouts=layouts,
+        entries=entries, layouts=layouts, programs=job.programs,
     )
     manifest.write_manifest(work / "manifest.yaml", data)
     step("built")
-    for target in targets:
+    for target in binaries:
         for build in job.builds:
             entry, layout = entries[target][build], layouts[target][build]
             linkage = {True: "static", False: "dynamic"}.get(layout["static"], "unknown")
             say(f"  out/{target}/{entry['file']:<40} {entry['bytes']:>10,} bytes  {text_size(layout):>10} .text  "
-                f"{linkage:<7}  sha256 {entry['sha256']}")
+                f"{linkage:<7}  sha256 {entry['sha256']}" + ("  (program)" if target in job.programs else ""))
     say(f"manifest: {work / 'manifest.yaml'}")
     if options.summary:
-        options.summary.write_text(summary_table(targets, job.builds, entries, layouts), encoding="utf-8")
-    not_static = [(f"out/{target}/{entries[target][build]['file']}", layouts[target][build]["static"])
-                  for target in targets for build in job.builds if layouts[target][build]["static"] is not True]
-    for binary, static in not_static:
+        options.summary.write_text(summary_table(targets, job.builds, entries, layouts, job.programs),
+                                   encoding="utf-8")
+    not_static = [(target, f"out/{target}/{entries[target][build]['file']}", layouts[target][build]["static"])
+                  for target in binaries for build in job.builds if layouts[target][build]["static"] is not True]
+    for target, binary, static in not_static:
         why = "is dynamically linked" if static is False else "has program headers that cannot be read"
-        print(validate.printable(f"{job.name}: {binary} {why}: a fuzz target must be statically linked (no PT_INTERP "
+        kind = "a whole program" if target in job.programs else "a fuzz target"
+        print(validate.printable(f"{job.name}: {binary} {why}: {kind} must be statically linked (no PT_INTERP "
                                  "or PT_DYNAMIC program header)"), file=sys.stderr)
     if not_static:
         return 2
@@ -349,7 +365,7 @@ def main():
             return 1
         # The rebuild block is written only now, after the comparison, and also when the builds differ.
         data["rebuild"], differences, matched = manifest.rebuild(
-            entries, again, targets_again, host=socket.gethostname(),
+            entries, again, [*targets_again, *job.programs], host=socket.gethostname(),
             at=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             builder=builder_ids, builds=job.builds)
         manifest.write_manifest(work / "manifest.yaml", data)
@@ -376,7 +392,7 @@ def main():
         # The checks of the binaries, into the manifest: per build, the uninstrumented list in the harness.yaml shape,
         # and the four results in its binary_checks block.
         try:
-            block, uninstrumented = check_binaries.binary_checks(job, tag, toolchain, targets, entries,
+            block, uninstrumented = check_binaries.binary_checks(job, tag, toolchain, binaries, entries,
                                                                  data["sources"], work,
                                                                  labels=check_build.work_label(work))
             for target, by_build in uninstrumented.items():
@@ -387,19 +403,24 @@ def main():
                         data["targets"][target]["builds"][build]["uninstrumented"] = listing
             data["binary_checks"] = block
             manifest.write_manifest(work / "manifest.yaml", data)
-            binaries = check_binaries.report(block, uninstrumented, job.builds)
+            binaries_report = check_binaries.report(block, uninstrumented, job.builds, job.programs)
         # Any error: the step must never change tools/check's exit status.
         except Exception as failure:
-            binaries = ("### The checks of the binaries\n\n`tools/check --checks` could not run them: "
-                        f"{check_checks.code(f'{type(failure).__name__}: {failure}', 1500)}\n")
+            binaries_report = ("### The checks of the binaries\n\n`tools/check --checks` could not run them: "
+                               f"{check_checks.code(f'{type(failure).__name__}: {failure}', 1500)}\n")
         try:
-            report = check_checks.checks(job, tag, targets, work, work / "raw", labels=check_build.work_label(work),
-                                         ubsan=ubsan_settings(job, toolchain), budget=options.checks_budget)
+            # The fuzz targets only: a whole program has no seed corpus and no breakage patches.
+            report = (check_checks.checks(job, tag, targets, work, work / "raw", labels=check_build.work_label(work),
+                                          ubsan=ubsan_settings(job, toolchain), budget=options.checks_budget)
+                      if targets else "### The checks of the fuzz targets\n\nThe project has no fuzz target.\n")
         # Any error: the step must never change tools/check's exit status.
         except Exception as failure:
             report = ("### The checks of the fuzz targets\n\n`tools/check --checks` could not measure them: "
                       f"{check_checks.code(f'{type(failure).__name__}: {failure}', 1500)}\n")
-        report = f"{report.rstrip()}\n\n{binaries}"
+        if job.programs:
+            report = (f"{report.rstrip()}\n\nThe whole programs ({', '.join(map(markdown_name, job.programs))}) have "
+                      "no seed corpus and no breakage patches, so these checks skip them.\n")
+        report = f"{report.rstrip()}\n\n{binaries_report}"
         step("--checks: what the fuzz targets' checks catch, and the checks of the binaries")
         say(report)
         options.checks.write_text(report, encoding="utf-8")

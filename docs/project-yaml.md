@@ -21,6 +21,7 @@ The field names come from OSS Scanner if it has the field, then from OSS-Fuzz. W
 | `sanitizers` | no | the sanitizer builds in addition to `plain` | `[address, undefined]` |
 | `ubsan_checks` | no | changes to the UBSan checks of the `ubsan` and `asan-ubsan` builds, with the next toolchain version ([below](#ubsan_checks)) | none: the checks that OSS-Fuzz makes fatal, for the project's language |
 | `fuzz_targets` | no | the fuzz targets to verify | each fuzz target that the build makes |
+| `programs` | no | the whole programs to verify, each with its own `main` ([below](#programs)) | none |
 | `mutants` | no | the directory of the breakage patches, from the `WORKDIR` of the `Dockerfile` ([below](#mutants)) | none |
 | `patch_style` | no | the path of your `patch_style.md` in your repository ([below](#patch_style)) | |
 | `budgets` | no | the memory budgets of the statements | today's values |
@@ -142,6 +143,12 @@ Give the names of the fuzz targets that `build.sh` puts in `$OUT`. If you do not
 
 The manifest and the lock record the list that a build used. Thus "each fuzz target" cannot change what a proof is about without a record. A build that does not make a fuzz target in this list fails.
 
+### programs
+
+Give the names of the whole programs that `build.sh` puts in `$OUT`, for a `c` or `c++` project. A whole program is a program with its own `main`, for example a command-line tool, not a fuzz target: `build.sh` links it into `$OUT/<name>` itself, with `$OV_PROGRAM_LDFLAGS`, and with no driver and no seals ([build-contract.md](build-contract.md#whole-programs)). Thus a statement about a whole program does not take one input file, as a statement about a fuzz target does. It states its own input set (the arguments, the environment, standard input and the rest of the process's world) and the exit statuses that it accepts.
+
+Each program must be in each build. It is a static executable, and it does not define `LLVMFuzzerTestOneInput`: `compile` refuses it otherwise. Give each name only once, and do not give a name in both `fuzz_targets` and `programs`. A project with `programs` can have no fuzz target. A program takes no seed corpus, and the seed and breakage checks of `tools/check --checks` skip it ([build-contract.md](build-contract.md#the-checks-of-a-fuzz-target)).
+
 ### mutants
 
 Give the directory that holds breakage patches of your fuzz targets: changes to the library or to a fuzz target that make a check fail on an input in the seed corpus. A one-line change is usually a `mutant:` record in the check's comment instead, and a project can use both ([.claude/skills/add-project/SKILL.md](../.claude/skills/add-project/SKILL.md), step 3.4). The path starts at the `WORKDIR` of the `Dockerfile`, where `build.sh` runs. For a `Dockerfile` that fetches your repository into `$SRC/<name>` and works there, it is a directory of your repository, for example `fuzz/mutants`.
@@ -247,7 +254,7 @@ The build files of a seeded project come from the build recipe of that release. 
 
 A seed corpus is a zip file of example inputs of one fuzz target. Together, its inputs run each API call and each property check of the fuzz target at least once ([.claude/skills/add-project/SKILL.md](../.claude/skills/add-project/SKILL.md), step 3.3). OSS-Fuzz uses the same name. A seed corpus must obey these rules:
 
-* Its name is `<target>_seed_corpus.zip`. If you give `fuzz_targets`, it lists `<target>`.
+* Its name is `<target>_seed_corpus.zip`. If you give `fuzz_targets`, it lists `<target>`. `programs` does not list `<target>`.
 * Each input is a file at the top level of the zip file. It is an input as libFuzzer takes it, without the six-byte header that the driver reads ([build-contract.md](build-contract.md#the-driver)).
 * It holds at most 1,024 inputs.
 * Its size is at most 1 MiB, and at most 16 MiB when uncompressed.

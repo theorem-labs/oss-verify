@@ -1,15 +1,18 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
-"""Fuzz targets, the build manifest, and locks: the parts of tools/check that need no Docker.
+"""Fuzz targets, whole programs, the build manifest, and locks: the parts of tools/check that need no Docker.
 
 A fuzz target is an executable in a build's $OUT whose ELF symbol table defines LLVMFuzzerTestOneInput. This is
 OSS-Fuzz's rule (infra/utils.py, is_fuzz_target_local), reading the symbol table instead of searching the bytes. A Go
-program has no such symbol, so `compile` lists the Go fuzz targets in $OUT/.go-fuzz-targets.
+program has no such symbol, so `compile` lists the Go fuzz targets in $OUT/.go-fuzz-targets. A whole program, a
+program with its own main, is not found by a rule: project.yaml's programs names each one, and it must be an
+executable in $OUT in every build that does not define LLVMFuzzerTestOneInput.
 `compile` saves the stripped twin of each one as $OUT/.stripped/<sha256 of the executable>, and those stripped bytes
 are what is collected, published and pinned.
 
 The manifest's targets.<target>.builds section has the shape of the builds: section of an oss-fuzz-theorems
-harness.yaml (file, bytes, sha256 for each build), so that the lock in the proofs repository can take it as it is.
+harness.yaml (file, bytes, sha256 for each build), so that the lock in the proofs repository can take it as it is; it
+has the whole programs too, and the programs field lists which of its binaries they are.
 Its layout section gives each binary's .text size and whether it is statically linked, apart from that harness shape.
 With --twice, its rebuild block records the second build in the same shape, and whether the two are identical.
 """
@@ -259,9 +262,11 @@ def published(out, path):
     return twin if twin.is_file() and not twin.is_symlink() else None
 
 
-def resolve_targets(found, wanted=None):
+def resolve_targets(found, wanted=None, *, programs=()):
     """Decide which fuzz targets a check covers. `found` maps each build to the targets discovered in it; `wanted` is
-    project.yaml's fuzz_targets, or None for all of them. Return (targets, problems)."""
+    project.yaml's fuzz_targets, or None for all of them; `programs` is project.yaml's programs, which are never fuzz
+    targets, and with which a build may have no fuzz target. Return (targets, problems)."""
+    found = {build: [name for name in names if name not in programs] for build, names in found.items()}
     builds = list(found)
     common = set.intersection(*(set(found[build]) for build in builds)) if builds else set()
     problems = []
@@ -271,7 +276,7 @@ def resolve_targets(found, wanted=None):
             problems.append(f"fuzz target {name} is in the {build} build but not in the {', '.join(missing)} build")
     if wanted is None:
         targets = sorted(common)
-        if not targets and not problems:
+        if not targets and not problems and not programs:
             problems.append(
                 "the build produced no fuzz target: no executable in $OUT defines LLVMFuzzerTestOneInput "
                 "(link each one with $LIB_FUZZING_ENGINE)"
@@ -283,24 +288,50 @@ def resolve_targets(found, wanted=None):
     return [name for name in wanted if name in common], problems
 
 
-def collect(raw, targets, out):
-    """Copy each target's published bytes from raw[<build>] (a build's $OUT) to out/<target>/<target>.<build>.
+def find_programs(raw, programs):
+    """Check project.yaml's programs in each build's $OUT (raw[<build>]): a whole program comes from that list, not from
+    the symbol table rule. Return the problems: a program file that is not an executable ELF file, or that defines
+    LLVMFuzzerTestOneInput. A program that a build does not have at all is collect()'s problem."""
+    problems = []
+    for name in programs:
+        for build, out in raw.items():
+            path = pathlib.Path(out) / name
+            if not path.is_file() or path.is_symlink():
+                continue
+            if not is_executable(path):
+                problems.append(f"program {name} in the {build} build is not an executable ELF file")
+            elif ENTRY in defined_symbols(path, {ENTRY}):
+                problems.append(f"program {name} in the {build} build defines LLVMFuzzerTestOneInput: it is a fuzz "
+                                "target, not a program")
+    return problems
 
-    Return ({target: {build: {file, bytes, sha256}}}, problems).
+
+def collect(raw, targets, out, programs=()):
+    """Copy the published bytes of each fuzz target in `targets` and each program in `programs` from raw[<build>] (a
+    build's $OUT) to out/<name>/<name>.<build>.
+
+    Return ({name: {build: {file, bytes, sha256}}}, problems).
     """
     out = pathlib.Path(out)
     if out.exists():
         shutil.rmtree(out)
     entries, problems = {}, []
-    for target in targets:
+    for target in [*targets, *programs]:
         (out / target).mkdir(parents=True)
         entries[target] = {}
         for build, directory in raw.items():
-            twin = published(directory, pathlib.Path(directory) / target)
+            path = pathlib.Path(directory) / target
+            if not path.is_file() or path.is_symlink():
+                # Only a program can be missing: resolve_targets gives the fuzz targets that every build has.
+                problems.append(f"program {target}, which project.yaml lists, is not in the {build} build")
+                continue
+            twin = published(directory, path)
             if twin is None:
                 problems.append(
-                    f"{target} in the {build} build has no stripped twin: it was not linked through $CC or $CXX "
-                    "with $LIB_FUZZING_ENGINE, or build.sh changed it after the link"
+                    f"{target} in the {build} build has no stripped twin: "
+                    + ("compile saves one for each program that OV_PROGRAMS names" if target in programs else
+                       "it was not linked through $CC or $CXX with $LIB_FUZZING_ENGINE, or build.sh changed it after "
+                       "the link")
                 )
                 continue
             if has_symbol_table(twin):
@@ -324,8 +355,11 @@ def layouts(out, entries):
             for target, builds in entries.items()}
 
 
-def manifest(*, project, repo, ref, commit, oss_verify, builder, sources, builds, targets, entries, layouts):
-    """The build manifest of one check, as a mapping ready for YAML."""
+def manifest(*, project, repo, ref, commit, oss_verify, builder, sources, builds, targets, entries, layouts,
+             programs=()):
+    """The build manifest of one check, as a mapping ready for YAML. `targets` are the fuzz targets and `programs` the
+    whole programs: the targets and layout sections hold both."""
+    binaries = [*targets, *programs]
     return {
         "schema": MANIFEST_SCHEMA,
         "project": project,
@@ -337,8 +371,9 @@ def manifest(*, project, repo, ref, commit, oss_verify, builder, sources, builds
         "sources": sources,
         "builds": builds,
         "fuzz_targets": targets,
-        "targets": {target: {"builds": entries[target]} for target in targets},
-        "layout": {target: layouts[target] for target in targets},
+        "programs": list(programs),
+        "targets": {name: {"builds": entries[name]} for name in binaries},
+        "layout": {name: layouts[name] for name in binaries},
     }
 
 

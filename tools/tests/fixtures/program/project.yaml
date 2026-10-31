@@ -1,0 +1,6 @@
+# A test project for tools/tests/test_builder.py: one whole program with its own main, and no fuzz target. Its source
+# is in this directory, not in a repository; repo names a full commit, so tools/check builds it with no ls-remote.
+repo: https://example.invalid/program#0000000000000000000000000000000000000000
+primary_contact: n/a
+language: c
+programs: [ov_program]

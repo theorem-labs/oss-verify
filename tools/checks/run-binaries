@@ -2,15 +2,16 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 #
-# run-binaries: runs fuzz-target binaries for the binary checks of tools/check --checks (tools/check_binaries.py), in a
-# fresh container of the toolchain image with no network, so that the binaries a pull request built never run on the
-# host itself:
+# run-binaries: runs the binaries of fuzz targets and whole programs for the binary checks of tools/check --checks
+# (tools/check_binaries.py), in a fresh container of the toolchain image with no network, so that the binaries a pull
+# request built never run on the host itself:
 #
 #     docker run --rm --init --network=none -v <qemu-riscv64-static>:/ovc-qemu:ro -v tools/checks:/ovc:ro \
 #         -v <job>:/job:ro -v <results>:/results --entrypoint /ovc/run-binaries <toolchain image> <seconds> <total>
 #
 # /job/runs has one run on each line: <id> <binary> <input> <name>, the binary and the input relative to /job, and the
-# name the program gets as its argv[0] (the fuzz target's name). The runs are made one after the other, each as the
+# name the program gets as its argv[0] (the fuzz target's name); an input of - is a whole program's run, with no
+# input.bin and no argument. The runs are made one after the other, each as the
 # process model's environment has it: in an empty working directory, /ovb, that holds the input as input.bin, named by
 # that relative name; with an empty /tmp; with an /etc that holds only the files written below, so that no file of the
 # image's /etc decides what a run does; with no environment; and as user 65534, so that the program cannot write what
@@ -50,12 +51,12 @@ while read -r id binary input name; do
   # Each run starts afresh: no run leaves state for the next, in the working directory or anywhere a program writes.
   rm -rf /ovb /ovt /tmp/* /tmp/.[!.]* /var/tmp/* /var/tmp/.[!.]* /dev/shm/* /dev/shm/.[!.]* 2>/dev/null || true
   mkdir /ovb /ovt
-  cp -- "/job/$input" /ovb/input.bin
+  if [ "$input" = - ]; then set --; else cp -- "/job/$input" /ovb/input.bin; set -- input.bin; fi
   chown -R "$guest:$guest" /ovb /ovt
   chmod 1777 /tmp
   status=0
   (cd /ovb && exec timeout -s KILL "$limit" /ovc-host-calls "/results/$id.calls" "$guest" \
-     /ovc-qemu -0 "$name" -strace -D /ovt/trace "/job/$binary" input.bin) \
+     /ovc-qemu -0 "$name" -strace -D /ovt/trace "/job/$binary" "$@") \
     > /ovr.out 2> /ovr.err < /dev/null || status=$?
   wc -c < /ovr.out > "/results/$id.out"
   wc -c < /ovr.err > "/results/$id.err"

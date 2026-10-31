@@ -11,9 +11,11 @@ import tempfile
 import time
 import unittest
 import zipfile
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import check_binaries  # noqa: E402
+import check_build  # noqa: E402
 import check_links  # noqa: E402
 import model_release  # noqa: E402
 from check_build import Failed  # noqa: E402
@@ -938,6 +940,75 @@ class Runs(unittest.TestCase):
         self.assertIn("| `t.plain` | pass | pass | pass | not instrumented (plain) | 1 files |", text)
         self.assertIn("| `t.asan` | pass | **fail** | pass | pass | not recorded |", text)
         self.assertIn("`t.asan`, system calls: `uname: not in the table`", text)
+
+    def test_a_programs_run_needs_no_input_file(self):
+        """A whole program runs once with no argument: no input.bin, so its trace need not open one."""
+        self.write("l0.status", 1)
+        (self.results / "l0.trace").write_text("7 write(2,0x1,30) = 30\n7 exit_group(1)\n")
+        seen = {}
+
+        def check_trace(model, text, *, stance, require_exit, binary, lengths, inputs):
+            seen.update(inputs=inputs)
+            return {"calls": 12, "names": ["write", "exit_group"], "unmodeled": [], "exited": True,
+                    "verdict": "pass", "host_log": "present"}
+
+        saved = check_binaries.syscall_shapes.check_trace
+        check_binaries.syscall_shapes.check_trace = check_trace
+        try:
+            result = check_binaries.system_calls(object(), "", self.QEMU, "bin", [(check_binaries.NO_ARGUMENTS, None)],
+                                                 self.results)
+        finally:
+            check_binaries.syscall_shapes.check_trace = saved
+        self.assertEqual(seen, {"inputs": None})
+        self.assertEqual((result["result"], result["whole"]), ("pass", [check_binaries.NO_ARGUMENTS]))
+
+    def test_the_report_skips_checks_3_and_4_of_a_program_once(self):
+        not_run = {"result": "not-run", "detail": "skipped"}
+        block = {"model": {"name": "m", "commit": "f" * 40, "release": "2026.10.0"},
+                 "inputs": {"t": ["a", "b"], "tool": [check_binaries.NO_ARGUMENTS]},
+                 "targets": {"t": {"plain": {"elf": {"result": "pass"}, "system_calls": {"result": "pass"},
+                                             "quiet_loud": {"result": "pass"}, "instrumented": {"result": "plain"}}},
+                             "tool": {"plain": {"elf": {"result": "pass"}, "system_calls": {"result": "pass"},
+                                                "quiet_loud": not_run, "instrumented": not_run}}}}
+        listing = {"t": {"plain": [{"name": "libc.a", "kind": "libc"}]}, "tool": {"plain": None}}
+        text = check_binaries.report(block, listing, ["plain"], ["tool"])
+        self.assertIn("seed inputs (`t`: 2).", text)
+        self.assertEqual(text.count("Each whole program (`tool`) ran once"), 1)
+        self.assertIn("| `tool.plain` | pass | pass | skipped (program) | skipped (program) | skipped (program) |",
+                      text)
+        self.assertNotIn("What each failure is", text)
+        # Programs only: no line about the fuzz targets' seed inputs.
+        del block["targets"]["t"], block["inputs"]["t"]
+        self.assertNotIn("Each fuzz target", check_binaries.report(block, listing, ["plain"], ["tool"]))
+
+    def test_binary_checks_run_a_program_once_with_no_argument(self):
+        work = self.results / "work"
+        (work / "out" / "tool").mkdir(parents=True)
+        (work / "out" / "tool" / "tool.plain").write_bytes(b"\x7fELF, not a whole one")
+        job = check_build.Job(name="p", directory=work, repo="https://x/y", ref="", dockerfile="", builds=["plain"],
+                              fuzz_targets=None, programs=["tool"])
+        runs = {}
+
+        def run_job(job_dir, image, qemu, labels, seconds):
+            runs[job_dir.name] = (job_dir / "job" / "runs").read_text()
+            return job_dir / "results"
+
+        with mock.patch.object(model_release, "release_model", side_effect=Failed("offline")), \
+                mock.patch.object(check_binaries.check_checks, "qemu", return_value="/qemu"), \
+                mock.patch.object(check_binaries, "qemu_version", return_value=self.QEMU), \
+                mock.patch.object(check_binaries, "run_job", run_job), \
+                mock.patch.object(check_binaries, "record_of", side_effect=AssertionError("a program has no record")):
+            block, uninstrumented = check_binaries.binary_checks(job, "project", "toolchain", ["tool"],
+                                                                 {"tool": {"plain": {"file": "tool.plain"}}}, {}, work,
+                                                                 labels=[])
+        self.assertEqual(runs, {"tool.plain": "l0 binary - tool\n"})
+        self.assertEqual(list((work / "binaries" / "tool.plain" / "job" / "inputs").iterdir()), [])
+        self.assertEqual(block["inputs"], {"tool": [check_binaries.NO_ARGUMENTS]})
+        self.assertEqual(uninstrumented, {"tool": {"plain": None}})
+        result = block["targets"]["tool"]["plain"]
+        self.assertEqual({key: result[key]["result"] for key in result},
+                         {"elf": "error", "system_calls": "error", "quiet_loud": "not-run", "instrumented": "not-run"})
+        self.assertIn(check_binaries.PROGRAM_NO_QUIET, result["quiet_loud"]["detail"])
 
 
 if __name__ == "__main__":

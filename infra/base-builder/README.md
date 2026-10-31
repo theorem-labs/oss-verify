@@ -4,11 +4,11 @@ Every project's `Dockerfile` starts `FROM` this image. It is a toolchain image p
 
 | path in the image | what it is |
 |---|---|
-| `/usr/local/bin/compile` | [compile](compile): runs `$SRC/build.sh` for the build `$SANITIZER` names, with that build's compilers and flags |
+| `/usr/local/bin/compile` | [compile](compile): runs `$SRC/build.sh` for the build `$SANITIZER` names, with that build's compilers and flags, then checks each whole program that `OV_PROGRAMS` names and saves its stripped twin |
 | `/usr/local/bin/fetch-commit` | [fetch-commit](fetch-commit): checks out `$REPO` at `$COMMIT`, for a project's Dockerfile |
 | `/usr/local/lib/oss-verify/toolchain.sh` | [toolchain.sh](toolchain.sh): the compiler wrappers and flags of each build |
 | `/usr/local/lib/oss-verify/link-fuzz-target` | [link-fuzz-target](link-fuzz-target): how a fuzz target is linked |
-| `/usr/local/lib/oss-verify/driver/` | [driver/](driver/): the driver that `$LIB_FUZZING_ENGINE` links into every fuzz target, and the adapter `$LIB_ALLOCATION_FAILURE_ENGINE` links into an allocation-failure fuzz target |
+| `/usr/local/lib/oss-verify/driver/` | [driver/](driver/): the driver that `$LIB_FUZZING_ENGINE` links into every fuzz target, the adapter `$LIB_ALLOCATION_FAILURE_ENGINE` links into an allocation-failure fuzz target, and [asan_options.c](driver/asan_options.c), which `$OV_PROGRAM_LDFLAGS` links into a whole program in the AddressSanitizer builds |
 | `/usr/local/bin/lay-out-sources` | [lay-out-sources](lay-out-sources): lays out a project's other source trees and files from its `sources` file |
 | `/usr/local/lib/oss-verify/recipes.sh` | [recipes.sh](recipes.sh): the release's build recipes (CMake, autotools, Meson, blind and header-only builds, the C++ runtime group), for ported builds |
 | `/usr/local/lib/oss-verify/release-target.sh` | [release-target.sh](release-target.sh): builds one release target as the release's build body does, for ported builds |

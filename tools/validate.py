@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # Copyright 2026 Anthropic PBC
 # SPDX-License-Identifier: Apache-2.0
-# Modified 2026 by Theorem Labs, PBC: OSS Verify's fields (language, sanitizers, fuzz_targets, patch_style, budgets,
-# proofs, publish) and files (build.sh, patch_style.md, harness sources, build-only patches and their series), the
-# n/a contact of a seeded project, warnings, and checking named directories.
+# Modified 2026 by Theorem Labs, PBC: OSS Verify's fields (language, sanitizers, fuzz_targets, programs, patch_style,
+# budgets, proofs, publish) and files (build.sh, patch_style.md, harness sources, build-only patches and their series),
+# the n/a contact of a seeded project, warnings, and checking named directories.
 """Check projects/<name>/ directories against the enrollment rules in docs/project-yaml.md.
 
     tools/validate.py                 check every directory under projects/
@@ -30,6 +30,8 @@ Fields allowed in project.yaml:
     ubsan_checks: {add, remove, reason}  optional  changes to the UBSan checks of the ubsan builds (default: OSS-Fuzz's, by language),
                                                    with a toolchain that applies them; provisional format
     fuzz_targets: [<target>, ...]       optional   default: every fuzz target the build produces
+    programs: [<program>, ...]          optional   whole programs, each with its own main, that build.sh writes to
+                                                   $OUT/<program> (c and c++ only; docs/build-contract.md)
     patch_style: <path in your repo>    optional   or a patch_style.md next to project.yaml
     budgets: {halts: ..., agrees: ...}  optional   memory budgets (docs/what-gets-proven.md)
     proofs: {repo: ..., path: ...}      optional   where the proofs are published (docs/project-yaml.md)
@@ -62,7 +64,7 @@ PROJECTS = pathlib.Path(__file__).resolve().parent.parent / "projects"
 REQUIRED_KEYS = ("repo", "primary_contact", "language")
 OPTIONAL_KEYS = (
     "auto_ccs", "homepage", "pgp", "disabled", "dockerfile",
-    "sanitizers", "ubsan_checks", "fuzz_targets", "patch_style", "budgets", "proofs", "publish", "mutants",
+    "sanitizers", "ubsan_checks", "fuzz_targets", "programs", "patch_style", "budgets", "proofs", "publish", "mutants",
 )
 ALLOWED_KEYS = REQUIRED_KEYS + OPTIONAL_KEYS
 # Settings controlled by the program's operators. A pull request may not set them. There are none yet.
@@ -126,6 +128,8 @@ PLAIN_ONLY = ("go", "jvm")
 # The languages that the builder builds today: those of the toolchains in infra/toolchains.tsv. The builders of the
 # others are pending.
 BUILT_TODAY = ("c", "c++", "rust", "python", "go")
+# The languages whose projects may list whole programs (programs): the builder links one from C or C++ only.
+PROGRAM_LANGUAGES = ("c", "c++")
 # The languages whose UBSan builds are clang's UndefinedBehaviorSanitizer, which ubsan_checks changes (a python
 # project's builds compile CPython with it). A rust project's ubsan build is rustc's UB checks
 # (docs/build-contract.md#rust-fuzz-targets).
@@ -338,7 +342,7 @@ def check_pgp(config):
 
 
 def check_builds(config):
-    """Yield a problem with language, sanitizers, fuzz_targets or publish."""
+    """Yield a problem with language, sanitizers, fuzz_targets, programs or publish."""
     language = config.get("language")
     if isinstance(language, str) and language not in LANGUAGES:
         yield f"language must be one of {', '.join(LANGUAGES)} (got {language!r})"
@@ -371,6 +375,23 @@ def check_builds(config):
                     yield f"fuzz_targets: {item!r} is not a fuzz target name (A-Z a-z 0-9 . _ + -, at most 100)"
             if len(set(targets)) != len(targets):
                 yield "fuzz_targets names a fuzz target twice"
+
+    programs = config.get("programs")
+    if programs is not None:
+        if not (isinstance(programs, list) and programs and all(isinstance(item, str) for item in programs)):
+            yield "programs must be a non-empty list of program names (or left out, for none)"
+        else:
+            for item in programs:
+                if not TARGET.fullmatch(item):
+                    yield f"programs: {item!r} is not a program name (A-Z a-z 0-9 . _ + -, at most 100)"
+            if len(set(programs)) != len(programs):
+                yield "programs names a program twice"
+            if isinstance(targets, list):
+                for item in sorted(set(programs) & {item for item in targets if isinstance(item, str)}):
+                    yield f"programs: {item!r} is in fuzz_targets too: a binary is a fuzz target or a whole program"
+            if isinstance(language, str) and language in LANGUAGES and language not in PROGRAM_LANGUAGES:
+                yield (f"programs: a {language} project cannot list programs: the builder builds a whole program "
+                       f"from {' or '.join(PROGRAM_LANGUAGES)} only")
 
     publish = config.get("publish")
     if isinstance(publish, str) and publish not in PUBLISH:
@@ -629,6 +650,9 @@ def check_corpus(config, name, target, data):
     targets = config.get("fuzz_targets")
     if isinstance(targets, list) and target not in targets:
         yield f"{name} is the seed corpus of {target}, which fuzz_targets does not list"
+    programs = config.get("programs")
+    if isinstance(programs, list) and target in programs:
+        yield f"{name} is the seed corpus of {target}, a whole program: a program takes no seed corpus"
     if data is None:
         yield f"{name} is larger than {MAX_CORPUS_BYTES // 1024} KiB"
         return
@@ -738,9 +762,10 @@ def check_project(directory):
     else:
         where = "none yet"
     targets = ", ".join(config["fuzz_targets"]) if config.get("fuzz_targets") else "all"
+    programs = f"; programs: {', '.join(config['programs'])}" if config.get("programs") else ""
     summary = (
         f"{name:<24} {config['repo']}  -> {config['primary_contact']}  "
-        f"(Dockerfile: {where}; builds: {' '.join(builds_of(config))}; fuzz targets: {targets})"
+        f"(Dockerfile: {where}; builds: {' '.join(builds_of(config))}; fuzz targets: {targets}{programs})"
     )
     return [], config_warnings(config, files), summary
 

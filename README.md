@@ -10,7 +10,7 @@ We accept an established open-source project ([theorem.dev/oss-verify](https://t
 1. The person who enrolls the project is a core maintainer of it.
 2. The project has a licence that the Open Source Initiative approves.
 3. The project has a public git repository, which we get anonymously over `https`. One project directory names one repository.
-4. The project has at least one fuzz target: its own, its OSS-Fuzz fuzz targets, or new ones.
+4. The project has at least one fuzz target: its own, its OSS-Fuzz fuzz targets, or new ones. Or it has at least one whole program with its own `main`, which `programs` names ([docs/project-yaml.md](docs/project-yaml.md#programs)).
 5. Our builder can build the project. The [language table](docs/project-yaml.md#language) tells which languages it builds today.
 6. The enrollment names, in `primary_contact`, the one address that gets findings.
 

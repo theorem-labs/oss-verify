@@ -1,8 +1,8 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
-"""Build tests/fixtures/example, tests/fixtures/cjson, tests/fixtures/rust-example, tests/fixtures/python-example and
-tests/fixtures/go-example with the builder and run what they make. Needs Docker and the toolchain images (and, for cJSON, the Rust crates and the
-Python build backend, the network):
+"""Build tests/fixtures/example, tests/fixtures/program, tests/fixtures/cjson, tests/fixtures/rust-example,
+tests/fixtures/python-example and tests/fixtures/go-example with the builder and run what they make. Needs Docker and
+the toolchain images (and, for cJSON, the Rust crates and the Python build backend, the network):
 
     OV_DOCKER_TESTS=1 python3 -m pytest tools/tests
 
@@ -20,6 +20,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+import check_binaries  # noqa: E402
 import check_build  # noqa: E402
 import manifest  # noqa: E402
 import validate  # noqa: E402
@@ -228,6 +229,117 @@ class UbsanChecks(unittest.TestCase):
                 subprocess.run(["docker", "image", "rm", tag], capture_output=True)
         results = dict(line.split() for line in done.stdout.splitlines())
         self.assertEqual(results, {"case-n": "132", "case-o": "0"})
+
+
+PROGRAM_FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "program"
+PROGRAM_TAG = "oss-verify-test/program:latest"
+# The fixture's whole program (fixtures/program/program.c), on each first argument: its exit status in each build
+# (plain, ubsan, asan, asan-ubsan) and what it writes on standard output, each line ended with a comma.
+PROGRAM_EXPECTED = {
+    "none": ((0, 0, 0, 0), "hello,"),
+    "env": ((0, 0, 0, 0), "seen,"),
+    "huge": ((3, 3, 3, 3), ""),
+    "overflow": ((0, 0, 134, 134), ""),
+}
+PROGRAM_RUNNER = r"""
+for b in plain ubsan asan asan-ubsan; do
+  for c in none env huge overflow; do
+    if [ "$c" = none ]; then set --; else set -- "$c"; fi
+    OV_TEST_VALUE=seen q /bin2/ov_program.$b "$@" > /tmp/out 2> /tmp/err; s=$?
+    printf '%s ' "$b $c $s $(wc -c < /tmp/err)"; tr '\n' , < /tmp/out; echo
+  done
+done
+"""
+
+
+@unittest.skipUnless(os.environ.get("OV_DOCKER_TESTS") == "1" and docker_ready(),
+                     "set OV_DOCKER_TESTS=1, with Docker and the toolchain image, to build the fixture")
+class ProgramBuilder(unittest.TestCase):
+    """fixtures/program: a whole program, with its own main, linked with $OV_PROGRAM_LDFLAGS in each build, with no
+    driver and no seals (docs/build-contract.md, "Whole programs")."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.scratch = tempfile.TemporaryDirectory(prefix="ov-test-program.")
+        cls.work = pathlib.Path(cls.scratch.name)
+        job = check_build.Job(name="program", directory=PROGRAM_FIXTURE, repo="https://example.invalid/program",
+                              ref="", dockerfile="", builds=BUILDS, fuzz_targets=None, programs=["ov_program"])
+        builder = check_build.build_builder()
+        check_build.build_project(job, "0" * 40, builder, PROGRAM_TAG, cls.work)
+        cls.raw = {}
+        for build in BUILDS:
+            cls.raw[build] = cls.work / "raw" / build
+            check_build.compile_build(PROGRAM_TAG, build, validate.BUILDS[build], cls.raw[build],
+                                      labels=check_build.work_label(cls.work), programs=job.programs)
+        found = {build: manifest.discover(directory) for build, directory in cls.raw.items()}
+        cls.targets, cls.problems = manifest.resolve_targets(found, programs=job.programs)
+        cls.problems += manifest.find_programs(cls.raw, job.programs)
+        cls.entries, cls.missing = manifest.collect(cls.raw, cls.targets, cls.work / "out", job.programs)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.scratch.cleanup()
+        subprocess.run(["docker", "image", "rm", PROGRAM_TAG], capture_output=True)
+
+    def test_discovery(self):
+        self.assertEqual((self.problems, self.missing, self.targets), ([], [], []))
+        self.assertEqual(list(self.entries), ["ov_program"])
+
+    def test_the_published_bytes_are_the_static_stripped_twin(self):
+        for build in BUILDS:
+            with self.subTest(build=build):
+                raw = self.raw[build] / "ov_program"
+                twin = self.raw[build] / ".stripped" / manifest.sha256_of(raw)
+                published = self.work / "out" / "ov_program" / f"ov_program.{build}"
+                self.assertTrue(twin.is_file())
+                self.assertEqual(manifest.sha256_of(published), manifest.sha256_of(twin))
+                self.assertEqual(self.entries["ov_program"][build]["sha256"], manifest.sha256_of(twin))
+                self.assertTrue(manifest.has_symbol_table(raw))
+                self.assertFalse(manifest.is_fuzz_target(raw))
+                self.assertFalse(manifest.has_symbol_table(published))
+                self.assertEqual(manifest.binary_layout(published)["static"], True)
+                self.assertEqual(manifest.read_elf(published)[0]["type"], manifest.ET_EXEC)
+
+    @unittest.skipUnless(QEMU, "no qemu-riscv64 on this machine")
+    def test_exit_statuses_and_output(self):
+        binaries = self.work / "bin"
+        binaries.mkdir()
+        for build in BUILDS:
+            shutil.copy(self.work / "out" / "ov_program" / f"ov_program.{build}", binaries)
+        runner = f"q() {{ timeout 60 /qemu \"$@\"; }}\n{PROGRAM_RUNNER}"
+        done = subprocess.run(
+            ["docker", "run", "--rm", "--network=none", "-v", f"{QEMU}:/qemu:ro", "-v", f"{binaries}:/bin2:ro",
+             "--entrypoint", "sh", PROGRAM_TAG, "-c", runner],
+            capture_output=True, text=True, check=True,
+        )
+        results = {}
+        for line in done.stdout.splitlines():
+            build, case, status, errors, out = line.split(" ", 4)
+            results[(build, case)] = (status, errors, out)
+        for case, (statuses, out) in PROGRAM_EXPECTED.items():
+            for build, status in zip(BUILDS, statuses):
+                with self.subTest(build=build, case=case):
+                    # Nothing on standard error in any build: an AddressSanitizer detection aborts with no report.
+                    self.assertEqual(results[(build, case)], (str(status), "0", out))
+
+    @unittest.skipUnless(shutil.which("qemu-riscv64-static"), "no qemu-riscv64-static on PATH")
+    def test_the_binary_checks_run_it_with_no_argument(self):
+        """tools/checks/run-binaries' run of a whole program: no input.bin, no argument, its own name as argv[0]."""
+        for build in ("plain", "asan"):
+            job_dir = self.work / "jobs" / build
+            (job_dir / "job").mkdir(parents=True)
+            shutil.copyfile(self.work / "out" / "ov_program" / f"ov_program.{build}", job_dir / "job" / "binary")
+            os.chmod(job_dir / "job" / "binary", 0o755)
+            (job_dir / "job" / "runs").write_text(f"l0 binary {check_binaries.NO_INPUT} ov_program\n")
+            results = check_binaries.run_job(job_dir, check_build.newest_toolchain(),
+                                             pathlib.Path(shutil.which("qemu-riscv64-static")).resolve(), [], 600)
+            self.assertEqual((results / "l0.status").read_text().strip(), "0", build)
+            self.assertEqual((results / "l0.out").read_text().strip(), str(len("hello\n")), build)
+            self.assertEqual((results / "l0.err").read_text().strip(), "0", build)
+            self.assertEqual((results / "l0.calls").read_text().split("\n")[0], "exec", build)
+            trace = (results / "l0.trace").read_text()
+            self.assertNotIn("input.bin", trace, build)
+            self.assertRegex(trace, r"exit_group\(0\)", build)
 
 
 PYTHON_FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "python-example"
