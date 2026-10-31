@@ -22,11 +22,12 @@ and gives each build of each fuzz target two results:
    archive member the link took that is neither the driver's nor the toolchain image's. In the AddressSanitizer
    builds (asan, asan-ubsan), each one with code must refer to __asan_init or __asan_version_mismatch_check_*, as the
    constructor that AddressSanitizer adds to each instrumented object does. rustc's allocator shim, an object that only
-   forwards __rust_alloc and its siblings to the standard library, is the one exception (at most one such member), as
-   it makes no memory access for AddressSanitizer to check. The UndefinedBehaviorSanitizer runs in trap mode and
-   leaves no symbol: its checks are trap instructions (`unimp`), and rustc's UB checks are precondition_check
-   functions. So in the ubsan and asan-ubsan builds, each archive of the project's code must hold more of them than
-   the same archive in the plain build, and so must the project's code as a whole.
+   forwards __rust_alloc and its siblings to the standard library (under these names, or v0-mangled in rustc's
+   `__rustc` crate), is the one exception (at most one such member), as it makes no memory access for AddressSanitizer
+   to check. The UndefinedBehaviorSanitizer runs in trap mode and leaves no symbol: its checks are trap instructions
+   (`unimp`), and rustc's UB checks are precondition_check functions. So in the ubsan and asan-ubsan builds, each
+   archive of the project's code must hold more of them than the same archive in the plain build, and so must the
+   project's code as a whole.
 
 The plain build instruments nothing, by design; its result is "plain" when its record is complete, and "error"
 when it has no record or an incomplete one. A Go program has no record (Go's linker writes no map): its result is
@@ -62,9 +63,20 @@ FORTRAN_RUNTIME = re.compile(r"lib(Fortran[A-Za-z]*|flang[A-Za-z_.]*|gfortran|qu
 # musl's C library: its start files, libc.a, its empty stub archives, and libssp_nonshared.a.
 LIBC = re.compile(r"(crt1|crti|crtn|Scrt1|rcrt1)\.o|lib(c|m|rt|pthread|crypt|util|xnet|resolv|dl|ssp_nonshared)\.a")
 SYSROOT_LIB = re.compile(r"/opt/[^/]+(/[^/]+)*/usr/lib/[^/]+\.a")
-# rustc's allocator shim defines only these, and forwards each to the standard library.
-RUST_ALLOCATOR_SHIM = re.compile(r"__rust_(alloc|dealloc|realloc|alloc_zeroed|alloc_error_handler|"
-                                 r"no_alloc_shim_is_unstable)")
+# rustc's allocator shim defines only these, and forwards each to the standard library. Newer rustc names them inside
+# its `__rustc` crate, v0-mangled (`_RNvCs<disambiguator>_7___rustc12___rust_alloc`, where 12 is the length of
+# `__rust_alloc`), and adds `_v2` to two of them; a mangled name counts only when its length matches its identifier.
+RUST_ALLOCATOR_SHIM = re.compile(r"(?:_RNvCs[0-9A-Za-z]*_7___rustc(?P<len>[0-9]+)_)?(?P<ident>__rust_(?:alloc|dealloc|"
+                                 r"realloc|alloc_zeroed|alloc_error_handler|alloc_error_handler_should_panic(?:_v2)?|"
+                                 r"no_alloc_shim_is_unstable(?:_v2)?))")
+
+
+def rust_allocator_shim(name):
+    """Whether `name` is one of the functions rustc's allocator shim defines (RUST_ALLOCATOR_SHIM)."""
+    m = RUST_ALLOCATOR_SHIM.fullmatch(name)
+    return bool(m) and (m["len"] is None or int(m["len"]) == len(m["ident"]))
+
+
 # The symbols that AddressSanitizer's module constructor, in every object it instruments, refers to.
 ASAN_MODULE = re.compile(r"__asan_init|__asan_version_mismatch_check_v[0-9]+")
 TRAP = 0xC0001073  # `unimp`, the word a trap-mode UndefinedBehaviorSanitizer check executes on riscv64
@@ -750,7 +762,7 @@ def analyse(records, image, dwarf_units=None, checkouts=(), assembly_sources=Non
             for c in with_code:
                 if c.facts.bitcode or c.facts.asan:
                     continue
-                if c.facts.defined and all(RUST_ALLOCATOR_SHIM.fullmatch(n) for n in c.facts.defined):
+                if c.facts.defined and all(rust_allocator_shim(n) for n in c.facts.defined):
                     shims.append(c.label)
                 elif not c.facts.compiled and not any(C_FAMILY.search(n) for n in c.facts.files):
                     assembly.append(c)
