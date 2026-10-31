@@ -21,6 +21,7 @@ from check_build import Failed  # noqa: E402
 UNIMP = struct.pack("<I", check_links.TRAP)
 NOP = struct.pack("<I", 0x00000013)  # addi x0, x0, 0
 ASAN = ["__asan_init", "__asan_version_mismatch_check_v8", "__asan_load4"]
+MSAN = ["__msan_init", "__msan_param_tls", "__msan_warning_noreturn"]
 
 
 def elf_object(text=b"", defined=(), undefined=(), files=(), local=(), comment=False):
@@ -225,6 +226,12 @@ class Objects(unittest.TestCase):
         # An uninstrumented object may still declare a public AddressSanitizer function.
         facts = check_links.object_facts(elf_object(NOP, defined=["f"], undefined=["__asan_poison_memory_region"]))
         self.assertFalse(facts.asan)
+
+    def test_only_the_constructor_symbol_marks_msan(self):
+        self.assertTrue(check_links.object_facts(elf_object(NOP, defined=["f"], undefined=MSAN)).msan)
+        facts = check_links.object_facts(elf_object(NOP, defined=["f"], undefined=["__msan_unpoison"]))
+        self.assertFalse(facts.msan)
+        self.assertFalse(check_links.object_facts(elf_object(NOP, defined=["f"], undefined=ASAN)).msan)
 
     def test_extended_section_numbering(self):
         data = bytearray(elf_object(NOP, defined=["f"], undefined=ASAN, comment=True))
@@ -458,6 +465,29 @@ class Analyse(unittest.TestCase):
         other = elf_object(NOP, defined=["__wrap_getenv", "helper"], comment=True, files=["wrap_getenv.c"])
         record = self.record({"/work/l.a": {"a.o": good()}}, loose={"/work/b/wrap_getenv.o": other})
         self.assertEqual(self.analyse({"asan": record})["asan"]["instrumented"]["result"], "fail")
+
+    def test_msan_wants_every_object_instrumented(self):
+        msan = elf_object(NOP, defined=["f"], undefined=MSAN, files=["lib.c"], comment=True)
+        bad = elf_object(NOP, defined=["g"], files=["other.c"], comment=True)
+        result = self.analyse({"msan": self.record({"/work/libproject.a": {"lib.c.o": msan}})})["msan"]
+        self.assertEqual(result["instrumented"]["result"], "pass")
+        result = self.analyse({"msan": self.record({"/work/libproject.a": {"lib.c.o": msan, "other.c.o": bad}})})
+        self.assertEqual(result["msan"]["instrumented"]["result"], "fail")
+        self.assertIn("libproject.a(other.c.o)", result["msan"]["instrumented"]["detail"])
+        # An object that AddressSanitizer instrumented is not one that MemorySanitizer did.
+        result = self.analyse({"msan": self.record({"/work/libproject.a": {"lib.c.o": good()}})})["msan"]
+        self.assertEqual(result["instrumented"]["result"], "fail")
+
+    def test_the_msan_getenv_seal_a_recipe_compiled_is_the_drivers(self):
+        msan = elf_object(NOP, defined=["f"], undefined=MSAN, files=["lib.c"], comment=True)
+        seal = elf_object(NOP, defined=["getenv"], comment=True, files=["msan_getenv.c"])
+        record = self.record({"/work/l.a": {"a.o": msan}}, loose={"/work/b/msan_getenv.o": seal})
+        self.assertEqual(self.analyse({"msan": record})["msan"]["instrumented"]["result"], "pass")
+        # The same name with another function, or getenv from another file: the project's code, uninstrumented.
+        for other in (elf_object(NOP, defined=["getenv", "helper"], comment=True, files=["msan_getenv.c"]),
+                      elf_object(NOP, defined=["getenv"], comment=True, files=["env.c"])):
+            record = self.record({"/work/l.a": {"a.o": msan}}, loose={"/work/b/msan_getenv.o": other})
+            self.assertEqual(self.analyse({"msan": record})["msan"]["instrumented"]["result"], "fail")
 
     def test_ubsan_wants_more_traps_than_plain_in_each_archive(self):
         def build(lib, dep):

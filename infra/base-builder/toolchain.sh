@@ -1,7 +1,7 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 #
-# The compilers and flags of one build, sourced by `compile` with FLAV set to plain, asan, ubsan or asanubsan.
+# The compilers and flags of one build, sourced by `compile` with FLAV set to plain, asan, ubsan, asanubsan or msan.
 #
 # Taken from the build body of the oss-fuzz-theorems 2026.10 release recipe (tools/build-body.sh), whose
 # binaries this reproduces byte for byte. Kept as it is there: the flags, the compiler shims and what they write,
@@ -87,6 +87,12 @@ write_cc_shim "$SHIM/$CHOST-clang-sealed" \
 write_cc_shim "$SHIM/$CHOST-clang++-sealed" \
   'clang++ --config=/tmp/asan-musl-sealed-noiconv.cfg -stdlib=libc++' " $SHIM/nogc-discard.ld"
 
+# The sealed MemorySanitizer configuration, as the toolchain ships it. Only a toolchain image built from a static-asan
+# with riscv64 MemorySanitizer has it, and the msan build fails without it (below).
+MSAN_CFG=/opt/asan-static/msan-musl-sealed.cfg
+write_cc_shim "$SHIM/$CHOST-clang-msan" "clang --config=$MSAN_CFG" " $SHIM/nogc-discard.ld"
+write_cc_shim "$SHIM/$CHOST-clang++-msan" "clang++ --config=$MSAN_CFG -stdlib=libc++" " $SHIM/nogc-discard.ld"
+
 # The driver is compiled without a sanitizer in every build. The library and the harness get the build's own.
 DRVCC=$SHIM/$CHOST-clang-plain
 DRVCXX=$SHIM/$CHOST-clang++-plain
@@ -163,12 +169,20 @@ case "$FLAV" in
       CXX=$SHIM/$CHOST-clang++-ubsan
     fi
     SAN="$UBSAN" ;;
+  msan)
+    if [ ! -f "$MSAN_CFG" ]; then
+      echo "toolchain.sh: the msan build needs $MSAN_CFG, and this toolchain image has none" >&2
+      exit 1
+    fi
+    CC=$SHIM/$CHOST-clang-msan
+    CXX=$SHIM/$CHOST-clang++-msan
+    SAN="-fsanitize=memory" ;;
   plain)
     CC=$DRVCC
     CXX=$DRVCXX
     SAN="" ;;
   *)
-    echo "toolchain.sh: FLAV must be plain, asan, ubsan or asanubsan (got '${FLAV:-}')" >&2
+    echo "toolchain.sh: FLAV must be plain, asan, ubsan, asanubsan or msan (got '${FLAV:-}')" >&2
     exit 1 ;;
 esac
 CFLAGS="$BASE_CFLAGS $SAN"

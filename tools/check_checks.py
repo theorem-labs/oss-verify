@@ -62,7 +62,8 @@ NOT_RUN = -1
 # The driver's header in front of each seed input: no config bytes and no allocation mask (docs/build-contract.md).
 HEADER = b"\0" * 6
 # The sanitizer builds, the most checking first: a breakage is also run on the first one the project has.
-SANITIZER_BUILDS = (("asan-ubsan", "address-undefined"), ("asan", "address"), ("ubsan", "undefined"))
+SANITIZER_BUILDS = (("asan-ubsan", "address-undefined"), ("asan", "address"), ("msan", "memory"),
+                    ("ubsan", "undefined"))
 # The time the breakages may take together, in minutes, by default.
 BUDGET_MINUTES = 60
 # The most time each run of all the seed inputs on the unchanged code may take, in minutes.

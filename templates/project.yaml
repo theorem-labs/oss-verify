@@ -31,8 +31,9 @@ disabled: false
 # REQUIRED. The language of the code we build. docs/project-yaml.md lists the values.
 language: c
 
-# Optional. The sanitizer builds besides the plain one: a subset of [address, undefined]. With both there is also an
-# asan-ubsan build. This is the default.
+# Optional. The sanitizer builds besides the plain one: a subset of [address, undefined, memory]. With address and
+# undefined there is also an asan-ubsan build. [address, undefined] is the default. memory, the msan build, is for a
+# c project only, and only with the next toolchain version.
 sanitizers: [address, undefined]
 
 # Optional, and only with the next toolchain version: changes to the UBSan checks of the ubsan and asan-ubsan builds,

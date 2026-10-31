@@ -150,7 +150,7 @@ ov_target_begin() {
   # The target is built with the release's compilers, its shims, by their paths, which a build can record (OpenSSL
   # puts $CC in its version string); compile's $CC, which hands a fuzz target's link to link-fuzz-target, links it.
   OV_LINK_CC=$CC
-  case "$FLAV" in asan|asanubsan) ov_shim=sealed ;; *) ov_shim=plain ;; esac
+  case "$FLAV" in asan|asanubsan) ov_shim=sealed ;; msan) ov_shim=msan ;; *) ov_shim=plain ;; esac
   CC=$SHIM/$CHOST-clang-$ov_shim
   CXX=$SHIM/$CHOST-clang++-$ov_shim
   export -n SRC WORK OUT SANITIZER SAN CXXFLAGS LIB_FUZZING_ENGINE ARCHITECTURE FUZZING_ENGINE \

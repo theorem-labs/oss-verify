@@ -12,7 +12,7 @@ An OSS-Fuzz `Dockerfile` and `build.sh` do not run here without changes. They ex
 
 1. Make the builder image from [infra/base-builder/](../infra/base-builder/), from a toolchain image ([below](#toolchains)).
 2. Build the project image from the project's `Dockerfile`, on the builder. `tools/check` gives the build arguments `COMMIT` (the full commit that `repo#ref` names), `REPO` and `BASE_BUILDER`. Only this step has network access.
-3. Run `compile` in a new container of the project image, with no network (`docker run --network=none`). Do this once for each build that `project.yaml` asks for: `plain`, `ubsan`, `asan` and `asan-ubsan`. `compile` sets the compilers and flags of the build and runs `$SRC/build.sh`.
+3. Run `compile` in a new container of the project image, with no network (`docker run --network=none`). Do this once for each build that `project.yaml` asks for: `plain`, `ubsan`, `asan`, `asan-ubsan` and `msan`. `compile` sets the compilers and flags of the build and runs `$SRC/build.sh`.
 4. Find the fuzz targets in the `$OUT` of each build. Copy each binary to `out/<target>/<target>.<build>`. Write the manifest, with the SHA-256 of each binary. `tools/check` lists each binary with its size, the size of its `.text` section, `static` or `dynamic`, and its SHA-256. With `--summary <file>`, it also writes this list as a Markdown table; the Build check of a pull request shows that table. A binary with a `PT_INTERP` or `PT_DYNAMIC` program header is dynamically linked. `tools/check` refuses a dynamically linked binary, and one whose program headers it cannot read, with exit status 2, the status for a project that breaks the enrollment rules. Size is not a rule: a binary of any size passes. Because of our capacity, we are most likely to respond quickly to a project in C whose plain binaries have less than 1 MB of code: the larger of their `.text` section and their executable segments, which can hold read-only data too ([README](../README.md#who-can-enroll)).
 
 ## The builder
@@ -56,7 +56,7 @@ We check builds ported from oss-fuzz-theorems against the release's binaries, on
 | `$LIB_FUZZING_ENGINE` | the driver, which takes the place of libFuzzer in each fuzz target ([below](#the-driver)) |
 | `$LIB_ALLOCATION_FAILURE_ENGINE` | the driver of an allocation-failure fuzz target ([below](#allocation-failure-fuzz-targets)) |
 | `$LIB_ALLOCATION_COUNTING_ENGINE` | the same, with counting mode on, for sweep and test builds that we never publish |
-| `$SANITIZER` | `none`, `undefined`, `address` or `address-undefined` |
+| `$SANITIZER` | `none`, `undefined`, `address`, `address-undefined` or `memory` |
 | `$ARCHITECTURE`, `$FUZZING_ENGINE` | `riscv64`; `none`, the OSS-Fuzz name for a driver that runs inputs from files |
 | `$CMAKE_TOOLCHAIN_FILE` | a CMake toolchain file for this build. CMake 3.21 and later find it without help. |
 | `$AR`, `$NM`, `$RANLIB`, `$STRIP`, `$OBJCOPY` | the LLVM tools, as `riscv64-linux-musl-ar` and the other names, which are also on `PATH` |
@@ -74,7 +74,7 @@ These are the common compile flags:
     -fno-builtin-aligned_alloc -fno-builtin-posix_memalign -fno-builtin-memalign -fno-builtin-valloc
     -fno-builtin-strdup -fno-builtin-strndup
 
-The `-fno-builtin-*` flags keep each allocation an ordinary call in all four builds. Thus the optimizer cannot remove or merge an allocation in one build and keep it in a different build.
+The `-fno-builtin-*` flags keep each allocation an ordinary call in every build. Thus the optimizer cannot remove or merge an allocation in one build and keep it in a different build.
 
 `compile` builds the driver with these flags and `-fno-plt`. clang does not use `-fno-plt` for this target. Thus each C, C++, Rust and Python build writes `warning: argument unused during compilation: '-fno-plt'` seven times, before `build.sh` starts. You can ignore this warning. `$CFLAGS` does not have `-fno-plt`.
 
@@ -84,6 +84,9 @@ The `-fno-builtin-*` flags keep each allocation an ordinary call in all four bui
 | `ubsan` | `undefined` | `-fsanitize=undefined -fno-sanitize-recover=all -fsanitize-trap=all -fno-sanitize=function` | `SIGILL` (status 132), with no output |
 | `asan` | `address` | `-fsanitize=address`, with the sealed static runtime | `abort()` (status 134), with no output |
 | `asan-ubsan` | `address-undefined` | both | either |
+| `msan` | `memory` | `-fsanitize=memory`, with the sealed static runtime | `abort()` (status 134), with no output |
+
+The `msan` build is for a `c` project only ([project-yaml.md](project-yaml.md#sanitizers)), and only with the next toolchain version: no image in `infra/toolchains.tsv` has `/opt/asan-static/msan-musl-sealed.cfg` yet, and `compile` fails the `msan` build without it.
 
 The UBSan builds trap, with no runtime. oss-fuzz-theorems measured the checks that clang 20 makes with these flags:
 
@@ -108,13 +111,15 @@ The sealed AddressSanitizer runtime has these properties, as the documentation o
 * The runtime installs no signal handlers.
 * At start, it reserves more than 100 GiB of address space. Under a limit such as `ulimit -v`, the reservation fails and the program waits forever.
 
+The sealed MemorySanitizer runtime of the `msan` build has the same properties, with `MSAN_OPTIONS` for `ASAN_OPTIONS`; the driver's `msan_options.c` sets its `allocator_may_return_null=1`. It reserves its whole shadow and origin layout at start, with `MAP_NORESERVE`.
+
 The driver is compiled with no sanitizer flags in each build. The library and the fuzz targets get the flags of the build. In each build, `getenv()` returns NULL, `getpid()` and `getppid()` return 1, and `mkstemp()` and the related functions use a fixed name in the current directory. Thus a program depends only on its input file.
 
 ### Functions that the AddressSanitizer runtime wraps
 
 The sealed AddressSanitizer runtime intercepts functions through the linker's `--wrap` option. Each `asan` and `asan-ubsan` link gets `-Wl,--wrap=<function>` for each function on the runtime's list, and the runtime defines `__wrap_<function>` for them (for example `__wrap_fopen`). The list in the toolchain image has 380 functions. The builder removes `iconv` from it, so the links wrap 379 functions. `fopen`, `time`, `clock_gettime` and `dlopen` are on the list.
 
-Thus do not link with `-Wl,--wrap=<function>` for a function on the list, and do not define `__wrap_<function>` for it. If you define `__wrap_<function>`, two objects define it, and the link of the AddressSanitizer builds fails. To replace a function on the list, rename the call when you compile. This method works in all four builds:
+Thus do not link with `-Wl,--wrap=<function>` for a function on the list, and do not define `__wrap_<function>` for it. If you define `__wrap_<function>`, two objects define it, and the link of the AddressSanitizer builds fails. The `msan` build links the MemorySanitizer runtime's own list, `libclang_rt.msan.a.wrap` in the same directory, with the same rule. To replace a function on a list, rename the call when you compile. This method works in every build:
 
 * Compile the file that calls the function with `-D<function>=<name>`, for example `-Dfopen=my_fopen`. `-D` changes each use of the name in that file and in the headers that it includes. Thus use it only in a C file, and only for a name that has no other meaning there.
 * Define `my_fopen` in your fuzz target. In a C++ fuzz target, define it with `extern "C"`.
@@ -122,7 +127,7 @@ Thus do not link with `-Wl,--wrap=<function>` for a function on the list, and do
 
 The list is a file in the toolchain image: `/opt/asan-static-rt/lib/clang/20/lib/riscv64-unknown-linux-musl/libclang_rt.asan.a.wrap`. Each `--wrap=<function>` line names one function. To read it, run `docker run --rm --entrypoint cat <image> <path>`, with the image from [infra/toolchains.tsv](../infra/toolchains.tsv). [infra/base-builder/toolchain.sh](../infra/base-builder/toolchain.sh) removes the `--wrap=iconv` line.
 
-The driver's seals also use `--wrap`, in all four builds: `getenv`, `getpid`, `getppid`, `mkstemp`, `mkostemp`, `mkstemps` and `mkostemps`. `link-fuzz-target` adds them to each link. In a `build.sh` that you write by hand, do not wrap these functions, and do not define `__wrap_<function>` for them. If a link wraps `getenv`, `getpid` or `mkstemp` itself, `link-fuzz-target` adds none of the seals, and the program can then depend on its environment, its process id and the names of its temporary files. A build ported from oss-fuzz-theorems adds the same seals with the `oft_seal_*` helpers of `recipes.sh`. Keep those calls.
+The driver's seals also use `--wrap`, in every build: `getenv`, `getpid`, `getppid`, `mkstemp`, `mkostemp`, `mkstemps` and `mkostemps`. In the `msan` build the MemorySanitizer runtime wraps `getenv` itself, so there the `getenv` seal is a definition of `getenv`, which returns NULL and which the runtime's wrapper calls. `link-fuzz-target` adds them to each link. In a `build.sh` that you write by hand, do not wrap these functions, and do not define `__wrap_<function>` for them. If a link wraps `getenv`, `getpid` or `mkstemp` itself, `link-fuzz-target` adds none of the seals, and the program can then depend on its environment, its process id and the names of its temporary files. A build ported from oss-fuzz-theorems adds the same seals with the `oft_seal_*` helpers of `recipes.sh`. Keep those calls.
 
 ## What the Dockerfile must do
 
@@ -275,7 +280,7 @@ While `LLVMFuzzerTestOneInput` runs, the driver counts these calls from 0, over 
 * `posix_memalign` returns `ENOMEM`;
 * `operator new` throws `std::bad_alloc`, and its nothrow form returns `NULL`.
 
-Calls after the 32nd never fail. The driver counts no other allocations. It does not count its own allocations, or those of `LLVMFuzzerInitialize`. It does not count the allocations that the C or C++ library makes inside a function that the project called. Thus an input makes the same calls fail in all four builds. The builds compile with `-fno-builtin-malloc` and the related flags, so the compiler keeps each call.
+Calls after the 32nd never fail. The driver counts no other allocations. It does not count its own allocations, or those of `LLVMFuzzerInitialize`. It does not count the allocations that the C or C++ library makes inside a function that the project called. Thus an input makes the same calls fail in every build. The builds compile with `-fno-builtin-malloc` and the related flags, so the compiler keeps each call.
 
 ### Counting mode
 

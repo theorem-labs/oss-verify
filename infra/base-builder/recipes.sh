@@ -2273,6 +2273,19 @@ oft_seal_getenv() {
     echo "     real environment, and is the -env half of the pair"
     return 0
   fi
+  if [ "${FLAV:-}" = msan ]; then
+    # MemorySanitizer wraps getenv itself (--wrap=getenv): the seal is a getenv that returns NULL, which the
+    # wrapper calls (driver/msan_getenv.c). The flag repeats the wrap list's, and tells link-fuzz-target, as in the
+    # other builds, that this link has its own seals, so that it does not add a second getenv.
+    local mobj="$BUILDDIR/msan_getenv.o"
+    "${DRVCC:?build.sh must export DRVCC}" ${BASE_CFLAGS} -c /usr/local/lib/oss-verify/driver/msan_getenv.c -o "$mobj" || return 1
+    "$CHOST-nm" "$mobj" | grep -q ' T getenv$' || {
+      echo "oft: msan_getenv.o defines no getenv" >&2
+      return 1
+    }
+    LIB_EXTRA="${LIB_EXTRA:-} $mobj -Wl,--wrap=getenv"
+    return 0
+  fi
   local obj="$BUILDDIR/wrap_getenv.o"
 
   "${DRVCC:?build.sh must export DRVCC}" ${BASE_CFLAGS} -c /usr/local/lib/oss-verify/driver/wrap_getenv.c -o "$obj" || return 1

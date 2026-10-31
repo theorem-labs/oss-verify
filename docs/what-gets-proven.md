@@ -39,7 +39,7 @@ There are exceptions, and this is the full list. Each exception is a limit of ho
 
 * **Leaks.** Leak detection is off in the AddressSanitizer builds (`detect_leaks=0`). The leak check of LeakSanitizer at exit cannot run in the sealed static runtime. Thus a leak, which OSS-Fuzz reports, is not an error here.
 * **A UBSan check that trap mode cannot make.** The UBSan builds trap, with no runtime. Thus today's builds leave out `vptr`, which needs a runtime. OSS-Fuzz makes it ([below](#ubsan-checks)). With the next toolchain version, the `ubsan` build of a `c++` project makes it through a trap-only handler, in code compiled with RTTI; the `asan-ubsan` build still leaves it out.
-* **No MemorySanitizer.** There is no MemorySanitizer build, so we do not check reads of uninitialized memory. OSS-Fuzz runs MemorySanitizer for some projects. MemorySanitizer needs each library in the program built with it, the C and C++ libraries included. This static riscv64 toolchain does not supply them.
+* **MemorySanitizer for C only.** Only the `msan` build checks reads of uninitialized memory. Only a `c` project can have it, with `memory` in its `sanitizers`, and only with the next toolchain version: no toolchain image has it yet. OSS-Fuzz also runs MemorySanitizer for C++ projects, with a libc++ built with it, which this toolchain does not supply. As in the other builds, the C library, the compiler's runtime libraries and the driver are not instrumented. MemorySanitizer intercepts the C library functions on its list; memory that other uninstrumented code writes stays uninitialized to it, and a read of that memory is reported. Such a report is an error, so it makes an agrees statement false; it cannot make one true.
 * **One thread.** A process in LPS runs one thread. LPS does not cover a fuzz target that starts a thread. We cannot prove the statements of such a fuzz target until LPS includes threads.
 * **Inputs smaller than 64 MiB.** The driver refuses an input file of 64 MiB or more, with status 2. Thus no statement is about a larger input.
 * **The size classes of the AddressSanitizer allocator.** On riscv64, this allocator refuses a request when the size class of the request holds 3.5 GiB. The plain build can use up to 16 GiB. Thus an AddressSanitizer build can refuse memory to an input that the plain build accepts. For this cause, their budgets are different ([below](#memory-budgets)).
@@ -82,12 +82,14 @@ budgets:
   agrees:                    # for each sanitizer: [plain side, sanitizer side]
     address: [2GiB, 512GiB]  # also for asan-ubsan
     undefined: [16GiB, 512GiB]
+    memory: [2GiB, 512GiB]   # the msan build, which that release does not have
 ```
 
 * `halts` is the budget of each build in its halts statement. It is always 16 GiB: a project's own halts budget is not carried into the statements yet.
-* `agrees.<sanitizer>` gives the two budgets of the agrees statement: the plain build's budget, which is the condition, and the sanitizer build's budget. The sanitizer build's budget is large, because a sanitizer needs memory of its own. `address` applies to the `asan` and `asan-ubsan` builds, and `undefined` to the `ubsan` build.
+* `agrees.<sanitizer>` gives the two budgets of the agrees statement: the plain build's budget, which is the condition, and the sanitizer build's budget. The sanitizer build's budget is large, because a sanitizer needs memory of its own. `address` applies to the `asan` and `asan-ubsan` builds, `undefined` to the `ubsan` build, and `memory` to the `msan` build.
 * The plain side of `address` is 2 GiB, because the AddressSanitizer allocator limits each size class to 3.5 GiB on riscv64. The address space that the AddressSanitizer runtime reserves at start, more than 100 GiB, is not part of a budget.
 * So a plain side of `address` that is more than 2 GiB can make an agrees statement false for a correct program.
+* The plain side of `memory` is 2 GiB too, as for `address`. The MemorySanitizer allocator refuses one allocation of more than 8 GiB on riscv64. Its shadow and origin reservations at start are `MAP_NORESERVE`: only the pages that a run touches count toward the sanitizer side.
 
 A project can set its own budgets in `project.yaml` ([project-yaml.md](project-yaml.md#budgets)).
 
