@@ -27,7 +27,9 @@ import validate  # noqa: E402
 FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "example"
 TAG = "oss-verify-test/example:latest"
 QEMU = shutil.which("qemu-riscv64-static") or shutil.which("qemu-riscv64")
-BUILDS = list(validate.BUILDS)
+# The builds the published toolchain images make, in validate.BUILDS's order. The msan build is not one of them: it
+# needs a toolchain image with MemorySanitizer (infra/base-builder/toolchain.sh), which no published image has.
+BUILDS = ["plain", "ubsan", "asan", "asan-ubsan"]
 
 # Payload first byte -> exit status in each build (plain, ubsan, asan, asan-ubsan), after the six-byte header.
 # A load through a null pointer is a segmentation fault ('s'), except where UBSan's null check catches it first ('n'):

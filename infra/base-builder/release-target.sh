@@ -131,8 +131,13 @@ done'
     'clang --config=/tmp/asan-musl-sealed-noiconv.cfg' " $SHIM/oft-nogc-discard.ld"
   oft_write_cc_shim "$SHIM/$CHOST-clang++-sealed" \
     'clang++ --config=/tmp/asan-musl-sealed-noiconv.cfg -stdlib=libc++' " $SHIM/oft-nogc-discard.ld"
-  chmod +x "$SHIM/$CHOST-clang-plain" "$SHIM/$CHOST-clang-sealed" \
-           "$SHIM/$CHOST-clang++-plain" "$SHIM/$CHOST-clang++-sealed"
+  # The msan build's, with toolchain.sh's configuration (only a toolchain image with MemorySanitizer has it).
+  oft_write_cc_shim "$SHIM/$CHOST-clang-msan" \
+    'clang --config=/opt/asan-static/msan-musl-sealed.cfg' " $SHIM/oft-nogc-discard.ld"
+  oft_write_cc_shim "$SHIM/$CHOST-clang++-msan" \
+    'clang++ --config=/opt/asan-static/msan-musl-sealed.cfg -stdlib=libc++' " $SHIM/oft-nogc-discard.ld"
+  chmod +x "$SHIM/$CHOST-clang-plain" "$SHIM/$CHOST-clang-sealed" "$SHIM/$CHOST-clang-msan" \
+           "$SHIM/$CHOST-clang++-plain" "$SHIM/$CHOST-clang++-sealed" "$SHIM/$CHOST-clang++-msan"
 }
 
 # ov_target_begin <target> [<dependency> ...]: what the release's build sets up for a target before it reads the
