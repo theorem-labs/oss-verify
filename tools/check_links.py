@@ -31,12 +31,13 @@ those records, with no Docker, and gives each build of each fuzz target two resu
    functions; and code with nothing to check compiles to the same bytes with its flags as without them. So in the
    ubsan and asan-ubsan builds, each object and archive member is judged first by the recorded compiles that wrote
    its bytes (by their SHA-256): instrumented if one of them carried the build's UBSan flags for its language (each of
-   them, but the -fno-sanitize= ones, among its arguments, and no -fno-sanitize= argument that turns off a check the
-   build's own flags keep), whatever its traps; not instrumented (fail) if none did, whatever its traps. A compile of a
-   language that the sanitizer does not instrument (assembly), or one whose arguments are in a response file, decides
-   nothing. The code that no recorded compile decides is judged by its checks: each archive that holds some of it must
-   hold more of them than the same archive in the plain build, and so must the project's code as a whole; a build
-   with no compile records is judged by its checks alone, as before.
+   them, but the -fno-sanitize= ones, among its arguments; no -fno-sanitize= argument that turns off a check the
+   build's own flags keep; and no ignorelist, -fno-sanitize-trap or -fsanitize-recover argument, which take checks
+   away or turn traps into calls, that the build's own flags do not have), whatever its traps; not instrumented (fail)
+   if none did, whatever its traps. A compile of a language that the sanitizer does not instrument (assembly), or one
+   whose arguments are in a response file, decides nothing. The code that no recorded compile decides is judged by its
+   checks: each archive that holds some of it must hold more of them than the same archive in the plain build, and so
+   must the project's code as a whole; a build with no compile records is judged by its checks alone, as before.
 
 The plain build instruments nothing, by design; its result is "plain" when its record is complete, and "error"
 when it has no record or an incomplete one. A Go program has no record (Go's linker writes no map): its result is
@@ -92,6 +93,12 @@ UBSAN_LANGUAGES = {"c": "c", "cpp-output": "c", "c-header": "c", "objective-c": 
                    "c++": "c++", "c++-cpp-output": "c++", "c++-header": "c++", "objective-c++": "c++",
                    "objective-c++-cpp-output": "c++"}
 NO_SANITIZE = "-fno-sanitize="
+# The arguments that take a check away from a compile, or turn its trap into a call, while its -fsanitize= flags stay:
+# an ignorelist (and clang's older spelling, blacklist; the system ones too), and -fno-sanitize-trap and
+# -fsanitize-recover, with or without =<checks> (and clang's older spelling of -fno-sanitize-trap=undefined). A compile
+# that has one the build's own flags do not have did not carry the build's flags.
+UNDO_CHECKS = re.compile(r"-fsanitize-(system-)?(ignorelist|blacklist)=.*|-fno-sanitize-trap(=.*)?"
+                         r"|-fsanitize-recover(=.*)?|-fno-sanitize-undefined-trap-on-error")
 C_FAMILY = re.compile(r"\.(c|cc|cp|cpp|cxx|c\+\+|C|CPP|m|mm|h|hh|hpp|hxx|inc|ii|i)$")
 ASSEMBLY = re.compile(r"\.(S|s|sx|asm)$")
 FORTRAN = re.compile(r"\.(f|for|ftn|fpp|f77|f90|f95|f03|f08|f18)$", re.I)
@@ -721,9 +728,10 @@ def ubsan_compile(compiles, compile):
     """Whether one recorded compile carried the build's UndefinedBehaviorSanitizer flags for its language: (True,
     ""), (False, why), or (None, "") when its record cannot say, for a language the sanitizer does not instrument
     (assembly) or arguments it read from a response file (@file). It carried them when each of the build's UBSan flags
-    for that language is one of its arguments, but the -fno-sanitize= ones, and each check that a -fno-sanitize=
-    argument of it turns off is one that the build's own sanitizer flags for that language turn off: a check that the
-    build turns off is the build's choice, one the compile adds is not."""
+    for that language is one of its arguments, but the -fno-sanitize= ones; each check that a -fno-sanitize= argument
+    of it turns off is one that the build's own sanitizer flags for that language turn off (a check that the build
+    turns off is the build's choice, one the compile adds is not); and it has no ignorelist, -fno-sanitize-trap or
+    -fsanitize-recover argument (UNDO_CHECKS) that the build's own flags do not have."""
     language = UBSAN_LANGUAGES.get(compile.language)
     wanted = [w for w in compiles.ubsan[language] if not w.startswith(NO_SANITIZE)] if language else []
     if not wanted or any(a.startswith("@") for a in compile.arguments):
@@ -732,8 +740,10 @@ def ubsan_compile(compiles, compile):
     allowed = {check for w in compiles.sanitizer[language] if w.startswith(NO_SANITIZE)
                for check in w[len(NO_SANITIZE):].split(",")}
     missing = [w for w in wanted if w not in have]
+    own = set(compiles.sanitizer[language])
     extra = sorted({a for a in compile.arguments
-                    if a.startswith(NO_SANITIZE) and not set(a[len(NO_SANITIZE):].split(",")) <= allowed})
+                    if a.startswith(NO_SANITIZE) and not set(a[len(NO_SANITIZE):].split(",")) <= allowed
+                    or UNDO_CHECKS.fullmatch(a) and a not in own})
     if not missing and not extra:
         return True, ""
     return False, (f"{compile.file}: " + ", ".join((["without " + " ".join(missing)] if missing else [])

@@ -613,6 +613,44 @@ class Analyse(unittest.TestCase):
         self.assertEqual(result["result"], "fail", result)
         self.assertIn("libx.a(x.c.o) (x.c: with -fno-sanitize=undefined)", result["detail"])
 
+    UNDOING = ["-fsanitize-ignorelist=/src/ignore.txt", "-fsanitize-blacklist=/src/ignore.txt",
+               "-fsanitize-system-ignorelist=/src/sys.txt", "-fsanitize-system-blacklist=/src/sys.txt",
+               "-fno-sanitize-trap=null", "-fno-sanitize-trap=all", "-fno-sanitize-trap",
+               "-fsanitize-recover=undefined", "-fsanitize-recover=all", "-fsanitize-recover",
+               "-fno-sanitize-undefined-trap-on-error"]
+
+    def test_a_compile_with_the_flags_that_takes_checks_away_fails(self):
+        """An ignorelist takes checks away and -fno-sanitize-trap / -fsanitize-recover turn traps into handler calls,
+        while every -fsanitize= word is there: such a compile did not carry the build's flags, and the word is named."""
+        sink = elf_object(LW + UNIMP + RET, defined=["f"], undefined=ASAN, comment=True)
+        plain = {"/work/b/libx.a": {"x.c.o": elf_object(LW + RET, defined=["f"], comment=True)}}
+        archives = {"/work/b/libx.a": {"x.c.o": sink}}
+        for word in self.UNDOING:
+            for build in ("ubsan", "asan-ubsan"):
+                compiled = [(sink, "x.c", "c", compile_arguments("x.c", after=[word]))]
+                result = self.ubsan(build, plain, archives, compiled)
+                self.assertEqual(result["result"], "fail", (word, build, result))
+                self.assertIn(f"libx.a(x.c.o) (x.c: with {word})", result["detail"])
+                self.assertNotIn("AddressSanitizer constructor", result["detail"])
+
+    def test_the_builds_own_trap_and_recover_words_and_coverage_words_are_not_taken_for_them(self):
+        """The build's own -fsanitize-trap=all and -fno-sanitize-recover=all, -fsanitize-coverage=0 (which curl's seed
+        gives its protobuf build), and a word the build's own flags have, do not fail a compile."""
+        sink = elf_object(RET, defined=["f"], comment=True)
+        archives = {"/work/b/libx.a": {"x.c.o": sink}}
+        result = self.ubsan("ubsan", archives, archives,
+                            [(sink, "x.c", "c", compile_arguments("x.c", after=["-fsanitize-coverage=0"]))])
+        self.assertEqual(result["result"], "pass", result)
+        plain = self.record(archives, build="plain")
+        record = self.record(archives, compiled=[(sink, "x.c", "c", compile_arguments(
+            "x.c", after=["-fsanitize-ignorelist=/src/ignore.txt"]))])
+        record.compiles.sanitizer["c"].append("-fsanitize-ignorelist=/src/ignore.txt")
+        self.assertEqual(self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]["result"], "pass")
+        record.compiles.objects[hashlib.sha256(sink).hexdigest()][0].arguments[-1] = "-fsanitize-ignorelist=/src/b.txt"
+        result = self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]
+        self.assertEqual(result["result"], "fail", result)
+        self.assertIn("with -fsanitize-ignorelist=/src/b.txt", result["detail"])
+
     def test_any_compile_of_the_same_bytes_with_the_flags_decides(self):
         """Two compiles that wrote the same bytes, one without the flags (a host tool's copy, say): the bytes are the
         same whichever made them, so the one with the flags makes the member instrumented."""
