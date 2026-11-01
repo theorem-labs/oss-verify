@@ -66,7 +66,8 @@ SYSROOT_LIB = re.compile(r"/opt/[^/]+(/[^/]+)*/usr/lib/[^/]+\.a")
 # rustc's allocator shim defines only these, and forwards each to the standard library. Newer rustc names them inside
 # its `__rustc` crate, v0-mangled (`_RNvCs<disambiguator>_7___rustc12___rust_alloc`, where 12 is the length of
 # `__rust_alloc`), and adds `_v2` to two of them; a mangled name counts only when its length is its identifier's,
-# written as rustc writes it: no leading zero, and compared as text, so a length of any number of digits is a refusal.
+# written as rustc writes it, with no leading zero; it is compared as text, so a length too long for int() is a refusal,
+# not a traceback.
 RUST_ALLOCATOR_SHIM = re.compile(r"(?:_RNvCs[0-9A-Za-z]*_7___rustc(?P<len>[0-9]+)_)?(?P<ident>__rust_(?:alloc|dealloc|"
                                  r"realloc|alloc_zeroed|alloc_error_handler|alloc_error_handler_should_panic(?:_v2)?|"
                                  r"no_alloc_shim_is_unstable(?:_v2)?))")
