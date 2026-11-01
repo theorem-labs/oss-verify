@@ -268,8 +268,8 @@ class WorkflowArguments(unittest.TestCase):
               "RUN_URL": "https://github.com/theorem-labs/oss-verify/actions/runs/7"}, [gcp]),
             ("build.yaml review issue draft store", steps("build.yaml", "review", "Store the issue draft for a person"),
              json.dumps({"generation": "1761500000000000"}),
-             {"GCP_ACCESS_TOKEN": gcp, "ISSUE": "45", "RUN_ID": "7", "RUN_ATTEMPT": "1",
-              "RUN_URL": "https://github.com/theorem-labs/oss-verify/actions/runs/7"}, [gcp]),
+             {"GCP_ACCESS_TOKEN": gcp, "REPO": "theorem-labs/oss-verify", "ISSUE": "45", "RUN_ID": "7",
+              "RUN_ATTEMPT": "1", "RUN_URL": "https://github.com/theorem-labs/oss-verify/actions/runs/7"}, [gcp]),
             ("build.yaml hold listing", steps("build.yaml", "hold", "Look for stored held findings"),
              json.dumps({"items": [{"name": "held/7/" + "a" * 32}]}), {"GCP_ACCESS_TOKEN": gcp}, [gcp]),
             ("build.yaml hold repository", steps("build.yaml", "hold", "Where the held findings go"),
@@ -1447,7 +1447,8 @@ class ReviewJob(unittest.TestCase):
                 read(root / "temp" / "held-finding.md"), self.outputs(read(root / "output")),
                 read(root / "home" / ".claude" / "ossv-last-review"))
 
-    def store(self, issue="5", attempt="2", answer='{"generation": "1730000000000000"}',
+    def store(self, issue="5", attempt="2", repo="theorem-labs/oss-verify",
+              answer='{"generation": "1730000000000000"}',
               draft="The draft reply:\n\nSee docs/dsl.md.\n"):
         """.github/scripts/store-issue-draft on a draft file, with a stand-in curl that keeps its arguments, the object
         it uploads, and answers `answer`. Return the exit status, the output, the summary, curl's arguments and the
@@ -1468,8 +1469,9 @@ class ReviewJob(unittest.TestCase):
             run = subprocess.run([str(ROOT / ".github" / "scripts" / "store-issue-draft"), str(root / "draft.md")],
                                  capture_output=True, text=True,
                                  env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
-                                      "GCP_ACCESS_TOKEN": "gcp-token-not-a-secret", "ISSUE": issue, "RUN_ID": "77",
-                                      "RUN_ATTEMPT": attempt, "RUN_URL": "https://github.com/o/r/actions/runs/77",
+                                      "GCP_ACCESS_TOKEN": "gcp-token-not-a-secret", "REPO": repo, "ISSUE": issue,
+                                      "RUN_ID": "77", "RUN_ATTEMPT": attempt,
+                                      "RUN_URL": "https://github.com/o/r/actions/runs/77",
                                       "GITHUB_STEP_SUMMARY": str(root / "summary")})
             read = lambda path: path.read_text(encoding="utf-8") if path.exists() else ""  # noqa: E731
             return (run.returncode, run.stdout, read(root / "summary"), read(root / "argv"), read(root / "object"),
@@ -1478,15 +1480,25 @@ class ReviewJob(unittest.TestCase):
     def test_an_issue_draft_is_stored_privately_once_and_the_summary_names_only_where(self):
         code, out, summary, argv, stored, header = self.store()
         self.assertEqual(code, 0, out)
-        name = "issue-drafts%2F5%2F77-2"
+        name = "issue-drafts%2Foss-verify%2F5%2F77-2"
         self.assertIn("/b/theorem-agent-infra-oss-verify-held-findings/o?uploadType=media&ifGenerationMatch=0"
                       f"&name={name}", argv)
         self.assertEqual(stored, "oss-verify issue draft v1\nissue: 5\nrun: https://github.com/o/r/actions/runs/77\n"
                                  "---\nThe draft reply:\n\nSee docs/dsl.md.\n")
         self.assertEqual(header, "Authorization: Bearer gcp-token-not-a-secret\n")
         self.assertNotIn("gcp-token-not-a-secret", argv)
-        self.assertIn("gcloud storage cat gs://theorem-agent-infra-oss-verify-held-findings/issue-drafts/5/77-2", summary)
+        self.assertIn("gcloud storage cat gs://theorem-agent-infra-oss-verify-held-findings/issue-drafts/oss-verify/5/77-2", summary)
         self.assertNotIn("dsl.md", summary + out)
+
+    def test_another_repository_draft_is_stored_under_its_own_name(self):
+        for repo in ("theorem-labs/oss-verify-proofs", "theorem-labs/rocq-linux-process-semantics"):
+            with self.subTest(repo=repo):
+                code, out, summary, argv, _, _ = self.store(repo=repo)
+                self.assertEqual(code, 0, out)
+                name = f"issue-drafts%2F{repo.rsplit('/', 1)[1]}%2F5%2F77-2"
+                self.assertIn(f"&name={name}", argv)
+                self.assertIn(f"gs://theorem-agent-infra-oss-verify-held-findings/issue-drafts/"
+                              f"{repo.rsplit('/', 1)[1]}/5/77-2", summary)
 
     def test_a_draft_that_cannot_be_stored_fails_the_step(self):
         for kwargs in ({"answer": '{"error": "403"}'}, {"issue": "5; x"}, {"attempt": ""}):
@@ -1771,19 +1783,25 @@ class ReviewJob(unittest.TestCase):
 @unittest.skipUnless(shutil.which("jq"), "needs jq, which the gh stand-in runs the script's filters with")
 class IssueDraftCap(unittest.TestCase):
     """.github/scripts/issue-draft-cap, build.yaml's step "Hold the draft at the hourly cap", with a stand-in gh: it
-    counts the other runs for an issue's own event in the last hour whose review reached the model, and holds the
-    draft at the cap or on a failed read with a ::error::HELD annotation and exit status 1."""
+    counts the other runs for one repository's issue drafts in the last hour whose review reached the model, and holds
+    the draft at the cap or on a failed read with a ::error::HELD annotation and exit status 1."""
 
-    def cap(self, runs, skipped=(), held=(), stopped=(), fail=None, run_id="99"):
-        """runs: the run ids that the runs API lists; skipped: the ids whose review job was skipped; held: the ids whose
-        step "Hold the draft at the hourly cap" failed; stopped: the ids whose step "Stop before the model when the
-        draft cannot be stored" failed (a refused sign-in); fail: "runs", or the id whose jobs cannot be read. Return
-        the exit status, the output and gh's calls."""
+    def cap(self, runs, skipped=(), held=(), stopped=(), fail=None, run_id="99", source_repo="oss-verify"):
+        """runs: ids, or (id, event, title) triples, that the runs API lists; skipped: the ids whose review job was
+        skipped; held: the ids whose step "Hold the draft at the hourly cap" failed; stopped: the ids whose step
+        "Stop before the model when the draft cannot be stored" failed (a refused sign-in); fail: "runs", or the id
+        whose jobs cannot be read. Return the exit status, the output and gh's calls."""
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             (root / "bin").mkdir()
-            (root / "runs.json").write_text(json.dumps({"workflow_runs": [{"id": i} for i in runs]}))
-            for i in runs:
+            records = [{"id": item, "event": "issues", "display_title": "Issue 5"}
+                       if isinstance(item, int) else {"id": item[0], "event": item[1], "display_title": item[2]}
+                       for item in runs]
+            ids = [record["id"] for record in records]
+            (root / "runs.json").write_text(json.dumps({"workflow_runs": records}))
+            (root / "issue-runs.json").write_text(json.dumps(
+                {"workflow_runs": [record for record in records if record["event"] == "issues"]}))
+            for i in ids:
                 gate = "skipped" if i in held else "failure" if i in stopped else "success"
                 model = "skipped" if i in held or i in stopped else "success"
                 review = {"name": "review",
@@ -1798,7 +1816,8 @@ class IssueDraftCap(unittest.TestCase):
                 (root / f"jobs-{i}.json").write_text(json.dumps({"jobs": [
                     {"name": "route", "conclusion": "success", "steps": []}, review]}))
             listing = ('echo "gh: HTTP 502" >&2; exit 1' if fail == "runs"
-                       else f'jq -r "$filter" {root}/runs.json')
+                       else f'if [[ " $*" == *" event=issues "* ]]; then jq -r "$filter" {root}/issue-runs.json; '
+                       f'else jq -r "$filter" {root}/runs.json; fi')
             (root / "bin" / "gh").write_text(
                 "#!/bin/bash\n"
                 'filter=""; path=""; for a; do [ "$prev" = --jq ] && filter=$a; [[ $a == repos/* ]] && path=$a; prev=$a; done\n'
@@ -1812,7 +1831,8 @@ class IssueDraftCap(unittest.TestCase):
             (root / "bin" / "gh").chmod(0o755)
             run = subprocess.run([str(ROOT / ".github" / "scripts" / "issue-draft-cap")], capture_output=True, text=True,
                                  env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "GH_TOKEN": "x",
-                                      "REPO": "o/r", "RUN_ID": run_id, "CAP": "6"})
+                                      "REPO": "o/r", "RUNS_REPO": "theorem-labs/oss-verify", "RUN_ID": run_id,
+                                      "CAP": "6", "SOURCE_REPO": source_repo})
             return run.returncode, run.stdout, (root / "calls").read_text()
 
     def test_under_the_cap_the_draft_is_made(self):
@@ -1821,7 +1841,7 @@ class IssueDraftCap(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("5 issue drafts ran the model in the last hour, under the cap of 6", out)
         self.assertNotIn("HELD", out)
-        self.assertIn("event=issues", calls)
+        self.assertNotIn("event=issues", calls)
         self.assertIn("created=>=", calls)
         self.assertNotIn("runs/99/jobs", calls)
 
@@ -1847,6 +1867,16 @@ class IssueDraftCap(unittest.TestCase):
         code, out, _ = self.cap([*range(1, 8), 99], held=(7,))
         self.assertEqual(code, 1)
         self.assertIn("::error::HELD: 6 issue drafts ran the model in the last hour, at the cap of 6.", out)
+
+
+    def test_another_repository_issue_draft_hits_its_hourly_cap(self):
+        for repo in ("oss-verify-proofs", "rocq-linux-process-semantics"):
+            with self.subTest(repo=repo):
+                runs = [(number, "workflow_dispatch", f"Issue {repo}#{number}") for number in range(1, 7)]
+                code, out, calls = self.cap(runs, source_repo=repo)
+                self.assertEqual(code, 1)
+                self.assertIn("::error::HELD: 6 issue drafts ran the model in the last hour, at the cap of 6.", out)
+                self.assertNotIn("event=issues", calls)
 
     def test_a_read_that_fails_holds_the_draft(self):
         for fail in ("runs", 3):
