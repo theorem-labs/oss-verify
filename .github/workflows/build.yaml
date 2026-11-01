@@ -24,11 +24,11 @@ name: "Build"
 #            else edit or reopen another person's issue), when an owner or a member of the organization sent it
 #            (GitHub's author_association OWNER or MEMBER), or when any App sent it (actor-kind). A run for a pull
 #            request of oss-verify-proofs or rocq-linux-process-semantics (-f repo=<name> -f pr=<n> -f head=<commit>,
-#            which the starter workflow of that repository starts on its own events: .github/starters/) is a change
-#            whatever it changes, and route refuses it unless repo is one of the names of the input's list, pr a
-#            number and head 40 hexadecimal digits. When head is no longer that pull request's head, route asks for
-#            nothing: the run of the newer head reviews it. One for an issue there (-f repo=<name> -f issue=<n>) is
-#            an issue, as here.
+#            which the starter workflow of that repository, once installed, starts on its own events:
+#            .github/starters/) is a change whatever it changes, and route refuses it unless repo is one of the names
+#            of the input's list, pr a number and head 40 hexadecimal digits. When head is no longer that pull
+#            request's head, route asks for nothing: the starter reads the head when it runs, so its newest run starts
+#            the review of the newer head. One for an issue there (-f repo=<name> -f issue=<n>) is an issue, as here.
 #   project-builds
 #            the build above, under the check name build, when route asks for it; it passes with nothing to build
 #            when the pull request enrolls no project (below). Its job id stays project-builds, the name the other jobs
@@ -59,7 +59,8 @@ name: "Build"
 #            person's run for an issue of this repository, started by hand, skips it. At 6 drafts for that source
 #            repository that ran the model in the last hour, or when it cannot read the runs, it fails the job with
 #            `::error::HELD: ...`: no draft is made and the run is red, and the CI/CD lane's inbound watch pages for
-#            each such run (ISSUE CAP HELD). A person re-runs the job to make the draft. The draft is stored in the
+#            each such run (ISSUE CAP HELD). A person re-runs the job to make the draft once fewer drafts of that
+#            repository ran in the last hour: a re-run is counted against the same cap. The draft is stored in the
 #            private bucket as issue-drafts/<repository>/<issue>/<run id>-<attempt>. It can be stored only when
 #            Google's identity provider for this repository admits the run's event: when the sign-in before the model
 #            is refused for an issue, the step "Stop before the model when the draft cannot be stored" fails the job
@@ -220,8 +221,8 @@ name: "Build"
 # To draft the reply to an issue of this repository (its own events start such runs too):
 #   gh workflow run build.yaml -f issue=45
 # To review a pull request of theorem-labs/oss-verify-proofs or theorem-labs/rocq-linux-process-semantics as a change,
-# against review-change.md, or draft the reply to an issue there (the starter workflow of each of those repositories
-# starts these runs on its own events, with the OSS Verify App's token: .github/starters/):
+# against review-change.md, or draft the reply to an issue there (the starter workflow of each of those repositories,
+# once installed, starts these runs on its own events, with the OSS Verify App's token: .github/starters/):
 #   gh workflow run build.yaml -f repo=rocq-linux-process-semantics -f pr=34 -f head=<the pull request's head commit>
 #   gh workflow run build.yaml -f repo=oss-verify-proofs -f issue=3
 # Such a run reviews that head only while it is the pull request's head, and its title, "Review <repo>#<n> at <head>",
@@ -359,7 +360,8 @@ jobs:
           if [ "${OTHER:-}" = true ]; then
             # Another repository's pull request: a change review (review-change.md) of the head the run names, only
             # while it is the head, whatever the pull request changes and whoever started the run. Nothing is built.
-            # A run of an older head asks for nothing and passes: the run of the newer head reviews it.
+            # A run of an older head asks for nothing and passes: the starter reads the head when it runs, so its
+            # newest run starts the review of the newer head.
             [[ ${WANT_HEAD:-} =~ ^[0-9a-f]{40}$ ]] \
               || { echo "::error::Give head, the head commit of $REPO#$PR, as 40 hexadecimal digits."; exit 1; }
             current=$(jq -r .head.sha <<< "$pull")

@@ -449,11 +449,21 @@ def test_only_this_repositorys_pull_request_runs_cancel_an_older_run(event, inpu
 def test_a_starter_dispatches_one_event_at_a_time_for_each_pull_request_or_issue(name):
     starter = yaml.safe_load((ROOT / ".github" / "starters" / name).read_text())
     group = starter["concurrency"]["group"]
-    pull = lambda n: {"github": {"event": {"pull_request": {"number": n}}}}  # noqa: E731
-    issue = lambda n: {"github": {"event": {"issue": {"number": n}}}}  # noqa: E731
-    assert evaluate(group, pull(7)) == evaluate(group, pull(7))
+    pull = lambda n, run=1: {"github": {"run_id": run, "event": {"pull_request": {"number": n}}}}  # noqa: E731
+
+    def issue(n, sender="alice", run=1):
+        return {"github": {"run_id": run, "event": {"sender": {"login": sender},
+                                                    "issue": {"number": n, "user": {"login": "alice"}}}}}
+
+    # Every event of one pull request, and every event its author sends for one issue, waits in one group.
+    assert evaluate(group, pull(7, run=1)) == evaluate(group, pull(7, run=2))
+    assert evaluate(group, issue(9, run=1)) == evaluate(group, issue(9, run=2))
     # Pull requests and issues share one number space in a repository.
-    assert len({evaluate(group, pull(7)), evaluate(group, pull(8)), evaluate(group, issue(9))}) == 3
+    assert len({evaluate(group, pull(7)), evaluate(group, pull(8)), evaluate(group, issue(9)),
+                evaluate(group, issue(10))}) == 4
+    # An event someone else sends for an issue starts nothing, so it never replaces the author's waiting event.
+    assert evaluate(group, issue(9, sender="carol", run=3)) not in {evaluate(group, issue(9)),
+                                                                    evaluate(group, issue(9, sender="carol", run=4))}
     assert starter["concurrency"]["cancel-in-progress"] is False
 
 
@@ -505,7 +515,7 @@ def posting(inputs, issue=False, repos=None):
     if repos is None:
         # A value with no ${{ }} is the literal itself, as GitHub reads it.
         listed = str(jobs["route"]["outputs"]["post_review_repos"])
-        repos = as_text(evaluate(listed, {})) if "${{" in listed else listed
+        repos = as_text(evaluate(listed, {"vars": NoVariables()})) if "${{" in listed else listed
     context = {"inputs": inputs, "vars": NoVariables(), "github": {"repository": "theorem-labs/oss-verify"},
                "needs": {"route": {"outputs": {"kind": "issue" if issue else "change",
                                                "post_review_repos": repos}},

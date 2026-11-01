@@ -1879,7 +1879,7 @@ class IssueDraftCap(unittest.TestCase):
                 code, out, _ = self.cap(runs, source_repo=repo)
                 self.assertEqual(code, 1, out)
                 self.assertIn("::error::HELD: 6 issue drafts ran the model in the last hour, at the cap of 6.", out)
-                # Five of its own and all eighteen others: under the cap.
+                # Five of its own and the twelve of the other two repositories: under the cap.
                 own = {"oss-verify": 6, "oss-verify-proofs": 16, "rocq-linux-process-semantics": 26}[repo]
                 code, out, _ = self.cap([r for r in runs if r[0] != own], source_repo=repo)
                 self.assertEqual(code, 0, out)
@@ -2156,39 +2156,56 @@ class Starters(unittest.TestCase):
         [job] = self.starter(name)["jobs"].values()
         return {s["name"]: s for s in job["steps"]}
 
-    def event(self, name, **values):
+    def event(self, name, current="e" * 40, **values):
         """The starter's first step, with the env GitHub gives it on an event of `values` (pull_request, issue, sender,
-        event_name). Return its exit status and outputs."""
+        event_name), and a stand-in gh whose pull request 34 has the head `current`. Return its exit status, its
+        outputs and gh's calls."""
         step = self.steps(name)["Read what to start from the event"]
-        context = {"github": {"event_name": values.get("event_name", "pull_request_target"),
+        context = {"github": {"event_name": values.get("event_name", "pull_request_target"), "token": "x",
                               "event": {k: v for k, v in values.items() if k != "event_name"}}}
         env = {k: as_text(evaluate(v, context)) if "${{" in str(v) else str(v) for k, v in step["env"].items()}
         with tempfile.TemporaryDirectory() as directory:
-            output = pathlib.Path(directory) / "output"
+            root = pathlib.Path(directory)
+            (root / "bin").mkdir()
+            (root / "pull.json").write_text(json.dumps({"head": {"sha": current}}))
+            (root / "bin" / "gh").write_text(
+                '#!/bin/bash\nfilter=""; for a; do [ "$prev" = --jq ] && filter=$a; prev=$a; done\n'
+                f'echo "$*" >> {root}/calls\n'
+                f'case "$*" in *"repos/theorem-labs/{name}/pulls/34"*) jq -r "$filter" {root}/pull.json ;; '
+                '*) exit 1 ;; esac\n')
+            (root / "bin" / "gh").chmod(0o755)
+            output = root / "output"
             run = subprocess.run(["bash", "-e", "-c", step["run"]], capture_output=True, text=True,
-                                 env={**os.environ, **env, "GITHUB_OUTPUT": str(output)})
+                                 env={**os.environ, **env, "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
+                                      "GITHUB_OUTPUT": str(output)})
             outputs = dict(line.split("=", 1) for line in output.read_text().splitlines()) if output.exists() else {}
-        return run.returncode, outputs
+            calls = (root / "calls").read_text() if (root / "calls").exists() else ""
+        return run.returncode, outputs, calls
 
-    def test_it_starts_only_values_of_their_shape_read_from_the_event(self):
-        # (4) The repository from the fixed list, the pull request's number and head, or the issue's number, from the
-        # event; each must have its shape, or nothing starts.
-        head = "c" * 40
+    def test_it_starts_only_values_of_their_shape_read_from_the_event_and_the_pull_request(self):
+        # (4) The repository from the fixed list, the pull request's number from the event and its head as the API
+        # gives it when the step runs, or the issue's number; each must have its shape, or nothing starts. The head is
+        # read when the step runs, not taken from the event: a run that waited in the group behind an older event's
+        # run starts the review of the newest head, so a later push is never left unreviewed.
+        event_head, newest = "c" * 40, "e" * 40
         for name in self.NAMES:
             with self.subTest(name=name):
-                self.assertEqual(self.event(name, pull_request={"number": 34, "head": {"sha": head}}),
-                                 (0, {"repo": name, "pr": "34", "head": head}))
+                code, outputs, calls = self.event(name, pull_request={"number": 34, "head": {"sha": event_head}})
+                self.assertEqual((code, outputs), (0, {"repo": name, "pr": "34", "head": newest}))
+                self.assertIn(f"repos/theorem-labs/{name}/pulls/34", calls)
                 alice = {"login": "alice"}
-                self.assertEqual(self.event(name, event_name="issues", sender=alice,
-                                            issue={"number": 5, "user": alice, "author_association": "NONE"}),
-                                 (0, {"repo": name, "issue": "5"}))
-                for pull in ({"number": "34; x", "head": {"sha": head}}, {"number": 34, "head": {"sha": head[:7]}},
-                             {"number": 34, "head": {"sha": head.upper()}}, {"number": 34, "head": {"sha": ""}}):
-                    code, outputs = self.event(name, pull_request=pull)
-                    self.assertNotEqual(code, 0, pull)
-                    self.assertEqual(outputs, {}, pull)
-                code, outputs = self.event(name, event_name="issues", sender=alice,
-                                           issue={"number": "5x", "user": alice, "author_association": "NONE"})
+                code, outputs, calls = self.event(name, event_name="issues", sender=alice,
+                                                  issue={"number": 5, "user": alice, "author_association": "NONE"})
+                self.assertEqual((code, outputs, calls), (0, {"repo": name, "issue": "5"}, ""))
+                for pull, current in (({"number": "34; x", "head": {"sha": event_head}}, newest),
+                                      ({"number": 34, "head": {"sha": event_head}}, newest[:7]),
+                                      ({"number": 34, "head": {"sha": event_head}}, newest.upper()),
+                                      ({"number": 34, "head": {"sha": event_head}}, "null")):
+                    code, outputs, _ = self.event(name, current=current, pull_request=pull)
+                    self.assertNotEqual(code, 0, (pull, current))
+                    self.assertEqual(outputs, {}, (pull, current))
+                code, outputs, _ = self.event(name, event_name="issues", sender=alice,
+                                              issue={"number": "5x", "user": alice, "author_association": "NONE"})
                 self.assertNotEqual(code, 0)
                 self.assertEqual(outputs, {})
                 # An issue's event that is ours starts nothing, and succeeds.
@@ -2197,14 +2214,14 @@ class Starters(unittest.TestCase):
                                                     ("carol", "alice", "NONE")):
                     self.assertEqual(self.event(name, event_name="issues", sender={"login": sender},
                                                 issue={"number": 5, "user": {"login": author},
-                                                       "author_association": association}), (0, {}), sender)
+                                                       "author_association": association}), (0, {}, ""), sender)
         # A name outside the list is refused, so a copy that names another repository starts nothing.
         step = self.steps(self.NAMES[0])["Read what to start from the event"]
         with tempfile.TemporaryDirectory() as directory:
             output = pathlib.Path(directory) / "output"
             run = subprocess.run(["bash", "-e", "-c", step["run"]], capture_output=True, text=True,
                                  env={**os.environ, **{k: "" for k in step["env"]}, "NAME": "oss-verify-proofs-internal",
-                                      "EVENT": "pull_request_target", "PR": "34", "HEAD": head,
+                                      "EVENT": "pull_request_target", "PR": "34", "HEAD": event_head,
                                       "GITHUB_OUTPUT": str(output)})
             self.assertNotEqual(run.returncode, 0)
             self.assertFalse(output.exists())
