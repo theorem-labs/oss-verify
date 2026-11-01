@@ -279,9 +279,10 @@ concurrency:
   # run of the author's own edit. An event that the author sent and route still skips (an owner, a member or an App
   # wrote the issue) is of an issue that never gets a draft. A run for another repository never cancels a running
   # review or draft either: its starter's dispatches can arrive late, and the newest waiting run replaces an older
-  # waiting one. A run whose head is no longer the pull request's head asks for nothing (route).
-  group: build-${{ github.event_name }}-${{ inputs.repo || 'oss-verify' }}-${{ github.event.pull_request.number || inputs.pr || inputs.issue || (github.event.sender.login == github.event.issue.user.login && github.event.issue.number || format('{0}-run-{1}', github.event.issue.number, github.run_id)) }}
-  cancel-in-progress: ${{ github.event_name != 'issues' && (!inputs.repo || inputs.repo == 'oss-verify') }}
+  # waiting one. Each external pull request head has its own group, so a delayed run of an older head cannot replace
+  # the run of a newer head. A run whose head is no longer the pull request's head asks for nothing (route).
+  group: build-${{ github.event_name }}-${{ inputs.repo || 'oss-verify' }}-${{ github.event.pull_request.number || inputs.pr || inputs.issue || (github.event.sender.login == github.event.issue.user.login && github.event.issue.number || format('{0}-run-{1}', github.event.issue.number, github.run_id)) }}-${{ inputs.repo && inputs.repo != 'oss-verify' && inputs.pr && inputs.head || '' }}
+  cancel-in-progress: ${{ github.event_name != 'issues' && (inputs.repo == '' || inputs.repo == 'oss-verify') }}
 
 jobs:
   route:

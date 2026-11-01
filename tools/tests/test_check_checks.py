@@ -2160,6 +2160,9 @@ class Starters(unittest.TestCase):
         """The starter's first step, with the env GitHub gives it on an event of `values` (pull_request, issue, sender,
         event_name), and a stand-in gh whose pull request 34 has the head `current`. Return its exit status, its
         outputs and gh's calls."""
+        starter = self.starter(name)
+        [job] = starter["jobs"].values()
+        self.assertEqual(job["permissions"], {"pull-requests": "read"})
         step = self.steps(name)["Read what to start from the event"]
         context = {"github": {"event_name": values.get("event_name", "pull_request_target"), "token": "x",
                               "event": {k: v for k, v in values.items() if k != "event_name"}}}
@@ -2169,9 +2172,10 @@ class Starters(unittest.TestCase):
             (root / "bin").mkdir()
             (root / "pull.json").write_text(json.dumps({"head": {"sha": current}}))
             (root / "bin" / "gh").write_text(
-                '#!/bin/bash\nfilter=""; for a; do [ "$prev" = --jq ] && filter=$a; prev=$a; done\n'
+                '#!/bin/bash\n[ "$GH_TOKEN" = x ] || { echo "missing token" >&2; exit 1; }\n'
+                'filter=""; for a; do [ "$prev" = --jq ] && filter=$a; prev=$a; done\n'
                 f'echo "$*" >> {root}/calls\n'
-                f'case "$*" in *"repos/theorem-labs/{name}/pulls/34"*) jq -r "$filter" {root}/pull.json ;; '
+                f'case "$*" in "api repos/theorem-labs/{name}/pulls/34 --jq .head.sha") jq -r "$filter" {root}/pull.json ;; '
                 '*) exit 1 ;; esac\n')
             (root / "bin" / "gh").chmod(0o755)
             output = root / "output"
@@ -2221,7 +2225,7 @@ class Starters(unittest.TestCase):
             output = pathlib.Path(directory) / "output"
             run = subprocess.run(["bash", "-e", "-c", step["run"]], capture_output=True, text=True,
                                  env={**os.environ, **{k: "" for k in step["env"]}, "NAME": "oss-verify-proofs-internal",
-                                      "EVENT": "pull_request_target", "PR": "34", "HEAD": event_head,
+                                      "EVENT": "pull_request_target", "PR": "34",
                                       "GITHUB_OUTPUT": str(output)})
             self.assertNotEqual(run.returncode, 0)
             self.assertFalse(output.exists())

@@ -6,7 +6,7 @@
 # so that its tests read it (tools/tests/test_check_checks.py, class Starters). A change to it is made in both
 # repositories.
 name: "OSS Verify review"
-# Starts OSS Verify's review of each pull request of this repository at each new head, and the draft reply to each
+# Starts OSS Verify's review of each pull request of this repository at its newest head, and the draft reply to each
 # issue that waits for us. The review runs in theorem-labs/oss-verify's Build workflow (.github/workflows/build.yaml,
 # with -f repo=oss-verify-proofs), which posts nothing here unless its list of the repositories
 # whose reviews post (post_review_repos, empty for now) names this one. Nothing here runs on a schedule.

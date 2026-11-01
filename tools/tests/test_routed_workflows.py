@@ -388,6 +388,9 @@ def test_another_repository_routes_to_a_change_review(tmp_path, repo):
     # A run of another repository's pull request 34 never cancels one of this repository's, nor its comment job.
     ours = {"inputs": {"repo": "oss-verify", "pr": 34}, "github": {"event_name": "workflow_dispatch"}}
     assert evaluate(flow["concurrency"]["group"], run) != evaluate(flow["concurrency"]["group"], ours)
+    newer = {"inputs": {"repo": repo, "pr": 34, "head": "d" * 40}, "github": {"event_name": "workflow_dispatch"}}
+    # A late run of an older external pull request head cannot replace the run of the newest head.
+    assert evaluate(flow["concurrency"]["group"], run) != evaluate(flow["concurrency"]["group"], newer)
     group = flow["jobs"]["comment"]["concurrency"]["group"]
     assert evaluate(group, run) != evaluate(group, ours)
 
