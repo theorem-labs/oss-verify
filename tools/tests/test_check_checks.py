@@ -742,7 +742,7 @@ else:
         old = (f"enrollment PR: theorem-labs/oss-verify#68\nenrollment PR head: {'1' * 40}\n"
                f"public PR comment: not posted yet\nreview run: {self.RUN}\n"
                f"held finding key: held/40971300962/{'f' * 32} 1\n" + text)
-        lane = f"held finding key: libreac-1 (lane record ossv-agent-open:/home/sami/libreac-1.md)\n{text}"
+        lane = f"held finding key: libreac-1 (lane record ossv-agent-open:notes/libreac-1.md)\n{text}"
         for what, body in (("the old key", old), ("the statement work's", lane)):
             with self.subTest(what=what):
                 run, calls, sent = self.run_held(self.HELD, bodies_on_github=[(body, "open", title)],
@@ -1595,11 +1595,13 @@ class ReviewJob(unittest.TestCase):
         self.assertNotEqual(run.returncode, 0)
         self.assertIsNone(last)
 
-    # bootstrap/'s stack outputs in agent-infra, read with `pulumi stack output --stack prod` after the apply of
-    # 2026-10-31 that made the federated identity ossv-review-github and the Service svc:spend (INFRA-832 S1a):
-    # ossvReviewTailnetClientId, and spendCollectorTailnetUrl, http:// and the Service's IPv4 address.
-    CLIENT_ID = "TWbBfz7fqc11CNTRL-kwYSkwdwGN11CNTRL"
-    COLLECTOR_URL = "http://100.116.58.240"
+    # Neither value is in this public repository: each is a repository variable the workflow reads, and the tests
+    # below check that the workflow reads the variable and names no address and no client id of its own.
+    CLIENT_ID = "${{ vars.TAILNET_CLIENT_ID }}"
+    COLLECTOR_URL = "${{ vars.SPEND_COLLECTOR_URL }}"
+    # The address the export tests give the step, standing for whatever the variable holds in a run (RFC 5737
+    # keeps 203.0.113.0/24 for documentation, so it is nobody's address).
+    STAND_IN_URL = "http://203.0.113.9"
 
     def test_the_job_joins_the_tailnet_as_ossv_review(self):
         join = self.steps["Join Theorem's tailnet, to export this review's usage"]
@@ -1645,12 +1647,12 @@ class ReviewJob(unittest.TestCase):
         steps = sum(step["timeout-minutes"] for step in job["steps"] if "timeout-minutes" in step)
         self.assertGreater(job["timeout-minutes"], steps)
 
-    def test_the_tailnet_client_id_is_the_one_tailscale_gave(self):
+    def test_the_tailnet_client_id_comes_from_the_repository_variable(self):
         self.assertEqual(self.jobs["review"]["env"]["TAILNET_CLIENT_ID"], self.CLIENT_ID)
 
-    def test_the_collector_url_is_the_collector_tailnet_address(self):
-        # One URL for every sender, and it holds the address, because linux28-agents-1 joins the tailnet with
-        # --accept-dns=false and resolves no MagicDNS name (INFRA-832).
+    def test_the_collector_url_comes_from_the_repository_variable(self):
+        # One URL for every sender, and it holds the address, because a sender that joins the tailnet with
+        # --accept-dns=false resolves no MagicDNS name.
         self.assertEqual(self.jobs["review"]["env"]["SPEND_COLLECTOR_URL"], self.COLLECTOR_URL)
 
     def leave(self, installed):
@@ -1683,14 +1685,18 @@ class ReviewJob(unittest.TestCase):
         self.assertNotIn("agent-otel-public", text)
         self.assertNotIn("OTEL_EXPORTER_OTLP_HEADERS", text)
         self.assertNotIn("Sign in to Google Cloud, for the cost collector's token", text)
-        # One URL for every sender, the address in SPEND_COLLECTOR_URL: no step and no comment of the file names
-        # the tailnet's MagicDNS domain, which linux28-agents-1, a sender that joins with --accept-dns=false,
-        # cannot resolve.
+        # One URL for every sender, the address the variable SPEND_COLLECTOR_URL holds: no step and no comment of
+        # the file names the tailnet's MagicDNS domain, which a sender that joins with --accept-dns=false cannot
+        # resolve.
         self.assertNotIn("ts.net", text)
+        # Nor does the file name the address or the client id themselves: both are repository variables.
+        self.assertIn("${{ vars.SPEND_COLLECTOR_URL }}", text)
+        self.assertIn("${{ vars.TAILNET_CLIENT_ID }}", text)
 
     def export(self, outcome, name="libreac", kind="enrollment", answers=True):
-        """The export step, with the job's own SPEND_COLLECTOR_URL as Actions gives it, and a stand-in curl that
-        records its arguments and answers, or fails as a refused connection does (exit status 7)."""
+        """The export step, with a stand-in address for the one the variable SPEND_COLLECTOR_URL holds in a real
+        run, and a stand-in curl that records its arguments and answers, or fails as a refused connection does
+        (exit status 7)."""
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             (root / "bin").mkdir()
@@ -1701,7 +1707,7 @@ class ReviewJob(unittest.TestCase):
             run = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=root, capture_output=True, text=True,
                                  env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
                                       "GITHUB_ENV": str(root / "env"), "TAILNET": outcome, "NAME": name, "KIND": kind,
-                                      "SPEND_COLLECTOR_URL": self.jobs["review"]["env"]["SPEND_COLLECTOR_URL"]})
+                                      "SPEND_COLLECTOR_URL": self.STAND_IN_URL})
             env, curl = ((root / f).read_text() if (root / f).exists() else "" for f in ("env", "curl"))
             return run, env, curl
 
@@ -1710,10 +1716,10 @@ class ReviewJob(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(run.stdout, "")
         # The probe: one GET of the collector's address, for at most 10 seconds.
-        self.assertEqual(curl, f"-q\n-sS\n--max-time\n10\n-o\n/dev/null\n{self.COLLECTOR_URL}\n")
+        self.assertEqual(curl, f"-q\n-sS\n--max-time\n10\n-o\n/dev/null\n{self.STAND_IN_URL}\n")
         self.assertEqual(env, "CLAUDE_CODE_ENABLE_TELEMETRY=1\nOTEL_LOGS_EXPORTER=otlp\nOTEL_METRICS_EXPORTER=none\n"
                          "OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf\n"
-                         "OTEL_EXPORTER_OTLP_ENDPOINT=http://100.116.58.240\n"
+                         f"OTEL_EXPORTER_OTLP_ENDPOINT={self.STAND_IN_URL}\n"
                          "OTEL_RESOURCE_ATTRIBUTES=theorem.project=oss-verify,theorem.subproject=libreac,"
                          "theorem.lane=enroll-review-ci,theorem.credential=oss-verify-ci\n")
         self.assertNotIn("Authorization", env)
@@ -1742,10 +1748,10 @@ class ReviewJob(unittest.TestCase):
     def test_review_runs_when_the_collector_does_not_answer(self):
         run, env, curl = self.export("success", answers=False)
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertIn(f"::warning::The cost collector did not answer at '{self.COLLECTOR_URL}' on the tailnet",
+        self.assertIn(f"::warning::The cost collector did not answer at '{self.STAND_IN_URL}' on the tailnet",
                       run.stdout)
         self.assertEqual(env, "")
-        self.assertTrue(curl.endswith(f"{self.COLLECTOR_URL}\n"))
+        self.assertTrue(curl.endswith(f"{self.STAND_IN_URL}\n"))
 
 
 @unittest.skipUnless(shutil.which("jq"), "needs jq, which the gh stand-in runs the script's filters with")

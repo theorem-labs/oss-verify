@@ -73,8 +73,8 @@ import yaml
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import triage  # noqa: E402
 
-# The size line for statements that start with no person's decision, "Up to 1 MB" of a plain binary
-# (dispatch://OSSV-141/ask/7c73eb21), the README's "less than 1 MB of code": 1 MB is 1,000,000 bytes here. It is
+# The size line for statements that start with no person's decision, "Up to 1 MB" of a plain binary, which is also
+# the README's "less than 1 MB of code": 1 MB is 1,000,000 bytes here. It is
 # applied to the larger of the .text section's size and the bytes the loader maps executable, which renaming or
 # resizing a section does not change (tools/manifest.py, executable_bytes); the executable segments can hold
 # read-only data too, so the measure errs toward a person's review, never away from it.

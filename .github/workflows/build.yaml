@@ -138,7 +138,8 @@ name: "Build"
 #
 # The review reaches Claude by workload identity federation, with no stored key: the review job's GitHub identity token
 # is traded for an Anthropic token, by the federation rule whose ids the Review step gives (ids, not secrets). A rule,
-# made in the Claude Console of Anthropic's organization "Theorem - HDO", grants Claude calls only:
+# made in the Claude Console of the Anthropic organization whose id the Review step gives below, grants Claude
+# calls only:
 #   issuer   fdis_01JvJ1UhZ8X2HHgcmXqjkJbc: https://token.actions.githubusercontent.com, keys by discovery
 #   main     fdrl_019restxFx3PhpLhbziQoQKf: subject_prefix "repo:theorem-labs@212152656/oss-verify@1429568498:*",
 #            audience "https://api.anthropic.com", claims {"repository_id": "1429568498",
@@ -159,21 +160,21 @@ name: "Build"
 # for the reply to an issue, which posts nothing and stores the draft in the private bucket.
 # Before the merge, tools/tests runs the review's own steps with stand-ins.
 #
-# The review's Claude Code exports its usage by OpenTelemetry to Theorem's cost collector, over Theorem's tailnet, at
-# the collector's tailnet address on port 80 (SPEND_COLLECTOR_URL below; an address, not a secret). The collector
-# keeps a public endpoint with a bearer token until INFRA-832 deletes it; this job uses neither. The review job joins
-# the tailnet as an ephemeral node with the tag tag:ossv-review, and holds no token for the collector: Tailscale
-# makes the node from this job's GitHub identity token, and WireGuard authenticates and encrypts each connection.
-# The tag, the federated identity that trades the token for the node, the grant that gives the tag the collector's
-# Tailscale Service svc:spend on tcp:80 and nothing else beyond the two read-only pages every node of the tailnet
-# may read (Dispatch and the results dashboard, on tcp:443), and the policy test that fails if the tag reaches
-# anything else, are declared by INFRA-832 S1a in agent-infra, merged on 2026-10-30 as 99d1b5d. Its bootstrap apply
-# ran on 2026-10-31 at agent-infra c96f3d672, and the client id and the address below are outputs of that apply. The
-# export is tagged theorem.project=oss-verify, theorem.subproject=<name> (or _change, or _issue: a project name never
-# starts with `_`), theorem.lane=enroll-review-ci and theorem.credential=oss-verify-ci. The export is a measurement and
-# never decides whether a review runs: if the job cannot join the tailnet, or the collector does not answer at its
-# address, the run's page carries a warning saying that this review's usage is not exported, and the review runs
-# without it.
+# The review's Claude Code exports its usage by OpenTelemetry to Theorem's cost collector, over Theorem's tailnet,
+# at the collector's tailnet address on port 80. Two repository variables hold the two values that needs, so that
+# this public file names neither: vars.SPEND_COLLECTOR_URL, the collector's address, and vars.TAILNET_CLIENT_ID,
+# the client id Tailscale gave the federated identity that makes the node. The collector keeps a public endpoint
+# with a bearer token; this job uses neither. The review job joins the tailnet as an ephemeral node with the tag
+# tag:ossv-review, and holds no token for the collector: Tailscale makes the node from this job's GitHub identity
+# token, and WireGuard authenticates and encrypts each connection. The tag, the federated identity that trades the
+# token for the node, the grant that gives the tag the collector's Tailscale Service svc:spend on tcp:80 and
+# nothing else beyond the two read-only pages every node of the tailnet may read (on tcp:443), and the policy test
+# that fails if the tag reaches anything else, are declared in Theorem's infrastructure code. The export is tagged
+# theorem.project=oss-verify, theorem.subproject=<name> (or _change, or _issue: a project name never starts with
+# `_`), theorem.lane=enroll-review-ci and theorem.credential=oss-verify-ci. The export is a measurement and never
+# decides whether a review runs: if either variable is unset, if the job cannot join the tailnet, or if the
+# collector does not answer at its address, the run's page carries a warning saying that this review's usage is
+# not exported, and the review runs without it.
 #
 # The review's session goes from one push to the next in the Actions cache, under the key
 # enroll-review/<pull request>/<project>/<run id>-<attempt>: ~/.claude/projects, where Claude Code keeps its sessions,
@@ -526,18 +527,16 @@ jobs:
       SESSION_KEY: enroll-review/${{ github.event.pull_request.number || inputs.pr }}/${{ needs.project-builds.outputs.name }}/
       GCP_WORKLOAD_IDENTITY_PROVIDER: projects/805240912354/locations/global/workloadIdentityPools/github/providers/github-ossv
       GCP_SERVICE_ACCOUNT: ossv-ci@theorem-agent-infra.iam.gserviceaccount.com
-      # The client id Tailscale gave the federated identity ossv-review-github: bootstrap/'s stack output
-      # ossvReviewTailnetClientId in agent-infra (INFRA-832 S1a, merged as 99d1b5d), copied from
-      # `pulumi stack output ossvReviewTailnetClientId --stack prod` after the apply of 2026-10-31 that made the
-      # identity. The id is public, not a secret, and this is the one place this file names it.
-      TAILNET_CLIENT_ID: "TWbBfz7fqc11CNTRL-kwYSkwdwGN11CNTRL"
-      # The cost collector's address on the tailnet, http://<IPv4 address> on port 80. Every sender of spend
-      # records takes this one URL, and it holds the address, not the Service's MagicDNS name, because
-      # linux28-agents-1 joins the tailnet with --accept-dns=false and resolves no MagicDNS name; tailscaled
-      # routes a Tailscale Service by the destination address. The address is the one Tailscale gave the Service
-      # svc:spend when that same apply made it: bootstrap/'s stack output spendCollectorTailnetUrl
-      # (theorem-labs/agent-infra#1059), copied from `pulumi stack output spendCollectorTailnetUrl --stack prod`.
-      SPEND_COLLECTOR_URL: "http://100.116.58.240"
+      # The client id Tailscale gave the federated identity that makes the export's node. It is not a secret, but
+      # it names Theorem's tailnet, so it is a repository variable and not a value in this public file. A run of a
+      # repository where it is unset joins no tailnet and exports nothing; the review runs just the same.
+      TAILNET_CLIENT_ID: ${{ vars.TAILNET_CLIENT_ID }}
+      # The cost collector's address on the tailnet, http://<address> on port 80. Every sender of spend records
+      # takes this one URL, and it holds the address, not the Service's MagicDNS name, because a sender that joins
+      # the tailnet with --accept-dns=false resolves no MagicDNS name; tailscaled routes a Tailscale Service by the
+      # destination address. It is a repository variable for the same reason as the client id above, and an unset
+      # one leaves the address empty, which the export step reports as a collector that did not answer.
+      SPEND_COLLECTOR_URL: ${{ vars.SPEND_COLLECTOR_URL }}
     outputs:
       # The result step writes it for an enrollment or a change, never for an issue: an issue's draft, which no one has
       # approved, is in no output (a re-run with debug logging prints outputs to the public log).
@@ -617,12 +616,12 @@ jobs:
           echo "::error::NOT STORED: $message"
           echo "$message" >> "$GITHUB_STEP_SUMMARY"
           exit 1
-      # The node is ephemeral and preauthorized, and it carries tag:ossv-review. INFRA-832 S1a in agent-infra,
-      # merged as 99d1b5d, declares that tag, the grant that gives it the cost collector's Tailscale Service
-      # svc:spend on tcp:80 and nothing else beyond the two read-only pages every node of the tailnet may read, and
-      # the federated identity ossv-review-github, whose claims admit only this workflow of this repository, on
-      # refs/heads/main, in the environment enroll-review, on a GitHub-hosted runner. Its apply of 2026-10-31 made
-      # the client id above. The job joins with its GitHub identity token, so no key is stored. One review
+      # The node is ephemeral and preauthorized, and it carries tag:ossv-review. Theorem's infrastructure code
+      # declares that tag, the grant that gives it the cost collector's Tailscale Service svc:spend on tcp:80 and
+      # nothing else beyond the two read-only pages every node of the tailnet may read, and the federated identity
+      # whose claims admit only this workflow of this repository, on refs/heads/main, in the environment
+      # enroll-review, on a GitHub-hosted runner. Its client id is the repository variable above. The job joins
+      # with its GitHub identity token, so no key is stored. One review
       # job runs in a run attempt, so the run id and the attempt name the node. A Linux device reaches a Tailscale
       # Service's address only with Tailscale 1.94 or later, or with --accept-routes
       # (https://tailscale.com/kb/1552, "Access Tailscale Services from other devices"): this action meets both at
@@ -650,7 +649,7 @@ jobs:
           log-mode: quiet
       # After a join that passed, the step asks the collector's address for a page, for at most 10 seconds. curl takes
       # any HTTP answer, a 404 too, so only a refused or timed-out connection, or an empty address, fails it. The
-      # address stays only while the Service svc:spend does (INFRA-832's spec, D9): a Service made again gets new
+      # address stays only while the Service svc:spend does: a Service made again gets new
       # addresses, and a job that joined would then send every record to an address that answers nothing. So when the
       # collector does not answer, the step writes no exporter variables either, and the warning names the address.
       # The step takes continue-on-error, as the join and the logout do: the export never decides whether a review runs.

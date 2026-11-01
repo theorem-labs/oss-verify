@@ -1,7 +1,7 @@
 # enroll-dispatch.yml: when every required check of an enrollment pull request has passed, start the theorem statements.
 #
-# The decision on dispatch://OSSV-141: once the enrollment check passes, "it would be okay for us to start working on
-# the theorem statements, maybe with some kind of rate limit of a few per day". So, each time a run of Build,
+# Theorem decided that once the enrollment check passes, it is all right to start working on
+# the theorem statements, with a rate limit of a few per day. So, each time a run of Build,
 # Validate, Terms or Tests completes:
 #
 #   decide    .github/scripts/enroll-dispatch reads GitHub's API: the checks main's ruleset requires, each from the
@@ -15,7 +15,7 @@
 #             keeps the daily limit and labels a pull request statements-queued when it is over it, or when the
 #             project's archives wait for the next release. On label: puts
 #             the label on the pull request and sends nothing, so that a person decides: size-review (a plain binary
-#             above 1,000,000 bytes, the line "Up to 1 MB", dispatch://OSSV-141/ask/7c73eb21), language-paused (a
+#             above 1,000,000 bytes, the line "Up to 1 MB"), language-paused (a
 #             language whose projects are paused for now), name-review (a name the statements repository cannot
 #             take) or maintainer-review (the pull request's author is not shown to maintain the repository that
 #             `repo` names, by triage.py's maintainer check; someone other than the author who can label, a member
