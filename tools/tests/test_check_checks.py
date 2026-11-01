@@ -21,7 +21,6 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import check_checks  # noqa: E402
 import check_records  # noqa: E402
 import validate  # noqa: E402
-from workflow_expressions import evaluate  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -268,8 +267,8 @@ class WorkflowArguments(unittest.TestCase):
               "RUN_URL": "https://github.com/theorem-labs/oss-verify/actions/runs/7"}, [gcp]),
             ("build.yaml review issue draft store", steps("build.yaml", "review", "Store the issue draft for a person"),
              json.dumps({"generation": "1761500000000000"}),
-             {"GCP_ACCESS_TOKEN": gcp, "REPO": "theorem-labs/oss-verify", "ISSUE": "45", "RUN_ID": "7",
-              "RUN_ATTEMPT": "1", "RUN_URL": "https://github.com/theorem-labs/oss-verify/actions/runs/7"}, [gcp]),
+             {"GCP_ACCESS_TOKEN": gcp, "ISSUE": "45", "RUN_ID": "7", "RUN_ATTEMPT": "1",
+              "RUN_URL": "https://github.com/theorem-labs/oss-verify/actions/runs/7"}, [gcp]),
             ("build.yaml hold listing", steps("build.yaml", "hold", "Look for stored held findings"),
              json.dumps({"items": [{"name": "held/7/" + "a" * 32}]}), {"GCP_ACCESS_TOKEN": gcp}, [gcp]),
             ("build.yaml hold repository", steps("build.yaml", "hold", "Where the held findings go"),
@@ -1524,8 +1523,7 @@ class ReviewJob(unittest.TestCase):
                 read(root / "temp" / "held-finding.md"), self.outputs(read(root / "output")),
                 read(root / "home" / ".claude" / "ossv-last-review"))
 
-    def store(self, issue="5", attempt="2", repo="theorem-labs/oss-verify",
-              answer='{"generation": "1730000000000000"}',
+    def store(self, issue="5", attempt="2", answer='{"generation": "1730000000000000"}',
               draft="The draft reply:\n\nSee docs/dsl.md.\n"):
         """.github/scripts/store-issue-draft on a draft file, with a stand-in curl that keeps its arguments, the object
         it uploads, and answers `answer`. Return the exit status, the output, the summary, curl's arguments and the
@@ -1546,9 +1544,8 @@ class ReviewJob(unittest.TestCase):
             run = subprocess.run([str(ROOT / ".github" / "scripts" / "store-issue-draft"), str(root / "draft.md")],
                                  capture_output=True, text=True,
                                  env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
-                                      "GCP_ACCESS_TOKEN": "gcp-token-not-a-secret", "REPO": repo, "ISSUE": issue,
-                                      "RUN_ID": "77", "RUN_ATTEMPT": attempt,
-                                      "RUN_URL": "https://github.com/o/r/actions/runs/77",
+                                      "GCP_ACCESS_TOKEN": "gcp-token-not-a-secret", "ISSUE": issue, "RUN_ID": "77",
+                                      "RUN_ATTEMPT": attempt, "RUN_URL": "https://github.com/o/r/actions/runs/77",
                                       "GITHUB_STEP_SUMMARY": str(root / "summary")})
             read = lambda path: path.read_text(encoding="utf-8") if path.exists() else ""  # noqa: E731
             return (run.returncode, run.stdout, read(root / "summary"), read(root / "argv"), read(root / "object"),
@@ -1557,29 +1554,18 @@ class ReviewJob(unittest.TestCase):
     def test_an_issue_draft_is_stored_privately_once_and_the_summary_names_only_where(self):
         code, out, summary, argv, stored, header = self.store()
         self.assertEqual(code, 0, out)
-        name = "issue-drafts%2Foss-verify%2F5%2F77-2"
+        name = "issue-drafts%2F5%2F77-2"
         self.assertIn("/b/theorem-agent-infra-oss-verify-held-findings/o?uploadType=media&ifGenerationMatch=0"
                       f"&name={name}", argv)
         self.assertEqual(stored, "oss-verify issue draft v1\nissue: 5\nrun: https://github.com/o/r/actions/runs/77\n"
                                  "---\nThe draft reply:\n\nSee docs/dsl.md.\n")
         self.assertEqual(header, "Authorization: Bearer gcp-token-not-a-secret\n")
         self.assertNotIn("gcp-token-not-a-secret", argv)
-        self.assertIn("gcloud storage cat gs://theorem-agent-infra-oss-verify-held-findings/issue-drafts/oss-verify/5/77-2", summary)
+        self.assertIn("gcloud storage cat gs://theorem-agent-infra-oss-verify-held-findings/issue-drafts/5/77-2", summary)
         self.assertNotIn("dsl.md", summary + out)
 
-    def test_another_repository_draft_is_stored_under_its_own_name(self):
-        for repo in ("theorem-labs/oss-verify-proofs", "theorem-labs/rocq-linux-process-semantics"):
-            with self.subTest(repo=repo):
-                code, out, summary, argv, _, _ = self.store(repo=repo)
-                self.assertEqual(code, 0, out)
-                name = f"issue-drafts%2F{repo.rsplit('/', 1)[1]}%2F5%2F77-2"
-                self.assertIn(f"&name={name}", argv)
-                self.assertIn(f"gs://theorem-agent-infra-oss-verify-held-findings/issue-drafts/"
-                              f"{repo.rsplit('/', 1)[1]}/5/77-2", summary)
-
     def test_a_draft_that_cannot_be_stored_fails_the_step(self):
-        for kwargs in ({"answer": '{"error": "403"}'}, {"issue": "5; x"}, {"attempt": ""}, {"repo": ""},
-                       {"repo": "theorem-labs/oss-verify-proofs-internal"}, {"repo": "other/oss-verify"}):
+        for kwargs in ({"answer": '{"error": "403"}'}, {"issue": "5; x"}, {"attempt": ""}):
             with self.subTest(kwargs=kwargs):
                 code, _, summary, _, _, _ = self.store(**kwargs)
                 self.assertNotEqual(code, 0)
@@ -1618,19 +1604,19 @@ class ReviewJob(unittest.TestCase):
         return json.loads(re.search(r"--json-schema '([^']*)'", arguments).group(1))
 
     def test_the_prompt_of_each_kind_names_its_rules_and_its_schema(self):
-        code, out = self.prompt(KIND="change", PR="8", REPO="theorem-labs/oss-verify")
+        code, out = self.prompt(KIND="change", PR="8")
         self.assertEqual(code, 0)
         self.assertTrue(out["prompt"].startswith("Read review-change.md at the root of this checkout"))
-        self.assertIn("pull request #8 of theorem-labs/oss-verify checks,", out["prompt"])
+        self.assertIn("pull request #8,", out["prompt"])
         schema = self.schema(out["arguments"])
         self.assertEqual(schema["required"], ["comment", "verdicts"])
         self.assertEqual(schema["properties"]["verdicts"]["required"], ["1", "2", "3", "4", "5"])
         self.assertNotIn("held", schema["properties"])
         self.assertNotIn("--resume", out["arguments"])
-        code, out = self.prompt(KIND="issue", ISSUE="45", REPO="theorem-labs/oss-verify-proofs")
+        code, out = self.prompt(KIND="issue", ISSUE="45")
         self.assertEqual(code, 0)
         self.assertTrue(out["prompt"].startswith("Read review-issue.md at the root of this checkout"))
-        self.assertIn("issue #45 of theorem-labs/oss-verify-proofs says,", out["prompt"])
+        self.assertIn("issue #45 ", out["prompt"])
         schema = self.schema(out["arguments"])
         self.assertEqual((schema["required"], sorted(schema["properties"])), (["comment", "decide"],
                                                                             ["comment", "decide"]))
@@ -1642,8 +1628,7 @@ class ReviewJob(unittest.TestCase):
         self.assertEqual((schema["required"], schema["properties"]["verdicts"]["required"]),
                          (["comment", "held", "verdicts"], ["F2", "F7"]))
         self.assertNotIn("--resume", out["arguments"])
-        for code, out in (self.prompt(KIND="issue", ISSUE="45", REPO="o/r"),
-                          self.prompt(KIND="change", PR="8", REPO="o/r")):
+        for code, out in (self.prompt(KIND="issue", ISSUE="45"), self.prompt(KIND="change", PR="8")):
             self.assertTrue(out["prompt"].endswith(" Give the result as the structured output."))
 
     def test_an_enrollment_with_a_kept_session_resumes_it_for_the_diff_and_check_d3(self):
@@ -1658,24 +1643,20 @@ class ReviewJob(unittest.TestCase):
 
     def test_a_change_with_a_kept_session_resumes_it_and_judges_checks_4_and_5_on_the_whole_diff(self):
         session, last, head = "09227178-7bbf-4e5f-86db-8736e530ef01", "2" * 40, "3" * 40
-        code, out = self.prompt(KIND="change", PR="34", REPO="theorem-labs/rocq-linux-process-semantics",
-                                SESSION=session, LAST=last, HEAD_SHA=head)
+        code, out = self.prompt(KIND="change", PR="34", SESSION=session, LAST=last, HEAD_SHA=head)
         self.assertEqual(code, 0)
         self.assertTrue(out["arguments"].endswith(f"' --resume {session}"))
-        self.assertIn("pull request #34 of theorem-labs/rocq-linux-process-semantics", out["prompt"])
         self.assertIn(f".review/since-last-review.diff, the diff from {last} to {head}, is an aid for checks 1 to 3"
                       " only. Judge checks 4 and 5 on the whole diff of the pull request against its base,"
                       " .review/pr.diff, as on a first review.", out["prompt"])
         # Without a session that review-gather kept, the review is fresh.
-        code, out = self.prompt(KIND="change", PR="34", REPO="o/r", LAST=last, HEAD_SHA=head)
+        code, out = self.prompt(KIND="change", PR="34", LAST=last, HEAD_SHA=head)
         self.assertEqual(code, 0)
         self.assertNotIn("since-last-review", out["prompt"])
         self.assertNotIn("--resume", out["arguments"])
 
     def test_the_prompt_refuses_what_it_cannot_check(self):
-        for env in ({"KIND": "issue", "ISSUE": "45 extra", "REPO": "o/r"}, {"KIND": "change", "PR": "", "REPO": "o/r"},
-                    {"KIND": "change", "PR": "8"}, {"KIND": "change", "PR": "8", "REPO": "o/r; x"},
-                    {"KIND": "issue", "ISSUE": "45", "REPO": "$(touch pwned)"},
+        for env in ({"KIND": "issue", "ISSUE": "45 extra"}, {"KIND": "change", "PR": ""},
                     {"KIND": "enrollment", "PR": "8", "NAME": "$(touch pwned)"}, {"KIND": "", "PR": "8"},
                     {"KIND": "other", "PR": "8"}):
             with self.subTest(env=env):
@@ -1861,25 +1842,19 @@ class ReviewJob(unittest.TestCase):
 @unittest.skipUnless(shutil.which("jq"), "needs jq, which the gh stand-in runs the script's filters with")
 class IssueDraftCap(unittest.TestCase):
     """.github/scripts/issue-draft-cap, build.yaml's step "Hold the draft at the hourly cap", with a stand-in gh: it
-    counts the other runs for one repository's issue drafts in the last hour whose review reached the model, and holds
-    the draft at the cap or on a failed read with a ::error::HELD annotation and exit status 1."""
+    counts the other runs for an issue's own event in the last hour whose review reached the model, and holds the
+    draft at the cap or on a failed read with a ::error::HELD annotation and exit status 1."""
 
-    def cap(self, runs, skipped=(), held=(), stopped=(), fail=None, run_id="99", source_repo="oss-verify"):
-        """runs: ids, or (id, event, title) triples, that the runs API lists; skipped: the ids whose review job was
-        skipped; held: the ids whose step "Hold the draft at the hourly cap" failed; stopped: the ids whose step
-        "Stop before the model when the draft cannot be stored" failed (a refused sign-in); fail: "runs", or the id
-        whose jobs cannot be read. Return the exit status, the output and gh's calls."""
+    def cap(self, runs, skipped=(), held=(), stopped=(), fail=None, run_id="99"):
+        """runs: the run ids that the runs API lists; skipped: the ids whose review job was skipped; held: the ids whose
+        step "Hold the draft at the hourly cap" failed; stopped: the ids whose step "Stop before the model when the
+        draft cannot be stored" failed (a refused sign-in); fail: "runs", or the id whose jobs cannot be read. Return
+        the exit status, the output and gh's calls."""
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             (root / "bin").mkdir()
-            records = [{"id": item, "event": "issues", "display_title": "Issue 5"}
-                       if isinstance(item, int) else {"id": item[0], "event": item[1], "display_title": item[2]}
-                       for item in runs]
-            ids = [record["id"] for record in records]
-            (root / "runs.json").write_text(json.dumps({"workflow_runs": records}))
-            (root / "issue-runs.json").write_text(json.dumps(
-                {"workflow_runs": [record for record in records if record["event"] == "issues"]}))
-            for i in ids:
+            (root / "runs.json").write_text(json.dumps({"workflow_runs": [{"id": i} for i in runs]}))
+            for i in runs:
                 gate = "skipped" if i in held else "failure" if i in stopped else "success"
                 model = "skipped" if i in held or i in stopped else "success"
                 review = {"name": "review",
@@ -1894,8 +1869,7 @@ class IssueDraftCap(unittest.TestCase):
                 (root / f"jobs-{i}.json").write_text(json.dumps({"jobs": [
                     {"name": "route", "conclusion": "success", "steps": []}, review]}))
             listing = ('echo "gh: HTTP 502" >&2; exit 1' if fail == "runs"
-                       else f'if [[ " $*" == *" event=issues "* ]]; then jq -r "$filter" {root}/issue-runs.json; '
-                       f'else jq -r "$filter" {root}/runs.json; fi')
+                       else f'jq -r "$filter" {root}/runs.json')
             (root / "bin" / "gh").write_text(
                 "#!/bin/bash\n"
                 'filter=""; path=""; for a; do [ "$prev" = --jq ] && filter=$a; [[ $a == repos/* ]] && path=$a; prev=$a; done\n'
@@ -1909,8 +1883,7 @@ class IssueDraftCap(unittest.TestCase):
             (root / "bin" / "gh").chmod(0o755)
             run = subprocess.run([str(ROOT / ".github" / "scripts" / "issue-draft-cap")], capture_output=True, text=True,
                                  env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "GH_TOKEN": "x",
-                                      "RUNS_REPO": "theorem-labs/oss-verify", "RUN_ID": run_id, "CAP": "6",
-                                      "SOURCE_REPO": source_repo})
+                                      "REPO": "o/r", "RUN_ID": run_id, "CAP": "6"})
             return run.returncode, run.stdout, (root / "calls").read_text()
 
     def test_under_the_cap_the_draft_is_made(self):
@@ -1919,7 +1892,7 @@ class IssueDraftCap(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("5 issue drafts ran the model in the last hour, under the cap of 6", out)
         self.assertNotIn("HELD", out)
-        self.assertNotIn("event=issues", calls)
+        self.assertIn("event=issues", calls)
         self.assertIn("created=>=", calls)
         self.assertNotIn("runs/99/jobs", calls)
 
@@ -1945,49 +1918,6 @@ class IssueDraftCap(unittest.TestCase):
         code, out, _ = self.cap([*range(1, 8), 99], held=(7,))
         self.assertEqual(code, 1)
         self.assertIn("::error::HELD: 6 issue drafts ran the model in the last hour, at the cap of 6.", out)
-
-    def test_each_source_repository_has_its_own_cap(self):
-        # Six drafts of each of the three repositories in the hour: each repository counts only its own six.
-        runs = [(n, "issues", f"Issue {n}") for n in range(1, 7)]
-        runs += [(10 + n, "workflow_dispatch", f"Issue oss-verify-proofs#{n}") for n in range(1, 7)]
-        runs += [(20 + n, "workflow_dispatch", f"Issue rocq-linux-process-semantics#{n}") for n in range(1, 7)]
-        for repo in ("oss-verify", "oss-verify-proofs", "rocq-linux-process-semantics"):
-            with self.subTest(repo=repo):
-                code, out, _ = self.cap(runs, source_repo=repo)
-                self.assertEqual(code, 1, out)
-                self.assertIn("::error::HELD: 6 issue drafts ran the model in the last hour, at the cap of 6.", out)
-                # Five of its own and the twelve of the other two repositories: under the cap.
-                own = {"oss-verify": 6, "oss-verify-proofs": 16, "rocq-linux-process-semantics": 26}[repo]
-                code, out, _ = self.cap([r for r in runs if r[0] != own], source_repo=repo)
-                self.assertEqual(code, 0, out)
-                self.assertIn("5 issue drafts ran the model in the last hour, under the cap of 6", out)
-
-    def test_this_repositorys_cap_counts_issue_events_only(self):
-        # As on main: a person's run for an issue of this repository, started by hand, is neither held nor counted.
-        runs = [(n, "workflow_dispatch", f"Issue {n}") for n in range(1, 7)]
-        code, out, _ = self.cap(runs)
-        self.assertEqual(code, 0, out)
-        self.assertIn("0 issue drafts ran the model in the last hour, under the cap of 6", out)
-
-    def test_another_repository_issue_draft_hits_its_hourly_cap(self):
-        for repo in ("oss-verify-proofs", "rocq-linux-process-semantics"):
-            with self.subTest(repo=repo):
-                runs = [(number, "workflow_dispatch", f"Issue {repo}#{number}") for number in range(1, 7)]
-                code, out, calls = self.cap(runs, source_repo=repo)
-                self.assertEqual(code, 1)
-                self.assertIn("::error::HELD: 6 issue drafts ran the model in the last hour, at the cap of 6.", out)
-                self.assertNotIn("event=issues", calls)
-
-    def test_a_pull_request_titled_as_an_issue_is_not_counted(self):
-        # A pull request's run carries the pull request's title, which its author chooses. Such titles never count
-        # towards an issue draft cap, for this repository or for another one.
-        for repo, title in (("oss-verify", "Issue 5"), ("oss-verify-proofs", "Issue oss-verify-proofs#5"),
-                            ("rocq-linux-process-semantics", "Issue rocq-linux-process-semantics#5")):
-            with self.subTest(repo=repo):
-                runs = [(number, "pull_request_target", title) for number in range(1, 7)]
-                code, out, _ = self.cap(runs, source_repo=repo)
-                self.assertEqual(code, 0, out)
-                self.assertIn("0 issue drafts ran the model in the last hour, under the cap of 6", out)
 
     def test_a_read_that_fails_holds_the_draft(self):
         for fail in ("runs", 3):
@@ -2044,14 +1974,10 @@ class ChangeReviewSession(unittest.TestCase):
     """A change review resumes its last session for context: review-gather takes the head that review reviewed from
     the runs API, and the session's id from the cache only when the cache names that head."""
 
-    def setUp(self):
-        self.workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
-        self.jobs = self.workflow["jobs"]
-        self.steps = {s.get("name"): s for s in self.jobs["review"]["steps"]}
-
-    # A change review of pull request 34 at HEAD, in Build run 900 of theorem-labs/oss-verify.
+    # A change review of pull request 34 at HEAD, in Build run 900.
     HEAD, LAST, OLDER, FAILED, CACHED = "e" * 40, "b" * 40, "a" * 40, "f" * 40, "d" * 40
     SESSION = "09227178-7bbf-4e5f-86db-8736e530ef01"
+    PULL = {"head": {"ref": "fix-x", "repo": {"full_name": "someone/oss-verify"}}}
     # A stand-in for gh: `gh pr view` and `gh pr diff`, and `gh api` answered from state.json by its path without the
     # query, with the script's own --jq filter applied by the real jq; a compare gives its status (ahead when the base
     # is in state["ahead"]), or with the diff media type the diff. It records every call.
@@ -2083,21 +2009,20 @@ else:
     print(json.dumps(answer))
 '''
 
-    def gather_change(self, repo, runs, reviews, last_review, pull=None, ahead=()):
-        """review-gather for the change review of pull request 34 of `repo`: `runs` the runs API's Build runs, newest
-        first; `reviews` {run id: its review job's conclusion}; `last_review` the file of the cache (None: none);
-        `pull` the pull request as the API gives it. Return the run, its output, since-last-review.diff, pr.diff and
-        gh's calls."""
+    def gather_change(self, runs, reviews, last_review, ahead=()):
+        """review-gather for the change review of pull request 34 of theorem-labs/oss-verify (the head branch fix-x of
+        someone/oss-verify): `runs` the runs API's Build runs, newest first; `reviews` {run id: its review job's
+        conclusion}; `last_review` the file of the cache (None: none). Return the run, its output,
+        since-last-review.diff, pr.diff and gh's calls."""
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             (root / "bin").mkdir()
-            runs_path = "repos/theorem-labs/oss-verify/actions/workflows/build.yaml/runs"
-            state = {"ahead": list(ahead), runs_path: {"workflow_runs": runs}}
+            repo = "repos/theorem-labs/oss-verify"
+            state = {"ahead": list(ahead), f"{repo}/actions/workflows/build.yaml/runs": {"workflow_runs": runs},
+                     f"{repo}/pulls/34": self.PULL}
             for run_id, conclusion in reviews.items():
-                state[f"repos/theorem-labs/oss-verify/actions/runs/{run_id}/jobs"] = {"jobs": [
+                state[f"{repo}/actions/runs/{run_id}/jobs"] = {"jobs": [
                     {"name": "route", "conclusion": "success"}, {"name": "review", "conclusion": conclusion}]}
-            if pull is not None:
-                state[f"repos/{repo}/pulls/34"] = pull
             (root / "state.json").write_text(json.dumps(state))
             (root / "bin" / "gh").write_text(
                 self.GATHER_GH.replace("@@PYTHON@@", sys.executable).replace("@@ROOT@@", repr(str(root))))
@@ -2107,76 +2032,47 @@ else:
             run = subprocess.run([str(ROOT / ".github" / "scripts" / "review-gather"), str(root / "out")], cwd=ROOT,
                                  capture_output=True, text=True,
                                  env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "GH_TOKEN": "x",
-                                      "KIND": "change", "REPO": repo, "PR": "34", "NAME": "", "HEAD_SHA": self.HEAD,
-                                      "LAST_REVIEW": str(root / "last-review"), "RUNS_REPO": "theorem-labs/oss-verify",
+                                      "KIND": "change", "REPO": "theorem-labs/oss-verify", "PR": "34", "NAME": "",
+                                      "HEAD_SHA": self.HEAD, "LAST_REVIEW": str(root / "last-review"),
                                       "RUN_ID": "900", "GITHUB_OUTPUT": str(root / "output")})
-            read = lambda path: path.read_text() if path.exists() else None
+            read = lambda path: path.read_text() if path.exists() else None  # noqa: E731
             calls = [json.loads(line) for line in (root / "calls").read_text().splitlines()]
             return (run, read(root / "output") or "", read(root / "out" / "since-last-review.diff"),
                     read(root / "out" / "pr.diff"), calls)
 
     @staticmethod
-    def dispatched(run_id, title, event="workflow_dispatch", branch="main"):
-        """A Build run of theorem-labs/oss-verify as the runs API lists it."""
+    def own(run_id, sha, fork="someone/oss-verify", branch="fix-x", event="pull_request_target"):
+        """A Build run of the pull request as the runs API lists it."""
         return {"id": run_id, "event": event, "head_branch": branch, "path": ".github/workflows/build.yaml",
-                "display_title": title, "head_sha": "9" * 40, "head_repository": {"full_name": "theorem-labs/oss-verify"}}
-
-    def test_a_change_review_restores_its_session_by_repository_and_number(self):
-        # The cache key, evaluated: one key for each repository and number, and none is the start of another, which
-        # restore-keys would match.
-        key = self.jobs["review"]["env"]["CHANGE_KEY"]
-        keys = [evaluate(key, {"inputs": {"repo": repo, "pr": number}})
-                for repo in ("oss-verify", "oss-verify-proofs", "rocq-linux-process-semantics") for number in (1, 10)]
-        self.assertEqual(keys[2], "review-oss-verify-proofs-1-")
-        self.assertFalse([(a, b) for a in keys for b in keys if a != b and a.startswith(b)])
-        self.assertEqual(evaluate(key, {"github": {"event": {"pull_request": {"number": 7}}}}), "review-oss-verify-7-")
+                "display_title": "fix x", "head_sha": sha, "head_repository": {"full_name": fork}}
 
     def test_last_comes_from_the_runs_api_not_the_cache(self):
-        name = "rocq-linux-process-semantics"
         cached = f"session={self.SESSION} head={self.LAST}\n"
-        runs = [self.dispatched(950, f"Review {name}#34 at {'3' * 40}"),  # made after this run
-                self.dispatched(900, f"Review {name}#34 at {self.HEAD}"),  # this run
-                self.dispatched(890, f"Review {name}#34 at {self.FAILED}"),  # its review failed
-                # A pull request of this repository can take any title; a run on another branch is not main's.
-                self.dispatched(880, f"Review {name}#34 at {'0' * 40}", event="pull_request_target"),
-                self.dispatched(875, f"Review {name}#34 at {'0' * 40}", branch="ci/x"),
-                self.dispatched(870, f"Review {name}#340 at {'1' * 40}"),
-                self.dispatched(865, f"Review oss-verify-proofs#34 at {'2' * 40}"),
-                self.dispatched(860, f"Review {name}#34 at {self.LAST}"),
-                self.dispatched(850, f"Review {name}#34 at {self.OLDER}")]
-        reviews = {950: "success", 900: None, 890: "failure", 880: "success", 875: "success", 870: "success",
-                   865: "success", 860: "success", 850: "success"}
-        run, output, since, _, calls = self.gather_change(f"theorem-labs/{name}", runs, reviews, cached,
-                                                          ahead=(self.LAST, self.OLDER, self.CACHED))
+        runs = [self.own(950, "3" * 40),  # made after this run
+                self.own(900, self.HEAD),  # this run
+                self.own(890, self.FAILED),  # its review failed
+                self.own(885, "2" * 40, fork="other/oss-verify"),  # a branch of the same name in another fork
+                self.own(882, "1" * 40, branch="fix-y"),  # another branch
+                self.own(881, "0" * 40, event="workflow_dispatch"),  # a run started by hand
+                self.own(880, self.LAST),
+                self.own(870, self.OLDER)]
+        reviews = {950: "success", 900: None, 890: "failure", 885: "success", 882: "success", 881: "success",
+                   880: "success", 870: "success"}
+        run, output, since, _, _ = self.gather_change(runs, reviews, cached, ahead=(self.LAST, self.OLDER, self.CACHED))
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(output, f"session={self.SESSION}\nlast={self.LAST}\n")
         self.assertEqual(since, f"diff from {self.LAST} to {self.HEAD}\n(exit status 0)\n")
         # The session itself comes from the cache: with no cache entry, the review is fresh.
-        self.assertEqual(self.gather_change(f"theorem-labs/{name}", runs, reviews, None, ahead=(self.LAST,))[1], "")
+        self.assertEqual(self.gather_change(runs, reviews, None, ahead=(self.LAST,))[1], "")
         # No earlier review that succeeded: fresh, whatever head the cache names.
-        self.assertEqual(self.gather_change(f"theorem-labs/{name}", runs[2:3], {890: "failure"},
-                                            f"session={self.SESSION} head={self.LAST}\n", ahead=(self.LAST,))[1], "")
-        # A pull request of this repository: its own events' runs, of its head branch in its head repository.
-        pull = {"head": {"ref": "fix-x", "repo": {"full_name": "someone/oss-verify"}}}
-        own = lambda run_id, sha, fork="someone/oss-verify": {
-            "id": run_id, "event": "pull_request_target", "head_branch": "fix-x", "display_title": "fix x",
-            "path": ".github/workflows/build.yaml", "head_sha": sha, "head_repository": {"full_name": fork}}
-        run, output, since, _, _ = self.gather_change(
-            "theorem-labs/oss-verify",
-            [own(900, self.HEAD), own(885, "2" * 40, fork="other/oss-verify"), own(880, self.LAST),
-             own(870, self.OLDER), self.dispatched(860, "Pull request 34")],
-            {885: "success", 880: "success", 870: "success", 860: "success"}, cached, pull=pull, ahead=(self.LAST,))
-        self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(output, f"session={self.SESSION}\nlast={self.LAST}\n")
+        self.assertEqual(self.gather_change(runs[2:3], {890: "failure"}, cached, ahead=(self.LAST,))[1], "")
 
     def test_a_session_kept_for_another_head_is_not_resumed(self):
         # The runs API names the head the last review reviewed; the session in the cache was kept for another head (the
         # save of that review did not happen, or the cache holds an older run's session). It is not resumed, and the
         # head the cache names is never read.
-        name = "rocq-linux-process-semantics"
-        runs = [self.dispatched(860, f"Review {name}#34 at {self.LAST}")]
         run, output, since, _, calls = self.gather_change(
-            f"theorem-labs/{name}", runs, {860: "success"}, f"session={self.SESSION} head={self.CACHED}\n",
+            [self.own(860, self.LAST)], {860: "success"}, f"session={self.SESSION} head={self.CACHED}\n",
             ahead=(self.LAST, self.CACHED))
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual((output, since), ("", None))
@@ -2184,22 +2080,15 @@ else:
                       run.stdout)
         self.assertFalse([c for c in calls if self.CACHED in json.dumps(c) or "/compare/" in json.dumps(c)])
 
-    def test_checks_4_and_5_read_the_whole_diff_against_main(self):
-        env = {"KIND": "change", "PR": "34", "REPO": "theorem-labs/rocq-linux-process-semantics", "HEAD_SHA": self.HEAD}
-        code, resumed = ReviewJob.prompt(self, **env, SESSION=self.SESSION, LAST=self.LAST)
-        self.assertEqual(code, 0)
-        self.assertIn("pull request #34 of theorem-labs/rocq-linux-process-semantics", resumed["prompt"])
-        self.assertIn(f".review/since-last-review.diff, the diff from {self.LAST} to {self.HEAD}, is an aid for checks 1 "
-                      "to 3 only. Judge checks 4 and 5 on the whole diff of the pull request against its base, "
-                      ".review/pr.diff, as on a first review.", resumed["prompt"])
-        self.assertNotIn("since-last-review", ReviewJob.prompt(self, **env)[1]["prompt"])
-        # The gather writes that whole diff whether or not the review resumes.
-        name = "rocq-linux-process-semantics"
+    def test_the_whole_diff_is_gathered_whether_or_not_the_review_resumes(self):
+        # Checks 4 and 5 read pr.diff, the whole diff against the base, on a resumed review too.
         _, output, since, whole, _ = self.gather_change(
-            f"theorem-labs/{name}", [self.dispatched(860, f"Review {name}#34 at {self.LAST}")], {860: "success"},
-            f"session={self.SESSION} head={self.LAST}\n", ahead=(self.LAST,))
+            [self.own(860, self.LAST)], {860: "success"}, f"session={self.SESSION} head={self.LAST}\n",
+            ahead=(self.LAST,))
         self.assertTrue(output and since)
         self.assertEqual(whole, "the whole diff against the base\n")
+        _, output, since, whole, _ = self.gather_change([], {}, None)
+        self.assertEqual((output, since, whole), ("", None, "the whole diff against the base\n"))
 
 
 class Owners(unittest.TestCase):

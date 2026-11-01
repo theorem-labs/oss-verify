@@ -9,9 +9,8 @@
 # The object is <header> and a newline, then the first 1,048,000 bytes of <file>. It is written only if no object of
 # that name exists (ifGenerationMatch=0): ossv-ci can create objects in the bucket and nothing else. build.yaml's
 # review job runs it for a held finding (the step "Store the held finding for the hold job", held/<run id>/<32 hex
-# digits>) and for an issue's draft (.github/scripts/store-issue-draft,
-# issue-drafts/<repository>/<issue>/<run id>-<attempt>). A write that fails, or an answer with no generation, exits
-# non-zero and prints nothing.
+# digits>) and for an issue's draft (.github/scripts/store-issue-draft, issue-drafts/<issue>/<run id>-<attempt>). A
+# write that fails, or an answer with no generation, exits non-zero and prints nothing.
 set -euo pipefail
 name=${1:?usage: held-bucket-put <object name> <header> <file>}
 header=${2?usage: held-bucket-put <object name> <header> <file>}

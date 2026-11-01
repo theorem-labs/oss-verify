@@ -20,7 +20,6 @@ import pytest
 import yaml
 
 from test_take_project import git, isolated_git_env
-from workflow_expressions import as_text, evaluate
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 COLLECT = ROOT / ".github" / "scripts" / "collect"
@@ -270,10 +269,6 @@ def route_issue(tmp_path, pr, issue, is_pull=False, event="workflow_dispatch", s
 
 def test_a_run_for_an_issue_asks_for_the_review_alone(tmp_path):
     assert route_issue(tmp_path, "", "5") == (0, ["kind=issue"])
-    # The comment job, which alone posts, never runs for an issue: its if: and the required job's ASKED_COMMENT,
-    # evaluated.
-    for inputs in ({"issue": 5}, {"repo": OTHER, "issue": 5}):
-        assert posting(inputs, issue=True) == (False, False)
 
 
 @pytest.mark.parametrize("pr, issue, is_pull", [
@@ -328,174 +323,6 @@ def test_an_issues_event_reaches_route_only_as_data(tmp_path, sender, author, as
     assert code == 0
     for where in (tmp_path, ROOT):
         assert sorted(where.glob("pwned-*")) == []
-
-
-# --- build.yaml for the pull requests and issues of the other two repositories ---
-
-
-def test_the_expression_stand_in_reads_as_github_does():
-    context = {"inputs": {"repo": "x"}, "vars": {}}
-    assert evaluate("${{ inputs.repo == 'X' && 'a' || 'b' }}", context) == "a"
-    assert evaluate("${{ inputs.missing == '' }}", context) is True
-    assert evaluate("${{ !inputs.missing && format('{0}-{{1}}', inputs.repo) }}", context) == "x-{1}"
-    assert evaluate("review-${{ inputs.repo }}-${{ inputs.pr || 7 }}-", context) == "review-x-7-"
-    assert evaluate("contains(format(',{0},', vars.LIST), ',x,')", context) is False
-    assert evaluate("!cancelled() && (inputs.repo != 'x' || 'y')", context) == "y"
-
-
-OTHER = "rocq-linux-process-semantics"
-HEAD = "c" * 40
-
-
-def route_other(tmp_path, repo=OTHER, head=HEAD, pr_head=HEAD, pr=34):
-    """build.yaml's route step, with its own env as GitHub would give it, on a run that a person started by hand for
-    pull request `pr` of `repo` at `head`, with a fake gh whose pull request 34, which changes a file under projects/, is
-    at `pr_head`. Return its exit status, its outputs and the API paths it read."""
-    bin = tmp_path / "bin"
-    bin.mkdir()
-    (tmp_path / "pull.json").write_text(json.dumps({"head": {"sha": pr_head}, "changed_files": 1,
-                                                    "base": {"ref": "main", "repo": {"default_branch": "main"}}}))
-    (tmp_path / "files.json").write_text(json.dumps([{"filename": "projects/p/project.yaml"}]))
-    (bin / "gh").write_text('#!/bin/bash\nfilter=""; for a; do [ "$prev" = --jq ] && filter=$a; prev=$a; done\n'
-                            f'for a; do [[ $a == repos/* ]] && echo "$a" >> {tmp_path}/paths; done\n'
-                            f'case "$*" in *"/files"*) jq -r "$filter" {tmp_path}/files.json ;; '
-                            f'*"/pulls/34") cat {tmp_path}/pull.json ;; *) exit 1 ;; esac\n')
-    (bin / "gh").chmod(0o755)
-    written = tmp_path / "output"
-    decide = step(workflow("build.yaml")["jobs"]["route"], "An enrollment, a change or an issue")
-    context = {"inputs": {"repo": repo, "pr": pr, "head": head},
-               "github": {"repository": "theorem-labs/oss-verify", "actor": "alice", "token": "x"}}
-    env = {k: as_text(evaluate(v, context)) if "${{" in str(v) else str(v) for k, v in decide["env"].items()}
-    run = subprocess.run(["bash", "-e", "-c", decide["run"]], capture_output=True, text=True,
-                         env={**os.environ, **env, "PATH": f"{bin}:{os.environ['PATH']}", "GITHUB_OUTPUT": str(written),
-                              "GITHUB_STEP_SUMMARY": str(tmp_path / "summary")})
-    paths = (tmp_path / "paths").read_text().splitlines() if (tmp_path / "paths").exists() else []
-    return run.returncode, written.read_text().splitlines() if written.exists() else [], paths
-
-
-@pytest.mark.parametrize("repo", ["oss-verify-proofs", OTHER])
-def test_another_repository_routes_to_a_change_review(tmp_path, repo):
-    # Whatever it changes, projects/ too.
-    code, outputs, paths = route_other(tmp_path, repo=repo)
-    assert (code, outputs) == (0, [f"sha={HEAD}", "kind=change"])
-    assert paths and all(p.startswith(f"repos/theorem-labs/{repo}/") for p in paths)
-    flow = workflow("build.yaml")
-    # The next review of the pull request finds the head its last review reviewed by this title (review-gather).
-    run = {"inputs": {"repo": repo, "pr": 34, "head": HEAD}, "github": {"event_name": "workflow_dispatch"}}
-    assert evaluate(flow["run-name"], run) == f"Review {repo}#34 at {HEAD}"
-    assert evaluate(flow["run-name"], {"inputs": {"repo": repo, "issue": 5}}) == f"Issue {repo}#5"
-    assert evaluate(flow["run-name"], {"inputs": {"repo": "oss-verify", "pr": 34}}) == "Pull request 34"
-    # A run of another repository's pull request 34 never cancels one of this repository's, nor shares its comment
-    # job's group.
-    ours = {"inputs": {"repo": "oss-verify", "pr": 34}, "github": {"event_name": "workflow_dispatch"}}
-    assert evaluate(flow["concurrency"]["group"], run) != evaluate(flow["concurrency"]["group"], ours)
-    comment_group = flow["jobs"]["comment"]["concurrency"]["group"]
-    assert evaluate(comment_group, run) != evaluate(comment_group, ours)
-    newer = {"inputs": {"repo": repo, "pr": 34, "head": "d" * 40}, "github": {"event_name": "workflow_dispatch"}}
-    # A late run of an older external pull request head cannot replace the run of the newest head.
-    assert evaluate(flow["concurrency"]["group"], run) != evaluate(flow["concurrency"]["group"], newer)
-
-
-@pytest.mark.parametrize("repo", ["oss-verify-proofs", OTHER])
-def test_another_repository_issue_runs_its_hourly_cap(repo):
-    cap = step(workflow("build.yaml")["jobs"]["review"], "Hold the draft at the hourly cap")
-    context = {"github": {"event_name": "workflow_dispatch", "repository": "theorem-labs/oss-verify", "run_id": 99},
-               "inputs": {"repo": repo, "issue": 5}, "needs": {"route": {"outputs": {"kind": "issue"}}}}
-    assert bool(evaluate(cap["if"], context))
-    assert evaluate(cap["env"]["RUNS_REPO"], context) == "theorem-labs/oss-verify"
-    assert evaluate(cap["env"]["SOURCE_REPO"], context) == repo
-
-
-@pytest.mark.parametrize("event, inputs, held", [
-    ("issues", {}, True),  # an issue's own event, as on main
-    ("workflow_dispatch", {"issue": 5}, False),  # a person's run for an issue of this repository, as on main
-    ("workflow_dispatch", {"repo": "oss-verify", "issue": 5}, False),
-])
-def test_this_repository_keeps_mains_cap_on_issue_events_only(event, inputs, held):
-    cap = step(workflow("build.yaml")["jobs"]["review"], "Hold the draft at the hourly cap")
-    context = {"github": {"event_name": event}, "inputs": inputs, "needs": {"route": {"outputs": {"kind": "issue"}}}}
-    assert bool(evaluate(cap["if"], context)) is held
-
-
-@pytest.mark.parametrize("head, pr_head", [
-    ("", HEAD),  # no head given
-    (HEAD[:7], HEAD),  # not a whole commit id
-])
-def test_a_malformed_head_is_refused(tmp_path, head, pr_head):
-    code, outputs, _ = route_other(tmp_path, head=head, pr_head=pr_head)
-    assert code != 0 and outputs == []
-
-
-def test_a_moved_head_runs_nothing_and_passes(tmp_path):
-    # A run can reach Build after the pull request moved on, or after the newer head's run. It asks for nothing: the
-    # run of the newer head reviews the pull request, and a stale run is not a failure on main.
-    code, outputs, _ = route_other(tmp_path, head=HEAD, pr_head="d" * 40)
-    assert (code, outputs) == (0, [])
-    assert "nothing runs" in (tmp_path / "summary").read_text()
-
-
-@pytest.mark.parametrize("event, inputs, cancels", [
-    ("pull_request_target", {}, True),
-    ("workflow_dispatch", {"pr": 7}, True),
-    ("workflow_dispatch", {"repo": "oss-verify", "pr": 7}, True),
-    ("issues", {}, False),
-    # Another repository's runs wait in order: a later run never cancels a running review or draft.
-    ("workflow_dispatch", {"repo": "oss-verify-proofs", "pr": 7, "head": HEAD}, False),
-    ("workflow_dispatch", {"repo": OTHER, "issue": 5}, False),
-])
-def test_only_this_repositorys_pull_request_runs_cancel_an_older_run(event, inputs, cancels):
-    flow = workflow("build.yaml")
-    assert bool(evaluate(flow["concurrency"]["cancel-in-progress"],
-                         {"github": {"event_name": event}, "inputs": inputs})) is cancels
-
-
-@pytest.mark.parametrize("repo, pr, head", [
-    ("oss-verify-proofs-internal", 34, HEAD),  # a repository outside the input's list
-    ("../oss-verify-proofs", 34, HEAD),
-    (OTHER, "34x", HEAD),  # a pull request number that is not a number
-    (OTHER, "-1", HEAD),
-    (OTHER, 34, HEAD.upper()),  # a head that is not 40 lowercase hexadecimal digits
-    (OTHER, 34, HEAD + "c"),
-])
-def test_a_bad_repo_pr_or_head_is_refused(tmp_path, repo, pr, head):
-    # build.yaml checks the three values, whoever started the run.
-    code, outputs, paths = route_other(tmp_path, repo=repo, pr=pr, head=head)
-    assert code != 0 and outputs == []
-    if repo != OTHER or pr != 34:
-        assert paths == []  # refused before any read
-
-
-def test_the_review_reads_the_repository_the_run_names():
-    jobs = workflow("build.yaml")["jobs"]
-    # Evaluated: the repository that route and the review read follows the run's input.
-    for inputs, name in (({"repo": OTHER, "pr": 34, "head": HEAD}, OTHER),
-                         ({"repo": "oss-verify-proofs", "pr": 7, "head": HEAD}, "oss-verify-proofs"),
-                         ({"repo": "oss-verify", "pr": 7}, "oss-verify"), ({}, "oss-verify")):
-        context = {"inputs": inputs, "github": {"repository": "theorem-labs/oss-verify"}}
-        for where in (jobs["review"]["env"]["REPO"],
-                      step(jobs["route"], "An enrollment, a change or an issue")["env"]["REPO"]):
-            assert evaluate(where, context) == f"theorem-labs/{name}"
-
-
-def posting(inputs, issue=False):
-    """(the comment job runs, the required job asks for it) for a successful review on a run with `inputs` (none on a
-    pull request's own event)."""
-    jobs = workflow("build.yaml")["jobs"]
-    context = {"inputs": inputs, "github": {"repository": "theorem-labs/oss-verify"},
-               "needs": {"route": {"outputs": {"kind": "issue" if issue else "change"}},
-                         "review": {"result": "success", "outputs": {"comment": "Thanks.\n", "held_object": ""}},
-                         "hold": {"result": "success"}}}
-    asked = step(jobs["required"], "Every job route asked for passed, and no other ran")["env"]["ASKED_COMMENT"]
-    return bool(evaluate(jobs["comment"]["if"], context)), bool(evaluate(asked, context))
-
-
-def test_only_this_repositorys_pull_requests_get_a_comment():
-    # Another repository's review is a draft only: the comment job never runs for it.
-    for repo in ("oss-verify-proofs", OTHER):
-        assert posting({"repo": repo, "pr": 34, "head": HEAD}) == (False, False), repo
-    # This repository's pull requests post, from their own events or by hand.
-    for inputs in ({}, {"repo": "oss-verify", "pr": 7}):
-        assert posting(inputs) == (True, True), inputs
 
 
 # --- tests.yaml's route, run on made-up commits ---
