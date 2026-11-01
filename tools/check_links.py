@@ -38,10 +38,12 @@ those records, with no Docker, and gives each build of each fuzz target two resu
    traps; not instrumented (fail) if none did, whatever its traps. A compile of a language that the sanitizer does not
    instrument (assembly), one whose arguments are in a response file, or one with an option whose effect the record
    does not show (an -mllvm option, --config, --config-user-dir, --config-system-dir, -resource-dir) that the build's
-   own flags do not have, decides nothing; a compile run with CCC_OVERRIDE_OPTIONS has no record. The code that no
-   recorded compile decides is judged by its checks: each archive that holds some of it must hold more of them than
-   the same archive in the plain build, and so must the project's code as a whole; a build with no compile records is
-   judged by its checks alone, as before.
+   own flags do not have, decides nothing; a compile run with CCC_OVERRIDE_OPTIONS has no record. Nor does any compile
+   decide in a language whose recorded UBSan flags turn on no check (no -fsanitize= word: flags that every compile
+   carries); the result notes it, as it notes a build with no compile records. The code that no recorded compile
+   decides is judged by its checks: each archive that holds some of it must hold more of them than the same archive in
+   the plain build, and so must the project's code as a whole; a build with no compile records is judged by its checks
+   alone, as before.
 
 The plain build instruments nothing, by design; its result is "plain" when its record is complete, and "error"
 when it has no record or an incomplete one. A Go program has no record (Go's linker writes no map): its result is
@@ -758,20 +760,28 @@ def option_values(words, option):
             if w == option and i + 1 < len(words) or w.startswith(option + "=")]
 
 
+def wants_checks(compiles, language):
+    """Whether the build's UBSan flags for `language` ("c" or "c++") turn on a check: hold a -fsanitize= word. Flags
+    that turn on none (an empty list, or only -fno-sanitize-recover and the like) are carried by any compile, and so
+    show nothing: such a build's compile records decide nothing for that language."""
+    return any(w.startswith("-fsanitize=") for w in compiles.ubsan[language])
+
+
 def ubsan_compile(compiles, compile):
     """Whether one recorded compile carried the build's UndefinedBehaviorSanitizer flags for its language: (True,
     ""), (False, why), or (None, "") when its record cannot say: for a language the sanitizer does not instrument
-    (assembly), arguments it read from a response file (@file), or an option of UNSEEN (an LLVM option, or one that
-    makes clang read flags or an ignorelist from a file the record does not hold) with a value that the build's own
-    flags do not give it. It carried them when each of the build's UBSan flags for that language is one of its
-    arguments, but the -fno-sanitize= ones; each check that a -fno-sanitize= argument of it turns off is one that the
-    build's own sanitizer flags for that language turn off (a check that the build turns off is the build's choice,
-    one the compile adds is not); and it has no ignorelist, -fno-sanitize-trap, -fsanitize-recover or -ftrap-function
-    argument (UNDO_CHECKS) that the build's own flags do not have. A word that the driver hands on to the front end
-    (-Xclang, -Xclang=, -Xpreprocessor, -Wp,) counts against the compile as the bare word does, and never for it."""
+    (assembly), a build whose UBSan flags for that language turn on no check (no -fsanitize= word: wants_checks),
+    arguments it read from a response file (@file), or an option of UNSEEN (an LLVM option, or one that makes clang
+    read flags or an ignorelist from a file the record does not hold) with a value that the build's own flags do not
+    give it. It carried them when each of the build's UBSan flags for that language is one of its arguments, but the
+    -fno-sanitize= ones; each check that a -fno-sanitize= argument of it turns off is one that the build's own
+    sanitizer flags for that language turn off (a check that the build turns off is the build's choice, one the
+    compile adds is not); and it has no ignorelist, -fno-sanitize-trap, -fsanitize-recover or -ftrap-function argument
+    (UNDO_CHECKS) that the build's own flags do not have. A word that the driver hands on to the front end (-Xclang,
+    -Xclang=, -Xpreprocessor, -Wp,) counts against the compile as the bare word does, and never for it."""
     language = UBSAN_LANGUAGES.get(compile.language)
     wanted = [w for w in compiles.ubsan[language] if not w.startswith(NO_SANITIZE)] if language else []
-    if not wanted or any(a.startswith("@") for a in compile.arguments):
+    if not language or not wants_checks(compiles, language) or any(a.startswith("@") for a in compile.arguments):
         return None, ""
     own = set(compiles.sanitizer[language])
     words, own_words = driver_words(compile.arguments), driver_words(compiles.sanitizer[language])
@@ -947,6 +957,18 @@ def analyse(records, image, dwarf_units=None, checkouts=(), assembly_sources=Non
             compiles = records[build].compiles
             if compiles is not None and compiles.build != build:
                 compiles = None
+            # A build whose records cannot decide says so in its cell: its code is then judged by its traps alone.
+            if compiles is None:
+                notes.append("the build has no compile records that this reads (flags.json or compiles.jsonl is not "
+                             "there, cannot be read, or is another build's), so its code is judged by its UBSan "
+                             "traps")
+            else:
+                none_on = [language for language in ("c", "c++") if not wants_checks(compiles, language)]
+                if none_on:
+                    notes.append("the build's recorded UndefinedBehaviorSanitizer flags for "
+                                 + " and ".join("C" if language == "c" else "C++" for language in none_on)
+                                 + " turn on no check (no -fsanitize= word), so its compile records decide nothing "
+                                 "for that code, which is judged by its UBSan traps")
             without, undecided = [], []
             for c in with_code:
                 verdict, why = ubsan_record(compiles, c.data) if not c.facts.bitcode else (None, "")
