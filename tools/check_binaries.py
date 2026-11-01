@@ -401,9 +401,18 @@ def binary_checks(job, tag, toolchain, targets, entries, sources, work, *, label
             wanted |= {real for real, _, _ in record.inputs.values() if real.startswith("/opt/")}
             wanted |= {original for original, _ in record.renamed.values() if original.startswith("/opt/")}
     image = image_hashes(toolchain, wanted, labels=labels)
+    # The project image's files at the paths a compile record names, by SHA-256: a build directory's copy of an
+    # assembly source is shown to be the checkout's file by its bytes (check_links.copied_sources). If the image cannot
+    # be read, no copy is shown, and those objects are judged as before.
+    def checkout_files(paths):
+        try:
+            return image_hashes(tag, paths, labels=labels)
+        except Failed:
+            return {}
+
     links = {target: check_links.analyse({build: records[(target, build)] for build in job.builds}, image,
                                          dwarf_reader(toolchain, labels), sorted(sources),
-                                         assembly_reader(tag, sorted(sources), labels))
+                                         assembly_reader(tag, sorted(sources), labels), checkout_files)
              for target in targets}
 
     step(f"--checks: each binary on its inputs, under qemu-riscv64 (at most {RUN_SECONDS} seconds a run, "

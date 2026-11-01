@@ -346,9 +346,10 @@ class Analyse(unittest.TestCase):
                compiled=None, build="ubsan"):
         """A Record whose link took `runtimes` from the image, the members of `archives` ({archive path: {member:
         bytes}}), the objects `loose` ({path: bytes}) and the driver. With `compiled` ([(object bytes, source,
-        language, arguments)]), the build has compile records: the flags.json compile writes for `build`, with the
-        toolchain's fixed UBSan flags, and a line of compiles.jsonl as record-compile writes it for each compile,
-        read back with check_links.read_compiles."""
+        language, arguments[, directory, source's sha256])]), the build has compile records: the flags.json compile
+        writes for `build`, with the toolchain's fixed UBSan flags, and a line of compiles.jsonl as record-compile
+        writes it for each compile (in /work/b, with no source_sha256, unless given), read back with
+        check_links.read_compiles."""
         taken, inputs = [], {}
         for path in runtimes:
             taken.append((path, None, ".text", 4))
@@ -371,10 +372,16 @@ class Analyse(unittest.TestCase):
             sanitizer = (["-fsanitize=address"] if build in check_links.ASAN_BUILDS else []) + ubsan
             (raw / ".records" / "flags.json").write_text(json.dumps(
                 {"build": build, "sanitizer": {"c": sanitizer, "c++": sanitizer}, "ubsan": {"c": ubsan, "c++": ubsan}}))
-            (raw / ".records" / "compiles.jsonl").write_text("".join(
-                json.dumps({"sha256": hashlib.sha256(body).hexdigest(), "output": "x.o", "directory": "/work/b",
-                            "file": source, "language": language, "shim": "/tmp/shim/riscv64-linux-musl-clang-plain",
-                            "arguments": arguments}) + "\n" for body, source, language, arguments in compiled))
+            lines = []
+            for body, source, language, arguments, *more in compiled:
+                directory, source_sha256 = more if more else ("/work/b", None)
+                line = {"sha256": hashlib.sha256(body).hexdigest(), "output": "x.o", "directory": directory,
+                        "file": source, "language": language, "shim": "/tmp/shim/riscv64-linux-musl-clang-plain",
+                        "arguments": arguments}
+                if source_sha256 is not None:
+                    line["source_sha256"] = source_sha256
+                lines.append(json.dumps(line) + "\n")
+            (raw / ".records" / "compiles.jsonl").write_text("".join(lines))
             compiles = check_links.read_compiles(raw)
             self.assertIsNotNone(compiles)
         return check_links.Record(taken, inputs, set(driver), renamed or {}, self.raw, None, compiles)
@@ -437,6 +444,98 @@ class Analyse(unittest.TestCase):
         units = lambda objects: [("DW_LANG_Mips_Assembler", "/tmp/x.S", "/")] * len(objects)
         self.assertEqual(self.analyse({"asan": record}, dwarf_units=units, checkouts=["/src/lib"])["asan"]
                          ["instrumented"]["result"], "fail")
+
+    # libunwind's ported build: the release recipe copies the checkout into a build directory and assembles the copy,
+    # so each object's DWARF names the copy, outside every checkout. Its C member has a UBSan trap, as libunwind's do.
+    CHECKOUT = "/src/upstream/libunwind"
+    COPY = "/work/build/lib/{flav}/libunwind-fuzz_libunwind/src/src"
+    ASM = {"getcontext.o": ("getcontext", b"getcontext source\n"),
+           "setcontext.o": ("setcontext", b"setcontext source\n"),
+           "lt1-siglongjmp.o": ("siglongjmp", b"siglongjmp source\n")}
+
+    def copied(self, build, flags=None, sources=None, members=None, checkout=None):
+        """The analysis of a libunwind-like link in `build`: its three assembly members compiled in the build
+        directory's copy, with `flags` (the build's own by default) and the recorded SHA-256 of `sources` ({name:
+        bytes}, the checkout's by default; None in it: no source_sha256); `members` the names that have a record
+        (all by default); `checkout` the checkout's files ({relative path: bytes})."""
+        flav = {"asan": "asan", "asan-ubsan": "asanubsan"}[build]
+        own = ["-fsanitize=address"] + (UBSAN_FLAGS if build == "asan-ubsan" else [])
+        flags = own if flags is None else flags
+        checkout = ({f"src/riscv/{stem}.S": text for stem, text in self.ASM.values()} if checkout is None
+                    else checkout)
+        objects = {name: elf_object(NOP, defined=[stem]) for name, (stem, _) in self.ASM.items()}
+        compiled = []
+        for name, (stem, text) in self.ASM.items():
+            if members is not None and name not in members:
+                continue
+            source = (sources or {}).get(name, text)
+            compiled.append((objects[name], f"riscv/{stem}.S", "assembler-with-cpp",
+                             BASE + list(flags) + ["-c", f"riscv/{stem}.S", "-o", f"riscv/{stem}.o"],
+                             self.COPY.format(flav=flav),
+                             None if source is None else hashlib.sha256(source).hexdigest()))
+        checked = elf_object(LW + UNIMP + RET, defined=["unw_step"], undefined=ASAN, files=["lib.c"], comment=True)
+        record = self.record({"/work/b/liboft.a": {"lib.c.o": checked, **objects}}, compiled=compiled, build=build)
+        plain = self.record({"/work/b/liboft.a": {"lib.c.o": elf_object(LW + RET, defined=["unw_step"], comment=True),
+                                                  **objects}}, build="plain")
+        units = {hashlib.sha256(objects[name]).hexdigest():
+                 ("DW_LANG_Mips_Assembler", f"riscv/{stem}.S", self.COPY.format(flav=flav))
+                 for name, (stem, _) in self.ASM.items()}
+        files = {f"{self.CHECKOUT}/{path}": hashlib.sha256(text).hexdigest() for path, text in checkout.items()}
+        self.asked = []
+
+        def checkout_files(paths):
+            self.asked.append(sorted(paths))
+            return {path: files[path] for path in paths if path in files}
+
+        return self.analyse({"plain": plain, build: record},
+                            dwarf_units=lambda data: [units.get(hashlib.sha256(d).hexdigest()) for d in data],
+                            checkouts=[self.CHECKOUT], checkout_files=checkout_files)[build]
+
+    def test_a_build_directory_copy_of_an_assembly_source_is_listed_by_its_checkout_path(self):
+        for build in ("asan", "asan-ubsan"):
+            result = self.copied(build)
+            self.assertEqual(result["instrumented"]["result"], "pass", (build, result))
+            for name, (stem, _) in self.ASM.items():
+                self.assertIn({"name": name, "kind": "assembly", "source": f"src/riscv/{stem}.S"},
+                              result["uninstrumented"])
+            # One read of the project image for all three, of paths in the checkout only.
+            self.assertEqual(len(self.asked), 1)
+            self.assertTrue(all(path.startswith(self.CHECKOUT + "/") for path in self.asked[0]))
+
+    def test_a_copy_with_no_record_or_other_bytes_fails_as_before(self):
+        cases = {"no record": {"members": ()}, "other bytes": {"sources": {"getcontext.o": b"planted\n"}},
+                 "no source sha256": {"sources": {"getcontext.o": None}},
+                 "not in the checkout": {"checkout": {"src/riscv/setcontext.S": b"setcontext source\n",
+                                                      "src/riscv/siglongjmp.S": b"siglongjmp source\n"}}}
+        for case, options in cases.items():
+            result = self.copied("asan", **options)["instrumented"]
+            self.assertEqual(result["result"], "fail", (case, result))
+            self.assertIn("liboft.a(getcontext.o): its assembly source riscv/getcontext.S is in no checkout of the "
+                          "project image", result["detail"])
+            if case != "no record":
+                self.assertNotIn("setcontext.o", result["detail"], case)
+
+    def test_a_copy_assembled_without_the_builds_sanitizer_flags_fails(self):
+        """A planted assembly file built without -fsanitize: it fails, named, with the flags it lacks."""
+        result = self.copied("asan", flags=[])["instrumented"]
+        self.assertEqual(result["result"], "fail", result)
+        self.assertIn("liboft.a(getcontext.o): assembled without the build's sanitizer flags (riscv/getcontext.S: "
+                      "without -fsanitize=address)", result["detail"])
+        result = self.copied("asan-ubsan", flags=["-fsanitize=address"])["instrumented"]
+        self.assertEqual(result["result"], "fail", result)
+        self.assertIn("(riscv/getcontext.S: without -fsanitize=undefined -fno-sanitize-recover=all "
+                      "-fsanitize-trap=all)", result["detail"])
+
+    def test_an_assembly_source_in_a_checkout_is_judged_as_before(self):
+        """Nothing else changes: an object whose DWARF names a checkout's file needs no record."""
+        asm = elf_object(NOP, defined=["memcpy_fast"])
+        record = self.record({"/work/libproject.a": {"lib.c.o": good(), "memcpy.S.o": asm}},
+                             compiled=[(asm, "src/arch/memcpy.S", "assembler-with-cpp", BASE, "/src/lib", None)],
+                             build="asan")
+        units = lambda objects: [("DW_LANG_Mips_Assembler", "src/arch/memcpy.S", "/src/lib")] * len(objects)
+        result = self.analyse({"asan": record}, dwarf_units=units, checkouts=["/src/lib"],
+                              checkout_files=lambda paths: self.fail("no checkout file is read"))["asan"]
+        self.assertEqual(result["instrumented"]["result"], "pass", result)
 
     def test_a_file_of_the_image_with_no_kind_leaves_no_list(self):
         """A list that leaves a file out would say that the build links less uninstrumented code than it does."""
@@ -1159,6 +1258,8 @@ exit "${SHIM_STATUS:-0}"
 
     def test_a_compile_runs_as_without_records_and_is_recorded(self):
         arguments = ["-Iinc", '-DQ="a \\ b"', "-DT=a\tb\x01", "-fsanitize=undefined", "-c", "src/x.c", "-o", "x.o"]
+        (self.dir / "src").mkdir()
+        (self.dir / "src" / "x.c").write_bytes(b"int x;\n")
         bare = self.run_shim(*arguments, through=False)
         made = (self.dir / "x.o").read_bytes()
         (self.dir / "x.o").unlink()
@@ -1166,8 +1267,22 @@ exit "${SHIM_STATUS:-0}"
         self.assertEqual((done.returncode, done.stdout, done.stderr), (bare.returncode, bare.stdout, bare.stderr))
         self.assertEqual((self.dir / "x.o").read_bytes(), made)
         self.assertEqual(self.lines(), [{"sha256": hashlib.sha256(made).hexdigest(), "output": "x.o",
-                                         "directory": str(self.dir), "file": "src/x.c", "language": "c",
+                                         "directory": str(self.dir), "file": "src/x.c",
+                                         "source_sha256": hashlib.sha256(b"int x;\n").hexdigest(), "language": "c",
                                          "shim": str(self.shim), "arguments": arguments}])
+        records = self.dir / "out" / ".records"
+        records.mkdir(parents=True)
+        (records / "flags.json").write_text('{"build": "ubsan", "sanitizer": {"c": [], "c++": []}, '
+                                            '"ubsan": {"c": [], "c++": []}}')
+        (records / "compiles.jsonl").write_text(next((self.records / "compiles").iterdir()).read_text())
+        compiles = check_links.read_compiles(self.dir / "out")
+        compile, = compiles.objects[hashlib.sha256(made).hexdigest()]
+        self.assertEqual((compile.directory, compile.source_sha256),
+                         (str(self.dir), hashlib.sha256(b"int x;\n").hexdigest()))
+
+    def test_a_source_from_standard_input_has_no_source_sha256(self):
+        self.assertEqual(self.run_shim("-x", "c", "-c", "-", "-o", "x.o").returncode, 0)
+        self.assertEqual([(line["file"], line["source_sha256"]) for line in self.lines()], [("-", None)])
 
     def test_only_a_compile_that_succeeds_is_recorded(self):
         self.assertEqual(self.run_shim("-E", "-c", "x.c", "-o", "x.i").returncode, 0)

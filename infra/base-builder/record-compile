@@ -27,8 +27,10 @@
 # after this script has seen them. A record is one line of JSON:
 #
 #     {"sha256": "<of the object's bytes>", "output": "<the object: -o's file, else clang's name for it>",
-#      "directory": "<the working directory>", "file": "<its source>", "language": "<the source's language>",
-#      "shim": "<the shim the build ran>", "arguments": ["<each argument the build gave the shim>", ...]}
+#      "directory": "<the working directory>", "file": "<its source>",
+#      "source_sha256": "<of the source's bytes after the step>" or null (standard input),
+#      "language": "<the source's language>", "shim": "<the shim the build ran>",
+#      "arguments": ["<each argument the build gave the shim>", ...]}
 #
 # The language is clang's name for what the step took the source as: -x's, else that of its extension (.c c, .cc and
 # .cpp c++, .m objective-c, .s assembler, .S assembler-with-cpp, ...), and a C++ shim (clang++) takes C as C++.
@@ -176,7 +178,7 @@ record() {
   done
   [ "${#files[@]}" -gt 0 ] || return 0
   mkdir -p "$records/compiles" || return 1
-  local arguments="" separator="" called directory
+  local arguments="" separator="" called directory source
   for a in "$@"; do
     json "$a"
     arguments="$arguments$separator$REPLY"
@@ -199,6 +201,13 @@ record() {
     json "$object"; line="{\"sha256\": \"$sum\", \"output\": $REPLY"
     line="$line, \"directory\": $directory"
     json "${files[$i]}"; line="$line, \"file\": $REPLY"
+    # The source's bytes, as the step read them: a regular file, not standard input.
+    source=null
+    if [ "${files[$i]}" != - ] && [ -f "${files[$i]}" ]; then
+      source=$(sha256sum < "${files[$i]}") || return 1
+      source="\"${source%% *}\""
+    fi
+    line="$line, \"source_sha256\": $source"
     json "${languages[$i]}"; line="$line, \"language\": $REPLY"
     line="$line, \"shim\": $called, \"arguments\": [$arguments]}"
     tmp=$(mktemp "$records/compiles/XXXXXXXXXX") || return 1
