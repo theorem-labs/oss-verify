@@ -450,6 +450,26 @@ class Analyse(unittest.TestCase):
         result = self.analyse({"asan": self.record({"/work/l.a": {"a.o": good(), "shim.o": shim, "s2.o": shim}})})
         self.assertEqual(result["asan"]["instrumented"]["result"], "fail")
 
+    def test_a_mangled_rust_allocator_shim_is_exempt(self):
+        # The 7 functions of the shim member liboft.a(oft-dd14ae4059f60934.54nkdnmsskol3vqqxdbk7rtq9.rcgu.o) in the
+        # knives asan link (rustc 1.90.0-nightly 2025-07-15), which the unmangled names alone failed.
+        names = ["_RNvCs6UdHf40Qw6p_7___rustc12___rust_alloc", "_RNvCs6UdHf40Qw6p_7___rustc14___rust_dealloc",
+                 "_RNvCs6UdHf40Qw6p_7___rustc14___rust_realloc", "_RNvCs6UdHf40Qw6p_7___rustc19___rust_alloc_zeroed",
+                 "_RNvCs6UdHf40Qw6p_7___rustc26___rust_alloc_error_handler",
+                 "_RNvCs6UdHf40Qw6p_7___rustc42___rust_alloc_error_handler_should_panic_v2",
+                 "_RNvCs6UdHf40Qw6p_7___rustc35___rust_no_alloc_shim_is_unstable_v2"]
+        shim = elf_object(NOP, defined=names, comment=True)
+        result = self.analyse({"asan": self.record({"/work/l.a": {"a.o": good(), "shim.o": shim}})})["asan"]
+        self.assertEqual(result["instrumented"]["result"], "pass")
+        # A length that is not its identifier's (also one with a leading zero, or too long for int()), or a function
+        # of another name, is the project's code.
+        for bad in ("_RNvCs6UdHf40Qw6p_7___rustc13___rust_alloc", "_RNvCs6UdHf40Qw6p_7___rustc12___rust_other",
+                    "_RNvCs6UdHf40Qw6p_7___rustc012___rust_alloc",
+                    "_RNvCs6UdHf40Qw6p_7___rustc" + "1" * 5000 + "___rust_alloc"):
+            other = elf_object(NOP, defined=names[1:] + [bad], comment=True)
+            result = self.analyse({"asan": self.record({"/work/l.a": {"a.o": good(), "shim.o": other}})})["asan"]
+            self.assertEqual(result["instrumented"]["result"], "fail", bad)
+
     def test_a_seal_compiled_from_the_driver_sources_is_the_drivers(self):
         seal = elf_object(NOP, defined=["__wrap_getenv"], comment=True, files=["wrap_getenv.c"])
         record = self.record({"/work/l.a": {"a.o": good()}}, loose={"/work/b/wrap_getenv.o": seal})
