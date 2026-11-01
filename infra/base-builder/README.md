@@ -8,6 +8,7 @@ Every project's `Dockerfile` starts `FROM` this image. It is a toolchain image p
 | `/usr/local/bin/fetch-commit` | [fetch-commit](fetch-commit): checks out `$REPO` at `$COMMIT`, for a project's Dockerfile |
 | `/usr/local/lib/oss-verify/toolchain.sh` | [toolchain.sh](toolchain.sh): the compiler wrappers and flags of each build |
 | `/usr/local/lib/oss-verify/link-fuzz-target` | [link-fuzz-target](link-fuzz-target): how a fuzz target is linked |
+| `/usr/local/lib/oss-verify/record-compile` | [record-compile](record-compile): with `tools/check --checks`, a front before each compiler shim that records each compile (the object's SHA-256, its source, the source's SHA-256 and language, and the compiler's arguments) in `$OUT/.records/compiles.jsonl`, beside the build's sanitizer flags in `$OUT/.records/flags.json` ([compile](compile)), for the check that the UndefinedBehaviorSanitizer reached the project's code |
 | `/usr/local/lib/oss-verify/driver/` | [driver/](driver/): the driver that `$LIB_FUZZING_ENGINE` links into every fuzz target, and the adapter `$LIB_ALLOCATION_FAILURE_ENGINE` links into an allocation-failure fuzz target |
 | `/usr/local/bin/lay-out-sources` | [lay-out-sources](lay-out-sources): lays out a project's other source trees and files from its `sources` file |
 | `/usr/local/lib/oss-verify/recipes.sh` | [recipes.sh](recipes.sh): the release's build recipes (CMake, autotools, Meson, blind and header-only builds, the C++ runtime group), for ported builds |

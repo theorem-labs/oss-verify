@@ -31,7 +31,8 @@
 # single-entry and stub gates, the link). Changed: a neutral name already in place for this target is kept (one
 # container builds several targets here, where the release started a container for each). Left out: the release's
 # respelling of paths, which a build from its recipe never uses. The link names $LIB_FUZZING_ENGINE, so
-# link-fuzz-target makes it in the release's order, with the seals build_lib added.
+# link-fuzz-target makes it in the release's order, with the seals build_lib added. Added: when compile records the
+# build (tools/check --checks), a front before each shim that records each compile (record-compile).
 
 # shellcheck source=recipes.sh
 . /usr/local/lib/oss-verify/recipes.sh
@@ -133,6 +134,12 @@ done'
     'clang++ --config=/tmp/asan-musl-sealed-noiconv.cfg -stdlib=libc++' " $SHIM/oft-nogc-discard.ld"
   chmod +x "$SHIM/$CHOST-clang-plain" "$SHIM/$CHOST-clang-sealed" \
            "$SHIM/$CHOST-clang++-plain" "$SHIM/$CHOST-clang++-sealed"
+  # When compile records the build (OV_RECORDS, tools/check --checks): a front before each shim, which records each
+  # compile (record-compile). Without records the shims are the release's, as written above.
+  if [ -n "${OV_RECORDS:-}" ]; then
+    /usr/local/lib/oss-verify/record-compile --front "$OV_RECORDS" "$SHIM/$CHOST-clang-plain" \
+      "$SHIM/$CHOST-clang++-plain" "$SHIM/$CHOST-clang-sealed" "$SHIM/$CHOST-clang++-sealed" || :
+  fi
 }
 
 # ov_target_begin <target> [<dependency> ...]: what the release's build sets up for a target before it reads the

@@ -446,10 +446,15 @@ class WorkflowArguments(unittest.TestCase):
 
 
 class PostingStep(unittest.TestCase):
-    """build.yaml's own "Post the comment" step, run with a fake gh: what it sends GitHub."""
+    """build.yaml's own "Post the comment" step, run with a fake gh: what it sends GitHub. Its BODY is the review job's
+    body.md, made here by .github/scripts/review-body from the review, the checks' report and the rules file, as the
+    review job makes it, unless `text` gives it."""
 
     def post(self, review, existing=True, head="b" * 40, pr_head=None, checks="### new report\n", rules="review.md",
-             pr="8", status=0):
+             pr="8", status=0, verdicts="", text=None):
+        if text is None:
+            # As the job output gives it: without the file's last line end.
+            text = body(verdicts, head, review=review, checks=checks, rules=rules).removesuffix("\n")
         workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
         name = "Post the comment, or update the one already there"
         matches = [s for s in workflow["jobs"]["comment"]["steps"] if s.get("name") == name]
@@ -473,8 +478,7 @@ class PostingStep(unittest.TestCase):
             (bin / "gh").chmod(0o755)
             (directory / "temp").mkdir()
             environment = {**os.environ, "PATH": f"{bin}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r",
-                           "PR": pr, "REVIEW": review, "CHECKS": checks, "HEAD_SHA": head, "RULES": rules,
-                           "RUNNER_TEMP": str(directory / "temp")}
+                           "PR": pr, "BODY": text, "HEAD_SHA": head, "RUNNER_TEMP": str(directory / "temp")}
             run = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=ROOT, env=environment, capture_output=True,
                                  text=True)
             self.assertEqual(run.returncode, status, run.stderr)
@@ -543,6 +547,79 @@ class PostingStep(unittest.TestCase):
         body = self.post("R" * 70_000, checks="C" * 20_000)
         self.assertLess(len(body), 65_536)
         self.assertIn("R" * 50_000, body)
+
+    def test_the_draft_body_md_is_what_the_comment_job_posts(self):
+        # The review job's step writes body.md with .github/scripts/review-body, and its job output `body`; the comment
+        # job's post step, given that output, posts body.md as it is. Both steps are run here. Which values the job
+        # gives the first step is the workflow's, proved on a run.
+        jobs = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["jobs"]
+        [write] = [s for s in jobs["review"]["steps"]
+                   if s.get("name") == "Write the comment as the comment job posts it"]
+        review = "Thanks.\n\n1. Fix X.\n"
+        with tempfile.TemporaryDirectory() as directory:
+            temp = pathlib.Path(directory)
+            (temp / "draft").mkdir()
+            # As the result step writes it (jq .verdicts): over several lines.
+            (temp / "draft" / "verdicts.json").write_text(
+                json.dumps({"F2": "fail", "F7": "pass", "C4": "person"}, indent=2) + "\n")
+            run = subprocess.run(["bash", "-e", "-c", write["run"]], cwd=ROOT, capture_output=True, text=True,
+                                 env={**os.environ, "RUNNER_TEMP": str(temp), "GITHUB_OUTPUT": str(temp / "output"),
+                                      "HEAD_SHA": "b" * 40, "REVIEW": review, "CHECKS": "### new report\n",
+                                      "RULES": "review.md"})
+            self.assertEqual(run.returncode, 0, run.stderr)
+            output = (temp / "output").read_text()
+            draft = (temp / "draft" / "body.md").read_text()
+        # GITHUB_OUTPUT's form for a value of several lines: body<<delimiter, the lines, the delimiter.
+        first, rest = output.split("\n", 1)
+        self.assertRegex(first, r"\Abody<<body_[0-9a-f]{32}\Z")
+        delimiter = first.split("<<", 1)[1]
+        self.assertTrue(rest.endswith(f"\n{delimiter}\n"))
+        self.assertEqual(self.post(review, text=rest[:-len(delimiter) - 2]), draft)
+        self.assertEqual(draft.split("\n")[1],
+                         '<!-- oss-verify-verdict {"head":"%s","blocking":["F2"],"person":["C4"]} -->' % ("b" * 40))
+
+
+HEAD40 = "0123456789abcdef0123456789abcdef01234567"
+
+
+def body(verdicts, head, review="Thanks.\n", checks="", rules="review.md"):
+    """The comment that .github/scripts/review-body prints from this environment, as both of build.yaml's jobs run it."""
+    run = subprocess.run([str(ROOT / ".github" / "scripts" / "review-body")], capture_output=True, text=True,
+                         env={**os.environ, "HEAD_SHA": head, "REVIEW": review, "CHECKS": checks,
+                              "VERDICTS": verdicts, "RULES": rules})
+    assert run.returncode == 0, run.stderr
+    return run.stdout
+
+
+class VerdictLine(unittest.TestCase):
+    """Line 2 of the review comment: the checks whose verdict is fail, and those left to a person, at the reviewed
+    commit, for the inbound watcher (the stream's bin/ossv-pr-watch, verdict_line)."""
+
+    def test_the_comment_has_the_verdict_line_second(self):
+        lines = body(verdicts='{"A1":"pass","F2":"fail","C4":"person","F7":"pass"}', head=HEAD40).split("\n")
+        self.assertEqual(lines[0], "<!-- oss-verify-review -->")
+        self.assertEqual(lines[1], '<!-- oss-verify-verdict {"head":"%s","blocking":["F2"],"person":["C4"]} -->' % HEAD40)
+
+    def test_no_verdicts_writes_no_verdict_line(self):
+        for v in ("", "null", "{}", "[]"):
+            self.assertNotIn("oss-verify-verdict", body(verdicts=v, head=HEAD40))
+
+    def test_a_long_review_keeps_the_verdict_line_second(self):
+        self.assertTrue(body(verdicts='{"F2":"pass","F7":"pass"}', head=HEAD40, review="x" * 60000)
+                        .split("\n")[1].startswith("<!-- oss-verify-verdict "))
+
+    def test_a_change_review_uses_its_own_ids(self):
+        self.assertIn('"blocking":["2"],"person":["5"]',
+                      body(verdicts='{"1":"pass","2":"fail","5":"person"}', head=HEAD40).split("\n")[1])
+
+    def test_the_rest_of_the_body_is_unchanged(self):
+        b = body(verdicts='{"F2":"pass","F7":"pass"}', head=HEAD40, review="r" * 50001, checks="c", rules="review.md")
+        lines = b.split("\n")
+        self.assertEqual(lines[2], "<sub>Claude wrote this review of `%s` from `review.md`. It can be wrong. "
+                                   "Each push replaces it.</sub>" % HEAD40[:7])
+        self.assertIn("r" * 50000 + "\n", b)
+        self.assertNotIn("r" * 50001, b)
+        self.assertIn("<details><summary>What the checks of the fuzz targets and of the binaries measured</summary>", b)
 
 
 @unittest.skipUnless(shutil.which("jq"), "needs jq, which the gh stand-in runs the script's filters with")
@@ -2279,6 +2356,199 @@ class Starters(unittest.TestCase):
                              steps["Start OSS Verify's review in theorem-labs/oss-verify"]):
                     self.assertIs(evaluate(step["if"], {"steps": {"event": {"outputs": {}}}}), False)
                     self.assertIs(evaluate(step["if"], {"steps": {"event": {"outputs": {"repo": name}}}}), True)
+
+
+@unittest.skipUnless(shutil.which("jq"), "needs jq, which the gh stand-in runs the step's filters with")
+class ReviewRerun(unittest.TestCase):
+    """review-rerun.yml, on each completed Build run: its one step, run with a stand-in gh, re-runs the failed jobs of
+    a failed run of an enrollment pull request whose review job failed, up to the run's third attempt."""
+
+    HEAD = "c" * 40
+    ENROLLMENT = ["projects/zlib/project.yaml", "projects/zlib/build.sh"]
+
+    def setUp(self):
+        self.workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "review-rerun.yml").read_text())
+        (self.job,) = self.workflow["jobs"].values()
+
+    @staticmethod
+    def jobs(review="failure", **others):
+        """The jobs of one attempt of a Build run, by the names the API gives them: project-builds' job is "build", the
+        required job is "project-builds" (build.yaml), and the review job has no name of its own."""
+        jobs = {"route": "success", "build": "success", "review": review, "record": "success", "hold": "success",
+                "comment": "skipped", "project-builds": "success" if review == "success" else "failure"}
+        return {**jobs, **others}
+
+    def rerun(self, attempt, jobs, pulls=None, run_id=40, fails=None, ok=True, lost=False):
+        """Run the step for the completion of attempt `attempt` of Build run `run_id` at HEAD. jobs: {name: conclusion}
+        of that attempt. pulls: {number: (head, paths)} or {number: (head, paths, draft)} of the open pull requests
+        into main, the path "new<-old" for a rename (default: one enrollment at HEAD, ready for review). fails: {call:
+        n}, the first n tries of that call ("jobs", "pulls", "files" or "rerun") fail, after printing a cut page. lost:
+        GitHub takes the first re-run (the run moves to the next attempt) but its answer is lost. ok: whether the step
+        must succeed. Return the re-runs GitHub took, the output and the summary; self.waits holds the waits it asked
+        sleep for, and self.tries the tries of each call."""
+        pulls = {5: (self.HEAD, self.ENROLLMENT)} if pulls is None else pulls
+        pulls = {n: (p + (False,))[:3] for n, p in pulls.items()}
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "bin").mkdir()
+            (root / f"jobs-{run_id}-{attempt}.json").write_text(json.dumps({"total_count": len(jobs), "jobs": [
+                {"name": name, "status": "completed", "conclusion": conclusion, "run_attempt": attempt,
+                 "head_branch": "$(touch pwned)"} for name, conclusion in jobs.items()]}))
+            (root / "pulls.json").write_text(json.dumps(
+                [{"number": n, "head": {"sha": head, "ref": "`touch pwned`"}, "base": {"ref": "main"}, "draft": draft}
+                 for n, (head, paths, draft) in pulls.items()]))
+            for number, (head, paths, draft) in pulls.items():
+                (root / f"files-{number}.json").write_text(json.dumps(
+                    [dict(zip(("filename", "previous_filename"), path.split("<-"))) for path in paths]))
+            for call, n in (fails or {}).items():
+                (root / f"fails-{call}").write_text(str(n))
+            (root / "attempt-now").write_text(str(attempt))
+            if lost:
+                (root / "lose-first-rerun").write_text("")
+            (root / "bin" / "gh").write_text(
+                "#!/bin/bash\n"
+                'filter=""; path=""; for a; do [ "$prev" = --jq ] && filter=$a\n'
+                '  [[ $a == repos/* ]] && path=${path:-$a}; prev=$a; done\n'
+                f'cd {root}\n'
+                'echo "gh $*" >> calls\n'
+                'case "$path" in\n'
+                '  "") call=rerun ;;\n'
+                '  repos/o/r/actions/runs/*/attempts/*/jobs\\?per_page=100) call=jobs ;;\n'
+                '  repos/o/r/actions/runs/*) echo "{\\"run_attempt\\": $(cat attempt-now)}" | jq -r "$filter"\n'
+                '    exit ;;\n'
+                '  "repos/o/r/pulls?state=open&base=main&per_page=100") call=pulls ;;\n'
+                '  repos/o/r/pulls/*/files\\?per_page=100) call=files ;;\n'
+                '  *) echo "unexpected gh $*" >&2; exit 1 ;;\n'
+                "esac\n"
+                'try=$(( $(cat "tries-$call" 2>/dev/null || echo 0) + 1 )); echo "$try" > "tries-$call"\n'
+                'if [ "$call" = rerun ] && [ -f lose-first-rerun ] && (( try == 1 )); then\n'
+                '  echo "$*" >> reruns; echo $(( $(cat attempt-now) + 1 )) > attempt-now\n'
+                '  echo "connection reset" >&2; exit 1\n'
+                'fi\n'
+                'if (( try <= $(cat "fails-$call" 2>/dev/null || echo 0) )); then\n'
+                '  echo 99; echo "HTTP 502" >&2; exit 1\n'
+                'fi\n'
+                'case $call in\n'
+                '  rerun) [ "$1 $2" = "run rerun" ] || { echo "unexpected gh $*" >&2; exit 1; }\n'
+                '    echo "$*" >> reruns ;;\n'
+                '  jobs) r=${path#repos/o/r/actions/runs/}; a=${r#*/attempts/}\n'
+                '    jq -r "$filter" "jobs-${r%%/*}-${a%%/*}.json" ;;\n'
+                '  pulls) jq -r "$filter" pulls.json ;;\n'
+                '  files) n=${path#repos/o/r/pulls/}; jq -r "$filter" "files-${n%%/*}.json" ;;\n'
+                "esac\n")
+            (root / "bin" / "gh").chmod(0o755)
+            (root / "bin" / "sleep").write_text(f'#!/bin/bash\necho "$1" >> {root}/waits\n')
+            (root / "bin" / "sleep").chmod(0o755)
+            (step,) = self.job["steps"]
+            run = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=root, capture_output=True, text=True,
+                                 env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "GH_TOKEN": "x",
+                                      "REPO": "o/r", "RUN_ID": str(run_id), "RUN_ATTEMPT": str(attempt),
+                                      "HEAD_SHA": self.HEAD, "GITHUB_STEP_SUMMARY": str(root / "summary")})
+            if ok:
+                self.assertEqual(run.returncode, 0, run.stderr)
+            else:
+                self.assertNotEqual(run.returncode, 0, run.stdout)
+            self.assertFalse((root / "pwned").exists())
+            reruns = (root / "reruns").read_text().splitlines() if (root / "reruns").exists() else []
+            summary = (root / "summary").read_text() if (root / "summary").exists() else ""
+            self.waits = [int(w) for w in (root / "waits").read_text().split()] if (root / "waits").exists() else []
+            self.tries = {p.name[len("tries-"):]: int(p.read_text()) for p in root.glob("tries-*")}
+            return reruns, run.stdout, summary
+
+    def test_a_failed_enrollment_review_is_re_run_at_attempt_1_and_2(self):
+        # A review that fails for a short fault: a 401 of the model's API (2026-10-26), a 429 of its rate limit (pull
+        # request 59, Build run 40523715526), or a job cancelled or out of time. A label from an earlier commit, or
+        # none, changes nothing: the step reads none. A renamed file counts under both names.
+        enrollment = self.ENROLLMENT + ["projects/zlib/fuzz.c<-projects/zlib/old_fuzz.c"]
+        for attempt in (1, 2):
+            for review in ("failure", "cancelled", "timed_out"):
+                with self.subTest(attempt=attempt, review=review):
+                    reruns, out, summary = self.rerun(attempt, self.jobs(review), {5: (self.HEAD, enrollment)})
+                    self.assertEqual(reruns, ["run rerun 40 --failed -R o/r"])
+                    self.assertEqual(summary.splitlines(), [
+                        f"Pull request 5: the review job of Build run 40 ended {review} at attempt {attempt}; its "
+                        "failed jobs run again."])
+
+    def test_a_review_is_re_run_at_most_two_times_for_one_build_run(self):
+        # Attempt 3 is the second re-run's; a fourth is a person's re-run by hand.
+        for attempt in (3, 4):
+            with self.subTest(attempt=attempt):
+                reruns, out, summary = self.rerun(attempt, self.jobs())
+                self.assertEqual(reruns, [])
+                self.assertEqual(summary.splitlines(), [
+                    f"Pull request 5: the review job of Build run 40 ended failure at attempt {attempt}. At most two "
+                    "re-runs for one Build run: it is not run again."])
+
+    def test_a_successful_run_re_runs_nothing(self):
+        # The step re-runs nothing whose review passed, whatever its verdicts (`person` too: a person decides, not a
+        # re-run).
+        reruns, out, summary = self.rerun(1, self.jobs("success"))
+        self.assertEqual((reruns, summary), ([], ""))
+
+    def test_a_failure_of_another_job_alone_re_runs_nothing(self):
+        # Another job failed and the review passed or did not run; or the build failed too, which is the project's or
+        # the runner's, and a maintainer re-runs it (build.yaml): the step re-runs no build of up to six hours.
+        for jobs in (self.jobs("success", build="failure"), self.jobs("success", record="failure"),
+                     self.jobs("skipped", build="failure"), self.jobs("success", hold="failure"),
+                     self.jobs("failure", build="failure"), self.jobs("failure", build="cancelled")):
+            with self.subTest(jobs=jobs):
+                reruns, out, summary = self.rerun(1, jobs)
+                self.assertEqual((reruns, summary), ([], ""))
+
+    def test_a_change_or_a_pull_request_that_moved_on_is_not_re_run(self):
+        # Not one enrollment: a change, a project and another file, two projects, a file renamed into a project, a file
+        # directly in projects/. Or no open pull request into main is at the run's head any more: a later push, a
+        # close, a merge (its review decides nothing, and a re-run could cancel the newer head's Build run). Or the
+        # pull request at the head is a draft: enroll-dispatch's decide refuses it, and marking it ready runs Build.
+        cases = [{5: (self.HEAD, ["tools/check"])}, {5: (self.HEAD, ["projects/zlib/build.sh", "README.md"])},
+                 {5: (self.HEAD, ["projects/zlib/build.sh", "projects/curl/build.sh"])},
+                 {5: (self.HEAD, ["projects/zlib/build.sh<-tools/x"])}, {5: (self.HEAD, ["projects/zlib"])},
+                 {5: ("d" * 40, self.ENROLLMENT)}, {}, {5: (self.HEAD, self.ENROLLMENT, True)},
+                 # Two pull requests at the head: each must be one enrollment.
+                 {5: (self.HEAD, self.ENROLLMENT), 6: (self.HEAD, ["tools/check"])}]
+        for pulls in cases:
+            with self.subTest(pulls=pulls):
+                reruns, out, summary = self.rerun(1, self.jobs(), pulls)
+                self.assertEqual((reruns, summary), ([], ""))
+
+    def test_a_failed_call_is_tried_again_and_the_review_is_re_run(self):
+        # A fault of GitHub's API on any call: the jobs, the pull requests, their files, the re-run. One or three
+        # failed tries, 15, 30 and 60 s apart, then the call succeeds. A failed try's output (here a cut page that
+        # names pull request 99) is never used.
+        for call in ("jobs", "pulls", "files", "rerun"):
+            for failed in (1, 3):
+                with self.subTest(call=call, failed=failed):
+                    reruns, out, summary = self.rerun(1, self.jobs(), fails={call: failed})
+                    self.assertEqual(reruns, ["run rerun 40 --failed -R o/r"])
+                    self.assertEqual(self.waits, [15, 30, 60][:failed])
+                    self.assertEqual(self.tries[call], failed + 1)
+                    self.assertEqual(summary.splitlines(), [
+                        "Pull request 5: the review job of Build run 40 ended failure at attempt 1; its failed jobs "
+                        "run again."])
+
+    def test_four_failed_tries_fail_the_job_and_name_the_build_run(self):
+        # Nothing runs on a schedule, so nothing else would try again: the job fails, and its summary says which Build
+        # run is not re-run.
+        for call, what in (("jobs", "read the jobs of attempt 1"), ("pulls", "list the open pull requests"),
+                           ("files", "list the files of pull request 5"), ("rerun", "re-run its failed jobs")):
+            with self.subTest(call=call):
+                reruns, out, summary = self.rerun(1, self.jobs(), fails={call: 4}, ok=False)
+                self.assertEqual(reruns, [])
+                self.assertEqual(self.waits, [15, 30, 60])
+                self.assertEqual(self.tries[call], 4)
+                self.assertEqual(summary.splitlines(),
+                                 [f"Build run 40: could not {what} after 4 tries, so it is not re-run."])
+                self.assertIn(f"::error::Build run 40: could not {what} after 4 tries", out)
+
+    def test_a_re_run_whose_answer_is_lost_is_not_asked_for_twice(self):
+        # GitHub takes the first try of the re-run, but its answer is lost. Before the next try the run is already at
+        # attempt 2, so the step asks for no second re-run, and it does not fail.
+        reruns, out, summary = self.rerun(1, self.jobs(), lost=True)
+        self.assertEqual(reruns, ["run rerun 40 --failed -R o/r"])
+        self.assertEqual((self.tries["rerun"], self.waits), (1, [15]))
+        self.assertIn("Build run 40 is at attempt 2: a try was taken, though its answer was lost.", out)
+        self.assertEqual(summary.splitlines(), [
+            "Pull request 5: the review job of Build run 40 ended failure at attempt 1; its failed jobs run again."])
 
 
 if __name__ == "__main__":

@@ -52,7 +52,7 @@ For these statements, we build the fuzz targets two times, and pin the SHA-256 o
 
 ## After we merge
 
-We merge an enrollment when we intend to prove the project.
+We merge an enrollment when we intend to prove the project. If we merge your pull request before its theorem statements started, the merge starts them.
 
 1. We prove the theorem statements ([docs/what-gets-proven.md](docs/what-gets-proven.md)). Our tools do not write theorem statements for Go projects yet ([docs/project-yaml.md](docs/project-yaml.md#language)).
 2. We send each finding privately to `primary_contact`, with a patch when we have one. There is no disclosure deadline, and we do not publish findings.
