@@ -664,6 +664,63 @@ class Analyse(unittest.TestCase):
             self.assertEqual(result["result"], "pass", (after, result))
             self.assertNotIn("by the compile that wrote them", result["detail"])
 
+    FROM_FILES = (["--config=/w/ign.cfg"], ["--config", "/w/ign.cfg"], ["--config-user-dir=/w/cfg"],
+                  ["--config-user-dir", "/w/cfg"], ["--config-system-dir=/w/cfg"], ["--config-system-dir", "/w/cfg"],
+                  ["-resource-dir=/w/rd"], ["-resource-dir", "/w/rd"], ["-Xclang", "-resource-dir", "-Xclang", "/w/rd"],
+                  ["-Xclang=-resource-dir=/w/rd"], ["-Wp,-resource-dir,/w/rd"], ["-Xclang=--config=/w/ign.cfg"])
+
+    def test_a_compile_that_reads_flags_from_a_file_decides_nothing(self):
+        """A configuration file, a directory of default configuration files, or a resource directory can hold an
+        ignorelist or LLVM options that take every check away, and the record shows only the option: such a compile
+        leaves its object to the trap count."""
+        sink = elf_object(RET, defined=["f"], comment=True)
+        trapped = elf_object(LW + UNIMP + RET, defined=["f"], comment=True)
+        plain = {"/work/b/libx.a": {"x.c.o": elf_object(LW + RET, defined=["f"], comment=True)}}
+        for after in self.FROM_FILES:
+            result = self.ubsan("ubsan", plain, {"/work/b/libx.a": {"x.c.o": sink}},
+                                [(sink, "x.c", "c", compile_arguments("x.c", after=after))])
+            self.assertEqual(result["result"], "fail", (after, result))
+            self.assertIn("libx.a: 0 UBSan traps and UB checks, the plain build's 0", result["detail"])
+            self.assertNotIn("by the compile", result["detail"])
+            self.assertNotIn("compiled without", result["detail"])
+            result = self.ubsan("ubsan", plain, {"/work/b/libx.a": {"x.c.o": trapped}},
+                                [(trapped, "x.c", "c", compile_arguments("x.c", after=after))])
+            self.assertEqual(result["result"], "pass", (after, result))
+            self.assertNotIn("by the compile that wrote them", result["detail"])
+
+    def test_a_file_option_the_build_gives_itself_decides(self):
+        """The same option with the same value in the build's own flags is the build's: the compile decides. Another
+        value decides nothing."""
+        sink = elf_object(RET, defined=["f"], comment=True)
+        archives = {"/work/b/libx.a": {"x.c.o": sink}}
+        plain = self.record(archives, build="plain")
+        record = self.record(archives, compiled=[(sink, "x.c", "c", compile_arguments(
+            "x.c", after=["--config", "/opt/build.cfg", "-mllvm", "-some-option"]))])
+        record.compiles.sanitizer["c"] += ["--config=/opt/build.cfg", "-mllvm", "-some-option"]
+        self.assertEqual(self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]["result"], "pass")
+        record.compiles.objects[hashlib.sha256(sink).hexdigest()][0].arguments.append("--config=/w/other.cfg")
+        result = self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]
+        self.assertEqual(result["result"], "fail", result)
+        self.assertIn("libx.a: 0 UBSan traps", result["detail"])
+
+    def test_a_word_given_through_the_preprocessor_options_counts_as_the_bare_word(self):
+        """-Wp, and -Xpreprocessor hand their words to clang's front end as -Xclang does."""
+        sink = elf_object(LW + UNIMP + RET, defined=["f"], comment=True)
+        plain = {"/work/b/libx.a": {"x.c.o": elf_object(LW + RET, defined=["f"], comment=True)}}
+        archives = {"/work/b/libx.a": {"x.c.o": sink}}
+        for after, word in ((["-Wp,-fsanitize-ignorelist=ign.txt"], "-fsanitize-ignorelist=ign.txt"),
+                            (["-Xpreprocessor", "-fsanitize-ignorelist=ign.txt"], "-fsanitize-ignorelist=ign.txt"),
+                            (["-Wp,-MD,x.d,-fno-sanitize=null"], "-fno-sanitize=null")):
+            result = self.ubsan("ubsan", plain, archives, [(sink, "x.c", "c", compile_arguments("x.c", after=after))])
+            self.assertEqual(result["result"], "fail", (after, result))
+            self.assertIn(f"libx.a(x.c.o) (x.c: with {word})", result["detail"])
+        sink = elf_object(RET, defined=["f"], comment=True)
+        result = self.ubsan("ubsan", {"/work/b/libx.a": {"x.c.o": sink}}, {"/work/b/libx.a": {"x.c.o": sink}},
+                            [(sink, "x.c", "c", compile_arguments(
+                                "x.c", after=["-Wp,-mllvm,-ubsan-guard-checks"]))])
+        self.assertEqual(result["result"], "fail", result)
+        self.assertIn("libx.a: 0 UBSan traps", result["detail"])
+
     def test_the_builds_own_trap_and_recover_words_and_coverage_words_are_not_taken_for_them(self):
         """The build's own -fsanitize-trap=all and -fno-sanitize-recover=all, -fsanitize-coverage=0 (which curl's seed
         gives its protobuf build), and a word the build's own flags have, do not fail a compile."""

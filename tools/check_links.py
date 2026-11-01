@@ -33,13 +33,15 @@ those records, with no Docker, and gives each build of each fuzz target two resu
    its bytes (by their SHA-256): instrumented if one of them carried the build's UBSan flags for its language (each of
    them, but the -fno-sanitize= ones, among its arguments; no -fno-sanitize= argument that turns off a check the
    build's own flags keep; and no ignorelist, -fno-sanitize-trap or -fsanitize-recover argument, which take checks
-   away or turn traps into calls, that the build's own flags do not have; a word given through -Xclang or -Xclang=
-   counts as the bare word), whatever its traps; not instrumented (fail) if none did, whatever its traps. A compile of
-   a language that the sanitizer does not instrument (assembly), one whose arguments are in a response file, or one
-   with an -mllvm option that the build's own flags do not have, decides nothing; a compile run with
-   CCC_OVERRIDE_OPTIONS has no record. The code that no recorded compile decides is judged by its checks: each archive
-   that holds some of it must hold more of them than the same archive in the plain build, and so must the project's
-   code as a whole; a build with no compile records is judged by its checks alone, as before.
+   away or turn traps into calls, that the build's own flags do not have; a word that the driver hands on to the
+   front end through -Xclang, -Xclang=, -Xpreprocessor or -Wp, counts as the bare word), whatever its traps; not
+   instrumented (fail) if none did, whatever its traps. A compile of a language that the sanitizer does not instrument
+   (assembly), one whose arguments are in a response file, or one with an option whose effect the record does not
+   show (an -mllvm option, --config, --config-user-dir, --config-system-dir, -resource-dir) that the build's own flags
+   do not have, decides nothing; a compile run with CCC_OVERRIDE_OPTIONS has no record. The code that no recorded
+   compile decides is judged by its checks: each archive that holds some of it must hold more of them than the same
+   archive in the plain build, and so must the project's code as a whole; a build with no compile records is judged by
+   its checks alone, as before.
 
 The plain build instruments nothing, by design; its result is "plain" when its record is complete, and "error"
 when it has no record or an incomplete one. A Go program has no record (Go's linker writes no map): its result is
@@ -101,6 +103,13 @@ NO_SANITIZE = "-fno-sanitize="
 # that has one the build's own flags do not have did not carry the build's flags.
 UNDO_CHECKS = re.compile(r"-fsanitize-(system-)?(ignorelist|blacklist)=.*|-fno-sanitize-trap(=.*)?"
                          r"|-fsanitize-recover(=.*)?|-fno-sanitize-undefined-trap-on-error")
+# The options whose effect the record does not show, each as <option> <value> or <option>=<value>: LLVM's own options,
+# which can take every check away; and those that make clang read flags or an ignorelist from a file: a configuration
+# file, the directories clang looks for its default configuration file in, and the resource directory, whose
+# share/ubsan_ignorelist.txt the driver applies. A compile that gives one a value that the build's own flags do not
+# give it decides nothing. The compiler shims' own --config is not in a record: the record holds the arguments the
+# build gave the shim.
+UNSEEN = ("-mllvm", "--config", "--config-user-dir", "--config-system-dir", "-resource-dir")
 C_FAMILY = re.compile(r"\.(c|cc|cp|cpp|cxx|c\+\+|C|CPP|m|mm|h|hh|hpp|hxx|inc|ii|i)$")
 ASSEMBLY = re.compile(r"\.(S|s|sx|asm)$")
 FORTRAN = re.compile(r"\.(f|for|ftn|fpp|f77|f90|f95|f03|f08|f18)$", re.I)
@@ -727,34 +736,45 @@ def ub_count(code):
 
 
 def driver_words(arguments):
-    """`arguments`, with each word that -Xclang hands to clang's front end as a bare word: -Xclang=<word> as <word>,
-    and each -Xclang before a word left out."""
-    return [a[len("-Xclang="):] if a.startswith("-Xclang=") else a for a in arguments if a != "-Xclang"]
+    """`arguments`, with each word that the driver hands on to clang's front end as a bare word: -Xclang=<word> and
+    -Wp,<word>,<word>... as the words, and each -Xclang or -Xpreprocessor before a word left out."""
+    words = []
+    for a in arguments:
+        if a in ("-Xclang", "-Xpreprocessor"):
+            continue
+        if a.startswith("-Xclang="):
+            words.append(a[len("-Xclang="):])
+        elif a.startswith("-Wp,"):
+            words += a[len("-Wp,"):].split(",")
+        else:
+            words.append(a)
+    return words
 
 
-def mllvm_options(words):
-    """The values of the -mllvm options among `words` (driver_words): -mllvm <value> and -mllvm=<value>."""
-    return [words[i + 1] if w == "-mllvm" else w[len("-mllvm="):] for i, w in enumerate(words)
-            if w == "-mllvm" and i + 1 < len(words) or w.startswith("-mllvm=")]
+def option_values(words, option):
+    """The values that `option` has among `words` (driver_words): <option> <value> and <option>=<value>."""
+    return [words[i + 1] if w == option else w[len(option) + 1:] for i, w in enumerate(words)
+            if w == option and i + 1 < len(words) or w.startswith(option + "=")]
 
 
 def ubsan_compile(compiles, compile):
     """Whether one recorded compile carried the build's UndefinedBehaviorSanitizer flags for its language: (True,
     ""), (False, why), or (None, "") when its record cannot say: for a language the sanitizer does not instrument
-    (assembly), arguments it read from a response file (@file), or an -mllvm option that the build's own flags do not
-    have (LLVM's options can take checks away, and are not the driver's to name). It carried them when each of the
-    build's UBSan flags for that language is one of its arguments, but the -fno-sanitize= ones; each check that a
-    -fno-sanitize= argument of it turns off is one that the build's own sanitizer flags for that language turn off (a
-    check that the build turns off is the build's choice, one the compile adds is not); and it has no ignorelist,
-    -fno-sanitize-trap or -fsanitize-recover argument (UNDO_CHECKS) that the build's own flags do not have. A word
-    that -Xclang or -Xclang= hands to the front end counts against the compile as the bare word does."""
+    (assembly), arguments it read from a response file (@file), or an option of UNSEEN (an LLVM option, or one that
+    makes clang read flags or an ignorelist from a file the record does not hold) with a value that the build's own
+    flags do not give it. It carried them when each of the build's UBSan flags for that language is one of its
+    arguments, but the -fno-sanitize= ones; each check that a -fno-sanitize= argument of it turns off is one that the
+    build's own sanitizer flags for that language turn off (a check that the build turns off is the build's choice,
+    one the compile adds is not); and it has no ignorelist, -fno-sanitize-trap or -fsanitize-recover argument
+    (UNDO_CHECKS) that the build's own flags do not have. A word that the driver hands on to the front end (-Xclang,
+    -Xclang=, -Xpreprocessor, -Wp,) counts against the compile as the bare word does, and never for it."""
     language = UBSAN_LANGUAGES.get(compile.language)
     wanted = [w for w in compiles.ubsan[language] if not w.startswith(NO_SANITIZE)] if language else []
     if not wanted or any(a.startswith("@") for a in compile.arguments):
         return None, ""
     own = set(compiles.sanitizer[language])
-    words = driver_words(compile.arguments)
-    if not set(mllvm_options(words)) <= set(mllvm_options(driver_words(compiles.sanitizer[language]))):
+    words, own_words = driver_words(compile.arguments), driver_words(compiles.sanitizer[language])
+    if any(not set(option_values(words, option)) <= set(option_values(own_words, option)) for option in UNSEEN):
         return None, ""
     have = set(compile.arguments)
     allowed = {check for w in compiles.sanitizer[language] if w.startswith(NO_SANITIZE)
