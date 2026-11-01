@@ -17,12 +17,13 @@
 # $CC and $CXX (compile's wrappers run the shims), a shim named by its path (a ported build), and $DRVCC. A build that
 # runs a compiler by its own name (clang) goes round them, and its objects have no record.
 #
-# The shim runs with the same arguments, working directory, standard streams and environment as without a front (but
-# for SHLVL and _, which bash sets and no compiler reads; -p keeps BASH_ENV and SHELLOPTS from changing what this
-# script does), and the step ends as the shim ends: with its exit status, or killed by the same signal. When the step
-# compiles (-c, and none of -E, -S, -fsyntax-only, -M, -MM, -###) and the shim succeeds, this then writes one record
-# for each object that the step wrote, as a file of its own in <records>/compiles/, which compile gathers into
-# $OUT/.records/compiles.jsonl. A record is one line of JSON:
+# The shim runs with the same arguments, working directory, open files (standard streams and any other) and
+# environment as without a front (but for SHLVL and _, which bash sets and no compiler reads; -p keeps BASH_ENV and
+# SHELLOPTS from changing what this script does), and the step ends as the shim ends: with its exit status, or killed
+# by the same signal. When the step compiles (-c, and none of -E, -S, -fsyntax-only, -M, -MM, -###) and the shim
+# succeeds, this then writes one record for each object that the step wrote, as a file of its own in
+# <records>/compiles/, which compile gathers into $OUT/.records/compiles.jsonl. A step run with CCC_OVERRIDE_OPTIONS
+# set has none: clang's driver edits its arguments after this script has seen them. A record is one line of JSON:
 #
 #     {"sha256": "<of the object's bytes>", "output": "<the object: -o's file, else clang's name for it>",
 #      "directory": "<the working directory>", "file": "<its source>", "language": "<the source's language>",
@@ -69,18 +70,31 @@ for a in "$@"; do
     -E|-S|-fsyntax-only|-M|-MM|'-###') exec "$shim" "$@" ;;
   esac
 done
-[ -n "$compiles" ] || exec "$shim" "$@"
+# CCC_OVERRIDE_OPTIONS edits the arguments inside clang's driver, after the record would have taken them: no record.
+[ -n "$compiles" ] && [ -z "${CCC_OVERRIDE_OPTIONS:-}" ] || exec "$shim" "$@"
 # A mark of when the step starts: an object older than it is not one the step wrote.
 mark=$({ mkdir -p "$records/marks" && mktemp "$records/marks/XXXXXXXXXX"; } 2>/dev/null) || mark=""
-# The shim writes to the step's standard error (3); bash's own report of a shim killed by a signal goes nowhere.
-{ "$shim" "$@" 2>&3 3>&-; } 3>&2 2>/dev/null
-status=$?
+# The shim writes to the step's standard error, kept in an fd that bash picks above 9, so that every fd the build
+# gave the step reaches the shim as it is; bash's own report of a shim killed by a signal goes nowhere.
+if exec {stderr}>&2; then
+  { "$shim" "$@" 2>&"$stderr" {stderr}>&-; } 2>/dev/null
+  status=$?
+  exec {stderr}>&-
+else
+  "$shim" "$@"
+  status=$?
+fi
 if [ "$status" -ne 0 ]; then
   [ -z "$mark" ] || rm -f "$mark"
-  # A shim killed by a signal: the step is killed by the same signal.
+  # A shim killed by a signal that ends a process: the step is killed by the same signal. The others (a stop, or one
+  # whose default is to do nothing: SIGCHLD, SIGCONT, SIGURG, SIGWINCH) and a status over 128 that a shim exits with
+  # itself end the step with that status.
   if [ "$status" -gt 128 ] && [ "$status" -lt 192 ]; then
-    trap - "$((status - 128))" 2>/dev/null
-    kill -n "$((status - 128))" "$$" 2>/dev/null
+    case $((status - 128)) in
+      17|18|19|20|21|22|23|28) ;;
+      *) trap - "$((status - 128))" 2>/dev/null
+         kill -n "$((status - 128))" "$$" 2>/dev/null ;;
+    esac
   fi
   exit "$status"
 fi

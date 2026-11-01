@@ -633,6 +633,37 @@ class Analyse(unittest.TestCase):
                 self.assertIn(f"libx.a(x.c.o) (x.c: with {word})", result["detail"])
                 self.assertNotIn("AddressSanitizer constructor", result["detail"])
 
+    def test_a_word_given_through_xclang_counts_as_the_bare_word(self):
+        sink = elf_object(LW + UNIMP + RET, defined=["f"], comment=True)
+        plain = {"/work/b/libx.a": {"x.c.o": elf_object(LW + RET, defined=["f"], comment=True)}}
+        archives = {"/work/b/libx.a": {"x.c.o": sink}}
+        for after, word in ((["-Xclang=-fsanitize-ignorelist=ign.txt"], "-fsanitize-ignorelist=ign.txt"),
+                            (["-Xclang", "-fsanitize-ignorelist=ign.txt"], "-fsanitize-ignorelist=ign.txt"),
+                            (["-Xclang=-fno-sanitize=undefined"], "-fno-sanitize=undefined"),
+                            (["-Xclang=-fno-sanitize-trap=null"], "-fno-sanitize-trap=null")):
+            result = self.ubsan("ubsan", plain, archives, [(sink, "x.c", "c", compile_arguments("x.c", after=after))])
+            self.assertEqual(result["result"], "fail", (after, result))
+            self.assertIn(f"libx.a(x.c.o) (x.c: with {word})", result["detail"])
+
+    def test_a_compile_with_an_llvm_option_decides_nothing(self):
+        """LLVM's own options can take every check away (-ubsan-guard-checks with -lower-allow-check-random-rate=0):
+        a compile with one that the build's own flags do not have leaves its object to the trap count."""
+        sink = elf_object(RET, defined=["f"], comment=True)
+        trapped = elf_object(LW + UNIMP + RET, defined=["f"], comment=True)
+        plain = {"/work/b/libx.a": {"x.c.o": elf_object(LW + RET, defined=["f"], comment=True)}}
+        for after in (["-mllvm", "-ubsan-guard-checks", "-mllvm", "-lower-allow-check-random-rate=0"],
+                      ["-Xclang", "-mllvm", "-Xclang", "-lower-allow-check-random-rate=0"],
+                      ["-Xclang=-mllvm", "-Xclang=-ubsan-guard-checks"], ["-mllvm=-ubsan-guard-checks"]):
+            result = self.ubsan("ubsan", plain, {"/work/b/libx.a": {"x.c.o": sink}},
+                                [(sink, "x.c", "c", compile_arguments("x.c", after=after))])
+            self.assertEqual(result["result"], "fail", (after, result))
+            self.assertIn("libx.a: 0 UBSan traps and UB checks, the plain build's 0", result["detail"])
+            self.assertNotIn("1 of them by the compile", result["detail"])
+            result = self.ubsan("ubsan", plain, {"/work/b/libx.a": {"x.c.o": trapped}},
+                                [(trapped, "x.c", "c", compile_arguments("x.c", after=after))])
+            self.assertEqual(result["result"], "pass", (after, result))
+            self.assertNotIn("by the compile that wrote them", result["detail"])
+
     def test_the_builds_own_trap_and_recover_words_and_coverage_words_are_not_taken_for_them(self):
         """The build's own -fsanitize-trap=all and -fno-sanitize-recover=all, -fsanitize-coverage=0 (which curl's seed
         gives its protobuf build), and a word the build's own flags have, do not fail a compile."""
@@ -978,13 +1009,14 @@ RECORD_COMPILE = BUILDER / "record-compile"
 class CompileRecords(unittest.TestCase):
     """infra/base-builder/record-compile, with a stand-in for a compiler shim; and the wrapper compile writes."""
 
-    # The stand-in: it writes each object its arguments name (-o's, else <name>.o for each .c, .cc or .S) unless
-    # SHIM_WRITE=0, writes its arguments to both streams, and exits with $SHIM_STATUS, or kills itself with SIGSEGV.
+    # The stand-in: it writes each object its arguments name (-o's or -o<file>'s, else <name>.o for each .c, .cc or
+    # .S) unless SHIM_WRITE=0, writes its arguments to both streams (and to fd 3 with SHIM_FD3=1), and exits with
+    # $SHIM_STATUS, or kills itself with SIGSEGV.
     SHIM = r"""#!/bin/sh
 out=""; prev=""; sources=""
 for a in "$@"; do
-  [ "$prev" = -o ] && out=$a
-  case "$a" in *.c|*.cc|*.S) sources="$sources ${a##*/}" ;; esac
+  case "$prev" in -o|--output) out=$a ;; esac
+  case "$a" in --output=*) out=${a#--output=} ;; -o?*) out=${a#-o} ;; *.c|*.cc|*.S) sources="$sources ${a##*/}" ;; esac
   prev=$a
 done
 if [ "${SHIM_WRITE:-1}" = 1 ]; then
@@ -992,6 +1024,7 @@ if [ "${SHIM_WRITE:-1}" = 1 ]; then
   else for s in $sources; do printf 'object of %s\n' "$s" > "${s%.*}.o"; done; fi
 fi
 printf 'out: %s [%s] %s\n' "$#" "$PWD" "$*"; printf 'err: [%s]\n' "$@" >&2
+[ "${SHIM_FD3:-0}" != 1 ] || printf 'fd3: %s\n' "$*" >&3 || exit 7
 [ "${SHIM_STATUS:-0}" != segv ] || kill -SEGV $$
 exit "${SHIM_STATUS:-0}"
 """
@@ -1007,9 +1040,13 @@ exit "${SHIM_STATUS:-0}"
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_shim(self, *arguments, through=True, shim=None, status=0, **env):
+    def run_shim(self, *arguments, through=True, shim=None, status=0, fd3=None, **env):
+        """The stand-in, through record-compile or not; with `fd3`, a file that the step gets open as fd 3."""
         command = [str(RECORD_COMPILE), str(self.records)] if through else []
-        return subprocess.run(command + [str(shim or self.shim), *arguments], cwd=self.dir, capture_output=True,
+        command += [str(shim or self.shim), *arguments]
+        if fd3 is not None:
+            command = ["bash", "-c", 'exec 3>>"$0"; exec "$@"', str(fd3), *command]
+        return subprocess.run(command, cwd=self.dir, capture_output=True, timeout=60,
                               env={**os.environ, "SHIM_STATUS": str(status), **env})
 
     def lines(self):
@@ -1053,6 +1090,42 @@ exit "${SHIM_STATUS:-0}"
             bare = self.run_shim(*arguments, through=False, **env)
             done = self.run_shim(*arguments, **env)
             self.assertEqual((done.returncode, done.stdout, done.stderr), (bare.returncode, bare.stdout, bare.stderr))
+
+    def test_a_shim_exit_status_that_names_a_stop_signal_is_the_steps(self):
+        """A shim that exits with 147-150 (128 + SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU) or 145 (128 + SIGCHLD): the step
+        exits with that status and does not stop itself."""
+        for status in (145, 147, 148, 149, 150):
+            bare = self.run_shim("-c", "x.c", "-o", "x.o", through=False, status=status)
+            done = self.run_shim("-c", "x.c", "-o", "x.o", status=status)
+            self.assertEqual((done.returncode, done.stdout, done.stderr), (bare.returncode, bare.stdout, bare.stderr))
+            self.assertEqual(done.returncode, status)
+
+    def test_every_open_file_reaches_the_shim(self):
+        """A build that gives the compiler fd 3 open: the shim writes to it as it does without the front."""
+        for arguments in (["-c", "x.c", "-o", "x.o"], ["x.c", "-o", "x"]):
+            bare_file, done_file = self.dir / "bare3", self.dir / "done3"
+            bare = self.run_shim(*arguments, through=False, fd3=bare_file, SHIM_FD3="1")
+            done = self.run_shim(*arguments, fd3=done_file, SHIM_FD3="1")
+            self.assertEqual((done.returncode, done.stdout, done.stderr), (bare.returncode, bare.stdout, bare.stderr))
+            self.assertEqual(done.returncode, 0)
+            self.assertEqual(done_file.read_text(), bare_file.read_text())
+            bare_file.unlink()
+            done_file.unlink()
+
+    def test_a_compile_whose_arguments_clang_edits_has_no_record(self):
+        """CCC_OVERRIDE_OPTIONS edits the arguments inside clang's driver, after the record would take them."""
+        env = {"CCC_OVERRIDE_OPTIONS": "+-fno-sanitize=undefined"}
+        bare = self.run_shim("-fsanitize=undefined", "-c", "x.c", "-o", "x.o", through=False, **env)
+        done = self.run_shim("-fsanitize=undefined", "-c", "x.c", "-o", "x.o", **env)
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (bare.returncode, bare.stdout, bare.stderr))
+        self.assertEqual(self.lines(), [])
+        self.assertEqual(self.run_shim("-c", "x.c", "-o", "x.o", CCC_OVERRIDE_OPTIONS="").returncode, 0)
+        self.assertEqual(len(self.lines()), 1)
+
+    def test_the_output_named_in_each_spelling(self):
+        for arguments in (["-c", "a.c", "-oj.o"], ["-c", "a.c", "--output", "k.o"], ["-c", "--output=l.o", "a.c"]):
+            self.assertEqual(self.run_shim(*arguments).returncode, 0)
+        self.assertEqual([line["output"] for line in self.lines()], ["j.o", "k.o", "l.o"])
 
     def test_each_object_and_its_language(self):
         self.assertEqual(self.run_shim("-c", "a.c", "lib/b.cc", "-x", "c++", "e.S", "-I", "f.c").returncode, 0)
