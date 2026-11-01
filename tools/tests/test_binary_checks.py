@@ -3,9 +3,11 @@
 """Tests for the checks of the binaries that need no Docker: tools/check_links.py, tools/model_release.py and
 tools/check_binaries.py. python3 -m pytest tools/tests"""
 import hashlib
+import json
 import os
 import pathlib
 import struct
+import subprocess
 import sys
 import tempfile
 import time
@@ -20,7 +22,16 @@ from check_build import Failed  # noqa: E402
 
 UNIMP = struct.pack("<I", check_links.TRAP)
 NOP = struct.pack("<I", 0x00000013)  # addi x0, x0, 0
+RET = struct.pack("<I", 0x00008067)  # jalr x0, 0(ra): a function with nothing for UBSan to check
+LW = struct.pack("<I", 0x00052503)  # lw a0, 0(a0): a load UBSan checks (null, alignment)
 ASAN = ["__asan_init", "__asan_version_mismatch_check_v8", "__asan_load4"]
+# The release's fixed UBSan flags (infra/base-builder/toolchain.sh), and a compile's arguments with and without them.
+UBSAN_FLAGS = ["-fsanitize=undefined", "-fno-sanitize-recover=all", "-fsanitize-trap=all", "-fno-sanitize=function"]
+BASE = ["-march=rv64g", "-mabi=lp64d", "-Os", "-g", "-ffunction-sections", "-fdata-sections"]
+
+
+def compile_arguments(source, flags=UBSAN_FLAGS, after=()):
+    return BASE + list(flags) + ["-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION", "-c", source, "-o", "x.o", *after]
 
 
 def elf_object(text=b"", defined=(), undefined=(), files=(), local=(), comment=False):
@@ -331,9 +342,13 @@ class Analyse(unittest.TestCase):
         (self.raw / ".records" / "store" / digest).write_bytes(body)
         return digest
 
-    def record(self, archives, runtimes=(LIBC, CRT1), driver=("/tmp/ov/cli.o",), loose=None, renamed=None):
+    def record(self, archives, runtimes=(LIBC, CRT1), driver=("/tmp/ov/cli.o",), loose=None, renamed=None,
+               compiled=None, build="ubsan"):
         """A Record whose link took `runtimes` from the image, the members of `archives` ({archive path: {member:
-        bytes}}), the objects `loose` ({path: bytes}) and the driver."""
+        bytes}}), the objects `loose` ({path: bytes}) and the driver. With `compiled` ([(object bytes, source,
+        language, arguments)]), the build has compile records: the flags.json compile writes for `build`, with the
+        toolchain's fixed UBSan flags, and a line of compiles.jsonl as record-compile writes it for each compile,
+        read back with check_links.read_compiles."""
         taken, inputs = [], {}
         for path in runtimes:
             taken.append((path, None, ".text", 4))
@@ -348,7 +363,21 @@ class Analyse(unittest.TestCase):
         for path in driver:
             taken.append((path, None, ".text", 4))
             inputs[path] = (path, "d" * 64, 1)
-        return check_links.Record(taken, inputs, set(driver), renamed or {}, self.raw, None)
+        compiles = None
+        if compiled is not None:
+            raw = pathlib.Path(tempfile.mkdtemp(dir=self.raw))
+            (raw / ".records").mkdir()
+            ubsan = UBSAN_FLAGS if build in check_links.UBSAN_BUILDS else []
+            sanitizer = (["-fsanitize=address"] if build in check_links.ASAN_BUILDS else []) + ubsan
+            (raw / ".records" / "flags.json").write_text(json.dumps(
+                {"build": build, "sanitizer": {"c": sanitizer, "c++": sanitizer}, "ubsan": {"c": ubsan, "c++": ubsan}}))
+            (raw / ".records" / "compiles.jsonl").write_text("".join(
+                json.dumps({"sha256": hashlib.sha256(body).hexdigest(), "output": "x.o", "directory": "/work/b",
+                            "file": source, "language": language, "shim": "/tmp/shim/riscv64-linux-musl-clang-plain",
+                            "arguments": arguments}) + "\n" for body, source, language, arguments in compiled))
+            compiles = check_links.read_compiles(raw)
+            self.assertIsNotNone(compiles)
+        return check_links.Record(taken, inputs, set(driver), renamed or {}, self.raw, None, compiles)
 
     def analyse(self, records, **options):
         return check_links.analyse(records, self.IMAGE, **options)
@@ -520,6 +549,322 @@ class Analyse(unittest.TestCase):
         result = self.analyse({"asan": record})["asan"]
         self.assertEqual(result["instrumented"]["result"], "pass", result)
         self.assertIn({"name": "libz.a", "kind": "image-library", "sha256": "f" * 64}, result["uninstrumented"])
+
+    # The UBSan builds judge an object by the compile that wrote its bytes, when the build recorded one.
+
+    def ubsan(self, build, plain_archives, archives, compiled):
+        plain = self.record(plain_archives, build="plain")
+        record = self.record(archives, compiled=compiled, build=build)
+        return self.analyse({"plain": plain, build: record})[build]["instrumented"]
+
+    def test_a_member_with_nothing_to_check_passes_by_its_recorded_compile(self):
+        """libabsl_log_sink.a in curl_fuzzer_proto_file: its code is a `ret`, with no UBSan trap in either build."""
+        sink = elf_object(RET, defined=["_ZN4absl7LogSinkD2Ev"], undefined=ASAN, comment=True)
+        archives = {"/work/b/libabsl_log_sink.a": {"log_sink.cc.o": sink}}
+        for build in ("ubsan", "asan-ubsan"):
+            result = self.ubsan(build, archives, archives,
+                                [(sink, "absl/log/log_sink.cc", "c++", compile_arguments("absl/log/log_sink.cc"))])
+            self.assertEqual(result["result"], "pass", (build, result))
+            self.assertIn("1 of them by the compile that wrote them", result["detail"])
+            # With no compile record, the traps decide, and there are none.
+            result = self.ubsan(build, archives, archives, None)
+            self.assertEqual(result["result"], "fail", (build, result))
+            self.assertIn("libabsl_log_sink.a: 0 UBSan traps and UB checks, the plain build's 0", result["detail"])
+
+    def test_a_planted_member_compiled_without_the_flags_fails(self):
+        """A load UBSan would check, no trap, and a compile without -fsanitize: the archive's other member has traps,
+        which would pass the archive by its count; the record fails the member, and names it."""
+        planted = elf_object(LW + RET, defined=["planted"], comment=True)
+        checked = elf_object(LW + UNIMP + RET, defined=["checked"], comment=True)
+        plain = {"/work/b/libplanted.a": {"checked.c.o": elf_object(LW + RET, defined=["checked"], comment=True),
+                                          "planted.c.o": planted}}
+        archives = {"/work/b/libplanted.a": {"checked.c.o": checked, "planted.c.o": planted}}
+        result = self.ubsan("ubsan", plain, archives, [
+            (checked, "src/checked.c", "c", compile_arguments("src/checked.c")),
+            (planted, "src/planted.c", "c", compile_arguments("src/planted.c", flags=()))])
+        self.assertEqual(result["result"], "fail", result)
+        self.assertIn("1 objects were compiled without the build's UndefinedBehaviorSanitizer flags: "
+                      "libplanted.a(planted.c.o) (src/planted.c: without -fsanitize=undefined "
+                      "-fno-sanitize-recover=all -fsanitize-trap=all)", result["detail"])
+
+    def test_a_planted_member_with_no_compile_record_fails_by_its_traps(self):
+        planted = elf_object(LW + RET, defined=["planted"], comment=True)
+        archives = {"/work/b/libplanted.a": {"planted.c.o": planted}}
+        # A build with records that has none for these bytes (a compile that ran no shim), and one with no records.
+        for compiled in ([], None):
+            result = self.ubsan("ubsan", archives, archives, compiled)
+            self.assertEqual(result["result"], "fail", (compiled, result))
+            self.assertIn("libplanted.a: 0 UBSan traps and UB checks, the plain build's 0", result["detail"])
+            self.assertNotIn("compiled without", result["detail"])
+
+    def test_a_member_with_traps_compiled_without_the_flags_fails(self):
+        trapped = elf_object(LW + UNIMP + RET, defined=["f"], comment=True)
+        plain = {"/work/b/libx.a": {"x.c.o": elf_object(LW + RET, defined=["f"], comment=True)}}
+        result = self.ubsan("ubsan", plain, {"/work/b/libx.a": {"x.c.o": trapped}},
+                            [(trapped, "x.c", "c", compile_arguments("x.c", flags=()))])
+        self.assertEqual(result["result"], "fail", result)
+        self.assertIn("libx.a(x.c.o) (x.c: without", result["detail"])
+
+    def test_a_compile_that_turns_the_sanitizer_off_after_its_flags_fails(self):
+        sink = elf_object(RET, defined=["f"], comment=True)
+        archives = {"/work/b/libx.a": {"x.c.o": sink}}
+        result = self.ubsan("ubsan", archives, archives,
+                            [(sink, "x.c", "c", compile_arguments("x.c", after=["-fno-sanitize=undefined"]))])
+        self.assertEqual(result["result"], "fail", result)
+        self.assertIn("libx.a(x.c.o) (x.c: with -fno-sanitize=undefined)", result["detail"])
+
+    UNDOING = ["-fsanitize-ignorelist=/src/ignore.txt", "-fsanitize-blacklist=/src/ignore.txt",
+               "-fsanitize-system-ignorelist=/src/sys.txt", "-fsanitize-system-blacklist=/src/sys.txt",
+               "-fno-sanitize-trap=null", "-fno-sanitize-trap=all", "-fno-sanitize-trap",
+               "-fsanitize-recover=undefined", "-fsanitize-recover=all", "-fsanitize-recover",
+               "-fno-sanitize-undefined-trap-on-error", "-ftrap-function=nothing"]
+
+    def test_a_compile_with_the_flags_that_takes_checks_away_fails(self):
+        """An ignorelist takes checks away and -fno-sanitize-trap / -fsanitize-recover turn traps into handler calls,
+        while every -fsanitize= word is there: such a compile did not carry the build's flags, and the word is named."""
+        sink = elf_object(LW + UNIMP + RET, defined=["f"], undefined=ASAN, comment=True)
+        plain = {"/work/b/libx.a": {"x.c.o": elf_object(LW + RET, defined=["f"], comment=True)}}
+        archives = {"/work/b/libx.a": {"x.c.o": sink}}
+        for word in self.UNDOING:
+            for build in ("ubsan", "asan-ubsan"):
+                compiled = [(sink, "x.c", "c", compile_arguments("x.c", after=[word]))]
+                result = self.ubsan(build, plain, archives, compiled)
+                self.assertEqual(result["result"], "fail", (word, build, result))
+                self.assertIn(f"libx.a(x.c.o) (x.c: with {word})", result["detail"])
+                self.assertNotIn("AddressSanitizer constructor", result["detail"])
+
+    def test_a_word_given_through_xclang_counts_as_the_bare_word(self):
+        sink = elf_object(LW + UNIMP + RET, defined=["f"], comment=True)
+        plain = {"/work/b/libx.a": {"x.c.o": elf_object(LW + RET, defined=["f"], comment=True)}}
+        archives = {"/work/b/libx.a": {"x.c.o": sink}}
+        for after, word in ((["-Xclang=-fsanitize-ignorelist=ign.txt"], "-fsanitize-ignorelist=ign.txt"),
+                            (["-Xclang", "-fsanitize-ignorelist=ign.txt"], "-fsanitize-ignorelist=ign.txt"),
+                            (["-Xclang=-fno-sanitize=undefined"], "-fno-sanitize=undefined"),
+                            (["-Xclang=-fno-sanitize-trap=null"], "-fno-sanitize-trap=null"),
+                            (["-Xclang", "-ftrap-function=nothing"], "-ftrap-function=nothing"),
+                            (["-Xclang=-ftrap-function=nothing"], "-ftrap-function=nothing"),
+                            (["-Wp,-ftrap-function=nothing"], "-ftrap-function=nothing")):
+            result = self.ubsan("ubsan", plain, archives, [(sink, "x.c", "c", compile_arguments("x.c", after=after))])
+            self.assertEqual(result["result"], "fail", (after, result))
+            self.assertIn(f"libx.a(x.c.o) (x.c: with {word})", result["detail"])
+
+    def test_a_compile_with_an_llvm_option_decides_nothing(self):
+        """LLVM's own options can take every check away (-ubsan-guard-checks with -lower-allow-check-random-rate=0):
+        a compile with one that the build's own flags do not have leaves its object to the trap count."""
+        sink = elf_object(RET, defined=["f"], comment=True)
+        trapped = elf_object(LW + UNIMP + RET, defined=["f"], comment=True)
+        plain = {"/work/b/libx.a": {"x.c.o": elf_object(LW + RET, defined=["f"], comment=True)}}
+        for after in (["-mllvm", "-ubsan-guard-checks", "-mllvm", "-lower-allow-check-random-rate=0"],
+                      ["-Xclang", "-mllvm", "-Xclang", "-lower-allow-check-random-rate=0"],
+                      ["-Xclang=-mllvm", "-Xclang=-ubsan-guard-checks"], ["-mllvm=-ubsan-guard-checks"]):
+            result = self.ubsan("ubsan", plain, {"/work/b/libx.a": {"x.c.o": sink}},
+                                [(sink, "x.c", "c", compile_arguments("x.c", after=after))])
+            self.assertEqual(result["result"], "fail", (after, result))
+            self.assertIn("libx.a: 0 UBSan traps and UB checks, the plain build's 0", result["detail"])
+            self.assertNotIn("1 of them by the compile", result["detail"])
+            result = self.ubsan("ubsan", plain, {"/work/b/libx.a": {"x.c.o": trapped}},
+                                [(trapped, "x.c", "c", compile_arguments("x.c", after=after))])
+            self.assertEqual(result["result"], "pass", (after, result))
+            self.assertNotIn("by the compile that wrote them", result["detail"])
+
+    FROM_FILES = (["--config=/w/ign.cfg"], ["--config", "/w/ign.cfg"], ["--config-user-dir=/w/cfg"],
+                  ["--config-user-dir", "/w/cfg"], ["--config-system-dir=/w/cfg"], ["--config-system-dir", "/w/cfg"],
+                  ["-resource-dir=/w/rd"], ["-resource-dir", "/w/rd"], ["-Xclang", "-resource-dir", "-Xclang", "/w/rd"],
+                  ["-Xclang=-resource-dir=/w/rd"], ["-Wp,-resource-dir,/w/rd"], ["-Xclang=--config=/w/ign.cfg"])
+
+    def test_a_compile_that_reads_flags_from_a_file_decides_nothing(self):
+        """A configuration file, a directory of default configuration files, or a resource directory can hold an
+        ignorelist or LLVM options that take every check away, and the record shows only the option: such a compile
+        leaves its object to the trap count."""
+        sink = elf_object(RET, defined=["f"], comment=True)
+        trapped = elf_object(LW + UNIMP + RET, defined=["f"], comment=True)
+        plain = {"/work/b/libx.a": {"x.c.o": elf_object(LW + RET, defined=["f"], comment=True)}}
+        for after in self.FROM_FILES:
+            result = self.ubsan("ubsan", plain, {"/work/b/libx.a": {"x.c.o": sink}},
+                                [(sink, "x.c", "c", compile_arguments("x.c", after=after))])
+            self.assertEqual(result["result"], "fail", (after, result))
+            self.assertIn("libx.a: 0 UBSan traps and UB checks, the plain build's 0", result["detail"])
+            self.assertNotIn("by the compile", result["detail"])
+            self.assertNotIn("compiled without", result["detail"])
+            result = self.ubsan("ubsan", plain, {"/work/b/libx.a": {"x.c.o": trapped}},
+                                [(trapped, "x.c", "c", compile_arguments("x.c", after=after))])
+            self.assertEqual(result["result"], "pass", (after, result))
+            self.assertNotIn("by the compile that wrote them", result["detail"])
+
+    def test_a_file_option_the_build_gives_itself_decides(self):
+        """The same option with the same value in the build's own flags is the build's: the compile decides. Another
+        value decides nothing."""
+        sink = elf_object(RET, defined=["f"], comment=True)
+        archives = {"/work/b/libx.a": {"x.c.o": sink}}
+        plain = self.record(archives, build="plain")
+        record = self.record(archives, compiled=[(sink, "x.c", "c", compile_arguments(
+            "x.c", after=["--config", "/opt/build.cfg", "-mllvm", "-some-option"]))])
+        record.compiles.sanitizer["c"] += ["--config=/opt/build.cfg", "-mllvm", "-some-option"]
+        self.assertEqual(self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]["result"], "pass")
+        record.compiles.objects[hashlib.sha256(sink).hexdigest()][0].arguments.append("--config=/w/other.cfg")
+        result = self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]
+        self.assertEqual(result["result"], "fail", result)
+        self.assertIn("libx.a: 0 UBSan traps", result["detail"])
+
+    def test_a_word_given_through_the_preprocessor_options_counts_as_the_bare_word(self):
+        """-Wp, and -Xpreprocessor hand their words to clang's front end as -Xclang does."""
+        sink = elf_object(LW + UNIMP + RET, defined=["f"], comment=True)
+        plain = {"/work/b/libx.a": {"x.c.o": elf_object(LW + RET, defined=["f"], comment=True)}}
+        archives = {"/work/b/libx.a": {"x.c.o": sink}}
+        for after, word in ((["-Wp,-fsanitize-ignorelist=ign.txt"], "-fsanitize-ignorelist=ign.txt"),
+                            (["-Xpreprocessor", "-fsanitize-ignorelist=ign.txt"], "-fsanitize-ignorelist=ign.txt"),
+                            (["-Wp,-MD,x.d,-fno-sanitize=null"], "-fno-sanitize=null")):
+            result = self.ubsan("ubsan", plain, archives, [(sink, "x.c", "c", compile_arguments("x.c", after=after))])
+            self.assertEqual(result["result"], "fail", (after, result))
+            self.assertIn(f"libx.a(x.c.o) (x.c: with {word})", result["detail"])
+        sink = elf_object(RET, defined=["f"], comment=True)
+        result = self.ubsan("ubsan", {"/work/b/libx.a": {"x.c.o": sink}}, {"/work/b/libx.a": {"x.c.o": sink}},
+                            [(sink, "x.c", "c", compile_arguments(
+                                "x.c", after=["-Wp,-mllvm,-ubsan-guard-checks"]))])
+        self.assertEqual(result["result"], "fail", result)
+        self.assertIn("libx.a: 0 UBSan traps", result["detail"])
+
+    def test_the_builds_own_trap_and_recover_words_and_coverage_words_are_not_taken_for_them(self):
+        """The build's own -fsanitize-trap=all and -fno-sanitize-recover=all, -fsanitize-coverage=0 (which curl's seed
+        gives its protobuf build), and a word the build's own flags have, do not fail a compile."""
+        sink = elf_object(RET, defined=["f"], comment=True)
+        archives = {"/work/b/libx.a": {"x.c.o": sink}}
+        result = self.ubsan("ubsan", archives, archives,
+                            [(sink, "x.c", "c", compile_arguments("x.c", after=["-fsanitize-coverage=0"]))])
+        self.assertEqual(result["result"], "pass", result)
+        plain = self.record(archives, build="plain")
+        record = self.record(archives, compiled=[(sink, "x.c", "c", compile_arguments(
+            "x.c", after=["-fsanitize-ignorelist=/src/ignore.txt"]))])
+        record.compiles.sanitizer["c"].append("-fsanitize-ignorelist=/src/ignore.txt")
+        self.assertEqual(self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]["result"], "pass")
+        record.compiles.objects[hashlib.sha256(sink).hexdigest()][0].arguments[-1] = "-fsanitize-ignorelist=/src/b.txt"
+        result = self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]
+        self.assertEqual(result["result"], "fail", result)
+        self.assertIn("with -fsanitize-ignorelist=/src/b.txt", result["detail"])
+
+    def test_any_compile_of_the_same_bytes_with_the_flags_decides(self):
+        """Two compiles that wrote the same bytes, one without the flags (a host tool's copy, say): the bytes are the
+        same whichever made them, so the one with the flags makes the member instrumented."""
+        sink = elf_object(RET, defined=["f"], comment=True)
+        archives = {"/work/b/libx.a": {"x.c.o": sink}}
+        result = self.ubsan("ubsan", archives, archives, [(sink, "x.c", "c", compile_arguments("x.c", flags=())),
+                                                          (sink, "x.c", "c", compile_arguments("x.c"))])
+        self.assertEqual(result["result"], "pass", result)
+
+    def test_a_compile_the_records_cannot_judge_falls_back_to_the_traps(self):
+        """Assembly, which UBSan does not instrument, and arguments in a response file decide nothing."""
+        code = elf_object(RET, defined=["f"], comment=True)
+        archives = {"/work/b/libx.a": {"x.o": code}}
+        for language, arguments in (("assembler-with-cpp", compile_arguments("x.S", flags=())),
+                                    ("c", ["@x.rsp", "-c", "x.c"])):
+            result = self.ubsan("ubsan", archives, archives, [(code, "x", language, arguments)])
+            self.assertEqual(result["result"], "fail", (language, result))
+            self.assertIn("libx.a: 0 UBSan traps", result["detail"])
+            self.assertNotIn("compiled without", result["detail"])
+
+    def test_an_exclusion_counts_only_where_the_build_has_it(self):
+        """compile leaves OV_UBSAN_C_EXCLUDE out of the C compiles only: a C++ compile with it adds an exclusion."""
+        plain = self.record({}, build="plain")
+        sink = elf_object(RET, defined=["f"], comment=True)
+        record = self.record({"/work/b/libx.a": {"x.o": sink}},
+                             compiled=[(sink, "x", "c", compile_arguments("x", after=["-fno-sanitize=vptr"]))])
+        record.compiles.sanitizer["c"].append("-fno-sanitize=vptr")
+        record.compiles.ubsan["c"].append("-fno-sanitize=vptr")
+        self.assertEqual(self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]["result"], "pass")
+        record.compiles.objects[hashlib.sha256(sink).hexdigest()][0].language = "c++"
+        result = self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]
+        self.assertEqual(result["result"], "fail", result)
+        self.assertIn("with -fno-sanitize=vptr", result["detail"])
+        # A C compile need not repeat the exclusion: with it off, the compile has more checks, not fewer.
+        record.compiles.objects[hashlib.sha256(sink).hexdigest()][0] = check_links.Compile(
+            "x.c", "c", compile_arguments("x.c"))
+        self.assertEqual(self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]["result"], "pass")
+
+    def test_another_builds_compile_records_decide_nothing(self):
+        sink = elf_object(RET, defined=["f"], comment=True)
+        archives = {"/work/b/libx.a": {"x.o": sink}}
+        plain = self.record(archives, build="plain")
+        record = self.record(archives, compiled=[(sink, "x.c", "c", compile_arguments("x.c"))], build="ubsan")
+        record.compiles.build = "asan-ubsan"
+        self.assertEqual(self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]["result"], "fail")
+
+    def test_a_loose_object_compiled_without_the_flags_fails(self):
+        """With no record, a loose object with no check is only named; recorded without the flags, it fails."""
+        fuzzer = elf_object(LW + RET, defined=["LLVMFuzzerTestOneInput"], comment=True)
+        lib = elf_object(LW + UNIMP + RET, defined=["f"], comment=True)
+        plain = self.record({"/work/b/l.a": {"a.o": elf_object(LW + RET, defined=["f"], comment=True)}},
+                            loose={"/work/b/fuzzer.o": fuzzer}, build="plain")
+        for compiled, verdict in ((None, "pass"), ([(lib, "a.c", "c", compile_arguments("a.c")),
+                                                    (fuzzer, "fuzzer.c", "c", compile_arguments("fuzzer.c", ()))],
+                                                   "fail")):
+            ubsan = self.record({"/work/b/l.a": {"a.o": lib}}, loose={"/work/b/fuzzer.o": fuzzer}, compiled=compiled)
+            result = self.analyse({"plain": plain, "ubsan": ubsan})["ubsan"]["instrumented"]
+            self.assertEqual(result["result"], verdict, result)
+            self.assertIn("fuzzer.o", result["detail"])
+
+    def test_an_archive_with_code_no_record_decides_is_judged_by_its_checks(self):
+        """A member that no record decides (here, assembly) leaves its archive to the trap count, as before."""
+        sink = elf_object(RET, defined=["f"], comment=True)
+        asm = elf_object(RET, defined=["g"])
+        archives = {"/work/b/libx.a": {"x.o": sink, "g.o": asm}}
+        compiled = [(sink, "x.c", "c", compile_arguments("x.c")),
+                    (asm, "g.S", "assembler-with-cpp", compile_arguments("g.S", ()))]
+        result = self.ubsan("ubsan", archives, archives, compiled)
+        self.assertEqual(result["result"], "fail", result)
+        self.assertIn("libx.a: 0 UBSan traps and UB checks, the plain build's 0", result["detail"])
+        trapped = elf_object(LW + UNIMP + RET, defined=["f"], comment=True)
+        result = self.ubsan("ubsan", {"/work/b/libx.a": {"x.o": elf_object(LW + RET, defined=["f"], comment=True),
+                                                         "g.o": asm}},
+                            {"/work/b/libx.a": {"x.o": trapped, "g.o": asm}},
+                            [(trapped, "x.c", "c", compile_arguments("x.c")),
+                             (asm, "g.S", "assembler-with-cpp", compile_arguments("g.S", ()))])
+        self.assertEqual(result["result"], "pass", result)
+
+    def test_the_plain_build_is_needed_only_for_code_no_record_decides(self):
+        sink = elf_object(RET, defined=["f"], comment=True)
+        archives = {"/work/b/libx.a": {"x.o": sink}}
+        result = self.analyse({"ubsan": self.record(archives, compiled=[(sink, "x.c", "c",
+                                                                         compile_arguments("x.c"))])})["ubsan"]
+        self.assertEqual(result["instrumented"]["result"], "pass", result)
+        # With no records, as before: no plain build, no decision.
+        result = self.analyse({"ubsan": self.record(archives)})["ubsan"]
+        self.assertEqual(result["instrumented"]["result"], "error", result)
+        self.assertIn("no plain build", result["instrumented"]["detail"])
+
+    def test_an_exclusion_the_build_makes_is_allowed_by_check_name(self):
+        sink = elf_object(RET, defined=["f"], comment=True)
+        plain = self.record({}, build="plain")
+        record = self.record({"/work/b/libx.a": {"x.o": sink}},
+                             compiled=[(sink, "x.cc", "c++", compile_arguments("x.cc", after=["-fno-sanitize=vptr"]))])
+        record.compiles.sanitizer["c++"][-1] = "-fno-sanitize=function,vptr"
+        self.assertEqual(self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]["result"], "pass")
+        record.compiles.objects[hashlib.sha256(sink).hexdigest()][0].arguments.append("-fno-sanitize=vptr,null")
+        result = self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]
+        self.assertEqual(result["result"], "fail", result)
+        self.assertIn("with -fno-sanitize=vptr,null", result["detail"])
+
+    def test_compile_records_are_read_safely(self):
+        good_line = json.dumps({"sha256": "a" * 64, "output": "x.o", "directory": "/w", "file": "x.c",
+                                "language": "c", "shim": "s", "arguments": ["-c", "x.c"]})
+        records = self.raw / ".records"
+        (records / "flags.json").write_text(json.dumps({"build": "ubsan", "sanitizer": {"c": [], "c++": []},
+                                                         "ubsan": {"c": [], "c++": []}}))
+        (records / "compiles.jsonl").write_bytes(b"not json\n" + good_line.encode() + b"\n"
+                                                 + b'{"sha256": "short", "file": "y.c", "language": "c", '
+                                                   b'"arguments": []}\n' + b'{"sha256": "' + b"b" * 64
+                                                 + b'", "file": "\xff.c", "language": "c", "arguments": ["\xfe"]}\n')
+        compiles = check_links.read_compiles(self.raw)
+        self.assertEqual(sorted(compiles.objects), ["a" * 64, "b" * 64])
+        self.assertEqual(compiles.objects["a" * 64][0].arguments, ["-c", "x.c"])
+        # No records, flags that are not the build's, or a link planted in their place: no records.
+        (records / "compiles.jsonl").unlink()
+        self.assertIsNone(check_links.read_compiles(self.raw))
+        (records / "compiles.jsonl").symlink_to(records / "flags.json")
+        self.assertIsNone(check_links.read_compiles(self.raw))
+        (records / "compiles.jsonl").unlink()
+        (records / "compiles.jsonl").write_text(good_line + "\n")
+        (records / "flags.json").write_text('{"build": "ubsan", "sanitizer": {"c": []}}')
+        self.assertIsNone(check_links.read_compiles(self.raw))
 
     def test_a_changed_image_file_is_examined_as_the_projects_code(self):
         changed = archive({"x.o": elf_object(NOP, defined=["x"], comment=True)})
@@ -715,6 +1060,182 @@ class Analyse(unittest.TestCase):
         ])
         self.assertEqual(check_links.parse_dwarfdump(text),
                          {"/objects/0.o": ("DW_LANG_Mips_Assembler", "src/arch/memcpy.S", "/src/lib")})
+
+
+BUILDER = pathlib.Path(__file__).resolve().parents[2] / "infra" / "base-builder"
+RECORD_COMPILE = BUILDER / "record-compile"
+
+
+class CompileRecords(unittest.TestCase):
+    """infra/base-builder/record-compile, with a stand-in for a compiler shim; and the wrapper compile writes."""
+
+    # The stand-in: it writes each object its arguments name (-o's or -o<file>'s, else <name>.o for each .c, .cc or
+    # .S) unless SHIM_WRITE=0, writes its arguments to both streams (and to fd 3 with SHIM_FD3=1), and exits with
+    # $SHIM_STATUS, or kills itself with SIGSEGV.
+    SHIM = r"""#!/bin/sh
+out=""; prev=""; sources=""
+for a in "$@"; do
+  case "$prev" in -o|--output) out=$a ;; esac
+  case "$a" in --output=*) out=${a#--output=} ;; -o?*) out=${a#-o} ;; *.c|*.cc|*.S) sources="$sources ${a##*/}" ;; esac
+  prev=$a
+done
+if [ "${SHIM_WRITE:-1}" = 1 ]; then
+  if [ -n "$out" ]; then printf 'object of %s\n' "$*" > "$out"
+  else for s in $sources; do printf 'object of %s\n' "$s" > "${s%.*}.o"; done; fi
+fi
+printf 'out: %s [%s] %s\n' "$#" "$PWD" "$*"; printf 'err: [%s]\n' "$@" >&2
+[ "${SHIM_FD3:-0}" != 1 ] || printf 'fd3: %s\n' "$*" >&3 || exit 7
+[ "${SHIM_STATUS:-0}" != segv ] || kill -SEGV $$
+exit "${SHIM_STATUS:-0}"
+"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(os.path.realpath(self.tmp.name))
+        self.records = self.dir / "records"
+        self.shim = self.dir / "riscv64-linux-musl-clang-plain"
+        self.shim.write_text(self.SHIM)
+        self.shim.chmod(0o755)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_shim(self, *arguments, through=True, shim=None, status=0, fd3=None, **env):
+        """The stand-in, through record-compile or not; with `fd3`, a file that the step gets open as fd 3."""
+        command = [str(RECORD_COMPILE), str(self.records)] if through else []
+        command += [str(shim or self.shim), *arguments]
+        if fd3 is not None:
+            command = ["bash", "-c", 'exec 3>>"$0"; exec "$@"', str(fd3), *command]
+        return subprocess.run(command, cwd=self.dir, capture_output=True, timeout=60,
+                              env={**os.environ, "SHIM_STATUS": str(status), **env})
+
+    def lines(self):
+        files = sorted((self.records / "compiles").glob("*")) if (self.records / "compiles").exists() else []
+        return sorted((json.loads(path.read_text()) for path in files), key=lambda line: line["output"])
+
+    def test_a_compile_runs_as_without_records_and_is_recorded(self):
+        arguments = ["-Iinc", '-DQ="a \\ b"', "-DT=a\tb\x01", "-fsanitize=undefined", "-c", "src/x.c", "-o", "x.o"]
+        bare = self.run_shim(*arguments, through=False)
+        made = (self.dir / "x.o").read_bytes()
+        (self.dir / "x.o").unlink()
+        done = self.run_shim(*arguments)
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (bare.returncode, bare.stdout, bare.stderr))
+        self.assertEqual((self.dir / "x.o").read_bytes(), made)
+        self.assertEqual(self.lines(), [{"sha256": hashlib.sha256(made).hexdigest(), "output": "x.o",
+                                         "directory": str(self.dir), "file": "src/x.c", "language": "c",
+                                         "shim": str(self.shim), "arguments": arguments}])
+
+    def test_only_a_compile_that_succeeds_is_recorded(self):
+        self.assertEqual(self.run_shim("-E", "-c", "x.c", "-o", "x.i").returncode, 0)
+        self.assertEqual(self.run_shim("x.c", "-o", "x").returncode, 0)  # a link
+        self.assertEqual(self.run_shim("-c", "x.c", "-o", "x.o", status=3).returncode, 3)
+        # An object older than the step is not one it wrote.
+        (self.dir / "y.o").write_text("stale")
+        os.utime(self.dir / "y.o", (1, 1))
+        self.assertEqual(self.run_shim("-c", "y.c", SHIM_WRITE="0").returncode, 0)
+        self.assertEqual(self.lines(), [])
+
+    def test_a_step_ends_as_the_shim_ends(self):
+        """Killed by a signal, the step is killed by it too, with nothing more on standard error; and a BASH_ENV or
+        SHELLOPTS that the build exports changes nothing the step writes."""
+        for arguments in (["-c", "x.c", "-o", "x.o"], ["x.c", "-o", "x"]):
+            bare = self.run_shim(*arguments, through=False, status="segv")
+            done = self.run_shim(*arguments, status="segv")
+            self.assertEqual(bare.returncode, -11)
+            self.assertEqual((done.returncode, done.stdout, done.stderr), (bare.returncode, bare.stdout, bare.stderr))
+        startup = self.dir / "startup.sh"
+        startup.write_text("echo from BASH_ENV >&2\n")
+        env = {"BASH_ENV": str(startup), "SHELLOPTS": "braceexpand:hashall:interactive-comments:xtrace"}
+        for arguments in (["-c", "x.c", "-o", "x.o"], ["--version"]):
+            bare = self.run_shim(*arguments, through=False, **env)
+            done = self.run_shim(*arguments, **env)
+            self.assertEqual((done.returncode, done.stdout, done.stderr), (bare.returncode, bare.stdout, bare.stderr))
+
+    def test_a_shim_exit_status_that_names_a_stop_signal_is_the_steps(self):
+        """A shim that exits with 147-150 (128 + SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU) or 145 (128 + SIGCHLD): the step
+        exits with that status and does not stop itself."""
+        for status in (145, 147, 148, 149, 150):
+            bare = self.run_shim("-c", "x.c", "-o", "x.o", through=False, status=status)
+            done = self.run_shim("-c", "x.c", "-o", "x.o", status=status)
+            self.assertEqual((done.returncode, done.stdout, done.stderr), (bare.returncode, bare.stdout, bare.stderr))
+            self.assertEqual(done.returncode, status)
+
+    def test_every_open_file_reaches_the_shim(self):
+        """A build that gives the compiler fd 3 open: the shim writes to it as it does without the front."""
+        for arguments in (["-c", "x.c", "-o", "x.o"], ["x.c", "-o", "x"]):
+            bare_file, done_file = self.dir / "bare3", self.dir / "done3"
+            bare = self.run_shim(*arguments, through=False, fd3=bare_file, SHIM_FD3="1")
+            done = self.run_shim(*arguments, fd3=done_file, SHIM_FD3="1")
+            self.assertEqual((done.returncode, done.stdout, done.stderr), (bare.returncode, bare.stdout, bare.stderr))
+            self.assertEqual(done.returncode, 0)
+            self.assertEqual(done_file.read_text(), bare_file.read_text())
+            bare_file.unlink()
+            done_file.unlink()
+
+    def test_a_compile_whose_arguments_clang_edits_has_no_record(self):
+        """CCC_OVERRIDE_OPTIONS edits the arguments inside clang's driver, after the record would take them."""
+        env = {"CCC_OVERRIDE_OPTIONS": "+-fno-sanitize=undefined"}
+        bare = self.run_shim("-fsanitize=undefined", "-c", "x.c", "-o", "x.o", through=False, **env)
+        done = self.run_shim("-fsanitize=undefined", "-c", "x.c", "-o", "x.o", **env)
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (bare.returncode, bare.stdout, bare.stderr))
+        self.assertEqual(self.lines(), [])
+        self.assertEqual(self.run_shim("-c", "x.c", "-o", "x.o", CCC_OVERRIDE_OPTIONS="").returncode, 0)
+        self.assertEqual(len(self.lines()), 1)
+
+    def test_the_output_named_in_each_spelling(self):
+        for arguments in (["-c", "a.c", "-oj.o"], ["-c", "a.c", "--output", "k.o"], ["-c", "--output=l.o", "a.c"]):
+            self.assertEqual(self.run_shim(*arguments).returncode, 0)
+        self.assertEqual([line["output"] for line in self.lines()], ["j.o", "k.o", "l.o"])
+
+    def test_each_object_and_its_language(self):
+        self.assertEqual(self.run_shim("-c", "a.c", "lib/b.cc", "-x", "c++", "e.S", "-I", "f.c").returncode, 0)
+        self.assertEqual([(line["output"], line["file"], line["language"]) for line in self.lines()],
+                         [("a.o", "a.c", "c"), ("b.o", "lib/b.cc", "c++"), ("e.o", "e.S", "c++")])
+        # A C++ shim (clang++) takes C as C++.
+        cxx = self.dir / "riscv64-linux-musl-clang++-plain"
+        cxx.write_text(self.SHIM)
+        cxx.chmod(0o755)
+        (self.records / "compiles").rename(self.dir / "earlier")
+        self.assertEqual(self.run_shim("-c", "a.c", "f.S", shim=cxx).returncode, 0)
+        self.assertEqual([(line["output"], line["language"]) for line in self.lines()],
+                         [("a.o", "c++"), ("f.o", "assembler-with-cpp")])
+
+    def test_a_front_hands_the_shim_every_argument(self):
+        original = self.shim.read_bytes()
+        for _ in range(2):  # a shim that has a front keeps it
+            subprocess.run([str(RECORD_COMPILE), "--front", str(self.records), str(self.shim)], check=True)
+        aside = self.dir / ".recorded" / self.shim.name
+        self.assertEqual(aside.read_bytes(), original)
+        self.assertEqual(self.shim.read_text(), "#!/bin/sh\n# record-compile front\n"
+                         f'exec {RECORD_COMPILE} {self.records} {aside} "$@"\n')
+        # The build runs the shim by its path, and the front hands the shim what the shim itself got.
+        arguments = ["-c", "a b.c", "-o", "a.o", "-DX=\"$HOME\"", "-D*", "", "--", "-x"]
+        done = self.run_shim(*arguments, through=False)
+        bare = self.run_shim(*arguments, through=False, shim=aside)
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (bare.returncode, bare.stdout, bare.stderr))
+        self.assertEqual([(line["shim"], line["arguments"]) for line in self.lines()], [(str(self.shim), arguments)])
+
+    def test_compile_writes_the_wrapper_it_always_wrote(self):
+        """compile's wrappers for $CC and $CXX are the text compile has always written, with records and without:
+        the records come from a front before each shim, never from the wrappers."""
+        script = ('eval "$(sed -n \'/^write_wrapper() {/,/^}/p\' "$1")"\n'
+                  "LIB=/usr/local/lib/oss-verify LIB_FUZZING_ENGINE=/tmp/ov/libFuzzingEngine.a\n"
+                  "LIB_ALLOCATION_FAILURE_ENGINE=/tmp/ov/libAllocationFailureEngine.a\n"
+                  "LIB_ALLOCATION_COUNTING_ENGINE=/tmp/ov/libAllocationCountingEngine.a OV_RECORDS=$2\n"
+                  'write_wrapper "$3" /tmp/shim/riscv64-linux-musl-clang-plain\n')
+        shim = "/tmp/shim/riscv64-linux-musl-clang-plain"
+        expected = (
+            '#!/bin/sh\nfor a in "$@"; do\n'
+            f'  case "$a" in -c|-E|-S|-fsyntax-only|-M|-MM|--version|-dumpmachine|-print-*) exec {shim} "$@" ;; esac\n'
+            'done\nfor a in "$@"; do\n'
+            '  case "$a" in "/tmp/ov/libFuzzingEngine.a"|"/tmp/ov/libAllocationFailureEngine.a"|'
+            '"/tmp/ov/libAllocationCountingEngine.a")\n'
+            f'    exec /usr/local/lib/oss-verify/link-fuzz-target {shim} "$@" ;; esac\n'
+            f'done\nexec {shim} "$@"\n')
+        for n, records in enumerate(("", "/tmp/ov/records")):
+            out = self.dir / f"wrapper{n}"
+            subprocess.run(["bash", "-c", script, "bash", str(BUILDER / "compile"), records, str(out)], check=True)
+            self.assertEqual(out.read_text(), expected)
 
 
 class ModelRelease(unittest.TestCase):

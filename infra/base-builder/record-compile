@@ -1,0 +1,213 @@
+#!/bin/bash -p
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+#
+# record-compile: the compile records of tools/check --checks, for its check that the UndefinedBehaviorSanitizer
+# reached the project's code (tools/check_links.py). The sanitizer runs in trap mode and leaves no symbol, and code
+# that it has nothing to check in compiles to the same bytes with its flags as without them, so an object cannot say
+# which flags made it. The compile says so here, as it runs.
+#
+#     record-compile --front <records> <shim>...    put a front before each compiler shim
+#     record-compile <records> <shim> <arguments>   what a front runs: the shim with the arguments, then the records
+#
+# compile, and release-target.sh for the shims of a ported build, call --front only when compile records the build
+# ($OV_RECORDS, which compile sets when tools/check --checks gives OV_RECORD=1, for its first build). Without records
+# no shim has a front, and no compile changes. --front copies each shim to .recorded/ beside it and puts at its path a
+# front that hands every argument, unchanged, to this script. Each compile of the project's code goes through a shim:
+# $CC and $CXX (compile's wrappers run the shims), a shim named by its path (a ported build), and $DRVCC. A build that
+# runs a compiler by its own name (clang) goes round them, and its objects have no record.
+#
+# The shim runs with the same arguments, working directory, open files (standard streams and any other) and
+# environment as without a front (but for SHLVL and _, which bash sets and no compiler reads; -p keeps BASH_ENV and
+# SHELLOPTS from changing what this script does), and the step ends as the shim ends: with its exit status, or killed
+# by the same signal (but for a failing step whose exit status is over 128, below). When the step compiles (-c, and
+# none of -E, -S, -fsyntax-only, -M, -MM, -###) and the shim succeeds, this then writes one record for each object
+# that the step wrote, as a file of its own in <records>/compiles/, which compile gathers into
+# $OUT/.records/compiles.jsonl. A step run with CCC_OVERRIDE_OPTIONS set has none: clang's driver edits its arguments
+# after this script has seen them. A record is one line of JSON:
+#
+#     {"sha256": "<of the object's bytes>", "output": "<the object: -o's file, else clang's name for it>",
+#      "directory": "<the working directory>", "file": "<its source>", "language": "<the source's language>",
+#      "shim": "<the shim the build ran>", "arguments": ["<each argument the build gave the shim>", ...]}
+#
+# The language is clang's name for what the step took the source as: -x's, else that of its extension (.c c, .cc and
+# .cpp c++, .m objective-c, .s assembler, .S assembler-with-cpp, ...), and a C++ shim (clang++) takes C as C++.
+# A step's input of no such extension, and no -x, is an input of a link (an object, an archive) and has no record. An
+# object older than the step (a file the step did not write) has none either. Recording writes nothing to standard
+# output or standard error: a configure test that reads what the compiler says sees the same as without records. A
+# record that cannot be written is left out, and tools/check_links.py then judges that object as it judges one with no
+# record.
+shopt -u patsub_replacement 2>/dev/null
+
+if [ "${1:-}" = --front ]; then
+  records=${2:?record-compile --front needs the records directory}
+  shift 2
+  status=0
+  # The fronts run this file by the path it has, /usr/local/lib/oss-verify/record-compile in the builder.
+  self=$(readlink -f -- "$0") || exit 1
+  for shim in "$@"; do
+    [ -f "$shim" ] || continue
+    # A shim that already has a front keeps it.
+    [ "$(sed -n 2p "$shim")" != "# record-compile front" ] || continue
+    aside=${shim%/*}/.recorded/${shim##*/}
+    # Copied, then the front moved over the shim, so that the shim's path never names nothing.
+    mkdir -p "${aside%/*}" && cp -p "$shim" "$aside.tmp" && mv -f "$aside.tmp" "$aside" \
+      && printf '#!/bin/sh\n# record-compile front\nexec %s %s %s "$@"\n' "$self" "$records" "$aside" \
+           > "$shim.front" \
+      && chmod 0755 "$shim.front" && mv -f "$shim.front" "$shim" \
+      || { echo "record-compile: no front for $shim: its compiles have no record" >&2; status=1; }
+  done
+  exit "$status"
+fi
+
+records=${1:?record-compile needs the records directory}
+shim=${2:?record-compile needs the shim}
+shift 2
+
+compiles=""
+for a in "$@"; do
+  case "$a" in
+    -c) compiles=1 ;;
+    -E|-S|-fsyntax-only|-M|-MM|'-###') exec "$shim" "$@" ;;
+  esac
+done
+# CCC_OVERRIDE_OPTIONS edits the arguments inside clang's driver, after the record would have taken them: no record.
+[ -n "$compiles" ] && [ -z "${CCC_OVERRIDE_OPTIONS:-}" ] || exec "$shim" "$@"
+# A mark of when the step starts: an object older than it is not one the step wrote.
+mark=$({ mkdir -p "$records/marks" && mktemp "$records/marks/XXXXXXXXXX"; } 2>/dev/null) || mark=""
+# The shim writes to the step's standard error, kept in an fd that bash picks above 9, so that every fd the build
+# gave the step reaches the shim as it is; bash's own report of a shim killed by a signal goes nowhere.
+if exec {stderr}>&2; then
+  { "$shim" "$@" 2>&"$stderr" {stderr}>&-; } 2>/dev/null
+  status=$?
+  exec {stderr}>&-
+else
+  "$shim" "$@"
+  status=$?
+fi
+if [ "$status" -ne 0 ]; then
+  [ -z "$mark" ] || rm -f "$mark"
+  # bash gives a shim killed by signal N the status 128+N, the same as a shim that exits with 128+N itself, and cannot
+  # tell the two apart. A status of 128+N for a signal N whose default action ends a process ends the step with that
+  # signal: so a shim that exits with 139 itself ends the step by SIGSEGV. One for a stop, or for a signal whose
+  # default is to do nothing (SIGCHLD, SIGCONT, SIGURG, SIGWINCH), and every other status, is the step's exit status.
+  # Either way the step fails, as it does without the front; clang itself exits with 1 when it fails, even when its
+  # front end crashes.
+  if [ "$status" -gt 128 ] && [ "$status" -lt 192 ]; then
+    case $((status - 128)) in
+      17|18|19|20|21|22|23|28) ;;
+      *) trap - "$((status - 128))" 2>/dev/null
+         kill -n "$((status - 128))" "$$" 2>/dev/null ;;
+    esac
+  fi
+  exit "$status"
+fi
+
+# json <text>: REPLY is <text> as a JSON string.
+json() {
+  local s=$1 n hex c u
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  case "$s" in
+    *[$'\001'-$'\037']*)
+      s=${s//$'\n'/\\n}
+      s=${s//$'\t'/\\t}
+      s=${s//$'\r'/\\r}
+      for n in {1..31}; do
+        printf -v hex %02x "$n"
+        printf -v c "\\x$hex"
+        printf -v u '\\u%04x' "$n"
+        s=${s//"$c"/$u}
+      done ;;
+  esac
+  REPLY="\"$s\""
+}
+
+# record <arguments>: the records of a compile that succeeded.
+record() {
+  local LC_ALL=C cxx="" out="" lang="" skip="" a l i object sum line tmp
+  local -a files=() languages=()
+  case "${shim##*/}" in *++*) cxx=1 ;; esac
+  for a in "$@"; do
+    if [ -n "$skip" ]; then
+      case "$skip" in -o) out=$a ;; -x) lang=$a ;; esac
+      skip=""
+      continue
+    fi
+    case "$a" in
+      # The options whose value is the next argument.
+      -o|--output|-x|-I|-D|-U|-include|-imacros|-isystem|-idirafter|-iquote|-iprefix|-iwithprefix|\
+      -iwithprefixbefore|-isysroot|-iframework|-isystem-after|-cxx-isystem|-ivfsoverlay|-iwithsysroot|-imultilib|\
+      -include-pch|-MF|-MT|-MQ|-MJ|-Xclang|-Xpreprocessor|-Xassembler|-Xlinker|-Xanalyzer|-Xopenmp-target|-mllvm|\
+      -arch|-target|--param|-main-file-name|-gcc-toolchain|--sysroot|--config|-B|-F|-L|-T|-u|-z|-e|-A|\
+      -dependency-file|-dependency-dot|-serialize-diagnostics|--serialize-diagnostics|-working-directory)
+        skip=${a/#--output/-o}
+        continue ;;
+      --output=*) out=${a#--output=}; continue ;;
+      -o?*) out=${a#-o}; continue ;;
+      -x?*) lang=${a#-x}; continue ;;
+      -) ;;
+      -*) continue ;;
+    esac
+    if [ -n "$lang" ] && [ "$lang" != none ]; then
+      l=$lang
+    else
+      case "$a" in
+        *.c) l=c ;;
+        *.i) l=cpp-output ;;
+        *.h) l=c-header ;;
+        *.m) l=objective-c ;;
+        *.mi) l=objective-c-cpp-output ;;
+        *.mm|*.M) l=objective-c++ ;;
+        *.mii) l=objective-c++-cpp-output ;;
+        *.cc|*.CC|*.cp|*.cpp|*.CPP|*.cxx|*.CXX|*.c++|*.C++|*.C|*.cppm|*.ccm|*.cxxm|*.c++m|*.ixx) l=c++ ;;
+        *.ii) l=c++-cpp-output ;;
+        *.hh|*.hpp|*.hxx|*.HPP|*.HXX|*.H|*.h++|*.hp|*.tcc) l=c++-header ;;
+        *.s) l=assembler ;;
+        *.S|*.sx) l=assembler-with-cpp ;;
+        *) continue ;;
+      esac
+      if [ -n "$cxx" ]; then
+        case "$l" in c) l=c++ ;; cpp-output) l=c++-cpp-output ;; c-header) l=c++-header ;; esac
+      fi
+    fi
+    files+=("$a")
+    languages+=("$l")
+  done
+  [ "${#files[@]}" -gt 0 ] || return 0
+  mkdir -p "$records/compiles" || return 1
+  local arguments="" separator="" called directory
+  for a in "$@"; do
+    json "$a"
+    arguments="$arguments$separator$REPLY"
+    separator=", "
+  done
+  json "${shim/\/.recorded\//\/}"; called=$REPLY
+  json "$PWD"; directory=$REPLY
+  for i in "${!files[@]}"; do
+    if [ -n "$out" ]; then
+      object=$out
+    else
+      object=${files[$i]##*/}
+      object=${object%.*}.o
+    fi
+    # An object the step wrote: there, a regular file, and no older than the step.
+    [ "$object" != - ] && [ -f "$object" ] || continue
+    [ -z "$mark" ] || [ ! "$object" -ot "$mark" ] || continue
+    sum=$(sha256sum < "$object") || return 1
+    sum=${sum%% *}
+    json "$object"; line="{\"sha256\": \"$sum\", \"output\": $REPLY"
+    line="$line, \"directory\": $directory"
+    json "${files[$i]}"; line="$line, \"file\": $REPLY"
+    json "${languages[$i]}"; line="$line, \"language\": $REPLY"
+    line="$line, \"shim\": $called, \"arguments\": [$arguments]}"
+    tmp=$(mktemp "$records/compiles/XXXXXXXXXX") || return 1
+    printf '%s\n' "$line" > "$tmp" || return 1
+    # With -o the step compiles one source.
+    [ -z "$out" ] || break
+  done
+}
+
+record "$@" > /dev/null 2>&1
+[ -z "$mark" ] || rm -f "$mark"
+exit 0
