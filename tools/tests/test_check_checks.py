@@ -65,12 +65,15 @@ class Shifts(unittest.TestCase):
         self.assertEqual(check_checks.moved(check_records.Check(40, None, path="/src/p/fuzz/f.c"), shifts), 40)
 
     def test_record_patches_apply_on_the_last_lines(self):
-        import subprocess, tempfile
+        # Applied as tools/checks/compile-check applies a breakage patch in the image's working directory: git must
+        # look for no repository above that directory, or it reads the patch's paths from the top of an enclosing one,
+        # skips every one of them and still exits 0. On a machine whose TMPDIR is inside a git repository, a bare
+        # `git apply` here therefore changed nothing and reported success.
         for ending in (b"\n", b""):
             data = b"a\nb\nc\nd\ne" + ending
             for line in range(1, 6):
                 with tempfile.TemporaryDirectory() as directory:
-                    directory = pathlib.Path(directory)
+                    directory = pathlib.Path(directory).resolve()
                     (directory / "f.c").write_bytes(data)
                     record = check_records.Record("f.c", line, "abcde"[line - 1], "X", "s")
                     changed, _ = check_records.mutate(data, record)
@@ -78,7 +81,10 @@ class Shifts(unittest.TestCase):
                     diff = b"".join(difflib.diff_bytes(difflib.unified_diff, check_checks.diff_lines(data),
                                                        check_checks.diff_lines(changed), b"a/f.c", b"b/f.c"))
                     (directory / "p").write_bytes(b"diff --git a/f.c b/f.c\n" + diff)
-                    subprocess.run(["git", "apply", "p"], cwd=directory, check=True, capture_output=True)
+                    done = subprocess.run(["git", "apply", "--verbose", "p"], cwd=directory, check=True,
+                                          capture_output=True,
+                                          env={**os.environ, "GIT_CEILING_DIRECTORIES": str(directory.parent)})
+                    self.assertNotIn(b"Skipped patch", done.stdout + done.stderr, (line, ending))
                     self.assertEqual((directory / "f.c").read_bytes(), changed, (line, ending))
 
     def test_record_patches_split_on_newlines_only(self):
