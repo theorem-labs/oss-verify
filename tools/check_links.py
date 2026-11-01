@@ -65,7 +65,8 @@ LIBC = re.compile(r"(crt1|crti|crtn|Scrt1|rcrt1)\.o|lib(c|m|rt|pthread|crypt|uti
 SYSROOT_LIB = re.compile(r"/opt/[^/]+(/[^/]+)*/usr/lib/[^/]+\.a")
 # rustc's allocator shim defines only these, and forwards each to the standard library. Newer rustc names them inside
 # its `__rustc` crate, v0-mangled (`_RNvCs<disambiguator>_7___rustc12___rust_alloc`, where 12 is the length of
-# `__rust_alloc`), and adds `_v2` to two of them; a mangled name counts only when its length matches its identifier.
+# `__rust_alloc`), and adds `_v2` to two of them; a mangled name counts only when its length is its identifier's,
+# written as rustc writes it: no leading zero, and compared as text, so a length of any number of digits is a refusal.
 RUST_ALLOCATOR_SHIM = re.compile(r"(?:_RNvCs[0-9A-Za-z]*_7___rustc(?P<len>[0-9]+)_)?(?P<ident>__rust_(?:alloc|dealloc|"
                                  r"realloc|alloc_zeroed|alloc_error_handler|alloc_error_handler_should_panic(?:_v2)?|"
                                  r"no_alloc_shim_is_unstable(?:_v2)?))")
@@ -74,7 +75,7 @@ RUST_ALLOCATOR_SHIM = re.compile(r"(?:_RNvCs[0-9A-Za-z]*_7___rustc(?P<len>[0-9]+
 def rust_allocator_shim(name):
     """Whether `name` is one of the functions rustc's allocator shim defines (RUST_ALLOCATOR_SHIM)."""
     m = RUST_ALLOCATOR_SHIM.fullmatch(name)
-    return bool(m) and (m["len"] is None or int(m["len"]) == len(m["ident"]))
+    return bool(m) and (m["len"] is None or m["len"] == str(len(m["ident"])))
 
 
 # The symbols that AddressSanitizer's module constructor, in every object it instruments, refers to.

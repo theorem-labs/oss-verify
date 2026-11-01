@@ -461,8 +461,11 @@ class Analyse(unittest.TestCase):
         shim = elf_object(NOP, defined=names, comment=True)
         result = self.analyse({"asan": self.record({"/work/l.a": {"a.o": good(), "shim.o": shim}})})["asan"]
         self.assertEqual(result["instrumented"]["result"], "pass")
-        # A length that is not its identifier's, or a function of another name, is the project's code.
-        for bad in ("_RNvCs6UdHf40Qw6p_7___rustc13___rust_alloc", "_RNvCs6UdHf40Qw6p_7___rustc12___rust_other"):
+        # A length that is not its identifier's (also one with a leading zero, or too long for int()), or a function
+        # of another name, is the project's code.
+        for bad in ("_RNvCs6UdHf40Qw6p_7___rustc13___rust_alloc", "_RNvCs6UdHf40Qw6p_7___rustc12___rust_other",
+                    "_RNvCs6UdHf40Qw6p_7___rustc012___rust_alloc",
+                    "_RNvCs6UdHf40Qw6p_7___rustc" + "1" * 5000 + "___rust_alloc"):
             other = elf_object(NOP, defined=names[1:] + [bad], comment=True)
             result = self.analyse({"asan": self.record({"/work/l.a": {"a.o": good(), "shim.o": other}})})["asan"]
             self.assertEqual(result["instrumented"]["result"], "fail", bad)
