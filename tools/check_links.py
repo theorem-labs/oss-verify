@@ -23,10 +23,12 @@ and gives each build of each fuzz target two results:
    builds (asan, asan-ubsan), each one with code must refer to __asan_init or __asan_version_mismatch_check_*, as the
    constructor that AddressSanitizer adds to each instrumented object does. rustc's allocator shim, an object that only
    forwards __rust_alloc and its siblings to the standard library, is the one exception (at most one such member), as
-   it makes no memory access for AddressSanitizer to check. The UndefinedBehaviorSanitizer runs in trap mode and
-   leaves no symbol: its checks are trap instructions (`unimp`), and rustc's UB checks are precondition_check
-   functions. So in the ubsan and asan-ubsan builds, each archive of the project's code must hold more of them than
-   the same archive in the plain build, and so must the project's code as a whole.
+   it makes no memory access for AddressSanitizer to check. In the msan build, each one with code must refer to
+   __msan_init, as the constructor that MemorySanitizer adds to each instrumented object does. The
+   UndefinedBehaviorSanitizer runs in trap mode and leaves no symbol: its checks are trap instructions (`unimp`), and
+   rustc's UB checks are precondition_check functions. So in the ubsan and asan-ubsan builds, each archive of the
+   project's code must hold more of them than the same archive in the plain build, and so must the project's code as
+   a whole.
 
 The plain build instruments nothing, by design; its result is "plain" when its record is complete, and "error"
 when it has no record or an incomplete one. A Go program has no record (Go's linker writes no map): its result is
@@ -67,8 +69,9 @@ RUST_ALLOCATOR_SHIM = re.compile(r"__rust_(alloc|dealloc|realloc|alloc_zeroed|al
                                  r"no_alloc_shim_is_unstable)")
 # The symbols that AddressSanitizer's module constructor, in every object it instruments, refers to.
 ASAN_MODULE = re.compile(r"__asan_init|__asan_version_mismatch_check_v[0-9]+")
+MSAN_MODULE = re.compile(r"__msan_init")
 TRAP = 0xC0001073  # `unimp`, the word a trap-mode UndefinedBehaviorSanitizer check executes on riscv64
-SANITIZER_BUILDS = ("ubsan", "asan", "asan-ubsan")
+SANITIZER_BUILDS = ("ubsan", "asan", "asan-ubsan", "msan")
 ASAN_BUILDS = ("asan", "asan-ubsan")
 UBSAN_BUILDS = ("ubsan", "asan-ubsan")
 C_FAMILY = re.compile(r"\.(c|cc|cp|cpp|cxx|c\+\+|C|CPP|m|mm|h|hh|hpp|hxx|inc|ii|i)$")
@@ -93,6 +96,9 @@ MAX_RECORD_BYTES = 1 << 30
 DRIVER_SEALS = frozenset(path.name for path in
                          (pathlib.Path(__file__).resolve().parent.parent / "infra" / "base-builder" / "driver")
                          .glob("wrap_*.c"))
+# The getenv seal of the msan build, driver/msan_getenv.c: MemorySanitizer's runtime wraps getenv itself, so this seal
+# defines getenv, which that wrapper calls, and nothing else.
+MSAN_GETENV_SEAL = "msan_getenv.c"
 
 SHT_SYMTAB, SHT_NOBITS = 2, 8
 SHF_EXECINSTR = 0x4
@@ -492,6 +498,7 @@ class ObjectFacts:
     files: list  # the names of its STT_FILE symbols
     compiled: bool  # a compiler's .comment or .llvm_addrsig: it was compiled from C, C++ or another language
     bitcode: bool  # LLVM bitcode, which this cannot read
+    msan: bool = False  # it refers to MemorySanitizer's module constructor symbol (MSAN_MODULE)
 
 
 def words(body):
@@ -544,7 +551,7 @@ def object_facts(data):
             body = raw(index)
             code += len(body)
             traps += words(body).count(TRAP)
-    asan, defined, files, ub_checks = False, [], [], 0
+    asan, msan, defined, files, ub_checks = False, False, [], [], 0
     for index, (_, kind, _, _, _, _, link, _, _, entsize) in enumerate(sections):
         if kind != SHT_SYMTAB or entsize < 24 or link >= shnum:
             continue
@@ -557,12 +564,13 @@ def object_facts(data):
                 files.append(text)
             elif shndx == SHN_UNDEF:
                 asan = asan or bool(ASAN_MODULE.fullmatch(text))
+                msan = msan or bool(MSAN_MODULE.fullmatch(text))
             elif (info & 0xF) == 2:  # a function this object defines
                 # rustc's UB checks: a precondition_check function, of any binding.
                 ub_checks += "precondition_check" in text
                 if (info >> 4) in (1, 2):  # global or weak
                     defined.append(text)
-    return ObjectFacts(code, asan, traps, ub_checks, defined, files, compiled, False)
+    return ObjectFacts(code, asan, traps, ub_checks, defined, files, compiled, False, msan)
 
 
 # ── one target ───────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -578,10 +586,13 @@ class Code:
 
 
 def is_seal(facts):
-    """Whether an object is one of the driver's seals that a recipe compiled (DRIVER_SEALS)."""
-    return (facts is not None and facts.defined and facts.files
-            and all(pathlib.PurePosixPath(name).name in DRIVER_SEALS for name in facts.files)
-            and all(name.startswith("__wrap_") for name in facts.defined))
+    """Whether an object is one of the driver's seals that a recipe compiled (DRIVER_SEALS, MSAN_GETENV_SEAL)."""
+    if facts is None or not facts.defined or not facts.files:
+        return False
+    sources = {pathlib.PurePosixPath(name).name for name in facts.files}
+    if sources == {MSAN_GETENV_SEAL}:
+        return facts.defined == ["getenv"]
+    return sources <= DRIVER_SEALS and all(name.startswith("__wrap_") for name in facts.defined)
 
 
 def project_code(record, image):
@@ -775,6 +786,11 @@ def analyse(records, image, dwarf_units=None, checkouts=(), assembly_sources=Non
             plain_c += shims[1:]
             if plain_c:
                 found.append(f"{len(plain_c)} of {len(with_code)} objects with code refer to no AddressSanitizer "
+                             "constructor: " + ", ".join(listed(plain_c)))
+        if build == "msan":
+            plain_c = [c.label for c in with_code if not (c.facts.bitcode or c.facts.msan)]
+            if plain_c:
+                found.append(f"{len(plain_c)} of {len(with_code)} objects with code refer to no MemorySanitizer "
                              "constructor: " + ", ".join(listed(plain_c)))
         notes = []
         if build in UBSAN_BUILDS:

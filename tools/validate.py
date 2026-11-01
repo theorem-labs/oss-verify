@@ -130,10 +130,15 @@ BUILT_TODAY = ("c", "c++", "rust", "python", "go")
 # project's builds compile CPython with it). A rust project's ubsan build is rustc's UB checks
 # (docs/build-contract.md#rust-fuzz-targets).
 UBSAN_CHECK_LANGUAGES = ("c", "c++", "python")
-SANITIZERS = ("address", "undefined")
+SANITIZERS = ("address", "undefined", "memory")
+# The languages that may ask for memory, the msan build (docs/project-yaml.md#sanitizers). MemorySanitizer needs all
+# of a program's code built with it, and the toolchain's MemorySanitizer configs link C++ against a libc++ that is not.
+# The rust build has no msan form (rust/recipes.sh), and no python build has been made with it.
+MEMORY_LANGUAGES = ("c",)
 PUBLISH = ("eager", "after_fixes", "never")
 # The builds, in the order their statements and manifests list them, each with the SANITIZER that `compile` takes.
-BUILDS = {"plain": "none", "ubsan": "undefined", "asan": "address", "asan-ubsan": "address-undefined"}
+BUILDS = {"plain": "none", "ubsan": "undefined", "asan": "address", "asan-ubsan": "address-undefined",
+          "msan": "memory"}
 
 DEFAULT_SANITIZERS = ["address", "undefined"]
 # The UndefinedBehaviorSanitizer checks and groups that the toolchain's clang (20) takes with -fsanitize-trap for
@@ -182,7 +187,8 @@ UBSAN_CHANGES = ("add", "remove", "reason")
 DEFAULT_PUBLISH = "after_fixes"
 # Today's values (docs/what-gets-proven.md, Memory budgets): the halts budget for each build run alone; for each
 # sanitizer, the agrees budgets of the plain side and the sanitizer side. asan-ubsan uses the address pair.
-DEFAULT_BUDGETS = {"halts": "16GiB", "agrees": {"address": ["2GiB", "512GiB"], "undefined": ["16GiB", "512GiB"]}}
+DEFAULT_BUDGETS = {"halts": "16GiB", "agrees": {"address": ["2GiB", "512GiB"], "undefined": ["16GiB", "512GiB"],
+                                              "memory": ["2GiB", "512GiB"]}}
 PROOFS_REPO = "https://github.com/theorem-labs/oss-verify-proofs"
 
 
@@ -267,11 +273,14 @@ def source_suffixes(config):
 
 
 def builds_of(config):
-    """The builds a valid project.yaml asks for: plain, one per sanitizer, and asan-ubsan when there are both."""
+    """The builds a valid project.yaml asks for: plain, one per sanitizer, and asan-ubsan when there are both
+    address and undefined."""
     sanitizers = sanitizers_of(config)
     wanted = {"plain", *(("ubsan",) if "undefined" in sanitizers else ()), *(("asan",) if "address" in sanitizers else ())}
     if "address" in sanitizers and "undefined" in sanitizers:
         wanted.add("asan-ubsan")
+    if "memory" in sanitizers:
+        wanted.add("msan")
     return [build for build in BUILDS if build in wanted]
 
 
@@ -356,6 +365,9 @@ def check_builds(config):
             if language in PLAIN_ONLY and sanitizers:
                 yield (f"a {language} project has the plain build only: give sanitizers: [] "
                        "or leave it out")
+            elif "memory" in sanitizers and isinstance(language, str) and language not in MEMORY_LANGUAGES:
+                yield (f"sanitizers: memory, the msan build, is for a {' or '.join(MEMORY_LANGUAGES)} project only, "
+                       f"not {language} (docs/project-yaml.md#sanitizers)")
 
     changes = ubsan_changes_of(config)
     if changes is not None:

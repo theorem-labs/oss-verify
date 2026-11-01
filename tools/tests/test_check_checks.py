@@ -120,6 +120,12 @@ class Report(unittest.TestCase):
         self.assertFalse(check_checks.Run("t", "s", None, "coverage").caught())
         self.assertIn("abort()", check_checks.describe(check_checks.Run("t", "s", 134, "asan")))
 
+    def test_the_seeds_run_on_the_most_checking_sanitizer_build(self):
+        # A project with plain, ubsan and msan runs its seeds on msan: msan comes after asan and before ubsan.
+        self.assertEqual(check_checks.sanitizer_build(["plain", "ubsan", "msan"]), ("msan", "memory"))
+        self.assertEqual(check_checks.sanitizer_build(["plain", "ubsan", "asan", "msan"]), ("asan", "address"))
+        self.assertIsNone(check_checks.sanitizer_build(["plain"]))
+
     def test_seeds_get_the_driver_header(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = pathlib.Path(directory)

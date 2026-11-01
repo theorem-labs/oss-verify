@@ -97,9 +97,12 @@ Each build makes a different set of binaries, with its own statements.
 | `plain` | always | none |
 | `ubsan` | `sanitizers` contains `undefined` | UndefinedBehaviorSanitizer |
 | `asan` | `sanitizers` contains `address` | AddressSanitizer |
-| `asan-ubsan` | `sanitizers` contains both | both |
+| `asan-ubsan` | `sanitizers` contains `address` and `undefined` | both |
+| `msan` | `sanitizers` contains `memory` | MemorySanitizer |
 
 [build-contract.md](build-contract.md#the-builds) gives the flags of each build. A `go` or `jvm` project has the plain build only ([above](#language)).
+
+`memory` is for a `c` project only, and only with the next toolchain version. MemorySanitizer needs all of a program's code built with it, and the toolchain links C++ against a libc++ that is not; a `rust` build has no MemorySanitizer form. [what-gets-proven.md](what-gets-proven.md#what-the-statements-catch) says what the `msan` build leaves out.
 
 ### ubsan_checks
 
@@ -186,6 +189,7 @@ budgets:
   agrees:                    # for each sanitizer: [plain side, sanitizer side]
     address: [2GiB, 512GiB]  # also for asan-ubsan
     undefined: [16GiB, 512GiB]
+    memory: [2GiB, 512GiB]
 ```
 
 Give a size as a positive number of bytes, or as a number followed by `KiB`, `MiB`, `GiB` or `TiB`. Give a budget under `agrees` only for a sanitizer that the project uses. Give only the values that you want to change. The plain side of a pair must be at least 4096 bytes, and the sanitizer side must be at least the plain side. `halts` can only be 16GiB: a project's own halts budget is not carried into the statements yet.

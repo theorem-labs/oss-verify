@@ -12,6 +12,7 @@
 #                                      -fno-sanitize=function
 #     address             asan         -fsanitize=address, with the sealed static AddressSanitizer runtime
 #     address-undefined   asan-ubsan   both
+#     memory              msan         -fsanitize=memory, with the sealed static MemorySanitizer runtime
 #
 # It sets up that build's compilers and flags (toolchain.sh), compiles the driver ($LIB_FUZZING_ENGINE), and runs
 # $SRC/build.sh with bash -eux from the image's working directory. build.sh builds each fuzz target into $OUT, as
@@ -36,7 +37,9 @@ case "${SANITIZER:=none}" in
   address) FLAV=asan BUILD=asan ;;
   undefined) FLAV=ubsan BUILD=ubsan ;;
   address-undefined) FLAV=asanubsan BUILD=asan-ubsan ;;
-  *) echo "compile: SANITIZER must be none, address, undefined or address-undefined, not '$SANITIZER'" >&2; exit 2 ;;
+  memory) FLAV=msan BUILD=msan ;;
+  *) echo "compile: SANITIZER must be none, address, undefined, address-undefined or memory, not '$SANITIZER'" >&2
+     exit 2 ;;
 esac
 export SANITIZER FLAV
 
@@ -118,18 +121,32 @@ for f in malloc calloc realloc reallocarray aligned_alloc posix_memalign memalig
 done
 
 silent=""
-case "$FLAV" in asan|asanubsan) silent="-Wl,--defsym=__sanitizer_silent_reports=1" ;; esac
+case "$FLAV" in asan|asanubsan|msan) silent="-Wl,--defsym=__sanitizer_silent_reports=1" ;; esac
+# The msan build: the MemorySanitizer runtime intercepts getenv by --wrap, as the getenv seal does, so there the seal
+# is a definition of getenv that returns NULL, which the interceptor calls. msan_options.o goes with cli.o into every
+# link, and gives MemorySanitizer the allocator_may_return_null=1 that cli.c gives AddressSanitizer: a malloc the
+# allocator cannot serve returns NULL to the program, as in the plain build, instead of a report. Its quiet twin is the
+# same object, under the name link-fuzz-target looks for.
+getenv_seal="$OV/wrap_getenv.o -Wl,--wrap=getenv"
+cli=$OV/cli.o
+if [ "$FLAV" = msan ]; then
+  "$DRVCC" $BASE_CFLAGS -c "$LIB/driver/msan_getenv.c" -o "$OV/msan_getenv.o"
+  "$DRVCC" $BASE_CFLAGS -c "$LIB/driver/msan_options.c" -o "$OV/msan_options.o"
+  [ -z "$OV_RECORDS" ] || cp "$OV/msan_options.o" "$OV/msan_options-quiet.o"
+  getenv_seal=$OV/msan_getenv.o
+  cli="$cli $OV/msan_options.o"
+fi
 cat > "$OV/link.env" <<EOF
 OV_LFE='$LIB_FUZZING_ENGINE'
-OV_DRIVER='$OV/cli.o $OV/adapter.o'
-OV_CLI='$OV/cli.o'
+OV_DRIVER='$cli $OV/adapter.o'
+OV_CLI='$cli'
 OV_SILENT_LD='$silent'
-OV_SEALS='$OV/wrap_getenv.o -Wl,--wrap=getenv $OV/wrap_mkstemp.o -Wl,--wrap=mkstemp -Wl,--wrap=mkostemp -Wl,--wrap=mkstemps -Wl,--wrap=mkostemps $OV/wrap_getpid.o -Wl,--wrap=getpid -Wl,--wrap=getppid'
+OV_SEALS='$getenv_seal $OV/wrap_mkstemp.o -Wl,--wrap=mkstemp -Wl,--wrap=mkostemp -Wl,--wrap=mkstemps -Wl,--wrap=mkostemps $OV/wrap_getpid.o -Wl,--wrap=getpid -Wl,--wrap=getppid'
 OV_TWINS='$OV/twins'
 OV_AFE='$LIB_ALLOCATION_FAILURE_ENGINE'
-OV_AF_DRIVER='$OV/cli.o $OV/allocation_failure.o'
+OV_AF_DRIVER='$cli $OV/allocation_failure.o'
 OV_AFC='$LIB_ALLOCATION_COUNTING_ENGINE'
-OV_AFC_DRIVER='$OV/cli.o $OV/allocation_counting.o'
+OV_AFC_DRIVER='$cli $OV/allocation_counting.o'
 OV_RECORDS='$OV_RECORDS'
 OV_AF_RENAME='${af_rename# }'
 EOF

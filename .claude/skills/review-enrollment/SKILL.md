@@ -65,7 +65,7 @@ project: <name>
 harness: <fuzz target>
 upstream repository: <URL>
 upstream commit: <full sha>
-build: <plain, ubsan, asan or asan-ubsan>, riscv64
+build: <plain, ubsan, asan, asan-ubsan or msan>, riscv64
 reproducer: <the input as base64 in a fenced block, and the exact command, or "not known">
 observed: <the exit status and the first 20 lines of the sanitizer's output, or "not known">
 why held: <memory safety, crash, or other: what>

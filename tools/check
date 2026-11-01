@@ -8,7 +8,7 @@
 Build a project's fuzz targets the way we do, collect the binaries, and write the build manifest.
 
     tools/check <name>                  build projects/<name>: every build its project.yaml asks for
-    tools/check --build asan <name>     only some builds (repeat --build; plain, ubsan, asan, asan-ubsan); out/
+    tools/check --build asan <name>     only some builds (repeat --build; plain, ubsan, asan, asan-ubsan, msan); out/
                                         then holds only these builds' binaries
     tools/check --twice <name>          then build it all again from scratch, and compare every byte
     tools/check --lock <file> <name>    compare with a lock: a manifest from an earlier check, or a harness.yaml

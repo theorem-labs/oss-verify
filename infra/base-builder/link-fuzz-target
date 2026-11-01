@@ -10,11 +10,12 @@
 #
 #     <compiler> -static -no-pie -Wl,--gc-sections <driver> [<silent reports>] <the link's own arguments> <seals>
 #
-# The driver (cli.o, adapter.o) comes first, in place of $LIB_FUZZING_ENGINE wherever the link named it, and the
-# seals (getenv, mkstemp and getpid, each wrapped) come last: both positions change the bytes. A link that already
-# wraps one of those functions has its own seals (a build ported from the release's recipe adds them where its pin
-# did), and gets none added. In the AddressSanitizer builds, --defsym=__sanitizer_silent_reports=1 makes a detection
-# abort without printing a report.
+# The driver (cli.o, adapter.o, and msan_options.o in the msan build) comes first, in place of $LIB_FUZZING_ENGINE
+# wherever the link named it, and the seals (getenv, mkstemp and getpid, each wrapped; in the msan build, getenv is
+# defined instead, for the MemorySanitizer runtime's own wrapper to call) come last: both positions change the bytes.
+# A link that already wraps one of those functions has its own seals (a build ported from the release's recipe adds
+# them where its pin did), and gets none added. In the AddressSanitizer builds and the msan build,
+# --defsym=__sanitizer_silent_reports=1 makes a detection abort without printing a report.
 #
 # It links twice: the output the link asked for, with its symbols, and the same link with --strip-all, saved under
 # the sha256 of the first for compile to collect.

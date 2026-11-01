@@ -128,6 +128,9 @@ class Builds(unittest.TestCase):
         self.assertEqual(validate.builds_of({"sanitizers": ["address"]}), ["plain", "asan"])
         self.assertEqual(validate.builds_of({"sanitizers": ["undefined"]}), ["plain", "ubsan"])
         self.assertEqual(validate.builds_of({"sanitizers": []}), ["plain"])
+        self.assertEqual(validate.builds_of({"sanitizers": ["address", "undefined", "memory"]}),
+                         ["plain", "ubsan", "asan", "asan-ubsan", "msan"])
+        self.assertEqual(validate.builds_of({"sanitizers": ["memory"]}), ["plain", "msan"])
 
     def test_sizes(self):
         self.assertEqual(validate.size_in_bytes("16GiB"), 16 << 30)
@@ -173,6 +176,13 @@ class Languages(unittest.TestCase):
             self.assertTrue(any("plain build only" in problem for problem in problems), problems)
         self.assertEqual(validate.builds_of({"language": "go"}), ["plain"])
         self.assertEqual(validate.builds_of({"language": "rust"}), ["plain", "ubsan", "asan", "asan-ubsan"])
+
+    def test_only_a_c_project_has_the_msan_build(self):
+        self.assertEqual(check(MINIMAL + "sanitizers: [address, memory]\n")[0], [])
+        for language in ("c++", "rust", "python"):
+            problems, _, _ = check(MINIMAL.replace("language: c", f"language: {language}") + "sanitizers: [memory]\n")
+            self.assertTrue(any(f"for a c project only, not {language}" in problem for problem in problems),
+                            problems)
 
     def test_harness_suffixes_follow_the_language(self):
         files = {"Dockerfile": "FROM x\n", "build.sh": "#!/bin/bash\n", "fuzz_parse.rs": "fn main() {}\n",
@@ -347,7 +357,7 @@ class Problems(unittest.TestCase):
     def test_build_fields(self):
         self.assertProblem(MINIMAL.replace("language: c", "language: swift"), "language must be one of")
         self.assertProblem(MINIMAL + "sanitizers: address\n", "sanitizers must be a list")
-        self.assertProblem(MINIMAL + "sanitizers: [memory]\n", "'memory' is not one of")
+        self.assertProblem(MINIMAL + "sanitizers: [thread]\n", "'thread' is not one of")
         self.assertProblem(MINIMAL + "sanitizers: [address, address]\n", "names a sanitizer twice")
         self.assertProblem(MINIMAL + "fuzz_targets: []\n", "non-empty list")
         self.assertProblem(MINIMAL + "fuzz_targets: [a, a]\n", "names a fuzz target twice")
@@ -358,7 +368,7 @@ class Problems(unittest.TestCase):
         self.assertProblem(MINIMAL + "budgets: {oom: 1GiB}\n", "unknown field 'oom'")
         self.assertProblem(MINIMAL + "budgets: {halts: 16GB}\n", "budgets.halts must be a size")
         self.assertProblem(MINIMAL + "budgets: {agrees: [1]}\n", "budgets.agrees must be a mapping")
-        self.assertProblem(MINIMAL + "budgets: {agrees: {memory: [1, 2]}}\n", "'memory' is not one of")
+        self.assertProblem(MINIMAL + "budgets: {agrees: {thread: [1, 2]}}\n", "'thread' is not one of")
         self.assertProblem(MINIMAL + "budgets: {agrees: {address: [2GiB]}}\n", "must be two sizes")
         self.assertProblem(
             MINIMAL + "sanitizers: [undefined]\nbudgets: {agrees: {address: [2GiB, 512GiB]}}\n",
