@@ -4,10 +4,11 @@
 #
 # Stores an issue's draft reply, which no one has approved, where only Theorem can read it:
 #
-#   GCP_ACCESS_TOKEN=<ossv-ci's access token> REPO=<owner>/<name> ISSUE=<number> RUN_ID=<id> RUN_ATTEMPT=<n> \
-#   RUN_URL=<url> .github/scripts/store-issue-draft <draft file>
+#   GCP_ACCESS_TOKEN=<ossv-ci's access token> REPO=theorem-labs/<reviewed repository> ISSUE=<number> RUN_ID=<id> \
+#   RUN_ATTEMPT=<n> RUN_URL=<url> .github/scripts/store-issue-draft <draft file>
 #
-# build.yaml's review job runs it for an issue (the step "Store the issue draft for a person"). The reviewed
+# build.yaml's review job runs it for an issue (the step "Store the issue draft for a person"). REPO is
+# theorem-labs/oss-verify, theorem-labs/oss-verify-proofs or theorem-labs/rocq-linux-process-semantics. The reviewed
 # repositories are public: their job summaries are public, and any signed-in GitHub account can download their
 # artifacts, so the draft and what a person decides on it go to neither. They go to the private bucket where the
 # review job leaves a held finding, as the object issue-drafts/<repository>/<issue>/<run id>-<attempt>, written once
@@ -21,6 +22,10 @@ set -euo pipefail
 draft=${1:?usage: store-issue-draft <draft file>}
 [[ ${ISSUE:-} =~ ^[0-9]+$ && ${RUN_ID:-} =~ ^[0-9]+$ && ${RUN_ATTEMPT:-} =~ ^[0-9]+$ ]] \
   || { echo "store-issue-draft: ISSUE, RUN_ID or RUN_ATTEMPT is not a number" >&2; exit 2; }
+case ${REPO:-} in
+  theorem-labs/oss-verify | theorem-labs/oss-verify-proofs | theorem-labs/rocq-linux-process-semantics) ;;
+  *) echo "store-issue-draft: REPO is not a reviewed repository" >&2; exit 2 ;;
+esac
 repository=${REPO#theorem-labs/}
 name="issue-drafts/$repository/$ISSUE/$RUN_ID-$RUN_ATTEMPT"
 clean=$(mktemp)

@@ -69,12 +69,8 @@ name: "Build"
 #   comment  posts that comment, with the checks' report folded under it, or replaces the one already there: for
 #            each pull request of this repository, and for another repository's only while route's list
 #            post_review_repos names that repository. The comment starts with <!-- oss-verify-review -->, as the
-#            triage comment starts with its own marker, and its second line is the verdict line that the inbound
-#            watcher reads:
-#            <!-- oss-verify-verdict {"head":"<commit>","blocking":[...],"person":[...]} -->, the checks whose verdict
-#            is fail and those left to a person (.github/scripts/review-body; none when the review gave no verdicts).
-#            It never runs for an issue: a person approves the exact text of each reply to an issue before anyone
-#            posts it.
+#            triage comment starts with its own marker. It never runs for an issue: a person approves the exact text
+#            of each reply to an issue before anyone posts it.
 #   required always runs, last, and reports the required check (below).
 #
 # project-builds is the required check, and the job required reports it (.github/scripts/collect). required runs on

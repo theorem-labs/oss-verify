@@ -10,15 +10,16 @@
 #
 # OSS Verify and the two other repositories whose issues it reviews are public, so anyone with a GitHub account can
 # open an issue and start a model run. This counts Build's other runs for every issue of the same source repository in
-# the last hour. The source repository is validated against Build's input list and is recognized in the run title:
-# "Issue <number>" for oss-verify and "Issue <repository>#<number>" for the other two. Its review job ran, in any
-# state but skipped, and neither of the two steps that stop it before the model failed, this step or "Stop before the
-# model when the draft cannot be stored" (a refused Google sign-in). A run that either step stopped called no model and
-# is not counted; a run whose steps have not finished yet is. Under CAP it exits 0, and the draft is made. At CAP or
-# over, and when any read fails, it holds the draft: it prints a `::error::HELD: ...` annotation and exits 1, so the
-# review job fails before its Review step and the run is red. A held run is never skipped as a pass. The CI/CD lane's
-# inbound watch pages for each run whose step of this name failed (ISSUE CAP HELD), and a person re-runs the job to
-# make the draft.
+# the last hour. The source repository is validated against Build's input list and is recognized by event and title:
+# an issue event or a run started by hand titled "Issue <number>" for oss-verify, and a run started by hand titled
+# "Issue <repository>#<number>" for the other two. A pull request run never counts, even when its title matches. A
+# counted run's review job ran, in any state but skipped, and neither of the two steps that stop it before the model
+# failed, this step or "Stop before the model when the draft cannot be stored" (a refused Google sign-in). A run that
+# either step stopped called no model and is not counted; a run whose steps have not finished yet is. Under CAP it
+# exits 0, and the draft is made. At CAP or over, and when any read fails, it holds the draft: it prints a
+# `::error::HELD: ...` annotation and exits 1, so the review job fails before its Review step and the run is red. A
+# held run is never skipped as a pass. The CI/CD lane's inbound watch pages for each run whose step of this name
+# failed (ISSUE CAP HELD), and a person re-runs the job to make the draft.
 #
 set -uo pipefail
 cap=${CAP:-6}
@@ -34,7 +35,12 @@ case ${SOURCE_REPO:-} in
 esac
 since=$(date -u -d '-1 hour' +%Y-%m-%dT%H:%M:%SZ) || held "the time an hour ago could not be read."
 if ! runs=$(gh api --method GET --paginate "repos/$RUNS_REPO/actions/workflows/build.yaml/runs" \
-    -f created=">=$since" -F per_page=100 --jq '.workflow_runs[] | select(.display_title | if env.SOURCE_REPO == "oss-verify" then test("^Issue [0-9]+$") else test("^Issue " + env.SOURCE_REPO + "#[0-9]+$") end) | .id'); then
+    -f created=">=$since" -F per_page=100 --jq '.workflow_runs[]
+      | select(if env.SOURCE_REPO == "oss-verify"
+          then (.event == "issues" or .event == "workflow_dispatch") and (.display_title | test("^Issue [0-9]+$"))
+          else .event == "workflow_dispatch" and (.display_title | test("^Issue " + env.SOURCE_REPO + "#[0-9]+$"))
+          end)
+      | .id'); then
   held "the runs of the last hour could not be read."
 fi
 count=0

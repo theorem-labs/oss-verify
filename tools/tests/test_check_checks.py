@@ -1501,7 +1501,8 @@ class ReviewJob(unittest.TestCase):
                               f"{repo.rsplit('/', 1)[1]}/5/77-2", summary)
 
     def test_a_draft_that_cannot_be_stored_fails_the_step(self):
-        for kwargs in ({"answer": '{"error": "403"}'}, {"issue": "5; x"}, {"attempt": ""}):
+        for kwargs in ({"answer": '{"error": "403"}'}, {"issue": "5; x"}, {"attempt": ""}, {"repo": ""},
+                       {"repo": "theorem-labs/oss-verify-proofs-internal"}, {"repo": "other/oss-verify"}):
             with self.subTest(kwargs=kwargs):
                 code, _, summary, _, _, _ = self.store(**kwargs)
                 self.assertNotEqual(code, 0)
@@ -1877,6 +1878,17 @@ class IssueDraftCap(unittest.TestCase):
                 self.assertEqual(code, 1)
                 self.assertIn("::error::HELD: 6 issue drafts ran the model in the last hour, at the cap of 6.", out)
                 self.assertNotIn("event=issues", calls)
+
+    def test_a_pull_request_titled_as_an_issue_is_not_counted(self):
+        # A pull request's run carries the pull request's title, which its author chooses. Such titles never count
+        # towards an issue draft cap, for this repository or for another one.
+        for repo, title in (("oss-verify", "Issue 5"), ("oss-verify-proofs", "Issue oss-verify-proofs#5"),
+                            ("rocq-linux-process-semantics", "Issue rocq-linux-process-semantics#5")):
+            with self.subTest(repo=repo):
+                runs = [(number, "pull_request_target", title) for number in range(1, 7)]
+                code, out, _ = self.cap(runs, source_repo=repo)
+                self.assertEqual(code, 0, out)
+                self.assertIn("0 issue drafts ran the model in the last hour, under the cap of 6", out)
 
     def test_a_read_that_fails_holds_the_draft(self):
         for fail in ("runs", 3):
