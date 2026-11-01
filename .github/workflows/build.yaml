@@ -1027,10 +1027,11 @@ jobs:
     environment:
       name: comment
       deployment: false
-    # One comment job at a time for a pull request, whatever event started its run (the run's own group is by event):
-    # two at once could each find no comment, each post one, and only the first would ever be updated after.
+    # One comment job at a time for each pull request in this repository. Each external head has its own group, so an
+    # older head's job cannot replace the newer head's job. Every job checks its head before it posts, so a job of an
+    # old head passes without writing.
     concurrency:
-      group: build-comment-${{ inputs.repo || 'oss-verify' }}-${{ github.event.pull_request.number || inputs.pr }}
+      group: build-comment-${{ inputs.repo || 'oss-verify' }}-${{ github.event.pull_request.number || inputs.pr }}-${{ inputs.repo && inputs.repo != 'oss-verify' && inputs.head || '' }}
       cancel-in-progress: false
     permissions:
       # Only for the GitHub identity token that Google's federation trades for an access token of

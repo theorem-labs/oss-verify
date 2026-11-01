@@ -391,8 +391,15 @@ def test_another_repository_routes_to_a_change_review(tmp_path, repo):
     newer = {"inputs": {"repo": repo, "pr": 34, "head": "d" * 40}, "github": {"event_name": "workflow_dispatch"}}
     # A late run of an older external pull request head cannot replace the run of the newest head.
     assert evaluate(flow["concurrency"]["group"], run) != evaluate(flow["concurrency"]["group"], newer)
-    group = flow["jobs"]["comment"]["concurrency"]["group"]
-    assert evaluate(group, run) != evaluate(group, ours)
+    comment = flow["jobs"]["comment"]["concurrency"]
+    comment_group = comment["group"]
+    # Reviews of different external heads may run together. An old head's comment job then exits at its head check
+    # and cannot replace a pending comment job for a newer head.
+    assert evaluate(comment_group, run) != evaluate(comment_group, newer)
+
+    own_head = {"inputs": {"repo": "oss-verify", "pr": 34, "head": HEAD},
+                "github": {"event_name": "workflow_dispatch"}}
+    assert evaluate(comment_group, own_head) == evaluate(comment_group, ours)
 
 
 @pytest.mark.parametrize("repo", ["oss-verify-proofs", OTHER])

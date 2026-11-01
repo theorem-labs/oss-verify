@@ -2222,13 +2222,19 @@ class Starters(unittest.TestCase):
         # A name outside the list is refused, so a copy that names another repository starts nothing.
         step = self.steps(self.NAMES[0])["Read what to start from the event"]
         with tempfile.TemporaryDirectory() as directory:
-            output = pathlib.Path(directory) / "output"
+            root = pathlib.Path(directory)
+            (root / "bin").mkdir()
+            (root / "bin" / "gh").write_text(
+                f'#!/bin/bash\necho called > {root}/called\necho {"e" * 40}\n')
+            (root / "bin" / "gh").chmod(0o755)
+            output = root / "output"
             run = subprocess.run(["bash", "-e", "-c", step["run"]], capture_output=True, text=True,
                                  env={**os.environ, **{k: "" for k in step["env"]}, "NAME": "oss-verify-proofs-internal",
-                                      "EVENT": "pull_request_target", "PR": "34",
+                                      "EVENT": "pull_request_target", "PR": "34", "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
                                       "GITHUB_OUTPUT": str(output)})
             self.assertNotEqual(run.returncode, 0)
             self.assertFalse(output.exists())
+            self.assertFalse((root / "called").exists())
 
     def start(self, name, outputs):
         """The starter's start step, with the token and the first step's outputs, and a stand-in gh that records its
