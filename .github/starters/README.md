@@ -30,11 +30,15 @@ on only in this order:
    bypass it. Without it, any writer can push a workflow to the default branch that reads the environment's secret.
 3. A person decides which App's key the starter holds. The key it names is the key of the App that posts review
    comments and opens the private issues of held findings. The other choice is a dedicated App whose only permission
-   is `actions: write` on this repository. Either token can also re-run a Build run with debug logging, which
-   `build.yaml` forbids for the review job because that prints a held finding to the public log.
+   is `actions: write` on this repository: its client id then goes into both starters, and its bot into
+   `ALLOWED_BOTS` of `build.yaml`, or the review's action refuses its runs. Either token can also re-run a Build run
+   with debug logging, which `build.yaml` forbids for the review job because that prints a held finding to the public
+   log.
 4. The environment `oss-verify-starter` and its secret are created, with deployment branches the default branch alone.
 5. The starter is copied to `.github/workflows/oss-verify-review.yml` of that repository, by a reviewed pull request.
 
-Until then no review of that repository runs. Once one runs, it still posts nothing there: its review stays the
-artifact `enroll-review-draft` until the list `post_review_repos` in `build.yaml` names the repository, and an issue's
-draft reply is never posted.
+Until then no starter starts a review of that repository. A person with write access to this repository can still
+start one by hand (`gh workflow run build.yaml -f repo=<name> ...`, at the top of `build.yaml`). Condition 1 holds for
+that review too: it is not believed until the rules files cover the repository. A review of that repository, by a
+starter or by hand, posts nothing there: it stays the artifact `enroll-review-draft` until the list
+`post_review_repos` in `build.yaml` names the repository, and an issue's draft reply is never posted.
