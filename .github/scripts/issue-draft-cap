@@ -8,12 +8,11 @@
 #   GH_TOKEN=<token with actions: read> RUNS_REPO=theorem-labs/oss-verify RUN_ID=<this run's id> \
 #   SOURCE_REPO=<repository name> CAP=<runs an hour> .github/scripts/issue-draft-cap
 #
-# OSS Verify and the two other repositories whose issues it reviews are public, so anyone with a GitHub account can
-# open an issue and start a model run. This counts Build's other runs for every issue of the same source repository in
-# the last hour. The source repository is validated against Build's input list and is recognized by event and title:
-# an issue event titled "Issue <number>" for oss-verify (a person's run started by hand is not counted, and build.yaml
-# does not hold it), and a run started by hand titled "Issue <repository>#<number>" for the other two, whose starters
-# start such runs. A pull request run never counts, even when its title matches. A
+# OSS Verify is public, so anyone with a GitHub account can open an issue and start a model run. This counts Build's
+# other runs for every issue of the same source repository in the last hour. The source repository is validated against
+# Build's input list and is recognized by event and title: an issue event titled "Issue <number>" for oss-verify (a
+# person's run started by hand is not counted, and build.yaml does not hold it), and a run started by hand titled
+# "Issue <repository>#<number>" for the other two. A pull request run never counts, even when its title matches. A
 # counted run's review job ran, in any state but skipped, and neither of the two steps that stop it before the model
 # failed, this step or "Stop before the model when the draft cannot be stored" (a refused Google sign-in). A run that
 # either step stopped called no model and is not counted; a run whose steps have not finished yet is. Under CAP it

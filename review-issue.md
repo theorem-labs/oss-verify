@@ -2,8 +2,8 @@
 
 The review job of `.github/workflows/build.yaml` reads this file from `main` for an issue of this repository. It also
 reads it for an issue of `theorem-labs/oss-verify-proofs` or `theorem-labs/rocq-linux-process-semantics`, on a run
-with `-f repo=<name>` (`.github/starters/README.md`). This file is written for this repository alone, so a draft reply
-for one of those repositories is not believed until this file covers that repository. `.github/CODEOWNERS` names its
+that a person starts by hand (`-f repo=<name>`). This file is written for this repository alone, so a draft reply for
+one of those repositories is not believed until this file covers that repository. `.github/CODEOWNERS` names its
 owner, as for `review.md`. The job gathers the issue into `.review/issue.json` (title, body, author, comments). The
 checkout around it is `main`. The reply is a draft: no job posts it, and a person approves its exact text before
 anyone does.
