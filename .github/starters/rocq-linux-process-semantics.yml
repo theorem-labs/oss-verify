@@ -14,8 +14,9 @@ name: "OSS Verify review"
 #   - runs in the environment oss-verify-starter, which holds the OSS Verify App's private key (the environment secret
 #     OSS_VERIFY_APP_PRIVATE_KEY) and whose deployment branches are the default branch alone; no other job names it. A
 #     run of pull_request_target or issues has the default branch as its ref, whatever a pull request holds. That
-#     keeps the key from other code only while the default branch takes reviewed changes alone: a ruleset on it
-#     requires a pull request with an approving review, and no writer can bypass it.
+#     keeps the key from other code only while the default branch takes reviewed changes alone. So the environment
+#     and its secret are made only after a ruleset on the default branch requires a pull request with an approving
+#     review, with no bypass for any writer (.github/starters/README.md).
 #   - gets the App's token for theorem-labs/oss-verify alone, with actions: write alone. That is the narrowest
 #     permission that can start a workflow run (POST .../actions/workflows/{id}/dispatches). There it also allows
 #     deleting runs, their logs, artifacts and caches, cancelling and re-running runs, disabling and enabling
@@ -37,6 +38,12 @@ on:
     types: [opened, edited, reopened]
 
 permissions: {}
+
+# One dispatch at a time for each pull request or issue, in the order of its events: a later push never overtakes an
+# earlier one, and Build passes with nothing to do for a head that is no longer the pull request's head.
+concurrency:
+  group: oss-verify-review-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
 
 jobs:
   start:

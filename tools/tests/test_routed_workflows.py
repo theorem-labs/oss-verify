@@ -270,11 +270,10 @@ def route_issue(tmp_path, pr, issue, is_pull=False, event="workflow_dispatch", s
 
 def test_a_run_for_an_issue_asks_for_the_review_alone(tmp_path):
     assert route_issue(tmp_path, "", "5") == (0, ["kind=issue"])
-    # The comment job, which alone posts, never runs for an issue, whatever variable is set and even when the literal
-    # list names the repository: its if: and the required job's ASKED_COMMENT, evaluated.
-    for variables, inputs, repos in (({"OSSV_POST_REVIEW": "post"}, {"issue": 5}, None),
-                                     ({}, {"repo": OTHER, "issue": 5}, OTHER)):
-        assert posting(variables, inputs, issue=True, repos=repos)[:2] == (False, False)
+    # The comment job, which alone posts, never runs for an issue, even when the literal list names the repository:
+    # its if: and the required job's ASKED_COMMENT, evaluated.
+    for inputs, repos in (({"issue": 5}, None), ({"repo": OTHER, "issue": 5}, OTHER)):
+        assert posting(inputs, issue=True, repos=repos)[:2] == (False, False)
 
 
 @pytest.mark.parametrize("pr, issue, is_pull", [
@@ -403,14 +402,59 @@ def test_another_repository_issue_runs_its_hourly_cap(repo):
     assert evaluate(cap["env"]["SOURCE_REPO"], context) == repo
 
 
+@pytest.mark.parametrize("event, inputs, held", [
+    ("issues", {}, True),  # an issue's own event, as on main
+    ("workflow_dispatch", {"issue": 5}, False),  # a person's run for an issue of this repository, as on main
+    ("workflow_dispatch", {"repo": "oss-verify", "issue": 5}, False),
+])
+def test_this_repository_keeps_mains_cap_on_issue_events_only(event, inputs, held):
+    cap = step(workflow("build.yaml")["jobs"]["review"], "Hold the draft at the hourly cap")
+    context = {"github": {"event_name": event}, "inputs": inputs, "needs": {"route": {"outputs": {"kind": "issue"}}}}
+    assert bool(evaluate(cap["if"], context)) is held
+
+
 @pytest.mark.parametrize("head, pr_head", [
-    (HEAD, "d" * 40),  # the pull request moved on after its starter read it
     ("", HEAD),  # no head given
     (HEAD[:7], HEAD),  # not a whole commit id
 ])
-def test_a_moved_head_is_refused(tmp_path, head, pr_head):
+def test_a_malformed_head_is_refused(tmp_path, head, pr_head):
     code, outputs, _ = route_other(tmp_path, head=head, pr_head=pr_head)
     assert code != 0 and outputs == []
+
+
+def test_a_moved_head_runs_nothing_and_passes(tmp_path):
+    # A starter's run can reach Build after the pull request moved on, or after the newer head's run. It asks for
+    # nothing: the run of the newer head reviews the pull request, and a stale run is not a failure on main.
+    code, outputs, _ = route_other(tmp_path, head=HEAD, pr_head="d" * 40)
+    assert (code, outputs) == (0, [])
+    assert "nothing runs" in (tmp_path / "summary").read_text()
+
+
+@pytest.mark.parametrize("event, inputs, cancels", [
+    ("pull_request_target", {}, True),
+    ("workflow_dispatch", {"pr": 7}, True),
+    ("workflow_dispatch", {"repo": "oss-verify", "pr": 7}, True),
+    ("issues", {}, False),
+    # Another repository's runs wait in order: a later dispatch never cancels a running review or draft.
+    ("workflow_dispatch", {"repo": "oss-verify-proofs", "pr": 7, "head": HEAD}, False),
+    ("workflow_dispatch", {"repo": OTHER, "issue": 5}, False),
+])
+def test_only_this_repositorys_pull_request_runs_cancel_an_older_run(event, inputs, cancels):
+    flow = workflow("build.yaml")
+    assert bool(evaluate(flow["concurrency"]["cancel-in-progress"],
+                         {"github": {"event_name": event}, "inputs": inputs})) is cancels
+
+
+@pytest.mark.parametrize("name", ["oss-verify-proofs.yml", "rocq-linux-process-semantics.yml"])
+def test_a_starter_dispatches_one_event_at_a_time_for_each_pull_request_or_issue(name):
+    starter = yaml.safe_load((ROOT / ".github" / "starters" / name).read_text())
+    group = starter["concurrency"]["group"]
+    pull = lambda n: {"github": {"event": {"pull_request": {"number": n}}}}  # noqa: E731
+    issue = lambda n: {"github": {"event": {"issue": {"number": n}}}}  # noqa: E731
+    assert evaluate(group, pull(7)) == evaluate(group, pull(7))
+    # Pull requests and issues share one number space in a repository.
+    assert len({evaluate(group, pull(7)), evaluate(group, pull(8)), evaluate(group, issue(9))}) == 3
+    assert starter["concurrency"]["cancel-in-progress"] is False
 
 
 @pytest.mark.parametrize("repo, pr, head", [
@@ -446,16 +490,23 @@ def test_the_token_names_the_target_repository():
             assert evaluate(where, context) == f"theorem-labs/{name}"
 
 
-def posting(variables, inputs, issue=False, repos=None):
+class NoVariables(dict):
+    """The `vars` context of a posting condition: a read of any repository variable fails the test."""
+
+    def get(self, name, default=None):
+        raise AssertionError(f"a posting condition reads vars.{name}")
+
+
+def posting(inputs, issue=False, repos=None):
     """(the comment job runs, the required job asks for it, the post step runs) for a successful review on a run with
-    `inputs` (none on a pull request's own event), the repository variables `variables`, and the list of other
-    repositories whose reviews post: `repos`, or by default the workflow's own (route's output post_review_repos)."""
+    `inputs` (none on a pull request's own event), and the list of other repositories whose reviews post: `repos`, or
+    by default the workflow's own (route's output post_review_repos). A read of any repository variable fails."""
     jobs = workflow("build.yaml")["jobs"]
     if repos is None:
         # A value with no ${{ }} is the literal itself, as GitHub reads it.
         listed = str(jobs["route"]["outputs"]["post_review_repos"])
         repos = as_text(evaluate(listed, {})) if "${{" in listed else listed
-    context = {"inputs": inputs, "vars": variables, "github": {"repository": "theorem-labs/oss-verify"},
+    context = {"inputs": inputs, "vars": NoVariables(), "github": {"repository": "theorem-labs/oss-verify"},
                "needs": {"route": {"outputs": {"kind": "issue" if issue else "change",
                                                "post_review_repos": repos}},
                          "review": {"result": "success", "outputs": {"comment": "Thanks.\n", "held_object": ""}},
@@ -466,38 +517,35 @@ def posting(variables, inputs, issue=False, repos=None):
 
 
 def test_post_review_alone_posts_nothing_on_another_repository():
-    # With the workflow's own list (empty for now), another repository's review posts nothing, whatever variable is
-    # set: OSSV_POST_REVIEW is not read for it, and no variable names the repositories.
+    # With the workflow's own list (empty for now), another repository's review posts nothing, and no repository
+    # variable is read.
     for repo in ("oss-verify-proofs", OTHER):
-        for variables in ({"OSSV_POST_REVIEW": "post"}, {"OSSV_POST_REVIEW": "post", "OSSV_POST_REVIEW_REPOS": repo}):
-            assert posting(variables, {"repo": repo, "pr": 34, "head": HEAD}) == (False, False, False), (repo, variables)
+        assert posting({"repo": repo, "pr": 34, "head": HEAD}) == (False, False, False), repo
     # This repository's pull requests post, from their own events or by hand, with no variable.
     for inputs in ({}, {"repo": "oss-verify", "pr": 7}):
-        assert posting({}, inputs) == (True, True, True), inputs
+        assert posting(inputs) == (True, True, True), inputs
 
 
 def test_the_repos_switch_posts_only_the_repository_it_names():
     # The list as a reviewed pull request would set it: each name posts its own repository's reviews alone.
     proofs = {"repo": "oss-verify-proofs", "pr": 7, "head": HEAD}
     other = {"repo": OTHER, "pr": 34, "head": HEAD}
-    assert posting({}, proofs, repos="oss-verify-proofs") == (True, True, True)
-    assert posting({}, other, repos="oss-verify-proofs") == (False, False, False)
+    assert posting(proofs, repos="oss-verify-proofs") == (True, True, True)
+    assert posting(other, repos="oss-verify-proofs") == (False, False, False)
     both = f"{OTHER},oss-verify-proofs"
-    assert posting({}, proofs, repos=both) == posting({}, other, repos=both) == (True, True, True)
+    assert posting(proofs, repos=both) == posting(other, repos=both) == (True, True, True)
     # A name counts whole: not a longer name, nor a part of one.
     for value in ("oss-verify-proofs-internal", "verify-proofs", "oss-verify-proof", "OSS-VERIFY-PROOFS-x"):
-        assert posting({}, proofs, repos=value) == (False, False, False), value
+        assert posting(proofs, repos=value) == (False, False, False), value
     # Never for an issue: a person approves each reply to an issue before anyone posts it.
-    assert posting({}, {"repo": "oss-verify-proofs", "issue": 3}, issue=True, repos="oss-verify-proofs")[:2] == (
+    assert posting({"repo": "oss-verify-proofs", "issue": 3}, issue=True, repos="oss-verify-proofs")[:2] == (
         False, False)
 
 
 def test_the_repos_list_does_not_change_oss_verify():
     every = f"oss-verify,oss-verify-proofs,{OTHER}"
-    for variables in ({"OSSV_POST_REVIEW": "draft"},
-                      {"OSSV_POST_REVIEW_REPOS": "oss-verify-proofs"}):
-        for inputs in ({}, {"repo": "oss-verify", "pr": 7}):
-            assert posting(variables, inputs, repos=every) == (True, True, True), (variables, inputs)
+    for inputs in ({}, {"repo": "oss-verify", "pr": 7}):
+        assert posting(inputs, repos=every) == (True, True, True), inputs
 
 
 # --- tests.yaml's route, run on made-up commits ---

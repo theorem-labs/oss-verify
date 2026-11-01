@@ -1832,8 +1832,8 @@ class IssueDraftCap(unittest.TestCase):
             (root / "bin" / "gh").chmod(0o755)
             run = subprocess.run([str(ROOT / ".github" / "scripts" / "issue-draft-cap")], capture_output=True, text=True,
                                  env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "GH_TOKEN": "x",
-                                      "REPO": "o/r", "RUNS_REPO": "theorem-labs/oss-verify", "RUN_ID": run_id,
-                                      "CAP": "6", "SOURCE_REPO": source_repo})
+                                      "RUNS_REPO": "theorem-labs/oss-verify", "RUN_ID": run_id, "CAP": "6",
+                                      "SOURCE_REPO": source_repo})
             return run.returncode, run.stdout, (root / "calls").read_text()
 
     def test_under_the_cap_the_draft_is_made(self):
@@ -1869,6 +1869,28 @@ class IssueDraftCap(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("::error::HELD: 6 issue drafts ran the model in the last hour, at the cap of 6.", out)
 
+    def test_each_source_repository_has_its_own_cap(self):
+        # Six drafts of each of the three repositories in the hour: each repository counts only its own six.
+        runs = [(n, "issues", f"Issue {n}") for n in range(1, 7)]
+        runs += [(10 + n, "workflow_dispatch", f"Issue oss-verify-proofs#{n}") for n in range(1, 7)]
+        runs += [(20 + n, "workflow_dispatch", f"Issue rocq-linux-process-semantics#{n}") for n in range(1, 7)]
+        for repo in ("oss-verify", "oss-verify-proofs", "rocq-linux-process-semantics"):
+            with self.subTest(repo=repo):
+                code, out, _ = self.cap(runs, source_repo=repo)
+                self.assertEqual(code, 1, out)
+                self.assertIn("::error::HELD: 6 issue drafts ran the model in the last hour, at the cap of 6.", out)
+                # Five of its own and all eighteen others: under the cap.
+                own = {"oss-verify": 6, "oss-verify-proofs": 16, "rocq-linux-process-semantics": 26}[repo]
+                code, out, _ = self.cap([r for r in runs if r[0] != own], source_repo=repo)
+                self.assertEqual(code, 0, out)
+                self.assertIn("5 issue drafts ran the model in the last hour, under the cap of 6", out)
+
+    def test_this_repositorys_cap_counts_issue_events_only(self):
+        # As on main: a person's run for an issue of this repository, started by hand, is neither held nor counted.
+        runs = [(n, "workflow_dispatch", f"Issue {n}") for n in range(1, 7)]
+        code, out, _ = self.cap(runs)
+        self.assertEqual(code, 0, out)
+        self.assertIn("0 issue drafts ran the model in the last hour, under the cap of 6", out)
 
     def test_another_repository_issue_draft_hits_its_hourly_cap(self):
         for repo in ("oss-verify-proofs", "rocq-linux-process-semantics"):

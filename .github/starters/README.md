@@ -15,5 +15,15 @@ both places: in the pull request to its repository, and here.
 Each starter starts `.github/workflows/build.yaml` of this repository (`-f repo=<name> -f pr=<n> -f head=<commit>`, or
 `-f repo=<name> -f issue=<n>`) on its repository's pull request and issue events, with a token of the OSS Verify App
 for this repository alone, with `actions: write` alone. The App's private key is the secret `OSS_VERIFY_APP_PRIVATE_KEY`
-of the environment `oss-verify-starter` of that repository, whose deployment branches are the default branch alone. An
-administrator of the repository creates the environment and its secret.
+of the environment `oss-verify-starter` of that repository, whose deployment branches are the default branch alone.
+
+Neither starter is installed yet. An administrator installs one only in this order:
+
+1. A ruleset on the repository's default branch requires a pull request with an approving review, and no writer can
+   bypass it. Without it, any writer can push a workflow to the default branch that reads the environment's secret.
+2. The environment `oss-verify-starter` and its secret are created, with deployment branches the default branch alone.
+3. The starter is copied to `.github/workflows/oss-verify-review.yml` of that repository, by a reviewed pull request.
+
+Until then no review of that repository runs. The key the starters name is the key of the App that posts review
+comments and opens the private issues of held findings: whether the starters use it, or an App that can only start
+workflow runs in this repository, is decided before step 2.

@@ -26,7 +26,8 @@ name: "Build"
 #            request of oss-verify-proofs or rocq-linux-process-semantics (-f repo=<name> -f pr=<n> -f head=<commit>,
 #            which the starter workflow of that repository starts on its own events: .github/starters/) is a change
 #            whatever it changes, and route refuses it unless repo is one of the names of the input's list, pr a
-#            number and head that pull request's head commit; one for an issue there (-f repo=<name> -f issue=<n>) is
+#            number and head 40 hexadecimal digits. When head is no longer that pull request's head, route asks for
+#            nothing: the run of the newer head reviews it. One for an issue there (-f repo=<name> -f issue=<n>) is
 #            an issue, as here.
 #   project-builds
 #            the build above, under the check name build, when route asks for it; it passes with nothing to build
@@ -53,15 +54,16 @@ name: "Build"
 #            it and what a person decides on it go to the private held-findings bucket
 #            (.github/scripts/store-issue-draft), and the job summary says how a person at Theorem reads them.
 #            Each reviewed repository is public, so anyone with a GitHub account can open an issue and start that
-#            path. The step "Hold the draft at the hourly cap" (.github/scripts/issue-draft-cap) runs first for every
-#            issue, including an issue that another repository's starter starts here. At 6 drafts for that source
+#            path. The step "Hold the draft at the hourly cap" (.github/scripts/issue-draft-cap) runs first on an
+#            issue's own event here and on every run for an issue that another repository's starter starts here; a
+#            person's run for an issue of this repository, started by hand, skips it. At 6 drafts for that source
 #            repository that ran the model in the last hour, or when it cannot read the runs, it fails the job with
 #            `::error::HELD: ...`: no draft is made and the run is red, and the CI/CD lane's inbound watch pages for
 #            each such run (ISSUE CAP HELD). A person re-runs the job to make the draft. The draft is stored in the
-#            private bucket under the source repository's name. It can be stored only when Google's identity provider
-#            for this repository admits the run's event: when the sign-in before the model is refused for an issue,
-#            the step "Stop before the model when the draft cannot be stored" fails the job with `::error::NOT STORED:
-#            ...` before the model runs, and the cap does not count that run.
+#            private bucket as issue-drafts/<repository>/<issue>/<run id>-<attempt>. It can be stored only when
+#            Google's identity provider for this repository admits the run's event: when the sign-in before the model
+#            is refused for an issue, the step "Stop before the model when the draft cannot be stored" fails the job
+#            with `::error::NOT STORED: ...` before the model runs, and the cap does not count that run.
 #   hold     sends each real bug in a project's own code that a review held back from its comment (review.md, rule 6)
 #            to the disclosure route as a private issue (.github/scripts/review-hold): the review job stores it in a
 #            private bucket that only this job can read, and this job sends every finding stored there, a cancelled
@@ -128,9 +130,10 @@ name: "Build"
 # variables out of Claude Code's environment, and with allowed_non_write_users it keeps the GitHub token out of the
 # checkout's git config. Never re-run the review job with debug logging (ACTIONS_STEP_DEBUG): the action then prints
 # the whole conversation, a held finding too, to the public log. The comment job alone writes: it posts the comment as
-# the oss-verify GitHub App (oss-verify[bot]), with an installation token that can write pull requests in this
-# repository only. It makes that token from the App's client id below and its private key, which it reads at run time
-# from Secret Manager (oss-verify-github-app-key), and runs no code of the pull request or the project.
+# the oss-verify GitHub App (oss-verify[bot]), with an installation token that can write pull requests in the one
+# repository whose pull request the run reviews. It makes that token from the App's client id below and its private
+# key, which it reads at run time from Secret Manager (oss-verify-github-app-key), and runs no code of the pull request
+# or the project.
 #
 # This repository stores no long-lived credential for any of that. Google's provider admits this file, triage.yaml
 # and the enrollment workflow enroll-dispatch.yml, each on refs/heads/main and only from its own events (here
@@ -273,9 +276,11 @@ concurrency:
   # edit while a draft runs waits for it. Only the events that the issue's author sent share that group: route skips
   # every other (the top of this file), and each of those gets a group of its own run, so it never replaces a waiting
   # run of the author's own edit. An event that the author sent and route still skips (an owner, a member or an App
-  # wrote the issue) is of an issue that never gets a draft.
+  # wrote the issue) is of an issue that never gets a draft. A run for another repository never cancels a running
+  # review or draft either: its starter's dispatches can arrive late, and the newest waiting run replaces an older
+  # waiting one. A run whose head is no longer the pull request's head asks for nothing (route).
   group: build-${{ github.event_name }}-${{ inputs.repo || 'oss-verify' }}-${{ github.event.pull_request.number || inputs.pr || inputs.issue || (github.event.sender.login == github.event.issue.user.login && github.event.issue.number || format('{0}-run-{1}', github.event.issue.number, github.run_id)) }}
-  cancel-in-progress: ${{ github.event_name != 'issues' }}
+  cancel-in-progress: ${{ github.event_name != 'issues' && (!inputs.repo || inputs.repo == 'oss-verify') }}
 
 jobs:
   route:
@@ -354,11 +359,15 @@ jobs:
           if [ "${OTHER:-}" = true ]; then
             # Another repository's pull request: a change review (review-change.md) of the head the run names, only
             # while it is the head, whatever the pull request changes and whoever started the run. Nothing is built.
+            # A run of an older head asks for nothing and passes: the run of the newer head reviews it.
             [[ ${WANT_HEAD:-} =~ ^[0-9a-f]{40}$ ]] \
               || { echo "::error::Give head, the head commit of $REPO#$PR, as 40 hexadecimal digits."; exit 1; }
             current=$(jq -r .head.sha <<< "$pull")
-            [ "$current" = "$WANT_HEAD" ] \
-              || { echo "::error::The head of $REPO#$PR is $current, not $WANT_HEAD: the run of its head reviews it."; exit 1; }
+            [[ $current =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Could not read the head commit of $REPO#$PR."; exit 1; }
+            if [ "$current" != "$WANT_HEAD" ]; then
+              say "change review of $REPO#$PR: its head is now ${current:0:7}, not ${WANT_HEAD:0:7}, so nothing runs; the run of ${current:0:7} reviews it."
+              exit 0
+            fi
             { echo "sha=$WANT_HEAD"; echo "kind=change"; } >> "$GITHUB_OUTPUT"
             say "change review of $REPO#$PR at ${WANT_HEAD:0:7}: nothing is built (review-change.md)."
             exit 0
@@ -615,14 +624,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with: {persist-credentials: false, fetch-depth: 0}
       # The cap on the model runs of the issue path: each reviewed repository is public, so anyone with a GitHub
-      # account can open an issue and start one. The source repository identifies the drafts that share its cap of 6
-      # in the last hour. At the cap, or when it cannot read the runs, the step fails with a `::error::HELD: ...`
+      # account can open an issue and start one. The step runs for an issue's own event here, and for every run for
+      # another repository's issue, which its starter starts. A person's run for an issue of this repository, started
+      # by hand, is neither held nor counted, as before. Each source repository has its own cap of 6 drafts in the
+      # last hour. At the cap, or when it cannot read the runs, the step fails with a `::error::HELD: ...`
       # annotation: no draft, a red run, never a pass. The CI/CD lane's inbound watch pages the CI/CD role once for
       # each run and attempt whose step of this name failed (ISSUE CAP HELD); a run stopped by the later step "Stop
       # before the model when the draft cannot be stored" is not paged as held. Keep this step's name:
       # issue-draft-cap's count and the inbound watch both find a held run by it.
       - name: Hold the draft at the hourly cap
-        if: needs.route.outputs.kind == 'issue'
+        if: needs.route.outputs.kind == 'issue' && (github.event_name == 'issues' || inputs.repo && inputs.repo != 'oss-verify')
         env:
           GH_TOKEN: ${{ github.token }}
           RUNS_REPO: ${{ github.repository }}
