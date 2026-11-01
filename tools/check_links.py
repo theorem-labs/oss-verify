@@ -32,16 +32,16 @@ those records, with no Docker, and gives each build of each fuzz target two resu
    ubsan and asan-ubsan builds, each object and archive member is judged first by the recorded compiles that wrote
    its bytes (by their SHA-256): instrumented if one of them carried the build's UBSan flags for its language (each of
    them, but the -fno-sanitize= ones, among its arguments; no -fno-sanitize= argument that turns off a check the
-   build's own flags keep; and no ignorelist, -fno-sanitize-trap or -fsanitize-recover argument, which take checks
-   away or turn traps into calls, that the build's own flags do not have; a word that the driver hands on to the
-   front end through -Xclang, -Xclang=, -Xpreprocessor or -Wp, counts as the bare word), whatever its traps; not
-   instrumented (fail) if none did, whatever its traps. A compile of a language that the sanitizer does not instrument
-   (assembly), one whose arguments are in a response file, or one with an option whose effect the record does not
-   show (an -mllvm option, --config, --config-user-dir, --config-system-dir, -resource-dir) that the build's own flags
-   do not have, decides nothing; a compile run with CCC_OVERRIDE_OPTIONS has no record. The code that no recorded
-   compile decides is judged by its checks: each archive that holds some of it must hold more of them than the same
-   archive in the plain build, and so must the project's code as a whole; a build with no compile records is judged by
-   its checks alone, as before.
+   build's own flags keep; and no ignorelist, -fno-sanitize-trap, -fsanitize-recover or -ftrap-function argument,
+   which take checks away or turn traps into calls, that the build's own flags do not have; a word that the driver
+   hands on to the front end through -Xclang, -Xclang=, -Xpreprocessor or -Wp, counts as the bare word), whatever its
+   traps; not instrumented (fail) if none did, whatever its traps. A compile of a language that the sanitizer does not
+   instrument (assembly), one whose arguments are in a response file, or one with an option whose effect the record
+   does not show (an -mllvm option, --config, --config-user-dir, --config-system-dir, -resource-dir) that the build's
+   own flags do not have, decides nothing; a compile run with CCC_OVERRIDE_OPTIONS has no record. The code that no
+   recorded compile decides is judged by its checks: each archive that holds some of it must hold more of them than
+   the same archive in the plain build, and so must the project's code as a whole; a build with no compile records is
+   judged by its checks alone, as before.
 
 The plain build instruments nothing, by design; its result is "plain" when its record is complete, and "error"
 when it has no record or an incomplete one. A Go program has no record (Go's linker writes no map): its result is
@@ -98,11 +98,12 @@ UBSAN_LANGUAGES = {"c": "c", "cpp-output": "c", "c-header": "c", "objective-c": 
                    "objective-c++-cpp-output": "c++"}
 NO_SANITIZE = "-fno-sanitize="
 # The arguments that take a check away from a compile, or turn its trap into a call, while its -fsanitize= flags stay:
-# an ignorelist (and clang's older spelling, blacklist; the system ones too), and -fno-sanitize-trap and
-# -fsanitize-recover, with or without =<checks> (and clang's older spelling of -fno-sanitize-trap=undefined). A compile
-# that has one the build's own flags do not have did not carry the build's flags.
+# an ignorelist (and clang's older spelling, blacklist; the system ones too), -fno-sanitize-trap and -fsanitize-recover,
+# with or without =<checks> (and clang's older spelling of -fno-sanitize-trap=undefined), and -ftrap-function, which
+# makes each trap a call of the function it names. A compile that has one the build's own flags do not have did not
+# carry the build's flags.
 UNDO_CHECKS = re.compile(r"-fsanitize-(system-)?(ignorelist|blacklist)=.*|-fno-sanitize-trap(=.*)?"
-                         r"|-fsanitize-recover(=.*)?|-fno-sanitize-undefined-trap-on-error")
+                         r"|-fsanitize-recover(=.*)?|-fno-sanitize-undefined-trap-on-error|-ftrap-function(=.*)?")
 # The options whose effect the record does not show, each as <option> <value> or <option>=<value>: LLVM's own options,
 # which can take every check away; and those that make clang read flags or an ignorelist from a file: a configuration
 # file, the directories clang looks for its default configuration file in, and the resource directory, whose
@@ -765,9 +766,9 @@ def ubsan_compile(compiles, compile):
     flags do not give it. It carried them when each of the build's UBSan flags for that language is one of its
     arguments, but the -fno-sanitize= ones; each check that a -fno-sanitize= argument of it turns off is one that the
     build's own sanitizer flags for that language turn off (a check that the build turns off is the build's choice,
-    one the compile adds is not); and it has no ignorelist, -fno-sanitize-trap or -fsanitize-recover argument
-    (UNDO_CHECKS) that the build's own flags do not have. A word that the driver hands on to the front end (-Xclang,
-    -Xclang=, -Xpreprocessor, -Wp,) counts against the compile as the bare word does, and never for it."""
+    one the compile adds is not); and it has no ignorelist, -fno-sanitize-trap, -fsanitize-recover or -ftrap-function
+    argument (UNDO_CHECKS) that the build's own flags do not have. A word that the driver hands on to the front end
+    (-Xclang, -Xclang=, -Xpreprocessor, -Wp,) counts against the compile as the bare word does, and never for it."""
     language = UBSAN_LANGUAGES.get(compile.language)
     wanted = [w for w in compiles.ubsan[language] if not w.startswith(NO_SANITIZE)] if language else []
     if not wanted or any(a.startswith("@") for a in compile.arguments):

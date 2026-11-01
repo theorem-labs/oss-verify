@@ -617,7 +617,7 @@ class Analyse(unittest.TestCase):
                "-fsanitize-system-ignorelist=/src/sys.txt", "-fsanitize-system-blacklist=/src/sys.txt",
                "-fno-sanitize-trap=null", "-fno-sanitize-trap=all", "-fno-sanitize-trap",
                "-fsanitize-recover=undefined", "-fsanitize-recover=all", "-fsanitize-recover",
-               "-fno-sanitize-undefined-trap-on-error"]
+               "-fno-sanitize-undefined-trap-on-error", "-ftrap-function=nothing"]
 
     def test_a_compile_with_the_flags_that_takes_checks_away_fails(self):
         """An ignorelist takes checks away and -fno-sanitize-trap / -fsanitize-recover turn traps into handler calls,
@@ -640,7 +640,10 @@ class Analyse(unittest.TestCase):
         for after, word in ((["-Xclang=-fsanitize-ignorelist=ign.txt"], "-fsanitize-ignorelist=ign.txt"),
                             (["-Xclang", "-fsanitize-ignorelist=ign.txt"], "-fsanitize-ignorelist=ign.txt"),
                             (["-Xclang=-fno-sanitize=undefined"], "-fno-sanitize=undefined"),
-                            (["-Xclang=-fno-sanitize-trap=null"], "-fno-sanitize-trap=null")):
+                            (["-Xclang=-fno-sanitize-trap=null"], "-fno-sanitize-trap=null"),
+                            (["-Xclang", "-ftrap-function=nothing"], "-ftrap-function=nothing"),
+                            (["-Xclang=-ftrap-function=nothing"], "-ftrap-function=nothing"),
+                            (["-Wp,-ftrap-function=nothing"], "-ftrap-function=nothing")):
             result = self.ubsan("ubsan", plain, archives, [(sink, "x.c", "c", compile_arguments("x.c", after=after))])
             self.assertEqual(result["result"], "fail", (after, result))
             self.assertIn(f"libx.a(x.c.o) (x.c: with {word})", result["detail"])
