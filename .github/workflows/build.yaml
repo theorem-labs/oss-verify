@@ -146,7 +146,7 @@ name: "Build"
 #            "ref": "refs/heads/main", "workflow": "Build"}, and the condition
 #            claims.workflow_ref.startsWith("theorem-labs/oss-verify/.github/workflows/build.yaml@")
 #   target   the service account oss-verify-ci (svac_01WdHTLcJPEfiPttcuLK1hGT), with the developer role
-#   scope    workspace:inference, in the workspace Default+CVP, with a token lifetime of 3600 seconds
+#   scope    workspace:inference, in the workspace whose id the Review step gives, with a token lifetime of 3600 seconds
 # The numbers are the immutable ids of theorem-labs and of this repository. `workflow` is the workflow's display name
 # (its `name:`), not its file, and `ref` is the run's ref; the condition pins the file, so the rule gives a token only
 # to this file, build.yaml, on main, from any event (a fork's pull_request_target run carries this repository's
@@ -161,20 +161,24 @@ name: "Build"
 # Before the merge, tools/tests runs the review's own steps with stand-ins.
 #
 # The review's Claude Code exports its usage by OpenTelemetry to Theorem's cost collector, over Theorem's tailnet,
-# at the collector's tailnet address on port 80. Two repository variables hold the two values that needs, so that
-# this public file names neither: vars.SPEND_COLLECTOR_URL, the collector's address, and vars.TAILNET_CLIENT_ID,
-# the client id Tailscale gave the federated identity that makes the node. The collector keeps a public endpoint
-# with a bearer token; this job uses neither. The review job joins the tailnet as an ephemeral node with the tag
-# tag:ossv-review, and holds no token for the collector: Tailscale makes the node from this job's GitHub identity
-# token, and WireGuard authenticates and encrypts each connection. The tag, the federated identity that trades the
-# token for the node, the grant that gives the tag the collector's Tailscale Service svc:spend on tcp:80 and
-# nothing else beyond the two read-only pages every node of the tailnet may read (on tcp:443), and the policy test
-# that fails if the tag reaches anything else, are declared in Theorem's infrastructure code. The export is tagged
-# theorem.project=oss-verify, theorem.subproject=<name> (or _change, or _issue: a project name never starts with
-# `_`), theorem.lane=enroll-review-ci and theorem.credential=oss-verify-ci. The export is a measurement and never
-# decides whether a review runs: if either variable is unset, if the job cannot join the tailnet, or if the
-# collector does not answer at its address, the run's page carries a warning saying that this review's usage is
-# not exported, and the review runs without it.
+# at the collector's tailnet address on port 80. Two environment secrets of enroll-review hold the two values that
+# needs, so that neither this public file nor a public run log shows them: SPEND_COLLECTOR_URL, the collector's
+# address, which the export step reads, and TAILNET_CLIENT_ID, the client id Tailscale gave the federated identity
+# that makes the node, which the join step reads. Actions masks a secret wherever it appears in a log, and the
+# export step masks the bare host of the address as well, which a secret holding the whole URL does not cover.
+# The collector keeps a public endpoint with a bearer token; this job uses neither. The review job joins the
+# tailnet as an ephemeral node with the tag tag:ossv-review, and holds no token for the collector: Tailscale makes
+# the node from this job's GitHub identity token, and WireGuard authenticates and encrypts each connection. The
+# tag, the federated identity that trades the token for the node, the grant that gives the tag the collector's
+# Tailscale Service svc:spend on tcp:80 and nothing else beyond the two read-only pages every node of the tailnet
+# may read (on tcp:443), and the policy test that fails if the tag reaches anything else, are declared in
+# Theorem's infrastructure code, which declares the environment enroll-review and these two secrets of it too. The
+# export is tagged theorem.project=oss-verify, theorem.subproject=<name> (or _change, or _issue: a project name
+# never starts with `_`), theorem.lane=enroll-review-ci and theorem.credential=oss-verify-ci. The export is a
+# measurement and never decides whether a review runs: if either secret is unset, if the job cannot join the
+# tailnet, or if the collector does not answer at its address, the run's page carries a warning saying that this
+# review's usage is not exported, and the review runs without it. An unset client id also puts the join action's
+# own error on the run's page; its continue-on-error keeps that from failing the run.
 #
 # The review's session goes from one push to the next in the Actions cache, under the key
 # enroll-review/<pull request>/<project>/<run id>-<attempt>: ~/.claude/projects, where Claude Code keeps its sessions,
@@ -527,16 +531,9 @@ jobs:
       SESSION_KEY: enroll-review/${{ github.event.pull_request.number || inputs.pr }}/${{ needs.project-builds.outputs.name }}/
       GCP_WORKLOAD_IDENTITY_PROVIDER: projects/805240912354/locations/global/workloadIdentityPools/github/providers/github-ossv
       GCP_SERVICE_ACCOUNT: ossv-ci@theorem-agent-infra.iam.gserviceaccount.com
-      # The client id Tailscale gave the federated identity that makes the export's node. It is not a secret, but
-      # it names Theorem's tailnet, so it is a repository variable and not a value in this public file. A run of a
-      # repository where it is unset joins no tailnet and exports nothing; the review runs just the same.
-      TAILNET_CLIENT_ID: ${{ vars.TAILNET_CLIENT_ID }}
-      # The cost collector's address on the tailnet, http://<address> on port 80. Every sender of spend records
-      # takes this one URL, and it holds the address, not the Service's MagicDNS name, because a sender that joins
-      # the tailnet with --accept-dns=false resolves no MagicDNS name; tailscaled routes a Tailscale Service by the
-      # destination address. It is a repository variable for the same reason as the client id above, and an unset
-      # one leaves the address empty, which the export step reports as a collector that did not answer.
-      SPEND_COLLECTOR_URL: ${{ vars.SPEND_COLLECTOR_URL }}
+      # The two values the usage export needs are environment secrets of enroll-review, read only by the step that
+      # needs each one (the join below, and the export below it): a job-level entry here would print both to this
+      # public repository's run log, which Actions does not mask for a configuration variable.
     outputs:
       # The result step writes it for an enrollment or a change, never for an issue: an issue's draft, which no one has
       # approved, is in no output (a re-run with debug logging prints outputs to the public log).
@@ -620,8 +617,8 @@ jobs:
       # declares that tag, the grant that gives it the cost collector's Tailscale Service svc:spend on tcp:80 and
       # nothing else beyond the two read-only pages every node of the tailnet may read, and the federated identity
       # whose claims admit only this workflow of this repository, on refs/heads/main, in the environment
-      # enroll-review, on a GitHub-hosted runner. Its client id is the repository variable above. The job joins
-      # with its GitHub identity token, so no key is stored. One review
+      # enroll-review, on a GitHub-hosted runner. Its client id is the environment secret TAILNET_CLIENT_ID, which
+      # this step alone reads. The job joins with its GitHub identity token, so no key is stored. One review
       # job runs in a run attempt, so the run id and the attempt name the node. A Linux device reaches a Tailscale
       # Service's address only with Tailscale 1.94 or later, or with --accept-routes
       # (https://tailscale.com/kb/1552, "Access Tailscale Services from other devices"): this action meets both at
@@ -641,24 +638,31 @@ jobs:
         timeout-minutes: 3
         uses: tailscale/github-action@99a8333667fff04fdd6cffb46dfd409f8329a7bf # v4.3.0 (sha-pinned)
         with:
-          oauth-client-id: ${{ env.TAILNET_CLIENT_ID }}
+          oauth-client-id: ${{ secrets.TAILNET_CLIENT_ID }}
           audience: theorem.dev/tailnet/ossv-review
           tags: tag:ossv-review
           hostname: ossv-review-${{ github.run_id }}-${{ github.run_attempt }}
           use-cache: false
           log-mode: quiet
-      # After a join that passed, the step asks the collector's address for a page, for at most 10 seconds. curl takes
-      # any HTTP answer, a 404 too, so only a refused or timed-out connection, or an empty address, fails it. The
-      # address stays only while the Service svc:spend does: a Service made again gets new
-      # addresses, and a job that joined would then send every record to an address that answers nothing. So when the
-      # collector does not answer, the step writes no exporter variables either, and the warning names the address.
-      # The step takes continue-on-error, as the join and the logout do: the export never decides whether a review runs.
+      # After a join that passed, the step masks the bare host of the collector's address, because Actions masks a
+      # secret only where the whole secret shows and curl prints the host alone when a connection is refused. Then
+      # it asks the address for a page, for at most 10 seconds. curl takes any HTTP answer, a 404 too, so only a
+      # refused or timed-out connection, or an empty address, fails it. The address stays only while the Service
+      # svc:spend does: a Service made again gets new addresses, and a job that joined would then send every record
+      # to an address that answers nothing. So when the collector does not answer, the step writes no exporter
+      # variables either. The step takes continue-on-error, as the join and the logout do: the export never decides
+      # whether a review runs.
       - name: Export the review's usage to the cost collector
         continue-on-error: true
-        env: {TAILNET: "${{ steps.tailnet.outcome }}"}
+        env:
+          TAILNET: ${{ steps.tailnet.outcome }}
+          SPEND_COLLECTOR_URL: ${{ secrets.SPEND_COLLECTOR_URL }}
         run: |
           if [ "$TAILNET" != success ]; then
             echo "::warning::This job did not join the tailnet: this review's usage is not exported."; exit 0; fi
+          host=${SPEND_COLLECTOR_URL#*://}
+          host=${host%%[:/]*}
+          if [ -n "$host" ]; then echo "::add-mask::$host"; fi
           if ! curl -q -sS --max-time 10 -o /dev/null "$SPEND_COLLECTOR_URL"; then
             echo "::warning::The cost collector did not answer at '$SPEND_COLLECTOR_URL' on the tailnet: this review's usage is not exported."
             exit 0
