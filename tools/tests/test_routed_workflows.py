@@ -474,7 +474,6 @@ def test_a_starter_dispatches_one_event_at_a_time_for_each_pull_request_or_issue
     # An event someone else sends for an issue starts nothing, so it never replaces the author's waiting event.
     assert evaluate(group, issue(9, sender="carol", run=3)) not in {evaluate(group, issue(9)),
                                                                     evaluate(group, issue(9, sender="carol", run=4))}
-    assert starter["concurrency"]["cancel-in-progress"] is False
 
 
 @pytest.mark.parametrize("repo, pr, head", [

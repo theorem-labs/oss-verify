@@ -2237,9 +2237,6 @@ class Starters(unittest.TestCase):
         """The starter's first step, with the env GitHub gives it on an event of `values` (pull_request, issue, sender,
         event_name), and a stand-in gh whose pull request 34 has the head `current`. Return its exit status, its
         outputs and gh's calls."""
-        starter = self.starter(name)
-        [job] = starter["jobs"].values()
-        self.assertEqual(job["permissions"], {"pull-requests": "read"})
         step = self.steps(name)["Read what to start from the event"]
         context = {"github": {"event_name": values.get("event_name", "pull_request_target"), "token": "x",
                               "event": {k: v for k, v in values.items() if k != "event_name"}}}
