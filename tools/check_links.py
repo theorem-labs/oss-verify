@@ -5,8 +5,11 @@
 
 compile records each link of a fuzz target when tools/check asks (infra/base-builder/link-fuzz-target, "the record of
 this link"): the linker's map, each file the map names with its real path and SHA-256, the driver's objects, the
-copies an allocation-failure link made, and a copy of every input. This module reads those records, with no Docker,
-and gives each build of each fuzz target two results:
+copies an allocation-failure link made, and a copy of every input. It also records each compile that runs a compiler
+shim (infra/base-builder/record-compile), one line of $OUT/.records/compiles.jsonl for each object a compile wrote: the
+SHA-256 of its bytes, its source and that source's language, and every argument the build gave the compiler; and the
+build's own sanitizer flags, by language, in $OUT/.records/flags.json (infra/base-builder/compile). This module reads
+those records, with no Docker, and gives each build of each fuzz target two results:
 
 1. The uninstrumented list, in the shape of the proofs repository's harness.yaml (builds.<build>.uninstrumented):
    each file the link took from the toolchain image, which no sanitizer instruments in any build, as in OSS-Fuzz's
@@ -25,8 +28,15 @@ and gives each build of each fuzz target two results:
    forwards __rust_alloc and its siblings to the standard library, is the one exception (at most one such member), as
    it makes no memory access for AddressSanitizer to check. The UndefinedBehaviorSanitizer runs in trap mode and
    leaves no symbol: its checks are trap instructions (`unimp`), and rustc's UB checks are precondition_check
-   functions. So in the ubsan and asan-ubsan builds, each archive of the project's code must hold more of them than
-   the same archive in the plain build, and so must the project's code as a whole.
+   functions; and code with nothing to check compiles to the same bytes with its flags as without them. So in the
+   ubsan and asan-ubsan builds, each object and archive member is judged first by the recorded compiles that wrote
+   its bytes (by their SHA-256): instrumented if one of them carried the build's UBSan flags for its language (each of
+   them, but the -fno-sanitize= ones, among its arguments, and no -fno-sanitize= argument that turns off a check the
+   build's own flags keep), whatever its traps; not instrumented (fail) if none did, whatever its traps. A compile of a
+   language that the sanitizer does not instrument (assembly), or one whose arguments are in a response file, decides
+   nothing. The code that no recorded compile decides is judged by its checks: each archive that holds some of it must
+   hold more of them than the same archive in the plain build, and so must the project's code as a whole; a build
+   with no compile records is judged by its checks alone, as before.
 
 The plain build instruments nothing, by design; its result is "plain" when its record is complete, and "error"
 when it has no record or an incomplete one. A Go program has no record (Go's linker writes no map): its result is
@@ -34,13 +44,18 @@ when it has no record or an incomplete one. A Go program has no record (Go's lin
 function of its code a line table, as Go's compiler and assembler do (a .syso file's C code has none), and "error"
 otherwise.
 
-What this catches: a build whose sanitizer flags did not reach some of its code, by mistake. The records are written
-inside the build's own container, so a build.sh that sets out to deceive the check can; the review of the pull request
-is what stands against that.
+What this catches: a build whose sanitizer flags did not reach some of its code, by mistake; with the compile
+records, also a member compiled without the flags whose archive's other members hold checks. And a member that has
+nothing to check passes when its recorded compile carried the flags. What it misses: code that no recorded compile
+wrote (a compiler run by its own name, not through a shim; an object changed after its compile, such as an
+allocation-failure link's renamed copy; a prebuilt object) is judged by its checks only, as before, and a member with
+nothing to check then fails with its archive. The records are written inside the build's own container, so a build.sh
+that sets out to deceive the check can; the review of the pull request is what stands against that.
 """
 import array
 import dataclasses
 import hashlib
+import json
 import os
 import pathlib
 import posixpath
@@ -71,6 +86,12 @@ TRAP = 0xC0001073  # `unimp`, the word a trap-mode UndefinedBehaviorSanitizer ch
 SANITIZER_BUILDS = ("ubsan", "asan", "asan-ubsan")
 ASAN_BUILDS = ("asan", "asan-ubsan")
 UBSAN_BUILDS = ("ubsan", "asan-ubsan")
+# The languages of a recorded compile (infra/base-builder/record-compile) that the UndefinedBehaviorSanitizer
+# instruments, by the language whose flags (the build's flags.json) a compile of it gets.
+UBSAN_LANGUAGES = {"c": "c", "cpp-output": "c", "c-header": "c", "objective-c": "c", "objective-c-cpp-output": "c",
+                   "c++": "c++", "c++-cpp-output": "c++", "c++-header": "c++", "objective-c++": "c++",
+                   "objective-c++-cpp-output": "c++"}
+NO_SANITIZE = "-fno-sanitize="
 C_FAMILY = re.compile(r"\.(c|cc|cp|cpp|cxx|c\+\+|C|CPP|m|mm|h|hh|hpp|hxx|inc|ii|i)$")
 ASSEMBLY = re.compile(r"\.(S|s|sx|asm)$")
 FORTRAN = re.compile(r"\.(f|for|ftn|fpp|f77|f90|f95|f03|f08|f18)$", re.I)
@@ -161,6 +182,7 @@ class Record:
     renamed: dict  # {real path of an allocation-failure link's copy: (real path of the original, its sha256)}
     raw: pathlib.Path  # the build's $OUT, whose .records/store holds the bytes of the inputs
     quiet: pathlib.Path | None  # the quiet twin, if the link made one
+    compiles: "Compiles | None" = None  # the build's compile records, if it has them
 
     def store(self, sha256):
         """The bytes of the input with this SHA-256, checked. Raise RecordError if they were not kept."""
@@ -168,6 +190,59 @@ class Record:
         if hashlib.sha256(data).hexdigest() != sha256:
             raise RecordError(f"the kept copy of {sha256[:16]} has other bytes")
         return data
+
+
+@dataclasses.dataclass
+class Compile:
+    """One recorded compile of an object (infra/base-builder/record-compile)."""
+
+    file: str  # its source
+    language: str  # clang's name for the source's language
+    arguments: list  # the arguments the build gave the compiler shim
+
+
+@dataclasses.dataclass
+class Compiles:
+    """A build's compile records (infra/base-builder/compile, record-compile): its own sanitizer flags, by language,
+    and each recorded compile, by the SHA-256 of the object it wrote."""
+
+    build: str  # the build the flags are of
+    sanitizer: dict  # {"c": [word], "c++": [word]}: the build's own sanitizer flags
+    ubsan: dict  # the same, the UndefinedBehaviorSanitizer's only
+    objects: dict  # {sha256: [Compile]}
+
+
+def read_compiles(raw):
+    """The compile records in the build's $OUT `raw` (.records/flags.json and .records/compiles.jsonl), or None if it
+    has none or they cannot be read: each object is then judged as one with no record. A line that is not a record is
+    left out, and its object has no record."""
+    try:
+        flags = json.loads(read_regular(below(raw, ".records", "flags.json")))
+        lines = read_regular(below(raw, ".records", "compiles.jsonl")).decode("utf-8", "surrogateescape")
+    except (RecordError, ValueError, RecursionError):
+        return None
+
+    def words(value):
+        return (isinstance(value, dict)
+                and all(isinstance(value.get(language), list) and all(isinstance(w, str) for w in value[language])
+                        for language in ("c", "c++")))
+
+    if not (isinstance(flags, dict) and isinstance(flags.get("build"), str) and words(flags.get("sanitizer"))
+            and words(flags.get("ubsan"))):
+        return None
+    objects = {}
+    for line in lines.split("\n"):
+        try:
+            entry = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if not (isinstance(entry, dict) and isinstance(entry.get("sha256"), str)
+                and re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]) and isinstance(entry.get("file"), str)
+                and isinstance(entry.get("language"), str) and isinstance(entry.get("arguments"), list)
+                and all(isinstance(a, str) for a in entry["arguments"])):
+            continue
+        objects.setdefault(entry["sha256"], []).append(Compile(entry["file"], entry["language"], entry["arguments"]))
+    return Compiles(flags["build"], flags["sanitizer"], flags["ubsan"], objects)
 
 
 @dataclasses.dataclass
@@ -399,9 +474,10 @@ def parse_map(text):
     return taken
 
 
-def read_record(raw, sha256):
+def read_record(raw, sha256, compiles=None):
     """The record of the link whose unstripped output has this SHA-256, in the build's $OUT `raw`
-    ($OUT/.records/<sha256>/). Raise RecordError if it is not there, is incomplete, or holds a symbolic link."""
+    ($OUT/.records/<sha256>/), with the build's compile records `compiles` (read_compiles). Raise RecordError if it is
+    not there, is incomplete, or holds a symbolic link."""
     directory = below(raw, ".records", sha256)
 
     def text(name):
@@ -428,7 +504,7 @@ def read_record(raw, sha256):
             quiet = None
     except RecordError:
         quiet = None
-    return Record(parse_map(mapping), inputs, set(driver), renamed, pathlib.Path(raw), quiet)
+    return Record(parse_map(mapping), inputs, set(driver), renamed, pathlib.Path(raw), quiet, compiles)
 
 
 def runtime_kind(path):
@@ -641,6 +717,43 @@ def ub_count(code):
     return counts
 
 
+def ubsan_compile(compiles, compile):
+    """Whether one recorded compile carried the build's UndefinedBehaviorSanitizer flags for its language: (True,
+    ""), (False, why), or (None, "") when its record cannot say, for a language the sanitizer does not instrument
+    (assembly) or arguments it read from a response file (@file). It carried them when each of the build's UBSan flags
+    for that language is one of its arguments, but the -fno-sanitize= ones, and each check that a -fno-sanitize=
+    argument of it turns off is one that the build's own sanitizer flags for that language turn off: a check that the
+    build turns off is the build's choice, one the compile adds is not."""
+    language = UBSAN_LANGUAGES.get(compile.language)
+    wanted = [w for w in compiles.ubsan[language] if not w.startswith(NO_SANITIZE)] if language else []
+    if not wanted or any(a.startswith("@") for a in compile.arguments):
+        return None, ""
+    have = set(compile.arguments)
+    allowed = {check for w in compiles.sanitizer[language] if w.startswith(NO_SANITIZE)
+               for check in w[len(NO_SANITIZE):].split(",")}
+    missing = [w for w in wanted if w not in have]
+    extra = sorted({a for a in compile.arguments
+                    if a.startswith(NO_SANITIZE) and not set(a[len(NO_SANITIZE):].split(",")) <= allowed})
+    if not missing and not extra:
+        return True, ""
+    return False, (f"{compile.file}: " + ", ".join((["without " + " ".join(missing)] if missing else [])
+                                                   + (["with " + " ".join(extra)] if extra else [])))
+
+
+def ubsan_record(compiles, data):
+    """What the build's compile records say of an object's bytes `data`: (True, ""), when a recorded compile that
+    wrote these bytes carried the build's UBSan flags (the bytes are the same whichever one made them); (False, why),
+    when compiles wrote them and none carried the flags; (None, "") when no record decides."""
+    if compiles is None:
+        return None, ""
+    verdicts = [ubsan_compile(compiles, compile)
+                for compile in compiles.objects.get(hashlib.sha256(data).hexdigest(), [])]
+    if any(verdict for verdict, _ in verdicts):
+        return True, ""
+    against = [why for verdict, why in verdicts if verdict is False]
+    return (False, against[0]) if against else (None, "")
+
+
 def relative_source(path, checkouts):
     """`path` relative to the git checkout of the image that holds it, or None."""
     path = posixpath.normpath(path)
@@ -776,29 +889,50 @@ def analyse(records, image, dwarf_units=None, checkouts=(), assembly_sources=Non
             if plain_c:
                 found.append(f"{len(plain_c)} of {len(with_code)} objects with code refer to no AddressSanitizer "
                              "constructor: " + ", ".join(listed(plain_c)))
-        notes = []
+        notes, shown = [], 0
         if build in UBSAN_BUILDS:
-            # Every archive of the project's code must hold more checks than the same archive in the plain build, and
-            # so must its code as a whole. An object the link took on its own is named when it holds none, and does
-            # not fail the build: one can genuinely have nothing to check (the example fixture's own fuzz target
-            # object has no check in either build), and nothing in the object tells the two apart. The enrollment's
-            # review reads that line. Without a plain build there is nothing to compare, and the check decides
-            # nothing.
-            if "plain" not in scanned:
+            # Each object and archive member is judged first by the compile that wrote its bytes, when the build
+            # recorded one: one that carried the build's UBSan flags is instrumented, whatever its traps (code with
+            # nothing to check has none); one without them is not, whatever its traps.
+            compiles = records[build].compiles
+            if compiles is not None and compiles.build != build:
+                compiles = None
+            without, undecided = [], []
+            for c in with_code:
+                verdict, why = ubsan_record(compiles, c.data) if not c.facts.bitcode else (None, "")
+                if verdict:
+                    shown += 1
+                elif verdict is False:
+                    without.append(f"{c.label} ({why})")
+                else:
+                    undecided.append(c)
+            if without:
+                found.append(f"{len(without)} objects were compiled without the build's UndefinedBehaviorSanitizer "
+                             "flags: " + "; ".join(listed(without)))
+            # The code that no record decides (a prebuilt object, a compile that ran no shim, a build without records)
+            # is judged by its checks: each archive that holds some of it must hold more checks than the same archive
+            # in the plain build, and so must the project's code as a whole. An object the link took on its own is
+            # named when it holds none, and does not fail the build: one can genuinely have nothing to check (the
+            # example fixture's own fuzz target object has no check in either build), and nothing in the object tells
+            # the two apart. The enrollment's review reads that line. Without a plain build there is nothing to
+            # compare, and the check decides nothing. A build without records is judged by its checks alone.
+            by_checks = compiles is None or bool(undecided)
+            if by_checks and "plain" not in scanned:
                 incomplete = incomplete + ["no plain build to compare the UndefinedBehaviorSanitizer's checks with"]
                 found.append(incomplete[-1])
             counts, baseline = ub_count(with_code), ub_count(scanned.get("plain", []))
             archives = {c.archive for c in with_code if c.archive}
+            judged = {c.archive or c.label for c in undecided}
             short, quiet = [], []
             for where, count in sorted(counts.items()):
                 before = baseline.get(where)
-                if count and (before is None or count > before):
+                if where not in judged or count and (before is None or count > before):
                     continue
                 text = (f"{where}: {count} UBSan traps and UB checks"
                         + (f", the plain build's {before}" if before is not None else ""))
                 (short if where in archives else quiet).append(text)
             total, before = sum(counts.values()), sum(baseline.values())
-            if total == 0 or (baseline and total <= before):
+            if by_checks and (total == 0 or (baseline and total <= before)):
                 short.append(f"the project's code as a whole: {total} UBSan traps and UB checks"
                              + (f", the plain build's {before}" if baseline else ""))
             if short:
@@ -821,7 +955,9 @@ def analyse(records, image, dwarf_units=None, checkouts=(), assembly_sources=Non
             result["instrumented"] = {"result": "fail", "detail": "; ".join(found + notes)}
         else:
             result["instrumented"] = {"result": "pass", "detail": "; ".join(
-                [f"{len(with_code)} objects with code, all instrumented"] + notes)}
+                [f"{len(with_code)} objects with code, all instrumented"
+                 + (f", {shown} of them by the compile that wrote them, which carried the build's "
+                    "UndefinedBehaviorSanitizer flags" if shown else "")] + notes)}
     return results
 
 

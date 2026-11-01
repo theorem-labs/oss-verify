@@ -155,10 +155,10 @@ def assembly_reader(tag, checkouts, labels):
     return sources
 
 
-def record_of(raw, target):
-    """The link record of a fuzz target in one build's $OUT `raw`: a check_links.Record, a check_links.GoProgram (a
-    program that Go's linker linked, which has no map), or the reason there is neither. Also its quiet twin's bytes, or
-    None."""
+def record_of(raw, target, compiles=None):
+    """The link record of a fuzz target in one build's $OUT `raw`, with the build's compile records `compiles`
+    (check_links.read_compiles): a check_links.Record, a check_links.GoProgram (a program that Go's linker linked,
+    which has no map), or the reason there is neither. Also its quiet twin's bytes, or None."""
     try:
         executable = check_links.read_regular(check_links.below(raw, target))
     except check_links.RecordError as error:
@@ -172,7 +172,7 @@ def record_of(raw, target):
             pass
         if os.path.lexists(raw / ".records" / digest / "map"):
             try:
-                return check_links.read_record(raw, digest), quiet
+                return check_links.read_record(raw, digest, compiles), quiet
             except check_links.RecordError as error:
                 return str(error), quiet
         why = "its link has no map"
@@ -389,9 +389,12 @@ def binary_checks(job, tag, toolchain, targets, entries, sources, work, *, label
 
     step("--checks: the links of each binary")
     records, quiet = {}, {}
+    # The compile records are the build's, and every target of it reads them.
+    compiles = {build: check_links.read_compiles(work / "raw" / build) for build in job.builds}
     for target in targets:
         for build in job.builds:
-            records[(target, build)], quiet[(target, build)] = record_of(work / "raw" / build, target)
+            records[(target, build)], quiet[(target, build)] = record_of(work / "raw" / build, target,
+                                                                         compiles[build])
     wanted = set()
     for record in records.values():
         if isinstance(record, check_links.Record):
