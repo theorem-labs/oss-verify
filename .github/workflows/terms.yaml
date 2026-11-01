@@ -16,6 +16,12 @@ on:
 
 permissions: {}
 
+concurrency:
+  # One run per pull request: an edit or a push while a run is going supersedes it, so the newest description is
+  # the one this check reports on.
+  group: terms-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   terms-accepted:
     name: terms-accepted
