@@ -251,7 +251,7 @@ on:
         required: false
         type: number
       issue:
-        description: "Number of the issue of this repository to draft a reply to (give pr or issue, not both)"
+        description: "Number of the issue of the repository repo names, to draft a reply to (give pr or issue, not both)"
         required: false
         type: number
       repo:
