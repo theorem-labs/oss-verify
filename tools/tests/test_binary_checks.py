@@ -780,6 +780,50 @@ class Analyse(unittest.TestCase):
             "x.c", "c", compile_arguments("x.c"))
         self.assertEqual(self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]["result"], "pass")
 
+    def test_flags_that_turn_on_no_check_decide_nothing(self):
+        """A build whose recorded UBSan flags hold no -fsanitize= word (none at all, or only words every compile
+        carries): its records would call every compile instrumented, so they decide nothing, the trap rule refuses a
+        member with no trap, and the cell says why."""
+        sink = elf_object(RET, defined=["f"], undefined=ASAN, comment=True)
+        archives = {"/work/b/libx.a": {"x.c.o": sink}}
+        for build in ("ubsan", "asan-ubsan"):
+            for wanted in ([], ["-fno-sanitize-recover=all"], ["-fno-sanitize=vptr", "-fno-sanitize-recover=all"]):
+                plain = self.record(archives, build="plain")
+                record = self.record(archives, build=build,
+                                     compiled=[(sink, "x.c", "c", compile_arguments("x.c", flags=wanted))])
+                own = (["-fsanitize=address"] if build == "asan-ubsan" else []) + wanted
+                record.compiles.ubsan = {"c": list(wanted), "c++": list(wanted)}
+                record.compiles.sanitizer = {"c": own, "c++": own}
+                result = self.analyse({"plain": plain, build: record})[build]["instrumented"]
+                self.assertEqual(result["result"], "fail", (build, wanted, result))
+                self.assertIn("libx.a: 0 UBSan traps and UB checks, the plain build's 0", result["detail"])
+                self.assertNotIn("by the compile that wrote them", result["detail"])
+                self.assertIn("the build's recorded UndefinedBehaviorSanitizer flags for C and C++ turn on no check",
+                              result["detail"])
+
+    def test_flags_that_turn_on_no_check_for_one_language_decide_nothing_there(self):
+        """C++'s flags name checks, C's do not: the C++ member is decided by its record, the C member by its traps."""
+        c_sink = elf_object(RET, defined=["f"], comment=True)
+        cxx_sink = elf_object(RET, defined=["g"], comment=True)
+        archives = {"/work/b/libc.a": {"c.o": c_sink}, "/work/b/libcxx.a": {"cxx.o": cxx_sink}}
+        plain = self.record(archives, build="plain")
+        record = self.record(archives, compiled=[(c_sink, "c.c", "c", compile_arguments("c.c")),
+                                                 (cxx_sink, "x.cc", "c++", compile_arguments("x.cc"))])
+        record.compiles.ubsan["c"] = ["-fno-sanitize-recover=all"]
+        result = self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]
+        self.assertEqual(result["result"], "fail", result)
+        self.assertIn("libc.a: 0 UBSan traps", result["detail"])
+        self.assertNotIn("libcxx.a", result["detail"])
+        self.assertIn("flags for C turn on no check", result["detail"])
+
+    def test_a_build_with_no_compile_records_says_so(self):
+        trapped = elf_object(LW + UNIMP + RET, defined=["f"], comment=True)
+        plain = self.record({"/work/b/libx.a": {"x.o": elf_object(LW + RET, defined=["f"], comment=True)}})
+        ubsan = self.record({"/work/b/libx.a": {"x.o": trapped}})
+        result = self.analyse({"plain": plain, "ubsan": ubsan})["ubsan"]["instrumented"]
+        self.assertEqual(result["result"], "pass", result)
+        self.assertIn("the build has no compile records that this reads", result["detail"])
+
     def test_another_builds_compile_records_decide_nothing(self):
         sink = elf_object(RET, defined=["f"], comment=True)
         archives = {"/work/b/libx.a": {"x.o": sink}}
