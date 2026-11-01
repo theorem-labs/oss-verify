@@ -24,6 +24,22 @@ import validate  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
+# The marker lines of a PEM block, in parts, so that no line of this file is a private key: the leak checks refuse
+# such a block by its shape, and a committed test fixture looks exactly like a real key to them.
+PEM_MARKER = "-----{} RSA PRIVATE KEY-----"
+
+
+def stand_in_key():
+    """A stand-in for the oss-verify App's private key, as the lines of a PEM block, made here and never committed.
+
+    The steps under test never read the key as a key: each base64-decodes what Secret Manager answers, masks every
+    non-blank line of it, and writes those lines to the step's output. Only the shape of a PEM block matters to
+    them, so random base64 between the markers exercises them exactly as a real key does, without a key generation
+    this test has no use for.
+    """
+    body = base64.b64encode(os.urandom(48)).decode()
+    return [PEM_MARKER.format("BEGIN"), body[:32], body[32:], PEM_MARKER.format("END")]
+
 
 class Shifts(unittest.TestCase):
     def test_a_patch_moves_the_lines_after_its_hunks(self):
@@ -250,8 +266,7 @@ class WorkflowArguments(unittest.TestCase):
         if not shutil.which("strace"):
             self.skipTest("strace is not installed (the tests workflow installs it)")
         gcp = "gcp-not-a-secret"
-        key_lines = ["-----BEGIN RSA PRIVATE KEY-----", "MIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4",
-                     "KUpRKfFLfRYC9AIKjbJTWit+CqvjWYzvQwECAwEAAQ==", "-----END RSA PRIVATE KEY-----"]
+        key_lines = stand_in_key()
         key = "\n".join(key_lines) + "\n"
 
         def steps(workflow, job, name):
@@ -395,8 +410,7 @@ class WorkflowArguments(unittest.TestCase):
         # The key-reading step is in each of these files, and the runner logs the private-key input of the next step:
         # these masks are what keep a key that does not expire out of a public log. Each copy is run with a stand-in
         # curl for Secret Manager, and every non-blank line of the key, and its base64 form, must be masked.
-        key = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu\n" \
-              "KUpRKfFLfRYC9AIKjbJTWit+CqvjWYzvQwECAwEAAQ==\n-----END RSA PRIVATE KEY-----\n"
+        key = "\n".join(stand_in_key()) + "\n"
         payload = base64.b64encode(key.encode()).decode()
         for workflow, key_job in [(w, j) for w, js in self.KEY_JOBS.items() for j in js]:
             steps = [s for s in self.workflow(workflow)["jobs"][key_job]["steps"]
