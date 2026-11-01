@@ -36,7 +36,9 @@ name: "Build"
 #            .github/scripts/review-gather gathered: the pull request, the project's source at the built commit, and
 #            the build's results, with .claude/skills/review-enrollment/SKILL.md for where those are. It gives a
 #            structured output: the comment that asks the maintainer for each fix, any finding held back (review.md,
-#            rule 6), and a verdict for each check. The comment and the verdicts are the artifact enroll-review-draft.
+#            rule 6), and a verdict for each check. The comment, the verdicts and body.md, the whole comment as the
+#            comment job posts it (.github/scripts/review-body), are the artifact enroll-review-draft; body.md is also
+#            the job's output `body`, which the comment job posts as it is.
 #            On a later push it resumes the same Claude Code session as the last review, so it knows what it asked
 #            for and why, and reviews only the diff since the commit it reviewed then, with one exception: check D3 of
 #            review.md answers each failing result of this build's report of the new head. For a change it checks
@@ -60,8 +62,11 @@ name: "Build"
 #            run's too. A finding never reaches a log, an output or an artifact.
 #   comment  posts that comment, with the checks' report folded under it, or replaces
 #            the one already there. The comment starts with <!-- oss-verify-review -->, as the triage comment starts
-#            with its own marker. It never runs for an issue: a person approves the exact text of each reply to an
-#            issue before anyone posts it.
+#            with its own marker, and its second line is the verdict line that the inbound watcher reads:
+#            <!-- oss-verify-verdict {"head":"<commit>","blocking":[...],"person":[...]} -->, the checks whose verdict
+#            is fail and those left to a person (.github/scripts/review-body; none when the review gave no verdicts).
+#            It never runs for an issue: a person approves the exact text of each reply to an issue before anyone
+#            posts it.
 #   required always runs, last, and reports the required check (below).
 #
 # project-builds is the required check, and the job required reports it (.github/scripts/collect). required runs on
@@ -543,6 +548,8 @@ jobs:
       # approved, is in no output (a re-run with debug logging prints outputs to the public log).
       comment: ${{ steps.result.outputs.comment }}
       held_object: ${{ steps.held.outputs.object }}
+      # body.md, the whole comment, which the comment job posts as it is: that job runs no script of its own.
+      body: ${{ steps.body.outputs.body }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with: {persist-credentials: false, fetch-depth: 0}
@@ -733,6 +740,20 @@ jobs:
           { echo '<!-- held finding -->'; jq -r '.held // ""' <<< "$out"; } > "$RUNNER_TEMP/held-finding.md"
           if jq -e '(.held // "") | test("\\S")' <<< "$out" > /dev/null; then echo "held=yes" >> "$GITHUB_OUTPUT"
           else mkdir -p ~/.claude && printf 'session=%s head=%s\n' "$SESSION" "$HEAD_SHA" > ~/.claude/ossv-last-review; fi
+      # body.md: the whole comment, with the verdict line, which the comment job posts as it is (the job's output
+      # `body`, written as the result step writes `comment`). Never for an issue: no job posts its reply.
+      - name: Write the comment as the comment job posts it
+        id: body
+        if: env.KIND != 'issue'
+        env:
+          REVIEW: ${{ steps.result.outputs.comment }}
+          CHECKS: ${{ needs.project-builds.outputs.checks }}
+          RULES: ${{ needs.route.outputs.kind == 'change' && 'review-change.md' || 'review.md' }}
+        run: |
+          verdicts=$(jq -c . "$RUNNER_TEMP/draft/verdicts.json")
+          VERDICTS=$verdicts .github/scripts/review-body > "$RUNNER_TEMP/draft/body.md"
+          delimiter="body_$(openssl rand -hex 16)"
+          { echo "body<<$delimiter"; cat "$RUNNER_TEMP/draft/body.md"; echo "$delimiter"; } >> "$GITHUB_OUTPUT"
       # enroll-dispatch.yml reads verdicts.json from this run: F2 or F7 fail, or no verdicts, starts no statements. A
       # re-run replaces it, which is how a held enrollment is decided again. Never for an issue (the step above).
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (sha-pinned)
@@ -988,10 +1009,9 @@ jobs:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number || inputs.pr }}
-          REVIEW: ${{ needs.review.outputs.comment }}
-          CHECKS: ${{ needs.project-builds.outputs.checks }}
+          # The review job's body.md: the whole comment, made there by .github/scripts/review-body.
+          BODY: ${{ needs.review.outputs.body }}
           HEAD_SHA: ${{ needs.project-builds.outputs.sha || needs.route.outputs.sha }}
-          RULES: ${{ needs.route.outputs.kind == 'change' && 'review-change.md' || 'review.md' }}
         run: |
           set -euo pipefail
           # A pull request's comment only: a run for an issue has no pull request, and an issue's draft is never posted.
@@ -1003,14 +1023,9 @@ jobs:
             echo "The pull request's head is now $current, not $HEAD_SHA: the run of $current posts the comment."
             exit 0
           fi
-          # The marker first, which finds the comment again; GitHub refuses a comment over 65,536 characters.
-          {
-            printf '<!-- oss-verify-review -->\n<sub>Claude wrote this review of `%s` from `%s`. It can be wrong. Each push replaces it.</sub>\n\n%s\n' \
-              "${HEAD_SHA:0:7}" "$RULES" "${REVIEW:0:50000}"
-            if [ -n "$CHECKS" ]; then
-              printf '\n<details><summary>What the checks of the fuzz targets and of the binaries measured</summary>\n\n%s\n\n</details>\n' "${CHECKS:0:12000}"
-            fi
-          } > "$RUNNER_TEMP/comment.md"
+          # The review job's body.md as it is: the marker first, which finds the comment again, then the verdict line.
+          # A job output drops the file's last line end, which this puts back.
+          printf '%s\n' "$BODY" > "$RUNNER_TEMP/comment.md"
           # Ours is the oss-verify App's comment that starts with the marker.
           existing=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
             --jq '.[] | select(.user.login == "oss-verify[bot]" and (.body | startswith("<!-- oss-verify-review -->"))) | .id')
