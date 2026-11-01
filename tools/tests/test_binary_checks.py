@@ -526,16 +526,31 @@ class Analyse(unittest.TestCase):
         self.assertIn("(riscv/getcontext.S: without -fsanitize=undefined -fno-sanitize-recover=all "
                       "-fsanitize-trap=all)", result["detail"])
 
-    def test_an_assembly_source_in_a_checkout_is_judged_as_before(self):
-        """Nothing else changes: an object whose DWARF names a checkout's file needs no record."""
+    def test_an_assembly_object_in_a_checkout_needs_the_flags_when_it_has_a_record(self):
+        """An object whose DWARF names a checkout's file: recorded without the build's sanitizer flags it fails, named;
+        recorded with them, or with no record, it passes as before. No checkout file is read for it."""
         asm = elf_object(NOP, defined=["memcpy_fast"])
-        record = self.record({"/work/libproject.a": {"lib.c.o": good(), "memcpy.S.o": asm}},
-                             compiled=[(asm, "src/arch/memcpy.S", "assembler-with-cpp", BASE, "/src/lib", None)],
-                             build="asan")
+        checked = elf_object(LW + UNIMP + RET, defined=["f"], undefined=ASAN, files=["lib.c"], comment=True)
+        plain = self.record({"/work/libproject.a": {"lib.c.o": elf_object(LW + RET, defined=["f"], comment=True),
+                                                    "memcpy.S.o": asm}}, build="plain")
         units = lambda objects: [("DW_LANG_Mips_Assembler", "src/arch/memcpy.S", "/src/lib")] * len(objects)
-        result = self.analyse({"asan": record}, dwarf_units=units, checkouts=["/src/lib"],
-                              checkout_files=lambda paths: self.fail("no checkout file is read"))["asan"]
-        self.assertEqual(result["instrumented"]["result"], "pass", result)
+        for build, own in (("asan", ["-fsanitize=address"]), ("asan-ubsan", ["-fsanitize=address", *UBSAN_FLAGS])):
+            for flags, compiled, verdict in (([], True, "fail"), (own, True, "pass"), ([], False, "pass")):
+                record = self.record(
+                    {"/work/libproject.a": {"lib.c.o": checked, "memcpy.S.o": asm}}, build=build,
+                    compiled=[(asm, "src/arch/memcpy.S", "assembler-with-cpp", BASE + list(flags) + ["-c", "x.S"],
+                               "/src/lib", None)] if compiled else [])
+                result = self.analyse({"plain": plain, build: record}, dwarf_units=units, checkouts=["/src/lib"],
+                                      checkout_files=lambda paths: self.fail("no checkout file is read"))[build]
+                case = (build, flags, compiled, result)
+                self.assertEqual(result["instrumented"]["result"], verdict, case)
+                if verdict == "fail":
+                    self.assertIn("libproject.a(memcpy.S.o): assembled without the build's sanitizer flags "
+                                  "(src/arch/memcpy.S: without -fsanitize=address", result["instrumented"]["detail"])
+                    self.assertIsNone(result["uninstrumented"], case)
+                else:
+                    self.assertIn({"name": "memcpy.S.o", "kind": "assembly", "source": "src/arch/memcpy.S"},
+                                  result["uninstrumented"])
 
     def test_a_file_of_the_image_with_no_kind_leaves_no_list(self):
         """A list that leaves a file out would say that the build links less uninstrumented code than it does."""

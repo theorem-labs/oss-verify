@@ -22,9 +22,10 @@ target two results:
    image, or, for one assembled without DWARF, when a source of the project carries its name and names every global it
    defines. A ported build assembles a build directory's copy of the checkout, so the DWARF names the copy: such an
    object is listed with the checkout's file when a recorded compile that wrote its bytes, with the build's own
-   sanitizer flags, read a copy of that file with the same bytes (copied_sources); one recorded without those flags is
-   a finding. The driver (cli.o, the adapter and the seals) is compiled without a sanitizer in every build, by design,
-   and is not listed.
+   sanitizer flags, read a copy of that file with the same bytes (copied_sources). Wherever its source is, an assembly
+   object whose recorded compiles all lack the build's own sanitizer flags is a finding (unflagged_assembly); one with
+   no record is judged as before. The driver (cli.o, the adapter and the seals) is compiled without a sanitizer in
+   every build, by design, and is not listed.
 
 2. Whether the project's own code is instrumented, in each sanitizer build. The project's code is every object and
    archive member the link took that is neither the driver's nor the toolchain image's. In the AddressSanitizer
@@ -835,39 +836,51 @@ def relative_source(path, checkouts):
     return None
 
 
+def assembly_records(compiles, c):
+    """The recorded compiles of assembly that wrote the bytes of the object `c` (Code), but those whose arguments are
+    in a response file, which the record does not show."""
+    return [k for k in compiles.objects.get(hashlib.sha256(c.data).hexdigest(), [])
+            if k.language in ("assembler", "assembler-with-cpp") and not any(a.startswith("@") for a in k.arguments)]
+
+
+def assembly_flags(compiles):
+    """The build's own sanitizer flags that a compile of assembly must carry: each of them but the -fno-sanitize=
+    ones, for C and C++ alike."""
+    return [w for w in compiles.sanitizer["c"] if not w.startswith(NO_SANITIZE) and w in compiles.sanitizer["c++"]]
+
+
+def unflagged_assembly(c, compiles):
+    """The problem of an assembly object (Code) whose recorded compiles (assembly_records) all lack the build's own
+    sanitizer flags (assembly_flags), wherever its source is: the build's flags did not reach it. It names the object
+    and the flags. None when one of them carried the flags, or there is no record (the object is judged as before)."""
+    if compiles is None:
+        return None
+    recorded, flags = assembly_records(compiles, c), assembly_flags(compiles)
+    if not recorded or any(all(w in k.arguments for w in flags) for k in recorded):
+        return None
+    missing = [w for w in flags if w not in recorded[0].arguments]
+    return f"{c.label}: assembled without the build's sanitizer flags ({recorded[0].file}: without {' '.join(missing)})"
+
+
 def copied_sources(objects, compiles, checkouts, checkout_files):
-    """For each assembly object of `objects` ([Code]) whose DWARF names a source outside every checkout: what the
-    build's compile records `compiles` say of its source, as (source relative to its checkout, None), (None, problem)
-    or (None, None). A ported build copies the source tree into a build directory and assembles the copy there
+    """For each assembly object of `objects` ([Code]) whose DWARF names a source outside every checkout: the
+    checkout's file that the build's compile records `compiles` show it was assembled from, relative to its checkout,
+    or None. A ported build copies the source tree into a build directory and assembles the copy there
     (infra/base-builder/release-target.sh, BUILDDIR), so the object's DWARF names the copy. A recorded compile of an
-    assembly source that wrote the object's bytes names the copy too (its directory and file), and the SHA-256 of the
-    source it read (source_sha256): the source is the checkout's file at <checkout>/<the copy's path less some of its
-    leading directories>, the longest such path, when that file has the same bytes (`checkout_files(paths)` gives
-    {path: sha256} of the project image's files). That compile must carry the build's own sanitizer flags (each of
-    them but the -fno-sanitize= ones, for C and C++ alike): one without them is a problem, which names the object and
-    the flags it lacks. No record, a record with no source_sha256 or with its arguments in a response file, or no
-    checkout file with those bytes: (None, None), and the object is judged as before."""
-    results = [(None, None)] * len(objects)
+    assembly source that wrote the object's bytes, with the build's own sanitizer flags (assembly_flags), names the
+    copy too (its directory and file), and the SHA-256 of the source it read (source_sha256): the source is the
+    checkout's file at <checkout>/<the copy's path less some of its leading directories>, the longest such path, when
+    that file has the same bytes (`checkout_files(paths)` gives {path: sha256} of the project image's files). No such
+    record, or no checkout file with those bytes: None, and the object is judged as before."""
+    results = [None] * len(objects)
     if compiles is None or not checkouts:
         return results
-    flags = [w for w in compiles.sanitizer["c"] if not w.startswith(NO_SANITIZE) and w in compiles.sanitizer["c++"]]
+    flags = assembly_flags(compiles)
     plans, paths = [], set()
     for n, c in enumerate(objects):
-        recorded = [k for k in compiles.objects.get(hashlib.sha256(c.data).hexdigest(), [])
-                    if k.language in ("assembler", "assembler-with-cpp")
-                    and not any(a.startswith("@") for a in k.arguments)]
-        if not recorded:
-            continue
-        carried = [k for k in recorded if all(w in k.arguments for w in flags)]
-        if not carried:
-            k = recorded[0]
-            missing = [w for w in flags if w not in k.arguments]
-            results[n] = (None, f"{c.label}: assembled without the build's sanitizer flags ({k.file}: without "
-                                + " ".join(missing) + ")")
-            continue
         candidates = []
-        for k in carried:
-            if k.source_sha256 is None or not k.directory.startswith("/"):
+        for k in assembly_records(compiles, c):
+            if not all(w in k.arguments for w in flags) or k.source_sha256 is None or not k.directory.startswith("/"):
                 continue
             parts = [p for p in posixpath.normpath(posixpath.join(k.directory, k.file)).split("/") if p]
             for i in range(1, len(parts)):
@@ -882,7 +895,7 @@ def copied_sources(objects, compiles, checkouts, checkout_files):
     for n, candidates in plans:
         for _, path, tail, sha256 in candidates:
             if hashes.get(path) == sha256:
-                results[n] = (tail, None)
+                results[n] = tail
                 break
     return results
 
@@ -895,7 +908,7 @@ def dwarf_source(unit, checkouts):
     return relative_source(unit[1] if unit[1].startswith("/") else posixpath.join(unit[2] or "", unit[1]), checkouts)
 
 
-def source_entry(c, unit, checkouts, named=None, copied=(None, None)):
+def source_entry(c, unit, checkouts, named=None, copied=None):
     """The uninstrumented entry of an object with no mark of a C or C++ compiler: (entry, problem or None). A
     compiler adds no sanitizer check to hand-written assembly or to Fortran, and OSS-Fuzz allows both uninstrumented,
     listed by name with the source they came from; the facts' schema asks for that source. Three things can name it:
@@ -922,9 +935,7 @@ def source_entry(c, unit, checkouts, named=None, copied=(None, None)):
         return entry, None
     source = dwarf_source(unit, checkouts)
     if not source and kind == "assembly":
-        source, problem = copied
-        if problem:
-            return entry, problem
+        source = copied
     if not source or not SOURCE.fullmatch(source) or not (ASSEMBLY if kind == "assembly" else FORTRAN).search(source):
         return entry, (f"{c.label}: its {kind} source {unit[1] or '(not named)'} is in no checkout of the project "
                        "image" + (", and no compile record of it shows the checkout's file with the same bytes"
@@ -1025,7 +1036,10 @@ def analyse(records, image, dwarf_units=None, checkouts=(), assembly_sources=Non
                                                           checkout_files)))
                 for n, (c, unit) in enumerate(zip(assembly, units)):
                     entry, problem = source_entry(c, unit, checkouts, next(found_sources) if unit is None else None,
-                                                  copied.get(n, (None, None)))
+                                                  copied.get(n))
+                    # Wherever its source is, an assembly object whose recorded compiles lack the build's sanitizer
+                    # flags is one the build's flags did not reach: a finding.
+                    problem = unflagged_assembly(c, compiles) or problem
                     if problem:
                         # Code not shown to be assembly or Fortran is a finding (fail), and the list, which could not
                         # hold its entry, is not written either: never shorter than what the link took.
