@@ -21,11 +21,11 @@ of the environment `oss-verify-starter` of that repository, whose deployment bra
 Neither starter is installed yet, and both stay inert until every condition below holds. An administrator turns one
 on only in this order:
 
-1. `review-change.md` and `review-issue.md` cover that repository. Today both are written for this repository alone:
-   `review-change.md` says it is read for a pull request of this repository that changes nothing under `projects/`,
-   and `review-issue.md` says it is read for an issue of this repository. A review of the other repository reads both
-   files, so it is not believed until they say what they check there, or that repository has rules files of its own.
-   Both files belong to `@theorem-labs/engineering` (`.github/CODEOWNERS`), whose review a change to them needs.
+1. `review-change.md` and `review-issue.md` cover that repository. Today both are written for this repository alone,
+   and each says so in its first paragraph: the change checks name this repository's tests and documents, and an
+   issue's reply answers from this repository's files. A review of the other repository reads both files, so it is
+   not believed until they say what they check there, or that repository has rules files of its own. Both files
+   belong to `@theorem-labs/engineering` (`.github/CODEOWNERS`), whose review a change to them needs.
 2. A ruleset on the repository's default branch requires a pull request with an approving review, and no writer can
    bypass it. Without it, any writer can push a workflow to the default branch that reads the environment's secret.
 3. A person decides which App's key the starter holds. The key it names is the key of the App that posts review
