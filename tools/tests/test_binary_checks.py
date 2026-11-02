@@ -1225,7 +1225,8 @@ RECORD_COMPILE = BUILDER / "record-compile"
 
 
 class CompileRecords(unittest.TestCase):
-    """infra/base-builder/record-compile, with a stand-in for a compiler shim; and the wrapper compile writes."""
+    """infra/base-builder/record-compile, with a stand-in for a compiler shim; the wrapper compile writes; and the
+    record code of compile and release-target.sh."""
 
     # The stand-in: it writes each object its arguments name (-o's or -o<file>'s, else <name>.o for each .c, .cc or
     # .S) unless SHIM_WRITE=0, writes its arguments to both streams (and to fd 3 with SHIM_FD3=1), and exits with
@@ -1412,10 +1413,9 @@ exit "${SHIM_STATUS:-0}"
             self.assertEqual(out.read_text(), expected)
 
     def test_compile_writes_records_that_check_links_reads(self):
-        """compile's own record code: the build's flags.json and the sorted compiles.jsonl it copies to $OUT/.records,
-        read back by check_links.read_compiles. A word with a quote or a backslash survives, and C gets the C
-        exclusion that C++ does not."""
-        compile_ = BUILDER / "compile"
+        """compile's own record code: the build's flags.json and compiles.jsonl, the records of every compile in byte
+        order, which it copies to $OUT/.records, read back by check_links.read_compiles. A word with a quote or a
+        backslash survives, and C gets the C exclusion that C++ does not."""
         script = ('set -euo pipefail\n'
                   'eval "$(sed -n \'/^c_exclude=""/,/^\\[ -z "\\$c_exclude" \\]/p\' "$1")"\n'
                   'eval "$(sed -n \'/^  json_words() {/,/> "\\$OV_RECORDS\\/flags.json"/p\' "$1")"\n'
@@ -1423,11 +1423,13 @@ exit "${SHIM_STATUS:-0}"
         san = '-fsanitize=address -fsanitize=undefined -DQ="a\\b"'
         ubsan = "-fsanitize=undefined -fsanitize-trap=all"
         (self.dir / "src").mkdir()
-        (self.dir / "src" / "x.c").write_text("int x;\n")
-        self.assertEqual(self.run_shim("-c", "src/x.c", "-o", "x.o").returncode, 0)
+        names = ["x", "a", "q", "c", "m"]
+        for name in names:
+            (self.dir / "src" / f"{name}.c").write_text(f"int {name};\n")
+            self.assertEqual(self.run_shim("-c", f"src/{name}.c", "-o", f"{name}.o").returncode, 0)
         out = self.dir / "out"
         for flav, build, wanted_ubsan in (("asanubsan", "asan-ubsan", ubsan.split()), ("asan", "asan", [])):
-            subprocess.run(["bash", "-c", script, "bash", str(compile_)], check=True, cwd=self.dir,
+            subprocess.run(["bash", "-c", script, "bash", str(BUILDER / "compile")], check=True, cwd=self.dir,
                            env={**os.environ, "FLAV": flav, "BUILD": build, "SAN": san, "UBSAN": ubsan, "CFLAGS": "",
                                 "OV_UBSAN_C_EXCLUDE": "function", "OV_UBSAN_CHECKS": "undefined",
                                 "OV_RECORDS": str(self.records), "OUT": str(out)})
@@ -1438,10 +1440,13 @@ exit "${SHIM_STATUS:-0}"
             exclude = ["-fno-sanitize=function"] if wanted_ubsan else []
             self.assertEqual(compiles.sanitizer, {"c": words + exclude, "c++": words})
             self.assertEqual(compiles.ubsan, {"c": wanted_ubsan + exclude, "c++": wanted_ubsan})
-            digest = hashlib.sha256((self.dir / "x.o").read_bytes()).hexdigest()
-            self.assertEqual(list(compiles.objects), [digest])
-            [compile_record] = compiles.objects[digest]
-            self.assertEqual((compile_record.file, compile_record.language), ("src/x.c", "c"))
+            lines = (out / ".records" / "compiles.jsonl").read_bytes().splitlines()
+            self.assertEqual((len(lines), lines), (len(names), sorted(lines)))
+            digests = {hashlib.sha256((self.dir / f"{name}.o").read_bytes()).hexdigest(): name for name in names}
+            self.assertEqual(set(compiles.objects), set(digests))
+            for digest, name in digests.items():
+                compile, = compiles.objects[digest]
+                self.assertEqual((compile.file, compile.language), (f"src/{name}.c", "c"))
 
     def test_release_target_puts_a_front_before_each_shim_it_writes(self):
         """release-target.sh's record code: with OV_RECORDS, a front before each of the four shims it wrote, which

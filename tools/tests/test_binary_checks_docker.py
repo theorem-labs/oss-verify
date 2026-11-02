@@ -81,7 +81,7 @@ class Records(unittest.TestCase):
                 self.assertTrue(any(path.endswith("/cli.o") for path in record.driver))
 
     def test_the_lists_and_the_instrumentation(self):
-        # As tools/check does: each build's compile records, read from its own $OUT.
+        # As check_binaries.binary_checks does: each build's compile records, read from its own $OUT.
         records = {build: check_binaries.record_of(self.raw[build], "example_fuzzer",
                                                    check_links.read_compiles(self.raw[build]))[0] for build in BUILDS}
         self.assertIsNotNone(records["ubsan"].compiles)
