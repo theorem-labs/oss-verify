@@ -134,14 +134,17 @@ KEPT_STATUS = re.compile(r"\(exit status (\d+)\)\n?\Z")
 NOT_SENT_DIRECTORIES = ("head", "source")
 # A seed corpus's listing of its inputs in hexadecimal (review-gather): a row is an offset, 16 bytes and their text.
 SEED_ROW = re.compile(r"[0-9a-f]{4}  ((?:[0-9a-f]{2} ){0,15}[0-9a-f]{2}) *  .{1,16}")
-# A file a diff shows as binary, whose lines the diff does not hold. A seed corpus is the one binary file an
-# enrollment has, and its inputs are read from seeds/.
-BINARY_DIFF = re.compile(r"^Binary files (?:a/.*|/dev/null) and (b/.*|/dev/null) differ$", re.M)
-SEED_CORPUS = re.compile(r"b/projects/[^/]+/[^/]+_seed_corpus\.zip")
-# Characters that hide text from a person or a filter and that a model may still read: Unicode tag characters, and
-# the bidirectional embedding, override and isolate controls. Text that holds one is held unscreened. (The word
-# joiner U+2060, which this repository's comments put after each @, is not one of them.)
-HIDING = re.compile("[\U000e0000-\U000e007f\u202a-\u202e\u2066-\u2069]")
+# A file a diff shows as binary, whose lines the diff does not hold (a quoted name, as git writes a name that is not
+# ASCII, too). A seed corpus is the one binary file an enrollment has, and its inputs are read from seeds/: its line is
+# exempt only in this exact form, with no space in the path, so that no crafted file name can take its form.
+BINARY_DIFF = re.compile(r"^Binary files (.*) and (.*) differ$", re.M)
+SEED_CORPUS = re.compile(r"Binary files (?:/dev/null|a/(projects/[^/ ]+/[^/ ]+_seed_corpus\.zip)) and "
+                         r"b/(projects/[^/ ]+/[^/ ]+_seed_corpus\.zip) differ")
+# Characters that hide text from a person or a filter and that a model may still read: Unicode tag characters, the
+# bidirectional embedding, override and isolate controls, the zero-width characters, the byte order mark, the soft
+# hyphen and the invisible operators. Text that holds one is held unscreened. (The word joiner U+2060, which this
+# repository's comments put after each @, is not one of them.)
+HIDING = re.compile("[\U000e0000-\U000e007f\u202a-\u202e\u2066-\u2069\u200b-\u200d\ufeff\u00ad\u2061-\u2064]")
 
 
 def kept(text):
@@ -218,6 +221,19 @@ def parts(review, project=None):
     for kind in ("comments", "reviews"):
         for i, c in enumerate(item.get(kind) or []):
             found.append((f"{kind} {i + 1}", c.get("body") or ""))
+    scope = os.environ.get("SCREEN_SCOPE") or "all"
+    if scope not in ("all", "comments"):
+        return [], [f"SCREEN_SCOPE is {scope!r}, not all or comments"]
+    if scope == "comments":
+        # A writer's pull request or issue that holds comments of others: only the comments, reviews and review
+        # comments are screened, every one of them, and the rest is a writer's, which the review reads as before.
+        path = os.path.join(review, "review-comments.txt")
+        text = read_text(path) if os.path.isfile(path) else ""
+        if text is None:
+            unscreenable.append("review-comments.txt is not UTF-8 text")
+        else:
+            found.append(("review-comments.txt", text))
+        return finish(found, unscreenable)
     rest = {k: v for k, v in item.items() if k not in ("title", "body", "comments", "reviews")}
     found.append((f"{shown_item}, other fields", "\n".join(strings(rest))))
     for root, dirs, files in os.walk(review):
@@ -238,8 +254,11 @@ def parts(review, project=None):
                 unscreenable.append("pr.diff is not a diff")
                 continue
             if source.endswith(".diff"):
-                unscreenable += [f"{source} shows {m.group(1)[2:]} as binary" for m in BINARY_DIFF.finditer(text)
-                                 if m.group(1) != "/dev/null" and not SEED_CORPUS.fullmatch(m.group(1))]
+                for m in BINARY_DIFF.finditer(text):
+                    seed = SEED_CORPUS.fullmatch(m.group(0))
+                    if m.group(2) == "/dev/null" or (seed and seed.group(1) in (None, seed.group(2))):
+                        continue   # a deleted file is read by no one; a seed corpus is read from seeds/
+                    unscreenable.append(f"{source} shows {m.group(2).strip(chr(34))[2:]} as binary")
             if name.endswith(".json"):
                 body, status = kept(text)
                 try:
@@ -262,8 +281,15 @@ def parts(review, project=None):
                     unscreenable.append(f"{label} {os.path.relpath(path, directory)} is not UTF-8 text")
                 elif HIDING.search(text):
                     unscreenable.append(f"{label} {os.path.relpath(path, directory)} holds hiding characters")
+    return finish(found, unscreenable)
+
+
+def finish(found, unscreenable):
+    """The pairs that hold text, and the reasons: characters that hide text, and too much text. A seed corpus is read
+    by the review as hexadecimal, so what its bytes decode to hides nothing from it."""
     found = [(s, t) for s, t in found if t.strip()]
-    unscreenable += [f"{s} holds hiding characters" for s, t in found if HIDING.search(t)]
+    unscreenable += [f"{s} holds hiding characters" for s, t in found
+                     if HIDING.search(t) and not s.startswith("seeds" + os.sep)]
     total = sum(len(s) + len(t) + 4 for s, t in found)
     if total > MAX_CHARS:
         unscreenable.append(f"{total} characters, over the {MAX_CHARS} this screen reads")

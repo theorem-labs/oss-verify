@@ -351,6 +351,42 @@ class ScreenTest(unittest.TestCase):
         self.item(kind="pr", diff="Binary files /dev/null and b/projects/libx/fuzz_seed_corpus.zip differ\n"
                                   "diff --git a/old.png b/old.png\nBinary files a/old.png and /dev/null differ\n")
         self.assertEqual(self.verdict()[0], "clean")
+        # Only that exact form: a crafted path that ends in a seed corpus's name, a quoted name, or another directory.
+        for line, shown in (("Binary files a/assets/logo.png and b/docs/q and b/projects/p/z_seed_corpus.zip differ",
+                             "projects/p/z_seed_corpus.zip"),
+                            ('Binary files "a/\\303\\251.png" and "b/\\303\\251.png" differ', "\\303\\251.png"),
+                            ("Binary files a/projects/p/x/z_seed_corpus.zip and b/projects/p/x/z_seed_corpus.zip differ",
+                             "projects/p/x/z_seed_corpus.zip")):
+            with self.subTest(line=line):
+                self.fresh()
+                self.item(kind="pr", diff=line + "\n")
+                v, reason = self.verdict()
+                self.assertEqual(v, "held")
+                self.assertEqual(reason["unscreenable"], [f"pr.diff shows {shown} as binary"])
+
+    def test_a_writers_item_is_screened_for_its_comments_alone(self):
+        """SCREEN_SCOPE comments: every comment, review and review comment, and nothing of the writer's own diff,
+        files or other fields, which the review reads as before."""
+        self.item(kind="pr", title="WRITER-TITLE", body="WRITER-BODY", comments=[("mallory", "OUTSIDE-COMMENT")],
+                  diff="+WRITER-DIFF\nBinary files a/x.png and b/x.png differ\n", review_comments="eve a:1 OUTSIDE-RC\n",
+                  head={"x.png": b"\x89PNG\0"}, files={"build/checks.md": "x" * screen.MAX_CHARS})
+        self.env["SCREEN_SCOPE"] = "comments"
+        self.assertEqual(self.verdict()[0], "clean")
+        for sent in self.sent():
+            self.assertIn("OUTSIDE-COMMENT", sent)
+            self.assertIn("OUTSIDE-RC", sent)
+            for word in ("WRITER-DIFF", "Change the model", "xxxxxxxxxx"):
+                self.assertNotIn(word, sent)
+        for scope in ("", "everything"):
+            with self.subTest(scope=scope):
+                self.fresh()
+                self.item()
+                self.env["SCREEN_SCOPE"] = scope
+                if scope == "":
+                    self.assertEqual(self.verdict()[0], "clean")   # unset or empty is all
+                    del self.env["SCREEN_SCOPE"]
+                else:
+                    self.assertEqual(self.verdict()[0], "held")
 
     def test_many_small_comments_cost_few_requests(self):
         """The text is joined before it is cut, so the requests grow with the characters, not the comments."""
@@ -549,7 +585,9 @@ class ScreenTest(unittest.TestCase):
         for where, kwargs in (("body", {"body": "Fine.\U000e0049\U000e0047\U000e004e"}),
                               ("comment", {"comments": [("eve", "a \u202eevil\u202c b")]}),
                               ("changed file", {"kind": "pr", "diff": "+x\n", "head": {"a.v": "x \u2066y\u2069"}}),
-                              ("project file", {"kind": "pr", "diff": "+x\n", "project": {"build.sh": "\u202d"}})):
+                              ("project file", {"kind": "pr", "diff": "+x\n", "project": {"build.sh": "\u202d"}}),
+                              ("zero width", {"body": "ig\u200bnore"}), ("byte order mark", {"body": "a\ufeffb"}),
+                              ("soft hyphen", {"body": "a\u00adb"}), ("invisible operator", {"body": "a\u2062b"})):
             with self.subTest(where=where):
                 self.fresh()
                 self.item(**kwargs)
@@ -560,6 +598,12 @@ class ScreenTest(unittest.TestCase):
         # the word joiner our comments put after each @ is not one
         self.fresh()
         self.item(comments=[("oss-verify", "Thanks @\u2060alice.")])
+        self.assertEqual(self.verdict()[0], "clean")
+        # a seed input's bytes, which the review reads as hexadecimal, hide nothing from it
+        self.fresh()
+        data = "a\u202eb".encode()
+        row = f"0000  {data.hex(' '):<47}  {'.' * len(data)}"
+        self.item(kind="pr", diff="+x\n", files={"seeds/t.hex.txt": f"== 'x': {len(data)} bytes\n{row}\n"})
         self.assertEqual(self.verdict()[0], "clean")
 
     def test_a_seed_inputs_bytes_are_read_as_text_too(self):

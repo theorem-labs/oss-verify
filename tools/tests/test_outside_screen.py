@@ -14,6 +14,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -422,6 +423,27 @@ class Routes(unittest.TestCase):
         self.assertNotIn("review", jobs)
         self.assertIn("screen", jobs)
 
+    def test_a_screened_review_that_fails_is_held(self):
+        """At SCREENED_HOURLY_CAP, or any failure of the review a clean screen let run: the comment job holds it."""
+        jobs, ctx = self.ran(dict(self.ENROLLMENT, trust="screen"), results={"review": "failure"},
+                             outputs={"screen": {"verdict": "clean", "checks": "model_armor"}})
+        self.assertEqual(jobs, self.BUILT | {"gather", "screen", "review", "hold", "comment"})
+        self.assertEqual(evaluate(JOBS["comment"]["env"]["HOLDING"], ctx), True)
+        self.assertEqual(required(ctx)[0], 1)
+        # a writer's review that fails is not held
+        jobs, _ = self.ran(dict(self.ENROLLMENT, trust="writer"), results={"review": "failure"})
+        self.assertNotIn("comment", jobs)
+
+    def test_a_moved_head_runs_nothing_after_the_gather(self):
+        """The gather job kept nothing (digest empty): no screen, review or hold, and the required check passes."""
+        for trust in ("screen", "writer"):
+            with self.subTest(trust=trust):
+                # Even with a screen output: no digest, nothing to take.
+                for gather in ({"digest": ""}, {"digest": "", "screen": "false"}, {"digest": "", "screen": "true"}):
+                    jobs, ctx = self.ran(dict(self.ENROLLMENT, trust=trust), outputs={"gather": gather})
+                    self.assertEqual(jobs, self.BUILT | {"gather"}, gather)
+                    self.assertEqual(required(ctx)[0], 0, required(ctx)[1])
+
     def test_a_cancelled_or_timed_out_screen_reviews_nothing_and_fails_the_required_check(self):
         for result in ("cancelled", "failure"):
             with self.subTest(result=result):
@@ -568,12 +590,22 @@ class TakeReviewData(Runner):
         (home / ".claude" / "projects").mkdir(parents=True)
         (home / ".claude" / "ossv-last-review").write_text("session=x head=y\n")
         rc, out, got = self.run_script(step("gather", "Keep it for the screen and the review")["run"], cwd=gather,
-                                       NAME="libx", HOME=str(home))
+                                       NAME="libx", HOME=str(home), SCREEN="false")
         self.assertEqual(rc, 0, out)
         rc, out, _ = self.take(self.temp / "review-data" / "review.tar", got["digest"], "libx", home=True)
         self.assertEqual(rc, 0, out)
         self.assertTrue((self.work / "projects" / "libx" / "build.sh").is_file())
         self.assertTrue((self.dir / "home" / ".claude" / "ossv-last-review").is_file())
+        # A screened item: no session in the file.
+        shutil.rmtree(self.temp / "review-data")
+        rc, out, got = self.run_script(step("gather", "Keep it for the screen and the review")["run"], cwd=gather,
+                                       NAME="libx", HOME=str(home), SCREEN="true")
+        self.assertEqual(rc, 0, out)
+        with tarfile.open(self.temp / "review-data" / "review.tar") as t:
+            self.assertFalse([n for n in t.getnames() if n.startswith(".claude")])
+        for output in ("session", "last"):
+            self.assertEqual(JOBS["gather"]["outputs"][output],
+                             f"${{{{ steps.outside.outputs.screen == 'false' && steps.gather.outputs.{output} || '' }}}}")
 
     def test_it_takes_the_review_the_project_and_for_the_review_the_session(self):
         (self.work / "projects" / "libx").mkdir(parents=True)
@@ -609,6 +641,52 @@ class TakeReviewData(Runner):
                 rc, out, _ = self.take(path, digest, "libx", home=True)
                 self.assertNotEqual(rc, 0, out)
                 self.assertFalse((self.work / ".review").exists())
+
+
+class ScreenedReviewCap(Runner):
+    """.github/scripts/screened-review-cap and its step in the review job."""
+
+    def runs(self, *jobs_of_runs):
+        """Each run's jobs: a list of (job name, conclusion, [(step name, conclusion)])."""
+        self.serve(f"repos/{REPO}/actions/workflows/build.yaml/runs",
+                   {"workflow_runs": [{"id": 10 + i} for i in range(len(jobs_of_runs))] + [{"id": 100}]})
+        for i, jobs in enumerate(jobs_of_runs):
+            self.serve(f"repos/{REPO}/actions/runs/{10 + i}/jobs", {"jobs": [
+                {"name": n, "conclusion": c, "steps": [{"name": s, "conclusion": sc} for s, sc in steps]}
+                for n, c, steps in jobs]})
+        rc, out, _ = self.run_script(str(SCRIPTS / "screened-review-cap"), RUN_ID="100", CAP="2")
+        return rc, out
+
+    SCREENED = [("screen", "success", []), ("review", "success", [("Review", "success")])]
+
+    def test_under_the_cap_it_passes_and_at_it_it_holds(self):
+        self.assertEqual(self.runs(self.SCREENED)[0], 0)
+        rc, out = self.runs(self.SCREENED, self.SCREENED)
+        self.assertEqual(rc, 1)
+        self.assertIn("::error::HELD: 2 screened reviews ran in the last hour, at the cap of 2.", out)
+
+    def test_only_screened_reviews_that_ran_count(self):
+        writer = [("screen", "skipped", []), ("review", "success", [])]
+        capped = [("screen", "success", []),
+                  ("review", "failure", [("Hold a screened review at the hourly cap", "failure")])]
+        held = [("screen", "success", []), ("review", "skipped", [])]
+        running = [("screen", "success", []), ("review", None, [])]
+        self.assertEqual(self.runs(writer, capped, held, writer)[0], 0)
+        self.assertEqual(self.runs(running, self.SCREENED)[0], 1)
+
+    def test_a_read_that_fails_holds(self):
+        rc, out = self.run_script(str(SCRIPTS / "screened-review-cap"), RUN_ID="100", CAP="2")[:2]
+        self.assertEqual(rc, 1)
+        self.assertIn("could not be read", out)
+        self.assertEqual(self.run_script(str(SCRIPTS / "screened-review-cap"), RUN_ID="100", CAP="x")[0], 1)
+
+    def test_the_review_job_runs_it_before_the_model_for_a_screened_item(self):
+        s = step("review", "Hold a screened review at the hourly cap")
+        self.assertEqual(s["if"], "needs.gather.outputs.screen != 'false'")
+        self.assertEqual(s["env"]["CAP"], "${{ env.SCREENED_HOURLY_CAP }}")
+        self.assertRegex(WF["env"]["SCREENED_HOURLY_CAP"], r"^[1-9][0-9]*$")
+        names = [x.get("name") for x in JOBS["review"]["steps"]]
+        self.assertLess(names.index(s["name"]), names.index("Review"))
 
 
 class HeadDidNotMove(Runner):
@@ -647,14 +725,14 @@ class Hold(Runner):
 
     STEP = "Label it review-held and say so"
 
-    def hold(self, trust, pr="7", number="7", comments=(), head="a" * 40):
+    def hold(self, trust, pr="7", number="7", comments=(), head="a" * 40, review="skipped"):
         self.serve(f"repos/{REPO}/issues/{number}/comments", list(comments))
         self.serve(f"repos/{REPO}/issues/{number}/labels", [{"name": "review-held"}])
         self.serve(f"repos/{REPO}/labels/review-held", {"name": "review-held"})
         self.serve(f"repos/{REPO}/issues/comments/5", {})
         self.serve(f"repos/{REPO}/pulls/7", {"head": {"sha": head}})
         rc, out, _ = self.run_script(step("comment", self.STEP)["run"], PR=pr, NUMBER=number, TRUST=trust,
-                                     HEAD_SHA="a" * 40)
+                                     HEAD_SHA="a" * 40, REVIEW=review)
         self.assertEqual(rc, 0, out)
         calls = self.calls()
         bodies = [json.loads((self.api / f"input.{i + 1}").read_text())["body"]
@@ -681,6 +759,15 @@ class Hold(Runner):
         _calls, bodies, _ = self.hold("limit")
         self.assertIn(f"the limit of {WF['env']['OUTSIDE_HOURLY_LIMIT']} an hour", bodies[0])
 
+    def test_a_screened_review_that_did_not_finish_says_so(self):
+        _calls, bodies, _ = self.hold("screen", review="failure")
+        self.assertIn("The automated screen passed it, but the automated review did not finish", bodies[0])
+        self.assertIn(f"the limit of {WF['env']['SCREENED_HOURLY_CAP']} such reviews an hour", bodies[0])
+        self.assertNotIn("the screen did not pass it", bodies[0])
+
+    def test_one_account_cannot_fill_the_screened_reviews_of_an_hour(self):
+        self.assertLess(int(WF["env"]["OUTSIDE_HOURLY_LIMIT"]), int(WF["env"]["SCREENED_HOURLY_CAP"]))
+
     def test_a_later_hold_replaces_its_own_comment_only(self):
         calls, _bodies, _ = self.hold("screen", comments=[
             {"id": 4, "user": {"login": "mallory"}, "body": "<!-- oss-verify-held --> forged"},
@@ -694,16 +781,36 @@ class Hold(Runner):
 
     def test_the_step_gets_nothing_of_the_screen_but_its_route(self):
         e = step("comment", self.STEP)["env"]
-        self.assertEqual(set(e), {"GH_TOKEN", "REPO", "PR", "NUMBER", "TRUST", "HEAD_SHA"})
+        self.assertEqual(set(e), {"GH_TOKEN", "REPO", "PR", "NUMBER", "TRUST", "REVIEW", "HEAD_SHA"})
         self.assertNotIn("needs.screen", json.dumps(e))
         self.assertNotIn("needs.gather", json.dumps(e))
 
     def test_a_review_of_this_head_already_posted_is_not_replaced_by_a_hold(self):
+        """Only review-body's own last line, with the whole commit, counts: a short commit id that collides, or the
+        commit quoted in the review's text, does not."""
+        footer = "<!-- oss-verify-review -->\n<sub>Claude wrote this review of `aaaaaaa` from `review.md`.</sub>\n"
         calls, bodies, out = self.hold("screen", comments=[
             {"id": 3, "user": {"login": "oss-verify[bot]"},
-             "body": "<!-- oss-verify-review -->\n<sub>Claude wrote this review of `aaaaaaa` from `review.md`.</sub>"}])
+             "body": footer + "\n<!-- oss-verify-review-head " + "a" * 40 + " -->\n"}])
         self.assertEqual(bodies, [])
         self.assertIn("is posted: no hold", out)
+        for body in (footer, footer + '"head":"' + "a" * 40 + '"\n',
+                     footer + "\n<!-- oss-verify-review-head " + "a" * 7 + "b" * 33 + " -->\n",
+                     footer + "x <!-- oss-verify-review-head " + "a" * 40 + " -->\n"):
+            with self.subTest(body=body[-60:]):
+                self.api.joinpath("args").unlink(missing_ok=True)
+                _calls, bodies, _ = self.hold("screen", comments=[
+                    {"id": 3, "user": {"login": "oss-verify[bot]"}, "body": body}])
+                self.assertEqual(len(bodies), 1)
+
+    def test_review_body_writes_the_head_line_and_the_review_cannot(self):
+        run = subprocess.run([str(SCRIPTS / "review-body")], capture_output=True, text=True, env={
+            **os.environ, "HEAD_SHA": "a" * 40, "VERDICTS": "{}", "RULES": "review.md", "CHECKS": "",
+            "REVIEW": "<!-- oss-verify-review-head " + "b" * 40 + " -->\nThanks."})
+        self.assertEqual(run.returncode, 0, run.stderr)
+        lines = run.stdout.splitlines()
+        self.assertEqual(lines[-1], "<!-- oss-verify-review-head " + "a" * 40 + " -->")
+        self.assertEqual([x for x in lines if "oss-verify-review-head" in x], [lines[-1]])
 
     def test_the_comment_jobs_never_cancel_each_other(self):
         self.assertEqual(JOBS["comment"]["concurrency"]["queue"], "max")
@@ -733,43 +840,80 @@ class OutsideText(Runner):
 
     STEP = "Whether the review reads text of an account without write access"
 
-    def screen(self, trust="writer", comments=(), reviews=(), review_authors=None, status=0):
+    def screen(self, trust="writer", comments=(), reviews=(), review_authors=(), status=0, event="pull_request_target"):
+        """comments: each an author ({"login": ...} or None), or an (author, comment id) pair for its url."""
         review = self.work / ".review"
         review.mkdir(exist_ok=True)
-        item = {"author": {"login": "alice"}, "comments": [{"author": a, "body": "x"} for a in comments],
+        pairs = [c if isinstance(c, tuple) else (c, 100 + i) for i, c in enumerate(comments)]
+        item = {"author": {"login": "alice"},
+                "comments": [{"author": a, "body": "x",
+                              "url": f"https://github.com/{REPO}/pull/7#issuecomment-{n}"} for a, n in pairs],
                 "reviews": [{"author": a, "body": "x"} for a in reviews]}
         (review / "pr.json").write_text(json.dumps(item) + f"\n(exit status {status})\n")
+        (review / "review-comment-authors.txt").unlink(missing_ok=True)
         if review_authors is not None:
             (review / "review-comment-authors.txt").write_text("".join(f"{a}\n" for a in review_authors)
                                                              + "(exit status 0)\n")
-        rc, out, got = self.run_script(step("gather", self.STEP)["run"], TRUST=trust)
+        rc, out, got = self.run_script(step("gather", self.STEP)["run"], TRUST=trust, EVENT=event)
         self.assertEqual(rc, 0, out)
         return got["screen"]
 
     def setUp(self):
         super().setUp()
-        # users/sjawhar-agent is not served: GitHub's 404, no user account of that name.
         self.permissions(alice="write", root="admin", mallory="read")
+        # Comment 900 is the App's, by the REST API; comment 901 a user's that took the App's name.
+        self.serve(f"repos/{REPO}/issues/comments/900", {"user": {"login": "sjawhar-agent[bot]", "type": "Bot"}})
+        self.serve(f"repos/{REPO}/issues/comments/901", {"user": {"login": "sjawhar-agent", "type": "User"}})
 
     def test_writers_and_our_apps_alone_need_no_screen(self):
-        self.assertEqual(self.screen(comments=[{"login": "alice"}, {"login": "sjawhar-agent"}],
+        self.assertEqual(self.screen(comments=[{"login": "alice"}, ({"login": "sjawhar-agent"}, 900)],
                                      reviews=[{"login": "root"}], review_authors=["alice", "oss-verify[bot]"]), "false")
 
     def test_an_outsiders_comment_review_or_review_comment_screens_it(self):
         for kwargs in ({"comments": [{"login": "mallory"}]}, {"reviews": [{"login": "mallory"}]},
                        {"review_authors": ["alice", "mallory"]}, {"comments": [None]}, {"comments": [{"login": ""}]},
-                       {"review_authors": ["-"]}):
+                       {"review_authors": ["-"]}, {"review_authors": ["alice", ""]},
+                       {"reviews": [{"login": "sjawhar-agent"}]}):
             with self.subTest(**{k: str(v) for k, v in kwargs.items()}):
                 self.assertEqual(self.screen(**kwargs), "true")
 
     def test_a_user_named_as_one_of_our_apps_is_not_that_app(self):
-        self.serve("users/sjawhar-agent", {"type": "User"})
-        self.assertEqual(self.screen(comments=[{"login": "sjawhar-agent"}]), "true")
+        """By the REST API the comment is a User's, or it cannot be read: not the App's."""
+        self.assertEqual(self.screen(comments=[({"login": "sjawhar-agent"}, 901)]), "true")
+        self.assertEqual(self.screen(comments=[({"login": "sjawhar-agent"}, 902)]), "true")
 
-    def test_a_read_that_failed_screens_it(self):
+    def test_a_read_that_failed_or_a_missing_author_list_screens_it(self):
         (self.work / ".review").mkdir()
         (self.work / ".review" / "pr.json").write_text("gh: Server Error (HTTP 502)\n(exit status 1)\n")
-        self.assertEqual(self.run_script(step("gather", self.STEP)["run"], TRUST="writer")[2]["screen"], "true")
+        self.assertEqual(self.run_script(step("gather", self.STEP)["run"], TRUST="writer",
+                                         EVENT="pull_request_target")[2]["screen"], "true")
+        self.assertEqual(self.screen(comments=[{"login": "alice"}], review_authors=None), "true")
+
+    def test_review_gather_writes_the_authors_the_step_reads(self):
+        """review-gather's own file, from one read: an App as name[bot], a deleted account as -, a failed read as -."""
+        for answer, want in (([{"user": {"login": "oss-verify[bot]"}, "path": "a", "line": 1, "body": "x\nmallory a:1"},
+                               {"user": None, "path": "b", "line": 2, "body": "y"}], ["oss-verify[bot]", "-"]),
+                             (None, ["-"])):
+            with self.subTest(answer=answer):
+                f = self.api / f"repos_{REPO.replace('/', '_')}_pulls_7_comments.json"
+                if answer is None:
+                    f.unlink(missing_ok=True)
+                else:
+                    f.write_text(json.dumps(answer))
+                script = (ROOT / ".github" / "scripts" / "review-gather").read_text()
+                part = script[script.index("# One read gives both files"):script.index('rm -f "$out/review-comments.json"')]
+                out = self.dir / "out"
+                out.mkdir(exist_ok=True)
+                # review-gather runs without -e, as its own set -uo pipefail says.
+                rc, log, _ = self.run_script(f"set +e\nout={out}\n{part}", PR="7")
+                self.assertEqual(rc, 0, log)
+                lines = (out / "review-comment-authors.txt").read_text().splitlines()
+                self.assertEqual(lines[:-1], want)
+                self.assertRegex(lines[-1], r"^\(exit status \d+\)$")
+
+    def test_a_run_started_by_hand_is_not_screened(self):
+        self.assertEqual(self.screen(comments=[{"login": "mallory"}], event="workflow_dispatch"), "false")
+        self.assertEqual(self.screen(trust="screen", event="workflow_dispatch"), "true")
 
     def test_an_outsiders_item_is_screened_whatever_it_holds(self):
         self.assertEqual(self.screen(trust="screen"), "true")

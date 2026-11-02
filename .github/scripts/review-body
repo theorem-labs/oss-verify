@@ -60,3 +60,6 @@ if [ -n "$CHECKS" ]; then
   printf '%s' "$CHECKS" | "$neutralize" --drop-markers 12000
   printf '\n\n</details>\n'
 fi
+# The last line names the whole reviewed commit, for the comment job, which holds no item whose head a posted review
+# names. Only this script writes it: --drop-markers takes every line that holds oss-verify-review out of the text above.
+printf '\n<!-- oss-verify-review-head %s -->\n' "$HEAD_SHA"

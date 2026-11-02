@@ -89,7 +89,7 @@ gh pr diff "$PR" -R "$REPO" > "$out/pr.diff" 2>&1
 # One read gives both files: the review comments as the review reads them, and their authors, one login a line, which
 # build.yaml's gather job asks GitHub about (an account without write access has the screen read the text first).
 gh api --paginate "repos/$REPO/pulls/$PR/comments" \
-  --jq '.[] | [.user.login // "", "\(.user.login) \(.path):\(.line) \(.body)"]' > "$out/review-comments.json" 2>&1
+  --jq '.[] | [(.user.login // "-"), "\(.user.login) \(.path):\(.line) \(.body)"]' > "$out/review-comments.json" 2>&1
 status=$?
 { jq -r '.[1]' "$out/review-comments.json" 2> /dev/null || cat "$out/review-comments.json"
   echo "(exit status $status)"; } > "$out/review-comments.txt"

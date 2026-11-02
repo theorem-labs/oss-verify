@@ -35,16 +35,21 @@ name: "Build"
 #            artifact review-data, which the screen and the review take only by its SHA-256
 #            (.github/scripts/take-review-data): the review reads exactly what the screen passed. It holds no model,
 #            no identity token and no write permission. Its output `screen` is true for route's trust `screen`, and
-#            for a writer's item whose comments, reviews or review comments include one by an account without write
-#            access (or one GitHub cannot name). For an enrollment of an account without write access it gathers
-#            none of the project's repository (below).
-#   screen   when the gather job's output `screen` is true (.github/scripts/screen.py): independent checks read the
-#            text that the pull request or the issue carries: Google Cloud Model Armor's prompt injection and
-#            jailbreak filter, always; Azure AI Content Safety's Prompt Shields, and a small Claude model with no tools
-#            whose answer a schema holds to the words clean and suspicious, each once its identity is set up (its env
-#            below). Each reads all the text joined. The verdict is clean only when every check that ran answers
-#            clean; a check that is set up and cannot answer, a file the review reads that is not text, text with
-#            characters that hide it, or more text than the screen reads, holds it. It runs in the environment
+#            for a writer's item, but a run started by hand, whose comments, reviews or review comments include one by
+#            an account without write access (or one GitHub cannot name; an App's own comment is told by the REST
+#            API's account type). A screened item gets no session to resume: no screen reads one. For an enrollment of
+#            an account without write access it gathers none of the project's repository (below).
+#   screen   when the gather job's output `screen` is true (.github/scripts/screen.py): independent checks, which
+#            SCREEN_CHECKS lists, read the text that the pull request or the issue carries (for a writer's item, its
+#            comments, reviews and review comments alone, SCREEN_SCOPE comments): Google Cloud Model Armor's prompt
+#            injection and jailbreak filter, always; Azure AI Content Safety's Prompt Shields, and a small Claude model
+#            with no tools whose answer a schema holds to the words clean and suspicious, each once its identity is
+#            set up (its env below). Each reads all the text joined. The verdict is clean only when every check that
+#            ran answers clean; a check that cannot answer or runs out of time, a file the review reads that is not
+#            text or that the diff shows as binary, text with characters that hide it, or more text than the screen
+#            reads, holds it. A screened review runs at most SCREENED_HOURLY_CAP times an hour; one that fails, at
+#            the cap or not, is held and fails the required check, which a re-run of the failed jobs clears. It runs
+#            in the environment
 #            review-screen, whose jobs alone reach the screen's Google, Azure and Anthropic identities. Why it held an
 #            item goes to the private bucket theorem-agent-infra-review-screen-reasons, as
 #            theorem-labs/oss-verify/<run>-<attempt>.json, never to this public log, an output or a comment: its
@@ -199,17 +204,19 @@ name: "Build"
 #   main     fdrl_019restxFx3PhpLhbziQoQKf: subject_prefix "repo:theorem-labs@212152656/oss-verify@1429568498:*",
 #            audience "https://api.anthropic.com", claims {"repository_id": "1429568498",
 #            "ref": "refs/heads/main", "workflow": "Build"}, and the condition
-#            claims.workflow_ref.startsWith("theorem-labs/oss-verify/.github/workflows/build.yaml@")
+#            claims.workflow_ref.startsWith("theorem-labs/oss-verify/.github/workflows/build.yaml@"); and, once
+#            Theorem's infrastructure code applies its change of 2026-11-02, the claim "environment": "enroll-review"
 #   target   the service account oss-verify-ci (svac_01WdHTLcJPEfiPttcuLK1hGT), with the developer role
 #   scope    workspace:inference, in the workspace Default+CVP, with a token lifetime of 3600 seconds
 # The numbers are the immutable ids of theorem-labs and of this repository. `workflow` is the workflow's display name
 # (its `name:`), not its file, and `ref` is the run's ref; the condition pins the file, so the rule gives a token only
 # to this file, build.yaml, on main, from any event (a fork's pull_request_target run carries this repository's
 # workflow_ref, so it signs in too). The review, screen, hold and comment jobs of this file ask for an identity token; no
-# other job of it does. The subject prefix above admits every environment of this repository, the screen job's
-# review-screen too, so Theorem's infrastructure code must make this rule refuse review-screen (or admit enroll-review
-# alone) before the screen's Anthropic check is set up; the screen job's own rule, oss-verify-screen, admits
-# review-screen alone.
+# other job of it does. The subject prefix above admits every environment of this repository, so until the claim
+# "environment": "enroll-review" is applied, any job of this file that holds an identity token, the screen job's in
+# review-screen too, could have this rule mint an oss-verify-ci token; the screen job runs only main's screen.py and
+# take-review-data, and asks for none. Once it is applied, only the review job can. The screen job's own rule,
+# oss-verify-screen, admits review-screen alone.
 # A review runs only on main: the Anthropic rule above admits refs/heads/main alone, so a run on another branch gets
 # no Anthropic token (Google's provider and the tailnet identity of the export below admit main alone too, so such a
 # run also gets no Google token and no tailnet node). So a change to
@@ -311,11 +318,11 @@ env:
   # to it, an issue or an edit of it) and have screened: the next such run in that hour is held without a screen. Every
   # run its events started counts, the held and the cancelled ones too, so a burst stays held until an hour has passed
   # since its runs.
-  OUTSIDE_HOURLY_LIMIT: "4"
+  OUTSIDE_HOURLY_LIMIT: "3"
   # The most reviews that a clean screen lets run with no person in one hour, whatever account: many accounts each
   # under OUTSIDE_HOURLY_LIMIT still cannot start model runs without limit. The review job stops before the model at
   # it (.github/scripts/screened-review-cap), and the comment job holds the item.
-  SCREENED_HOURLY_CAP: "4"
+  SCREENED_HOURLY_CAP: "6"
   # The label a held pull request or issue gets, and the marker of the comment that says so.
   HELD_LABEL: review-held
 
@@ -696,9 +703,11 @@ jobs:
       # true when the screen reads the item first: route's trust is screen, or the review would read text of an
       # account without write access (the step below).
       screen: ${{ steps.outside.outputs.screen }}
-      # The session to resume and the commit it reviewed, from review-gather (empty for a fresh review).
-      session: ${{ steps.gather.outputs.session }}
-      last: ${{ steps.gather.outputs.last }}
+      # The session to resume and the commit it reviewed, from review-gather (empty for a fresh review). None for a
+      # screened item: no screen reads a session, which a review that read unscreened text, such as one started by
+      # hand, may have kept.
+      session: ${{ steps.outside.outputs.screen == 'false' && steps.gather.outputs.session || '' }}
+      last: ${{ steps.outside.outputs.screen == 'false' && steps.gather.outputs.last || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with: {persist-credentials: false, fetch-depth: 0}
@@ -762,11 +771,12 @@ jobs:
           echo "The pull request's head is $HEAD_SHA, before and after the reads."
       # A writer's pull request or issue can hold the text of others: comments, reviews and review comments, which
       # anyone can write and the review reads. When any of their accounts has no write access, or cannot be named,
-      # the screen reads the item first, as it reads an outsider's. The accounts come from the files the review reads.
+      # the screen reads those texts first (SCREEN_SCOPE comments). The accounts come from the files the review reads.
+      # A run a person with write access started by hand is that person's request: it is not screened.
       - name: Whether the review reads text of an account without write access
         id: outside
         if: steps.head.outputs.moved != 'true'
-        env: {GH_TOKEN: "${{ github.token }}", REPO: "${{ github.repository }}"}
+        env: {GH_TOKEN: "${{ github.token }}", REPO: "${{ github.repository }}", EVENT: "${{ github.event_name }}"}
         run: |
           set -uo pipefail
           # trusted
@@ -781,34 +791,42 @@ jobs:
             [[ $permission == admin || $permission == write ]]
           }
           # end of trusted
-          # writer <login>: whether trusted says 0. gh's pull request and issue JSON names an App without its [bot]:
-          # such a name, of one of the ALLOWED_BOTS, is that App when GitHub has no user account of that name.
+          # writer <login> <url>: whether trusted says 0. gh's pull request and issue JSON names an App without its
+          # [bot]: such a name, of one of the ALLOWED_BOTS, is that App when the comment at <url> is, by the REST API,
+          # a Bot's of that name with [bot]. An account's type never changes, so no user named so, or renamed so, is
+          # taken for the App.
           writer() {
-            local rc=0 answer
+            local rc=0 id
             trusted "$1" || rc=$?
             (( rc != 0 )) || return 0
-            [[ ,$ALLOWED_BOTS, == *",$1[bot],"* ]] || return 1
-            answer=$(gh api "users/$1" --jq .type 2>&1) && return 1
-            [[ $answer == *"(HTTP 404)"* || $answer == *"Not Found"* ]]
+            [[ ,$ALLOWED_BOTS, == *",$1[bot],"* && $2 =~ \#issuecomment-([0-9]+)$ ]] || return 1
+            id=${BASH_REMATCH[1]}
+            [ "$(gh api "repos/$REPO/issues/comments/$id" --jq '"\(.user.login) \(.user.type)"' 2> /dev/null)" = "$1[bot] Bot" ]
           }
           screen=true
-          if [ "$TRUST" = writer ]; then
+          if [ "$TRUST" = writer ] && [ "$EVENT" = workflow_dispatch ]; then
+            screen=false
+          elif [ "$TRUST" = writer ]; then
             item=.review/pr.json
             [ -f "$item" ] || item=.review/issue.json
             # keep()'s last line is the exit status; an account GitHub no longer names is "-". A read that cannot be
-            # parsed leaves screen true.
-            if logins=$(sed '$d' "$item" | jq -r '(.comments // [])[], (.reviews // [])[]
-                | (.author.login // "") | if . == "" then "-" else . end' 2> /dev/null); then
-              if [ -f .review/review-comment-authors.txt ]; then logins+=$'\n'$(sed '$d' .review/review-comment-authors.txt); fi
+            # parsed, or a pull request with no list of its review comments' authors, leaves screen true.
+            if accounts=$(sed '$d' "$item" | jq -r '((.comments // [])[] | [(.author.login // ""), (.url // "")]),
+                ((.reviews // [])[] | [(.author.login // ""), ""])
+                | (if .[0] == "" then "-" else .[0] end) + "\t" + .[1]' 2> /dev/null) \
+                && { [ "$item" = .review/issue.json ] || [ -f .review/review-comment-authors.txt ]; }; then
+              if [ -f .review/review-comment-authors.txt ]; then
+                accounts+=$'\n'$(sed '$d' .review/review-comment-authors.txt | sed 's/^$/-/')
+              fi
               screen=false
-              while IFS= read -r login; do
-                [ -n "$login" ] || continue
-                if ! writer "$login"; then
+              while IFS=$'\t' read -r login url; do
+                [ -n "$login$url" ] || continue
+                if ! writer "${login:--}" "${url:-}"; then
                   screen=true
                   echo "The review reads text of an account without write access, or one GitHub cannot name: the screen reads it first."
                   break
                 fi
-              done < <(sort -u <<< "$logins")
+              done < <(sort -u <<< "$accounts")
             fi
           fi
           echo "screen=$screen" >> "$GITHUB_OUTPUT"
@@ -824,6 +842,7 @@ jobs:
       - name: Keep it for the screen and the review
         id: keep
         if: steps.head.outputs.moved != 'true'
+        env: {SCREEN: "${{ steps.outside.outputs.screen }}"}
         run: |
           set -euo pipefail
           mkdir "$RUNNER_TEMP/review-data"
@@ -832,8 +851,9 @@ jobs:
           if [ -n "$NAME" ] && [ -d "projects/$NAME" ]; then members+=("projects/$NAME"); fi
           tar -cf "$tar" "${members[@]}"
           session=()
+          # No session for a screened item (its output above).
           for path in .claude/projects .claude/ossv-last-review; do
-            if [ -e "$HOME/$path" ]; then session+=("$path"); fi
+            if [ "$SCREEN" = false ] && [ -e "$HOME/$path" ]; then session+=("$path"); fi
           done
           if (( ${#session[@]} )); then tar -rf "$tar" -C "$HOME" "${session[@]}"; fi
           digest=$(sha256sum "$tar" | cut -d' ' -f1)
@@ -917,6 +937,9 @@ jobs:
           NUMBER: ${{ github.event.pull_request.number || inputs.pr || inputs.issue || github.event.issue.number }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           REASON_OBJECT: ${{ github.repository }}/${{ github.run_id }}-${{ github.run_attempt }}.json
+          # A writer's item is screened only for the comments, reviews and review comments of others it holds: the
+          # rest is a writer's, which the review reads as before.
+          SCREEN_SCOPE: ${{ needs.route.outputs.trust == 'writer' && 'comments' || 'all' }}
         run: python3 .github/scripts/screen.py .review ${NAME:+"projects/$NAME"}
 
   review:
@@ -1491,6 +1514,7 @@ jobs:
           PR: ${{ github.event.pull_request.number || inputs.pr }}
           NUMBER: ${{ github.event.pull_request.number || inputs.pr || inputs.issue || github.event.issue.number }}
           TRUST: ${{ needs.route.outputs.trust }}
+          REVIEW: ${{ needs.review.result }}
           HEAD_SHA: ${{ needs.project-builds.outputs.sha || needs.route.outputs.sha }}
         run: |
           set -euo pipefail
@@ -1505,7 +1529,7 @@ jobs:
             # A review of this head that is posted already (one a person started by hand) stands: no hold replaces it.
             reviews=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
               --jq '.[] | select(.user.login == "oss-verify[bot]" and (.body | startswith("<!-- oss-verify-review -->"))) | .body')
-            if grep -qF -e "\"head\":\"$HEAD_SHA\"" -e "review of \`${HEAD_SHA:0:7}\`" <<< "$reviews"; then
+            if grep -qxF "<!-- oss-verify-review-head $HEAD_SHA -->" <<< "$reviews"; then
               echo "A review of $HEAD_SHA is posted: no hold."
               exit 0
             fi
@@ -1515,6 +1539,8 @@ jobs:
           ask="A person with write access can start the review with \`gh workflow run build.yaml -R $REPO -f $input=$NUMBER\`."
           if [ "$TRUST" = limit ]; then
             why="The account that started this run has no write access to this repository, and its pull requests, issues and pushes have reached the limit of $OUTSIDE_HOURLY_LIMIT an hour that are screened for the automated review. The next one after that hour is screened again."
+          elif [ "$REVIEW" = failure ]; then
+            why="It comes from, or holds the text of, an account without write access to this repository. The automated screen passed it, but the automated review did not finish (one cause: the limit of $SCREENED_HOURLY_CAP such reviews an hour). A maintainer will look at it."
           else
             why="It comes from, or holds the text of, an account without write access to this repository, so an automated screen reads it before the automated review does, and the screen did not pass it or could not read it. A maintainer will look at it."
           fi
