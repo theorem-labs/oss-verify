@@ -907,6 +907,7 @@ class Analyse(unittest.TestCase):
                             (["-Xclang=-fstrict-flex-arrays=0", "-fstrict-flex-arrays=3"], "-fstrict-flex-arrays=0"),
                             (["-Wp,-fstrict-flex-arrays=0"], "-fstrict-flex-arrays=0"),
                             (["-fstrict-flex-arrays=x"], "-fstrict-flex-arrays=x"),
+                            (["-fstrict-flex-arrays=²"], "-fstrict-flex-arrays=²"),
                             (["-fstrict-flex-arrays=0", "-fstrict-flex-arrays=2"], None),
                             ([], None), (["-fstrict-flex-arrays=1"], None), (["-fstrict-flex-arrays=3"], None),
                             (["-Xclang", "-fstrict-flex-arrays=2"], None)):

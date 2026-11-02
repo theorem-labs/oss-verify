@@ -807,7 +807,7 @@ def lower_flex_levels(wanted, arguments):
         return []
     driver, forwarded = flex_levels(arguments)
     return [STRICT_FLEX_ARRAYS + level for level in driver[-1:] + forwarded
-            if not (level.isdigit() and int(level) >= int(build[-1]))]
+            if not (re.fullmatch("[0-9]+", level) and int(level) >= int(build[-1]))]
 
 
 def wants_checks(compiles, language):
