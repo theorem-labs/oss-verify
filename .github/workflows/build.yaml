@@ -1409,10 +1409,11 @@ jobs:
     # Posts the review's comment as oss-verify[bot], or updates the one already there; when the review held a finding
     # back, only once the hold job sent it, because the comment says that it was sent. Never the draft for an issue: a
     # person approves the exact text of each reply to an issue before anyone posts it.
-    # Or, for a pull request or an issue that the screen held, that could not be gathered or screened, or whose account
-    # is at OUTSIDE_HOURLY_LIMIT: it puts the label review-held on it and posts one comment that says so, in fixed
-    # words, which a later hold replaces. The comment says nothing of why, and this job could not: the screen job's
-    # only output is its verdict, and why is in the private bucket. A later review that is posted takes the label off.
+    # Or, for a pull request or an issue that the screen held, that could not be gathered or screened, whose screened
+    # review failed, or whose account is at OUTSIDE_HOURLY_LIMIT: it puts the label review-held on it and posts one
+    # comment that says so, in fixed words, which a later hold replaces. The comment says nothing of why, and this job
+    # could not: the screen job's only output is its verdict, and why is in the private bucket. A later review that is
+    # posted takes the label off and deletes the hold comment.
     needs: [route, project-builds, gather, screen, review, hold]
     if: >-
       ${{ !cancelled() && ((needs.route.outputs.kind != 'issue'
