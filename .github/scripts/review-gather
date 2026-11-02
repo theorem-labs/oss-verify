@@ -11,13 +11,14 @@
 #     .github/scripts/review-gather <directory>
 #   KIND=issue GH_TOKEN=... REPO=... ISSUE=<number> .github/scripts/review-gather <directory>
 #
-# build.yaml's review job runs it from the base branch's checkout, after take-project has put the pull request's
+# build.yaml's gather job runs it from the base branch's checkout, after take-project has put the pull request's
 # projects/<name>/ into that checkout. It runs no code of the pull request or of the project: it reads the pull request
 # through the API, clones the project's repository at the built commit as data, and runs this repository's own
 # tools/validate.py and .github/scripts/triage.py on them, as the validate and triage workflows do. The directory gets
 # the files that the section "In CI" of .claude/skills/review-enrollment/SKILL.md lists, the build's results (BUILD,
 # BINARIES and CHECKS) among them. A failed read leaves its file with the error in it, and the review says what it could
-# not check. LAST_REVIEW is the file the review job keeps beside the last review's session in the Actions cache, one line
+# not check. LAST_REVIEW is the file the review job keeps beside the last review's session in the Actions cache, and the
+# gather job restores, one line
 # `session=<id> head=<commit>`: when the head descends from that commit, this writes the diff since it and, to
 # GITHUB_OUTPUT, `session` and `last`, so that the review resumes that session for the diff alone.
 # KIND is route's decision in build.yaml, and this chooses its path on it once, here at its top.

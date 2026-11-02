@@ -27,8 +27,9 @@ name: "Build"
 #            collaborator permission API answers, admin or write; membership of the organisation alone is not, and the
 #            Apps in ALLOWED_BOTS count as having it. `writer` when the author of the pull request or issue and the
 #            account that started the run (the one that pushed, opened, edited or reopened) both have write access, or
-#            the run was started by hand: the review runs as it comes. `screen` otherwise: the screen job reads the
-#            pull request or issue first, and only a clean verdict lets the review run, with no person. `limit` when
+#            the run was started by hand: the review runs as it comes, unless the gather job finds comments of others
+#            in it (below). `screen` otherwise: the screen job reads the pull request or issue first, and only a clean
+#            verdict lets the review run, with no person. `limit` when
 #            the account that started the run has no write access and its events started OUTSIDE_HOURLY_LIMIT runs of
 #            this file in the last hour: it is held without a screen.
 #   gather   gathers what the review reads, once, with .github/scripts/review-gather (below), and keeps it as the
@@ -116,18 +117,20 @@ name: "Build"
 #            is notified as oss-verify[bot] and the verdict line is the job's own. It never posts an issue's draft: a
 #            person approves the exact text of each reply to an issue before anyone posts it.
 #            It also holds: for a pull request or an issue that the screen held, that could not be gathered or
-#            screened, or that route held at OUTSIDE_HOURLY_LIMIT, it puts the label review-held on it and posts one
-#            comment in fixed words (marker <!-- oss-verify-held -->) that says it was held and how a person with write
-#            access starts the review, and nothing of why. A review it posts later takes the label off.
+#            screened, whose screened review did not finish, or that route held at OUTSIDE_HOURLY_LIMIT, it puts the
+#            label review-held on it and posts one comment in fixed words (marker <!-- oss-verify-held -->) that says it
+#            was held and how a person with write access starts the review, and nothing of why. A review it posts
+#            later takes the label off and deletes that comment.
 #   required always runs, last, and reports the required check (below).
 #
 # project-builds is the required check, and the job required reports it (.github/scripts/collect). required runs on
 # every run, after all the other jobs whatever their results, and passes only if route passed and every job route asked
 # for passed: the build when route asked for it, and the record, gather, screen, review, session, hold and comment jobs
-# when their own conditions call for them (the review when the build took a project, or the kind is change or issue,
-# and the item was not held); every other job must be skipped. A held item passes it when the build passed (if asked)
-# and the comment job labelled it: it waits for a person, as its label says, and an enrollment's statements do not
-# start without the review's verdicts. A gather or screen job that failed fails it. A skipped job counts as a pass
+# when their own conditions call for them (the screen and the review on the gather job's outputs screen and digest);
+# every other job must be skipped. A held item passes it when the build passed (if asked) and the comment job labelled
+# it: it waits for a person, as its label says, and an enrollment's statements do not start without the review's
+# verdicts. A gather or screen job that failed fails it, and so does a screened review that did not finish (at
+# SCREENED_HOURLY_CAP, say), which a re-run of the failed jobs clears. A skipped job counts as a pass
 # where a check is required, so the build job is never the required check itself. The build takes the project with
 # .github/scripts/take-project, for each commit on its own:
 #   - A pull request from a fork is judged on the files GitHub lists for it: it fails if it changes anything but one
@@ -181,7 +184,8 @@ name: "Build"
 # checkout's git config. Never re-run the review job with debug logging (ACTIONS_STEP_DEBUG): the action then prints
 # the whole conversation, a held finding too, to the public log. The comment job alone writes: it posts the comment as
 # the oss-verify GitHub App (oss-verify[bot]), with an installation token that can write pull requests in this
-# repository only. It makes that token from the App's client id below and its private key, which it reads at run time
+# repository only, or, to hold an item, one that can write its pull requests and issues (the label and the hold
+# comment). It makes that token from the App's client id below and its private key, which it reads at run time
 # from Secret Manager (oss-verify-github-app-key), and runs no code of the pull request or the project.
 #
 # This repository stores no long-lived credential for any of that. Google's provider admits this file, triage.yaml
@@ -243,7 +247,7 @@ name: "Build"
 #
 # The review's session goes from one push to the next in the Actions cache, under the key
 # enroll-review/<pull request>/<project>/<run id>-<attempt>: ~/.claude/projects, where Claude Code keeps its sessions,
-# and ~/.claude/ossv-last-review, one line `session=<id> head=<commit>`. The review job restores the newest entry of
+# and ~/.claude/ossv-last-review, one line `session=<id> head=<commit>`. The gather job restores the newest entry of
 # the pull request and project; when the head descends from the commit that session reviewed, review-gather writes the
 # diff since then and the review resumes that session (claude --resume <id>, which keeps its id) to review only that
 # diff. When a session is kept, the log of the gather step says which: "the review resumes the session <id>", or "the
@@ -251,15 +255,16 @@ name: "Build"
 # Under pull_request_target GitHub gives a job read-only access to main's cache unless the job declares a
 # write-capable cache-mode, and such a job must process no untrusted input before it writes, or a run that later
 # restores the entry could act on what the pull request put there (GitHub's dependency caching reference,
-# "Bypassing the default untrusted-trigger cache restriction"). So the review job, which reads the pull request and
-# runs the model, only restores (cache-mode: read). After the review it keeps the two paths as the artifact
+# "Bypassing the default untrusted-trigger cache restriction"). So the gather job, which reads the pull request, only
+# restores (cache-mode: read), and keeps the session in the file the review job takes; the review job, which runs the
+# model, does not touch the cache. After the review it keeps the two paths as the artifact
 # enroll-review-session, for one day, and the session job saves that artifact, by its id, in the cache (cache-mode:
 # write): that job checks out nothing, runs no script, holds no permission and no identity token, and runs two pinned
 # actions that move the files. Both are main's copy of this file, whatever the pull request changes. A run on main
 # restores only entries that a run on main saved: a pull request's own runs (pull_request, or a push to its branch)
 # save only in the scope of refs/pull/<n>/merge or of their branch, which a run on main does not restore. So the code
 # of a pull request cannot write the session that its review resumes. Every other job has cache-mode: none (below).
-# What the review job restores is still text that the pull request steered, the session of its own earlier review:
+# What the gather job restores is still text that the pull request steered, the session of its own earlier review:
 # it is the model's context, read as data as the pull request itself is, and no step runs it.
 # A session holds the public inputs the review read and the review's own reasoning. As with every cache entry of main,
 # a pull request's own run can read it, and so can anyone signed in to GitHub, for a day, as the artifact. GitHub
@@ -945,9 +950,10 @@ jobs:
   review:
     # Claude Code, through anthropics/claude-code-action, checks the enrollment against review.md, or a change against
     # review-change.md, or drafts the reply to an issue as review-issue.md says (the top of this file): route's kind.
-    # It reads what the gather job kept. A writer's pull request or issue is reviewed as it comes; another only when
-    # the screen's verdict is clean. A run whose gather job failed, or whose screen held it, failed or was cancelled,
-    # has no review.
+    # It reads what the gather job kept. An item that the gather job's output screen says is not screened (a writer's
+    # with no text of others, or a run started by hand) is reviewed as it comes; another only when the screen's
+    # verdict is clean. A run whose gather job failed or kept nothing, or whose screen held it, failed or was
+    # cancelled, has no review.
     needs: [route, project-builds, gather, screen]
     if: >-
       ${{ !cancelled() && needs.gather.result == 'success' && needs.gather.outputs.digest != ''
@@ -1234,12 +1240,12 @@ jobs:
           echo "object=$name" >> "$GITHUB_OUTPUT" && echo "Stored the held finding as $name, generation $generation."
 
   session:
-    # Saves the session the review job kept in the Actions cache, under the key that job restores from, for the review
-    # of the next push (the top of this file). The review job reads the pull request and runs the model, so it only
-    # restores the cache. This job writes it, and it processes no input of the pull request before it writes, as
-    # GitHub's dependency caching reference asks of a job that declares a write-capable cache-mode on an untrusted
-    # trigger: it checks out nothing, runs no script, holds no permission and no identity token, and its two pinned
-    # actions move the one artifact the review job uploaded, by that artifact's id, into the cache. A save that fails is
+    # Saves the session the review job kept in the Actions cache, under the key the gather job restores from, for the
+    # review of the next push (the top of this file). The gather job reads the pull request and the review job runs the
+    # model, so neither writes the cache. This job writes it, and it processes no input of the pull request before it
+    # writes, as GitHub's dependency caching reference asks of a job that declares a write-capable cache-mode on an
+    # untrusted trigger: it checks out nothing, runs no script, holds no permission and no identity token, and its two
+    # pinned actions move the one artifact the review job uploaded, by that artifact's id, into the cache. A save that fails is
     # a warning, never a failure, as a cache save is in any job: the next review is then fresh.
     needs: [project-builds, review]
     if: ${{ !cancelled() && needs.review.outputs.session != '' }}
@@ -1648,14 +1654,16 @@ jobs:
           ASKED_BUILD: ${{ needs.route.outputs.kind == 'enrollment' }}
           # Each of the others is asked for on its own job's condition: the record when the build passed and took a
           # project; gather when the build took a project or the kind is change or issue (the item is reviewable), and
-          # route did not hold it at OUTSIDE_HOURLY_LIMIT; the screen when gather passed and route asked for it; the
-          # review when gather passed and route found writers, or the screen's verdict is clean; the session when the
+          # route did not hold it at OUTSIDE_HOURLY_LIMIT; the screen when gather kept the item (its output digest)
+          # and its output screen is not false; the review when gather kept it and its output screen is false, or the
+          # screen's verdict is clean; the session when the
           # review kept one; hold when an enrollment's review ran; comment when the review wrote a comment (and, if it
           # held a finding back, the hold job sent it), never for an issue, or when a reviewable item is held (route's
-          # limit, or a screen that held it, failed, or had no gathered item to read). So a held item passes this check
-          # when the build passed (if asked) and the comment job labelled it and said so: it waits for a person, as the
-          # label says, and an enrollment's statements do not start without review verdicts (enroll-dispatch's
-          # review-pending). A gather or a screen job that failed fails it, held or not.
+          # limit, a screen that held it or failed, a screened review that failed, or no gathered item to read). So a
+          # held item passes this check when the build passed (if asked) and the comment job labelled it and said so:
+          # it waits for a person, as the label says, and an enrollment's statements do not start without review
+          # verdicts (enroll-dispatch's review-pending). A gather or a screen job that failed fails it, held or not,
+          # and so does a screened review that failed (at SCREENED_HOURLY_CAP, say).
           RECORD: ${{ needs.record.result }}
           ASKED_RECORD: ${{ needs.project-builds.result == 'success' && needs.project-builds.outputs.name != '' }}
           GATHER: ${{ needs.gather.result }}

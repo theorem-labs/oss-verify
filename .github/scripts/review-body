@@ -10,7 +10,9 @@
 #     VERDICTS=<the review's verdicts.json> RULES=<review.md or review-change.md> \
 #     [SCREENED=<the screen's checks that ran, comma-separated>] .github/scripts/review-body
 #
-# Line 1 is the marker <!-- oss-verify-review -->, by which the comment job finds its comment again. Line 2 is the
+# Line 1 is the marker <!-- oss-verify-review -->, by which the comment job finds its comment again; the last line is
+# <!-- oss-verify-review-head <commit> -->, the whole reviewed commit, which the comment job reads before it holds an
+# item. Line 2 is the
 # verdict line, which the inbound watcher reads (the stream's bin/ossv-pr-watch, verdict_line):
 #   <!-- oss-verify-verdict {"head":"<commit>","blocking":[<ids whose verdict is fail>],"person":[<ids whose verdict is person>]} -->
 # with the ids sorted. VERDICTS empty, null, {} or anything but one JSON object gives no verdict line, so a missing
