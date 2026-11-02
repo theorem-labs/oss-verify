@@ -358,7 +358,7 @@ def image_files(tag, paths, *, labels):
     is a file larger than MAX_IMAGE_FILE_BYTES, or one that would take the files kept past MAX_IMAGE_BYTES.
 
     tar's archive is read as a stream, one member at a time, so the host never holds more than the files it keeps:
-    the bytes of a file it leaves out pass through and are dropped."""
+    the bytes of a file it leaves out pass through and are dropped, and so is each member's header once it is read."""
     if not paths:
         return {}
     process = subprocess.Popen(["docker", "run", "--rm", "--network=none", *labels, "--entrypoint", "tar", tag, "-cf",
@@ -367,10 +367,13 @@ def image_files(tag, paths, *, labels):
     files, kept = {}, 0
     try:
         with tarfile.open(fileobj=process.stdout, mode="r|") as archive:
-            for member in archive:
+            while (member := archive.next()) is not None:
                 if member.isfile() and member.size <= MAX_IMAGE_FILE_BYTES and kept + member.size <= MAX_IMAGE_BYTES:
                     files["/" + member.name.lstrip("/")] = archive.extractfile(member).read()
                     kept += member.size
+                # A TarFile keeps every header it has read in .members, which a stream never reads back: drop each
+                # one, so that a tar that writes headers without end holds no more memory than one header.
+                archive.members.clear()
     except tarfile.TarError:
         pass
     finally:

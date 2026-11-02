@@ -293,6 +293,47 @@ class ImageFiles(unittest.TestCase):
         self.assertEqual(self.read(data[:512 + 512] + b"\xff" * 2048), {"/src/a": b"aaaa"})
         self.assertEqual(self.read(b"not a tar file" * 100), {})
 
+    def test_headers_without_end_hold_no_memory(self):
+        """A tar that writes empty members without end (its image's tar is the pull request's): image_files keeps no
+        header it has read, so its memory does not grow with them (a TarFile keeps each one by default)."""
+        import io
+        import tarfile
+        import tracemalloc
+        count, header = 60_000, tarfile.TarInfo("x").tobuf()
+
+        class Headers(io.RawIOBase):
+            """`count` copies of one header, then the end of the archive, read in pieces as a pipe is."""
+            def __init__(self):
+                self.data = memoryview(header * count + bytes(1024))
+                self.at = 0
+
+            def readable(self):
+                return True
+
+            def readinto(self, buffer):
+                n = min(len(buffer), len(self.data) - self.at)
+                buffer[:n] = self.data[self.at:self.at + n]
+                self.at += n
+                return n
+
+        stream = io.BufferedReader(Headers(), 1 << 16)
+        tracemalloc.start()
+        try:
+            baseline = tracemalloc.get_traced_memory()[0]
+            self.assertEqual(self.read_stream(stream), {"/x": b""})
+            peak = tracemalloc.get_traced_memory()[1] - baseline
+        finally:
+            tracemalloc.stop()
+        # Kept, 60,000 headers take about 20 MiB; dropped, less than one.
+        self.assertLess(peak, 4 << 20)
+
+    def read_stream(self, stream):
+        from unittest import mock
+        tar = self.Tar(b"")
+        tar.stdout = stream
+        with mock.patch.object(check_checks.subprocess, "Popen", lambda *args, **kwargs: tar):
+            return check_checks.image_files("tag", ["/x"], labels=[])
+
     def test_no_path_runs_nothing(self):
         from unittest import mock
         with mock.patch.object(check_checks.subprocess, "Popen", side_effect=AssertionError("ran")):
