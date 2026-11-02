@@ -56,22 +56,29 @@ name: "Build"
 #            before the model is refused for an issue, the step "Stop before the model when the draft cannot be
 #            stored" fails the job with `::error::NOT STORED: ...` before the model runs, and the cap does not count
 #            that run.
+#   session  saves the review's session in the Actions cache, for the review of the next push (below). It runs no
+#            script and reads nothing of the pull request: it moves the artifact the review job kept into the cache.
 #   hold     sends each real bug in a project's own code that a review held back from its comment (review.md, rule 6)
 #            to the disclosure route as a private issue (.github/scripts/review-hold): the review job stores it in a
 #            private bucket that only this job can read, and this job sends every finding stored there, a cancelled
-#            run's too. A finding never reaches a log, an output or an artifact.
+#            run's too. A finding never reaches a log, an output or an artifact. Its title and text go through
+#            .github/scripts/review-neutralize before they are posted, as the comment's do (below).
 #   comment  posts that comment, with the checks' report folded under it, or replaces
 #            the one already there. The comment starts with <!-- oss-verify-review -->, as the triage comment starts
 #            with its own marker, and its second line is the verdict line that the inbound watcher reads:
 #            <!-- oss-verify-verdict {"head":"<commit>","blocking":[...],"person":[...]} -->, the checks whose verdict
-#            is fail and those left to a person (.github/scripts/review-body; none when the review gave no verdicts).
-#            It never runs for an issue: a person approves the exact text of each reply to an issue before anyone
-#            posts it.
+#            is fail and those left to a person (.github/scripts/review-body; none when the review gave no verdicts,
+#            or gave one under a key that is not a check id).
+#            The review's text and the checks' report, which a pull request can steer, reach the comment only through
+#            .github/scripts/review-neutralize: with no mention, no reference to an issue or pull request, no unclosed
+#            HTML comment that hides what follows it, and no line that holds a marker of this comment, so no one else
+#            is notified as oss-verify[bot] and the verdict line is the job's own. It never runs for an issue: a person
+#            approves the exact text of each reply to an issue before anyone posts it.
 #   required always runs, last, and reports the required check (below).
 #
 # project-builds is the required check, and the job required reports it (.github/scripts/collect). required runs on
 # every run, after all the other jobs whatever their results, and passes only if route passed and every job route asked
-# for passed: the build when route asked for it, and the record, review, hold and comment jobs when their own
+# for passed: the build when route asked for it, and the record, review, session, hold and comment jobs when their own
 # conditions call for them (the review when the build took a project, or the kind is change or issue); every other
 # job must be skipped. A skipped job counts as a pass where a check is required, so the build job is never the
 # required check itself. The build takes the project with .github/scripts/take-project, for each commit on its own:
@@ -186,16 +193,26 @@ name: "Build"
 # the pull request and project; when the head descends from the commit that session reviewed, review-gather writes the
 # diff since then and the review resumes that session (claude --resume <id>, which keeps its id) to review only that
 # diff. When a session is kept, the log of the gather step says which: "the review resumes the session <id>", or "the
-# review is fresh"; it says neither on a first review. The
-# review job saves the session after the review (cache-mode: write); it runs no code of the pull request, and its
-# Claude can write nothing. Both are main's copy of this file, whatever the pull request changes. A run on main
+# review is fresh"; it says neither on a first review.
+# Under pull_request_target GitHub gives a job read-only access to main's cache unless the job declares a
+# write-capable cache-mode, and such a job must process no untrusted input before it writes, or a run that later
+# restores the entry could act on what the pull request put there (GitHub's dependency caching reference,
+# "Bypassing the default untrusted-trigger cache restriction"). So the review job, which reads the pull request and
+# runs the model, only restores (cache-mode: read). After the review it keeps the two paths as the artifact
+# enroll-review-session, for one day, and the session job saves that artifact, by its id, in the cache (cache-mode:
+# write): that job checks out nothing, runs no script, holds no permission and no identity token, and runs two pinned
+# actions that move the files. Both are main's copy of this file, whatever the pull request changes. A run on main
 # restores only entries that a run on main saved: a pull request's own runs (pull_request, or a push to its branch)
 # save only in the scope of refs/pull/<n>/merge or of their branch, which a run on main does not restore. So the code
 # of a pull request cannot write the session that its review resumes. Every other job has cache-mode: none (below).
+# What the review job restores is still text that the pull request steered, the session of its own earlier review:
+# it is the model's context, read as data as the pull request itself is, and no step runs it.
 # A session holds the public inputs the review read and the review's own reasoning. As with every cache entry of main,
-# a pull request's own run can read it. GitHub drops an entry that no run has read for 7 days, and the next review is
-# then fresh. A review that holds back a finding (review.md, rule 6) keeps no session, because the session would hold
-# the finding: the next push resumes the last session kept before it, or starts fresh.
+# a pull request's own run can read it, and so can anyone signed in to GitHub, for a day, as the artifact. GitHub
+# drops an entry that no run has read for 7 days, and the next review is then fresh. A save that fails is a warning,
+# never a failure, and the next review is then fresh too. A review that holds back a finding (review.md, rule 6) keeps
+# no session, because the session would hold the finding: the next push resumes the last session kept before it, or
+# starts fresh.
 # Only the review job can act as ossv-ci: that comes with the environment enroll-review. Its deployment branch rule,
 # declared in Theorem's infrastructure code, allows main alone; GitHub checks it against the run's ref, which is main
 # for pull_request_target and refs/pull/<n>/merge for a pull request's own run
@@ -229,7 +246,8 @@ on:
         type: number
 
 permissions: {}
-# No job reads or writes the Actions cache unless it says so: only the review job does, for its session.
+# No job reads or writes the Actions cache unless it says so: the review job restores its session, and the session
+# job saves it.
 cache-mode: none
 
 env:
@@ -516,7 +534,9 @@ jobs:
     if: ${{ !cancelled() && (needs.project-builds.outputs.name != '' || needs.route.outputs.kind == 'change' || needs.route.outputs.kind == 'issue') }}
     runs-on: ubuntu-latest
     timeout-minutes: 70
-    cache-mode: write
+    # Restores the last review's session and never saves one: the job reads the pull request and runs the model, and
+    # the session job saves (the top of this file).
+    cache-mode: read
     environment: {name: enroll-review, deployment: false}
     # actions: read only for the hourly cap of issue drafts (its step below), which reads this workflow's runs. A job's
     # permissions cannot change with route's kind, so the job holds it for every kind, and the Review step's token has
@@ -550,6 +570,9 @@ jobs:
       held_object: ${{ steps.held.outputs.object }}
       # body.md, the whole comment, which the comment job posts as it is: that job runs no script of its own.
       body: ${{ steps.body.outputs.body }}
+      # The id of the artifact enroll-review-session, which the session job saves in the cache; empty when no session
+      # is kept.
+      session: ${{ steps.session.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with: {persist-credentials: false, fetch-depth: 0}
@@ -759,11 +782,16 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (sha-pinned)
         if: env.KIND != 'issue'
         with: {name: enroll-review-draft, path: "${{ runner.temp }}/draft", if-no-files-found: error, overwrite: true}
-      # A session that holds a held finding is not kept: any run of a pull request can read main's cache.
+      # A session that holds a held finding is not kept: any run of a pull request can read main's cache. This job only
+      # restores the cache, so it keeps the session as an artifact, for a day, and the session job saves it in the cache.
+      # The artifact's root is ~/.claude, where both paths are. A failed upload, as a failed save before, is a warning,
+      # and the next review is then fresh.
       - name: Keep this review's session for the next push's review
+        id: session
         if: ${{ steps.result.outputs.held != 'yes' && env.KIND == 'enrollment' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
-        with: {path: "~/.claude/projects\n~/.claude/ossv-last-review", key: "${{ env.SESSION_KEY }}${{ github.run_id }}-${{ github.run_attempt }}"}
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (sha-pinned)
+        with: {name: enroll-review-session, path: "~/.claude/projects\n~/.claude/ossv-last-review", include-hidden-files: true, if-no-files-found: warn, retention-days: 1, overwrite: true}
       # A sign-in of its own, after the model: its 300 s token is minted for the store step that follows, never older.
       - name: Sign in to Google Cloud to store the held finding, or an issue's draft
         id: gcp-held
@@ -787,6 +815,31 @@ jobs:
           header=$(printf 'oss-verify held finding v1\npr: %s\nhead: %s\nproject: %s\nrun: %s\n---' "$PR" "$HEAD_SHA" "$NAME" "$RUN_URL")
           generation=$(.github/scripts/held-bucket-put "$name" "$header" "$RUNNER_TEMP/held-finding.md")
           echo "object=$name" >> "$GITHUB_OUTPUT" && echo "Stored the held finding as $name, generation $generation."
+
+  session:
+    # Saves the session the review job kept in the Actions cache, under the key that job restores from, for the review
+    # of the next push (the top of this file). The review job reads the pull request and runs the model, so it only
+    # restores the cache. This job writes it, and it processes no input of the pull request before it writes, as
+    # GitHub's dependency caching reference asks of a job that declares a write-capable cache-mode on an untrusted
+    # trigger: it checks out nothing, runs no script, holds no permission and no identity token, and its two pinned
+    # actions move the one artifact the review job uploaded, by that artifact's id, into the cache. A save that fails is
+    # a warning, never a failure, as a cache save is in any job: the next review is then fresh.
+    needs: [project-builds, review]
+    if: ${{ !cancelled() && needs.review.outputs.session != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    cache-mode: write
+    permissions: {}
+    env:
+      SESSION_KEY: enroll-review/${{ github.event.pull_request.number || inputs.pr }}/${{ needs.project-builds.outputs.name }}/
+    steps:
+      - name: Take the session the review job kept
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2 (sha-pinned)
+        with: {artifact-ids: "${{ needs.review.outputs.session }}", path: "~/.claude"}
+      - name: Keep it for the next push's review
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
+        with: {path: "~/.claude/projects\n~/.claude/ossv-last-review", key: "${{ env.SESSION_KEY }}${{ github.run_id }}-${{ github.run_attempt }}"}
 
   hold:
     # Sends every finding stored in the held-findings bucket to the disclosure route as a private issue
@@ -1042,7 +1095,7 @@ jobs:
     # The required check project-builds (the top of this file), with .github/scripts/collect. A static name: GitHub
     # reports the check under it on every run.
     name: project-builds
-    needs: [route, project-builds, record, review, hold, comment]
+    needs: [route, project-builds, record, review, session, hold, comment]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -1061,13 +1114,15 @@ jobs:
           BUILD: ${{ needs.project-builds.result }}
           ASKED_BUILD: ${{ needs.route.outputs.kind == 'enrollment' }}
           # Each of the others is asked for on its own job's condition: the record when the build passed and took a
-          # project, the review when the build took a project or the kind is change or issue, hold when an
-          # enrollment's review ran, comment when the review wrote a comment (and, if it held a finding back, the hold
-          # job sent it), never for an issue.
+          # project, the review when the build took a project or the kind is change or issue, the session when the
+          # review kept one, hold when an enrollment's review ran, comment when the review wrote a comment (and, if it
+          # held a finding back, the hold job sent it), never for an issue.
           RECORD: ${{ needs.record.result }}
           ASKED_RECORD: ${{ needs.project-builds.result == 'success' && needs.project-builds.outputs.name != '' }}
           REVIEW: ${{ needs.review.result }}
           ASKED_REVIEW: ${{ (needs.project-builds.outputs.name != '' || needs.route.outputs.kind == 'change' || needs.route.outputs.kind == 'issue') }}
+          SESSION: ${{ needs.session.result }}
+          ASKED_SESSION: ${{ needs.review.outputs.session != '' }}
           HOLD: ${{ needs.hold.result }}
           ASKED_HOLD: ${{ needs.review.result != 'skipped' && needs.route.outputs.kind == 'enrollment' }}
           COMMENT: ${{ needs.comment.result }}
@@ -1077,4 +1132,5 @@ jobs:
             && (needs.review.outputs.held_object == '' || needs.hold.result == 'success') }}
         run: >-
           .github/scripts/collect "$ROUTE" "build:$BUILD:$ASKED_BUILD" "record:$RECORD:$ASKED_RECORD"
-          "review:$REVIEW:$ASKED_REVIEW" "hold:$HOLD:$ASKED_HOLD" "comment:$COMMENT:$ASKED_COMMENT"
+          "review:$REVIEW:$ASKED_REVIEW" "session:$SESSION:$ASKED_SESSION" "hold:$HOLD:$ASKED_HOLD"
+          "comment:$COMMENT:$ASKED_COMMENT"
