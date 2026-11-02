@@ -27,8 +27,8 @@ Fields allowed in project.yaml:
     disabled: true | false              optional   true pauses the project
     sanitizers: [address, undefined]    optional   the sanitizer builds besides plain (this is the default; go and
                                                    jvm take none, and default to [])
-    ubsan_checks: {add, remove, reason}  optional  changes to the UBSan checks of the ubsan builds (default: OSS-Fuzz's, by language),
-                                                   with a toolchain that applies them; provisional format
+    ubsan_checks: {add, remove, reason}  optional  changes to the UBSan checks of the ubsan builds (default: OSS-Fuzz's, by language,
+                                                   with strict-flex-arrays), with a toolchain that applies them; provisional format
     fuzz_targets: [<target>, ...]       optional   default: every fuzz target the build produces
     patch_style: <path in your repo>    optional   or a patch_style.md next to project.yaml
     budgets: {halts: ..., agrees: ...}  optional   memory budgets (docs/what-gets-proven.md)

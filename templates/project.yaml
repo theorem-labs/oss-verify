@@ -36,7 +36,8 @@ language: c
 sanitizers: [address, undefined]
 
 # Optional, and only with the next toolchain version: changes to the UBSan checks of the ubsan and asan-ubsan builds,
-# whose default is the checks that OSS-Fuzz makes fatal (docs/project-yaml.md#ubsan_checks). Provisional format.
+# whose default is the checks that OSS-Fuzz makes fatal, with strict-flex-arrays (docs/project-yaml.md#ubsan_checks).
+# Provisional format.
 # ubsan_checks:
 #   add: [alignment]
 #   remove: []

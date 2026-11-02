@@ -19,7 +19,7 @@ The field names come from OSS Scanner if it has the field, then from OSS-Fuzz. W
 | `pgp` | no | your armored OpenPGP public key | |
 | `disabled` | no | `true` pauses the project | `false` |
 | `sanitizers` | no | the sanitizer builds in addition to `plain` | `[address, undefined]` |
-| `ubsan_checks` | no | changes to the UBSan checks of the `ubsan` and `asan-ubsan` builds, with the next toolchain version ([below](#ubsan_checks)) | none: the checks that OSS-Fuzz makes fatal, for the project's language |
+| `ubsan_checks` | no | changes to the UBSan checks of the `ubsan` and `asan-ubsan` builds, with the next toolchain version ([below](#ubsan_checks)) | none: the checks that OSS-Fuzz makes fatal, for the project's language, with `strict-flex-arrays` |
 | `fuzz_targets` | no | the fuzz targets to verify | each fuzz target that the build makes |
 | `mutants` | no | the directory of the breakage patches, from the `WORKDIR` of the `Dockerfile` ([below](#mutants)) | none |
 | `patch_style` | no | the path of your `patch_style.md` in your repository ([below](#patch_style)) | |
