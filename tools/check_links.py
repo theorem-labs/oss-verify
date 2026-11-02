@@ -39,8 +39,9 @@ target two results:
    its bytes (by their SHA-256): instrumented if one of them carried the build's UBSan flags for its language (each of
    them, but the -fno-sanitize= ones, among its arguments; no -fno-sanitize= argument that turns off a check the
    build's own flags keep; and no ignorelist, -fno-sanitize-trap, -fsanitize-recover or -ftrap-function argument,
-   which take checks away or turn traps into calls, that the build's own flags do not have; a word that the driver
-   hands on to the front end through -Xclang, -Xclang=, -Xpreprocessor or -Wp, counts as the bare word), whatever its
+   which take checks away or turn traps into calls, that the build's own flags do not have; no -fstrict-flex-arrays=
+   after them with a lower level than theirs, since clang keeps the last one; a word that the driver hands on to the
+   front end through -Xclang, -Xclang=, -Xpreprocessor or -Wp, counts as the bare word), whatever its
    traps; not instrumented (fail) if none did, whatever its traps. A compile of a language that the sanitizer does not
    instrument (assembly), one whose arguments are in a response file, or one with an option whose effect the record
    does not show (an -mllvm option, --config, --config-user-dir, --config-system-dir, -resource-dir) that the build's
@@ -119,6 +120,10 @@ UNDO_CHECKS = re.compile(r"-fsanitize-(system-)?(ignorelist|blacklist)=.*|-fno-s
 # give it decides nothing. The compiler shims' own --config is not in a record: the record holds the arguments the
 # build gave the shim.
 UNSEEN = ("-mllvm", "--config", "--config-user-dir", "--config-system-dir", "-resource-dir")
+# -fstrict-flex-arrays=<level>: which trailing arrays of a struct array-bounds checks (infra/base-builder/toolchain.sh).
+# clang keeps only the last one the driver gets, so a compile that gives a lower level after the build's flags takes
+# that check away while each of the build's words stays among its arguments.
+STRICT_FLEX_ARRAYS = "-fstrict-flex-arrays="
 C_FAMILY = re.compile(r"\.(c|cc|cp|cpp|cxx|c\+\+|C|CPP|m|mm|h|hh|hpp|hxx|inc|ii|i)$")
 ASSEMBLY = re.compile(r"\.(S|s|sx|asm)$")
 FORTRAN = re.compile(r"\.(f|for|ftn|fpp|f77|f90|f95|f03|f08|f18)$", re.I)
@@ -772,6 +777,39 @@ def option_values(words, option):
             if w == option and i + 1 < len(words) or w.startswith(option + "=")]
 
 
+def flex_levels(arguments):
+    """The -fstrict-flex-arrays= values among `arguments`: (those the driver reads itself, in order; those it hands on
+    to clang's front end, as driver_words reads them)."""
+    driver, forwarded = [], []
+    handed_on = False
+    for a in arguments:
+        if handed_on:
+            forwarded.append(a)
+            handed_on = False
+        elif a in ("-Xclang", "-Xpreprocessor"):
+            handed_on = True
+        elif a.startswith("-Xclang="):
+            forwarded.append(a[len("-Xclang="):])
+        elif a.startswith("-Wp,"):
+            forwarded += a[len("-Wp,"):].split(",")
+        else:
+            driver.append(a)
+    return ([w[len(STRICT_FLEX_ARRAYS):] for w in driver if w.startswith(STRICT_FLEX_ARRAYS)],
+            [w[len(STRICT_FLEX_ARRAYS):] for w in forwarded if w.startswith(STRICT_FLEX_ARRAYS)])
+
+
+def lower_flex_levels(wanted, arguments):
+    """The -fstrict-flex-arrays= words of a compile's `arguments` that give a lower level than the build's UBSan flags
+    `wanted` do (the last of theirs), or none when those flags have none: the last one the driver reads, and each one
+    it hands on to the front end, which counts against the compile and never for it."""
+    build = flex_levels(wanted)[0]
+    if not build:
+        return []
+    driver, forwarded = flex_levels(arguments)
+    return [STRICT_FLEX_ARRAYS + level for level in driver[-1:] + forwarded
+            if not (re.fullmatch("[0-9]+", level) and int(level) >= int(build[-1]))]
+
+
 def wants_checks(compiles, language):
     """Whether the build's UBSan flags for `language` ("c" or "c++") turn on a check: hold a -fsanitize= word. Flags
     that turn on none (an empty list, or only -fno-sanitize-recover and the like) are carried by any compile, and so
@@ -789,8 +827,9 @@ def ubsan_compile(compiles, compile):
     -fno-sanitize= ones; each check that a -fno-sanitize= argument of it turns off is one that the build's own
     sanitizer flags for that language turn off (a check that the build turns off is the build's choice, one the
     compile adds is not); and it has no ignorelist, -fno-sanitize-trap, -fsanitize-recover or -ftrap-function argument
-    (UNDO_CHECKS) that the build's own flags do not have. A word that the driver hands on to the front end (-Xclang,
-    -Xclang=, -Xpreprocessor, -Wp,) counts against the compile as the bare word does, and never for it."""
+    (UNDO_CHECKS) that the build's own flags do not have, and, when the build's UBSan flags give -fstrict-flex-arrays=,
+    no later one that gives a lower level (lower_flex_levels). A word that the driver hands on to the front end
+    (-Xclang, -Xclang=, -Xpreprocessor, -Wp,) counts against the compile as the bare word does, and never for it."""
     language = UBSAN_LANGUAGES.get(compile.language)
     wanted = [w for w in compiles.ubsan[language] if not w.startswith(NO_SANITIZE)] if language else []
     if not language or not wants_checks(compiles, language) or any(a.startswith("@") for a in compile.arguments):
@@ -805,7 +844,7 @@ def ubsan_compile(compiles, compile):
     missing = [w for w in wanted if w not in have]
     extra = sorted({a for a in words
                     if a.startswith(NO_SANITIZE) and not set(a[len(NO_SANITIZE):].split(",")) <= allowed
-                    or UNDO_CHECKS.fullmatch(a) and a not in own})
+                    or UNDO_CHECKS.fullmatch(a) and a not in own} | set(lower_flex_levels(wanted, compile.arguments)))
     if not missing and not extra:
         return True, ""
     return False, (f"{compile.file}: " + ", ".join((["without " + " ".join(missing)] if missing else [])
