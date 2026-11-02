@@ -11,7 +11,6 @@ tools/check imports this module; it is not run on its own.
 import codecs
 import contextlib
 import dataclasses
-import fcntl
 import hashlib
 import os
 import pathlib
@@ -195,6 +194,9 @@ def cache_lock(entry):
     """Hold an exclusive lock for the cache entry `entry` (a path in the cache) while a run fills or reads it, through
     the file <entry>.lock beside it: a second tools/check on this host that fills the same entry waits, rather than
     removing what the first is writing."""
+    # Imported here, not at the top: fcntl is POSIX only, and tools/validate.py (with the triage preview that
+    # CONTRIBUTING.md gives) imports this module, and must still run where there is none, as on Windows.
+    import fcntl
     entry = pathlib.Path(entry)
     entry.parent.mkdir(parents=True, exist_ok=True)
     with open(entry.parent / f"{entry.name}.lock", "a", encoding="utf-8") as handle:

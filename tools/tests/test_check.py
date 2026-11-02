@@ -432,6 +432,16 @@ class CacheLock(unittest.TestCase):
                 fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)  # released: no wait
                 fcntl.flock(other, fcntl.LOCK_UN)
 
+    def test_validate_runs_without_fcntl(self):
+        """fcntl is POSIX only. tools/validate.py, and the triage preview of CONTRIBUTING.md, import check_build, so it
+        must import, and validate, where there is no fcntl (as on Windows); only cache_lock needs it."""
+        code = ("import sys; sys.modules['fcntl'] = None; sys.path.insert(0, sys.argv[1]);"
+                " import check_build, validate;"
+                " problems, _, summary = validate.check_project(validate.PROJECTS / 'bzip2');"
+                " print(problems, bool(summary))")
+        done = subprocess.run([sys.executable, "-c", code, str(TOOLS)], capture_output=True, text=True)
+        self.assertEqual((done.returncode, done.stdout.strip()), (0, "[] True"), done.stderr)
+
     def test_the_model_is_fetched_once_under_the_lock(self):
         import fcntl
         import model_release
