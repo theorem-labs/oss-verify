@@ -383,17 +383,31 @@ def load_lock(path):
         raise LockError(f"cannot read {path}: {error}") from None
     if not isinstance(data, dict):
         raise LockError(f"{path} is not a mapping")
+
+    def mapping(value, what):
+        """`value`, a mapping of the lock, or {} if it is not set. Raise LockError if it is set to anything else: a
+        lock of the wrong shape is refused with a message, never a traceback."""
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise LockError(f"{path}: {what} is not a mapping")
+        return value
+
     pins, toolchain = {}, None
     if data.get("schema") == MANIFEST_SCHEMA or isinstance(data.get("targets"), dict):
-        for target, entry in (data.get("targets") or {}).items():
-            for build, pin in ((entry or {}).get("builds") or {}).items():
+        for target, entry in mapping(data.get("targets"), "targets").items():
+            builds = mapping(mapping(entry, f"targets.{target}").get("builds"), f"targets.{target}.builds")
+            for build, pin in builds.items():
                 pins[(str(target), str(build))] = pin
         commit = data.get("commit")
         toolchain = (data.get("builder") or {}).get("toolchain") if isinstance(data.get("builder"), dict) else None
     elif data.get("schema") == HARNESS_SCHEMA or (isinstance(data.get("builds"), dict) and data.get("harness")):
-        for build, pin in (data.get("builds") or {}).items():
-            pins[(str(data["harness"]), str(build))] = pin
-        commit = (data.get("library") or {}).get("commit")
+        harness = data.get("harness")
+        if isinstance(harness, bool) or not isinstance(harness, (str, int)) or harness == "":
+            raise LockError(f"{path}: harness does not name the fuzz target")
+        for build, pin in mapping(data.get("builds"), "builds").items():
+            pins[(str(harness), str(build))] = pin
+        commit = mapping(data.get("library"), "library").get("commit")
         project_file = pathlib.Path(path).resolve().parent.parent / "project.yaml"
         try:
             project = yaml.safe_load(project_file.read_text(encoding="utf-8")) if project_file.is_file() else None
