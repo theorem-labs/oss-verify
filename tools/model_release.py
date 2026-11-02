@@ -58,10 +58,13 @@ def fetch(repository, commit, cache=None):
     """A checkout of the model at `commit`, fetched once into the cache: its directory. git checks every object
     against the commit id, so the files are the commit's."""
     home = (cache or check_build.CACHE) / "model" / commit
-    if (home / ".fetched").is_file():
-        return home
-    check_build.clone(repository, commit, home)
-    (home / ".fetched").write_text(f"{repository} {commit}\n", encoding="utf-8")
+    # Under the entry's lock: a second run that fetches the same commit at the same time waits, then finds it fetched,
+    # instead of removing the first run's checkout while git writes it (clone() starts by removing the directory).
+    with check_build.cache_lock(home):
+        if (home / ".fetched").is_file():
+            return home
+        check_build.clone(repository, commit, home)
+        (home / ".fetched").write_text(f"{repository} {commit}\n", encoding="utf-8")
     return home
 
 

@@ -69,6 +69,11 @@ BUDGET_MINUTES = 60
 BASELINE_MINUTES = 20
 MAX_PATCH_BYTES = 256 * 1024
 MAX_PATCHES = 200
+# The most of the project image's files that image_files() keeps: of one file, and of all of them. The paths come from
+# the pull request (its fuzz targets' mutant: records, its mutants directory), so a path to a huge or sparse file must
+# not fill the host's memory.
+MAX_IMAGE_FILE_BYTES = 16 << 20
+MAX_IMAGE_BYTES = 256 << 20
 MAX_LISTED = 60
 LANGUAGES = ("c", "c++")
 STATUS_NAMES = {134: "abort()", 132: "a UBSan trap", 139: "a segmentation fault", 77: "exit()",
@@ -280,20 +285,26 @@ def compiler_rt(version):
     url, sha256 = COMPILER_RT[version]
     home = check_build.CACHE / f"compiler-rt-{version}"
     source = home / f"compiler-rt-{version}.src"
-    if (source / "lib" / "profile").is_dir():
-        return source
-    step(f"download compiler-rt {version}'s source, for the coverage build")
-    try:
-        with urllib.request.urlopen(url, timeout=120) as response:
-            data = response.read()
-    except OSError as error:
-        raise Failed(f"cannot download {url}: {error}") from error
-    if hashlib.sha256(data).hexdigest() != sha256:
-        raise Failed(f"{url} does not have the SHA-256 {sha256}")
-    shutil.rmtree(home, ignore_errors=True)
-    home.mkdir(parents=True)
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r:xz") as archive:
-        archive.extractall(home, filter="data")
+    # The mark is written only once every file is out of the archive: a run stopped part way through leaves no mark,
+    # and the next run extracts again instead of building from half a tree. The lock keeps two runs from extracting
+    # into one directory at once.
+    done = home / ".extracted"
+    with check_build.cache_lock(home):
+        if done.is_file() and (source / "lib" / "profile").is_dir():
+            return source
+        step(f"download compiler-rt {version}'s source, for the coverage build")
+        try:
+            with urllib.request.urlopen(url, timeout=120) as response:
+                data = response.read()
+        except OSError as error:
+            raise Failed(f"cannot download {url}: {error}") from error
+        if hashlib.sha256(data).hexdigest() != sha256:
+            raise Failed(f"{url} does not have the SHA-256 {sha256}")
+        shutil.rmtree(home, ignore_errors=True)
+        home.mkdir(parents=True)
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:xz") as archive:
+            archive.extractall(home, filter="data")
+        done.write_text(f"{url} {sha256}\n", encoding="utf-8")
     return source
 
 
@@ -343,19 +354,34 @@ def export_coverage(tag, binaries, profiles, *, labels):
 
 
 def image_files(tag, paths, *, labels):
-    """The bytes of these regular files of the project image: {path: bytes}. A path that is missing is left out."""
+    """The bytes of these regular files of the project image: {path: bytes}. A path that is missing is left out, and so
+    is a file larger than MAX_IMAGE_FILE_BYTES, or one that would take the files kept past MAX_IMAGE_BYTES.
+
+    tar's archive is read as a stream, one member at a time, so the host never holds more than the files it keeps:
+    the bytes of a file it leaves out pass through and are dropped."""
     if not paths:
         return {}
-    done = subprocess.run(["docker", "run", "--rm", "--network=none", *labels, "--entrypoint", "tar", tag, "-cf", "-",
-                           "--", *sorted(paths)], stdin=subprocess.DEVNULL, capture_output=True)
-    files = {}
+    process = subprocess.Popen(["docker", "run", "--rm", "--network=none", *labels, "--entrypoint", "tar", tag, "-cf",
+                                "-", "--", *sorted(paths)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL)
+    files, kept = {}, 0
     try:
-        with tarfile.open(fileobj=io.BytesIO(done.stdout)) as archive:
-            for member in archive.getmembers():
-                if member.isfile() and member.size <= 16 << 20:
+        with tarfile.open(fileobj=process.stdout, mode="r|") as archive:
+            for member in archive:
+                if member.isfile() and member.size <= MAX_IMAGE_FILE_BYTES and kept + member.size <= MAX_IMAGE_BYTES:
                     files["/" + member.name.lstrip("/")] = archive.extractfile(member).read()
+                    kept += member.size
     except tarfile.TarError:
         pass
+    finally:
+        # The tar is the project image's, so it may never stop writing: with the pipe closed, a tar that is still
+        # writing ends on its broken pipe, and one that does not is stopped.
+        process.stdout.close()
+        try:
+            process.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
     return files
 
 

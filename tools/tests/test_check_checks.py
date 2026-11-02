@@ -184,6 +184,121 @@ class Mutants(unittest.TestCase):
             self.assertTrue(problems, bad)
 
 
+class CompilerRt(unittest.TestCase):
+    """check_checks.compiler_rt: the coverage build's compiler-rt source, downloaded once into the cache."""
+
+    VERSION = "0.0.0"
+
+    def archive(self):
+        import io
+        import tarfile
+        data = io.BytesIO()
+        with tarfile.open(fileobj=data, mode="w:xz") as archive:
+            for name, text in ((f"compiler-rt-{self.VERSION}.src/lib/profile/InstrProfiling.c", b"int x;\n"),
+                               (f"compiler-rt-{self.VERSION}.src/include/profile/a.h", b"\n")):
+                info = tarfile.TarInfo(name)
+                info.size = len(text)
+                archive.addfile(info, io.BytesIO(text))
+        return data.getvalue()
+
+    def fetch(self, cache, data):
+        """compiler_rt() with the cache at `cache` and the download replaced: (its directory, the downloads)."""
+        import hashlib
+        import io
+        from unittest import mock
+        downloads = []
+
+        def urlopen(url, timeout=None):
+            downloads.append(url)
+            return io.BytesIO(data)
+
+        table = {self.VERSION: ("https://example.org/rt.tar.xz", hashlib.sha256(data).hexdigest())}
+        with mock.patch.object(check_checks.check_build, "CACHE", cache), \
+                mock.patch.object(check_checks, "COMPILER_RT", table), \
+                mock.patch.object(check_checks.urllib.request, "urlopen", urlopen), \
+                mock.patch.object(check_checks, "step", lambda text: None):
+            return check_checks.compiler_rt(self.VERSION), downloads
+
+    def test_a_half_extracted_tree_is_extracted_again(self):
+        data = self.archive()
+        with tempfile.TemporaryDirectory() as scratch:
+            cache = pathlib.Path(scratch)
+            # What a run stopped part way through extracting left: lib/profile, without the rest or the mark.
+            (cache / f"compiler-rt-{self.VERSION}" / f"compiler-rt-{self.VERSION}.src" / "lib" / "profile").mkdir(
+                parents=True)
+            source, downloads = self.fetch(cache, data)
+            self.assertEqual(len(downloads), 1)
+            self.assertTrue((source / "include" / "profile" / "a.h").is_file())
+            self.assertTrue((source / "lib" / "profile" / "InstrProfiling.c").is_file())
+            # Once whole, the next run takes it from the cache.
+            again, downloads = self.fetch(cache, data)
+            self.assertEqual((again, downloads), (source, []))
+
+
+class ImageFiles(unittest.TestCase):
+    """check_checks.image_files: files of the project image, whose paths and tar the pull request chooses, read with
+    bounded memory."""
+
+    class Tar:
+        """A stand-in for `docker run ... tar -cf -`: its standard output is `data`."""
+
+        def __init__(self, data):
+            import io
+            self.stdout = io.BytesIO(data)
+            self.waited = self.killed = False
+
+        def wait(self, timeout=None):
+            self.waited = True
+            return 0
+
+        def kill(self):
+            self.killed = True
+
+    @staticmethod
+    def archive(members):
+        import io
+        import tarfile
+        data = io.BytesIO()
+        with tarfile.open(fileobj=data, mode="w") as archive:
+            for name, body in members:
+                info = tarfile.TarInfo(name)
+                if body is None:
+                    info.type, info.linkname = tarfile.SYMTYPE, "/etc/passwd"
+                    archive.addfile(info)
+                else:
+                    info.size = len(body)
+                    archive.addfile(info, io.BytesIO(body))
+        return data.getvalue()
+
+    def read(self, data, paths=("/src/a",), **limits):
+        from unittest import mock
+        limits = {"MAX_IMAGE_FILE_BYTES": check_checks.MAX_IMAGE_FILE_BYTES,
+                  "MAX_IMAGE_BYTES": check_checks.MAX_IMAGE_BYTES, **limits}
+        tar = self.Tar(data)
+        with mock.patch.object(check_checks.subprocess, "Popen", lambda *args, **kwargs: tar), \
+                mock.patch.multiple(check_checks, **limits):
+            files = check_checks.image_files("tag", list(paths), labels=[])
+        self.assertTrue(tar.stdout.closed and tar.waited)
+        return files
+
+    def test_keeps_regular_files_within_the_limits(self):
+        data = self.archive([("src/a", b"aaaa"), ("src/big", b"b" * 9), ("src/link", None), ("src/c", b"cccc"),
+                             ("src/d", b"dddd")])
+        files = self.read(data, MAX_IMAGE_FILE_BYTES=8, MAX_IMAGE_BYTES=8)
+        # big is over the limit of one file, link is not a regular file, and d would pass the limit of all of them.
+        self.assertEqual(files, {"/src/a": b"aaaa", "/src/c": b"cccc"})
+
+    def test_a_damaged_archive_keeps_what_was_read(self):
+        data = self.archive([("src/a", b"aaaa")])
+        self.assertEqual(self.read(data[:512 + 512] + b"\xff" * 2048), {"/src/a": b"aaaa"})
+        self.assertEqual(self.read(b"not a tar file" * 100), {})
+
+    def test_no_path_runs_nothing(self):
+        from unittest import mock
+        with mock.patch.object(check_checks.subprocess, "Popen", side_effect=AssertionError("ran")):
+            self.assertEqual(check_checks.image_files("tag", [], labels=[]), {})
+
+
 class WorkflowArguments(unittest.TestCase):
     """What build.yaml, triage.yaml and enroll-dispatch.yml do with the credentials they hold, as far as their text
     shows it: each named credential reaches a command through a pipe or a shell builtin and never as a process's

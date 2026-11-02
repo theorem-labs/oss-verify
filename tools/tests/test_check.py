@@ -380,6 +380,79 @@ class ProjectTag(unittest.TestCase):
         self.assertTrue(self.tag({"project.yaml": "repo: x\n"}, suffix="-twice").endswith("-twice"))
 
 
+class TreeHash(unittest.TestCase):
+    """check_build.tree_hash, which names the builder image and the project image: one tree, one hash."""
+
+    def hash_of(self, files, links=()):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = pathlib.Path(scratch)
+            for name, data in files.items():
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_bytes(data)
+            for name, target in links:
+                (root / name).symlink_to(target)
+            return check_build.tree_hash(root)
+
+    def test_a_file_cannot_pass_for_two(self):
+        # Without lengths, the stream of a, with these bytes, was the stream of the files a and b.
+        self.assertNotEqual(self.hash_of({"a": b"x", "b": b"y"}), self.hash_of({"a": b"x\0b\x000\0y"}))
+
+    def test_the_same_tree_gives_the_same_hash(self):
+        files = {"Dockerfile": b"FROM a\n", "sub/build.sh": b"true\n"}
+        self.assertEqual(self.hash_of(files), self.hash_of(dict(files)))
+        self.assertNotEqual(self.hash_of(files), self.hash_of({**files, "sub/build.sh": b"false\n"}))
+        self.assertNotEqual(self.hash_of(files), self.hash_of({"Dockerfile": b"FROM a\n", "sub/build.SH": b"true\n"}))
+
+    def test_bytecode_caches_are_left_out(self):
+        files = {"tool.py": b"print(1)\n"}
+        self.assertEqual(self.hash_of(files), self.hash_of({**files, "__pycache__/tool.pyc": b"\0\0"}))
+
+    def test_a_link_counts_as_its_text(self):
+        # docker build sends a link as a link: the hash is of where it points, never of the file it reaches, and a
+        # link to a directory counts too.
+        files = {"target": b"data"}
+        link = self.hash_of(files, links=[("alias", "target")])
+        self.assertNotEqual(link, self.hash_of({**files, "alias": b"data"}))
+        self.assertNotEqual(link, self.hash_of(files, links=[("alias", "elsewhere")]))
+        self.assertNotEqual(self.hash_of(files), self.hash_of(files, links=[("dir", "/etc")]))
+
+
+class CacheLock(unittest.TestCase):
+    """check_build.cache_lock: one run at a time fills a cache entry."""
+
+    def test_a_second_holder_waits(self):
+        import fcntl
+        with tempfile.TemporaryDirectory() as scratch:
+            entry = pathlib.Path(scratch) / "model" / COMMIT
+            with check_build.cache_lock(entry):
+                with open(entry.parent / f"{entry.name}.lock", "a") as other:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with open(entry.parent / f"{entry.name}.lock", "a") as other:
+                fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)  # released: no wait
+                fcntl.flock(other, fcntl.LOCK_UN)
+
+    def test_the_model_is_fetched_once_under_the_lock(self):
+        import fcntl
+        import model_release
+        calls = []
+        with tempfile.TemporaryDirectory() as scratch:
+            cache = pathlib.Path(scratch)
+            home = cache / "model" / COMMIT
+
+            def clone(repository, commit, checkout):
+                with open(home.parent / f"{home.name}.lock", "a") as other:
+                    with self.assertRaises(BlockingIOError):  # fetch() holds the entry's lock while git writes
+                        fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                checkout.mkdir(parents=True, exist_ok=True)
+                calls.append((repository, commit))
+
+            with mock.patch.object(check_build, "clone", clone):
+                self.assertEqual(model_release.fetch("https://github.com/o/m", COMMIT, cache), home)
+                self.assertEqual(model_release.fetch("https://github.com/o/m", COMMIT, cache), home)
+            self.assertEqual(calls, [("https://github.com/o/m", COMMIT)])
+
+
 class Toolchains(unittest.TestCase):
     """The toolchain that tools/check builds a project with, by its language (infra/toolchains.tsv)."""
 

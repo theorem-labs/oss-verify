@@ -9,7 +9,9 @@
 tools/check imports this module; it is not run on its own.
 """
 import codecs
+import contextlib
 import dataclasses
+import fcntl
 import hashlib
 import os
 import pathlib
@@ -162,13 +164,45 @@ def in_checkout(checkout, path):
 
 def tree_hash(directory):
     """A hash of every file under `directory` (less Python's bytecode caches): its relative path, its mode and its
-    bytes."""
+    bytes. A symbolic link counts as the text of the link, not what it points to, as `docker build` sends it. Each
+    field goes in with its length in front, so no two trees give one stream (a file whose bytes look like the next
+    file's path cannot pass for two files), and a file's bytes go in by their own SHA-256, read in chunks."""
     digest = hashlib.sha256()
+
+    def field(data):
+        digest.update(len(data).to_bytes(8, "big") + data)
+
     for path in sorted(directory.rglob("*")):
-        if path.is_file() and "__pycache__" not in path.relative_to(directory).parts:
-            digest.update(f"{path.relative_to(directory)}\0{path.stat().st_mode & 0o111:o}\0".encode())
-            digest.update(path.read_bytes() + b"\0")
+        relative = path.relative_to(directory)
+        if "__pycache__" in relative.parts:
+            continue
+        if path.is_symlink():
+            for data in (b"link", os.fsencode(relative), os.fsencode(os.readlink(path))):
+                field(data)
+        elif path.is_file():
+            content = hashlib.sha256()
+            with open(path, "rb") as handle:
+                while chunk := handle.read(1 << 20):
+                    content.update(chunk)
+            for data in (b"file", os.fsencode(relative), f"{path.stat().st_mode & 0o111:o}".encode(),
+                         content.digest()):
+                field(data)
     return digest.hexdigest()
+
+
+@contextlib.contextmanager
+def cache_lock(entry):
+    """Hold an exclusive lock for the cache entry `entry` (a path in the cache) while a run fills or reads it, through
+    the file <entry>.lock beside it: a second tools/check on this host that fills the same entry waits, rather than
+    removing what the first is writing."""
+    entry = pathlib.Path(entry)
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    with open(entry.parent / f"{entry.name}.lock", "a", encoding="utf-8") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def toolchains():
