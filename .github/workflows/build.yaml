@@ -61,17 +61,19 @@ name: "Build"
 #   hold     sends each real bug in a project's own code that a review held back from its comment (review.md, rule 6)
 #            to the disclosure route as a private issue (.github/scripts/review-hold): the review job stores it in a
 #            private bucket that only this job can read, and this job sends every finding stored there, a cancelled
-#            run's too. A finding never reaches a log, an output or an artifact.
+#            run's too. A finding never reaches a log, an output or an artifact. Its title and text go through
+#            .github/scripts/review-neutralize before they are posted, as the comment's do (below).
 #   comment  posts that comment, with the checks' report folded under it, or replaces
 #            the one already there. The comment starts with <!-- oss-verify-review -->, as the triage comment starts
 #            with its own marker, and its second line is the verdict line that the inbound watcher reads:
 #            <!-- oss-verify-verdict {"head":"<commit>","blocking":[...],"person":[...]} -->, the checks whose verdict
-#            is fail and those left to a person (.github/scripts/review-body; none when the review gave no verdicts).
+#            is fail and those left to a person (.github/scripts/review-body; none when the review gave no verdicts,
+#            or gave one under a key that is not a check id).
 #            The review's text and the checks' report, which a pull request can steer, reach the comment only through
-#            .github/scripts/review-neutralize: with no mention, no reference to an issue or pull request, and no line
-#            that holds a marker of this comment, so no one else is notified as oss-verify[bot] and the verdict line is
-#            the job's own. It never runs for an issue: a person approves the exact text of each reply to an issue
-#            before anyone posts it.
+#            .github/scripts/review-neutralize: with no mention, no reference to an issue or pull request, no unclosed
+#            HTML comment that hides what follows it, and no line that holds a marker of this comment, so no one else
+#            is notified as oss-verify[bot] and the verdict line is the job's own. It never runs for an issue: a person
+#            approves the exact text of each reply to an issue before anyone posts it.
 #   required always runs, last, and reports the required check (below).
 #
 # project-builds is the required check, and the job required reports it (.github/scripts/collect). required runs on

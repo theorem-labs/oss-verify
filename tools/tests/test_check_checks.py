@@ -631,6 +631,27 @@ def body(verdicts, head, review="Thanks.\n", checks="", rules="review.md"):
     return run.stdout
 
 
+def check_ids(rules):
+    """The id of each check that a rules file defines, as the review names it in its verdicts: in review.md, a numbered
+    item of a section of the checklist is the section's letter and the number (A1), and a section with no numbered item
+    is its letter alone (B, E: the enrollment reviews of 2026-10 gave exactly these keys); in review-change.md, a numbered
+    check is its number."""
+    text = (ROOT / rules).read_text()
+    if rules == "review-change.md":
+        return re.findall(r"(?m)^([0-9]+)\. \*\*", text.split("\n## Checks\n", 1)[1].split("\n## ", 1)[0])
+    found = []
+    for section in re.split(r"(?m)^### ", text.split("\n## Checklist\n", 1)[1].split("\n## ", 1)[0])[1:]:
+        letter, items = section[0], re.findall(r"(?m)^([0-9]+)\. \*\*", section)
+        found += [letter + n for n in items] or [letter]
+    return found
+
+
+# Verdict keys that are no check id: a model that a pull request steers chooses the keys of its verdicts, and line 2 of
+# the comment prints the keys whose verdict is fail or person.
+HOSTILE_KEYS = ["x --> @octocat cli/cli#1 <!--", "F2 --> @octocat", "f2", "F2 ", " F2", "F2\n", "x\nF2", "FF2", "H1",
+                "2a", "", "-1", "F2\u2060", "\uff26\uff12"]
+
+
 class VerdictLine(unittest.TestCase):
     """Line 2 of the review comment: the checks whose verdict is fail, and those left to a person, at the reviewed
     commit, for the inbound watcher (the stream's bin/ossv-pr-watch, verdict_line)."""
@@ -651,6 +672,30 @@ class VerdictLine(unittest.TestCase):
     def test_a_change_review_uses_its_own_ids(self):
         self.assertIn('"blocking":["2"],"person":["5"]',
                       body(verdicts='{"1":"pass","2":"fail","5":"person"}', head=HEAD40).split("\n")[1])
+
+    def test_every_check_of_the_rules_reaches_the_verdict_line(self):
+        enrollment, change = check_ids("review.md"), check_ids("review-change.md")
+        self.assertEqual(enrollment, ["A1", "A2", "A3", "A4", "A5", "A6", "B", "C1", "C2", "C3", "C4", "C5", "C6", "C7",
+                                      "D1", "D2", "D3", "E", "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "G1", "G2",
+                                      "G3", "G4", "G5"])
+        self.assertEqual(change, ["1", "2", "3", "4", "5"])
+        for ids in (enrollment, change):
+            with self.subTest(ids=ids):
+                line = body(verdicts=json.dumps({i: "fail" for i in ids}), head=HEAD40).split("\n")[1]
+                self.assertEqual(json.loads(line.removeprefix("<!-- oss-verify-verdict ").removesuffix(" -->")),
+                                 {"head": HEAD40, "blocking": sorted(ids), "person": []})
+
+    def test_a_verdict_key_that_is_no_check_id_writes_no_verdict_line(self):
+        # A missing verdict line never reads as "nothing blocks", so the line goes, not only the key: whatever a key
+        # outside the check ids holds, a reader cannot tell what the review decided.
+        for key in HOSTILE_KEYS:
+            for value in ("fail", "person", "pass"):
+                with self.subTest(key=key, value=value):
+                    b = body(verdicts=json.dumps({"F2": "pass", "F7": "fail", key: value}), head=HEAD40)
+                    self.assertNotIn("oss-verify-verdict", b)
+                    shown = html.unescape(b)
+                    self.assertIsNone(ModelText.MENTION.search(shown), shown)
+                    self.assertIsNone(ModelText.REFERENCE.search(shown), shown)
 
     def test_the_rest_of_the_body_is_unchanged(self):
         b = body(verdicts='{"F2":"pass","F7":"pass"}', head=HEAD40, review="r" * 50001, checks="c", rules="review.md")
@@ -736,6 +781,19 @@ class ModelText(unittest.TestCase):
         # Each @ gains a word joiner: the review is cut after that, so the comment is still under 65,536 characters.
         b = body(verdicts='{"F2":"pass"}', head=HEAD40, review="@" * 70_000, checks="#1" * 20_000)
         self.assertLess(len(b), 65_536)
+
+    def test_an_unclosed_html_comment_or_declaration_hides_nothing_after_it(self):
+        # GitHub's markdown API, on 2026-11-02: each of these, at the start of a line and never closed, hides every line
+        # after it, the folded checks' report too; with a word joiner after its "<" it renders as text.
+        for opener in ("<!-- hidden", "<?php hidden", "<![CDATA[ hidden", "<!DOCTYPE hidden", "  <!--hidden"):
+            with self.subTest(opener=opener):
+                b = body(verdicts='{"F2":"pass"}', head=HEAD40, review=f"Before.\n\n{opener}\n\nAfter.\n",
+                         checks=f"Above.\n\n{opener}\n\nBelow.\n")
+                steered = b.split("\n", 2)[2]
+                self.assertNotRegex(steered, r"<[!?]")
+                self.assertIn(opener.replace("<", "<\u2060"), steered)
+                for kept in ("After.", "Below.", "<details><summary>"):
+                    self.assertIn(kept, steered)
 
 
 @unittest.skipUnless(shutil.which("jq"), "needs jq, which the gh stand-in runs the script's filters with")
@@ -1193,6 +1251,32 @@ else:
         run, _, bodies = self.run_held("<!-- held finding -->\ntitle: crash in f\nlog:\ntitle: from the input\n")
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(self.finding_of(bodies[0], []), "log:\ntitle: from the input\n")
+
+    def test_the_models_text_reaches_the_private_issue_with_no_mention_and_no_reference(self):
+        # The model writes the held field, and a pull request can steer it. In the private repository the oss-verify App
+        # must not mention a member or a team of the organisation, or link an issue, any more than in the public
+        # comment. Long enough for three parts, so the comments are checked too.
+        steered = ("Ask @octocat and @theorem-labs/engineering, see cli/cli#1, #2, GH-3 and "
+                   "https://github.com/o/r/issues/4.\n<!-- hidden\n")
+        finding = "project: libreac\nwhy held: crash: it aborts\n\n" + steered + "x" * 61_000 + "\n" + steered
+        held = "<!-- held finding -->\ntitle: crash @octocat #5 in parse_x\n" + finding
+        run, calls, bodies = self.run_held(held)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(len(bodies), 3)
+        [title] = [c[c.index("-f") + 1] for c in self.opened(calls)]
+        posted = self.finding_of(bodies[0], bodies[1:])
+        for shown in (title, posted):
+            self.assertIsNone(ModelText.MENTION.search(shown), shown[:300])
+            self.assertIsNone(ModelText.REFERENCE.search(shown), shown[:300])
+            self.assertNotRegex(shown, r"<[!?]")
+        # Only word joiners were added: the disclosure route reads the finding as the review wrote it.
+        self.assertEqual(title.replace("\u2060", ""), "title=crash @octocat #5 in parse_x")
+        self.assertEqual(posted.replace("\u2060", ""), finding)
+        # The key and the hash of the text are of the finding as the review stored it, so a re-run files nothing.
+        run, calls, again = self.run_held(held, bodies_on_github=[bodies[0]], comments=bodies[1:],
+                                          obj="held/9/" + "b" * 32, header=self.HEADER.replace("runs/7", "runs/9"))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual((self.opened(calls), again), ([], []))
 
     def test_a_line_longer_than_a_part_is_cut_between_characters(self):
         # One long line of two-, three- or four-byte characters, after a prefix of 0 to 3 bytes, so that byte 60,000
@@ -1764,6 +1848,25 @@ class ReviewJob(unittest.TestCase):
                     {"KIND": "other", "PR": "8"}):
             with self.subTest(env=env):
                 self.assertEqual(self.prompt(**env), (2, {}))
+
+    def test_each_schema_takes_only_the_check_ids_of_its_rules_as_verdict_keys(self):
+        # The action validates the structured output against this schema (JSON Schema draft-07, whose `pattern` is an
+        # ECMAScript regular expression: its `$` is the end of the text, which Python writes `\Z`), and asks the model
+        # again on a mismatch, so a key outside the check ids never reaches the result step.
+        for env, rules in (({"KIND": "enrollment", "PR": "8", "NAME": "libreac"}, "review.md"),
+                           ({"KIND": "change", "PR": "8"}, "review-change.md")):
+            with self.subTest(rules=rules):
+                code, out = self.prompt(**env)
+                self.assertEqual(code, 0)
+                verdicts = self.schema(out["arguments"])["properties"]["verdicts"]
+                self.assertEqual(verdicts["additionalProperties"], {"enum": ["pass", "fail", "person"]})
+                pattern = verdicts["propertyNames"]["pattern"]
+                self.assertTrue(pattern.startswith("^") and pattern.endswith("$"), pattern)
+                takes = re.compile(pattern[:-1] + r"\Z").search
+                for key in check_ids(rules) + verdicts["required"]:
+                    self.assertTrue(takes(key), key)
+                for key in HOSTILE_KEYS:
+                    self.assertFalse(takes(key), key)
 
     def test_a_review_without_a_held_finding_keeps_its_session(self):
         run, comment, verdicts, held, output, last = self.result(

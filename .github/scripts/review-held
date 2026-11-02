@@ -59,6 +59,12 @@
 # the review's structured output: each finding starts with a marker line (`<!-- held finding -->`, in any case and
 # spacing), then `key: value` lines (`title:` is the issue's title), then free text.
 #
+# The finding's title and text are the model's, which a pull request can steer, and this script posts them as the
+# oss-verify App in a repository of this organisation. So each goes through .github/scripts/review-neutralize before it
+# is posted: a word joiner, which shows as nothing, after every @, between # or GH- and a digit, before the number of an
+# issue URL and after a < that opens an HTML comment, so that no member or team is mentioned, no issue is linked and no
+# part of the text is hidden. The key and the hash of the text are of the finding as the review stored it.
+#
 # .github/scripts/review-hold runs it, in build.yaml's hold job, with a token of the oss-verify App for
 # HELD_FINDINGS_REPO only, with issues: write only. The review job, which runs the model, never holds the App's key: it
 # stores the finding in a private bucket where it can only create objects, and only the hold job can read it. A
@@ -76,6 +82,7 @@ run_id=${BASH_REMATCH[1]}
 # for a new issue, the finding's own title; this job's log and summary are public, so gh's own words go nowhere and
 # this script says what failed in its. The exit status is gh's, so no failure passes for a success.
 private() { gh "$@" 2> /dev/null; }
+neutralize="$(dirname "${BASH_SOURCE[0]}")/review-neutralize"
 # Never a public or internal repository: a held finding must not reach a reader the disclosure route does not choose.
 visibility=$(private api "repos/$HELD_FINDINGS_REPO" --jq .visibility) || visibility=""
 [ "$visibility" = private ] \
@@ -204,18 +211,20 @@ lookup() {
 #   send <key> <title> <file whose text is the finding> [the keys of the findings in it]
 # One issue, unless one with that key is already there: then nothing is opened, whether it is open or closed, and a
 # text that is not on it yet goes on it as a comment. A finding over 60,000 bytes (GitHub takes 65,536 characters in
-# a body) goes in parts: only the finding's own text is split, at line ends, so the parts are the same on every run
-# whatever the lines this script adds. A line over 60,000 bytes is cut before a UTF-8 character, never inside one,
-# since GitHub would store a cut character as U+FFFD. Part 1 is the issue, after this script's lines; each other part
-# is a comment that starts `held finding part: <key> k/n`. A new text goes as comments that start
-# `held finding update: <key> <text hash> k/n`, then the run that found it and a blank line. Run again, it posts only
-# the parts that are not there yet, so the finding is whole, byte for byte, once any run finishes it.
+# a body) goes in parts: only the finding's own text, as review-neutralize writes it, is split, at line ends, so the
+# parts are the same on every run whatever the lines this script adds. A line over 60,000 bytes is cut before a UTF-8
+# character, never inside one, since GitHub would store a cut character as U+FFFD. Part 1 is the issue, after this
+# script's lines; each other part is a comment that starts `held finding part: <key> k/n`. A new text goes as comments
+# that start `held finding update: <key> <text hash> k/n`, then the run that found it and a blank line. Run again, it
+# posts only the parts that are not there yet, so the finding is whole, byte for byte, once any run finishes it.
 send() {
   local key="$1" line="held finding key: $1" members=${4:-} texthash number state bodyhash how
   local chunks total k posted marker first posts=0
   texthash=$(sha256sum < "$3" | cut -c1-12)
   rm -f "$parts"/chunk.*
-  python3 - "$3" "$parts/chunk." <<'EOF'
+  "$neutralize" < "$3" > "$parts/neutral" \
+    || { echo "review-held: could not neutralize the text of a finding" >&2; return 1; }
+  python3 - "$parts/neutral" "$parts/chunk." <<'EOF'
 import sys
 data, out, most = open(sys.argv[1], "rb").read(), sys.argv[2], 60000
 parts, start = [], 0
@@ -252,7 +261,7 @@ EOF
       if [ "$total" -gt 1 ]; then printf '\n\n(Part 1 of %s: the rest follows in the comments.)\n' "$total"; fi
     } > "$parts/part"
     number=$(private api "repos/$HELD_FINDINGS_REPO/issues" \
-      -f title="$(tr -d '[:cntrl:]' <<< "$2" | cut -c1-200)" -F body=@"$parts/part" -f "labels[]=$label" --jq .number) \
+      -f title="$(tr -d '[:cntrl:]' <<< "$2" | "$neutralize" 200)" -F body=@"$parts/part" -f "labels[]=$label" --jq .number) \
       || { echo "review-held: could not open the issue of a finding" >&2; return 1; }
     sent=$((sent + 1))
     posted="" marker="held finding part: $key" first=2

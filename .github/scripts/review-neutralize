@@ -1,33 +1,39 @@
 #!/usr/bin/env python3
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
-"""Print text that a pull request can steer, read on standard input, as the review comment may carry it, cut at LIMIT
-characters:
+"""Print text that a pull request can steer, read on standard input, as a comment or an issue that a GitHub App posts
+may carry it, cut at LIMIT characters when LIMIT is given:
 
-    .github/scripts/review-neutralize LIMIT < text
+    .github/scripts/review-neutralize [--drop-markers] [LIMIT] < text
 
-.github/scripts/review-body runs it on the review's text and on the checks' report, which shows names that the pull
-request chooses. The comment job posts the comment as oss-verify[bot], so the comment must notify no one, link no issue
-or pull request, and carry no verdict line but the job's own. This is gh-aw's output sanitization ("@mention
-Neutralization" and "Bot Trigger Protection", https://github.github.com/gh-aw/introduction/architecture/), in four steps:
+.github/scripts/review-body runs it, with --drop-markers, on the review's text and on the checks' report, which shows
+names that the pull request chooses; the comment job posts that comment as oss-verify[bot]. .github/scripts/review-held
+runs it on the title and the text of each held finding, which the hold job posts as the same App in the private
+repository of the disclosure route. Each must notify no one, link no issue or pull request, and hide nothing that
+follows it, and the comment must carry no verdict line but the job's own. This is gh-aw's output sanitization
+("@mention Neutralization" and "Bot Trigger Protection", https://github.github.com/gh-aw/introduction/architecture/),
+in five steps:
 
 1. Each character reference (&#64; &#x40; &commat;, and a numeric one with no `;`, which an HTML parser decodes in a
    raw HTML block) whose characters are ASCII letters or digits or @ # / : . _ - is written as those characters, until
-   none is left. Steps 3 and 4 then see each @, # and URL that GitHub would render. Every other reference stays as it
+   none is left. Steps 3 to 5 then see each @, # and URL that GitHub would render. Every other reference stays as it
    is written, so code such as `p = &x;` or `&lt;stdio.h&gt;` is unchanged.
-2. Each line that holds oss-verify-verdict, oss-verify-review or oss-verify-meta, in any case, is dropped: those are the
-   marker and header lines of the comment, which the comment job and the inbound watcher read, and only review-body
-   writes them.
+2. With --drop-markers, each line that holds oss-verify-verdict, oss-verify-review or oss-verify-meta, in any case, is
+   dropped: those are the marker and header lines of the review comment, which the comment job and the inbound watcher
+   read, and only review-body writes them.
 3. A word joiner (U+2060), which shows as nothing, goes after every @, so that no @ is followed by a name: GitHub then
    renders no mention, in code or out of it (an @ after a backtick that ends a code span is a mention too).
 4. A word joiner goes between # and a digit (#12, owner/repo#12), between GH- and a digit, and between the /issues/,
    /pull/, /pulls/ or /discussions/ of a github.com URL and its number: GitHub then renders no issue link and makes no
    cross-reference.
+5. A word joiner goes after each < that comes before ! or ?: an HTML comment (<!--), a declaration (<!DOCTYPE), a CDATA
+   section or a processing instruction (<?) that is never closed hides every line after it, the folded checks' report
+   too, and with the joiner it is text.
 
 GitHub's markdown API renders &#64;octocat, &commat;octocat, `x`@octocat, #1, GH-1 and an issue URL as a mention or an
-issue link, and renders none of them with the word joiner of steps 3 and 4 (measured on 2026-11-02;
-tools/tests/test_check_checks.py, ModelText). The text is cut after these steps, so that the joiners cannot take the
-comment over GitHub's limit of 65,536 characters."""
+issue link, hides what follows an unclosed <!--, <!DOCTYPE, <![CDATA[ or <?, and does none of these with the word
+joiners of steps 3 to 5 (measured on 2026-11-02; tools/tests/test_check_checks.py, ModelText). The text is cut after
+these steps, so that the joiners cannot take the text over a limit that GitHub sets."""
 import html
 import re
 import sys
@@ -42,6 +48,7 @@ BREAKS = (
     (re.compile(r"(GH-)(?=[0-9])", re.IGNORECASE), r"\1" + JOINER),
     (re.compile(r"(github\.com/[^/\s]+/[^/\s]+/(?:issues|pulls?|discussions)/)(?=[0-9])", re.IGNORECASE),
      r"\1" + JOINER),
+    (re.compile(r"<(?=[!?])"), "<" + JOINER),
 )
 
 
@@ -50,21 +57,27 @@ def plain(match):
     return decoded if PLAIN.fullmatch(decoded) else match.group(0)
 
 
-def neutralize(text):
+def neutralize(text, drop_markers):
     # Each pass makes the text shorter, so this ends.
     while (decoded := REFERENCE.sub(plain, text)) != text:
         text = decoded
-    text = "\n".join(line for line in text.split("\n") if not MARKER.search(line))
+    if drop_markers:
+        text = "\n".join(line for line in text.split("\n") if not MARKER.search(line))
     for pattern, replacement in BREAKS:
         text = pattern.sub(replacement, text)
     return text
 
 
 def main():
-    if len(sys.argv) != 2 or not sys.argv[1].isdigit():
-        sys.exit("usage: review-neutralize LIMIT < text")
-    text = sys.stdin.buffer.read().decode("utf-8", "replace")
-    sys.stdout.buffer.write(neutralize(text)[:int(sys.argv[1])].encode("utf-8"))
+    arguments = sys.argv[1:]
+    drop_markers = arguments[:1] == ["--drop-markers"]
+    arguments = arguments[drop_markers:]
+    if len(arguments) > 1 or not all(a.isdigit() for a in arguments):
+        sys.exit("usage: review-neutralize [--drop-markers] [LIMIT] < text")
+    text = neutralize(sys.stdin.buffer.read().decode("utf-8", "replace"), drop_markers)
+    if arguments:
+        text = text[:int(arguments[0])]
+    sys.stdout.buffer.write(text.encode("utf-8"))
 
 
 if __name__ == "__main__":
