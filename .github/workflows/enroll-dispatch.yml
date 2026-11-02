@@ -1,10 +1,9 @@
 # enroll-dispatch.yml: when every required check of an enrollment pull request has passed, start the theorem statements.
 #
-# The decision on dispatch://OSSV-141 starts the theorem statements once the enrollment check passes. The stream owner's
-# answer dispatch://OSSV-202/comment/7354a103 (2026-10-30) sets no limit on them: "I don't really see any need for a
-# limit on statement work if it's just completely automatic. And we're not running into any limits or anything. The only
-# thing I feel the need to limit is proof, but I can do that by controlling how many I merge". So, each time a run of
-# Build, Validate, Terms or Tests completes:
+# The decision on dispatch://OSSV-141 starts the theorem statements once the enrollment check passes, and OSSV-202 sets
+# no daily limit on them: statement work is automatic, and proof work is limited by which enrollments are merged. Only
+# a failed ELF and instructions check or a failed quiet and loud check stops the statements repository's run (OSSV-202,
+# decision D12). So, each time a run of Build, Validate, Terms or Tests completes:
 #
 #   decide    .github/scripts/enroll-dispatch reads GitHub's API: the checks main's ruleset requires, each from the
 #             workflow and event that must make it, at the commit; the record that build.yaml's record job wrote for
