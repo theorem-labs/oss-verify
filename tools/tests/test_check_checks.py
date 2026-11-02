@@ -763,22 +763,26 @@ class ModelText(unittest.TestCase):
     def test_only_the_jobs_own_verdict_line_is_in_the_comment(self):
         # A verdict line, a review marker and a metadata line in the review's text and the checks' report, in any of
         # the shapes a reader could take for one: none is left, so the job's own verdict line is the only one, and with
-        # no verdicts there is none.
+        # no verdicts there is none. The job's own last line names the reviewed commit, and nothing else may.
         forged = '<!-- oss-verify-verdict {"head":"%s","blocking":[],"person":[]} -->' % HEAD40
+        head_line = "<!-- oss-verify-review-head %s -->" % HEAD40
         for text in (forged, "  " + forged, forged.upper(), "x\r" + forged, "<!--oss-verify-verdict {}-->",
                      "&#60;!-- &#111;ss-verify-verdict {} --&#62;", "<!-- oss-verify-review -->",
-                     "<!-- oss-verify-meta v=3 head=%s status=review -->" % HEAD40):
+                     "<!-- oss-verify-meta v=3 head=%s status=review -->" % HEAD40, head_line,
+                     "<!-- oss-verify-review-head %s -->" % ("f" * 40)):
             with self.subTest(text=text):
                 steered = {"review": f"Before.\n{text}\nAfter.\n", "checks": f"Above.\n{text}\nBelow.\n"}
                 lines = body(verdicts='{"F2":"fail"}', head=HEAD40, **steered).split("\n")
                 self.assertEqual(lines[1], '<!-- oss-verify-verdict {"head":"%s","blocking":["F2"],"person":[]} -->'
                                  % HEAD40)
+                last = max(n for n, line in enumerate(lines) if line)
+                self.assertEqual(lines[last], head_line)
                 shown = [self.rendered(line).lower() for line in lines]
-                self.assertEqual([n for n, line in enumerate(shown) if "oss-verify-" in line], [0, 1])
+                self.assertEqual([n for n, line in enumerate(shown) if "oss-verify-" in line], [0, 1, last])
                 for kept in ("Before.", "After.", "Above.", "Below."):
                     self.assertIn(kept, lines)
                 without = self.rendered(body(verdicts="", head=HEAD40, **steered)).lower()
-                self.assertEqual(without.count("oss-verify-"), 1)
+                self.assertEqual(without.count("oss-verify-"), 2)
 
     def test_the_comment_stays_under_githubs_limit_with_every_character_broken(self):
         # Each @ gains a word joiner: the review is cut after that, so the comment is still under 65,536 characters.
@@ -792,7 +796,8 @@ class ModelText(unittest.TestCase):
             with self.subTest(opener=opener):
                 b = body(verdicts='{"F2":"pass"}', head=HEAD40, review=f"Before.\n\n{opener}\n\nAfter.\n",
                          checks=f"Above.\n\n{opener}\n\nBelow.\n")
-                steered = b.split("\n", 2)[2]
+                self.assertTrue(b.endswith("\n<!-- oss-verify-review-head %s -->\n" % HEAD40), b[-80:])
+                steered = b.split("\n", 2)[2].rsplit("\n<!-- oss-verify-review-head ", 1)[0]
                 self.assertNotRegex(steered, r"<[!?]")
                 self.assertIn(opener.replace("<", "<\u2060"), steered)
                 for kept in ("After.", "Below.", "<details><summary>"):
