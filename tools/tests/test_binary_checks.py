@@ -1630,6 +1630,23 @@ class Runs(unittest.TestCase):
         self.write("q0.status", 0)
         self.assertEqual(check_binaries.quiet_loud(True, "", self.inputs, self.results, set())["result"], "fail")
 
+    def test_check_2_without_a_verdict_is_named_as_the_reason(self):
+        """When check 2 could not read the runs at all (no model, another qemu), it lists no whole run, and check 3
+        says that check 2 could not tell, with check 2's reason, not that each run fell short of its input."""
+        for n in range(2):
+            self.write(f"l{n}.status", 0)
+            self.write(f"q{n}.status", 0)
+            self.write(f"q{n}.out", 0)
+            self.write(f"q{n}.err", 0)
+        result = check_binaries.quiet_loud(True, "", self.inputs, self.results, set(), "qemu 8.2.2: not 10.0.11")
+        self.assertEqual(result["result"], "error")
+        self.assertIn("check 2 could not tell whether the binary's run reached its input", result["detail"])
+        self.assertIn("(check 2: qemu 8.2.2: not 10.0.11)", result["detail"])
+        self.assertNotIn("not a whole run", result["detail"])
+        # A difference still fails.
+        self.write("q1.status", 3)
+        self.assertEqual(check_binaries.quiet_loud(True, "", self.inputs, self.results, set(), "x")["result"], "fail")
+
     def test_a_linked_result_is_not_read(self):
         secret = self.results / "secret"
         secret.write_text("0\n")

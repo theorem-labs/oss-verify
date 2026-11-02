@@ -300,10 +300,12 @@ def system_calls(model, stale, qemu, binary, inputs, results):
     return result
 
 
-def quiet_loud(has_quiet, why_none, inputs, results, whole=None):
+def quiet_loud(has_quiet, why_none, inputs, results, whole=None, unknown=None):
     """Check 3 for one binary from its runs. `whole` holds the names of the inputs whose loud run was a whole run of
     that input (system_calls); None means every run counts. A run that died before it reached its input writes
-    nothing either, so it decides nothing here."""
+    nothing either, so it decides nothing here. `unknown`, if given, is why check 2 could not tell which runs were
+    whole at all (its detail): then no run was shown to be whole, and the result says that, not that each run fell
+    short of its input."""
     if not has_quiet:
         return {"result": "not-run", "detail": f"no quiet twin: {why_none}"}
     differ, noisy, undecided, agreed = [], [], [], 0
@@ -324,13 +326,17 @@ def quiet_loud(has_quiet, why_none, inputs, results, whole=None):
         if written:
             noisy.append(f"{name}: the quiet twin wrote {written} bytes")
         if whole is not None and name not in whole:
-            undecided.append(f"{name}: the binary's run was not a whole run of the input")
+            undecided.append(f"{name}: " + ("check 2 could not tell whether the binary's run reached its input"
+                                            if unknown else "the binary's run was not a whole run of the input"))
         elif loud == silent and not written:
             agreed += 1
     if differ or noisy:
         return {"result": "fail", "detail": "; ".join((differ + noisy)[:MAX_LISTED])}
     if not agreed:
-        return {"result": "error", "detail": "no input decided: " + "; ".join(undecided[:MAX_LISTED])}
+        detail = "no input decided: " + "; ".join(undecided[:MAX_LISTED])
+        if unknown:
+            detail += f" (check 2: {unknown})"
+        return {"result": "error", "detail": detail}
     detail = f"the same status on {agreed} inputs, and the quiet twin wrote nothing"
     if undecided:
         detail += "; not decided: " + "; ".join(undecided[:MAX_LISTED])
@@ -469,8 +475,11 @@ def binary_checks(job, tag, toolchain, targets, entries, sources, work, *, label
             if (target, build) in results:
                 calls = guarded(system_calls, model, shape_stale, version, binary, inputs[target],
                                 results[(target, build)])
+                # Check 2 lists the whole runs only when it could read the runs: with no list (no model, another
+                # qemu, a trace it could not read), check 3 says that check 2's reason is why no input decided.
+                unknown = None if "whole" in calls else calls.get("detail") or "it gave no reason"
                 agreement = guarded(quiet_loud, quiet[(target, build)] is not None, why_none, inputs[target],
-                                    results[(target, build)], set(calls.get("whole", [])))
+                                    results[(target, build)], set(calls.get("whole", [])), unknown)
             else:
                 why = failures.get((target, build), "not run")
                 calls = {"result": "error", "detail": why}
