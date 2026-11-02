@@ -1842,6 +1842,20 @@ class ReviewJob(unittest.TestCase):
         self.assertIn(f"each failing result of the report this build wrote for {head}, whatever the diff holds",
                       out["prompt"])
 
+    def test_a_change_with_a_kept_session_resumes_it_and_judges_checks_4_and_5_on_the_whole_diff(self):
+        session, last, head = "09227178-7bbf-4e5f-86db-8736e530ef01", "2" * 40, "3" * 40
+        code, out = self.prompt(KIND="change", PR="34", SESSION=session, LAST=last, HEAD_SHA=head)
+        self.assertEqual(code, 0)
+        self.assertTrue(out["arguments"].endswith(f"' --resume {session}"))
+        self.assertIn(f".review/since-last-review.diff, the diff from {last} to {head}, is an aid for checks 1 to 3"
+                      " only. Judge checks 4 and 5 on the whole diff of the pull request against its base,"
+                      " .review/pr.diff, as on a first review.", out["prompt"])
+        # Without a session that review-gather kept, the review is fresh.
+        code, out = self.prompt(KIND="change", PR="34", LAST=last, HEAD_SHA=head)
+        self.assertEqual(code, 0)
+        self.assertNotIn("since-last-review", out["prompt"])
+        self.assertNotIn("--resume", out["arguments"])
+
     def test_the_prompt_refuses_what_it_cannot_check(self):
         for env in ({"KIND": "issue", "ISSUE": "45 extra"}, {"KIND": "change", "PR": ""},
                     {"KIND": "enrollment", "PR": "8", "NAME": "$(touch pwned)"}, {"KIND": "", "PR": "8"},
@@ -2080,24 +2094,32 @@ class SessionCache(unittest.TestCase):
             self.assertNotIn("run", step)
             self.assertIn(step.get("uses"), self.WRITERS)
 
-    def test_the_session_job_saves_what_the_review_kept_where_the_next_review_restores_it(self):
+    def test_the_session_job_saves_each_kind_of_review_under_the_key_it_restores_from(self):
         review, session = self.jobs["review"], self.jobs["session"]
         steps = {s.get("name"): s for s in review["steps"]}
-        restore = steps["Restore the last review's session and the head it reviewed"]["with"]
+        enrollment_restore = steps["Restore the last review's session and the head it reviewed"]["with"]
+        change_restore = steps["Restore the last change review's session"]["with"]
         keep = steps["Keep this review's session for the next push's review"]
-        # Kept only when the review held no finding back (the session would hold it), and only for an enrollment.
-        self.assertEqual(keep["if"], "${{ steps.result.outputs.held != 'yes' && env.KIND == 'enrollment' }}")
+        # Kept only when the review held no finding back (the session would hold it), for an enrollment or a change.
+        self.assertEqual(keep["if"], "${{ steps.result.outputs.held != 'yes' && (env.KIND == 'enrollment' || env.KIND == 'change') }}")
         self.assertEqual(keep["id"], "session")
-        self.assertEqual(keep["with"]["path"], restore["path"])
+        self.assertEqual(keep["with"]["path"], enrollment_restore["path"])
         self.assertIs(keep["with"]["include-hidden-files"], True)
         self.assertEqual(review["outputs"]["session"], "${{ steps.session.outputs.artifact-id }}")
+        # Kind reaches the session job as a review output, not by reading the event. It selects the same key each kind
+        # restores from.
+        self.assertEqual(review["outputs"]["kind"], "${{ needs.route.outputs.kind }}")
+        self.assertEqual(session["env"]["KIND"], "${{ needs.review.outputs.kind }}")
+        self.assertEqual(session["env"]["SESSION_KEY"],
+                         "${{ needs.review.outputs.kind == 'change' && format('review-{0}-', github.event.pull_request.number || inputs.pr) || format('enroll-review/{0}/{1}/', github.event.pull_request.number || inputs.pr, needs.project-builds.outputs.name) }}")
+        self.assertEqual(change_restore["key"], "${{ env.CHANGE_KEY }}${{ github.run_id }}-${{ github.run_attempt }}")
         download, save = session["steps"]
         # The one artifact the review job uploaded, by its id, into ~/.claude, the root of the paths it holds.
         self.assertEqual(download["with"]["artifact-ids"], "${{ needs.review.outputs.session }}")
         self.assertEqual(download["with"]["path"], "~/.claude")
-        # The same paths, so the same cache version, and the same key.
-        self.assertEqual(save["with"], {"path": restore["path"], "key": restore["key"]})
-        self.assertEqual(session["env"]["SESSION_KEY"], review["env"]["SESSION_KEY"])
+        # The same paths, so the same cache version, and the same key selected by kind.
+        self.assertEqual(save["with"], {"path": enrollment_restore["path"],
+                                        "key": "${{ env.SESSION_KEY }}${{ github.run_id }}-${{ github.run_attempt }}"})
         self.assertEqual(session["if"], "${{ !cancelled() && needs.review.outputs.session != '' }}")
 
     def test_the_required_check_collects_the_session_job(self):
@@ -2236,6 +2258,128 @@ class StoreSignInGate(unittest.TestCase):
         for event in ("issues", "workflow_dispatch"):
             with self.subTest(event=event):
                 self.assertEqual(self.gate("success", event), (0, "", ""))
+
+
+@unittest.skipUnless(shutil.which("jq"), "needs jq, which the gh stand-in runs the script's filters with")
+class ChangeReviewSession(unittest.TestCase):
+    """A change review resumes its last session for context: review-gather takes the head that review reviewed from
+    the runs API, and the session's id from the cache only when the cache names that head."""
+
+    # A change review of pull request 34 at HEAD, in Build run 900.
+    HEAD, LAST, OLDER, FAILED, CACHED = "e" * 40, "b" * 40, "a" * 40, "f" * 40, "d" * 40
+    SESSION = "09227178-7bbf-4e5f-86db-8736e530ef01"
+    PULL = {"head": {"ref": "fix-x", "repo": {"full_name": "someone/oss-verify"}}}
+    # A stand-in for gh: `gh pr view` and `gh pr diff`, and `gh api` answered from state.json by its path without the
+    # query, with the script's own --jq filter applied by the real jq; a compare gives its status (ahead when the base
+    # is in state["ahead"]), or with the diff media type the diff. It records every call.
+    GATHER_GH = r'''#!@@PYTHON@@
+import json, pathlib, subprocess, sys
+root = pathlib.Path(@@ROOT@@)
+a = sys.argv[1:]
+with open(root / "calls", "a") as f:
+    f.write(json.dumps(a) + "\n")
+if a[:2] == ["pr", "view"]:
+    sys.exit(print("{}"))
+if a[:2] == ["pr", "diff"]:
+    sys.exit(print("the whole diff against the base"))
+state = json.loads((root / "state.json").read_text())
+path = next(x for x in a if x.startswith("repos/")).split("?")[0]
+if "/compare/" in path:
+    base, head = path.split("/compare/")[1].split("...")
+    if "Accept: application/vnd.github.diff" in a:
+        sys.exit(print(f"diff from {base} to {head}"))
+    answer = {"status": "ahead" if base in state["ahead"] else "diverged"}
+else:
+    # The pull request's files and review comments: none.
+    answer = state.get(path, [])
+if "--jq" in a:
+    sys.stdout.flush()
+    sys.stdout.buffer.write(subprocess.run(["jq", "-r", a[a.index("--jq") + 1]], input=json.dumps(answer).encode(),
+                                           capture_output=True, check=True).stdout)
+else:
+    print(json.dumps(answer))
+'''
+
+    def gather_change(self, runs, reviews, last_review, ahead=()):
+        """review-gather for the change review of pull request 34 of theorem-labs/oss-verify (the head branch fix-x of
+        someone/oss-verify): `runs` the runs API's Build runs, newest first; `reviews` {run id: its review job's
+        conclusion}; `last_review` the file of the cache (None: none). Return the run, its output,
+        since-last-review.diff, pr.diff and gh's calls."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "bin").mkdir()
+            repo = "repos/theorem-labs/oss-verify"
+            state = {"ahead": list(ahead), f"{repo}/actions/workflows/build.yaml/runs": {"workflow_runs": runs},
+                     f"{repo}/pulls/34": self.PULL}
+            for run_id, conclusion in reviews.items():
+                state[f"{repo}/actions/runs/{run_id}/jobs"] = {"jobs": [
+                    {"name": "route", "conclusion": "success"}, {"name": "review", "conclusion": conclusion}]}
+            (root / "state.json").write_text(json.dumps(state))
+            (root / "bin" / "gh").write_text(
+                self.GATHER_GH.replace("@@PYTHON@@", sys.executable).replace("@@ROOT@@", repr(str(root))))
+            (root / "bin" / "gh").chmod(0o755)
+            if last_review is not None:
+                (root / "last-review").write_text(last_review)
+            run = subprocess.run([str(ROOT / ".github" / "scripts" / "review-gather"), str(root / "out")], cwd=ROOT,
+                                 capture_output=True, text=True,
+                                 env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "GH_TOKEN": "x",
+                                      "KIND": "change", "REPO": "theorem-labs/oss-verify", "PR": "34", "NAME": "",
+                                      "HEAD_SHA": self.HEAD, "LAST_REVIEW": str(root / "last-review"),
+                                      "RUN_ID": "900", "GITHUB_OUTPUT": str(root / "output")})
+            read = lambda path: path.read_text() if path.exists() else None  # noqa: E731
+            calls = [json.loads(line) for line in (root / "calls").read_text().splitlines()]
+            return (run, read(root / "output") or "", read(root / "out" / "since-last-review.diff"),
+                    read(root / "out" / "pr.diff"), calls)
+
+    @staticmethod
+    def own(run_id, sha, fork="someone/oss-verify", branch="fix-x", event="pull_request_target"):
+        """A Build run of the pull request as the runs API lists it."""
+        return {"id": run_id, "event": event, "head_branch": branch, "path": ".github/workflows/build.yaml",
+                "display_title": "fix x", "head_sha": sha, "head_repository": {"full_name": fork}}
+
+    def test_last_comes_from_the_runs_api_not_the_cache(self):
+        cached = f"session={self.SESSION} head={self.LAST}\n"
+        runs = [self.own(950, "3" * 40),  # made after this run
+                self.own(900, self.HEAD),  # this run
+                self.own(890, self.FAILED),  # its review failed
+                self.own(885, "2" * 40, fork="other/oss-verify"),  # a branch of the same name in another fork
+                self.own(882, "1" * 40, branch="fix-y"),  # another branch
+                self.own(881, "0" * 40, event="workflow_dispatch"),  # a run started by hand
+                self.own(880, self.LAST),
+                self.own(870, self.OLDER)]
+        reviews = {950: "success", 900: None, 890: "failure", 885: "success", 882: "success", 881: "success",
+                   880: "success", 870: "success"}
+        run, output, since, _, _ = self.gather_change(runs, reviews, cached, ahead=(self.LAST, self.OLDER, self.CACHED))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(output, f"session={self.SESSION}\nlast={self.LAST}\n")
+        self.assertEqual(since, f"diff from {self.LAST} to {self.HEAD}\n(exit status 0)\n")
+        # The session itself comes from the cache: with no cache entry, the review is fresh.
+        self.assertEqual(self.gather_change(runs, reviews, None, ahead=(self.LAST,))[1], "")
+        # No earlier review that succeeded: fresh, whatever head the cache names.
+        self.assertEqual(self.gather_change(runs[2:3], {890: "failure"}, cached, ahead=(self.LAST,))[1], "")
+
+    def test_a_session_kept_for_another_head_is_not_resumed(self):
+        # The runs API names the head the last review reviewed; the session in the cache was kept for another head (the
+        # save of that review did not happen, or the cache holds an older run's session). It is not resumed, and the
+        # head the cache names is never read.
+        run, output, since, _, calls = self.gather_change(
+            [self.own(860, self.LAST)], {860: "success"}, f"session={self.SESSION} head={self.CACHED}\n",
+            ahead=(self.LAST, self.CACHED))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual((output, since), ("", None))
+        self.assertIn(f"the session in the cache was kept for {self.CACHED}, not {self.LAST}: the review is fresh",
+                      run.stdout)
+        self.assertFalse([c for c in calls if self.CACHED in json.dumps(c) or "/compare/" in json.dumps(c)])
+
+    def test_the_whole_diff_is_gathered_whether_or_not_the_review_resumes(self):
+        # Checks 4 and 5 read pr.diff, the whole diff against the base, on a resumed review too.
+        _, output, since, whole, _ = self.gather_change(
+            [self.own(860, self.LAST)], {860: "success"}, f"session={self.SESSION} head={self.LAST}\n",
+            ahead=(self.LAST,))
+        self.assertTrue(output and since)
+        self.assertEqual(whole, "the whole diff against the base\n")
+        _, output, since, whole, _ = self.gather_change([], {}, None)
+        self.assertEqual((output, since, whole), ("", None, "the whole diff against the base\n"))
 
 
 class Owners(unittest.TestCase):

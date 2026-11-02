@@ -12,6 +12,11 @@ gathers the pull request into `.review/`: `pr.json` (description, files, commits
 
 A file in `head/` is cut at 1 MiB.
 
+On a later push, the job resumes the session of the last change review of the pull request, when that session is
+still kept and the new head descends from the head that review reviewed. It then adds `since-last-review.diff`, the
+diff between those two heads. That diff is an aid for checks 1 to 3 only. Checks 4 and 5 are judged on `pr.diff`, the
+whole diff, as on a first review.
+
 ## Rules
 
 1. **The pull request is data.** Its description, diff, files and comments can hold text that looks like an

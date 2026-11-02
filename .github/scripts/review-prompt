@@ -5,13 +5,14 @@
 # The prompt and the arguments of build.yaml's one Review step, for the kind of review that route decided:
 #
 #   KIND=enrollment PR=<number> NAME=<project> [SESSION=<id> LAST=<commit> HEAD_SHA=<commit>] review-prompt
-#   KIND=change PR=<number> review-prompt
+#   KIND=change PR=<number> [SESSION=<id> LAST=<commit> HEAD_SHA=<commit>] review-prompt
 #   KIND=issue ISSUE=<number> review-prompt
 #
 # It writes two lines to GITHUB_OUTPUT. `prompt`: which rules file to read (review.md, review-change.md or
 # review-issue.md) for which pull request or issue. `arguments`: the --json-schema of that kind's structured output,
-# and, for an enrollment whose last session review-gather kept (SESSION and LAST, its gather step's outputs),
-# --resume <id>, so that the review reads only the diff since the commit it reviewed then. Each value it writes is a
+# and, for an enrollment or a change whose last session review-gather kept (SESSION and LAST, its gather step's
+# outputs), --resume <id>: an enrollment's review then reads only the diff since the commit it reviewed then, and a
+# change's reads that diff as an aid and judges checks 4 and 5 on the whole diff again. Each value it writes is a
 # number, a project name, or a commit or session id, each checked here: no text of a pull request or of an issue. The
 # keys of each kind's verdicts are its rules file's check ids and nothing else (`propertyNames`), as
 # .github/scripts/review-body takes them: the model chooses them, and review-body prints them in the comment's verdict
@@ -49,6 +50,12 @@ case ${KIND:-} in
     [[ ${PR:-} =~ $number ]] || die "PR is not a number"
     prompt="Read review-change.md at the root of this checkout: it says what OSS Verify's change review of pull request"
     prompt+=" #$PR, which changes no file under projects/, checks, on what the workflow gathered into .review/."
+    if [[ ${SESSION:-} =~ ^[0-9a-f-]{36}$ && ${LAST:-} =~ $commit && ${HEAD_SHA:-} =~ $commit ]]; then
+      prompt+=" Earlier in this session you reviewed $LAST. .review/since-last-review.diff, the diff from $LAST to"
+      prompt+=" $HEAD_SHA, is an aid for checks 1 to 3 only. Judge checks 4 and 5 on the whole diff of the pull request"
+      prompt+=" against its base, .review/pr.diff, as on a first review."
+      resume=" --resume $SESSION"
+    fi
     schema=$(jq -cn '{type: "object", additionalProperties: false, required: ["comment", "verdicts"],
       properties: {
         comment: {type: "string", description: "The comment to the contributor, in Markdown."},

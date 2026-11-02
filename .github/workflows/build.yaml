@@ -42,7 +42,9 @@ name: "Build"
 #            On a later push it resumes the same Claude Code session as the last review, so it knows what it asked
 #            for and why, and reviews only the diff since the commit it reviewed then, with one exception: check D3 of
 #            review.md answers each failing result of this build's report of the new head. For a change it checks
-#            what review-change.md says, on the pull request's diff and files read as data, with no session kept. For
+#            what review-change.md says, on the pull request's diff and files read as data; on a later push it
+#            resumes the last change review's session for context (key review-<number>), with the head that review
+#            reviewed taken from the runs API only, and judges checks 4 and 5 on the whole diff again. For
 #            an issue it drafts the reply as review-issue.md says, from the issue's title, body and comments, read as
 #            data, with no session kept. No job posts the draft, and it is never the public artifact or job summary:
 #            it and what a person decides on it go to the private held-findings bucket
@@ -213,6 +215,10 @@ name: "Build"
 # never a failure, and the next review is then fresh too. A review that holds back a finding (review.md, rule 6) keeps
 # no session, because the session would hold the finding: the next push resumes the last session kept before it, or
 # starts fresh.
+# A change review keeps its session the same way under review-<number>-<run id>-<attempt>, for context only:
+# review-gather takes the commit its last review reviewed from the runs API, never from ossv-last-review, and the review
+# judges checks 4 and 5 on the whole diff again (.github/scripts/review-gather). Of the cached file it takes the
+# session's id, and resumes that session only when the head the file names is the commit the runs API gave.
 # Only the review job can act as ossv-ci: that comes with the environment enroll-review. Its deployment branch rule,
 # declared in Theorem's infrastructure code, allows main alone; GitHub checks it against the run's ref, which is main
 # for pull_request_target and refs/pull/<n>/merge for a pull request's own run
@@ -538,9 +544,10 @@ jobs:
     # the session job saves (the top of this file).
     cache-mode: read
     environment: {name: enroll-review, deployment: false}
-    # actions: read only for the hourly cap of issue drafts (its step below), which reads this workflow's runs. A job's
-    # permissions cannot change with route's kind, so the job holds it for every kind, and the Review step's token has
-    # it too: read-only, on the runs of a public repository.
+    # actions: read for the hourly cap of issue drafts (its step below), which reads this workflow's runs, and for the
+    # runs API, which gives a change review the head its last review reviewed. A job's permissions cannot change with
+    # route's kind, so the job holds it for every kind, and the Review step's token has it too: read-only, on the runs
+    # of a public repository.
     permissions: {contents: read, pull-requests: read, issues: read, checks: read, statuses: read, actions: read, id-token: write}
     env:
       KIND: ${{ needs.route.outputs.kind }}
@@ -549,6 +556,9 @@ jobs:
       NAME: ${{ needs.project-builds.outputs.name }}
       HEAD_SHA: ${{ needs.project-builds.outputs.sha || needs.route.outputs.sha }}
       SESSION_KEY: enroll-review/${{ github.event.pull_request.number || inputs.pr }}/${{ needs.project-builds.outputs.name }}/
+      # A change review's session, by pull request; the last `-` keeps one pull request's key from being the start of
+      # another's (pull request 1 and pull request 10), which restore-keys would match.
+      CHANGE_KEY: review-${{ github.event.pull_request.number || inputs.pr }}-
       GCP_WORKLOAD_IDENTITY_PROVIDER: projects/805240912354/locations/global/workloadIdentityPools/github/providers/github-ossv
       GCP_SERVICE_ACCOUNT: ossv-ci@theorem-agent-infra.iam.gserviceaccount.com
       # The client id Tailscale gave the federated identity ossv-review-github: bootstrap/'s stack output
@@ -573,6 +583,8 @@ jobs:
       # The id of the artifact enroll-review-session, which the session job saves in the cache; empty when no session
       # is kept.
       session: ${{ steps.session.outputs.artifact-id }}
+      # Its kind, which the session job reads to select the cache key; it does not read the event.
+      kind: ${{ needs.route.outputs.kind }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with: {persist-credentials: false, fetch-depth: 0}
@@ -598,12 +610,19 @@ jobs:
         if: env.KIND == 'enrollment'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
         with: {path: "~/.claude/projects\n~/.claude/ossv-last-review", key: "${{ env.SESSION_KEY }}${{ github.run_id }}-${{ github.run_attempt }}", restore-keys: "${{ env.SESSION_KEY }}"}
+      # A change review resumes its last session for context only: review-gather takes the head that session reviewed
+      # from the runs API, never from this cache, which the runs of outside pull requests can write too (main's scope).
+      - name: Restore the last change review's session
+        if: env.KIND == 'change'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
+        with: {path: "~/.claude/projects\n~/.claude/ossv-last-review", key: "${{ env.CHANGE_KEY }}${{ github.run_id }}-${{ github.run_attempt }}", restore-keys: "${{ env.CHANGE_KEY }}"}
       - name: Gather what the review reads, and the diff since the last review
         id: gather
         timeout-minutes: 15
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
           COMMIT: ${{ needs.project-builds.outputs.commit }}
           BUILD: "The Build check ${{ needs.project-builds.result }}: ${{ needs.project-builds.outputs.result || 'no result' }}."
           BINARIES: ${{ needs.project-builds.outputs.binaries }}
@@ -700,7 +719,7 @@ jobs:
             "OTEL_RESOURCE_ATTRIBUTES=theorem.project=oss-verify,theorem.subproject=$subproject,theorem.lane=enroll-review-ci,theorem.credential=oss-verify-ci" \
             >> "$GITHUB_ENV"
       # What the one Review step reads and gives, for route's kind: the rules file, the pull request or issue, the
-      # structured output's schema, and for an enrollment the session to resume.
+      # structured output's schema, and for an enrollment or a change the session to resume.
       - name: What the review reads and gives
         id: prompt
         env:
@@ -788,7 +807,7 @@ jobs:
       # and the next review is then fresh.
       - name: Keep this review's session for the next push's review
         id: session
-        if: ${{ steps.result.outputs.held != 'yes' && env.KIND == 'enrollment' }}
+        if: ${{ steps.result.outputs.held != 'yes' && (env.KIND == 'enrollment' || env.KIND == 'change') }}
         continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (sha-pinned)
         with: {name: enroll-review-session, path: "~/.claude/projects\n~/.claude/ossv-last-review", include-hidden-files: true, if-no-files-found: warn, retention-days: 1, overwrite: true}
@@ -831,7 +850,10 @@ jobs:
     cache-mode: write
     permissions: {}
     env:
-      SESSION_KEY: enroll-review/${{ github.event.pull_request.number || inputs.pr }}/${{ needs.project-builds.outputs.name }}/
+      # Kind comes from the review job's output. The review job does not write the cache, so this job selects its key
+      # without reading any event data.
+      KIND: ${{ needs.review.outputs.kind }}
+      SESSION_KEY: ${{ needs.review.outputs.kind == 'change' && format('review-{0}-', github.event.pull_request.number || inputs.pr) || format('enroll-review/{0}/{1}/', github.event.pull_request.number || inputs.pr, needs.project-builds.outputs.name) }}
     steps:
       - name: Take the session the review job kept
         continue-on-error: true
