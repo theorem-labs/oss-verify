@@ -1,15 +1,28 @@
 # Adapted from OSS Scanner's .github/workflows/terms.yaml (https://github.com/anthropics/oss-scanner), Copyright 2026
-# Anthropic PBC, Apache-2.0. Modified 2026 by Theorem Labs, PBC: the OSS Verify terms, and the repository's
-# maintainers recognised by their association with it rather than by a list of logins.
+# Anthropic PBC, Apache-2.0. Modified 2026 by Theorem Labs, PBC: the OSS Verify terms, the repository's maintainers
+# recognised by their association with it rather than by a list of logins, and no box for a pull request that enrolls
+# nothing.
 name: "Terms"
 # An enrollment pull request must accept the OSS Verify terms: the box in the pull request template, ticked in the
 # description. This check fails until it is, and runs again whenever the description is edited. A branch of this
 # repository needs no box: only an account with write access, including a GitHub App, can push one.
 #
+# A pull request that changes no file under projects/ (a change to tools/ or docs/, say) enrolls nothing, and needs no
+# box either: the terms govern the enrollment of a project. They say so in their first paragraph: "This OSS Verify
+# Agreement (the "Agreement") governs your ("Participant") enrollment of a project in OSS Verify", accepted "by ticking
+# "I accept the OSS Verify terms" in an enrollment pull request" (https://theorem.dev/oss-verify/terms/). Any other
+# contribution is under the Apache License 2.0, as CONTRIBUTING.md says. The files are read from the API only when the
+# box is not ticked, every page of them, renames under both names, as build.yaml's route reads them. A pull request
+# that changes more files than the 3000 the API lists, or whose head moves while they are read, needs the box.
+#
 # pull_request_target, not pull_request: with pull_request the workflow file is taken from the pull request itself, so
-# a contributor could edit this check away. This job reads only the event's description, never the pull request's
-# code, and gets no token at all. The description reaches the script through an environment variable, never by
-# ${{ }} substitution into the script, so its text cannot become shell.
+# a contributor could edit this check away. This job reads only the event's description and the list of the files the
+# pull request changes, never the pull request's code. Its token has no permission (permissions: {} below): the API
+# gives a public repository's pull request and its files to any token ("This endpoint can be used without
+# authentication or the aforementioned permissions if only public resources are requested",
+# https://docs.github.com/en/rest/pulls/pulls#list-pull-requests-files), and a token is used, not none, for the
+# authenticated rate limit. The description reaches the script through an environment variable, never by ${{ }}
+# substitution into the script, so its text cannot become shell.
 on:
   pull_request_target:
     types: [opened, edited, reopened, synchronize]
@@ -35,7 +48,13 @@ jobs:
           ASSOCIATION: ${{ github.event.pull_request.author_association }}
           HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
           REPOSITORY: ${{ github.repository }}
+          # No permission (the top of this file): it reads only what the API gives anyone.
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
+          # No pipefail: grep -q below stops reading early, and printf's broken pipe must not read as no box.
+          set -eu
           # A same-repository branch can only be pushed by an account with write access, including a GitHub App.
           if [ "$HEAD_REPOSITORY" = "$REPOSITORY" ]; then
             echo "Opened from this repository: no terms box needed."; exit 0
@@ -50,8 +69,19 @@ jobs:
               echo "Opened by a maintainer of this repository ($ASSOCIATION): no terms box needed."; exit 0 ;;
           esac
           if printf '%s\n' "$BODY" | grep -qiE '^[[:space:]]*[-*][[:space:]]+\[[xX]\][[:space:]]+I accept the \[OSS Verify terms\]\(https://theorem\.dev/oss-verify/terms/?\)'; then
-            echo "The OSS Verify terms are accepted in the description."
-          else
-            echo "::error::Tick 'I accept the OSS Verify terms' in the pull request description. Editing the description runs this check again."
-            exit 1
+            echo "The OSS Verify terms are accepted in the description."; exit 0
           fi
+          # Not an enrollment (the top of this file): no file under projects/, of a head that did not move meanwhile.
+          pull=$(gh api "repos/$REPOSITORY/pulls/$PR")
+          changed=$(jq -r .changed_files <<< "$pull")
+          if [ "$(jq -r .head.sha <<< "$pull")" = "$HEAD_SHA" ] && [[ $changed =~ ^[0-9]+$ ]] && (( changed <= 3000 )); then
+            paths=$(gh api --paginate "repos/$REPOSITORY/pulls/$PR/files?per_page=100" \
+              --jq '.[] | .filename, (.previous_filename // empty)')
+            if ! grep -q '^projects/' <<< "$paths" \
+                && [ "$(gh api "repos/$REPOSITORY/pulls/$PR" --jq .head.sha)" = "$HEAD_SHA" ]; then
+              echo "Not an enrollment: this pull request changes no file under projects/, so no terms box is needed."
+              exit 0
+            fi
+          fi
+          echo "::error::Tick 'I accept the OSS Verify terms' in the pull request description. Editing the description runs this check again."
+          exit 1

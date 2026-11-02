@@ -66,7 +66,7 @@ To pause the project, set `disabled: true` in `project.yaml`. To leave, remove `
 
 ## Learn more
 
-The [OSS Verify FAQ](https://theorem.dev/oss-verify/#faq) answers questions. To send feedback about a finding or a patch, reply to its report, or write to [oss-verify@theorem.dev](mailto:oss-verify@theorem.dev). [SECURITY.md](SECURITY.md) tells how to report a vulnerability in this repository. Use of OSS Verify is subject to the [OSS Verify terms](https://theorem.dev/oss-verify/terms/). We accept only enrollment pull requests ([CONTRIBUTING.md](CONTRIBUTING.md)).
+The [OSS Verify FAQ](https://theorem.dev/oss-verify/#faq) answers questions. To send feedback about a finding or a patch, reply to its report, or write to [oss-verify@theorem.dev](mailto:oss-verify@theorem.dev). [SECURITY.md](SECURITY.md) tells how to report a vulnerability in this repository. Use of OSS Verify is subject to the [OSS Verify terms](https://theorem.dev/oss-verify/terms/). Most pull requests here enroll a project; [CONTRIBUTING.md](CONTRIBUTING.md) tells how other changes are reviewed.
 
 ## Licence
 

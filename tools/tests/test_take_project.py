@@ -174,6 +174,8 @@ NOT_A_PROJECT = {
     "workflow": {".github/workflows/build.yaml": "name: rewritten\n"},
     "subdirectory": {"projects/demo/sub/build.sh": "#!/bin/bash\n"},
 }
+# Of those, the ones with no file under projects/: a fork's such pull request is not an enrollment.
+OUTSIDE_PROJECTS = ("tools", "workflow")
 # An enrollment with one more file outside its project: a line of STATUS.md, the project's row in
 # docs/seeded-projects.tsv.
 WITH_ANOTHER_FILE = {
@@ -250,16 +252,36 @@ def test_a_fork_that_changes_two_projects_and_nothing_else_fails(tmp_path, head)
 
 
 @pytest.mark.parametrize("head", ["someone/oss-verify", ""])
-@pytest.mark.parametrize("change", list(NOT_A_PROJECT))
-def test_a_fork_that_changes_no_project_but_other_files_fails(tmp_path, head, change):
-    # It must not pass as "nothing to validate": a fork's tests check runs none of its code, so these checks are the only
-    # ones that judge it.
-    files = NOT_A_PROJECT[change]
-    code, log, values, summary = PullRequest(tmp_path, files).run(head)
+@pytest.mark.parametrize("change", OUTSIDE_PROJECTS)
+def test_a_fork_that_changes_no_file_under_projects_is_not_an_enrollment(tmp_path, head, change):
+    # tests.yaml runs this repository's tests on it, and build.yaml gives it a change review.
+    pull = PullRequest(tmp_path, NOT_A_PROJECT[change])
+    code, log, values, summary = pull.run(head)
+    assert code == 0, log
+    assert values.get("name", "") == ""
+    assert values["same_repository"] == "false"
+    expected = ("Not an enrollment (it changes 1 file, none under projects/): nothing to validate. The tests check "
+                "(tests.yaml) runs this repository's tests on it.")
+    assert expected in log
+    assert expected in summary
+    # Nothing of the fork is fetched.
+    assert subprocess.run(["git", "cat-file", "-e", pull.sha], cwd=pull.checkout, env=pull.env,
+                          capture_output=True).returncode != 0
+
+
+@pytest.mark.parametrize("head", ["someone/oss-verify", ""])
+@pytest.mark.parametrize("listed", [["projects/demo/sub/build.sh"], ["tools/x.yaml", "projects/demo/x.yaml"],
+                                    ["projects/README.md"]],
+                         ids=["a subdirectory of a project", "a rename out of projects/", "a file directly in projects/"])
+def test_a_fork_that_changes_a_file_under_projects_and_other_files_fails(tmp_path, head, listed):
+    # A path under projects/, of any shape, makes it an enrollment, which must change only one projects/<name>/: it
+    # must not pass as "nothing to validate".
+    code, log, values, summary = PullRequest(tmp_path, NOT_A_PROJECT["subdirectory"]).run(head, listed=listed)
     assert code == 1, log
     assert values.get("name", "") == ""
-    assert f"outside projects/<name>/: {next(iter(files))}" in log
+    assert "outside projects/<name>/: " in log
     assert "nothing to validate" not in log + summary
+    assert "Not an enrollment" not in log + summary
 
 
 def test_a_branch_of_this_repository_that_is_not_an_enrollment_says_so(tmp_path):
