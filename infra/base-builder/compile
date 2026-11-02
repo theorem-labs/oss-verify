@@ -28,7 +28,8 @@
 # Set OV_RECORD=1 to have each fuzz target's link recorded, with a quiet twin, in $OUT/.records/<sha256 of the
 # executable>/ (link-fuzz-target says what a record holds), and each compile of the build in
 # $OUT/.records/compiles.jsonl, one line of JSON for each object a compile wrote (record-compile says what a line
-# holds), with the build's own sanitizer flags in $OUT/.records/flags.json:
+# holds), the objects compiled again with their sources' no_sanitize attributes taken out in
+# $OUT/.records/nosan/<sha256>, and the build's own sanitizer flags in $OUT/.records/flags.json:
 #
 #     {"build": "<plain, ubsan, asan or asan-ubsan>",
 #      "sanitizer": {"c": [<each word of the flags a C compile gets>], "c++": [<a C++ compile's>]},
@@ -249,9 +250,14 @@ if [ -n "$OV_RECORDS" ] && [ -d "$OV_RECORDS/store" ]; then
   mkdir -p "$OUT/.records/store"
   cp -R "$OV_RECORDS/store/." "$OUT/.records/store/"
 fi
-# The compile records (record-compile), one line each, sorted, and the build's flags.
+# The compile records (record-compile), one line each, sorted, the build's flags, and the objects compiled with their
+# sources' no_sanitize attributes taken out.
 if [ -n "$OV_RECORDS" ]; then
   mkdir -p "$OUT/.records"
   cp "$OV_RECORDS/flags.json" "$OUT/.records/flags.json"
   find "$OV_RECORDS/compiles" -type f -exec awk 1 {} + | LC_ALL=C sort > "$OUT/.records/compiles.jsonl"
+  if [ -d "$OV_RECORDS/nosan" ]; then
+    mkdir -p "$OUT/.records/nosan"
+    cp -R "$OV_RECORDS/nosan/." "$OUT/.records/nosan/"
+  fi
 fi
