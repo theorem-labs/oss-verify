@@ -16,7 +16,7 @@ static void late_exit_0(void) { _Exit(0); }
 static void late_return(void) { }
 
 /* A struct whose last member is a fixed-size array. clang takes a trailing array to be of unknown size unless it
- * compiles with -fstrict-flex-arrays=3, so array-bounds checks the index only then. */
+ * compiles with -fstrict-flex-arrays=1 or higher, so array-bounds checks the index only then. */
 struct record { int kind; char tail[16]; };
 /* The flexible array of older C: a trailing [1], allocated with room for more elements. */
 struct legacy { int count; char data[1]; };

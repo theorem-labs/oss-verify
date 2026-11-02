@@ -585,8 +585,9 @@ def config_warnings(config, files):
         if not (set(map(str, added)) | set(map(str, removed))) - set(UBSAN_NAMES) - set(NOT_CLANG_CHECKS):
             in_effect = ubsan_checks_in_effect(config)
             if STRICT_FLEX_ARRAYS in in_effect and not {"array-bounds", "bounds", "undefined"} & set(in_effect):
-                warnings.append(f"ubsan_checks: {STRICT_FLEX_ARRAYS} does nothing without array-bounds, which the "
-                                "checks leave out")
+                warnings.append(f"ubsan_checks: {STRICT_FLEX_ARRAYS} adds no check without array-bounds, which the "
+                                "checks leave out; it still changes how clang optimizes the code of the two UBSan "
+                                "builds")
         if not newest_toolchain_applies_ubsan_checks():
             warnings.append("ubsan_checks has no effect yet: the newest toolchain keeps the release's fixed UBSan flags, "
                             "and tools/check refuses the field with it")
