@@ -2390,7 +2390,7 @@ class Owners(unittest.TestCase):
         team = "@theorem-labs/engineering"
         owned = [[pattern, team] for pattern in (
             # What changes what a workflow runs (the top of CODEOWNERS).
-            "/.github/", "/tools/", "/infra/", "/.claude/", "CLAUDE*.md", "AGENTS*.md", "/.mcp.json", "/*.py",
+            "/.github/", "/tools/", "/infra/", ".claude/", "CLAUDE*.md", "AGENTS*.md", "/.mcp.json", "/*.py",
             "/pytest.ini", "/.pytest.ini", "/pyproject.toml", "/setup.cfg", "/tox.ini",
             "/review.md", "/review-change.md", "/review-issue.md", "/.claude/skills/write-to-maintainer/",
             "/.github/CODEOWNERS")]

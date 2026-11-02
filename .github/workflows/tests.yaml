@@ -178,9 +178,9 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml python3-pytest strace
 
       # The binary checks' rules (tools/binary_isa.py, tools/syscall_shapes.py) are tested against the files of the
-      # public process model at the commit they were written against, fetched anonymously. Each python3 here runs with
-      # -P, which keeps the top of the checkout off sys.path, so that no file or directory there shadows a module
-      # (.github/CODEOWNERS owns the top's .py files and pytest's configuration files).
+      # public process model at the commit they were written against, fetched anonymously. Each python3 -c and -m here
+      # runs with -P, which keeps the top of the checkout off sys.path, so that no file or directory there shadows a
+      # module (.github/CODEOWNERS owns the top's .py files and pytest's configuration files).
       - name: The process model the binary checks were written against
         run: |
           commit=$(python3 -P -c 'import sys; sys.path.insert(0, "tools"); import binary_isa, syscall_shapes
