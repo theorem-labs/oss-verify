@@ -382,6 +382,12 @@ class Problems(unittest.TestCase):
             "is not one of this project's sanitizers",
         )
 
+    def test_budgets_with_a_null_sanitizers_field(self):
+        # An empty or null sanitizers: is the default, address and undefined, so their agrees budgets are allowed.
+        for empty in ("sanitizers:\n", "sanitizers: null\n", "sanitizers: ~\n"):
+            text = MINIMAL + empty + "budgets: {agrees: {address: [2GiB, 512GiB], undefined: [16GiB, 512GiB]}}\n"
+            self.assertEqual(check(text)[0], [], empty)
+
     def test_budget_floor_and_order(self):
         self.assertProblem(MINIMAL + "budgets: {agrees: {undefined: [4095, 5TiB]}}\n", "at least 4096 bytes")
         self.assertProblem(MINIMAL + "budgets: {agrees: {undefined: [5TiB, 2GiB]}}\n", "at least the plain side")

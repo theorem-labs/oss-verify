@@ -407,7 +407,10 @@ def check_budgets(config):
     if not isinstance(agrees, dict):
         yield "budgets.agrees must be a mapping from a sanitizer to [plain side, sanitizer side]"
         return
-    wanted = sanitizers_of(config) if isinstance(config.get("sanitizers", []), list) else []
+    # A missing or null sanitizers: is the default, as for builds_of(). A malformed one is check_builds' problem, and
+    # wants no sanitizer here.
+    sanitizers = config.get("sanitizers")
+    wanted = sanitizers_of(config) if sanitizers is None or isinstance(sanitizers, list) else []
     for sanitizer, pair in agrees.items():
         if sanitizer not in SANITIZERS:
             yield f"budgets.agrees: {sanitizer!r} is not one of {', '.join(SANITIZERS)}"
