@@ -149,12 +149,14 @@ ORDER = ["route", "project-builds", "record", "gather", "screen", "review", "ses
 def run_graph(route, results=None, outputs=None, event="pull_request_target"):
     """The result of each job, as GitHub decides it: a job runs when its if is true, and an if with no status function
     also needs every job it needs to have succeeded (GitHub's implicit success()). route is route's outputs; results
-    and outputs give a job that runs another result than success, and its outputs. Return (results, the context)."""
+    and outputs give a job that runs another result than success, and its outputs. A job that did not succeed has no
+    outputs unless they are given. Return (results, the context)."""
     results, outputs = dict(results or {}), dict(outputs or {})
     assert set(ORDER) == set(JOBS), set(JOBS)
     ctx = {"github.event_name": event, "github.event.pull_request.number": "7"}
     got = {}
     defaults = {"project-builds": {"name": "libx", "sha": "a" * 40},
+                "gather": {"digest": "d" * 64, "screen": "true" if route.get("trust") == "screen" else "false"},
                 "review": {"comment": "Thanks.", "held_object": "", "session": "", "kind": route.get("kind", "")}}
     for name in ORDER:
         job = JOBS[name]
@@ -167,7 +169,8 @@ def run_graph(route, results=None, outputs=None, event="pull_request_target"):
             if condition is None or not STATUS_FUNCTIONS.search(str(condition)):
                 ran = ran and all(got[n] == "success" for n in needs)
         got[name] = results.get(name, "success") if ran else "skipped"
-        out = route if name == "route" else outputs.get(name, defaults.get(name, {})) if ran else {}
+        out = (route if name == "route" else outputs.get(name, defaults.get(name, {}))
+               if ran and (got[name] == "success" or name in outputs) else {})
         ctx[f"needs.{name}.result"] = got[name]
         for key, value in out.items():
             ctx[f"needs.{name}.outputs.{key}"] = value
@@ -255,7 +258,8 @@ class Trust(Runner):
 
     def trust(self, event, author="", actor="", runs=()):
         self.serve(f"repos/{REPO}/actions/workflows/build.yaml/runs", {"workflow_runs": [
-            {"id": i, "triggering_actor": {"login": who}, "event": e} for i, who, e in runs]})
+            {"id": i, "actor": {"login": who}, "triggering_actor": {"login": "someone-else"}, "event": e}
+            for i, who, e in runs]})
         return self.run_script(step("route", self.STEP)["run"], EVENT=event, AUTHOR=author, ACTOR=actor,
                                RUN_ID="100")
 
@@ -401,6 +405,31 @@ class Routes(unittest.TestCase):
         jobs, _ = self.ran({"kind": "", "trust": ""})
         self.assertEqual(jobs, set())
 
+    def test_a_writers_item_with_an_outsiders_comment_is_screened(self):
+        """The gather job's output screen is true for it: the screen runs, and only a clean verdict reviews it."""
+        route = dict(self.ENROLLMENT, trust="writer")
+        gather = {"digest": "d" * 64, "screen": "true"}
+        jobs, ctx = self.ran(route, outputs={"gather": gather, "screen": {"verdict": "clean", "checks": "model_armor"}})
+        self.assertTrue({"screen", "review"} <= jobs, jobs)
+        jobs, ctx = self.ran(route, outputs={"gather": gather, "screen": {"verdict": "held"}})
+        self.assertEqual(jobs, self.BUILT | {"gather", "screen", "comment"})
+        self.assertEqual(required(ctx)[0], 0, required(ctx)[1])
+
+    def test_a_gather_job_with_no_screen_output_screens(self):
+        """Fail closed: only the word false skips the screen."""
+        jobs, ctx = self.ran(dict(self.ENROLLMENT, trust="writer"), outputs={"gather": {"digest": "d" * 64}},
+                             results={"screen": "failure"})
+        self.assertNotIn("review", jobs)
+        self.assertIn("screen", jobs)
+
+    def test_a_cancelled_or_timed_out_screen_reviews_nothing_and_fails_the_required_check(self):
+        for result in ("cancelled", "failure"):
+            with self.subTest(result=result):
+                jobs, ctx = self.ran(dict(self.ENROLLMENT, trust="screen"), results={"screen": result},
+                                     outputs={"screen": {"verdict": "clean"}})
+                self.assertNotIn("review", jobs)
+                self.assertEqual(required(ctx)[0], 1)
+
     def test_the_review_reads_what_the_screen_passed(self):
         """The screen and the review take the gathered file by the gather job's digest, and only the gather job
         gathers: the review job runs neither review-gather nor take-project, and restores no cache."""
@@ -517,6 +546,35 @@ class TakeReviewData(Runner):
     GOOD = {".review/pr.json": b"{}", "projects/libx/build.sh": b"make\n",
             ".claude/ossv-last-review": b"session=x head=y\n", ".claude/projects/a/s.jsonl": b"{}"}
 
+    def test_a_hard_link_is_refused(self):
+        path = self.dir / "review.tar"
+        with tarfile.open(path, "w") as t:
+            info = tarfile.TarInfo(".review/a")
+            t.addfile(info, io.BytesIO(b""))
+            link = tarfile.TarInfo(".review/b")
+            link.type, link.linkname = tarfile.LNKTYPE, ".review/a"
+            t.addfile(link)
+        rc, out, _ = self.take(path, hashlib.sha256(path.read_bytes()).hexdigest(), "libx")
+        self.assertNotEqual(rc, 0, out)
+
+    def test_what_the_gather_jobs_keep_step_makes_is_taken(self):
+        """The gather job's own step, with GNU tar, and take-review-data on its file by the digest it gave."""
+        gather = self.dir / "gather"
+        (gather / ".review").mkdir(parents=True)
+        (gather / ".review" / "pr.json").write_text("{}\n")
+        (gather / "projects" / "libx").mkdir(parents=True)
+        (gather / "projects" / "libx" / "build.sh").write_text("make\n")
+        home = self.dir / "gather-home"
+        (home / ".claude" / "projects").mkdir(parents=True)
+        (home / ".claude" / "ossv-last-review").write_text("session=x head=y\n")
+        rc, out, got = self.run_script(step("gather", "Keep it for the screen and the review")["run"], cwd=gather,
+                                       NAME="libx", HOME=str(home))
+        self.assertEqual(rc, 0, out)
+        rc, out, _ = self.take(self.temp / "review-data" / "review.tar", got["digest"], "libx", home=True)
+        self.assertEqual(rc, 0, out)
+        self.assertTrue((self.work / "projects" / "libx" / "build.sh").is_file())
+        self.assertTrue((self.dir / "home" / ".claude" / "ossv-last-review").is_file())
+
     def test_it_takes_the_review_the_project_and_for_the_review_the_session(self):
         (self.work / "projects" / "libx").mkdir(parents=True)
         (self.work / "projects" / "libx" / "old").write_text("main's\n")
@@ -563,20 +621,25 @@ class HeadDidNotMove(Runner):
         (self.work / ".review" / "pr.json").write_text(json.dumps({"headRefOid": read}) + "\n(exit status 0)\n")
         if now:
             self.serve(f"repos/{REPO}/pulls/7", {"head": {"sha": now}})
-        return self.run_script(step("gather", self.STEP)["run"], PR="7", HEAD_SHA="a" * 40, TRUST=trust)[0]
+        rc, _out, got = self.run_script(step("gather", self.STEP)["run"], PR="7", HEAD_SHA="a" * 40, TRUST=trust)
+        return rc, got.get("moved")
 
     def test_the_same_head_passes(self):
-        self.assertEqual(self.check("a" * 40, "a" * 40, "screen"), 0)
+        self.assertEqual(self.check("a" * 40, "a" * 40, "screen"), (0, None))
 
-    def test_a_head_that_moved_fails_it(self):
+    def test_a_head_that_moved_keeps_nothing(self):
+        """The job passes and says moved: its later steps keep nothing, and no screen, review or hold runs."""
         for read, now in (("b" * 40, "a" * 40), ("a" * 40, "b" * 40)):
             for trust in ("screen", "writer"):
                 with self.subTest(read=read[0], now=now[0], trust=trust):
-                    self.assertEqual(self.check(read, now, trust), 1)
+                    self.assertEqual(self.check(read, now, trust), (0, "true"))
+        for name in ("Whether the review reads text of an account without write access",
+                     "Keep it for the screen and the review"):
+            self.assertTrue(step("gather", name)["if"].startswith("steps.head.outputs.moved != 'true'"))
 
     def test_a_head_that_cannot_be_read_fails_only_a_screened_one(self):
-        self.assertEqual(self.check("a" * 40, None, "screen"), 1)
-        self.assertEqual(self.check("a" * 40, None, "writer"), 0)
+        self.assertEqual(self.check("a" * 40, None, "screen")[0], 1)
+        self.assertEqual(self.check("a" * 40, None, "writer"), (0, None))
 
 
 class Hold(Runner):
@@ -635,15 +698,115 @@ class Hold(Runner):
         self.assertNotIn("needs.screen", json.dumps(e))
         self.assertNotIn("needs.gather", json.dumps(e))
 
-    def test_a_posted_review_takes_the_label_off(self):
+    def test_a_review_of_this_head_already_posted_is_not_replaced_by_a_hold(self):
+        calls, bodies, out = self.hold("screen", comments=[
+            {"id": 3, "user": {"login": "oss-verify[bot]"},
+             "body": "<!-- oss-verify-review -->\n<sub>Claude wrote this review of `aaaaaaa` from `review.md`.</sub>"}])
+        self.assertEqual(bodies, [])
+        self.assertIn("is posted: no hold", out)
+
+    def test_the_comment_jobs_never_cancel_each_other(self):
+        self.assertEqual(JOBS["comment"]["concurrency"]["queue"], "max")
+        self.assertIs(JOBS["comment"]["concurrency"]["cancel-in-progress"], False)
+
+    def test_a_posted_review_takes_the_label_and_the_hold_comment_off(self):
         s = step("comment", "Take the label review-held off")
         self.serve(f"repos/{REPO}/issues/7/labels/review-held", [])
+        self.serve(f"repos/{REPO}/issues/7/comments", [
+            {"id": 4, "user": {"login": "mallory"}, "body": "<!-- oss-verify-held --> forged"},
+            {"id": 5, "user": {"login": "oss-verify[bot]"}, "body": "<!-- oss-verify-held -->\nheld"}])
+        self.serve(f"repos/{REPO}/issues/comments/5", {})
         rc, out, _ = self.run_script(s["run"], PR="7")
         self.assertEqual(rc, 0, out)
-        self.assertIn(["--method", "DELETE", f"repos/{REPO}/issues/7/labels/review-held"], self.calls())
+        calls = self.calls()
+        self.assertIn(["--method", "DELETE", f"repos/{REPO}/issues/7/labels/review-held"], calls)
+        self.assertIn(["--method", "DELETE", f"repos/{REPO}/issues/comments/5"], calls)
+        self.assertNotIn(["--method", "DELETE", f"repos/{REPO}/issues/comments/4"], calls)
         (self.api / f"repos_{REPO.replace('/', '_')}_issues_7_labels_review-held.json").unlink()
         rc, out, _ = self.run_script(s["run"], PR="7")
         self.assertEqual(rc, 0, out)
+
+
+class OutsideText(Runner):
+    """The gather job's step that has the screen read a writer's item that holds text of an account without write
+    access."""
+
+    STEP = "Whether the review reads text of an account without write access"
+
+    def screen(self, trust="writer", comments=(), reviews=(), review_authors=None, status=0):
+        review = self.work / ".review"
+        review.mkdir(exist_ok=True)
+        item = {"author": {"login": "alice"}, "comments": [{"author": a, "body": "x"} for a in comments],
+                "reviews": [{"author": a, "body": "x"} for a in reviews]}
+        (review / "pr.json").write_text(json.dumps(item) + f"\n(exit status {status})\n")
+        if review_authors is not None:
+            (review / "review-comment-authors.txt").write_text("".join(f"{a}\n" for a in review_authors)
+                                                             + "(exit status 0)\n")
+        rc, out, got = self.run_script(step("gather", self.STEP)["run"], TRUST=trust)
+        self.assertEqual(rc, 0, out)
+        return got["screen"]
+
+    def setUp(self):
+        super().setUp()
+        # users/sjawhar-agent is not served: GitHub's 404, no user account of that name.
+        self.permissions(alice="write", root="admin", mallory="read")
+
+    def test_writers_and_our_apps_alone_need_no_screen(self):
+        self.assertEqual(self.screen(comments=[{"login": "alice"}, {"login": "sjawhar-agent"}],
+                                     reviews=[{"login": "root"}], review_authors=["alice", "oss-verify[bot]"]), "false")
+
+    def test_an_outsiders_comment_review_or_review_comment_screens_it(self):
+        for kwargs in ({"comments": [{"login": "mallory"}]}, {"reviews": [{"login": "mallory"}]},
+                       {"review_authors": ["alice", "mallory"]}, {"comments": [None]}, {"comments": [{"login": ""}]},
+                       {"review_authors": ["-"]}):
+            with self.subTest(**{k: str(v) for k, v in kwargs.items()}):
+                self.assertEqual(self.screen(**kwargs), "true")
+
+    def test_a_user_named_as_one_of_our_apps_is_not_that_app(self):
+        self.serve("users/sjawhar-agent", {"type": "User"})
+        self.assertEqual(self.screen(comments=[{"login": "sjawhar-agent"}]), "true")
+
+    def test_a_read_that_failed_screens_it(self):
+        (self.work / ".review").mkdir()
+        (self.work / ".review" / "pr.json").write_text("gh: Server Error (HTTP 502)\n(exit status 1)\n")
+        self.assertEqual(self.run_script(step("gather", self.STEP)["run"], TRUST="writer")[2]["screen"], "true")
+
+    def test_an_outsiders_item_is_screened_whatever_it_holds(self):
+        self.assertEqual(self.screen(trust="screen"), "true")
+
+    def test_both_copies_of_trusted_are_the_same(self):
+        def trusted(text):
+            found = re.findall(r"# trusted\n(.*?)# end of trusted\n", text, re.S)
+            self.assertEqual(len(found), 1)
+            return found[0]
+        self.assertEqual(trusted(step("route", Trust.STEP)["run"]), trusted(step("gather", self.STEP)["run"]))
+
+
+class OutsidersEnrollment(Runner):
+    """An enrollment of an account without write access: its review gets none of the project's repository, which no
+    screen reads."""
+
+    STEP = "A screened enrollment's review reads none of the project's repository"
+
+    def test_the_source_goes_and_source_txt_says_why(self):
+        s = step("gather", self.STEP)
+        self.assertEqual(s["if"], "steps.head.outputs.moved != 'true' && env.KIND == 'enrollment' && env.TRUST == 'screen'")
+        (self.work / ".review" / "source").mkdir(parents=True)
+        (self.work / ".review" / "source" / "README").write_text("upstream\n")
+        rc, out, _ = self.run_script(s["run"], PR="7")
+        self.assertEqual(rc, 0, out)
+        self.assertFalse((self.work / ".review" / "source").exists())
+        self.assertIn("gh workflow run build.yaml -f pr=7", (self.work / ".review" / "source.txt").read_text())
+        names = [x.get("name") for x in JOBS["gather"]["steps"]]
+        self.assertLess(names.index(self.STEP), names.index("Keep it for the screen and the review"))
+
+
+class TrustWiring(unittest.TestCase):
+    def test_the_trust_step_reads_the_author_and_the_account_that_started_the_run(self):
+        e = step("route", Trust.STEP)["env"]
+        self.assertEqual(e["AUTHOR"], "${{ github.event.pull_request.user.login || github.event.issue.user.login }}")
+        self.assertEqual(e["ACTOR"], "${{ github.actor }}")
+        self.assertEqual(e["EVENT"], "${{ github.event_name }}")
 
 
 class ScreenedFooter(unittest.TestCase):
@@ -667,7 +830,7 @@ class ScreenedFooter(unittest.TestCase):
                 self.assertIn(f"An automated screen passed it first; the checks that ran: {names}.", run.stdout)
         self.assertNotIn("screen", self.body("").stdout)
         self.assertEqual(step("review", "Write the comment as the comment job posts it")["env"]["SCREENED"],
-                         "${{ needs.route.outputs.trust == 'screen' && needs.screen.outputs.checks || '' }}")
+                         "${{ needs.gather.outputs.screen != 'false' && needs.screen.outputs.checks || '' }}")
 
     def test_anything_else_is_refused(self):
         for screened in ("x; rm -rf /", "model_armor,", "@octocat", "model_armor,other"):

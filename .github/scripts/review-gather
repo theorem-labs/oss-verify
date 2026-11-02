@@ -86,8 +86,17 @@ keep pr.json gh pr view "$PR" -R "$REPO" --json \
 # Apart, so that a token that cannot read the checks leaves pr.json whole.
 keep checks.json gh pr view "$PR" -R "$REPO" --json statusCheckRollup
 gh pr diff "$PR" -R "$REPO" > "$out/pr.diff" 2>&1
-keep review-comments.txt gh api --paginate "repos/$REPO/pulls/$PR/comments" \
-  --jq '.[] | "\(.user.login) \(.path):\(.line) \(.body)"'
+# One read gives both files: the review comments as the review reads them, and their authors, one login a line, which
+# build.yaml's gather job asks GitHub about (an account without write access has the screen read the text first).
+gh api --paginate "repos/$REPO/pulls/$PR/comments" \
+  --jq '.[] | [.user.login // "", "\(.user.login) \(.path):\(.line) \(.body)"]' > "$out/review-comments.json" 2>&1
+status=$?
+{ jq -r '.[1]' "$out/review-comments.json" 2> /dev/null || cat "$out/review-comments.json"
+  echo "(exit status $status)"; } > "$out/review-comments.txt"
+# A read that failed names "-", no account, so the gather job takes it as an account without write access.
+{ { [ "$status" = 0 ] && jq -r '.[0]' "$out/review-comments.json" 2> /dev/null; } || echo "-"
+  echo "(exit status $status)"; } > "$out/review-comment-authors.txt"
+rm -f "$out/review-comments.json"
 if [ "$KIND" = change ]; then
   # Claude Code reads a CLAUDE.md or .claude/ beside a file it reads as instructions: the pull request's are data.
   # Every file, not only the first 100 that pr.json lists.
