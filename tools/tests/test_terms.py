@@ -110,6 +110,7 @@ def test_a_list_that_cannot_decide_needs_the_box(tmp_path, case):
     code, out, _ = terms(tmp_path, ["tools/check"], **arguments)
     assert code == 1, out
     assert "Not an enrollment" not in out
+    assert "::error::Tick 'I accept the OSS Verify terms' in the pull request description." in out
 
 
 @pytest.mark.parametrize("arguments", [

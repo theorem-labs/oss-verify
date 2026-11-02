@@ -4,11 +4,11 @@ name: "Tests"
 # tests runs this repository's tests and checks every project with tools/validate.py, on main and on pull requests. It
 # runs the pull request's code, with GitHub's pull_request event: a run from a fork gets a read-only token and no
 # secret, and GitHub holds it until a maintainer approves it while the author has no merged contribution here. A pull
-# request from a fork that changes a file under projects/ is an enrollment: for it this workflow checks out and runs
-# nothing, and passes with "not run" in its summary. enrollment (validate.yaml) refuses such a fork if it changes
-# anything but one projects/<name>/, and project-builds (build.yaml) builds that project. A pull request from a fork
-# that changes no file under projects/ (a change to tools/, say) is tested as a branch of this repository is, and
-# project-builds gives it a change review.
+# request from a fork that changes a file under projects/ is an enrollment: for it route checks out the merge only to
+# read the paths it changes, no job runs its code, and the check passes with "not run" in its summary. enrollment
+# (validate.yaml) refuses such a fork if it changes anything but one projects/<name>/, and project-builds (build.yaml)
+# builds that project. A pull request from a fork that changes no file under projects/ (a change to tools/, say) is
+# tested as a branch of this repository is, and project-builds gives it a change review.
 #
 # Each commit is judged on its own changes: for a pull request, GitHub's merge of it against the base branch; for a push
 # to main, against the commit before the push. The jobs:

@@ -121,6 +121,11 @@ gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" --jq '.[] | .filena
 # The list is of the head and base as they were when the list was read.
 now=$(gh api "repos/$REPO/pulls/$PR")
 current "$now"
+# A fork that lists no path under projects/ is not an enrollment (the top of this file).
+enrollment=true
+if [ "$same_repository" = false ] && ! grep -q '^projects/' "$RUNNER_TEMP/paths"; then
+  enrollment=false
+fi
 names=() outside=0
 while IFS= read -r path; do
   if [[ $path =~ ^projects/([^/]+)/. ]]; then
@@ -128,7 +133,7 @@ while IFS= read -r path; do
   fi
   [[ $path =~ ^projects/[^/]+/[^/]+$ ]] && continue
   outside=$((outside + 1))
-  [ "$same_repository" = true ] || print_path "outside projects/<name>/" "$path"
+  [ "$same_repository" = true ] || [ "$enrollment" = false ] || print_path "outside projects/<name>/" "$path"
 done < "$RUNNER_TEMP/paths"
 projects=$(if (( ${#names[@]} )); then printf '%s\0' "${names[@]}" | sort -z -u | grep -z -c .; else echo 0; fi)
 
@@ -137,9 +142,9 @@ projects=$(if (( ${#names[@]} )); then printf '%s\0' "${names[@]}" | sort -z -u 
 if [ "$same_repository" = false ] && (( projects + outside == 0 )); then
   nothing "This pull request changes no file: nothing to $action."
 fi
-# A fork that lists no path under projects/ is not an enrollment (the top of this file).
-if [ "$same_repository" = false ] && ! grep -q '^projects/' "$RUNNER_TEMP/paths"; then
-  nothing "Not an enrollment (it changes $(count "$outside" file), none under projects/): nothing to $action. The tests check (tests.yaml) runs this repository's tests on it."
+if [ "$enrollment" = false ]; then
+  # A renamed file is listed under both names, so this counts paths, not files.
+  nothing "Not an enrollment (it lists $(count "$outside" path), none under projects/): nothing to $action. The tests check (tests.yaml) runs this repository's tests on it."
 fi
 
 # Fetch the pull request's commit, and for a branch of this repository the merge base, once. Nothing is checked out.

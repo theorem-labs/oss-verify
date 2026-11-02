@@ -71,17 +71,23 @@ jobs:
           if printf '%s\n' "$BODY" | grep -qiE '^[[:space:]]*[-*][[:space:]]+\[[xX]\][[:space:]]+I accept the \[OSS Verify terms\]\(https://theorem\.dev/oss-verify/terms/?\)'; then
             echo "The OSS Verify terms are accepted in the description."; exit 0
           fi
-          # Not an enrollment (the top of this file): no file under projects/, of a head that did not move meanwhile.
-          pull=$(gh api "repos/$REPOSITORY/pulls/$PR")
-          changed=$(jq -r .changed_files <<< "$pull")
-          if [ "$(jq -r .head.sha <<< "$pull")" = "$HEAD_SHA" ] && [[ $changed =~ ^[0-9]+$ ]] && (( changed <= 3000 )); then
+          # Not an enrollment (the top of this file): no file under projects/, of a head that did not move meanwhile. A
+          # read that fails, a list over the API's 3000 files, or a head that moved, decides nothing: the box is needed.
+          # In an if condition bash -e stops nothing, so each step that can fail returns by hand.
+          not_an_enrollment() {
+            local pull changed paths
+            pull=$(gh api "repos/$REPOSITORY/pulls/$PR") || return 1
+            [ "$(jq -r .head.sha <<< "$pull")" = "$HEAD_SHA" ] || return 1
+            changed=$(jq -r .changed_files <<< "$pull") || return 1
+            [[ $changed =~ ^[0-9]+$ ]] && (( changed <= 3000 )) || return 1
             paths=$(gh api --paginate "repos/$REPOSITORY/pulls/$PR/files?per_page=100" \
-              --jq '.[] | .filename, (.previous_filename // empty)')
-            if ! grep -q '^projects/' <<< "$paths" \
-                && [ "$(gh api "repos/$REPOSITORY/pulls/$PR" --jq .head.sha)" = "$HEAD_SHA" ]; then
-              echo "Not an enrollment: this pull request changes no file under projects/, so no terms box is needed."
-              exit 0
-            fi
+              --jq '.[] | .filename, (.previous_filename // empty)') || return 1
+            ! grep -q '^projects/' <<< "$paths" || return 1
+            [ "$(gh api "repos/$REPOSITORY/pulls/$PR" --jq .head.sha)" = "$HEAD_SHA" ]
+          }
+          if not_an_enrollment; then
+            echo "Not an enrollment: this pull request changes no file under projects/, so no terms box is needed."
+            exit 0
           fi
           echo "::error::Tick 'I accept the OSS Verify terms' in the pull request description. Editing the description runs this check again."
           exit 1

@@ -260,10 +260,12 @@ def test_a_fork_that_changes_no_file_under_projects_is_not_an_enrollment(tmp_pat
     assert code == 0, log
     assert values.get("name", "") == ""
     assert values["same_repository"] == "false"
-    expected = ("Not an enrollment (it changes 1 file, none under projects/): nothing to validate. The tests check "
+    expected = ("Not an enrollment (it lists 1 path, none under projects/): nothing to validate. The tests check "
                 "(tests.yaml) runs this repository's tests on it.")
     assert expected in log
     assert expected in summary
+    # Its paths are not refused as outside a project.
+    assert "outside projects/<name>/" not in log
     # Nothing of the fork is fetched.
     assert subprocess.run(["git", "cat-file", "-e", pull.sha], cwd=pull.checkout, env=pull.env,
                           capture_output=True).returncode != 0
