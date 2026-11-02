@@ -894,6 +894,39 @@ class Analyse(unittest.TestCase):
             "x.c", "c", compile_arguments("x.c"))
         self.assertEqual(self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]["result"], "pass")
 
+    def test_a_later_lower_strict_flex_arrays_level_takes_the_check_away(self):
+        """clang keeps only the last -fstrict-flex-arrays= it is given: when the build's UBSan flags give level 1, a
+        compile that gives 0 after them did not carry them; one that keeps 1 or gives a higher level did. A word handed
+        on to the front end counts against the compile, never for it. A build without the flag holds no level."""
+        plain = self.record({}, build="plain")
+        sink = elf_object(RET, defined=["f"], undefined=ASAN, comment=True)
+        flags = UBSAN_FLAGS + ["-fstrict-flex-arrays=1"]
+        for after, word in ((["-fstrict-flex-arrays=0"], "-fstrict-flex-arrays=0"),
+                            (["-fstrict-flex-arrays=3", "-fstrict-flex-arrays=0"], "-fstrict-flex-arrays=0"),
+                            (["-Xclang", "-fstrict-flex-arrays=0"], "-fstrict-flex-arrays=0"),
+                            (["-Xclang=-fstrict-flex-arrays=0", "-fstrict-flex-arrays=3"], "-fstrict-flex-arrays=0"),
+                            (["-Wp,-fstrict-flex-arrays=0"], "-fstrict-flex-arrays=0"),
+                            (["-fstrict-flex-arrays=x"], "-fstrict-flex-arrays=x"),
+                            (["-fstrict-flex-arrays=0", "-fstrict-flex-arrays=2"], None),
+                            ([], None), (["-fstrict-flex-arrays=1"], None), (["-fstrict-flex-arrays=3"], None),
+                            (["-Xclang", "-fstrict-flex-arrays=2"], None)):
+            for build in ("ubsan", "asan-ubsan"):
+                record = self.record({"/work/b/libx.a": {"x.c.o": sink}}, build=build,
+                                     compiled=[(sink, "x.c", "c", compile_arguments("x.c", flags=flags, after=after))])
+                for language in ("c", "c++"):
+                    record.compiles.ubsan[language].append("-fstrict-flex-arrays=1")
+                    record.compiles.sanitizer[language].append("-fstrict-flex-arrays=1")
+                result = self.analyse({"plain": plain, build: record})[build]["instrumented"]
+                if word is None:
+                    self.assertEqual(result["result"], "pass", (after, build, result))
+                else:
+                    self.assertEqual(result["result"], "fail", (after, build, result))
+                    self.assertIn(f"libx.a(x.c.o) (x.c: with {word})", result["detail"])
+        # Without the flag in the build's own UBSan flags, a level in the compile is the project's choice.
+        record = self.record({"/work/b/libx.a": {"x.c.o": sink}}, compiled=[
+            (sink, "x.c", "c", compile_arguments("x.c", after=["-fstrict-flex-arrays=0"]))])
+        self.assertEqual(self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]["result"], "pass")
+
     def test_flags_that_turn_on_no_check_decide_nothing(self):
         """A build whose recorded UBSan flags hold no -fsanitize= word (none at all, or only words every compile
         carries): its records would call every compile instrumented, so they decide nothing, the trap rule refuses a
