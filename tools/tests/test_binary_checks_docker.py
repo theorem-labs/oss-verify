@@ -81,7 +81,10 @@ class Records(unittest.TestCase):
                 self.assertTrue(any(path.endswith("/cli.o") for path in record.driver))
 
     def test_the_lists_and_the_instrumentation(self):
-        records = {build: check_binaries.record_of(self.raw[build], "example_fuzzer")[0] for build in BUILDS}
+        # As tools/check does: each build's compile records, read from its own $OUT.
+        records = {build: check_binaries.record_of(self.raw[build], "example_fuzzer",
+                                                   check_links.read_compiles(self.raw[build]))[0] for build in BUILDS}
+        self.assertIsNotNone(records["ubsan"].compiles)
         wanted = {real for record in records.values() for real, _, _ in record.inputs.values()
                   if real.startswith("/opt/")}
         toolchain = check_build.newest_toolchain()
@@ -90,6 +93,8 @@ class Records(unittest.TestCase):
         self.assertEqual(results["plain"]["instrumented"]["result"], "plain")
         for build in ("ubsan", "asan"):
             self.assertEqual(results[build]["instrumented"]["result"], "pass", results[build]["instrumented"])
+        # The compile records that compile and record-compile wrote decide the fixture's own objects in the ubsan build.
+        self.assertIn("by the compile that wrote them", results["ubsan"]["instrumented"]["detail"])
         kinds = {entry["kind"] for entry in results["asan"]["uninstrumented"]}
         self.assertTrue({"libc", "compiler-rt", "sanitizer-runtime"} <= kinds, kinds)
         self.assertNotIn("sanitizer-runtime", {entry["kind"] for entry in results["plain"]["uninstrumented"]})

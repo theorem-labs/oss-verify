@@ -1411,6 +1411,61 @@ exit "${SHIM_STATUS:-0}"
             subprocess.run(["bash", "-c", script, "bash", str(BUILDER / "compile"), records, str(out)], check=True)
             self.assertEqual(out.read_text(), expected)
 
+    def test_compile_writes_records_that_check_links_reads(self):
+        """compile's own record code: the build's flags.json and the sorted compiles.jsonl it copies to $OUT/.records,
+        read back by check_links.read_compiles. A word with a quote or a backslash survives, and C gets the C
+        exclusion that C++ does not."""
+        compile_ = BUILDER / "compile"
+        script = ('set -euo pipefail\n'
+                  'eval "$(sed -n \'/^c_exclude=""/,/^\\[ -z "\\$c_exclude" \\]/p\' "$1")"\n'
+                  'eval "$(sed -n \'/^  json_words() {/,/> "\\$OV_RECORDS\\/flags.json"/p\' "$1")"\n'
+                  'eval "$(sed -n \'/^# The compile records (record-compile), one line each/,/^fi/p\' "$1")"\n')
+        san = '-fsanitize=address -fsanitize=undefined -DQ="a\\b"'
+        ubsan = "-fsanitize=undefined -fsanitize-trap=all"
+        (self.dir / "src").mkdir()
+        (self.dir / "src" / "x.c").write_text("int x;\n")
+        self.assertEqual(self.run_shim("-c", "src/x.c", "-o", "x.o").returncode, 0)
+        out = self.dir / "out"
+        for flav, build, wanted_ubsan in (("asanubsan", "asan-ubsan", ubsan.split()), ("asan", "asan", [])):
+            subprocess.run(["bash", "-c", script, "bash", str(compile_)], check=True, cwd=self.dir,
+                           env={**os.environ, "FLAV": flav, "BUILD": build, "SAN": san, "UBSAN": ubsan, "CFLAGS": "",
+                                "OV_UBSAN_C_EXCLUDE": "function", "OV_UBSAN_CHECKS": "undefined",
+                                "OV_RECORDS": str(self.records), "OUT": str(out)})
+            compiles = check_links.read_compiles(out)
+            self.assertIsNotNone(compiles, build)
+            self.assertEqual(compiles.build, build)
+            words = ["-fsanitize=address", "-fsanitize=undefined", '-DQ="a\\b"']
+            exclude = ["-fno-sanitize=function"] if wanted_ubsan else []
+            self.assertEqual(compiles.sanitizer, {"c": words + exclude, "c++": words})
+            self.assertEqual(compiles.ubsan, {"c": wanted_ubsan + exclude, "c++": wanted_ubsan})
+            digest = hashlib.sha256((self.dir / "x.o").read_bytes()).hexdigest()
+            self.assertEqual(list(compiles.objects), [digest])
+            [compile_record] = compiles.objects[digest]
+            self.assertEqual((compile_record.file, compile_record.language), ("src/x.c", "c"))
+
+    def test_release_target_puts_a_front_before_each_shim_it_writes(self):
+        """release-target.sh's record code: with OV_RECORDS, a front before each of the four shims it wrote, which
+        records each compile; without it, the shims stay as written."""
+        block = subprocess.run(["sed", "-n", '/^  if \\[ -n "${OV_RECORDS:-}" \\]; then/,/^  fi/p',
+                                str(BUILDER / "release-target.sh")], capture_output=True, text=True, check=True).stdout
+        self.assertIn("record-compile --front", block)
+        block = block.replace("/usr/local/lib/oss-verify/record-compile", str(RECORD_COMPILE))
+        names = [f"riscv64-linux-musl-{n}" for n in ("clang-plain", "clang++-plain", "clang-sealed", "clang++-sealed")]
+        shims = self.dir / "shim"
+        shims.mkdir()
+        for name in names:
+            (shims / name).write_text(self.SHIM)
+            (shims / name).chmod(0o755)
+        for records in ("", str(self.records)):
+            subprocess.run(["bash", "-euc", block], check=True, cwd=self.dir,
+                           env={**os.environ, "SHIM": str(shims), "CHOST": "riscv64-linux-musl", "OV_RECORDS": records})
+            fronted = [name for name in names if "# record-compile front" in (shims / name).read_text()]
+            self.assertEqual(fronted, names if records else [])
+        (self.dir / "y.c").write_text("int y;\n")
+        self.assertEqual(subprocess.run([str(shims / names[2]), "-c", "y.c", "-o", "y.o"], cwd=self.dir,
+                                        capture_output=True).returncode, 0)
+        self.assertEqual([(line["output"], line["shim"]) for line in self.lines()], [("y.o", str(shims / names[2]))])
+
 
 class ModelRelease(unittest.TestCase):
     RELEASE = ("schema: oss-fuzz-theorems/release/1\nrelease: 2026.10.0\nsemantics:\n"
