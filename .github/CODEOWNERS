@@ -1,10 +1,35 @@
 # review.md, review-change.md and review-issue.md say what the enrollment review and the change review check, and what
 # the draft reply to an issue says (.github/workflows/build.yaml reads main's copies), and
-# .claude/skills/write-to-maintainer/ says how every message to a maintainer is written and checked. The ruleset of
-# main requires a code owner's approval, so a change to any of them, or to this file, which says who owns them, needs
-# the approval of a member of @theorem-labs/engineering, a team of people. No other file has an owner, so no other pull
-# request needs a code owner. These lines stay the last patterns of the file: the last pattern that matches a file
-# decides its owner.
+# .claude/skills/write-to-maintainer/ says how every message to a maintainer is written and checked.
+#
+# The other lines own each file that changes what a workflow runs, whoever opens the pull request:
+#   /.github/                     the workflows and the scripts they run.
+#   /tools/                       the tools the workflows run (tools/check, tools/validate.py) and their tests.
+#   /infra/                       the toolchains tools/check builds with (infra/toolchains.tsv, infra/base-builder/).
+#   /.claude/, CLAUDE*.md,        what Claude Code loads in the review job, which holds an identity token:
+#   AGENTS*.md, /.mcp.json        settings and hooks, skills, instructions and MCP servers.
+#   /*.py and pytest's            what python3 -m pytest in tests.yaml loads from the top of the checkout. The
+#   configuration files           workflows run python3 with -P, so no new directory at the top shadows a module.
+# A pull request from a fork that changes no file under projects/ passes the enrollment checks, and tests.yaml runs the
+# fork's own copy of itself, so these lines are what keeps such a change from merging on one person's reading.
+#
+# The ruleset of main requires a code owner's approval, so a change to any of these files, or to this file, which says
+# who owns them, needs the approval of a member of @theorem-labs/engineering, a team of people. No other file has an
+# owner, so no other pull request needs a code owner. These lines stay the last patterns of the file: the last pattern
+# that matches a file decides its owner.
+/.github/ @theorem-labs/engineering
+/tools/ @theorem-labs/engineering
+/infra/ @theorem-labs/engineering
+/.claude/ @theorem-labs/engineering
+CLAUDE*.md @theorem-labs/engineering
+AGENTS*.md @theorem-labs/engineering
+/.mcp.json @theorem-labs/engineering
+/*.py @theorem-labs/engineering
+/pytest.ini @theorem-labs/engineering
+/.pytest.ini @theorem-labs/engineering
+/pyproject.toml @theorem-labs/engineering
+/setup.cfg @theorem-labs/engineering
+/tox.ini @theorem-labs/engineering
 /review.md @theorem-labs/engineering
 /review-change.md @theorem-labs/engineering
 /review-issue.md @theorem-labs/engineering

@@ -178,10 +178,12 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml python3-pytest strace
 
       # The binary checks' rules (tools/binary_isa.py, tools/syscall_shapes.py) are tested against the files of the
-      # public process model at the commit they were written against, fetched anonymously.
+      # public process model at the commit they were written against, fetched anonymously. Each python3 here runs with
+      # -P, which keeps the top of the checkout off sys.path, so that no file or directory there shadows a module
+      # (.github/CODEOWNERS owns the top's .py files and pytest's configuration files).
       - name: The process model the binary checks were written against
         run: |
-          commit=$(python3 -c 'import sys; sys.path.insert(0, "tools"); import binary_isa, syscall_shapes
+          commit=$(python3 -P -c 'import sys; sys.path.insert(0, "tools"); import binary_isa, syscall_shapes
           assert binary_isa.MODEL_COMMIT == syscall_shapes.MODEL_COMMIT, "the two checks name two model commits"
           print(syscall_shapes.MODEL_COMMIT)')
           git init -q "$RUNNER_TEMP/model"
@@ -192,7 +194,7 @@ jobs:
       # The Docker tests (tools/tests/test_builder.py, test_binary_checks_docker.py) need the toolchain image and are
       # skipped here.
       - name: The tests in tools/tests
-        run: python3 -m pytest -q -p no:cacheprovider tools/tests
+        run: python3 -P -m pytest -q -p no:cacheprovider tools/tests
 
       - name: Every project passes tools/validate.py
         run: python3 tools/validate.py < /dev/null
@@ -215,7 +217,7 @@ jobs:
       - name: The tests that read the documentation
         run: |
           set -o pipefail
-          python3 -m pytest -q -p no:cacheprovider -rs \
+          python3 -P -m pytest -q -p no:cacheprovider -rs \
             "tools/tests/test_check.py::Toolchains::test_infra_toolchains_tsv_is_the_one_file_that_names_a_toolchain_digest" \
             "tools/tests/test_seeded_projects.py::Committed::test_docs_seeded_projects_tsv_is_what_the_generator_writes" \
             | tee "$RUNNER_TEMP/pytest"

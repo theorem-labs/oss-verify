@@ -468,8 +468,9 @@ jobs:
             fi
           done
 
-          # For the review: the commit the build fetched, from the manifest tools/check wrote, and the three texts.
-          commit=$(python3 -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["commit"])' \
+          # For the review: the commit the build fetched, from the manifest tools/check wrote, and the three texts. -P
+          # keeps the top of the checkout off sys.path, so no file or directory there shadows yaml.
+          commit=$(python3 -P -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["commit"])' \
             ~/.cache/oss-verify-check/"$NAME"/manifest.yaml 2> /dev/null || true)
           [[ $commit =~ ^[0-9a-f]{40}$ ]] || commit=""
           # For the record job: each binary's .text bytes and executable bytes (.github/scripts/binary-sizes), as one
