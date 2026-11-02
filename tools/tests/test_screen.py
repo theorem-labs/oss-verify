@@ -267,6 +267,65 @@ class ScreenTest(unittest.TestCase):
                 self.assertEqual(v, "held")
                 self.assertIn("error", {c["word"] for c in reason["checks"].values()})
 
+    # Model Armor's answers as the live service gave them on 2026-11-02 (template review-screen's settings, us), verbatim.
+    LIVE_INSPECT_ONLY = {"sanitizationResult": {"invocationResult": "SUCCESS"}}
+    LIVE_NO_MATCH = {"sanitizationResult": {"filterMatchState": "NO_MATCH_FOUND", "filterResults": {
+        "csam": {"csamFilterFilterResult": {"executionState": "EXECUTION_SUCCESS", "matchState": "NO_MATCH_FOUND"}},
+        "pi_and_jailbreak": {"piAndJailbreakFilterResult": {"executionState": "EXECUTION_SUCCESS",
+                                                            "matchState": "NO_MATCH_FOUND"}}},
+        "sanitizationMetadata": {"filterVersionConfig": {"filterVersion": "v3",
+                                                         "filterVersionAlias": "FILTER_VERSION_ALIAS_STABLE",
+                                                         "releaseDate": {"year": 2026, "month": 5, "day": 25},
+                                                         "projectedDeprecationDate": {}}},
+        "invocationResult": "SUCCESS"}}
+    LIVE_MATCH = {"sanitizationResult": {"filterMatchState": "MATCH_FOUND", "filterResults": {
+        "csam": {"csamFilterFilterResult": {"executionState": "EXECUTION_SUCCESS", "matchState": "NO_MATCH_FOUND"}},
+        "pi_and_jailbreak": {"piAndJailbreakFilterResult": {"executionState": "EXECUTION_SUCCESS",
+                                                            "matchState": "MATCH_FOUND",
+                                                            "confidenceLevel": "MEDIUM_AND_ABOVE"}}},
+        "sanitizationMetadata": {"filterVersionConfig": {"filterVersion": "v3",
+                                                         "filterVersionAlias": "FILTER_VERSION_ALIAS_STABLE",
+                                                         "releaseDate": {"year": 2026, "month": 5, "day": 25},
+                                                         "projectedDeprecationDate": {}}},
+        "invocationResult": "SUCCESS"}}
+
+    def test_the_live_answers_of_model_armor(self):
+        """The shapes the service really returns: a verdict, or (under INSPECT_ONLY) no filter result, which holds."""
+        for name, answer, verdict, word in (("no match", self.LIVE_NO_MATCH, "clean", "clean"),
+                                            ("match", self.LIVE_MATCH, "held", "suspicious"),
+                                            ("INSPECT_ONLY", self.LIVE_INSPECT_ONLY, "held", "error")):
+            with self.subTest(answer=name):
+                self.fresh()
+                self.item()
+                self.env["SCREEN_CHECKS"] = "model_armor"
+                self.services.answers[":sanitizeUserPrompt"] = (200, answer)
+                written, printed, reason = self.run_screen()
+                self.assertEqual(written.split("\n")[0], f"verdict={verdict}")
+                self.assertEqual(reason["checks"]["model_armor"]["word"], word)
+                if word == "suspicious":
+                    self.assertEqual(reason["checks"]["model_armor"]["matches"],
+                                     [{"piece": 1, "confidence": "MEDIUM_AND_ABOVE"}])
+                if word == "error":
+                    self.assertIn("(model_armor: no answer, no prompt injection result (invocationResult 'SUCCESS', "
+                                  "filters None)).", printed)
+
+    def test_a_filter_that_did_not_run_is_no_verdict(self):
+        """executionState decides whether the filter answered: anything but EXECUTION_SUCCESS holds the item."""
+        for state in ("EXECUTION_SKIPPED", "EXECUTION_STATE_UNSPECIFIED", None):
+            with self.subTest(state=state):
+                self.fresh()
+                self.item()
+                self.env["SCREEN_CHECKS"] = "model_armor"
+                answer = json.loads(json.dumps(self.LIVE_NO_MATCH))
+                result = answer["sanitizationResult"]["filterResults"]["pi_and_jailbreak"]["piAndJailbreakFilterResult"]
+                if state is None:
+                    del result["executionState"]
+                else:
+                    result["executionState"] = state
+                self.services.answers[":sanitizeUserPrompt"] = (200, answer)
+                v, reason = self.verdict()
+                self.assertEqual((v, reason["checks"]["model_armor"]["word"]), ("held", "error"))
+
     def test_a_service_that_cannot_be_reached_holds_it(self):
         self.item()
         self.env["CONTENT_SAFETY_URL"] = "http://127.0.0.1:9"   # discard port: nothing listens
@@ -307,7 +366,7 @@ class ScreenTest(unittest.TestCase):
                     self.env["ANTHROPIC_FEDERATION_RULE_ID"] = "fdrl_x"
                 written, printed, reason = self.run_screen()
                 self.assertEqual(written, f"verdict=clean\nchecks={','.join(ran)}\n")
-                self.assertIn(f"from the checks {', '.join(ran)}.", printed)
+                self.assertIn(f"from the checks {', '.join(ran)} (", printed)
                 self.assertEqual(reason["ran"], ran)
                 for check in screen.CHECKS:
                     if check not in ran:
@@ -415,7 +474,8 @@ class ScreenTest(unittest.TestCase):
         self.services.answers["/v1/messages"] = lambda _b: message('{"verdict": "suspicious"}')
         written, printed, reason = self.run_screen()
         self.assertEqual(written, "verdict=held\nchecks=model_armor,prompt_shields,claude\n")
-        self.assertEqual(printed, "The screen's verdict: held, from the checks model_armor, prompt_shields, claude. "
+        self.assertEqual(printed, "The screen's verdict: held, from the checks model_armor, prompt_shields, claude "
+                                  "(model_armor: no answer, HTTP 403; prompt_shields: answered; claude: answered). "
                                   "Its reason is in the private bucket, as acme/model/1-1.json.\n")
         self.assertIn(MARK, json.dumps(reason))
         upload = self.services.to("/storage/upload/storage/v1/b/reasons/o")[0]
@@ -433,7 +493,8 @@ class ScreenTest(unittest.TestCase):
         r = subprocess.run([sys.executable, str(SCRIPTS / "screen.py"), self.review], env=env,
                            capture_output=True, text=True, timeout=120)
         self.assertEqual((r.returncode, r.stderr), (0, ""))
-        self.assertEqual(r.stdout, "The screen's verdict: held, from the checks model_armor, prompt_shields, claude. "
+        self.assertEqual(r.stdout, "The screen's verdict: held, from the checks model_armor, prompt_shields, claude "
+                                   "(model_armor: no answer, HTTP 418; prompt_shields: answered; claude: answered). "
                                    "Its reason is in the private bucket, as acme/model/1-1.json.\n")
         with open(self.output) as f:
             self.assertEqual(f.read(), "verdict=held\nchecks=model_armor,prompt_shields,claude\n")
@@ -443,8 +504,41 @@ class ScreenTest(unittest.TestCase):
         self.env["STORAGE_URL"] = "http://127.0.0.1:9"
         written, printed, _reason = self.run_screen()
         self.assertEqual(written, "verdict=clean\nchecks=model_armor,prompt_shields,claude\n")
-        self.assertEqual(printed, "The screen's verdict: clean, from the checks model_armor, prompt_shields, claude. "
+        self.assertEqual(printed, "The screen's verdict: clean, from the checks model_armor, prompt_shields, claude "
+                                  "(model_armor: answered; prompt_shields: answered; claude: answered). "
                                   "Its reason could not be stored.\n")
+
+    def test_the_log_says_how_each_check_ran_and_never_its_word(self):
+        """An operator tells a broken screen from a working one by the log, which never says which check flagged."""
+        cases = {
+            "flagged": ((":sanitizeUserPrompt", lambda _b: armor("MATCH_FOUND")), "model_armor: answered"),
+            "refused": ((":sanitizeUserPrompt", (403, {"error": {"message": MARK}})), "model_armor: no answer, HTTP 403"),
+            "unknown": ((":sanitizeUserPrompt", lambda _b: armor(execution="EXECUTION_SKIPPED")),
+                        "model_armor: no answer, an answer in a form the screen does not know"),
+            "unreachable": (None, "model_armor: no answer, unreachable"),
+            "no filter result": ((":sanitizeUserPrompt", (200, {"sanitizationResult": {
+                "invocationResult": "FAILURE", "filterResults": {"csam": {}},
+                "sanitizationMetadata": {"errorCode": "7", "errorMessage": MARK}}})),
+                "model_armor: no answer, no prompt injection result (invocationResult 'FAILURE', filters ['csam'])"),
+        }
+        for name, (answer, want) in cases.items():
+            with self.subTest(case=name):
+                self.fresh()
+                self.item(body=f"Body {MARK}.")
+                self.env["SCREEN_CHECKS"] = "model_armor"
+                if answer:
+                    self.services.answers[answer[0]] = answer[1]
+                else:
+                    self.env["MODEL_ARMOR_URL"] = "http://127.0.0.1:9"
+                written, printed, reason = self.run_screen()
+                self.assertEqual(written.split("\n")[0], "verdict=held")
+                self.assertIn(f"({want}).", printed)
+                self.assertNotIn(MARK, printed)
+                self.assertNotIn("suspicious", printed)
+        self.fresh()
+        self.item()
+        self.env["SCREEN_CHECKS"] = "model_armor"
+        self.assertIn("(model_armor: answered).", self.run_screen()[1])
 
     def test_a_fault_of_the_screen_holds_it_and_prints_nothing_of_it(self):
         self.item()

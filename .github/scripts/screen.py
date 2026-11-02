@@ -464,34 +464,41 @@ def identity_token(audience):
 # --- the three checks ---------------------------------------------------------------------------------------------
 
 def model_armor(found):
-    """Model Armor, one request for each piece of all the text joined. A piece matches when the prompt injection and
+    """Model Armor, one request for each piece of the joined text. A piece matches when the prompt injection and
     jailbreak filter ran on it and found a match; the filter's own state must say it ran, so a skipped piece (too
     long, or a server error) is no answer."""
     url = f"{env('MODEL_ARMOR_URL')}/v1/{env('MODEL_ARMOR_TEMPLATE')}:sanitizeUserPrompt"
     headers = {"Authorization": "Bearer " + env("GOOGLE_ACCESS_TOKEN")}
     matches = []
-    for source, text in (("the text", joined(found)),):
-        for i, piece in enumerate(pieces(text, ARMOR_PIECE, ARMOR_OVERLAP)):
-            answer = http("POST", url, {"userPromptData": {"text": piece}}, headers)
-            try:
-                result = answer["sanitizationResult"]["filterResults"]["pi_and_jailbreak"]["piAndJailbreakFilterResult"]
-            except (KeyError, TypeError):
-                raise CheckError(f"no prompt injection result for {source}, piece {i + 1}") from None
-            if result.get("executionState") != "EXECUTION_SUCCESS":
-                raise CheckError(f"the filter did not run on {source}, piece {i + 1}: "
-                                 f"{json.dumps(result.get('messageItems'))[:500]}")
-            state = result.get("matchState")
-            if state == "MATCH_FOUND":
-                matches.append({"source": source, "piece": i + 1, "confidence": result.get("confidenceLevel")})
-            elif state != "NO_MATCH_FOUND":
-                raise CheckError(f"match state {state!r} for {source}, piece {i + 1}")
+    for i, piece in enumerate(pieces(joined(found), ARMOR_PIECE, ARMOR_OVERLAP)):
+        answer = http("POST", url, {"userPromptData": {"text": piece}}, headers)
+        try:
+            result = answer["sanitizationResult"]["filterResults"]["pi_and_jailbreak"]["piAndJailbreakFilterResult"]
+        except (KeyError, TypeError):
+            # What the service said instead, its own metadata and no text: the invocation's state, its error, and
+            # the filters it answered for.
+            r = answer.get("sanitizationResult") if isinstance(answer, dict) else None
+            r = r if isinstance(r, dict) else {}
+            raise CheckError(f"no prompt injection result for piece {i + 1}: invocationResult "
+                             f"{r.get('invocationResult')!r}, sanitizationMetadata "
+                             f"{json.dumps(r.get('sanitizationMetadata'))[:500]}, filterResults keys "
+                             f"{sorted((r.get('filterResults') or {}).keys()) if isinstance(r.get('filterResults'), dict) else None}, "
+                             f"answer keys {sorted(answer) if isinstance(answer, dict) else type(answer).__name__}") from None
+        if result.get("executionState") != "EXECUTION_SUCCESS":
+            raise CheckError(f"the filter did not run on piece {i + 1}: "
+                             f"{json.dumps(result.get('messageItems'))[:500]}")
+        state = result.get("matchState")
+        if state == "MATCH_FOUND":
+            matches.append({"piece": i + 1, "confidence": result.get("confidenceLevel")})
+        elif state != "NO_MATCH_FOUND":
+            raise CheckError(f"match state {state!r} for piece {i + 1}")
     return ("suspicious" if matches else "clean"), {"matches": matches}
 
 
 def prompt_shields(found):
-    """Prompt Shields, with all the text joined as its documents: up to five pieces and 10,000 characters a request.
-    An attack found in any document is a match. The service answers for each document it was sent, and for the fixed
-    user prompt, which must never be an attack."""
+    """Prompt Shields, with the text as its documents: up to five pieces and 10,000 characters a request. An attack
+    found in any document is a match. The service answers for each document it was sent, and for the fixed user
+    prompt, which must never be an attack."""
     token = http("POST", f"{env('AZURE_LOGIN_URL')}/{env('AZURE_TENANT_ID')}/oauth2/v2.0/token", {
         "client_id": env("AZURE_CLIENT_ID"),
         "scope": "https://cognitiveservices.azure.com/.default",
@@ -502,11 +509,10 @@ def prompt_shields(found):
     if not isinstance(token, str) or not token:
         raise CheckError("Microsoft Entra gave no access token")
     url = f"{env('CONTENT_SAFETY_URL')}/contentsafety/text:shieldPrompt?api-version={SHIELD_API_VERSION}"
-    labelled = [(source, i + 1, piece) for source, text in (("the text", joined(found)),)
-                for i, piece in enumerate(pieces(text, SHIELD_PIECE, SHIELD_OVERLAP))]
+    labelled = list(enumerate(pieces(joined(found), SHIELD_PIECE, SHIELD_OVERLAP), 1))
     batches, batch = [], []
     for entry in labelled:
-        if batch and (len(batch) == SHIELD_DOCUMENTS or sum(len(p) for _s, _i, p in batch) + len(entry[2]) > SHIELD_TOTAL):
+        if batch and (len(batch) == SHIELD_DOCUMENTS or sum(len(p) for _i, p in batch) + len(entry[1]) > SHIELD_TOTAL):
             batches.append(batch)
             batch = []
         batch.append(entry)
@@ -516,18 +522,18 @@ def prompt_shields(found):
     for n, batch in enumerate(batches):
         if n:
             time.sleep(0.25)   # the free tier answers five requests a second
-        answer = http("POST", url, {"userPrompt": SHIELD_PROMPT, "documents": [p for _s, _i, p in batch]},
+        answer = http("POST", url, {"userPrompt": SHIELD_PROMPT, "documents": [p for _i, p in batch]},
                       {"Authorization": "Bearer " + token})
         documents = answer.get("documentsAnalysis") if isinstance(answer, dict) else None
         prompt = (answer.get("userPromptAnalysis") or {}).get("attackDetected") if isinstance(answer, dict) else None
         if prompt is not False or not isinstance(documents, list) or len(documents) != len(batch):
             raise CheckError("an answer of Prompt Shields in a form this screen does not know")
-        for (source, i, _p), d in zip(batch, documents):
+        for (i, _p), d in zip(batch, documents):
             detected = d.get("attackDetected") if isinstance(d, dict) else None
             if detected is True:
-                matches.append({"source": source, "piece": i})
+                matches.append({"piece": i})
             elif detected is not False:
-                raise CheckError(f"no attackDetected for {source}, piece {i}")
+                raise CheckError(f"no attackDetected for piece {i}")
     return ("suspicious" if matches else "clean"), {"matches": matches, "requests": len(batches)}
 
 
@@ -615,11 +621,32 @@ def screen(review, project=None):
             word, detail = "error", {"error": str(e)[:2000]}
         except Exception as e:   # a fault of this file: no answer, and so held
             word, detail = "error", {"error": f"{type(e).__name__}: {str(e)[:2000]}"}
-        reason["checks"][name] = dict(detail, word=word)
+        reason["checks"][name] = dict(detail, word=word, outcome=outcome(word, detail.get("error", "")))
     for name in CHECKS:
         reason["checks"].setdefault(name, {"word": "not listed in SCREEN_CHECKS"})
     clean = all(reason["checks"][name]["word"] == "clean" for name in ran)
     return ("clean" if clean else "held"), ran, reason
+
+
+def outcome(word, error):
+    """What a check's run was, for the public log: that it answered (never which word), or the kind of failure, which
+    says nothing of the text: an HTTP status, an unreachable service, no time left, a missing setting, or an answer
+    in a form the screen does not know."""
+    if word in WORDS:
+        return "answered"
+    m = re.match(r"HTTP (\d{3}) ", error)
+    if m:
+        return f"no answer, HTTP {m.group(1)}"
+    # The service's own state and the names of the filters it answered for: no text of the item is in either.
+    m = re.match(r"no prompt injection result for piece \d+: invocationResult ('[A-Z_]+'|None), .*filterResults keys "
+                 r"(\[[a-z_', ]*\]|None),", error)
+    if m:
+        return f"no answer, no prompt injection result (invocationResult {m.group(1)}, filters {m.group(2)})"
+    for needle, kind in (("ran out of its", "no answer, out of time"), (" reaching ", "no answer, unreachable"),
+                         (" is not set", "no answer, a setting is missing")):
+        if needle in error:
+            return kind
+    return "no answer, an answer in a form the screen does not know"
 
 
 def store(reason):
@@ -650,7 +677,11 @@ def main():
         where = "Its reason could not be stored."
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
         f.write(f"verdict={verdict}\nchecks={','.join(ran)}\n")
-    print(f"The screen's verdict: {verdict}, from the checks {', '.join(ran) or 'none'}. {where}")
+    # Each check's outcome class, never its word: an operator tells a broken screen from a working one by it.
+    outcomes = "; ".join(f"{n}: {reason.get('checks', {}).get(n, {}).get('outcome', '?')}" for n in ran)
+    held_unscreened = " The text could not be screened." if verdict == "held" and not ran else ""
+    print(f"The screen's verdict: {verdict}, from the checks {', '.join(ran) or 'none'}"
+          f"{f' ({outcomes})' if outcomes else ''}.{held_unscreened} {where}")
     return 0
 
 
