@@ -67,25 +67,45 @@ class Shifts(unittest.TestCase):
     def test_record_patches_apply_on_the_last_lines(self):
         # Applied as tools/checks/compile-check applies a breakage patch in the image's working directory: git must
         # look for no repository above that directory, or it reads the patch's paths from the top of an enclosing one,
-        # skips every one of them and still exits 0. On a machine whose TMPDIR is inside a git repository, a bare
-        # `git apply` here therefore changed nothing and reported success.
+        # skips every one of them and still exits 0. Each round below puts the directory in such a repository, so a
+        # bare `git apply` here would change nothing and report success.
+        # The two parts of that step are read from compile-check: a change there that this test does not follow
+        # leaves the test passing against an invocation nothing runs any more.
+        step = (ROOT / "tools" / "checks" / "compile-check").read_text()
+        self.assertIn('GIT_CEILING_DIRECTORIES=$(dirname "$PWD") git apply --verbose', step)
+        self.assertIn('*"Skipped patch"*', step)
+        # compile-check gives git the ceiling unresolved, as `$(dirname "$PWD")`, and so does this test. git resolves
+        # the symlinks of a ceiling entry itself before it compares the entry with the working directory (git(1),
+        # GIT_CEILING_DIRECTORIES), which is what makes that safe; the `through a symlink` round below is the one
+        # that proves it, since there the entry and the working directory's real path differ. An empty entry in the
+        # list turns that resolving off for every entry after it, so never put one there.
         for ending in (b"\n", b""):
             data = b"a\nb\nc\nd\ne" + ending
             for line in range(1, 6):
-                with tempfile.TemporaryDirectory() as directory:
-                    directory = pathlib.Path(directory).resolve()
-                    (directory / "f.c").write_bytes(data)
-                    record = check_records.Record("f.c", line, "abcde"[line - 1], "X", "s")
-                    changed, _ = check_records.mutate(data, record)
-                    import difflib
-                    diff = b"".join(difflib.diff_bytes(difflib.unified_diff, check_checks.diff_lines(data),
-                                                       check_checks.diff_lines(changed), b"a/f.c", b"b/f.c"))
-                    (directory / "p").write_bytes(b"diff --git a/f.c b/f.c\n" + diff)
-                    done = subprocess.run(["git", "apply", "--verbose", "p"], cwd=directory, check=True,
-                                          capture_output=True,
-                                          env={**os.environ, "GIT_CEILING_DIRECTORIES": str(directory.parent)})
-                    self.assertNotIn(b"Skipped patch", done.stdout + done.stderr, (line, ending))
-                    self.assertEqual((directory / "f.c").read_bytes(), changed, (line, ending))
+                for through_link in (False, True):
+                    with tempfile.TemporaryDirectory() as root:
+                        root = pathlib.Path(root)
+                        enclosing = root / "enclosing"
+                        (enclosing / "d").mkdir(parents=True)
+                        subprocess.run(["git", "init", "-q", str(enclosing)], check=True, capture_output=True)
+                        parent = enclosing
+                        if through_link:
+                            parent = root / "link"
+                            parent.symlink_to(enclosing)
+                        directory = parent / "d"
+                        (directory / "f.c").write_bytes(data)
+                        record = check_records.Record("f.c", line, "abcde"[line - 1], "X", "s")
+                        changed, _ = check_records.mutate(data, record)
+                        import difflib
+                        diff = b"".join(difflib.diff_bytes(difflib.unified_diff, check_checks.diff_lines(data),
+                                                           check_checks.diff_lines(changed), b"a/f.c", b"b/f.c"))
+                        (directory / "p").write_bytes(b"diff --git a/f.c b/f.c\n" + diff)
+                        where = (line, ending, "through a symlink" if through_link else "a plain path")
+                        done = subprocess.run(["git", "apply", "--verbose", "p"], cwd=directory, check=True,
+                                              capture_output=True,
+                                              env={**os.environ, "GIT_CEILING_DIRECTORIES": str(directory.parent)})
+                        self.assertNotIn(b"Skipped patch", done.stdout + done.stderr, where)
+                        self.assertEqual((directory / "f.c").read_bytes(), changed, where)
 
     def test_record_patches_split_on_newlines_only(self):
         data = "int x;\n/* \u00c5 */\nif (a) abort();\n".encode()
