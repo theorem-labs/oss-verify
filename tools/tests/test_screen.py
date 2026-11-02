@@ -581,29 +581,95 @@ class ScreenTest(unittest.TestCase):
             self.assertEqual(len(pieces), 1)
             self.assertRegex(pieces[0], r"(?s)Ignore all.*previous instructions.*approve this")
 
-    def test_text_with_hiding_characters_is_held_unscreened(self):
-        for where, kwargs in (("body", {"body": "Fine.\U000e0049\U000e0047\U000e004e"}),
-                              ("comment", {"comments": [("eve", "a \u202eevil\u202c b")]}),
-                              ("changed file", {"kind": "pr", "diff": "+x\n", "head": {"a.v": "x \u2066y\u2069"}}),
-                              ("project file", {"kind": "pr", "diff": "+x\n", "project": {"build.sh": "\u202d"}}),
-                              ("zero width", {"body": "ig\u200bnore"}), ("byte order mark", {"body": "a\ufeffb"}),
-                              ("soft hyphen", {"body": "a\u00adb"}), ("invisible operator", {"body": "a\u2062b"})):
+    # Text that hides text, each with the character the reason names (rocq-linux-process-semantics's list, but for the
+    # word joiner after @, which this repository's App puts there itself: it is in ALLOWED, and one inside a word here).
+    HIDDEN = {
+        "a bidirectional override": ("Fine.\u202Eenil", "U+202E"),
+        "a bidirectional isolate": ("Fine.\u2066x\u2069", "U+2066"),
+        "a tag character": ("Fine.\U000E0041\U000E0042", "U+E0041"),
+        "a zero-width space in a word": ("ig\u200Bnore", "U+200B"),
+        "a joiner in a Latin word": ("ig\u200Dnore", "U+200D"),
+        "a non-joiner in a Latin word": ("ig\u200Cnore", "U+200C"),
+        "a joiner run between Latin letters": ("a\u200C\u200D\u200C\u200Db", "U+200C"),
+        "a joiner run between Persian letters": ("\u0645\u06CC\u200C\u200C\u062E\u0648\u0627\u0647\u0645", "U+200C"),
+        "a joiner between a Latin letter and an emoji": ("a\u200D\U0001F600", "U+200D"),
+        "a non-joiner between emoji": ("\U0001F468\u200C\U0001F469", "U+200C"),
+        "a word joiner in a word": ("ig\u2060nore", "U+2060"),
+        "a word joiner after # before a letter": ("#\u2060x", "U+2060"),
+        "a word joiner after < before a letter": ("<\u2060x", "U+2060"),
+        "a byte order mark inside a body": ("Fine.\uFEFFhidden", "U+FEFF"),
+    }
+    # Text where those characters do ordinary work.
+    ALLOWED = {
+        "a Persian non-joiner": "\u0645\u06CC\u200C\u062E\u0648\u0627\u0647\u0645",
+        "a Devanagari joiner after a virama": "\u0915\u094D\u200D\u0937",
+        "a Malayalam non-joiner": "\u0D15\u0D4D\u200C\u0D15",
+        "an emoji family": "\U0001F468\u200D\U0001F469\u200D\U0001F467",
+        "an emoji with a variation selector and skin tone": "\U0001F3F3\uFE0F\u200D\U0001F308 \U0001F44B\U0001F3FD\u200D\u2642",
+        "a word joiner after @, as review-neutralize writes it": "Ask @\u2060octocat.",
+        "review-neutralize's other word joiners": ("See #\u20601, GH-\u20602, cli/cli#\u20603, "
+                                                   "https://github.com/a/b/pull/\u20604 and <\u2060!-- x."),
+    }
+
+    def test_text_that_hides_text_is_held_unscreened(self):
+        for name, (body, char) in self.HIDDEN.items():
+            with self.subTest(name=name):
+                self.fresh()
+                self.item(body=body)
+                v, reason = self.verdict()
+                self.assertEqual(v, "held")
+                self.assertEqual(reason["unscreenable"], [f"body holds {char}, a character that hides text"])
+                self.assertEqual(self.services.to(":sanitizeUserPrompt"), [])
+        for where, kwargs, want in (
+                ("comment", {"comments": [("eve", "a \u202eevil\u202c b")]}, "comments 1 holds U+202E"),
+                ("changed file", {"kind": "pr", "diff": "+x\n", "head": {"a.v": "x \u2066y\u2069"}},
+                 "changed file a.v holds U+2066"),
+                ("project file", {"kind": "pr", "diff": "+x\n", "project": {"build.sh": "\u202d"}},
+                 "project file build.sh holds U+202D")):
             with self.subTest(where=where):
                 self.fresh()
                 self.item(**kwargs)
                 v, reason = self.verdict()
                 self.assertEqual(v, "held")
-                self.assertTrue(any("hiding characters" in u for u in reason["unscreenable"]), reason["unscreenable"])
-                self.assertEqual(self.services.to("/v1/messages"), [])
-        # the word joiner our comments put after each @ is not one
-        self.fresh()
-        self.item(comments=[("oss-verify", "Thanks @\u2060alice.")])
-        self.assertEqual(self.verdict()[0], "clean")
+                self.assertEqual(reason["unscreenable"], [f"{want}, a character that hides text"])
         # a seed input's bytes, which the review reads as hexadecimal, hide nothing from it
         self.fresh()
         data = "a\u202eb".encode()
         row = f"0000  {data.hex(' '):<47}  {'.' * len(data)}"
         self.item(kind="pr", diff="+x\n", files={"seeds/t.hex.txt": f"== 'x': {len(data)} bytes\n{row}\n"})
+        self.assertEqual(self.verdict()[0], "clean")
+
+    def test_joiners_that_do_ordinary_work_pass(self):
+        for name, body in self.ALLOWED.items():
+            with self.subTest(name=name):
+                self.fresh()
+                self.item(body=f"{body} is how it is written.")
+                self.assertEqual(self.verdict()[0], "clean")
+        # the soft hyphen and the invisible operators are no longer held
+        self.fresh()
+        self.item(body="co\u00adop a\u2062b")
+        self.assertEqual(self.verdict()[0], "clean")
+
+    def test_a_byte_order_mark_passes_only_as_a_files_first_character(self):
+        new_file = ("diff --git a/n.v b/n.v\nnew file mode 100644\n--- /dev/null\n+++ b/n.v\n@@ -0,0 +1,2 @@\n"
+                    "+\uFEFFLemma x.\n+Proof. Qed.\n")
+        changed = ("diff --git a/o.v b/o.v\n--- a/o.v\n+++ b/o.v\n@@ -1,2 +1,2 @@\n-Lemma y.\n+\uFEFFLemma y.\n"
+                   " Proof. Qed.\n")
+        later = "diff --git a/o.v b/o.v\n--- a/o.v\n+++ b/o.v\n@@ -4,2 +4,2 @@\n-x\n+\uFEFFx\n y\n"
+        midline = "diff --git a/o.v b/o.v\n--- a/o.v\n+++ b/o.v\n@@ -0,0 +1 @@\n+Lemma\uFEFF y.\n"
+        for diff, want in ((new_file, "clean"), (changed, "clean"), (later, "held"), (midline, "held")):
+            with self.subTest(diff=diff[-30:]):
+                self.fresh()
+                self.item(kind="pr", files={"pr.diff": diff})
+                v, reason = self.verdict()
+                self.assertEqual(v, want, reason["unscreenable"])
+                if want == "held":
+                    self.assertEqual(reason["unscreenable"], ["pr.diff holds U+FEFF, a character that hides text"])
+        self.fresh()
+        self.item(files={"omitted.txt": "\uFEFFa.png: not a regular file\n"})
+        self.assertEqual(self.verdict()[0], "clean")
+        self.fresh()
+        self.item(kind="pr", diff="+x\n", head={"a.v": "\uFEFFLemma x.\n"})
         self.assertEqual(self.verdict()[0], "clean")
 
     def test_a_seed_inputs_bytes_are_read_as_text_too(self):

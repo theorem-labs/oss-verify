@@ -33,10 +33,12 @@ Every setting is an environment variable that build.yaml sets; the tokens come f
 the job's environment review-screen alone can exchange for them.
 
 This is the screen of theorem-labs/rocq-linux-process-semantics's review.yml, with the same checks, limits and
-verdict. Only parts() differs, for this repository's .github/scripts/review-gather: pr.json and the other files it
-keeps end with the line of their read's exit status; an enrollment's seed corpora are read from their listing (their
-bytes) and are the one binary file a diff may show; the project's repository (source/) is not read; and the
-project's own directory must be text.
+verdict. parts() differs, for this repository's .github/scripts/review-gather: pr.json and the other files it keeps
+end with the line of their read's exit status; an enrollment's seed corpora are read from their listing (their bytes)
+and are the one binary file a diff may show; the project's repository (source/) is not read; and the project's own
+directory must be text. And hiding() lets a word joiner pass where review-neutralize puts one: this repository's App
+posts the review comment through it, and that comment is in pr.json's comments, which the screen reads; in
+rocq-linux-process-semantics the bot's comment is not gathered, so its screen holds every word joiner.
 """
 
 import json
@@ -45,6 +47,7 @@ import re
 import secrets
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -140,11 +143,97 @@ SEED_ROW = re.compile(r"[0-9a-f]{4}  ((?:[0-9a-f]{2} ){0,15}[0-9a-f]{2}) *  .{1,
 BINARY_DIFF = re.compile(r"^Binary files (.*) and (.*) differ$", re.M)
 SEED_CORPUS = re.compile(r"Binary files (?:/dev/null|a/(projects/[^/ ]+/[^/ ]+_seed_corpus\.zip)) and "
                          r"b/(projects/[^/ ]+/[^/ ]+_seed_corpus\.zip) differ")
-# Characters that hide text from a person or a filter and that a model may still read: Unicode tag characters, the
-# bidirectional embedding, override and isolate controls, the zero-width characters, the byte order mark, the soft
-# hyphen and the invisible operators. Text that holds one is held unscreened. (The word joiner U+2060, which this
-# repository's comments put after each @, is not one of them.)
-HIDING = re.compile("[\U000e0000-\U000e007f\u202a-\u202e\u2066-\u2069\u200b-\u200d\ufeff\u00ad\u2061-\u2064]")
+# Characters used to hide text from a person, or to split a word so that a check misses it while a model reads
+# through it: the bidirectional overrides and isolates, the tag characters, and the zero-width characters (space,
+# non-joiner, joiner, word joiner, byte order mark). Some of them do ordinary work, and hiding() lets those pass.
+HIDING = re.compile("[\u202A-\u202E\u2066-\u2069\U000E0000-\U000E007F\u200B-\u200D\u2060\uFEFF]")
+# The scripts whose words use the zero-width non-joiner and joiner between their letters (Persian among the Arabic
+# script's languages, and the Indic scripts), by the first word of each character's Unicode name.
+JOINER_SCRIPTS = frozenset("ARABIC SYRIAC NKO THAANA MONGOLIAN DEVANAGARI BENGALI GURMUKHI GUJARATI ORIYA TAMIL TELUGU "
+                           "KANNADA MALAYALAM SINHALA TIBETAN MYANMAR KHMER".split())
+# A diff's hunk header, with the first line of each side.
+HUNK = re.compile(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+# Where .github/scripts/review-neutralize puts a word joiner in the comments this repository's App posts, which the
+# review reads again: after every @; between #, GH- or a github.com issue, pull request or discussion URL and a digit;
+# and between < and ! or ?. There it splits no word: each of @, #, - and / ends one already. (This is where this screen
+# differs from rocq-linux-process-semantics's: there the bot's own comment is not gathered, and every word joiner is
+# held. Here the App's review comment is in pr.json's comments, and holding its word joiners would hold every pull
+# request after its first review.)
+NEUTRALIZED_BEFORE = re.compile(r"(?:@|#|(?i:gh-)|(?i:github\.com/[^/\s]+/[^/\s]+/(?:issues|pulls?|discussions)/)|<)\Z")
+
+
+def in_joiner_script(c):
+    """A letter or mark of a script that uses joiners (a virama before a joiner is a mark)."""
+    return unicodedata.category(c)[0] in "LM" and unicodedata.name(c, "").split(" ")[0] in JOINER_SCRIPTS
+
+
+def emoji(c):
+    cp = ord(c)
+    return (0x1F000 <= cp <= 0x1FAFF or 0x2600 <= cp <= 0x27BF or 0x2300 <= cp <= 0x23FF or 0x2B00 <= cp <= 0x2BFF
+            or 0x2190 <= cp <= 0x21FF or cp in (0xA9, 0xAE, 0x203C, 0x2049, 0x2122, 0x2139, 0x3030, 0x303D))
+
+
+def emoji_before(text, k):
+    """Whether an emoji ends just before position k, past its variation selector and skin tone."""
+    j = k - 1
+    while j >= 0 and (text[j] == "\uFE0F" or 0x1F3FB <= ord(text[j]) <= 0x1F3FF):
+        j -= 1
+    return j >= 0 and emoji(text[j])
+
+
+def first_of_file(text, k, whole_file, diff):
+    """Whether position k is the very first character of a file: of a file that is the whole text, or, in a diff, of
+    the first line of a file on the side the line belongs to."""
+    if whole_file and k == 0:
+        return True
+    if not diff or k < 2 or text[k - 1] not in "+- " or text[k - 2] != "\n":
+        return False
+    side = text[k - 1]
+    # Back from this line to its hunk's header, over the lines of the other side only: then this line is the first of
+    # its side in the hunk.
+    other = {"+": "-", "-": "+", " ": ""}[side]
+    end = k - 2
+    while True:
+        start = text.rfind("\n", 0, end) + 1
+        line = text[start:end]
+        m = HUNK.match(line)
+        if m:
+            break
+        if not other or not line.startswith(other) or start == 0:
+            return False
+        end = start - 1
+    old, new = m.group(1), m.group(2)
+    return {"-": old in ("0", "1"), "+": new == "1", " ": old == "1" and new == "1"}[side]
+
+
+def neutralized(text, k):
+    """Whether the word joiner at position k stands where review-neutralize puts one."""
+    after = text[k + 1:k + 2]
+    before = NEUTRALIZED_BEFORE.search(text, max(0, k - 200), k)
+    if not before:
+        return False
+    mark = before.group()
+    return mark == "@" or (mark == "<" and after in ("!", "?")) or (mark not in ("@", "<") and after.isdigit())
+
+
+def hiding(text, whole_file=False, diff=False):
+    """The first character of text that hides text, as U+XXXX, or None. A non-joiner or joiner passes between two
+    letters of a script that uses joiners, and a joiner inside an emoji sequence; a byte order mark passes as the very
+    first character of a file; a word joiner passes where review-neutralize puts one. Anything else of HIDING, a run of
+    joiners among them, holds the item."""
+    for m in HIDING.finditer(text):
+        c, k = m.group(), m.start()
+        if c in "\u200C\u200D" and 0 < k < len(text) - 1:
+            if in_joiner_script(text[k - 1]) and in_joiner_script(text[k + 1]):
+                continue
+            if c == "\u200D" and emoji_before(text, k) and emoji(text[k + 1]):
+                continue
+        if c == "\uFEFF" and first_of_file(text, k, whole_file, diff):
+            continue
+        if c == "\u2060" and neutralized(text, k):
+            continue
+        return f"U+{ord(c):04X}"
+    return None
 
 
 def kept(text):
@@ -202,7 +291,7 @@ def parts(review, project=None):
     file the review reads must be text: a changed file of a change (head/), and each file of projects/<name>/ but a
     seed corpus, and the diff must show it as text. The diff then shows every line a text file's change adds, and an
     image or another binary file could carry what no check here reads."""
-    found, unscreenable = [], []
+    found, unscreenable, whole_files = [], [], set()
     item_path = next((os.path.join(review, n) for n in ("pr.json", "issue.json")
                       if os.path.isfile(os.path.join(review, n))), None)
     if item_path is None:
@@ -233,7 +322,7 @@ def parts(review, project=None):
             unscreenable.append("review-comments.txt is not UTF-8 text")
         else:
             found.append(("review-comments.txt", text))
-        return finish(found, unscreenable)
+        return finish(found, unscreenable, {"review-comments.txt"})
     rest = {k: v for k, v in item.items() if k not in ("title", "body", "comments", "reviews")}
     found.append((f"{shown_item}, other fields", "\n".join(strings(rest))))
     for root, dirs, files in os.walk(review):
@@ -267,6 +356,8 @@ def parts(review, project=None):
                     pass
             elif source.startswith("seeds" + os.sep) and source.endswith(".hex.txt"):
                 text = seed_text(text)
+            else:
+                whole_files.add(source)
             found.append((source, text))
     for directory, label in ((os.path.join(review, "head"), "changed file"), (project, "project file")):
         if not directory or not os.path.isdir(directory):
@@ -279,17 +370,23 @@ def parts(review, project=None):
                 text = read_text(path)
                 if text is None:
                     unscreenable.append(f"{label} {os.path.relpath(path, directory)} is not UTF-8 text")
-                elif HIDING.search(text):
-                    unscreenable.append(f"{label} {os.path.relpath(path, directory)} holds hiding characters")
-    return finish(found, unscreenable)
+                elif hiding(text, whole_file=True):
+                    unscreenable.append(f"{label} {os.path.relpath(path, directory)} holds {hiding(text, True)}, "
+                                        "a character that hides text")
+    return finish(found, unscreenable, whole_files)
 
 
-def finish(found, unscreenable):
-    """The pairs that hold text, and the reasons: characters that hide text, and too much text. A seed corpus is read
-    by the review as hexadecimal, so what its bytes decode to hides nothing from it."""
+def finish(found, unscreenable, whole_files=frozenset()):
+    """The pairs that hold text, and the reasons: characters that hide text, and too much text. whole_files names the
+    sources that are a whole file (a byte order mark may begin one). A seed corpus is read by the review as
+    hexadecimal, so what its bytes decode to hides nothing from it."""
     found = [(s, t) for s, t in found if t.strip()]
-    unscreenable += [f"{s} holds hiding characters" for s, t in found
-                     if HIDING.search(t) and not s.startswith("seeds" + os.sep)]
+    for source, text in found:
+        if source.startswith("seeds" + os.sep):
+            continue
+        c = hiding(text, whole_file=source in whole_files, diff=source.endswith(".diff"))
+        if c:
+            unscreenable.append(f"{source} holds {c}, a character that hides text")
     total = sum(len(s) + len(t) + 4 for s, t in found)
     if total > MAX_CHARS:
         unscreenable.append(f"{total} characters, over the {MAX_CHARS} this screen reads")

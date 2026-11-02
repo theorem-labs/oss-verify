@@ -47,7 +47,10 @@ name: "Build"
 #            with no tools whose answer a schema holds to the words clean and suspicious, each once its identity is
 #            set up (its env below). Each reads all the text joined. The verdict is clean only when every check that
 #            ran answers clean; a check that cannot answer or runs out of time, a file the review reads that is not
-#            text or that the diff shows as binary, text with characters that hide it, or more text than the screen
+#            text or that the diff shows as binary, text with characters that hide it (bidirectional overrides and
+#            isolates, tag characters, and zero-width characters, but a joiner between two letters of a script that
+#            uses joiners or inside an emoji, a byte order mark at the start of a file, and a word joiner where
+#            .github/scripts/review-neutralize puts one in this App's own comments), or more text than the screen
 #            reads, holds it. A screened review runs at most SCREENED_HOURLY_CAP times an hour; one that fails, at
 #            the cap or not, is held and fails the required check, which a re-run of the failed jobs clears. It runs
 #            in the environment
