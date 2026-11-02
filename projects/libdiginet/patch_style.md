@@ -6,8 +6,9 @@ byte a desk sends: the frame and its header (`diginet_frame_parse` and `diginet_
 in `src/diginet_frame.c`), the command stream of a data frame (`diginet_msg_next` in
 `src/diginet_msg.c`), the controls in it (`diginet_decoder_next` in `src/diginet_decode.c`), and
 the session those frames drive (`diginet_session_rx` and the rest of
-`transport/src/diginet_session.c`). These readers are the code that matters most here, and the
-four fuzz targets drive them, with the encoders of `src/diginet_codec.c`.
+`transport/src/diginet_session.c`), and the desk mux that hands each desk its frames
+(`transport/src/diginet_mux.c`). These readers are the code that matters most here, and the five
+fuzz targets drive them, with the encoders of `src/diginet_codec.c`.
 
 ## How findings and patches land
 

@@ -26,7 +26,15 @@
 # Set OV_OWNER=<uid>:<gid> to have $OUT handed to that owner at the end.
 #
 # Set OV_RECORD=1 to have each fuzz target's link recorded, with a quiet twin, in $OUT/.records/<sha256 of the
-# executable>/ (link-fuzz-target says what a record holds). tools/check --checks sets it for its first build.
+# executable>/ (link-fuzz-target says what a record holds), and each compile of the build in
+# $OUT/.records/compiles.jsonl, one line of JSON for each object a compile wrote (record-compile says what a line
+# holds), with the build's own sanitizer flags in $OUT/.records/flags.json:
+#
+#     {"build": "<plain, ubsan, asan or asan-ubsan>",
+#      "sanitizer": {"c": [<each word of the flags a C compile gets>], "c++": [<a C++ compile's>]},
+#      "ubsan": {"c": [<those of them that are the UndefinedBehaviorSanitizer's>], "c++": [...]}}
+#
+# tools/check --checks sets it for its first build. A build that records makes the same binaries as one that does not.
 set -euo pipefail
 
 LIB=/usr/local/lib/oss-verify
@@ -65,9 +73,11 @@ define_fuzzing_build_mode
 CXXFLAGS="$CFLAGS -stdlib=libc++"
 # With a project's UBSan checks: what its C compiles leave out (OV_UBSAN_C_EXCLUDE), as OSS-Fuzz leaves function out
 # of each C compile. C++ compiles keep it.
+c_exclude=""
 if [ -n "${OV_UBSAN_C_EXCLUDE:-}" ] && [ -n "${OV_UBSAN_CHECKS:-}" ]; then
-  case "$FLAV" in ubsan|asanubsan) CFLAGS="$CFLAGS -fno-sanitize=$OV_UBSAN_C_EXCLUDE" ;; esac
+  case "$FLAV" in ubsan|asanubsan) c_exclude="-fno-sanitize=$OV_UBSAN_C_EXCLUDE" ;; esac
 fi
+[ -z "$c_exclude" ] || CFLAGS="$CFLAGS $c_exclude"
 
 # The driver and the seals are compiled as the release recipe compiles them: with no sanitizer, in every build.
 OV=/tmp/ov
@@ -84,17 +94,34 @@ LIB_FUZZING_ENGINE=$OV/libFuzzingEngine.a
 
 # With OV_RECORD=1 (tools/check --checks), link-fuzz-target records each link for the checks of the binaries and links
 # a quiet twin with the quiet driver: each driver object compiled again with -DHARNESS_QUIET, as <object>-quiet.o, so
-# that cli.c's DIAG and the adapter's emit_printf (emit.h) write nothing. The records reach $OUT/.records/ at the end.
-# They change no byte of the binaries.
+# that cli.c's DIAG and the adapter's emit_printf (emit.h) write nothing; and record-compile, through a front before
+# each compiler shim, records each compile of build.sh (below, before build.sh runs). The records reach $OUT/.records/
+# at the end. They change no byte of the binaries.
 OV_RECORDS=""
 if [ "${OV_RECORD:-}" = 1 ]; then
   OV_RECORDS=$OV/records
-  mkdir -p "$OV_RECORDS"
+  mkdir -p "$OV_RECORDS/compiles"
   for src in cli adapter allocation_failure; do
     "$DRVCC" $BASE_CFLAGS -DHARNESS_QUIET -c -I"$LIB/driver" "$LIB/driver/$src.c" -o "$OV/$src-quiet.o"
   done
   "$DRVCC" $BASE_CFLAGS -DHARNESS_QUIET -DOV_ALLOCATION_COUNTING -c -I"$LIB/driver" "$LIB/driver/allocation_failure.c" \
     -o "$OV/allocation_counting-quiet.o"
+  # The build's own sanitizer flags, by language, which tools/check_links.py judges each recorded compile by ($SAN,
+  # with c_exclude for C), and of them the UndefinedBehaviorSanitizer's ($UBSAN, in the ubsan and asan-ubsan builds).
+  json_words() {
+    local word list="" separator=""
+    for word in $1; do
+      word=${word//\\/\\\\}
+      list="$list$separator\"${word//\"/\\\"}\""
+      separator=", "
+    done
+    printf '[%s]' "$list"
+  }
+  ubsan=""
+  case "$FLAV" in ubsan|asanubsan) ubsan=$UBSAN ;; esac
+  printf '{"build": "%s", "sanitizer": {"c": %s, "c++": %s}, "ubsan": {"c": %s, "c++": %s}}\n' "$BUILD" \
+    "$(json_words "$SAN $c_exclude")" "$(json_words "$SAN")" "$(json_words "$ubsan $c_exclude")" \
+    "$(json_words "$ubsan")" > "$OV_RECORDS/flags.json"
 fi
 # For the recipes that compile their own adapter, which then compile a quiet one too (OV_ADAPTER_QUIET).
 export OV_RECORDS
@@ -188,6 +215,12 @@ export AR=$CHOST-ar NM=$CHOST-nm RANLIB=$CHOST-ranlib STRIP=$CHOST-strip OBJCOPY
 echo "compile: CC=$CC"
 echo "compile: CFLAGS=$CFLAGS"
 echo "compile: CXXFLAGS=$CXXFLAGS"
+# With records: a front before each C and C++ compiler shim, which records each compile (record-compile). A ported
+# build's release-target.sh puts one before the shims it writes itself.
+if [ -n "$OV_RECORDS" ]; then
+  "$LIB/record-compile" --front "$OV_RECORDS" "$SHIM/$CHOST"-clang-* "$SHIM/$CHOST"-clang++-* \
+    || echo "compile: warning: a compiler shim has no front, and its compiles no record" >&2
+fi
 bash -eux "$SRC/build.sh"
 
 # Save the stripped twin of each executable build.sh left in $OUT.
@@ -215,4 +248,10 @@ echo "compile: $found fuzz target(s) in $OUT, the $BUILD build"
 if [ -n "$OV_RECORDS" ] && [ -d "$OV_RECORDS/store" ]; then
   mkdir -p "$OUT/.records/store"
   cp -R "$OV_RECORDS/store/." "$OUT/.records/store/"
+fi
+# The compile records (record-compile), one line each, sorted, and the build's flags.
+if [ -n "$OV_RECORDS" ]; then
+  mkdir -p "$OUT/.records"
+  cp "$OV_RECORDS/flags.json" "$OUT/.records/flags.json"
+  find "$OV_RECORDS/compiles" -type f -exec awk 1 {} + | LC_ALL=C sort > "$OUT/.records/compiles.jsonl"
 fi

@@ -71,7 +71,7 @@ The triage row "Checklist" counts only the ticked boxes. It does not compare the
 
 1. **One project directory.** Each path in `pr.json` `.files` is directly inside `projects/<name>/`: **pass**. Also see the triage row "Pull request scope".
 2. **The validator passes on today's main.** Run `python3 tools/validate.py "$DIR"`. `DIR` must end in `projects/<name>`. No problem and no warning: **pass**. A warning goes in the summary. A problem is **fail**: quote it in the comment.
-3. **The build is reproducible.** The `project-builds` check passed, and the log ends with `reproducible: all N binaries are byte for byte the same in the second build`, or `rebuild.result` is `identical`: **pass**.
+3. **The build is reproducible.** The `build` check passed, and the log ends with `reproducible: all N binaries are byte for byte the same in the second build`, or `rebuild.result` is `identical`: **pass**.
 4. **The contact field is present.** `primary_contact` is set and is not `n/a`: **pass**.
 5. **The build files.** Read the `Dockerfile`, `build.sh`, `sources` and each patch in `series`. Each image is pinned by digest, and each dependency comes from a lockfile or from a line in `sources` with a commit or a SHA-256: **pass**. A build patch must change only how the project builds (`docs/project-yaml.md`, "Build patches"). A patch that fixes a bug is **fail**.
 6. **Terms.** The `terms-accepted` check passed. If the description says that an agent accepted the terms for the maintainer, write it in the summary.

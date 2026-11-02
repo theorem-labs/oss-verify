@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+#
+# Prints the review comment of a pull request. build.yaml's review job writes it as body.md, into the artifact
+# enroll-review-draft and into its output `body`, and the comment job posts that output as it is, so the draft is
+# exactly what is posted.
+#
+#   HEAD_SHA=<reviewed commit> REVIEW=<the review's comment> CHECKS=<the checks' report, or empty> \
+#     VERDICTS=<the review's verdicts.json> RULES=<review.md or review-change.md> .github/scripts/review-body
+#
+# Line 1 is the marker <!-- oss-verify-review -->, by which the comment job finds its comment again. Line 2 is the
+# verdict line, which the inbound watcher reads (the stream's bin/ossv-pr-watch, verdict_line):
+#   <!-- oss-verify-verdict {"head":"<commit>","blocking":[<ids whose verdict is fail>],"person":[<ids whose verdict is person>]} -->
+# with the ids sorted. VERDICTS empty, null, {} or anything but one JSON object gives no verdict line, so a missing
+# verdict never reads as "nothing blocks". The model chooses the keys of VERDICTS, so a key that is not a check id
+# also gives no verdict line: an id is a section's letter with an optional item number (A1, B, F7) in review.md, or a
+# number (1 to 5) in review-change.md, and nothing else, so no key of the line can close the HTML comment or hold a
+# mention or a reference. The schemas of .github/scripts/review-prompt ask for the same keys. Then the footer that
+# names the commit and the rules file, the review's first 50,000 characters and, when CHECKS is not empty, the first
+# 12,000 of the checks' report folded under it: GitHub refuses a comment over 65,536 characters. The review and the
+# report are what a pull request can steer, so each goes through .github/scripts/review-neutralize first: no mention,
+# no reference to an issue or pull request, no unclosed HTML comment that hides what follows it, and no line of
+# theirs that holds a marker of this comment (so lines 1 and 2 are the only marker and verdict line).
+set -euo pipefail
+
+[[ ${HEAD_SHA:-} =~ ^[0-9a-f]{40}$ ]] || { echo "review-body: HEAD_SHA is not a commit id" >&2; exit 2; }
+REVIEW=${REVIEW:-} CHECKS=${CHECKS:-} RULES=${RULES:-}
+neutralize="$(dirname "${BASH_SOURCE[0]}")/review-neutralize"
+# -s: two JSON values are not one object. A VERDICTS that is not JSON gives no line. \A and \z, not ^ and $: jq's $
+# also matches before a newline at the end of a key.
+verdict=$(jq -sc --arg head "$HEAD_SHA" '
+  select(length == 1) | .[0] | select(type == "object" and length > 0)
+  | select(keys | map(test("\\A(?:[A-G][0-9]*|[0-9]+)\\z")) | all)
+  | {head: $head, blocking: ([to_entries[] | select(.value == "fail") | .key] | sort),
+     person: ([to_entries[] | select(.value == "person") | .key] | sort)}' <<< "${VERDICTS:-}" 2> /dev/null) \
+  || verdict=""
+printf '<!-- oss-verify-review -->\n'
+if [ -n "$verdict" ]; then printf '<!-- oss-verify-verdict %s -->\n' "$verdict"; fi
+# shellcheck disable=SC2016 # the backticks are Markdown's
+printf '<sub>Claude wrote this review of `%s` from `%s`. It can be wrong. Each push replaces it.</sub>\n\n' \
+  "${HEAD_SHA:0:7}" "$RULES"
+printf '%s' "$REVIEW" | "$neutralize" --drop-markers 50000
+printf '\n'
+if [ -n "$CHECKS" ]; then
+  printf '\n<details><summary>What the checks of the fuzz targets and of the binaries measured</summary>\n\n'
+  printf '%s' "$CHECKS" | "$neutralize" --drop-markers 12000
+  printf '\n\n</details>\n'
+fi

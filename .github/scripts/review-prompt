@@ -12,7 +12,10 @@
 # review-issue.md) for which pull request or issue. `arguments`: the --json-schema of that kind's structured output,
 # and, for an enrollment whose last session review-gather kept (SESSION and LAST, its gather step's outputs),
 # --resume <id>, so that the review reads only the diff since the commit it reviewed then. Each value it writes is a
-# number, a project name, or a commit or session id, each checked here: no text of a pull request or of an issue.
+# number, a project name, or a commit or session id, each checked here: no text of a pull request or of an issue. The
+# keys of each kind's verdicts are its rules file's check ids and nothing else (`propertyNames`), as
+# .github/scripts/review-body takes them: the model chooses them, and review-body prints them in the comment's verdict
+# line. Claude Code validates the structured output against the schema and asks the model again on a mismatch.
 set -euo pipefail
 die() { echo "review-prompt: $1" >&2; exit 2; }
 number='^[0-9]+$' commit='^[0-9a-f]{40}$'
@@ -39,7 +42,8 @@ case ${KIND:-} in
         comment: {type: "string", description: "The comment to the maintainer, in Markdown. Never a held finding."},
         held: {type: "string", description: "Each finding held back under rule 6 of review.md, as the skill section A held finding says, or empty."},
         verdicts: {type: "object", description: "The verdict of each check of review.md by its id, A1 to G5, and for an F check the worst over the fuzz targets.",
-                   required: ["F2", "F7"], additionalProperties: {enum: ["pass", "fail", "person"]}}}}')
+                   required: ["F2", "F7"], propertyNames: {pattern: "^[A-G][0-9]*$"},
+                   additionalProperties: {enum: ["pass", "fail", "person"]}}}}')
     ;;
   change)
     [[ ${PR:-} =~ $number ]] || die "PR is not a number"
@@ -49,7 +53,8 @@ case ${KIND:-} in
       properties: {
         comment: {type: "string", description: "The comment to the contributor, in Markdown."},
         verdicts: {type: "object", description: "The verdict of each check of review-change.md by its number.",
-                   required: ["1", "2", "3", "4", "5"], additionalProperties: {enum: ["pass", "fail", "person"]}}}}')
+                   required: ["1", "2", "3", "4", "5"], propertyNames: {pattern: "^[0-9]+$"},
+                   additionalProperties: {enum: ["pass", "fail", "person"]}}}}')
     ;;
   issue)
     [[ ${ISSUE:-} =~ $number ]] || die "ISSUE is not a number"

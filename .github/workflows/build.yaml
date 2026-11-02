@@ -36,7 +36,9 @@ name: "Build"
 #            .github/scripts/review-gather gathered: the pull request, the project's source at the built commit, and
 #            the build's results, with .claude/skills/review-enrollment/SKILL.md for where those are. It gives a
 #            structured output: the comment that asks the maintainer for each fix, any finding held back (review.md,
-#            rule 6), and a verdict for each check. The comment and the verdicts are the artifact enroll-review-draft.
+#            rule 6), and a verdict for each check. The comment, the verdicts and body.md, the whole comment as the
+#            comment job posts it (.github/scripts/review-body), are the artifact enroll-review-draft; body.md is also
+#            the job's output `body`, which the comment job posts as it is.
 #            On a later push it resumes the same Claude Code session as the last review, so it knows what it asked
 #            for and why, and reviews only the diff since the commit it reviewed then, with one exception: check D3 of
 #            review.md answers each failing result of this build's report of the new head. For a change it checks
@@ -54,19 +56,29 @@ name: "Build"
 #            before the model is refused for an issue, the step "Stop before the model when the draft cannot be
 #            stored" fails the job with `::error::NOT STORED: ...` before the model runs, and the cap does not count
 #            that run.
+#   session  saves the review's session in the Actions cache, for the review of the next push (below). It runs no
+#            script and reads nothing of the pull request: it moves the artifact the review job kept into the cache.
 #   hold     sends each real bug in a project's own code that a review held back from its comment (review.md, rule 6)
 #            to the disclosure route as a private issue (.github/scripts/review-hold): the review job stores it in a
 #            private bucket that only this job can read, and this job sends every finding stored there, a cancelled
-#            run's too. A finding never reaches a log, an output or an artifact.
+#            run's too. A finding never reaches a log, an output or an artifact. Its title and text go through
+#            .github/scripts/review-neutralize before they are posted, as the comment's do (below).
 #   comment  posts that comment, with the checks' report folded under it, or replaces
 #            the one already there. The comment starts with <!-- oss-verify-review -->, as the triage comment starts
-#            with its own marker. It never runs for an issue: a person approves the exact text of each reply to an
-#            issue before anyone posts it.
+#            with its own marker, and its second line is the verdict line that the inbound watcher reads:
+#            <!-- oss-verify-verdict {"head":"<commit>","blocking":[...],"person":[...]} -->, the checks whose verdict
+#            is fail and those left to a person (.github/scripts/review-body; none when the review gave no verdicts,
+#            or gave one under a key that is not a check id).
+#            The review's text and the checks' report, which a pull request can steer, reach the comment only through
+#            .github/scripts/review-neutralize: with no mention, no reference to an issue or pull request, no unclosed
+#            HTML comment that hides what follows it, and no line that holds a marker of this comment, so no one else
+#            is notified as oss-verify[bot] and the verdict line is the job's own. It never runs for an issue: a person
+#            approves the exact text of each reply to an issue before anyone posts it.
 #   required always runs, last, and reports the required check (below).
 #
 # project-builds is the required check, and the job required reports it (.github/scripts/collect). required runs on
 # every run, after all the other jobs whatever their results, and passes only if route passed and every job route asked
-# for passed: the build when route asked for it, and the record, review, hold and comment jobs when their own
+# for passed: the build when route asked for it, and the record, review, session, hold and comment jobs when their own
 # conditions call for them (the review when the build took a project, or the kind is change or issue); every other
 # job must be skipped. A skipped job counts as a pass where a check is required, so the build job is never the
 # required check itself. The build takes the project with .github/scripts/take-project, for each commit on its own:
@@ -110,7 +122,8 @@ name: "Build"
 # job. Its results reach the other jobs only as job outputs, which this repository's tools write: text, never code.
 # The review job runs no code of the pull request or the project. It and the comment job hold identity tokens
 # (id-token: write), which they trade for short-lived tokens: the review's for an Anthropic token by workload identity
-# federation, so no API key is stored, and both jobs' for a Google access token by Google workload identity
+# federation, so no API key is stored, and for an ephemeral tailnet node that exports the review's usage (below), and
+# both jobs' for a Google access token by Google workload identity
 # federation (Theorem's infrastructure code). Claude gets three tools only, Read, Glob and Grep (`--tools`), in the
 # default permission mode (`--permission-mode default`, which refuses a read outside the checkout): no shell, no
 # network and no tool that writes, so the text of the pull request, which it reads as data (review.md, rule 1),
@@ -126,7 +139,7 @@ name: "Build"
 # and the enrollment workflow enroll-dispatch.yml, each on refs/heads/main and only from its own events (here
 # pull_request_target, issues and workflow_dispatch; Theorem's infrastructure code lists them). A token carries no job
 # name, so what keeps each Google account to the job that needs it is the job's GitHub Environment, which the token
-# carries a claim for: `ossv-ci`, which reads the cost collector's token and nothing else, can be acted as only from
+# carries a claim for: `ossv-ci`, which this job uses only to store a held finding or an issue's draft, can be acted as only from
 # the environment `enroll-review`, which the review job declares; `ossv-app-comment`, the account these jobs read the
 # App's key as, only from `comment`, which the comment job declares. A job that declares no environment,
 # project-builds among them, reaches neither account, and project-builds, which builds the pull request's code, must
@@ -151,19 +164,28 @@ name: "Build"
 # workflow_ref, so it signs in too). The review and comment jobs of this
 # file ask for an identity token; no other job of it does.
 # A review runs only on main: the Anthropic rule above admits refs/heads/main alone, so a run on another branch gets
-# no Anthropic token (and Google's provider, which also admits main alone, gives it no collector token). So a change to
+# no Anthropic token (Google's provider and the tailnet identity of the export below admit main alone too, so such a
+# run also gets no Google token and no tailnet node). So a change to
 # the review is tried for real only once it is on main: run `gh workflow run build.yaml -f pr=<n>`, which posts the
 # comment on that pull request (its draft is also the review job's artifact enroll-review-draft), or `-f issue=<n>`
 # for the reply to an issue, which posts nothing and stores the draft in the private bucket.
 # Before the merge, tools/tests runs the review's own steps with stand-ins.
 #
-# The review's Claude Code exports its usage by OpenTelemetry to Theorem's cost collector, at the public URL below
-# (a literal here because it is public), with the collector's bearer token, which the review job reads at run time
-# from Secret Manager (agent-spend-otel-token, whose readers Theorem's infrastructure code names). The export is
-# tagged theorem.project=oss-verify, theorem.subproject=<name> (or _change, or _issue: a project name never starts with
-# `_`), theorem.lane=enroll-review-ci and theorem.credential=oss-verify-ci. The export is a measurement and never
-# decides whether a review runs: if the sign-in or the read fails, the run's page carries a warning saying that this
-# review's usage is not exported, and the review runs without it.
+# The review's Claude Code exports its usage by OpenTelemetry to Theorem's cost collector, over Theorem's tailnet, at
+# the collector's tailnet address on port 80 (SPEND_COLLECTOR_URL below; an address, not a secret). The collector
+# keeps a public endpoint with a bearer token until INFRA-832 deletes it; this job uses neither. The review job joins
+# the tailnet as an ephemeral node with the tag tag:ossv-review, and holds no token for the collector: Tailscale
+# makes the node from this job's GitHub identity token, and WireGuard authenticates and encrypts each connection.
+# The tag, the federated identity that trades the token for the node, the grant that gives the tag the collector's
+# Tailscale Service svc:spend on tcp:80 and nothing else beyond the two read-only pages every node of the tailnet
+# may read (Dispatch and the results dashboard, on tcp:443), and the policy test that fails if the tag reaches
+# anything else, are declared by INFRA-832 S1a in agent-infra, merged on 2026-10-30 as 99d1b5d. Its bootstrap apply
+# ran on 2026-10-31 at agent-infra c96f3d672, and the client id and the address below are outputs of that apply. The
+# export is tagged theorem.project=oss-verify, theorem.subproject=<name> (or _change, or _issue: a project name never
+# starts with `_`), theorem.lane=enroll-review-ci and theorem.credential=oss-verify-ci. The export is a measurement and
+# never decides whether a review runs: if the job cannot join the tailnet, or the collector does not answer at its
+# address, the run's page carries a warning saying that this review's usage is not exported, and the review runs
+# without it.
 #
 # The review's session goes from one push to the next in the Actions cache, under the key
 # enroll-review/<pull request>/<project>/<run id>-<attempt>: ~/.claude/projects, where Claude Code keeps its sessions,
@@ -171,16 +193,26 @@ name: "Build"
 # the pull request and project; when the head descends from the commit that session reviewed, review-gather writes the
 # diff since then and the review resumes that session (claude --resume <id>, which keeps its id) to review only that
 # diff. When a session is kept, the log of the gather step says which: "the review resumes the session <id>", or "the
-# review is fresh"; it says neither on a first review. The
-# review job saves the session after the review (cache-mode: write); it runs no code of the pull request, and its
-# Claude can write nothing. Both are main's copy of this file, whatever the pull request changes. A run on main
+# review is fresh"; it says neither on a first review.
+# Under pull_request_target GitHub gives a job read-only access to main's cache unless the job declares a
+# write-capable cache-mode, and such a job must process no untrusted input before it writes, or a run that later
+# restores the entry could act on what the pull request put there (GitHub's dependency caching reference,
+# "Bypassing the default untrusted-trigger cache restriction"). So the review job, which reads the pull request and
+# runs the model, only restores (cache-mode: read). After the review it keeps the two paths as the artifact
+# enroll-review-session, for one day, and the session job saves that artifact, by its id, in the cache (cache-mode:
+# write): that job checks out nothing, runs no script, holds no permission and no identity token, and runs two pinned
+# actions that move the files. Both are main's copy of this file, whatever the pull request changes. A run on main
 # restores only entries that a run on main saved: a pull request's own runs (pull_request, or a push to its branch)
 # save only in the scope of refs/pull/<n>/merge or of their branch, which a run on main does not restore. So the code
 # of a pull request cannot write the session that its review resumes. Every other job has cache-mode: none (below).
+# What the review job restores is still text that the pull request steered, the session of its own earlier review:
+# it is the model's context, read as data as the pull request itself is, and no step runs it.
 # A session holds the public inputs the review read and the review's own reasoning. As with every cache entry of main,
-# a pull request's own run can read it. GitHub drops an entry that no run has read for 7 days, and the next review is
-# then fresh. A review that holds back a finding (review.md, rule 6) keeps no session, because the session would hold
-# the finding: the next push resumes the last session kept before it, or starts fresh.
+# a pull request's own run can read it, and so can anyone signed in to GitHub, for a day, as the artifact. GitHub
+# drops an entry that no run has read for 7 days, and the next review is then fresh. A save that fails is a warning,
+# never a failure, and the next review is then fresh too. A review that holds back a finding (review.md, rule 6) keeps
+# no session, because the session would hold the finding: the next push resumes the last session kept before it, or
+# starts fresh.
 # Only the review job can act as ossv-ci: that comes with the environment enroll-review. Its deployment branch rule,
 # declared in Theorem's infrastructure code, allows main alone; GitHub checks it against the run's ref, which is main
 # for pull_request_target and refs/pull/<n>/merge for a pull request's own run
@@ -214,7 +246,8 @@ on:
         type: number
 
 permissions: {}
-# No job reads or writes the Actions cache unless it says so: only the review job does, for its session.
+# No job reads or writes the Actions cache unless it says so: the review job restores its session, and the session
+# job saves it.
 cache-mode: none
 
 env:
@@ -500,8 +533,10 @@ jobs:
     needs: [route, project-builds]
     if: ${{ !cancelled() && (needs.project-builds.outputs.name != '' || needs.route.outputs.kind == 'change' || needs.route.outputs.kind == 'issue') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    cache-mode: write
+    timeout-minutes: 70
+    # Restores the last review's session and never saves one: the job reads the pull request and runs the model, and
+    # the session job saves (the top of this file).
+    cache-mode: read
     environment: {name: enroll-review, deployment: false}
     # actions: read only for the hourly cap of issue drafts (its step below), which reads this workflow's runs. A job's
     # permissions cannot change with route's kind, so the job holds it for every kind, and the Review step's token has
@@ -516,11 +551,28 @@ jobs:
       SESSION_KEY: enroll-review/${{ github.event.pull_request.number || inputs.pr }}/${{ needs.project-builds.outputs.name }}/
       GCP_WORKLOAD_IDENTITY_PROVIDER: projects/805240912354/locations/global/workloadIdentityPools/github/providers/github-ossv
       GCP_SERVICE_ACCOUNT: ossv-ci@theorem-agent-infra.iam.gserviceaccount.com
+      # The client id Tailscale gave the federated identity ossv-review-github: bootstrap/'s stack output
+      # ossvReviewTailnetClientId in agent-infra (INFRA-832 S1a, merged as 99d1b5d), copied from
+      # `pulumi stack output ossvReviewTailnetClientId --stack prod` after the apply of 2026-10-31 that made the
+      # identity. The id is public, not a secret, and this is the one place this file names it.
+      TAILNET_CLIENT_ID: "TWbBfz7fqc11CNTRL-kwYSkwdwGN11CNTRL"
+      # The cost collector's address on the tailnet, http://<IPv4 address> on port 80. Every sender of spend
+      # records takes this one URL, and it holds the address, not the Service's MagicDNS name, because
+      # linux28-agents-1 joins the tailnet with --accept-dns=false and resolves no MagicDNS name; tailscaled
+      # routes a Tailscale Service by the destination address. The address is the one Tailscale gave the Service
+      # svc:spend when that same apply made it: bootstrap/'s stack output spendCollectorTailnetUrl
+      # (theorem-labs/agent-infra#1059), copied from `pulumi stack output spendCollectorTailnetUrl --stack prod`.
+      SPEND_COLLECTOR_URL: "http://100.116.58.240"
     outputs:
       # The result step writes it for an enrollment or a change, never for an issue: an issue's draft, which no one has
       # approved, is in no output (a re-run with debug logging prints outputs to the public log).
       comment: ${{ steps.result.outputs.comment }}
       held_object: ${{ steps.held.outputs.object }}
+      # body.md, the whole comment, which the comment job posts as it is: that job runs no script of its own.
+      body: ${{ steps.body.outputs.body }}
+      # The id of the artifact enroll-review-session, which the session job saves in the cache; empty when no session
+      # is kept.
+      session: ${{ steps.session.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with: {persist-credentials: false, fetch-depth: 0}
@@ -561,7 +613,10 @@ jobs:
             dpkg -s python3-yaml unzip > /dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml unzip; }
           fi
           LAST_REVIEW=~/.claude/ossv-last-review .github/scripts/review-gather .review
-      - name: Sign in to Google Cloud, for the cost collector's token
+      # The sign-in an issue's draft needs, and nothing else: the review's usage goes over the tailnet with no
+      # Google token (below), so this step runs for the issue path alone.
+      - name: Sign in to Google Cloud, to check that an issue's draft can be stored
+        if: env.KIND == 'issue'
         id: gcp
         continue-on-error: true
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0 (sha-pinned)
@@ -592,19 +647,58 @@ jobs:
           echo "::error::NOT STORED: $message"
           echo "$message" >> "$GITHUB_STEP_SUMMARY"
           exit 1
+      # The node is ephemeral and preauthorized, and it carries tag:ossv-review. INFRA-832 S1a in agent-infra,
+      # merged as 99d1b5d, declares that tag, the grant that gives it the cost collector's Tailscale Service
+      # svc:spend on tcp:80 and nothing else beyond the two read-only pages every node of the tailnet may read, and
+      # the federated identity ossv-review-github, whose claims admit only this workflow of this repository, on
+      # refs/heads/main, in the environment enroll-review, on a GitHub-hosted runner. Its apply of 2026-10-31 made
+      # the client id above. The job joins with its GitHub identity token, so no key is stored. One review
+      # job runs in a run attempt, so the run id and the attempt name the node. A Linux device reaches a Tailscale
+      # Service's address only with Tailscale 1.94 or later, or with --accept-routes
+      # (https://tailscale.com/kb/1552, "Access Tailscale Services from other devices"): this action meets both at
+      # the pinned commit. Its action.yml gives the version input the default 1.104.2, and its src/main.ts puts
+      # --accept-routes in every `tailscale up`. The test of this step pins the exact set of its settings, so no
+      # version input can be given at all. use-cache is off: the action would
+      # otherwise keep the tailscale binary in this repository's Actions cache and run it as root from there, and
+      # the review job's cache holds its review session alone (above). log-mode is quiet: at the pinned commit
+      # src/logging.ts silences the action's commands only when the run is not in debug, so a re-run with debug logging
+      # would print to this public log the `tailscale up` command with this job's GitHub identity token, which the
+      # action does not mask (src/main.ts), and the output of `tailscale status --json`, the tailnet's nodes. quiet
+      # keeps them silent whatever the debug setting, and a command that fails still writes its error output. The
+      # job's 70 minutes hold every step's cap: gather 15, join 3, review 45 and logout 2.
+      - name: Join Theorem's tailnet, to export this review's usage
+        id: tailnet
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: tailscale/github-action@99a8333667fff04fdd6cffb46dfd409f8329a7bf # v4.3.0 (sha-pinned)
+        with:
+          oauth-client-id: ${{ env.TAILNET_CLIENT_ID }}
+          audience: theorem.dev/tailnet/ossv-review
+          tags: tag:ossv-review
+          hostname: ossv-review-${{ github.run_id }}-${{ github.run_attempt }}
+          use-cache: false
+          log-mode: quiet
+      # After a join that passed, the step asks the collector's address for a page, for at most 10 seconds. curl takes
+      # any HTTP answer, a 404 too, so only a refused or timed-out connection, or an empty address, fails it. The
+      # address stays only while the Service svc:spend does (INFRA-832's spec, D9): a Service made again gets new
+      # addresses, and a job that joined would then send every record to an address that answers nothing. So when the
+      # collector does not answer, the step writes no exporter variables either, and the warning names the address.
+      # The step takes continue-on-error, as the join and the logout do: the export never decides whether a review runs.
       - name: Export the review's usage to the cost collector
-        env: {GCP_ACCESS_TOKEN: "${{ steps.gcp.outputs.access_token }}"}
+        continue-on-error: true
+        env: {TAILNET: "${{ steps.tailnet.outcome }}"}
         run: |
-          OTEL_COLLECTOR_TOKEN=$(curl -q -sSf -H @<(builtin printf 'Authorization: Bearer %s\n' "$GCP_ACCESS_TOKEN") \
-            https://secretmanager.googleapis.com/v1/projects/theorem-agent-infra/secrets/agent-spend-otel-token/versions/latest:access \
-            | jq -er '.payload.data | select(type == "string" and length > 0)' | base64 -d | tr -d '[:space:]') || OTEL_COLLECTOR_TOKEN=""
-          if [ -z "$OTEL_COLLECTOR_TOKEN" ]; then echo "::warning::No cost collector token: this review's usage is not exported."; exit 0; fi
-          builtin printf '::add-mask::%s\n' "$OTEL_COLLECTOR_TOKEN"
+          if [ "$TAILNET" != success ]; then
+            echo "::warning::This job did not join the tailnet: this review's usage is not exported."; exit 0; fi
+          if ! curl -q -sS --max-time 10 -o /dev/null "$SPEND_COLLECTOR_URL"; then
+            echo "::warning::The cost collector did not answer at '$SPEND_COLLECTOR_URL' on the tailnet: this review's usage is not exported."
+            exit 0
+          fi
           subproject=${NAME:-_$KIND}
-          { builtin printf '%s\n' CLAUDE_CODE_ENABLE_TELEMETRY=1 OTEL_LOGS_EXPORTER=otlp OTEL_METRICS_EXPORTER=none \
-              OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf OTEL_EXPORTER_OTLP_ENDPOINT=https://agent-otel-public-6acxmql5za-uw.a.run.app \
-              "OTEL_RESOURCE_ATTRIBUTES=theorem.project=oss-verify,theorem.subproject=$subproject,theorem.lane=enroll-review-ci,theorem.credential=oss-verify-ci"
-            builtin printf 'OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer %s\n' "$OTEL_COLLECTOR_TOKEN"; } >> "$GITHUB_ENV"
+          builtin printf '%s\n' CLAUDE_CODE_ENABLE_TELEMETRY=1 OTEL_LOGS_EXPORTER=otlp OTEL_METRICS_EXPORTER=none \
+            OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf "OTEL_EXPORTER_OTLP_ENDPOINT=$SPEND_COLLECTOR_URL" \
+            "OTEL_RESOURCE_ATTRIBUTES=theorem.project=oss-verify,theorem.subproject=$subproject,theorem.lane=enroll-review-ci,theorem.credential=oss-verify-ci" \
+            >> "$GITHUB_ENV"
       # What the one Review step reads and gives, for route's kind: the rules file, the pull request or issue, the
       # structured output's schema, and for an enrollment the session to resume.
       - name: What the review reads and gives
@@ -630,6 +724,20 @@ jobs:
           claude_args: >-
             --tools Read,Glob,Grep --permission-mode default --model claude-opus-5-5 --effort xhigh --max-turns 300
             ${{ steps.prompt.outputs.arguments }}
+      # The logout deletes the ephemeral node at once, whatever the review did and whatever the join's outcome: at
+      # the pinned commit the action stops waiting for `tailscale up` after its 2-minute timeout but does not stop
+      # the command (src/main.ts), so a join that failed can still make the node. When the join never installed
+      # tailscale, the step has nothing to log out and passes. When the runner itself is lost, Tailscale deletes the
+      # node 30 to 60 minutes after its last activity. The step takes
+      # continue-on-error, as the join does: this is the measurement's own cleanup, and a failed logout must not skip
+      # the steps below it, which keep the draft, the verdicts and a held finding. The action's post step logs out
+      # again at the end of the job.
+      - name: Leave the tailnet
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 2
+        run: |
+          if command -v tailscale > /dev/null; then sudo tailscale logout; fi
       - name: Keep the draft, and the held finding apart from it
         id: result
         env:
@@ -655,16 +763,35 @@ jobs:
           { echo '<!-- held finding -->'; jq -r '.held // ""' <<< "$out"; } > "$RUNNER_TEMP/held-finding.md"
           if jq -e '(.held // "") | test("\\S")' <<< "$out" > /dev/null; then echo "held=yes" >> "$GITHUB_OUTPUT"
           else mkdir -p ~/.claude && printf 'session=%s head=%s\n' "$SESSION" "$HEAD_SHA" > ~/.claude/ossv-last-review; fi
+      # body.md: the whole comment, with the verdict line, which the comment job posts as it is (the job's output
+      # `body`, written as the result step writes `comment`). Never for an issue: no job posts its reply.
+      - name: Write the comment as the comment job posts it
+        id: body
+        if: env.KIND != 'issue'
+        env:
+          REVIEW: ${{ steps.result.outputs.comment }}
+          CHECKS: ${{ needs.project-builds.outputs.checks }}
+          RULES: ${{ needs.route.outputs.kind == 'change' && 'review-change.md' || 'review.md' }}
+        run: |
+          verdicts=$(jq -c . "$RUNNER_TEMP/draft/verdicts.json")
+          VERDICTS=$verdicts .github/scripts/review-body > "$RUNNER_TEMP/draft/body.md"
+          delimiter="body_$(openssl rand -hex 16)"
+          { echo "body<<$delimiter"; cat "$RUNNER_TEMP/draft/body.md"; echo "$delimiter"; } >> "$GITHUB_OUTPUT"
       # enroll-dispatch.yml reads verdicts.json from this run: F2 or F7 fail, or no verdicts, starts no statements. A
       # re-run replaces it, which is how a held enrollment is decided again. Never for an issue (the step above).
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (sha-pinned)
         if: env.KIND != 'issue'
         with: {name: enroll-review-draft, path: "${{ runner.temp }}/draft", if-no-files-found: error, overwrite: true}
-      # A session that holds a held finding is not kept: any run of a pull request can read main's cache.
+      # A session that holds a held finding is not kept: any run of a pull request can read main's cache. This job only
+      # restores the cache, so it keeps the session as an artifact, for a day, and the session job saves it in the cache.
+      # The artifact's root is ~/.claude, where both paths are. A failed upload, as a failed save before, is a warning,
+      # and the next review is then fresh.
       - name: Keep this review's session for the next push's review
+        id: session
         if: ${{ steps.result.outputs.held != 'yes' && env.KIND == 'enrollment' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
-        with: {path: "~/.claude/projects\n~/.claude/ossv-last-review", key: "${{ env.SESSION_KEY }}${{ github.run_id }}-${{ github.run_attempt }}"}
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (sha-pinned)
+        with: {name: enroll-review-session, path: "~/.claude/projects\n~/.claude/ossv-last-review", include-hidden-files: true, if-no-files-found: warn, retention-days: 1, overwrite: true}
       # A sign-in of its own, after the model: its 300 s token is minted for the store step that follows, never older.
       - name: Sign in to Google Cloud to store the held finding, or an issue's draft
         id: gcp-held
@@ -688,6 +815,31 @@ jobs:
           header=$(printf 'oss-verify held finding v1\npr: %s\nhead: %s\nproject: %s\nrun: %s\n---' "$PR" "$HEAD_SHA" "$NAME" "$RUN_URL")
           generation=$(.github/scripts/held-bucket-put "$name" "$header" "$RUNNER_TEMP/held-finding.md")
           echo "object=$name" >> "$GITHUB_OUTPUT" && echo "Stored the held finding as $name, generation $generation."
+
+  session:
+    # Saves the session the review job kept in the Actions cache, under the key that job restores from, for the review
+    # of the next push (the top of this file). The review job reads the pull request and runs the model, so it only
+    # restores the cache. This job writes it, and it processes no input of the pull request before it writes, as
+    # GitHub's dependency caching reference asks of a job that declares a write-capable cache-mode on an untrusted
+    # trigger: it checks out nothing, runs no script, holds no permission and no identity token, and its two pinned
+    # actions move the one artifact the review job uploaded, by that artifact's id, into the cache. A save that fails is
+    # a warning, never a failure, as a cache save is in any job: the next review is then fresh.
+    needs: [project-builds, review]
+    if: ${{ !cancelled() && needs.review.outputs.session != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    cache-mode: write
+    permissions: {}
+    env:
+      SESSION_KEY: enroll-review/${{ github.event.pull_request.number || inputs.pr }}/${{ needs.project-builds.outputs.name }}/
+    steps:
+      - name: Take the session the review job kept
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2 (sha-pinned)
+        with: {artifact-ids: "${{ needs.review.outputs.session }}", path: "~/.claude"}
+      - name: Keep it for the next push's review
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
+        with: {path: "~/.claude/projects\n~/.claude/ossv-last-review", key: "${{ env.SESSION_KEY }}${{ github.run_id }}-${{ github.run_attempt }}"}
 
   hold:
     # Sends every finding stored in the held-findings bucket to the disclosure route as a private issue
@@ -910,10 +1062,9 @@ jobs:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number || inputs.pr }}
-          REVIEW: ${{ needs.review.outputs.comment }}
-          CHECKS: ${{ needs.project-builds.outputs.checks }}
+          # The review job's body.md: the whole comment, made there by .github/scripts/review-body.
+          BODY: ${{ needs.review.outputs.body }}
           HEAD_SHA: ${{ needs.project-builds.outputs.sha || needs.route.outputs.sha }}
-          RULES: ${{ needs.route.outputs.kind == 'change' && 'review-change.md' || 'review.md' }}
         run: |
           set -euo pipefail
           # A pull request's comment only: a run for an issue has no pull request, and an issue's draft is never posted.
@@ -925,14 +1076,9 @@ jobs:
             echo "The pull request's head is now $current, not $HEAD_SHA: the run of $current posts the comment."
             exit 0
           fi
-          # The marker first, which finds the comment again; GitHub refuses a comment over 65,536 characters.
-          {
-            printf '<!-- oss-verify-review -->\n<sub>Claude wrote this review of `%s` from `%s`. It can be wrong. Each push replaces it.</sub>\n\n%s\n' \
-              "${HEAD_SHA:0:7}" "$RULES" "${REVIEW:0:50000}"
-            if [ -n "$CHECKS" ]; then
-              printf '\n<details><summary>What the checks of the fuzz targets and of the binaries measured</summary>\n\n%s\n\n</details>\n' "${CHECKS:0:12000}"
-            fi
-          } > "$RUNNER_TEMP/comment.md"
+          # The review job's body.md as it is: the marker first, which finds the comment again, then the verdict line.
+          # A job output drops the file's last line end, which this puts back.
+          printf '%s\n' "$BODY" > "$RUNNER_TEMP/comment.md"
           # Ours is the oss-verify App's comment that starts with the marker.
           existing=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
             --jq '.[] | select(.user.login == "oss-verify[bot]" and (.body | startswith("<!-- oss-verify-review -->"))) | .id')
@@ -949,7 +1095,7 @@ jobs:
     # The required check project-builds (the top of this file), with .github/scripts/collect. A static name: GitHub
     # reports the check under it on every run.
     name: project-builds
-    needs: [route, project-builds, record, review, hold, comment]
+    needs: [route, project-builds, record, review, session, hold, comment]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -968,13 +1114,15 @@ jobs:
           BUILD: ${{ needs.project-builds.result }}
           ASKED_BUILD: ${{ needs.route.outputs.kind == 'enrollment' }}
           # Each of the others is asked for on its own job's condition: the record when the build passed and took a
-          # project, the review when the build took a project or the kind is change or issue, hold when an
-          # enrollment's review ran, comment when the review wrote a comment (and, if it held a finding back, the hold
-          # job sent it), never for an issue.
+          # project, the review when the build took a project or the kind is change or issue, the session when the
+          # review kept one, hold when an enrollment's review ran, comment when the review wrote a comment (and, if it
+          # held a finding back, the hold job sent it), never for an issue.
           RECORD: ${{ needs.record.result }}
           ASKED_RECORD: ${{ needs.project-builds.result == 'success' && needs.project-builds.outputs.name != '' }}
           REVIEW: ${{ needs.review.result }}
           ASKED_REVIEW: ${{ (needs.project-builds.outputs.name != '' || needs.route.outputs.kind == 'change' || needs.route.outputs.kind == 'issue') }}
+          SESSION: ${{ needs.session.result }}
+          ASKED_SESSION: ${{ needs.review.outputs.session != '' }}
           HOLD: ${{ needs.hold.result }}
           ASKED_HOLD: ${{ needs.review.result != 'skipped' && needs.route.outputs.kind == 'enrollment' }}
           COMMENT: ${{ needs.comment.result }}
@@ -984,4 +1132,5 @@ jobs:
             && (needs.review.outputs.held_object == '' || needs.hold.result == 'success') }}
         run: >-
           .github/scripts/collect "$ROUTE" "build:$BUILD:$ASKED_BUILD" "record:$RECORD:$ASKED_RECORD"
-          "review:$REVIEW:$ASKED_REVIEW" "hold:$HOLD:$ASKED_HOLD" "comment:$COMMENT:$ASKED_COMMENT"
+          "review:$REVIEW:$ASKED_REVIEW" "session:$SESSION:$ASKED_SESSION" "hold:$HOLD:$ASKED_HOLD"
+          "comment:$COMMENT:$ASKED_COMMENT"
