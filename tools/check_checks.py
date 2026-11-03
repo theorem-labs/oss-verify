@@ -37,6 +37,7 @@ import subprocess
 import tarfile
 import time
 import urllib.request
+import uuid
 import zipfile
 
 import check_build
@@ -361,9 +362,10 @@ def image_files(tag, paths, *, labels):
     the bytes of a file it leaves out pass through and are dropped, and so is each member's header once it is read."""
     if not paths:
         return {}
-    process = subprocess.Popen(["docker", "run", "--rm", "--network=none", *labels, "--entrypoint", "tar", tag, "-cf",
-                                "-", "--", *sorted(paths)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                               stderr=subprocess.DEVNULL)
+    name = f"oss-verify-check-{uuid.uuid4().hex}"
+    process = subprocess.Popen(["docker", "run", "--rm", "--name", name, "--network=none", *labels, "--entrypoint",
+                                "tar", tag, "-cf", "-", "--", *sorted(paths)], stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     files, kept = {}, 0
     try:
         with tarfile.open(fileobj=process.stdout, mode="r|") as archive:
@@ -377,14 +379,18 @@ def image_files(tag, paths, *, labels):
     except tarfile.TarError:
         pass
     finally:
-        # The tar is the project image's, so it may never stop writing: with the pipe closed, a tar that is still
-        # writing ends on its broken pipe, and one that does not is stopped.
+        # The tar is the project image's, so it may never stop writing. With the pipe closed, docker run ends on its
+        # broken pipe, and is stopped if it does not; but its container runs on without it, so it is removed. A tar
+        # that wrote its whole archive has ended with its container, unless it exits non-zero (GNU tar does, 2, for a
+        # path that is not there); then the container is already gone, and its removal does nothing.
         process.stdout.close()
         try:
             process.wait(timeout=60)
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()
+        if process.returncode != 0:
+            check_build.remove_containers(name)
     return files
 
 
@@ -694,7 +700,11 @@ def checks(job, tag, targets, work, raw, *, labels, ubsan=None, budget=BUDGET_MI
         step(f"--checks: {len(buildable)} breakages, at most {budget} minutes")
         jobs = max(1, int(os.environ.get("OVC_JOBS") or (os.cpu_count() or 2)))
         with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
-            list(pool.map(lambda pair: evaluate(ctx, pair[0], pair[1], record_targets), enumerate(buildable)))
+            try:
+                list(pool.map(lambda pair: evaluate(ctx, pair[0], pair[1], record_targets), enumerate(buildable)))
+            except (KeyboardInterrupt, SystemExit):
+                check_build.abandon(pool)
+                raise
     except Failed as failure:
         lines += [f"- **Breakages:** not measured: {code(str(failure), 1500)}", ""]
         return "\n".join(lines)

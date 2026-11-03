@@ -240,16 +240,23 @@ class ImageFiles(unittest.TestCase):
     bounded memory."""
 
     class Tar:
-        """A stand-in for `docker run ... tar -cf -`: its standard output is `data`."""
+        """A stand-in for `docker run ... tar -cf -`: its standard output is `data`, and it exits `code`; if `hangs`,
+        it does not end until it is killed."""
 
-        def __init__(self, data):
+        def __init__(self, data, code=0, hangs=False):
             import io
             self.stdout = io.BytesIO(data)
+            self.code, self.hangs = code, hangs
+            self.returncode = None
             self.waited = self.killed = False
 
         def wait(self, timeout=None):
+            import subprocess
             self.waited = True
-            return 0
+            if self.hangs and not self.killed:
+                raise subprocess.TimeoutExpired("docker", timeout)
+            self.returncode = -9 if self.killed else self.code
+            return self.returncode
 
         def kill(self):
             self.killed = True
@@ -270,16 +277,26 @@ class ImageFiles(unittest.TestCase):
                     archive.addfile(info, io.BytesIO(body))
         return data.getvalue()
 
-    def read(self, data, paths=("/src/a",), **limits):
+    def read(self, data, paths=("/src/a",), code=0, hangs=False, **limits):
+        """image_files on a tar that writes `data`. Keep the docker run it started in self.started, the containers it
+        removed in self.removed, and the stand-in in self.tar."""
         from unittest import mock
         limits = {"MAX_IMAGE_FILE_BYTES": check_checks.MAX_IMAGE_FILE_BYTES,
                   "MAX_IMAGE_BYTES": check_checks.MAX_IMAGE_BYTES, **limits}
-        tar = self.Tar(data)
-        with mock.patch.object(check_checks.subprocess, "Popen", lambda *args, **kwargs: tar), \
+        self.tar, self.started, self.removed = self.Tar(data, code, hangs), [], []
+        with mock.patch.object(check_checks.subprocess, "Popen", lambda argv, **kwargs: self.started.append(argv)
+                               or self.tar), \
+                mock.patch.object(check_checks.check_build, "remove_containers",
+                                  lambda *names: self.removed.extend(names)), \
                 mock.patch.multiple(check_checks, **limits):
             files = check_checks.image_files("tag", list(paths), labels=[])
-        self.assertTrue(tar.stdout.closed and tar.waited)
+        self.assertTrue(self.tar.stdout.closed and self.tar.waited)
         return files
+
+    def name(self):
+        """The name that image_files gave the container of its docker run."""
+        argv = self.started[-1]
+        return argv[argv.index("--name") + 1]
 
     def test_keeps_regular_files_within_the_limits(self):
         data = self.archive([("src/a", b"aaaa"), ("src/big", b"b" * 9), ("src/link", None), ("src/c", b"cccc"),
@@ -292,6 +309,27 @@ class ImageFiles(unittest.TestCase):
         data = self.archive([("src/a", b"aaaa")])
         self.assertEqual(self.read(data[:512 + 512] + b"\xff" * 2048), {"/src/a": b"aaaa"})
         self.assertEqual(self.read(b"not a tar file" * 100), {})
+
+    def test_a_container_that_may_run_on_is_removed(self):
+        """docker run ends on its broken pipe when image_files stops reading a tar that writes on (its image's tar is
+        the pull request's), and its container runs on without it: image_files removes it, by the name it gave it."""
+        self.assertEqual(self.read(b"garbage " * 1000, code=1), {})
+        self.assertTrue(self.name().startswith("oss-verify-check-"))
+        self.assertEqual(self.removed, [self.name()])
+
+    def test_a_client_that_does_not_end_is_killed_and_its_container_removed(self):
+        """A tar that writes its whole archive and then neither ends nor writes: docker run waits on it, so it is
+        killed, and the container that it leaves is removed."""
+        self.assertEqual(self.read(self.archive([("src/a", b"aaaa")]), hangs=True), {"/src/a": b"aaaa"})
+        self.assertTrue(self.tar.killed)
+        self.assertEqual(self.removed, [self.name()])
+
+    def test_a_tar_that_ended_well_leaves_nothing_to_remove(self):
+        self.assertEqual(self.read(self.archive([("src/a", b"aaaa")])), {"/src/a": b"aaaa"})
+        first = self.name()
+        self.assertEqual(self.removed, [])
+        self.read(self.archive([("src/a", b"aaaa")]))
+        self.assertNotEqual(self.name(), first)  # each container its own name, so no run removes another's
 
     def test_headers_without_end_hold_no_memory(self):
         """A tar that writes empty members without end (its image's tar is the pull request's): image_files keeps no

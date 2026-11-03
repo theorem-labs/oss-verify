@@ -451,11 +451,15 @@ def binary_checks(job, tag, toolchain, targets, entries, sources, work, *, label
             futures = {pool.submit(lambda job_dir: run_job(job_dir, toolchain, qemu, labels,
                                                            deadline - time.monotonic()), job_dir): key
                        for key, job_dir in jobs.items()}
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    results[futures[future]] = future.result()
-                except Failed as failure:
-                    failures[futures[future]] = str(failure)
+            try:
+                for future in concurrent.futures.as_completed(futures):
+                    try:
+                        results[futures[future]] = future.result()
+                    except Failed as failure:
+                        failures[futures[future]] = str(failure)
+            except (KeyboardInterrupt, SystemExit):
+                check_build.abandon(pool)
+                raise
     except Failed as failure:
         failures = {key: str(failure) for key in jobs}
 

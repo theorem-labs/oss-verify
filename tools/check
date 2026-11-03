@@ -57,6 +57,9 @@ It runs these steps:
 Everything is kept in ~/.cache/oss-verify-check/<name>, or in --dir if given. Each run replaces out/ there, so the
 binaries of an earlier run's other builds are gone after a run with --build.
 
+When it ends, however it ends (Ctrl-C, SIGTERM and SIGHUP among them), it removes each container it started that is
+still there: a container outlives its docker run client. Its containers keep no log on the Docker host.
+
 Security note: the project's Dockerfile is built with network access, as `docker build` would. Check a project from
 someone you don't trust on a machine with nothing to lose.
 
@@ -410,7 +413,8 @@ def main():
 
 
 if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    except KeyboardInterrupt:
-        sys.exit(130)
+    with check_build.containers_stopped():
+        try:
+            sys.exit(main())
+        except KeyboardInterrupt:
+            sys.exit(130)
