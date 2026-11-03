@@ -112,6 +112,19 @@ class Discovery(Scratch):
         self.assertTrue(manifest.has_symbol_table(self.dir / "out/target"))
         self.assertFalse(manifest.has_symbol_table(self.dir / "out/stripped"))
 
+    def test_a_symbol_table_past_any_file_is_no_symbol_table(self):
+        """The build writes $OUT, so the pull request chooses every byte of each file there. A symbol table, or its
+        strings, at an offset no file can reach is no symbol table: discover() goes on, rather than end tools/check
+        with a traceback that build.yaml reports as "does not build"."""
+        data = elf([(ENTRY, GLOBAL_FUNC, 1)])
+        headers = len(data) - 4 * 64  # the section headers: none, .symtab, .strtab, .shstrtab
+        for index, offset in ((2, 2 ** 63), (1, 2 ** 64 - 1)):
+            far = bytearray(data)
+            far[headers + index * 64 + 24:headers + index * 64 + 32] = offset.to_bytes(8, "little")  # sh_offset
+            self.assertFalse(manifest.is_fuzz_target(self.write(f"out/far{index}", bytes(far), 0o755)), index)
+        self.write("out/target", data, 0o755)
+        self.assertEqual(list(manifest.discover(self.dir / "out")), ["target"])
+
     def test_the_go_fuzz_targets_compile_lists(self):
         self.write("out/a", elf(symtab=False))
         self.write("out/b", elf(symtab=False))
