@@ -1709,6 +1709,104 @@ class Runs(unittest.TestCase):
         finally:
             check_binaries.syscall_shapes.check_trace = saved
 
+    def test_check_3_reads_each_result_of_check_2(self):
+        """whole_runs() on each result system_calls() can give: the whole runs, and no reason, when check 2 read the
+        runs; none, and check 2's reason, when it could not read them or raised. Check 3 then says which."""
+        opened = '7 openat(AT_FDCWD,"input.bin",O_RDONLY|O_LARGEFILE) = 3\n'
+        for n, text in {0: opened + "7 read(3,0x1,65536) = 6\n", 1: opened + "7 read(3,0x1,65536) = 7\n"}.items():
+            for name, value in ((f"l{n}.status", 0), (f"q{n}.status", 0), (f"q{n}.out", 0), (f"q{n}.err", 0)):
+                self.write(name, value)
+            (self.results / f"l{n}.trace").write_text(text)
+        verdict = {"calls": 12, "names": ["openat", "read", "exit_group"], "unmodeled": [], "exited": True,
+                   "verdict": "pass", "host_log": "present"}
+
+        def check_trace(model, text, **options):
+            if verdict.get("raises"):
+                raise TypeError("the trace is cut short")
+            return dict(verdict)
+
+        def check_2(model=object(), stale="", qemu=self.QEMU, results=self.results):
+            return check_binaries.guarded(check_binaries.system_calls, model, stale, qemu, "bin", self.inputs, results)
+
+        def check_3(calls):
+            return check_binaries.quiet_loud(True, "", self.inputs, self.results, *check_binaries.whole_runs(calls))
+
+        both = {check_binaries.EMPTY, "seed1"}
+        saved = check_binaries.syscall_shapes.check_trace
+        check_binaries.syscall_shapes.check_trace = check_trace
+        try:
+            # Check 2 read the runs: its list of whole runs, and no reason, whatever its result.
+            for result, change in (("pass", {}), ("stale", {"stale": "the rules are old"})):
+                calls = check_2(**change)
+                self.assertEqual((calls["result"], check_binaries.whole_runs(calls)), (result, (both, None)))
+            self.assertEqual(check_3(check_2())["result"], "pass")
+            verdict["unmodeled"] = [{"call": "uname", "why": "not in the model's table"}]
+            self.assertEqual((check_2()["result"], check_binaries.whole_runs(check_2())), ("fail", (both, None)))
+            verdict.update(unmodeled=[], exited=False)
+            calls = check_2()  # runs that decide nothing: a list, empty, and still no reason
+            self.assertEqual((calls["result"], check_binaries.whole_runs(calls)), ("error", (set(), None)))
+            self.assertIn("not a whole run of the input", check_3(calls)["detail"])
+            verdict.update(exited=True, raises=True)
+            # Check 2 could not read the runs, or raised: no list, and its detail as the reason.
+            unread = {"model": check_2(model="the model could not be read: no release.yaml"),
+                      "qemu": check_2(qemu="qemu-riscv64 version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)"),
+                      "trace": check_2(), "raised": check_2(results=None)}
+            for why, calls in unread.items():
+                with self.subTest(why=why):
+                    self.assertNotIn("whole", calls)
+                    self.assertEqual(check_binaries.whole_runs(calls), (set(), calls["detail"]))
+                    self.assertIn(f"(check 2: {calls['detail'][:40]}", check_3(calls)["detail"])
+                    self.assertNotIn("not a whole run", check_3(calls)["detail"])
+            self.assertIn("the trace could not be read", unread["trace"]["detail"])
+            self.assertTrue(unread["raised"]["detail"].startswith("system_calls: TypeError"))
+            self.assertEqual(check_binaries.whole_runs({"result": "error"}), (set(), "it gave no reason"))
+        finally:
+            check_binaries.syscall_shapes.check_trace = saved
+
+    def test_binary_checks_gives_check_3_the_reason_of_check_2(self):
+        """binary_checks() itself, with its docker and model steps replaced: with no model, check 2 reads no run, and
+        check 3 names check 2's reason, not that each run fell short of its input."""
+        from unittest import mock
+        import types
+        work = self.results / "work"
+        (work / "out" / "t").mkdir(parents=True)
+        (work / "out" / "t" / "t.plain").write_bytes(b"\x7fELF")
+
+        def release_model():
+            raise Failed("no release.yaml")
+
+        def run_job(job_dir, image, qemu, labels, seconds):  # one whole run of each binary, quiet and loud alike
+            results = job_dir / "results"
+            results.mkdir()
+            for kind in "lq":
+                (results / f"{kind}0.calls").write_text("exec\n")
+                (results / f"{kind}0.status").write_text("0\n")
+            for name in ("q0.out", "q0.err"):
+                (results / name).write_text("0\n")
+            return results
+
+        link = {"plain": {"uninstrumented": None, "instrumented": {"result": "plain"}}}
+        with mock.patch.object(model_release, "release_model", release_model), \
+                mock.patch.object(check_links, "read_compiles", lambda raw: {}), \
+                mock.patch.object(check_links, "analyse", lambda *arguments: link), \
+                mock.patch.multiple(check_binaries, record_of=lambda *arguments: ("no record", b"quiet"),
+                                    image_hashes=lambda *arguments, **options: {},
+                                    dwarf_reader=lambda *arguments: None, assembly_reader=lambda *arguments: None,
+                                    seed_inputs=lambda directory, target: [(check_binaries.EMPTY,
+                                                                            check_binaries.HEADER)],
+                                    qemu_version=lambda qemu: self.QEMU, run_job=run_job), \
+                mock.patch.object(check_binaries.check_checks, "qemu", lambda: "/bin/true"):
+            block, _ = check_binaries.binary_checks(types.SimpleNamespace(builds=["plain"], directory=work), "tag",
+                                                    "toolchain", ["t"], {"t": {"plain": {"file": "t.plain"}}}, {},
+                                                    work, labels=[])
+        checks = block["targets"]["t"]["plain"]
+        self.assertEqual(checks["system_calls"], {"result": "error",
+                                                  "detail": "the model could not be read: no release.yaml"})
+        agreement = checks["quiet_loud"]
+        self.assertEqual(agreement["result"], "error")
+        self.assertIn("check 2 could not tell whether the binary's run reached its input", agreement["detail"])
+        self.assertIn("(check 2: the model could not be read: no release.yaml)", agreement["detail"])
+
     def test_a_trace_that_cannot_be_read_fails_one_binary_only(self):
         self.write("l0.status", 0)
         (self.results / "l0.trace").write_text("7 exit_group(0)\n")

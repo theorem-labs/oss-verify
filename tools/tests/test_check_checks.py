@@ -377,6 +377,17 @@ class ImageFiles(unittest.TestCase):
         with mock.patch.object(check_checks.subprocess, "Popen", side_effect=AssertionError("ran")):
             self.assertEqual(check_checks.image_files("tag", [], labels=[]), {})
 
+    def test_the_report_names_the_files_not_read(self):
+        """A fuzz target's file that image_files() left out (past its limits, or missing) is named in the report, so
+        that its checks are not taken to be none."""
+        paths = ["/src/p/fuzz.c", "/src/p/huge_table.c", "/src/p/gone.c"]
+        self.assertEqual(check_checks.unread_lines(paths, {path: b"" for path in paths}), [])
+        lines = check_checks.unread_lines(paths, {"/src/p/fuzz.c": b"abort();"})
+        self.assertTrue(lines[0].startswith("- **Files not read:** 2, so no check in them is counted."))
+        self.assertIn("larger than 16 MiB", lines[0])
+        self.assertIn("past 256 MiB", lines[0])
+        self.assertEqual(lines[1:], ["  - `p/huge_table.c`", "  - `p/gone.c`"])
+
 
 class WorkflowArguments(unittest.TestCase):
     """What build.yaml, triage.yaml and enroll-dispatch.yml do with the credentials they hold, as far as their text

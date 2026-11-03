@@ -9,6 +9,7 @@
 tools/check imports this module; it is not run on its own.
 """
 import codecs
+import concurrent.futures
 import contextlib
 import dataclasses
 import hashlib
@@ -327,6 +328,24 @@ def abandon(pool):
     would run every job to its time limit before tools/check could end."""
     pool.shutdown(wait=False, cancel_futures=True)
     stop_containers()
+
+
+def in_threads(function, items, workers):
+    """function(item) for each of `items`, at most `workers` at once, each in a thread of its own: what each call
+    returned, or the exception it raised, in the order of `items`. If Ctrl-C, or a signal of containers_stopped(),
+    stops the wait, the calls are abandoned (abandon()) and it is raised again. Each pool of docker runs runs here."""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(function, item) for item in items]
+        try:
+            concurrent.futures.wait(futures)
+        except (KeyboardInterrupt, SystemExit):
+            abandon(pool)
+            raise
+    outcomes = []
+    for future in futures:
+        error = future.exception()
+        outcomes.append(error if error is not None else future.result())
+    return outcomes
 
 
 def _end(number, frame):

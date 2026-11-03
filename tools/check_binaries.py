@@ -31,7 +31,6 @@ Each result is pass, fail, error (the check could not decide), stale (above), pl
 for check 3, not-run (no quiet twin). What the step finds changes no exit status of tools/check. Its results go into
 the build manifest and its report into the --checks file.
 """
-import concurrent.futures
 import hashlib
 import os
 import pathlib
@@ -343,6 +342,16 @@ def quiet_loud(has_quiet, why_none, inputs, results, whole=None, unknown=None):
     return {"result": "pass", "detail": detail}
 
 
+def whole_runs(calls):
+    """What check 3 takes from check 2's result `calls`: (the inputs whose loud run was a whole run, why check 2 could
+    not tell or None). system_calls() lists the whole runs, perhaps none, in each result it reads the runs for: a pass,
+    a failure, a stale model, runs that decide nothing. It lists none when it could not read the runs at all (no model,
+    another qemu, a trace it could not read) or raised (guarded()), and then its detail is the reason."""
+    if "whole" in calls:
+        return set(calls["whole"]), None
+    return set(), calls.get("detail") or "it gave no reason"
+
+
 def guarded(check, *arguments):
     """One check's result, or an error that names what went wrong: a binary or a trace that a check cannot read gives
     that binary an error, and the step's other results stand."""
@@ -447,19 +456,17 @@ def binary_checks(job, tag, toolchain, targets, entries, sources, work, *, label
     try:
         qemu = check_checks.qemu()
         version = qemu_version(qemu)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, os.cpu_count() or 2)) as pool:
-            futures = {pool.submit(lambda job_dir: run_job(job_dir, toolchain, qemu, labels,
-                                                           deadline - time.monotonic()), job_dir): key
-                       for key, job_dir in jobs.items()}
-            try:
-                for future in concurrent.futures.as_completed(futures):
-                    try:
-                        results[futures[future]] = future.result()
-                    except Failed as failure:
-                        failures[futures[future]] = str(failure)
-            except (KeyboardInterrupt, SystemExit):
-                check_build.abandon(pool)
-                raise
+        keys = list(jobs)
+        outcomes = check_build.in_threads(
+            lambda key: run_job(jobs[key], toolchain, qemu, labels, deadline - time.monotonic()), keys,
+            max(1, os.cpu_count() or 2))
+        for key, outcome in zip(keys, outcomes):
+            if isinstance(outcome, Failed):
+                failures[key] = str(outcome)
+            elif isinstance(outcome, BaseException):
+                raise outcome
+            else:
+                results[key] = outcome
     except Failed as failure:
         failures = {key: str(failure) for key in jobs}
 
@@ -479,11 +486,8 @@ def binary_checks(job, tag, toolchain, targets, entries, sources, work, *, label
             if (target, build) in results:
                 calls = guarded(system_calls, model, shape_stale, version, binary, inputs[target],
                                 results[(target, build)])
-                # Check 2 lists the whole runs only when it could read the runs: with no list (no model, another
-                # qemu, a trace it could not read), check 3 says that check 2's reason is why no input decided.
-                unknown = None if "whole" in calls else calls.get("detail") or "it gave no reason"
                 agreement = guarded(quiet_loud, quiet[(target, build)] is not None, why_none, inputs[target],
-                                    results[(target, build)], set(calls.get("whole", [])), unknown)
+                                    results[(target, build)], *whole_runs(calls))
             else:
                 why = failures.get((target, build), "not run")
                 calls = {"result": "error", "detail": why}

@@ -473,10 +473,13 @@ class ContainerCleanup(unittest.TestCase):
     # two containers.
     DOCKER = ('#!/bin/sh\nprintf "%s\\n" "$*" >> "$DOCKER_LOG"\n'
               'case $1 in\n  run) exec sleep 30 ;;\n  ps) printf "c1\\nc2\\n" ;;\nesac\n')
-    # A run as tools/check's __main__ makes it, whose one step is a docker run. Ctrl-C as from a terminal, even if
-    # the tests run where SIGINT is ignored.
+    # A run as tools/check's __main__ makes it, whose one step is a docker run. Ctrl-C as from a terminal, and SIGHUP
+    # and SIGTERM at their defaults, even where the tests run with one ignored (nohup pytest): a child keeps an ignored
+    # signal ignored, and containers_stopped() then leaves it so.
     CHILD = ("import signal, subprocess, sys; sys.path.insert(0, sys.argv[1]); import check_build\n"
              "signal.signal(signal.SIGINT, signal.default_int_handler)\n"
+             "signal.signal(signal.SIGHUP, signal.SIG_DFL)\n"
+             "signal.signal(signal.SIGTERM, signal.SIG_DFL)\n"
              "with check_build.containers_stopped():\n"
              "    try:\n"
              "        subprocess.run(['docker', 'run', *check_build.work_label('/work'), 'image', 'compile'])\n"
@@ -586,6 +589,44 @@ class ContainerCleanup(unittest.TestCase):
             self.assertEqual(done.returncode, 0, done.stderr)
             self.assertRegex(log.read_text(encoding="utf-8"),
                              rf"\Aps -aq --filter label={check_build.RUN_LABEL}=[0-9a-f]{{32}}\nrm -f c1 c2\n\Z")
+
+    def test_in_threads_gives_each_result_or_error_in_order(self):
+        def job(n):
+            if n == 1:
+                raise check_build.Failed("no run")
+            return n * 10
+
+        first, second, third = check_build.in_threads(job, [0, 1, 2], 2)
+        self.assertEqual((first, third), (0, 20))
+        self.assertIsInstance(second, check_build.Failed)
+
+    def test_in_threads_abandons_its_calls_when_its_wait_is_stopped(self):
+        """Ctrl-C, or SIGTERM or SIGHUP through containers_stopped(), while in_threads() waits: no queued call starts,
+        the containers of the running one are stopped, and the stop is raised again. Both pools of docker runs, the
+        binaries' runs (check_binaries) and the breakages (check_checks), run in in_threads()."""
+        import threading
+        for stop in (KeyboardInterrupt(), SystemExit(143)):
+            with self.subTest(stop=type(stop).__name__):
+                running, released, started, stopped = threading.Event(), threading.Event(), [], []
+
+                def job(n):
+                    started.append(n)
+                    running.set()
+                    released.wait(20)  # until its container is removed
+
+                def wait(futures, *args, **kwargs):  # stopped once a call runs
+                    self.assertTrue(running.wait(20))
+                    raise stop
+
+                def stop_containers():
+                    stopped.append(True)
+                    released.set()
+
+                with mock.patch.object(check_build.concurrent.futures, "wait", wait), \
+                        mock.patch.object(check_build, "stop_containers", stop_containers), \
+                        self.assertRaises(type(stop)):
+                    check_build.in_threads(job, range(4), 1)
+                self.assertEqual((started, stopped), ([0], [True]))
 
     def test_abandon_starts_no_queued_job_and_stops_the_running_one(self):
         import concurrent.futures

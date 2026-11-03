@@ -23,7 +23,6 @@ no network. The coverage build needs compiler-rt's source for the toolchain's LL
 and checks.
 """
 import bisect
-import concurrent.futures
 import dataclasses
 import difflib
 import hashlib
@@ -506,6 +505,18 @@ def listed(items, limit=MAX_LISTED):
     return items[:limit] + ([f"  - and {len(items) - limit} more"] if len(items) > limit else [])
 
 
+def unread_lines(paths, files):
+    """The report's lines for the `paths` whose bytes image_files() did not give in `files`: no check in them is
+    counted, so the report names them rather than read them as files with no check. [] if it gave each one."""
+    unread = [path for path in paths if path not in files]
+    if not unread:
+        return []
+    return [f"- **Files not read:** {len(unread)}, so no check in them is counted. Each is missing from the project "
+            f"image, is not a regular file, is larger than {MAX_IMAGE_FILE_BYTES >> 20} MiB, or would take the files "
+            f"read past {MAX_IMAGE_BYTES >> 20} MiB.",
+            *listed([f"  - {code(shown(path))}" for path in unread], 20)]
+
+
 # ── the step ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 @dataclasses.dataclass
@@ -668,6 +679,7 @@ def checks(job, tag, targets, work, raw, *, labels, ubsan=None, budget=BUDGET_MI
     lines.append(f"- **Checks:** {len(properties)} property checks in "
                  f"{', '.join(code(shown(path)) for path in harness) or 'no file'}"
                  + (f", and {len(exempt)} stops marked `not a property`" if exempt else "") + ".")
+    lines += unread_lines(harness, sources)
     if unreached:
         lines.append(f"- **Checks that no seed input reaches:** {len(unreached)}. Step 3.3 asks for an input that "
                      "reaches each check. Add one to the seed corpus.")
@@ -699,12 +711,11 @@ def checks(job, tag, targets, work, raw, *, labels, ubsan=None, budget=BUDGET_MI
         buildable = [b for b in breakages if b.patch is not None]
         step(f"--checks: {len(buildable)} breakages, at most {budget} minutes")
         jobs = max(1, int(os.environ.get("OVC_JOBS") or (os.cpu_count() or 2)))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
-            try:
-                list(pool.map(lambda pair: evaluate(ctx, pair[0], pair[1], record_targets), enumerate(buildable)))
-            except (KeyboardInterrupt, SystemExit):
-                check_build.abandon(pool)
-                raise
+        # evaluate() records a Failed in its breakage, so an error here is a fault of this code's own.
+        for outcome in check_build.in_threads(lambda pair: evaluate(ctx, pair[0], pair[1], record_targets),
+                                              list(enumerate(buildable)), jobs):
+            if isinstance(outcome, BaseException):
+                raise outcome
     except Failed as failure:
         lines += [f"- **Breakages:** not measured: {code(str(failure), 1500)}", ""]
         return "\n".join(lines)
