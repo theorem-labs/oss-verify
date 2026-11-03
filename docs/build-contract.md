@@ -36,7 +36,7 @@ The statements use [Linux Process Semantics (LPS)](https://github.com/theorem-la
 
 A new toolchain image changes the bytes of each binary that it builds, and a proof is about specified bytes. Thus each project is built with one toolchain image, its vintage.
 
-* [infra/toolchains.tsv](../infra/toolchains.tsv) lists the published toolchain images, oldest first, and the languages that each one builds ([project-yaml.md](project-yaml.md#language)). Today it lists four images: the C and C++ image above, and the Rust, Python and Go toolchains of the same release. We add a new image only after its publication. Outside `projects/`, no other file names the digest of a toolchain image.
+* [infra/toolchains.tsv](../infra/toolchains.tsv) lists the published toolchain images, oldest first, and the languages that each one builds ([project-yaml.md](project-yaml.md#language)). Today it lists seven images: the C and C++ image above, and the Rust, Python and Go toolchains of the same release; then the C and C++, Rust and Python images with frame pointers ([below](#frame-pointers)), which are thus the newest for their languages. We add a new image only after its publication. Outside `projects/`, no other file names the digest of a toolchain image.
 * The builder gets the toolchain image as a build argument (`--build-arg TOOLCHAIN=<image>`). Its `Dockerfile` has no default, so a build without the argument fails.
 * `tools/check --lock` builds with the toolchain that the lock names. For a manifest, this is `builder.toolchain`. For a `harness.yaml` of oss-fuzz-theorems, it is the `build.builder` field of the `project.yaml` two directories above.
 * If you give more than one lock, the locks must name the same toolchain.
