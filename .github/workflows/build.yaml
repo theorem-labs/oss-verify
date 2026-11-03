@@ -1611,6 +1611,9 @@ jobs:
           TRUST: ${{ needs.route.outputs.trust }}
           REVIEW: ${{ needs.review.result }}
           HEAD_SHA: ${{ needs.project-builds.outputs.sha || needs.route.outputs.sha }}
+          # The run that holds it, which the comment names, so that a re-run of this run's failed jobs that posts a
+          # review takes its own hold off (route, and so its start time, is not re-run).
+          RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
           [[ $NUMBER =~ ^[1-9][0-9]*$ ]] || { echo "::error::not a number: $NUMBER"; exit 1; }
@@ -1639,8 +1642,9 @@ jobs:
           else
             why="It comes from, or holds the text of, an account without write access to this repository, so an automated screen reads it before the automated review does, and the screen did not pass it or could not read it. A maintainer will look at it."
           fi
-          printf '%s\n%s\n\n%s %s\n' '<!-- oss-verify-held -->' "**Automated review held.**" "$why" "$ask" \
-            > "$RUNNER_TEMP/held.md"
+          [[ $RUN_ID =~ ^[0-9]+$ ]] || { echo "::error::not a run id: $RUN_ID"; exit 1; }
+          printf '%s\n%s\n\n%s %s\n\n%s\n' '<!-- oss-verify-held -->' "**Automated review held.**" "$why" "$ask" \
+            "<!-- oss-verify-held-run $RUN_ID -->" > "$RUNNER_TEMP/held.md"
           # Adding a label that does not exist makes it, so a failed creation (two holds at once) only loses the colour.
           if ! gh api "repos/$REPO/labels/$HELD_LABEL" --jq .name > /dev/null 2>&1; then
             gh api --method POST "repos/$REPO/labels" -f name="$HELD_LABEL" -f color=d93f0b \
@@ -1699,8 +1703,9 @@ jobs:
           echo "posted=true" >> "$GITHUB_OUTPUT"
 
       # A review replaces a hold: one a maintainer started, or a later push that the screen passed; for an issue, a
-      # review that made its draft. The label comes off, and the hold comment goes. Not when a hold came after this
-      # run started: a newer event of the pull request or the issue was held, in a run of its own.
+      # review that made its draft. The label comes off, and the hold comment goes. Not when another run's hold came
+      # after this run started: a newer event of the pull request or the issue was held, in a run of its own. This
+      # run's own hold, from an attempt before a re-run of its failed jobs, counts as older whatever its time.
       - name: Take the label review-held off
         if: steps.post.outputs.posted == 'true' || (env.HOLDING != 'true' && env.KIND == 'issue')
         env:
@@ -1708,19 +1713,24 @@ jobs:
           REPO: ${{ github.repository }}
           NUMBER: ${{ github.event.pull_request.number || inputs.pr || inputs.issue || github.event.issue.number }}
           STARTED: ${{ needs.route.outputs.started }}
+          RUN_ID: ${{ github.run_id }}
         run: |
           set -uo pipefail
           [[ $NUMBER =~ ^[1-9][0-9]*$ ]] || { echo "::error::not a number: $NUMBER"; exit 1; }
+          [[ $RUN_ID =~ ^[0-9]+$ ]] || { echo "::error::not a run id: $RUN_ID"; exit 1; }
           [[ $STARTED =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
             || { echo "::error::no start time of this run"; exit 1; }
           held=$(gh api "repos/$REPO/issues/$NUMBER/comments" --paginate \
-            --jq '.[] | select(.user.login == "oss-verify[bot]" and (.body | startswith("<!-- oss-verify-held -->"))) | "\(.id) \(.updated_at)"') \
-            || { echo "::error::the comments could not be read"; exit 1; }
-          last=$(cut -d' ' -f2 <<< "$held" | sort | tail -n 1)
-          if [[ -n $last && ! $last < $STARTED ]]; then
-            echo "#$NUMBER was held at $last, after this run started at $STARTED: the label and the hold comment stay."
-            exit 0
-          fi
+            --jq '.[] | select(.user.login == "oss-verify[bot]" and (.body | startswith("<!-- oss-verify-held -->")))
+              | "\(.id) \(.updated_at) \((.body | capture("\n<!-- oss-verify-held-run (?<r>[0-9]+) -->\n?$") | .r) // "-")"') \
+            || { echo "::error::the comments of #$NUMBER could not be read"; exit 1; }
+          while read -r _ at run; do
+            [ -n "${at:-}" ] && [ "$run" != "$RUN_ID" ] || continue
+            if [[ ! $at < $STARTED ]]; then
+              echo "#$NUMBER was held at $at by run $run, after this run started at $STARTED: the label and the hold comment stay."
+              exit 0
+            fi
+          done <<< "$held"
           out=$(gh api --method DELETE "repos/$REPO/issues/$NUMBER/labels/$HELD_LABEL" 2>&1) \
             || [[ $out == *"(HTTP 404)"* ]] || { echo "::error::the label $HELD_LABEL could not be taken off: $out"; exit 1; }
           while read -r id _; do

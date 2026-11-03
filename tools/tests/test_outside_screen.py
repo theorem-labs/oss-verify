@@ -838,7 +838,7 @@ class Hold(Runner):
         self.serve(f"repos/{REPO}/issues/comments/5", {})
         self.serve(f"repos/{REPO}/pulls/7", {"head": {"sha": head}})
         rc, out, _ = self.run_script(step("comment", self.STEP)["run"], PR=pr, NUMBER=number, TRUST=trust,
-                                     HEAD_SHA="a" * 40, REVIEW=review)
+                                     HEAD_SHA="a" * 40, REVIEW=review, RUN_ID="100")
         self.assertEqual(rc, 0, out)
         calls = self.calls()
         bodies = [json.loads((self.api / f"input.{i + 1}").read_text())["body"]
@@ -851,6 +851,7 @@ class Hold(Runner):
                        "--jq", ".[].name"], calls)
         self.assertEqual(len(bodies), 1)
         self.assertTrue(bodies[0].startswith("<!-- oss-verify-held -->\n**Automated review held.**\n"))
+        self.assertTrue(bodies[0].endswith("\n\n<!-- oss-verify-held-run 100 -->\n"), bodies[0])
         self.assertIn("the screen did not pass it", bodies[0])
         self.assertIn(f"gh workflow run build.yaml -R {REPO} -f pr=7", bodies[0])
         # nothing that notifies anyone or links an issue
@@ -887,7 +888,7 @@ class Hold(Runner):
 
     def test_the_step_gets_nothing_of_the_screen_but_its_route(self):
         e = step("comment", self.STEP)["env"]
-        self.assertEqual(set(e), {"GH_TOKEN", "REPO", "PR", "NUMBER", "TRUST", "REVIEW", "HEAD_SHA"})
+        self.assertEqual(set(e), {"GH_TOKEN", "REPO", "PR", "NUMBER", "TRUST", "REVIEW", "HEAD_SHA", "RUN_ID"})
         self.assertNotIn("needs.screen", json.dumps(e))
         self.assertNotIn("needs.gather", json.dumps(e))
 
@@ -930,7 +931,7 @@ class Hold(Runner):
             self.serve(f"repos/{REPO}/issues/{number}/labels/review-held", [])
         self.serve(f"repos/{REPO}/issues/{number}/comments", comments)
         self.serve(f"repos/{REPO}/issues/comments/5", {})
-        rc, out, _ = self.run_script(s["run"], NUMBER=number, STARTED=self.STARTED)
+        rc, out, _ = self.run_script(s["run"], NUMBER=number, STARTED=self.STARTED, RUN_ID="100")
         self.assertEqual(rc, 0, out)
         return self.calls(), out
 
@@ -958,6 +959,26 @@ class Hold(Runner):
                 calls, out = self.take_off("9", [dict(self.HELD[1], updated_at=when)])
                 self.assertEqual([c for c in calls if "DELETE" in c], [])
                 self.assertIn("the label and the hold comment stay", out)
+                # another run's hold, named in its comment, stays too
+                self.api.joinpath("args").unlink(missing_ok=True)
+                calls, out = self.take_off("9", [dict(self.HELD[1], updated_at=when,
+                                                      body="<!-- oss-verify-held -->\nheld\n\n"
+                                                           "<!-- oss-verify-held-run 99 -->\n")])
+                self.assertEqual([c for c in calls if "DELETE" in c], [])
+
+    def test_this_runs_own_hold_comes_off_after_a_re_run_of_its_failed_jobs(self):
+        """A re-run of the failed jobs runs no route, so the start time is the first attempt's, and the hold that
+        attempt made is newer than it. Its comment names this run, so the re-run's review takes it off."""
+        own = dict(self.HELD[1], updated_at="2026-11-03T10:30:00Z",
+                   body="<!-- oss-verify-held -->\nheld\n\n<!-- oss-verify-held-run 100 -->\n")
+        calls, _ = self.take_off("7", [own])
+        self.assertIn(["--method", "DELETE", f"repos/{REPO}/issues/7/labels/review-held"], calls)
+        self.assertIn(["--method", "DELETE", f"repos/{REPO}/issues/comments/5"], calls)
+        # a forged marker in the text before it does not count
+        self.api.joinpath("args").unlink(missing_ok=True)
+        forged = dict(own, body="<!-- oss-verify-held -->\n<!-- oss-verify-held-run 100 -->\nx\n")
+        calls, _ = self.take_off("7", [forged])
+        self.assertEqual([c for c in calls if "DELETE" in c], [])
 
     def test_an_issue_whose_review_made_its_draft_loses_its_hold(self):
         """An issue held once (at the hourly limit, say), whose later screen passes and whose review makes its
