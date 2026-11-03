@@ -45,7 +45,11 @@ name: "Build"
 #            trust is `screen` unless the author and that account both have write access (`writer`, and the gather
 #            job still screens the text of others). The account's rescreens count toward OUTSIDE_HOURLY_LIMIT with
 #            its own events, so at the limit it is `limit` again, and the hold comment says from when it is tried
-#            next. A hold of the screen is never screened again this way: a person decides.
+#            next. A hold of the screen is never screened again this way: a person decides. A rescreen that settles
+#            nothing (no review posted, no new hold: its route could not read GitHub, say) leaves the hold as it was;
+#            the item is started again while fewer than REVIEW_TRIES rescreens of it ran since that hold, and at
+#            REVIEW_TRIES review-rescreen.yml rewrites the hold comment to say that a person with write access will
+#            look at it, with no marker that is tried again, and fails its run once so that someone sees it.
 #   gather   gathers what the review reads, once, with .github/scripts/review-gather (below), and keeps it as the
 #            artifact review-data, which the screen and the review take only by its SHA-256
 #            (.github/scripts/take-review-data): the review reads exactly what the screen passed. It holds no model,
@@ -382,15 +386,17 @@ env:
   # held. review-rescreen.yml keeps the same number, which tools/tests checks.
   OUTSIDE_HOURLY_LIMIT: "3"
   # The most reviews that a clean screen lets run with no person in one hour, whatever account: many accounts each
-  # under OUTSIDE_HOURLY_LIMIT still cannot start model runs without limit. The review job stops before the model at
-  # it (.github/scripts/screened-review-cap), and the comment job holds the item.
+  # under OUTSIDE_HOURLY_LIMIT still cannot start model runs without limit. The review job counts them
+  # (.github/scripts/screened-review-cap) and stops before the model at it, and the comment job holds the item. A
+  # count that could not read GitHub fails too, and the item is held as a review that did not finish.
   SCREENED_HOURLY_CAP: "6"
   # The label a held pull request or issue gets, and the marker of the comment that says so.
   HELD_LABEL: review-held
   # The most times the review of an outsider's item that the screen passed may fail, or run out of time, before a
   # person decides: each such hold is tried again with no person (review-rescreen.yml), and the third one is not. A
   # review stopped at SCREENED_HOURLY_CAP is not such a failure, and is tried again whatever this number: the cap is
-  # not the item's.
+  # not the item's. It is also the most rescreens of one hold that settle nothing (neither post a review nor hold the
+  # item again) before a person decides. review-rescreen.yml keeps the same number, which tools/tests checks.
   REVIEW_TRIES: "3"
 
 concurrency:
@@ -1223,7 +1229,13 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           CAP: 6
         run: .github/scripts/issue-draft-cap
-      - name: Hold a screened review at the hourly cap
+      # The hourly cap on screened reviews, in two steps, so that the comment job can tell a review held at the cap
+      # from one that did not finish. The count fails only when it cannot read GitHub (or the cap is not a number):
+      # the hold step is then skipped, and the item is held as a review that did not finish, tried again under
+      # REVIEW_TRIES. The hold step fails only at the cap. Keep the hold step's name: screened-review-cap and the
+      # comment job find a review held at the cap by it.
+      - name: Count the screened reviews of the last hour
+        id: cap-count
         if: needs.gather.outputs.screen != 'false'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1231,6 +1243,18 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           CAP: ${{ env.SCREENED_HOURLY_CAP }}
         run: .github/scripts/screened-review-cap
+      - name: Hold a screened review at the hourly cap
+        if: needs.gather.outputs.screen != 'false'
+        env:
+          COUNT: ${{ steps.cap-count.outputs.count }}
+          CAP: ${{ env.SCREENED_HOURLY_CAP }}
+        run: |
+          set -euo pipefail
+          if (( COUNT >= CAP )); then
+            echo "::error::HELD: $COUNT screened reviews ran in the last hour, at the cap of $CAP. No model ran. A person can start the review by hand."
+            exit 1
+          fi
+          echo "$COUNT screened reviews ran in the last hour, under the cap of $CAP."
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2 (sha-pinned)
         with: {name: review-data, path: "${{ runner.temp }}/review-data"}
       # .review/, projects/<name>/ and the last review's session, as the gather job kept them, by their SHA-256: for a
@@ -1784,9 +1808,12 @@ jobs:
           elif [ "$REVIEW" = failure ] || [ "$REVIEW" = cancelled ]; then
             # An outsider's item (trust screen) is tried again: at the cap, or after a review that failed or ran out
             # of time (cancelled: a newer push cancels the whole run, and then this job does not run). A writer's item
-            # whose screen read the text of others is its writer's to start again.
+            # whose screen read the text of others is its writer's to start again. At the cap means the review job's
+            # step "Hold a screened review at the hourly cap" failed, which it does at the cap alone: a count that
+            # could not read GitHub fails the step before it and skips this one, and is a review that did not finish.
             capped=$(GH_TOKEN=$RUN_TOKEN gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs" \
-              --jq '.jobs[] | .steps[]? | select(.name == "Hold a screened review at the hourly cap" and .conclusion == "failure") | .name') \
+              --jq '.jobs[] | select(.name == "review") | .steps[]?
+                    | select(.name == "Hold a screened review at the hourly cap" and .conclusion == "failure") | .name') \
               || { echo "::warning::the jobs of this run could not be read: the hold counts as a review that did not finish."; capped=""; }
             if [ -n "$capped" ]; then
               why="It comes from, or holds the text of, an account without write access to this repository. The automated screen passed it, but the automated reviews of such items had reached their limit of $SCREENED_HOURLY_CAP an hour."

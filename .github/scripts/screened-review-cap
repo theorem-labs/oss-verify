@@ -2,48 +2,51 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 #
-# The hourly cap on the reviews that a clean screen lets run with no person (build.yaml, the review job's step "Hold a
-# screened review at the hourly cap"):
+# Counts the reviews that a clean screen let run with no person in the last hour, for the hourly cap on them
+# (build.yaml, the review job's step "Count the screened reviews of the last hour"):
 #
 #   GH_TOKEN=<token with actions: read> REPO=<owner>/<name> RUN_ID=<this run's id> CAP=<reviews an hour> \
 #     .github/scripts/screened-review-cap
 #
 # OUTSIDE_HOURLY_LIMIT holds one account; many accounts could still start many screened reviews, each a model run.
 # This counts this workflow's other runs made in the last hour whose screen job passed and whose review job ran, in any
-# state but skipped, and was not stopped by this step. A run whose jobs have not finished yet counts. Under CAP it exits
-# 0. At CAP or over, and when any read fails, it prints `::error::HELD: ...` and exits 1: the review job fails before
-# the model, and the comment job holds the pull request or the issue for a person.
+# state but skipped, and was stopped neither at the cap nor by a count of its own that failed. A run whose jobs have
+# not finished yet counts. It stops counting at CAP, writes count=<n> to GITHUB_OUTPUT and exits 0; the next step,
+# "Hold a screened review at the hourly cap", fails at CAP or over, and only there, so that the comment job can tell a
+# review held at the cap (tried again whatever REVIEW_TRIES) from one that did not finish. When CAP is not a number or
+# a read fails, this prints `::error::` and exits 1: the review job fails before the model, the hold step is skipped,
+# and the comment job holds the item as a screened review that did not finish (tried again under REVIEW_TRIES).
 set -uo pipefail
 cap=${CAP:-}
-held() {
-  echo "::error::HELD: $1 A person can start the review by hand."
+fail() {
+  echo "::error::$1 No model ran. A person can start the review by hand."
   exit 1
 }
-[[ $cap =~ ^[1-9][0-9]*$ ]] || held "the cap is not a number."
-since=$(date -u -d '-1 hour' +%Y-%m-%dT%H:%M:%SZ) || held "the time an hour ago could not be read."
+[[ $cap =~ ^[1-9][0-9]*$ ]] || fail "the cap is not a number."
+since=$(date -u -d '-1 hour' +%Y-%m-%dT%H:%M:%SZ) || fail "the time an hour ago could not be read."
 if ! runs=$(gh api --method GET --paginate "repos/$REPO/actions/workflows/build.yaml/runs" \
     -f created=">=$since" -F per_page=100 --jq '.workflow_runs[].id'); then
-  held "the runs of the last hour could not be read."
+  fail "the runs of the last hour could not be read."
 fi
 count=0
 for id in $runs; do
-  [[ $id =~ ^[0-9]+$ ]] || held "the runs API gave a run id that is not a number."
+  [[ $id =~ ^[0-9]+$ ]] || fail "the runs API gave a run id that is not a number."
   [ "$id" = "${RUN_ID:-}" ] && continue
   # shellcheck disable=SC2016 # $screened is jq's
   if ! ran=$(gh api "repos/$REPO/actions/runs/$id/jobs?per_page=100" \
       --jq '([.jobs[] | select(.name == "screen" and .conclusion == "success")] | length) as $screened
             | [.jobs[] | select(.name == "review" and .conclusion != "skipped")
-               | select(any(.steps[]?; .name == "Hold a screened review at the hourly cap"
+               | select(any(.steps[]?; (.name == "Hold a screened review at the hourly cap"
+                                        or .name == "Count the screened reviews of the last hour")
                                        and .conclusion == "failure") | not)]
             | if $screened > 0 then length else 0 end'); then
-    held "the jobs of run $id could not be read."
+    fail "the jobs of run $id could not be read."
   fi
-  [[ $ran =~ ^[0-9]+$ ]] || held "the jobs of run $id could not be read."
+  [[ $ran =~ ^[0-9]+$ ]] || fail "the jobs of run $id could not be read."
   if (( ran > 0 )); then
     count=$((count + 1))
   fi
-  if (( count >= cap )); then
-    held "$count screened reviews ran in the last hour, at the cap of $cap."
-  fi
+  (( count < cap )) || break
 done
-echo "$count screened reviews ran in the last hour, under the cap of $cap."
+echo "count=$count" >> "${GITHUB_OUTPUT:?}"
+echo "$count screened reviews ran in the last hour; the cap is $cap."

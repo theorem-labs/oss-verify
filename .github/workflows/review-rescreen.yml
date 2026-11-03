@@ -8,6 +8,11 @@ name: "Review rescreen"
 # of build.yaml), whose route reads the item, its hold and the account again from the API: the item is screened, then
 # reviewed, as for an event; at the limit it is held again, and its hold comment says from when it is tried next. A
 # hold of the screen is never screened again this way: a person decides on it.
+# A rescreen that settles nothing (it posts no review and holds the item no new time: its route could not read GitHub,
+# say) leaves the hold as it was, and the item is started again while fewer than REVIEW_TRIES rescreens of it ran since
+# that hold. At REVIEW_TRIES the job rewrites the item's hold comment in fixed words, with no marker that is tried
+# again: it was screened again that many times without settling, and a person with write access will look at it. The
+# item is then no longer started, and the job fails that once, so that someone sees it.
 #
 # It is its own workflow, not a schedule of build.yaml: each completed Build run starts enroll-dispatch.yml and
 # review-rerun.yml, and reports the required check project-builds on its commit, so a scheduled Build run every 15
@@ -15,9 +20,14 @@ name: "Review rescreen"
 #
 # Its job is the only one in this repository that starts build.yaml with rescreen=true, and it holds actions: write
 # for that alone (a run that a dispatch with its token starts has github-actions[bot] as its actor, which build.yaml's
-# route accepts for a rescreen only). It reads the held items, their comments and build.yaml's runs, checks out main's
-# .github/scripts, holds no secret and no identity token, and runs no code of a pull request. It runs only in
-# theorem-labs/oss-verify: a fork that keeps this file starts nothing.
+# route accepts for a rescreen only). It holds issues: write and pull-requests: write for the rewrite of a hold comment
+# at REVIEW_TRIES alone: the comment is oss-verify[bot]'s, and this job holds no key of that App, so it edits the
+# comment with its own token, which those permissions allow on any comment of this repository; the comment stays the
+# App's, which the comment job finds, replaces and deletes by. Giving this job the App's key would need the
+# environment comment and its identity, which only build.yaml's comment and hold jobs have. A comment of its own
+# beside the hold would leave the hold's promise of an automatic screen in place. It reads the held items, their
+# comments and build.yaml's runs, checks out main's .github/scripts, holds no secret and no identity token, and runs no
+# code of a pull request. It runs only in theorem-labs/oss-verify: a fork that keeps this file starts nothing.
 # The cost in GitHub Actions: one job of a few seconds every 15 minutes, 96 billed minutes a day on a standard runner,
 # which GitHub does not bill in a public repository; and the build.yaml runs it starts, at most OUTSIDE_HOURLY_LIMIT an
 # hour for each account with held items.
@@ -35,6 +45,7 @@ concurrency:
 env:
   # build.yaml's own values, which tools/tests checks are the same.
   OUTSIDE_HOURLY_LIMIT: "3"
+  REVIEW_TRIES: "3"
   HELD_LABEL: review-held
 
 jobs:
@@ -45,8 +56,8 @@ jobs:
     permissions:
       actions: write        # to start build.yaml, and to read its runs
       contents: read        # the checkout of main's .github/scripts
-      issues: read          # the held issues and pull requests, and their comments
-      pull-requests: read   # the comments of a held pull request
+      issues: write         # the held items and their comments, and the rewrite of a hold comment at REVIEW_TRIES
+      pull-requests: write  # the same, on a held pull request
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with:
