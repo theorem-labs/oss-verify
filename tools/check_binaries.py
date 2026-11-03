@@ -31,7 +31,6 @@ Each result is pass, fail, error (the check could not decide), stale (above), pl
 for check 3, not-run (no quiet twin). What the step finds changes no exit status of tools/check. Its results go into
 the build manifest and its report into the --checks file.
 """
-import concurrent.futures
 import hashlib
 import os
 import pathlib
@@ -300,10 +299,12 @@ def system_calls(model, stale, qemu, binary, inputs, results):
     return result
 
 
-def quiet_loud(has_quiet, why_none, inputs, results, whole=None):
+def quiet_loud(has_quiet, why_none, inputs, results, whole=None, unknown=None):
     """Check 3 for one binary from its runs. `whole` holds the names of the inputs whose loud run was a whole run of
     that input (system_calls); None means every run counts. A run that died before it reached its input writes
-    nothing either, so it decides nothing here."""
+    nothing either, so it decides nothing here. `unknown`, if given, is why check 2 could not tell which runs were
+    whole at all (its detail): then no run was shown to be whole, and the result says that, not that each run fell
+    short of its input."""
     if not has_quiet:
         return {"result": "not-run", "detail": f"no quiet twin: {why_none}"}
     differ, noisy, undecided, agreed = [], [], [], 0
@@ -324,17 +325,31 @@ def quiet_loud(has_quiet, why_none, inputs, results, whole=None):
         if written:
             noisy.append(f"{name}: the quiet twin wrote {written} bytes")
         if whole is not None and name not in whole:
-            undecided.append(f"{name}: the binary's run was not a whole run of the input")
+            undecided.append(f"{name}: " + ("check 2 could not tell whether the binary's run reached its input"
+                                            if unknown else "the binary's run was not a whole run of the input"))
         elif loud == silent and not written:
             agreed += 1
     if differ or noisy:
         return {"result": "fail", "detail": "; ".join((differ + noisy)[:MAX_LISTED])}
     if not agreed:
-        return {"result": "error", "detail": "no input decided: " + "; ".join(undecided[:MAX_LISTED])}
+        detail = "no input decided: " + "; ".join(undecided[:MAX_LISTED])
+        if unknown:
+            detail += f" (check 2: {unknown})"
+        return {"result": "error", "detail": detail}
     detail = f"the same status on {agreed} inputs, and the quiet twin wrote nothing"
     if undecided:
         detail += "; not decided: " + "; ".join(undecided[:MAX_LISTED])
     return {"result": "pass", "detail": detail}
+
+
+def whole_runs(calls):
+    """What check 3 takes from check 2's result `calls`: (the inputs whose loud run was a whole run, why check 2 could
+    not tell or None). system_calls() lists the whole runs, perhaps none, in each result it reads the runs for: a pass,
+    a failure, a stale model, runs that decide nothing. It lists none when it could not read the runs at all (no model,
+    another qemu, a trace it could not read) or raised (guarded()), and then its detail is the reason."""
+    if "whole" in calls:
+        return set(calls["whole"]), None
+    return set(), calls.get("detail") or "it gave no reason"
 
 
 def guarded(check, *arguments):
@@ -441,15 +456,17 @@ def binary_checks(job, tag, toolchain, targets, entries, sources, work, *, label
     try:
         qemu = check_checks.qemu()
         version = qemu_version(qemu)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, os.cpu_count() or 2)) as pool:
-            futures = {pool.submit(lambda job_dir: run_job(job_dir, toolchain, qemu, labels,
-                                                           deadline - time.monotonic()), job_dir): key
-                       for key, job_dir in jobs.items()}
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    results[futures[future]] = future.result()
-                except Failed as failure:
-                    failures[futures[future]] = str(failure)
+        keys = list(jobs)
+        outcomes = check_build.in_threads(
+            lambda key: run_job(jobs[key], toolchain, qemu, labels, deadline - time.monotonic()), keys,
+            max(1, os.cpu_count() or 2))
+        for key, outcome in zip(keys, outcomes):
+            if isinstance(outcome, Failed):
+                failures[key] = str(outcome)
+            elif isinstance(outcome, BaseException):
+                raise outcome
+            else:
+                results[key] = outcome
     except Failed as failure:
         failures = {key: str(failure) for key in jobs}
 
@@ -470,7 +487,7 @@ def binary_checks(job, tag, toolchain, targets, entries, sources, work, *, label
                 calls = guarded(system_calls, model, shape_stale, version, binary, inputs[target],
                                 results[(target, build)])
                 agreement = guarded(quiet_loud, quiet[(target, build)] is not None, why_none, inputs[target],
-                                    results[(target, build)], set(calls.get("whole", [])))
+                                    results[(target, build)], *whole_runs(calls))
             else:
                 why = failures.get((target, build), "not run")
                 calls = {"result": "error", "detail": why}

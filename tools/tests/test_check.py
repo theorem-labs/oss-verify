@@ -5,10 +5,12 @@ import contextlib
 import importlib.machinery
 import importlib.util
 import io
+import os
 import pathlib
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -378,6 +380,271 @@ class ProjectTag(unittest.TestCase):
 
     def test_the_suffix_stays_last(self):
         self.assertTrue(self.tag({"project.yaml": "repo: x\n"}, suffix="-twice").endswith("-twice"))
+
+
+class TreeHash(unittest.TestCase):
+    """check_build.tree_hash, which names the builder image and the project image: one tree, one hash."""
+
+    def hash_of(self, files, links=()):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = pathlib.Path(scratch)
+            for name, data in files.items():
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_bytes(data)
+            for name, target in links:
+                (root / name).symlink_to(target)
+            return check_build.tree_hash(root)
+
+    def test_a_file_cannot_pass_for_two(self):
+        # Without lengths, the stream of a, with these bytes, was the stream of the files a and b.
+        self.assertNotEqual(self.hash_of({"a": b"x", "b": b"y"}), self.hash_of({"a": b"x\0b\x000\0y"}))
+
+    def test_the_same_tree_gives_the_same_hash(self):
+        files = {"Dockerfile": b"FROM a\n", "sub/build.sh": b"true\n"}
+        self.assertEqual(self.hash_of(files), self.hash_of(dict(files)))
+        self.assertNotEqual(self.hash_of(files), self.hash_of({**files, "sub/build.sh": b"false\n"}))
+        self.assertNotEqual(self.hash_of(files), self.hash_of({"Dockerfile": b"FROM a\n", "sub/build.SH": b"true\n"}))
+
+    def test_bytecode_caches_are_left_out(self):
+        files = {"tool.py": b"print(1)\n"}
+        self.assertEqual(self.hash_of(files), self.hash_of({**files, "__pycache__/tool.pyc": b"\0\0"}))
+
+    def test_a_link_counts_as_its_text(self):
+        # docker build sends a link as a link: the hash is of where it points, never of the file it reaches, and a
+        # link to a directory counts too.
+        files = {"target": b"data"}
+        link = self.hash_of(files, links=[("alias", "target")])
+        self.assertNotEqual(link, self.hash_of({**files, "alias": b"data"}))
+        self.assertNotEqual(link, self.hash_of(files, links=[("alias", "elsewhere")]))
+        self.assertNotEqual(self.hash_of(files), self.hash_of(files, links=[("dir", "/etc")]))
+
+
+class CacheLock(unittest.TestCase):
+    """check_build.cache_lock: one run at a time fills a cache entry."""
+
+    def test_a_second_holder_waits(self):
+        import fcntl
+        with tempfile.TemporaryDirectory() as scratch:
+            entry = pathlib.Path(scratch) / "model" / COMMIT
+            with check_build.cache_lock(entry):
+                with open(entry.parent / f"{entry.name}.lock", "a") as other:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with open(entry.parent / f"{entry.name}.lock", "a") as other:
+                fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)  # released: no wait
+                fcntl.flock(other, fcntl.LOCK_UN)
+
+    def test_validate_runs_without_fcntl(self):
+        """fcntl is POSIX only. tools/validate.py, and the triage preview of CONTRIBUTING.md, import check_build, so it
+        must import, and validate, where there is no fcntl (as on Windows); only cache_lock needs it."""
+        code = ("import sys; sys.modules['fcntl'] = None; sys.path.insert(0, sys.argv[1]);"
+                " import check_build, validate;"
+                " problems, _, summary = validate.check_project(validate.PROJECTS / 'bzip2');"
+                " print(problems, bool(summary))")
+        done = subprocess.run([sys.executable, "-c", code, str(TOOLS)], capture_output=True, text=True)
+        self.assertEqual((done.returncode, done.stdout.strip()), (0, "[] True"), done.stderr)
+
+    def test_the_model_is_fetched_once_under_the_lock(self):
+        import fcntl
+        import model_release
+        calls = []
+        with tempfile.TemporaryDirectory() as scratch:
+            cache = pathlib.Path(scratch)
+            home = cache / "model" / COMMIT
+
+            def clone(repository, commit, checkout):
+                with open(home.parent / f"{home.name}.lock", "a") as other:
+                    with self.assertRaises(BlockingIOError):  # fetch() holds the entry's lock while git writes
+                        fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                checkout.mkdir(parents=True, exist_ok=True)
+                calls.append((repository, commit))
+
+            with mock.patch.object(check_build, "clone", clone):
+                self.assertEqual(model_release.fetch("https://github.com/o/m", COMMIT, cache), home)
+                self.assertEqual(model_release.fetch("https://github.com/o/m", COMMIT, cache), home)
+            self.assertEqual(calls, [("https://github.com/o/m", COMMIT)])
+
+
+class ContainerCleanup(unittest.TestCase):
+    """A container outlives its docker run client: tools/check removes the containers it started when it ends, however
+    it ends, and they keep no log on the Docker host."""
+
+    # A stand-in for docker on PATH: it logs each command; `docker run` runs until it is killed, and `docker ps` lists
+    # two containers.
+    DOCKER = ('#!/bin/sh\nprintf "%s\\n" "$*" >> "$DOCKER_LOG"\n'
+              'case $1 in\n  run) exec sleep 30 ;;\n  ps) printf "c1\\nc2\\n" ;;\nesac\n')
+    # A run as tools/check's __main__ makes it, whose one step is a docker run. Ctrl-C as from a terminal, and SIGHUP
+    # and SIGTERM at their defaults, even where the tests run with one ignored (nohup pytest): a child keeps an ignored
+    # signal ignored, and containers_stopped() then leaves it so.
+    CHILD = ("import signal, subprocess, sys; sys.path.insert(0, sys.argv[1]); import check_build\n"
+             "signal.signal(signal.SIGINT, signal.default_int_handler)\n"
+             "signal.signal(signal.SIGHUP, signal.SIG_DFL)\n"
+             "signal.signal(signal.SIGTERM, signal.SIG_DFL)\n"
+             "with check_build.containers_stopped():\n"
+             "    try:\n"
+             "        subprocess.run(['docker', 'run', *check_build.work_label('/work'), 'image', 'compile'])\n"
+             "    except KeyboardInterrupt:\n"
+             "        sys.exit(130)\n")
+
+    def fake_docker(self, scratch):
+        directory = pathlib.Path(scratch)
+        (directory / "docker").write_text(self.DOCKER, encoding="utf-8")
+        (directory / "docker").chmod(0o755)
+        log = directory / "log"
+        log.touch()
+        env = {**os.environ, "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}", "DOCKER_LOG": str(log)}
+        return env, log
+
+    def test_every_container_carries_the_run_label_and_keeps_no_log(self):
+        options = check_build.work_label(pathlib.Path("/work"))
+        self.assertEqual(options, ["--label", f"{check_build.WORK_LABEL}=/work",
+                                   "--label", f"{check_build.RUN_LABEL}={check_build.RUN}", "--log-driver=none"])
+
+    def test_stop_containers_removes_this_process_containers(self):
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, "c1\nc2\n" if argv[1] == "ps" else "", "")
+
+        with mock.patch.object(check_build.subprocess, "run", run):
+            check_build.stop_containers()
+        mine = f"label={check_build.RUN_LABEL}={check_build.RUN}"
+        self.assertEqual(calls, [["docker", "ps", "-aq", "--filter", mine], ["docker", "rm", "-f", "c1", "c2"]])
+
+    def test_stop_containers_with_none_left_or_no_docker_does_nothing(self):
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with mock.patch.object(check_build.subprocess, "run", run):
+            check_build.stop_containers()
+        self.assertEqual([argv[1] for argv in calls], ["ps"])
+        for error in (FileNotFoundError("docker"), subprocess.TimeoutExpired("docker", 60)):
+            with mock.patch.object(check_build.subprocess, "run", mock.Mock(side_effect=error)):
+                check_build.stop_containers()  # no error
+
+    def test_containers_are_stopped_however_the_block_ends(self):
+        """At its end, normal or by an error, with no signal able to cut the removal short; then each signal's handler
+        is what it was."""
+        import signal
+        before = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+        seen = []
+
+        def stop():
+            seen.append({number: signal.getsignal(number) for number in before})
+
+        for error in (None, RuntimeError, KeyboardInterrupt):
+            with self.subTest(error=error), mock.patch.object(check_build, "stop_containers", stop):
+                seen.clear()
+                with contextlib.suppress(*([error] if error else [])):
+                    with check_build.containers_stopped():
+                        if error:
+                            raise error()
+                self.assertEqual(seen, [{number: signal.SIG_IGN for number in before}])
+                self.assertEqual({number: signal.getsignal(number) for number in before}, before)
+
+    def test_a_signal_ignored_at_the_start_stays_ignored(self):
+        """nohup tools/check: the SIGHUP that nohup ignores still does not end the run, in the block or after it."""
+        import signal
+        previous = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        try:
+            with mock.patch.object(check_build, "stop_containers", lambda: None):
+                with check_build.containers_stopped():
+                    self.assertIs(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
+                    self.assertNotIn(signal.getsignal(signal.SIGTERM), (signal.SIG_IGN, signal.SIG_DFL))
+            self.assertIs(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
+        finally:
+            signal.signal(signal.SIGHUP, previous)
+
+    def test_a_signal_ends_the_run_and_its_containers(self):
+        """SIGTERM, SIGHUP or Ctrl-C while a docker run runs: the run ends with 128 + the signal's number, and removes
+        each container that carries its own label."""
+        import signal
+        for number, code in ((signal.SIGTERM, 143), (signal.SIGHUP, 129), (signal.SIGINT, 130)):
+            with self.subTest(signal=number.name), tempfile.TemporaryDirectory() as scratch:
+                env, log = self.fake_docker(scratch)
+                process = subprocess.Popen([sys.executable, "-c", self.CHILD, str(TOOLS)], env=env,
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                self.addCleanup(process.kill)  # if it does not end, as a test that fails leaves it
+                deadline = time.monotonic() + 20
+                while not log.read_text(encoding="utf-8").startswith("run ") and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                process.send_signal(number)
+                _, errors = process.communicate(timeout=20)
+                self.assertEqual(process.returncode, code, errors)
+                started, listed, removed = log.read_text(encoding="utf-8").splitlines()
+                run = next(arg for arg in started.split() if arg.startswith(f"{check_build.RUN_LABEL}="))
+                self.assertEqual(listed, f"ps -aq --filter label={run}")
+                self.assertEqual(removed, "rm -f c1 c2")
+
+    def test_tools_check_removes_its_containers_when_it_ends(self):
+        """tools/check's __main__ runs within containers_stopped(): even a run that starts none asks for its own."""
+        with tempfile.TemporaryDirectory() as scratch:
+            env, log = self.fake_docker(scratch)
+            done = subprocess.run([sys.executable, str(TOOLS / "check"), "--print-toolchain", "bzip2"], env=env,
+                                  stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertRegex(log.read_text(encoding="utf-8"),
+                             rf"\Aps -aq --filter label={check_build.RUN_LABEL}=[0-9a-f]{{32}}\nrm -f c1 c2\n\Z")
+
+    def test_in_threads_gives_each_result_or_error_in_order(self):
+        def job(n):
+            if n == 1:
+                raise check_build.Failed("no run")
+            return n * 10
+
+        first, second, third = check_build.in_threads(job, [0, 1, 2], 2)
+        self.assertEqual((first, third), (0, 20))
+        self.assertIsInstance(second, check_build.Failed)
+
+    def test_in_threads_abandons_its_calls_when_its_wait_is_stopped(self):
+        """Ctrl-C, or SIGTERM or SIGHUP through containers_stopped(), while in_threads() waits: no queued call starts,
+        the containers of the running one are stopped, and the stop is raised again. Both pools of docker runs, the
+        binaries' runs (check_binaries) and the breakages (check_checks), run in in_threads()."""
+        import threading
+        for stop in (KeyboardInterrupt(), SystemExit(143)):
+            with self.subTest(stop=type(stop).__name__):
+                running, released, started, stopped = threading.Event(), threading.Event(), [], []
+
+                def job(n):
+                    started.append(n)
+                    running.set()
+                    released.wait(20)  # until its container is removed
+
+                def wait(futures, *args, **kwargs):  # stopped once a call runs
+                    self.assertTrue(running.wait(20))
+                    raise stop
+
+                def stop_containers():
+                    stopped.append(True)
+                    released.set()
+
+                with mock.patch.object(check_build.concurrent.futures, "wait", wait), \
+                        mock.patch.object(check_build, "stop_containers", stop_containers), \
+                        self.assertRaises(type(stop)):
+                    check_build.in_threads(job, range(4), 1)
+                self.assertEqual((started, stopped), ([0], [True]))
+
+    def test_abandon_starts_no_queued_job_and_stops_the_running_one(self):
+        import concurrent.futures
+        import threading
+        running, released, started = threading.Event(), threading.Event(), []
+
+        def job(n):
+            started.append(n)
+            running.set()
+            released.wait(20)  # until its container is removed
+
+        with mock.patch.object(check_build, "stop_containers", released.set):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                futures = [pool.submit(job, n) for n in range(4)]
+                self.assertTrue(running.wait(20))
+                check_build.abandon(pool)
+        self.assertEqual(started, [0])
+        self.assertTrue(all(future.cancelled() for future in futures[1:]))
 
 
 class Toolchains(unittest.TestCase):
