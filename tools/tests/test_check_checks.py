@@ -1994,12 +1994,29 @@ class ReviewJob(unittest.TestCase):
         self.assertNotIn("agent-otel-public", text)
         self.assertNotIn("OTEL_EXPORTER_OTLP_HEADERS", text)
         self.assertNotIn("Sign in to Google Cloud, for the cost collector's token", text)
-        # One URL for every sender, the address in SPEND_COLLECTOR_URL: the tailnet's MagicDNS domain appears only in
-        # the model gateway's URL, which must be a name, since Tailscale's certificate for its HTTPS door names it.
-        self.assertEqual(text.count("ts.net"), text.count("https://ossv-model-gateway.tail12ec1c.ts.net"))
-        self.assertEqual(self.jobs["review"]["env"]["ANTHROPIC_BASE_URL"],
-                         "https://ossv-model-gateway.tail12ec1c.ts.net")
+        # One URL for every sender, the address in SPEND_COLLECTOR_URL: no step and no comment of the file names
+        # the tailnet's MagicDNS domain, which linux28-agents-1, a sender that joins with --accept-dns=false,
+        # cannot resolve. The model gateway's URL is the repository variable's, not this file's.
+        self.assertNotIn("ts.net", text)
+        self.assertEqual(self.jobs["review"]["env"]["ANTHROPIC_BASE_URL"], "${{ vars.OSSV_MODEL_GATEWAY_URL }}")
         self.assertEqual(self.jobs["review"]["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "claude-haiku-4-5")
+
+    def test_the_review_stops_before_the_sign_in_on_any_other_gateway_url(self):
+        step = self.steps["Check the model gateway's URL"]
+        names = [s.get("name") for s in self.jobs["review"]["steps"]]
+        self.assertEqual(names.index("Check the model gateway's URL") + 1, names.index("Sign in to the model gateway"))
+        self.assertNotIn("if", step)
+        self.assertNotIn("continue-on-error", step)
+        for value, passes in (("https://gateway.example", True), ("", False), ("http://gateway.example", False),
+                              ("https://gateway.example:4000", False), ("https://gateway.example/v1", False),
+                              ("https:/" + "/u" + "@gateway.example", False)):
+            with self.subTest(value=value):
+                run = subprocess.run([shutil.which("bash"), "-e", "-c", step["run"]], capture_output=True, text=True,
+                                     env={**os.environ, "ANTHROPIC_BASE_URL": value})
+                self.assertEqual(run.returncode == 0, passes, run.stdout + run.stderr)
+                if not passes:
+                    self.assertIn("::error::the repository variable OSSV_MODEL_GATEWAY_URL is not https://<host>",
+                                  run.stdout)
 
     def test_the_review_signs_in_to_the_model_gateway_with_no_stored_key(self):
         gateway = self.steps["Sign in to the model gateway"]
