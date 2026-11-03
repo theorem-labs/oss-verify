@@ -927,6 +927,17 @@ class Analyse(unittest.TestCase):
         record = self.record({"/work/b/libx.a": {"x.c.o": sink}}, compiled=[
             (sink, "x.c", "c", compile_arguments("x.c", after=["-fstrict-flex-arrays=0"]))])
         self.assertEqual(self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]["result"], "pass")
+        # A build level that is not decimal digits cannot be compared: a compile that then gives a decimal level fails,
+        # and no traceback stops the check.
+        record = self.record({"/work/b/libx.a": {"x.c.o": sink}}, compiled=[
+            (sink, "x.c", "c", compile_arguments("x.c", flags=UBSAN_FLAGS + ["-fstrict-flex-arrays=²"],
+                                                 after=["-fstrict-flex-arrays=1"]))])
+        for language in ("c", "c++"):
+            record.compiles.ubsan[language].append("-fstrict-flex-arrays=²")
+            record.compiles.sanitizer[language].append("-fstrict-flex-arrays=²")
+        result = self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]
+        self.assertEqual(result["result"], "fail", result)
+        self.assertIn("libx.a(x.c.o) (x.c: with -fstrict-flex-arrays=²)", result["detail"])
 
     def test_flags_that_turn_on_no_check_decide_nothing(self):
         """A build whose recorded UBSan flags hold no -fsanitize= word (none at all, or only words every compile

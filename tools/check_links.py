@@ -803,10 +803,13 @@ def flex_levels(arguments):
 def lower_flex_levels(wanted, arguments):
     """The -fstrict-flex-arrays= words of a compile's `arguments` that give a lower level than the build's UBSan flags
     `wanted` do (the last of theirs), or none when those flags have none: the last one the driver reads, and each one
-    it hands on to the front end, which counts against the compile and never for it."""
+    it hands on to the front end, which counts against the compile and never for it. A build level that is not decimal
+    digits cannot be compared, so each compile then counts as giving a lower level: the build's own word."""
     build = flex_levels(wanted)[0]
     if not build:
         return []
+    if not re.fullmatch("[0-9]+", build[-1]):
+        return [STRICT_FLEX_ARRAYS + build[-1]]
     driver, forwarded = flex_levels(arguments)
     return [STRICT_FLEX_ARRAYS + level for level in driver[-1:] + forwarded
             if not (re.fullmatch("[0-9]+", level) and int(level) >= int(build[-1]))]
