@@ -1682,6 +1682,22 @@ class ReviewRescreen(Held):
         self.assertIn(f"7: {self.TRIES - 1} rescreens since its hold at", out)
         self.assertEqual(self.patches(), [])
 
+    def test_a_rescreen_that_settled_nothing_is_tried_again_only_once_it_is_an_hour_old(self):
+        """A rescreen that settles nothing leaves the hold's time where it was, so without a wait one problem of
+        GitHub's would use all REVIEW_TRIES within 45 minutes."""
+        self.items((7, "open", True))
+        self.held(7, limit_hold(50, at=self.ago(180)))
+        self.origin(50, "mallory")
+        self.runs((40, "github-actions[bot]", "workflow_dispatch", "Rescreen 7 of mallory", "completed", 120),
+                  (41, "github-actions[bot]", "workflow_dispatch", "Rescreen 7 of mallory", "completed", 30))
+        rc, out, runs = self.started()
+        self.assertEqual((rc, runs, self.patches()), (0, [], []), out)
+        self.assertIn("settled nothing; it is tried again once that is an hour old", out)
+        self.runs((40, "github-actions[bot]", "workflow_dispatch", "Rescreen 7 of mallory", "completed", 120),
+                  (41, "github-actions[bot]", "workflow_dispatch", "Rescreen 7 of mallory", "completed", 61))
+        (self.api / "args").unlink()
+        self.assertEqual(self.started()[2], [self.want(7, "mallory")])
+
     def test_at_review_tries_its_hold_comment_says_a_person_decides_and_the_job_fails_once(self):
         self.items((7, "open", True), (9, "open", False))
         self.held(7, screen_hold(at="1999-01-01T00:00:00Z"), limit_hold(50, at=self.ago(180), kind="transient", tries=1))

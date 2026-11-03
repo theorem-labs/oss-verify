@@ -10,9 +10,10 @@ name: "Review rescreen"
 # hold of the screen is never screened again this way: a person decides on it.
 # A rescreen that settles nothing (it posts no review and holds the item no new time: its route could not read GitHub,
 # say) leaves the hold as it was, and the item is started again while fewer than REVIEW_TRIES rescreens of it ran since
-# that hold. At REVIEW_TRIES the job rewrites the item's hold comment in fixed words, with no marker that is tried
-# again: it was screened again that many times without settling, and a person with write access will look at it. The
-# item is then no longer started, and the job fails that once, so that someone sees it.
+# that hold, each once the one before is over an hour old. At REVIEW_TRIES the job rewrites the item's hold comment in
+# fixed words, with no marker that is tried again: it was screened again that many times without settling, and a
+# person with write access will look at it. The item is then no longer started, and the job fails that once, so that
+# someone sees it.
 #
 # It is its own workflow, not a schedule of build.yaml: each completed Build run starts enroll-dispatch.yml and
 # review-rerun.yml, and reports the required check project-builds on its commit, so a scheduled Build run every 15

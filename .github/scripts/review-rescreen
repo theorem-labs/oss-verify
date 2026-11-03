@@ -27,7 +27,9 @@
 # the review. The rewrite has no marker that is tried again, so limit-hold reads it as a hold a person decides on and
 # neither this script nor build.yaml's route takes the item again until a new hold; it keeps the run marker that the
 # comment job's step "Take the label review-held off" reads. The script then prints `::error::` and exits 1 for that
-# run, so that someone sees it; the next run passes.
+# run, so that someone sees it; the next run passes. Below the bound, an item with such rescreens is started again only
+# once the newest of them is over an hour old: a rescreen that settles nothing does not move the hold's time, so
+# without that wait one problem of GitHub's could use all REVIEW_TRIES in 45 minutes.
 # The hold comment is oss-verify[bot]'s, and this job has no key of that App: it edits the comment with its own token,
 # which issues: write and pull-requests: write allow on any comment of this repository. The comment stays the App's
 # (an edit does not change its author), so the comment job finds, replaces or deletes it as before.
@@ -112,7 +114,7 @@ while read -r number input; do
       -f created=">=$at" -F per_page=100 --jq '.workflow_runs[]
         | select(.event == "workflow_dispatch" and .status == "completed" and (.created_at // "") >= $ENV.AT
                  and ((.display_title // "") | startswith($ENV.PREFIX)))
-        | .id'); then
+        | .created_at // ""'); then
     echo "::error::the rescreens of $number since its hold could not be read."
     failed=1
     continue
@@ -129,7 +131,14 @@ while read -r number input; do
     failed=1
     continue
   fi
-  (( unsettled == 0 )) || echo "$number: $unsettled rescreens since its hold at $at settled nothing; it is tried again."
+  if (( unsettled > 0 )); then
+    newest=$(sort <<< "$since_hold" | tail -n 1)
+    if [[ ! $newest < $from ]]; then
+      echo "$number: its last rescreen, at $newest, settled nothing; it is tried again once that is an hour old."
+      continue
+    fi
+    echo "$number: $unsettled rescreens since its hold at $at settled nothing; it is tried again."
+  fi
   echo "$at $number $input $account" >> "$due"
 done <<< "$items"
 while read -r at number input account; do

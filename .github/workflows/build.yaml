@@ -47,9 +47,10 @@ name: "Build"
 #            its own events, so at the limit it is `limit` again, and the hold comment says from when it is tried
 #            next. A hold of the screen is never screened again this way: a person decides. A rescreen that settles
 #            nothing (no review posted, no new hold: its route could not read GitHub, say) leaves the hold as it was;
-#            the item is started again while fewer than REVIEW_TRIES rescreens of it ran since that hold, and at
-#            REVIEW_TRIES review-rescreen.yml rewrites the hold comment to say that a person with write access will
-#            look at it, with no marker that is tried again, and fails its run once so that someone sees it.
+#            the item is started again while fewer than REVIEW_TRIES rescreens of it ran since that hold, each once
+#            the one before is over an hour old, and at REVIEW_TRIES review-rescreen.yml rewrites the hold comment to
+#            say that a person with write access will look at it, with no marker that is tried again, and fails its
+#            run once so that someone sees it.
 #   gather   gathers what the review reads, once, with .github/scripts/review-gather (below), and keeps it as the
 #            artifact review-data, which the screen and the review take only by its SHA-256
 #            (.github/scripts/take-review-data): the review reads exactly what the screen passed. It holds no model,
