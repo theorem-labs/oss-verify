@@ -22,9 +22,14 @@
 # counts as a change to that project. A path not directly inside one projects/<name>/, a file in a subdirectory of a
 # project included, is outside it.
 #   - A pull request that changes no file, or removes its one project, passes with nothing to build or validate.
-#   - A pull request from a fork, a deleted fork included, is judged on the files GitHub lists for it. It fails if it
-#     changes any path outside one projects/<name>/: a file outside projects/, a file in a subdirectory of a project,
-#     or a second project, one it renames or removes included. Otherwise its project is taken.
+#   - A pull request from a fork, a deleted fork included, is judged on the files GitHub lists for it.
+#       - No listed path under projects/ (a change to tools/, docs/ or a workflow, say): it is not an enrollment. It
+#         passes with nothing to build or validate, and the log and step summary say so. The tests check
+#         (tests.yaml) runs this repository's tests on it, build.yaml gives it a change review, and a maintainer
+#         decides whether to merge it.
+#       - Any listed path under projects/: it is an enrollment, and fails if it changes any path outside one
+#         projects/<name>/: a file outside projects/, a file in a subdirectory of a project, or a second project,
+#         one it renames or removes included. Otherwise its project is taken.
 #   - A pull request from a branch of this repository, which only an account with write access can push, is judged on
 #     what merging it into the base branch changes. GitHub's list is the three-dot diff from the merge base, so it can
 #     name a project that merging leaves as it is: a stacked branch's parent once the parent is squash-merged, or a
@@ -116,6 +121,11 @@ gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" --jq '.[] | .filena
 # The list is of the head and base as they were when the list was read.
 now=$(gh api "repos/$REPO/pulls/$PR")
 current "$now"
+# A fork that lists no path under projects/ is not an enrollment (the top of this file).
+enrollment=true
+if [ "$same_repository" = false ] && ! grep -q '^projects/' "$RUNNER_TEMP/paths"; then
+  enrollment=false
+fi
 names=() outside=0
 while IFS= read -r path; do
   if [[ $path =~ ^projects/([^/]+)/. ]]; then
@@ -123,7 +133,7 @@ while IFS= read -r path; do
   fi
   [[ $path =~ ^projects/[^/]+/[^/]+$ ]] && continue
   outside=$((outside + 1))
-  [ "$same_repository" = true ] || print_path "outside projects/<name>/" "$path"
+  [ "$same_repository" = true ] || [ "$enrollment" = false ] || print_path "outside projects/<name>/" "$path"
 done < "$RUNNER_TEMP/paths"
 projects=$(if (( ${#names[@]} )); then printf '%s\0' "${names[@]}" | sort -z -u | grep -z -c .; else echo 0; fi)
 
@@ -131,6 +141,10 @@ projects=$(if (( ${#names[@]} )); then printf '%s\0' "${names[@]}" | sort -z -u 
 # list is empty or cut short.
 if [ "$same_repository" = false ] && (( projects + outside == 0 )); then
   nothing "This pull request changes no file: nothing to $action."
+fi
+if [ "$enrollment" = false ]; then
+  # A renamed file is listed under both names, so this counts paths, not files.
+  nothing "Not an enrollment (it lists $(count "$outside" path), none under projects/): nothing to $action. The tests check (tests.yaml) runs this repository's tests on it."
 fi
 
 # Fetch the pull request's commit, and for a branch of this repository the merge base, once. Nothing is checked out.
