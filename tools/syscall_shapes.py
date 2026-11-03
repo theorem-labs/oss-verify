@@ -42,7 +42,9 @@ which pages the run has touched (Sys/Mm/Mremap.v mremap_backing_uniform_b), the 
 (mmap_noreserve_backed_ok, mmap_fixed_rw_budget_ok, mprotect_budget_ok, brk_budget_ok), the run's RLIMIT_NOFILE
 (Sys/Fs/File.v dup3_newfd_under_limit), and the number the model would give a new descriptor (Sys/Fs/File.v
 lowest_fd: the trace does not show qemu's own descriptors, so the run's numbers are shifted from the model's). A call
-whose only gate is one of those passes on its name.
+whose only gate is one of those passes on its name. The handler word of an rt_sigaction of SIGABRT does not pass on its
+name: it is SIG_DFL for the one install the model answers there (Sys/Kernel/Signal.v sigabrt_dfl_install). A pass on
+its name would admit the handler and the SIG_IGN that the model declines, so such an install is undecided.
 
 Facts about the run that the trace does not carry, and what the checker takes for them:
 
@@ -97,7 +99,7 @@ from check_build import Failed
 # every model file they rest on, by its path in the model repository. model_release.stale() says when a release names
 # a model whose code differs in one of them. Comments are not hashed, so no rule may rest on one: the arm numbers are
 # read from spec_table's code and named through SYSCALL_NUMBERS.
-MODEL_COMMIT = "f1006fe8178338a499b5e5c41be83006c4edd058"
+MODEL_COMMIT = "505d161e1a2e89273739c0c44675892ed4c671a0"
 MODEL_DIR = "theories/LinuxProcessSem"
 MODEL_FILES = {f"{MODEL_DIR}/{rel}": digest for rel, digest in {
     "Fs.v": "9da1fca6410440131f0e55fc41cd43c15696ddc32832180597a8961ba73f4dba",
@@ -128,7 +130,7 @@ MODEL_FILES = {f"{MODEL_DIR}/{rel}": digest for rel, digest in {
     "Sys/Kernel/Futex/Syscalls.v": "6ee3af7d7166186ad9e4fb57fcd93f96fe1d8339752eabbe0d5057d3760dbbc4",
     "Sys/Kernel/Groups.v": "033ae29b686941c651848a02a1fc174b74135007f123e3bf0fe39e5fd19479d4",
     "Sys/Kernel/Sched/Syscalls.v": "0a87a2a1b2f77373a71f300cf7277136d2246443f2ad061c7e9a96e7f0ab3622",
-    "Sys/Kernel/Signal.v": "3fafa840770bcb490bf14d59e9ee60c2a1b599efa067a795f77b5c9a6a8259ea",
+    "Sys/Kernel/Signal.v": "37721a59c831003a35e3bcb2fd8f63a42216b1faa2a14585b5b1445140bcd626",
     "Sys/Kernel/Sys.v": "55f4c69db7559d1b5b876f110e361f166fa7999a4b8f6d5123908c880531081f",
     "Sys/Kernel/Time/Hrtimer.v": "5cec6e4973aea425672d0fc7a056a299c06382631caf6f64ad4ffcb2023aa75e",
     "Sys/Kernel/Time/PosixTimers.v": "fffb5d0122a401aaaf7cef55a402621426cc0cf59eec40c2623995f6a202f5d5",
@@ -2716,8 +2718,17 @@ def _rt_sigaction(run, args, ret, errno, tid):
     """Sys/Kernel/Signal.v rt_sigaction_spec: a sigsetsize other than 8 is -EINVAL, before everything else, and qemu
     does not print it (print_rt_sigaction prints three arguments), so -EINVAL is always an answer the model can give.
     Then: a non-NULL old action is unmodeled; with act NULL every valid signal answers 0; with act non-NULL SIGKILL,
-    SIGSTOP and signals out of range are -EINVAL, SIGINT and SIGTERM are answered (sigaction_accepted), and every
-    other signal is unmodeled. The sa_flags test reads the struct and is not checked."""
+    SIGSTOP and signals out of range are -EINVAL, SIGINT and SIGTERM are answered (sigaction_accepted), SIGABRT is
+    answered when its handler word is SIG_DFL (sigabrt_dfl_install), and every other signal is unmodeled. The sa_flags
+    test reads the struct and is not checked.
+
+    SIGABRT's handler word does not pass on its name: SIG_DFL answers 0, and SIG_IGN or a handler address is
+    unmodeled. Neither the trace nor the host-call log shows the word. qemu prints act as a pointer
+    (linux-user/strace.c print_rt_sigaction), and the log has no rt_sigaction line; qemu's own host call could not
+    tell the two apart either, since for SIGABRT, a signal that dumps core, qemu installs its host handler for SIG_DFL
+    and for a guest handler alike (linux-user/signal.c do_sigaction). So a SIGABRT install that answered 0 is
+    undecided. -EFAULT (act's 24 bytes are not readable, which the model tests first) and -EINVAL are answers whatever
+    the word, and any other answer is none of the model's."""
     if len(args) < 3:
         return und("unparseable argument list")
     if ret is not None and ret < 0 and errno == EINVAL:
@@ -2731,9 +2742,17 @@ def _rt_sigaction(run, args, ret, errno, tid):
         if not 1 <= sig <= 64 or sig in (9, 19):
             return errno_only(ret, errno, {EINVAL}, f"rt_sigaction of signal {args[0]}",
                               "Sys/Kernel/Signal.v sig_valid, sig_kernel_only")
+        if sig == SIGABRT:
+            why = answered(ret, errno, {0}, {EFAULT}, f"rt_sigaction of signal {args[0]}",
+                           "Sys/Kernel/Signal.v rt_sigaction_spec, sigabrt_dfl_install")
+            if why or (ret is not None and ret < 0):
+                return why
+            return und("the handler word of a SIGABRT install decides its answer: SIG_DFL is answered 0, and any other "
+                       "word is unmodeled (Sys/Kernel/Signal.v sigabrt_dfl_install); qemu prints act as a pointer, so "
+                       "neither the trace nor the host-call log shows the word")
         if sig not in (2, 15):
-            return (f"a handler for signal {args[0]} is unmodeled: only SIGINT and SIGTERM are accepted "
-                    "(Sys/Kernel/Signal.v sigaction_accepted)")
+            return (f"a handler for signal {args[0]} is unmodeled: only SIGINT and SIGTERM are accepted, and SIGABRT "
+                    "with SIG_DFL (Sys/Kernel/Signal.v sigaction_accepted, sigabrt_dfl_install)")
     elif not 1 <= sig <= 64:
         return errno_only(ret, errno, {EINVAL}, f"rt_sigaction of signal {args[0]}", "Sys/Kernel/Signal.v sig_valid")
     # -EINVAL is accepted above (the sigsetsize qemu does not print); else 0, and -EFAULT for an unreadable act.

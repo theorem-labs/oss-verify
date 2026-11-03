@@ -1029,6 +1029,57 @@ def test_half_an_abort_is_no_end(model, image, text):
         assert result["verdict"] == "fail" and not result["exited"], (stance, result)
 
 
+# musl's abort() on its second path (src/exit/abort.c, musl 1.2.6), which it takes when raise(SIGABRT) returns: here
+# the launch mask already blocks SIGABRT, so the restore inside raise() unblocks nothing. abort() then blocks every
+# signal, installs SIG_DFL for SIGABRT, sends SIGABRT again and unblocks it, which delivers it. This is the trace of
+# such a run (abort() in a static musl program, under qemu 10.0.11 with SIGABRT blocked at its start), with the plants'
+# task id and pointers. qemu prints a signal set as names to 31 and numbers above (strace.c print_target_sigset_t_1).
+QEMU_SIGNAL_NAMES = ("SIGHUP SIGINT SIGQUIT SIGILL SIGTRAP SIGIOT SIGBUS SIGFPE SIGKILL SIGUSR1 SIGSEGV SIGUSR2 SIGPIPE "
+                     "SIGALRM SIGTERM SIGSTKFLT SIGCHLD SIGCONT SIGSTOP SIGTSTP SIGTTIN SIGTTOU SIGURG SIGXCPU SIGXFSZ "
+                     "SIGVTALRM SIGPROF SIGWINCH SIGIO SIGPWR SIGSYS")
+APP_SIGNALS = "[" + QEMU_SIGNAL_NAMES + " " + " ".join(str(sig) for sig in range(35, 65)) + "]"   # raise(): not 32-34
+ALL_SIGNALS = "[" + QEMU_SIGNAL_NAMES + " " + " ".join(str(sig) for sig in range(32, 65)) + "]"
+ABORT_SECOND_PATH = (TID + f"1 rt_sigprocmask(SIG_BLOCK,{APP_SIGNALS},0x40007ff8b0,8) = 0 (oldset=[SIGIOT])\n"
+                     "1 tkill(1,SIGIOT) = 0\n1 rt_sigprocmask(SIG_SETMASK,[SIGIOT],NULL,8) = 0\n"
+                     f"1 rt_sigprocmask(SIG_BLOCK,{ALL_SIGNALS},NULL,8) = 0\n"
+                     "1 rt_sigaction(SIGIOT,0x40007ff8b0,NULL) = 0\n"
+                     "1 tkill(1,SIGIOT) = 0\n1 rt_sigprocmask(SIG_UNBLOCK,[SIGIOT],NULL,8) = 0\n" + DEATH)
+
+
+@needs_model
+def test_a_musl_abort_on_its_second_path(model, image):
+    # rt_sigaction_spec answers the install 0 because its handler word is SIG_DFL (sigabrt_dfl_install), and qemu
+    # prints act as a pointer. So the run is undecided, never a pass; each of its other calls is answered.
+    for stance in ("abort", "either"):
+        result = check(model, image, ABORT_SECOND_PATH, stance=stance)
+        assert "handler word" in one_undecided(result, "rt_sigaction"), stance
+        assert result["exited"], stance
+
+
+@needs_model
+@pytest.mark.parametrize("line,verdict", [
+    # Sys/Kernel/Signal.v rt_sigaction_spec, arm 4: a non-NULL act is -EFAULT unless its 24 bytes are readable; then
+    # SIGABRT answers 0 when its handler word is SIG_DFL (sigabrt_dfl_install), and is unmodeled for SIG_IGN and for a
+    # handler address. qemu prints act as a pointer (strace.c print_rt_sigaction), so a success decides nothing: musl's
+    # sigaction() of a handler, its sigaction() of SIG_IGN, and abort()'s SIG_DFL install all print this first line.
+    ("rt_sigaction(SIGIOT,0x40007ff8b0,NULL) = 0", "undecided"),
+    ("rt_sigaction(SIGIOT,0x40007ff8b0,NULL) = -1 errno=14", "pass"),
+    ("rt_sigaction(SIGIOT,0x40007ff8b0,NULL) = -1 errno=22", "pass"),     # the sigsetsize qemu does not print
+    ("rt_sigaction(SIGIOT,NULL,NULL) = 0", "pass"),
+    ("rt_sigaction(SIGIOT,0x40007ff8b0,NULL) = -1 errno=1", "fail"),      # no handler word gives -EPERM
+    ("rt_sigaction(SIGIOT,0x40007ff8b0,0x40007ff8c8) = 0", "fail"),       # a non-NULL old action, declined first
+    # The signals around it keep their answers: SIGINT and SIGTERM are answered, every other handler is unmodeled.
+    ("rt_sigaction(SIGTERM,0x40007ff8b0,NULL) = 0", "pass"),
+    ("rt_sigaction(SIGTRAP,0x40007ff8b0,NULL) = 0", "fail"),
+])
+def test_a_sigabrt_install_turns_on_its_handler_word(model, image, line, verdict):
+    result = check(model, image, "1 " + line + "\n" + EXIT)
+    assert result["verdict"] == verdict, (result["unmodeled"], result["undecided"])
+    if verdict == "undecided":
+        why = one_undecided(result, "rt_sigaction")
+        assert "handler word" in why and "sigabrt_dfl_install" in why, why
+
+
 @needs_model
 def test_stance_spellings(model, image):
     assert S.STANCES == ("off", "abort", "either")
