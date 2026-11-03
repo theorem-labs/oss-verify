@@ -16,12 +16,15 @@ name: "Toolchain images"
 #            than the base image's, in another order; if the configuration is not the base image's with
 #            OFT_FRAME_POINTERS=1 added to its environment; or if a file under /opt/musl-sysroot or /opt/asan-static-rt
 #            has another SHA-256 in the new image. Its step summary gives the digest, and the SHA-256 of the C library
-#            and of the AddressSanitizer runtime in both images.
+#            and of the AddressSanitizer runtime in both images. When infra/toolchains.tsv has the row
+#            <base row>-frame-pointers, it also fails unless that row names the image it made, and ghcr.io holds it:
+#            thus the pull request that adds the rows passes only once the images it names are published.
 #   publish  on a push to main, or by hand on main, after make passed for every image: makes the image again in a
-#            registry on the runner. If ghcr.io already holds that digest in the package of its base image, it pushes
-#            nothing; else it pushes the image there, under the tag frame-pointers-<commit>, and fails unless ghcr.io
-#            gives the same digest. Either way it checks the image on ghcr.io as make does, and its step summary gives
-#            the digest. Only this job can write a package.
+#            registry on the runner, and fails, pushing nothing, if the frame-pointer row names another image. If
+#            ghcr.io already holds that digest in the package of its base image, it pushes nothing; else it pushes the
+#            image there, under the tag frame-pointers-<commit>, and fails unless ghcr.io gives the same digest. Either
+#            way it checks the image on ghcr.io as make does, and its step summary gives the digest. Only this job can
+#            write a package.
 #
 # A row of infra/toolchains.tsv names an image only after it is published, so the rows of these images come in a pull
 # request after the push. The release's toolchain packages are linked to no repository, so this repository's token can
@@ -44,6 +47,7 @@ on:
     branches: [main]
     paths:
       - .github/workflows/toolchain-images.yaml
+      - infra/toolchains.tsv
   workflow_dispatch:
 
 permissions: {}
@@ -110,6 +114,25 @@ jobs:
           [[ "$ref" =~ @sha256:[0-9a-f]{64}$ ]] || { echo "::error::crane gave no digest: '$ref'"; exit 1; }
           echo "made $ref"
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: the frame-pointer row of infra/toolchains.tsv, if there is one, names this image, and ghcr.io holds it
+        env:
+          NAME: ${{ steps.base.outputs.name }}
+          MADE: ${{ steps.made.outputs.ref }}
+        run: |
+          set -euo pipefail
+          row="$BASE_ROW-frame-pointers"
+          named=$(awk -F'\t' -v row="$row" '$1 == row { print $2 }' infra/toolchains.tsv)
+          if [ -z "$named" ]; then
+            echo "infra/toolchains.tsv has no row $row yet: nothing to compare" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          want="$NAME@${MADE#*@}"
+          [ "$named" = "$want" ] ||
+            { echo "::error::infra/toolchains.tsv's row $row names $named, but the image made from $BASE_ROW is $want"; exit 1; }
+          crane manifest "$named" > /dev/null ||
+            { echo "::error::infra/toolchains.tsv's row $row names $named, which ghcr.io does not hold: publish it first"; exit 1; }
+          echo "row $row names \`$named\`: the image made here, and ghcr.io holds it" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: the manifest names the base image's layers, and the configuration differs only by OFT_FRAME_POINTERS=1
         env:
@@ -216,6 +239,10 @@ jobs:
           digest=${made#*@}
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::crane gave no digest: '$made'"; exit 1; }
           ref="$name@$digest"
+          # the frame-pointer row, once infra/toolchains.tsv has it, must name this image: else push nothing
+          named=$(awk -F'\t' -v row="$BASE_ROW-frame-pointers" '$1 == row { print $2 }' infra/toolchains.tsv)
+          [ -z "$named" ] || [ "$named" = "$ref" ] ||
+            { echo "::error::infra/toolchains.tsv's row $BASE_ROW-frame-pointers names $named, not $ref: nothing pushed"; exit 1; }
           if crane manifest "$ref" > /dev/null 2>&1; then
             how="already on ghcr.io, nothing pushed"
           else
