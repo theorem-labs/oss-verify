@@ -607,7 +607,8 @@ class ScreenTest(unittest.TestCase):
         self.verdict()
         request = self.services.to("/v1/messages")[0]
         body = request["body"]
-        self.assertEqual(set(body), {"model", "max_tokens", "system", "messages", "output_config"})
+        self.assertEqual(set(body), {"model", "max_tokens", "system", "messages", "output_config", "thinking"})
+        self.assertEqual(body["thinking"], {"type": "disabled"})
         self.assertEqual(body["output_config"], {"format": {"type": "json_schema", "schema": {
             "type": "object", "additionalProperties": False, "required": ["verdict"],
             "properties": {"verdict": {"type": "string", "enum": ["clean", "suspicious"]}}}}})
