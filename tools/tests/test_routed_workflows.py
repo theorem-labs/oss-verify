@@ -140,7 +140,7 @@ def literal_env(flow, decide):
     return {k: str(v) for k, v in pairs.items() if "${{" not in str(v)}
 
 
-def route_build(tmp_path, files, changed=None, base="main", actor="someone"):
+def route_build(tmp_path, files, changed=None, base="main", actor="someone", rescreen=""):
     """Run build.yaml's route step, started by `actor`, with a fake gh whose pull request into `base` lists `files` (a
     path, or a (new, old) pair for a rename; changed_files: `changed`, by default their number), and applies the step's
     --jq filter as gh does. Return its outputs, one line each."""
@@ -161,7 +161,8 @@ def route_build(tmp_path, files, changed=None, base="main", actor="someone"):
     run = subprocess.run(["bash", "-e", "-c", decide["run"]], capture_output=True, text=True, cwd=ROOT,
                          env={**os.environ, **literal_env(flow, decide),
                               "PATH": f"{bin}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r",
-                              "PR": "8", "HEAD_SHA": "", "ACTOR": actor, "GITHUB_OUTPUT": str(written),
+                              "PR": "8", "HEAD_SHA": "", "ACTOR": actor, "RESCREEN": rescreen,
+                              "GITHUB_OUTPUT": str(written),
                               "GITHUB_STEP_SUMMARY": str(tmp_path / "summary")})
     assert run.returncode == 0, run.stderr
     return written.read_text().splitlines()
@@ -197,6 +198,14 @@ def test_builds_route_reviews_a_pull_request_with_no_file_under_projects_as_a_ch
 ])
 def test_a_change_that_an_app_the_review_refuses_started_is_built_as_before(tmp_path, actor, want):
     assert route_build(tmp_path, [".github/workflows/build.yaml"], actor=actor)[-1] == want
+
+
+@pytest.mark.parametrize("rescreen, want", [("true", "kind=change"), ("", "kind=enrollment"),
+                                            ("false", "kind=enrollment")])
+def test_a_rescreens_change_started_by_github_actions_is_reviewed_as_a_change(tmp_path, rescreen, want):
+    """review-rescreen.yml's dispatch makes github-actions[bot] the run's actor, which the Review step admits for a
+    rescreen that route's trust step accepts; any other run it started is built, as an App's the action refuses."""
+    assert route_build(tmp_path, ["README.md"], actor="github-actions[bot]", rescreen=rescreen)[-1] == want
 
 
 def actor_kind(tmp_path, login, allowed="sjawhar-agent[bot],oss-verify[bot]", answer=None):

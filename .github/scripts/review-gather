@@ -11,13 +11,14 @@
 #     .github/scripts/review-gather <directory>
 #   KIND=issue GH_TOKEN=... REPO=... ISSUE=<number> .github/scripts/review-gather <directory>
 #
-# build.yaml's review job runs it from the base branch's checkout, after take-project has put the pull request's
+# build.yaml's gather job runs it from the base branch's checkout, after take-project has put the pull request's
 # projects/<name>/ into that checkout. It runs no code of the pull request or of the project: it reads the pull request
 # through the API, clones the project's repository at the built commit as data, and runs this repository's own
 # tools/validate.py and .github/scripts/triage.py on them, as the validate and triage workflows do. The directory gets
 # the files that the section "In CI" of .claude/skills/review-enrollment/SKILL.md lists, the build's results (BUILD,
 # BINARIES and CHECKS) among them. A failed read leaves its file with the error in it, and the review says what it could
-# not check. LAST_REVIEW is the file the review job keeps beside the last review's session in the Actions cache, one line
+# not check. LAST_REVIEW is the file the review job keeps beside the last review's session in the Actions cache, and the
+# gather job restores, one line
 # `session=<id> head=<commit>`: when the head descends from that commit, this writes the diff since it and, to
 # GITHUB_OUTPUT, `session` and `last`, so that the review resumes that session for the diff alone.
 # KIND is route's decision in build.yaml, and this chooses its path on it once, here at its top.
@@ -86,8 +87,17 @@ keep pr.json gh pr view "$PR" -R "$REPO" --json \
 # Apart, so that a token that cannot read the checks leaves pr.json whole.
 keep checks.json gh pr view "$PR" -R "$REPO" --json statusCheckRollup
 gh pr diff "$PR" -R "$REPO" > "$out/pr.diff" 2>&1
-keep review-comments.txt gh api --paginate "repos/$REPO/pulls/$PR/comments" \
-  --jq '.[] | "\(.user.login) \(.path):\(.line) \(.body)"'
+# One read gives both files: the review comments as the review reads them, and their authors, one login a line, which
+# build.yaml's gather job asks GitHub about (an account without write access has the screen read the text first).
+gh api --paginate "repos/$REPO/pulls/$PR/comments" \
+  --jq '.[] | [(.user.login // "-"), "\(.user.login) \(.path):\(.line) \(.body)"]' > "$out/review-comments.json" 2>&1
+status=$?
+{ jq -r '.[1]' "$out/review-comments.json" 2> /dev/null || cat "$out/review-comments.json"
+  echo "(exit status $status)"; } > "$out/review-comments.txt"
+# A read that failed names "-", no account, so the gather job takes it as an account without write access.
+{ { [ "$status" = 0 ] && jq -r '.[0]' "$out/review-comments.json" 2> /dev/null; } || echo "-"
+  echo "(exit status $status)"; } > "$out/review-comment-authors.txt"
+rm -f "$out/review-comments.json"
 if [ "$KIND" = change ]; then
   # Claude Code reads a CLAUDE.md or .claude/ beside a file it reads as instructions: the pull request's are data.
   # Every file, not only the first 100 that pr.json lists.

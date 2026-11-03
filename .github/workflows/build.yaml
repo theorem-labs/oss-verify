@@ -23,6 +23,78 @@ name: "Build"
 #            not the issue's author sent it (only a person with access to this repository can: GitHub lets no one
 #            else edit or reopen another person's issue), when an owner or a member of the organization sent it
 #            (GitHub's author_association OWNER or MEMBER), or when any App sent it (actor-kind).
+#            Its trust step then decides who goes first, its output `trust`. Write access is what GitHub's
+#            collaborator permission API answers, admin or write; membership of the organisation alone is not, and the
+#            Apps in ALLOWED_BOTS count as having it. `writer` when the author of the pull request or issue and the
+#            account that started the run (the one that pushed, opened, edited or reopened) both have write access, or
+#            the run was started by hand: the review runs as it comes, unless the gather job finds comments of others
+#            in it (below). `screen` otherwise: the screen job reads the pull request or issue first, and only a clean
+#            verdict lets the review run, with no person. `limit` when
+#            the account that started the run has no write access and its events started OUTSIDE_HOURLY_LIMIT runs of
+#            this file in the last hour: it is held without a screen, and screened again later with no person (the
+#            rescreen, below). `measure` for a run started by hand with -f measure=true and no pr or issue: the
+#            screen job alone runs, and measures its rules (below).
+#            A rescreen is a run that review-rescreen.yml starts, every 15 minutes, for each open pull request or issue
+#            whose newest hold is one that is tried again, over an hour old (.github/scripts/review-rescreen): at that
+#            limit; an outsider's screened review stopped at SCREENED_HOURLY_CAP; or one that failed or ran out of
+#            time, until it has failed REVIEW_TRIES times (the comment job's hold, below). It runs with
+#            -f rescreen=true and -f account=<the account the hold names>; a person with write access can start one
+#            too. The trust step accepts it only from github-actions[bot] (that workflow's dispatch) or a person
+#            with write access or an App of ALLOWED_BOTS, and never as a run by hand: it reads the item, its hold,
+#            the run the hold names and that run's account again from the API (.github/scripts/limit-hold), and the
+#            trust is `screen` unless the author and that account both have write access (`writer`, and the gather
+#            job still screens the text of others). The account's rescreens count toward OUTSIDE_HOURLY_LIMIT with
+#            its own events, so at the limit it is `limit` again, and the hold comment says from when it is tried
+#            next. A hold of the screen is never screened again this way: a person decides. A rescreen that settles
+#            nothing (no review posted, no new hold: its route could not read GitHub, say) leaves the hold as it was;
+#            the item is started again while fewer than REVIEW_TRIES rescreens of it ran since that hold, each once
+#            the one before is over an hour old, and at REVIEW_TRIES review-rescreen.yml rewrites the hold comment to
+#            say that a person with write access will look at it, with no marker that is tried again, and fails its
+#            run once so that someone sees it.
+#   gather   gathers what the review reads, once, with .github/scripts/review-gather (below), and keeps it as the
+#            artifact review-data, which the screen and the review take only by its SHA-256
+#            (.github/scripts/take-review-data): the review reads exactly what the screen passed. It holds no model,
+#            no identity token and no write permission. Its output `screen` is true for route's trust `screen`, and
+#            for a writer's item, but a run started by hand, whose comments, reviews or review comments include one by
+#            an account without write access (or one GitHub cannot name; an App's own comment is told by the REST
+#            API's account type). A screened item gets no session to resume: no screen reads one. For an enrollment of
+#            an account without write access it gathers none of the project's repository (below).
+#   screen   when the gather job's output `screen` is true (.github/scripts/screen.py): independent checks, which
+#            SCREEN_CHECKS lists, read the text that the pull request or the issue carries (for a writer's item, its
+#            comments, reviews and review comments alone, SCREEN_SCOPE comments): Google Cloud Model Armor's prompt
+#            injection and jailbreak filter; Azure AI Content Safety's Prompt Shields, which reads the text as
+#            documents; and a small Claude model with no tools whose answer a schema holds to the words clean and
+#            suspicious, each through the screen's own identity (its env below). Each reads all the text joined.
+#            SCREEN_RULE makes the verdict of their words: claude_or_both_detectors, held when the model answers
+#            suspicious or Model Armor and Prompt Shields both do (.github/scripts/screen.py, RULES, and the
+#            measurement that chose it). Under every rule, a check that cannot answer or runs out of time, a file
+#            the review reads that is not text or that the diff shows as binary, text with characters that hide it
+#            (bidirectional overrides and isolates, tag characters, and zero-width characters, but a joiner between
+#            two letters of a script that
+#            uses joiners or inside an emoji, a byte order mark at the start of a file, and a word joiner where
+#            .github/scripts/review-neutralize puts one in this App's own comments), or more text than the screen
+#            reads, holds it. A screened review runs at most SCREENED_HOURLY_CAP times an hour; one that fails, at
+#            the cap or not, is held and fails the required check, which a re-run of the failed jobs clears. It runs
+#            in the environment
+#            review-screen, whose jobs alone reach the screen's Google, Azure and Anthropic identities. Why it held an
+#            item goes to the private bucket theorem-agent-infra-review-screen-reasons, as
+#            theorem-labs/oss-verify/<run>-<attempt>.json, never to this public log, an output or a comment: its
+#            outputs are the verdict and the names of the checks that ran.
+#            A measurement (gh workflow run build.yaml -f measure=true [-f measure_set=measure/set-v<n>.json]
+#            [-f measure_repeats=<1-5>]) reviews nothing: the screen job runs every listed check that many times
+#            (3 by default) on each text of a labelled set kept in the private bucket (measure/set-v1.json by
+#            default; the screen's account can read only measure/set-* of it), and puts the false holds and missed
+#            injections of each rule in the run's summary. The texts, and each check's words for them, stay in the
+#            bucket, as measure/runs/theorem-labs/oss-verify/<run>-<attempt>.json. On such a run the required check
+#            passes when route and the screen job passed and every other job was skipped.
+#            What it reads: the item's title, body, every account's comments, reviews and review comments, its other
+#            fields, the diff, the checks' names, and for an enrollment what review-gather wrote from the build, the
+#            validator, triage, the facts of the project's repository and the seed corpora's bytes; each changed file,
+#            and each file of projects/<name>/ but a seed corpus, must be text, whose new lines the diff holds. What it
+#            does not read: the project's repository at the built commit (.review/source/), far more text than a
+#            screen reads, which the review of a writer's enrollment reads as data, and the review of an outsider's
+#            enrollment does not get (its checks that need it are left to a person, who can start the full review
+#            by hand); and the last review's session that the review resumes, the model's own earlier context.
 #   project-builds
 #            the build above, under the check name build, when route asks for it; it passes with nothing to build
 #            when the pull request enrolls no project (below). Its job id stays project-builds, the name the other jobs
@@ -74,16 +146,29 @@ name: "Build"
 #            The review's text and the checks' report, which a pull request can steer, reach the comment only through
 #            .github/scripts/review-neutralize: with no mention, no reference to an issue or pull request, no unclosed
 #            HTML comment that hides what follows it, and no line that holds a marker of this comment, so no one else
-#            is notified as oss-verify[bot] and the verdict line is the job's own. It never runs for an issue: a person
-#            approves the exact text of each reply to an issue before anyone posts it.
+#            is notified as oss-verify[bot] and the verdict line is the job's own. It never posts an issue's draft: a
+#            person approves the exact text of each reply to an issue before anyone posts it.
+#            It also holds: for a pull request or an issue that the screen held, that could not be gathered or
+#            screened, whose screened review did not finish, or that route held at OUTSIDE_HOURLY_LIMIT, it puts the
+#            label review-held on it and posts one comment in fixed words (marker <!-- oss-verify-held -->) that says it
+#            was held and how a person with write access starts the review, and nothing of why. A hold at the limit
+#            says from when it is screened again with no person, and names, in the marker
+#            <!-- oss-verify-held-limit <run> -->, the run whose event the limit first held, by which
+#            .github/scripts/limit-hold finds it and the account. A review it posts later, or for an issue a later
+#            review that made its draft, takes the label off and deletes that comment, unless a newer hold came after
+#            that review's run started.
 #   required always runs, last, and reports the required check (below).
 #
 # project-builds is the required check, and the job required reports it (.github/scripts/collect). required runs on
 # every run, after all the other jobs whatever their results, and passes only if route passed and every job route asked
-# for passed: the build when route asked for it, and the record, review, session, hold and comment jobs when their own
-# conditions call for them (the review when the build took a project, or the kind is change or issue); every other
-# job must be skipped. A skipped job counts as a pass where a check is required, so the build job is never the
-# required check itself. The build takes the project with .github/scripts/take-project, for each commit on its own:
+# for passed: the build when route asked for it, and the record, gather, screen, review, session, hold and comment jobs
+# when their own conditions call for them (the screen and the review on the gather job's outputs screen and digest);
+# every other job must be skipped. A held item passes it when the build passed (if asked) and the comment job labelled
+# it: it waits for a person, as its label says, and an enrollment's statements do not start without the review's
+# verdicts. A gather or screen job that failed fails it, and so does a screened review that did not finish (at
+# SCREENED_HOURLY_CAP, say), which a re-run of the failed jobs clears. A skipped job counts as a pass
+# where a check is required, so the build job is never the required check itself. The build takes the project with
+# .github/scripts/take-project, for each commit on its own:
 #   - A pull request from a fork is judged on the files GitHub lists for it: one that changes a file under projects/
 #     fails if it changes anything but one project, which is built as it is at the fork's head. A pull request from a
 #     branch of this repository is judged on what merging it into the base branch changes (git merge-tree): it fails
@@ -124,10 +209,11 @@ name: "Build"
 # one image tools/check will build FROM without signing in, for every pull request, before the pull request's
 # Dockerfile or build.sh runs. Never add a secret, a cache, an artifact, an identity token or a write permission to that
 # job. Its results reach the other jobs only as job outputs, which this repository's tools write: text, never code.
-# The review job runs no code of the pull request or the project. It and the comment job hold identity tokens
-# (id-token: write), which they trade for short-lived tokens: the review's for an ephemeral tailnet node, which reaches
-# Theorem's model gateway and exports the review's usage (below), and for the gateway's sign-in, a Google identity
-# token, so no API key is stored; and both jobs' for a Google access token by Google workload identity
+# The review job runs no code of the pull request or the project. It, the screen job and the comment job hold identity
+# tokens (id-token: write), which they trade for short-lived tokens: the review's for an ephemeral tailnet node, which
+# reaches Theorem's model gateway and exports the review's usage (below), and for the gateway's sign-in, a Google
+# identity token, so no API key is stored; the screen's for the screen's own Google, Azure and Anthropic tokens (the
+# screen job); and the review's and comment job's for a Google access token by Google workload identity
 # federation (Theorem's infrastructure code). Claude gets three tools only, Read, Glob and Grep (`--tools`), in the
 # default permission mode (`--permission-mode default`, which refuses a read outside the checkout): no shell, no
 # network and no tool that writes, so the text of the pull request, which it reads as data (review.md, rule 1),
@@ -136,7 +222,8 @@ name: "Build"
 # checkout's git config. Never re-run the review job with debug logging (ACTIONS_STEP_DEBUG): the action then prints
 # the whole conversation, a held finding too, to the public log. The comment job alone writes: it posts the comment as
 # the oss-verify GitHub App (oss-verify[bot]), with an installation token that can write pull requests in this
-# repository only. It makes that token from the App's client id below and its private key, which it reads at run time
+# repository only, or, to hold an item, one that can write its pull requests and issues (the label and the hold
+# comment). It makes that token from the App's client id below and its private key, which it reads at run time
 # from Secret Manager (oss-verify-github-app-key), and runs no code of the pull request or the project.
 #
 # This repository stores no long-lived credential for any of that. Google's provider admits this file, triage.yaml
@@ -145,9 +232,9 @@ name: "Build"
 # name, so what keeps each Google account to the job that needs it is the job's GitHub Environment, which the token
 # carries a claim for: `ossv-ci`, which this job uses only to store a held finding or an issue's draft, can be acted as only from
 # the environment `enroll-review`, which the review job declares; `ossv-app-comment`, the account these jobs read the
-# App's key as, only from `comment`, which the comment job declares. A job that declares no environment,
-# project-builds among them, reaches neither account, and project-builds, which builds the pull request's code, must
-# never be given id-token: write.
+# App's key as, only from `comment`, which the comment job declares; the screen's account, only from `review-screen`,
+# which the screen job declares. A job that declares no environment, project-builds and gather among them, reaches no
+# account, and project-builds, which builds the pull request's code, must never be given id-token: write.
 # A pull request from a fork gets the same identity tokens in the review and comment jobs: pull_request_target runs
 # this file from the base branch, never the fork's, so the fork's code never holds them.
 # Runs do not wait for a maintainer's approval. To build only on request, remove pull_request_target below.
@@ -160,8 +247,9 @@ name: "Build"
 # token for a Google identity token of the service account oss-verify-ci, audience model-gateway-gce, which the gateway
 # serves as its team oss-verify-ci with model calls only, and which the Review step gives Claude Code as its API key.
 # Google's identity token lives one hour, longer than the Review step's 45 minutes, and the sign-in runs just before it.
-# The provider admits this file, on refs/heads/main, from its own events. The review and comment jobs of this
-# file ask for an identity token; no other job of it does.
+# The provider admits this file, on refs/heads/main, from its own events. The review, screen, hold and comment jobs of
+# this file ask for an identity token; no other job of it does. The screen job's Anthropic token comes from its own
+# federation rule, oss-verify-screen, which admits the environment review-screen alone.
 # A review runs only on main: Google's provider and the tailnet identity below admit refs/heads/main alone, so a run on
 # another branch gets no Google token and no tailnet node. So a change to
 # the review is tried for real only once it is on main: run `gh workflow run build.yaml -f pr=<n>`, which posts the
@@ -187,7 +275,7 @@ name: "Build"
 #
 # The review's session goes from one push to the next in the Actions cache, under the key
 # enroll-review/<pull request>/<project>/<run id>-<attempt>: ~/.claude/projects, where Claude Code keeps its sessions,
-# and ~/.claude/ossv-last-review, one line `session=<id> head=<commit>`. The review job restores the newest entry of
+# and ~/.claude/ossv-last-review, one line `session=<id> head=<commit>`. The gather job restores the newest entry of
 # the pull request and project; when the head descends from the commit that session reviewed, review-gather writes the
 # diff since then and the review resumes that session (claude --resume <id>, which keeps its id) to review only that
 # diff. When a session is kept, the log of the gather step says which: "the review resumes the session <id>", or "the
@@ -195,15 +283,16 @@ name: "Build"
 # Under pull_request_target GitHub gives a job read-only access to main's cache unless the job declares a
 # write-capable cache-mode, and such a job must process no untrusted input before it writes, or a run that later
 # restores the entry could act on what the pull request put there (GitHub's dependency caching reference,
-# "Bypassing the default untrusted-trigger cache restriction"). So the review job, which reads the pull request and
-# runs the model, only restores (cache-mode: read). After the review it keeps the two paths as the artifact
+# "Bypassing the default untrusted-trigger cache restriction"). So the gather job, which reads the pull request, only
+# restores (cache-mode: read), and keeps the session in the file the review job takes; the review job, which runs the
+# model, does not touch the cache. After the review it keeps the two paths as the artifact
 # enroll-review-session, for one day, and the session job saves that artifact, by its id, in the cache (cache-mode:
 # write): that job checks out nothing, runs no script, holds no permission and no identity token, and runs two pinned
 # actions that move the files. Both are main's copy of this file, whatever the pull request changes. A run on main
 # restores only entries that a run on main saved: a pull request's own runs (pull_request, or a push to its branch)
 # save only in the scope of refs/pull/<n>/merge or of their branch, which a run on main does not restore. So the code
 # of a pull request cannot write the session that its review resumes. Every other job has cache-mode: none (below).
-# What the review job restores is still text that the pull request steered, the session of its own earlier review:
+# What the gather job restores is still text that the pull request steered, the session of its own earlier review:
 # it is the model's context, read as data as the pull request itself is, and no step runs it.
 # A session holds the public inputs the review read and the review's own reasoning. As with every cache entry of main,
 # a pull request's own run can read it, and so can anyone signed in to GitHub, for a day, as the artifact. GitHub
@@ -229,7 +318,7 @@ name: "Build"
 # Such a run reports a check named project-builds too, but a check from a workflow_dispatch run never satisfies a
 # ruleset's required check (https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks#checks-from-some-workflow-jobs-are-not-evaluated).
 
-run-name: ${{ github.event.pull_request.title || ((inputs.issue || github.event.issue.number) && format('Issue {0}', inputs.issue || github.event.issue.number)) || format('Pull request {0}', inputs.pr) }}
+run-name: ${{ inputs.measure && 'Measure the screen' || inputs.rescreen && format('Rescreen {0} of {1}', inputs.pr || inputs.issue, inputs.account) || github.event.pull_request.title || ((inputs.issue || github.event.issue.number) && format('Issue {0}', inputs.issue || github.event.issue.number)) || format('Pull request {0}', inputs.pr) }}
 
 on:
   pull_request_target:
@@ -246,17 +335,61 @@ on:
         description: "Number of the issue of this repository to draft a reply to (give pr or issue, not both)"
         required: false
         type: number
+      measure:
+        description: "Measure the screen's rules on its private labelled set, and review nothing (give no pr or issue)"
+        type: boolean
+        default: false
+      measure_set:
+        description: "The labelled set to measure on, an object of the private bucket (measure/set-v<n>.json)"
+        type: string
+        default: measure/set-v1.json
+      measure_repeats:
+        description: "How many times each check answers each text of the set (1 to 5)"
+        type: number
+        default: 3
+      rescreen:
+        description: "Screen again a pull request or issue held at the hourly limit (review-rescreen.yml sets it; route checks the hold)"
+        type: boolean
+        default: false
+      account:
+        description: "With rescreen, the account the hourly limit held, which the item's hold must name"
+        type: string
+        default: ""
 
 permissions: {}
-# No job reads or writes the Actions cache unless it says so: the review job restores its session, and the session
-# job saves it.
+# No job reads or writes the Actions cache unless it says so: the gather job restores the review's session, and the
+# session job saves it.
 cache-mode: none
 
 env:
   # The Apps whose runs the review's action admits (its allowed_bots): our automation's, which opens enrollments and
   # starts this file by hand, and the oss-verify App's. The one list: route reads it through .github/scripts/actor-kind,
-  # which decides as the action does, and the Review step gives it to the action.
+  # which decides as the action does, and the Review step gives it to the action. route's trust step counts these
+  # Apps as accounts with write access.
   ALLOWED_BOTS: sjawhar-agent[bot],oss-verify[bot]
+  # The most runs that one account without write access may start in an hour by its events (a pull request, a push
+  # to it, an issue or an edit of it) and have screened: the next such run in that hour is held without a screen. Every
+  # run its events started counts, the held and the cancelled ones too, so a burst stays held until an hour has passed
+  # since its runs. The rescreens of its held items count toward the same limit, with its events: so N, the most
+  # rescreens of one account in an hour, is this number, 3, less what its own events used. One count and one limit,
+  # because a rescreen is the screen that the held event did not get: it gives an account no more screens an hour than
+  # its events alone could, which keeps it under SCREENED_HOURLY_CAP, so one account cannot fill that pool. A smaller N
+  # for rescreens would only leave a burst held for longer; an account that keeps opening, pushing or editing stays
+  # held. review-rescreen.yml keeps the same number, which tools/tests checks.
+  OUTSIDE_HOURLY_LIMIT: "3"
+  # The most reviews that a clean screen lets run with no person in one hour, whatever account: many accounts each
+  # under OUTSIDE_HOURLY_LIMIT still cannot start model runs without limit. The review job counts them
+  # (.github/scripts/screened-review-cap) and stops before the model at it, and the comment job holds the item. A
+  # count that could not read GitHub fails too, and the item is held as a review that did not finish.
+  SCREENED_HOURLY_CAP: "6"
+  # The label a held pull request or issue gets, and the marker of the comment that says so.
+  HELD_LABEL: review-held
+  # The most times the review of an outsider's item that the screen passed may fail, or run out of time, before a
+  # person decides: each such hold is tried again with no person (review-rescreen.yml), and the third one is not. A
+  # review stopped at SCREENED_HOURLY_CAP is not such a failure, and is tried again whatever this number: the cap is
+  # not the item's. It is also the most rescreens of one hold that settle nothing (neither post a review nor hold the
+  # item again) before a person decides. review-rescreen.yml keeps the same number, which tools/tests checks.
+  REVIEW_TRIES: "3"
 
 concurrency:
   # By event too, so that a run started by hand never cancels the pull request's own run of the required check. For an
@@ -264,19 +397,32 @@ concurrency:
   # edit while a draft runs waits for it. Only the events that the issue's author sent share that group: route skips
   # every other (the top of this file), and each of those gets a group of its own run, so it never replaces a waiting
   # run of the author's own edit. An event that the author sent and route still skips (an owner, a member or an App
-  # wrote the issue) is of an issue that never gets a draft.
-  group: build-${{ github.event_name }}-${{ github.event.pull_request.number || inputs.pr || inputs.issue || (github.event.sender.login == github.event.issue.user.login && github.event.issue.number || format('{0}-run-{1}', github.event.issue.number, github.run_id)) }}
+  # wrote the issue) is of an issue that never gets a draft. A rescreen has a group of its own, so it never cancels a
+  # run that a person started by hand.
+  group: build-${{ github.event_name }}${{ inputs.rescreen && '-rescreen' || '' }}-${{ github.event.pull_request.number || inputs.pr || inputs.issue || (github.event.sender.login == github.event.issue.user.login && github.event.issue.number || format('{0}-run-{1}', github.event.issue.number, github.run_id)) }}
   cancel-in-progress: ${{ github.event_name != 'issues' }}
 
 jobs:
   route:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    # contents: read only for the checkout of .github/scripts, main's (actor-kind).
-    permissions: {contents: read, pull-requests: read, issues: read}
+    # contents: read only for the checkout of .github/scripts, main's (actor-kind, limit-hold). actions: read for
+    # OUTSIDE_HOURLY_LIMIT, which reads this workflow's runs.
+    permissions: {contents: read, pull-requests: read, issues: read, actions: read}
     outputs:
       kind: ${{ steps.decide.outputs.kind }}
       sha: ${{ steps.decide.outputs.sha }}
+      # writer, screen, limit or measure (the trust step below); empty when kind is and no measurement was asked.
+      trust: ${{ steps.trust.outputs.trust }}
+      # When the trust step decided, which the comment job compares with the time of a hold.
+      started: ${{ steps.trust.outputs.started }}
+      # true for a rescreen that the trust step accepted: the Review step then admits github-actions[bot], the account
+      # the rescreen's dispatch makes the run's actor, and the gather job does not take the run as one by hand.
+      rescreen: ${{ steps.trust.outputs.rescreen }}
+      # The run whose event this item's hold names (a hold that is tried again), and the screened reviews of the item
+      # that failed so far, which a hold of a review that did not finish counts on.
+      origin: ${{ steps.trust.outputs.origin }}
+      tries: ${{ steps.trust.outputs.tries }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with:
@@ -298,9 +444,19 @@ jobs:
           SENDER: ${{ github.event.sender.login }}
           AUTHOR: ${{ github.event.issue.user.login }}
           ASSOCIATION: ${{ github.event.issue.author_association }}
+          MEASURE: ${{ inputs.measure }}
+          RESCREEN: ${{ inputs.rescreen }}
         run: |
           set -euo pipefail
           say() { echo "$1"; echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
+          # A measurement of the screen, by hand, reviews nothing: no kind, and the trust step routes it alone.
+          if [[ ${EVENT:-} == workflow_dispatch && ${MEASURE:-} == true ]]; then
+            [[ -z ${PR:-} && -z ${ISSUE:-} ]] \
+              || { echo "::error::A measurement of the screen reviews nothing: give no pr or issue."; exit 1; }
+            echo "measure=true" >> "$GITHUB_OUTPUT"
+            say "measurement of the screen: nothing is built or reviewed; the screen job measures its rules."
+            exit 0
+          fi
           # An issue's event that is ours (the top of this file) asks for nothing: the issue does not wait for us.
           if [ "${EVENT:-}" = issues ]; then
             if [[ $SENDER != "$AUTHOR" || $ASSOCIATION == OWNER || $ASSOCIATION == MEMBER ]]; then
@@ -337,8 +493,12 @@ jobs:
           # A change only into the default branch: take-project refuses a pull request into any other.
           if [ -n "$paths" ] && ! grep -q '^projects/' <<< "$paths" && (( $(jq .changed_files <<< "$pull") <= 3000 )) \
               && [ "$(jq -r .base.ref <<< "$pull")" = "$(jq -r .base.repo.default_branch <<< "$pull")" ]; then
-            # The action refuses a run that an App outside ALLOWED_BOTS started: such a change is built, as before.
-            who=$(.github/scripts/actor-kind "$ACTOR")
+            # The action refuses a run that an App outside ALLOWED_BOTS started: such a change is built, as before. A
+            # rescreen's is started by github-actions[bot], which the Review step admits when the trust step accepts
+            # the rescreen (and when it does not, no review runs).
+            bots=$ALLOWED_BOTS
+            [ "${RESCREEN:-}" != true ] || bots+=",github-actions[bot]"
+            who=$(ALLOWED_BOTS=$bots .github/scripts/actor-kind "$ACTOR")
             if [ "$who" != refused ]; then
               kind=change
               message="change review: the pull request changes no file under projects/, so nothing is built (review-change.md)."
@@ -346,6 +506,156 @@ jobs:
           fi
           echo "kind=$kind" >> "$GITHUB_OUTPUT"
           say "$message"
+
+      # Whether the review may run on its own, or the screen reads the pull request or the issue first (the top of
+      # this file). Write access is what GitHub's collaborator permission API answers: admin or write (maintain is
+      # write). Membership of the organisation alone is not write access. The Apps in ALLOWED_BOTS count as having it.
+      - name: Whether the author and the account that started the run have write access
+        id: trust
+        if: steps.decide.outputs.kind != '' || steps.decide.outputs.measure == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          AUTHOR: ${{ github.event.pull_request.user.login || github.event.issue.user.login }}
+          ACTOR: ${{ github.actor }}
+          RUN_ID: ${{ github.run_id }}
+          MEASURE: ${{ steps.decide.outputs.measure }}
+          RESCREEN: ${{ inputs.rescreen }}
+          ACCOUNT: ${{ inputs.account }}
+          NUMBER: ${{ inputs.pr || inputs.issue }}
+        run: |
+          set -euo pipefail
+          say() { echo "$1"; echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
+          # trusted
+          # trusted <login>: 0 when <login> is one of the ALLOWED_BOTS, or an account that GitHub's collaborator
+          # permission API gives admin or write; 1 when it is neither; 2 when the API could not say.
+          trusted() {
+            local permission
+            [[ $1 =~ ^[A-Za-z0-9-]+(\[bot\])?$ ]] || return 1
+            [[ ,$ALLOWED_BOTS, != *",$1,"* ]] || return 0
+            [[ $1 != *'[bot]' ]] || return 1
+            permission=$(gh api "repos/$REPO/collaborators/$1/permission" --jq .permission) || return 2
+            [[ $permission == admin || $permission == write ]]
+          }
+          # end of trusted
+          # known <login>: trusted's answer, 0 or 1; the run stops when GitHub could not say.
+          known() {
+            local rc=0
+            trusted "$1" || rc=$?
+            (( rc != 2 )) || { echo "::error::GitHub did not say whether $1 has write access. Re-run this run."; exit 1; }
+            return "$rc"
+          }
+          # earlier <login>: sets count to how many runs of this workflow in the last hour, before this run, either
+          # <login> started by an event, or screened again an item that the limit held for <login> (a rescreen, whose
+          # name, which its trust step checks, ends with the account; only a run started by hand counts by its name).
+          # A rescreen that its trust step refused does not count. The run stops when GitHub could not say.
+          earlier() {
+            local from runs id kind verdict
+            count=0
+            from=$(date -u -d '-1 hour' +%Y-%m-%dT%H:%M:%SZ)
+            # shellcheck disable=SC2016 # $ENV is jq's, read from this step's environment
+            runs=$(LOGIN=$1 gh api --method GET --paginate "repos/$REPO/actions/workflows/build.yaml/runs" \
+              -f created=">=$from" -F per_page=100 --jq '.workflow_runs[] | (.display_title // "") as $title
+                | select(.id < ($ENV.RUN_ID | tonumber)
+                         and ((.actor.login == $ENV.LOGIN and (.event == "pull_request_target" or .event == "issues"))
+                              or (.event == "workflow_dispatch"
+                                  and ($title | test("^Rescreen [0-9]+ of [A-Za-z0-9-]+(\\[bot\\])?$"))
+                                  and ($title | endswith(" of " + $ENV.LOGIN)))))
+                | "\(.id) \(if .event == "workflow_dispatch" then "rescreen" else "event" end)"') \
+              || { echo "::error::the runs of this workflow could not be read. Re-run this run."; exit 1; }
+            while read -r id kind; do
+              [ -n "$id" ] || continue
+              [[ $id =~ ^[0-9]+$ ]] || { echo "::error::a run id is not a number. Re-run this run."; exit 1; }
+              if [ "$kind" = rescreen ]; then
+                # A rescreen that its trust step refused (the item closed, or lost its label, in between) screened
+                # nothing: route finished, and neither the gather job nor the comment job ran.
+                verdict=$(gh api --method GET --paginate "repos/$REPO/actions/runs/$id/jobs" -F per_page=100 \
+                  --jq '([.jobs[] | select(.name == "route")] | first) as $r
+                    | ([.jobs[] | select(.name == "gather" or .name == "comment")]) as $then
+                    | if $r != null and $r.status == "completed" and ($then | length) == 2
+                         and ($then | all(.conclusion == "skipped")) then "skip" else "count" end') \
+                  || { echo "::error::the jobs of run $id could not be read. Re-run this run."; exit 1; }
+                [[ $verdict == *count* ]] || continue
+              fi
+              count=$((count + 1))
+            done <<< "$runs"
+          }
+          # origin: the run whose event this item's hold names, for a hold that is tried again; tries: the screened
+          # reviews of the item that failed so far, which a rescreen carries from its hold to the next.
+          rescreen=false origin="" tries=0
+          trust() {
+            { echo "trust=$1"; echo "rescreen=$rescreen"; echo "origin=$origin"; echo "tries=$tries"
+              echo "started=$(date -u +%Y-%m-%dT%H:%M:%SZ)"; } \
+              >> "$GITHUB_OUTPUT"
+            say "$2"
+            exit 0
+          }
+          [[ $RUN_ID =~ ^[0-9]+$ ]] || { echo "::error::not a run id: $RUN_ID"; exit 1; }
+          [[ $OUTSIDE_HOURLY_LIMIT =~ ^[1-9][0-9]*$ ]] || { echo "::error::OUTSIDE_HOURLY_LIMIT is not a number"; exit 1; }
+          case $EVENT in
+            pull_request_target|issues)
+              author=0 actor=0
+              known "$AUTHOR" || author=$?
+              known "$ACTOR" || actor=$?
+              (( author != 0 || actor != 0 )) || trust writer "The author and $ACTOR have write access: no screen."
+              # The limit is the account's that started the run; a writer's action on an outsider's item has none.
+              # This run is the one a hold of it names: at the limit, or of a screened review that does not finish.
+              origin=$RUN_ID
+              if (( actor != 0 )); then
+                earlier "$ACTOR"
+                (( count < OUTSIDE_HOURLY_LIMIT )) || trust limit "Held without a screen: $ACTOR has no write access, and its events and rescreens started $count runs of this workflow in the last hour, the limit is $OUTSIDE_HOURLY_LIMIT."
+              fi
+              trust screen "Screened first: the author or $ACTOR has no write access. A person with write access can ask for the review without it: gh workflow run build.yaml -R $REPO -f pr=<n> (or -f issue=<n>)." ;;
+            # GitHub lets only an account with write access start a run by hand; an App must be one of ALLOWED_BOTS. A
+            # rescreen may come from github-actions[bot] too: a dispatch made with the token of a job of this repository
+            # given actions: write, which review-rescreen.yml's job is. Whoever started it, a rescreen is checked
+            # against the hold, screened unless both accounts are writers, and counted.
+            workflow_dispatch)
+              if [ "$MEASURE" = true ]; then
+                if [[ $ACTOR == *'[bot]' ]] && ! known "$ACTOR"; then
+                  say "No measurement: the App that started this run ($ACTOR) is not one of ALLOWED_BOTS."
+                  exit 0
+                fi
+                trust measure "A measurement of the screen, started by hand by $ACTOR: the screen job alone runs."
+              fi
+              if [ "$RESCREEN" = true ]; then
+                # A held item screened again: an outsider's path, decided from what the API says now, never a run by
+                # hand. The item must be open and held, its newest hold must be one at the limit, and the run that hold
+                # names must be an event's of this workflow, whose account is the one the inputs give.
+                rescreen=true
+                stop() { say "No rescreen of $NUMBER: $1"; exit 0; }
+                if [[ $ACTOR == *'[bot]' && $ACTOR != 'github-actions[bot]' ]] && ! known "$ACTOR"; then
+                  stop "the App that started this run ($ACTOR) is not one of ALLOWED_BOTS."
+                fi
+                [[ $NUMBER =~ ^[1-9][0-9]*$ ]] || { echo "::error::not a number: $NUMBER"; exit 1; }
+                # shellcheck disable=SC2016 # $ENV is jq's, read from this step's environment
+                item=$(gh api "repos/$REPO/issues/$NUMBER" --jq '[.state, .user.login,
+                  (any(.labels[]?; .name == $ENV.HELD_LABEL) | tostring)] | join(" ")') \
+                  || { echo "::error::$NUMBER could not be read. Re-run this run."; exit 1; }
+                read -r state AUTHOR labelled <<< "$item"
+                [ "$state" = open ] || stop "it is $state."
+                [ "$labelled" = true ] || stop "it is not labelled $HELD_LABEL."
+                hold=$(.github/scripts/limit-hold "$NUMBER") \
+                  || { echo "::error::the hold of $NUMBER could not be read. Re-run this run."; exit 1; }
+                read -r _ origin account tries _ <<< "$hold"
+                [[ -n $origin && $origin != - ]] || stop "it has no hold that is tried again: the screen held it, or a person decides."
+                [[ $tries =~ ^[0-9]+$ ]] || stop "its hold names no count of tries."
+                [ "$ACCOUNT" = "$account" ] || stop "the account its hold names is $account, not ${ACCOUNT:-none}."
+                author=0 actor=0
+                known "$AUTHOR" || author=$?
+                known "$account" || actor=$?
+                # A writer's item, which the limit held for a writer's account: no screen of its own text.
+                (( author != 0 || actor != 0 )) || trust writer "A rescreen: the author and $account have write access: no screen."
+                if (( actor != 0 )); then
+                  earlier "$account"
+                  (( count < OUTSIDE_HOURLY_LIMIT )) || trust limit "A rescreen held again without a screen: $account has no write access, and its events and rescreens started $count runs of this workflow in the last hour, the limit is $OUTSIDE_HOURLY_LIMIT."
+                fi
+                trust screen "A rescreen, screened first: the author or $account has no write access."
+              fi
+              trust writer "Started by hand by $ACTOR: no screen." ;;
+            *) echo "::error::not an event of this workflow: $EVENT"; exit 1 ;;
+          esac
 
   project-builds:
     # Not the required check, which the job required reports (the top of this file).
@@ -530,24 +840,29 @@ jobs:
           # A re-run of the job replaces the record of its run, so that the run keeps one.
           overwrite: true
 
-  review:
-    # Claude Code, through anthropics/claude-code-action, checks the enrollment against review.md, or a change against
-    # review-change.md, or drafts the reply to an issue as review-issue.md says (the top of this file): route's kind.
+  gather:
+    # What the review reads, gathered once, for the screen and the review: .github/scripts/review-gather's .review/,
+    # projects/<name>/ as take-project takes it for an enrollment, and the last review's session that the review
+    # resumes. It holds no model, no identity token and no write permission, and runs no code of the pull request or
+    # the project. It keeps them as one tar file, the artifact review-data, for a day, and gives its SHA-256 as its
+    # output `digest`: the screen job and the review job each take the file only by that digest
+    # (.github/scripts/take-review-data), so the review reads exactly what the screen passed. One tar file, so that no
+    # file name of the pull request can stop the upload. It runs for every review (the review job's condition, in
+    # route's kind), whoever wrote the pull request or the issue, except one held at OUTSIDE_HOURLY_LIMIT.
     needs: [route, project-builds]
-    if: ${{ !cancelled() && (needs.project-builds.outputs.name != '' || needs.route.outputs.kind == 'change' || needs.route.outputs.kind == 'issue') }}
+    if: >-
+      ${{ !cancelled() && (needs.project-builds.outputs.name != '' || needs.route.outputs.kind == 'change' || needs.route.outputs.kind == 'issue')
+      && (needs.route.outputs.trust == 'writer' || needs.route.outputs.trust == 'screen') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 70
-    # Restores the last review's session and never saves one: the job reads the pull request and runs the model, and
-    # the session job saves (the top of this file).
+    timeout-minutes: 25
+    # Restores the last review's session and never saves one: the job reads the pull request, and the session job
+    # saves (the top of this file).
     cache-mode: read
-    environment: {name: enroll-review, deployment: false}
-    # actions: read for the hourly cap of issue drafts (its step below), which reads this workflow's runs, and for the
-    # runs API, which gives a change review the head its last review reviewed. A job's permissions cannot change with
-    # route's kind, so the job holds it for every kind, and the Review step's token has it too: read-only, on the runs
-    # of a public repository.
-    permissions: {contents: read, pull-requests: read, issues: read, checks: read, statuses: read, actions: read, id-token: write}
+    # actions: read for the runs API, which gives a change review the head its last review reviewed.
+    permissions: {contents: read, pull-requests: read, issues: read, checks: read, statuses: read, actions: read}
     env:
       KIND: ${{ needs.route.outputs.kind }}
+      TRUST: ${{ needs.route.outputs.trust }}
       PR: ${{ github.event.pull_request.number || inputs.pr }}
       ISSUE: ${{ inputs.issue || github.event.issue.number }}
       NAME: ${{ needs.project-builds.outputs.name }}
@@ -556,6 +871,313 @@ jobs:
       # A change review's session, by pull request; the last `-` keeps one pull request's key from being the start of
       # another's (pull request 1 and pull request 10), which restore-keys would match.
       CHANGE_KEY: review-${{ github.event.pull_request.number || inputs.pr }}-
+    outputs:
+      digest: ${{ steps.keep.outputs.digest }}
+      # true when the screen reads the item first: route's trust is screen, or the review would read text of an
+      # account without write access (the step below).
+      screen: ${{ steps.outside.outputs.screen }}
+      # The session to resume and the commit it reviewed, from review-gather (empty for a fresh review). None for a
+      # screened item: no screen reads a session, which a review that read unscreened text, such as one started by
+      # hand, may have kept.
+      session: ${{ steps.outside.outputs.screen == 'false' && steps.gather.outputs.session || '' }}
+      last: ${{ steps.outside.outputs.screen == 'false' && steps.gather.outputs.last || '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
+        with: {persist-credentials: false, fetch-depth: 0}
+      - name: Take projects/<name>/ from the pull request, as the build did
+        if: env.KIND == 'enrollment'
+        env: {GH_TOKEN: "${{ github.token }}", REPO: "${{ github.repository }}"}
+        run: GITHUB_STEP_SUMMARY=/dev/null .github/scripts/take-project build
+      - name: Restore the last review's session and the head it reviewed
+        if: env.KIND == 'enrollment'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
+        with: {path: "~/.claude/projects\n~/.claude/ossv-last-review", key: "${{ env.SESSION_KEY }}${{ github.run_id }}-${{ github.run_attempt }}", restore-keys: "${{ env.SESSION_KEY }}"}
+      # A change review resumes its last session for context only: review-gather takes the head that session reviewed
+      # from the runs API, never from this cache, which the runs of outside pull requests can write too (main's scope).
+      - name: Restore the last change review's session
+        if: env.KIND == 'change'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
+        with: {path: "~/.claude/projects\n~/.claude/ossv-last-review", key: "${{ env.CHANGE_KEY }}${{ github.run_id }}-${{ github.run_attempt }}", restore-keys: "${{ env.CHANGE_KEY }}"}
+      - name: Gather what the review reads, and the diff since the last review
+        id: gather
+        timeout-minutes: 15
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          COMMIT: ${{ needs.project-builds.outputs.commit }}
+          BUILD: "The Build check ${{ needs.project-builds.result }}: ${{ needs.project-builds.outputs.result || 'no result' }}."
+          BINARIES: ${{ needs.project-builds.outputs.binaries }}
+          CHECKS: ${{ needs.project-builds.outputs.checks }}
+        run: |
+          if [ "$KIND" = enrollment ]; then
+            dpkg -s python3-yaml unzip > /dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml unzip; }
+          fi
+          LAST_REVIEW=~/.claude/ossv-last-review .github/scripts/review-gather .review
+      # The files of projects/<name>/ and of head/ are HEAD_SHA's, and pr.json and pr.diff are what GitHub gave when
+      # they were read: the head the pull request had then. When the head moved in between, the diff that the screen
+      # reads may not hold every line of the files that the review reads. HEAD_SHA must be the head that pr.json names,
+      # read before the diff, and the head GitHub gives after it. When either names another head, this job keeps
+      # nothing (its output digest is empty), so no screen, review or hold runs: the push started a run of its own,
+      # which reviews the new head. A head that cannot be read fails the job for a screened item, which is held; for
+      # a writer's, a read that failed decides nothing, as before: review-gather left the error in the file.
+      - name: The pull request's head did not move while it was read
+        id: head
+        if: env.KIND != 'issue'
+        env: {GH_TOKEN: "${{ github.token }}", REPO: "${{ github.repository }}"}
+        run: |
+          set -uo pipefail
+          # pr.json's last line is the exit status that review-gather's keep() wrote.
+          read=$(sed '$d' .review/pr.json | jq -r '.headRefOid // empty' 2> /dev/null) || read=""
+          now=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha 2> /dev/null) || now=""
+          for head in "$read" "$now"; do
+            if [[ -n $head && $head != "$HEAD_SHA" ]]; then
+              echo "The pull request's head moved while it was read (read: ${read:-unknown}, now: ${now:-unknown}, gathered: $HEAD_SHA): nothing is kept, and the run of the new head reviews it."
+              echo "moved=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [[ -z $head && $TRUST == screen ]]; then
+              echo "::error::The pull request's head could not be read (read: ${read:-unknown}, now: ${now:-unknown}), so it is not screened."
+              exit 1
+            fi
+          done
+          echo "The pull request's head is $HEAD_SHA, before and after the reads."
+      # A writer's pull request or issue can hold the text of others: comments, reviews and review comments, which
+      # anyone can write and the review reads. When any of their accounts has no write access, or cannot be named,
+      # the screen reads those texts first (SCREEN_SCOPE comments). The accounts come from the files the review reads.
+      # A run a person with write access started by hand is that person's request: it is not screened. A rescreen is
+      # not such a run, whoever started it: route decided its trust from the API.
+      - name: Whether the review reads text of an account without write access
+        id: outside
+        if: steps.head.outputs.moved != 'true'
+        env: {GH_TOKEN: "${{ github.token }}", REPO: "${{ github.repository }}", EVENT: "${{ github.event_name }}", RESCREEN: "${{ needs.route.outputs.rescreen }}"}
+        run: |
+          set -uo pipefail
+          # trusted
+          # trusted <login>: 0 when <login> is one of the ALLOWED_BOTS, or an account that GitHub's collaborator
+          # permission API gives admin or write; 1 when it is neither; 2 when the API could not say.
+          trusted() {
+            local permission
+            [[ $1 =~ ^[A-Za-z0-9-]+(\[bot\])?$ ]] || return 1
+            [[ ,$ALLOWED_BOTS, != *",$1,"* ]] || return 0
+            [[ $1 != *'[bot]' ]] || return 1
+            permission=$(gh api "repos/$REPO/collaborators/$1/permission" --jq .permission) || return 2
+            [[ $permission == admin || $permission == write ]]
+          }
+          # end of trusted
+          # writer <login> <url>: whether trusted says 0. gh's pull request and issue JSON names an App without its
+          # [bot]: such a name, of one of the ALLOWED_BOTS, is that App when the comment at <url> is, by the REST API,
+          # a Bot's of that name with [bot]. An account's type never changes, so no user named so, or renamed so, is
+          # taken for the App.
+          writer() {
+            local rc=0 id
+            trusted "$1" || rc=$?
+            (( rc != 0 )) || return 0
+            [[ ,$ALLOWED_BOTS, == *",$1[bot],"* && $2 =~ \#issuecomment-([0-9]+)$ ]] || return 1
+            id=${BASH_REMATCH[1]}
+            [ "$(gh api "repos/$REPO/issues/comments/$id" --jq '"\(.user.login) \(.user.type)"' 2> /dev/null)" = "$1[bot] Bot" ]
+          }
+          screen=true
+          if [ "$TRUST" = writer ] && [ "$EVENT" = workflow_dispatch ] && [ "$RESCREEN" != true ]; then
+            screen=false
+          elif [ "$TRUST" = writer ]; then
+            item=.review/pr.json
+            [ -f "$item" ] || item=.review/issue.json
+            # keep()'s last line is the exit status; an account GitHub no longer names is "-". A read that cannot be
+            # parsed, or a pull request with no list of its review comments' authors, leaves screen true.
+            if accounts=$(sed '$d' "$item" | jq -r '((.comments // [])[] | [(.author.login // ""), (.url // "")]),
+                ((.reviews // [])[] | [(.author.login // ""), ""])
+                | (if .[0] == "" then "-" else .[0] end) + "\t" + .[1]' 2> /dev/null) \
+                && { [ "$item" = .review/issue.json ] || [ -f .review/review-comment-authors.txt ]; }; then
+              if [ -f .review/review-comment-authors.txt ]; then
+                accounts+=$'\n'$(sed '$d' .review/review-comment-authors.txt | sed 's/^$/-/')
+              fi
+              screen=false
+              while IFS=$'\t' read -r login url; do
+                [ -n "$login$url" ] || continue
+                if ! writer "${login:--}" "${url:-}"; then
+                  screen=true
+                  echo "The review reads text of an account without write access, or one GitHub cannot name: the screen reads it first."
+                  break
+                fi
+              done < <(sort -u <<< "$accounts")
+            fi
+          fi
+          echo "screen=$screen" >> "$GITHUB_OUTPUT"
+      # The project's repository at the built commit is far more text than the screen reads, and an enrollment of an
+      # account without write access names it: so that review reads none of it. Its source.txt says so, and the
+      # checks that need it are left to a person; a person with write access starts the full review by hand.
+      - name: A screened enrollment's review reads none of the project's repository
+        if: steps.head.outputs.moved != 'true' && env.KIND == 'enrollment' && env.TRUST == 'screen'
+        run: |
+          set -euo pipefail
+          rm -rf .review/source
+          echo "Not gathered: this pull request comes from an account without write access, and no screen reads the project's repository. A person with write access starts the review that reads it: gh workflow run build.yaml -f pr=$PR" > .review/source.txt
+      - name: Keep it for the screen and the review
+        id: keep
+        if: steps.head.outputs.moved != 'true'
+        env: {SCREEN: "${{ steps.outside.outputs.screen }}"}
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/review-data"
+          tar=$RUNNER_TEMP/review-data/review.tar
+          members=(.review)
+          if [ -n "$NAME" ] && [ -d "projects/$NAME" ]; then members+=("projects/$NAME"); fi
+          tar -cf "$tar" "${members[@]}"
+          session=()
+          # No session for a screened item (its output above).
+          for path in .claude/projects .claude/ossv-last-review; do
+            if [ "$SCREEN" = false ] && [ -e "$HOME/$path" ]; then session+=("$path"); fi
+          done
+          if (( ${#session[@]} )); then tar -rf "$tar" -C "$HOME" "${session[@]}"; fi
+          digest=$(sha256sum "$tar" | cut -d' ' -f1)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Kept ${members[*]} ${session[*]} as review.tar, SHA-256 $digest."
+      - if: steps.head.outputs.moved != 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (sha-pinned)
+        with: {name: review-data, path: "${{ runner.temp }}/review-data/review.tar", if-no-files-found: error, retention-days: 1, overwrite: true}
+
+  screen:
+    # The screen of a pull request or an issue whose author, or the account that started the run, has no write access
+    # (route's trust: screen), or whose comments, reviews or review comments the review reads include one of such an
+    # account (the gather job's output screen; the top of this file, and .github/scripts/screen.py). It runs in the
+    # environment review-screen, whose jobs alone can exchange their identity token for the screen's tokens: Google
+    # Cloud (Model Armor, and adding the reason to its bucket), Azure (Prompt Shields) and Anthropic (the service
+    # account review-screen; the review reaches Claude through the model gateway instead). It reaches neither ossv-ci
+    # nor the App's key, whose Google bindings name other environments. No other job, the review's included, gets the
+    # screen's tokens.
+    # Its GitHub token can only read, no key is stored, and it runs only main's .github/scripts. Its outputs are the
+    # verdict, clean or held, and the names of the checks that ran; why goes to the private bucket REASON_BUCKET,
+    # never to this public log or an output.
+    needs: [route, project-builds, gather]
+    # A screen of what the gather job kept, or a measurement, which needs no gather job.
+    if: >-
+      ${{ !cancelled() && ((needs.gather.result == 'success' && needs.gather.outputs.digest != ''
+          && needs.gather.outputs.screen != 'false') || needs.route.outputs.trust == 'measure') }}
+    environment: {name: review-screen, deployment: false}
+    runs-on: ubuntu-24.04
+    # A job that runs out of its own time ends as cancelled, which neither reviews nor holds the item. So each step
+    # has a time of its own, and those of the steps that run add up to less than the job's: a step that runs out of
+    # its time fails the job, and the comment job holds the item. The Screen step's 12 minutes are more than
+    # screen.py's own DEADLINE_SECONDS, after which it holds the item itself.
+    timeout-minutes: ${{ needs.route.outputs.trust == 'measure' && 60 || 25 }}
+    permissions: {contents: read, id-token: write}
+    outputs:
+      verdict: ${{ steps.screen.outputs.verdict }}
+      # The names of the checks that ran, which the review's comment names.
+      checks: ${{ steps.screen.outputs.checks }}
+    env:
+      NAME: ${{ needs.project-builds.outputs.name }}
+      # Ids and endpoints, not secrets. Google Cloud: the pool, its provider and the account that only this
+      # environment's jobs reach, Model Armor's template, and the bucket the reason goes to.
+      GCP_WORKLOAD_IDENTITY_PROVIDER: projects/805240912354/locations/global/workloadIdentityPools/review-screen/providers/github
+      GCP_SERVICE_ACCOUNT: review-screen@theorem-agent-infra.iam.gserviceaccount.com
+      MODEL_ARMOR_URL: https://modelarmor.us.rep.googleapis.com
+      MODEL_ARMOR_TEMPLATE: projects/theorem-agent-infra/locations/us/templates/review-screen
+      STORAGE_URL: https://storage.googleapis.com
+      REASON_BUCKET: theorem-agent-infra-review-screen-reasons
+      # Azure: Theorem's tenant, the managed identity review-screen (its client id, agent-infra #1428), whose one
+      # federated credential admits this repository's jobs in review-screen, and the Content Safety account.
+      AZURE_LOGIN_URL: https://login.microsoftonline.com
+      AZURE_TENANT_ID: aaa6ad34-51af-41e7-891f-f16f5c53c396
+      AZURE_CLIENT_ID: 878cb696-144f-4c60-b04c-3974fad24e96
+      CONTENT_SAFETY_URL: https://theorem-review-screen.cognitiveservices.azure.com
+      # Anthropic: Theorem's organization, the service account review-screen, its workspace, and the federation rule
+      # oss-verify-screen (fdrl_01PJtZrFW7ECzfBk5UVFjhw9), which admits this file's jobs in review-screen on main and
+      # nothing else (ids, not secrets).
+      ANTHROPIC_URL: https://api.anthropic.com
+      ANTHROPIC_ORGANIZATION_ID: 5fd73c3e-8a2c-4166-b80d-fb5ce0c1b4a6
+      ANTHROPIC_WORKSPACE_ID: wrkspc_01Qr1iUVcow4jdgQM7Amfks5
+      ANTHROPIC_SERVICE_ACCOUNT_ID: svac_01JFhEhPizCyTiK2i22mRJ8a
+      ANTHROPIC_FEDERATION_RULE_ID: fdrl_01PJtZrFW7ECzfBk5UVFjhw9
+      SCREEN_MODEL: claude-haiku-5-5
+      # The checks that run, which must name model_armor. A listed check whose settings are missing holds every item;
+      # a check leaves only by leaving this list.
+      SCREEN_CHECKS: model_armor,prompt_shields,claude
+      # How the checks' words make the verdict (.github/scripts/screen.py, RULES, with the measurement behind the
+      # choice): held when the model answers suspicious, or Model Armor and Prompt Shields both do; and, under every
+      # rule, when a check cannot answer.
+      SCREEN_RULE: claude_or_both_detectors
+    steps:
+      # main's .github/scripts, for take-review-data and screen.py; never the pull request.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
+        timeout-minutes: 2
+        with: {persist-credentials: false, sparse-checkout: .github/scripts}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2 (sha-pinned)
+        if: needs.route.outputs.trust != 'measure'
+        timeout-minutes: 2
+        with: {name: review-data, path: "${{ runner.temp }}/review-data"}
+      - name: Take what the gather job kept
+        if: needs.route.outputs.trust != 'measure'
+        timeout-minutes: 1
+        env: {DIGEST: "${{ needs.gather.outputs.digest }}"}
+        run: .github/scripts/take-review-data "$RUNNER_TEMP/review-data/review.tar"
+      # A token for 10 minutes (an hour for a measurement, which runs every check many times), which the account can
+      # use for Model Armor, for adding an object to the reason bucket and for reading the labelled set, and for
+      # nothing else. A sign-in that fails fails this job, and the comment job holds the item.
+      - name: Sign in to Google Cloud
+        id: google
+        timeout-minutes: 2
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0 (sha-pinned)
+        with: {workload_identity_provider: "${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}", service_account: "${{ env.GCP_SERVICE_ACCOUNT }}", token_format: access_token, access_token_lifetime: "${{ needs.route.outputs.trust == 'measure' && '3600s' || '600s' }}", create_credentials_file: false, export_environment_variables: false}
+      - name: Screen
+        id: screen
+        if: needs.route.outputs.trust != 'measure'
+        timeout-minutes: 12
+        env:
+          GOOGLE_ACCESS_TOKEN: ${{ steps.google.outputs.access_token }}
+          REPOSITORY: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number || inputs.pr || inputs.issue || github.event.issue.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REASON_OBJECT: ${{ github.repository }}/${{ github.run_id }}-${{ github.run_attempt }}.json
+          # A writer's item is screened only for the comments, reviews and review comments of others it holds: the
+          # rest is a writer's, which the review reads as before.
+          SCREEN_SCOPE: ${{ needs.route.outputs.trust == 'writer' && 'comments' || 'all' }}
+        run: python3 .github/scripts/screen.py .review ${NAME:+"projects/$NAME"}
+      # Every listed check, MEASURE_REPEATS times, on each text of the labelled set kept in the private bucket (the
+      # screen's account can read only its measure/set-* objects), and the verdict of each rule of SCREEN_RULE's
+      # choices. The texts and their words stay in the bucket, under measure/runs/; this log and the run's summary get
+      # the counts per rule alone.
+      - name: Measure
+        if: needs.route.outputs.trust == 'measure'
+        timeout-minutes: 50
+        env:
+          GOOGLE_ACCESS_TOKEN: ${{ steps.google.outputs.access_token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          MEASURE_SET: ${{ inputs.measure_set }}
+          MEASURE_OBJECT: measure/runs/${{ github.repository }}/${{ github.run_id }}-${{ github.run_attempt }}.json
+          MEASURE_REPEATS: ${{ inputs.measure_repeats }}
+        run: |
+          set -euo pipefail
+          [[ $MEASURE_SET =~ ^measure/set-v[0-9]+\.json$ ]] || { echo "::error::not a labelled set: $MEASURE_SET"; exit 1; }
+          [[ $MEASURE_REPEATS =~ ^[1-5]$ ]] || { echo "::error::MEASURE_REPEATS must be 1 to 5"; exit 1; }
+          python3 .github/scripts/screen.py --measure
+
+  review:
+    # Claude Code, through anthropics/claude-code-action, checks the enrollment against review.md, or a change against
+    # review-change.md, or drafts the reply to an issue as review-issue.md says (the top of this file): route's kind.
+    # It reads what the gather job kept. An item that the gather job's output screen says is not screened (a writer's
+    # with no text of others, or a run started by hand) is reviewed as it comes; another only when the screen's
+    # verdict is clean. A run whose gather job failed or kept nothing, or whose screen held it, failed or was
+    # cancelled, has no review.
+    needs: [route, project-builds, gather, screen]
+    if: >-
+      ${{ !cancelled() && needs.gather.result == 'success' && needs.gather.outputs.digest != ''
+      && (needs.gather.outputs.screen == 'false'
+          || (needs.screen.result == 'success' && needs.screen.outputs.verdict == 'clean')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    environment: {name: enroll-review, deployment: false}
+    # actions: read for the hourly cap of issue drafts (its step below), which reads this workflow's runs. A job's
+    # permissions cannot change with route's kind, so the job holds it for every kind, and the Review step's token has
+    # it too: read-only, on the runs of a public repository.
+    permissions: {contents: read, pull-requests: read, issues: read, checks: read, statuses: read, actions: read, id-token: write}
+    env:
+      KIND: ${{ needs.route.outputs.kind }}
+      PR: ${{ github.event.pull_request.number || inputs.pr }}
+      ISSUE: ${{ inputs.issue || github.event.issue.number }}
+      NAME: ${{ needs.project-builds.outputs.name }}
+      HEAD_SHA: ${{ needs.project-builds.outputs.sha || needs.route.outputs.sha }}
       GCP_WORKLOAD_IDENTITY_PROVIDER: projects/805240912354/locations/global/workloadIdentityPools/github/providers/github-ossv
       GCP_SERVICE_ACCOUNT: ossv-ci@theorem-agent-infra.iam.gserviceaccount.com
       # The account the model gateway serves as its team oss-verify-ci (Theorem's infrastructure code).
@@ -608,36 +1230,50 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           CAP: 6
         run: .github/scripts/issue-draft-cap
-      - name: Take projects/<name>/ from the pull request, as the build did
-        if: env.KIND == 'enrollment'
-        env: {GH_TOKEN: "${{ github.token }}", REPO: "${{ github.repository }}"}
-        run: GITHUB_STEP_SUMMARY=/dev/null .github/scripts/take-project build
-      - name: Restore the last review's session and the head it reviewed
-        if: env.KIND == 'enrollment'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
-        with: {path: "~/.claude/projects\n~/.claude/ossv-last-review", key: "${{ env.SESSION_KEY }}${{ github.run_id }}-${{ github.run_attempt }}", restore-keys: "${{ env.SESSION_KEY }}"}
-      # A change review resumes its last session for context only: review-gather takes the head that session reviewed
-      # from the runs API, never from this cache, which the runs of outside pull requests can write too (main's scope).
-      - name: Restore the last change review's session
-        if: env.KIND == 'change'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
-        with: {path: "~/.claude/projects\n~/.claude/ossv-last-review", key: "${{ env.CHANGE_KEY }}${{ github.run_id }}-${{ github.run_attempt }}", restore-keys: "${{ env.CHANGE_KEY }}"}
-      - name: Gather what the review reads, and the diff since the last review
-        id: gather
-        timeout-minutes: 15
+      # The hourly cap on screened reviews, in three steps, so that the comment job can tell a review held at the cap
+      # from one that did not finish. The count fails when it cannot read GitHub, the cap is not a number, or the count
+      # cannot be written; the check fails when the count it got is not a number (an empty one would read as 0 and let
+      # the review run past the cap). Either failure skips the hold step, and the item is held as a review that did not
+      # finish, tried again under REVIEW_TRIES. So the hold step runs only with a count and a cap that are numbers, and
+      # fails only at the cap. Keep the three names: screened-review-cap counts no run that one of them stopped, and the
+      # comment job finds a review held at the cap by the hold step's.
+      - name: Count the screened reviews of the last hour
+        id: cap-count
+        if: needs.gather.outputs.screen != 'false'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
-          COMMIT: ${{ needs.project-builds.outputs.commit }}
-          BUILD: "The Build check ${{ needs.project-builds.result }}: ${{ needs.project-builds.outputs.result || 'no result' }}."
-          BINARIES: ${{ needs.project-builds.outputs.binaries }}
-          CHECKS: ${{ needs.project-builds.outputs.checks }}
+          CAP: ${{ env.SCREENED_HOURLY_CAP }}
+        run: .github/scripts/screened-review-cap
+      - name: Check the count of screened reviews
+        if: needs.gather.outputs.screen != 'false'
+        env:
+          COUNT: ${{ steps.cap-count.outputs.count }}
+          CAP: ${{ env.SCREENED_HOURLY_CAP }}
         run: |
-          if [ "$KIND" = enrollment ]; then
-            dpkg -s python3-yaml unzip > /dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml unzip; }
+          set -euo pipefail
+          [[ $COUNT =~ ^[0-9]+$ && $CAP =~ ^[1-9][0-9]*$ ]] \
+            || { echo "::error::the count of the last hour's screened reviews (\"$COUNT\") or the cap is not a number. No model ran."; exit 1; }
+      - name: Hold a screened review at the hourly cap
+        if: needs.gather.outputs.screen != 'false'
+        env:
+          COUNT: ${{ steps.cap-count.outputs.count }}
+          CAP: ${{ env.SCREENED_HOURLY_CAP }}
+        run: |
+          set -euo pipefail
+          if (( COUNT >= CAP )); then
+            echo "::error::HELD: $COUNT screened reviews ran in the last hour, at the cap of $CAP. No model ran. A person can start the review by hand."
+            exit 1
           fi
-          LAST_REVIEW=~/.claude/ossv-last-review .github/scripts/review-gather .review
+          echo "$COUNT screened reviews ran in the last hour, under the cap of $CAP."
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2 (sha-pinned)
+        with: {name: review-data, path: "${{ runner.temp }}/review-data"}
+      # .review/, projects/<name>/ and the last review's session, as the gather job kept them, by their SHA-256: for a
+      # screened pull request or issue, exactly what the screen passed.
+      - name: Take what the gather job kept
+        env: {DIGEST: "${{ needs.gather.outputs.digest }}"}
+        run: .github/scripts/take-review-data "$RUNNER_TEMP/review-data/review.tar" "$HOME"
       # The sign-in an issue's draft needs, and nothing else: the review's usage goes over the tailnet with no
       # Google token (below), so this step runs for the issue path alone.
       - name: Sign in to Google Cloud, to check that an issue's draft can be stored
@@ -730,8 +1366,8 @@ jobs:
       - name: What the review reads and gives
         id: prompt
         env:
-          SESSION: ${{ steps.gather.outputs.session }}
-          LAST: ${{ steps.gather.outputs.last }}
+          SESSION: ${{ needs.gather.outputs.session }}
+          LAST: ${{ needs.gather.outputs.last }}
         run: .github/scripts/review-prompt
       # An empty or other value would send the gateway's token elsewhere: Claude Code's default is Anthropic's own API.
       - name: Check the model gateway's URL
@@ -753,9 +1389,15 @@ jobs:
           # The gateway's identity token, which Claude Code sends to ANTHROPIC_BASE_URL as its key (x-api-key).
           anthropic_api_key: ${{ steps.gateway.outputs.id_token }}
           github_token: ${{ github.token }}
+          # The action's own check of the account that started the run is off ("*"): who is reviewed without a
+          # person is decided by route's trust step and the screen, in this job's condition. A value is still given,
+          # because with none the action writes this job's GitHub token into the checkout's git configuration, which
+          # Claude can read.
           allowed_non_write_users: "*"
-          # Only these Apps' runs get a review (the action refuses any other App): the one list, at the top.
-          allowed_bots: ${{ env.ALLOWED_BOTS }}
+          # Only these Apps' runs get a review (the action refuses any other App): the one list, at the top. And
+          # github-actions[bot], which starts a rescreen's run (review-rescreen.yml's dispatch), only for a rescreen
+          # that route's trust step accepted: its item is then screened, or a writer's whose others' text is screened.
+          allowed_bots: ${{ needs.route.outputs.rescreen == 'true' && format('{0},github-actions[bot]', env.ALLOWED_BOTS) || env.ALLOWED_BOTS }}
           prompt: ${{ steps.prompt.outputs.prompt }}
           claude_args: >-
             --tools Read,Glob,Grep --permission-mode default --model claude-opus-5-5 --effort xhigh --max-turns 300
@@ -808,6 +1450,8 @@ jobs:
           REVIEW: ${{ steps.result.outputs.comment }}
           CHECKS: ${{ needs.project-builds.outputs.checks }}
           RULES: ${{ needs.route.outputs.kind == 'change' && 'review-change.md' || 'review.md' }}
+          # The checks the screen ran, when it screened this pull request first.
+          SCREENED: ${{ needs.gather.outputs.screen != 'false' && needs.screen.outputs.checks || '' }}
         run: |
           verdicts=$(jq -c . "$RUNNER_TEMP/draft/verdicts.json")
           VERDICTS=$verdicts .github/scripts/review-body > "$RUNNER_TEMP/draft/body.md"
@@ -853,12 +1497,12 @@ jobs:
           echo "object=$name" >> "$GITHUB_OUTPUT" && echo "Stored the held finding as $name, generation $generation."
 
   session:
-    # Saves the session the review job kept in the Actions cache, under the key that job restores from, for the review
-    # of the next push (the top of this file). The review job reads the pull request and runs the model, so it only
-    # restores the cache. This job writes it, and it processes no input of the pull request before it writes, as
-    # GitHub's dependency caching reference asks of a job that declares a write-capable cache-mode on an untrusted
-    # trigger: it checks out nothing, runs no script, holds no permission and no identity token, and its two pinned
-    # actions move the one artifact the review job uploaded, by that artifact's id, into the cache. A save that fails is
+    # Saves the session the review job kept in the Actions cache, under the key the gather job restores from, for the
+    # review of the next push (the top of this file). The gather job reads the pull request and the review job runs the
+    # model, so neither writes the cache. This job writes it, and it processes no input of the pull request before it
+    # writes, as GitHub's dependency caching reference asks of a job that declares a write-capable cache-mode on an
+    # untrusted trigger: it checks out nothing, runs no script, holds no permission and no identity token, and its two
+    # pinned actions move the one artifact the review job uploaded, by that artifact's id, into the cache. A save that fails is
     # a warning, never a failure, as a cache save is in any job: the next review is then fresh.
     needs: [project-builds, review]
     if: ${{ !cancelled() && needs.review.outputs.session != '' }}
@@ -1020,13 +1664,27 @@ jobs:
 
   comment:
     # Posts the review's comment as oss-verify[bot], or updates the one already there; when the review held a finding
-    # back, only once the hold job sent it, because the comment says that it was sent. Never for an issue: a person
-    # approves the exact text of each reply to an issue before anyone posts it.
-    needs: [route, project-builds, review, hold]
+    # back, only once the hold job sent it, because the comment says that it was sent. Never the draft for an issue: a
+    # person approves the exact text of each reply to an issue before anyone posts it.
+    # Or, for a pull request or an issue that the screen held, that could not be gathered or screened, whose screened
+    # review failed, or whose account is at OUTSIDE_HOURLY_LIMIT: it puts the label review-held on it and posts one
+    # comment that says so, in fixed words, which a later hold replaces. The comment says nothing of why, and this job
+    # could not: the screen job's only output is its verdict, and why is in the private bucket. A later review that is
+    # posted, or for an issue a later review that made its draft, takes the label off and deletes the hold comment.
+    needs: [route, project-builds, gather, screen, review, hold]
     if: >-
-      ${{ !cancelled() && needs.route.outputs.kind != 'issue'
+      ${{ !cancelled() && ((needs.route.outputs.kind != 'issue'
       && needs.review.result == 'success' && needs.review.outputs.comment != ''
-      && (needs.review.outputs.held_object == '' || needs.hold.result == 'success') }}
+      && (needs.review.outputs.held_object == '' || needs.hold.result == 'success'))
+      || (needs.route.outputs.kind == 'issue' && needs.review.result == 'success')
+      || ((needs.project-builds.outputs.name != '' || needs.route.outputs.kind == 'change' || needs.route.outputs.kind == 'issue')
+          && (needs.route.outputs.trust == 'limit'
+              || (needs.route.outputs.trust == 'screen' && needs.gather.result == 'failure')
+              || (needs.gather.result == 'success' && needs.gather.outputs.digest != '' && needs.gather.outputs.screen != 'false'
+                  && (needs.screen.result == 'failure'
+                      || (needs.screen.result == 'success'
+                          && (needs.screen.outputs.verdict != 'clean' || needs.review.result == 'failure'
+                              || needs.review.result == 'cancelled'))))))) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # The GitHub Environment is what gets this job the App's key and keeps it from every other job: its identity
@@ -1040,21 +1698,29 @@ jobs:
     environment:
       name: comment
       deployment: false
-    # One comment job at a time for a pull request, whatever event started its run (the run's own group is by event):
-    # two at once could each find no comment, each post one, and only the first would ever be updated after.
+    # One comment job at a time for a pull request or an issue, whatever event started its run (the run's own group is
+    # by event): two at once could each find no comment, each post one, and only the first would ever be updated after.
+    # Every waiting job keeps its place (queue: max), so none is cancelled by a later one and fails the required check.
     concurrency:
-      group: build-comment-${{ github.event.pull_request.number || inputs.pr }}
+      group: build-comment-${{ github.event.pull_request.number || inputs.pr || inputs.issue || github.event.issue.number }}
       cancel-in-progress: false
+      queue: max
     permissions:
       # Only for the GitHub identity token that Google's federation trades for an access token of
       # ossv-app-comment@theorem-agent-infra, which reads the App's key. It writes with the oss-verify App's token, not
       # this job's, and runs no code of the pull request.
       id-token: write
+      # Only for this run's jobs, read with this job's own token: was a screened review stopped at its hourly cap?
+      actions: read
     env:
       # The review job's provider, and the account only a job in this environment can act as
       # (Theorem's infrastructure code).
       GCP_WORKLOAD_IDENTITY_PROVIDER: projects/805240912354/locations/global/workloadIdentityPools/github/providers/github-ossv
       GCP_SERVICE_ACCOUNT: ossv-app-comment@theorem-agent-infra.iam.gserviceaccount.com
+      # Whether this job holds the item (above) rather than post a review: the review job ran only when the item was
+      # not held, and this job runs for a review only when it succeeded.
+      HOLDING: ${{ needs.review.result != 'success' }}
+      KIND: ${{ needs.route.outputs.kind }}
     steps:
       - name: Sign in to Google Cloud
         id: gcp
@@ -1090,13 +1756,136 @@ jobs:
 
       - name: Get the oss-verify App's token
         id: app
+        if: env.HOLDING != 'true' && env.KIND != 'issue'
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0 (sha-pinned)
         with:
           client-id: Iv23liAWPMahJZYsw3un
           private-key: ${{ steps.key.outputs.key }}
           permission-pull-requests: write
 
+      # Issues too: the item held can be an issue, and an issue whose draft was made loses its label and comment.
+      - name: Get the oss-verify App's token for a hold or an issue
+        id: app-hold
+        if: env.HOLDING == 'true' || env.KIND == 'issue'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0 (sha-pinned)
+        with:
+          client-id: Iv23liAWPMahJZYsw3un
+          private-key: ${{ steps.key.outputs.key }}
+          permission-issues: write
+          permission-pull-requests: write
+
+      # Fixed words: nothing of the pull request, the issue, its account or the screen's reason.
+      - name: Label it review-held and say so
+        if: env.HOLDING == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-hold.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
+          NUMBER: ${{ github.event.pull_request.number || inputs.pr || inputs.issue || github.event.issue.number }}
+          TRUST: ${{ needs.route.outputs.trust }}
+          REVIEW: ${{ needs.review.result }}
+          HEAD_SHA: ${{ needs.project-builds.outputs.sha || needs.route.outputs.sha }}
+          # The run that holds it, which the comment names, so that a re-run of this run's failed jobs that posts a
+          # review takes its own hold off (route, and so its start time, is not re-run).
+          RUN_ID: ${{ github.run_id }}
+          # The run whose event the hourly limit first held, for a hold at the limit (review-rescreen.yml finds it so).
+          ORIGIN: ${{ needs.route.outputs.origin }}
+          # The screened reviews of the item that failed so far, which a rescreen carries from the hold before.
+          TRIES: ${{ needs.route.outputs.tries }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          # This job's own token, which reads this run's jobs (the App's token cannot).
+          RUN_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ $NUMBER =~ ^[1-9][0-9]*$ ]] || { echo "::error::not a number: $NUMBER"; exit 1; }
+          # A pull request's run of an older head holds nothing: the run of its current head decides.
+          if [ -n "${PR:-}" ]; then
+            current=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)
+            if [ "$current" != "$HEAD_SHA" ]; then
+              echo "The pull request's head is now $current, not $HEAD_SHA: the run of $current decides."
+              exit 0
+            fi
+            # A review of this head that is posted already (one a person started by hand) stands: no hold replaces it.
+            reviews=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+              --jq '.[] | select(.user.login == "oss-verify[bot]" and (.body | startswith("<!-- oss-verify-review -->"))) | .body')
+            if grep -qxF "<!-- oss-verify-review-head $HEAD_SHA -->" <<< "$reviews"; then
+              echo "A review of $HEAD_SHA is posted: no hold."
+              exit 0
+            fi
+          fi
+          input="pr"
+          [ -n "${PR:-}" ] || input="issue"
+          ask="A person with write access can start the review with \`gh workflow run build.yaml -R $REPO -f $input=$NUMBER\`."
+          [[ $REVIEW_TRIES =~ ^[1-9][0-9]*$ ]] || { echo "::error::REVIEW_TRIES is not a number"; exit 1; }
+          [[ $RUN_ID =~ ^[0-9]+$ && $RUN_ATTEMPT =~ ^[0-9]+$ ]] || { echo "::error::not a run id or attempt"; exit 1; }
+          tries=${TRIES:-0}
+          [[ $tries =~ ^[0-9]+$ ]] || tries=0
+          kind=""
+          # review-rescreen.yml takes a hold with a marker once its comment is an hour old, at its next run of the four
+          # each hour.
+          next=$(date -u -d '+1 hour' '+%Y-%m-%d %H:%M UTC')
+          again="It is screened again automatically, with no maintainer, from $next, by a check that runs every 15 minutes. If that account is still at the limit then, the check tries again later, and if the item is held again, this comment gives the new time."
+          if [ "$TRUST" = limit ]; then
+            kind=limit
+            why="The account behind its latest event has no write access to this repository, and its pull requests, issues and pushes have reached the limit of $OUTSIDE_HOURLY_LIMIT an hour that are screened for the automated review. $again"
+          elif [ "$REVIEW" = failure ] || [ "$REVIEW" = cancelled ]; then
+            # An outsider's item (trust screen) is tried again: at the cap, or after a review that failed or ran out
+            # of time (cancelled: a newer push cancels the whole run, and then this job does not run). A writer's item
+            # whose screen read the text of others is its writer's to start again. At the cap means the review job's
+            # step "Hold a screened review at the hourly cap" failed. That step runs only after the count and its check
+            # passed, and fails only at the cap: a count that could not read GitHub or write its answer, or a count that
+            # is not a number, fails a step before it and skips it, and is a review that did not finish.
+            capped=$(GH_TOKEN=$RUN_TOKEN gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs" \
+              --jq '.jobs[] | select(.name == "review") | .steps[]?
+                    | select(.name == "Hold a screened review at the hourly cap" and .conclusion == "failure") | .name') \
+              || { echo "::warning::the jobs of this run could not be read: the hold counts as a review that did not finish."; capped=""; }
+            if [ -n "$capped" ]; then
+              why="It comes from, or holds the text of, an account without write access to this repository. The automated screen passed it, but the automated reviews of such items had reached their limit of $SCREENED_HOURLY_CAP an hour."
+              if [ "$TRUST" = screen ]; then kind=cap; why="$why $again"; else why="$why A maintainer will look at it."; fi
+            elif [ "$TRUST" = screen ] && (( tries + 1 < REVIEW_TRIES )); then
+              tries=$((tries + 1))
+              kind=transient
+              why="It comes from, or holds the text of, an account without write access to this repository. The automated screen passed it, but the automated review did not finish ($tries of the $REVIEW_TRIES times it is tried). $again"
+            elif [ "$TRUST" = screen ]; then
+              tries=$((tries + 1))
+              why="It comes from, or holds the text of, an account without write access to this repository. The automated screen passed it, but the automated review did not finish, $tries times. A maintainer will look at it."
+            else
+              why="It comes from, or holds the text of, an account without write access to this repository. The automated screen passed it, but the automated review did not finish. A maintainer will look at it."
+            fi
+          else
+            why="It comes from, or holds the text of, an account without write access to this repository, so an automated screen reads it before the automated review does, and the screen did not pass it or could not read it. A maintainer will look at it."
+          fi
+          marker=""
+          if [ -n "$kind" ]; then
+            [[ $ORIGIN =~ ^[1-9][0-9]*$ ]] || { echo "::error::not a run id: $ORIGIN"; exit 1; }
+            marker="<!-- oss-verify-held-$kind $ORIGIN $tries -->"$'\n'
+          fi
+          [[ $RUN_ID =~ ^[0-9]+$ ]] || { echo "::error::not a run id: $RUN_ID"; exit 1; }
+          printf '%s\n%s\n\n%s %s\n\n%s%s\n' '<!-- oss-verify-held -->' "**Automated review held.**" "$why" "$ask" \
+            "$marker" "<!-- oss-verify-held-run $RUN_ID -->" > "$RUNNER_TEMP/held.md"
+          # Adding a label that does not exist makes it, so a failed creation (two holds at once) only loses the colour.
+          if ! gh api "repos/$REPO/labels/$HELD_LABEL" --jq .name > /dev/null 2>&1; then
+            gh api --method POST "repos/$REPO/labels" -f name="$HELD_LABEL" -f color=d93f0b \
+              -f description="The automated screen held this for a maintainer" --jq .name \
+              || echo "::warning::the label $HELD_LABEL could not be made; adding it makes it."
+          fi
+          gh api --method POST "repos/$REPO/issues/$NUMBER/labels" -f "labels[]=$HELD_LABEL" --jq '.[].name' > /dev/null
+          existing=$(gh api "repos/$REPO/issues/$NUMBER/comments" --paginate \
+            --jq '.[] | select(.user.login == "oss-verify[bot]" and (.body | startswith("<!-- oss-verify-held -->"))) | .id')
+          existing=${existing%%$'\n'*}
+          if [ -n "$existing" ]; then
+            jq -n --rawfile body "$RUNNER_TEMP/held.md" '{body: $body}' \
+              | gh api --method PATCH "repos/$REPO/issues/comments/$existing" --input - > /dev/null
+          else
+            jq -n --rawfile body "$RUNNER_TEMP/held.md" '{body: $body}' \
+              | gh api --method POST "repos/$REPO/issues/$NUMBER/comments" --input - > /dev/null
+          fi
+          echo "Held: labelled $HELD_LABEL, and said so."
+
+
       - name: Post the comment, or update the one already there
+        id: post
+        if: env.HOLDING != 'true' && env.KIND != 'issue'
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           REPO: ${{ github.repository }}
@@ -1129,12 +1918,50 @@ jobs:
             jq -n --rawfile body "$RUNNER_TEMP/comment.md" '{body: $body}' \
               | gh api --method POST "repos/$REPO/issues/$PR/comments" --input - > /dev/null
           fi
+          echo "posted=true" >> "$GITHUB_OUTPUT"
+
+      # A review replaces a hold: one a maintainer started, or a later push that the screen passed; for an issue, a
+      # review that made its draft. The label comes off, and the hold comment goes. Not when another run's hold came
+      # after this run started: a newer event of the pull request or the issue was held, in a run of its own. This
+      # run's own hold, from an attempt before a re-run of its failed jobs, counts as older whatever its time.
+      - name: Take the label review-held off
+        if: steps.post.outputs.posted == 'true' || (env.HOLDING != 'true' && env.KIND == 'issue')
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || steps.app-hold.outputs.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number || inputs.pr || inputs.issue || github.event.issue.number }}
+          STARTED: ${{ needs.route.outputs.started }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          [[ $NUMBER =~ ^[1-9][0-9]*$ ]] || { echo "::error::not a number: $NUMBER"; exit 1; }
+          [[ $RUN_ID =~ ^[0-9]+$ ]] || { echo "::error::not a run id: $RUN_ID"; exit 1; }
+          [[ $STARTED =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
+            || { echo "::error::no start time of this run"; exit 1; }
+          held=$(gh api "repos/$REPO/issues/$NUMBER/comments" --paginate \
+            --jq '.[] | select(.user.login == "oss-verify[bot]" and (.body | startswith("<!-- oss-verify-held -->")))
+              | "\(.id) \(.updated_at) \((.body | capture("\n<!-- oss-verify-held-run (?<r>[0-9]+) -->\n?$") | .r) // "-")"') \
+            || { echo "::error::the comments of #$NUMBER could not be read"; exit 1; }
+          while read -r _ at run; do
+            [ -n "${at:-}" ] && [ "$run" != "$RUN_ID" ] || continue
+            if [[ ! $at < $STARTED ]]; then
+              echo "#$NUMBER was held at $at by run $run, after this run started at $STARTED: the label and the hold comment stay."
+              exit 0
+            fi
+          done <<< "$held"
+          out=$(gh api --method DELETE "repos/$REPO/issues/$NUMBER/labels/$HELD_LABEL" 2>&1) \
+            || [[ $out == *"(HTTP 404)"* ]] || { echo "::error::the label $HELD_LABEL could not be taken off: $out"; exit 1; }
+          while read -r id _; do
+            [[ $id =~ ^[0-9]+$ ]] || continue
+            gh api --method DELETE "repos/$REPO/issues/comments/$id" > /dev/null \
+              || { echo "::error::the hold comment $id could not be deleted"; exit 1; }
+          done <<< "$held"
 
   required:
     # The required check project-builds (the top of this file), with .github/scripts/collect. A static name: GitHub
     # reports the check under it on every run.
     name: project-builds
-    needs: [route, project-builds, record, review, session, hold, comment]
+    needs: [route, project-builds, record, gather, screen, review, session, hold, comment]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -1153,23 +1980,53 @@ jobs:
           BUILD: ${{ needs.project-builds.result }}
           ASKED_BUILD: ${{ needs.route.outputs.kind == 'enrollment' }}
           # Each of the others is asked for on its own job's condition: the record when the build passed and took a
-          # project, the review when the build took a project or the kind is change or issue, the session when the
-          # review kept one, hold when an enrollment's review ran, comment when the review wrote a comment (and, if it
-          # held a finding back, the hold job sent it), never for an issue.
+          # project; gather when the build took a project or the kind is change or issue (the item is reviewable), and
+          # route did not hold it at OUTSIDE_HOURLY_LIMIT; the screen when gather kept the item (its output digest)
+          # and its output screen is not false; the review when gather kept it and its output screen is false, or the
+          # screen's verdict is clean; the session when the
+          # review kept one; hold when an enrollment's review ran; comment when the review wrote a comment (and, if it
+          # held a finding back, the hold job sent it) for a pull request, when the review of an issue made its draft
+          # (the comment job takes a hold off it), or when a reviewable item is held (route's
+          # limit, a screen that held it or failed, a screened review that failed, or no gathered item to read). So a
+          # held item passes this check when the build passed (if asked) and the comment job labelled it and said so:
+          # it waits for a person, as the label says, and an enrollment's statements do not start without review
+          # verdicts (enroll-dispatch's review-pending). A gather or a screen job that failed fails it, held or not,
+          # and so does a screened review that failed (at SCREENED_HOURLY_CAP, say).
           RECORD: ${{ needs.record.result }}
           ASKED_RECORD: ${{ needs.project-builds.result == 'success' && needs.project-builds.outputs.name != '' }}
+          GATHER: ${{ needs.gather.result }}
+          ASKED_GATHER: >-
+            ${{ (needs.project-builds.outputs.name != '' || needs.route.outputs.kind == 'change' || needs.route.outputs.kind == 'issue')
+            && (needs.route.outputs.trust == 'writer' || needs.route.outputs.trust == 'screen') }}
+          SCREEN: ${{ needs.screen.result }}
+          # A measurement asks for the screen job alone (route's trust measure), and for no other job.
+          ASKED_SCREEN: >-
+            ${{ (needs.gather.result == 'success' && needs.gather.outputs.digest != '' && needs.gather.outputs.screen != 'false')
+            || needs.route.outputs.trust == 'measure' }}
           REVIEW: ${{ needs.review.result }}
-          ASKED_REVIEW: ${{ (needs.project-builds.outputs.name != '' || needs.route.outputs.kind == 'change' || needs.route.outputs.kind == 'issue') }}
+          ASKED_REVIEW: >-
+            ${{ needs.gather.result == 'success' && needs.gather.outputs.digest != ''
+            && (needs.gather.outputs.screen == 'false'
+                || (needs.screen.result == 'success' && needs.screen.outputs.verdict == 'clean')) }}
           SESSION: ${{ needs.session.result }}
           ASKED_SESSION: ${{ needs.review.outputs.session != '' }}
           HOLD: ${{ needs.hold.result }}
           ASKED_HOLD: ${{ needs.review.result != 'skipped' && needs.route.outputs.kind == 'enrollment' }}
           COMMENT: ${{ needs.comment.result }}
           ASKED_COMMENT: >-
-            ${{ needs.route.outputs.kind != 'issue'
+            ${{ (needs.route.outputs.kind != 'issue'
             && needs.review.result == 'success' && needs.review.outputs.comment != ''
-            && (needs.review.outputs.held_object == '' || needs.hold.result == 'success') }}
+            && (needs.review.outputs.held_object == '' || needs.hold.result == 'success'))
+            || (needs.route.outputs.kind == 'issue' && needs.review.result == 'success')
+            || ((needs.project-builds.outputs.name != '' || needs.route.outputs.kind == 'change' || needs.route.outputs.kind == 'issue')
+                && (needs.route.outputs.trust == 'limit'
+                    || (needs.route.outputs.trust == 'screen' && needs.gather.result == 'failure')
+                    || (needs.gather.result == 'success' && needs.gather.outputs.digest != '' && needs.gather.outputs.screen != 'false'
+                        && (needs.screen.result == 'failure'
+                            || (needs.screen.result == 'success'
+                                && (needs.screen.outputs.verdict != 'clean' || needs.review.result == 'failure'
+                                    || needs.review.result == 'cancelled')))))) }}
         run: >-
           .github/scripts/collect "$ROUTE" "build:$BUILD:$ASKED_BUILD" "record:$RECORD:$ASKED_RECORD"
-          "review:$REVIEW:$ASKED_REVIEW" "session:$SESSION:$ASKED_SESSION" "hold:$HOLD:$ASKED_HOLD"
-          "comment:$COMMENT:$ASKED_COMMENT"
+          "gather:$GATHER:$ASKED_GATHER" "screen:$SCREEN:$ASKED_SCREEN" "review:$REVIEW:$ASKED_REVIEW"
+          "session:$SESSION:$ASKED_SESSION" "hold:$HOLD:$ASKED_HOLD" "comment:$COMMENT:$ASKED_COMMENT"

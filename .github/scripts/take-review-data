@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+#
+# Takes what build.yaml's gather job kept, review.tar, into the screen job or the review job:
+#
+#   DIGEST=<SHA-256> [NAME=<project>] .github/scripts/take-review-data <review.tar> [<home>]
+#
+# DIGEST is the gather job's output `digest`, the SHA-256 of the file that job made, and the file is refused unless its
+# SHA-256 is that one: so the screen and the review read the same bytes, the ones the gather job kept, whatever else
+# uploaded an artifact of that name in this run. The file is also refused when a member is not a regular file or a
+# directory (a symbolic or hard link could point outside), when a path is absolute or has a `..` part, and when a path
+# is outside .review/, projects/<NAME>/ (an enrollment's, as take-project wrote it) and the last review's session
+# (.claude/projects/ and .claude/ossv-last-review).
+#
+# .review/ and projects/<NAME>/ go into the working directory, the checkout of main: projects/<NAME>/ replaces main's
+# copy, as take-project does. The session goes into <home> only when <home> is given (the review job; the screen job
+# reads no session).
+set -euo pipefail
+export LC_ALL=C
+tar=${1:?usage: take-review-data <review.tar> [<home>]}
+home=${2:-}
+fail() { echo "::error::take-review-data: $1"; exit 1; }
+[[ ${DIGEST:-} =~ ^[0-9a-f]{64}$ ]] || fail "the gather job gave no SHA-256"
+[[ -z ${NAME:-} || $NAME =~ ^[a-z0-9][a-z0-9._-]{0,62}$ ]] || fail "NAME is not a project name"
+printf '%s  %s\n' "$DIGEST" "$tar" | sha256sum -c --strict --quiet || fail "review.tar is not the file the gather job kept"
+# Each member's type, from the verbose listing (its first character), and its path.
+tar --numeric-owner -tvf "$tar" | cut -c1 > "$RUNNER_TEMP/review-data-types"
+tar -tf "$tar" > "$RUNNER_TEMP/review-data-paths"
+[ "$(wc -l < "$RUNNER_TEMP/review-data-types")" = "$(wc -l < "$RUNNER_TEMP/review-data-paths")" ] \
+  || fail "review.tar lists a path over more than one line"
+! grep -qv '^[-d]$' "$RUNNER_TEMP/review-data-types" || fail "review.tar holds a member that is neither a file nor a directory"
+allowed='^\.review(/|$)|^\.claude/(projects(/|$)|ossv-last-review$)'
+[ -z "${NAME:-}" ] || allowed+="|^projects/${NAME//./\\.}(/|$)"
+! grep -qvE "$allowed" "$RUNNER_TEMP/review-data-paths" || fail "review.tar holds a path outside what the review reads"
+! grep -qE '^/|(^|/)\.\.(/|$)' "$RUNNER_TEMP/review-data-paths" || fail "review.tar holds an absolute or a .. path"
+[ ! -e .review ] || fail ".review is there already"
+members=(.review)
+if [ -n "${NAME:-}" ] && grep -q "^projects/${NAME//./\\.}/" "$RUNNER_TEMP/review-data-paths"; then
+  rm -rf "projects/$NAME"
+  members+=("projects/$NAME")
+fi
+tar -xf "$tar" --no-same-owner --no-same-permissions "${members[@]}"
+if [ -n "$home" ] && grep -q '^\.claude/' "$RUNNER_TEMP/review-data-paths"; then
+  tar -xf "$tar" --no-same-owner --no-same-permissions -C "$home" --wildcards '.claude/*'
+fi
+echo "Took $(find .review -type f | wc -l) files of .review/${NAME:+, and projects/$NAME/}."
