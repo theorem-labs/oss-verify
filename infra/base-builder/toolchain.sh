@@ -21,6 +21,18 @@ CHOST=riscv64-linux-musl
 OFT_NO_BUILTIN_ALLOC="-fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-reallocarray -fno-builtin-free -fno-builtin-aligned_alloc -fno-builtin-posix_memalign -fno-builtin-memalign -fno-builtin-valloc -fno-builtin-strdup -fno-builtin-strndup"
 BASE_CFLAGS="-march=rv64g -mabi=lp64d -Os -g -ffunction-sections -fdata-sections -fno-stack-protector -fno-plt -Wdate-time $OFT_NO_BUILTIN_ALLOC"
 
+# Frame pointers, on a toolchain image that sets OFT_FRAME_POINTERS=1 (.github/workflows/toolchain-images.yaml makes
+# them): every function keeps its frame record in s0, which AddressSanitizer's fast unwinder follows when it records an
+# allocation's stack, so a recorded trace is a call chain. The release's images do not set it, so their builds keep the
+# release's flags and bytes (docs/build-contract.md, "Frame pointers").
+case "${OFT_FRAME_POINTERS:-}" in
+  "") ;;
+  1) BASE_CFLAGS="$BASE_CFLAGS -fno-omit-frame-pointer" ;;
+  *)
+    echo "toolchain.sh: OFT_FRAME_POINTERS must be 1 or unset (got '$OFT_FRAME_POINTERS')" >&2
+    exit 1 ;;
+esac
+
 SHIM=/tmp/shim; mkdir -p "$SHIM"; PATH=$SHIM:$PATH; export PATH
 
 # riscv64-linux-musl-ar and friends are the LLVM tools, which understand riscv64 objects on any host.

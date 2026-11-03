@@ -23,7 +23,8 @@
 #     asan        --cfg fuzzing -Zub-checks=no -Zsanitizer=address
 #     asan-ubsan  --cfg fuzzing -Zub-checks=yes -Zsanitizer=address
 #
-# with -Cdebug-assertions=on in each when CARGO_DEBUG_ASSERTIONS=1 (as OSS-Fuzz's build fuzzes the project). The
+# with -Cdebug-assertions=on in each when CARGO_DEBUG_ASSERTIONS=1 (as OSS-Fuzz's build fuzzes the project), and with
+# -Cforce-frame-pointers=yes in each on a toolchain image that sets OFT_FRAME_POINTERS=1 (toolchain.sh). The
 # standard library is the sealed copy in the toolchain image (its seal-std.sh): getrandom with GRND_NONBLOCK,
 # available_parallelism() 1, and, with OFT_RUST_QUIET_STDIO=1, the stdio seal that the quiet link's byte switches.
 #
@@ -168,6 +169,9 @@ oft_build_cargo_shim() {
     asanubsan) _rf="$_rf -Zub-checks=yes -Zsanitizer=address" ;;
     *) oft_rust_fail "the build $FLAV has no Rust meaning"; return 1 ;;
   esac
+  # Frame pointers, as toolchain.sh gives the C compiles on an image that sets OFT_FRAME_POINTERS=1. -Zbuild-std
+  # compiles the standard library with these flags too, so its frames keep their frame records as well.
+  [ "${OFT_FRAME_POINTERS:-}" != 1 ] || _rf="$_rf -Cforce-frame-pointers=yes"
   [ "${OFT_RUST_QUIET_STDIO:-0}" != 1 ] || _rf="$_rf --cfg $_qcfg"
   _rf="$_rf $(oft_rust_release_rustflags "$_w")"
   _feat=""
