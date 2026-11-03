@@ -64,8 +64,9 @@ SHIELD_API_VERSION = "2024-09-01"
 SHIELD_PROMPT = "Review the pull request or issue in the documents."
 ANTHROPIC_VERSION = "2023-06-01"
 TIMEOUT = 60
-# The whole screen's time. A request after it is no answer, so the item is held before the job's own timeout, which
-# GitHub reports as cancelled, and which would leave the item neither reviewed nor held.
+# The whole screen's time. A request after it is no answer, so the item is held before the Screen step's own timeout
+# (which fails the job, and holds the item too) and the job's (which GitHub reports as cancelled, and which would leave
+# the item neither reviewed nor held).
 DEADLINE_SECONDS = 600
 DEADLINE = time.monotonic() + DEADLINE_SECONDS
 
@@ -381,11 +382,12 @@ def parts(review, project=None):
 
 def finish(found, unscreenable, whole_files=frozenset()):
     """The pairs that hold text, and the reasons: characters that hide text, and too much text. whole_files names the
-    sources that are a whole file (a byte order mark may begin one). A seed corpus is read by the review as
-    hexadecimal, so what its bytes decode to hides nothing from it."""
+    sources that are a whole file (a byte order mark may begin one). A seed's .hex.txt is read by the review as
+    hexadecimal, so what its bytes decode to hides nothing from it. A seed corpus's listing names its zip entries as
+    they are stored, so it is checked like any other text."""
     found = [(s, t) for s, t in found if t.strip()]
     for source, text in found:
-        if source.startswith("seeds" + os.sep):
+        if source.startswith("seeds" + os.sep) and source.endswith(".hex.txt"):
             continue
         c = hiding(text, whole_file=source in whole_files, diff=source.endswith(".diff"))
         if c:
@@ -616,9 +618,9 @@ def listed():
 #                              recorded only.
 #   claude                     held when the model answers suspicious; the detectors' words are recorded only.
 #   claude_or_both_detectors   held when the model answers suspicious, or Model Armor and Prompt Shields both do.
-# Measured on a set of 20 texts we wrote (10 ordinary, 10 injections, 3 answers each), on 2026-11-03: any held 8 of
-# 30 ordinary answers and missed none; two_of_three and detectors each missed 12 of 30 injections (four injections
-# only the model caught); claude and claude_or_both_detectors held 5 of 30 and missed none.
+# Measured on 345 real items (220 ordinary, 125 injections): claude_or_both_detectors, the rule in use, held 6 of the
+# 220 ordinary items and let 6 of the 125 injections through; two_of_three and detectors each held none of the 220
+# and let 86 of the 125 through.
 def _flagged(words, *checks):
     return [words.get(c) == "suspicious" for c in checks]
 

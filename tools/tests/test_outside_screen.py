@@ -58,13 +58,13 @@ jq -r "$filter" "$file"
 
 def evaluate(expression, ctx):
     """A GitHub Actions expression, with or without ${{ }}, as GitHub evaluates it for what these tests need: string,
-    boolean and null literals, contexts looked up whole in ctx (a missing one is null), == and != (strings compared
-    without case), !, && and || (which give an operand, not a boolean), parentheses, and the functions cancelled and
-    always. cancelled() is false: these tests run no cancelled run."""
+    whole number, boolean and null literals, contexts looked up whole in ctx (a missing one is null), == and !=
+    (strings compared without case), !, && and || (which give an operand, not a boolean), parentheses, and the
+    functions cancelled and always. cancelled() is false: these tests run no cancelled run."""
     text = str(expression).strip()
     if text.startswith("${{") and text.endswith("}}"):
         text = text[3:-2]
-    tokens = re.findall(r"\s*('(?:[^']|'')*'|&&|\|\||==|!=|!|\(|\)|,|[A-Za-z_][A-Za-z0-9_.\-]*)", text)
+    tokens = re.findall(r"\s*('(?:[^']|'')*'|&&|\|\||==|!=|!|\(|\)|,|[0-9]+(?![A-Za-z_])|[A-Za-z_][A-Za-z0-9_.\-]*)", text)
     assert "".join(tokens).replace(" ", "") == re.sub(r"\s+", "", text), text
     toks = [t.strip() for t in tokens]
     pos = [0]
@@ -98,6 +98,8 @@ def evaluate(expression, ctx):
             return not truthy(primary())
         if t.startswith("'"):
             return t[1:-1].replace("''", "'")
+        if t.isdigit():
+            return int(t)
         if t in ("true", "false"):
             return t == "true"
         if t == "null":
@@ -267,6 +269,8 @@ class Trust(Runner):
     def assertTrust(self, want, *args, **kwargs):
         rc, out, got = self.trust(*args, **kwargs)
         self.assertEqual((rc, got.get("trust")), (0, want), out)
+        # When it decided, which the comment job compares with the time of a hold.
+        self.assertRegex(got.get("started", ""), r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
         return out
 
     def test_writers_are_reviewed_as_they_come(self):
@@ -509,6 +513,25 @@ class Routes(unittest.TestCase):
                                      outputs={"screen": {"verdict": "clean"}})
                 self.assertNotIn("review", jobs)
                 self.assertEqual(required(ctx)[0], 1)
+
+    def test_a_screen_that_runs_out_of_time_fails_and_so_is_held(self):
+        """A job that runs out of its own time ends as cancelled, and is neither reviewed nor held. Each step of the
+        screen job has a time of its own, and those of the steps that run add up to less than the job's, so a slow
+        step fails the job instead, and the comment job holds the item. The Screen step outlasts screen.py's own
+        deadline, which holds the item first."""
+        job = JOBS["screen"]
+        for step_ in job["steps"]:
+            self.assertIsInstance(step_.get("timeout-minutes"), int, step_.get("name") or step_.get("uses"))
+        for trust in ("screen", "writer", "measure"):
+            with self.subTest(trust=trust):
+                ctx = {"needs.route.outputs.trust": trust}
+                ran = [s for s in job["steps"] if "if" not in s or evaluate(s["if"], ctx)]
+                self.assertLess(sum(s["timeout-minutes"] for s in ran), int(evaluate(job["timeout-minutes"], ctx)))
+        deadline = int(re.search(r"^DEADLINE_SECONDS = ([0-9]+)$", (SCRIPTS / "screen.py").read_text(), re.M).group(1))
+        self.assertGreater(step("screen", "Screen")["timeout-minutes"] * 60, deadline)
+        jobs, ctx = self.ran(dict(self.ENROLLMENT, trust="screen"), results={"screen": "failure"})
+        self.assertIn("comment", jobs)
+        self.assertEqual(evaluate(JOBS["comment"]["env"]["HOLDING"], ctx), True)
 
     def test_the_review_reads_what_the_screen_passed(self):
         """The screen and the review take the gathered file by the gather job's digest, and only the gather job
@@ -899,22 +922,71 @@ class Hold(Runner):
         self.assertEqual(JOBS["comment"]["concurrency"]["queue"], "max")
         self.assertIs(JOBS["comment"]["concurrency"]["cancel-in-progress"], False)
 
-    def test_a_posted_review_takes_the_label_and_the_hold_comment_off(self):
+    STARTED = "2026-11-03T10:00:00Z"
+
+    def take_off(self, number, comments, label=True):
         s = step("comment", "Take the label review-held off")
-        self.serve(f"repos/{REPO}/issues/7/labels/review-held", [])
-        self.serve(f"repos/{REPO}/issues/7/comments", [
-            {"id": 4, "user": {"login": "mallory"}, "body": "<!-- oss-verify-held --> forged"},
-            {"id": 5, "user": {"login": "oss-verify[bot]"}, "body": "<!-- oss-verify-held -->\nheld"}])
+        if label:
+            self.serve(f"repos/{REPO}/issues/{number}/labels/review-held", [])
+        self.serve(f"repos/{REPO}/issues/{number}/comments", comments)
         self.serve(f"repos/{REPO}/issues/comments/5", {})
-        rc, out, _ = self.run_script(s["run"], PR="7")
+        rc, out, _ = self.run_script(s["run"], NUMBER=number, STARTED=self.STARTED)
         self.assertEqual(rc, 0, out)
-        calls = self.calls()
-        self.assertIn(["--method", "DELETE", f"repos/{REPO}/issues/7/labels/review-held"], calls)
-        self.assertIn(["--method", "DELETE", f"repos/{REPO}/issues/comments/5"], calls)
-        self.assertNotIn(["--method", "DELETE", f"repos/{REPO}/issues/comments/4"], calls)
-        (self.api / f"repos_{REPO.replace('/', '_')}_issues_7_labels_review-held.json").unlink()
-        rc, out, _ = self.run_script(s["run"], PR="7")
-        self.assertEqual(rc, 0, out)
+        return self.calls(), out
+
+    HELD = [{"id": 4, "user": {"login": "mallory"}, "body": "<!-- oss-verify-held --> forged",
+             "updated_at": "2026-11-03T09:00:00Z"},
+            {"id": 5, "user": {"login": "oss-verify[bot]"}, "body": "<!-- oss-verify-held -->\nheld",
+             "updated_at": "2026-11-03T09:00:00Z"}]
+
+    def test_a_posted_review_takes_the_label_and_the_hold_comment_off(self):
+        for number in ("7", "9"):
+            with self.subTest(number=number):
+                self.api.joinpath("args").unlink(missing_ok=True)
+                calls, _ = self.take_off(number, self.HELD)
+                self.assertIn(["--method", "DELETE", f"repos/{REPO}/issues/{number}/labels/review-held"], calls)
+                self.assertIn(["--method", "DELETE", f"repos/{REPO}/issues/comments/5"], calls)
+                self.assertNotIn(["--method", "DELETE", f"repos/{REPO}/issues/comments/4"], calls)
+        # no label and no hold comment is no error
+        self.take_off("8", [], label=False)
+
+    def test_a_hold_after_this_run_started_stays(self):
+        """A newer event of the item, held in a run of its own while this run's review ran, keeps its hold."""
+        for when in (self.STARTED, "2026-11-03T10:30:00Z"):
+            with self.subTest(when=when):
+                self.api.joinpath("args").unlink(missing_ok=True)
+                calls, out = self.take_off("9", [dict(self.HELD[1], updated_at=when)])
+                self.assertEqual([c for c in calls if "DELETE" in c], [])
+                self.assertIn("the label and the hold comment stay", out)
+
+    def test_an_issue_whose_review_made_its_draft_loses_its_hold(self):
+        """An issue held once (at the hourly limit, say), whose later screen passes and whose review makes its
+        draft: the comment job runs, holds nothing and posts nothing, and takes the label and the hold comment off
+        with a token that can write issues."""
+        for trust in ("screen", "writer"):
+            with self.subTest(trust=trust):
+                got, ctx = run_graph({"kind": "issue", "sha": "", "trust": trust, "started": self.STARTED},
+                                     outputs={"screen": {"verdict": "clean", "checks": "model_armor"},
+                                              "project-builds": {"name": ""}})
+                self.assertEqual(got["comment"], "success")
+                self.assertEqual(required(ctx)[0], 0, required(ctx)[1])
+                env = {f"env.{k}": as_text(evaluate(JOBS["comment"]["env"][k], ctx)) for k in ("HOLDING", "KIND")}
+                ran = {s.get("name") for s in JOBS["comment"]["steps"]
+                       if "if" not in s or evaluate(s["if"], dict(ctx, **env))}
+                self.assertIn("Get the oss-verify App's token for a hold or an issue", ran)
+                self.assertNotIn("Get the oss-verify App's token", ran)
+                self.assertNotIn("Label it review-held and say so", ran)
+                self.assertNotIn("Post the comment, or update the one already there", ran)
+                self.assertIn("Take the label review-held off", ran)
+        token = step("comment", "Get the oss-verify App's token for a hold or an issue")["with"]
+        self.assertEqual(token["permission-issues"], "write")
+        e = step("comment", "Take the label review-held off")["env"]
+        self.assertEqual(e["STARTED"], "${{ needs.route.outputs.started }}")
+        self.assertEqual(e["GH_TOKEN"], "${{ steps.app.outputs.token || steps.app-hold.outputs.token }}")
+        # an issue whose review failed is held, and keeps its hold
+        got, ctx = run_graph({"kind": "issue", "sha": "", "trust": "screen"}, results={"review": "failure"},
+                             outputs={"screen": {"verdict": "clean"}, "project-builds": {"name": ""}})
+        self.assertEqual(evaluate(JOBS["comment"]["env"]["HOLDING"], ctx), True)
 
 
 class OutsideText(Runner):
