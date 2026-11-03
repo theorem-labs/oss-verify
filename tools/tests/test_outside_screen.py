@@ -1462,6 +1462,12 @@ class ReviewRescreen(Held):
                 rc, out, runs = self.started()
                 self.assertEqual((rc, runs), (0, [self.want(8, "eve")]), out)
                 self.assertIn("7: its rescreen has not finished", out)
+                # The stand-in gh ignores query fields, so the lookup's own arguments show that it has no time window:
+                # each read by status sets no created, and every unfinished status is read.
+                by_status = [c for c in self.calls() if any(a.startswith("status=") for a in c)]
+                self.assertEqual({a for c in by_status for a in c if a.startswith("status=")},
+                                 {f"status={s}" for s in ("requested", "queued", "pending", "waiting", "in_progress")})
+                self.assertFalse(any(a.startswith("created=") for c in by_status for a in c), by_status)
 
     def test_a_finished_rescreen_over_an_hour_ago_does_not_count(self):
         self.items((7, "open", True))

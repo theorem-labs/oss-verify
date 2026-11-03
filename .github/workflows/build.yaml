@@ -1735,7 +1735,7 @@ jobs:
             [[ $ORIGIN =~ ^[1-9][0-9]*$ ]] || { echo "::error::not a run id: $ORIGIN"; exit 1; }
             # review-rescreen.yml takes it once this comment is an hour old, at its next run of the four each hour.
             next=$(date -u -d '+1 hour' '+%Y-%m-%d %H:%M UTC')
-            why="The account behind its latest event has no write access to this repository, and its pull requests, issues and pushes have reached the limit of $OUTSIDE_HOURLY_LIMIT an hour that are screened for the automated review. It is screened again automatically, with no maintainer, from $next, by a check that runs every 15 minutes, as soon as that account is under the limit; if it is held again, this comment says the new time."
+            why="The account behind its latest event has no write access to this repository, and its pull requests, issues and pushes have reached the limit of $OUTSIDE_HOURLY_LIMIT an hour that are screened for the automated review. It is screened again automatically, with no maintainer, from $next, by a check that runs every 15 minutes. If that account is still at the limit then, the check tries again later, and if the item is held again, this comment gives the new time."
             marker="<!-- oss-verify-held-limit $ORIGIN -->"$'\n'
           elif [ "$REVIEW" = failure ]; then
             why="It comes from, or holds the text of, an account without write access to this repository. The automated screen passed it, but the automated review did not finish (one cause: the limit of $SCREENED_HOURLY_CAP such reviews an hour). A maintainer will look at it."
