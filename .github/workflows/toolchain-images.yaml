@@ -140,7 +140,10 @@ jobs:
           sums "$NEW" > "$RUNNER_TEMP/new.sha256"
           diff "$RUNNER_TEMP/base.sha256" "$RUNNER_TEMP/new.sha256" ||
             { echo "::error::a file of the musl sysroot or the AddressSanitizer runtime changed"; exit 1; }
-          key='/opt/musl-sysroot/lib/libc\.a$|/libclang_rt\.asan[^/]*\.a$'
+          key='^[0-9a-f]+  /opt/musl-sysroot/(usr/)?lib/libc\.a$|/libclang_rt\.asan[^/]*\.a$'
+          grep -qE '/opt/musl-sysroot/(usr/)?lib/libc\.a$' "$RUNNER_TEMP/new.sha256" ||
+            { echo "::error::no libc.a under /opt/musl-sysroot"; exit 1; }
+          echo "$(wc -l < "$RUNNER_TEMP/new.sha256") files under /opt/musl-sysroot and /opt/asan-static-rt: the same SHA-256 in both images"
           grep -E "$key" "$RUNNER_TEMP/base.sha256" | sed 's/^/base: /'
           grep -E "$key" "$RUNNER_TEMP/new.sha256" | sed 's/^/new:  /'
           {
