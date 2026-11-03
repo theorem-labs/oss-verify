@@ -1913,12 +1913,12 @@ class ReviewJob(unittest.TestCase):
     COLLECTOR_URL = "http://100.116.58.240"
 
     def test_the_job_joins_the_tailnet_as_ossv_review(self):
-        join = self.steps["Join Theorem's tailnet, to export this review's usage"]
+        join = self.steps["Join Theorem's tailnet, to reach the model gateway and export this review's usage"]
         self.assertEqual(join["uses"],
                          "tailscale/github-action@99a8333667fff04fdd6cffb46dfd409f8329a7bf")
         self.assertEqual(join["id"], "tailnet")
-        # The join never decides whether a review runs.
-        self.assertIs(join["continue-on-error"], True)
+        # The review reaches the model gateway over the tailnet alone, so a join that fails fails the review.
+        self.assertNotIn("continue-on-error", join)
         # Exactly these settings: another one, `args:` for example, would change how the node joins while the join
         # still passed. `version:` is forbidden here too, so the action keeps its own default, 1.104.2, which is
         # above the 1.94 a Linux device needs to reach a Tailscale Service's address.
@@ -1938,8 +1938,8 @@ class ReviewJob(unittest.TestCase):
         self.assertEqual(join["with"]["log-mode"], "quiet")
         self.assertEqual(join["timeout-minutes"], 3)
         # The node is ephemeral: the logout deletes it at once, whatever the review did and whatever the join's
-        # outcome. Neither the join, the export nor the logout may stop the steps that keep the draft, the verdicts
-        # and a held finding.
+        # outcome. Neither the export nor the logout may stop the steps that keep the draft, the verdicts and a held
+        # finding.
         self.assertIs(self.steps["Export the review's usage to the cost collector"]["continue-on-error"], True)
         leave = self.steps["Leave the tailnet"]
         self.assertEqual(leave["if"], "always()")
@@ -1994,10 +1994,29 @@ class ReviewJob(unittest.TestCase):
         self.assertNotIn("agent-otel-public", text)
         self.assertNotIn("OTEL_EXPORTER_OTLP_HEADERS", text)
         self.assertNotIn("Sign in to Google Cloud, for the cost collector's token", text)
-        # One URL for every sender, the address in SPEND_COLLECTOR_URL: no step and no comment of the file names
-        # the tailnet's MagicDNS domain, which linux28-agents-1, a sender that joins with --accept-dns=false,
-        # cannot resolve.
-        self.assertNotIn("ts.net", text)
+        # One URL for every sender, the address in SPEND_COLLECTOR_URL: the tailnet's MagicDNS domain appears only in
+        # the model gateway's URL, which must be a name, since Tailscale's certificate for its HTTPS door names it.
+        self.assertEqual(text.count("ts.net"), text.count("https://ossv-model-gateway.tail12ec1c.ts.net"))
+        self.assertEqual(self.jobs["review"]["env"]["ANTHROPIC_BASE_URL"],
+                         "https://ossv-model-gateway.tail12ec1c.ts.net")
+
+    def test_the_review_signs_in_to_the_model_gateway_with_no_stored_key(self):
+        gateway = self.steps["Sign in to the model gateway"]
+        self.assertEqual(gateway["uses"],
+                         "google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093")
+        self.assertEqual(gateway["with"], {
+            "workload_identity_provider": "${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}",
+            "service_account": "${{ env.GATEWAY_SERVICE_ACCOUNT }}", "token_format": "id_token",
+            "id_token_audience": "model-gateway-gce", "id_token_include_email": True,
+            "create_credentials_file": False, "export_environment_variables": False})
+        self.assertEqual(self.jobs["review"]["env"]["GATEWAY_SERVICE_ACCOUNT"],
+                         "oss-verify-ci@theorem-agent-infra.iam.gserviceaccount.com")
+        review = self.steps["Review"]["with"]
+        self.assertEqual(review["anthropic_api_key"], "${{ steps.gateway.outputs.id_token }}")
+        self.assertFalse([k for k in review if k.startswith("anthropic_") and k != "anthropic_api_key"], review)
+        # The sign-in comes right before the Review step: Google's identity token lives one hour.
+        names = [s.get("name") for s in self.jobs["review"]["steps"]]
+        self.assertEqual(names.index("Sign in to the model gateway") + 1, names.index("Review"))
 
     def export(self, outcome, name="libreac", kind="enrollment", answers=True):
         """The export step, with the job's own SPEND_COLLECTOR_URL as Actions gives it, and a stand-in curl that
@@ -2036,7 +2055,7 @@ class ReviewJob(unittest.TestCase):
                 _, env, _ = self.export("success", name="", kind=kind)
                 self.assertIn(f"theorem.subproject=_{kind},", env)
 
-    def test_review_runs_when_the_tailnet_join_fails(self):
+    def test_the_export_passes_when_the_tailnet_join_fails(self):
         for outcome in ("failure", "skipped", ""):
             with self.subTest(outcome=outcome):
                 run, env, curl = self.export(outcome)
@@ -2045,7 +2064,7 @@ class ReviewJob(unittest.TestCase):
                 self.assertIn("tailnet", run.stdout)
                 self.assertEqual(env, "")
                 self.assertEqual(curl, "")
-        # The Review step comes after the export and has no condition of its own, so it runs either way.
+        # The Review step comes after the export and has no condition of its own.
         names = [s.get("name") for s in self.jobs["review"]["steps"]]
         self.assertLess(names.index("Export the review's usage to the cost collector"), names.index("Review"))
         self.assertNotIn("if", self.steps["Review"])
