@@ -1278,6 +1278,13 @@ class LimitHold(Held):
                 self.assertEqual(rc, 0, out)
                 self.assertRegex(out, r"^\S+ -$")
 
+    def test_a_run_github_no_longer_has_is_not_one_at_the_limit(self):
+        """A deleted or expired run: the item is left to a person, and the rescreen job does not fail on it each time."""
+        self.held(7, limit_hold(50))
+        rc, out = self.hold()
+        self.assertEqual(rc, 0, out)
+        self.assertRegex(out, r"^\S+ -$")
+
     def test_no_hold_comment_prints_nothing_and_a_failed_read_fails(self):
         self.held(7)
         self.assertEqual(self.hold(), (0, ""))
@@ -1449,8 +1456,9 @@ class ReviewRescreen(Held):
                 self.held(8, limit_hold(51))
                 self.origin(50, "mallory")
                 self.origin(51, "eve")
-                # Started 2 hours ago: it no longer counts toward the hour, but it still runs.
-                self.runs((10, "github-actions[bot]", "workflow_dispatch", "Rescreen 7 of mallory", status, 120))
+                # Made 4 hours ago (an enrollment's build alone may take 6): it no longer counts toward the hour, but it
+                # still runs.
+                self.runs((10, "github-actions[bot]", "workflow_dispatch", "Rescreen 7 of mallory", status, 240))
                 rc, out, runs = self.started()
                 self.assertEqual((rc, runs), (0, [self.want(8, "eve")]), out)
                 self.assertIn("7: its rescreen has not finished", out)

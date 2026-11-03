@@ -22,21 +22,28 @@ set -euo pipefail
 [ -n "${HELD_LABEL:-}" ] || { echo "::error::HELD_LABEL is not set"; exit 1; }
 here=$(dirname "$0")
 from=$(date -u -d '-1 hour' +%Y-%m-%dT%H:%M:%SZ)
-since=$(date -u -d '-3 hours' +%Y-%m-%dT%H:%M:%SZ)
-# build.yaml's rescreens of the last 3 hours, by the run's name, which each run's route checks against the hold: those
-# of the last hour count toward each account's limit, and one not completed holds its item back. 3 hours cover a run's
-# jobs and their time in the queue.
-runs=$(gh api --method GET --paginate "repos/$REPO/actions/workflows/build.yaml/runs" \
-  -f event=workflow_dispatch -f created=">=$since" -F per_page=100 \
-  --jq '.workflow_runs[] | select(.event == "workflow_dispatch")
-        | "\(.created_at // "-") \(.status // "-") \(.display_title // "")"') \
-  || { echo "::error::the runs of build.yaml could not be read."; exit 1; }
 declare -A used=() running=()
 title_re='^Rescreen ([0-9]+) of ([A-Za-z0-9-]+(\[bot\])?)$'
-while read -r created status title; do
-  [[ ${title:-} =~ $title_re ]] || continue
-  [ "$status" = completed ] || running[${BASH_REMATCH[1]}]=1
-  if [[ ! $created < $from ]]; then
+# build.yaml's rescreens, by the run's name, which each run's route checks against the hold. Those not finished, made
+# at any time (an enrollment's build alone may take 6 hours), hold their items back.
+for status in requested queued pending waiting in_progress; do
+  runs=$(gh api --method GET --paginate "repos/$REPO/actions/workflows/build.yaml/runs" \
+    -f event=workflow_dispatch -f status="$status" -F per_page=100 \
+    --jq '.workflow_runs[] | select(.event == "workflow_dispatch" and .status != "completed") | .display_title // ""') \
+    || { echo "::error::the runs of build.yaml could not be read."; exit 1; }
+  while IFS= read -r title; do
+    if [[ $title =~ $title_re ]]; then running[${BASH_REMATCH[1]}]=1; fi
+  done <<< "$runs"
+done
+# Those made in the last hour, finished or not, count toward each account's limit.
+# shellcheck disable=SC2016 # $ENV is jq's
+runs=$(FROM=$from gh api --method GET --paginate "repos/$REPO/actions/workflows/build.yaml/runs" \
+  -f event=workflow_dispatch -f created=">=$from" -F per_page=100 \
+  --jq '.workflow_runs[] | select(.event == "workflow_dispatch" and (.created_at // "") >= $ENV.FROM)
+        | .display_title // ""') \
+  || { echo "::error::the runs of build.yaml could not be read."; exit 1; }
+while IFS= read -r title; do
+  if [[ $title =~ $title_re ]]; then
     used[${BASH_REMATCH[2]}]=$(( ${used[${BASH_REMATCH[2]}]:-0} + 1 ))
   fi
 done <<< "$runs"
