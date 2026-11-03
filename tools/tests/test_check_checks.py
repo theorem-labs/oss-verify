@@ -377,6 +377,17 @@ class ImageFiles(unittest.TestCase):
         with mock.patch.object(check_checks.subprocess, "Popen", side_effect=AssertionError("ran")):
             self.assertEqual(check_checks.image_files("tag", [], labels=[]), {})
 
+    def test_a_record_whose_path_has_a_nul_is_a_problem(self):
+        """A `mutant:` path with a NUL in it, from a fuzz target's comment: its breakage has a problem, and docker
+        runs for no such path, which subprocess would refuse with an error that ends the step."""
+        from unittest import mock
+        source = "void f(int x) {\n  // mutant: a\x00.c:2 `x` -> `y`\n  // input: s\n  if (x) abort();\n}\n"
+        checks = check_records.find_checks(source, "/src/p/f.c")
+        with mock.patch.object(check_checks.subprocess, "Popen", side_effect=AssertionError("docker ran")):
+            (breakage,) = check_checks.record_breakages(checks, "tag", "/src/p", labels=[])
+        self.assertIsNone(breakage.patch)
+        self.assertIn("is not a path inside the WORKDIR", breakage.problem)
+
     def test_the_report_names_the_files_not_read(self):
         """A fuzz target's file that image_files() left out (past its limits, or missing) is named in the report, so
         that its checks are not taken to be none."""

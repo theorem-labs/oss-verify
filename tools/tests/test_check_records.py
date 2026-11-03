@@ -106,8 +106,29 @@ class Reader(unittest.TestCase):
 
     def test_safe_path(self):
         self.assertTrue(check_records.safe_path("src/a.c"))
-        for path in ("/etc/passwd", "../a.c", "src/../../a.c", "", "a\\b.c"):
-            self.assertFalse(check_records.safe_path(path), path)
+        # A NUL, or another control character, cannot be in a command's arguments (image_files() runs docker).
+        for path in ("/etc/passwd", "../a.c", "src/../../a.c", "", "a\\b.c", "a\x00.c", "a\nb.c", "a\x7f.c"):
+            self.assertFalse(check_records.safe_path(path), repr(path))
+
+    def test_a_text_that_ends_in_an_escape_is_read(self):
+        """A string or character literal whose last character, at the end of the text, is a backslash: blank() stops
+        at the end, rather than read past it, and the checks before it are found."""
+        for literal in ('"\\', "'\\", 'x = "\\', "char c = '\\"):
+            code, _ = check_records.blank(literal)
+            self.assertEqual(len(code), len(literal), repr(literal))
+            (found,) = check_records.find_checks("void f(int x) {\n  if (x) abort();\n}\n" + literal)
+            self.assertEqual(found.line, 2)
+
+    def test_a_line_number_that_no_file_has_is_a_problem(self):
+        """int() refuses a number of more than 4300 digits: such a line is a problem with the record, not an error
+        that ends the step."""
+        source = ("void f(int x) {\n  // mutant: a.c:" + "1" * 5000 + " `x` -> `y`\n  // input: s\n"
+                  "  if (x) abort();\n}\n")
+        (found,) = check_records.find_checks(source)
+        self.assertEqual(found.records, [])
+        self.assertIn("names line 111111111111..., which no file has", found.problems[0])
+        (found,) = check_records.find_checks(source.replace("1" * 5000, "999999999"))
+        self.assertEqual([record.line for record in found.records], [999999999])
 
 
 
