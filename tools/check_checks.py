@@ -355,7 +355,8 @@ def export_coverage(tag, binaries, profiles, *, labels):
 
 def image_files(tag, paths, *, labels):
     """The bytes of these regular files of the project image: {path: bytes}. A path that is missing is left out, and so
-    is a file larger than MAX_IMAGE_FILE_BYTES, or one that would take the files kept past MAX_IMAGE_BYTES.
+    is a file larger than MAX_IMAGE_FILE_BYTES, one that would take the files kept past MAX_IMAGE_BYTES, and each file
+    after a point where tar's archive cannot be read.
 
     tar's archive is read as a stream, one member at a time, so the host never holds more than the files it keeps:
     the bytes of a file it leaves out pass through and are dropped, and so is each member's header once it is read."""
@@ -512,8 +513,8 @@ def unread_lines(paths, files):
     if not unread:
         return []
     return [f"- **Files not read:** {len(unread)}, so no check in them is counted. Each is missing from the project "
-            f"image, is not a regular file, is larger than {MAX_IMAGE_FILE_BYTES >> 20} MiB, or would take the files "
-            f"read past {MAX_IMAGE_BYTES >> 20} MiB.",
+            f"image, is not a regular file, is larger than {MAX_IMAGE_FILE_BYTES >> 20} MiB, would take the files "
+            f"read past {MAX_IMAGE_BYTES >> 20} MiB, or comes after a point where tar's archive could not be read.",
             *listed([f"  - {code(shown(path))}" for path in unread], 20)]
 
 

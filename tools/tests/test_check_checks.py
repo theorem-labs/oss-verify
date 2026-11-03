@@ -386,6 +386,7 @@ class ImageFiles(unittest.TestCase):
         self.assertTrue(lines[0].startswith("- **Files not read:** 2, so no check in them is counted."))
         self.assertIn("larger than 16 MiB", lines[0])
         self.assertIn("past 256 MiB", lines[0])
+        self.assertIn("tar's archive could not be read", lines[0])
         self.assertEqual(lines[1:], ["  - `p/huge_table.c`", "  - `p/gone.c`"])
 
 
