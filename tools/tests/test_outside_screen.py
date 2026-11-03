@@ -840,15 +840,23 @@ class Hold(Runner):
 
     STEP = "Label it review-held and say so"
 
-    def hold(self, trust, pr="7", number="7", comments=(), head="a" * 40, review="skipped", origin=""):
+    def hold(self, trust, pr="7", number="7", comments=(), head="a" * 40, review="skipped", origin="", tries="",
+             capped=False):
+        """capped: this run's screened review stopped at SCREENED_HOURLY_CAP (its step of that name failed)."""
         self.serve(f"repos/{REPO}/issues/{number}/comments", list(comments))
         self.serve(f"repos/{REPO}/issues/{number}/labels", [{"name": "review-held"}])
         self.serve(f"repos/{REPO}/labels/review-held", {"name": "review-held"})
         self.serve(f"repos/{REPO}/issues/comments/5", {})
         self.serve(f"repos/{REPO}/pulls/7", {"head": {"sha": head}})
+        self.serve(f"repos/{REPO}/actions/runs/100/attempts/1/jobs", {"jobs": [
+            {"name": "route", "steps": [{"name": "An enrollment, a change or an issue", "conclusion": "success"}]},
+            {"name": "review", "steps": [
+                {"name": "Hold a screened review at the hourly cap", "conclusion": "failure" if capped else "success"},
+                {"name": "Review", "conclusion": "skipped" if capped else "failure"}]}]})
         rc, out, _ = self.run_script(step("comment", self.STEP)["run"], PR=pr, NUMBER=number, TRUST=trust,
-                                     HEAD_SHA="a" * 40, REVIEW=review, RUN_ID="100",
-                                     ORIGIN=origin or ("50" if trust == "limit" else ""))
+                                     HEAD_SHA="a" * 40, REVIEW=review, RUN_ID="100", RUN_ATTEMPT="1",
+                                     RUN_TOKEN="stand-in", TRIES=tries,
+                                     ORIGIN=origin or ("50" if trust in ("limit", "screen") else ""))
         self.assertEqual(rc, 0, out)
         calls = self.calls()
         bodies = [json.loads((self.api / f"input.{i + 1}").read_text())["body"]
@@ -880,28 +888,73 @@ class Hold(Runner):
         self.assertRegex(bodies[0], r"It is screened again automatically, with no maintainer, from "
                                     r"[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2} UTC, by a check that runs every 15 "
                                     r"minutes")
-        self.assertTrue(bodies[0].endswith("\n\n<!-- oss-verify-held-limit 50 -->\n<!-- oss-verify-held-run 100 -->\n"),
+        self.assertTrue(bodies[0].endswith("\n\n<!-- oss-verify-held-limit 50 0 -->\n<!-- oss-verify-held-run 100 -->\n"),
                         bodies[0])
         self.assertNotRegex(bodies[0], r"#[0-9]|@")
 
     def test_a_hold_of_the_screen_names_no_run_of_the_limit(self):
         _calls, bodies, _ = self.hold("screen")
-        self.assertNotIn("oss-verify-held-limit", bodies[0])
+        self.assertNotRegex(bodies[0], r"oss-verify-held-(limit|cap|transient)")
 
-    def test_at_the_limit_a_hold_needs_its_run(self):
-        for origin in ("", "5 0", "-1"):
-            with self.subTest(origin=origin):
-                self.serve(f"repos/{REPO}/pulls/7", {"head": {"sha": "a" * 40}})
-                self.serve(f"repos/{REPO}/issues/7/comments", [])
-                rc, out, _ = self.run_script(step("comment", self.STEP)["run"], PR="7", NUMBER="7", TRUST="limit",
-                                             HEAD_SHA="a" * 40, REVIEW="skipped", RUN_ID="100", ORIGIN=origin)
-                self.assertEqual(rc, 1, out)
+    def test_a_hold_tried_again_needs_its_run(self):
+        for trust, review, capped in (("limit", "skipped", False), ("screen", "failure", False),
+                                      ("screen", "failure", True)):
+            for origin in ("", "5 0", "-1"):
+                with self.subTest(trust=trust, capped=capped, origin=origin):
+                    self.serve(f"repos/{REPO}/pulls/7", {"head": {"sha": "a" * 40}})
+                    self.serve(f"repos/{REPO}/issues/7/comments", [])
+                    self.serve(f"repos/{REPO}/actions/runs/100/attempts/1/jobs", {"jobs": [{"name": "review", "steps": [
+                        {"name": "Hold a screened review at the hourly cap",
+                         "conclusion": "failure" if capped else "success"}]}]})
+                    rc, out, _ = self.run_script(step("comment", self.STEP)["run"], PR="7", NUMBER="7", TRUST=trust,
+                                                 HEAD_SHA="a" * 40, REVIEW=review, RUN_ID="100", RUN_ATTEMPT="1",
+                                                 RUN_TOKEN="stand-in", TRIES="", ORIGIN=origin)
+                    self.assertEqual(rc, 1, out)
+
+    AGAIN = (r"It is screened again automatically, with no maintainer, from [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2} "
+             r"UTC, by a check that runs every 15 minutes\. If that account is still at the limit then, the check tries "
+             r"again later, and if the item is held again, this comment gives the new time\.")
+
+    def test_an_outsiders_review_stopped_at_the_cap_is_tried_again_and_counts_no_try(self):
+        _calls, bodies, _ = self.hold("screen", review="failure", tries="1", capped=True)
+        self.assertIn(f"had reached their limit of {WF['env']['SCREENED_HOURLY_CAP']} an hour", bodies[0])
+        self.assertRegex(bodies[0], self.AGAIN)
+        self.assertTrue(bodies[0].endswith("\n\n<!-- oss-verify-held-cap 50 1 -->\n<!-- oss-verify-held-run 100 -->\n"),
+                        bodies[0])
+
+    def test_an_outsiders_review_that_did_not_finish_is_tried_again_up_to_review_tries(self):
+        tries = int(WF["env"]["REVIEW_TRIES"])
+        self.assertGreater(tries, 1)
+        for review in ("failure", "cancelled"):
+            for before in range(tries):
+                with self.subTest(review=review, before=before):
+                    self.tearDown()
+                    self.setUp()
+                    _calls, bodies, _ = self.hold("screen", review=review, tries=str(before))
+                    if before + 1 < tries:
+                        self.assertIn(f"did not finish ({before + 1} of the {tries} times it is tried)", bodies[0])
+                        self.assertRegex(bodies[0], self.AGAIN)
+                        self.assertIn(f"\n\n<!-- oss-verify-held-transient 50 {before + 1} -->\n", bodies[0])
+                    else:
+                        self.assertIn(f"did not finish, {tries} times. A maintainer will look at it.", bodies[0])
+                        self.assertNotRegex(bodies[0], r"oss-verify-held-(limit|cap|transient)")
+
+    def test_a_writers_item_whose_review_did_not_finish_is_its_writers(self):
+        """Its screen read the text of others; no account without write access waits on it."""
+        for capped in (False, True):
+            with self.subTest(capped=capped):
+                self.tearDown()
+                self.setUp()
+                _calls, bodies, _ = self.hold("writer", review="failure", capped=capped)
+                self.assertIn("A maintainer will look at it.", bodies[0])
+                self.assertNotRegex(bodies[0], r"oss-verify-held-(limit|cap|transient)")
 
     def test_a_screened_review_that_did_not_finish_says_so(self):
         _calls, bodies, _ = self.hold("screen", review="failure")
         self.assertIn("The automated screen passed it, but the automated review did not finish", bodies[0])
-        self.assertIn(f"the limit of {WF['env']['SCREENED_HOURLY_CAP']} such reviews an hour", bodies[0])
         self.assertNotIn("the screen did not pass it", bodies[0])
+        _calls, bodies, _ = self.hold("screen", review="failure", capped=True)
+        self.assertIn(f"their limit of {WF['env']['SCREENED_HOURLY_CAP']} an hour", bodies[-1])
 
     def test_one_account_cannot_fill_the_screened_reviews_of_an_hour(self):
         self.assertLess(int(WF["env"]["OUTSIDE_HOURLY_LIMIT"]), int(WF["env"]["SCREENED_HOURLY_CAP"]))
@@ -919,7 +972,9 @@ class Hold(Runner):
 
     def test_the_step_gets_nothing_of_the_screen_but_its_route(self):
         e = step("comment", self.STEP)["env"]
-        self.assertEqual(set(e), {"GH_TOKEN", "REPO", "PR", "NUMBER", "TRUST", "REVIEW", "HEAD_SHA", "RUN_ID", "ORIGIN"})
+        self.assertEqual(set(e), {"GH_TOKEN", "REPO", "PR", "NUMBER", "TRUST", "REVIEW", "HEAD_SHA", "RUN_ID", "ORIGIN",
+                                  "TRIES", "RUN_ATTEMPT", "RUN_TOKEN"})
+        self.assertEqual(e["RUN_TOKEN"], "${{ github.token }}")
         self.assertNotIn("needs.screen", json.dumps(e))
         self.assertNotIn("needs.gather", json.dumps(e))
 
@@ -1202,11 +1257,13 @@ APP = "oss-verify[bot]"
 RESCREEN_WF = yaml.safe_load((ROOT / ".github" / "workflows" / "review-rescreen.yml").read_text())
 
 
-def limit_hold(run, at=OLD, user=APP):
-    """A hold comment at the limit, as the comment job writes it."""
+def limit_hold(run, at=OLD, user=APP, kind="limit", tries=None):
+    """A hold comment that review-rescreen.yml tries again, as the comment job writes it: kind limit, cap or transient,
+    and the tries so far (none: a marker without them, read as 0)."""
+    count = "" if tries is None else f" {tries}"
     return {"id": run, "user": {"login": user}, "updated_at": at,
-            "body": f"<!-- oss-verify-held -->\n**Automated review held.**\n\nAt the limit.\n\n"
-                    f"<!-- oss-verify-held-limit {run} -->\n<!-- oss-verify-held-run {run + 1000} -->\n"}
+            "body": f"<!-- oss-verify-held -->\n**Automated review held.**\n\nHeld.\n\n"
+                    f"<!-- oss-verify-held-{kind} {run}{count} -->\n<!-- oss-verify-held-run {run + 1000} -->\n"}
 
 
 def screen_hold(at=OLD, user=APP):
@@ -1243,6 +1300,12 @@ class Held(Runner):
              "created_at": (now - datetime.timedelta(minutes=r[5] if len(r) > 5 else 10))
              .strftime("%Y-%m-%dT%H:%M:%SZ")}
             for r in runs]})
+        # Each run's jobs: one that did its work (route finished, and the gather job ran).
+        for r in runs:
+            self.serve(f"repos/{REPO}/actions/runs/{r[0]}/jobs", {"jobs": [
+                {"name": "route", "status": "completed", "conclusion": "success"},
+                {"name": "gather", "status": "completed", "conclusion": "success"},
+                {"name": "comment", "status": "completed", "conclusion": "skipped"}]})
 
     @staticmethod
     def rescreened(account, n, first=10):
@@ -1260,7 +1323,13 @@ class LimitHold(Held):
     def test_a_hold_at_the_limit_names_its_run_and_account(self):
         self.held(7, screen_hold(at="2000-01-01T00:00:00Z"), limit_hold(50, at="2000-02-01T00:00:00Z"))
         self.origin(50, "mallory")
-        self.assertEqual(self.hold(), (0, "2000-02-01T00:00:00Z 50 mallory"))
+        self.assertEqual(self.hold(), (0, "2000-02-01T00:00:00Z 50 mallory 0 limit"))
+        for kind, tries in (("cap", 1), ("transient", 2)):
+            with self.subTest(kind=kind):
+                self.held(7, limit_hold(50, kind=kind, tries=tries))
+                self.assertEqual(self.hold(), (0, f"{OLD} 50 mallory {tries} {kind}"))
+        self.held(7, limit_hold(50, kind="screen"))
+        self.assertRegex(self.hold()[1], r"^\S+ -$")
 
     def test_any_other_newest_hold_is_not_one_at_the_limit(self):
         cases = (
@@ -1333,6 +1402,30 @@ class RescreenTrust(Held):
         self.item(author="mallory")
         self.origin(50, "bob")
         self.assertEqual(self.route(account="bob").get("trust"), "screen")
+
+    def test_holds_at_the_cap_and_of_a_review_that_did_not_finish_take_the_outsiders_path_and_keep_their_tries(self):
+        for kind, tries, want in (("cap", 1, "1"), ("transient", 2, "2"), ("limit", None, "0")):
+            with self.subTest(kind=kind):
+                self.held(7, limit_hold(50, kind=kind, tries=tries))
+                got = self.route()
+                self.assertEqual((got.get("trust"), got.get("origin"), got.get("tries")), ("screen", "50", want))
+
+    def test_a_rescreen_its_trust_step_refused_does_not_count(self):
+        """The item closed or lost its label in between: route finished, and neither the gather job nor the comment job
+        ran. A rescreen held again at the limit, or not finished, counts."""
+        rescreens = self.rescreened("mallory", self.LIMIT)
+        self.runs(*rescreens)
+        refused = [{"name": "route", "status": "completed", "conclusion": "success"},
+                   {"name": "gather", "status": "completed", "conclusion": "skipped"},
+                   {"name": "comment", "status": "completed", "conclusion": "skipped"}]
+        self.serve(f"repos/{REPO}/actions/runs/{rescreens[0][0]}/jobs", {"jobs": refused})
+        self.assertEqual(self.route().get("trust"), "screen")
+        held_again = [dict(j, conclusion="success") if j["name"] == "comment" else j for j in refused]
+        self.serve(f"repos/{REPO}/actions/runs/{rescreens[0][0]}/jobs", {"jobs": held_again})
+        self.assertEqual(self.route().get("trust"), "limit")
+        running = [{"name": "route", "status": "in_progress", "conclusion": None}]
+        self.serve(f"repos/{REPO}/actions/runs/{rescreens[0][0]}/jobs", {"jobs": running})
+        self.assertEqual(self.route().get("trust"), "limit")
 
     def test_the_cap(self):
         """The account's rescreens and events of the last hour, together, against OUTSIDE_HOURLY_LIMIT."""
@@ -1431,6 +1524,18 @@ class ReviewRescreen(Held):
         rc, out, runs = self.started()
         self.assertEqual(rc, 0, out)
         self.assertEqual(runs, [self.want(7, "mallory"), self.want(13, "mallory", "issue")])
+
+    def test_holds_at_the_cap_and_of_a_review_that_did_not_finish_are_picked_too(self):
+        """Neither is the item's own doing; a hold whose marker is another word is not one."""
+        self.items((7, "open", True), (8, "open", False), (9, "open", True), (10, "open", True))
+        self.held(7, limit_hold(50, kind="cap", tries=1))
+        self.held(8, limit_hold(51, kind="transient", tries=2))
+        self.held(9, limit_hold(52, kind="screen"))
+        self.held(10, limit_hold(53, kind="transient", tries=1, at=NEW))
+        for run, who in ((50, "mallory"), (51, "eve"), (52, "mallory"), (53, "eve")):
+            self.origin(run, who)
+        rc, out, runs = self.started()
+        self.assertEqual((rc, runs), (0, [self.want(7, "mallory"), self.want(8, "eve", "issue")]), out)
 
     def test_the_cap_per_account_oldest_first(self):
         self.items(*[(n, "open", True) for n in (7, 8, 9, 10, 11)])
@@ -1553,6 +1658,20 @@ class RescreenWiring(unittest.TestCase):
                 self.assertEqual(required(ctx)[0], 0, required(ctx)[1])
                 got, _ = run_graph(dict(route, trust="limit"), event="workflow_dispatch")
                 self.assertEqual({n for n, r in got.items() if r != "skipped"} - {"route", "required"}, {"comment"})
+
+    def test_a_screened_review_that_ran_out_of_time_is_held(self):
+        """A review job that runs out of its own time ends cancelled, and the run goes on (a newer push cancels the
+        whole run, and then no job after it runs): the comment job holds the item, to be tried again."""
+        route = {"kind": "change", "sha": "a" * 40, "trust": "screen", "origin": "100"}
+        got, ctx = run_graph(route, results={"review": "cancelled"},
+                             outputs={"screen": {"verdict": "clean", "checks": "model_armor"}})
+        self.assertEqual({n for n, r in got.items() if r != "skipped"} - {"route", "required"},
+                         {"gather", "screen", "review", "comment"})
+        self.assertEqual(evaluate(JOBS["comment"]["env"]["HOLDING"], ctx), True)
+        self.assertNotEqual(required(ctx)[0], 0)
+
+    def test_the_comment_job_reads_this_runs_jobs_with_its_own_token(self):
+        self.assertEqual(JOBS["comment"]["permissions"], {"id-token": "write", "actions": "read"})
 
     def test_names_the_counts_read_are_the_rescreens_own(self):
         ctx = {"inputs.rescreen": True, "inputs.pr": 7, "inputs.account": "mallory"}

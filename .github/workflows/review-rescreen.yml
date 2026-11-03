@@ -1,12 +1,13 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 name: "Review rescreen"
-# Every 15 minutes, screens again each pull request or issue that build.yaml held at OUTSIDE_HOURLY_LIMIT over an hour
-# ago, so that an outsider's item held at the limit waits on neither the account's next event nor a person. It starts
-# build.yaml for each with -f rescreen=true (.github/scripts/review-rescreen, and the top of build.yaml), whose route
-# reads the item, its hold and the account again from the API: the item is screened, then reviewed, as for an event;
-# at the limit it is held again, and its hold comment says from when it is tried next. A hold of the screen is never
-# screened again this way: a person decides on it.
+# Every 15 minutes, screens again each pull request or issue that build.yaml held over an hour ago for a reason that is
+# not its own: at OUTSIDE_HOURLY_LIMIT; an outsider's screened review stopped at SCREENED_HOURLY_CAP; or one that failed
+# or ran out of time, until it has failed REVIEW_TRIES times. So an outsider's item waits on neither the account's next
+# event nor a person. It starts build.yaml for each with -f rescreen=true (.github/scripts/review-rescreen, and the top
+# of build.yaml), whose route reads the item, its hold and the account again from the API: the item is screened, then
+# reviewed, as for an event; at the limit it is held again, and its hold comment says from when it is tried next. A
+# hold of the screen is never screened again this way: a person decides on it.
 #
 # It is its own workflow, not a schedule of build.yaml: each completed Build run starts enroll-dispatch.yml and
 # review-rerun.yml, and reports the required check project-builds on its commit, so a scheduled Build run every 15

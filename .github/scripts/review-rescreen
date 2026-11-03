@@ -2,17 +2,19 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 #
-# Starts the screen again of each pull request or issue held at build.yaml's OUTSIDE_HOURLY_LIMIT over an hour ago
-# (review-rescreen.yml runs it every 15 minutes):
+# Starts the screen again of each pull request or issue that build.yaml held over an hour ago for a reason that is not
+# its own (review-rescreen.yml runs it every 15 minutes):
 #
 #   GH_TOKEN=<token with actions: write> REPO=<owner/repo> OUTSIDE_HOURLY_LIMIT=<n> HELD_LABEL=review-held \
 #     .github/scripts/review-rescreen
 #
-# For each open pull request or issue labelled HELD_LABEL whose newest hold is one at the limit
-# (.github/scripts/limit-hold) and was made or updated over an hour ago, it starts build.yaml on main with -f pr=<n>
-# (or -f issue=<n>), -f rescreen=true and -f account=<the account the limit held>. Never for a hold of the screen: a
-# person decides on that. Oldest hold first, each account gets at most OUTSIDE_HOURLY_LIMIT rescreens an hour, less
-# those it had in the last hour (build.yaml's runs named `Rescreen <n> of <account>`); the others wait for a later run.
+# For each open pull request or issue labelled HELD_LABEL whose newest hold is one that is tried again
+# (.github/scripts/limit-hold: at OUTSIDE_HOURLY_LIMIT; a screened review stopped at SCREENED_HOURLY_CAP; or one that
+# failed or ran out of time, under REVIEW_TRIES) and was made or updated over an hour ago, it starts build.yaml on main
+# with -f pr=<n> (or -f issue=<n>), -f rescreen=true and -f account=<the account the hold names>. Never for a hold of
+# the screen: a person decides on that. Oldest hold first, each account gets at most OUTSIDE_HOURLY_LIMIT rescreens an
+# hour, less those it had in the last hour (build.yaml's runs named `Rescreen <n> of <account>`); the others wait for a
+# later run.
 # An item whose rescreen has not finished is not started again: its screen and review can outlast the 15 minutes
 # between runs, and a second run would cancel them and use the hour's screened reviews twice.
 # build.yaml's route counts again, with the account's own events, and holds the item again at the limit.
@@ -61,13 +63,13 @@ while read -r number input; do
     continue
   fi
   hold=$("$here/limit-hold" "$number") || { echo "::error::the hold of $number could not be read."; failed=1; continue; }
-  read -r at run account <<< "$hold"
+  read -r at run account _ <<< "$hold"
   if [[ -z ${run:-} || $run == - ]]; then
-    echo "$number: no hold at the limit (the screen held it, or its run is not an event's): a person decides."
+    echo "$number: no hold that is tried again (the screen held it, a person decides, or its run is not an event's)."
     continue
   fi
   if [[ ! $at < $from ]]; then
-    echo "$number: held at the limit at $at, less than an hour ago."
+    echo "$number: held at $at, less than an hour ago."
     continue
   fi
   echo "$at $number $input $account" >> "$due"
