@@ -547,6 +547,11 @@ class Holdings(unittest.TestCase):
         listed = e["SCREEN_CHECKS"].split(",")
         self.assertIn("model_armor", listed)
         self.assertEqual(len(set(listed)), len(listed))
+        # All three checks run, each under the screen's own identity.
+        self.assertEqual(listed, ["model_armor", "prompt_shields", "claude"])
+        self.assertEqual((e["AZURE_CLIENT_ID"], e["ANTHROPIC_SERVICE_ACCOUNT_ID"], e["ANTHROPIC_FEDERATION_RULE_ID"]),
+                         ("878cb696-144f-4c60-b04c-3974fad24e96", "svac_01JFhEhPizCyTiK2i22mRJ8a",
+                          "fdrl_01PJtZrFW7ECzfBk5UVFjhw9"))
         for check in listed:
             for name in settings[check]:
                 self.assertTrue(e[name], f"{check} is listed, and {name} is empty")

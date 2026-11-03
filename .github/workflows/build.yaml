@@ -43,9 +43,9 @@ name: "Build"
 #   screen   when the gather job's output `screen` is true (.github/scripts/screen.py): independent checks, which
 #            SCREEN_CHECKS lists, read the text that the pull request or the issue carries (for a writer's item, its
 #            comments, reviews and review comments alone, SCREEN_SCOPE comments): Google Cloud Model Armor's prompt
-#            injection and jailbreak filter, always; a small Claude model with no tools whose answer a schema holds to
-#            the words clean and suspicious, through the screen's own Anthropic identity; and Azure AI Content
-#            Safety's Prompt Shields once its identity is set up (its env below). Each reads all the text joined. The
+#            injection and jailbreak filter; Azure AI Content Safety's Prompt Shields, which reads the text as
+#            documents; and a small Claude model with no tools whose answer a schema holds to the words clean and
+#            suspicious, each through the screen's own identity (its env below). Each reads all the text joined. The
 #            verdict is clean only when every check that
 #            ran answers clean; a check that cannot answer or runs out of time, a file the review reads that is not
 #            text or that the diff shows as binary, text with characters that hide it (bidirectional overrides and
@@ -906,11 +906,11 @@ jobs:
       MODEL_ARMOR_TEMPLATE: projects/theorem-agent-infra/locations/us/templates/review-screen
       STORAGE_URL: https://storage.googleapis.com
       REASON_BUCKET: theorem-agent-infra-review-screen-reasons
-      # Azure: Theorem's tenant, the managed identity review-screen and the Content Safety account.
+      # Azure: Theorem's tenant, the managed identity review-screen (its client id, agent-infra #1428), whose one
+      # federated credential admits this repository's jobs in review-screen, and the Content Safety account.
       AZURE_LOGIN_URL: https://login.microsoftonline.com
       AZURE_TENANT_ID: aaa6ad34-51af-41e7-891f-f16f5c53c396
-      # Empty until the managed identity exists: Prompt Shields then does not run, and the verdict says so.
-      AZURE_CLIENT_ID: ""
+      AZURE_CLIENT_ID: 878cb696-144f-4c60-b04c-3974fad24e96
       CONTENT_SAFETY_URL: https://theorem-review-screen.cognitiveservices.azure.com
       # Anthropic: Theorem's organization, the service account review-screen, its workspace, and the federation rule
       # oss-verify-screen (fdrl_01PJtZrFW7ECzfBk5UVFjhw9), which admits this file's jobs in review-screen on main and
@@ -921,10 +921,9 @@ jobs:
       ANTHROPIC_SERVICE_ACCOUNT_ID: svac_01JFhEhPizCyTiK2i22mRJ8a
       ANTHROPIC_FEDERATION_RULE_ID: fdrl_01PJtZrFW7ECzfBk5UVFjhw9
       SCREEN_MODEL: claude-haiku-5-5
-      # The checks that run, which must name model_armor: Prompt Shields joins the list once its identity exists. A
-      # listed check whose setting is missing holds every item, so a check is never turned off by a setting that goes
-      # missing.
-      SCREEN_CHECKS: model_armor,claude
+      # The checks that run, which must name model_armor. A listed check whose settings are missing holds every item;
+      # a check leaves only by leaving this list.
+      SCREEN_CHECKS: model_armor,prompt_shields,claude
     steps:
       # main's .github/scripts, for take-review-data and screen.py; never the pull request.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
