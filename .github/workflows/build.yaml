@@ -562,6 +562,9 @@ jobs:
       # Theorem's model gateway on the tailnet (the top of this file). Claude Code reads it here, from the job's
       # environment, and the action passes it on (its action.yml, ANTHROPIC_BASE_URL: env.ANTHROPIC_BASE_URL).
       ANTHROPIC_BASE_URL: https://ossv-model-gateway.tail12ec1c.ts.net
+      # The gateway serves Claude Code's small helper model by its bare id alone, and refuses the dated id the tool
+      # asks for by default. The action's step inherits this from the job's environment, as Claude Code does.
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-4-5
       # The client id Tailscale gave the federated identity ossv-review-github: bootstrap/'s stack output
       # ossvReviewTailnetClientId in agent-infra (INFRA-832 S1a, merged as 99d1b5d), copied from
       # `pulumi stack output ossvReviewTailnetClientId --stack prod` after the apply of 2026-10-31 that made the

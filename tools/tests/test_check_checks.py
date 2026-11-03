@@ -1999,6 +1999,7 @@ class ReviewJob(unittest.TestCase):
         self.assertEqual(text.count("ts.net"), text.count("https://ossv-model-gateway.tail12ec1c.ts.net"))
         self.assertEqual(self.jobs["review"]["env"]["ANTHROPIC_BASE_URL"],
                          "https://ossv-model-gateway.tail12ec1c.ts.net")
+        self.assertEqual(self.jobs["review"]["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "claude-haiku-4-5")
 
     def test_the_review_signs_in_to_the_model_gateway_with_no_stored_key(self):
         gateway = self.steps["Sign in to the model gateway"]
