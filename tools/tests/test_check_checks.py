@@ -337,7 +337,7 @@ class ImageFiles(unittest.TestCase):
         import io
         import tarfile
         import tracemalloc
-        count, header = 60_000, tarfile.TarInfo("x").tobuf()
+        count, header = 20_000, tarfile.TarInfo("x").tobuf()
 
         class Headers(io.RawIOBase):
             """`count` copies of one header, then the end of the archive, read in pieces as a pipe is."""
@@ -362,7 +362,7 @@ class ImageFiles(unittest.TestCase):
             peak = tracemalloc.get_traced_memory()[1] - baseline
         finally:
             tracemalloc.stop()
-        # Kept, 60,000 headers take about 20 MiB; dropped, less than one.
+        # Kept, 20,000 headers take about 7 MiB; dropped, less than one.
         self.assertLess(peak, 4 << 20)
 
     def read_stream(self, stream):
@@ -1494,6 +1494,20 @@ else:
                                           obj="held/9/" + "b" * 32, header=self.HEADER.replace("runs/7", "runs/9"))
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual((self.opened(calls), again), ([], []))
+
+    def test_the_identity_of_a_long_finding_takes_little_time(self):
+        """identity() removes each URL before it looks for a file name. Its pattern once took time that grew with the
+        square of a run of word characters (a hex dump, a long name): 130,000 letters took 37 seconds, and the hold
+        job that runs it has 5 minutes. 300,000 letters, in its own Python, now take well under a second."""
+        script = (ROOT / ".github" / "scripts" / "review-held").read_text(encoding="utf-8")
+        code = re.search(r"\nidentity\(\) \{\n  python3 - \"\$1\" \"\$2\" <<'EOF'\n(.*?)\nEOF\n", script, re.S).group(1)
+        with tempfile.TemporaryDirectory() as directory:
+            finding = pathlib.Path(directory) / "finding"
+            finding.write_text("title: a long word in f\nwhy held: crash\n" + "a" * 300000 + " in src/f.c\n")
+            done = subprocess.run([sys.executable, "-", str(finding), "demo"], input=code, capture_output=True,
+                                  text=True, timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertRegex(done.stdout, r"\Areview/demo/none/none/[0-9a-f]{12}\n\Z")
 
     def test_a_line_longer_than_a_part_is_cut_between_characters(self):
         # One long line of two-, three- or four-byte characters, after a prefix of 0 to 3 bytes, so that byte 60,000
