@@ -819,6 +819,25 @@ class ScreenedReviewCap(Runner):
         self.assertIn("the jobs of run 10 could not be read", out)
         self.assertEqual(self.run_script(str(SCRIPTS / "screened-review-cap"), RUN_ID="100", CAP="x")[0], 1)
 
+    def test_a_count_that_cannot_be_written_fails_the_count(self):
+        """An unwritten count would reach the hold step empty, read as 0, and let the review run past the cap."""
+        self.serve(f"repos/{REPO}/actions/workflows/build.yaml/runs", {"workflow_runs": [{"id": 100}]})
+        unwritable = self.dir / "not-a-file"
+        unwritable.mkdir()
+        for output, said in ((str(unwritable), "the count could not be written"), ("", "GITHUB_OUTPUT is not set")):
+            with self.subTest(output=output):
+                rc, out, _ = self.run_script(str(SCRIPTS / "screened-review-cap"), RUN_ID="100", CAP="2",
+                                             GITHUB_OUTPUT=output)
+                self.assertEqual(rc, 1, out)
+                self.assertIn(f"::error::{said}", out)
+
+    def test_the_hold_step_holds_a_count_that_is_not_a_number(self):
+        for count in ("", "x", "-1"):
+            with self.subTest(count=count):
+                rc, out = self.held(count)
+                self.assertEqual(rc, 1, out)
+                self.assertIn("::error::HELD:", out)
+
     def test_the_review_job_runs_both_before_the_model_for_a_screened_item(self):
         count, hold = step("review", self.COUNT), step("review", self.HOLD)
         for s in (count, hold):
@@ -1733,6 +1752,38 @@ class ReviewRescreen(Held):
         # And build.yaml's route no longer takes it as a hold that is tried again.
         self.assertEqual(subprocess.run([str(SCRIPTS / "limit-hold"), "7"], capture_output=True, text=True,
                                         env=self.env).stdout.split()[1:], ["-"])
+
+    def test_a_hold_made_again_while_it_ran_is_not_rewritten(self):
+        """The comment job may hold the item again between this script's read of the hold and its rewrite: the rewrite
+        happens only while the newest hold comment's time is still the one the count started from. A stand-in
+        limit-hold gives the time of the first read; the comment, read again at the bound, has the time given here."""
+        counted = self.ago(180)
+        for now, rewritten in ((counted, True), (self.ago(5), False)):
+            with self.subTest(rewritten=rewritten):
+                self.tearDown()
+                self.setUp()
+                scripts = self.dir / "scripts"
+                scripts.mkdir()
+                shutil.copy(SCRIPTS / "review-rescreen", scripts / "review-rescreen")
+                (scripts / "limit-hold").write_text(f"#!/usr/bin/env bash\necho '{counted} 50 mallory 0 limit'\n")
+                (scripts / "limit-hold").chmod(0o755)
+                self.items((7, "open", True))
+                self.held(7, limit_hold(50, at=now))
+                self.serve(f"repos/{REPO}/issues/comments/50", {})
+                self.runs(*[(40 + i, "github-actions[bot]", "workflow_dispatch", "Rescreen 7 of mallory", "completed",
+                             120 - i) for i in range(self.TRIES)])
+                rc, out, _ = self.run_script(str(scripts / "review-rescreen"),
+                                             OUTSIDE_HOURLY_LIMIT=RESCREEN_WF["env"]["OUTSIDE_HOURLY_LIMIT"],
+                                             REVIEW_TRIES=RESCREEN_WF["env"]["REVIEW_TRIES"],
+                                             HELD_LABEL=RESCREEN_WF["env"]["HELD_LABEL"])
+                started = [c for c in self.calls() if f"repos/{REPO}/actions/workflows/build.yaml/dispatches" in c]
+                self.assertEqual(started, [], out)
+                if rewritten:
+                    self.assertEqual((rc, [p[0] for p in self.patches()]), (1, ["50"]), out)
+                else:
+                    self.assertEqual((rc, self.patches()), (0, []), out)
+                    self.assertIn(f"7: held again after {counted}, while this run read it: the newer hold stands", out)
+                    self.assertNotIn("::error::", out)
 
     def test_an_issue_at_review_tries_is_told_its_own_command(self):
         self.items((9, "open", False))

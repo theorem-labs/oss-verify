@@ -13,10 +13,11 @@
 # state but skipped, and was stopped neither at the cap nor by a count of its own that failed. A run whose jobs have
 # not finished yet counts. It stops counting at CAP, writes count=<n> to GITHUB_OUTPUT and exits 0; the next step,
 # "Hold a screened review at the hourly cap", fails at CAP or over, and only there, so that the comment job can tell a
-# review held at the cap (tried again whatever REVIEW_TRIES) from one that did not finish. When CAP is not a number or
-# a read fails, this prints `::error::` and exits 1: the review job fails before the model, the hold step is skipped,
-# and the comment job holds the item as a screened review that did not finish (tried again under REVIEW_TRIES).
-set -uo pipefail
+# review held at the cap (tried again whatever REVIEW_TRIES) from one that did not finish. When CAP is not a number, a
+# read fails, or the count cannot be written to GITHUB_OUTPUT, this prints `::error::` and exits 1: the review job fails
+# before the model, the hold step is skipped, and the comment job holds the item as a screened review that did not
+# finish (tried again under REVIEW_TRIES). An unwritten count must never reach the hold step, which would read it as 0.
+set -euo pipefail
 cap=${CAP:-}
 fail() {
   echo "::error::$1 No model ran. A person can start the review by hand."
@@ -48,5 +49,6 @@ for id in $runs; do
   fi
   (( count < cap )) || break
 done
-echo "count=$count" >> "${GITHUB_OUTPUT:?}"
+[ -n "${GITHUB_OUTPUT:-}" ] || fail "GITHUB_OUTPUT is not set, so the count cannot be written."
+printf 'count=%s\n' "$count" >> "$GITHUB_OUTPUT" || fail "the count could not be written to GITHUB_OUTPUT."
 echo "$count screened reviews ran in the last hour; the cap is $cap."

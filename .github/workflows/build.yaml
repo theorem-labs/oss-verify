@@ -1251,6 +1251,10 @@ jobs:
           CAP: ${{ env.SCREENED_HOURLY_CAP }}
         run: |
           set -euo pipefail
+          # An empty count would read as 0 and let the review run past the cap: no number, no model. The count step
+          # writes the count or fails, so this should never fire.
+          [[ $COUNT =~ ^[0-9]+$ && $CAP =~ ^[1-9][0-9]*$ ]] \
+            || { echo "::error::HELD: the count of the last hour's screened reviews (\"$COUNT\") or the cap is not a number. No model ran."; exit 1; }
           if (( COUNT >= CAP )); then
             echo "::error::HELD: $COUNT screened reviews ran in the last hour, at the cap of $CAP. No model ran. A person can start the review by hand."
             exit 1

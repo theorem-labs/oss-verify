@@ -30,6 +30,9 @@
 # run, so that someone sees it; the next run passes. Below the bound, an item with such rescreens is started again only
 # once the newest of them is over an hour old: a rescreen that settles nothing does not move the hold's time, so
 # without that wait one problem of GitHub's could use all REVIEW_TRIES in 45 minutes.
+# The rewrite happens only while the newest hold comment's updated_at is still the hold time the count started from:
+# if the comment job held the item again while this script ran, the newer hold stands, and the item is left, with no
+# error, for the next run, which counts from the new time.
 # The hold comment is oss-verify[bot]'s, and this job has no key of that App: it edits the comment with its own token,
 # which issues: write and pull-requests: write allow on any comment of this repository. The comment stays the App's
 # (an edit does not change its author), so the comment job finds, replaces or deletes it as before.
@@ -41,8 +44,10 @@ set -euo pipefail
 here=$(dirname "$0")
 from=$(date -u -d '-1 hour' +%Y-%m-%dT%H:%M:%SZ)
 declare -A used=() running=()
-# stop_hold <number> <pr|issue> <rescreens>: rewrites the item's newest hold comment, oss-verify[bot]'s, to say that a
-# person decides, with no marker that is tried again and the run marker it had.
+# stop_hold <number> <pr|issue> <rescreens> <hold time>: rewrites the item's newest hold comment, oss-verify[bot]'s, to
+# say that a person decides, with no marker that is tried again and the run marker it had. Only while that comment's
+# updated_at is still the hold time this run counted from: a comment job that held the item again in between (a newer
+# hold, a new time) is left as it is, and stop_hold returns 2. Any read or write that fails returns 1.
 stop_hold() {
   local newest at id run body
   newest=$(gh api --paginate "repos/$REPO/issues/$1/comments" --jq '.[]
@@ -51,12 +56,14 @@ stop_hold() {
     | sort | tail -n 1) || return 1
   read -r at id run <<< "$newest"
   [[ -n ${at:-} && ${id:-} =~ ^[1-9][0-9]*$ ]] || return 1
+  [ "$at" = "$4" ] || return 2
   body=$(printf '%s\n%s\n\n%s %s\n' '<!-- oss-verify-held -->' "**Automated review held.**" \
     "It was screened again automatically $3 times since it was held, and none of those runs settled it, so it is not screened again automatically. A person with write access will look at it." \
-    "A person with write access can start the review with \`gh workflow run build.yaml -R $REPO -f $2=$1\`.")
+    "A person with write access can start the review with \`gh workflow run build.yaml -R $REPO -f $2=$1\`.") \
+    || return 1
   if [[ $run =~ ^[0-9]+$ ]]; then body+=$'\n\n'"<!-- oss-verify-held-run $run -->"; fi
   jq -n --arg body "$body"$'\n' '{body: $body}' \
-    | gh api --method PATCH "repos/$REPO/issues/comments/$id" --input - > /dev/null
+    | gh api --method PATCH "repos/$REPO/issues/comments/$id" --input - > /dev/null || return 1
 }
 title_re='^Rescreen ([0-9]+) of ([A-Za-z0-9-]+(\[bot\])?)$'
 # build.yaml's rescreens, by the run's name, which each run's route checks against the hold. Those not finished, made
@@ -86,8 +93,9 @@ items=$(gh api --paginate "repos/$REPO/issues?state=open&labels=$HELD_LABEL&per_
   --jq '.[] | select(.state == "open") | "\(.number) \(if .pull_request then "pr" else "issue" end)"') \
   || { echo "::error::the held pull requests and issues could not be read."; exit 1; }
 failed=0
-due=$(mktemp)
-trap 'rm -f "$due"' EXIT
+# The items to start, one line each, oldest hold first once sorted. Kept in a variable, not a file: a sort or a read
+# that fails stops the script (set -e) and cannot pass as an empty list.
+due=""
 while read -r number input; do
   [ -n "${number:-}" ] || continue
   [[ $number =~ ^[1-9][0-9]*$ ]] || { echo "::error::not a number: $number"; exit 1; }
@@ -121,14 +129,17 @@ while read -r number input; do
   fi
   unsettled=$(grep -c . <<< "$since_hold" || true)
   if (( unsettled >= REVIEW_TRIES )); then
-    if stop_hold "$number" "$input" "$unsettled"; then
-      echo "::error::$number: screened again $unsettled times since its hold at $at, and none settled it: its hold" \
-        "comment now says that a person with write access will look at it, and it is not screened again."
-    else
-      echo "::error::$number: screened again $unsettled times since its hold at $at, and its hold comment could not" \
-        "be rewritten: the next run tries again."
-    fi
-    failed=1
+    stopped=0
+    stop_hold "$number" "$input" "$unsettled" "$at" || stopped=$?
+    case $stopped in
+      0) echo "::error::$number: screened again $unsettled times since its hold at $at, and none settled it: its" \
+           "hold comment now says that a person with write access will look at it, and it is not screened again."
+         failed=1 ;;
+      2) echo "$number: held again after $at, while this run read it: the newer hold stands, and the next run reads it." ;;
+      *) echo "::error::$number: screened again $unsettled times since its hold at $at, and its hold comment could" \
+           "not be rewritten: the next run tries again."
+         failed=1 ;;
+    esac
     continue
   fi
   if (( unsettled > 0 )); then
@@ -139,9 +150,11 @@ while read -r number input; do
     fi
     echo "$number: $unsettled rescreens since its hold at $at settled nothing; it is tried again."
   fi
-  echo "$at $number $input $account" >> "$due"
+  due+="$at $number $input $account"$'\n'
 done <<< "$items"
+queue=$(sort <<< "$due")
 while read -r at number input account; do
+  [ -n "${number:-}" ] || continue
   if (( ${used[$account]:-0} >= OUTSIDE_HOURLY_LIMIT )); then
     echo "$number waits: $account had ${used[$account]} rescreens in the last hour, the limit is $OUTSIDE_HOURLY_LIMIT."
     continue
@@ -154,5 +167,5 @@ while read -r at number input account; do
     echo "::error::the rescreen of $number could not be started."
     failed=1
   fi
-done < <(sort "$due")
+done <<< "$queue"
 exit "$failed"
