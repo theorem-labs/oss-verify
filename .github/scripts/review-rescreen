@@ -32,7 +32,9 @@
 # without that wait one problem of GitHub's could use all REVIEW_TRIES in 45 minutes.
 # The rewrite happens only while the newest hold comment's updated_at is still the hold time the count started from:
 # if the comment job held the item again while this script ran, the newer hold stands, and the item is left, with no
-# error, for the next run, which counts from the new time.
+# error, for the next run, which counts from the new time. This narrows the race and does not close it: GitHub has no
+# conditional update of a comment, so a hold that the comment job writes between that read and the rewrite is still
+# overwritten.
 # The hold comment is oss-verify[bot]'s, and this job has no key of that App: it edits the comment with its own token,
 # which issues: write and pull-requests: write allow on any comment of this repository. The comment stays the App's
 # (an edit does not change its author), so the comment job finds, replaces or deletes it as before.

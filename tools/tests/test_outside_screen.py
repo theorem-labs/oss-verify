@@ -761,10 +761,11 @@ class TakeReviewData(Runner):
 
 
 class ScreenedReviewCap(Runner):
-    """.github/scripts/screened-review-cap, which counts, and the review job's two steps: the count, and the hold that
-    fails at the cap alone."""
+    """.github/scripts/screened-review-cap, which counts, and the review job's three steps: the count, its check that
+    the count is a number, and the hold that fails at the cap alone."""
 
     COUNT = "Count the screened reviews of the last hour"
+    CHECK = "Check the count of screened reviews"
     HOLD = "Hold a screened review at the hourly cap"
 
     def runs(self, *jobs_of_runs):
@@ -780,6 +781,9 @@ class ScreenedReviewCap(Runner):
 
     def held(self, count, cap="2"):
         return self.run_script(step("review", self.HOLD)["run"], COUNT=count, CAP=cap)[:2]
+
+    def checked(self, count, cap="2"):
+        return self.run_script(step("review", self.CHECK)["run"], COUNT=count, CAP=cap)[:2]
 
     SCREENED = [("screen", "success", []), ("review", "success", [("Review", "success")])]
 
@@ -801,9 +805,11 @@ class ScreenedReviewCap(Runner):
         writer = [("screen", "skipped", []), ("review", "success", [])]
         capped = [("screen", "success", []), ("review", "failure", [(self.COUNT, "success"), (self.HOLD, "failure")])]
         unread = [("screen", "success", []), ("review", "failure", [(self.COUNT, "failure"), (self.HOLD, "skipped")])]
+        unchecked = [("screen", "success", []),
+                     ("review", "failure", [(self.COUNT, "success"), (self.CHECK, "failure"), (self.HOLD, "skipped")])]
         held = [("screen", "success", []), ("review", "skipped", [])]
         running = [("screen", "success", []), ("review", None, [])]
-        self.assertEqual(self.runs(writer, capped, unread, held, writer)[2], {"count": "0"})
+        self.assertEqual(self.runs(writer, capped, unread, unchecked, held, writer)[2], {"count": "0"})
         self.assertEqual(self.runs(running, self.SCREENED)[2], {"count": "2"})
 
     def test_a_read_that_fails_fails_the_count_and_is_no_hold_at_the_cap(self):
@@ -831,23 +837,31 @@ class ScreenedReviewCap(Runner):
                 self.assertEqual(rc, 1, out)
                 self.assertIn(f"::error::{said}", out)
 
-    def test_the_hold_step_holds_a_count_that_is_not_a_number(self):
-        for count in ("", "x", "-1"):
-            with self.subTest(count=count):
-                rc, out = self.held(count)
+    def test_the_check_step_fails_on_a_count_that_is_not_a_number_and_says_no_cap(self):
+        """Its failure skips the hold step, so the comment job holds the item as a review that did not finish (tried
+        again under REVIEW_TRIES), not as one held at the cap."""
+        for count, cap in (("0", "2"), ("5", "2")):
+            with self.subTest(count=count, cap=cap):
+                self.assertEqual(self.checked(count, cap)[0], 0)
+        for count, cap in (("", "2"), ("x", "2"), ("-1", "2"), ("1", ""), ("1", "0")):
+            with self.subTest(count=count, cap=cap):
+                rc, out = self.checked(count, cap)
                 self.assertEqual(rc, 1, out)
-                self.assertIn("::error::HELD:", out)
+                self.assertIn("::error::the count of the last hour's screened reviews", out)
+                self.assertNotIn("HELD", out)
 
-    def test_the_review_job_runs_both_before_the_model_for_a_screened_item(self):
-        count, hold = step("review", self.COUNT), step("review", self.HOLD)
-        for s in (count, hold):
+    def test_the_review_job_runs_all_three_before_the_model_for_a_screened_item(self):
+        count, check, hold = step("review", self.COUNT), step("review", self.CHECK), step("review", self.HOLD)
+        for s in (count, check, hold):
             self.assertEqual(s["if"], "needs.gather.outputs.screen != 'false'")
             self.assertEqual(s["env"]["CAP"], "${{ env.SCREENED_HOURLY_CAP }}")
         self.assertEqual(count["run"], ".github/scripts/screened-review-cap")
-        self.assertEqual(hold["env"]["COUNT"], f"${{{{ steps.{count['id']}.outputs.count }}}}")
+        for s in (check, hold):
+            self.assertEqual(s["env"]["COUNT"], f"${{{{ steps.{count['id']}.outputs.count }}}}")
         self.assertRegex(WF["env"]["SCREENED_HOURLY_CAP"], r"^[1-9][0-9]*$")
         names = [x.get("name") for x in JOBS["review"]["steps"]]
-        self.assertEqual(names.index(self.HOLD), names.index(self.COUNT) + 1)
+        self.assertEqual([names.index(self.CHECK), names.index(self.HOLD)],
+                         [names.index(self.COUNT) + 1, names.index(self.COUNT) + 2])
         self.assertLess(names.index(self.HOLD), names.index("Review"))
 
 
@@ -986,27 +1000,32 @@ class Hold(Runner):
                         self.assertIn(f"did not finish, {tries} times. A maintainer will look at it.", bodies[0])
                         self.assertNotRegex(bodies[0], r"oss-verify-held-(limit|cap|transient)")
 
-    def test_a_count_of_the_cap_that_could_not_read_github_is_a_review_that_did_not_finish(self):
-        """Its count step failed and its hold step was skipped: tried again under REVIEW_TRIES, not as one held at the
-        cap. Only the review job's hold step says the cap."""
-        self.serve(f"repos/{REPO}/issues/7/comments", [])
-        self.serve(f"repos/{REPO}/issues/7/labels", [{"name": "review-held"}])
-        self.serve(f"repos/{REPO}/labels/review-held", {"name": "review-held"})
-        self.serve(f"repos/{REPO}/pulls/7", {"head": {"sha": "a" * 40}})
-        self.serve(f"repos/{REPO}/actions/runs/100/attempts/1/jobs", {"jobs": [
-            {"name": "other", "steps": [{"name": ScreenedReviewCap.HOLD, "conclusion": "failure"}]},
-            {"name": "review", "steps": [
-                {"name": ScreenedReviewCap.COUNT, "conclusion": "failure"},
-                {"name": ScreenedReviewCap.HOLD, "conclusion": "skipped"},
-                {"name": "Review", "conclusion": "skipped"}]}]})
-        rc, out, _ = self.run_script(step("comment", self.STEP)["run"], PR="7", NUMBER="7", TRUST="screen",
-                                     HEAD_SHA="a" * 40, REVIEW="failure", RUN_ID="100", RUN_ATTEMPT="1",
-                                     RUN_TOKEN="stand-in", TRIES="0", ORIGIN="50")
-        self.assertEqual(rc, 0, out)
-        body = json.loads((self.api / f"input.{len(self.calls())}").read_text())["body"]
-        self.assertIn(f"did not finish (1 of the {WF['env']['REVIEW_TRIES']} times it is tried)", body)
-        self.assertIn("\n\n<!-- oss-verify-held-transient 50 1 -->\n", body)
-        self.assertNotIn("had reached their limit", body)
+    def test_a_count_of_the_cap_that_failed_or_was_no_number_is_a_review_that_did_not_finish(self):
+        """Its count step or its check failed and its hold step was skipped: tried again under REVIEW_TRIES, not as one
+        held at the cap. Only the review job's hold step says the cap."""
+        for count, check in (("failure", "skipped"), ("success", "failure")):
+            with self.subTest(count=count, check=check):
+                self.tearDown()
+                self.setUp()
+                self.serve(f"repos/{REPO}/issues/7/comments", [])
+                self.serve(f"repos/{REPO}/issues/7/labels", [{"name": "review-held"}])
+                self.serve(f"repos/{REPO}/labels/review-held", {"name": "review-held"})
+                self.serve(f"repos/{REPO}/pulls/7", {"head": {"sha": "a" * 40}})
+                self.serve(f"repos/{REPO}/actions/runs/100/attempts/1/jobs", {"jobs": [
+                    {"name": "other", "steps": [{"name": ScreenedReviewCap.HOLD, "conclusion": "failure"}]},
+                    {"name": "review", "steps": [
+                        {"name": ScreenedReviewCap.COUNT, "conclusion": count},
+                        {"name": ScreenedReviewCap.CHECK, "conclusion": check},
+                        {"name": ScreenedReviewCap.HOLD, "conclusion": "skipped"},
+                        {"name": "Review", "conclusion": "skipped"}]}]})
+                rc, out, _ = self.run_script(step("comment", self.STEP)["run"], PR="7", NUMBER="7", TRUST="screen",
+                                             HEAD_SHA="a" * 40, REVIEW="failure", RUN_ID="100", RUN_ATTEMPT="1",
+                                             RUN_TOKEN="stand-in", TRIES="0", ORIGIN="50")
+                self.assertEqual(rc, 0, out)
+                body = json.loads((self.api / f"input.{len(self.calls())}").read_text())["body"]
+                self.assertIn(f"did not finish (1 of the {WF['env']['REVIEW_TRIES']} times it is tried)", body)
+                self.assertIn("\n\n<!-- oss-verify-held-transient 50 1 -->\n", body)
+                self.assertNotIn("had reached their limit", body)
 
     def test_a_writers_item_whose_review_did_not_finish_is_its_writers(self):
         """Its screen read the text of others; no account without write access waits on it."""

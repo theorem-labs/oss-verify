@@ -1230,11 +1230,13 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           CAP: 6
         run: .github/scripts/issue-draft-cap
-      # The hourly cap on screened reviews, in two steps, so that the comment job can tell a review held at the cap
-      # from one that did not finish. The count fails only when it cannot read GitHub (or the cap is not a number):
-      # the hold step is then skipped, and the item is held as a review that did not finish, tried again under
-      # REVIEW_TRIES. The hold step fails only at the cap. Keep the hold step's name: screened-review-cap and the
-      # comment job find a review held at the cap by it.
+      # The hourly cap on screened reviews, in three steps, so that the comment job can tell a review held at the cap
+      # from one that did not finish. The count fails when it cannot read GitHub, the cap is not a number, or the count
+      # cannot be written; the check fails when the count it got is not a number (an empty one would read as 0 and let
+      # the review run past the cap). Either failure skips the hold step, and the item is held as a review that did not
+      # finish, tried again under REVIEW_TRIES. So the hold step runs only with a count and a cap that are numbers, and
+      # fails only at the cap. Keep the three names: screened-review-cap counts no run that one of them stopped, and the
+      # comment job finds a review held at the cap by the hold step's.
       - name: Count the screened reviews of the last hour
         id: cap-count
         if: needs.gather.outputs.screen != 'false'
@@ -1244,6 +1246,15 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           CAP: ${{ env.SCREENED_HOURLY_CAP }}
         run: .github/scripts/screened-review-cap
+      - name: Check the count of screened reviews
+        if: needs.gather.outputs.screen != 'false'
+        env:
+          COUNT: ${{ steps.cap-count.outputs.count }}
+          CAP: ${{ env.SCREENED_HOURLY_CAP }}
+        run: |
+          set -euo pipefail
+          [[ $COUNT =~ ^[0-9]+$ && $CAP =~ ^[1-9][0-9]*$ ]] \
+            || { echo "::error::the count of the last hour's screened reviews (\"$COUNT\") or the cap is not a number. No model ran."; exit 1; }
       - name: Hold a screened review at the hourly cap
         if: needs.gather.outputs.screen != 'false'
         env:
@@ -1251,10 +1262,6 @@ jobs:
           CAP: ${{ env.SCREENED_HOURLY_CAP }}
         run: |
           set -euo pipefail
-          # An empty count would read as 0 and let the review run past the cap: no number, no model. The count step
-          # writes the count or fails, so this should never fire.
-          [[ $COUNT =~ ^[0-9]+$ && $CAP =~ ^[1-9][0-9]*$ ]] \
-            || { echo "::error::HELD: the count of the last hour's screened reviews (\"$COUNT\") or the cap is not a number. No model ran."; exit 1; }
           if (( COUNT >= CAP )); then
             echo "::error::HELD: $COUNT screened reviews ran in the last hour, at the cap of $CAP. No model ran. A person can start the review by hand."
             exit 1
@@ -1825,8 +1832,9 @@ jobs:
             # An outsider's item (trust screen) is tried again: at the cap, or after a review that failed or ran out
             # of time (cancelled: a newer push cancels the whole run, and then this job does not run). A writer's item
             # whose screen read the text of others is its writer's to start again. At the cap means the review job's
-            # step "Hold a screened review at the hourly cap" failed, which it does at the cap alone: a count that
-            # could not read GitHub fails the step before it and skips this one, and is a review that did not finish.
+            # step "Hold a screened review at the hourly cap" failed. That step runs only after the count and its check
+            # passed, and fails only at the cap: a count that could not read GitHub or write its answer, or a count that
+            # is not a number, fails a step before it and skips it, and is a review that did not finish.
             capped=$(GH_TOKEN=$RUN_TOKEN gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs" \
               --jq '.jobs[] | select(.name == "review") | .steps[]?
                     | select(.name == "Hold a screened review at the hourly cap" and .conclusion == "failure") | .name') \
