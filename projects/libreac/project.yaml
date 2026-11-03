@@ -1,19 +1,14 @@
 # libreac: the C library for Roland REAC audio over Ethernet (EtherType 0x8819): frame decode and encode, control
-# blocks, stagebox identity and head-amps, discovery, and the pcap reader. The pin moves from f37a23c5 (the head of
-# FreeREAC/libreac#29, issue #28; the merge of #29 adds nothing to it) to v1.9.0 (d16f3f4, tagged 2026-10-27). The
-# changes to built or fuzzed code are:
-#   - #31: fuzz_ctrl reads the address from bytes 9 and 10 of the joined record.
-#   - #33: pcap_source skips a record larger than the buffer without writing to stderr.
-#   - #37: a comment in reac_ctrlblk.h changes, which moves the lines below it down by one.
-#   - #36: reac_cfg.h declares the pace and role vocabulary that the transport headers used from reac-pw, and
-#     LIBREAC_VERSION_MINOR becomes 9.
-#   - #40: the fuzz_grant mutant records cite the current reac_ctrlblk.h lines.
-# The other changes are fuzz tooling, tests, the build system and packaging, CI and documentation: #38 (the coverage
-# floor reads a brace-less body as the check of its nearest if, else, case or default), #30 and #32. #36 also changes
-# the tests, the build system and packaging, and removes the vendored copies of reac-pw's reac_rate_cfg.h and
-# reac_role_cfg.h, which reac_pacer.h and reac_role_swap.h no longer include.
-# Every number except issue #28 is a FreeREAC/libreac pull request.
-repo: https://github.com/FreeREAC/libreac#d16f3f4eba605ee2cb9e7a70bf72685f1b7b5d25
+# blocks, stagebox identity and head-amps, discovery, and the pcap reader. The pin moves from v1.9.0 (d16f3f4) to
+# 848c6cb5 of sjawhar/libreac, the head of FreeREAC/libreac#47 (for issue #35). Its base is FreeREAC/libreac main at
+# cfb43f91 (the merge of #45). The changes to built or fuzzed code are:
+#   - #45: fuzz_ctrl's round trip requires each block the row has.
+#   - #47: pcap_source counts the oversized records it skips, and LIBREAC_ABI becomes 7.
+#   - #41: reac_code.h declares three more codes; #43: LIBREAC_VERSION_MINOR becomes 10. Neither changes a binary.
+# The other changes are fuzz tooling (#43 adds fuzz_qdisc, which build.sh does not build), tests, the Python
+# bindings, the build system and packaging, CI and documentation.
+# Every number except issue #35 is a FreeREAC/libreac pull request.
+repo: https://github.com/sjawhar/libreac#848c6cb5d3f8768e6ecc2d5e72b4f57d44fc2070
 primary_contact: linuxnow@gmail.com
 homepage: https://github.com/FreeREAC/libreac
 language: c
