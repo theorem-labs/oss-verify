@@ -52,15 +52,14 @@ There are exceptions, and this is the full list. Each exception is a limit of ho
 A statement about a `ubsan` or `asan-ubsan` binary names the UBSan checks in effect in its build. A check that is not in effect is not part of the statement.
 
 * **Today's toolchain vintage.** The checks are fixed: those that clang's `undefined` group makes in trap mode ([build-contract.md](build-contract.md#the-builds)).
-* **The next toolchain version.** The checks are those that OSS-Fuzz makes fatal, with `strict-flex-arrays`, changed by the project's `ubsan_checks` if it has one ([project-yaml.md](project-yaml.md#ubsan_checks)).
+* **The next toolchain version.** The checks are those that OSS-Fuzz makes fatal, changed by the project's `ubsan_checks` if it has one ([project-yaml.md](project-yaml.md#ubsan_checks)).
 
 These are the default checks of a `c++` project:
 
     array-bounds bool builtin enum function integer-divide-by-zero null object-size return
     returns-nonnull-attribute shift signed-integer-overflow unreachable vla-bound vptr libcxx-hardening
-    strict-flex-arrays
 
-`libcxx-hardening` is libc++'s extensive hardening mode, which OSS-Fuzz does not turn on: a failed libc++ precondition traps, as a UBSan check does. It and `vptr` are made in the `ubsan` build only. `strict-flex-arrays` is `-fstrict-flex-arrays=1`, which OSS-Fuzz does not turn on either: with it, `array-bounds` also checks an index into the last array of a struct, unless that array is declared `[]`, `[0]` or `[1]`, the ways C writes a flexible array. It is in both UBSan builds and in each language's default. The default of a `c` or `python` project is the same, less `function`, `vptr` and `libcxx-hardening`, and the checks of a `c++` project's C files are the same less `function`. OSS-Fuzz leaves `function` out of those compiles too. OSS-Fuzz also instruments `unsigned-integer-overflow`, but it silences the reports, so its default does not catch an unsigned overflow either. An unsigned overflow is not undefined behaviour, and correct code uses it.
+`libcxx-hardening` is libc++'s extensive hardening mode, which OSS-Fuzz does not turn on: a failed libc++ precondition traps, as a UBSan check does. It and `vptr` are made in the `ubsan` build only. The default of a `c` or `python` project is the same, less `function`, `vptr` and `libcxx-hardening`, and the checks of a `c++` project's C files are the same less `function`. OSS-Fuzz leaves `function` out of those compiles too. OSS-Fuzz also instruments `unsigned-integer-overflow`, but it silences the reports, so its default does not catch an unsigned overflow either. An unsigned overflow is not undefined behaviour, and correct code uses it.
 
 ## Memory budgets
 
