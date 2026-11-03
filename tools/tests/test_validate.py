@@ -299,10 +299,11 @@ class UbsanChecks(unittest.TestCase):
         self.assertFalse(any("strict-flex-arrays" in warning for warning in warnings), warnings)
         self.assertEqual(validate.ubsan_checks_in_effect(yaml_of(out)),
                          [c for c in validate.DEFAULT_UBSAN_CHECKS["c"] if c != "strict-flex-arrays"])
-        # Without array-bounds it changes nothing, which is worth a warning, not a refusal.
+        # Without array-bounds it adds no check, which is worth a warning, not a refusal.
         alone = MINIMAL + "ubsan_checks: {remove: [array-bounds], reason: x}\n"
         self.assertEqual(check(alone)[0], [])
-        self.has("strict-flex-arrays does nothing without array-bounds", check(alone)[1])
+        self.has("strict-flex-arrays adds no check without array-bounds, which the checks leave out; it still changes "
+                 "how clang optimizes the code of the two UBSan builds", check(alone)[1])
 
     def test_warnings(self):
         warnings = check(MINIMAL + "ubsan_checks: {add: [vptr, enum], remove: [alignment], reason: x}\n")[1]

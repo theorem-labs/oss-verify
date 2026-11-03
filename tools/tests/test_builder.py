@@ -53,7 +53,7 @@ EXPECTED = {
     "n": (139, 132, 139, 132),
     "o": (0, 132, 0, 132),
     "h": (0, 0, 134, 134),
-    # The fixed flags have no -fstrict-flex-arrays=3, so array-bounds does not check a trailing array, and the write
+    # The fixed flags have no -fstrict-flex-arrays=1, so array-bounds does not check a trailing array, and the write
     # stays inside the allocation, where AddressSanitizer sees nothing.
     "f": (0, 0, 0, 0),
     "l": (0, 0, 0, 0),

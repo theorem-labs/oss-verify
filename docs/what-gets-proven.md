@@ -52,7 +52,7 @@ There are exceptions, and this is the full list. Each exception is a limit of ho
 A statement about a `ubsan` or `asan-ubsan` binary names the UBSan checks in effect in its build. A check that is not in effect is not part of the statement.
 
 * **Today's toolchain vintage.** The checks are fixed: those that clang's `undefined` group makes in trap mode ([build-contract.md](build-contract.md#the-builds)).
-* **The next toolchain version.** The checks are those that OSS-Fuzz makes fatal, changed by the project's `ubsan_checks` if it has one ([project-yaml.md](project-yaml.md#ubsan_checks)).
+* **The next toolchain version.** The checks are those that OSS-Fuzz makes fatal, with `strict-flex-arrays`, changed by the project's `ubsan_checks` if it has one ([project-yaml.md](project-yaml.md#ubsan_checks)).
 
 These are the default checks of a `c++` project:
 
