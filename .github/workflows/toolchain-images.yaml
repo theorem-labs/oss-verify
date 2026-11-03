@@ -17,15 +17,20 @@ name: "Toolchain images"
 #            OFT_FRAME_POINTERS=1 added to its environment; or if a file under /opt/musl-sysroot or /opt/asan-static-rt
 #            has another SHA-256 in the new image. Its step summary gives the digest, and the SHA-256 of the C library
 #            and of the AddressSanitizer runtime in both images.
-#   publish  on a push to main, or by hand on main, after make passed for every image: makes the image again, in the
-#            package of its base image on ghcr.io, under the tag frame-pointers-<commit>, and checks the pushed image's
-#            layers and configuration as make does. Its step summary gives the pushed digest, which is make's, since the
-#            same base gives the same image. Only this job can write a package.
+#   publish  on a push to main, or by hand on main, after make passed for every image: makes the image again in a
+#            registry on the runner. If ghcr.io already holds that digest in the package of its base image, it pushes
+#            nothing; else it pushes the image there, under the tag frame-pointers-<commit>, and fails unless ghcr.io
+#            gives the same digest. Either way it checks the image on ghcr.io as make does, and its step summary gives
+#            the digest. Only this job can write a package.
 #
 # A row of infra/toolchains.tsv names an image only after it is published, so the rows of these images come in a pull
-# request after the push. To push, the token needs write access to each package: an organization admin adds this
-# repository with the Write role under "Manage Actions access" in the settings of oss-fuzz-theorems-toolchain,
-# oss-fuzz-theorems-toolchain-rust and oss-fuzz-theorems-toolchain-python (GitHub has no API for it).
+# request after the push. The release's toolchain packages are linked to no repository, so this repository's token can
+# push to them only after an organization admin adds this repository with the Write role under "Manage Actions access"
+# in the settings of oss-fuzz-theorems-toolchain, oss-fuzz-theorems-toolchain-rust and
+# oss-fuzz-theorems-toolchain-python (GitHub has no API for it). Without that, a person whose token can write to the
+# packages runs make's command, with the base digest from infra/toolchains.tsv, before the merge:
+#   crane mutate <base image@digest> --env OFT_FRAME_POINTERS=1 -t <base image>:frame-pointers
+# It gives the digest that make's run shows, and publish then finds it and pushes nothing.
 #
 # No step runs code of the pull request but this file: the base images come from infra/toolchains.tsv, read as text.
 
@@ -166,14 +171,19 @@ jobs:
     needs: make
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       contents: read
-      packages: write # to push the image
+      packages: write # to push the image, when ghcr.io does not hold it yet
     strategy:
       fail-fast: false
       matrix:
         base: [oss-fuzz-theorems-2026.10, oss-fuzz-theorems-2026.10-rust, oss-fuzz-theorems-2026.10-python]
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
     env:
       BASE_ROW: ${{ matrix.base }}
     steps:
@@ -193,7 +203,7 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$CRANE_ARCHIVE" -C "$RUNNER_TEMP/bin" crane
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
-      - name: push to ghcr.io
+      - name: publish to ghcr.io, unless it holds the image already
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -201,17 +211,27 @@ jobs:
           base=$(awk -F'\t' -v row="$BASE_ROW" '$1 == row { print $2 }' infra/toolchains.tsv)
           [[ "$base" =~ ^ghcr\.io/theorem-labs/oss-fuzz-theorems-toolchain(-[a-z]+)?@sha256:[0-9a-f]{64}$ ]] ||
             { echo "::error::infra/toolchains.tsv has no row $BASE_ROW with a toolchain digest: '$base'"; exit 1; }
-          echo "$GH_TOKEN" | crane auth login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          tag="${base%@*}:frame-pointers-$GITHUB_SHA"
-          ref=$(crane mutate "$base" --env OFT_FRAME_POINTERS=1 -t "$tag")
-          crane auth logout ghcr.io
-          [[ "$ref" =~ @sha256:[0-9a-f]{64}$ ]] || { echo "::error::crane gave no digest: '$ref'"; exit 1; }
-          # The same check as make's, on the pushed image: the base image's layers, and its configuration plus the one
-          # variable.
+          name=${base%@*}
+          made=$(crane mutate "$base" --env OFT_FRAME_POINTERS=1 -t "localhost:5000/${name#ghcr.io/}:frame-pointers")
+          digest=${made#*@}
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::crane gave no digest: '$made'"; exit 1; }
+          ref="$name@$digest"
+          if crane manifest "$ref" > /dev/null 2>&1; then
+            how="already on ghcr.io, nothing pushed"
+          else
+            echo "$GH_TOKEN" | crane auth login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+            tag="$name:frame-pointers-$GITHUB_SHA"
+            pushed=$(crane mutate "$base" --env OFT_FRAME_POINTERS=1 -t "$tag")
+            crane auth logout ghcr.io
+            [ "$pushed" = "$ref" ] || { echo "::error::ghcr.io holds $pushed, not the image made here ($ref)"; exit 1; }
+            how="pushed under the tag ${tag##*:}"
+          fi
+          # The same check as make's, on the image on ghcr.io: the base image's layers, and its configuration plus
+          # the one variable.
           jq -e -n --argjson b "$(crane manifest "$base")" --argjson n "$(crane manifest "$ref")" \
             '$b.layers == $n.layers' > /dev/null ||
             { echo "::error::$ref does not name exactly the base image's layers"; exit 1; }
           jq -e -n --argjson b "$(crane config "$base")" --argjson n "$(crane config "$ref")" \
             '($b | .config.Env += ["OFT_FRAME_POINTERS=1"]) == $n' > /dev/null ||
             { echo "::error::$ref's configuration is not the base image's with OFT_FRAME_POINTERS=1 added"; exit 1; }
-          echo "### $BASE_ROW, with frame pointers: pushed \`$ref\` (tag \`${tag##*:}\`)" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "### $BASE_ROW, with frame pointers: \`$ref\` ($how)" | tee -a "$GITHUB_STEP_SUMMARY"
