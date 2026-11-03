@@ -539,6 +539,22 @@ class Holdings(unittest.TestCase):
         self.assertRegex(e["ANTHROPIC_SERVICE_ACCOUNT_ID"], r"^(svac_[0-9A-Za-z]+)?$")
         self.assertRegex(e["ANTHROPIC_FEDERATION_RULE_ID"], r"^(fdrl_[0-9A-Za-z]+)?$")
         self.assertEqual(bool(e["ANTHROPIC_SERVICE_ACCOUNT_ID"]), bool(e["ANTHROPIC_FEDERATION_RULE_ID"]))
+        # Each listed check has every setting it reads: a listed check with one missing would hold every item.
+        settings = {"model_armor": ("MODEL_ARMOR_URL", "MODEL_ARMOR_TEMPLATE"),
+                    "prompt_shields": ("AZURE_LOGIN_URL", "AZURE_TENANT_ID", "AZURE_CLIENT_ID", "CONTENT_SAFETY_URL"),
+                    "claude": ("ANTHROPIC_URL", "ANTHROPIC_ORGANIZATION_ID", "ANTHROPIC_WORKSPACE_ID",
+                               "ANTHROPIC_SERVICE_ACCOUNT_ID", "ANTHROPIC_FEDERATION_RULE_ID", "SCREEN_MODEL")}
+        listed = e["SCREEN_CHECKS"].split(",")
+        self.assertIn("model_armor", listed)
+        self.assertEqual(len(set(listed)), len(listed))
+        for check in listed:
+            for name in settings[check]:
+                self.assertTrue(e[name], f"{check} is listed, and {name} is empty")
+        # The screen's Anthropic identity is its own, never the review's.
+        review = step("review", "Review")["with"]
+        self.assertNotEqual(e["ANTHROPIC_SERVICE_ACCOUNT_ID"], review["anthropic_service_account_id"])
+        self.assertNotEqual(e["ANTHROPIC_FEDERATION_RULE_ID"], review["anthropic_federation_rule_id"])
+        self.assertEqual(JOBS["review"]["environment"], {"name": "enroll-review", "deployment": False})
         self.assertEqual(step("screen", "Screen")["env"]["REASON_OBJECT"],
                          "${{ github.repository }}/${{ github.run_id }}-${{ github.run_attempt }}.json")
 

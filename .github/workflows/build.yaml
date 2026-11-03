@@ -43,9 +43,10 @@ name: "Build"
 #   screen   when the gather job's output `screen` is true (.github/scripts/screen.py): independent checks, which
 #            SCREEN_CHECKS lists, read the text that the pull request or the issue carries (for a writer's item, its
 #            comments, reviews and review comments alone, SCREEN_SCOPE comments): Google Cloud Model Armor's prompt
-#            injection and jailbreak filter, always; Azure AI Content Safety's Prompt Shields, and a small Claude model
-#            with no tools whose answer a schema holds to the words clean and suspicious, each once its identity is
-#            set up (its env below). Each reads all the text joined. The verdict is clean only when every check that
+#            injection and jailbreak filter, always; a small Claude model with no tools whose answer a schema holds to
+#            the words clean and suspicious, through the screen's own Anthropic identity; and Azure AI Content
+#            Safety's Prompt Shields once its identity is set up (its env below). Each reads all the text joined. The
+#            verdict is clean only when every check that
 #            ran answers clean; a check that cannot answer or runs out of time, a file the review reads that is not
 #            text or that the diff shows as binary, text with characters that hide it (bidirectional overrides and
 #            isolates, tag characters, and zero-width characters, but a joiner between two letters of a script that
@@ -212,19 +213,18 @@ name: "Build"
 #   issuer   fdis_01JvJ1UhZ8X2HHgcmXqjkJbc: https://token.actions.githubusercontent.com, keys by discovery
 #   main     fdrl_019restxFx3PhpLhbziQoQKf: subject_prefix "repo:theorem-labs@212152656/oss-verify@1429568498:*",
 #            audience "https://api.anthropic.com", claims {"repository_id": "1429568498",
-#            "ref": "refs/heads/main", "workflow": "Build"}, and the condition
-#            claims.workflow_ref.startsWith("theorem-labs/oss-verify/.github/workflows/build.yaml@"); and, once
-#            Theorem's infrastructure code applies its change of 2026-11-02, the claim "environment": "enroll-review"
+#            "ref": "refs/heads/main", "workflow": "Build", "environment": "enroll-review"}, and the condition
+#            claims.workflow_ref.startsWith("theorem-labs/oss-verify/.github/workflows/build.yaml@"), which also
+#            refuses a token whose environment is review-screen
 #   target   the service account oss-verify-ci (svac_01WdHTLcJPEfiPttcuLK1hGT), with the developer role
 #   scope    workspace:inference, in the workspace Default+CVP, with a token lifetime of 3600 seconds
 # The numbers are the immutable ids of theorem-labs and of this repository. `workflow` is the workflow's display name
 # (its `name:`), not its file, and `ref` is the run's ref; the condition pins the file, so the rule gives a token only
 # to this file, build.yaml, on main, from any event (a fork's pull_request_target run carries this repository's
 # workflow_ref, so it signs in too). The review, screen, hold and comment jobs of this file ask for an identity token; no
-# other job of it does. The subject prefix above admits every environment of this repository, so until the claim
-# "environment": "enroll-review" is applied, any job of this file that holds an identity token, the screen job's in
-# review-screen too, could have this rule mint an oss-verify-ci token; the screen job runs only main's screen.py and
-# take-review-data, and asks for none. Once it is applied, only the review job can. The screen job's own rule,
+# other job of it does. The rule's claim "environment": "enroll-review" admits the review job alone, which declares that
+# environment: no other job of this file, the screen job in review-screen included, can have it mint an oss-verify-ci
+# token (Theorem's infrastructure code, agent-infra #1427, applied on 2026-11-03). The screen job's own rule,
 # oss-verify-screen, admits review-screen alone.
 # A review runs only on main: the Anthropic rule above admits refs/heads/main alone, so a run on another branch gets
 # no Anthropic token (Google's provider and the tailnet identity of the export below admit main alone too, so such a
@@ -913,18 +913,18 @@ jobs:
       AZURE_CLIENT_ID: ""
       CONTENT_SAFETY_URL: https://theorem-review-screen.cognitiveservices.azure.com
       # Anthropic: Theorem's organization, the service account review-screen, its workspace, and the federation rule
-      # oss-verify-screen, which admits this file's jobs in review-screen on main. The account and the rule ids are
-      # empty until they exist: the Claude check then does not run, and the verdict says so.
+      # oss-verify-screen (fdrl_01PJtZrFW7ECzfBk5UVFjhw9), which admits this file's jobs in review-screen on main and
+      # nothing else (ids, not secrets).
       ANTHROPIC_URL: https://api.anthropic.com
       ANTHROPIC_ORGANIZATION_ID: 5fd73c3e-8a2c-4166-b80d-fb5ce0c1b4a6
       ANTHROPIC_WORKSPACE_ID: wrkspc_01Qr1iUVcow4jdgQM7Amfks5
-      ANTHROPIC_SERVICE_ACCOUNT_ID: ""
-      ANTHROPIC_FEDERATION_RULE_ID: ""
+      ANTHROPIC_SERVICE_ACCOUNT_ID: svac_01JFhEhPizCyTiK2i22mRJ8a
+      ANTHROPIC_FEDERATION_RULE_ID: fdrl_01PJtZrFW7ECzfBk5UVFjhw9
       SCREEN_MODEL: claude-haiku-5-5
-      # The checks that run, which must name model_armor: Prompt Shields and the Claude check join the list once their
-      # identities exist. A listed check whose setting is missing holds every item, so a check is never turned off by
-      # a setting that goes missing.
-      SCREEN_CHECKS: model_armor
+      # The checks that run, which must name model_armor: Prompt Shields joins the list once its identity exists. A
+      # listed check whose setting is missing holds every item, so a check is never turned off by a setting that goes
+      # missing.
+      SCREEN_CHECKS: model_armor,claude
     steps:
       # main's .github/scripts, for take-review-data and screen.py; never the pull request.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
