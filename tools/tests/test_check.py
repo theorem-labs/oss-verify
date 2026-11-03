@@ -475,13 +475,13 @@ class ContainerCleanup(unittest.TestCase):
               'case $1 in\n  run) exec sleep 30 ;;\n  ps) printf "c1\\nc2\\n" ;;\nesac\n')
     # A run as tools/check's __main__ makes it, whose one step is a docker run. Ctrl-C as from a terminal, even if
     # the tests run where SIGINT is ignored.
-    RUN = ("import signal, subprocess, sys; sys.path.insert(0, sys.argv[1]); import check_build\n"
-           "signal.signal(signal.SIGINT, signal.default_int_handler)\n"
-           "with check_build.containers_stopped():\n"
-           "    try:\n"
-           "        subprocess.run(['docker', 'run', *check_build.work_label('/work'), 'image', 'compile'])\n"
-           "    except KeyboardInterrupt:\n"
-           "        sys.exit(130)\n")
+    CHILD = ("import signal, subprocess, sys; sys.path.insert(0, sys.argv[1]); import check_build\n"
+             "signal.signal(signal.SIGINT, signal.default_int_handler)\n"
+             "with check_build.containers_stopped():\n"
+             "    try:\n"
+             "        subprocess.run(['docker', 'run', *check_build.work_label('/work'), 'image', 'compile'])\n"
+             "    except KeyboardInterrupt:\n"
+             "        sys.exit(130)\n")
 
     def fake_docker(self, scratch):
         directory = pathlib.Path(scratch)
@@ -543,6 +543,19 @@ class ContainerCleanup(unittest.TestCase):
                 self.assertEqual(seen, [{number: signal.SIG_IGN for number in before}])
                 self.assertEqual({number: signal.getsignal(number) for number in before}, before)
 
+    def test_a_signal_ignored_at_the_start_stays_ignored(self):
+        """nohup tools/check: the SIGHUP that nohup ignores still does not end the run, in the block or after it."""
+        import signal
+        previous = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        try:
+            with mock.patch.object(check_build, "stop_containers", lambda: None):
+                with check_build.containers_stopped():
+                    self.assertIs(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
+                    self.assertNotIn(signal.getsignal(signal.SIGTERM), (signal.SIG_IGN, signal.SIG_DFL))
+            self.assertIs(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
+        finally:
+            signal.signal(signal.SIGHUP, previous)
+
     def test_a_signal_ends_the_run_and_its_containers(self):
         """SIGTERM, SIGHUP or Ctrl-C while a docker run runs: the run ends with 128 + the signal's number, and removes
         each container that carries its own label."""
@@ -550,8 +563,9 @@ class ContainerCleanup(unittest.TestCase):
         for number, code in ((signal.SIGTERM, 143), (signal.SIGHUP, 129), (signal.SIGINT, 130)):
             with self.subTest(signal=number.name), tempfile.TemporaryDirectory() as scratch:
                 env, log = self.fake_docker(scratch)
-                process = subprocess.Popen([sys.executable, "-c", self.RUN, str(TOOLS)], env=env,
+                process = subprocess.Popen([sys.executable, "-c", self.CHILD, str(TOOLS)], env=env,
                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                self.addCleanup(process.kill)  # if it does not end, as a test that fails leaves it
                 deadline = time.monotonic() + 20
                 while not log.read_text(encoding="utf-8").startswith("run ") and time.monotonic() < deadline:
                     time.sleep(0.05)

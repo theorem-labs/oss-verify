@@ -337,8 +337,10 @@ def _end(number, frame):
 def containers_stopped():
     """Around a whole tools/check run, in the main thread: when it ends, however it ends (its result, an error, Ctrl-C,
     or SIGTERM or SIGHUP, which end it with the exit status 128 + the signal's number, as they would a shell), stop
-    the containers that it started (stop_containers()). No signal cuts that short."""
-    caught = [getattr(signal, name) for name in ("SIGTERM", "SIGHUP") if hasattr(signal, name)]
+    the containers that it started (stop_containers()). No signal cuts that short. A signal that is ignored when the
+    run starts stays ignored, as a shell leaves it: under nohup, a SIGHUP does not end the run."""
+    caught = [getattr(signal, name) for name in ("SIGTERM", "SIGHUP")
+              if hasattr(signal, name) and signal.getsignal(getattr(signal, name)) is not signal.SIG_IGN]
     before = {number: signal.signal(number, _end) for number in caught}
     try:
         yield
