@@ -9,16 +9,20 @@
 tools/check imports this module; it is not run on its own.
 """
 import codecs
+import concurrent.futures
+import contextlib
 import dataclasses
 import hashlib
 import os
 import pathlib
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
 import time
+import uuid
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 BUILDER_DIR = ROOT / "infra" / "base-builder"
@@ -31,6 +35,10 @@ UBSAN_MODES = ("fixed", "checks")
 IMAGES = "images"
 # The label on every container a tools/check run starts: its work directory (work_label).
 WORK_LABEL = "oss-verify-check.work"
+# The label on every container this process starts, whatever its work directory (work_label): stop_containers() stops
+# this process's containers, and not those of another run, even one in the same work directory.
+RUN_LABEL = "oss-verify-check.run"
+RUN = uuid.uuid4().hex
 # The git checkouts under $SRC in a project image, and their commits, for the manifest.
 LIST_SOURCES = (
     'find "$SRC" -maxdepth 4 -name .git 2>/dev/null | sort | while read -r g; do d=${g%/.git}; '
@@ -162,13 +170,48 @@ def in_checkout(checkout, path):
 
 def tree_hash(directory):
     """A hash of every file under `directory` (less Python's bytecode caches): its relative path, its mode and its
-    bytes."""
+    bytes. A symbolic link counts as the text of the link, not what it points to, as `docker build` sends it. Each
+    field goes in with its length in front, so no two trees give one stream (a file whose bytes look like the next
+    file's path cannot pass for two files), and a file's bytes go in by their own SHA-256, read in chunks."""
     digest = hashlib.sha256()
+
+    def field(data):
+        digest.update(len(data).to_bytes(8, "big") + data)
+
     for path in sorted(directory.rglob("*")):
-        if path.is_file() and "__pycache__" not in path.relative_to(directory).parts:
-            digest.update(f"{path.relative_to(directory)}\0{path.stat().st_mode & 0o111:o}\0".encode())
-            digest.update(path.read_bytes() + b"\0")
+        relative = path.relative_to(directory)
+        if "__pycache__" in relative.parts:
+            continue
+        if path.is_symlink():
+            for data in (b"link", os.fsencode(relative), os.fsencode(os.readlink(path))):
+                field(data)
+        elif path.is_file():
+            content = hashlib.sha256()
+            with open(path, "rb") as handle:
+                while chunk := handle.read(1 << 20):
+                    content.update(chunk)
+            for data in (b"file", os.fsencode(relative), f"{path.stat().st_mode & 0o111:o}".encode(),
+                         content.digest()):
+                field(data)
     return digest.hexdigest()
+
+
+@contextlib.contextmanager
+def cache_lock(entry):
+    """Hold an exclusive lock for the cache entry `entry` (a path in the cache) while a run fills or reads it, through
+    the file <entry>.lock beside it: a second tools/check on this host that fills the same entry waits, rather than
+    removing what the first is writing."""
+    # Imported here, not at the top: fcntl is POSIX only, and tools/validate.py (with the triage preview that
+    # CONTRIBUTING.md gives) imports this module, and must still run where there is none, as on Windows.
+    import fcntl
+    entry = pathlib.Path(entry)
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    with open(entry.parent / f"{entry.name}.lock", "a", encoding="utf-8") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def toolchains():
@@ -248,9 +291,86 @@ def project_tag(job, commit, builder, home, suffix=""):
 
 
 def work_label(home):
-    """The label every container that the run with work directory `home` starts carries, so that a caller stops that
-    run's containers and no other's."""
-    return ["--label", f"{WORK_LABEL}={home}"]
+    """The docker run options of every container that the run with work directory `home` starts: the label of that
+    work directory, so that a caller stops that run's containers and no other's; the label of this process, for
+    stop_containers(); and no log. Docker keeps a container's log on the host for as long as the container writes,
+    read or not, so one that writes forever after its client is gone would fill the host's disk. docker run still
+    passes on all that its container writes."""
+    return ["--label", f"{WORK_LABEL}={home}", "--label", f"{RUN_LABEL}={RUN}", "--log-driver=none"]
+
+
+def _docker(*argv):
+    """Run a docker command quietly, for at most a minute, and return its standard output: "" if it fails, or there
+    is no docker."""
+    try:
+        return subprocess.run(["docker", *argv], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              errors="replace", timeout=60).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def remove_containers(*names):
+    """Kill and remove these containers (docker rm -f), quietly: one already gone is no error."""
+    if names:
+        _docker("rm", "-f", *names)
+
+
+def stop_containers():
+    """Kill and remove every container that this process started and that is still there (by its RUN_LABEL). A
+    container outlives its docker run client: if the client ends first (it is killed, or tools/check ends and leaves it
+    behind), the container runs on to its own end, or forever."""
+    remove_containers(*_docker("ps", "-aq", "--filter", f"label={RUN_LABEL}={RUN}").split())
+
+
+def abandon(pool):
+    """For a thread pool of docker runs whose caller is ending (Ctrl-C, or SIGTERM or SIGHUP in containers_stopped()):
+    start none of its jobs that have not started, and stop the containers of those that have. Else the pool's threads
+    would run every job to its time limit before tools/check could end."""
+    pool.shutdown(wait=False, cancel_futures=True)
+    stop_containers()
+
+
+def in_threads(function, items, workers):
+    """function(item) for each of `items`, at most `workers` at once, each in a thread of its own: what each call
+    returned, or the exception it raised, in the order of `items`. If Ctrl-C, or a signal of containers_stopped(),
+    stops the wait, the calls are abandoned (abandon()) and it is raised again. Each pool of docker runs runs here."""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(function, item) for item in items]
+        try:
+            concurrent.futures.wait(futures)
+        except (KeyboardInterrupt, SystemExit):
+            abandon(pool)
+            raise
+    outcomes = []
+    for future in futures:
+        error = future.exception()
+        outcomes.append(error if error is not None else future.result())
+    return outcomes
+
+
+def _end(number, frame):
+    raise SystemExit(128 + number)
+
+
+@contextlib.contextmanager
+def containers_stopped():
+    """Around a whole tools/check run, in the main thread: when it ends, however it ends (its result, an error, Ctrl-C,
+    or SIGTERM or SIGHUP, which end it with the exit status 128 + the signal's number, as they would a shell), stop
+    the containers that it started (stop_containers()). No signal cuts that short. A signal that is ignored when the
+    run starts stays ignored, as a shell leaves it: under nohup, a SIGHUP does not end the run."""
+    caught = [getattr(signal, name) for name in ("SIGTERM", "SIGHUP")
+              if hasattr(signal, name) and signal.getsignal(getattr(signal, name)) is not signal.SIG_IGN]
+    before = {number: signal.signal(number, _end) for number in caught}
+    try:
+        yield
+    finally:
+        held = {number: signal.signal(number, signal.SIG_IGN) for number in (signal.SIGINT, *caught)}
+        try:
+            stop_containers()
+        finally:
+            for number, handler in {**held, **before}.items():
+                if handler is not None:  # None: a handler that Python did not install, which it cannot put back
+                    signal.signal(number, handler)
 
 
 def record_image(record, tag):

@@ -7,8 +7,9 @@ compile records each link of a fuzz target when tools/check asks (infra/base-bui
 this link"): the linker's map, each file the map names with its real path and SHA-256, the driver's objects, the
 copies an allocation-failure link made, and a copy of every input. It also records each compile that runs a compiler
 shim (infra/base-builder/record-compile), one line of $OUT/.records/compiles.jsonl for each object a compile wrote: the
-SHA-256 of its bytes, its source, the SHA-256 of the source's bytes, that source's language, and every argument the
-build gave the compiler; and the build's own sanitizer flags, by language, in $OUT/.records/flags.json
+SHA-256 of its bytes, its source, the SHA-256 of the source's bytes, that source's language, the no_sanitize attributes
+of the preprocessed source and the SHA-256 of the object compiled with them taken out ($OUT/.records/nosan/), and every
+argument the build gave the compiler; and the build's own sanitizer flags, by language, in $OUT/.records/flags.json
 (infra/base-builder/compile). This module reads those records, with no Docker, and gives each build of each fuzz
 target two results:
 
@@ -39,10 +40,15 @@ target two results:
    its bytes (by their SHA-256): instrumented if one of them carried the build's UBSan flags for its language (each of
    them, but the -fno-sanitize= ones, among its arguments; no -fno-sanitize= argument that turns off a check the
    build's own flags keep; and no ignorelist, -fno-sanitize-trap, -fsanitize-recover or -ftrap-function argument,
-   which take checks away or turn traps into calls, that the build's own flags do not have; no -fstrict-flex-arrays=
-   after them with a lower level than theirs, since clang keeps the last one; a word that the driver hands on to the
-   front end through -Xclang, -Xclang=, -Xpreprocessor or -Wp, counts as the bare word), whatever its
-   traps; not instrumented (fail) if none did, whatever its traps. A compile of a language that the sanitizer does not
+   which take checks away or turn traps into calls, that the build's own flags do not have; the last
+   -fstrict-flex-arrays= that the driver reads gives no lower level than theirs, since clang keeps the last one, and
+   no -fstrict-flex-arrays= that it hands on to the front end gives a lower one, wherever it stands; a word that the
+   driver hands on to the front end through -Xclang, -Xclang=, -Xpreprocessor or -Wp, counts as the bare word, and a
+   -fstrict-flex-arrays= so handed on counts only against the compile), whatever its
+   traps (but bytes with no check, out of which the compile's no_sanitize attributes took checks, are not
+   instrumented: they fail; record-compile compiles such a source again with the attributes taken out, and that
+   object has checks. Bytes with no check whose record cannot say so are not decided by that compile); not
+   instrumented (fail) if none did, whatever its traps. A compile of a language that the sanitizer does not
    instrument (assembly), one whose arguments are in a response file, or one with an option whose effect the record
    does not show (an -mllvm option, --config, --config-user-dir, --config-system-dir, -resource-dir) that the build's
    own flags do not have, decides nothing; a compile run with CCC_OVERRIDE_OPTIONS has no record. Nor does any compile
@@ -59,11 +65,13 @@ function of its code a line table, as Go's compiler and assembler do (a .syso fi
 otherwise.
 
 What this catches: a build whose sanitizer flags did not reach some of its code, by mistake; with the compile
-records, also a member compiled without the flags whose archive's other members hold checks. And a member that has
-nothing to check passes when its recorded compile carried the flags. What it misses: code that no recorded compile
-wrote (a compiler run by its own name, not through a shim; an object changed after its compile, such as an
-allocation-failure link's renamed copy; a prebuilt object) is judged by its checks only, as before, and a member with
-nothing to check then fails with its archive. The records are written inside the build's own container, so a build.sh
+records, also a member compiled without the flags whose archive's other members hold checks, and a member with no
+check whose source's no_sanitize attributes took its checks out. A member that has nothing to check passes when its
+recorded compile carried the flags and its attributes took nothing out of it. What it misses: code that no recorded
+compile wrote (a compiler run by its own name, not through a shim; an object changed after its compile, such as an
+allocation-failure link's renamed copy; a prebuilt object), and a member with no check whose record cannot say what
+its attributes took out (record-compile), are judged by their checks only, as before, and a member with nothing to
+check then fails with its archive. The records are written inside the build's own container, so a build.sh
 that sets out to deceive the check can; the review of the pull request is what stands against that.
 """
 import array
@@ -113,6 +121,35 @@ NO_SANITIZE = "-fno-sanitize="
 # carry the build's flags.
 UNDO_CHECKS = re.compile(r"-fsanitize-(system-)?(ignorelist|blacklist)=.*|-fno-sanitize-trap(=.*)?"
                          r"|-fsanitize-recover(=.*)?|-fno-sanitize-undefined-trap-on-error|-ftrap-function(=.*)?")
+# The sanitizers that a no_sanitize attribute can name that are not the UndefinedBehaviorSanitizer's: an attribute
+# that names only these leaves its checks on. Every other name, a check or group of it ("undefined", "shift",
+# "signed-integer-overflow", ...) or one this does not know, turns a UBSan check off.
+NOT_UBSAN = {"address", "hwaddress", "kernel-address", "kernel-hwaddress", "memory", "kernel-memory", "thread",
+             "memtag", "memtag-stack", "memtag-heap", "memtag-globals", "safe-stack", "shadow-call-stack", "dataflow",
+             "leak", "kcfi", "scudo", "fuzzer", "fuzzer-no-link", "realtime", "numerical", "type"}
+NO_SANITIZE_ATTRIBUTE = re.compile(r"(?:__)?(no_sanitize[a-z_]*?)(?:__)?\s*(\((.*)\))?$", re.S)
+
+
+def turns_ubsan_off(attribute):
+    """Whether one no_sanitize attribute that record-compile read from a source (`no_sanitize_undefined`,
+    `no_sanitize("undefined")`, `__no_sanitize__("shift", "address")`, ...) turns a UBSan check off: one that names
+    a sanitizer outside NOT_UBSAN (no cfi- one) does, and so does one whose arguments name nothing this reads.
+    no_sanitize_address, no_sanitize_memory and no_sanitize_thread do not; nor does a bare `no_sanitize` with no
+    arguments, which is no attribute (an identifier of the code, or the name in __has_attribute)."""
+    m = NO_SANITIZE_ATTRIBUTE.fullmatch(attribute.strip())
+    if not m:
+        return True
+    name, arguments = m.group(1), m.group(3)
+    if name == "no_sanitize_undefined":
+        return True
+    if name != "no_sanitize":
+        return False
+    if m.group(2) is None:
+        return False
+    names = [n.strip() for s in re.findall(r'"([^"]*)"', arguments or "") for n in s.split(",")]
+    return not names or any(n not in NOT_UBSAN and not n.startswith("cfi") for n in names)
+
+
 # The options whose effect the record does not show, each as <option> <value> or <option>=<value>: LLVM's own options,
 # which can take every check away; and those that make clang read flags or an ignorelist from a file: a configuration
 # file, the directories clang looks for its default configuration file in, and the resource directory, whose
@@ -121,8 +158,8 @@ UNDO_CHECKS = re.compile(r"-fsanitize-(system-)?(ignorelist|blacklist)=.*|-fno-s
 # build gave the shim.
 UNSEEN = ("-mllvm", "--config", "--config-user-dir", "--config-system-dir", "-resource-dir")
 # -fstrict-flex-arrays=<level>: which trailing arrays of a struct array-bounds checks (infra/base-builder/toolchain.sh).
-# clang keeps only the last one the driver gets, so a compile that gives a lower level after the build's flags takes
-# that check away while each of the build's words stays among its arguments.
+# clang keeps only the last one the driver gets, so a compile whose last one gives a lower level than the build's
+# takes that check away while each of the build's words stays among its arguments (lower_flex_levels).
 STRICT_FLEX_ARRAYS = "-fstrict-flex-arrays="
 C_FAMILY = re.compile(r"\.(c|cc|cp|cpp|cxx|c\+\+|C|CPP|m|mm|h|hh|hpp|hxx|inc|ii|i)$")
 ASSEMBLY = re.compile(r"\.(S|s|sx|asm)$")
@@ -233,6 +270,11 @@ class Compile:
     arguments: list  # the arguments the build gave the compiler shim
     directory: str = ""  # the working directory of the compile, which a relative `file` is relative to
     source_sha256: str | None = None  # the SHA-256 of the source's bytes, if the record has it
+    # the no_sanitize attributes of its preprocessed source, or None when the record cannot say
+    no_sanitize: list | None = None
+    # the UBSan traps and UB checks of the object compiled with those attributes taken out, or None when the record
+    # has no such object or it cannot be read
+    no_sanitize_checks: int | None = None
 
 
 @dataclasses.dataclass
@@ -278,8 +320,21 @@ def read_compiles(raw):
         directory = entry.get("directory") if isinstance(entry.get("directory"), str) else ""
         source = entry.get("source_sha256")
         source = source if isinstance(source, str) and re.fullmatch(r"[0-9a-f]{64}", source) else None
+        attributes = entry.get("no_sanitize")
+        attributes = (attributes if isinstance(attributes, list) and all(isinstance(a, str) for a in attributes)
+                      else None)
+        # The object without the attributes, saved by its SHA-256 (record-compile): its checks, if it is that object.
+        stripped, checks = entry.get("no_sanitize_object"), None
+        if isinstance(stripped, str) and re.fullmatch(r"[0-9a-f]{64}", stripped):
+            try:
+                data = read_regular(below(raw, ".records", "nosan", stripped))
+            except RecordError:
+                data = None
+            facts = object_facts(data) if data is not None and hashlib.sha256(data).hexdigest() == stripped else None
+            if facts is not None and not facts.bitcode:
+                checks = facts.traps + facts.ub_checks
         objects.setdefault(entry["sha256"], []).append(
-            Compile(entry["file"], entry["language"], entry["arguments"], directory, source))
+            Compile(entry["file"], entry["language"], entry["arguments"], directory, source, attributes, checks))
     return Compiles(flags["build"], flags["sanitizer"], flags["ubsan"], objects)
 
 
@@ -801,10 +856,13 @@ def flex_levels(arguments):
 def lower_flex_levels(wanted, arguments):
     """The -fstrict-flex-arrays= words of a compile's `arguments` that give a lower level than the build's UBSan flags
     `wanted` do (the last of theirs), or none when those flags have none: the last one the driver reads, and each one
-    it hands on to the front end, which counts against the compile and never for it."""
+    it hands on to the front end, which counts against the compile and never for it. A build level that is not decimal
+    digits cannot be compared, so each compile then counts as giving a lower level: the build's own word."""
     build = flex_levels(wanted)[0]
     if not build:
         return []
+    if not re.fullmatch("[0-9]+", build[-1]):
+        return [STRICT_FLEX_ARRAYS + build[-1]]
     driver, forwarded = flex_levels(arguments)
     return [STRICT_FLEX_ARRAYS + level for level in driver[-1:] + forwarded
             if not (re.fullmatch("[0-9]+", level) and int(level) >= int(build[-1]))]
@@ -828,7 +886,8 @@ def ubsan_compile(compiles, compile):
     sanitizer flags for that language turn off (a check that the build turns off is the build's choice, one the
     compile adds is not); and it has no ignorelist, -fno-sanitize-trap, -fsanitize-recover or -ftrap-function argument
     (UNDO_CHECKS) that the build's own flags do not have, and, when the build's UBSan flags give -fstrict-flex-arrays=,
-    no later one that gives a lower level (lower_flex_levels). A word that the driver hands on to the front end
+    the last one that the driver reads gives no lower level, and none that it hands on to the front end gives a lower
+    level, wherever it stands (lower_flex_levels). A word that the driver hands on to the front end
     (-Xclang, -Xclang=, -Xpreprocessor, -Wp,) counts against the compile as the bare word does, and never for it."""
     language = UBSAN_LANGUAGES.get(compile.language)
     wanted = [w for w in compiles.ubsan[language] if not w.startswith(NO_SANITIZE)] if language else []
@@ -851,14 +910,36 @@ def ubsan_compile(compiles, compile):
                                                    + (["with " + " ".join(extra)] if extra else [])))
 
 
-def ubsan_record(compiles, data):
-    """What the build's compile records say of an object's bytes `data`: (True, ""), when a recorded compile that
-    wrote these bytes carried the build's UBSan flags (the bytes are the same whichever one made them); (False, why),
-    when compiles wrote them and none carried the flags; (None, "") when no record decides."""
+# What ubsan_record says of bytes with no check whose compile's source took UBSan checks out of them.
+TURNED_OFF = "no UBSan check, and its source's no_sanitize attributes took UBSan checks out of it"
+
+
+def ubsan_record(compiles, data, checks):
+    """What the build's compile records say of an object's bytes `data`, which hold `checks` UBSan traps and UB
+    checks: (True, ""), when a recorded compile that wrote these bytes carried the build's UBSan flags (the bytes are
+    the same whichever one made them); (False, why), when compiles wrote them and none carried the flags; (None, "")
+    when no record decides.
+
+    Code with nothing to check has no trap, and so has code whose source turns the checks off (a no_sanitize
+    attribute, turns_ubsan_off): the bytes do not tell the two apart, so a compile shows bytes with no check
+    instrumented only when its record shows that its source's attributes took no check out of them. That is so when
+    the source has no attribute that turns a UBSan check off, or when the object that record-compile compiled with the
+    attributes taken out has no check either. When that object has checks, the attributes took them out of these
+    bytes, and the compile says they were not instrumented. A record that cannot say (no_sanitize null, or no such
+    object) decides nothing for bytes with no check."""
     if compiles is None:
         return None, ""
-    verdicts = [ubsan_compile(compiles, compile)
-                for compile in compiles.objects.get(hashlib.sha256(data).hexdigest(), [])]
+    verdicts = []
+    for compile in compiles.objects.get(hashlib.sha256(data).hexdigest(), []):
+        verdict, why = ubsan_compile(compiles, compile)
+        if verdict and not checks:
+            off = None if compile.no_sanitize is None else [a for a in compile.no_sanitize if turns_ubsan_off(a)]
+            if off is None or off and compile.no_sanitize_checks is None:
+                verdict = None
+            elif off and compile.no_sanitize_checks:
+                verdict, why = False, (f"{compile.file}: {TURNED_OFF} ({compile.no_sanitize_checks} without "
+                                       + ", ".join(off) + ")")
+        verdicts.append((verdict, why))
     if any(verdict for verdict, _ in verdicts):
         return True, ""
     against = [why for verdict, why in verdicts if verdict is False]
@@ -1094,7 +1175,8 @@ def analyse(records, image, dwarf_units=None, checkouts=(), assembly_sources=Non
         if build in UBSAN_BUILDS:
             # Each object and archive member is judged first by the compile that wrote its bytes, when the build
             # recorded one: one that carried the build's UBSan flags is instrumented, whatever its traps (code with
-            # nothing to check has none); one without them is not, whatever its traps.
+            # nothing to check has none), unless it has none and its source turns a UBSan check off (ubsan_record);
+            # one without them is not, whatever its traps.
             # A build whose records cannot decide says so in its cell: its code is then judged by its traps alone.
             if compiles is None:
                 notes.append("the build has no compile records that this reads (flags.json or compiles.jsonl is not "
@@ -1107,18 +1189,23 @@ def analyse(records, image, dwarf_units=None, checkouts=(), assembly_sources=Non
                                  + " and ".join("C" if language == "c" else "C++" for language in none_on)
                                  + " turn on no check (no -fsanitize= word), so its compile records decide nothing "
                                  "for that code, which is judged by its UBSan traps")
-            without, undecided = [], []
+            without, turned_off, undecided = [], [], []
             for c in with_code:
-                verdict, why = ubsan_record(compiles, c.data) if not c.facts.bitcode else (None, "")
+                verdict, why = (ubsan_record(compiles, c.data, c.facts.traps + c.facts.ub_checks)
+                                if not c.facts.bitcode else (None, ""))
                 if verdict:
                     shown += 1
                 elif verdict is False:
-                    without.append(f"{c.label} ({why})")
+                    (turned_off if TURNED_OFF in why else without).append(f"{c.label} ({why})")
                 else:
                     undecided.append(c)
             if without:
                 found.append(f"{len(without)} objects were compiled without the build's UndefinedBehaviorSanitizer "
                              "flags: " + "; ".join(listed(without)))
+            if turned_off:
+                found.append(f"{len(turned_off)} objects have no UndefinedBehaviorSanitizer check because the "
+                             "no_sanitize attributes of their source took the checks out: "
+                             + "; ".join(listed(turned_off)))
             # The code that no record decides (a prebuilt object, a compile that ran no shim, a build without records)
             # is judged by its checks: each archive that holds some of it must hold more checks than the same archive
             # in the plain build, and so must the project's code as a whole. An object the link took on its own is

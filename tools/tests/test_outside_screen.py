@@ -649,10 +649,12 @@ class Holdings(unittest.TestCase):
         for check in listed:
             for name in settings[check]:
                 self.assertTrue(e[name], f"{check} is listed, and {name} is empty")
-        # The screen's Anthropic identity is its own, never the review's.
-        review = step("review", "Review")["with"]
-        self.assertNotEqual(e["ANTHROPIC_SERVICE_ACCOUNT_ID"], review["anthropic_service_account_id"])
-        self.assertNotEqual(e["ANTHROPIC_FEDERATION_RULE_ID"], review["anthropic_federation_rule_id"])
+        # The screen's Anthropic identity is its own: the review reaches Claude through the model gateway, and holds
+        # no Anthropic service account or federation rule at all.
+        review = json.dumps(JOBS["review"])
+        self.assertNotIn(e["ANTHROPIC_SERVICE_ACCOUNT_ID"], review)
+        self.assertNotIn(e["ANTHROPIC_FEDERATION_RULE_ID"], review)
+        self.assertNotRegex(review, r"svac_|fdrl_")
         self.assertEqual(JOBS["review"]["environment"], {"name": "enroll-review", "deployment": False})
         self.assertEqual(step("screen", "Screen")["env"]["REASON_OBJECT"],
                          "${{ github.repository }}/${{ github.run_id }}-${{ github.run_attempt }}.json")

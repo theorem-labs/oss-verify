@@ -346,10 +346,10 @@ class Analyse(unittest.TestCase):
                compiled=None, build="ubsan"):
         """A Record whose link took `runtimes` from the image, the members of `archives` ({archive path: {member:
         bytes}}), the objects `loose` ({path: bytes}) and the driver. With `compiled` ([(object bytes, source,
-        language, arguments[, directory, source's sha256])]), the build has compile records: the flags.json compile
-        writes for `build`, with the toolchain's fixed UBSan flags, and a line of compiles.jsonl as record-compile
-        writes it for each compile (in /work/b, with no source_sha256, unless given), read back with
-        check_links.read_compiles."""
+        language, arguments[, directory, source's sha256[, no_sanitize[, bytes of the object without them]]])]), the
+        build has compile records: the flags.json compile writes for `build`, with the toolchain's fixed UBSan flags,
+        and a line of compiles.jsonl as record-compile writes it for each compile (in /work/b, with no source_sha256
+        and a source with no no_sanitize attribute, unless given), read back with check_links.read_compiles."""
         taken, inputs = [], {}
         for path in runtimes:
             taken.append((path, None, ".text", 4))
@@ -374,10 +374,14 @@ class Analyse(unittest.TestCase):
                 {"build": build, "sanitizer": {"c": sanitizer, "c++": sanitizer}, "ubsan": {"c": ubsan, "c++": ubsan}}))
             lines = []
             for body, source, language, arguments, *more in compiled:
-                directory, source_sha256 = more if more else ("/work/b", None)
+                directory, source_sha256, no_sanitize, stripped = (list(more) + ["/work/b", None, [], None][len(more):])
                 line = {"sha256": hashlib.sha256(body).hexdigest(), "output": "x.o", "directory": directory,
-                        "file": source, "language": language, "shim": "/tmp/shim/riscv64-linux-musl-clang-plain",
-                        "arguments": arguments}
+                        "file": source, "language": language, "no_sanitize": no_sanitize, "no_sanitize_object": None,
+                        "shim": "/tmp/shim/riscv64-linux-musl-clang-plain", "arguments": arguments}
+                if stripped is not None:
+                    line["no_sanitize_object"] = hashlib.sha256(stripped).hexdigest()
+                    (raw / ".records" / "nosan").mkdir(exist_ok=True)
+                    (raw / ".records" / "nosan" / line["no_sanitize_object"]).write_bytes(stripped)
                 if source_sha256 is not None:
                     line["source_sha256"] = source_sha256
                 lines.append(json.dumps(line) + "\n")
@@ -701,6 +705,64 @@ class Analyse(unittest.TestCase):
                       "libplanted.a(planted.c.o) (src/planted.c: without -fsanitize=undefined "
                       "-fno-sanitize-recover=all -fsanitize-trap=all)", result["detail"])
 
+    def test_a_planted_member_whose_source_turns_ubsan_off_fails(self):
+        """A load UBSan would check, compiled with the build's flags, no trap, and a source whose no_sanitize attribute
+        took the check out (compiled again without it, the object has a trap): the archive's other member has traps,
+        which would pass the archive by its count; the record fails the member."""
+        planted = elf_object(LW + RET, defined=["planted"], undefined=ASAN, comment=True)
+        without = elf_object(LW + UNIMP + RET, defined=["planted"], undefined=ASAN, comment=True)
+        checked = elf_object(LW + UNIMP + RET, defined=["checked"], undefined=ASAN, comment=True)
+        plain = {"/work/b/libplanted.a": {"checked.c.o": elf_object(LW + RET, defined=["checked"], comment=True),
+                                          "planted.c.o": planted}}
+        archives = {"/work/b/libplanted.a": {"checked.c.o": checked, "planted.c.o": planted}}
+        for build in ("ubsan", "asan-ubsan"):
+            for attribute in ('no_sanitize("undefined")', "no_sanitize_undefined",
+                              'no_sanitize("signed-integer-overflow", "address")'):
+                result = self.ubsan(build, plain, archives, [
+                    (checked, "src/checked.c", "c", compile_arguments("src/checked.c")),
+                    (planted, "src/planted.c", "c", compile_arguments("src/planted.c"), "/work/b", None,
+                     [attribute], without)])
+                self.assertEqual(result["result"], "fail", (build, attribute, result))
+                self.assertIn("1 objects have no UndefinedBehaviorSanitizer check because the no_sanitize attributes "
+                              "of their source took the checks out: libplanted.a(planted.c.o) (src/planted.c: no UBSan "
+                              "check, and its source's no_sanitize attributes took UBSan checks out of it (1 without "
+                              f"{attribute}))", result["detail"])
+
+    def test_a_member_with_nothing_to_check_still_passes_with_an_attribute(self):
+        """Case 1 with attributes: a source whose attributes took nothing out of the object (compiled again without
+        them, it still has no trap: an unused inline function of a header), or whose attributes name only other
+        sanitizers, passes by its record; a member whose attribute left some checks in it (it has a trap) passes too."""
+        sink = elf_object(RET, defined=["_ZN4absl7LogSinkD2Ev"], undefined=ASAN, comment=True)
+        archives = {"/work/b/libabsl_log_sink.a": {"log_sink.cc.o": sink}}
+        arguments = compile_arguments("absl/log/log_sink.cc")
+        for build in ("ubsan", "asan-ubsan"):
+            for more in ([['no_sanitize("pointer-overflow")'], sink], [["no_sanitize_address"]],
+                         [['no_sanitize("address")', "no_sanitize"]], [[]]):
+                result = self.ubsan(build, archives, archives,
+                                    [(sink, "absl/log/log_sink.cc", "c++", arguments, "/work/b", None, *more)])
+                self.assertEqual(result["result"], "pass", (build, more, result))
+                self.assertIn("1 of them by the compile that wrote them", result["detail"])
+            trapped = elf_object(LW + UNIMP + RET, defined=["f"], undefined=ASAN, comment=True)
+            result = self.ubsan(build, {"/work/b/libf.a": {"f.c.o": elf_object(LW + RET, defined=["f"], comment=True)}},
+                                {"/work/b/libf.a": {"f.c.o": trapped}},
+                                [(trapped, "f.c", "c", compile_arguments("f.c"), "/work/b", None,
+                                  ['no_sanitize("shift")'], None)])
+            self.assertEqual(result["result"], "pass", (build, result))
+
+    def test_a_member_with_no_trap_whose_record_cannot_say_is_judged_by_traps(self):
+        """A record that cannot say what the source's attributes took out (no_sanitize null: standard input, a response
+        file, a precompiled header, a source that could not be preprocessed; or an attribute and no object compiled
+        without it) does not decide a
+        member with no trap: its archive is judged by its traps, and has none."""
+        sink = elf_object(RET, defined=["_ZN4absl7LogSinkD2Ev"], undefined=ASAN, comment=True)
+        archives = {"/work/b/libabsl_log_sink.a": {"log_sink.cc.o": sink}}
+        for more in ([None], [['no_sanitize("undefined")'], None]):
+            result = self.ubsan("ubsan", archives, archives, [
+                (sink, "absl/log/log_sink.cc", "c++", compile_arguments("absl/log/log_sink.cc"), "/work/b", None,
+                 *more)])
+            self.assertEqual(result["result"], "fail", (more, result))
+            self.assertIn("libabsl_log_sink.a: 0 UBSan traps and UB checks, the plain build's 0", result["detail"])
+
     def test_a_planted_member_with_no_compile_record_fails_by_its_traps(self):
         planted = elf_object(LW + RET, defined=["planted"], comment=True)
         archives = {"/work/b/libplanted.a": {"planted.c.o": planted}}
@@ -891,7 +953,7 @@ class Analyse(unittest.TestCase):
         self.assertIn("with -fno-sanitize=vptr", result["detail"])
         # A C compile need not repeat the exclusion: with it off, the compile has more checks, not fewer.
         record.compiles.objects[hashlib.sha256(sink).hexdigest()][0] = check_links.Compile(
-            "x.c", "c", compile_arguments("x.c"))
+            "x.c", "c", compile_arguments("x.c"), no_sanitize=[])
         self.assertEqual(self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]["result"], "pass")
 
     def test_a_later_lower_strict_flex_arrays_level_takes_the_check_away(self):
@@ -927,6 +989,17 @@ class Analyse(unittest.TestCase):
         record = self.record({"/work/b/libx.a": {"x.c.o": sink}}, compiled=[
             (sink, "x.c", "c", compile_arguments("x.c", after=["-fstrict-flex-arrays=0"]))])
         self.assertEqual(self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]["result"], "pass")
+        # A build level that is not decimal digits cannot be compared: a compile that then gives a decimal level fails,
+        # and no traceback stops the check.
+        record = self.record({"/work/b/libx.a": {"x.c.o": sink}}, compiled=[
+            (sink, "x.c", "c", compile_arguments("x.c", flags=UBSAN_FLAGS + ["-fstrict-flex-arrays=²"],
+                                                 after=["-fstrict-flex-arrays=1"]))])
+        for language in ("c", "c++"):
+            record.compiles.ubsan[language].append("-fstrict-flex-arrays=²")
+            record.compiles.sanitizer[language].append("-fstrict-flex-arrays=²")
+        result = self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]
+        self.assertEqual(result["result"], "fail", result)
+        self.assertIn("libx.a(x.c.o) (x.c: with -fstrict-flex-arrays=²)", result["detail"])
 
     def test_flags_that_turn_on_no_check_decide_nothing(self):
         """A build whose recorded UBSan flags hold no -fsanitize= word (none at all, or only words every compile
@@ -1319,7 +1392,8 @@ exit "${SHIM_STATUS:-0}"
         self.assertEqual(self.lines(), [{"sha256": hashlib.sha256(made).hexdigest(), "output": "x.o",
                                          "directory": str(self.dir), "file": "src/x.c",
                                          "source_sha256": hashlib.sha256(b"int x;\n").hexdigest(), "language": "c",
-                                         "shim": str(self.shim), "arguments": arguments}])
+                                         "no_sanitize": [], "no_sanitize_object": None, "shim": str(self.shim),
+                                         "arguments": arguments}])
         records = self.dir / "out" / ".records"
         records.mkdir(parents=True)
         (records / "flags.json").write_text('{"build": "ubsan", "sanitizer": {"c": [], "c++": []}, '
@@ -1333,6 +1407,98 @@ exit "${SHIM_STATUS:-0}"
     def test_a_source_from_standard_input_has_no_source_sha256(self):
         self.assertEqual(self.run_shim("-x", "c", "-c", "-", "-o", "x.o").returncode, 0)
         self.assertEqual([(line["file"], line["source_sha256"]) for line in self.lines()], [("-", None)])
+
+    def test_a_compile_records_the_no_sanitize_attributes_of_its_preprocessed_source(self):
+        """record-compile preprocesses the source again, with no output or dependency file of the step's, and records
+        each no_sanitize attribute of the result once; it compiles the result with every attribute taken out, without
+        the step's -include, and saves that object by its SHA-256. Each source of a step of two is read on its own."""
+        shim = self.dir / "riscv64-linux-musl-clang-pre"
+        shim.write_text(self.SHIM.replace(
+            'if [ "${SHIM_WRITE:-1}" = 1 ]; then',
+            'case " $* " in *" -E "*)\n'
+            '  case " $* " in *" -MD "*|*" -MF "*|*" -c "*|*" x.o "*|*" x.c "*" y.c "*) exit 9 ;; esac\n'
+            "  printf '%s\\n' 'int a __attribute__((no_sanitize(\"undefined\")));' "
+            "'int b __attribute__((no_sanitize_address)); int c __attribute__((no_sanitize(' "
+            "'\"undefined\"))); int no_sanitize_count;' "
+            "'int no_sanitize; int d [[clang::no_sanitize(\"shift\", \"address\")]];' > \"$out\"; exit 0 ;;\n"
+            '*" -x cpp-output "*)\n'
+            '  case " $* " in *" -include "*|*" x.c "*|*" y.c "*|*" -MD "*) exit 9 ;; esac\n'
+            '  for a in "$@"; do case "$a" in *.i) cat "$a" > "$out" ;; esac; done; exit 0 ;;\n'
+            "esac\n"
+            'if [ "${SHIM_WRITE:-1}" = 1 ]; then'))
+        shim.chmod(0o755)
+        self.assertEqual(self.run_shim("-include", "h.h", "-MD", "-MF", "x.d", "-c", "x.c", "-o", "x.o",
+                                       shim=shim).returncode, 0)
+        self.assertFalse((self.dir / "x.d").exists())
+        [line] = self.lines()
+        # The attribute of c runs onto the next line, as a source's own line break stays in the preprocessed text.
+        self.assertEqual(line["no_sanitize"], ["no_sanitize", 'no_sanitize( "undefined")',
+                                               'no_sanitize("shift", "address")', 'no_sanitize("undefined")',
+                                               "no_sanitize_address"])
+        self.assertEqual([check_links.turns_ubsan_off(a) for a in line["no_sanitize"]],
+                         [False, True, True, True, False])
+        stripped = (self.records / "nosan" / line["no_sanitize_object"]).read_bytes()
+        self.assertEqual(hashlib.sha256(stripped).hexdigest(), line["no_sanitize_object"])
+        self.assertEqual(stripped.decode(), "int a __attribute__(());\nint b __attribute__(()); "
+                                            "int c __attribute__(()); int no_sanitize_count;\n"
+                                            "int no_sanitize; int d [[]];\n")
+        self.assertEqual(sorted(p.name for p in self.records.iterdir() if p.name.startswith("pre.")), [])
+        (self.records / "compiles").rename(self.dir / "earlier")
+        self.assertEqual(self.run_shim("-c", "x.c", "y.c", shim=shim).returncode, 0)
+        # Each source is preprocessed and compiled again without the other (the stand-in exits 9 if it sees both).
+        self.assertEqual([(other["file"], other["no_sanitize"], other["no_sanitize_object"]) for other in self.lines()],
+                         [("x.c", line["no_sanitize"], line["no_sanitize_object"]),
+                          ("y.c", line["no_sanitize"], line["no_sanitize_object"])])
+        # A preprocessed text of one line (a step with -P, a source of one line): its attribute goes too.
+        one = self.dir / "riscv64-linux-musl-clang-one"
+        one.write_text(self.SHIM.replace(
+            'if [ "${SHIM_WRITE:-1}" = 1 ]; then',
+            'case " $* " in *" -E "*)\n'
+            "  printf '%s' 'int a __attribute__((no_sanitize(\"undefined\")));' > \"$out\"; exit 0 ;;\n"
+            '*" -x cpp-output "*)\n'
+            '  for a in "$@"; do case "$a" in *.i) cat "$a" > "$out" ;; esac; done; exit 0 ;;\n'
+            "esac\n"
+            'if [ "${SHIM_WRITE:-1}" = 1 ]; then'))
+        one.chmod(0o755)
+        (self.records / "compiles").rename(self.dir / "earlier2")
+        self.assertEqual(self.run_shim("-P", "-c", "x.c", "-o", "x.o", shim=one).returncode, 0)
+        [line] = self.lines()
+        self.assertEqual(line["no_sanitize"], ['no_sanitize("undefined")'])
+        self.assertEqual((self.records / "nosan" / line["no_sanitize_object"]).read_text(), "int a __attribute__(());")
+        # A step with arguments in a response file: the second runs could not filter them, and nothing is read.
+        (self.records / "compiles").rename(self.dir / "earlier3")
+        self.assertEqual(self.run_shim("@args", "-c", "x.c", "-o", "x.o", shim=one).returncode, 0)
+        self.assertEqual([(line["no_sanitize"], line["no_sanitize_object"]) for line in self.lines()], [(None, None)])
+        # A step that takes a precompiled header or clang modules: -E does not print their text, and nothing is read.
+        # That holds for the precompiled header that clang finds by itself beside a header given with -include.
+        (self.dir / "p.h.gch").mkdir()
+        (self.dir / "q.h.pch").write_text("pch")
+        for n, arguments in enumerate((["-include-pch", "h.pch"], ["-Xclang", "-include-pch", "-Xclang", "h.pch"],
+                                       ["-fmodules"], ["-fprebuilt-module-path=m"], ["-include", "p.h"],
+                                       ["-includeq.h"], ["--include=q.h"])):
+            (self.records / "compiles").rename(self.dir / f"earlier-pch-{n}")
+            self.assertEqual(self.run_shim(*arguments, "-c", "x.c", "-o", "x.o", shim=one).returncode, 0)
+            self.assertEqual([(line["no_sanitize"], line["no_sanitize_object"]) for line in self.lines()],
+                             [(None, None)], arguments)
+        # A header with no precompiled one beside it is read as before.
+        (self.records / "compiles").rename(self.dir / "earlier-h")
+        self.assertEqual(self.run_shim("-include", "h.h", "-c", "x.c", "-o", "x.o", shim=one).returncode, 0)
+        self.assertEqual([line["no_sanitize"] for line in self.lines()], [['no_sanitize("undefined")']])
+        # A source preprocessed already (.i) is read as it is, as clang's -E skips it; a -E that writes nothing says
+        # nothing.
+        silent = self.dir / "riscv64-linux-musl-clang-silent"
+        silent.write_text(self.SHIM.replace(
+            'if [ "${SHIM_WRITE:-1}" = 1 ]; then',
+            'case " $* " in *" -E "*) exit 0 ;;\n'
+            '*" -x cpp-output "*) printf \'stripped\\n\' > "$out"; exit 0 ;;\nesac\n'
+            'if [ "${SHIM_WRITE:-1}" = 1 ]; then'))
+        silent.chmod(0o755)
+        (self.dir / "z.i").write_text('int z __attribute__((no_sanitize("undefined")));\n')
+        (self.records / "compiles").rename(self.dir / "earlier-i")
+        self.assertEqual(self.run_shim("-c", "z.i", "-o", "z.o", shim=silent).returncode, 0)
+        self.assertEqual(self.run_shim("-c", "x.c", "-o", "x.o", shim=silent).returncode, 0)
+        self.assertEqual([(line["file"], line["no_sanitize"]) for line in self.lines()],
+                         [("x.c", None), ("z.i", ['no_sanitize("undefined")'])])
 
     def test_only_a_compile_that_succeeds_is_recorded(self):
         self.assertEqual(self.run_shim("-E", "-c", "x.c", "-o", "x.i").returncode, 0)
@@ -1448,8 +1614,9 @@ exit "${SHIM_STATUS:-0}"
 
     def test_compile_writes_records_that_check_links_reads(self):
         """compile's own record code: the build's flags.json and compiles.jsonl, the records of every compile in byte
-        order, which it copies to $OUT/.records, read back by check_links.read_compiles. A word with a quote or a
-        backslash survives, and C gets the C exclusion that C++ does not."""
+        order, and the objects compiled without a source's no_sanitize attributes, which it copies to $OUT/.records,
+        read back by check_links.read_compiles. A word with a quote or a backslash survives, and C gets the C exclusion
+        that C++ does not."""
         script = ('set -euo pipefail\n'
                   'eval "$(sed -n \'/^c_exclude=""/,/^\\[ -z "\\$c_exclude" \\]/p\' "$1")"\n'
                   'eval "$(sed -n \'/^  json_words() {/,/> "\\$OV_RECORDS\\/flags.json"/p\' "$1")"\n'
@@ -1458,9 +1625,19 @@ exit "${SHIM_STATUS:-0}"
         ubsan = "-fsanitize=undefined -fsanitize-trap=all"
         (self.dir / "src").mkdir()
         names = ["x", "a", "q", "c", "m"]
+        # m's source has an attribute (a stand-in whose -E output holds one), so record-compile saves an object of it.
+        attributed = self.dir / "riscv64-linux-musl-clang-attr"
+        attributed.write_text(self.SHIM.replace(
+            'if [ "${SHIM_WRITE:-1}" = 1 ]; then',
+            'case " $* " in *" -E "*) printf \'%s\\n\' \'int m __attribute__((no_sanitize_undefined));\' > "$out"; '
+            'exit 0 ;;\n*" -x cpp-output "*) printf \'stripped m\\n\' > "$out"; exit 0 ;;\nesac\n'
+            'if [ "${SHIM_WRITE:-1}" = 1 ]; then'))
+        attributed.chmod(0o755)
         for name in names:
             (self.dir / "src" / f"{name}.c").write_text(f"int {name};\n")
-            self.assertEqual(self.run_shim("-c", f"src/{name}.c", "-o", f"{name}.o").returncode, 0)
+            self.assertEqual(self.run_shim("-c", f"src/{name}.c", "-o", f"{name}.o",
+                                           shim=attributed if name == "m" else None).returncode, 0)
+        stripped = hashlib.sha256(b"stripped m\n").hexdigest()
         out = self.dir / "out"
         for flav, build, wanted_ubsan in (("asanubsan", "asan-ubsan", ubsan.split()), ("asan", "asan", [])):
             subprocess.run(["bash", "-c", script, "bash", str(BUILDER / "compile")], check=True, cwd=self.dir,
@@ -1481,6 +1658,9 @@ exit "${SHIM_STATUS:-0}"
             for digest, name in digests.items():
                 compile, = compiles.objects[digest]
                 self.assertEqual((compile.file, compile.language), (f"src/{name}.c", "c"))
+                self.assertEqual(compile.no_sanitize, ["no_sanitize_undefined"] if name == "m" else [])
+            self.assertEqual([p.name for p in (out / ".records" / "nosan").iterdir()], [stripped])
+            self.assertEqual((out / ".records" / "nosan" / stripped).read_bytes(), b"stripped m\n")
 
     def test_release_target_puts_a_front_before_each_shim_it_writes(self):
         """release-target.sh's record code: with OV_RECORDS, a front before each of the four shims it wrote, which
@@ -1630,6 +1810,23 @@ class Runs(unittest.TestCase):
         self.write("q0.status", 0)
         self.assertEqual(check_binaries.quiet_loud(True, "", self.inputs, self.results, set())["result"], "fail")
 
+    def test_check_2_without_a_verdict_is_named_as_the_reason(self):
+        """When check 2 could not read the runs at all (no model, another qemu), it lists no whole run, and check 3
+        says that check 2 could not tell, with check 2's reason, not that each run fell short of its input."""
+        for n in range(2):
+            self.write(f"l{n}.status", 0)
+            self.write(f"q{n}.status", 0)
+            self.write(f"q{n}.out", 0)
+            self.write(f"q{n}.err", 0)
+        result = check_binaries.quiet_loud(True, "", self.inputs, self.results, set(), "qemu 8.2.2: not 10.0.11")
+        self.assertEqual(result["result"], "error")
+        self.assertIn("check 2 could not tell whether the binary's run reached its input", result["detail"])
+        self.assertIn("(check 2: qemu 8.2.2: not 10.0.11)", result["detail"])
+        self.assertNotIn("not a whole run", result["detail"])
+        # A difference still fails.
+        self.write("q1.status", 3)
+        self.assertEqual(check_binaries.quiet_loud(True, "", self.inputs, self.results, set(), "x")["result"], "fail")
+
     def test_a_linked_result_is_not_read(self):
         secret = self.results / "secret"
         secret.write_text("0\n")
@@ -1691,6 +1888,104 @@ class Runs(unittest.TestCase):
             self.assertEqual(run(stale="the rules are old")["result"], "stale")
         finally:
             check_binaries.syscall_shapes.check_trace = saved
+
+    def test_check_3_reads_each_result_of_check_2(self):
+        """whole_runs() on each result system_calls() can give: the whole runs, and no reason, when check 2 read the
+        runs; none, and check 2's reason, when it could not read them or raised. Check 3 then says which."""
+        opened = '7 openat(AT_FDCWD,"input.bin",O_RDONLY|O_LARGEFILE) = 3\n'
+        for n, text in {0: opened + "7 read(3,0x1,65536) = 6\n", 1: opened + "7 read(3,0x1,65536) = 7\n"}.items():
+            for name, value in ((f"l{n}.status", 0), (f"q{n}.status", 0), (f"q{n}.out", 0), (f"q{n}.err", 0)):
+                self.write(name, value)
+            (self.results / f"l{n}.trace").write_text(text)
+        verdict = {"calls": 12, "names": ["openat", "read", "exit_group"], "unmodeled": [], "exited": True,
+                   "verdict": "pass", "host_log": "present"}
+
+        def check_trace(model, text, **options):
+            if verdict.get("raises"):
+                raise TypeError("the trace is cut short")
+            return dict(verdict)
+
+        def check_2(model=object(), stale="", qemu=self.QEMU, results=self.results):
+            return check_binaries.guarded(check_binaries.system_calls, model, stale, qemu, "bin", self.inputs, results)
+
+        def check_3(calls):
+            return check_binaries.quiet_loud(True, "", self.inputs, self.results, *check_binaries.whole_runs(calls))
+
+        both = {check_binaries.EMPTY, "seed1"}
+        saved = check_binaries.syscall_shapes.check_trace
+        check_binaries.syscall_shapes.check_trace = check_trace
+        try:
+            # Check 2 read the runs: its list of whole runs, and no reason, whatever its result.
+            for result, change in (("pass", {}), ("stale", {"stale": "the rules are old"})):
+                calls = check_2(**change)
+                self.assertEqual((calls["result"], check_binaries.whole_runs(calls)), (result, (both, None)))
+            self.assertEqual(check_3(check_2())["result"], "pass")
+            verdict["unmodeled"] = [{"call": "uname", "why": "not in the model's table"}]
+            self.assertEqual((check_2()["result"], check_binaries.whole_runs(check_2())), ("fail", (both, None)))
+            verdict.update(unmodeled=[], exited=False)
+            calls = check_2()  # runs that decide nothing: a list, empty, and still no reason
+            self.assertEqual((calls["result"], check_binaries.whole_runs(calls)), ("error", (set(), None)))
+            self.assertIn("not a whole run of the input", check_3(calls)["detail"])
+            verdict.update(exited=True, raises=True)
+            # Check 2 could not read the runs, or raised: no list, and its detail as the reason.
+            unread = {"model": check_2(model="the model could not be read: no release.yaml"),
+                      "qemu": check_2(qemu="qemu-riscv64 version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)"),
+                      "trace": check_2(), "raised": check_2(results=None)}
+            for why, calls in unread.items():
+                with self.subTest(why=why):
+                    self.assertNotIn("whole", calls)
+                    self.assertEqual(check_binaries.whole_runs(calls), (set(), calls["detail"]))
+                    self.assertIn(f"(check 2: {calls['detail'][:40]}", check_3(calls)["detail"])
+                    self.assertNotIn("not a whole run", check_3(calls)["detail"])
+            self.assertIn("the trace could not be read", unread["trace"]["detail"])
+            self.assertTrue(unread["raised"]["detail"].startswith("system_calls: TypeError"))
+            self.assertEqual(check_binaries.whole_runs({"result": "error"}), (set(), "it gave no reason"))
+        finally:
+            check_binaries.syscall_shapes.check_trace = saved
+
+    def test_binary_checks_gives_check_3_the_reason_of_check_2(self):
+        """binary_checks() itself, with its docker and model steps replaced: with no model, check 2 reads no run, and
+        check 3 names check 2's reason, not that each run fell short of its input."""
+        from unittest import mock
+        import types
+        work = self.results / "work"
+        (work / "out" / "t").mkdir(parents=True)
+        (work / "out" / "t" / "t.plain").write_bytes(b"\x7fELF")
+
+        def release_model():
+            raise Failed("no release.yaml")
+
+        def run_job(job_dir, image, qemu, labels, seconds):  # one whole run of each binary, quiet and loud alike
+            results = job_dir / "results"
+            results.mkdir()
+            for kind in "lq":
+                (results / f"{kind}0.calls").write_text("exec\n")
+                (results / f"{kind}0.status").write_text("0\n")
+            for name in ("q0.out", "q0.err"):
+                (results / name).write_text("0\n")
+            return results
+
+        link = {"plain": {"uninstrumented": None, "instrumented": {"result": "plain"}}}
+        with mock.patch.object(model_release, "release_model", release_model), \
+                mock.patch.object(check_links, "read_compiles", lambda raw: {}), \
+                mock.patch.object(check_links, "analyse", lambda *arguments: link), \
+                mock.patch.multiple(check_binaries, record_of=lambda *arguments: ("no record", b"quiet"),
+                                    image_hashes=lambda *arguments, **options: {},
+                                    dwarf_reader=lambda *arguments: None, assembly_reader=lambda *arguments: None,
+                                    seed_inputs=lambda directory, target: [(check_binaries.EMPTY,
+                                                                            check_binaries.HEADER)],
+                                    qemu_version=lambda qemu: self.QEMU, run_job=run_job), \
+                mock.patch.object(check_binaries.check_checks, "qemu", lambda: "/bin/true"):
+            block, _ = check_binaries.binary_checks(types.SimpleNamespace(builds=["plain"], directory=work), "tag",
+                                                    "toolchain", ["t"], {"t": {"plain": {"file": "t.plain"}}}, {},
+                                                    work, labels=[])
+        checks = block["targets"]["t"]["plain"]
+        self.assertEqual(checks["system_calls"], {"result": "error",
+                                                  "detail": "the model could not be read: no release.yaml"})
+        agreement = checks["quiet_loud"]
+        self.assertEqual(agreement["result"], "error")
+        self.assertIn("check 2 could not tell whether the binary's run reached its input", agreement["detail"])
+        self.assertIn("(check 2: the model could not be read: no release.yaml)", agreement["detail"])
 
     def test_a_trace_that_cannot_be_read_fails_one_binary_only(self):
         self.write("l0.status", 0)

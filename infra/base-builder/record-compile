@@ -29,8 +29,19 @@
 #     {"sha256": "<of the object's bytes>", "output": "<the object: -o's file, else clang's name for it>",
 #      "directory": "<the working directory>", "file": "<its source>",
 #      "source_sha256": "<of the source's bytes after the step>" or null (standard input),
-#      "language": "<the source's language>", "shim": "<the shim the build ran>",
+#      "language": "<the source's language>",
+#      "no_sanitize": ["<each no_sanitize attribute of the source, as the compiler sees it>", ...] or null,
+#      "no_sanitize_object": "<SHA-256 of the object compiled with those attributes taken out>" or null,
+#      "shim": "<the shim the build ran>",
 #      "arguments": ["<each argument the build gave the shim>", ...]}
+#
+# no_sanitize is read from the preprocessed source (no_sanitize below), so an attribute that a macro or a header
+# gives is there too; it is null for standard input, for a language other than C and C++ (and their preprocessed
+# forms), for a step with arguments in a response file (@file) or that takes a precompiled header or clang modules,
+# and when the source cannot be preprocessed again. When the source has one, the object compiled from the
+# preprocessed source with every such attribute taken out is saved as <records>/nosan/<SHA-256>, which compile
+# copies to $OUT/.records/nosan/. tools/check_links.py reads both: an object with no UBSan trap is not shown to be
+# instrumented by a compile whose attributes took traps out of it.
 #
 # The language is clang's name for what the step took the source as: -x's, else that of its extension (.c c, .cc and
 # .cpp c++, .m objective-c, .s assembler, .S assembler-with-cpp, ...), and a C++ shim (clang++) takes C as C++.
@@ -125,6 +136,103 @@ json() {
   REPLY="\"$s\""
 }
 
+# isolated <command>: the command, in a subshell with every fd above 2 closed and no standard input, so that a second
+# run of the shim writes to none of the build's own open files.
+isolated() {
+  ( for fd in /proc/"$BASHPID"/fd/*; do
+      fd=${fd##*/}
+      [ "$fd" -le 2 ] 2>/dev/null || eval "exec $fd>&-" 2>/dev/null
+    done
+    exec "$@" < /dev/null )
+}
+
+# no_sanitize <source> <language> <arguments>: the no_sanitize attributes of one C or C++ source of a step, as the
+# compiler sees them. The shim preprocesses that source again (-E) with the step's arguments, but its other sources
+# (the step's `files`) and those that name an output or write a file of their own (-c, -o, the dependency files,
+# diagnostics files, -save-temps, -ftime-trace), to a file of its own. REPLY is then the JSON list of each
+# `no_sanitize...` word that the result holds, with its parenthesised arguments, once each, or null when it cannot be
+# read. When there is one, the shim also compiles the preprocessed source with every such attribute taken out, with
+# the same arguments (but the sources, -include and -imacros, which the preprocessed source already holds), and NOSAN
+# is the SHA-256 of that object, saved as <records>/nosan/<SHA-256>: tools/check_links.py counts its UBSan traps,
+# which are those that the attributes took out of this object. NOSAN is null when there is no attribute or that
+# compile fails. None of this writes anything that the build reads.
+no_sanitize() {
+  local source=$1 language=$2 a f skip="" work list="" separator="" word name sum other
+  local -a arguments=()
+  shift 2
+  NOSAN=null
+  for a in "$@"; do
+    if [ -n "$skip" ]; then skip=""; continue; fi
+    case "$a" in
+      -o|--output|-MF|-MT|-MQ|-MJ|-dependency-file|-dependency-dot|-serialize-diagnostics|--serialize-diagnostics)
+        skip=1; continue ;;
+      -c|-o?*|--output=*|-MD|-MMD|-MP|-MF?*|-MT?*|-MQ?*|-MJ?*|-save-temps|-save-temps=*|-ftime-trace|-ftime-trace=*|\
+      --serialize-diagnostics=*) continue ;;
+      -Wp,*) case "$a" in *,-M*) continue ;; esac ;;
+    esac
+    other=""
+    for f in "${files[@]}"; do [ "$f" = "$source" ] || [ "$a" != "$f" ] || other=1; done
+    [ -n "$other" ] || arguments+=("$a")
+  done
+  # A directory of its own for the second runs and whatever side files they write, removed at the end.
+  work=$(mktemp -d "$records/pre.XXXXXXXXXX") || return 1
+  # A source that is preprocessed already (.i, .ii) is read as it is: clang's -E skips such input and writes nothing.
+  # No text to read (a failed run, or one that wrote nothing) says nothing.
+  case "${languages[$i]}" in
+    cpp-output|c++-cpp-output) cp "$source" "$work/pre" 2>/dev/null ;;
+    *) isolated "$shim" "${arguments[@]}" -E -o "$work/pre" ;;
+  esac
+  if [ $? -ne 0 ] || [ ! -s "$work/pre" ]; then
+    rm -rf "$work"
+    REPLY=null
+    return 0
+  fi
+  # The attributes, read with the lines joined: the source's own line breaks stay in the preprocessed text, and an
+  # attribute's arguments can run onto the next line. A word that only starts like one (no_sanitize_count) is an
+  # identifier of the code, and is left out.
+  while IFS= read -r word; do
+    name=${word%%[!A-Za-z0-9_]*}
+    name=${name#__}
+    name=${name%__}
+    case "$name" in no_sanitize|no_sanitize_address|no_sanitize_memory|no_sanitize_thread|no_sanitize_hwaddress|\
+      no_sanitize_undefined) ;; *) continue ;; esac
+    json "$word"
+    list="$list$separator$REPLY"
+    separator=", "
+  done < <(tr '\n' ' ' < "$work/pre" \
+             | grep -aoE '(^|[^A-Za-z0-9_])(__)?no_sanitize[A-Za-z0-9_]*[[:space:]]*(\([^)]*\))?' \
+             | sed -E 's/^[^_n]//; s/[[:space:]]+$//' | sort -u)
+  REPLY="[$list]"
+  if [ -n "$list" ]; then
+    # The attributes out, over the whole text (the lines are gathered first, a text of one line too) so that one that
+    # runs onto the next line goes too: `__attribute__((no_sanitize("x")))` becomes `__attribute__(())`,
+    # `[[clang::no_sanitize("x")]]` becomes `[[]]`, and `no_sanitize_undefined` and the like go. A bare `no_sanitize`
+    # is an identifier of the code, and stays.
+    sed -E -e ':a' -e '$!{N;ba' -e '}' \
+      -e 's/(\b(clang|gnu)::)?\b(__)?no_sanitize(_(address|memory|thread|hwaddress|undefined))?(__)?[[:space:]]*\([^)]*\)//g' \
+      -e 's/(\b(clang|gnu)::)?\b(__)?no_sanitize_(address|memory|thread|hwaddress|undefined)(__)?\b//g' "$work/pre" \
+      > "$work/strip.i" \
+      && arguments=() && skip="" && for a in "$@"; do
+        if [ -n "$skip" ]; then skip=""; continue; fi
+        case "$a" in
+          -o|--output|-MF|-MT|-MQ|-MJ|-dependency-file|-dependency-dot|-serialize-diagnostics|\
+          --serialize-diagnostics|-include|-imacros|-include-pch) skip=1; continue ;;
+          -c|-o?*|--output=*|-MD|-MMD|-MP|-MF?*|-MT?*|-MQ?*|-MJ?*|-save-temps|-save-temps=*|-ftime-trace|\
+          -ftime-trace=*|--serialize-diagnostics=*|-include-pch=*|-include?*|-imacros?*) continue ;;
+          -Wp,*) case "$a" in *,-M*) continue ;; esac ;;
+        esac
+        other=""
+        for f in "${files[@]}"; do [ "$a" != "$f" ] || other=1; done
+        [ -n "$other" ] || arguments+=("$a")
+      done \
+      && isolated "$shim" "${arguments[@]}" -w -c -x "$language" "$work/strip.i" -o "$work/strip.o" \
+      && sum=$(sha256sum < "$work/strip.o") && sum=${sum%% *} \
+      && mkdir -p "$records/nosan" && mv -f "$work/strip.o" "$records/nosan/$sum" \
+      && NOSAN="\"$sum\""
+  fi
+  rm -rf "$work"
+}
+
 # record <arguments>: the records of a compile that succeeded.
 record() {
   local LC_ALL=C cxx="" out="" lang="" skip="" a l i object sum line tmp
@@ -178,7 +286,7 @@ record() {
   done
   [ "${#files[@]}" -gt 0 ] || return 0
   mkdir -p "$records/compiles" || return 1
-  local arguments="" separator="" called directory source
+  local arguments="" separator="" called directory source unseen include
   for a in "$@"; do
     json "$a"
     arguments="$arguments$separator$REPLY"
@@ -209,6 +317,35 @@ record() {
     fi
     line="$line, \"source_sha256\": $source"
     json "${languages[$i]}"; line="$line, \"language\": $REPLY"
+    # The source's no_sanitize attributes, and the object without them: for a C or C++ source (or one preprocessed
+    # already, .i or .ii) from a file, else null. Null too for a step that the second runs cannot see the whole source
+    # of: one with arguments in a response file (@file), whose compile record decides nothing (tools/check_links.py),
+    # and one that takes a precompiled header or clang modules, whose text -E does not print. That covers the
+    # precompiled header that clang's driver finds by itself beside a header given with -include (<header>.pch, or
+    # <header>.gch as a file or a directory).
+    REPLY=null NOSAN=null
+    unseen="" include=""
+    for a in "$@"; do
+      if [ -n "$include" ]; then
+        include=""
+        [ ! -e "$a.pch" ] && [ ! -e "$a.gch" ] || unseen=1
+        continue
+      fi
+      case "$a" in
+        @*|-include-pch|-include-pch=*|-fmodules|-fcxx-modules|-fmodule-file=*|-fmodule-map-file=*|\
+        -fimplicit-module-maps|-fprebuilt-module-path=*) unseen=1 ;;
+        -include|--include) include=1 ;;
+        --include=*) [ ! -e "${a#--include=}.pch" ] && [ ! -e "${a#--include=}.gch" ] || unseen=1 ;;
+        -include?*) [ ! -e "${a#-include}.pch" ] && [ ! -e "${a#-include}.gch" ] || unseen=1 ;;
+      esac
+    done
+    if [ "${files[$i]}" != - ] && [ -z "$unseen" ]; then
+      case "${languages[$i]}" in
+        c|cpp-output) no_sanitize "${files[$i]}" cpp-output "$@" || REPLY=null NOSAN=null ;;
+        c++|c++-cpp-output) no_sanitize "${files[$i]}" c++-cpp-output "$@" || REPLY=null NOSAN=null ;;
+      esac
+    fi
+    line="$line, \"no_sanitize\": $REPLY, \"no_sanitize_object\": $NOSAN"
     line="$line, \"shim\": $called, \"arguments\": [$arguments]}"
     tmp=$(mktemp "$records/compiles/XXXXXXXXXX") || return 1
     printf '%s\n' "$line" > "$tmp" || return 1

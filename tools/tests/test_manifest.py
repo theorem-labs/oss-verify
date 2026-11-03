@@ -112,6 +112,19 @@ class Discovery(Scratch):
         self.assertTrue(manifest.has_symbol_table(self.dir / "out/target"))
         self.assertFalse(manifest.has_symbol_table(self.dir / "out/stripped"))
 
+    def test_a_symbol_table_past_any_file_is_no_symbol_table(self):
+        """The build writes $OUT, so the pull request chooses every byte of each file there. A symbol table, or its
+        strings, at an offset no file can reach is no symbol table: discover() goes on, rather than end tools/check
+        with a traceback that build.yaml reports as "does not build"."""
+        data = elf([(ENTRY, GLOBAL_FUNC, 1)])
+        headers = len(data) - 4 * 64  # the section headers: none, .symtab, .strtab, .shstrtab
+        for index, offset in ((2, 2 ** 63), (1, 2 ** 64 - 1)):
+            far = bytearray(data)
+            far[headers + index * 64 + 24:headers + index * 64 + 32] = offset.to_bytes(8, "little")  # sh_offset
+            self.assertFalse(manifest.is_fuzz_target(self.write(f"out/far{index}", bytes(far), 0o755)), index)
+        self.write("out/target", data, 0o755)
+        self.assertEqual(list(manifest.discover(self.dir / "out")), ["target"])
+
     def test_the_go_fuzz_targets_compile_lists(self):
         self.write("out/a", elf(symtab=False))
         self.write("out/b", elf(symtab=False))
@@ -268,6 +281,28 @@ class Locks(Scratch):
             (self.dir / "lock.yaml").write_text(text)
             with self.assertRaises(manifest.LockError, msg=text):
                 manifest.load_lock(self.dir / "lock.yaml")
+
+    def test_a_lock_of_the_wrong_shape_is_a_lock_error(self):
+        """Every shape that is not a lock is refused with LockError, which tools/check reports as a message, never an
+        AttributeError or KeyError that ends it with a traceback."""
+        harness = "schema: oss-fuzz-theorems/harness/1\n"
+        for text in (
+            "targets: {f: [1, 2]}\n",                                   # a target that is not a mapping
+            "targets: {f: {builds: [plain]}}\n",                        # builds that are not a mapping
+            f"schema: {manifest.MANIFEST_SCHEMA}\ntargets: [f]\n",      # targets that are not a mapping
+            harness + "builds: {plain: {sha256: aa}}\n",                # no harness
+            harness + "harness: {a: b}\nbuilds: {plain: {sha256: aa}}\n",
+            harness + "harness: f\nbuilds: [1]\n",
+            "harness: f\nbuilds: {plain: {sha256: aa}}\nlibrary: x\n",  # a library that is not a mapping
+        ):
+            (self.dir / "lock.yaml").write_text(text)
+            with self.assertRaises(manifest.LockError, msg=text):
+                manifest.load_lock(self.dir / "lock.yaml")
+        # Still a lock: a harness named by a number, and a manifest whose target has no builds yet.
+        (self.dir / "lock.yaml").write_text(harness + "harness: 7\nbuilds: {plain: {sha256: aa}}\n")
+        self.assertEqual(list(manifest.load_lock(self.dir / "lock.yaml")[1]), [("7", "plain")])
+        (self.dir / "lock.yaml").write_text("targets: {f: {builds: }}\n")
+        self.assertEqual(manifest.load_lock(self.dir / "lock.yaml")[1], {})
 
 
 if __name__ == "__main__":

@@ -184,6 +184,223 @@ class Mutants(unittest.TestCase):
             self.assertTrue(problems, bad)
 
 
+class CompilerRt(unittest.TestCase):
+    """check_checks.compiler_rt: the coverage build's compiler-rt source, downloaded once into the cache."""
+
+    VERSION = "0.0.0"
+
+    def archive(self):
+        import io
+        import tarfile
+        data = io.BytesIO()
+        with tarfile.open(fileobj=data, mode="w:xz") as archive:
+            for name, text in ((f"compiler-rt-{self.VERSION}.src/lib/profile/InstrProfiling.c", b"int x;\n"),
+                               (f"compiler-rt-{self.VERSION}.src/include/profile/a.h", b"\n")):
+                info = tarfile.TarInfo(name)
+                info.size = len(text)
+                archive.addfile(info, io.BytesIO(text))
+        return data.getvalue()
+
+    def fetch(self, cache, data):
+        """compiler_rt() with the cache at `cache` and the download replaced: (its directory, the downloads)."""
+        import hashlib
+        import io
+        from unittest import mock
+        downloads = []
+
+        def urlopen(url, timeout=None):
+            downloads.append(url)
+            return io.BytesIO(data)
+
+        table = {self.VERSION: ("https://example.org/rt.tar.xz", hashlib.sha256(data).hexdigest())}
+        with mock.patch.object(check_checks.check_build, "CACHE", cache), \
+                mock.patch.object(check_checks, "COMPILER_RT", table), \
+                mock.patch.object(check_checks.urllib.request, "urlopen", urlopen), \
+                mock.patch.object(check_checks, "step", lambda text: None):
+            return check_checks.compiler_rt(self.VERSION), downloads
+
+    def test_a_half_extracted_tree_is_extracted_again(self):
+        data = self.archive()
+        with tempfile.TemporaryDirectory() as scratch:
+            cache = pathlib.Path(scratch)
+            # What a run stopped part way through extracting left: lib/profile, without the rest or the mark.
+            (cache / f"compiler-rt-{self.VERSION}" / f"compiler-rt-{self.VERSION}.src" / "lib" / "profile").mkdir(
+                parents=True)
+            source, downloads = self.fetch(cache, data)
+            self.assertEqual(len(downloads), 1)
+            self.assertTrue((source / "include" / "profile" / "a.h").is_file())
+            self.assertTrue((source / "lib" / "profile" / "InstrProfiling.c").is_file())
+            # Once whole, the next run takes it from the cache.
+            again, downloads = self.fetch(cache, data)
+            self.assertEqual((again, downloads), (source, []))
+
+
+class ImageFiles(unittest.TestCase):
+    """check_checks.image_files: files of the project image, whose paths and tar the pull request chooses, read with
+    bounded memory."""
+
+    class Tar:
+        """A stand-in for `docker run ... tar -cf -`: its standard output is `data`, and it exits `code`; if `hangs`,
+        it does not end until it is killed."""
+
+        def __init__(self, data, code=0, hangs=False):
+            import io
+            self.stdout = io.BytesIO(data)
+            self.code, self.hangs = code, hangs
+            self.returncode = None
+            self.waited = self.killed = False
+
+        def wait(self, timeout=None):
+            import subprocess
+            self.waited = True
+            if self.hangs and not self.killed:
+                raise subprocess.TimeoutExpired("docker", timeout)
+            self.returncode = -9 if self.killed else self.code
+            return self.returncode
+
+        def kill(self):
+            self.killed = True
+
+    @staticmethod
+    def archive(members):
+        import io
+        import tarfile
+        data = io.BytesIO()
+        with tarfile.open(fileobj=data, mode="w") as archive:
+            for name, body in members:
+                info = tarfile.TarInfo(name)
+                if body is None:
+                    info.type, info.linkname = tarfile.SYMTYPE, "/etc/passwd"
+                    archive.addfile(info)
+                else:
+                    info.size = len(body)
+                    archive.addfile(info, io.BytesIO(body))
+        return data.getvalue()
+
+    def read(self, data, paths=("/src/a",), code=0, hangs=False, **limits):
+        """image_files on a tar that writes `data`. Keep the docker run it started in self.started, the containers it
+        removed in self.removed, and the stand-in in self.tar."""
+        from unittest import mock
+        limits = {"MAX_IMAGE_FILE_BYTES": check_checks.MAX_IMAGE_FILE_BYTES,
+                  "MAX_IMAGE_BYTES": check_checks.MAX_IMAGE_BYTES, **limits}
+        self.tar, self.started, self.removed = self.Tar(data, code, hangs), [], []
+        with mock.patch.object(check_checks.subprocess, "Popen", lambda argv, **kwargs: self.started.append(argv)
+                               or self.tar), \
+                mock.patch.object(check_checks.check_build, "remove_containers",
+                                  lambda *names: self.removed.extend(names)), \
+                mock.patch.multiple(check_checks, **limits):
+            files = check_checks.image_files("tag", list(paths), labels=[])
+        self.assertTrue(self.tar.stdout.closed and self.tar.waited)
+        return files
+
+    def name(self):
+        """The name that image_files gave the container of its docker run."""
+        argv = self.started[-1]
+        return argv[argv.index("--name") + 1]
+
+    def test_keeps_regular_files_within_the_limits(self):
+        data = self.archive([("src/a", b"aaaa"), ("src/big", b"b" * 9), ("src/link", None), ("src/c", b"cccc"),
+                             ("src/d", b"dddd")])
+        files = self.read(data, MAX_IMAGE_FILE_BYTES=8, MAX_IMAGE_BYTES=8)
+        # big is over the limit of one file, link is not a regular file, and d would pass the limit of all of them.
+        self.assertEqual(files, {"/src/a": b"aaaa", "/src/c": b"cccc"})
+
+    def test_a_damaged_archive_keeps_what_was_read(self):
+        data = self.archive([("src/a", b"aaaa")])
+        self.assertEqual(self.read(data[:512 + 512] + b"\xff" * 2048), {"/src/a": b"aaaa"})
+        self.assertEqual(self.read(b"not a tar file" * 100), {})
+
+    def test_a_container_that_may_run_on_is_removed(self):
+        """docker run ends on its broken pipe when image_files stops reading a tar that writes on (its image's tar is
+        the pull request's), and its container runs on without it: image_files removes it, by the name it gave it."""
+        self.assertEqual(self.read(b"garbage " * 1000, code=1), {})
+        self.assertTrue(self.name().startswith("oss-verify-check-"))
+        self.assertEqual(self.removed, [self.name()])
+
+    def test_a_client_that_does_not_end_is_killed_and_its_container_removed(self):
+        """A tar that writes its whole archive and then neither ends nor writes: docker run waits on it, so it is
+        killed, and the container that it leaves is removed."""
+        self.assertEqual(self.read(self.archive([("src/a", b"aaaa")]), hangs=True), {"/src/a": b"aaaa"})
+        self.assertTrue(self.tar.killed)
+        self.assertEqual(self.removed, [self.name()])
+
+    def test_a_tar_that_ended_well_leaves_nothing_to_remove(self):
+        self.assertEqual(self.read(self.archive([("src/a", b"aaaa")])), {"/src/a": b"aaaa"})
+        first = self.name()
+        self.assertEqual(self.removed, [])
+        self.read(self.archive([("src/a", b"aaaa")]))
+        self.assertNotEqual(self.name(), first)  # each container its own name, so no run removes another's
+
+    def test_headers_without_end_hold_no_memory(self):
+        """A tar that writes empty members without end (its image's tar is the pull request's): image_files keeps no
+        header it has read, so its memory does not grow with them (a TarFile keeps each one by default)."""
+        import io
+        import tarfile
+        import tracemalloc
+        count, header = 20_000, tarfile.TarInfo("x").tobuf()
+
+        class Headers(io.RawIOBase):
+            """`count` copies of one header, then the end of the archive, read in pieces as a pipe is."""
+            def __init__(self):
+                self.data = memoryview(header * count + bytes(1024))
+                self.at = 0
+
+            def readable(self):
+                return True
+
+            def readinto(self, buffer):
+                n = min(len(buffer), len(self.data) - self.at)
+                buffer[:n] = self.data[self.at:self.at + n]
+                self.at += n
+                return n
+
+        stream = io.BufferedReader(Headers(), 1 << 16)
+        tracemalloc.start()
+        try:
+            baseline = tracemalloc.get_traced_memory()[0]
+            self.assertEqual(self.read_stream(stream), {"/x": b""})
+            peak = tracemalloc.get_traced_memory()[1] - baseline
+        finally:
+            tracemalloc.stop()
+        # Kept, 20,000 headers take about 7 MiB; dropped, less than one.
+        self.assertLess(peak, 4 << 20)
+
+    def read_stream(self, stream):
+        from unittest import mock
+        tar = self.Tar(b"")
+        tar.stdout = stream
+        with mock.patch.object(check_checks.subprocess, "Popen", lambda *args, **kwargs: tar):
+            return check_checks.image_files("tag", ["/x"], labels=[])
+
+    def test_no_path_runs_nothing(self):
+        from unittest import mock
+        with mock.patch.object(check_checks.subprocess, "Popen", side_effect=AssertionError("ran")):
+            self.assertEqual(check_checks.image_files("tag", [], labels=[]), {})
+
+    def test_a_record_whose_path_has_a_nul_is_a_problem(self):
+        """A `mutant:` path with a NUL in it, from a fuzz target's comment: its breakage has a problem, and docker
+        runs for no such path, which subprocess would refuse with an error that ends the step."""
+        from unittest import mock
+        source = "void f(int x) {\n  // mutant: a\x00.c:2 `x` -> `y`\n  // input: s\n  if (x) abort();\n}\n"
+        checks = check_records.find_checks(source, "/src/p/f.c")
+        with mock.patch.object(check_checks.subprocess, "Popen", side_effect=AssertionError("docker ran")):
+            (breakage,) = check_checks.record_breakages(checks, "tag", "/src/p", labels=[])
+        self.assertIsNone(breakage.patch)
+        self.assertIn("is not a path inside the WORKDIR", breakage.problem)
+
+    def test_the_report_names_the_files_not_read(self):
+        """A fuzz target's file that image_files() left out (past its limits, or missing) is named in the report, so
+        that its checks are not taken to be none."""
+        paths = ["/src/p/fuzz.c", "/src/p/huge_table.c", "/src/p/gone.c"]
+        self.assertEqual(check_checks.unread_lines(paths, {path: b"" for path in paths}), [])
+        lines = check_checks.unread_lines(paths, {"/src/p/fuzz.c": b"abort();"})
+        self.assertTrue(lines[0].startswith("- **Files not read:** 2, so no check in them is counted."))
+        self.assertIn("larger than 16 MiB", lines[0])
+        self.assertIn("past 256 MiB", lines[0])
+        self.assertIn("tar's archive could not be read", lines[0])
+        self.assertEqual(lines[1:], ["  - `p/huge_table.c`", "  - `p/gone.c`"])
+
+
 class WorkflowArguments(unittest.TestCase):
     """What build.yaml, triage.yaml and enroll-dispatch.yml do with the credentials they hold, as far as their text
     shows it: each named credential reaches a command through a pipe or a shell builtin and never as a process's
@@ -1286,6 +1503,20 @@ else:
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual((self.opened(calls), again), ([], []))
 
+    def test_the_identity_of_a_long_finding_takes_little_time(self):
+        """identity() removes each URL before it looks for a file name. Its pattern once took time that grew with the
+        square of a run of word characters (a hex dump, a long name): 130,000 letters took 37 seconds, and the hold
+        job that runs it has 5 minutes. 300,000 letters, in its own Python, now take well under a second."""
+        script = (ROOT / ".github" / "scripts" / "review-held").read_text(encoding="utf-8")
+        code = re.search(r"\nidentity\(\) \{\n  python3 - \"\$1\" \"\$2\" <<'EOF'\n(.*?)\nEOF\n", script, re.S).group(1)
+        with tempfile.TemporaryDirectory() as directory:
+            finding = pathlib.Path(directory) / "finding"
+            finding.write_text("title: a long word in f\nwhy held: crash\n" + "a" * 300000 + " in src/f.c\n")
+            done = subprocess.run([sys.executable, "-", str(finding), "demo"], input=code, capture_output=True,
+                                  text=True, timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertRegex(done.stdout, r"\Areview/demo/none/none/[0-9a-f]{12}\n\Z")
+
     def test_a_line_longer_than_a_part_is_cut_between_characters(self):
         # One long line of two-, three- or four-byte characters, after a prefix of 0 to 3 bytes, so that byte 60,000
         # falls at every place inside a character. The stand-in stores bytes that are not UTF-8 as U+FFFD, as GitHub.
@@ -1921,12 +2152,12 @@ class ReviewJob(unittest.TestCase):
     COLLECTOR_URL = "http://100.116.58.240"
 
     def test_the_job_joins_the_tailnet_as_ossv_review(self):
-        join = self.steps["Join Theorem's tailnet, to export this review's usage"]
+        join = self.steps["Join Theorem's tailnet, to reach the model gateway and export this review's usage"]
         self.assertEqual(join["uses"],
                          "tailscale/github-action@99a8333667fff04fdd6cffb46dfd409f8329a7bf")
         self.assertEqual(join["id"], "tailnet")
-        # The join never decides whether a review runs.
-        self.assertIs(join["continue-on-error"], True)
+        # The review reaches the model gateway over the tailnet alone, so a join that fails fails the review.
+        self.assertNotIn("continue-on-error", join)
         # Exactly these settings: another one, `args:` for example, would change how the node joins while the join
         # still passed. `version:` is forbidden here too, so the action keeps its own default, 1.104.2, which is
         # above the 1.94 a Linux device needs to reach a Tailscale Service's address.
@@ -1946,8 +2177,8 @@ class ReviewJob(unittest.TestCase):
         self.assertEqual(join["with"]["log-mode"], "quiet")
         self.assertEqual(join["timeout-minutes"], 3)
         # The node is ephemeral: the logout deletes it at once, whatever the review did and whatever the join's
-        # outcome. Neither the join, the export nor the logout may stop the steps that keep the draft, the verdicts
-        # and a held finding.
+        # outcome. Neither the export nor the logout may stop the steps that keep the draft, the verdicts and a held
+        # finding.
         self.assertIs(self.steps["Export the review's usage to the cost collector"]["continue-on-error"], True)
         leave = self.steps["Leave the tailnet"]
         self.assertEqual(leave["if"], "always()")
@@ -2004,8 +2235,45 @@ class ReviewJob(unittest.TestCase):
         self.assertNotIn("Sign in to Google Cloud, for the cost collector's token", text)
         # One URL for every sender, the address in SPEND_COLLECTOR_URL: no step and no comment of the file names
         # the tailnet's MagicDNS domain, which linux28-agents-1, a sender that joins with --accept-dns=false,
-        # cannot resolve.
+        # cannot resolve. The model gateway's URL is the repository variable's, not this file's.
         self.assertNotIn("ts.net", text)
+        self.assertEqual(self.jobs["review"]["env"]["ANTHROPIC_BASE_URL"], "${{ vars.OSSV_MODEL_GATEWAY_URL }}")
+        self.assertEqual(self.jobs["review"]["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "claude-haiku-4-5")
+
+    def test_the_review_stops_before_the_sign_in_on_any_other_gateway_url(self):
+        step = self.steps["Check the model gateway's URL"]
+        names = [s.get("name") for s in self.jobs["review"]["steps"]]
+        self.assertEqual(names.index("Check the model gateway's URL") + 1, names.index("Sign in to the model gateway"))
+        self.assertNotIn("if", step)
+        self.assertNotIn("continue-on-error", step)
+        for value, passes in (("https://gateway.example", True), ("", False), ("http://gateway.example", False),
+                              ("https://gateway.example:4000", False), ("https://gateway.example/v1", False),
+                              ("https:/" + "/u" + "@gateway.example", False)):
+            with self.subTest(value=value):
+                run = subprocess.run([shutil.which("bash"), "-e", "-c", step["run"]], capture_output=True, text=True,
+                                     env={**os.environ, "ANTHROPIC_BASE_URL": value})
+                self.assertEqual(run.returncode == 0, passes, run.stdout + run.stderr)
+                if not passes:
+                    self.assertIn("::error::the repository variable OSSV_MODEL_GATEWAY_URL is not https://<host>",
+                                  run.stdout)
+
+    def test_the_review_signs_in_to_the_model_gateway_with_no_stored_key(self):
+        gateway = self.steps["Sign in to the model gateway"]
+        self.assertEqual(gateway["uses"],
+                         "google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093")
+        self.assertEqual(gateway["with"], {
+            "workload_identity_provider": "${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}",
+            "service_account": "${{ env.GATEWAY_SERVICE_ACCOUNT }}", "token_format": "id_token",
+            "id_token_audience": "model-gateway-gce", "id_token_include_email": True,
+            "create_credentials_file": False, "export_environment_variables": False})
+        self.assertEqual(self.jobs["review"]["env"]["GATEWAY_SERVICE_ACCOUNT"],
+                         "oss-verify-ci@theorem-agent-infra.iam.gserviceaccount.com")
+        review = self.steps["Review"]["with"]
+        self.assertEqual(review["anthropic_api_key"], "${{ steps.gateway.outputs.id_token }}")
+        self.assertFalse([k for k in review if k.startswith("anthropic_") and k != "anthropic_api_key"], review)
+        # The sign-in comes right before the Review step: Google's identity token lives one hour.
+        names = [s.get("name") for s in self.jobs["review"]["steps"]]
+        self.assertEqual(names.index("Sign in to the model gateway") + 1, names.index("Review"))
 
     def export(self, outcome, name="libreac", kind="enrollment", answers=True):
         """The export step, with the job's own SPEND_COLLECTOR_URL as Actions gives it, and a stand-in curl that
@@ -2044,7 +2312,7 @@ class ReviewJob(unittest.TestCase):
                 _, env, _ = self.export("success", name="", kind=kind)
                 self.assertIn(f"theorem.subproject=_{kind},", env)
 
-    def test_review_runs_when_the_tailnet_join_fails(self):
+    def test_the_export_passes_when_the_tailnet_join_fails(self):
         for outcome in ("failure", "skipped", ""):
             with self.subTest(outcome=outcome):
                 run, env, curl = self.export(outcome)
@@ -2053,7 +2321,7 @@ class ReviewJob(unittest.TestCase):
                 self.assertIn("tailnet", run.stdout)
                 self.assertEqual(env, "")
                 self.assertEqual(curl, "")
-        # The Review step comes after the export and has no condition of its own, so it runs either way.
+        # The Review step comes after the export and has no condition of its own.
         names = [s.get("name") for s in self.jobs["review"]["steps"]]
         self.assertLess(names.index("Export the review's usage to the cost collector"), names.index("Review"))
         self.assertNotIn("if", self.steps["Review"])

@@ -120,6 +120,7 @@ def blank(text):
             j = i + 1
             while j < n and text[j] not in (c, "\n"):
                 j += 2 if text[j] == "\\" else 1
+            j = min(j, n)  # a backslash that ends the text escapes nothing after it
             if j < n and text[j] == c:
                 j += 1
             wipe(i, j)
@@ -332,6 +333,9 @@ def parse_records(lines, check):
             elif not found["old"]:
                 check.problems.append(f"the mutant at {found['path']}:{found['line']} replaces nothing (`<old>` is "
                                       "empty)")
+            elif len(found["line"]) > 9:  # no file has a billion lines, and int() refuses over 4300 digits
+                check.problems.append(f"the mutant at {found['path']} names line {found['line'][:12]}..., which no "
+                                      "file has")
             else:
                 pending = Record(found["path"], int(found["line"]), found["old"], found["new"], "")
         elif text.startswith("input:"):
@@ -425,7 +429,9 @@ def mutate(data, record):
 
 
 def safe_path(path):
-    """True if `path` is a relative path that stays below the directory it is relative to."""
+    """True if `path` is a relative path that stays below the directory it is relative to, with no control character
+    (a NUL cannot be in a command's arguments, so image_files() could not ask for it)."""
     parts = pathlib.PurePosixPath(path).parts
-    return bool(parts) and not path.startswith("/") and ".." not in parts and "\\" not in path
+    return (bool(parts) and not path.startswith("/") and ".." not in parts and "\\" not in path
+            and not any(ord(character) < 0x20 or ord(character) == 0x7F for character in path))
 

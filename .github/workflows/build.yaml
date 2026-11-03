@@ -210,10 +210,10 @@ name: "Build"
 # Dockerfile or build.sh runs. Never add a secret, a cache, an artifact, an identity token or a write permission to that
 # job. Its results reach the other jobs only as job outputs, which this repository's tools write: text, never code.
 # The review job runs no code of the pull request or the project. It, the screen job and the comment job hold identity
-# tokens (id-token: write), which they trade for short-lived tokens: the review's for an Anthropic token by workload
-# identity federation, so no API key is stored, and for an ephemeral tailnet node that exports the review's usage
-# (below), the screen's for the screen's own Google, Azure and Anthropic tokens (the screen job), and the review's and
-# comment job's for a Google access token by Google workload identity
+# tokens (id-token: write), which they trade for short-lived tokens: the review's for an ephemeral tailnet node, which
+# reaches Theorem's model gateway and exports the review's usage (below), and for the gateway's sign-in, a Google
+# identity token, so no API key is stored; the screen's for the screen's own Google, Azure and Anthropic tokens (the
+# screen job); and the review's and comment job's for a Google access token by Google workload identity
 # federation (Theorem's infrastructure code). Claude gets three tools only, Read, Glob and Grep (`--tools`), in the
 # default permission mode (`--permission-mode default`, which refuses a read outside the checkout): no shell, no
 # network and no tool that writes, so the text of the pull request, which it reads as data (review.md, rule 1),
@@ -239,28 +239,19 @@ name: "Build"
 # this file from the base branch, never the fork's, so the fork's code never holds them.
 # Runs do not wait for a maintainer's approval. To build only on request, remove pull_request_target below.
 #
-# The review reaches Claude by workload identity federation, with no stored key: the review job's GitHub identity token
-# is traded for an Anthropic token, by the federation rule whose ids the Review step gives (ids, not secrets). A rule,
-# made in the Claude Console of Anthropic's organization "Theorem - HDO", grants Claude calls only:
-#   issuer   fdis_01JvJ1UhZ8X2HHgcmXqjkJbc: https://token.actions.githubusercontent.com, keys by discovery
-#   main     fdrl_019restxFx3PhpLhbziQoQKf: subject_prefix "repo:theorem-labs@212152656/oss-verify@1429568498:*",
-#            audience "https://api.anthropic.com", claims {"repository_id": "1429568498",
-#            "ref": "refs/heads/main", "workflow": "Build", "environment": "enroll-review"}, and the condition
-#            claims.workflow_ref.startsWith("theorem-labs/oss-verify/.github/workflows/build.yaml@"), which also
-#            refuses a token whose environment is review-screen
-#   target   the service account oss-verify-ci (svac_01WdHTLcJPEfiPttcuLK1hGT), with the developer role
-#   scope    workspace:inference, in the workspace Default+CVP, with a token lifetime of 3600 seconds
-# The numbers are the immutable ids of theorem-labs and of this repository. `workflow` is the workflow's display name
-# (its `name:`), not its file, and `ref` is the run's ref; the condition pins the file, so the rule gives a token only
-# to this file, build.yaml, on main, from any event (a fork's pull_request_target run carries this repository's
-# workflow_ref, so it signs in too). The review, screen, hold and comment jobs of this file ask for an identity token; no
-# other job of it does. The rule's claim "environment": "enroll-review" admits the review job alone, which declares that
-# environment: no other job of this file, the screen job in review-screen included, can have it mint an oss-verify-ci
-# token (Theorem's infrastructure code, agent-infra #1427, applied on 2026-11-03). The screen job's own rule,
-# oss-verify-screen, admits review-screen alone.
-# A review runs only on main: the Anthropic rule above admits refs/heads/main alone, so a run on another branch gets
-# no Anthropic token (Google's provider and the tailnet identity of the export below admit main alone too, so such a
-# run also gets no Google token and no tailnet node). So a change to
+# The review reaches Claude through Theorem's model gateway (INFRA-481), a proxy of Anthropic's API on Theorem's
+# tailnet alone, at the URL in the repository variable OSSV_MODEL_GATEWAY_URL (ANTHROPIC_BASE_URL below). The step
+# "Check the model gateway's URL" stops the job before the sign-in unless that value is exactly https://<host>: with
+# no base URL, Claude Code would send the gateway's token to Anthropic's own API. The review job signs in with no
+# stored key: Google's workload identity provider (Theorem's infrastructure code) trades the job's GitHub identity
+# token for a Google identity token of the service account oss-verify-ci, audience model-gateway-gce, which the gateway
+# serves as its team oss-verify-ci with model calls only, and which the Review step gives Claude Code as its API key.
+# Google's identity token lives one hour, longer than the Review step's 45 minutes, and the sign-in runs just before it.
+# The provider admits this file, on refs/heads/main, from its own events. The review, screen, hold and comment jobs of
+# this file ask for an identity token; no other job of it does. The screen job's Anthropic token comes from its own
+# federation rule, oss-verify-screen, which admits the environment review-screen alone.
+# A review runs only on main: Google's provider and the tailnet identity below admit refs/heads/main alone, so a run on
+# another branch gets no Google token and no tailnet node. So a change to
 # the review is tried for real only once it is on main: run `gh workflow run build.yaml -f pr=<n>`, which posts the
 # comment on that pull request (its draft is also the review job's artifact enroll-review-draft), or `-f issue=<n>`
 # for the reply to an issue, which posts nothing and stores the draft in the private bucket.
@@ -1052,9 +1043,9 @@ jobs:
     # account (the gather job's output screen; the top of this file, and .github/scripts/screen.py). It runs in the
     # environment review-screen, whose jobs alone can exchange their identity token for the screen's tokens: Google
     # Cloud (Model Armor, and adding the reason to its bucket), Azure (Prompt Shields) and Anthropic (the service
-    # account review-screen, not the review's). It reaches neither ossv-ci nor the App's key, whose Google bindings
-    # name other environments, nor the review's Anthropic rule, whose claim "environment": "enroll-review" refuses
-    # review-screen (the top of this file). No other job, the review's included, gets the screen's tokens.
+    # account review-screen; the review reaches Claude through the model gateway instead). It reaches neither ossv-ci
+    # nor the App's key, whose Google bindings name other environments. No other job, the review's included, gets the
+    # screen's tokens.
     # Its GitHub token can only read, no key is stored, and it runs only main's .github/scripts. Its outputs are the
     # verdict, clean or held, and the names of the checks that ran; why goes to the private bucket REASON_BUCKET,
     # never to this public log or an output.
@@ -1189,6 +1180,15 @@ jobs:
       HEAD_SHA: ${{ needs.project-builds.outputs.sha || needs.route.outputs.sha }}
       GCP_WORKLOAD_IDENTITY_PROVIDER: projects/805240912354/locations/global/workloadIdentityPools/github/providers/github-ossv
       GCP_SERVICE_ACCOUNT: ossv-ci@theorem-agent-infra.iam.gserviceaccount.com
+      # The account the model gateway serves as its team oss-verify-ci (Theorem's infrastructure code).
+      GATEWAY_SERVICE_ACCOUNT: oss-verify-ci@theorem-agent-infra.iam.gserviceaccount.com
+      # Theorem's model gateway on the tailnet (the top of this file), from the repository variable. Claude Code reads
+      # it here, from the job's environment, and the action passes it on (its action.yml, ANTHROPIC_BASE_URL:
+      # env.ANTHROPIC_BASE_URL).
+      ANTHROPIC_BASE_URL: ${{ vars.OSSV_MODEL_GATEWAY_URL }}
+      # The gateway serves Claude Code's small helper model by its bare id alone, and refuses the dated id the tool
+      # asks for by default. The action's step inherits this from the job's environment, as Claude Code does.
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-4-5
       # The client id Tailscale gave the federated identity ossv-review-github: bootstrap/'s stack output
       # ossvReviewTailnetClientId in agent-infra (INFRA-832 S1a, merged as 99d1b5d), copied from
       # `pulumi stack output ossvReviewTailnetClientId --stack prod` after the apply of 2026-10-31 that made the
@@ -1297,9 +1297,11 @@ jobs:
           echo "::error::NOT STORED: $message"
           echo "$message" >> "$GITHUB_STEP_SUMMARY"
           exit 1
-      # The node is ephemeral and preauthorized, and it carries tag:ossv-review. INFRA-832 S1a in agent-infra,
+      # The node is ephemeral and preauthorized, and it carries tag:ossv-review. Without it the review cannot reach the
+      # model gateway, so a join that fails fails the review. INFRA-832 S1a in agent-infra,
       # merged as 99d1b5d, declares that tag, the grant that gives it the cost collector's Tailscale Service
-      # svc:spend on tcp:80 and nothing else beyond the two read-only pages every node of the tailnet may read, and
+      # svc:spend on tcp:80 and the model gateway's tcp:443 and tcp:4000 (INFRA-481), beyond those
+      # nothing else but the two read-only pages every node of the tailnet may read, and
       # the federated identity ossv-review-github, whose claims admit only this workflow of this repository, on
       # refs/heads/main, in the environment enroll-review, on a GitHub-hosted runner. Its apply of 2026-10-31 made
       # the client id above. The job joins with its GitHub identity token, so no key is stored. One review
@@ -1316,9 +1318,8 @@ jobs:
       # action does not mask (src/main.ts), and the output of `tailscale status --json`, the tailnet's nodes. quiet
       # keeps them silent whatever the debug setting, and a command that fails still writes its error output. The
       # job's 70 minutes hold every step's cap: gather 15, join 3, review 45 and logout 2.
-      - name: Join Theorem's tailnet, to export this review's usage
+      - name: Join Theorem's tailnet, to reach the model gateway and export this review's usage
         id: tailnet
-        continue-on-error: true
         timeout-minutes: 3
         uses: tailscale/github-action@99a8333667fff04fdd6cffb46dfd409f8329a7bf # v4.3.0 (sha-pinned)
         with:
@@ -1333,7 +1334,7 @@ jobs:
       # address stays only while the Service svc:spend does (INFRA-832's spec, D9): a Service made again gets new
       # addresses, and a job that joined would then send every record to an address that answers nothing. So when the
       # collector does not answer, the step writes no exporter variables either, and the warning names the address.
-      # The step takes continue-on-error, as the join and the logout do: the export never decides whether a review runs.
+      # The step takes continue-on-error, as the logout does: the export never decides whether a review runs.
       - name: Export the review's usage to the cost collector
         continue-on-error: true
         env: {TAILNET: "${{ steps.tailnet.outcome }}"}
@@ -1357,15 +1358,25 @@ jobs:
           SESSION: ${{ needs.gather.outputs.session }}
           LAST: ${{ needs.gather.outputs.last }}
         run: .github/scripts/review-prompt
+      # An empty or other value would send the gateway's token elsewhere: Claude Code's default is Anthropic's own API.
+      - name: Check the model gateway's URL
+        run: |
+          [[ $ANTHROPIC_BASE_URL =~ ^https://[A-Za-z0-9.-]+$ ]] \
+            || { echo "::error::the repository variable OSSV_MODEL_GATEWAY_URL is not https://<host>"; exit 1; }
+      # The model gateway's sign-in: a Google identity token of oss-verify-ci, audience model-gateway-gce, with the
+      # email claim the gateway reads, from Google's workload identity provider. It lives one hour, and this step runs
+      # just before the Review step, whose 45 minutes it outlasts.
+      - name: Sign in to the model gateway
+        id: gateway
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0 (sha-pinned)
+        with: {workload_identity_provider: "${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}", service_account: "${{ env.GATEWAY_SERVICE_ACCOUNT }}", token_format: id_token, id_token_audience: model-gateway-gce, id_token_include_email: true, create_credentials_file: false, export_environment_variables: false}
       - name: Review
         id: review
         timeout-minutes: 45
         uses: anthropics/claude-code-action@d70510b174a1244958df0b03166a54912811f3e6 # v1 (v1.0.264, sha-pinned)
         with:
-          anthropic_federation_rule_id: fdrl_019restxFx3PhpLhbziQoQKf
-          anthropic_organization_id: 5fd73c3e-8a2c-4166-b80d-fb5ce0c1b4a6
-          anthropic_service_account_id: svac_01WdHTLcJPEfiPttcuLK1hGT
-          anthropic_workspace_id: wrkspc_01Qr1iUVcow4jdgQM7Amfks5
+          # The gateway's identity token, which Claude Code sends to ANTHROPIC_BASE_URL as its key (x-api-key).
+          anthropic_api_key: ${{ steps.gateway.outputs.id_token }}
           github_token: ${{ github.token }}
           # The action's own check of the account that started the run is off ("*"): who is reviewed without a
           # person is decided by route's trust step and the screen, in this job's condition. A value is still given,
