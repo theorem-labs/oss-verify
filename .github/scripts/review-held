@@ -146,7 +146,7 @@ found = re.search(r"(?mi)^[ \t]*why held:.*$", text)
 if found:
     body = text[found.end():]
 found = re.search(r"(?<![\w./-])((?:[\w.-]+/)*[\w-]+\.(?:c|h|cc|cpp|cxx|hpp|hxx|hh|inc|rs|go|py|java|js|ts|mm|zig))"
-                  r"(?![\w-])", re.sub(r"\w+://\S+", " ", body))
+                  r"(?![\w-])", re.sub(r"(?<!\w)\w+://\S+", " ", body))
 source = found.group(1).lower().lstrip("./") if found else "none"
 parts = ["oss-verify held finding identity v1", project, harness, repository, commit, kind, source, function]
 print("review/{}/{}/{}/{}".format(project or "not-known", harness, commit[:12] or "none",

@@ -196,10 +196,14 @@ def defined_symbols(path, wanted):
             _, str_offset, str_size, *_ = sections[link]
             if size > MAX_ELF_BYTES or str_size > MAX_ELF_BYTES:
                 continue
-            handle.seek(str_offset)
-            strings = handle.read(str_size)
-            handle.seek(offset)
-            table = handle.read(size)
+            try:
+                handle.seek(str_offset)
+                strings = handle.read(str_size)
+                handle.seek(offset)
+                table = handle.read(size)
+            # ValueError: an offset past what a file can hold. Such a table is not one, as read_elf() reads it.
+            except (OSError, ValueError):
+                continue
             for start in range(0, len(table) - entsize + 1, entsize):
                 fields = struct.unpack_from(symbol, table, start)
                 if wide:
