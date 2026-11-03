@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+#
+# The newest hold of a pull request or an issue, for a rescreen (build.yaml's route, .github/scripts/review-rescreen):
+#
+#   GH_TOKEN=<read-only token> REPO=<owner/repo> .github/scripts/limit-hold <number>
+#
+# Only oss-verify[bot]'s comments that start with <!-- oss-verify-held --> are holds; of them, the one updated last is
+# the newest. It prints `<time> <run> <account>` when that hold is one at OUTSIDE_HOURLY_LIMIT: its marker
+# <!-- oss-verify-held-limit <run> --> names the run whose event the limit first held, which is a run of build.yaml
+# that a pull request's or an issue's event started, and <account> is the account that started it. It prints
+# `<time> -` for any other newest hold (one of the screen, or one whose run is not such a run), and nothing when there
+# is no hold comment. A read that fails exits 1.
+set -euo pipefail
+number=${1:?usage: limit-hold <number>}
+[[ $number =~ ^[1-9][0-9]*$ ]] || { echo "limit-hold: not a number: $number" >&2; exit 1; }
+hold=$(gh api --paginate "repos/$REPO/issues/$number/comments" --jq '.[]
+  | select(.user.login == "oss-verify[bot]" and (.body | startswith("<!-- oss-verify-held -->")))
+  | "\(.updated_at) \((.body | capture("\n<!-- oss-verify-held-limit (?<run>[0-9]+) -->\n") | .run) // "-")"' \
+  | sort | tail -n 1)
+[ -n "$hold" ] || exit 0
+read -r at run <<< "$hold"
+if [ "$run" != - ]; then
+  workflow=$(gh api "repos/$REPO/actions/workflows/build.yaml" --jq .id)
+  answer=$(gh api "repos/$REPO/actions/runs/$run" --jq '"\(.workflow_id) \(.event) \(.actor.login)"')
+  read -r id event login <<< "$answer"
+  if [[ $id == "$workflow" && ($event == pull_request_target || $event == issues) \
+        && $login =~ ^[A-Za-z0-9-]+(\[bot\])?$ ]]; then
+    echo "$at $run $login"
+    exit 0
+  fi
+fi
+echo "$at -"

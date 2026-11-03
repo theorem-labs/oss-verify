@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+#
+# Starts the screen again of each pull request or issue held at build.yaml's OUTSIDE_HOURLY_LIMIT over an hour ago
+# (review-rescreen.yml runs it every 15 minutes):
+#
+#   GH_TOKEN=<token with actions: write> REPO=<owner/repo> OUTSIDE_HOURLY_LIMIT=<n> HELD_LABEL=review-held \
+#     .github/scripts/review-rescreen
+#
+# For each open pull request or issue labelled HELD_LABEL whose newest hold is one at the limit
+# (.github/scripts/limit-hold) and was made or updated over an hour ago, it starts build.yaml on main with -f pr=<n>
+# (or -f issue=<n>), -f rescreen=true and -f account=<the account the limit held>. Never for a hold of the screen: a
+# person decides on that. Oldest hold first, each account gets at most OUTSIDE_HOURLY_LIMIT rescreens an hour, less
+# those it had in the last hour (build.yaml's runs named `Rescreen <n> of <account>`); the others wait for a later run.
+# An item whose rescreen has not finished is not started again: its screen and review can outlast the 15 minutes
+# between runs, and a second run would cancel them and use the hour's screened reviews twice.
+# build.yaml's route counts again, with the account's own events, and holds the item again at the limit.
+# A read or a start that fails leaves that item for the next run, and the script exits 1 after the others.
+set -euo pipefail
+[[ ${OUTSIDE_HOURLY_LIMIT:-} =~ ^[1-9][0-9]*$ ]] || { echo "::error::OUTSIDE_HOURLY_LIMIT is not a number"; exit 1; }
+[ -n "${HELD_LABEL:-}" ] || { echo "::error::HELD_LABEL is not set"; exit 1; }
+here=$(dirname "$0")
+from=$(date -u -d '-1 hour' +%Y-%m-%dT%H:%M:%SZ)
+since=$(date -u -d '-3 hours' +%Y-%m-%dT%H:%M:%SZ)
+# build.yaml's rescreens of the last 3 hours, by the run's name, which each run's route checks against the hold: those
+# of the last hour count toward each account's limit, and one not completed holds its item back. 3 hours cover a run's
+# jobs and their time in the queue.
+runs=$(gh api --method GET --paginate "repos/$REPO/actions/workflows/build.yaml/runs" \
+  -f event=workflow_dispatch -f created=">=$since" -F per_page=100 \
+  --jq '.workflow_runs[] | select(.event == "workflow_dispatch")
+        | "\(.created_at // "-") \(.status // "-") \(.display_title // "")"') \
+  || { echo "::error::the runs of build.yaml could not be read."; exit 1; }
+declare -A used=() running=()
+title_re='^Rescreen ([0-9]+) of ([A-Za-z0-9-]+(\[bot\])?)$'
+while read -r created status title; do
+  [[ ${title:-} =~ $title_re ]] || continue
+  [ "$status" = completed ] || running[${BASH_REMATCH[1]}]=1
+  if [[ ! $created < $from ]]; then
+    used[${BASH_REMATCH[2]}]=$(( ${used[${BASH_REMATCH[2]}]:-0} + 1 ))
+  fi
+done <<< "$runs"
+items=$(gh api --paginate "repos/$REPO/issues?state=open&labels=$HELD_LABEL&per_page=100" \
+  --jq '.[] | select(.state == "open") | "\(.number) \(if .pull_request then "pr" else "issue" end)"') \
+  || { echo "::error::the held pull requests and issues could not be read."; exit 1; }
+failed=0
+due=$(mktemp)
+trap 'rm -f "$due"' EXIT
+while read -r number input; do
+  [ -n "${number:-}" ] || continue
+  [[ $number =~ ^[1-9][0-9]*$ ]] || { echo "::error::not a number: $number"; exit 1; }
+  if [ -n "${running[$number]:-}" ]; then
+    echo "$number: its rescreen has not finished."
+    continue
+  fi
+  hold=$("$here/limit-hold" "$number") || { echo "::error::the hold of $number could not be read."; failed=1; continue; }
+  read -r at run account <<< "$hold"
+  if [[ -z ${run:-} || $run == - ]]; then
+    echo "$number: no hold at the limit (the screen held it, or its run is not an event's): a person decides."
+    continue
+  fi
+  if [[ ! $at < $from ]]; then
+    echo "$number: held at the limit at $at, less than an hour ago."
+    continue
+  fi
+  echo "$at $number $input $account" >> "$due"
+done <<< "$items"
+while read -r at number input account; do
+  if (( ${used[$account]:-0} >= OUTSIDE_HOURLY_LIMIT )); then
+    echo "$number waits: $account had ${used[$account]} rescreens in the last hour, the limit is $OUTSIDE_HOURLY_LIMIT."
+    continue
+  fi
+  if gh api --method POST "repos/$REPO/actions/workflows/build.yaml/dispatches" -f ref=main \
+      -f "inputs[$input]=$number" -f "inputs[rescreen]=true" -f "inputs[account]=$account" > /dev/null; then
+    used[$account]=$(( ${used[$account]:-0} + 1 ))
+    echo "$number: screened again (held at the limit at $at, for $account)."
+  else
+    echo "::error::the rescreen of $number could not be started."
+    failed=1
+  fi
+done < <(sort "$due")
+exit "$failed"
