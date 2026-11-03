@@ -31,7 +31,8 @@ name: "Build"
 #            in it (below). `screen` otherwise: the screen job reads the pull request or issue first, and only a clean
 #            verdict lets the review run, with no person. `limit` when
 #            the account that started the run has no write access and its events started OUTSIDE_HOURLY_LIMIT runs of
-#            this file in the last hour: it is held without a screen.
+#            this file in the last hour: it is held without a screen. `measure` for a run started by hand with
+#            -f measure=true and no pr or issue: the screen job alone runs, and measures its rules (below).
 #   gather   gathers what the review reads, once, with .github/scripts/review-gather (below), and keeps it as the
 #            artifact review-data, which the screen and the review take only by its SHA-256
 #            (.github/scripts/take-review-data): the review reads exactly what the screen passed. It holds no model,
@@ -45,11 +46,13 @@ name: "Build"
 #            comments, reviews and review comments alone, SCREEN_SCOPE comments): Google Cloud Model Armor's prompt
 #            injection and jailbreak filter; Azure AI Content Safety's Prompt Shields, which reads the text as
 #            documents; and a small Claude model with no tools whose answer a schema holds to the words clean and
-#            suspicious, each through the screen's own identity (its env below). Each reads all the text joined. The
-#            verdict is clean only when every check that
-#            ran answers clean; a check that cannot answer or runs out of time, a file the review reads that is not
-#            text or that the diff shows as binary, text with characters that hide it (bidirectional overrides and
-#            isolates, tag characters, and zero-width characters, but a joiner between two letters of a script that
+#            suspicious, each through the screen's own identity (its env below). Each reads all the text joined.
+#            SCREEN_RULE makes the verdict of their words: claude_or_both_detectors, held when the model answers
+#            suspicious or Model Armor and Prompt Shields both do (.github/scripts/screen.py, RULES, and the
+#            measurement that chose it). Under every rule, a check that cannot answer or runs out of time, a file
+#            the review reads that is not text or that the diff shows as binary, text with characters that hide it
+#            (bidirectional overrides and isolates, tag characters, and zero-width characters, but a joiner between
+#            two letters of a script that
 #            uses joiners or inside an emoji, a byte order mark at the start of a file, and a word joiner where
 #            .github/scripts/review-neutralize puts one in this App's own comments), or more text than the screen
 #            reads, holds it. A screened review runs at most SCREENED_HOURLY_CAP times an hour; one that fails, at
@@ -59,6 +62,13 @@ name: "Build"
 #            item goes to the private bucket theorem-agent-infra-review-screen-reasons, as
 #            theorem-labs/oss-verify/<run>-<attempt>.json, never to this public log, an output or a comment: its
 #            outputs are the verdict and the names of the checks that ran.
+#            A measurement (gh workflow run build.yaml -f measure=true [-f measure_set=measure/set-v<n>.json]
+#            [-f measure_repeats=<1-5>]) reviews nothing: the screen job runs every listed check that many times
+#            (3 by default) on each text of a labelled set kept in the private bucket (measure/set-v1.json by
+#            default; the screen's account can read only measure/set-* of it), and puts the false holds and missed
+#            injections of each rule in the run's summary. The texts, and each check's words for them, stay in the
+#            bucket, as measure/runs/theorem-labs/oss-verify/<run>-<attempt>.json. On such a run the required check
+#            passes when route and the screen job passed and every other job was skipped.
 #            What it reads: the item's title, body, every account's comments, reviews and review comments, its other
 #            fields, the diff, the checks' names, and for an enrollment what review-gather wrote from the build, the
 #            validator, triage, the facts of the project's repository and the seed corpora's bytes; each changed file,
@@ -295,7 +305,7 @@ name: "Build"
 # Such a run reports a check named project-builds too, but a check from a workflow_dispatch run never satisfies a
 # ruleset's required check (https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks#checks-from-some-workflow-jobs-are-not-evaluated).
 
-run-name: ${{ github.event.pull_request.title || ((inputs.issue || github.event.issue.number) && format('Issue {0}', inputs.issue || github.event.issue.number)) || format('Pull request {0}', inputs.pr) }}
+run-name: ${{ inputs.measure && 'Measure the screen' || github.event.pull_request.title || ((inputs.issue || github.event.issue.number) && format('Issue {0}', inputs.issue || github.event.issue.number)) || format('Pull request {0}', inputs.pr) }}
 
 on:
   pull_request_target:
@@ -312,6 +322,18 @@ on:
         description: "Number of the issue of this repository to draft a reply to (give pr or issue, not both)"
         required: false
         type: number
+      measure:
+        description: "Measure the screen's rules on its private labelled set, and review nothing (give no pr or issue)"
+        type: boolean
+        default: false
+      measure_set:
+        description: "The labelled set to measure on, an object of the private bucket (measure/set-v<n>.json)"
+        type: string
+        default: measure/set-v1.json
+      measure_repeats:
+        description: "How many times each check answers each text of the set (1 to 5)"
+        type: number
+        default: 3
 
 permissions: {}
 # No job reads or writes the Actions cache unless it says so: the gather job restores the review's session, and the
@@ -356,7 +378,7 @@ jobs:
     outputs:
       kind: ${{ steps.decide.outputs.kind }}
       sha: ${{ steps.decide.outputs.sha }}
-      # writer, screen or limit (the trust step below); empty when kind is.
+      # writer, screen, limit or measure (the trust step below); empty when kind is and no measurement was asked.
       trust: ${{ steps.trust.outputs.trust }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
@@ -379,9 +401,18 @@ jobs:
           SENDER: ${{ github.event.sender.login }}
           AUTHOR: ${{ github.event.issue.user.login }}
           ASSOCIATION: ${{ github.event.issue.author_association }}
+          MEASURE: ${{ inputs.measure }}
         run: |
           set -euo pipefail
           say() { echo "$1"; echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
+          # A measurement of the screen, by hand, reviews nothing: no kind, and the trust step routes it alone.
+          if [[ ${EVENT:-} == workflow_dispatch && ${MEASURE:-} == true ]]; then
+            [[ -z ${PR:-} && -z ${ISSUE:-} ]] \
+              || { echo "::error::A measurement of the screen reviews nothing: give no pr or issue."; exit 1; }
+            echo "measure=true" >> "$GITHUB_OUTPUT"
+            say "measurement of the screen: nothing is built or reviewed; the screen job measures its rules."
+            exit 0
+          fi
           # An issue's event that is ours (the top of this file) asks for nothing: the issue does not wait for us.
           if [ "${EVENT:-}" = issues ]; then
             if [[ $SENDER != "$AUTHOR" || $ASSOCIATION == OWNER || $ASSOCIATION == MEMBER ]]; then
@@ -433,7 +464,7 @@ jobs:
       # write). Membership of the organisation alone is not write access. The Apps in ALLOWED_BOTS count as having it.
       - name: Whether the author and the account that started the run have write access
         id: trust
-        if: steps.decide.outputs.kind != ''
+        if: steps.decide.outputs.kind != '' || steps.decide.outputs.measure == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -441,6 +472,7 @@ jobs:
           AUTHOR: ${{ github.event.pull_request.user.login || github.event.issue.user.login }}
           ACTOR: ${{ github.actor }}
           RUN_ID: ${{ github.run_id }}
+          MEASURE: ${{ steps.decide.outputs.measure }}
         run: |
           set -euo pipefail
           say() { echo "$1"; echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
@@ -490,8 +522,16 @@ jobs:
                 (( count < OUTSIDE_HOURLY_LIMIT )) || trust limit "Held without a screen: $ACTOR has no write access, and its events started $count runs of this workflow in the last hour, the limit is $OUTSIDE_HOURLY_LIMIT."
               fi
               trust screen "Screened first: the author or $ACTOR has no write access. A person with write access can ask for the review without it: gh workflow run build.yaml -R $REPO -f pr=<n> (or -f issue=<n>)." ;;
-            # GitHub lets only an account with write access start a run by hand.
-            workflow_dispatch) trust writer "Started by hand by $ACTOR: no screen." ;;
+            # GitHub lets only an account with write access start a run by hand; an App must be one of ALLOWED_BOTS.
+            workflow_dispatch)
+              if [ "$MEASURE" = true ]; then
+                if [[ $ACTOR == *'[bot]' ]] && ! known "$ACTOR"; then
+                  say "No measurement: the App that started this run ($ACTOR) is not one of ALLOWED_BOTS."
+                  exit 0
+                fi
+                trust measure "A measurement of the screen, started by hand by $ACTOR: the screen job alone runs."
+              fi
+              trust writer "Started by hand by $ACTOR: no screen." ;;
             *) echo "::error::not an event of this workflow: $EVENT"; exit 1 ;;
           esac
 
@@ -887,10 +927,13 @@ jobs:
     # verdict, clean or held, and the names of the checks that ran; why goes to the private bucket REASON_BUCKET,
     # never to this public log or an output.
     needs: [route, project-builds, gather]
-    if: ${{ !cancelled() && needs.gather.result == 'success' && needs.gather.outputs.digest != '' && needs.gather.outputs.screen != 'false' }}
+    # A screen of what the gather job kept, or a measurement, which needs no gather job.
+    if: >-
+      ${{ !cancelled() && ((needs.gather.result == 'success' && needs.gather.outputs.digest != ''
+          && needs.gather.outputs.screen != 'false') || needs.route.outputs.trust == 'measure') }}
     environment: {name: review-screen, deployment: false}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: ${{ needs.route.outputs.trust == 'measure' && 60 || 15 }}
     permissions: {contents: read, id-token: write}
     outputs:
       verdict: ${{ steps.screen.outputs.verdict }}
@@ -924,23 +967,31 @@ jobs:
       # The checks that run, which must name model_armor. A listed check whose settings are missing holds every item;
       # a check leaves only by leaving this list.
       SCREEN_CHECKS: model_armor,prompt_shields,claude
+      # How the checks' words make the verdict (.github/scripts/screen.py, RULES, with the measurement behind the
+      # choice): held when the model answers suspicious, or Model Armor and Prompt Shields both do; and, under every
+      # rule, when a check cannot answer.
+      SCREEN_RULE: claude_or_both_detectors
     steps:
       # main's .github/scripts, for take-review-data and screen.py; never the pull request.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with: {persist-credentials: false, sparse-checkout: .github/scripts}
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2 (sha-pinned)
+        if: needs.route.outputs.trust != 'measure'
         with: {name: review-data, path: "${{ runner.temp }}/review-data"}
       - name: Take what the gather job kept
+        if: needs.route.outputs.trust != 'measure'
         env: {DIGEST: "${{ needs.gather.outputs.digest }}"}
         run: .github/scripts/take-review-data "$RUNNER_TEMP/review-data/review.tar"
-      # A token for 10 minutes, which the account can use for Model Armor and for adding an object to the reason
-      # bucket, and for nothing else. A sign-in that fails fails this job, and the comment job holds the item.
+      # A token for 10 minutes (an hour for a measurement, which runs every check many times), which the account can
+      # use for Model Armor, for adding an object to the reason bucket and for reading the labelled set, and for
+      # nothing else. A sign-in that fails fails this job, and the comment job holds the item.
       - name: Sign in to Google Cloud
         id: google
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0 (sha-pinned)
-        with: {workload_identity_provider: "${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}", service_account: "${{ env.GCP_SERVICE_ACCOUNT }}", token_format: access_token, access_token_lifetime: 600s, create_credentials_file: false, export_environment_variables: false}
+        with: {workload_identity_provider: "${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}", service_account: "${{ env.GCP_SERVICE_ACCOUNT }}", token_format: access_token, access_token_lifetime: "${{ needs.route.outputs.trust == 'measure' && '3600s' || '600s' }}", create_credentials_file: false, export_environment_variables: false}
       - name: Screen
         id: screen
+        if: needs.route.outputs.trust != 'measure'
         env:
           GOOGLE_ACCESS_TOKEN: ${{ steps.google.outputs.access_token }}
           REPOSITORY: ${{ github.repository }}
@@ -951,6 +1002,23 @@ jobs:
           # rest is a writer's, which the review reads as before.
           SCREEN_SCOPE: ${{ needs.route.outputs.trust == 'writer' && 'comments' || 'all' }}
         run: python3 .github/scripts/screen.py .review ${NAME:+"projects/$NAME"}
+      # Every listed check, MEASURE_REPEATS times, on each text of the labelled set kept in the private bucket (the
+      # screen's account can read only its measure/set-* objects), and the verdict of each rule of SCREEN_RULE's
+      # choices. The texts and their words stay in the bucket, under measure/runs/; this log and the run's summary get
+      # the counts per rule alone.
+      - name: Measure
+        if: needs.route.outputs.trust == 'measure'
+        env:
+          GOOGLE_ACCESS_TOKEN: ${{ steps.google.outputs.access_token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          MEASURE_SET: ${{ inputs.measure_set }}
+          MEASURE_OBJECT: measure/runs/${{ github.repository }}/${{ github.run_id }}-${{ github.run_attempt }}.json
+          MEASURE_REPEATS: ${{ inputs.measure_repeats }}
+        run: |
+          set -euo pipefail
+          [[ $MEASURE_SET =~ ^measure/set-v[0-9]+\.json$ ]] || { echo "::error::not a labelled set: $MEASURE_SET"; exit 1; }
+          [[ $MEASURE_REPEATS =~ ^[1-5]$ ]] || { echo "::error::MEASURE_REPEATS must be 1 to 5"; exit 1; }
+          python3 .github/scripts/screen.py --measure
 
   review:
     # Claude Code, through anthropics/claude-code-action, checks the enrollment against review.md, or a change against
@@ -1677,8 +1745,10 @@ jobs:
             ${{ (needs.project-builds.outputs.name != '' || needs.route.outputs.kind == 'change' || needs.route.outputs.kind == 'issue')
             && (needs.route.outputs.trust == 'writer' || needs.route.outputs.trust == 'screen') }}
           SCREEN: ${{ needs.screen.result }}
+          # A measurement asks for the screen job alone (route's trust measure), and for no other job.
           ASKED_SCREEN: >-
-            ${{ needs.gather.result == 'success' && needs.gather.outputs.digest != '' && needs.gather.outputs.screen != 'false' }}
+            ${{ (needs.gather.result == 'success' && needs.gather.outputs.digest != '' && needs.gather.outputs.screen != 'false')
+            || needs.route.outputs.trust == 'measure' }}
           REVIEW: ${{ needs.review.result }}
           ASKED_REVIEW: >-
             ${{ needs.gather.result == 'success' && needs.gather.outputs.digest != ''

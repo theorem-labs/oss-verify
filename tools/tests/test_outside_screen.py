@@ -257,12 +257,12 @@ class Trust(Runner):
 
     STEP = "Whether the author and the account that started the run have write access"
 
-    def trust(self, event, author="", actor="", runs=()):
+    def trust(self, event, author="", actor="", runs=(), measure=""):
         self.serve(f"repos/{REPO}/actions/workflows/build.yaml/runs", {"workflow_runs": [
             {"id": i, "actor": {"login": who}, "triggering_actor": {"login": "someone-else"}, "event": e}
             for i, who, e in runs]})
         return self.run_script(step("route", self.STEP)["run"], EVENT=event, AUTHOR=author, ACTOR=actor,
-                               RUN_ID="100")
+                               RUN_ID="100", MEASURE=measure)
 
     def assertTrust(self, want, *args, **kwargs):
         rc, out, got = self.trust(*args, **kwargs)
@@ -290,6 +290,28 @@ class Trust(Runner):
     def test_a_run_by_hand_is_a_writers(self):
         self.assertTrust("writer", "workflow_dispatch", "", "alice")
         self.assertEqual(self.calls(), [])
+
+    def test_a_writer_can_measure_the_screen(self):
+        self.assertTrust("measure", "workflow_dispatch", "", "alice", measure="true")
+        self.assertTrust("measure", "workflow_dispatch", "", "sjawhar-agent[bot]", measure="true")
+        rc, out, got = self.trust("workflow_dispatch", "", "dependabot[bot]", measure="true")
+        self.assertEqual((rc, got.get("trust")), (0, None), out)
+        # only by hand: an event has no measure input
+        self.permissions(mallory="read")
+        self.assertTrust("screen", "issues", "mallory", "mallory", measure="true")
+
+    def test_route_asks_for_a_measurement_alone(self):
+        decide = step("route", "An enrollment, a change or an issue")
+        self.assertEqual(decide["env"]["MEASURE"], "${{ inputs.measure }}")
+        for pr, issue, want in (("", "", (0, "true")), ("7", "", (1, None)), ("", "5", (1, None))):
+            with self.subTest(pr=pr, issue=issue):
+                rc, out, got = self.run_script(decide["run"], EVENT="workflow_dispatch", MEASURE="true", PR=pr,
+                                               ISSUE=issue, HEAD_SHA="", ACTOR="alice", SENDER="alice", AUTHOR="",
+                                               ASSOCIATION="")
+                self.assertEqual((rc, got.get("measure")), want, out)
+                self.assertNotIn("kind", got)
+        self.assertEqual(step("route", self.STEP)["if"],
+                         "steps.decide.outputs.kind != '' || steps.decide.outputs.measure == 'true'")
 
     def test_a_permission_github_does_not_give_stops_the_run(self):
         rc, out, got = self.trust("pull_request_target", "alice", "alice")
@@ -399,6 +421,42 @@ class Routes(unittest.TestCase):
                 self.assertEqual(jobs, {"comment"})
                 self.assertEqual(required(ctx)[0], 0, required(ctx)[1])
 
+    def test_a_measurement_runs_the_screen_job_alone(self):
+        """The screen job measures, and the required check asks for it and nothing else."""
+        jobs, ctx = self.ran({"kind": "", "trust": "measure"}, outputs={"gather": {}})
+        self.assertEqual(jobs, {"screen"})
+        self.assertEqual(required(ctx)[0], 0, required(ctx)[1])
+        jobs, ctx = self.ran({"kind": "", "trust": "measure"}, results={"screen": "failure"}, outputs={"gather": {}})
+        self.assertEqual(jobs, {"screen"})
+        self.assertEqual(required(ctx)[0], 1)
+        steps = {x.get("name") or x.get("uses", "").split("@")[0]: x.get("if") for x in JOBS["screen"]["steps"]}
+        self.assertEqual(steps["Screen"], "needs.route.outputs.trust != 'measure'")
+        self.assertEqual(steps["Measure"], "needs.route.outputs.trust == 'measure'")
+        self.assertEqual(steps["Take what the gather job kept"], "needs.route.outputs.trust != 'measure'")
+        self.assertEqual(steps["actions/download-artifact"], "needs.route.outputs.trust != 'measure'")
+        m = step("screen", "Measure")
+        self.assertTrue(m["run"].endswith("python3 .github/scripts/screen.py --measure\n"), m["run"])
+        self.assertEqual(m["env"]["MEASURE_SET"], "${{ inputs.measure_set }}")
+        self.assertEqual(m["env"]["MEASURE_REPEATS"], "${{ inputs.measure_repeats }}")
+        self.assertEqual(m["env"]["MEASURE_OBJECT"],
+                         "measure/runs/${{ github.repository }}/${{ github.run_id }}-${{ github.run_attempt }}.json")
+        # A measurement outlasts the screen's 10-minute token: its sign-in asks for an hour, a screen's for 10 minutes.
+        lifetime = step("screen", "Sign in to Google Cloud")["with"]["access_token_lifetime"]
+        self.assertEqual(evaluate(lifetime, {"needs.route.outputs.trust": "measure"}), "3600s")
+        for trust in ("screen", "writer"):
+            self.assertEqual(evaluate(lifetime, {"needs.route.outputs.trust": trust}), "600s")
+
+    def test_the_measure_step_takes_only_a_labelled_set_and_one_to_five_repeats(self):
+        run = step("screen", "Measure")["run"].replace("python3 .github/scripts/screen.py --measure", "echo ran")
+        for measure_set, repeats, ok in (("measure/set-v1.json", "3", True), ("measure/set-v12.json", "5", True),
+                                         ("measure/runs/x.json", "3", False), ("reasons/a.json", "3", False),
+                                         ("measure/set-v1.json\nx", "3", False), ("measure/set-v1.json", "0", False),
+                                         ("measure/set-v1.json", "6", False), ("measure/set-v1.json", "1;x", False)):
+            with self.subTest(measure_set=measure_set, repeats=repeats):
+                r = subprocess.run(["bash", "--noprofile", "--norc", "-e", "-c", run], capture_output=True, text=True,
+                                   env={**os.environ, "MEASURE_SET": measure_set, "MEASURE_REPEATS": repeats})
+                self.assertEqual(r.returncode == 0, ok, r.stdout + r.stderr)
+
     def test_nothing_reviewable_holds_nothing(self):
         """An enrollment pull request whose build took no project is not reviewed, so nothing is held either."""
         jobs, _ = self.ran(dict(self.ENROLLMENT, trust="limit"), outputs={"project-builds": {"name": ""}})
@@ -489,8 +547,10 @@ class Holdings(unittest.TestCase):
         uses = [s["uses"].split("@")[0] for s in job["steps"] if "uses" in s]
         self.assertEqual(uses, ["actions/checkout", "actions/download-artifact", "google-github-actions/auth"])
         runs = [s["run"] for s in job["steps"] if "run" in s]
-        self.assertEqual(runs, ['.github/scripts/take-review-data "$RUNNER_TEMP/review-data/review.tar"',
-                                'python3 .github/scripts/screen.py .review ${NAME:+"projects/$NAME"}'])
+        self.assertEqual(runs[:2], ['.github/scripts/take-review-data "$RUNNER_TEMP/review-data/review.tar"',
+                                    'python3 .github/scripts/screen.py .review ${NAME:+"projects/$NAME"}'])
+        self.assertEqual(len(runs), 3)
+        self.assertTrue(runs[2].endswith("python3 .github/scripts/screen.py --measure\n"))
 
     def test_only_the_screen_job_reaches_the_screens_identities(self):
         for name, job in JOBS.items():
@@ -549,6 +609,8 @@ class Holdings(unittest.TestCase):
         self.assertEqual(len(set(listed)), len(listed))
         # All three checks run, each under the screen's own identity.
         self.assertEqual(listed, ["model_armor", "prompt_shields", "claude"])
+        # the rule chosen by measurement (.github/scripts/screen.py, RULES)
+        self.assertEqual(e["SCREEN_RULE"], "claude_or_both_detectors")
         self.assertEqual((e["AZURE_CLIENT_ID"], e["ANTHROPIC_SERVICE_ACCOUNT_ID"], e["ANTHROPIC_FEDERATION_RULE_ID"]),
                          ("878cb696-144f-4c60-b04c-3974fad24e96", "svac_01JFhEhPizCyTiK2i22mRJ8a",
                           "fdrl_01PJtZrFW7ECzfBk5UVFjhw9"))

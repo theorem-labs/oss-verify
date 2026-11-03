@@ -75,6 +75,9 @@ class Services:
                     name = urllib.parse.parse_qs(url.query)["name"][0]
                     services.objects[name] = body
                     status, answer = 200, {"name": name, "generation": "1"}
+                elif url.path.startswith("/storage/storage/v1/b/") and method == "GET":
+                    name = urllib.parse.unquote(url.path.split("/o/", 1)[1])
+                    status, answer = (200, services.objects[name]) if name in services.objects else (404, {})
                 else:
                     key = next((k for k in services.answers if url.path.endswith(k)), None)
                     if key is None:
@@ -125,6 +128,7 @@ class ScreenTest(unittest.TestCase):
             "ANTHROPIC_ORGANIZATION_ID": "org", "ANTHROPIC_WORKSPACE_ID": "wrkspc_x",
             "ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_x", "ANTHROPIC_FEDERATION_RULE_ID": "fdrl_x",
             "SCREEN_MODEL": "claude-haiku-5-5", "SCREEN_CHECKS": "model_armor,prompt_shields,claude",
+            "SCREEN_RULE": "any",
             "GITHUB_OUTPUT": self.output, "REPOSITORY": "acme/model",
             "NUMBER": "7", "RUN_URL": "https://github.com/acme/model/actions/runs/1",
         }
@@ -328,6 +332,83 @@ class ScreenTest(unittest.TestCase):
                 self.services.answers[":sanitizeUserPrompt"] = (200, answer)
                 v, reason = self.verdict()
                 self.assertEqual((v, reason["checks"]["model_armor"]["word"]), ("held", "error"))
+
+    def test_each_rule_combines_the_words(self):
+        """any: one suspicious holds; two_of_three: two do; detectors: Model Armor or Prompt Shields does; claude: the
+        model does; claude_or_both_detectors: the model does, or both detectors do. An error holds under every rule."""
+        c, s_, e = "clean", "suspicious", "error"
+        rules = ("any", "two_of_three", "detectors", "claude", "claude_or_both_detectors")
+        self.assertEqual(tuple(screen.RULES), rules)
+        H, C = "held", "clean"
+        cases = [((c, c, c), (C, C, C, C, C)), ((s_, c, c), (H, C, H, C, C)), ((c, s_, c), (H, C, H, C, C)),
+                 ((c, c, s_), (H, C, C, H, H)), ((s_, s_, c), (H, H, H, C, H)), ((s_, c, s_), (H, H, H, H, H)),
+                 ((c, s_, s_), (H, H, H, H, H)), ((s_, s_, s_), (H, H, H, H, H)),
+                 ((c, c, e), (H, H, H, H, H)), ((e, c, c), (H, H, H, H, H)), ((c, e, c), (H, H, H, H, H))]
+        for (ma, ps, cl), want in cases:
+            words = {"model_armor": ma, "prompt_shields": ps, "claude": cl}
+            with self.subTest(words=words):
+                self.assertEqual(tuple(screen.combine(words, r) for r in rules), want)
+
+    def test_the_rule_decides_the_verdict(self):
+        for rule, want in (("any", "held"), ("two_of_three", "clean"), ("detectors", "clean"), ("claude", "held"),
+                           ("claude_or_both_detectors", "held")):
+            with self.subTest(rule=rule):
+                self.fresh()
+                self.item()
+                self.env["SCREEN_RULE"] = rule
+                self.services.answers["/v1/messages"] = lambda _b: message('{"verdict": "suspicious"}')
+                v, reason = self.verdict()
+                self.assertEqual((v, reason["rule"]), (want, rule))
+
+    def test_a_rule_that_is_not_one_or_lacks_its_checks_holds_it(self):
+        for rule, listed in (("", "model_armor,prompt_shields,claude"), ("majority", "model_armor,prompt_shields,claude"),
+                             ("two_of_three", "model_armor,prompt_shields"), ("detectors", "model_armor,claude"),
+                             ("claude", "model_armor,prompt_shields"),
+                             ("claude_or_both_detectors", "model_armor,claude")):
+            with self.subTest(rule=rule, listed=listed):
+                self.fresh()
+                self.item()
+                self.env.update(SCREEN_RULE=rule, SCREEN_CHECKS=listed)
+                v, reason = self.verdict()
+                self.assertEqual(v, "held")
+                self.assertIn("SCREEN_RULE", reason["unscreenable"][-1])
+                self.assertEqual(self.services.to(":sanitizeUserPrompt"), [])
+
+    def test_a_measurement_keeps_the_texts_private_and_counts_each_rule(self):
+        secret = "SET-TEXT-" + MARK
+        self.services.objects["measure/set-v1.json"] = {"items": [
+            {"name": "ordinary one " + secret, "label": "ordinary", "parts": [["body", "A fine report " + secret]]},
+            {"name": "only the model flags", "label": "ordinary", "parts": [["body", "MODEL-ONLY " + secret]]},
+            {"name": "injection", "label": "injection", "parts": [["body", "ARMOR-AND-MODEL " + secret]]},
+            {"name": "hidden", "label": "injection", "parts": [["body", "x\u202Ey " + secret]]}]}
+        self.services.answers[":sanitizeUserPrompt"] = lambda b: armor(
+            "MATCH_FOUND" if "ARMOR-AND-MODEL" in b["userPromptData"]["text"] else "NO_MATCH_FOUND")
+        self.services.answers["/v1/messages"] = lambda b: message(
+            '{"verdict": "suspicious"}' if "MODEL-ONLY" in json.dumps(b) or "ARMOR-AND-MODEL" in json.dumps(b)
+            else '{"verdict": "clean"}')
+        self.env.update(MEASURE_SET="measure/set-v1.json", MEASURE_OBJECT="measure/runs/acme/model/1-1.json",
+                        MEASURE_REPEATS="2", GITHUB_STEP_SUMMARY=os.path.join(self.dir, "summary"))
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("ACTIONS_", "GITHUB_", "ANTHROPIC_"))}
+        env.update(self.env)
+        r = subprocess.run([sys.executable, str(SCRIPTS / "screen.py"), "--measure"], env=env,
+                           capture_output=True, text=True, timeout=300)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        with open(self.env["GITHUB_STEP_SUMMARY"]) as f:
+            summary = f.read()
+        for public in (r.stdout, summary):
+            self.assertNotIn("SET-TEXT", public)
+            self.assertNotIn("only the model flags", public)
+        self.assertIn("| any | 2 of 4 | 0 of 4 | 0 |", r.stdout)
+        self.assertIn("| two_of_three | 0 of 4 | 0 of 4 | 0 |", r.stdout)
+        self.assertIn("| detectors | 0 of 4 | 0 of 4 | 0 |", r.stdout)
+        self.assertIn("| claude | 2 of 4 | 0 of 4 | 0 |", r.stdout)
+        self.assertIn("| claude_or_both_detectors | 2 of 4 | 0 of 4 | 0 |", r.stdout)
+        record = self.services.objects["measure/runs/acme/model/1-1.json"]
+        self.assertEqual(len(record["results"]), 8)
+        self.assertEqual(record["caught by one check alone"], [])
+        self.assertEqual(record["table"]["any"]["false holds"], 2)
+        self.assertEqual(self.services.to("/storage/upload/storage/v1/b/reasons/o")[0]["query"]["ifGenerationMatch"],
+                         ["0"])
 
     def test_a_service_that_cannot_be_reached_holds_it(self):
         self.item()

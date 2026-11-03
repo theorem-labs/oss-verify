@@ -608,18 +608,55 @@ def listed():
 
 # --- the verdict --------------------------------------------------------------------------------------------------
 
-def screen(review, project=None):
-    """The verdict, the names of the checks that ran, and the reason. Each check SCREEN_CHECKS names runs; one that
-    cannot answer, or a setting of it that is missing, holds the item."""
-    found, unscreenable = parts(review, project)
-    reason = {"sources": [[s, len(t)] for s, t in found], "unscreenable": unscreenable, "checks": {}}
-    try:
-        ran = listed()
-    except CheckError as e:
-        reason["unscreenable"].append(str(e))
-        return "held", [], reason
-    if unscreenable:
-        return "held", [], reason
+# How the checks' words make the verdict. Whatever the rule, a check that cannot answer holds the item.
+#   any                        held when any check answers suspicious.
+#   two_of_three               held when two of the three answer suspicious: the two detectors decide when they
+#                              agree, and the model breaks a tie.
+#   detectors                  held when Model Armor or Prompt Shields answers suspicious; the model's word is
+#                              recorded only.
+#   claude                     held when the model answers suspicious; the detectors' words are recorded only.
+#   claude_or_both_detectors   held when the model answers suspicious, or Model Armor and Prompt Shields both do.
+# Measured on a set of 20 texts we wrote (10 ordinary, 10 injections, 3 answers each), on 2026-11-03: any held 8 of
+# 30 ordinary answers and missed none; two_of_three and detectors each missed 12 of 30 injections (four injections
+# only the model caught); claude and claude_or_both_detectors held 5 of 30 and missed none.
+def _flagged(words, *checks):
+    return [words.get(c) == "suspicious" for c in checks]
+
+
+RULES = {
+    "any": (("model_armor",), lambda w: "suspicious" in w.values()),
+    "two_of_three": (("model_armor", "prompt_shields", "claude"),
+                     lambda w: sum(_flagged(w, "model_armor", "prompt_shields", "claude")) >= 2),
+    "detectors": (("model_armor", "prompt_shields"), lambda w: any(_flagged(w, "model_armor", "prompt_shields"))),
+    "claude": (("model_armor", "claude"), lambda w: w.get("claude") == "suspicious"),
+    "claude_or_both_detectors": (("model_armor", "prompt_shields", "claude"),
+                                 lambda w: w.get("claude") == "suspicious"
+                                 or all(_flagged(w, "model_armor", "prompt_shields"))),
+}
+
+
+def rule(ran):
+    """The rule SCREEN_RULE names; it must be one of RULES, and every check it needs must run."""
+    name = os.environ.get("SCREEN_RULE", "")
+    if name not in RULES:
+        raise CheckError(f"SCREEN_RULE is {name!r}: it must be one of {', '.join(RULES)}")
+    missing = [c for c in RULES[name][0] if c not in ran]
+    if missing:
+        raise CheckError(f"SCREEN_RULE {name} needs the checks {', '.join(missing)} in SCREEN_CHECKS")
+    return name
+
+
+def combine(words, name):
+    """The verdict of the checks' words under the rule name: held when any check could not answer, else as the
+    rule says."""
+    if any(w not in WORDS for w in words.values()):
+        return "held"
+    return "held" if RULES[name][1](words) else "clean"
+
+
+def run_checks(found, ran):
+    """Each check's result, as the reason records it."""
+    results = {}
     for name in ran:
         try:
             word, detail = CHECKS[name](found)
@@ -627,11 +664,93 @@ def screen(review, project=None):
             word, detail = "error", {"error": str(e)[:2000]}
         except Exception as e:   # a fault of this file: no answer, and so held
             word, detail = "error", {"error": f"{type(e).__name__}: {str(e)[:2000]}"}
-        reason["checks"][name] = dict(detail, word=word, outcome=outcome(word, detail.get("error", "")))
-    for name in CHECKS:
-        reason["checks"].setdefault(name, {"word": "not listed in SCREEN_CHECKS"})
-    clean = all(reason["checks"][name]["word"] == "clean" for name in ran)
-    return ("clean" if clean else "held"), ran, reason
+        results[name] = dict(detail, word=word, outcome=outcome(word, detail.get("error", "")))
+    return results
+
+
+def screen(review, project=None):
+    """The verdict, the names of the checks that ran, and the reason. Each check SCREEN_CHECKS names runs; one that
+    cannot answer, or a setting of it that is missing, holds the item; SCREEN_RULE makes the verdict of their words."""
+    found, unscreenable = parts(review, project)
+    reason = {"sources": [[s, len(t)] for s, t in found], "unscreenable": unscreenable, "checks": {}}
+    try:
+        ran = listed()
+        name = rule(ran)
+    except CheckError as e:
+        reason["unscreenable"].append(str(e))
+        return "held", [], reason
+    if unscreenable:
+        return "held", [], reason
+    reason["checks"] = run_checks(found, ran)
+    reason["rule"] = name
+    for check in CHECKS:
+        reason["checks"].setdefault(check, {"word": "not listed in SCREEN_CHECKS"})
+    verdict = combine({c: reason["checks"][c]["word"] for c in ran}, name)
+    return verdict, ran, reason
+
+
+# --- measuring the rules ------------------------------------------------------------------------------------------
+
+def fetch(name):
+    """An object of the private bucket, as JSON: the labelled set, which the screen account may read and nothing
+    else of that bucket."""
+    url = (f"{env('STORAGE_URL')}/storage/v1/b/{urllib.parse.quote(env('REASON_BUCKET'), safe='')}/o/"
+           f"{urllib.parse.quote(name, safe='')}?alt=media")
+    return http("GET", url, headers={"Authorization": "Bearer " + env("GOOGLE_ACCESS_TOKEN")})
+
+
+def measure():
+    """Every check SCREEN_CHECKS names, MEASURE_REPEATS times, on each text of the labelled set MEASURE_SET (an
+    object of the private bucket: {"items": [{"name", "label": "ordinary" or "injection", "parts": [[source,
+    text]]}]}), and the verdict of each rule. The per-text words go to the private bucket as MEASURE_OBJECT; the
+    public log and the run's summary get only the counts per rule, since the set's texts and names say what the
+    screen is tested against."""
+    ran = listed()
+    repeats = int(env("MEASURE_REPEATS"))
+    items = fetch(env("MEASURE_SET"))["items"]
+    results = []
+    for item in items:
+        found = [(s, t) for s, t in item["parts"]]
+        hidden = [c for c in (hiding(t) for _s, t in found) if c]
+        for _ in range(repeats):
+            words = {} if hidden else {c: r["word"] for c, r in run_checks(found, ran).items()}
+            results.append({"name": item["name"], "label": item["label"], "words": words, "hidden": hidden})
+    table = {}
+    for name, (needs, _f) in RULES.items():
+        if any(c not in ran for c in needs):
+            continue
+        row = {"false holds": 0, "ordinary answers": 0, "missed": 0, "injection answers": 0, "held for an error": 0}
+        for r in results:
+            verdict = "held" if r["hidden"] else combine(r["words"], name)
+            if any(w not in WORDS for w in r["words"].values()):
+                row["held for an error"] += 1
+            if r["label"] == "ordinary":
+                row["ordinary answers"] += 1
+                row["false holds"] += verdict == "held"
+            else:
+                row["injection answers"] += 1
+                row["missed"] += verdict == "clean"
+        table[name] = row
+    # The injections that one check alone caught in some answer: a rule that needs two lets them through.
+    alone = sorted({r["name"] for r in results if r["label"] == "injection"
+                    and sum(w == "suspicious" for w in r["words"].values()) == 1})
+    record = {"ran": ran, "repeats": repeats, "set": env("MEASURE_SET"), "results": results, "table": table,
+              "caught by one check alone": alone, "run": os.environ.get("RUN_URL", "")}
+    os.environ["REASON_OBJECT"] = env("MEASURE_OBJECT")
+    store(record)
+    lines = ["| rule | false holds | missed injections | held for an error |", "|---|---|---|---|"]
+    for name, row in table.items():
+        lines.append(f"| {name} | {row['false holds']} of {row['ordinary answers']} | {row['missed']} of "
+                     f"{row['injection answers']} | {row['held for an error']} |")
+    lines.append(f"\n{len(items)} texts, {repeats} answers each, checks {', '.join(ran)}. Injections that one check "
+                 f"alone caught in some answer: {len(alone)}. The words of each text are in the private bucket, as "
+                 f"{env('MEASURE_OBJECT')}.")
+    summary = "\n".join(lines)
+    print(summary)
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+            f.write(summary + "\n")
+    return 0
 
 
 def outcome(word, error):
@@ -667,8 +786,17 @@ def store(reason):
 
 
 def main():
+    if sys.argv[1:] == ["--measure"]:
+        global DEADLINE
+        DEADLINE = time.monotonic() + int(os.environ.get("MEASURE_SECONDS", "2400"))
+        try:
+            return measure()
+        except Exception as e:   # the message names a setting or a service, never a text of the set
+            print(f"The measurement failed: {type(e).__name__}: {str(e)[:300]}", file=sys.stderr)
+            return 1
     if len(sys.argv) not in (2, 3):
-        print("usage: screen.py <the .review directory> [<the projects/<name> directory>]", file=sys.stderr)
+        print("usage: screen.py <the .review directory> [<the projects/<name> directory>] | screen.py --measure",
+              file=sys.stderr)
         return 2
     try:
         verdict, ran, reason = screen(*sys.argv[1:])
