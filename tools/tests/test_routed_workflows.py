@@ -344,8 +344,10 @@ def commit(directory, environment, files):
 TREE = {"README.md": "x\n", "AGENTS.md": "x\n", "docs/a.md": "x\n", "tools/t.py": "x\n", "projects/p/project.yaml": "x\n"}
 
 
-def route_tests(tmp_path, change, event="pull_request", before=None):
-    """Run tests.yaml's "Which jobs the changes need" on a commit that makes `change` to TREE. Return its outputs."""
+def route_tests(tmp_path, change, event="pull_request", before=None, fork=None):
+    """Run tests.yaml's "Which jobs the changes need" on a commit that makes `change` to TREE, as a run of a pull
+    request from a fork when `fork` is "true" or "false" (the workflow's FORK; unset by default). Return its
+    outputs."""
     # git with no configuration from this machine, as in test_take_project.py.
     isolated = isolated_git_env(tmp_path)
     repo = tmp_path / "repo"
@@ -357,7 +359,8 @@ def route_tests(tmp_path, change, event="pull_request", before=None):
     paths = step(workflow("tests.yaml")["jobs"]["route"], "Which jobs the changes need")
     output, summary = tmp_path / "output", tmp_path / "summary"
     environment = {**isolated, "EVENT": event, "BEFORE": first if before is None else before,
-                   "GITHUB_OUTPUT": str(output), "GITHUB_STEP_SUMMARY": str(summary), "RUNNER_TEMP": str(tmp_path)}
+                   "GITHUB_OUTPUT": str(output), "GITHUB_STEP_SUMMARY": str(summary), "RUNNER_TEMP": str(tmp_path),
+                   **({} if fork is None else {"FORK": fork})}
     run = subprocess.run(["bash", "-e", "-c", paths["run"]], cwd=repo, env=environment, capture_output=True, text=True)
     assert run.returncode == 0, run.stderr
     return dict(line.split("=", 1) for line in output.read_text().splitlines()) if output.exists() else {}
@@ -385,6 +388,26 @@ def test_tests_route_asks_for_the_jobs_a_pull_requests_changes_need(tmp_path, ch
 
 def test_tests_route_compares_a_push_with_the_commit_before_it(tmp_path):
     assert route_tests(tmp_path, {"docs/a.md": "y\n"}, event="push") == {"docs": "true"}
+
+
+@pytest.mark.parametrize("change, outputs", [
+    # An enrollment, or any change under projects/: no job runs a fork's code.
+    ({"projects/p/project.yaml": "y\n"}, {}),
+    ({"projects/p/project.yaml": "y\n", "tools/t.py": "y\n"}, {}),
+    ({"projects/p/project.yaml": None, "tools/p.yaml": "x\n"}, {}),
+    # No file under projects/: tested as a branch of this repository is.
+    ({"tools/t.py": "y\n"}, {"suite": "true"}),
+    ({".github/workflows/tests.yaml": "y\n"}, {"suite": "true"}),
+    ({"docs/a.md": "y\n"}, {"docs": "true"}),
+])
+def test_tests_route_runs_a_forks_change_only_when_it_changes_no_file_under_projects(tmp_path, change, outputs):
+    assert route_tests(tmp_path, change, fork="true") == outputs
+    summary = (tmp_path / "summary").read_text()
+    assert ("Not run: this pull request is from a fork" in summary) == (outputs == {})
+
+
+def test_tests_route_runs_a_branchs_change_under_projects(tmp_path):
+    assert route_tests(tmp_path, {"projects/p/project.yaml": "y\n"}, fork="false") == {"suite": "true"}
 
 
 @pytest.mark.parametrize("event, before", [

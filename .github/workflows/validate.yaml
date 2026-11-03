@@ -5,10 +5,11 @@ name: "Validate"
 # enrollment checks the projects/<name>/ a pull request adds or changes against the enrollment rules, with the base
 # branch's tools/validate.py. It is a required check: it runs on every pull request, and takes the project as
 # build.yaml does (.github/scripts/take-project): the one project a fork's file list names, or the one project that
-# merging a branch of this repository into the base branch changes. A fork fails if it changes anything else, and a
-# branch of this repository fails if its merge conflicts. It passes with "nothing to validate" in the summary for a
-# pull request that changes no file or removes its project, and for one from a branch of this repository whose merge
-# changes no project or several ("Not an enrollment"). The merge decides for a branch of this repository however many
+# merging a branch of this repository into the base branch changes. A fork that changes a file under projects/ fails if
+# it changes anything but one project, and a branch of this repository fails if its merge conflicts. It passes with
+# "nothing to validate" in the summary for a pull request that changes no file or removes its project, for one from a
+# fork that changes no file under projects/, and for one from a branch of this repository whose merge changes no
+# project or several ("Not an enrollment"). The merge decides for a branch of this repository however many
 # files it changes; a fork that changes more than the 3000 files the API lists fails. It fails for a pull request into
 # any branch but the default one, and if the pull request's head or base moves while the step reads it. It does not
 # run on edited, which GitHub sends for an edit of the title or description (nothing this judges changes) and for a

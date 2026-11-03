@@ -8,7 +8,7 @@ Follow the skill [.claude/skills/add-project/SKILL.md](.claude/skills/add-projec
 
 Obey these rules:
 
-1. Change only `projects/<name>/`. This repository accepts no other change ([CONTRIBUTING.md](CONTRIBUTING.md)).
+1. Change only `projects/<name>/`: an enrollment changes nothing else ([CONTRIBUTING.md](CONTRIBUTING.md)).
 2. Ask the maintainer each question in the skill. Do not guess an answer.
 3. Follow the rules for the project directory in [docs/project-yaml.md](docs/project-yaml.md).
 4. Follow the rules for the build in [docs/build-contract.md](docs/build-contract.md).

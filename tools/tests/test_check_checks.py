@@ -2394,16 +2394,18 @@ else:
 
 class Owners(unittest.TestCase):
 
-    def test_only_the_review_files_the_skill_and_codeowners_have_an_owner_and_are_the_last_patterns(self):
+    def test_only_the_listed_patterns_have_an_owner_and_they_are_the_last_of_the_file(self):
         lines = [line.split() for line in (ROOT / ".github" / "CODEOWNERS").read_text().splitlines()
                  if line.strip() and not line.lstrip().startswith("#")]
-        owned = [["/review.md", "@theorem-labs/engineering"],
-                 ["/review-change.md", "@theorem-labs/engineering"],
-                 ["/review-issue.md", "@theorem-labs/engineering"],
-                 ["/.claude/skills/write-to-maintainer/", "@theorem-labs/engineering"],
-                 ["/.github/CODEOWNERS", "@theorem-labs/engineering"]]
+        team = "@theorem-labs/engineering"
+        owned = [[pattern, team] for pattern in (
+            # What changes what a workflow runs (the top of CODEOWNERS).
+            "/.github/", "/tools/", "/infra/", ".claude/", "CLAUDE*.md", "AGENTS*.md", "/.mcp.json", "/*.py",
+            "/pytest.ini", "/.pytest.ini", "/pyproject.toml", "/setup.cfg", "/tox.ini",
+            "/review.md", "/review-change.md", "/review-issue.md", "/.claude/skills/write-to-maintainer/",
+            "/.github/CODEOWNERS")]
         self.assertEqual([line for line in lines if len(line) > 1], owned)
-        self.assertEqual(lines[-5:], owned)
+        self.assertEqual(lines[-len(owned):], owned)
         self.assertTrue(all((ROOT / name).is_file() for name in ("review.md", "review-change.md", "review-issue.md")))
 
 

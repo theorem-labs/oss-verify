@@ -1,11 +1,14 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 name: "Tests"
-# tests runs this repository's tests and checks every project with tools/validate.py, on main and on pull requests
-# from branches of this repository. It runs that branch's code, so for a pull request from a fork it checks out and
-# runs nothing, and passes with "not run" in its summary: a fork's pull request may change only one projects/<name>/,
-# which enrollment (validate.yaml) judges, refusing a fork that changes anything else; project-builds (build.yaml)
-# builds a fork's project, and gives a fork's pull request that changes no file under projects/ a change review.
+# tests runs this repository's tests and checks every project with tools/validate.py, on main and on pull requests. It
+# runs the pull request's code, with GitHub's pull_request event: a run from a fork gets a read-only token and no
+# secret, and GitHub holds it until a maintainer approves it while the author has no merged contribution here. A pull
+# request from a fork that changes a file under projects/ is an enrollment: for it route checks out the merge only to
+# read the paths it changes, no job runs its code, and the check passes with "not run" in its summary. enrollment
+# (validate.yaml) refuses such a fork if it changes anything but one projects/<name>/, and project-builds (build.yaml)
+# builds that project. A pull request from a fork that changes no file under projects/ (a change to tools/, say) is
+# tested as a branch of this repository is, and project-builds gives it a change review.
 #
 # Each commit is judged on its own changes: for a pull request, GitHub's merge of it against the base branch; for a push
 # to main, against the commit before the push. The jobs:
@@ -15,7 +18,8 @@ name: "Tests"
 #                 docs, which runs the tests that read those files;
 #               - anything else: suite;
 #               - nothing: neither.
-#             A run started by hand, or a push whose earlier commit cannot be read, runs suite.
+#             A pull request from a fork that changes a file under projects/ runs neither (above). A run started by
+#             hand, or a push whose earlier commit cannot be read, runs suite.
 #   suite     the tests in tools/tests, and tools/validate.py on every project.
 #   docs      the tests that read the documentation: tools/tests/test_check.py's test that no tracked file but
 #             infra/toolchains.tsv names a toolchain digest, which reads every file git tracks, the documentation too;
@@ -53,7 +57,8 @@ on:
 permissions: {}
 
 env:
-  # A pull request from a fork, whose code this workflow runs none of.
+  # A pull request from a fork: when it changes a file under projects/, route asks for no job, so no step runs its code
+  # (the top of this file). The required job never runs a fork's code.
   FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
 
 concurrency:
@@ -84,22 +89,14 @@ jobs:
             exit 1
           fi
 
-      - name: A pull request from a fork runs nothing here
-        if: env.FORK == 'true'
-        run: |
-          message="Not run: this pull request is from a fork, whose code this workflow does not run. enrollment checks that it changes only one projects/<name>/."
-          echo "$message"
-          echo "$message" >> "$GITHUB_STEP_SUMMARY"
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
-        if: env.FORK != 'true'
         with:
           persist-credentials: false
           # The commit and its parents, for its changes against its first parent.
           fetch-depth: 2
 
       - name: The checkout is the merge into the base branch
-        if: github.event_name == 'pull_request' && env.FORK != 'true'
+        if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -117,7 +114,6 @@ jobs:
 
       - name: Which jobs the changes need
         id: paths
-        if: env.FORK != 'true'
         env:
           EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}
@@ -141,15 +137,20 @@ jobs:
             exit 0
           fi
           git diff --no-renames --name-only -z "$from" HEAD > "$RUNNER_TEMP/paths"
-          changed=0 other=0
+          changed=0 other=0 projects=0
           while IFS= read -r -d '' path; do
             changed=$((changed + 1))
+            [[ $path == projects/* ]] && projects=$((projects + 1))
             # docs/, and a Markdown file at the top but README.md (tools/tests/test_triage.py reads it).
             if [[ $path == docs/* || ( $path != */* && $path == *.md && $path != README.md ) ]]; then
               continue
             fi
             other=$((other + 1))
           done < "$RUNNER_TEMP/paths"
+          if [ "${FORK:-false}" = true ] && (( projects )); then
+            say "Not run: this pull request is from a fork and changes $projects of its $changed files under projects/, so it is an enrollment, and this workflow runs no code of a fork's enrollment. enrollment checks that it changes only one projects/<name>/, and project-builds builds that project."
+            exit 0
+          fi
           if (( other )); then
             echo "suite=true" >> "$GITHUB_OUTPUT"
             say "suite runs: $other of the $changed changed files are not documentation."
@@ -177,10 +178,12 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml python3-pytest strace
 
       # The binary checks' rules (tools/binary_isa.py, tools/syscall_shapes.py) are tested against the files of the
-      # public process model at the commit they were written against, fetched anonymously.
+      # public process model at the commit they were written against, fetched anonymously. Each python3 -c and -m here
+      # runs with -P, which keeps the top of the checkout off sys.path, so that no file or directory there shadows a
+      # module (.github/CODEOWNERS owns the top's .py files and pytest's configuration files).
       - name: The process model the binary checks were written against
         run: |
-          commit=$(python3 -c 'import sys; sys.path.insert(0, "tools"); import binary_isa, syscall_shapes
+          commit=$(python3 -P -c 'import sys; sys.path.insert(0, "tools"); import binary_isa, syscall_shapes
           assert binary_isa.MODEL_COMMIT == syscall_shapes.MODEL_COMMIT, "the two checks name two model commits"
           print(syscall_shapes.MODEL_COMMIT)')
           git init -q "$RUNNER_TEMP/model"
@@ -191,7 +194,7 @@ jobs:
       # The Docker tests (tools/tests/test_builder.py, test_binary_checks_docker.py) need the toolchain image and are
       # skipped here.
       - name: The tests in tools/tests
-        run: python3 -m pytest -q -p no:cacheprovider tools/tests
+        run: python3 -P -m pytest -q -p no:cacheprovider tools/tests
 
       - name: Every project passes tools/validate.py
         run: python3 tools/validate.py < /dev/null
@@ -214,7 +217,7 @@ jobs:
       - name: The tests that read the documentation
         run: |
           set -o pipefail
-          python3 -m pytest -q -p no:cacheprovider -rs \
+          python3 -P -m pytest -q -p no:cacheprovider -rs \
             "tools/tests/test_check.py::Toolchains::test_infra_toolchains_tsv_is_the_one_file_that_names_a_toolchain_digest" \
             "tools/tests/test_seeded_projects.py::Committed::test_docs_seeded_projects_tsv_is_what_the_generator_writes" \
             | tee "$RUNNER_TEMP/pytest"
@@ -241,7 +244,7 @@ jobs:
           sparse-checkout: .github/scripts
           # This job runs no code of a fork: a fork's run takes the script from the default branch as it is now, not
           # from the event's base.sha, which can be a commit from before the script existed. (A fork's pull request
-          # can change this workflow itself; enrollment fails it for any change outside one projects/<name>/.)
+          # can change this workflow itself, so the maintainer who merges a fork's change to it reads that change.)
           ref: ${{ env.FORK == 'true' && github.event.repository.default_branch || '' }}
 
       - name: Every job route asked for passed, and no other ran
