@@ -2,8 +2,9 @@
 # controller, from mod-host's protocol layer: the command parser, the dispatcher that maps each verb onto a host backend,
 # and the scenario reader. The fuzz targets read each reply from a buffer (fuzz/socket_fuzz.c in place of src/socket.c)
 # and compare values, each check in a check_<property> function with its mutant and input records.
-# Pinned to the head of FreeMixer/plugin-hostd-protocol#8, the fuzz/ written to the OSS Verify contract.
-repo: https://github.com/FreeMixer/plugin-hostd-protocol#cab7957c82eac3d79c73a0e767bdbf44d0f57a40
+# Pinned to main, after FreeMixer/plugin-hostd-protocol#8 (the fuzz/ written to the OSS Verify contract) and #10 (hello,
+# request tags, sequence numbers, param_get_many and param_set_many, and fuzz_session).
+repo: https://github.com/FreeMixer/plugin-hostd-protocol#72897aaf593edfa15a5e08d1d307a3682f21a20b
 primary_contact: linuxnow@gmail.com
 homepage: https://github.com/FreeMixer/plugin-hostd-protocol
 language: c
@@ -13,3 +14,4 @@ fuzz_targets:
   - fuzz_protocol
   - fuzz_dispatch
   - fuzz_scenario
+  - fuzz_session
