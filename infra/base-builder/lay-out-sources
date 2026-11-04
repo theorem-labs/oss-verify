@@ -338,12 +338,12 @@ def gomodules(path, name, files):
     print(f"lay-out-sources: gomodules {path}: {count} file(s) of {len(infos)} module(s)")
 
 
-# The modes a patch may give a file: git's two of a regular file. `git apply --summary` prints a `create mode`,
-# `delete mode` or `mode change` line for each file a patch makes, removes or remodes, with the mode as a six-digit
-# token, so a patch that would make a symbolic link (120000) or a submodule (160000) is named and refused before
-# anything is applied.
+# The modes a patch may give a file: git's two of a regular file. `git apply --summary` prints ` create mode <mode>
+# <path>`, ` delete mode <mode> <path>` or ` mode change <mode> => <mode> <path>` for each file a patch makes,
+# removes or remodes, so a patch that would make a symbolic link (120000) or a submodule (160000) is named and
+# refused before anything is applied. Only the mode fields of such a line are read: a path may hold six digits too.
 REGULAR_MODES = ("100644", "100755")
-MODE_TOKEN = re.compile(r"\b[0-7]{6}\b")
+MODE_LINE = re.compile(r"^ *(?:(?:create|delete) mode (\S+) |mode change (\S+) => (\S+) )")
 
 
 def patch(path, name, files):
@@ -358,7 +358,8 @@ def patch(path, name, files):
     summary = subprocess.run(["git", "apply", "--summary", "-p1", text], cwd=path, check=True, text=True,
                              stdin=subprocess.DEVNULL, capture_output=True, env=env).stdout
     for line in summary.splitlines():
-        if any(mode not in REGULAR_MODES for mode in MODE_TOKEN.findall(line)):
+        modes = MODE_LINE.match(line)
+        if modes and any(mode not in REGULAR_MODES for mode in modes.groups() if mode is not None):
             raise Failed(f"patch {name}: {line.strip()!r}: a patch may give a file mode "
                          f"{' or '.join(REGULAR_MODES)} only")
     subprocess.run(["git", "-c", "core.symlinks=false", "apply", "--whitespace=nowarn", "-p1", text], cwd=path,

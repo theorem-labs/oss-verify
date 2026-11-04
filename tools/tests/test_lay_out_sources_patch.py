@@ -29,6 +29,8 @@ ADD_AND_DELETE = ("diff --git a/two.c b/two.c\nnew file mode 100644\nindex 00000
                   "diff --git a/one.c b/one.c\ndeleted file mode 100644\nindex 2222222..0000000\n--- a/one.c\n"
                   "+++ /dev/null\n@@ -1 +0,0 @@\n-int one(void) { return 1; }\n")
 EXECUTABLE = "diff --git a/one.c b/one.c\nold mode 100644\nnew mode 100755\n"
+SIX_DIGIT_NAME = ("diff --git a/123456.txt b/123456.txt\nnew file mode 100644\nindex 0000000..1111111\n"
+                  "--- /dev/null\n+++ b/123456.txt\n@@ -0,0 +1 @@\n+hi\n")
 # what git diff writes when a file becomes a symbolic link: the file deleted, a link (mode 120000) made at its path
 TYPECHANGE = ("diff --git a/one.c b/one.c\ndeleted file mode 100644\nindex 2222222..0000000\n--- a/one.c\n"
               "+++ /dev/null\n@@ -1 +0,0 @@\n-int one(void) { return 1; }\n"
@@ -75,6 +77,11 @@ class PatchDirective(unittest.TestCase):
         self.lay_out(ADD_AND_DELETE)
         self.assertEqual((self.tree / "two.c").read_text(), "int two;\n")
         self.assertFalse(os.path.lexists(self.tree / "one.c"))
+
+    def test_a_patch_may_add_a_file_whose_name_holds_six_digits(self):
+        """Only the mode fields of a summary line are read, not every six-digit word of it."""
+        self.lay_out(SIX_DIGIT_NAME)
+        self.assertEqual((self.tree / "123456.txt").read_text(), "hi\n")
 
     def test_a_patch_may_make_a_file_executable(self):
         self.lay_out(EXECUTABLE)
