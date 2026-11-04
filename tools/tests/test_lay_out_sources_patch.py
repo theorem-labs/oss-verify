@@ -37,6 +37,9 @@ TYPECHANGE = ("diff --git a/one.c b/one.c\ndeleted file mode 100644\nindex 22222
               "diff --git a/one.c b/one.c\nnew file mode 120000\nindex 0000000..48980ad\n--- /dev/null\n"
               "+++ b/one.c\n@@ -0,0 +1 @@\n+/etc/hostname\n\\ No newline at end of file\n")
 TO_LINK = "diff --git a/one.c b/one.c\nold mode 100644\nnew mode 120000\n"
+# a rename that also makes the file a link: git's summary gives its mode change on a line with no path on it
+RENAME_TO_LINK = ("diff --git a/one.c b/two.c\nold mode 100644\nnew mode 120000\nsimilarity index 100%\n"
+                  "rename from one.c\nrename to two.c\n")
 UP = "--- a/../one.c\n+++ b/../one.c\n@@ -1 +1 @@\n-int one(void) { return 1; }\n+int one(void) { return 9; }\n"
 THROUGH_A_LINK = ("--- a/out/one.c\n+++ b/out/one.c\n@@ -1 +1 @@\n-int one(void) { return 1; }\n"
                   "+int one(void) { return 9; }\n")
@@ -88,7 +91,7 @@ class PatchDirective(unittest.TestCase):
         self.assertTrue(os.access(self.tree / "one.c", os.X_OK))
 
     def test_a_patch_that_would_make_a_symbolic_link_is_refused(self):
-        for text in (TYPECHANGE, TO_LINK):
+        for text in (TYPECHANGE, TO_LINK, RENAME_TO_LINK):
             with self.subTest(text=text):
                 said = self.refused(text)
                 self.assertIn("120000", said)

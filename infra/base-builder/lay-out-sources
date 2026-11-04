@@ -343,7 +343,8 @@ def gomodules(path, name, files):
 # removes or remodes, so a patch that would make a symbolic link (120000) or a submodule (160000) is named and
 # refused before anything is applied. Only the mode fields of such a line are read: a path may hold six digits too.
 REGULAR_MODES = ("100644", "100755")
-MODE_LINE = re.compile(r"^ *(?:(?:create|delete) mode (\S+) |mode change (\S+) => (\S+) )")
+# (a rename's mode change line carries no path, so the second mode ends the line there)
+MODE_LINE = re.compile(r"^ *(?:(?:create|delete) mode (\S+) |mode change (\S+) => (\d+)\b)")
 
 
 def patch(path, name, files):
