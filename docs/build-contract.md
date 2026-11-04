@@ -505,4 +505,6 @@ We checked each port with `tools/check --lock`, against each `harness.yaml` of t
 
 `series` lists each patch that the build applies, one time each, in order. In a ported build, `lay-out-sources` applies each `patch` line of `sources`, and stops when those lines are not the patches that `series` lists, in the same order.
 
+`lay-out-sources` applies each patch with `git apply` under `core.symlinks=false`, so a patch cannot make a symbolic link: a link in a patch becomes a regular file holding the text of its target. The setting is passed on that one command, never put in a clone's config, where it would break a working tree's own links.
+
 A patch of an enrolled project can only change how the project builds: static linking, cross-compilation, a version stamp or a generated file. A change that fixes a bug never goes in the directory of an enrolled project. We send it to the project as a patch, with its finding ([what-gets-proven.md](what-gets-proven.md#findings)). If a proof needed that patch, we publish the patch with the proof ([what-gets-proven.md](what-gets-proven.md#publishing)). The directory of a seeded project whose proofs we publish can also hold a patch that fixes a bug, once the finding of that bug is public. A proof can then be about the build with the fix. The facts list each such patch ([what-gets-proven.md](what-gets-proven.md#publishing)).

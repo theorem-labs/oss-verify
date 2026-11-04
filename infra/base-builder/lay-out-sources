@@ -34,7 +34,9 @@ trees out under /work, where the release's build had them.
     gomodules <path>  <project file>          the Go modules that a go.lock pins, as a module proxy directory for
                                               GOPROXY=file://<root>/<path>: each .mod and .zip downloaded from
                                               proxy.golang.org and checked, each .info as the lock holds it
-    patch    <path>  <project file>           a patch, applied to the tree at <path> with git apply
+    patch    <path>  <project file>           a patch, applied to the tree at <path> with git apply, under
+                                              core.symlinks=false: a link a patch creates is written as a regular
+                                              file holding the text of its target
 
 The directives run in order, and the patches in the order the project's series file lists them, which must be the
 order they appear here. A commit and a sha256 are the pins of a project's dependencies: this file is their only home
@@ -336,8 +338,15 @@ def gomodules(path, name, files):
 
 
 def patch(path, name, files):
-    subprocess.run(["git", "apply", "--whitespace=nowarn", "-p1", str(files / name)], cwd=path, check=True,
-                   stdin=subprocess.DEVNULL)
+    """Apply the project file `name` to the tree at `path` with git apply, under core.symlinks=false: git then
+    writes a link the patch creates as a regular file holding the text of its target, so a patch cannot make a
+    symbolic link at a source file's path, which every later step would read through. The setting is passed on
+    this command alone, never put in a clone's config, so that the real symbolic links of a working tree keep
+    working. GIT_CEILING_DIRECTORIES keeps a repository above the tree from counting: inside one, git apply reads
+    the paths of a patch with a `diff --git` header from the repository's top, and applies nothing."""
+    env = dict(os.environ, GIT_CEILING_DIRECTORIES=os.path.dirname(os.path.realpath(path)))
+    subprocess.run(["git", "-c", "core.symlinks=false", "apply", "--whitespace=nowarn", "-p1", str(files / name)],
+                   cwd=path, check=True, stdin=subprocess.DEVNULL, env=env)
 
 
 def main():

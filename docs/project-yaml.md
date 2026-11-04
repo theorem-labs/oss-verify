@@ -260,6 +260,8 @@ The seed corpus of a `python` project is an input of the build of its fuzz targe
 
 `series` lists each patch that the build applies, one file name on each line, in order. We ignore empty lines and lines that start with `#`. List each patch exactly once.
 
+The build applies each patch with `git apply` under `core.symlinks=false`, so a patch cannot make a symbolic link: a link in a patch becomes a regular file holding the text of its target.
+
 A patch of an enrolled project can only change how the project builds. For example, it can make the build static, set up cross-compilation, correct a version stamp or make a generated file. A change that fixes a bug never goes in the directory of your project. We send it to you as a patch, with its finding ([what-gets-proven.md](what-gets-proven.md#findings)). If a proof needed that patch, we publish the patch with the proof ([what-gets-proven.md](what-gets-proven.md#publishing)). Only the directory of a seeded project whose proofs we publish can hold such a patch ([build-contract.md](build-contract.md#build-patches)).
 
 ### Rules for each file
