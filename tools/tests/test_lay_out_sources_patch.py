@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the patch directive of infra/base-builder/lay-out-sources, which need no Docker:  python3 -m pytest tools/tests
 
-A patch row applies with `git apply` under `core.symlinks=false`, so a patch cannot make a symbolic link, and a
-patch whose own summary gives a file a mode that is not a regular file's stops the build before it is applied.
+A patch row applies with `git apply` under `core.symlinks=false`, so a patch cannot make a symbolic link: a link
+a patch makes is written as a regular file holding the text of its target.
 """
 import importlib.machinery
 import importlib.util
@@ -29,8 +29,6 @@ ADD_AND_DELETE = ("diff --git a/two.c b/two.c\nnew file mode 100644\nindex 00000
                   "diff --git a/one.c b/one.c\ndeleted file mode 100644\nindex 2222222..0000000\n--- a/one.c\n"
                   "+++ /dev/null\n@@ -1 +0,0 @@\n-int one(void) { return 1; }\n")
 EXECUTABLE = "diff --git a/one.c b/one.c\nold mode 100644\nnew mode 100755\n"
-SIX_DIGIT_NAME = ("diff --git a/123456.txt b/123456.txt\nnew file mode 100644\nindex 0000000..1111111\n"
-                  "--- /dev/null\n+++ b/123456.txt\n@@ -0,0 +1 @@\n+hi\n")
 # what git diff writes when a file becomes a symbolic link: the file deleted, a link (mode 120000) made at its path
 TYPECHANGE = ("diff --git a/one.c b/one.c\ndeleted file mode 100644\nindex 2222222..0000000\n--- a/one.c\n"
               "+++ /dev/null\n@@ -1 +0,0 @@\n-int one(void) { return 1; }\n"
@@ -81,23 +79,32 @@ class PatchDirective(unittest.TestCase):
         self.assertEqual((self.tree / "two.c").read_text(), "int two;\n")
         self.assertFalse(os.path.lexists(self.tree / "one.c"))
 
-    def test_a_patch_may_add_a_file_whose_name_holds_six_digits(self):
-        """Only the mode fields of a summary line are read, not every six-digit word of it."""
-        self.lay_out(SIX_DIGIT_NAME)
-        self.assertEqual((self.tree / "123456.txt").read_text(), "hi\n")
-
     def test_a_patch_may_make_a_file_executable(self):
         self.lay_out(EXECUTABLE)
         self.assertTrue(os.access(self.tree / "one.c", os.X_OK))
 
-    def test_a_patch_that_would_make_a_symbolic_link_is_refused(self):
-        for text in (TYPECHANGE, TO_LINK, RENAME_TO_LINK):
+    def test_a_patch_cannot_make_a_symbolic_link(self):
+        """Under core.symlinks=false git writes a link a patch makes as a regular file holding the text of its
+        target, so nothing out of the tree is readable through the laid-out file. git refuses some of these forms
+        by itself; either way, no link is made."""
+        for text, name in ((TYPECHANGE, "one.c"), (TO_LINK, "one.c"), (RENAME_TO_LINK, "two.c")):
             with self.subTest(text=text):
-                said = self.refused(text)
-                self.assertIn("120000", said)
-                self.assertIn("demo.patch", said)
-                self.assertFalse((self.tree / "one.c").is_symlink())
-                self.assertEqual((self.tree / "one.c").read_text(), ONE)
+                try:
+                    self.lay_out(text)
+                except SystemExit as stopped:
+                    self.assertIn("demo.patch", str(stopped.code))
+                made = self.tree / name
+                self.assertFalse(made.is_symlink())
+                if made.exists():
+                    self.assertNotEqual(made.read_text(), pathlib.Path("/etc/hostname").read_text())
+                self.setUp()
+
+    def test_a_link_a_patch_makes_is_a_regular_file_holding_its_target(self):
+        """The delete-then-add-as-link patch, the form git diff writes when a file becomes a link: the laid-out
+        file is a regular file whose text is the target's path, not the machine's /etc/hostname."""
+        self.lay_out(TYPECHANGE)
+        self.assertFalse((self.tree / "one.c").is_symlink())
+        self.assertEqual((self.tree / "one.c").read_text(), "/etc/hostname")
 
     def test_a_patch_with_a_path_out_of_the_tree_is_refused(self):
         self.assertIn("demo.patch", self.refused(UP))
@@ -113,8 +120,8 @@ class PatchDirective(unittest.TestCase):
         self.assertEqual((outside / "one.c").read_text(), ONE)
 
     def test_the_apply_runs_with_core_symlinks_false(self):
-        """The setting is the second line of the guard, and it is passed on the command, never set in a clone's
-        config, where it would break the real symbolic links of a working tree."""
+        """The setting is passed on the command, never put in a clone's config, where it would break the real
+        symbolic links of a working tree."""
         real = subprocess.run
         ran = []
 
@@ -124,19 +131,8 @@ class PatchDirective(unittest.TestCase):
 
         with mock.patch.object(lay_out_sources.subprocess, "run", record):
             self.lay_out(EDIT)
-        applied = [argv for argv in ran if "--summary" not in argv]
-        self.assertEqual(len(applied), 1)
-        self.assertEqual(applied[0][:4], ["git", "-c", "core.symlinks=false", "apply"])
-
-    def test_core_symlinks_false_writes_a_link_of_a_patch_as_a_regular_file(self):
-        """What the setting does to the patch the summary line also refuses: git writes the link as a regular file
-        holding the text of its target, so nothing out of the tree is readable through it."""
-        (self.project / "demo.patch").write_text(TYPECHANGE)
-        subprocess.run(["git", "-c", "core.symlinks=false", "apply", "--whitespace=nowarn", "-p1",
-                        str(self.project / "demo.patch")], cwd=self.tree, check=True, stdin=subprocess.DEVNULL,
-                       env=dict(os.environ, GIT_CEILING_DIRECTORIES=str(self.tree.parent)))
-        self.assertFalse((self.tree / "one.c").is_symlink())
-        self.assertEqual((self.tree / "one.c").read_text(), "/etc/hostname")
+        self.assertEqual(len(ran), 1)
+        self.assertEqual(ran[0][:4], ["git", "-c", "core.symlinks=false", "apply"])
 
     def test_a_repository_above_the_tree_does_not_take_the_patch(self):
         """Why the apply passes GIT_CEILING_DIRECTORIES: inside a repository, git apply reads the paths of a patch
