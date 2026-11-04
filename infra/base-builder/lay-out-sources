@@ -34,7 +34,10 @@ trees out under /work, where the release's build had them.
     gomodules <path>  <project file>          the Go modules that a go.lock pins, as a module proxy directory for
                                               GOPROXY=file://<root>/<path>: each .mod and .zip downloaded from
                                               proxy.golang.org and checked, each .info as the lock holds it
-    patch    <path>  <project file>           a patch, applied to the tree at <path> with git apply
+    patch    <path>  <project file>           a patch, applied to the tree at <path> with git apply, with
+                                              core.symlinks=false: it may change, add and delete regular files, and
+                                              a mode that is not a regular file's (a symbolic link, 120000, or a
+                                              submodule, 160000) stops the build
 
 The directives run in order, and the patches in the order the project's series file lists them, which must be the
 order they appear here. A commit and a sha256 are the pins of a project's dependencies: this file is their only home
@@ -335,9 +338,31 @@ def gomodules(path, name, files):
     print(f"lay-out-sources: gomodules {path}: {count} file(s) of {len(infos)} module(s)")
 
 
+# The modes a patch may give a file: git's two of a regular file. `git apply --summary` prints a `create mode`,
+# `delete mode` or `mode change` line for each file a patch makes, removes or remodes, with the mode as a six-digit
+# token, so a patch that would make a symbolic link (120000) or a submodule (160000) is named and refused before
+# anything is applied.
+REGULAR_MODES = ("100644", "100755")
+MODE_TOKEN = re.compile(r"\b[0-7]{6}\b")
+
+
 def patch(path, name, files):
-    subprocess.run(["git", "apply", "--whitespace=nowarn", "-p1", str(files / name)], cwd=path, check=True,
-                   stdin=subprocess.DEVNULL)
+    """Apply the project file `name` to the tree at `path` with git apply. A patch may only change, add and delete
+    regular files: a line of git's own summary that gives another mode stops the build, and the apply itself runs
+    with core.symlinks=false, under which git writes a link a patch creates as a regular file holding the text of
+    its target. The setting is passed on this command alone, never put in a clone's config, so that the real
+    symbolic links of a working tree keep working. GIT_CEILING_DIRECTORIES keeps a repository above the tree from
+    counting: inside one, git apply reads the patch's paths from the repository's top, and applies nothing."""
+    text = str(files / name)
+    env = dict(os.environ, GIT_CEILING_DIRECTORIES=os.path.dirname(os.path.realpath(path)))
+    summary = subprocess.run(["git", "apply", "--summary", "-p1", text], cwd=path, check=True, text=True,
+                             stdin=subprocess.DEVNULL, capture_output=True, env=env).stdout
+    for line in summary.splitlines():
+        if any(mode not in REGULAR_MODES for mode in MODE_TOKEN.findall(line)):
+            raise Failed(f"patch {name}: {line.strip()!r}: a patch may give a file mode "
+                         f"{' or '.join(REGULAR_MODES)} only")
+    subprocess.run(["git", "-c", "core.symlinks=false", "apply", "--whitespace=nowarn", "-p1", text], cwd=path,
+                   check=True, stdin=subprocess.DEVNULL, env=env)
 
 
 def main():
