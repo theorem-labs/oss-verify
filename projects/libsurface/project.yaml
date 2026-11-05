@@ -1,0 +1,16 @@
+# libsurface: the device behaviour of a motorised control surface, for FreeMixer: the motor-fader
+# policy (never fight the hand), touch, the bank window, the board shadow and its replay, the meter
+# step and the ring renderer. The fuzz targets drive the core through the calls a backend and a host
+# make, and the key table of the Control|24. Pinned to main after the merge of the fuzz contract.
+repo: https://github.com/FreeMixer/libsurface#963b2559f635b8ac36942123c026344ad2288cf9
+primary_contact: linuxnow@gmail.com
+homepage: https://github.com/FreeMixer/libsurface
+language: c
+sanitizers: [address, undefined]
+mutants: fuzz/sabotage
+fuzz_targets:
+  - fuzz_pure
+  - fuzz_board
+  - fuzz_bank
+  - fuzz_motor
+  - fuzz_keys
