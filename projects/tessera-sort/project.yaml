@@ -1,0 +1,6 @@
+repo: https://github.com/Yikai-Liao/tessera-sort#main
+primary_contact: lyk-boya@outlook.com
+homepage: https://github.com/Yikai-Liao/tessera-sort
+language: rust
+publish: after_fixes
+fuzz_targets: [sort]
