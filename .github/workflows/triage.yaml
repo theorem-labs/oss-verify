@@ -151,7 +151,7 @@ jobs:
       deployment: false
     permissions:
       # Only for the GitHub identity token that Google's federation trades for an access token of
-      # ossv-app-comment@theorem-agent-infra, which reads the App's key. This job posts text and runs no code of the
+      # ossv-app-comment@theorem-agent-root, which reads the App's key. This job posts text and runs no code of the
       # pull request.
       id-token: write
     env:
