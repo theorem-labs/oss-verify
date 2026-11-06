@@ -14,7 +14,10 @@ argument the build gave the compiler; and the build's own sanitizer flags, by la
 target two results:
 
 1. The uninstrumented list, in the shape of the proofs repository's harness.yaml (builds.<build>.uninstrumented):
-   each file the link took from the toolchain image, which no sanitizer instruments in any build, as in OSS-Fuzz's
+   each file of the toolchain image whose code is in the binary: an object, or an archive at least one of whose
+   members has an input section that the linker's map puts in a loaded section (one that --gc-sections kept; an
+   archive whose members left only debug information is not listed). The map is required: a link with none has no
+   list. No sanitizer instruments these files in any build, as in OSS-Fuzz's
    sanitizer builds: {name: <file name>, kind: libc | compiler-rt | sanitizer-runtime | cxx-runtime | fortran-runtime
    | image-library, sha256}, sorted by the file's path in the image. A file is the toolchain image's when its path is
    under /opt and the toolchain image has those bytes at that path (tools/check reads them from the image). In an
@@ -539,17 +542,25 @@ def go_program(data):
 
 
 def parse_map(text):
-    """The input sections of an lld map that reach the binary: [(file, member or None, section, size)]. An input
-    section is a line whose text, after the four columns of numbers, is indented by eight blanks and reads
-    <file>:(<section>) or <archive>(<member>):(<section>). A section at address 0 (debug information, which the
-    published binary's --strip-all removes) and the linker's own sections (<internal>) are left out."""
+    """The input sections of an lld map that reach the binary: [(file, member or None, section, size)]. An output
+    section is a line whose text follows the four columns of numbers with no indent; an input section is a line whose
+    text is indented by eight blanks and reads <file>:(<section>) or <archive>(<member>):(<section>), and belongs to
+    the output section above it. Only input sections of an output section at a non-zero address are kept: lld gives
+    a section that is not loaded (debug information, .comment, which the published binary's --strip-all removes) the
+    address 0, and its input sections their offsets in it, which are not 0 past the first. So an archive whose
+    members only have debug information left after --gc-sections is not taken. The linker's own sections
+    (<internal>) are left out."""
     taken = []
+    loaded = False
     for line in text.splitlines():
         found = MAP_COLUMNS.match(line)
         if not found:
             continue
         rest = line[found.end():]
-        if not rest.startswith(" " * 8) or rest[8:9] in ("", " "):
+        if rest[:1] not in ("", " "):
+            loaded = int(found.group(1), 16) != 0
+            continue
+        if not loaded or not rest.startswith(" " * 8) or rest[8:9] in ("", " "):
             continue
         rest = rest[8:]
         at = rest.rfind(":(")
@@ -562,8 +573,7 @@ def parse_map(text):
         if file.endswith(")") and "(" in file:
             open_at = file.rindex("(")
             file, member = file[:open_at], file[open_at + 1:-1]
-        if int(found.group(1), 16):
-            taken.append((file, member, section, int(found.group(2), 16)))
+        taken.append((file, member, section, int(found.group(2), 16)))
     return taken
 
 
