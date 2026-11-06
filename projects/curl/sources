@@ -1,0 +1,29 @@
+# Generated from the build recipe of the oss-fuzz-theorems 2026.10 release; do not edit.
+# kind	path	arguments: see lay-out-sources
+tree	ext/curl-fuzz_bufq/src	upstream/curl
+link	ext/curl-fuzz_fnmatch/src	ext/curl-fuzz_bufq/src
+file	targets/curl-fuzz_bufq/fuzz_bufq.cc	https://raw.githubusercontent.com/curl/curl-fuzzer/4768d8de6f3209bb5dd761cd24ff7ccbfbb6b5b8/fuzz_bufq.cc	b3caf628a0f010b94d3f168c188ae2e253d95aed56dc5bd6b544b624668d5e0d
+file	targets/curl-fuzz_bufq/fuzz_bufq.h	https://raw.githubusercontent.com/curl/curl-fuzzer/4768d8de6f3209bb5dd761cd24ff7ccbfbb6b5b8/fuzz_bufq.h	23ca300a2e9e32c23180d2090f38d976787898748b26bef1389981f53947046e
+file	targets/curl-fuzz_fnmatch/fuzz_fnmatch.cc	https://raw.githubusercontent.com/curl/curl-fuzzer/f41a4eef509bdee8ccc1fc90e6fb3404046d256b/fuzz_fnmatch.cc	9d48c1d9079ec0e24ae763165ae549e2412d47df43ba729eca4f4a88110c9313
+# Not of the release: the curl-fuzzer trees the fuzz targets come from, one row for each commit
+git	ext/curl-fuzzer-4768d8de6f32	https://github.com/curl/curl-fuzzer.git	4768d8de6f3209bb5dd761cd24ff7ccbfbb6b5b8
+git	ext/curl-fuzzer-f41a4eef509b	https://github.com/curl/curl-fuzzer.git	f41a4eef509bdee8ccc1fc90e6fb3404046d256b
+git	ext/curl-fuzzer-de8de303d3e0	https://github.com/curl/curl-fuzzer.git	de8de303d3e0d54e5ce235fd95d562154970ebf9
+# Not of the release: fuzz_url, fuzz_doh and fuzz_netrc from curl-fuzzer de8de303d3e0, on the curl tree of curl-fuzz_bufq's pin
+link	ext/curl-fuzz_url/src	ext/curl-fuzz_bufq/src
+link	ext/curl-fuzz_doh/src	ext/curl-fuzz_bufq/src
+link	ext/curl-fuzz_netrc/src	ext/curl-fuzz_bufq/src
+file	targets/curl-fuzz_url/fuzz_url.cc	https://raw.githubusercontent.com/curl/curl-fuzzer/de8de303d3e0d54e5ce235fd95d562154970ebf9/fuzz_url.cc	90791755a9c19a7001aa3fbf1bf2231eb9dd07d502751a2fb78303c6cb7bc426
+file	targets/curl-fuzz_doh/fuzz_doh.cc	https://raw.githubusercontent.com/curl/curl-fuzzer/de8de303d3e0d54e5ce235fd95d562154970ebf9/fuzz_doh.cc	bd6083480a7d7251ec65160e910fbe27ff1976450b81c0dff3e5b6052cd93ccc
+file	targets/curl-fuzz_netrc/fuzz_netrc.cc	https://raw.githubusercontent.com/curl/curl-fuzzer/de8de303d3e0d54e5ce235fd95d562154970ebf9/fuzz_netrc.cc	a3579477ec6fbe02d1c340858ab76e4414bdd25a1113c9c5b42b92eacf594165
+file	targets/curl-fuzz_netrc/proto_fuzzer/bounded_anonymous_input_file.h	https://raw.githubusercontent.com/curl/curl-fuzzer/de8de303d3e0d54e5ce235fd95d562154970ebf9/proto_fuzzer/bounded_anonymous_input_file.h	a2145119bdc3c4d364512d594ca0f5b87f0f839f0ce13ce921d051b6f2d99be6
+file	targets/curl-fuzz_netrc/proto_fuzzer/bounded_anonymous_input_file.cc	https://raw.githubusercontent.com/curl/curl-fuzzer/de8de303d3e0d54e5ce235fd95d562154970ebf9/proto_fuzzer/bounded_anonymous_input_file.cc	29beca8f00d5ae4689cf264fb56b524703d6db19c787eaf610667b72549ab11a
+# Not of the release: fuzz_bufq's harness as the OSS Verify proofs build it, without the three system calls of its first call that the process model declines
+patch	targets/curl-fuzz_bufq	curl-fuzz_bufq.0001-no-syscalls.patch
+# Not of the release: curl_fuzzer_proto_file from the curl-fuzzer de8de303d3e0 tree above, on the curl tree of curl-fuzz_bufq's pin, with libprotobuf-mutator v1.5, the protobuf it builds (v29.3), the abseil-cpp of that protobuf's submodule, and the pure-Python protobuf 7.36.2 that curl-fuzzer's uv.lock pins, for its schema_eligibility.py
+link	ext/curl-fuzz_proto_file/src	ext/curl-fuzz_bufq/src
+link	targets/curl-fuzz_proto_file	ext/curl-fuzzer-de8de303d3e0
+git	ext/libprotobuf-mutator-1.5	https://github.com/google/libprotobuf-mutator.git	dc4ced337a9fb4047e2dc727268fbac55ca82f73
+git	ext/protobuf-29.3	https://github.com/protocolbuffers/protobuf.git	b407e8416e3893036aee5af9a12bd9b6a0e2b2e6
+git	ext/protobuf-29.3/third_party/abseil-cpp	https://github.com/abseil/abseil-cpp.git	4a2c63365eff8823a5221db86ef490e828306f9d
+archive	ext/python-protobuf-7.36.2	https://files.pythonhosted.org/packages/e4/04/d52c7016b04b6c5108f26691f9d33ec82a9b65d041f1a9c771137693d618/protobuf-7.36.2-py3-none-any.whl	bdb3a345d48db958e6ce1f18e508beb0cc981d64f24088427549c866cd039f1e	0	google/
