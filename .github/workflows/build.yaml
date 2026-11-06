@@ -1551,7 +1551,7 @@ jobs:
       # contents: read only for the checkout of .github/scripts. It writes with the oss-verify App's token.
       contents: read
       # Only for the GitHub identity token that Google's federation trades for an access token of
-      # ossv-app-comment@theorem-agent-infra, which reads the App's key, the repository's name and the held findings.
+      # ossv-app-comment@theorem-agent-root, which reads the App's key, the repository's name and the held findings.
       id-token: write
     env:
       GCP_WORKLOAD_IDENTITY_PROVIDER: projects/844532188053/locations/global/workloadIdentityPools/github/providers/github-ossv
@@ -1707,7 +1707,7 @@ jobs:
       queue: max
     permissions:
       # Only for the GitHub identity token that Google's federation trades for an access token of
-      # ossv-app-comment@theorem-agent-infra, which reads the App's key. It writes with the oss-verify App's token, not
+      # ossv-app-comment@theorem-agent-root, which reads the App's key. It writes with the oss-verify App's token, not
       # this job's, and runs no code of the pull request.
       id-token: write
       # Only for this run's jobs, read with this job's own token: was a screened review stopped at its hourly cap?
