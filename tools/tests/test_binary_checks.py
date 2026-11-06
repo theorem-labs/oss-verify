@@ -189,7 +189,13 @@ def archive(members):
 
 
 def map_line(address, size, text):
+    """A line of an lld map: an input section, or with more indent a symbol."""
     return f"{address:>16x} {address:>16x} {size:>8x} {4:>5}         {text}"
+
+
+def map_output(address, size, name):
+    """A line of an lld map that starts an output section."""
+    return f"{address:>16x} {address:>16x} {size:>8x} {4:>5} {name}"
 
 
 def good(name="f"):
@@ -201,12 +207,15 @@ class MapParsing(unittest.TestCase):
     def test_input_sections_and_members(self):
         text = "\n".join([
             "             VMA              LMA     Size Align Out     In      Symbol",
-            map_line(0x10000, 0x40, ".text"),
+            map_output(0x10000, 0x40, ".text"),
             map_line(0x10000, 0x10, "/opt/musl-sysroot/usr/lib/crt1.o:(.text)"),
             map_line(0x10010, 0x20, "/work/build/libfoo.a(foo.c.o):(.text.foo)"),
             map_line(0x10010, 0, "        foo"),  # a symbol line, indented further
             map_line(0x10030, 0x8, "<internal>:(.rodata.str1.1)"),
+            map_output(0, 0x40, ".debug_info"),
             map_line(0, 0x2b, "/opt/rt/libclang_rt.asan_static.a(asan_rtl_static.cpp.o):(.debug_info)"),
+            # past the first, the input sections of a section that is not loaded have their offsets as addresses
+            map_line(0x2b, 0x15, "/work/build/libfoo.a(bar.c.o):(.debug_info)"),
         ])
         self.assertEqual(check_links.parse_map(text), [
             ("/opt/musl-sysroot/usr/lib/crt1.o", None, ".text", 0x10),
@@ -401,6 +410,56 @@ class Analyse(unittest.TestCase):
             {"name": "libc.a", "kind": "libc", "sha256": "c" * 64},
         ])
         self.assertEqual(result["instrumented"]["result"], "plain")
+
+    def test_an_archive_that_gc_sections_removed_is_not_listed(self):
+        """Two image archives that the link took members of: --gc-sections kept code of libz's and removed all of
+        libcrypto's, whose debug information alone is left in the map (OSSV-332). Only libz is listed, read from
+        the record a build writes; a record with no map gives no list."""
+        crypto = "/opt/musl-sysroot/usr/lib/libcrypto.a"
+        image = dict(self.IMAGE, **{crypto: "b" * 64})
+        digest = "a" * 64
+        directory = self.raw / ".records" / digest
+        directory.mkdir()
+        (directory / "map").write_text("\n".join([
+            "             VMA              LMA     Size Align Out     In      Symbol",
+            map_output(0x10000, 0x40, ".text"),
+            map_line(0x10000, 0x10, f"{self.CRT1}:(.text)"),
+            map_line(0x10010, 0x10, f"{self.LIBC}(memcpy.lo):(.text.memcpy)"),
+            map_line(0x10020, 0x20, f"{self.ZLIB}(inflate.o):(.text.inflate)"),
+            map_output(0, 0x300, ".debug_info"),
+            map_line(0, 0x100, f"{self.ZLIB}(inflate.o):(.debug_info)"),
+            map_line(0x100, 0x100, f"{crypto}(libcrypto-lib-init.o):(.debug_info)"),
+            map_line(0x200, 0x100, f"{crypto}(libcrypto-lib-err.o):(.debug_info)"),
+            map_output(0, 0x30, ".comment"),
+            map_line(0, 0x18, f"{self.ZLIB}(inflate.o):(.comment)"),
+            map_line(0x18, 0x18, f"{crypto}(libcrypto-lib-init.o):(.comment)"),
+        ]) + "\n")
+        (directory / "inputs.tsv").write_text("".join(
+            f"{path}\t{path}\t{image[path]}\t1\n" for path in (self.CRT1, self.LIBC, self.ZLIB, crypto)))
+        (directory / "driver").write_text("/tmp/ov/cli.o\n")
+        record = check_links.read_record(self.raw, digest)
+        result = check_links.analyse({"plain": record}, image)["plain"]
+        self.assertEqual(result["uninstrumented"], [
+            {"name": "crt1.o", "kind": "libc", "sha256": "1" * 64},
+            {"name": "libc.a", "kind": "libc", "sha256": "c" * 64},
+            {"name": "libz.a", "kind": "image-library", "sha256": "f" * 64},
+        ])
+        self.assertEqual(result["instrumented"]["result"], "plain")
+        # With no map, the step fails: no list at all, never the files the link took.
+        (directory / "map").unlink()
+        with self.assertRaises(check_links.RecordError):
+            check_links.read_record(self.raw, digest)
+        executable = elf_object(NOP)
+        (self.raw / "fuzzer").write_bytes(executable)
+        kept = self.raw / ".records" / hashlib.sha256(executable).hexdigest()
+        kept.mkdir()
+        (kept / "inputs.tsv").write_text((directory / "inputs.tsv").read_text())
+        (kept / "driver").write_text("/tmp/ov/cli.o\n")
+        reason, _ = check_binaries.record_of(self.raw, "fuzzer")
+        self.assertIsInstance(reason, str)
+        result = check_links.analyse({"plain": reason}, image)["plain"]
+        self.assertIsNone(result["uninstrumented"])
+        self.assertEqual(result["instrumented"]["result"], "error")
 
     def test_asan_wants_every_object_instrumented(self):
         bad = elf_object(NOP, defined=["g"], files=["other.c"], comment=True)
