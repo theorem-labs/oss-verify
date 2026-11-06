@@ -32,7 +32,8 @@ target two results:
    every build, by design, and is not listed.
 
 2. Whether the project's own code is instrumented, in each sanitizer build. The project's code is every object and
-   archive member the link took that is neither the driver's nor the toolchain image's. In the AddressSanitizer
+   archive member the link took, with code in a loaded section of the binary (parse_map), that is neither the
+   driver's nor the toolchain image's. In the AddressSanitizer
    builds (asan, asan-ubsan), each one with code must refer to __asan_init or __asan_version_mismatch_check_*, as the
    constructor that AddressSanitizer adds to each instrumented object does. rustc's allocator shim, an object that only
    forwards __rust_alloc and its siblings to the standard library, is the one exception (at most one such member), as
