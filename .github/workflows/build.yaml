@@ -64,7 +64,11 @@ name: "Build"
 #            comments, reviews and review comments alone, SCREEN_SCOPE comments): Google Cloud Model Armor's prompt
 #            injection and jailbreak filter; Azure AI Content Safety's Prompt Shields, which reads the text as
 #            documents; and a small Claude model with no tools whose answer a schema holds to the words clean and
-#            suspicious, each through the screen's own identity (its env below). Each reads all the text joined.
+#            suspicious, each through the screen's own identity (its env below). The two detectors read all the
+#            text joined. The model is asked two questions, each three times, each word the majority of its three
+#            answers: one about the text, and one about a projects/<name>/patch_style.md the enrollment adds,
+#            which a project writes for us and the review reads, and which the first question would answer about
+#            for being what it is. Either question's word suspicious is the model's word.
 #            SCREEN_RULE makes the verdict of their words: claude_or_both_detectors, held when the model answers
 #            suspicious or Model Armor and Prompt Shields both do (.github/scripts/screen.py, RULES, and the
 #            measurement that chose it). Under every rule, a check that cannot answer or runs out of time, a file
@@ -87,14 +91,21 @@ name: "Build"
 #            injections of each rule in the run's summary. The texts, and each check's words for them, stay in the
 #            bucket, as measure/runs/theorem-labs/oss-verify/<run>-<attempt>.json. On such a run the required check
 #            passes when route and the screen job passed and every other job was skipped.
-#            What it reads: the item's title, body, every account's comments, reviews and review comments, its other
-#            fields, the diff, the checks' names, and for an enrollment what review-gather wrote from the build, the
-#            validator, triage, the facts of the project's repository and the seed corpora's bytes; each changed file,
-#            and each file of projects/<name>/ but a seed corpus, must be text, whose new lines the diff holds. What it
-#            does not read: the project's repository at the built commit (.review/source/), far more text than a
-#            screen reads, which the review of a writer's enrollment reads as data, and the review of an outsider's
-#            enrollment does not get (its checks that need it are left to a person, who can start the full review
-#            by hand); and the last review's session that the review resumes, the model's own earlier context.
+#            What it reads: the text an outside account decides, by its author and its source, never by what it
+#            says. The item's title and body; its comments, reviews and review comments, but this App's own; the
+#            commit messages; the diff; for an enrollment the seed corpora's bytes, the facts of the project's
+#            repository and the report of the fuzz targets' checks, which quote that repository; and any other
+#            file the gather job writes that .github/scripts/screen.py's GENERATED does not name. Each changed
+#            file, and each file of projects/<name>/ but a seed corpus, must be text, whose new lines the diff
+#            holds. What it does not read: the files main's own scripts write (GENERATED, with the reason for
+#            each) -- the triage comment and triage's own report, the validator's and the checklist's output, the
+#            template's history, the checks' names, the line that stands in for the project's repository, the
+#            build's result and binaries table -- which are addressed to a reviewer or to the review's model, so
+#            a check that reads them answers about main and not about the account; the project's repository at
+#            the built commit (.review/source/), far more text than a screen reads, which the review of a
+#            writer's enrollment reads as data, and the review of an outsider's enrollment does not get (its
+#            checks that need it are left to a person, who can start the full review by hand); and the last
+#            review's session that the review resumes, the model's own earlier context.
 #   project-builds
 #            the build above, under the check name build, when route asks for it; it passes with nothing to build
 #            when the pull request enrolls no project (below). Its job id stays project-builds, the name the other jobs
@@ -876,6 +887,12 @@ jobs:
       # true when the screen reads the item first: route's trust is screen, or the review would read text of an
       # account without write access (the step below).
       screen: ${{ steps.outside.outputs.screen }}
+      # The logins of the comments' and reviews' authors that have write access, which the screen does not read:
+      # their text is this project's own (the step below).
+      writers: ${{ steps.outside.outputs.writers }}
+      # The ids of the comments the step below confirmed are this App's own, by the account type the REST API
+      # gives for each: gh names an App without its [bot], and a user can take that name.
+      app_comments: ${{ steps.outside.outputs.app_comments }}
       # The session to resume and the commit it reviewed, from review-gather (empty for a fresh review). None for a
       # screened item: no screen reads a session, which a review that read unscreened text, such as one started by
       # hand, may have kept.
@@ -942,11 +959,14 @@ jobs:
             fi
           done
           echo "The pull request's head is $HEAD_SHA, before and after the reads."
-      # A writer's pull request or issue can hold the text of others: comments, reviews and review comments, which
-      # anyone can write and the review reads. When any of their accounts has no write access, or cannot be named,
-      # the screen reads those texts first (SCREEN_SCOPE comments). The accounts come from the files the review reads.
-      # A run a person with write access started by hand is that person's request: it is not screened. A rescreen is
-      # not such a run, whoever started it: route decided its trust from the API.
+      # A pull request or an issue can hold the text of several accounts: its comments, its reviews and its review
+      # comments, which anyone can write and the review reads. This step asks GitHub which of their accounts have
+      # write access, for two decisions. A writer's item whose text is all writers' is not screened at all; one
+      # that holds text of another account is screened for those texts (SCREEN_SCOPE comments). And whatever the
+      # trust, the screen reads none of the writers' own text: it is this project's, not the outside text the
+      # screen is for (its output writers, and .github/scripts/screen.py). The accounts come from the files the
+      # review reads. A run a person with write access started by hand is that person's request: it is not
+      # screened. A rescreen is not such a run, whoever started it: route decided its trust from the API.
       - name: Whether the review reads text of an account without write access
         id: outside
         if: steps.head.outputs.moved != 'true'
@@ -977,14 +997,15 @@ jobs:
             id=${BASH_REMATCH[1]}
             [ "$(gh api "repos/$REPO/issues/comments/$id" --jq '"\(.user.login) \(.user.type)"' 2> /dev/null)" = "$1[bot] Bot" ]
           }
-          screen=true
+          screen=true writers="" app=""
+          item=.review/pr.json
+          [ -f "$item" ] || item=.review/issue.json
           if [ "$TRUST" = writer ] && [ "$EVENT" = workflow_dispatch ] && [ "$RESCREEN" != true ]; then
             screen=false
-          elif [ "$TRUST" = writer ]; then
-            item=.review/pr.json
-            [ -f "$item" ] || item=.review/issue.json
+          else
             # keep()'s last line is the exit status; an account GitHub no longer names is "-". A read that cannot be
-            # parsed, or a pull request with no list of its review comments' authors, leaves screen true.
+            # parsed, or a pull request with no list of its review comments' authors, names no writer, and leaves
+            # screen true: then the screen reads every comment, as it did before any of them was told apart.
             if accounts=$(sed '$d' "$item" | jq -r '((.comments // [])[] | [(.author.login // ""), (.url // "")]),
                 ((.reviews // [])[] | [(.author.login // ""), ""])
                 | (if .[0] == "" then "-" else .[0] end) + "\t" + .[1]' 2> /dev/null) \
@@ -992,18 +1013,36 @@ jobs:
               if [ -f .review/review-comment-authors.txt ]; then
                 accounts+=$'\n'$(sed '$d' .review/review-comment-authors.txt | sed 's/^$/-/')
               fi
-              screen=false
+              outside=0
               while IFS=$'\t' read -r login url; do
                 [ -n "$login$url" ] || continue
-                if ! writer "${login:--}" "${url:-}"; then
-                  screen=true
-                  echo "The review reads text of an account without write access, or one GitHub cannot name: the screen reads it first."
-                  break
+                rc=0
+                trusted "${login:--}" || rc=$?
+                if (( rc == 0 )); then
+                  # A login the collaborator API placed, or an App under the name the REST API gives it, with
+                  # its [bot]: no other account can hold that name.
+                  [[ ,$writers, == *",$login,"* ]] || writers+=",$login"
+                elif writer "${login:--}" "${url:-}" && [[ $url =~ \#issuecomment-([0-9]+)$ ]]; then
+                  # gh names an App without its [bot], and a user can take that name: this comment alone is the
+                  # App's, by the account type the REST API gives for it, so the screen is told its id, not a
+                  # name.
+                  app+=",${BASH_REMATCH[1]}"
+                else
+                  outside=1
                 fi
               done < <(sort -u <<< "$accounts")
+              if [ "$TRUST" = writer ]; then
+                if (( outside )); then
+                  echo "The review reads text of an account without write access, or one GitHub cannot name: the screen reads it first."
+                else
+                  screen=false
+                fi
+              fi
             fi
           fi
           echo "screen=$screen" >> "$GITHUB_OUTPUT"
+          echo "writers=${writers#,}" >> "$GITHUB_OUTPUT"
+          echo "app_comments=${app#,}" >> "$GITHUB_OUTPUT"
       # The project's repository at the built commit is far more text than the screen reads, and an enrollment of an
       # account without write access names it: so that review reads none of it. Its source.txt says so, and the
       # checks that need it are left to a person; a person with write access starts the full review by hand.
@@ -1133,6 +1172,10 @@ jobs:
           # A writer's item is screened only for the comments, reviews and review comments of others it holds: the
           # rest is a writer's, which the review reads as before.
           SCREEN_SCOPE: ${{ needs.route.outputs.trust == 'writer' && 'comments' || 'all' }}
+          # The comments' and reviews' authors that have write access (the gather job): the screen reads none of
+          # their text, whatever the scope, since it is this project's own and not the outside text it is for.
+          SCREEN_WRITERS: ${{ needs.gather.outputs.writers }}
+          SCREEN_APP_COMMENTS: ${{ needs.gather.outputs.app_comments }}
         run: python3 .github/scripts/screen.py .review ${NAME:+"projects/$NAME"}
       # Every listed check, MEASURE_REPEATS times, on each text of the labelled set kept in the private bucket (the
       # screen's account can read only its measure/set-* objects), and the verdict of each rule of SCREEN_RULE's
