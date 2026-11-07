@@ -916,8 +916,8 @@ class ScreenTest(unittest.TestCase):
                 ("a line of the file shaped like a header",
                  "diff --git a/projects/p/notes.md b/projects/p/notes.md\n--- /dev/null\n+++ b/projects/p/notes.md\n"
                  "@@ -0,0 +1,2 @@\n++++ b/projects/p/patch_style.md\n+SMUGGLED-LINE\n"),
-                ("a path with a space after it",
-                 "diff --git a/x b/x\n--- /dev/null\n+++ b/projects/p/patch_style.md \n@@ -0,0 +1 @@\n"
+                ("a path with a space after it, as git writes such a name, with a tab",
+                 "diff --git a/x b/x\n--- /dev/null\n+++ b/projects/p/patch_style.md \t\n@@ -0,0 +1 @@\n"
                  "+SMUGGLED-LINE\n")):
             with self.subTest(why=why):
                 self.fresh()
