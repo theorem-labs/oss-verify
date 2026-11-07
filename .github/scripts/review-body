@@ -14,12 +14,21 @@
 # <!-- oss-verify-review-head <commit> -->, the whole reviewed commit, which the comment job reads before it holds an
 # item. Line 2 is the
 # verdict line, which the inbound watcher reads (the stream's bin/ossv-pr-watch, verdict_line):
-#   <!-- oss-verify-verdict {"head":"<commit>","blocking":[<ids whose verdict is fail>],"person":[<ids whose verdict is person>]} -->
-# with the ids sorted. VERDICTS empty, null, {} or anything but one JSON object gives no verdict line, so a missing
+#   <!-- oss-verify-verdict {"head":"<commit>","blocking":[<ids whose verdict is fail>],
+#     "optional":[<ids whose verdict is optional>],"person":[<ids whose verdict is person>]} -->
+# on one line, with the ids sorted. `blocking` holds the checks that hold the enrollment, which the "Verdicts" section
+# of review.md calls **fail**, and nothing else: an **optional** verdict, review.md's weak-but-not-empty check of F5
+# or F8, is a request in the comment's collapsed block and a condition of nothing, so it goes in `optional`, never in
+# `blocking`. That is the same rule the comment's own first sentence counts by, so the line and the visible text
+# cannot disagree.
+# VERDICTS empty, null, {} or anything but one JSON object gives no verdict line, so a missing
 # verdict never reads as "nothing blocks". The model chooses the keys of VERDICTS, so a key that is not a check id
 # also gives no verdict line: an id is a section's letter with an optional item number (A1, B, F7) in review.md, or a
 # number (1 to 5) in review-change.md, and nothing else, so no key of the line can close the HTML comment or hold a
-# mention or a reference. The schemas of .github/scripts/review-prompt ask for the same keys. Then the footer that
+# mention or a reference. An **optional** under any id but F5 and F8 gives no verdict line either: review.md gives
+# that verdict to those two checks alone, so under another id it is a verdict no reader can place, and a line that
+# dropped it would read as a clean one. The schemas of .github/scripts/review-prompt ask for the same keys and the
+# same values. Then the footer that
 # names the commit and the rules file, the review's first 50,000 characters and, when CHECKS is not empty, the first
 # 12,000 of the checks' report folded under it: GitHub refuses a comment over 65,536 characters. The review and the
 # report are what a pull request can steer, so each goes through .github/scripts/review-neutralize first: no mention,
@@ -39,7 +48,9 @@ neutralize="$(dirname "${BASH_SOURCE[0]}")/review-neutralize"
 verdict=$(jq -sc --arg head "$HEAD_SHA" '
   select(length == 1) | .[0] | select(type == "object" and length > 0)
   | select(keys | map(test("\\A(?:[A-G][0-9]*|[0-9]+)\\z")) | all)
+  | select([to_entries[] | select(.value == "optional") | .key] - ["F5", "F8"] == [])
   | {head: $head, blocking: ([to_entries[] | select(.value == "fail") | .key] | sort),
+     optional: ([to_entries[] | select(.value == "optional") | .key] | sort),
      person: ([to_entries[] | select(.value == "person") | .key] | sort)}' <<< "${VERDICTS:-}" 2> /dev/null) \
   || verdict=""
 printf '<!-- oss-verify-review -->\n'

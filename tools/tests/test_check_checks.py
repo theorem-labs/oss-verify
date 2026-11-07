@@ -836,7 +836,8 @@ class PostingStep(unittest.TestCase):
         self.assertTrue(rest.endswith(f"\n{delimiter}\n"))
         self.assertEqual(self.post(review, text=rest[:-len(delimiter) - 2]), draft)
         self.assertEqual(draft.split("\n")[1],
-                         '<!-- oss-verify-verdict {"head":"%s","blocking":["F2"],"person":["C4"]} -->' % ("b" * 40))
+                         '<!-- oss-verify-verdict {"head":"%s","blocking":["F2"],"optional":[],"person":["C4"]} -->'
+                         % ("b" * 40))
 
 
 HEAD40 = "0123456789abcdef0123456789abcdef01234567"
@@ -879,7 +880,8 @@ class VerdictLine(unittest.TestCase):
     def test_the_comment_has_the_verdict_line_second(self):
         lines = body(verdicts='{"A1":"pass","F2":"fail","C4":"person","F7":"pass"}', head=HEAD40).split("\n")
         self.assertEqual(lines[0], "<!-- oss-verify-review -->")
-        self.assertEqual(lines[1], '<!-- oss-verify-verdict {"head":"%s","blocking":["F2"],"person":["C4"]} -->' % HEAD40)
+        self.assertEqual(lines[1], '<!-- oss-verify-verdict {"head":"%s","blocking":["F2"],"optional":[],'
+                                   '"person":["C4"]} -->' % HEAD40)
 
     def test_no_verdicts_writes_no_verdict_line(self):
         for v in ("", "null", "{}", "[]"):
@@ -890,7 +892,7 @@ class VerdictLine(unittest.TestCase):
                         .split("\n")[1].startswith("<!-- oss-verify-verdict "))
 
     def test_a_change_review_uses_its_own_ids(self):
-        self.assertIn('"blocking":["2"],"person":["5"]',
+        self.assertIn('"blocking":["2"],"optional":[],"person":["5"]',
                       body(verdicts='{"1":"pass","2":"fail","5":"person"}', head=HEAD40).split("\n")[1])
 
     def test_every_check_of_the_rules_reaches_the_verdict_line(self):
@@ -903,7 +905,7 @@ class VerdictLine(unittest.TestCase):
             with self.subTest(ids=ids):
                 line = body(verdicts=json.dumps({i: "fail" for i in ids}), head=HEAD40).split("\n")[1]
                 self.assertEqual(json.loads(line.removeprefix("<!-- oss-verify-verdict ").removesuffix(" -->")),
-                                 {"head": HEAD40, "blocking": sorted(ids), "person": []})
+                                 {"head": HEAD40, "blocking": sorted(ids), "optional": [], "person": []})
 
     def test_a_verdict_key_that_is_no_check_id_writes_no_verdict_line(self):
         # A missing verdict line never reads as "nothing blocks", so the line goes, not only the key: whatever a key
@@ -916,6 +918,34 @@ class VerdictLine(unittest.TestCase):
                     shown = html.unescape(b)
                     self.assertIsNone(ModelText.MENTION.search(shown), shown)
                     self.assertIsNone(ModelText.REFERENCE.search(shown), shown)
+
+    def test_an_optional_verdict_of_f5_or_f8_blocks_nothing(self):
+        # review.md, "Verdicts": `optional` is a weak but not empty check of F5 or F8. Its request goes in the
+        # comment's collapsed block, the first sentence does not count it, and it is a condition of nothing, so the
+        # verdict line must say that nothing blocks. These are the verdict sets of the two enrollment reviews whose
+        # line read "blocking":["F5"] while their text said that no blocking change was needed.
+        plugin_db = {"A1": "pass", "D3": "pass", "E": "person", "F2": "pass", "F5": "optional", "F6": "person",
+                     "F7": "pass"}
+        libmackie = {"A1": "pass", "D3": "pass", "E": "person", "F2": "pass", "F5": "optional", "F7": "pass"}
+        for verdicts, person in ((plugin_db, ["E", "F6"]), (libmackie, ["E"])):
+            with self.subTest(person=person):
+                line = body(verdicts=json.dumps(verdicts), head=HEAD40).split("\n")[1]
+                self.assertEqual(json.loads(line.removeprefix("<!-- oss-verify-verdict ").removesuffix(" -->")),
+                                 {"head": HEAD40, "blocking": [], "optional": ["F5"], "person": person})
+
+    def test_a_fail_of_f5_or_f8_still_blocks(self):
+        # The check that ends the run on no wrong value at all keeps the verdict fail, and the line says so.
+        line = body(verdicts='{"F2":"pass","F7":"pass","F5":"fail","F8":"optional"}', head=HEAD40).split("\n")[1]
+        self.assertEqual(json.loads(line.removeprefix("<!-- oss-verify-verdict ").removesuffix(" -->")),
+                         {"head": HEAD40, "blocking": ["F5"], "optional": ["F8"], "person": []})
+
+    def test_an_optional_verdict_under_another_id_writes_no_verdict_line(self):
+        # Only F5 and F8 take it. Under any other id it is a verdict no reader can place, and a line that dropped it
+        # would read as a clean one, so the whole line goes, as for a key that is no check id.
+        for key in ("F2", "F7", "A1", "D3", "F4", "G1", "1"):
+            with self.subTest(key=key):
+                verdicts = json.dumps({"F2": "pass", "F7": "pass", **{key: "optional"}})
+                self.assertNotIn("oss-verify-verdict", body(verdicts=verdicts, head=HEAD40))
 
     def test_the_rest_of_the_body_is_unchanged(self):
         b = body(verdicts='{"F2":"pass","F7":"pass"}', head=HEAD40, review="r" * 50001, checks="c", rules="review.md")
@@ -990,8 +1020,8 @@ class ModelText(unittest.TestCase):
             with self.subTest(text=text):
                 steered = {"review": f"Before.\n{text}\nAfter.\n", "checks": f"Above.\n{text}\nBelow.\n"}
                 lines = body(verdicts='{"F2":"fail"}', head=HEAD40, **steered).split("\n")
-                self.assertEqual(lines[1], '<!-- oss-verify-verdict {"head":"%s","blocking":["F2"],"person":[]} -->'
-                                 % HEAD40)
+                self.assertEqual(lines[1], '<!-- oss-verify-verdict {"head":"%s","blocking":["F2"],"optional":[],'
+                                           '"person":[]} -->' % HEAD40)
                 last = max(n for n, line in enumerate(lines) if line)
                 self.assertEqual(lines[last], head_line)
                 shown = [self.rendered(line).lower() for line in lines]
@@ -2120,6 +2150,20 @@ class ReviewJob(unittest.TestCase):
                     self.assertTrue(takes(key), key)
                 for key in HOSTILE_KEYS:
                     self.assertFalse(takes(key), key)
+
+    def test_only_f5_and_f8_of_an_enrollment_take_the_optional_verdict(self):
+        # review.md gives `optional` to those two checks alone, and review-body writes no verdict line at all when it
+        # arrives under another id, so the schema must keep it to them: the action asks the model again on a mismatch.
+        code, out = self.prompt(KIND="enrollment", PR="8", NAME="libreac")
+        self.assertEqual(code, 0)
+        verdicts = self.schema(out["arguments"])["properties"]["verdicts"]
+        self.assertEqual(verdicts["properties"], {"F5": {"enum": ["pass", "fail", "optional", "person"]},
+                                                  "F8": {"enum": ["pass", "fail", "optional", "person"]}})
+        code, out = self.prompt(KIND="change", PR="8")
+        self.assertEqual(code, 0)
+        change = self.schema(out["arguments"])["properties"]["verdicts"]
+        self.assertNotIn("properties", change)
+        self.assertEqual(change["additionalProperties"], {"enum": ["pass", "fail", "person"]})
 
     def test_a_review_without_a_held_finding_keeps_its_session(self):
         run, comment, verdicts, held, output, last = self.result(

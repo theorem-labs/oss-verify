@@ -140,9 +140,11 @@ name: "Build"
 #   comment  posts that comment, with the checks' report folded under it, or replaces
 #            the one already there. The comment starts with <!-- oss-verify-review -->, as the triage comment starts
 #            with its own marker, and its second line is the verdict line that the inbound watcher reads:
-#            <!-- oss-verify-verdict {"head":"<commit>","blocking":[...],"person":[...]} -->, the checks whose verdict
-#            is fail and those left to a person (.github/scripts/review-body; none when the review gave no verdicts,
-#            or gave one under a key that is not a check id).
+#            <!-- oss-verify-verdict {"head":"<commit>","blocking":[...],"optional":[...],"person":[...]} -->, the
+#            checks whose verdict is fail, those whose verdict is review.md's optional (F5 or F8, a request in the
+#            comment's collapsed block that holds nothing, so never in blocking) and those left to a person
+#            (.github/scripts/review-body; none when the review gave no verdicts, gave one under a key that is not a
+#            check id, or gave optional under an id other than F5 and F8).
 #            The review's text and the checks' report, which a pull request can steer, reach the comment only through
 #            .github/scripts/review-neutralize: with no mention, no reference to an issue or pull request, no unclosed
 #            HTML comment that hides what follows it, and no line that holds a marker of this comment, so no one else

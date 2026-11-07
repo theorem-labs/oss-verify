@@ -16,7 +16,10 @@
 # number, a project name, or a commit or session id, each checked here: no text of a pull request or of an issue. The
 # keys of each kind's verdicts are its rules file's check ids and nothing else (`propertyNames`), as
 # .github/scripts/review-body takes them: the model chooses them, and review-body prints them in the comment's verdict
-# line. Claude Code validates the structured output against the schema and asks the model again on a mismatch.
+# line. An enrollment's F5 and F8 also take review.md's fourth verdict, `optional`, the weak-but-not-empty check that
+# the comment asks for in its collapsed block and that holds nothing: review-body keeps it out of the line's
+# `blocking`, so the line and the comment's first sentence count the same checks. No other check and no change review
+# has it. Claude Code validates the structured output against the schema and asks the model again on a mismatch.
 set -euo pipefail
 die() { echo "review-prompt: $1" >&2; exit 2; }
 number='^[0-9]+$' commit='^[0-9a-f]{40}$'
@@ -42,8 +45,10 @@ case ${KIND:-} in
       properties: {
         comment: {type: "string", description: "The comment to the maintainer, in Markdown. Never a held finding."},
         held: {type: "string", description: "Each finding held back under rule 6 of review.md, as the skill section A held finding says, or empty."},
-        verdicts: {type: "object", description: "The verdict of each check of review.md by its id, A1 to G5, and for an F check the worst over the fuzz targets.",
+        verdicts: {type: "object", description: "The verdict of each check of review.md by its id, A1 to G5, and for an F check the worst over the fuzz targets. The verdict optional is the one review.md gives a weak but not empty check of F5 or F8: a request in the collapsed block of the comment, a condition of nothing, counted in no first sentence, and no other check takes it.",
                    required: ["F2", "F7"], propertyNames: {pattern: "^[A-G][0-9]*$"},
+                   properties: {F5: {enum: ["pass", "fail", "optional", "person"]},
+                                F8: {enum: ["pass", "fail", "optional", "person"]}},
                    additionalProperties: {enum: ["pass", "fail", "person"]}}}}')
     ;;
   change)
