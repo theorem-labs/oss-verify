@@ -283,8 +283,15 @@ def joined(found):
     return "\n\n".join(f"[{source}]\n{t}" for source, t in found)
 
 
-# This repository's own App, whose comments on an item are text main's own workflows wrote.
-APP = "oss-verify"
+# Three files of ours show text the project decides, and show it only inside a Markdown code span.
+# .github/scripts/triage.py's code() is the one way untrusted text reaches the triage report and this App's
+# triage comment: the line of the licence file when GitHub cannot name the licence, the names in the project's
+# .oss-verify/, the project's slug, its logins and its paths. The build job's table of the binaries names each
+# fuzz target the project's build script wrote, in a span too. code() turns a backtick in that text into an
+# apostrophe, so nothing in it can end its span: every such string is one span, and the screen reads the spans
+# of these three files and nothing else of them.
+IN_SPANS = ("triage-today.md", "triage-comment.md", os.path.join("build", "binaries.md"))
+SPAN = re.compile(r"`([^`\n]*)`")
 # The files of .review that main's own scripts write, which the screen does not read. Each is addressed to a
 # reviewer or to the review's model ("the review reads each reason", "A person with write access starts the review
 # that reads it: gh workflow run ..."), so a check that looks for text aimed at a model answers suspicious on it,
@@ -301,22 +308,17 @@ APP = "oss-verify"
 #   source.txt                  the line build.yaml writes in place of the project's repository for a screened
 #                               enrollment; it tells a person how to start the full review.
 #   template-history.txt        git log of this repository's pull request template.
-#   triage-comment.md           this App's own triage comment, which review-gather takes out of pr.json.
-#   triage-today.md             .github/scripts/triage.py --full, this repository's triage of the project from
-#                               public data: its rows carry the project's slug, licence, logins and counts, and
-#                               its footer is addressed to Theorem's reviewers.
 #   validate.txt                tools/validate.py on projects/<name>/, every line of which the diff adds.
 #   build/result.md             the build job's own one-line result.
-#   build/binaries.md           the build job's own table of the built binaries.
-# Two files review-gather writes keep only our shape: the project decides text inside them that no other source
-# carries, so they are read.
+# Five more files keep only our shape, and the project decides text inside them that no other source carries,
+# so each is read: triage-today.md, triage-comment.md and build/binaries.md through their code spans (IN_SPANS),
+# and these two whole:
 #   repository.txt              the facts of the project's repository: mostly a slug, logins and counts, but the
 #                               titles of the pull requests whose head branch is the ref are that repository's.
 #   build/checks.md             the report of the fuzz targets' checks, which quotes the reasons marked `not a
 #                               property` from the project's own source at the built commit.
 GENERATED = frozenset({"checks.json", "checklist.txt", "description.md", "review-comment-authors.txt", "source.txt",
-                       "template-history.txt", "triage-comment.md", "triage-today.md", "validate.txt",
-                       os.path.join("build", "result.md"), os.path.join("build", "binaries.md")})
+                       "template-history.txt", "validate.txt", os.path.join("build", "result.md")})
 
 
 def writers():
@@ -328,16 +330,30 @@ def writers():
     return {n.strip().lower() for n in os.environ.get("SCREEN_WRITERS", "").split(",") if n.strip()}
 
 
+def app_comments():
+    """The ids of the comments the gather job confirmed are this App's own, by the account type the REST API
+    gives for each one (SCREEN_APP_COMMENTS). A login is not enough: gh names an App without its [bot], so a
+    user can take the name of one, and the gather job's writer() tells them apart comment by comment."""
+    return {n.strip() for n in os.environ.get("SCREEN_APP_COMMENTS", "").split(",") if n.strip()}
+
+
+# The id of a comment, at the end of its URL.
+COMMENT_ID = re.compile(r"#issuecomment-([0-9]+)\Z")
+
+
 def ours(login):
-    """Whether this login is this repository's App or an account with write access. gh names an App without its
-    [bot], so both forms count."""
-    login = (login or "").lower()
-    return login in (APP, APP + "[bot]") or login in writers() or login.removesuffix("[bot]") in writers()
+    """Whether this login is an account with write access. An App is in the list under the name the REST API
+    gives it, with its [bot]."""
+    return (login or "").lower() in writers()
 
 
 def by_us(comment):
-    """Whether this comment or review is ours."""
-    return ours((comment.get("author") or {}).get("login"))
+    """Whether this comment or review is ours: its author has write access, or the gather job confirmed that
+    this very comment is this App's."""
+    if ours((comment.get("author") or {}).get("login")):
+        return True
+    at = COMMENT_ID.search(comment.get("url") or "")
+    return bool(at) and at.group(1) in app_comments()
 
 
 def all_review_comments_are_ours(review):
@@ -408,12 +424,19 @@ def parts(review, project=None):
         elif not all_review_comments_are_ours(review):
             found.append(("review-comments.txt", text))
         return finish(found, unscreenable, {"review-comments.txt"})
-    # The commit messages: the author's own text, which the review reads in pr.json. Every other field of pr.json
-    # or issue.json is GitHub's own record of the item (its number, its author, the dates, the head commit, and the
-    # changed files' paths, which the diff names too), not prose an account writes.
-    found.append((f"{shown_item}, the commit messages",
-                  "\n".join(f"{c.get('messageHeadline') or ''}\n{c.get('messageBody') or ''}"
-                            for c in (item.get("commits") or []) if isinstance(c, dict))))
+    # The commit messages, and the names an account chose: the display name of the item's author, and the name
+    # and the address of each commit's authors, which whoever makes a commit writes. Every other field of
+    # pr.json or issue.json is GitHub's own record of the item (its number, the logins, the dates, the head
+    # commit, and the changed files' paths, which the diff names too), not text an account writes.
+    names = [(item.get("author") or {}).get("name") or ""]
+    for c in item.get("commits") or []:
+        if not isinstance(c, dict):
+            continue
+        names.append(f"{c.get('messageHeadline') or ''}\n{c.get('messageBody') or ''}")
+        for a in c.get("authors") or []:
+            if isinstance(a, dict):
+                names.append(f"{a.get('name') or ''} {a.get('email') or ''}")
+    found.append((f"{shown_item}, the commit messages and the names an account chose", "\n".join(names)))
     ours_review_comments = all_review_comments_are_ours(review)
     for root, dirs, files in os.walk(review):
         rel = os.path.relpath(root, review)
@@ -440,6 +463,11 @@ def parts(review, project=None):
                     if m.group(2) == "/dev/null" or (seed and seed.group(1) in (None, seed.group(2))):
                         continue   # a deleted file is read by no one; a seed corpus is read from seeds/
                     unscreenable.append(f"{source} shows {m.group(2).strip(chr(34))[2:]} as binary")
+            if source in IN_SPANS:
+                # Ours but for what it quotes, and it quotes only in code spans (IN_SPANS).
+                found.append((f"{source}, what it quotes",
+                              "\n".join(m.group(1) for m in SPAN.finditer(text))))
+                continue
             if name.endswith(".json"):
                 body, status = kept(text)
                 try:

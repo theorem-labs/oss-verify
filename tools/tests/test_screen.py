@@ -158,8 +158,9 @@ class ScreenTest(unittest.TestCase):
         status; pr.diff (a diff of a.v around `diff`); review-comments.txt; head/; `files`, any other file of
         .review/; and `project`, the files of projects/<name>/."""
         item = {"number": 7, "title": title, "author": {"login": author}, "body": body,
-                "comments": [{"author": {"login": u}, "createdAt": "2026-11-01T00:00:00Z", "body": b}
-                             for u, b in comments]}
+                "comments": [{"author": {"login": u}, "createdAt": "2026-11-01T00:00:00Z", "body": b,
+                              "url": f"https://github.com/acme/model/pull/7#issuecomment-{100 + i}"}
+                             for i, (u, b) in enumerate(comments)]}
         name = "issue.json"
         if kind == "pr":
             name = "pr.json"
@@ -515,6 +516,7 @@ class ScreenTest(unittest.TestCase):
                   diff="+WRITER-DIFF\nBinary files a/x.png and b/x.png differ\n", review_comments="eve a:1 OUTSIDE-RC\n",
                   head={"x.png": b"\x89PNG\0"}, files={"build/checks.md": "x" * screen.MAX_CHARS})
         self.env["SCREEN_SCOPE"] = "comments"
+        self.env["SCREEN_APP_COMMENTS"] = "101"   # the gather job confirmed the second comment is the App's
         self.assertEqual(self.verdict()[0], "clean")
         for sent in self.sent():
             self.assertIn("OUTSIDE-COMMENT", sent)
@@ -690,6 +692,7 @@ class ScreenTest(unittest.TestCase):
         self.item(kind="pr", comments=[("oss-verify", "<!-- oss-verify-triage -->\nOURS-TRIAGE-IN-PR-JSON"),
                                        ("mallory", "MALLORY-COMMENT")],
                   diff="+x\n", files=dict(self.OURS, **{"source/README": "UPSTREAM-SOURCE\n"}))
+        self.env["SCREEN_APP_COMMENTS"] = "100"   # the gather job confirmed the first comment is the App's
         v, reason = self.verdict()
         self.assertEqual(v, "clean")
         for sent in self.sent():
@@ -699,7 +702,8 @@ class ScreenTest(unittest.TestCase):
             self.assertNotIn("UPSTREAM-SOURCE", sent)
             self.assertIn("MALLORY-COMMENT", sent)   # an outside comment always reaches each check
         self.assertEqual([s for s, _n in reason["sources"]],
-                         ["title", "body", "comments 2", "pr.json, the commit messages", "pr.diff"])
+                         ["title", "body", "comments 2",
+                          "pr.json, the commit messages and the names an account chose", "pr.diff"])
 
     def test_the_two_files_of_ours_that_carry_the_projects_own_text_are_sent(self):
         """repository.txt holds the titles of the project repository's pull requests, and build/checks.md quotes the
@@ -720,17 +724,21 @@ class ScreenTest(unittest.TestCase):
         read; this App's comment is not, whatever it says, and neither is one of an account with write access,
         which the gather job names in SCREEN_WRITERS. An agent of ours answering the review, and a maintainer
         asking the author for a change, are this project's text, written to be read by the review."""
-        self.item(kind="pr", comments=[("oss-verify", "APP-COMMENT"), ("Oss-Verify", "APP-COMMENT-OTHER-CASE"),
+        self.item(kind="pr", comments=[("oss-verify", "APP-COMMENT"), ("oss-verify", "APP-NAME-NOT-CONFIRMED"),
                                        ("mallory", "<!-- oss-verify-triage -->\nMALLORY-AS-TRIAGE"),
                                        ("oss-verify-bot", "ANOTHER-ACCOUNT"), ("alice", "WRITER-COMMENT"),
                                        ("ours-agent", "OUR-AGENT-COMMENT")], diff="+x\n",
                   review_comments="alice a.v:1 WRITER-RC\n(exit status 0)\n",
                   files={"review-comment-authors.txt": "alice\n(exit status 0)\n"})
-        self.env["SCREEN_WRITERS"] = "alice,ours-agent,oss-verify[bot]"
+        self.env["SCREEN_WRITERS"] = "alice,ours-agent"
+        self.env["SCREEN_APP_COMMENTS"] = "100"
         self.assertEqual(self.verdict()[0], "clean")
         for sent in self.sent():
             self.assertIn("MALLORY-AS-TRIAGE", sent)
             self.assertIn("ANOTHER-ACCOUNT", sent)
+            # A user can take the App's name, which gh writes without its [bot]: only the comment the gather
+            # job confirmed is the App's is left out.
+            self.assertIn("APP-NAME-NOT-CONFIRMED", sent)
             for word in ("APP-COMMENT", "WRITER-COMMENT", "OUR-AGENT-COMMENT", "WRITER-RC"):
                 self.assertNotIn(word, sent)
         # One review comment of an account that is not ours, and the file is read whole: a body can hold
@@ -745,33 +753,63 @@ class ScreenTest(unittest.TestCase):
             self.assertIn("MALLORY-RC", sent)
             self.assertIn("WRITER-RC", sent)
 
-    def test_the_commit_messages_are_sent_and_no_other_field(self):
-        """An author writes the commit messages; every other field of pr.json is GitHub's record of the item."""
+    def test_the_commit_messages_and_the_names_are_sent_and_no_other_field(self):
+        """Whoever makes a commit writes its message, and the name and the address on it; an account chooses the
+        display name GitHub shows for it. Every other field of pr.json is GitHub's record of the item."""
         self.item(kind="pr", author="MALLORY-LOGIN", diff="+x\n")
         path = os.path.join(self.review, "pr.json")
         with open(path, encoding="utf-8") as f:
             item = json.loads(f.read().rsplit("\n(exit status", 1)[0])
-        item["commits"] = [{"messageHeadline": "COMMIT-HEADLINE", "messageBody": "COMMIT-BODY"}]
+        item["author"]["name"] = "DISPLAY-NAME"
+        item["commits"] = [{"messageHeadline": "COMMIT-HEADLINE", "messageBody": "COMMIT-BODY",
+                            "authors": [{"name": "AUTHOR-NAME", "email": "AUTHOR@EXAMPLE-ADDRESS"}]}]
         item["files"] = [{"path": "projects/p/FILE-PATH", "additions": 1}]
         with open(path, "w", encoding="utf-8") as f:
             f.write(json.dumps(item) + "\n(exit status 0)\n")
         self.assertEqual(self.verdict()[0], "clean")
         for sent in self.sent():
-            self.assertIn("COMMIT-HEADLINE", sent)
-            self.assertIn("COMMIT-BODY", sent)
+            for word in ("COMMIT-HEADLINE", "COMMIT-BODY", "AUTHOR-NAME", "AUTHOR@EXAMPLE-ADDRESS",
+                         "DISPLAY-NAME"):
+                self.assertIn(word, sent)
             self.assertNotIn("MALLORY-LOGIN", sent)
             self.assertNotIn("FILE-PATH", sent)
 
+    def test_what_our_triage_and_the_build_quote_is_read_through_their_code_spans(self):
+        """triage.py puts every piece of text the project decides in a code span, and so does the build job's
+        table of the binaries: the line of the licence file when GitHub cannot name the licence, the names in
+        the project's .oss-verify/, each fuzz target's name. None of it is in another source of a screened
+        enrollment, whose review gets none of the project's repository."""
+        self.item(kind="pr", diff="+x\n", files={
+            "triage-today.md": "| WARN | License | GitHub cannot name the license; its file says `QUOTED-LICENSE "
+                               "LINE` |\n| OK | `.oss-verify/` | present (`QUOTED-FILE-NAME`) |\n"
+                               "<sub>OURS-FOOTER for the reviewers.</sub>\n(exit status 0)\n",
+            "triage-comment.md": "<!-- oss-verify-triage -->\nOURS-COMMENT-TEXT `QUOTED-IN-THE-COMMENT`\n",
+            "build/binaries.md": "| target | build |\n|---|---|\n| `QUOTED-TARGET-NAME` | plain |\nOURS-TABLE\n"})
+        v, reason = self.verdict()
+        self.assertEqual(v, "clean")
+        for sent in self.sent():
+            for word in ("QUOTED-LICENSE LINE", "QUOTED-FILE-NAME", "QUOTED-IN-THE-COMMENT", "QUOTED-TARGET-NAME"):
+                self.assertIn(word, sent)
+            for word in ("OURS-FOOTER", "OURS-COMMENT-TEXT", "OURS-TABLE", "GitHub cannot name"):
+                self.assertNotIn(word, sent)
+        self.assertIn("triage-today.md, what it quotes", [s for s, _n in reason["sources"]])
+
     def test_a_character_that_hides_text_holds_only_what_is_read(self):
-        """The unscreenable checks run on what remains: a word joiner in a file of ours is main's own, and holds
-        nothing; one in the description holds the item."""
+        """The unscreenable checks run on what remains: a word joiner in text of ours holds nothing, one in a
+        span that quotes the project holds the item, and one in the description holds the item."""
         self.item(kind="pr", diff="+x\n", files={"triage-today.md": "a\u200bb\n(exit status 0)\n"})
         self.assertEqual(self.verdict()[0], "clean")
-        self.fresh()
-        self.item(kind="pr", body="a\u200bb", diff="+x\n")
-        v, reason = self.verdict()
-        self.assertEqual(v, "held")
-        self.assertEqual(reason["unscreenable"], ["body holds U+200B, a character that hides text"])
+        for body, source in (("`a\u200bb`\n(exit status 0)\n", "triage-today.md, what it quotes"), (None, "body")):
+            with self.subTest(source=source):
+                self.fresh()
+                if body is None:
+                    self.item(kind="pr", body="a\u200bb", diff="+x\n")
+                else:
+                    self.item(kind="pr", diff="+x\n", files={"triage-today.md": body})
+                v, reason = self.verdict()
+                self.assertEqual(v, "held")
+                self.assertEqual(reason["unscreenable"],
+                                 [f"{source} holds U+200B, a character that hides text"])
 
     def test_the_model_gets_no_tool_and_can_answer_two_words_only(self):
         self.item()

@@ -886,6 +886,9 @@ jobs:
       # The logins of the comments' and reviews' authors that have write access, which the screen does not read:
       # their text is this project's own (the step below).
       writers: ${{ steps.outside.outputs.writers }}
+      # The ids of the comments the step below confirmed are this App's own, by the account type the REST API
+      # gives for each: gh names an App without its [bot], and a user can take that name.
+      app_comments: ${{ steps.outside.outputs.app_comments }}
       # The session to resume and the commit it reviewed, from review-gather (empty for a fresh review). None for a
       # screened item: no screen reads a session, which a review that read unscreened text, such as one started by
       # hand, may have kept.
@@ -990,7 +993,7 @@ jobs:
             id=${BASH_REMATCH[1]}
             [ "$(gh api "repos/$REPO/issues/comments/$id" --jq '"\(.user.login) \(.user.type)"' 2> /dev/null)" = "$1[bot] Bot" ]
           }
-          screen=true writers=""
+          screen=true writers="" app=""
           item=.review/pr.json
           [ -f "$item" ] || item=.review/issue.json
           if [ "$TRUST" = writer ] && [ "$EVENT" = workflow_dispatch ] && [ "$RESCREEN" != true ]; then
@@ -1009,8 +1012,17 @@ jobs:
               outside=0
               while IFS=$'\t' read -r login url; do
                 [ -n "$login$url" ] || continue
-                if writer "${login:--}" "${url:-}"; then
+                rc=0
+                trusted "${login:--}" || rc=$?
+                if (( rc == 0 )); then
+                  # A login the collaborator API placed, or an App under the name the REST API gives it, with
+                  # its [bot]: no other account can hold that name.
                   [[ ,$writers, == *",$login,"* ]] || writers+=",$login"
+                elif writer "${login:--}" "${url:-}" && [[ $url =~ \#issuecomment-([0-9]+)$ ]]; then
+                  # gh names an App without its [bot], and a user can take that name: this comment alone is the
+                  # App's, by the account type the REST API gives for it, so the screen is told its id, not a
+                  # name.
+                  app+=",${BASH_REMATCH[1]}"
                 else
                   outside=1
                 fi
@@ -1026,6 +1038,7 @@ jobs:
           fi
           echo "screen=$screen" >> "$GITHUB_OUTPUT"
           echo "writers=${writers#,}" >> "$GITHUB_OUTPUT"
+          echo "app_comments=${app#,}" >> "$GITHUB_OUTPUT"
       # The project's repository at the built commit is far more text than the screen reads, and an enrollment of an
       # account without write access names it: so that review reads none of it. Its source.txt says so, and the
       # checks that need it are left to a person; a person with write access starts the full review by hand.
@@ -1158,6 +1171,7 @@ jobs:
           # The comments' and reviews' authors that have write access (the gather job): the screen reads none of
           # their text, whatever the scope, since it is this project's own and not the outside text it is for.
           SCREEN_WRITERS: ${{ needs.gather.outputs.writers }}
+          SCREEN_APP_COMMENTS: ${{ needs.gather.outputs.app_comments }}
         run: python3 .github/scripts/screen.py .review ${NAME:+"projects/$NAME"}
       # Every listed check, MEASURE_REPEATS times, on each text of the labelled set kept in the private bucket (the
       # screen's account can read only its measure/set-* objects), and the verdict of each rule of SCREEN_RULE's

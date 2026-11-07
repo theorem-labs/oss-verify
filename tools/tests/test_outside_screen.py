@@ -1286,6 +1286,15 @@ class OutsideText(Runner):
         self.screen(trust="screen", comments=[{"login": "mallory"}], review_authors=[])
         self.assertEqual(self.last["writers"], "")
 
+    def test_an_apps_own_comment_is_named_by_its_id_and_not_by_a_login(self):
+        """gh names an App without its [bot], and a user can take that name: the step confirms the App comment
+        by comment, by the account type the REST API gives, and names the comment, not the account. A login the
+        REST API gives with its [bot] cannot be another account's, so that one is a writer."""
+        self.screen(trust="screen", comments=[({"login": "sjawhar-agent"}, 900), ({"login": "sjawhar-agent"}, 901)],
+                    review_authors=["oss-verify[bot]"])
+        self.assertEqual(self.last["app_comments"], "900")
+        self.assertEqual(self.last["writers"], "oss-verify[bot]")
+
     def test_a_read_that_failed_names_no_writer(self):
         """Then the screen reads every comment, as it did before any of them was told apart."""
         (self.work / ".review").mkdir()
