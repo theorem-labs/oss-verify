@@ -87,14 +87,21 @@ name: "Build"
 #            injections of each rule in the run's summary. The texts, and each check's words for them, stay in the
 #            bucket, as measure/runs/theorem-labs/oss-verify/<run>-<attempt>.json. On such a run the required check
 #            passes when route and the screen job passed and every other job was skipped.
-#            What it reads: the item's title, body, every account's comments, reviews and review comments, its other
-#            fields, the diff, the checks' names, and for an enrollment what review-gather wrote from the build, the
-#            validator, triage, the facts of the project's repository and the seed corpora's bytes; each changed file,
-#            and each file of projects/<name>/ but a seed corpus, must be text, whose new lines the diff holds. What it
-#            does not read: the project's repository at the built commit (.review/source/), far more text than a
-#            screen reads, which the review of a writer's enrollment reads as data, and the review of an outsider's
-#            enrollment does not get (its checks that need it are left to a person, who can start the full review
-#            by hand); and the last review's session that the review resumes, the model's own earlier context.
+#            What it reads: the text an outside account decides, by its author and its source, never by what it
+#            says. The item's title and body; its comments, reviews and review comments, but this App's own; the
+#            commit messages; the diff; for an enrollment the seed corpora's bytes, the facts of the project's
+#            repository and the report of the fuzz targets' checks, which quote that repository; and any other
+#            file the gather job writes that .github/scripts/screen.py's GENERATED does not name. Each changed
+#            file, and each file of projects/<name>/ but a seed corpus, must be text, whose new lines the diff
+#            holds. What it does not read: the files main's own scripts write (GENERATED, with the reason for
+#            each) -- the triage comment and triage's own report, the validator's and the checklist's output, the
+#            template's history, the checks' names, the line that stands in for the project's repository, the
+#            build's result and binaries table -- which are addressed to a reviewer or to the review's model, so
+#            a check that reads them answers about main and not about the account; the project's repository at
+#            the built commit (.review/source/), far more text than a screen reads, which the review of a
+#            writer's enrollment reads as data, and the review of an outsider's enrollment does not get (its
+#            checks that need it are left to a person, who can start the full review by hand); and the last
+#            review's session that the review resumes, the model's own earlier context.
 #   project-builds
 #            the build above, under the check name build, when route asks for it; it passes with nothing to build
 #            when the pull request enrolls no project (below). Its job id stays project-builds, the name the other jobs

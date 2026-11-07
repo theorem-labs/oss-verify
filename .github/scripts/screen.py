@@ -283,18 +283,63 @@ def joined(found):
     return "\n\n".join(f"[{source}]\n{t}" for source, t in found)
 
 
-def parts(review, project=None):
-    """The text that the review reads, but for this repository's main, the project's repository (source/) and the
-    last review's session, as (source, text) pairs, and the reasons it cannot be screened (empty when it can).
+# This repository's own App, whose comments on an item are text main's own workflows wrote.
+APP = "oss-verify"
+# The files of .review that main's own scripts write, which the screen does not read. Each is addressed to a
+# reviewer or to the review's model ("the review reads each reason", "A person with write access starts the review
+# that reads it: gh workflow run ..."), so a check that looks for text aimed at a model answers suspicious on it,
+# and that answer says nothing about the account whose item is screened. Against .github/scripts/review-gather,
+# what writes each, and where an outside account's own text in it is read instead:
+#   checks.json                 gh pr view --json statusCheckRollup: the names, states and URLs of this
+#                               repository's own checks.
+#   checklist.txt               review-gather's own heredoc, against .github/PULL_REQUEST_TEMPLATE.md. The box
+#                               labels it echoes from the description are in the description, read as body.
+#   description.md              jq -r .body of pr.json: the description again, read as body.
+#   review-comment-authors.txt  review-gather's list of the review comments' logins, one a line, for the gather
+#                               job; a login is letters, digits and hyphens, and carries no prose.
+#   source.txt                  the line build.yaml writes in place of the project's repository for a screened
+#                               enrollment; it tells a person how to start the full review.
+#   template-history.txt        git log of this repository's pull request template.
+#   triage-comment.md           this App's own triage comment, which review-gather takes out of pr.json.
+#   triage-today.md             .github/scripts/triage.py --full, this repository's triage of the project from
+#                               public data: its rows carry the project's slug, licence, logins and counts, and
+#                               its footer is addressed to Theorem's reviewers.
+#   validate.txt                tools/validate.py on projects/<name>/, every line of which the diff adds.
+#   build/result.md             the build job's own one-line result.
+#   build/binaries.md           the build job's own table of the built binaries.
+# Two files review-gather writes keep only our shape: the project decides text inside them that no other source
+# carries, so they are read.
+#   repository.txt              the facts of the project's repository: mostly a slug, logins and counts, but the
+#                               titles of the pull requests whose head branch is the ref are that repository's.
+#   build/checks.md             the report of the fuzz targets' checks, which quotes the reasons marked `not a
+#                               property` from the project's own source at the built commit.
+GENERATED = frozenset({"checks.json", "checklist.txt", "description.md", "review-comment-authors.txt", "source.txt",
+                       "template-history.txt", "triage-comment.md", "triage-today.md", "validate.txt",
+                       os.path.join("build", "result.md"), os.path.join("build", "binaries.md")})
 
-    Every file the gather job wrote is sent, but for the changed files under head/: pr.json or issue.json (its title,
-    its body, each comment and review, whoever wrote it, and every other field), the diff, the review comments and
-    their authors, the checks and, for an enrollment, what review-gather wrote from the build and the project: the
-    build's report, the validator's and triage's output, the facts of the project's repository, and the seed corpora
-    (their bytes). A writer's comment is sent too: telling the authors apart here is one more thing to get wrong. Each
-    file the review reads must be text: a changed file of a change (head/), and each file of projects/<name>/ but a
-    seed corpus, and the diff must show it as text. The diff then shows every line a text file's change adds, and an
-    image or another binary file could carry what no check here reads."""
+
+def by_app(comment):
+    """Whether this comment or review is this repository's own App's. gh names an App without its [bot]."""
+    login = (comment.get("author") or {}).get("login") or ""
+    return login.lower() in (APP, APP + "[bot]")
+
+
+def parts(review, project=None):
+    """The text an outside account decides, of what the review reads, as (source, text) pairs, and the reasons it
+    cannot be screened (empty when it can).
+
+    What is read: the item's title and body; each comment and review but this App's own; the commit messages; the
+    diff; the review comments; the seed corpora (their bytes); and the two files of review-gather that carry text
+    the project decides (GENERATED says which files are not read, and why). Any other file the gather job writes
+    is read too, so that a file added there is screened until someone says it is ours. Not read: the changed files
+    under head/, the project's repository (source/), and the last review's session.
+
+    The filter is by author and by source, never by what the text says: main's own scripts write text addressed to
+    a reviewer or to the review's model, and a screen that reads it answers about main, not about the account.
+
+    Each file the review reads must still be text: a changed file of a change (head/), and each file of
+    projects/<name>/ but a seed corpus, and the diff must show it as text. The diff then shows every line a text
+    file's change adds, and an image or another binary file could carry what no check here reads."""
     found, unscreenable, whole_files = [], [], set()
     item_path = next((os.path.join(review, n) for n in ("pr.json", "issue.json")
                       if os.path.isfile(os.path.join(review, n))), None)
@@ -309,17 +354,21 @@ def parts(review, project=None):
     if not isinstance(item, dict):
         return [], [f"{os.path.basename(item_path)} is not a read that passed"]
     shown_item = os.path.basename(item_path)
-    found.append(("title", item.get("title") or ""))
-    found.append(("body", item.get("body") or ""))
-    for kind in ("comments", "reviews"):
-        for i, c in enumerate(item.get(kind) or []):
-            found.append((f"{kind} {i + 1}", c.get("body") or ""))
     scope = os.environ.get("SCREEN_SCOPE") or "all"
     if scope not in ("all", "comments"):
         return [], [f"SCREEN_SCOPE is {scope!r}, not all or comments"]
+    if scope == "all":
+        found.append(("title", item.get("title") or ""))
+        found.append(("body", item.get("body") or ""))
+    for kind in ("comments", "reviews"):
+        for i, c in enumerate(item.get(kind) or []):
+            if not isinstance(c, dict) or by_app(c):
+                continue
+            found.append((f"{kind} {i + 1}", c.get("body") or ""))
     if scope == "comments":
         # A writer's pull request or issue that holds comments of others: only the comments, reviews and review
-        # comments are screened, every one of them, and the rest is a writer's, which the review reads as before.
+        # comments are screened, every one of them but this App's own, and the rest is a writer's, which the
+        # review reads as before.
         path = os.path.join(review, "review-comments.txt")
         text = read_text(path) if os.path.isfile(path) else ""
         if text is None:
@@ -327,8 +376,12 @@ def parts(review, project=None):
         else:
             found.append(("review-comments.txt", text))
         return finish(found, unscreenable, {"review-comments.txt"})
-    rest = {k: v for k, v in item.items() if k not in ("title", "body", "comments", "reviews")}
-    found.append((f"{shown_item}, other fields", "\n".join(strings(rest))))
+    # The commit messages: the author's own text, which the review reads in pr.json. Every other field of pr.json
+    # or issue.json is GitHub's own record of the item (its number, its author, the dates, the head commit, and the
+    # changed files' paths, which the diff names too), not prose an account writes.
+    found.append((f"{shown_item}, the commit messages",
+                  "\n".join(f"{c.get('messageHeadline') or ''}\n{c.get('messageBody') or ''}"
+                            for c in (item.get("commits") or []) if isinstance(c, dict))))
     for root, dirs, files in os.walk(review):
         rel = os.path.relpath(root, review)
         dirs.sort()
@@ -337,7 +390,8 @@ def parts(review, project=None):
         for name in sorted(files):
             path = os.path.join(root, name)
             source = os.path.normpath(os.path.join(rel, name))
-            if path == item_path:
+            # Ours, and its unscreenable checks with it: no outside account decides a character of it.
+            if path == item_path or source in GENERATED:
                 continue
             text = read_text(path)
             if text is None:
