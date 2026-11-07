@@ -908,6 +908,30 @@ class ScreenTest(unittest.TestCase):
         self.assertEqual(self.services.to(":sanitizeUserPrompt")[0]["path"],
                          f"/armor/v1/{TEMPLATE}:sanitizeUserPrompt")
 
+    def test_only_the_projects_own_patch_style_gets_the_other_question(self):
+        """The path comes from the section's header, the lines git writes before the first hunk, and is taken as
+        it stands: a line of a file that is shaped like a header, and a path that is this one with a space after
+        it, are text of the diff like any other, and the question for the text reads them."""
+        for why, diff in (
+                ("a line of the file shaped like a header",
+                 "diff --git a/projects/p/notes.md b/projects/p/notes.md\n--- /dev/null\n+++ b/projects/p/notes.md\n"
+                 "@@ -0,0 +1,2 @@\n++++ b/projects/p/patch_style.md\n+SMUGGLED-LINE\n"),
+                ("a path with a space after it",
+                 "diff --git a/x b/x\n--- /dev/null\n+++ b/projects/p/patch_style.md \n@@ -0,0 +1 @@\n"
+                 "+SMUGGLED-LINE\n")):
+            with self.subTest(why=why):
+                self.fresh()
+                self.item(kind="pr", files={"pr.diff": diff})
+                v, reason = self.verdict()
+                self.assertEqual(v, "clean")
+                self.assertEqual([s for s, _n in reason["sources"]],
+                                 ["title", "body", "pr.json, the commit messages and the names an account chose",
+                                  "pr.diff"])
+                bodies = [r["body"] for r in self.services.to("/v1/messages")]
+                self.assertEqual(len(bodies), screen.CLAUDE_ANSWERS)   # one question, no second
+                self.assertEqual(bodies[0]["system"], screen.SYSTEM)
+                self.assertIn("SMUGGLED-LINE", bodies[0]["messages"][0]["content"])
+
     # --- what cannot be screened, and the services' limits ----------------------------------------------------
 
     def test_a_file_the_review_reads_that_is_not_text_is_held_unscreened(self):

@@ -179,7 +179,10 @@ SEED_CORPUS = re.compile(r"Binary files (?:/dev/null|a/(projects/[^/ ]+/[^/ ]+_s
                          r"b/(projects/[^/ ]+/[^/ ]+_seed_corpus\.zip) differ")
 # A diff's section for one file, and the path of the file it writes. A project's patch_style.md is read with its
 # own question (PATCH_STYLE_SYSTEM), so its section comes out of the diff and is read on its own, by the path in
-# the section's own header.
+# that section's own header: the lines before its first hunk, which git writes, and never a line of the file,
+# which an author writes and could shape like a header. The path is taken as it stands, with no space stripped,
+# and git quotes a path that ends in a space or holds a backslash, a quotation mark or a byte that is not ASCII,
+# so a quoted path matches nothing here and that file is read with the rest of the diff.
 DIFF_SECTION = re.compile(r"^diff --git .*$", re.M)
 SECTION_PATH = re.compile(r"^\+\+\+ b/(.*)$", re.M)
 PATCH_STYLE_PATH = re.compile(r"projects/[^/\s]+/patch_style\.md")
@@ -192,10 +195,11 @@ def split_patch_style(text):
     rest, style, last = [], [], 0
     for start, end in zip(starts, starts[1:] + [len(text)]):
         section = text[start:end]
-        path = SECTION_PATH.search(section)
-        if path and PATCH_STYLE_PATH.fullmatch(path.group(1).strip()):
+        hunk = section.find("\n@@")
+        path = SECTION_PATH.search(section if hunk < 0 else section[:hunk])
+        if path and PATCH_STYLE_PATH.fullmatch(path.group(1)):
             rest.append(text[last:start])
-            style.append((path.group(1).strip(), section))
+            style.append((path.group(1), section))
             last = end
     if not style:
         return text, []
