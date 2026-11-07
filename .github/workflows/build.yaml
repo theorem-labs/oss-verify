@@ -64,7 +64,11 @@ name: "Build"
 #            comments, reviews and review comments alone, SCREEN_SCOPE comments): Google Cloud Model Armor's prompt
 #            injection and jailbreak filter; Azure AI Content Safety's Prompt Shields, which reads the text as
 #            documents; and a small Claude model with no tools whose answer a schema holds to the words clean and
-#            suspicious, each through the screen's own identity (its env below). Each reads all the text joined.
+#            suspicious, each through the screen's own identity (its env below). The two detectors read all the
+#            text joined. The model is asked two questions, each three times, each word the majority of its three
+#            answers: one about the text, and one about a projects/<name>/patch_style.md the enrollment adds,
+#            which a project writes for us and the review reads, and which the first question would answer about
+#            for being what it is. Either question's word suspicious is the model's word.
 #            SCREEN_RULE makes the verdict of their words: claude_or_both_detectors, held when the model answers
 #            suspicious or Model Armor and Prompt Shields both do (.github/scripts/screen.py, RULES, and the
 #            measurement that chose it). Under every rule, a check that cannot answer or runs out of time, a file
