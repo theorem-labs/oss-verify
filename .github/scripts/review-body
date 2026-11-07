@@ -17,10 +17,11 @@
 #   <!-- oss-verify-verdict {"head":"<commit>","blocking":[<ids whose verdict is fail>],
 #     "optional":[<ids whose verdict is optional>],"person":[<ids whose verdict is person>]} -->
 # on one line, with the ids sorted. `blocking` holds the checks that hold the enrollment, which the "Verdicts" section
-# of review.md calls **fail**, and nothing else: a check of F5 or F8 whose every request is a weak but not empty one
-# takes that section's **optional** instead, since each of its requests sits in the comment's collapsed block and is
-# a condition of nothing. review.md's "Finish" ties the two together, so `blocking` is empty exactly when the
-# comment's first sentence counts no item.
+# of review.md calls **fail**, and nothing else: a check of F5 or F8 whose every request is a weak but not empty one,
+# and that leaves nothing to a person, takes that section's **optional** instead, since each of its requests sits in
+# the comment's collapsed block and is a condition of nothing. A check that leaves something to a person is
+# **person**. review.md's "Finish" ties the two together, so `blocking` is empty exactly when the comment's first
+# sentence counts no item.
 # VERDICTS empty, null, {} or anything but one JSON object gives no verdict line, so a missing
 # verdict never reads as "nothing blocks". The model chooses the keys of VERDICTS, so a key that is not a check id
 # also gives no verdict line: an id is a section's letter with an optional item number (A1, B, F7) in review.md, or a
