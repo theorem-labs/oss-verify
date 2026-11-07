@@ -20,10 +20,3 @@ file	targets/curl-fuzz_netrc/proto_fuzzer/bounded_anonymous_input_file.h	https:/
 file	targets/curl-fuzz_netrc/proto_fuzzer/bounded_anonymous_input_file.cc	https://raw.githubusercontent.com/curl/curl-fuzzer/de8de303d3e0d54e5ce235fd95d562154970ebf9/proto_fuzzer/bounded_anonymous_input_file.cc	29beca8f00d5ae4689cf264fb56b524703d6db19c787eaf610667b72549ab11a
 # Not of the release: fuzz_bufq's harness as the OSS Verify proofs build it, without the three system calls of its first call that the process model declines
 patch	targets/curl-fuzz_bufq	curl-fuzz_bufq.0001-no-syscalls.patch
-# Not of the release: curl_fuzzer_proto_file from the curl-fuzzer de8de303d3e0 tree above, on the curl tree of curl-fuzz_bufq's pin, with libprotobuf-mutator v1.5, the protobuf it builds (v29.3), the abseil-cpp of that protobuf's submodule, and the pure-Python protobuf 7.36.2 that curl-fuzzer's uv.lock pins, for its schema_eligibility.py
-link	ext/curl-fuzz_proto_file/src	ext/curl-fuzz_bufq/src
-link	targets/curl-fuzz_proto_file	ext/curl-fuzzer-de8de303d3e0
-git	ext/libprotobuf-mutator-1.5	https://github.com/google/libprotobuf-mutator.git	dc4ced337a9fb4047e2dc727268fbac55ca82f73
-git	ext/protobuf-29.3	https://github.com/protocolbuffers/protobuf.git	b407e8416e3893036aee5af9a12bd9b6a0e2b2e6
-git	ext/protobuf-29.3/third_party/abseil-cpp	https://github.com/abseil/abseil-cpp.git	4a2c63365eff8823a5221db86ef490e828306f9d
-archive	ext/python-protobuf-7.36.2	https://files.pythonhosted.org/packages/e4/04/d52c7016b04b6c5108f26691f9d33ec82a9b65d041f1a9c771137693d618/protobuf-7.36.2-py3-none-any.whl	bdb3a345d48db958e6ce1f18e508beb0cc981d64f24088427549c866cd039f1e	0	google/

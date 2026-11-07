@@ -5,6 +5,8 @@ primary_contact: n/a
 homepage: https://curl.haxx.se
 language: c++
 sanitizers: [address, undefined]
-# build.sh also builds fuzz_doh, fuzz_netrc and curl_fuzzer_proto_file. They are not listed yet: each makes system calls
-# that the process model of the statements does not accept yet.
+# build.sh also builds fuzz_doh and fuzz_netrc. They are not listed yet: each makes system calls that the process
+# model of the statements does not accept yet. curl_fuzzer_proto_file is not built at all: it is not listed either,
+# and building libprotobuf-mutator and its protobuf for every sanitizer took about an hour each, past the time the
+# enrollment build is given.
 fuzz_targets: [fuzz_bufq, fuzz_fnmatch, fuzz_url]
