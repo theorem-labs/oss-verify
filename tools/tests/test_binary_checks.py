@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the checks of the binaries that need no Docker: tools/check_links.py, tools/model_release.py and
 tools/check_binaries.py. python3 -m pytest tools/tests"""
+import gzip
 import hashlib
 import json
 import os
@@ -189,13 +190,9 @@ def archive(members):
 
 
 def map_line(address, size, text):
-    """A line of an lld map: an input section, or with more indent a symbol."""
+    """A line of a link's record: an input section of the linker's map, or with more indent a symbol. A record
+    holds these lines alone (infra/base-builder/link-fuzz-target), never one that starts an output section."""
     return f"{address:>16x} {address:>16x} {size:>8x} {4:>5}         {text}"
-
-
-def map_output(address, size, name):
-    """A line of an lld map that starts an output section."""
-    return f"{address:>16x} {address:>16x} {size:>8x} {4:>5} {name}"
 
 
 def good(name="f"):
@@ -206,21 +203,107 @@ def good(name="f"):
 class MapParsing(unittest.TestCase):
     def test_input_sections_and_members(self):
         text = "\n".join([
-            "             VMA              LMA     Size Align Out     In      Symbol",
-            map_output(0x10000, 0x40, ".text"),
             map_line(0x10000, 0x10, "/opt/musl-sysroot/usr/lib/crt1.o:(.text)"),
             map_line(0x10010, 0x20, "/work/build/libfoo.a(foo.c.o):(.text.foo)"),
             map_line(0x10010, 0, "        foo"),  # a symbol line, indented further
             map_line(0x10030, 0x8, "<internal>:(.rodata.str1.1)"),
-            map_output(0, 0x40, ".debug_info"),
+            # a section that is not loaded: lld gives it and its input sections their offsets in it, from 0
             map_line(0, 0x2b, "/opt/rt/libclang_rt.asan_static.a(asan_rtl_static.cpp.o):(.debug_info)"),
-            # past the first, the input sections of a section that is not loaded have their offsets as addresses
             map_line(0x2b, 0x15, "/work/build/libfoo.a(bar.c.o):(.debug_info)"),
         ])
         self.assertEqual(check_links.parse_map(text), [
             ("/opt/musl-sysroot/usr/lib/crt1.o", None, ".text", 0x10),
             ("/work/build/libfoo.a", "foo.c.o", ".text.foo", 0x20),
         ])
+
+    def test_a_tbss_overlap_does_not_end_the_loaded_part(self):
+        """lld overlaps a .tbss input section with what follows it, so the address falls between two sections the
+        linker loads. The line after it begins another output section, which its address, not 0, says is loaded."""
+        text = "\n".join([
+            map_line(0x45522c, 0x10, "/work/build/liboft.a(shim.o):(.tbss.state)"),
+            map_line(0x4551b0, 0x8, "/opt/musl-sysroot/usr/lib/libc++.a(iostream.cpp.o):(.init_array.100)"),
+            map_line(0, 0x20, "/opt/musl-sysroot/usr/lib/libc++.a(iostream.cpp.o):(.debug_info)"),
+        ])
+        self.assertEqual(check_links.parse_map(text), [
+            ("/work/build/liboft.a", "shim.o", ".tbss.state", 0x10),
+            ("/opt/musl-sysroot/usr/lib/libc++.a", "iostream.cpp.o", ".init_array.100", 0x8),
+        ])
+
+
+class RealRecord(unittest.TestCase):
+    """The reading of a record that a build wrote, not one written here: tools/tests/fixtures/link-record/.
+
+    The record is the plain build's link of curl's fuzz_bufq, from the enrollment build of projects/curl at
+    908bbe80c3ccfbb3251ac204892b83d6635fc327 on the oss-fuzz-theorems-2026.10 toolchain (infra/toolchains.tsv),
+    as the build wrote it, with its map gzipped. A map written here says what its writer believes a link records;
+    a reading that no record carries passed on such a map and emptied the list of every binary of every build
+    (dispatch://OSSV-395), so the reading is held against a record a build wrote.
+    """
+
+    RECORD = pathlib.Path(__file__).resolve().parent / "fixtures/link-record/curl-fuzz_bufq.plain"
+    # The files of the toolchain image this link took whose code --gc-sections left in the binary, ...
+    IN_BINARY = ["clang_rt.crtbegin.o", "crt1.o", "libc++.a", "libc.a", "libclang_rt.builtins.a"]
+    # ... and the image archives it took a member of and left no code of: not listed (dispatch://OSSV-332).
+    EMPTIED = ["libbrotlicommon.a", "libbrotlidec.a", "libcrypto.a", "libnghttp2.a", "libssl.a", "libz.a",
+               "libzstd.a"]
+
+    def setUp(self):
+        with gzip.open(self.RECORD / "map.gz", "rt") as stream:
+            self.map = stream.read()
+        self.inputs = (self.RECORD / "inputs.tsv").read_text().splitlines()
+
+    def names(self, taken):
+        """The names of the toolchain image's files among some input sections."""
+        return sorted({pathlib.PurePosixPath(f).name for f, _m, _s, _z in taken if f.startswith("/opt/")})
+
+    def test_a_record_holds_input_sections_alone(self):
+        """What a build writes: every line is an input section, and none starts an output section. A reading that
+        waits for an output section therefore keeps nothing of it."""
+        lines = [line for line in self.map.splitlines() if check_links.MAP_COLUMNS.match(line)]
+        starts = [line for line in lines
+                  if line[check_links.MAP_COLUMNS.match(line).end():][:1] not in ("", " ")]
+        self.assertEqual((len(self.map.splitlines()), len(lines), len(starts)), (7865, 7865, 0))
+
+    def test_the_sections_that_reach_the_binary(self):
+        taken = check_links.parse_map(self.map)
+        self.assertEqual(len(taken), 224)
+        self.assertEqual(self.names(taken), self.IN_BINARY)
+
+    def test_the_sections_that_are_not_loaded_are_read_and_dropped(self):
+        """The control: the part of the same record that the linker does not load, from the first line at the
+        address 0, is 7,632 real lines naming the seven archives, and not one of them is taken."""
+        at = min(n for n, line in enumerate(self.map.splitlines())
+                 if n and check_links.MAP_COLUMNS.match(line)
+                 and int(check_links.MAP_COLUMNS.match(line).group(1), 16) == 0)
+        tail = "\n".join(self.map.splitlines()[at:])
+        self.assertEqual(len(tail.splitlines()), 7632)
+        self.assertTrue(all(any(f"/{name}(" in line for line in tail.splitlines()) for name in self.EMPTIED))
+        self.assertEqual(check_links.parse_map(tail), [])
+
+    def test_the_list_of_the_toolchain_image_s_files(self):
+        """The uninstrumented list this record gives: the five files of the image whose code is in the binary,
+        with the bytes the build recorded, and none of the seven archives it took and left no code of."""
+        image, took = {}, set()
+        for row in self.inputs:
+            path, real, sha256, _size = row.split("\t")
+            took.add(pathlib.PurePosixPath(path).name)
+            if real.startswith("/opt/"):
+                image[real] = sha256
+        self.assertTrue(set(self.EMPTIED) <= took, "the link took the archives the list must leave out")
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = pathlib.Path(tmp)
+            directory = raw / ".records" / ("a" * 64)
+            directory.mkdir(parents=True)
+            (directory / "map").write_text(self.map)
+            (directory / "inputs.tsv").write_text("\n".join(self.inputs) + "\n")
+            (directory / "driver").write_text((self.RECORD / "driver").read_text())
+            record = check_links.read_record(raw, "a" * 64)
+            _code, provided, _problems = check_links.project_code(record, image)
+        self.assertEqual(sorted((pathlib.PurePosixPath(p).name, s) for p, s in provided),
+                         sorted((pathlib.PurePosixPath(p).name, s) for p, s in image.items()
+                                if pathlib.PurePosixPath(p).name in self.IN_BINARY))
+        self.assertEqual(sorted(pathlib.PurePosixPath(p).name for p, _s in provided), self.IN_BINARY)
+        self.assertTrue(all(check_links.runtime_kind(p) for p, _s in provided))
 
 
 class Archives(unittest.TestCase):
@@ -421,16 +504,13 @@ class Analyse(unittest.TestCase):
         directory = self.raw / ".records" / digest
         directory.mkdir()
         (directory / "map").write_text("\n".join([
-            "             VMA              LMA     Size Align Out     In      Symbol",
-            map_output(0x10000, 0x40, ".text"),
             map_line(0x10000, 0x10, f"{self.CRT1}:(.text)"),
             map_line(0x10010, 0x10, f"{self.LIBC}(memcpy.lo):(.text.memcpy)"),
             map_line(0x10020, 0x20, f"{self.ZLIB}(inflate.o):(.text.inflate)"),
-            map_output(0, 0x300, ".debug_info"),
+            # the sections the linker does not load, each from the offset 0: all libcrypto has left
             map_line(0, 0x100, f"{self.ZLIB}(inflate.o):(.debug_info)"),
             map_line(0x100, 0x100, f"{crypto}(libcrypto-lib-init.o):(.debug_info)"),
             map_line(0x200, 0x100, f"{crypto}(libcrypto-lib-err.o):(.debug_info)"),
-            map_output(0, 0x30, ".comment"),
             map_line(0, 0x18, f"{self.ZLIB}(inflate.o):(.comment)"),
             map_line(0x18, 0x18, f"{crypto}(libcrypto-lib-init.o):(.comment)"),
         ]) + "\n")

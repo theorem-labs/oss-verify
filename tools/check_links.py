@@ -543,25 +543,37 @@ def go_program(data):
 
 
 def parse_map(text):
-    """The input sections of an lld map that reach the binary: [(file, member or None, section, size)]. An output
-    section is a line whose text follows the four columns of numbers with no indent; an input section is a line whose
-    text is indented by eight blanks and reads <file>:(<section>) or <archive>(<member>):(<section>), and belongs to
-    the output section above it. Only input sections of an output section at a non-zero address are kept: lld gives
-    a section that is not loaded (debug information, .comment, which the published binary's --strip-all removes) the
-    address 0, and its input sections their offsets in it, which are not 0 past the first. So an archive whose
-    members only have debug information left after --gc-sections is not taken. The linker's own sections
-    (<internal>) are left out."""
+    """The input sections of an lld map that reach the binary: [(file, member or None, section, size)]. A link's
+    record holds the map's input section lines alone (infra/base-builder/link-fuzz-target): four columns of
+    numbers — address, load address, size, alignment — then eight blanks and <file>:(<section>) or
+    <archive>(<member>):(<section>). The line that starts an output section is not in the record, so which output
+    section a line belongs to, and whether the linker loads it, are read from the record's order and its
+    addresses. Within one output section the addresses do not fall, so a line whose address is below the line
+    before it begins another one; and lld gives a section it does not load (.comment, .debug_*, which the
+    published binary's --strip-all removes) and each of that section's input sections their offsets in it, from
+    0, so the output section a line begins is loaded when that line's address is not 0. Only the input sections
+    of a loaded output section are kept, so an archive whose members have only debug information left after
+    --gc-sections is not taken. The linker's own sections (<internal>) are left out.
+
+    A step backwards inside the loaded part reads as another output section and decides it loaded again, which it
+    is: lld overlaps a .tbss input section with what follows it, so the address falls between two sections the
+    linker loads. Three things the link gives this reading: it is -static -no-pie (link-fuzz-target), so no output
+    section the linker loads is at the address 0; lld writes the sections it does not load last, so none of them
+    is followed by one it loads; and it starts each of them at 0."""
     taken = []
-    loaded = False
+    loaded, previous = False, None
     for line in text.splitlines():
         found = MAP_COLUMNS.match(line)
         if not found:
             continue
         rest = line[found.end():]
-        if rest[:1] not in ("", " "):
-            loaded = int(found.group(1), 16) != 0
+        if not rest.startswith(" " * 8) or rest[8:9] in ("", " "):
             continue
-        if not loaded or not rest.startswith(" " * 8) or rest[8:9] in ("", " "):
+        address = int(found.group(1), 16)
+        if previous is None or address < previous:
+            loaded = address != 0
+        previous = address
+        if not loaded:
             continue
         rest = rest[8:]
         at = rest.rfind(":(")

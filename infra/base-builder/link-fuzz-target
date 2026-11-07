@@ -123,7 +123,9 @@ mv -f "$OV_TWINS/$sum.tmp" "$OV_TWINS/$sum"
 
 [ -n "${OV_RECORDS:-}" ] || exit 0
 # The record of this link, for the checks of tools/check --checks (tools/check_links.py), in $OV_RECORDS/<sum>/:
-#   map         the input sections of the linker's map
+#   map         the input sections of the linker's map, in the map's own order. The reader takes the output section
+#               each one belongs to, and whether the linker loads it, from that order and from the addresses
+#               (tools/check_links.py, parse_map), so keep both: never sort or re-order the lines below.
 #   driver      the driver's objects and the seals, one a line: compiled without a sanitizer in every build, by design
 #   inputs.tsv  each file the map names: <path as the map names it> <real path> <sha256> <bytes>
 #   renamed     for an allocation-failure link, each copy it made: <copy> <real path of the original> <its sha256>
