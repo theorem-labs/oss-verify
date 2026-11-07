@@ -1,7 +1,0 @@
-# Generated from the build recipe of the oss-fuzz-theorems 2026.10 release; do not edit.
-# kind	path	arguments: see lay-out-sources
-tree	ext/curl-fuzz_bufq/src	upstream/curl
-link	ext/curl-fuzz_fnmatch/src	ext/curl-fuzz_bufq/src
-file	targets/curl-fuzz_bufq/fuzz_bufq.cc	https://raw.githubusercontent.com/curl/curl-fuzzer/4768d8de6f3209bb5dd761cd24ff7ccbfbb6b5b8/fuzz_bufq.cc	b3caf628a0f010b94d3f168c188ae2e253d95aed56dc5bd6b544b624668d5e0d
-file	targets/curl-fuzz_bufq/fuzz_bufq.h	https://raw.githubusercontent.com/curl/curl-fuzzer/4768d8de6f3209bb5dd761cd24ff7ccbfbb6b5b8/fuzz_bufq.h	23ca300a2e9e32c23180d2090f38d976787898748b26bef1389981f53947046e
-file	targets/curl-fuzz_fnmatch/fuzz_fnmatch.cc	https://raw.githubusercontent.com/curl/curl-fuzzer/f41a4eef509bdee8ccc1fc90e6fb3404046d256b/fuzz_fnmatch.cc	9d48c1d9079ec0e24ae763165ae549e2412d47df43ba729eca4f4a88110c9313

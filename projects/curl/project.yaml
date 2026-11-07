@@ -1,0 +1,12 @@
+# Seeded by Theorem from the oss-fuzz-theorems 2026.10 release, not enrolled by the project's
+# maintainers: provisional. To adopt it, set primary_contact and remove these lines (docs/project-yaml.md).
+repo: https://github.com/curl/curl#f190aa8ecea728e6ce7fb7a6250e03df4d4eaca5
+primary_contact: n/a
+homepage: https://curl.haxx.se
+language: c++
+sanitizers: [address, undefined]
+# build.sh also builds fuzz_doh and fuzz_netrc. They are not listed yet: each makes system calls that the process
+# model of the statements does not accept yet. curl_fuzzer_proto_file is not built at all: it is not listed either,
+# and building libprotobuf-mutator and its protobuf for every sanitizer took about an hour each, past the time the
+# enrollment build is given.
+fuzz_targets: [fuzz_bufq, fuzz_fnmatch, fuzz_url]
