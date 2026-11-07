@@ -883,6 +883,9 @@ jobs:
       # true when the screen reads the item first: route's trust is screen, or the review would read text of an
       # account without write access (the step below).
       screen: ${{ steps.outside.outputs.screen }}
+      # The logins of the comments' and reviews' authors that have write access, which the screen does not read:
+      # their text is this project's own (the step below).
+      writers: ${{ steps.outside.outputs.writers }}
       # The session to resume and the commit it reviewed, from review-gather (empty for a fresh review). None for a
       # screened item: no screen reads a session, which a review that read unscreened text, such as one started by
       # hand, may have kept.
@@ -949,11 +952,14 @@ jobs:
             fi
           done
           echo "The pull request's head is $HEAD_SHA, before and after the reads."
-      # A writer's pull request or issue can hold the text of others: comments, reviews and review comments, which
-      # anyone can write and the review reads. When any of their accounts has no write access, or cannot be named,
-      # the screen reads those texts first (SCREEN_SCOPE comments). The accounts come from the files the review reads.
-      # A run a person with write access started by hand is that person's request: it is not screened. A rescreen is
-      # not such a run, whoever started it: route decided its trust from the API.
+      # A pull request or an issue can hold the text of several accounts: its comments, its reviews and its review
+      # comments, which anyone can write and the review reads. This step asks GitHub which of their accounts have
+      # write access, for two decisions. A writer's item whose text is all writers' is not screened at all; one
+      # that holds text of another account is screened for those texts (SCREEN_SCOPE comments). And whatever the
+      # trust, the screen reads none of the writers' own text: it is this project's, not the outside text the
+      # screen is for (its output writers, and .github/scripts/screen.py). The accounts come from the files the
+      # review reads. A run a person with write access started by hand is that person's request: it is not
+      # screened. A rescreen is not such a run, whoever started it: route decided its trust from the API.
       - name: Whether the review reads text of an account without write access
         id: outside
         if: steps.head.outputs.moved != 'true'
@@ -984,14 +990,15 @@ jobs:
             id=${BASH_REMATCH[1]}
             [ "$(gh api "repos/$REPO/issues/comments/$id" --jq '"\(.user.login) \(.user.type)"' 2> /dev/null)" = "$1[bot] Bot" ]
           }
-          screen=true
+          screen=true writers=""
+          item=.review/pr.json
+          [ -f "$item" ] || item=.review/issue.json
           if [ "$TRUST" = writer ] && [ "$EVENT" = workflow_dispatch ] && [ "$RESCREEN" != true ]; then
             screen=false
-          elif [ "$TRUST" = writer ]; then
-            item=.review/pr.json
-            [ -f "$item" ] || item=.review/issue.json
+          else
             # keep()'s last line is the exit status; an account GitHub no longer names is "-". A read that cannot be
-            # parsed, or a pull request with no list of its review comments' authors, leaves screen true.
+            # parsed, or a pull request with no list of its review comments' authors, names no writer, and leaves
+            # screen true: then the screen reads every comment, as it did before any of them was told apart.
             if accounts=$(sed '$d' "$item" | jq -r '((.comments // [])[] | [(.author.login // ""), (.url // "")]),
                 ((.reviews // [])[] | [(.author.login // ""), ""])
                 | (if .[0] == "" then "-" else .[0] end) + "\t" + .[1]' 2> /dev/null) \
@@ -999,18 +1006,26 @@ jobs:
               if [ -f .review/review-comment-authors.txt ]; then
                 accounts+=$'\n'$(sed '$d' .review/review-comment-authors.txt | sed 's/^$/-/')
               fi
-              screen=false
+              outside=0
               while IFS=$'\t' read -r login url; do
                 [ -n "$login$url" ] || continue
-                if ! writer "${login:--}" "${url:-}"; then
-                  screen=true
-                  echo "The review reads text of an account without write access, or one GitHub cannot name: the screen reads it first."
-                  break
+                if writer "${login:--}" "${url:-}"; then
+                  [[ ,$writers, == *",$login,"* ]] || writers+=",$login"
+                else
+                  outside=1
                 fi
               done < <(sort -u <<< "$accounts")
+              if [ "$TRUST" = writer ]; then
+                if (( outside )); then
+                  echo "The review reads text of an account without write access, or one GitHub cannot name: the screen reads it first."
+                else
+                  screen=false
+                fi
+              fi
             fi
           fi
           echo "screen=$screen" >> "$GITHUB_OUTPUT"
+          echo "writers=${writers#,}" >> "$GITHUB_OUTPUT"
       # The project's repository at the built commit is far more text than the screen reads, and an enrollment of an
       # account without write access names it: so that review reads none of it. Its source.txt says so, and the
       # checks that need it are left to a person; a person with write access starts the full review by hand.
@@ -1140,6 +1155,9 @@ jobs:
           # A writer's item is screened only for the comments, reviews and review comments of others it holds: the
           # rest is a writer's, which the review reads as before.
           SCREEN_SCOPE: ${{ needs.route.outputs.trust == 'writer' && 'comments' || 'all' }}
+          # The comments' and reviews' authors that have write access (the gather job): the screen reads none of
+          # their text, whatever the scope, since it is this project's own and not the outside text it is for.
+          SCREEN_WRITERS: ${{ needs.gather.outputs.writers }}
         run: python3 .github/scripts/screen.py .review ${NAME:+"projects/$NAME"}
       # Every listed check, MEASURE_REPEATS times, on each text of the labelled set kept in the private bucket (the
       # screen's account can read only its measure/set-* objects), and the verdict of each rule of SCREEN_RULE's

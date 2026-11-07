@@ -1207,6 +1207,7 @@ class OutsideText(Runner):
                                                              + "(exit status 0)\n")
         rc, out, got = self.run_script(step("gather", self.STEP)["run"], TRUST=trust, EVENT=event, RESCREEN=rescreen)
         self.assertEqual(rc, 0, out)
+        self.last = got
         return got["screen"]
 
     def setUp(self):
@@ -1275,6 +1276,22 @@ class OutsideText(Runner):
 
     def test_an_outsiders_item_is_screened_whatever_it_holds(self):
         self.assertEqual(self.screen(trust="screen"), "true")
+
+    def test_the_accounts_with_write_access_are_named_for_the_screen(self):
+        """The screen reads none of their text, whatever the trust (.github/scripts/screen.py, SCREEN_WRITERS):
+        it is this project's own. An account the API cannot place, and one without write access, are not named."""
+        self.screen(trust="screen", comments=[{"login": "alice"}, {"login": "mallory"}, None],
+                    reviews=[{"login": "root"}], review_authors=["alice", "oss-verify[bot]", "-"])
+        self.assertEqual(self.last["writers"], "alice,oss-verify[bot],root")
+        self.screen(trust="screen", comments=[{"login": "mallory"}], review_authors=[])
+        self.assertEqual(self.last["writers"], "")
+
+    def test_a_read_that_failed_names_no_writer(self):
+        """Then the screen reads every comment, as it did before any of them was told apart."""
+        (self.work / ".review").mkdir()
+        (self.work / ".review" / "pr.json").write_text("gh: Server Error (HTTP 502)\n(exit status 1)\n")
+        got = self.run_script(step("gather", self.STEP)["run"], TRUST="screen", EVENT="pull_request_target")[2]
+        self.assertEqual((got["screen"], got["writers"]), ("true", ""))
 
     def test_both_copies_of_trusted_are_the_same(self):
         def trusted(text):

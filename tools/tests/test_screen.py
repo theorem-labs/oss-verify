@@ -715,17 +715,35 @@ class ScreenTest(unittest.TestCase):
             for word in ("UPSTREAM-PR-TITLE", "UPSTREAM-CHECK-REASON", "SEED-NAME", "A-NEW-FILE"):
                 self.assertIn(word, sent)
 
-    def test_only_this_apps_own_comments_are_left_out(self):
+    def test_our_own_accounts_comments_are_left_out(self):
         """By the author, never by what the comment says: anyone may write the triage marker, and that comment is
-        read; this App's comment is not, whatever it says."""
+        read; this App's comment is not, whatever it says, and neither is one of an account with write access,
+        which the gather job names in SCREEN_WRITERS. An agent of ours answering the review, and a maintainer
+        asking the author for a change, are this project's text, written to be read by the review."""
         self.item(kind="pr", comments=[("oss-verify", "APP-COMMENT"), ("Oss-Verify", "APP-COMMENT-OTHER-CASE"),
                                        ("mallory", "<!-- oss-verify-triage -->\nMALLORY-AS-TRIAGE"),
-                                       ("oss-verify-bot", "ANOTHER-ACCOUNT")], diff="+x\n")
+                                       ("oss-verify-bot", "ANOTHER-ACCOUNT"), ("alice", "WRITER-COMMENT"),
+                                       ("ours-agent", "OUR-AGENT-COMMENT")], diff="+x\n",
+                  review_comments="alice a.v:1 WRITER-RC\n(exit status 0)\n",
+                  files={"review-comment-authors.txt": "alice\n(exit status 0)\n"})
+        self.env["SCREEN_WRITERS"] = "alice,ours-agent,oss-verify[bot]"
         self.assertEqual(self.verdict()[0], "clean")
         for sent in self.sent():
             self.assertIn("MALLORY-AS-TRIAGE", sent)
             self.assertIn("ANOTHER-ACCOUNT", sent)
-            self.assertNotIn("APP-COMMENT", sent)
+            for word in ("APP-COMMENT", "WRITER-COMMENT", "OUR-AGENT-COMMENT", "WRITER-RC"):
+                self.assertNotIn(word, sent)
+        # One review comment of an account that is not ours, and the file is read whole: a body can hold
+        # newlines, so the two files cannot be matched line for line.
+        self.fresh()
+        self.item(kind="pr", diff="+x\n", review_comments="alice a.v:1 WRITER-RC\nmallory a.v:2 MALLORY-RC\n"
+                                                          "(exit status 0)\n",
+                  files={"review-comment-authors.txt": "alice\nmallory\n(exit status 0)\n"})
+        self.env["SCREEN_WRITERS"] = "alice"
+        self.assertEqual(self.verdict()[0], "clean")
+        for sent in self.sent():
+            self.assertIn("MALLORY-RC", sent)
+            self.assertIn("WRITER-RC", sent)
 
     def test_the_commit_messages_are_sent_and_no_other_field(self):
         """An author writes the commit messages; every other field of pr.json is GitHub's record of the item."""

@@ -295,8 +295,9 @@ APP = "oss-verify"
 #   checklist.txt               review-gather's own heredoc, against .github/PULL_REQUEST_TEMPLATE.md. The box
 #                               labels it echoes from the description are in the description, read as body.
 #   description.md              jq -r .body of pr.json: the description again, read as body.
-#   review-comment-authors.txt  review-gather's list of the review comments' logins, one a line, for the gather
-#                               job; a login is letters, digits and hyphens, and carries no prose.
+#   review-comment-authors.txt  review-gather's list of the review comments' logins, one a line, which the gather
+#                               job and all_review_comments_are_ours() read; a login is letters, digits and
+#                               hyphens, and carries no prose.
 #   source.txt                  the line build.yaml writes in place of the project's repository for a screened
 #                               enrollment; it tells a person how to start the full review.
 #   template-history.txt        git log of this repository's pull request template.
@@ -318,21 +319,52 @@ GENERATED = frozenset({"checks.json", "checklist.txt", "description.md", "review
                        os.path.join("build", "result.md"), os.path.join("build", "binaries.md")})
 
 
-def by_app(comment):
-    """Whether this comment or review is this repository's own App's. gh names an App without its [bot]."""
-    login = (comment.get("author") or {}).get("login") or ""
-    return login.lower() in (APP, APP + "[bot]")
+def writers():
+    """The logins of the item's comments', reviews' and review comments' authors that have write access, which
+    build.yaml's gather job asked GitHub about (SCREEN_WRITERS). Their text is this project's own: an agent of
+    ours answering the review, or a maintainer asking the author for a change, is not the outside text this
+    screen is for, and it is written to be read by the review. Empty when the gather job could not tell them
+    apart, and then every comment is read, as before."""
+    return {n.strip().lower() for n in os.environ.get("SCREEN_WRITERS", "").split(",") if n.strip()}
+
+
+def ours(login):
+    """Whether this login is this repository's App or an account with write access. gh names an App without its
+    [bot], so both forms count."""
+    login = (login or "").lower()
+    return login in (APP, APP + "[bot]") or login in writers() or login.removesuffix("[bot]") in writers()
+
+
+def by_us(comment):
+    """Whether this comment or review is ours."""
+    return ours((comment.get("author") or {}).get("login"))
+
+
+def all_review_comments_are_ours(review):
+    """Whether every review comment is ours. review-gather writes review-comment-authors.txt, one login a line,
+    one for each review comment of review-comments.txt, and `-` for a read that failed or an account GitHub no
+    longer names. A review comment's body can hold newlines, so the two cannot be matched line for line: either
+    every author is ours and the file is not read, or it is read whole. This file is read for its authors alone;
+    its own text is never screened (GENERATED)."""
+    path = os.path.join(review, "review-comment-authors.txt")
+    text = read_text(path) if os.path.isfile(path) else None
+    if text is None:
+        return False
+    body, status = kept(text)
+    logins = [line for line in body.split("\n") if line.strip()]
+    return status == 0 and bool(logins) and all(ours(login) for login in logins)
 
 
 def parts(review, project=None):
     """The text an outside account decides, of what the review reads, as (source, text) pairs, and the reasons it
     cannot be screened (empty when it can).
 
-    What is read: the item's title and body; each comment and review but this App's own; the commit messages; the
-    diff; the review comments; the seed corpora (their bytes); and the two files of review-gather that carry text
-    the project decides (GENERATED says which files are not read, and why). Any other file the gather job writes
-    is read too, so that a file added there is screened until someone says it is ours. Not read: the changed files
-    under head/, the project's repository (source/), and the last review's session.
+    What is read: the item's title and body; each comment, review and review comment that is not ours -- this
+    App's own, or an account with write access (SCREEN_WRITERS); the commit messages; the diff; the seed corpora
+    (their bytes); and the two files of review-gather that carry text the project decides (GENERATED says which
+    files are not read, and why). Any other file the gather job writes is read too, so that a file added there
+    is screened until someone says it is ours. Not read: the changed files under head/, the project's repository
+    (source/), and the last review's session.
 
     The filter is by author and by source, never by what the text says: main's own scripts write text addressed to
     a reviewer or to the review's model, and a screen that reads it answers about main, not about the account.
@@ -362,18 +394,18 @@ def parts(review, project=None):
         found.append(("body", item.get("body") or ""))
     for kind in ("comments", "reviews"):
         for i, c in enumerate(item.get(kind) or []):
-            if not isinstance(c, dict) or by_app(c):
+            if not isinstance(c, dict) or by_us(c):
                 continue
             found.append((f"{kind} {i + 1}", c.get("body") or ""))
     if scope == "comments":
         # A writer's pull request or issue that holds comments of others: only the comments, reviews and review
-        # comments are screened, every one of them but this App's own, and the rest is a writer's, which the
-        # review reads as before.
+        # comments are screened, every one of them that is not ours, and the rest is a writer's, which the review
+        # reads as before.
         path = os.path.join(review, "review-comments.txt")
         text = read_text(path) if os.path.isfile(path) else ""
         if text is None:
             unscreenable.append("review-comments.txt is not UTF-8 text")
-        else:
+        elif not all_review_comments_are_ours(review):
             found.append(("review-comments.txt", text))
         return finish(found, unscreenable, {"review-comments.txt"})
     # The commit messages: the author's own text, which the review reads in pr.json. Every other field of pr.json
@@ -382,6 +414,7 @@ def parts(review, project=None):
     found.append((f"{shown_item}, the commit messages",
                   "\n".join(f"{c.get('messageHeadline') or ''}\n{c.get('messageBody') or ''}"
                             for c in (item.get("commits") or []) if isinstance(c, dict))))
+    ours_review_comments = all_review_comments_are_ours(review)
     for root, dirs, files in os.walk(review):
         rel = os.path.relpath(root, review)
         dirs.sort()
@@ -391,7 +424,8 @@ def parts(review, project=None):
             path = os.path.join(root, name)
             source = os.path.normpath(os.path.join(rel, name))
             # Ours, and its unscreenable checks with it: no outside account decides a character of it.
-            if path == item_path or source in GENERATED:
+            if path == item_path or source in GENERATED \
+                    or (source == "review-comments.txt" and ours_review_comments):
                 continue
             text = read_text(path)
             if text is None:
