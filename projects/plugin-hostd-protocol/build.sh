@@ -7,12 +7,13 @@
 # static riscv64 programs, each linked against a static library of this build.
 flags=(-std=gnu99 -D_GNU_SOURCE -Iinclude)
 
-# The library: the command parser, the dispatcher, the scenario reader and the string helpers, in a fixed order, and
+# The library: the command parser, the dispatcher, the curve verbs, the scenario reader and the string helpers, in a
+# fixed order, and
 # fuzz/socket_fuzz.c in place of src/socket.c: its socket_send() copies each reply into a buffer the harness reads, so a
 # run opens no socket.
 mkdir -p "$WORK/obj"
 objs=()
-for src in src/protocol.c src/utils.c src/host-dispatch.c src/host-scenario.c fuzz/socket_fuzz.c; do
+for src in src/protocol.c src/utils.c src/host-dispatch.c src/host-curve.c src/host-scenario.c fuzz/socket_fuzz.c; do
   obj="$WORK/obj/$(basename "$src" .c).o"
   $CC $CFLAGS "${flags[@]}" -c "$src" -o "$obj"
   objs+=("$obj")
