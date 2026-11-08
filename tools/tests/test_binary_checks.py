@@ -315,6 +315,18 @@ class Archives(unittest.TestCase):
     def test_not_an_archive(self):
         self.assertEqual(check_links.ar_members(b"\x7fELF"), [])
 
+    def test_a_long_name_offset_that_is_not_ascii_digits_is_kept_as_written(self):
+        """A GNU member name `/<digits>` is an offset into the long-name table. The pull request's build writes the
+        archives that the record keeps, and "/²" (the byte 0xB2) passes str.isdigit(), which int() refuses: it is
+        a name, not an offset, and the walk goes on, rather than end the checks of the binaries with an error."""
+        def member(name, body):
+            return (name.ljust(16) + b"0".ljust(12) + b"0".ljust(6) + b"0".ljust(6) + b"644".ljust(8)
+                    + str(len(body)).encode().ljust(10) + b"`\n" + body + b"\n" * (len(body) % 2))
+
+        a = elf_object(NOP)
+        data = b"!<arch>\n" + member(b"//", b"long_name.o/\n") + member(b"/\xb2", a) + member(b"/0", a)
+        self.assertEqual(check_links.ar_members(data), [("/\xb2", a), ("long_name.o", a)])
+
 
 class Objects(unittest.TestCase):
     def test_facts(self):
@@ -378,6 +390,15 @@ class Records(unittest.TestCase):
         record = check_links.read_record(self.raw, "a" * 64)
         self.assertEqual(record.driver, {"/tmp/ov/cli.o"})
         self.assertIsNone(record.quiet)
+
+    def test_a_size_that_is_not_ascii_digits_leaves_its_row_out(self):
+        """inputs.tsv is the build's, so its size field may be anything: "²" passes str.isdigit() and 5,000 digits
+        are more than int() reads. Each such row is left out, as a row that is not a record, rather than end the
+        checks of the binaries with an error."""
+        rows = ["/work/a.o\t/work/a.o\t" + "b" * 64 + "\t12", "/work/b.o\t/work/b.o\t" + "c" * 64 + "\t²",
+                "/work/c.o\t/work/c.o\t" + "d" * 64 + "\t" + "1" * 5000]
+        (self.directory / "inputs.tsv").write_text("\n".join(rows) + "\n")
+        self.assertEqual(check_links.read_record(self.raw, "a" * 64).inputs, {"/work/a.o": ("/work/a.o", "b" * 64, 12)})
 
     def test_links_are_refused(self):
         secret = self.raw / "secret"

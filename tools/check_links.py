@@ -607,7 +607,8 @@ def read_record(raw, sha256, compiles=None):
     inputs, renamed = {}, {}
     for row in rows:
         fields = row.split("\t")
-        if len(fields) == 4 and re.fullmatch(r"[0-9a-f]{64}", fields[2]) and fields[3].isdigit():
+        # The size in ASCII digits, as int() reads them: isdigit() takes "²" too, and int() refuses over 4300 digits.
+        if len(fields) == 4 and re.fullmatch(r"[0-9a-f]{64}", fields[2]) and re.fullmatch(r"[0-9]{1,18}", fields[3]):
             inputs[fields[0]] = (fields[1], fields[2], int(fields[3]))
     for row in renamed_rows:
         fields = row.split("\t")
@@ -664,7 +665,7 @@ def ar_members(data):
             continue
         if name in ("/", "/SYM64/", "__.SYMDEF", "__.SYMDEF SORTED"):
             continue
-        if name.startswith("/") and name[1:].isdigit():
+        if name.startswith("/") and name[1:].isascii() and name[1:].isdigit():  # "/²" is no offset int() reads
             start = int(name[1:])
             end = names.find(b"\n", start)
             name = names[start:end if end >= 0 else len(names)].decode("latin-1")

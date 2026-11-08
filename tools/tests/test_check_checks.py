@@ -235,6 +235,34 @@ class CompilerRt(unittest.TestCase):
             self.assertEqual((again, downloads), (source, []))
 
 
+class SeedRuns(unittest.TestCase):
+    """check_checks.run_all: the status of each run, which the run's container writes."""
+
+    def test_a_status_that_is_not_ascii_digits_is_no_status(self):
+        """The fuzz target runs in the container that writes its status, so a status file may hold anything: "²"
+        passes str.isdigit(), which int() refuses, and bytes that are not UTF-8 are no text. Such a run has no
+        status, as one stopped at the time limit, rather than end the step with an error."""
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as scratch:
+            directory = pathlib.Path(scratch)
+            (directory / "bin").mkdir()
+            (directory / "bin" / "t").write_bytes(b"x")
+            results = directory / "results"
+            statuses = {0: "0\n".encode(), 1: "²\n".encode(), 2: b"\xff\xfe\n", 3: b"134\n"}
+
+            def run(*argv, quiet=False):  # the container: each run's status, as the run left it
+                (results / "t").mkdir(parents=True, exist_ok=True)
+                for n, data in statuses.items():
+                    (results / "t" / f"{n}.status").write_bytes(data)
+                return 0
+
+            with mock.patch.object(check_checks.check_build, "run", run), \
+                    mock.patch.object(check_checks, "qemu", lambda: "/bin/true"):
+                runs = check_checks.run_all("tag", directory / "bin", directory / "inputs", {"t": list("abcd")},
+                                            "coverage", results, labels=[])
+        self.assertEqual([run.status for run in runs], [0, None, None, 134])
+
+
 class ImageFiles(unittest.TestCase):
     """check_checks.image_files: files of the project image, whose paths and tar the pull request chooses, read with
     bounded memory."""
