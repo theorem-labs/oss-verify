@@ -770,11 +770,36 @@ class Analyse(unittest.TestCase):
             self.assertEqual(check_links.runtime_kind("/opt/fortran/lib/" + name), "fortran-runtime", name)
 
     def test_one_rust_allocator_shim_is_exempt(self):
-        shim = elf_object(NOP, defined=["__rust_alloc", "__rust_dealloc"], comment=True)
-        result = self.analyse({"asan": self.record({"/work/l.a": {"a.o": good(), "shim.o": shim}})})["asan"]
-        self.assertEqual(result["instrumented"]["result"], "pass")
-        result = self.analyse({"asan": self.record({"/work/l.a": {"a.o": good(), "shim.o": shim, "s2.o": shim}})})
-        self.assertEqual(result["asan"]["instrumented"]["result"], "fail")
+        # The v0 names are from the allocator shim of tessera-sort's enrollment
+        # with the pinned Rust toolchain (nightly-2025-07-16).
+        for names in (
+            ["__rust_alloc", "__rust_dealloc"],
+            ["_RNvC7___rustc12___rust_alloc", "_RNvC7___rustc14___rust_dealloc"],
+            ["_RNvCs6UdHf40Qw6p_7___rustc12___rust_alloc",
+             "_RNvCs6UdHf40Qw6p_7___rustc14___rust_dealloc",
+             "_RNvCs6UdHf40Qw6p_7___rustc14___rust_realloc",
+             "_RNvCs6UdHf40Qw6p_7___rustc19___rust_alloc_zeroed",
+             "_RNvCs6UdHf40Qw6p_7___rustc26___rust_alloc_error_handler",
+             "_RNvCs6UdHf40Qw6p_7___rustc35___rust_no_alloc_shim_is_unstable_v2",
+             "_RNvCs6UdHf40Qw6p_7___rustc42___rust_alloc_error_handler_should_panic_v2"],
+        ):
+            with self.subTest(names=names):
+                shim = elf_object(NOP, defined=names, comment=True)
+                result = self.analyse({"asan": self.record({"/work/l.a": {"a.o": good(), "shim.o": shim}})})["asan"]
+                self.assertEqual(result["instrumented"]["result"], "pass")
+                result = self.analyse({"asan": self.record({"/work/l.a": {"a.o": good(), "shim.o": shim,
+                                                                        "s2.o": shim}})})
+                self.assertEqual(result["asan"]["instrumented"]["result"], "fail")
+
+    def test_allocator_names_do_not_exempt_other_functions(self):
+        allocator = "_RNvCs6UdHf40Qw6p_7___rustc12___rust_alloc"
+        for other in ("helper", allocator.replace("7___rustc", "7___other"),
+                      allocator.replace("12___rust_alloc", "13___rust_alloc"),
+                      allocator + "extra", "_RNvCs6UdHf40Qw6p_7___rustc18___rust_alloc_extra"):
+            with self.subTest(other=other):
+                shim = elf_object(NOP, defined=[allocator, other], comment=True)
+                result = self.analyse({"asan": self.record({"/work/l.a": {"a.o": good(), "shim.o": shim}})})
+                self.assertEqual(result["asan"]["instrumented"]["result"], "fail")
 
     SHIMS = pathlib.Path(__file__).resolve().parent / "fixtures" / "allocator-shim"
 
