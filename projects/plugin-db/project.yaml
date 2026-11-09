@@ -1,8 +1,8 @@
 # plugin-db: the database of what is known about an audio plugin, for FreeMixer. The fuzz targets drive the key of
 # an entry: the pin of a plugin (the SHA-256 of each file it loads, the omx-layout/1 fingerprint of its controls and
 # ports, and the verdict and pool words a pin line carries), as a C header, and every reader of text in it: the pin
-# line, the layout bytes and the digest. Pinned to main at the merge of FreeMixer/plugin-db#18.
-repo: https://github.com/FreeMixer/plugin-db#028de535f48d2c1fbdee3d4e89d62fb100facfea
+# line, the layout bytes and the digest. Pinned to main at the merge of FreeMixer/plugin-db#20.
+repo: https://github.com/FreeMixer/plugin-db#e60b78ab9fd791145b251b75b32ff8f5b8bed0df
 primary_contact: linuxnow@gmail.com
 homepage: https://github.com/FreeMixer/plugin-db
 language: c
