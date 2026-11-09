@@ -11,7 +11,7 @@ flags=(-std=gnu11 -DOMX_CONTRACTS -ffp-contract=off -Iinclude -isystem "$SRC/omx
 
 mkdir -p "$WORK/obj"
 objs=()
-for src in src/omx_align_fit.c src/omx_fbs_detect.c src/omx_oversampler.c src/omx_room.c src/omx_sweep.c; do
+for src in src/omx_align_fit.c src/omx_fbs_detect.c src/omx_fbs_place.c src/omx_oversampler.c src/omx_room.c src/omx_sweep.c; do
   obj="$WORK/obj/$(basename "$src" .c).o"
   $CC $CFLAGS "${flags[@]}" -c "$src" -o "$obj"
   objs+=("$obj")
