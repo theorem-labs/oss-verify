@@ -31,17 +31,21 @@ name: "Build"
 #            it (below). So a run started by hand is trusted as the item's author, as an event's run is. `screen`
 #            otherwise: the screen job reads the pull request or issue first, and only a clean verdict lets the
 #            review run, with no person. Before that, the daily cap (REVIEW_CAP and REVIEW_CAP_AUTHOR, below) counts
-#            this file's runs of the last 24 hours that screened an item for an account without write access
-#            (.github/scripts/screened-review-cap): over it the trust is `cap`, the item gets no screen and no
-#            review, and route's output `free` gives the time the cap lets it run. `measure` for a run started by
-#            hand with -f measure=true and no pr or issue: the screen job alone runs, and measures its rules (below).
+#            this file's runs of the last 24 hours that route let screen for an account without write access, from
+#            the moment route did (its step "Mark this run for the daily cap"), unless they ended before their screen
+#            job started (.github/scripts/screened-review-cap): over it the trust is `cap`, the item gets no screen
+#            and no review, and route's output `free` gives the time the cap lets it run. `measure` for a run started
+#            by hand with -f measure=true and no pr or issue: the screen job alone runs, and measures its rules
+#            (below).
 #            GitHub starts this file on the event of every label (labeled, unlabeled), and route makes each a label
 #            run (its output `label_run`): it builds, screens and reviews nothing, and its project-builds copies the
 #            newest project-builds of another Build run at the head (the job required, below). The label parked,
 #            which a person puts on a pull request to hold it, is route's output `parked`: while it is on, the pull
 #            request gets no screen, no review and no review comment. The label run that adds it, and a push to a
 #            parked pull request, ask for the comment job, which records that a person holds it (below). The removal
-#            of parked is no label run: it runs, and cancels, as a push does, and reviews the head.
+#            of parked is no label run: it runs, and cancels, as a push does, and reviews the head; while it waits
+#            for the run it cancelled to finish, a newer event's run, a label run included, replaces it (concurrency,
+#            below).
 #   gather   gathers what the review reads, once, with .github/scripts/review-gather (below), and keeps it as the
 #            artifact review-data, which the screen and the review take only by its SHA-256
 #            (.github/scripts/take-review-data): the review reads exactly what the screen passed. It holds no model,
@@ -153,9 +157,10 @@ name: "Build"
 #            stops a person's merge. When the review gave its verdicts, the pull request is still at the run's head
 #            and parked is not on it, the same step posts the review comment, with the checks' report folded under
 #            it, or replaces the one already there; any other outcome posts nothing, and the comment of an earlier
-#            head stays. The step then deletes the App's hold comments from before and takes the label review-held
-#            off, so the review comment stays the App's only comment on an enrollment pull request. For a change pull
-#            request it posts the review comment the same way, with no check run. The comment starts with
+#            head stays. Its step "Take the label review-held off" then deletes the App's hold comments from before
+#            and takes the label review-held off, so the review comment stays the App's only comment on an enrollment
+#            pull request. For a change pull request it posts the review comment the same way, with no check run. The
+#            comment starts with
 #            <!-- oss-verify-review -->, as the triage comment starts with its own marker; an enrollment's comment
 #            then gives the fixed first sentence of the check run's conclusion (.github/scripts/review-body).
 #            The review's text and the checks' report, which a pull request can steer, reach the comment only through
@@ -210,9 +215,12 @@ name: "Build"
 # completion of this run, when the draft is marked ready, is what has it decide again.
 # It runs on labeled and unlabeled too, for the label parked (route, above). Each such run but the removal of parked is
 # a label run, which copies the head's standing project-builds and waits for the run already going: it cancels no
-# running run, but a newer event's run replaces it while it waits (concurrency, below). GitHub reads the required check
-# from the newest run at the head, so after a re-run clears a failed build, the newest label run at that head is re-run
-# too, or the maintainer pushes.
+# running run, but a newer event's run replaces it while it waits (concurrency, below). The removal of parked cancels
+# the running run as a push does; while either waits for that run to finish, a newer event's run, a label run
+# included, replaces it. GitHub reads the required check from the newest run at the head, so after a re-run clears a
+# failed build, the newest label run at that head is re-run too, or the maintainer pushes. When a label run replaced a
+# waiting push or removal of parked, the head has no build and no review: the maintainer re-runs the replaced run
+# (gh run rerun <run> -R theorem-labs/oss-verify), then the newest label run at that head; or pushes.
 # A failure is usually the project's, but it can be the runner's: GitHub's runner may run out of disk or time on a
 # build that works on a larger machine. A maintainer then reruns the failed job (gh run rerun <run> --failed). If it
 # fails again for the runner's reason, the maintainer builds the project with `tools/check --no-shell --twice <name>` on
@@ -388,9 +396,11 @@ env:
   # The daily cap on the screens and model reviews of accounts without write access: at most REVIEW_CAP runs in any 24
   # hours over all pull requests and issues, and at most REVIEW_CAP_AUTHOR of them charged to one account. route's
   # trust step counts them with .github/scripts/screened-review-cap for every item whose trust is screen, before the
-  # screen: a run started by an event is charged to the account that opened, pushed, edited or reopened the item, and a
-  # run started by hand to the item's author. An item over the cap gets trust cap: no screen and no model call, and
-  # route's output free gives the time the cap lets it run. A count that cannot read GitHub fails route.
+  # screen: the runs that route let screen (its step "Mark this run for the daily cap"), from that moment, unless they
+  # ended before their screen job started. A run started by an event is charged to the account that opened, pushed,
+  # edited or reopened the item, and a run started by hand to the item's author. An item over the cap gets trust cap:
+  # no screen and no model call, and route's output free gives the time the cap lets it run. A count that cannot read
+  # GitHub fails route.
   REVIEW_CAP: "24"
   REVIEW_CAP_AUTHOR: "12"
   # The label a held issue or change pull request gets, and the marker of the comment that says so.
@@ -405,9 +415,10 @@ concurrency:
   # wrote the issue) is of an issue that never gets a draft. A label's event (labeled, unlabeled) shares the pull
   # request's group and cancels no running run: it waits until the run already going finishes, so the job required of
   # a label run copies the result of a finished run, and a push still cancels a label run that waits or runs. GitHub
-  # keeps one waiting run in a group, so a newer event's run replaces a label run that waits. The removal of parked
-  # (GitHub compares the label's name without case) is a full run and cancels as a push does, so that it never waits
-  # where a later label event's run could replace it and leave the head unreviewed.
+  # keeps one waiting run in a group, so a newer event's run replaces a run that waits. The removal of parked (GitHub
+  # compares the label's name without case) is a full run and cancels the running run as a push does; while it waits
+  # for that run to finish (its job required has if: always()), a newer event's run, a label run included, replaces
+  # it, as it replaces a push's run that waits so. The top of this file says how to recover the head's build.
   group: build-${{ github.event_name }}-${{ github.event.pull_request.number || inputs.pr || inputs.issue || (github.event.sender.login == github.event.issue.user.login && github.event.issue.number || format('{0}-run-{1}', github.event.issue.number, github.run_id)) }}
   cancel-in-progress: ${{ github.event_name != 'issues' && ((github.event.action != 'labeled' && github.event.action != 'unlabeled') || (github.event.action == 'unlabeled' && github.event.label.name == 'parked')) }}
 
@@ -416,7 +427,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     # contents: read only for the checkout of .github/scripts, main's (actor-kind, screened-review-cap). actions: read
-    # for the daily cap, which reads this workflow's runs and their jobs.
+    # for the daily cap, which reads this workflow's runs and the artifacts that mark them for it.
     permissions: {contents: read, pull-requests: read, issues: read, actions: read}
     outputs:
       kind: ${{ steps.decide.outputs.kind }}
@@ -625,7 +636,16 @@ jobs:
               || { echo "::error::The daily cap gave no time it frees. Re-run this run."; exit 1; }
             trust cap "Held without a screen or a review: the daily cap is reached, $count of $REVIEW_CAP runs of accounts without write access in 24 hours, $account_count of $REVIEW_CAP_AUTHOR charged to $charged. The cap lets it run from $free."
           fi
+          echo "$RUN_ID" > "$RUNNER_TEMP/daily-cap"
           trust screen "$started; the author, $AUTHOR, or $ACTOR has no write access: screened first. The daily cap counts $count of $REVIEW_CAP runs in 24 hours, $account_count of $REVIEW_CAP_AUTHOR charged to $charged."
+
+      # The daily cap counts a run from the moment route lets it be screened (.github/scripts/screened-review-cap), so
+      # that a burst of items is counted before their builds end, which can take hours. This artifact says that route
+      # gave this run trust screen; the screen job's first steps keep daily-cap-screen once a runner took it.
+      - name: Mark this run for the daily cap
+        if: steps.trust.outputs.trust == 'screen'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (sha-pinned)
+        with: {name: daily-cap-route, path: "${{ runner.temp }}/daily-cap", if-no-files-found: error, retention-days: 2, overwrite: true}
 
   project-builds:
     # Not the required check, which the job required reports (the top of this file).
@@ -1097,6 +1117,14 @@ jobs:
       # rule, when a check cannot answer.
       SCREEN_RULE: claude_or_both_detectors
     steps:
+      # The daily cap counts a run whose screen job a runner took (.github/scripts/screened-review-cap), whatever the
+      # job does next, so these come first. A measurement's mark counts nothing: route kept no daily-cap-route for it.
+      - name: Mark this run's screen for the daily cap
+        timeout-minutes: 1
+        run: echo "$GITHUB_RUN_ID" > "$RUNNER_TEMP/daily-cap"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (sha-pinned)
+        timeout-minutes: 2
+        with: {name: daily-cap-screen, path: "${{ runner.temp }}/daily-cap", if-no-files-found: error, retention-days: 2, overwrite: true}
       # main's .github/scripts, for take-review-data and screen.py; never the pull request.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         timeout-minutes: 2
@@ -1847,7 +1875,8 @@ jobs:
           echo "Held: labelled $HELD_LABEL, and said so."
 
       # The review comment of a change pull request; for an enrollment pull request, the check run Enrollment review
-      # too, from the same parsed verdicts, on every run this job runs for.
+      # too, from the same parsed verdicts, on every run this job runs for. Its outputs: posted=true when it posted the
+      # review comment, and recorded=true when it recorded the check run (the step after it then takes a hold off).
       - name: Post the comment and record the verdict
         id: post
         if: env.KIND == 'enrollment' || (env.KIND == 'change' && env.HOLDING != 'true')
@@ -1909,14 +1938,8 @@ jobs:
           fi
           conclusion=""
           if [ "$KIND" = enrollment ]; then
-            if [ -n "$hold" ]; then
-              verdict=$(HOLD=$hold JOB=$job .github/scripts/review-verdict)
-            else
-              # The review's verdicts, as one line of JSON; what is not JSON is no verdict.
-              jq -c . <<< "${VERDICTS:-null}" > "$RUNNER_TEMP/verdicts.json" 2> /dev/null \
-                || echo null > "$RUNNER_TEMP/verdicts.json"
-              verdict=$(VERDICTS=$(< "$RUNNER_TEMP/verdicts.json") .github/scripts/review-verdict)
-            fi
+            # review-verdict reads the review's VERDICTS and REASONS from this step's env, and none of them with HOLD.
+            verdict=$(HOLD=$hold JOB=$job .github/scripts/review-verdict)
             conclusion=$(jq -r .conclusion <<< "$verdict")
           fi
           if [ -n "$hold" ]; then
@@ -1941,31 +1964,27 @@ jobs:
             echo "posted=true" >> "$GITHUB_OUTPUT"
           fi
           [ "$KIND" = enrollment ] || exit 0
-          # The one record of the verdict, at the head this run reviewed. enroll-dispatch reads it.
-          jq -n --arg head "$HEAD_SHA" --arg url "$RUN_URL" --argjson verdict "$verdict" \
-            '{name: "Enrollment review", head_sha: $head, status: "completed", conclusion: $verdict.conclusion,
-              details_url: $url, output: {title: $verdict.title, summary: $verdict.summary}}' \
+          # The one record of the verdict, at the head this run reviewed. enroll-dispatch reads it. jq reads the verdict
+          # on its standard input: as an argument it can be more than the 131,072 bytes Linux takes in one.
+          jq --arg head "$HEAD_SHA" --arg url "$RUN_URL" \
+            '{name: "Enrollment review", head_sha: $head, status: "completed", conclusion: .conclusion,
+              details_url: $url, output: {title: .title, summary: .summary}}' <<< "$verdict" \
             | gh api --method POST "repos/$REPO/check-runs" --input - > /dev/null
+          echo "recorded=true" >> "$GITHUB_OUTPUT"
           echo "Recorded the check run Enrollment review at $HEAD_SHA: $conclusion."
-          # The review comment stays the App's only comment on an enrollment pull request: a hold comment from before
-          # the check run goes, and so does the label review-held. One already gone is no error.
-          held=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-            --jq '.[] | select(.user.login == "oss-verify[bot]" and (.body | startswith("<!-- oss-verify-held -->"))) | .id')
-          while read -r id; do
-            [[ $id =~ ^[0-9]+$ ]] || continue
-            out=$(gh api --method DELETE "repos/$REPO/issues/comments/$id" 2>&1) \
-              || [[ $out == *"(HTTP 404)"* ]] || { echo "::error::the hold comment $id could not be deleted: $out"; exit 1; }
-          done <<< "$held"
-          out=$(gh api --method DELETE "repos/$REPO/issues/$PR/labels/$HELD_LABEL" 2>&1) \
-            || [[ $out == *"(HTTP 404)"* ]] || { echo "::error::the label $HELD_LABEL could not be taken off: $out"; exit 1; }
 
       # A review replaces a hold of a change pull request or an issue: one a maintainer started, or a later push that
       # the screen passed; for an issue, a review that made its draft. The label comes off, and the hold comment goes.
       # Not when another run's hold came after this run started: a newer event of the pull request or the issue was
       # held, in a run of its own. This run's own hold, from an attempt before a re-run of its failed jobs, counts as
-      # older whatever its time. An enrollment's step above takes its hold off.
+      # older whatever its time. For an enrollment pull request, every check run the step above records takes the
+      # label and the App's hold comments from before off, so the review comment stays the App's only comment on it:
+      # an enrollment gets no new hold comment, so no newer hold is kept (and a parked or label run has no start time).
+      # A hold comment or a label already gone is no error.
       - name: Take the label review-held off
-        if: (steps.post.outputs.posted == 'true' && env.KIND == 'change') || (env.HOLDING != 'true' && env.KIND == 'issue')
+        if: >-
+          (steps.post.outputs.posted == 'true' && env.KIND == 'change') || (steps.post.outputs.recorded == 'true' && env.KIND == 'enrollment')
+          || (env.HOLDING != 'true' && env.KIND == 'issue')
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           REPO: ${{ github.repository }}
@@ -1976,25 +1995,27 @@ jobs:
           set -uo pipefail
           [[ $NUMBER =~ ^[1-9][0-9]*$ ]] || { echo "::error::not a number: $NUMBER"; exit 1; }
           [[ $RUN_ID =~ ^[0-9]+$ ]] || { echo "::error::not a run id: $RUN_ID"; exit 1; }
-          [[ $STARTED =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
+          [ "$KIND" = enrollment ] || [[ $STARTED =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
             || { echo "::error::no start time of this run"; exit 1; }
           held=$(gh api "repos/$REPO/issues/$NUMBER/comments" --paginate \
             --jq '.[] | select(.user.login == "oss-verify[bot]" and (.body | startswith("<!-- oss-verify-held -->")))
               | "\(.id) \(.updated_at) \((.body | capture("\n<!-- oss-verify-held-run (?<r>[0-9]+) -->\n?$") | .r) // "-")"') \
             || { echo "::error::the comments of #$NUMBER could not be read"; exit 1; }
-          while read -r _ at run; do
-            [ -n "${at:-}" ] && [ "$run" != "$RUN_ID" ] || continue
-            if [[ ! $at < $STARTED ]]; then
-              echo "#$NUMBER was held at $at by run $run, after this run started at $STARTED: the label and the hold comment stay."
-              exit 0
-            fi
-          done <<< "$held"
+          if [ "$KIND" != enrollment ]; then
+            while read -r _ at run; do
+              [ -n "${at:-}" ] && [ "$run" != "$RUN_ID" ] || continue
+              if [[ ! $at < $STARTED ]]; then
+                echo "#$NUMBER was held at $at by run $run, after this run started at $STARTED: the label and the hold comment stay."
+                exit 0
+              fi
+            done <<< "$held"
+          fi
           out=$(gh api --method DELETE "repos/$REPO/issues/$NUMBER/labels/$HELD_LABEL" 2>&1) \
             || [[ $out == *"(HTTP 404)"* ]] || { echo "::error::the label $HELD_LABEL could not be taken off: $out"; exit 1; }
           while read -r id _; do
             [[ $id =~ ^[0-9]+$ ]] || continue
-            gh api --method DELETE "repos/$REPO/issues/comments/$id" > /dev/null \
-              || { echo "::error::the hold comment $id could not be deleted"; exit 1; }
+            out=$(gh api --method DELETE "repos/$REPO/issues/comments/$id" 2>&1) \
+              || [[ $out == *"(HTTP 404)"* ]] || { echo "::error::the hold comment $id could not be deleted: $out"; exit 1; }
           done <<< "$held"
 
   required:

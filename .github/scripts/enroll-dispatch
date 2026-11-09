@@ -237,43 +237,36 @@ def bound_checks(api: Api, runs: Runs, repo: str, sha: str, head: tuple) -> tupl
     return waiting, build_run
 
 
-def unexpired(api: Api, repo: str, run_id: int, name: str) -> list[dict]:
-    """Every unexpired artifact `name` of this run."""
-    return [a for page in api.pages(f"repos/{repo}/actions/runs/{run_id}/artifacts?name={name}&per_page=100")
-            for a in page.get("artifacts") or [] if a.get("name") == name and not a.get("expired")]
+def records(api: Api, repo: str, run_id: int) -> list[dict]:
+    """Every unexpired artifact RECORD_ARTIFACT of this Build run."""
+    return [a for page in api.pages(f"repos/{repo}/actions/runs/{run_id}/artifacts?name={RECORD_ARTIFACT}&per_page=100")
+            for a in page.get("artifacts") or [] if a.get("name") == RECORD_ARTIFACT and not a.get("expired")]
 
 
 def has_record(api: Api, repo: str, run_id: int) -> bool:
     """Whether this Build run uploaded an unexpired record: a full run, not one that a label event started."""
-    return bool(unexpired(api, repo, run_id, RECORD_ARTIFACT))
+    return bool(records(api, repo, run_id))
 
 
-def artifact_json(api: Api, repo: str, run_id: int, name: str, file: str, allowed: frozenset) -> tuple[object, str]:
-    """The JSON file `file` of the artifact `name` of this run, which holds no file outside `allowed`, or None and
-    why not."""
-    artifacts = unexpired(api, repo, run_id, name)
+def build_record(api: Api, repo: str, run_id: int | None) -> tuple[dict | None, str]:
+    """The record build.yaml's record job uploaded in this run: the JSON of record.json, the one file of its artifact
+    RECORD_ARTIFACT; or None and why not. No run (None) is a head none of whose bound Build runs wrote one."""
+    if run_id is None:
+        return None, f"no Build run of project-builds at this head wrote the artifact {RECORD_ARTIFACT}"
+    artifacts = records(api, repo, run_id)
     if len(artifacts) != 1:
-        return None, f"Build run {run_id} has {len(artifacts)} unexpired {name} artifacts, not one"
+        return None, f"Build run {run_id} has {len(artifacts)} unexpired {RECORD_ARTIFACT} artifacts, not one"
     if int(artifacts[0].get("size_in_bytes") or 0) > MAX_ARTIFACT_BYTES:
-        return None, f"Build run {run_id}'s {name} is larger than {MAX_ARTIFACT_BYTES} bytes"
+        return None, f"Build run {run_id}'s {RECORD_ARTIFACT} is larger than {MAX_ARTIFACT_BYTES} bytes"
     data = api.raw(f"repos/{repo}/actions/artifacts/{artifacts[0]['id']}/zip")
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             names = archive.namelist()
-            if file not in names or not set(names) <= allowed \
-                    or archive.getinfo(file).file_size > MAX_ARTIFACT_BYTES:
-                return None, f"Build run {run_id}'s {name} holds {names}, not {file} with {sorted(allowed)} only"
-            return json.loads(archive.read(file)), ""
+            if set(names) != {"record.json"} or archive.getinfo("record.json").file_size > MAX_ARTIFACT_BYTES:
+                return None, f"Build run {run_id}'s {RECORD_ARTIFACT} holds {names}, not record.json alone"
+            return json.loads(archive.read("record.json")), ""
     except (zipfile.BadZipFile, ValueError) as error:
-        return None, f"Build run {run_id}'s {name} cannot be read: {error}"
-
-
-def build_record(api: Api, repo: str, run_id: int | None) -> tuple[dict | None, str]:
-    """The record build.yaml's record job uploaded in this run, or None and why not. No run (None) is a head none of
-    whose bound Build runs wrote one."""
-    if run_id is None:
-        return None, f"no Build run of project-builds at this head wrote the artifact {RECORD_ARTIFACT}"
-    return artifact_json(api, repo, run_id, RECORD_ARTIFACT, "record.json", frozenset({"record.json"}))
+        return None, f"Build run {run_id}'s {RECORD_ARTIFACT} cannot be read: {error}"
 
 
 def review_conclusion(api: Api, repo: str, head: str) -> str:

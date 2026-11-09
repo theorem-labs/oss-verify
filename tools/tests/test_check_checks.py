@@ -744,9 +744,10 @@ SENTENCES = {"success": "No change is needed.", "failure": "The changes below ar
 
 
 class PostingStep(Runner):
-    """build.yaml's comment step "Post the comment and record the verdict", run with the stand-in gh of
-    test_outside_screen, which keeps each request's method, endpoint and body: the review comment it posts or updates,
-    and for an enrollment the one check run Enrollment review it records from the same verdicts (c1, c3)."""
+    """build.yaml's comment step "Post the comment and record the verdict", and after it the step "Take the label
+    review-held off" when its if holds, run with the stand-in gh of test_outside_screen, which keeps each request's
+    method, endpoint and body: the review comment it posts or updates, for an enrollment the one check run Enrollment
+    review it records from the same verdicts (c1, c3), and the holds taken off after it."""
 
     STEP = "Post the comment and record the verdict"
     REPO = "theorem-labs/oss-verify"
@@ -756,11 +757,12 @@ class PostingStep(Runner):
     MARKER = "<!-- oss-verify-review -->"
 
     def post(self, kind="enrollment", verdicts=None, reasons=None, review="Thanks.\n\n1. Fix X.\n", head=HEAD,
-             pr_head=None, labels=(), comments=(), label=True, status=0, **env):
+             pr_head=None, labels=(), comments=(), label=True, status=0, started="2026-11-03T10:00:00Z", **env):
         """Run the step for a run of `kind` at `head` whose review gave `verdicts` and `reasons` (None: no verdicts),
         on pull request 8, whose head is now `pr_head` (by default `head`) and which carries `labels` and `comments`
-        (and review-held, unless `label` is false). `env` replaces what the job gives the step. Return the step's
-        output and each request it sent, as (method, endpoint, body)."""
+        (and review-held, unless `label` is false); then the step after it, with route's output started `started`,
+        when its if holds. `env` replaces what the job gives the step. Return the steps' output and each request they
+        sent, as (method, endpoint, body)."""
         # Each run starts with no request recorded.
         self.api.joinpath("args").unlink(missing_ok=True)
         self.api.joinpath(f"repos_{self.REPO.replace('/', '_')}_issues_8_labels_review-held.json").unlink(
@@ -785,6 +787,14 @@ class PostingStep(Runner):
         self.assertEqual(set(posting["env"]) - {"GH_TOKEN", "REPO"}, set(given))
         rc, out, self.outputs = self.run_script(posting["run"], cwd=ROOT, KIND=kind, **given)
         self.assertEqual(rc, status, out)
+        take_off = step("comment", "Take the label review-held off")
+        self.assertEqual(set(take_off["env"]) - {"GH_TOKEN", "REPO"}, {"NUMBER", "STARTED", "RUN_ID"})
+        if rc == 0 and evaluate(take_off["if"], {"env.KIND": kind, "env.HOLDING": "false", **{
+                f"steps.post.outputs.{k}": v for k, v in self.outputs.items()}}):
+            rc, more, _ = self.run_script(take_off["run"], cwd=ROOT, KIND=kind, NUMBER="8", STARTED=started,
+                                          RUN_ID="77")
+            out += more
+            self.assertEqual(rc, 0, out)
         requests = []
         for n, call in enumerate(self.calls(), 1):
             method = call[call.index("--method") + 1] if "--method" in call else "GET"
@@ -930,7 +940,7 @@ class PostingStep(Runner):
         self.assertIn("<summary>What the checks of the fuzz targets and of the binaries measured</summary>\n\n"
                       "### new report", text)
         self.assertTrue(text.endswith(f"\n<!-- oss-verify-review-head {self.HEAD} -->\n"))
-        self.assertEqual(self.outputs, {"posted": "true"})
+        self.assertEqual(self.outputs, {"posted": "true", "recorded": "true"})
         # What review-body prints from the same values, as it is.
         self.assertEqual(text, body(self.HEAD, review="Thanks again.\n\n2. Fix Y.\n", checks="### new report\n"))
 
@@ -946,7 +956,9 @@ class PostingStep(Runner):
         self.assertTrue(text.startswith(self.MARKER + "\n<sub>Claude wrote this review of `bbbbbbb` from "
                                         "`review-change.md`."), text[:120])
         self.assertEqual([e for _, e, _ in requests if "check-runs" in e], [])
-        self.assertEqual([r for r in requests if r[0] == "DELETE"], [])
+        # Its posted review takes the label review-held off (Hold in test_outside_screen).
+        self.assertEqual([e for m, e, _ in requests if m == "DELETE"],
+                         [f"repos/{self.REPO}/issues/8/labels/review-held"])
         self.assertEqual(self.outputs, {"posted": "true"})
 
     def test_a_run_of_an_older_head_posts_nothing_and_records_its_own_head(self):
@@ -970,15 +982,17 @@ class PostingStep(Runner):
 
     def test_every_record_takes_a_hold_comment_and_review_held_off(self):
         """Decision 9: the App's hold comments of the time before the check run go, another account's stay, and a
-        label already gone is no error."""
+        label already gone is no error. A parked or label run has no start time of route, and needs none."""
         held = [{"id": 5, "user": {"login": "oss-verify[bot]"}, "body": "<!-- oss-verify-held -->\nheld"},
                 {"id": 6, "user": {"login": "mallory"}, "body": "<!-- oss-verify-held --> forged"}]
-        for env in ({"REVIEW_RESULT": "success"}, {"REVIEW_RESULT": "failure"}, {"PARKED": "true"}):
+        for env, started in (({"REVIEW_RESULT": "success"}, "2026-11-03T10:00:00Z"),
+                             ({"REVIEW_RESULT": "failure"}, "2026-11-03T10:00:00Z"), ({"PARKED": "true"}, "")):
             with self.subTest(env=env):
-                _, requests = self.post(verdicts=self.verdicts(), comments=held, **env)
+                _, requests = self.post(verdicts=self.verdicts(), comments=held, started=started, **env)
+                self.record(requests)
                 deleted = [e for m, e, _ in requests if m == "DELETE"]
-                self.assertEqual(deleted, [f"repos/{self.REPO}/issues/comments/5",
-                                           f"repos/{self.REPO}/issues/8/labels/review-held"])
+                self.assertEqual(deleted, [f"repos/{self.REPO}/issues/8/labels/review-held",
+                                           f"repos/{self.REPO}/issues/comments/5"])
         # GitHub answers 404 for a label the pull request does not carry.
         _, requests = self.post(verdicts=self.verdicts(), label=False)
         self.assertIn(("DELETE", f"repos/{self.REPO}/issues/8/labels/review-held", None), requests)
@@ -989,6 +1003,29 @@ class PostingStep(Runner):
         self.assertEqual(run["conclusion"], "action_required")
         self.assertEqual(run["output"]["summary"].count("The review gave no verdict."), len(check_ids("review.md")))
         self.assertEqual(self.first_sentence(requests), SENTENCES["action_required"])
+
+    def test_the_longest_verdict_reaches_the_check_run_in_no_argument_over_linuxs_limit(self):
+        """Linux refuses to start a process with an argument over 131,072 bytes. The longest reasons the review job
+        lets through, 31 of 1,500 characters that json.dumps writes as \\u escapes, make a verdict of about 280,000
+        bytes: the step gives it to no command as an argument, and the check run gets the whole summary."""
+        shim = self.dir / "shim"
+        shim.mkdir()
+        (shim / "jq").write_text("#!/usr/bin/env bash\n"
+                                 'lengths() { local LC_ALL=C a; for a in "$@"; do echo "${#a}"; done >> "$JQ_ARGV"; }\n'
+                                 f'lengths "$@"\nexec {shlex.quote(shutil.which("jq"))} "$@"\n')
+        (shim / "jq").chmod(0o755)
+        self.env.update(PATH=f"{shim}{os.pathsep}{self.env['PATH']}", JQ_ARGV=str(self.dir / "jq-argv"))
+        ids = check_ids("review.md")
+        reasons = {check: "é" * 1500 for check in ids}
+        _, requests = self.post(verdicts=self.verdicts(**{check: "fail" for check in ids}),
+                                REASONS=json.dumps(reasons, ensure_ascii=False))
+        run = self.record(requests)
+        self.assertEqual(run["conclusion"], "failure")
+        self.assertEqual(run["output"]["summary"].count("é" * 1500), len(ids))
+        self.assertGreater(len(json.dumps(run).encode()), 131_072)
+        lengths = [int(n) for n in (self.dir / "jq-argv").read_text().split()]
+        lengths += [len(a.encode()) for call in self.calls() for a in call]
+        self.assertLess(max(lengths), 131_072)
 
     def test_the_comment_stays_under_githubs_limit(self):
         _, requests = self.post(review="R" * 70_000, verdicts=self.verdicts(), CHECKS="C" * 20_000)

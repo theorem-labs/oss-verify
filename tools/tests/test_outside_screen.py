@@ -34,9 +34,9 @@ JOBS = WF["jobs"]
 REPO = "theorem-labs/oss-verify"
 
 # gh api <endpoint> [--paginate] [--jq <filter>] [--method M] [-f|-F k=v] [--input -], answered from
-# $FAKE_GH/<endpoint>.json (the endpoint's slashes as underscores, its query dropped) through jq, as gh applies --jq;
-# an endpoint with no file answers as GitHub's 404 does. Each call's arguments go to $FAKE_GH/args, and what it read
-# on its standard input (--input -) to $FAKE_GH/input.<n>.
+# $FAKE_GH/<endpoint>.json (the endpoint's slashes as underscores; its query kept when a file is served for the endpoint
+# with it, else dropped) through jq, as gh applies --jq; an endpoint with no file answers as GitHub's 404 does. Each
+# call's arguments go to $FAKE_GH/args, and what it read on its standard input (--input -) to $FAKE_GH/input.<n>.
 FAKE_GH = r"""#!/usr/bin/env bash
 [ "$1" = api ] || { echo "gh: only api is served here: $*" >&2; exit 9; }
 shift
@@ -51,11 +51,13 @@ while [ $# -gt 0 ]; do
     *) endpoint=$1; shift ;;
   esac
 done
+queried="$FAKE_GH/${endpoint//\//_}.json"
 endpoint=${endpoint%%\?*}
 printf '%s\0' "${all[@]}" >> "$FAKE_GH/args"; printf '\1' >> "$FAKE_GH/args"
 n=$(tr -cd '\1' < "$FAKE_GH/args" | wc -c)
 [ "$input" != - ] || cat > "$FAKE_GH/input.$n"
 file="$FAKE_GH/${endpoint//\//_}.json"
+[ ! -f "$queried" ] || file=$queried
 [ -f "$file" ] || { echo "gh: Not Found (HTTP 404): $endpoint" >&2; exit 1; }
 jq -r "$filter" "$file"
 """
@@ -278,10 +280,11 @@ class Trust(Runner):
 
     def trust(self, event, author="", actor="", measure="", number=""):
         """Run the trust step for an event's run, or a run by hand (workflow_dispatch) of item `number`, whose author
-        the API gives as `author`. The daily cap reads the runs a test serves, or none."""
+        the API gives as `author`. The daily cap reads the runs and the artifacts a test serves, or none."""
         runs = f"repos/{REPO}/actions/workflows/build.yaml/runs"
         if not (self.api / (runs.replace("/", "_") + ".json")).exists():
             self.serve(runs, {"workflow_runs": []})
+            self.serve(f"repos/{REPO}/actions/artifacts", {"artifacts": []})
         if event == "workflow_dispatch" and number:
             self.serve(f"repos/{REPO}/issues/{number}", {"number": int(number), "user": {"login": author}})
             author = ""
@@ -382,12 +385,19 @@ class Trust(Runner):
 
 
 class DailyCap(Runner):
-    """The daily cap: .github/scripts/screened-review-cap with a stand-in runs and jobs API, and route's trust step,
-    which calls it for every item whose trust is screen (c3 (c)-(f))."""
+    """The daily cap: .github/scripts/screened-review-cap with a stand-in runs and artifacts API, and route's trust
+    step, which calls it for every item whose trust is screen (c3 (c)-(f))."""
 
     STEP = Trust.STEP
     NOW = "2026-11-09T12:00:00Z"
     CAP, AUTHOR_CAP = int(WF["env"]["REVIEW_CAP"]), int(WF["env"]["REVIEW_CAP_AUTHOR"])
+    # A run's state, as (its status, its artifact daily-cap-route, its artifact daily-cap-screen): each artifact True,
+    # False (none) or "expired".
+    SCREENED = ("completed", True, True)  # route gave it trust screen, and its screen job started
+    BUILDING = ("in_progress", True, False)  # route gave it trust screen, and its build still runs
+    UNSTARTED = ("completed", True, False)  # cancelled before its screen job started
+    UNMARKED = ("completed", False, False)  # route gave it no trust screen: capped, a label run, a writer's trust
+    MEASURED = ("completed", False, True)  # a screen job with no trust screen: a measurement
 
     def setUp(self):
         super().setUp()
@@ -405,22 +415,22 @@ class DailyCap(Runner):
         return self.at(hours - 24)
 
     def runs(self, *runs):
-        """Serve build.yaml's runs and their jobs. Each run is (id, hours before NOW it was made, event, actor, the
-        conclusion of its screen job, or the whole job as GitHub gives it[, its name])."""
+        """Serve build.yaml's runs and the artifacts that mark them for the daily cap. Each run is (id, hours before
+        NOW it was made, event, actor, its state (above)[, its name])."""
         self.serve(f"repos/{REPO}/actions/workflows/build.yaml/runs", {"workflow_runs": [
-            {"id": r[0], "created_at": self.at(r[1]), "event": r[2], "actor": {"login": r[3]},
+            {"id": r[0], "created_at": self.at(r[1]), "status": r[4][0], "event": r[2], "actor": {"login": r[3]},
              "display_title": r[5] if len(r) > 5 else "projects/libx: enroll libx"} for r in runs]})
-        for r in runs:
-            screen = r[4] if isinstance(r[4], dict) else {"conclusion": r[4]}
-            self.serve(f"repos/{REPO}/actions/runs/{r[0]}/jobs", {"jobs": [
-                {"name": "route", "conclusion": "success"}, {"name": "screen", **screen},
-                {"name": "required", "conclusion": None}]})
+        for i, name in ((1, "daily-cap-route"), (2, "daily-cap-screen")):
+            self.serve(f"repos/{REPO}/actions/artifacts?name={name}&per_page=100", {"artifacts": [
+                {"id": r[0] * 10 + i, "name": name, "expired": r[4][i] == "expired", "workflow_run": {"id": r[0]}}
+                for r in runs if r[4][i]]})
 
-    @staticmethod
-    def screened(n, first=10, account=None, hours=0.5, start=0.0, event="pull_request_target"):
+    @classmethod
+    def screened(cls, n, first=10, account=None, hours=0.5, start=0.0, event="pull_request_target", state=None):
         """n runs that ran the screen, each `hours` before the one after it, the newest `start` + `hours` before NOW:
         each by an outside account of its own (o<i>), or all by `account`."""
-        return [(first + i, start + hours * (i + 1), event, account or f"o{i}", "success") for i in range(n)]
+        return [(first + i, start + hours * (i + 1), event, account or f"o{i}", state or cls.SCREENED)
+                for i in range(n)]
 
     def cap(self, account):
         """screened-review-cap for a run charged to `account`: its exit status, its log and what it printed."""
@@ -437,8 +447,8 @@ class DailyCap(Runner):
         """The endpoints of the stand-in gh's calls that end with `suffix`."""
         return [a for c in self.calls() for a in c if a.endswith(suffix)]
 
-    def jobs_read(self):
-        return {a.split("/")[-2] for a in self.read("/jobs?per_page=100")}
+    def assertNoJobsRead(self):
+        self.assertEqual([a for c in self.calls() for a in c if "/jobs" in a], [])
 
     def test_the_25th_over_all_authors_is_capped_until_the_oldest_leaves(self):
         """c3 (c): 24 counted runs of 24 outside accounts in 24 hours. A 25th, by a new account, gets trust cap: no
@@ -498,45 +508,57 @@ class DailyCap(Runner):
                                                   "free": self.freed(15)})
 
     def test_only_earlier_screened_runs_of_outside_accounts_in_24_hours_count(self):
-        self.runs((10, 25, "pull_request_target", "o0", "success"),  # over 24 hours old
-                  (11, 1, "pull_request_target", "o1", "skipped"),  # no screen: held, or a label run
-                  (12, 1, "pull_request_target", "alice", "success"),  # a writer's
-                  (13, 1, "issues", "sjawhar-agent[bot]", "success"),  # an App of ALLOWED_BOTS
-                  (14, 1, "workflow_dispatch", "alice", "success", "Measure the screen"),  # charged to no one
-                  (1000, 1, "pull_request_target", "o2", "success"),  # this run
-                  (1001, 1, "pull_request_target", "o3", "success"),  # a later run
-                  (15, 2, "pull_request_target", "mallory", "success"),
-                  (16, 3, "issues", "mallory", None),  # its screen has not finished
-                  (17, 4, "pull_request_target", "mallory", "failure"))
+        self.runs((10, 25, "pull_request_target", "o0", self.SCREENED),  # over 24 hours old
+                  (11, 1, "pull_request_target", "o1", self.UNMARKED),  # no trust screen: capped, or a label run
+                  (12, 1, "pull_request_target", "alice", self.SCREENED),  # a writer's push to an outsider's item
+                  (13, 1, "issues", "sjawhar-agent[bot]", self.SCREENED),  # an App of ALLOWED_BOTS
+                  (14, 1, "workflow_dispatch", "alice", self.MEASURED, "Measure the screen"),  # a measurement
+                  (1000, 1, "pull_request_target", "o2", self.SCREENED),  # this run
+                  (1001, 1, "pull_request_target", "o3", self.SCREENED),  # a later run
+                  (18, 1, "pull_request_target", "o4", ("completed", True, "expired")),  # its mark expired
+                  (19, 1, "pull_request_target", "o5", ("completed", "expired", True)),
+                  (15, 2, "pull_request_target", "mallory", self.SCREENED),
+                  (16, 3, "issues", "mallory", self.BUILDING),  # its screen has not started yet
+                  (17, 4, "pull_request_target", "mallory", self.SCREENED))
         rc, out, got = self.cap("mallory")
         self.assertEqual((rc, got), (0, {"count": "3", "account_count": "3", "capped": "false", "free": ""}), out)
-        # Writers' runs are dropped before any jobs read, with one permission read for each account.
-        self.assertEqual(self.jobs_read(), {"11", "15", "16", "17"})
+        # Each artifact list is read once, no run's jobs, and one permission read for each account a marked run is
+        # charged to.
+        self.assertEqual(self.read("&per_page=100"), [f"repos/{REPO}/actions/artifacts?name=daily-cap-{n}&per_page=100"
+                                                      for n in ("route", "screen")])
+        self.assertNoJobsRead()
         self.assertEqual(sorted(self.read("/permission")), sorted(f"repos/{REPO}/collaborators/{a}/permission"
-                                                              for a in ("o1", "alice", "mallory")))
+                                                              for a in ("alice", "mallory")))
 
-    def test_a_screen_cancelled_before_a_runner_took_it_is_not_counted(self):
-        """A push that cancels a run still building gives its screen job, which never started, the conclusion
-        cancelled with no runner and no steps (Build run 42503706951): no screen ran, so it is not counted. A screen
-        cancelled once it started is."""
-        self.runs((20, 1, "pull_request_target", "mallory",
-                   {"conclusion": "cancelled", "runner_name": None, "steps": []}),
-                  (21, 2, "pull_request_target", "mallory",
-                   {"conclusion": "cancelled", "runner_name": "GitHub Actions 1", "steps": [{"name": "x"}]}))
+    def test_a_run_counts_from_routes_mark_until_it_ends_without_a_screen(self):
+        """A run counts once route gave it trust screen (daily-cap-route), while it has not completed, and once it
+        has, only when its screen job started (daily-cap-screen): a push that cancels a run still building ends it
+        before its screen. A run that route gave no trust screen never counts, whatever ran."""
+        self.runs((20, 1, "pull_request_target", "mallory", self.UNSTARTED),
+                  (21, 2, "pull_request_target", "mallory", self.SCREENED),
+                  (22, 3, "pull_request_target", "mallory", self.BUILDING),
+                  (23, 4, "issues", "mallory", ("queued", True, False)),
+                  (24, 5, "pull_request_target", "mallory", self.UNMARKED),
+                  (25, 6, "pull_request_target", "mallory", self.MEASURED),
+                  (26, 7, "pull_request_target", "mallory", ("in_progress", False, False)))
         rc, out, got = self.cap("mallory")
-        self.assertEqual((rc, got), (0, {"count": "1", "account_count": "1", "capped": "false", "free": ""}), out)
+        self.assertEqual((rc, got), (0, {"count": "3", "account_count": "3", "capped": "false", "free": ""}), out)
+        # A burst: 24 items whose builds still run, none screened yet, cap the 25th.
+        self.runs(*self.screened(self.CAP, hours=0.01, state=self.BUILDING))
+        self.assertEqual(self.route("pull_request_target", "zed", "zed"), ("cap", self.freed(0.01 * self.CAP)))
+        self.assertNoJobsRead()
 
     def test_a_run_by_hand_is_charged_to_the_items_author(self):
         """A person's re-runs use up the author's share, never the starter's."""
         self.serve(f"repos/{REPO}/issues/9", {"user": {"login": "eve"}})
         self.serve(f"repos/{REPO}/issues/7", {"user": {"login": "mallory"}})
-        self.runs(*[(20 + i, 0.5 * (i + 1), "workflow_dispatch", "alice", "success", "Pull request 7")
-                    for i in range(11)], (40, 7, "workflow_dispatch", "sjawhar-agent[bot]", "success", "Issue 9"))
+        self.runs(*[(20 + i, 0.5 * (i + 1), "workflow_dispatch", "alice", self.SCREENED, "Pull request 7")
+                    for i in range(11)], (40, 7, "workflow_dispatch", "sjawhar-agent[bot]", self.SCREENED, "Issue 9"))
         self.assertEqual(self.cap("mallory")[2], {"count": "12", "account_count": "11", "capped": "false", "free": ""})
         self.assertEqual(self.cap("alice")[2]["account_count"], "0")
         self.assertEqual(self.read(f"repos/{REPO}/issues/7"), [f"repos/{REPO}/issues/7"] * 2)  # once per count
         # The 12th run of #7, by hand: charged to mallory, who reached the 12.
-        self.runs(*[(20 + i, 0.5 * (i + 1), "workflow_dispatch", "alice", "success", "Pull request 7")
+        self.runs(*[(20 + i, 0.5 * (i + 1), "workflow_dispatch", "alice", self.SCREENED, "Pull request 7")
                     for i in range(12)])
         self.assertEqual(self.route("workflow_dispatch", "mallory", "alice", number="7"), ("cap", self.freed(6)))
 
@@ -552,17 +574,20 @@ class DailyCap(Runner):
         rc, out, got = self.cap("mallory")
         self.assertEqual((rc, got), (1, {}), out)
         self.assertIn("::error::GitHub did not give this workflow's runs of the last 24 hours. Re-run this run.", out)
-        jobs = self.api / f"repos_{REPO.replace('/', '_')}_actions_runs_15_jobs.json"
-        for run, said in (((15, 1, "pull_request_target", "o200", "success"),
+        artifacts = f"repos_{REPO.replace('/', '_')}_actions_artifacts?name=daily-cap-%s&per_page=100.json"
+        for run, said in (((15, 1, "pull_request_target", "o200", self.SCREENED),
                            "GitHub did not say whether o200 has write access. Re-run this run."),
-                          ((15, 1, "workflow_dispatch", "alice", "success", "Pull request 8"),
+                          ((15, 1, "workflow_dispatch", "alice", self.SCREENED, "Pull request 8"),
                            "GitHub did not say who wrote 8. Re-run this run."),
-                          ((15, 1, "pull_request_target", "o1", "success"),
-                           "GitHub did not give the jobs of run 15. Re-run this run.")):
+                          ((15, 1, "pull_request_target", "o1", self.SCREENED),
+                           "GitHub did not give the artifacts daily-cap-route. Re-run this run."),
+                          ((15, 1, "pull_request_target", "o1", self.SCREENED),
+                           "GitHub did not give the artifacts daily-cap-screen. Re-run this run.")):
             with self.subTest(said=said):
                 self.runs(run)
-                if "jobs" in said:
-                    jobs.unlink()
+                for name in ("route", "screen"):
+                    if f"daily-cap-{name}." in said:
+                        self.api.joinpath(artifacts % name).unlink()
                 rc, out, got = self.cap("mallory")
                 self.assertEqual((rc, got), (1, {}), out)
                 self.assertIn(f"::error::{said}", out)
@@ -571,15 +596,37 @@ class DailyCap(Runner):
                 self.assertEqual((rc, got.get("trust")), (1, None), out)
                 self.assertIn(f"::error::{said}", out)
 
-    def test_it_reads_the_jobs_of_at_most_100_runs(self):
-        self.runs(*self.screened(100, hours=0.2))
-        self.assertEqual(self.cap("zed")[2]["count"], "100")
-        self.runs(*self.screened(101, hours=0.2))
-        self.api.joinpath("args").unlink()
+    def test_150_runs_of_one_account_are_counted_with_no_jobs_read(self):
+        """However many runs one account makes, the count reads no run's jobs and has no ceiling that fails route:
+        it caps."""
+        self.runs(*self.screened(150, account="mallory", hours=0.1))
         rc, out, got = self.cap("zed")
-        self.assertEqual((rc, got), (1, {}), out)
-        self.assertIn("could not all be counted. Re-run this run.", out)
-        self.assertEqual(len(self.jobs_read()), 100)
+        self.assertEqual((rc, got), (0, {"count": "150", "account_count": "0", "capped": "true",
+                                         "free": self.freed(0.1 * 24)}), out)
+        self.assertEqual(self.route("pull_request_target", "zed", "zed"), ("cap", self.freed(0.1 * 24)))
+        self.assertEqual(self.route("pull_request_target", "mallory", "mallory"), ("cap", self.freed(0.1 * 12)))
+        self.assertNoJobsRead()
+
+    def test_route_marks_a_screened_run_and_the_screen_job_marks_itself_first(self):
+        """The marks the count reads: route keeps daily-cap-route for trust screen alone, from the file its trust step
+        writes then, and the screen job's first steps keep daily-cap-screen, whatever the job does next."""
+        mark = step("route", "Mark this run for the daily cap")
+        for trust in ("screen", "writer", "cap", "measure", ""):
+            self.assertEqual(evaluate(mark["if"], {"steps.trust.outputs.trust": trust}), trust == "screen", trust)
+        self.assertEqual((mark["with"]["name"], mark["with"]["path"]),
+                         ("daily-cap-route", "${{ runner.temp }}/daily-cap"))
+        for author, trust in (("mallory", "screen"), ("alice", "writer")):
+            self.temp.joinpath("daily-cap").unlink(missing_ok=True)
+            self.assertEqual(Trust.trust(self, "pull_request_target", author, author)[2]["trust"], trust)
+            self.assertEqual(self.temp.joinpath("daily-cap").exists(), trust == "screen", author)
+        write, upload = JOBS["screen"]["steps"][:2]
+        self.assertNotIn("if", write)
+        self.assertNotIn("if", upload)
+        self.assertEqual((upload["uses"].split("@")[0], upload["with"]["name"], upload["with"]["path"]),
+                         ("actions/upload-artifact", "daily-cap-screen", "${{ runner.temp }}/daily-cap"))
+        subprocess.run(["bash", "-e", "-c", write["run"]], check=True,
+                       env={**os.environ, "GITHUB_RUN_ID": "1000", "RUNNER_TEMP": str(self.dir)})
+        self.assertEqual(self.dir.joinpath("daily-cap").read_text(), "1000\n")
 
 
 class Routes(unittest.TestCase):
@@ -656,13 +703,15 @@ class Routes(unittest.TestCase):
                 self.assertEqual(required_steps(ctx), {self.STANDING})
                 if want:
                     # The comment job holds nothing on it: no label review-held and no hold comment; its post step
-                    # records the check run that says a person holds it.
+                    # records the check run that says a person holds it, and once it has, the step after it takes off
+                    # any hold from before.
                     env = {f"env.{k}": as_text(evaluate(JOBS["comment"]["env"][k], ctx)) for k in ("HOLDING", "KIND")}
-                    ran = {s.get("name") for s in JOBS["comment"]["steps"]
-                           if "if" not in s or evaluate(s["if"], dict(ctx, **env))}
-                    self.assertNotIn("Label it review-held and say so", ran)
-                    self.assertIn("Post the comment and record the verdict", ran)
-                    self.assertNotIn("Take the label review-held off", ran)
+                    for recorded in ("", "true"):
+                        ran = {s.get("name") for s in JOBS["comment"]["steps"] if "if" not in s
+                               or evaluate(s["if"], dict(ctx, **env, **{"steps.post.outputs.recorded": recorded}))}
+                        self.assertNotIn("Label it review-held and say so", ran)
+                        self.assertIn("Post the comment and record the verdict", ran)
+                        self.assertEqual("Take the label review-held off" in ran, recorded == "true")
         # Every other run collects, and copies nothing.
         _, ctx = self.ran(dict(self.ENROLLMENT, trust="writer"))
         self.assertEqual(required_steps(ctx), {self.COLLECT})
@@ -899,12 +948,14 @@ class Holdings(unittest.TestCase):
         for name in self.OTHER_IDENTITIES:
             self.assertNotIn(name, text)
         uses = [s["uses"].split("@")[0] for s in job["steps"] if "uses" in s]
-        self.assertEqual(uses, ["actions/checkout", "actions/download-artifact", "google-github-actions/auth"])
+        self.assertEqual(uses, ["actions/upload-artifact", "actions/checkout", "actions/download-artifact",
+                                "google-github-actions/auth"])
         runs = [s["run"] for s in job["steps"] if "run" in s]
-        self.assertEqual(runs[:2], ['.github/scripts/take-review-data "$RUNNER_TEMP/review-data/review.tar"',
+        self.assertEqual(runs[:3], ['echo "$GITHUB_RUN_ID" > "$RUNNER_TEMP/daily-cap"',
+                                    '.github/scripts/take-review-data "$RUNNER_TEMP/review-data/review.tar"',
                                     'python3 .github/scripts/screen.py .review ${NAME:+"projects/$NAME"}'])
-        self.assertEqual(len(runs), 3)
-        self.assertTrue(runs[2].endswith("python3 .github/scripts/screen.py --measure\n"))
+        self.assertEqual(len(runs), 4)
+        self.assertTrue(runs[3].endswith("python3 .github/scripts/screen.py --measure\n"))
 
     def test_only_the_screen_job_reaches_the_screens_identities(self):
         for name, job in JOBS.items():
@@ -1288,13 +1339,13 @@ class Hold(Runner):
 
     STARTED = "2026-11-03T10:00:00Z"
 
-    def take_off(self, number, comments, label=True):
+    def take_off(self, number, comments, label=True, kind="change", started=STARTED):
         s = step("comment", "Take the label review-held off")
         if label:
             self.serve(f"repos/{REPO}/issues/{number}/labels/review-held", [])
         self.serve(f"repos/{REPO}/issues/{number}/comments", comments)
         self.serve(f"repos/{REPO}/issues/comments/5", {})
-        rc, out, _ = self.run_script(s["run"], NUMBER=number, STARTED=self.STARTED, RUN_ID="100")
+        rc, out, _ = self.run_script(s["run"], NUMBER=number, STARTED=started, RUN_ID="100", KIND=kind)
         self.assertEqual(rc, 0, out)
         return self.calls(), out
 
@@ -1313,6 +1364,23 @@ class Hold(Runner):
                 self.assertNotIn(["--method", "DELETE", f"repos/{REPO}/issues/comments/4"], calls)
         # no label and no hold comment is no error
         self.take_off("8", [], label=False)
+        # nor is a hold comment already gone (comment 6 answers 404), for every kind
+        for kind in ("change", "issue", "enrollment"):
+            with self.subTest(kind=kind):
+                self.api.joinpath("args").unlink(missing_ok=True)
+                calls, _ = self.take_off("7", [dict(self.HELD[1], id=6)], kind=kind)
+                self.assertIn(["--method", "DELETE", f"repos/{REPO}/issues/comments/6"], calls)
+
+    def test_an_enrollments_record_takes_every_hold_off(self):
+        """An enrollment gets no new hold comment, and a parked or label run has no start time: every hold comment
+        of the App and the label come off, whatever their time."""
+        for started in (self.STARTED, ""):
+            with self.subTest(started=started):
+                self.api.joinpath("args").unlink(missing_ok=True)
+                calls, _ = self.take_off("7", [dict(self.HELD[1], updated_at="2026-11-03T10:30:00Z")],
+                                         kind="enrollment", started=started)
+                self.assertIn(["--method", "DELETE", f"repos/{REPO}/issues/7/labels/review-held"], calls)
+                self.assertIn(["--method", "DELETE", f"repos/{REPO}/issues/comments/5"], calls)
 
     def test_a_hold_after_this_run_started_stays(self):
         """A newer event of the item, held in a run of its own while this run's review ran, keeps its hold."""
