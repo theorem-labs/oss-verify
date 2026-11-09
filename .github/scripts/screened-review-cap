@@ -14,7 +14,9 @@
 # the account that opened, pushed, edited or reopened the item; a run started by hand to the author of the item that
 # its name gives (`Pull request <n>` or `Issue <n>`, build.yaml's run-name), so that a person's re-runs use up the
 # author's share and never the starter's. A run by hand that names no item (a measurement of the screen) is charged to
-# no one. A run counts when it is charged to an account without write access and its screen job is not skipped. Write
+# no one. A run counts when it is charged to an account without write access and its screen job ran or waits to run:
+# not skipped, and not cancelled before a runner took it (a push that cancels a run still building gives its screen job
+# the conclusion cancelled, with no runner and no steps). Write
 # access is what GitHub's collaborator permission API answers, admin or write, and the Apps of ALLOWED_BOTS count as
 # having it: the runs of such accounts are dropped before any read of a run's jobs, with one read of each account's
 # permission. It reads the jobs of at most 100 runs.
@@ -87,7 +89,9 @@ while read -r id created event actor number; do
   (( reads < 100 )) || fail "More than 100 runs of the last 24 hours are charged to accounts without write access, so they could not all be counted."
   reads=$((reads + 1))
   screened=$(gh api "repos/$REPO/actions/runs/$id/jobs?per_page=100" \
-    --jq '[.jobs[] | select(.name == "screen" and .conclusion != "skipped")] | length') \
+    --jq '[.jobs[] | select(.name == "screen" and .conclusion != "skipped")
+           | select((.conclusion == "cancelled" and .runner_name == null and ((.steps // []) | length) == 0) | not)]
+          | length') \
     || fail "GitHub did not give the jobs of run $id."
   [[ $screened =~ ^[0-9]+$ ]] || fail "GitHub did not give the jobs of run $id."
   (( screened > 0 )) || continue

@@ -406,13 +406,14 @@ class DailyCap(Runner):
 
     def runs(self, *runs):
         """Serve build.yaml's runs and their jobs. Each run is (id, hours before NOW it was made, event, actor, the
-        conclusion of its screen job[, its name])."""
+        conclusion of its screen job, or the whole job as GitHub gives it[, its name])."""
         self.serve(f"repos/{REPO}/actions/workflows/build.yaml/runs", {"workflow_runs": [
             {"id": r[0], "created_at": self.at(r[1]), "event": r[2], "actor": {"login": r[3]},
              "display_title": r[5] if len(r) > 5 else "projects/libx: enroll libx"} for r in runs]})
         for r in runs:
+            screen = r[4] if isinstance(r[4], dict) else {"conclusion": r[4]}
             self.serve(f"repos/{REPO}/actions/runs/{r[0]}/jobs", {"jobs": [
-                {"name": "route", "conclusion": "success"}, {"name": "screen", "conclusion": r[4]},
+                {"name": "route", "conclusion": "success"}, {"name": "screen", **screen},
                 {"name": "required", "conclusion": None}]})
 
     @staticmethod
@@ -513,6 +514,17 @@ class DailyCap(Runner):
         self.assertEqual(self.jobs_read(), {"11", "15", "16", "17"})
         self.assertEqual(sorted(self.read("/permission")), sorted(f"repos/{REPO}/collaborators/{a}/permission"
                                                               for a in ("o1", "alice", "mallory")))
+
+    def test_a_screen_cancelled_before_a_runner_took_it_is_not_counted(self):
+        """A push that cancels a run still building gives its screen job, which never started, the conclusion
+        cancelled with no runner and no steps (Build run 42503706951): no screen ran, so it is not counted. A screen
+        cancelled once it started is."""
+        self.runs((20, 1, "pull_request_target", "mallory",
+                   {"conclusion": "cancelled", "runner_name": None, "steps": []}),
+                  (21, 2, "pull_request_target", "mallory",
+                   {"conclusion": "cancelled", "runner_name": "GitHub Actions 1", "steps": [{"name": "x"}]}))
+        rc, out, got = self.cap("mallory")
+        self.assertEqual((rc, got), (0, {"count": "1", "account_count": "1", "capped": "false", "free": ""}), out)
 
     def test_a_run_by_hand_is_charged_to_the_items_author(self):
         """A person's re-runs use up the author's share, never the starter's."""

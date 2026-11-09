@@ -1427,14 +1427,30 @@ jobs:
               > "$RUNNER_TEMP/issue-draft.md"
             exit 0
           fi
-          # The job's comment output, which the comment job posts.
+          # The job's outputs that the comment job reads, each in one environment variable of its step: Linux refuses
+          # to start a process with one over 128 KiB, so each is cut until it is at most 100,000 bytes. The comment
+          # first to the 50,000 characters review-body keeps of it, then to half of that, as often as it takes.
           delimiter="comment_$(openssl rand -hex 16)"
-          { echo "comment<<$delimiter"; jq -r .comment <<< "$out"; echo "$delimiter"; } >> "$GITHUB_OUTPUT"
+          for limit in 50000 25000 12500 6250 3125 0; do
+            jq -r --argjson n "$limit" '.comment[0:$n]' <<< "$out" > "$RUNNER_TEMP/comment.md"
+            (( $(wc -c < "$RUNNER_TEMP/comment.md") > 100000 )) || break
+          done
+          { echo "comment<<$delimiter"; cat "$RUNNER_TEMP/comment.md"; echo "$delimiter"; } >> "$GITHUB_OUTPUT"
           # Only an enrollment's schema has reasons and a held finding, and only an enrollment's verdicts are read: the
-          # comment job records them in the check run Enrollment review. jq -c writes each on one line.
+          # comment job records them in the check run Enrollment review. jq -c writes each on one line. Only a check id's
+          # verdict and reason are kept, and only a verdict of a word (review-verdict reads no other; it counts any
+          # other as person). Each reason is cut to the 1,500 characters the check run shows (review-verdict's
+          # REASON_LIMIT), and all of them to half of that, as often as it takes.
           if [ "$KIND" = enrollment ]; then
-            echo "verdicts=$(jq -c '.verdicts // {}' <<< "$out")" >> "$GITHUB_OUTPUT"
-            echo "reasons=$(jq -c '.reasons // {}' <<< "$out")" >> "$GITHUB_OUTPUT"
+            echo "verdicts=$(jq -c '.verdicts | if type == "object" then with_entries(select((.key | test("\\A[A-G][0-9]?\\z"))
+              and (.value | type == "string" and length <= 8))) else {} end' <<< "$out")" >> "$GITHUB_OUTPUT"
+            for limit in 1500 750 375 187 93 46 0; do
+              reasons=$(jq -c --argjson n "$limit" '.reasons | if type == "object" then
+                with_entries(select((.key | test("\\A[A-G][0-9]?\\z")) and (.value | type == "string"))
+                  | .value |= .[0:$n]) else {} end' <<< "$out")
+              (( $(printf '%s' "$reasons" | wc -c) > 100000 )) || break
+            done
+            echo "reasons=$reasons" >> "$GITHUB_OUTPUT"
           fi
           { echo '<!-- held finding -->'; jq -r '.held // ""' <<< "$out"; } > "$RUNNER_TEMP/held-finding.md"
           if jq -e '(.held // "") | test("\\S")' <<< "$out" > /dev/null; then echo "held=yes" >> "$GITHUB_OUTPUT"

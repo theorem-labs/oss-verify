@@ -1089,9 +1089,12 @@ class ReviewVerdict(unittest.TestCase):
                          "- **F7** (person): Ask @octocat about #12 and GH-3. <!-- hidden last")
 
     def test_the_summary_stays_under_githubs_limit(self):
+        """The longest reasons the review job passes on (1,500 characters each: its result step cuts them, and an
+        environment variable over 128 KiB starts no process) grow under review-neutralize (a word joiner after each
+        @), and review-verdict cuts each again: the summary keeps every check under GitHub's limit."""
         ids = check_ids("review.md")
         got = self.verdict(VERDICTS=json.dumps({check: "fail" for check in ids}),
-                           REASONS=json.dumps({check: "@" * 10_000 for check in ids}))
+                           REASONS=json.dumps({check: "@" * 1500 for check in ids}))
         self.assertLess(len(got["summary"]), 65_535)
         self.assertEqual(got["summary"].count("- **"), len(ids))
 
@@ -2349,6 +2352,30 @@ class ReviewJob(unittest.TestCase):
         self.assertEqual(output, {"comment": "Thanks.\n\nA finding was sent for private review.\n",
                                   "verdicts": '{"F2":"pass","F7":"pass"}', "reasons": "{}", "held": "yes"})
         self.assertIsNone(last)
+
+    def test_each_output_the_comment_job_reads_fits_one_environment_variable(self):
+        """Linux starts no process with an environment variable over 128 KiB, and the comment job's step takes the
+        comment, the verdicts and the reasons each in one. The result step cuts each to at most 100,000 bytes: a reason
+        to 1,500 characters, and all of them by half until they fit; the comment to the 50,000 characters review-body
+        keeps, and by half until it fits. Only a check id's verdict and reason, and a verdict of a word, go on."""
+        run, comment, verdicts, _, output, _ = self.result(
+            {"comment": "\U0001F600" * 300_000, "held": "",
+             "verdicts": {"F2": "pass", "F3": "x" * 200_000, "Z9": "fail"},
+             "reasons": {**{check: "\U0001F600" * 100_000 for check in check_ids("review.md")},
+                         "F2": 7, "Z9": "y" * 200_000}})
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertLessEqual(len(comment.encode()), 100_000)
+        self.assertEqual(set(comment.rstrip("\n")), {"\U0001F600"})
+        self.assertEqual(json.loads(verdicts), {"F2": "pass"})
+        self.assertLessEqual(len(output["reasons"].encode()), 100_000)
+        reasons = json.loads(output["reasons"])
+        self.assertEqual(set(reasons), set(check_ids("review.md")) - {"F2"})
+        self.assertEqual({len(text) for text in reasons.values()}, {750})
+        # Text that fits is cut only where review-body and review-verdict cut it anyway.
+        _, comment, _, _, output, _ = self.result(
+            {"comment": "a" * 60_000, "held": "", "verdicts": {}, "reasons": {"F7": "b" * 2_000}})
+        self.assertEqual(comment, "a" * 50_000)
+        self.assertEqual(json.loads(output["reasons"]), {"F7": "b" * 1_500})
 
     def test_a_result_without_a_structured_output_fails_the_step(self):
         run, comment, _, _, _, last = self.result(None)
