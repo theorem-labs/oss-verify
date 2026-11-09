@@ -742,16 +742,33 @@ class Routes(unittest.TestCase):
                     self.assertFalse(evaluate(JOBS[job]["if"], ctx), job)
                     self.assertFalse(evaluate(collect[asked], ctx), asked)
         # The same condition in each pair, over every route and gather the jobs can see.
-        for label_run, parked, trust, name, gathered, screen in itertools.product(
-                ("", "true"), ("", "true"), ("", "writer", "screen", "cap", "measure"), ("libx", ""),
-                ("success", "failure", "skipped"), ("true", "false")):
-            ctx = {"needs.route.outputs.label_run": label_run, "needs.route.outputs.parked": parked,
+        for route, label_run, parked, trust, name, gathered, screen in itertools.product(
+                ("success", "failure"), ("", "true"), ("", "true"), ("", "writer", "screen", "cap", "measure"),
+                ("libx", ""), ("success", "failure", "skipped"), ("true", "false")):
+            ctx = {"needs.route.result": route, "needs.route.outputs.label_run": label_run,
+                   "needs.route.outputs.parked": parked,
                    "needs.route.outputs.trust": trust, "needs.route.outputs.kind": "enrollment",
                    "needs.project-builds.outputs.name": name, "needs.gather.result": gathered,
                    "needs.gather.outputs.digest": "d" * 64 if gathered == "success" else "",
                    "needs.gather.outputs.screen": screen}
             for job, asked in (("gather", "ASKED_GATHER"), ("screen", "ASKED_SCREEN")):
                 self.assertEqual(bool(evaluate(JOBS[job]["if"], ctx)), bool(evaluate(collect[asked], ctx)), (job, ctx))
+
+    def test_a_route_that_failed_after_it_gave_trust_screen_gathers_screens_and_reviews_nothing(self):
+        """route's trust step gives trust screen and then the step that keeps the daily cap's mark fails: route fails,
+        and a failed job keeps the outputs its steps wrote. No kind of item is then gathered, screened or reviewed, so
+        no review escapes the cap's count, and the required check fails."""
+        for kind in ("enrollment", "change", "issue"):
+            with self.subTest(kind=kind):
+                route = {"kind": kind, "sha": "a" * 40, "trust": "screen", "started": "2026-11-09T12:00:00Z"}
+                got, ctx = run_graph(route, results={"route": "failure"}, outputs={"route": route},
+                                     event="issues" if kind == "issue" else "pull_request_target")
+                self.assertEqual({n for n, r in got.items() if r != "skipped"}, {"route", "required"}, got)
+                self.assertEqual(required(ctx)[0], 1)
+                # The same route, when it succeeded, gathers, screens and reviews.
+                got, _ = run_graph(route, outputs={"screen": {"verdict": "clean", "checks": "claude"}},
+                                   event="issues" if kind == "issue" else "pull_request_target")
+                self.assertTrue({"gather", "screen", "review"} <= {n for n, r in got.items() if r == "success"}, got)
 
     def test_the_review_and_the_comment_are_asked_for_on_their_own_conditions(self):
         """Every condition change of the review and comment jobs is mirrored in the job required's ASKED_REVIEW and

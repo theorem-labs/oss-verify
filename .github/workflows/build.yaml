@@ -840,10 +840,13 @@ jobs:
     # file name of the pull request can stop the upload. It runs for every review (the review job's condition, in
     # route's kind), whoever wrote the pull request or the issue, except on a label run, for a pull request that parked
     # holds, and for one that route held at the daily cap (route gives trust writer or screen to none of them, and
-    # this condition names each).
+    # this condition names each). Never after a failed route: its trust step can have given trust screen before the
+    # step that keeps the daily cap's mark failed, and an item gathered then would be screened and reviewed with no
+    # count of the cap to see it (project-builds, which needs route, is skipped too).
     needs: [route, project-builds]
     if: >-
-      ${{ !cancelled() && (needs.project-builds.outputs.name != '' || needs.route.outputs.kind == 'change' || needs.route.outputs.kind == 'issue')
+      ${{ !cancelled() && needs.route.result == 'success'
+      && (needs.project-builds.outputs.name != '' || needs.route.outputs.kind == 'change' || needs.route.outputs.kind == 'issue')
       && needs.route.outputs.label_run != 'true' && needs.route.outputs.parked != 'true' && needs.route.outputs.trust != 'cap'
       && (needs.route.outputs.trust == 'writer' || needs.route.outputs.trust == 'screen') }}
     runs-on: ubuntu-latest
@@ -2108,7 +2111,8 @@ jobs:
           ASKED_RECORD: ${{ needs.project-builds.result == 'success' && needs.project-builds.outputs.name != '' }}
           GATHER: ${{ needs.gather.result }}
           ASKED_GATHER: >-
-            ${{ (needs.project-builds.outputs.name != '' || needs.route.outputs.kind == 'change' || needs.route.outputs.kind == 'issue')
+            ${{ needs.route.result == 'success'
+            && (needs.project-builds.outputs.name != '' || needs.route.outputs.kind == 'change' || needs.route.outputs.kind == 'issue')
             && needs.route.outputs.label_run != 'true' && needs.route.outputs.parked != 'true' && needs.route.outputs.trust != 'cap'
             && (needs.route.outputs.trust == 'writer' || needs.route.outputs.trust == 'screen') }}
           SCREEN: ${{ needs.screen.result }}

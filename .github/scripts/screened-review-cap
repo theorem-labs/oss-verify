@@ -24,6 +24,10 @@
 # writer's trust. Write access is what GitHub's collaborator permission API answers, admin or write, and the Apps of
 # ALLOWED_BOTS count as having it, with one read of each account's permission. It reads the runs, their status
 # included, and the two artifacts' lists, each in one paginated call, and no run's jobs.
+# A known limit: route reads this count in its trust step and keeps its mark in the step after, so routes that run in
+# the same seconds each read the count before the others' marks exist, and a burst of items opened at once can pass
+# the cap by as many runs as there are routes in that window. The cap still bounds the screens and reviews of outside
+# accounts. When the mark cannot be kept, route fails, and the run gathers, screens and reviews nothing.
 #
 # It prints four lines: count=<the counted runs>, account_count=<those charged to ACCOUNT>, capped=true when count is
 # REVIEW_CAP or more or account_count is REVIEW_CAP_AUTHOR or more (else false), and free=<the time this run would be
