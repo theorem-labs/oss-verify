@@ -2,55 +2,112 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 #
-# Counts the reviews that a clean screen let run with no person in the last hour, for the hourly cap on them
-# (build.yaml, the review job's step "Count the screened reviews of the last hour"):
+# The daily cap on the screens and model reviews of accounts without write access (build.yaml, route's trust step,
+# for every item whose trust is screen, a run started by hand included):
 #
-#   GH_TOKEN=<token with actions: read> REPO=<owner>/<name> RUN_ID=<this run's id> CAP=<reviews an hour> \
-#     .github/scripts/screened-review-cap
+#   GH_TOKEN=<token with actions: read> REPO=<owner>/<name> RUN_ID=<this run's id> ACCOUNT=<the account this run is
+#     charged to> ALLOWED_BOTS=<the Apps that count as having write access> REVIEW_CAP=<runs in 24 hours> \
+#     REVIEW_CAP_AUTHOR=<runs of one account in 24 hours> [NOW=<the time, for tests>] .github/scripts/screened-review-cap
 #
-# OUTSIDE_HOURLY_LIMIT holds one account; many accounts could still start many screened reviews, each a model run.
-# This counts this workflow's other runs made in the last hour whose screen job passed and whose review job ran, in any
-# state but skipped, and was stopped by none of the cap's three steps (the count, its check, the hold). A run whose
-# jobs have not finished yet counts. It stops counting at CAP, writes count=<n> to GITHUB_OUTPUT and exits 0; the step
-# "Check the count of screened reviews" fails when that count is not a number, and the step "Hold a screened review at
-# the hourly cap" after it fails at CAP or over, and only there, so that the comment job can tell a review held at the
-# cap (tried again whatever REVIEW_TRIES) from one that did not finish. When CAP is not a number, a read fails, or the
-# count cannot be written to GITHUB_OUTPUT, this prints `::error::` and exits 1: the review job fails before the model,
-# the hold step is skipped, and the comment job holds the item as a screened review that did not finish (tried again
-# under REVIEW_TRIES). An unwritten count must never reach the hold step, which would read it as 0.
+# It reads this workflow's runs made in the 24 hours before NOW (by default the time it runs) that are older than this
+# run, and charges each to one account: a run started by an event (pull_request_target, issues) to the run's actor,
+# the account that opened, pushed, edited or reopened the item; a run started by hand to the author of the item that
+# its name gives (`Pull request <n>` or `Issue <n>`, build.yaml's run-name), so that a person's re-runs use up the
+# author's share and never the starter's. A run by hand that names no item (a measurement of the screen) is charged to
+# no one. A run counts when it is charged to an account without write access and its screen job is not skipped. Write
+# access is what GitHub's collaborator permission API answers, admin or write, and the Apps of ALLOWED_BOTS count as
+# having it: the runs of such accounts are dropped before any read of a run's jobs, with one read of each account's
+# permission. It reads the jobs of at most 100 runs.
+#
+# It prints four lines: count=<the counted runs>, account_count=<those charged to ACCOUNT>, capped=true when count is
+# REVIEW_CAP or more or account_count is REVIEW_CAP_AUTHOR or more (else false), and free=<the time this run would be
+# allowed, as 2026-11-09T12:00:00Z>, empty when it is not capped. That time is the moment enough counted runs leave the
+# 24 hours: for the total, the creation time of the (count - REVIEW_CAP + 1)-th oldest counted run plus 24 hours; for
+# ACCOUNT, that of its (account_count - REVIEW_CAP_AUTHOR + 1)-th oldest plus 24 hours; the later of the two that apply.
+# When a read fails, a count cannot be finished, or an input is not what it must be, it prints `::error::` and exits 1,
+# and route fails: the item gets no screen and no review until the run is re-run.
 set -euo pipefail
-cap=${CAP:-}
 fail() {
-  echo "::error::$1 No model ran. A person can start the review by hand."
+  echo "::error::$1 Re-run this run."
   exit 1
 }
-[[ $cap =~ ^[1-9][0-9]*$ ]] || fail "the cap is not a number."
-since=$(date -u -d '-1 hour' +%Y-%m-%dT%H:%M:%SZ) || fail "the time an hour ago could not be read."
-if ! runs=$(gh api --method GET --paginate "repos/$REPO/actions/workflows/build.yaml/runs" \
-    -f created=">=$since" -F per_page=100 --jq '.workflow_runs[].id'); then
-  fail "the runs of the last hour could not be read."
+# trusted <login>: 0 when <login> is one of the ALLOWED_BOTS, or an account that GitHub's collaborator permission API
+# gives admin or write; 1 when it is neither; 2 when the API could not say. As route's trust step decides.
+trusted() {
+  local permission
+  [[ $1 =~ ^[A-Za-z0-9-]+(\[bot\])?$ ]] || return 1
+  [[ ,$ALLOWED_BOTS, != *",$1,"* ]] || return 0
+  [[ $1 != *'[bot]' ]] || return 1
+  permission=$(gh api "repos/$REPO/collaborators/$1/permission" --jq .permission) || return 2
+  [[ $permission == admin || $permission == write ]]
+}
+[[ ${RUN_ID:-} =~ ^[0-9]+$ ]] || fail "Not a run id: ${RUN_ID:-}."
+[[ ${REVIEW_CAP:-} =~ ^[1-9][0-9]*$ && ${REVIEW_CAP_AUTHOR:-} =~ ^[1-9][0-9]*$ ]] \
+  || fail "REVIEW_CAP or REVIEW_CAP_AUTHOR is not a number."
+[ -n "${ACCOUNT:-}" ] || fail "No account to charge this run to."
+ALLOWED_BOTS=${ALLOWED_BOTS:-}
+now=$(date -u -d "${NOW:-now}" +%s) || fail "Not a time: ${NOW:-}."
+SINCE=$(date -u -d "@$((now - 86400))" +%Y-%m-%dT%H:%M:%SZ)
+export SINCE
+# id, creation time, event, actor, and for a run by hand the number of the item its name gives.
+# shellcheck disable=SC2016 # $ENV is jq's, read from this script's environment
+runs=$(gh api --method GET --paginate "repos/$REPO/actions/workflows/build.yaml/runs" -f created=">=$SINCE" \
+  -F per_page=100 --jq '.workflow_runs[] | select(.id < ($ENV.RUN_ID | tonumber) and .created_at >= $ENV.SINCE)
+    | "\(.id) \(.created_at) \(.event) \(.actor.login // "-")"
+      + " \((.display_title // "" | capture("^(Pull request|Issue) (?<n>[1-9][0-9]*)$").n) // "-")"') \
+  || fail "GitHub did not give this workflow's runs of the last 24 hours."
+declare -A author_of=() writer=()
+counted=""
+reads=0
+while read -r id created event actor number; do
+  [ -n "$id" ] || continue
+  [[ $id =~ ^[0-9]+$ ]] || fail "The runs API gave a run id that is not a number."
+  case $event in
+    pull_request_target|issues) account=$actor ;;
+    workflow_dispatch)
+      [ "$number" != - ] || continue
+      if [ -z "${author_of[$number]+set}" ]; then
+        author_of[$number]=$(gh api "repos/$REPO/issues/$number" --jq '.user.login // "-"') \
+          || fail "GitHub did not say who wrote $number."
+      fi
+      account=${author_of[$number]} ;;
+    *) continue ;;
+  esac
+  if [ -z "${writer[$account]+set}" ]; then
+    rc=0
+    trusted "$account" || rc=$?
+    (( rc != 2 )) || fail "GitHub did not say whether $account has write access."
+    writer[$account]=$rc
+  fi
+  [ "${writer[$account]}" != 0 ] || continue
+  (( reads < 100 )) || fail "More than 100 runs of the last 24 hours are charged to accounts without write access, so they could not all be counted."
+  reads=$((reads + 1))
+  screened=$(gh api "repos/$REPO/actions/runs/$id/jobs?per_page=100" \
+    --jq '[.jobs[] | select(.name == "screen" and .conclusion != "skipped")] | length') \
+    || fail "GitHub did not give the jobs of run $id."
+  [[ $screened =~ ^[0-9]+$ ]] || fail "GitHub did not give the jobs of run $id."
+  (( screened > 0 )) || continue
+  counted+="$created $account"$'\n'
+done <<< "$runs"
+# Oldest first. The creation time of the k-th oldest counted run of $1 (all, or one account), plus 24 hours.
+counted=$(sort <<< "${counted%$'\n'}")
+freed() {
+  local at
+  at=$(awk -v who="$1" -v k="$2" 'who == "" || $2 == who { if (++n == k) { print $1; exit } }' <<< "$counted")
+  date -u -d "@$(($(date -u -d "$at" +%s) + 86400))" +%Y-%m-%dT%H:%M:%SZ
+}
+count=0 account_count=0
+if [ -n "$counted" ]; then
+  count=$(wc -l <<< "$counted")
+  account_count=$(awk -v who="$ACCOUNT" '$2 == who' <<< "$counted" | wc -l)
 fi
-count=0
-for id in $runs; do
-  [[ $id =~ ^[0-9]+$ ]] || fail "the runs API gave a run id that is not a number."
-  [ "$id" = "${RUN_ID:-}" ] && continue
-  # shellcheck disable=SC2016 # $screened is jq's
-  if ! ran=$(gh api "repos/$REPO/actions/runs/$id/jobs?per_page=100" \
-      --jq '([.jobs[] | select(.name == "screen" and .conclusion == "success")] | length) as $screened
-            | [.jobs[] | select(.name == "review" and .conclusion != "skipped")
-               | select(any(.steps[]?; (.name == "Hold a screened review at the hourly cap"
-                                        or .name == "Check the count of screened reviews"
-                                        or .name == "Count the screened reviews of the last hour")
-                                       and .conclusion == "failure") | not)]
-            | if $screened > 0 then length else 0 end'); then
-    fail "the jobs of run $id could not be read."
-  fi
-  [[ $ran =~ ^[0-9]+$ ]] || fail "the jobs of run $id could not be read."
-  if (( ran > 0 )); then
-    count=$((count + 1))
-  fi
-  (( count < cap )) || break
-done
-[ -n "${GITHUB_OUTPUT:-}" ] || fail "GITHUB_OUTPUT is not set, so the count cannot be written."
-printf 'count=%s\n' "$count" >> "$GITHUB_OUTPUT" || fail "the count could not be written to GITHUB_OUTPUT."
-echo "$count screened reviews ran in the last hour; the cap is $cap."
+capped=false free=""
+if (( count >= REVIEW_CAP )); then
+  capped=true free=$(freed "" $((count - REVIEW_CAP + 1)))
+fi
+if (( account_count >= REVIEW_CAP_AUTHOR )); then
+  capped=true
+  at=$(freed "$ACCOUNT" $((account_count - REVIEW_CAP_AUTHOR + 1)))
+  [[ $at < "$free" ]] || free=$at
+fi
+printf 'count=%s\naccount_count=%s\ncapped=%s\nfree=%s\n' "$count" "$account_count" "$capped" "$free"
