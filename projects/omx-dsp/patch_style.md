@@ -10,7 +10,7 @@ the note map. Most of the library is inline in `include/omxdsp/`.
 ## How findings and patches land
 
 Nothing from the pipeline enters omx-dsp as it is. A maintainer reads each finding, reproduces it against the omx-dsp
-harness and build, and writes the fix in FreeMixer/omx-dsp as an ordinary change. A patch you send is a description of
+harness and build, and writes the fix in Open-Mixer/omx-dsp as an ordinary change. A patch you send is a description of
 a fix, and we re-author it before it lands.
 
 Every commit in omx-dsp is signed. No attribution line, trailer, or generated-by marker enters the history. When a
