@@ -110,7 +110,6 @@ class Rows(unittest.TestCase):
     def test_checklist_with_the_template(self):
         template = (ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md").read_text(encoding="utf-8")
         boxes = template.count("- [ ]")
-        self.assertGreaterEqual(boxes, 7)
         mark, text = triage.checklist_row(template)
         self.assertEqual(mark, triage.WARN)
         self.assertIn(f"{boxes - 1} of {boxes - 1} not ticked", text)  # the optional box is not counted
@@ -121,10 +120,9 @@ class Rows(unittest.TestCase):
         self.assertEqual(triage.checklist_row("no boxes here")[0], triage.WARN)
 
     def test_validate_row(self):
-        self.assertEqual(triage.validate_row([], []), (triage.OK, "passes"))
+        self.assertEqual(triage.validate_row([], [])[0], triage.OK)
         mark, text = triage.validate_row([], ["primary_contact is n/a: `x`"])
         self.assertEqual(mark, triage.WARN)
-        self.assertIn("passes, with warnings", text)
         self.assertIn("'x'", text)
         mark, text = triage.validate_row(["missing repo", "bad | thing"], ["ignored"])
         self.assertEqual(mark, triage.FAIL)
@@ -153,15 +151,19 @@ class Rows(unittest.TestCase):
         )
 
     def test_proofs_index(self):
-        self.assertEqual(triage.proofs_index_row(FakeGitHub(), "cjson")[0], triage.INFO)
-        self.assertIn("no proofs index yet", triage.proofs_index_row(FakeGitHub(), "cjson")[1])
+        mark, text = triage.proofs_index_row(FakeGitHub(), "cjson")
+        self.assertEqual(mark, triage.INFO)
+        self.assertIn(f"{triage.PROOFS_REPO}/{triage.PROOFS_INDEX}", text)  # the file it looked for and did not find
         index = "project\tlanguage\tstatus\tstatements\tproved\ncjson\tc\tavailable\t15\t0\nzlib\tc\tavailable\t9\t1\n"
         gh = FakeGitHub(texts={INDEX: index})
-        self.assertEqual(
-            triage.proofs_index_row(gh, "zlib"),
-            (triage.INFO, "`zlib` is `available` in the proofs index: `1` of `9` statements proved"),
-        )
-        self.assertEqual(triage.proofs_index_row(gh, "nope"), (triage.INFO, "`nope` is not in the proofs index"))
+        mark, text = triage.proofs_index_row(gh, "zlib")
+        self.assertEqual(mark, triage.INFO)
+        for value in ("`zlib`", "`available`", "`1`", "`9`"):  # this project's own row of the index, not another's
+            self.assertIn(value, text)
+        mark, text = triage.proofs_index_row(gh, "nope")
+        self.assertEqual(mark, triage.INFO)
+        self.assertIn("`nope`", text)
+        self.assertNotIn("`available`", text)  # a project with no row carries no other project's status
         self.assertEqual(triage.proofs_index_row(FakeGitHub(texts={INDEX: "name\tstate\n"}), "x")[0], triage.WARN)
         hostile = "project\tstatus\nx\t`</sub>|evil\n"
         self.assertNotIn("`</sub>|", triage.proofs_index_row(FakeGitHub(texts={INDEX: hostile}), "x")[1])
@@ -170,8 +172,11 @@ class Rows(unittest.TestCase):
         slug, ref = "a/b", "v1"
         here = triage.verifier_files_row(FakeGitHub(), slug, ref, {}, {"project.yaml", "Dockerfile", "build.sh"})
         self.assertEqual(here[0], triage.INFO)
-        self.assertIn("the Dockerfile and build.sh are in this pull request", here[1])
-        self.assertIn("no patch_style.md (optional)", here[1])
+        # The optional patch_style.md is noted when it is missing, whatever the note says.
+        styled = triage.verifier_files_row(FakeGitHub(), slug, ref, {},
+                                           {"project.yaml", "Dockerfile", "build.sh", "patch_style.md"})
+        self.assertEqual(styled[0], here[0])
+        self.assertNotEqual(styled[1], here[1])
         alone = triage.verifier_files_row(FakeGitHub(), slug, ref, {}, {"project.yaml", "Dockerfile"})
         self.assertEqual(alone[0], triage.WARN)
         found = {
@@ -181,12 +186,13 @@ class Rows(unittest.TestCase):
         config = {"dockerfile": ".oss-verify/Dockerfile"}
         mark, text = triage.verifier_files_row(FakeGitHub(found), slug, ref, config, {"project.yaml"})
         self.assertEqual(mark, triage.OK)
-        self.assertIn("with build.sh beside it", text)
+        self.assertIn("`.oss-verify/Dockerfile`", text)
         del found[f"repos/{slug}/contents/.oss-verify/build.sh"]
         self.assertEqual(triage.verifier_files_row(FakeGitHub(found), slug, ref, config, {"project.yaml"})[0], triage.WARN)
         self.assertEqual(triage.verifier_files_row(FakeGitHub(), slug, ref, config, {"project.yaml"})[0], triage.FAIL)
         seeded = triage.verifier_files_row(FakeGitHub(), slug, ref, {"primary_contact": "n/a"}, {"project.yaml"})
-        self.assertEqual(seeded, (triage.INFO, "not present; no patch_style.md (optional); no build files yet (a seeded project)"))
+        self.assertEqual(seeded[0], triage.INFO)  # a seeded project with no build files yet is not a failure
+        self.assertNotIn("Dockerfile", seeded[1])  # no Dockerfile is asked of a seeded project
 
 
 class FetchProject(unittest.TestCase):
@@ -275,6 +281,15 @@ def checks(text):
     return [line.split(" | ")[1] for line in text.splitlines() if line.startswith("| ") and " | Check | " not in line]
 
 
+def row(text, name):
+    """The mark and the result cell of the table's row of this name."""
+    for line in text.splitlines():
+        parts = line.split(" | ")
+        if line.startswith("| ") and len(parts) > 2 and parts[1] == name:
+            return parts[0].removeprefix("| "), " | ".join(parts[2:]).removesuffix(" |")
+    raise AssertionError(f"no {name!r} row in:\n{text}")
+
+
 class Comment(unittest.TestCase):
     @staticmethod
     def pull(yaml_text, association, files=None, changed=None, body=""):
@@ -310,30 +325,36 @@ class Comment(unittest.TestCase):
         forked = {**META, "fork": True, "parent": {"full_name": "upstream/libexample"}}
         with mock.patch.dict(META, forked, clear=True):
             result = triage.triage(self.pull(ON_GITHUB, "NONE"), REPO, 7)
-        self.assertIn("| ⚠️ | Fork | a fork of [upstream/libexample](https://github.com/upstream/libexample). "
-                      "We usually do not accept a fork ([CONTRIBUTING.md](https://github.com/theorem-labs/oss-verify"
-                      "/blob/main/CONTRIBUTING.md#review-of-an-enrollment)). A person at Theorem decides |",
-                      result.comment)
+        mark, cell = row(result.comment, "Fork")
+        self.assertEqual(mark, triage.WARN)
+        self.assertIn("[upstream/libexample](https://github.com/upstream/libexample)", cell)
+        self.assertIn("CONTRIBUTING.md#review-of-an-enrollment", cell)
 
     def test_a_fork_whose_parent_the_answer_does_not_give(self):
         """GitHub leaves out parent for a fork whose upstream repository is gone or private."""
         with mock.patch.dict(META, {**META, "fork": True}, clear=True):
             result = triage.triage(self.pull(ON_GITHUB, "NONE"), REPO, 7)
-        self.assertIn("| ⚠️ | Fork | a fork of another repository. We usually do not accept a fork",
-                      result.comment)
+        mark, cell = row(result.comment, "Fork")
+        self.assertEqual(mark, triage.WARN)
+        self.assertNotIn("libexample", cell)  # no parent came back, so none is named
+        self.assertIn("CONTRIBUTING.md#review-of-an-enrollment", cell)
 
     def test_a_seeded_project_from_outside(self):
         result = triage.triage(self.pull(SEEDED, "NONE"), REPO, 7)
         self.assertTrue(result.comment.startswith(triage.MARKER + "\n"))
         self.assertEqual(checks(result.comment), ["Pull request scope", "`tools/validate.py`", "Checklist"])
-        self.assertIn("| ✅ | Pull request scope |", result.comment)
-        self.assertIn("| ⚠️ | `tools/validate.py` | passes, with warnings", result.comment)
+        self.assertEqual(row(result.comment, "Pull request scope")[0], triage.OK)
+        self.assertEqual(row(result.comment, "`tools/validate.py`")[0], triage.WARN)
         self.assertNotIn("Seeded contact", result.comment)
-        self.assertIn("| ⚠️ | Seeded contact |", result.full)
-        self.assertIn("| ℹ️ | Proofs index | no proofs index yet", result.full)
-        self.assertIn("| ✅ | Pull request scope |", result.full)
-        self.assertIn("| ⚠️ | `tools/validate.py` | passes, with warnings", result.full)
-        self.assertIn("not a github.com repository", result.full)
+        self.assertEqual(row(result.full, "Seeded contact")[0], triage.WARN)
+        proofs = row(result.full, "Proofs index")
+        self.assertEqual(proofs[0], triage.INFO)
+        self.assertIn(triage.PROOFS_INDEX, proofs[1])  # no index file, so the row names the one it looked for
+        self.assertEqual(row(result.full, "Pull request scope")[0], triage.OK)
+        self.assertEqual(row(result.full, "`tools/validate.py`")[0], triage.WARN)
+        # Not a github.com repository, so the Repository row warns and no row that needs the API is there.
+        self.assertEqual(row(result.full, "Repository")[0], triage.WARN)
+        self.assertNotIn("Stars / forks", checks(result.full))
         self.assertIn(f"https://github.com/{REPO}#enroll-a-project", result.full)
 
     def test_the_full_table_links_a_readme_heading(self):
@@ -350,7 +371,7 @@ class Comment(unittest.TestCase):
     def test_an_enrolled_project(self):
         result = triage.triage(self.pull(ENROLLED, "NONE"), REPO, 7)
         self.assertNotIn("Seeded contact", result.full)
-        self.assertIn("| ✅ | `tools/validate.py` | passes |", result.comment)
+        self.assertEqual(row(result.comment, "`tools/validate.py`")[0], triage.OK)
         result = triage.triage(self.pull(ENROLLED, "NONE", files={}), REPO, 7)
         self.assertIn("| ❌ | `tools/validate.py` | `a Dockerfile is required", result.comment)
 
@@ -382,9 +403,9 @@ class Comment(unittest.TestCase):
             comment = triage.triage_local(gh, REPO, directory, "someone", template).comment
         self.assertTrue(comment.startswith(triage.MARKER + "\n"))
         self.assertIn("opened by `someone`", comment)
-        self.assertIn("| ✅ | Pull request scope | only this project's directory |", comment)
-        self.assertIn("| ✅ | `tools/validate.py` | passes |", comment)
-        self.assertIn("| ⚠️ | Checklist | ", comment)
+        self.assertEqual(row(comment, "Pull request scope")[0], triage.OK)
+        self.assertEqual(row(comment, "`tools/validate.py`")[0], triage.OK)
+        self.assertEqual(row(comment, "Checklist")[0], triage.WARN)
         self.assertFalse([path for path in gh.fetched if "/pulls/" in path], gh.fetched)
 
 

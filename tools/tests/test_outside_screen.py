@@ -1341,22 +1341,37 @@ class ScreenedFooter(unittest.TestCase):
     """The review comment names the checks of the screen that ran, so a clean verdict from fewer checks does not read
     as one from all three."""
 
+    # The screen's checks, as review-body names each of them to a reader.
+    NAMES = {"model_armor": "Google Cloud Model Armor", "prompt_shields": "Azure AI Content Safety Prompt Shields",
+             "claude": "a Claude model with no tools"}
+
     def body(self, screened):
         return subprocess.run([str(SCRIPTS / "review-body")], capture_output=True, text=True, env={
             **os.environ, "HEAD_SHA": "a" * 40, "REVIEW": "Thanks.", "CHECKS": "", "VERDICTS": "{}",
             "RULES": "review.md", "SCREENED": screened})
 
     def test_a_screened_review_names_the_checks_that_ran(self):
-        for screened, names in (("model_armor", "Google Cloud Model Armor"),
-                                ("model_armor,prompt_shields",
-                                 "Google Cloud Model Armor, Azure AI Content Safety Prompt Shields"),
-                                ("model_armor,prompt_shields,claude", "Google Cloud Model Armor, Azure AI Content "
-                                 "Safety Prompt Shields, a Claude model with no tools")):
+        for screened in ("model_armor", "model_armor,prompt_shields", "model_armor,prompt_shields,claude"):
+            ran = screened.split(",")
             with self.subTest(screened=screened):
                 run = self.body(screened)
                 self.assertEqual(run.returncode, 0, run.stderr)
-                self.assertIn(f"An automated screen passed it first; the checks that ran: {names}.", run.stdout)
-        self.assertNotIn("screen", self.body("").stdout)
+                # Each check is named when it ran, and only then: a clean verdict from fewer checks must not read as
+                # one from all three.
+                for check, name in self.NAMES.items():
+                    self.assertEqual(name in run.stdout, check in ran, (check, run.stdout))
+        unscreened = self.body("").stdout
+        for name in self.NAMES.values():
+            self.assertNotIn(name, unscreened)
+        # With nothing screened the footer says nothing of a screen at all: the screened footer only appends to it.
+        plain = unscreened.split("\n")[1].removesuffix("</sub>")
+        named = self.body("model_armor").stdout.split("\n")[1].removesuffix("</sub>")
+        self.assertTrue(named.startswith(plain) and len(named) > len(plain), (plain, named))
+        # Two checks are two names, each written once and separated: run together they read as one check's name.
+        two = self.body("model_armor,prompt_shields").stdout
+        first, second = self.NAMES["model_armor"], self.NAMES["prompt_shields"]
+        self.assertEqual((two.count(first), two.count(second)), (1, 1), two)
+        self.assertNotEqual(two.split(first, 1)[1].split(second, 1)[0], "", two)
         self.assertEqual(step("review", "Write the comment as the comment job posts it")["env"]["SCREENED"],
                          "${{ needs.gather.outputs.screen != 'false' && needs.screen.outputs.checks || '' }}")
 

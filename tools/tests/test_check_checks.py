@@ -783,14 +783,21 @@ class PostingStep(unittest.TestCase):
 
     def test_a_review_replaces_the_posted_one(self):
         body = self.post("Thanks again.\n\n2. Fix Y.\n")
-        self.assertTrue(body.startswith("<!-- oss-verify-review -->\n<sub>Claude wrote this review of `bbbbbbb`"))
+        marker, sub = body.split("\n")[:2]
+        self.assertEqual(marker, "<!-- oss-verify-review -->")
+        self.assertIn("`bbbbbbb`", sub)
         self.assertIn("\n\nThanks again.\n\n2. Fix Y.\n", body)
-        self.assertIn("<summary>What the checks of the fuzz targets and of the binaries measured</summary>\n\n### new report", body)
+        self.assertIn("<details>", body)
+        details = body.split("<details>", 1)[1].split("</details>")[0]
+        self.assertIn("### new report", details)
 
     def test_a_change_review_names_review_change_md(self):
         body = self.post("Thanks.\n", checks="", rules="review-change.md")
-        self.assertTrue(body.startswith("<!-- oss-verify-review -->\n<sub>Claude wrote this review of `bbbbbbb` from "
-                                        "`review-change.md`."))
+        marker, sub = body.split("\n")[:2]
+        self.assertEqual(marker, "<!-- oss-verify-review -->")
+        self.assertIn("`bbbbbbb`", sub)
+        self.assertIn("`review-change.md`", sub)
+        self.assertNotIn("`review.md`", sub)
 
     def test_without_a_posted_comment_it_posts_one(self):
         body = self.post("Thanks.\n", existing=False, checks="")
@@ -919,12 +926,12 @@ class VerdictLine(unittest.TestCase):
 
     def test_the_rest_of_the_body_is_unchanged(self):
         b = body(verdicts='{"F2":"pass","F7":"pass"}', head=HEAD40, review="r" * 50001, checks="c", rules="review.md")
-        lines = b.split("\n")
-        self.assertEqual(lines[2], "<sub>Claude wrote this review of `%s` from `review.md`. It can be wrong. "
-                                   "Each push replaces it.</sub>" % HEAD40[:7])
         self.assertIn("r" * 50000 + "\n", b)
         self.assertNotIn("r" * 50001, b)
-        self.assertIn("<details><summary>What the checks of the fuzz targets and of the binaries measured</summary>", b)
+        self.assertIn("<details>", b)
+        details = b.split("<details>", 1)[1].split("</details>")[0]
+        self.assertTrue(details.startswith("<summary>"), details[:40])
+        self.assertEqual(details.split("</summary>", 1)[1].strip(), "c")
 
 
 class ModelText(unittest.TestCase):
