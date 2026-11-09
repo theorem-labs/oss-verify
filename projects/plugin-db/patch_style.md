@@ -1,6 +1,6 @@
 # Patch style and report preferences
 
-plugin-db is FreeMixer's database of what is known about an audio plugin. This release holds the
+plugin-db is OpenMixer's database of what is known about an audio plugin. This release holds the
 key of an entry, the pin of a plugin, as one C header (`include/plugin-db/pin.h`): the SHA-256 of
 each file a plugin loads, the `omx-layout/1` fingerprint of its controls and ports, and the words a
 pin line carries (the verdict and the pool). Every reader of text in it decides whether a plugin
@@ -11,7 +11,7 @@ matters most here, and the three fuzz targets drive them.
 ## How findings and patches land
 
 Nothing from the pipeline enters plugin-db as it is. A maintainer reads each finding, reproduces
-it against the plugin-db harness and build, and writes the fix in FreeMixer/plugin-db as an
+it against the plugin-db harness and build, and writes the fix in Open-Mixer/plugin-db as an
 ordinary change. A patch you send is a description of a fix, and we re-author it before it lands.
 
 Every commit in plugin-db is signed. No attribution line, trailer, or generated-by marker enters
