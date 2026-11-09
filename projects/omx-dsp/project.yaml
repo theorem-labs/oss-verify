@@ -1,4 +1,4 @@
-# omx-dsp: the DSP library of FreeMixer, linked statically by the engine and the omx plugins. The fuzz targets drive what
+# omx-dsp: the DSP library of OpenMixer, linked statically by the engine and the omx plugins. The fuzz targets drive what
 # reaches it from outside: a host's port words and a block's samples through every instance face, the scalar laws, the
 # EQ, the sample-rate converter and the delay lines, and a stream of MIDI messages through the note map.
 # Pinned to the merge of omx-dsp#314 on main: each fuzz check read against its comment (docs/fuzz-checks.md),

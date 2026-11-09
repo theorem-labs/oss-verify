@@ -1,6 +1,6 @@
 # Patch style and report preferences
 
-omx-dsp is the DSP library of FreeMixer: the primitives, the effect kernels and the instance faces that the mixing
+omx-dsp is the DSP library of OpenMixer: the primitives, the effect kernels and the instance faces that the mixing
 engine and the omx plugins link statically. It holds no parser of files or presets. What reaches it from outside is a
 host's control port words (any float or int, NaN and the infinities included), a block's samples, a rate, and a stream
 of MIDI messages (`omx_note_map.h`). The six fuzz targets drive those: the instance faces (`include/omxdsp/fx/`), the
