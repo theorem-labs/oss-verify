@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+"""The verdict of an enrollment's review, as the check run `Enrollment review` of the oss-verify App records it:
+
+    VERDICTS=<json> REASONS=<json> .github/scripts/review-verdict
+    HOLD=screen|cap|parked|failed [FREE=<time>] [JOB=gather|screen|review|hold] RUN_URL=<run> REPO=<owner/repo> \\
+      PR=<number> .github/scripts/review-verdict
+    .github/scripts/review-verdict --ids
+    .github/scripts/review-verdict --sentence success|failure|action_required
+
+build.yaml's comment job runs it in its step "Post the comment and record the verdict", which posts the check run
+from what it prints: one JSON object with `conclusion`, `title` and `summary`.
+
+VERDICTS is the review's structured output `verdicts`, the id of each check of review.md to `pass`, `fail`, `person`
+or, for F5 and F8 alone, `optional`; REASONS is its `reasons`, an id to the sentences that decide the verdict. An id
+that VERDICTS does not give, or gives another value, counts as `person`, with the reason "the review gave no verdict".
+The conclusion is `failure` when one check is `fail`, `success` when every check is `pass` or `optional`, and
+`action_required` otherwise. The summary lists each check that is not `pass`, worst first, with its reason. A reason is
+what a pull request can steer, so each goes through .github/scripts/review-neutralize --drop-markers, as the comment's
+text does, and the summary stays under the 65,535 characters GitHub takes.
+
+HOLD gives no verdict of the review: the screen held the pull request, the daily cap stopped it (FREE, route's output
+free, the time the cap lets it run), the label parked holds it, or a job of the run failed (JOB). Each is
+`action_required`, with fixed words.
+
+--ids prints each check id of review.md, in its order, with the verdicts it takes, as one JSON object: the one list,
+which .github/scripts/review-prompt puts in the review's schema. --sentence prints the first sentence of the review
+comment for a conclusion, which .github/scripts/review-body writes."""
+import datetime
+import importlib.machinery
+import importlib.util
+import json
+import os
+import pathlib
+import re
+import sys
+
+# Every check of review.md's checklist, in its order: a numbered item of a section is the section's letter and its
+# number, and a section with no numbered item is its letter alone.
+IDS = ["A1", "A2", "A3", "A4", "A5", "A6", "B", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "D1", "D2", "D3", "E",
+       "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "G1", "G2", "G3", "G4", "G5"]
+# The verdicts each check takes: a weak fail of F5 or F8 is optional (review.md, "Verdicts").
+TAKES = {check: ["pass", "fail", "person"] + (["optional"] if check in ("F5", "F8") else []) for check in IDS}
+# The worst first: the order of the summary.
+ORDER = ("fail", "person", "optional")
+SENTENCES = {
+    "success": "No change is needed.",
+    "failure": "The changes below are needed.",
+    "action_required": "No change is asked of you, and the review left some checks open.",
+}
+JOBS = ("gather", "screen", "review", "hold")
+NO_VERDICT = "The review gave no verdict."
+NO_REASON = "The review gave no reason."
+# A reason's length, after review-neutralize, and the summary's: 31 reasons of REASON_LIMIT stay under SUMMARY_LIMIT.
+REASON_LIMIT = 1500
+SUMMARY_LIMIT = 65000
+
+# No bytecode file beside the scripts: the job's checkout is main's, and only read.
+sys.dont_write_bytecode = True
+_loader = importlib.machinery.SourceFileLoader(
+    "review_neutralize", str(pathlib.Path(__file__).resolve().with_name("review-neutralize")))
+_spec = importlib.util.spec_from_loader("review_neutralize", _loader)
+neutralize = importlib.util.module_from_spec(_spec)
+_loader.exec_module(neutralize)
+
+
+def die(message):
+    print(f"review-verdict: {message}", file=sys.stderr)
+    sys.exit(2)
+
+
+def as_object(text):
+    """A JSON object, or {} for anything else: a value the review did not give decides nothing."""
+    try:
+        value = json.loads(text or "")
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def reason(text):
+    """A reason as the summary shows it: neutralized as the comment's text is, on one line, cut at REASON_LIMIT."""
+    if not isinstance(text, str) or not text.strip():
+        return NO_REASON
+    return " ".join(neutralize.neutralize(text, True).split())[:REASON_LIMIT] or NO_REASON
+
+
+def from_verdicts(verdicts, reasons):
+    found = {}
+    for check in IDS:
+        verdict = verdicts.get(check)
+        if verdict not in TAKES[check]:
+            found[check] = ("person", NO_VERDICT)
+        elif verdict != "pass":
+            found[check] = (verdict, reason(reasons.get(check)))
+    kinds = {verdict for verdict, _ in found.values()}
+    conclusion = "failure" if "fail" in kinds else "action_required" if "person" in kinds else "success"
+    sentence = SENTENCES[conclusion]
+    lines = [f"- **{check}** ({verdict}): {text}"
+             for kind in ORDER for check, (verdict, text) in found.items() if verdict == kind]
+    summary = sentence + ("\n\n" + "\n".join(lines) if lines else "")
+    if len(summary) > SUMMARY_LIMIT:
+        summary = summary[:SUMMARY_LIMIT] + "\n\n(cut here: GitHub takes no longer summary)"
+    return conclusion, sentence, summary
+
+
+def from_hold(hold):
+    repo, pr = os.environ.get("REPO", ""), os.environ.get("PR", "")
+    run_url = os.environ.get("RUN_URL", "")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+        die("REPO is not owner/repository")
+    if not re.fullmatch(r"[1-9][0-9]*", pr):
+        die("PR is not a number")
+    run = re.fullmatch(r"https://[A-Za-z0-9.-]+/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/([0-9]+)", run_url)
+    if not run:
+        die("RUN_URL is not the address of a run")
+    if hold == "screen":
+        title = "The automated screen held this pull request."
+        summary = (f"{title} It comes from, or holds the text of, an account without write access to this repository,"
+                   " so an automated screen reads it before the automated review does, and the screen did not pass it"
+                   " or could not read it. No review ran. A maintainer will look at it.")
+    elif hold == "cap":
+        cap, author = os.environ.get("REVIEW_CAP", ""), os.environ.get("REVIEW_CAP_AUTHOR", "")
+        if not (cap.isdigit() and author.isdigit()):
+            die("REVIEW_CAP and REVIEW_CAP_AUTHOR are not numbers")
+        try:
+            free = datetime.datetime.strptime(os.environ.get("FREE", ""), "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            die("FREE is not a time such as 2026-11-09T12:00:00Z")
+        title = "The daily cap of automated reviews held this pull request."
+        summary = (f"{title} It comes from an account without write access to this repository, and the automated"
+                   f" reviews of such accounts reached their cap of {cap} in 24 hours, {author} for one author. From"
+                   f" {free:%Y-%m-%d %H:%M} UTC, a push or `gh workflow run build.yaml -R {repo} -f pr={pr}` reviews"
+                   " it.")
+    elif hold == "parked":
+        title = "A person holds this pull request."
+        summary = (f"{title} While the label parked is on it, it is not screened or reviewed. When a person takes the"
+                   " label off, it is screened and reviewed at its head.")
+    elif hold == "failed":
+        job = os.environ.get("JOB", "")
+        if job not in JOBS:
+            die(f"JOB is not one of {', '.join(JOBS)}")
+        title = f"The {job} job failed."
+        summary = (f"The {job} job of [this run]({run_url}) failed, so the review gave no verdict."
+                   f" `gh run rerun {run.group(1)} --failed -R {repo}` reviews it.")
+    else:
+        die("HOLD is not screen, cap, parked or failed")
+    return "action_required", title, summary
+
+
+def main():
+    arguments = sys.argv[1:]
+    if arguments == ["--ids"]:
+        print(json.dumps(TAKES))
+        return
+    if len(arguments) == 2 and arguments[0] == "--sentence":
+        if arguments[1] not in SENTENCES:
+            die("the conclusion is not success, failure or action_required")
+        print(SENTENCES[arguments[1]])
+        return
+    if arguments:
+        die("usage: review-verdict [--ids | --sentence CONCLUSION]")
+    hold = os.environ.get("HOLD", "")
+    if hold:
+        conclusion, title, summary = from_hold(hold)
+    else:
+        conclusion, title, summary = from_verdicts(as_object(os.environ.get("VERDICTS")),
+                                                   as_object(os.environ.get("REASONS")))
+    print(json.dumps({"conclusion": conclusion, "title": title, "summary": summary}))
+
+
+if __name__ == "__main__":
+    main()

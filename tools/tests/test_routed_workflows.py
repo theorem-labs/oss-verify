@@ -255,12 +255,12 @@ def test_removing_parked_is_a_full_run(tmp_path):
 
 
 def test_parked_holds_a_push_and_a_run_by_hand(tmp_path):
-    """A push to a pull request that parked holds builds it and asks for no screen or review; a run by hand reads the
-    label from GitHub."""
+    """A push to a pull request that parked holds builds it and asks for no screen or review: the comment job records
+    that a person holds it. A run by hand reads the label from GitHub."""
     outputs = route_build(tmp_path, ["projects/p/project.yaml"], event="pull_request_target", action="synchronize",
                           parked="true")
     assert outputs == [f"sha={'a' * 40}", "parked=true", "kind=enrollment"]
-    assert graph_of(outputs) == {"project-builds", "record"}
+    assert graph_of(outputs) == {"project-builds", "record", "comment"}
     outputs = route_build(tmp_path, ["projects/p/project.yaml"], event="workflow_dispatch", labels=["Parked", "x"])
     assert outputs == [f"sha={'a' * 40}", "parked=true", "kind=enrollment"]
     outputs = route_build(tmp_path, ["projects/p/project.yaml"], event="workflow_dispatch", labels=["size-review"])

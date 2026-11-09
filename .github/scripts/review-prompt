@@ -13,10 +13,12 @@
 # and, for an enrollment or a change whose last session review-gather kept (SESSION and LAST, its gather step's
 # outputs), --resume <id>: an enrollment's review then reads only the diff since the commit it reviewed then, and a
 # change's reads that diff as an aid and judges checks 4 and 5 on the whole diff again. Each value it writes is a
-# number, a project name, or a commit or session id, each checked here: no text of a pull request or of an issue. The
-# keys of each kind's verdicts are its rules file's check ids and nothing else (`propertyNames`), as
-# .github/scripts/review-body takes them: the model chooses them, and review-body prints them in the comment's verdict
-# line. Claude Code validates the structured output against the schema and asks the model again on a mismatch.
+# number, a project name, or a commit or session id, each checked here: no text of a pull request or of an issue. An
+# enrollment's verdicts give every check id of review.md, each with the verdicts it takes, as
+# .github/scripts/review-verdict lists them, and nothing else; its reasons give the sentences that decide each verdict
+# that is not pass, by the same ids. A change's verdicts take its rules file's check numbers and nothing else
+# (`propertyNames`). Claude Code validates the structured output against the schema and asks the model again on a
+# mismatch.
 set -euo pipefail
 die() { echo "review-prompt: $1" >&2; exit 2; }
 number='^[0-9]+$' commit='^[0-9a-f]{40}$'
@@ -38,13 +40,18 @@ case ${KIND:-} in
       prompt+=" Then review"
     fi
     prompt+=' as the section "In CI" of .claude/skills/review-enrollment/SKILL.md says.'
-    schema=$(jq -cn '{type: "object", additionalProperties: false, required: ["comment", "held", "verdicts"],
+    # Each check id, with the verdicts it takes: the one list, in review-verdict.
+    takes=$("$(dirname "${BASH_SOURCE[0]}")/review-verdict" --ids)
+    schema=$(jq -cn --argjson takes "$takes" '{type: "object", additionalProperties: false,
+      required: ["comment", "held", "verdicts", "reasons"],
       properties: {
         comment: {type: "string", description: "The comment to the maintainer, in Markdown. Never a held finding."},
         held: {type: "string", description: "Each finding held back under rule 6 of review.md, as the skill section A held finding says, or empty."},
-        verdicts: {type: "object", description: "The verdict of each check of review.md by its id, A1 to G5, and for an F check the worst over the fuzz targets.",
-                   required: ["F2", "F7"], propertyNames: {pattern: "^[A-G][0-9]*$"},
-                   additionalProperties: {enum: ["pass", "fail", "person"]}}}}')
+        verdicts: {type: "object", description: "The verdict of each check of review.md by its id, A1 to G5, and for an F check the worst over the fuzz targets. optional is the verdict of a weak fail of F5 or F8 alone, as review.md defines it.",
+                   required: ($takes | keys_unsorted), additionalProperties: false,
+                   properties: ($takes | map_values({enum: .}))},
+        reasons: {type: "object", description: "For each check whose verdict is not pass, by its id: one or two sentences that the maintainer reads in the check run Enrollment review, the fact that decides the verdict. Never a held finding, and never a guess about whether we take the project.",
+                  propertyNames: {enum: ($takes | keys_unsorted)}, additionalProperties: {type: "string"}}}}')
     ;;
   change)
     [[ ${PR:-} =~ $number ]] || die "PR is not a number"

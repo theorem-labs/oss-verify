@@ -1145,14 +1145,17 @@ jobs:
     # It reads what the gather job kept. An item that the gather job's output screen says is not screened (a writer's
     # with no text of others) is reviewed as it comes; another only when the screen's
     # verdict is clean. A run whose gather job failed or kept nothing, or whose screen held it, failed or was
-    # cancelled, has no review.
+    # cancelled, has no review, and neither has a label run, a pull request that parked holds, or an item that route
+    # held at the daily cap (each named here, as the gather job names them).
     needs: [route, project-builds, gather, screen]
     if: >-
-      ${{ !cancelled() && needs.gather.result == 'success' && needs.gather.outputs.digest != ''
+      ${{ !cancelled() && needs.route.outputs.label_run != 'true' && needs.route.outputs.parked != 'true' && needs.route.outputs.trust != 'cap'
+      && needs.gather.result == 'success' && needs.gather.outputs.digest != ''
       && (needs.gather.outputs.screen == 'false'
           || (needs.screen.result == 'success' && needs.screen.outputs.verdict == 'clean')) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 70
+    # Two attempts of the Review step, 45 minutes each, and the steps around them (the tailnet's join).
+    timeout-minutes: 105
     environment: {name: enroll-review, deployment: false}
     # actions: read for the hourly cap of issue drafts (its step below), which reads this workflow's runs. A job's
     # permissions cannot change with route's kind, so the job holds it for every kind, and the Review step's token has
@@ -1192,8 +1195,11 @@ jobs:
       # approved, is in no output (a re-run with debug logging prints outputs to the public log).
       comment: ${{ steps.result.outputs.comment }}
       held_object: ${{ steps.held.outputs.object }}
-      # body.md, the whole comment, which the comment job posts as it is: that job runs no script of its own.
-      body: ${{ steps.body.outputs.body }}
+      # An enrollment's verdicts and their reasons, each the structured output's object as one line of JSON, which the
+      # comment job parses: its step "Post the comment and record the verdict" writes the comment and the check run
+      # Enrollment review from them. No file and no artifact holds them.
+      verdicts: ${{ steps.result.outputs.verdicts }}
+      reasons: ${{ steps.result.outputs.reasons }}
       # The id of the artifact enroll-review-session, which the session job saves in the cache; empty when no session
       # is kept.
       session: ${{ steps.session.outputs.artifact-id }}
@@ -1277,7 +1283,7 @@ jobs:
       # would print to this public log the `tailscale up` command with this job's GitHub identity token, which the
       # action does not mask (src/main.ts), and the output of `tailscale status --json`, the tailnet's nodes. quiet
       # keeps them silent whatever the debug setting, and a command that fails still writes its error output. The
-      # job's 70 minutes hold every step's cap: gather 15, join 3, review 45 and logout 2.
+      # job's 105 minutes hold every step's cap: join 3, the Review step's two attempts of 45 each, and logout 2.
       - name: Join Theorem's tailnet, to reach the model gateway and export this review's usage
         id: tailnet
         timeout-minutes: 3
@@ -1330,8 +1336,11 @@ jobs:
         id: gateway
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0 (sha-pinned)
         with: {workload_identity_provider: "${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}", service_account: "${{ env.GATEWAY_SERVICE_ACCOUNT }}", token_format: id_token, id_token_audience: model-gateway-gce, id_token_include_email: true, create_credentials_file: false, export_environment_variables: false}
+      # The first attempt. When it fails or runs out of its 45 minutes, the job goes on to one more attempt, "Review
+      # again", with the same inputs and a token of its own; no step counts or writes the attempts.
       - name: Review
         id: review
+        continue-on-error: true
         timeout-minutes: 45
         uses: anthropics/claude-code-action@d70510b174a1244958df0b03166a54912811f3e6 # v1 (v1.0.264, sha-pinned)
         with:
@@ -1349,11 +1358,33 @@ jobs:
           claude_args: >-
             --tools Read,Glob,Grep --permission-mode default --model claude-opus-5-5 --effort xhigh --max-turns 300
             ${{ steps.prompt.outputs.arguments }}
+      # The second and last attempt, only after the first failed. It signs in again: the first token lives one hour,
+      # and may not outlast another 45 minutes. A failure here fails the job.
+      - name: Sign in to the model gateway again
+        id: gateway-again
+        if: steps.review.outcome == 'failure'
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0 (sha-pinned)
+        with: {workload_identity_provider: "${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}", service_account: "${{ env.GATEWAY_SERVICE_ACCOUNT }}", token_format: id_token, id_token_audience: model-gateway-gce, id_token_include_email: true, create_credentials_file: false, export_environment_variables: false}
+      - name: Review again
+        id: review-again
+        if: steps.review.outcome == 'failure'
+        timeout-minutes: 45
+        uses: anthropics/claude-code-action@d70510b174a1244958df0b03166a54912811f3e6 # v1 (v1.0.264, sha-pinned)
+        with:
+          # The same inputs as the Review step's, but the token of the sign-in just before.
+          anthropic_api_key: ${{ steps.gateway-again.outputs.id_token }}
+          github_token: ${{ github.token }}
+          allowed_non_write_users: "*"
+          allowed_bots: ${{ env.ALLOWED_BOTS }}
+          prompt: ${{ steps.prompt.outputs.prompt }}
+          claude_args: >-
+            --tools Read,Glob,Grep --permission-mode default --model claude-opus-5-5 --effort xhigh --max-turns 300
+            ${{ steps.prompt.outputs.arguments }}
       # The logout deletes the ephemeral node at once, whatever the review did and whatever the join's outcome: at
       # the pinned commit the action stops waiting for `tailscale up` after its 2-minute timeout but does not stop
       # the command (src/main.ts), so a join that failed can still make the node. When the join never installed
       # tailscale, the step has nothing to log out and passes. When the runner itself is lost, Tailscale deletes the
-      # node 30 to 60 minutes after its last activity. The step takes
+      # node 30 to 60 minutes after its last activity. The step comes after both attempts of the review, and takes
       # continue-on-error, as the join does: this is the measurement's own cleanup, and a failed logout must not skip
       # the steps below it, which keep the draft, the verdicts and a held finding. The action's post step logs out
       # again at the end of the job.
@@ -1363,11 +1394,12 @@ jobs:
         timeout-minutes: 2
         run: |
           if command -v tailscale > /dev/null; then sudo tailscale logout; fi
+      # The attempt that ran last: "Review again" when it ran, else the Review step.
       - name: Keep the draft, and the held finding apart from it
         id: result
         env:
-          RESULT: ${{ steps.review.outputs.execution_file }}
-          SESSION: ${{ steps.review.outputs.session_id }}
+          RESULT: ${{ steps.review-again.outputs.execution_file || steps.review.outputs.execution_file }}
+          SESSION: ${{ steps.review-again.outputs.session_id || steps.review.outputs.session_id }}
         run: |
           out=$(jq -ce 'map(select(.type == "result")) | last | .structured_output | objects' "$RESULT")
           # An issue's draft, which no one has approved, and what a person decides on it: never the artifact, which any
@@ -1379,36 +1411,19 @@ jobs:
               > "$RUNNER_TEMP/issue-draft.md"
             exit 0
           fi
-          mkdir -p "$RUNNER_TEMP/draft" && jq -r .comment <<< "$out" > "$RUNNER_TEMP/draft/comment.md"
+          jq -r .comment <<< "$out" > "$RUNNER_TEMP/comment.md"
           # The job's comment output, which the comment job posts.
           delimiter="comment_$(openssl rand -hex 16)"
-          { echo "comment<<$delimiter"; cat "$RUNNER_TEMP/draft/comment.md"; echo "$delimiter"; } >> "$GITHUB_OUTPUT"
-          jq .verdicts <<< "$out" > "$RUNNER_TEMP/draft/verdicts.json"
-          # Only an enrollment's schema has a held finding.
+          { echo "comment<<$delimiter"; cat "$RUNNER_TEMP/comment.md"; echo "$delimiter"; } >> "$GITHUB_OUTPUT"
+          # Only an enrollment's schema has reasons and a held finding, and only an enrollment's verdicts are read: the
+          # comment job records them in the check run Enrollment review. jq -c writes each on one line.
+          if [ "$KIND" = enrollment ]; then
+            echo "verdicts=$(jq -c '.verdicts // {}' <<< "$out")" >> "$GITHUB_OUTPUT"
+            echo "reasons=$(jq -c '.reasons // {}' <<< "$out")" >> "$GITHUB_OUTPUT"
+          fi
           { echo '<!-- held finding -->'; jq -r '.held // ""' <<< "$out"; } > "$RUNNER_TEMP/held-finding.md"
           if jq -e '(.held // "") | test("\\S")' <<< "$out" > /dev/null; then echo "held=yes" >> "$GITHUB_OUTPUT"
           else mkdir -p ~/.claude && printf 'session=%s head=%s\n' "$SESSION" "$HEAD_SHA" > ~/.claude/ossv-last-review; fi
-      # body.md: the whole comment, with the verdict line, which the comment job posts as it is (the job's output
-      # `body`, written as the result step writes `comment`). Never for an issue: no job posts its reply.
-      - name: Write the comment as the comment job posts it
-        id: body
-        if: env.KIND != 'issue'
-        env:
-          REVIEW: ${{ steps.result.outputs.comment }}
-          CHECKS: ${{ needs.project-builds.outputs.checks }}
-          RULES: ${{ needs.route.outputs.kind == 'change' && 'review-change.md' || 'review.md' }}
-          # The checks the screen ran, when it screened this pull request first.
-          SCREENED: ${{ needs.gather.outputs.screen != 'false' && needs.screen.outputs.checks || '' }}
-        run: |
-          verdicts=$(jq -c . "$RUNNER_TEMP/draft/verdicts.json")
-          VERDICTS=$verdicts .github/scripts/review-body > "$RUNNER_TEMP/draft/body.md"
-          delimiter="body_$(openssl rand -hex 16)"
-          { echo "body<<$delimiter"; cat "$RUNNER_TEMP/draft/body.md"; echo "$delimiter"; } >> "$GITHUB_OUTPUT"
-      # enroll-dispatch.yml reads verdicts.json from this run: F2 or F7 fail, or no verdicts, starts no statements. A
-      # re-run replaces it, which is how a held enrollment is decided again. Never for an issue (the step above).
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (sha-pinned)
-        if: env.KIND != 'issue'
-        with: {name: enroll-review-draft, path: "${{ runner.temp }}/draft", if-no-files-found: error, overwrite: true}
       # A session that holds a held finding is not kept: any run of a pull request can read main's cache. This job only
       # restores the cache, so it keeps the session as an artifact, for a day, and the session job saves it in the cache.
       # The artifact's root is ~/.claude, where both paths are. A failed upload, as a failed save before, is a warning,
@@ -1610,23 +1625,30 @@ jobs:
         run: .github/scripts/review-hold "$RUNNER_TEMP/held"
 
   comment:
-    # Posts the review's comment as oss-verify[bot], or updates the one already there; when the review held a finding
-    # back, only once the hold job sent it, because the comment says that it was sent. Never the draft for an issue: a
-    # person approves the exact text of each reply to an issue before anyone posts it.
-    # Or, for a pull request or an issue that the screen held, that could not be gathered or screened, whose screened
-    # review failed, or that route held at the daily cap: it puts the label review-held on it and posts one comment
-    # that says so, in fixed words, which a later hold replaces. The comment says nothing of why, and this job could
-    # not: the screen job's only output is its verdict, and why is in the private bucket. A later review that is
-    # posted, or for an issue a later review that made its draft, takes the label off and deletes the hold comment.
-    # It runs too for the label run that adds parked to an enrollment pull request, and holds nothing on it.
+    # Writes, as oss-verify[bot], what the run decided about the pull request or the issue. It runs no code of the
+    # pull request.
+    # For an enrollment pull request it runs on every run whose build took the project, and on the label run that adds
+    # parked. Its step "Post the comment and record the verdict" records one check run Enrollment review at the run's
+    # head (.github/scripts/review-verdict): the review's verdicts, or that the screen held it, that the daily cap
+    # stopped it, that parked holds it, or which job failed. With the review's verdicts, at the pull request's current
+    # head and with no parked on it, the step also posts the review comment, or updates the one already there
+    # (.github/scripts/review-body); when the review held a finding back, only once the hold job sent it, because the
+    # comment says that it was sent. Any other outcome posts no comment and leaves the comment of an earlier head as it
+    # is: the review comment stays the App's only comment on an enrollment pull request.
+    # For a change pull request it posts the review's comment the same way, with no check run. For a change pull
+    # request or an issue that the screen held, that could not be gathered or screened, whose screened review failed,
+    # or that route held at the daily cap: it puts the label review-held on it and posts one comment that says so, in
+    # fixed words, which a later hold replaces. The comment says nothing of why, and this job could not: the screen
+    # job's only output is its verdict, and why is in the private bucket. A later review that is posted, or for an
+    # issue a later review that made its draft, takes the label off and deletes the hold comment. Never the draft for
+    # an issue: a person approves the exact text of each reply to an issue before anyone posts it.
     needs: [route, project-builds, gather, screen, review, hold]
     if: >-
-      ${{ !cancelled() && ((needs.route.outputs.kind != 'issue'
-      && needs.review.result == 'success' && needs.review.outputs.comment != ''
-      && (needs.review.outputs.held_object == '' || needs.hold.result == 'success'))
+      ${{ !cancelled() && ((needs.route.outputs.kind == 'enrollment'
+          && (needs.project-builds.outputs.name != '' || (needs.route.outputs.label_run == 'true' && needs.route.outputs.parked == 'true')))
+      || (needs.route.outputs.kind == 'change' && needs.review.result == 'success' && needs.review.outputs.comment != '')
       || (needs.route.outputs.kind == 'issue' && needs.review.result == 'success')
-      || (needs.route.outputs.label_run == 'true' && needs.route.outputs.parked == 'true' && needs.route.outputs.kind == 'enrollment')
-      || ((needs.project-builds.outputs.name != '' || needs.route.outputs.kind == 'change' || needs.route.outputs.kind == 'issue')
+      || ((needs.route.outputs.kind == 'change' || needs.route.outputs.kind == 'issue')
           && (needs.route.outputs.trust == 'cap'
               || (needs.route.outputs.trust == 'screen' && needs.gather.result == 'failure')
               || (needs.gather.result == 'success' && needs.gather.outputs.digest != '' && needs.gather.outputs.screen != 'false'
@@ -1655,6 +1677,8 @@ jobs:
       cancel-in-progress: false
       queue: max
     permissions:
+      # contents: read only for the checkout of .github/scripts, main's (review-verdict, review-body, review-neutralize).
+      contents: read
       # Only for the GitHub identity token that Google's federation trades for an access token of
       # ossv-app-comment@theorem-agent-infra, which reads the App's key. It writes with the oss-verify App's token, not
       # this job's, and runs no code of the pull request.
@@ -1664,11 +1688,16 @@ jobs:
       # (Theorem's infrastructure code).
       GCP_WORKLOAD_IDENTITY_PROVIDER: projects/805240912354/locations/global/workloadIdentityPools/github/providers/github-ossv
       GCP_SERVICE_ACCOUNT: ossv-app-comment@theorem-agent-infra.iam.gserviceaccount.com
-      # Whether this job holds the item (above) rather than post a review: the review job ran only when the item was
-      # not held, and this job runs for a review only when it succeeded.
+      # Whether this job holds a change pull request or an issue (above) rather than post a review: the review job ran
+      # only when the item was not held, and this job runs for such a review only when it succeeded.
       HOLDING: ${{ needs.review.result != 'success' }}
       KIND: ${{ needs.route.outputs.kind }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
       - name: Sign in to Google Cloud
         id: gcp
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0 (sha-pinned)
@@ -1701,31 +1730,24 @@ jobs:
           delimiter="key-$(openssl rand -hex 16)"
           { echo "key<<$delimiter"; builtin printf '%s\n' "$key"; echo "$delimiter"; } >> "$GITHUB_OUTPUT"
 
+      # One token for every step below: checks for the check run Enrollment review, pull requests for the review
+      # comment, and issues for the label review-held and its comment, an issue's too.
       - name: Get the oss-verify App's token
         id: app
-        if: env.HOLDING != 'true' && env.KIND != 'issue'
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0 (sha-pinned)
         with:
           client-id: Iv23liAWPMahJZYsw3un
           private-key: ${{ steps.key.outputs.key }}
+          permission-checks: write
           permission-pull-requests: write
-
-      # Issues too: the item held can be an issue, and an issue whose draft was made loses its label and comment.
-      - name: Get the oss-verify App's token for a hold or an issue
-        id: app-hold
-        if: env.HOLDING == 'true' || env.KIND == 'issue'
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0 (sha-pinned)
-        with:
-          client-id: Iv23liAWPMahJZYsw3un
-          private-key: ${{ steps.key.outputs.key }}
           permission-issues: write
-          permission-pull-requests: write
 
-      # Fixed words: nothing of the pull request, the issue, its account or the screen's reason. Never on a label run.
+      # Fixed words: nothing of the pull request, the issue, its account or the screen's reason. Only a change pull
+      # request or an issue: the check run Enrollment review records an enrollment's hold.
       - name: Label it review-held and say so
-        if: env.HOLDING == 'true' && needs.route.outputs.label_run != 'true'
+        if: env.HOLDING == 'true' && env.KIND != 'enrollment'
         env:
-          GH_TOKEN: ${{ steps.app-hold.outputs.token }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number || inputs.pr }}
           NUMBER: ${{ github.event.pull_request.number || inputs.pr || inputs.issue || github.event.issue.number }}
@@ -1793,52 +1815,128 @@ jobs:
           fi
           echo "Held: labelled $HELD_LABEL, and said so."
 
-
-      - name: Post the comment, or update the one already there
+      # The review comment of a change pull request; for an enrollment pull request, the check run Enrollment review
+      # too, from the same parsed verdicts, on every run this job runs for.
+      - name: Post the comment and record the verdict
         id: post
-        if: env.HOLDING != 'true' && env.KIND != 'issue'
+        if: env.KIND == 'enrollment' || (env.KIND == 'change' && env.HOLDING != 'true')
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number || inputs.pr }}
-          # The review job's body.md: the whole comment, made there by .github/scripts/review-body.
-          BODY: ${{ needs.review.outputs.body }}
           HEAD_SHA: ${{ needs.project-builds.outputs.sha || needs.route.outputs.sha }}
+          # The check run's details_url: this run.
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # The review's comment, and an enrollment's verdicts and their reasons (the review job's outputs).
+          REVIEW: ${{ needs.review.outputs.comment }}
+          VERDICTS: ${{ needs.review.outputs.verdicts }}
+          REASONS: ${{ needs.review.outputs.reasons }}
+          CHECKS: ${{ needs.project-builds.outputs.checks }}
+          # The checks the screen ran, when it screened this pull request first.
+          SCREENED: ${{ needs.gather.outputs.screen != 'false' && needs.screen.outputs.checks || '' }}
+          # What the run decided, for an enrollment: route's hold (parked, or the daily cap and the time it frees), the
+          # result of each job, the screen's verdict, and whether the review held a finding back.
+          PARKED: ${{ needs.route.outputs.parked }}
+          TRUST: ${{ needs.route.outputs.trust }}
+          FREE: ${{ needs.route.outputs.free }}
+          GATHER_RESULT: ${{ needs.gather.result }}
+          SCREEN_RESULT: ${{ needs.screen.result }}
+          SCREEN_VERDICT: ${{ needs.screen.outputs.verdict }}
+          REVIEW_RESULT: ${{ needs.review.result }}
+          HELD: ${{ needs.review.outputs.held_object != '' }}
+          HOLD_RESULT: ${{ needs.hold.result }}
         run: |
           set -euo pipefail
           # A pull request's comment only: a run for an issue has no pull request, and an issue's draft is never posted.
           [[ ${PR:-} =~ ^[0-9]+$ ]] || { echo "::error::This run has no pull request, so nothing is posted."; exit 1; }
-          # Only a run of the pull request's current head posts: a run of an older head that finished later would
-          # replace the newer head's review. The current head's own run posts.
-          current=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)
-          if [ "$current" != "$HEAD_SHA" ]; then
+          [[ ${HEAD_SHA:-} =~ ^[0-9a-f]{40}$ ]] || { echo "::error::This run names no head commit, so nothing is posted."; exit 1; }
+          # Why an enrollment has no verdicts of its review: parked holds it, the daily cap stopped it, a job failed
+          # (the hold job too, when the comment says that it sent the review's held finding), or the screen held it.
+          hold="" job=""
+          if [ "$KIND" = enrollment ]; then
+            if [ "${PARKED:-}" = true ]; then hold=parked
+            elif [ "${TRUST:-}" = cap ]; then hold=cap
+            elif [[ $GATHER_RESULT == failure || $GATHER_RESULT == cancelled ]]; then hold=failed job=gather
+            elif [[ $SCREEN_RESULT == failure || $SCREEN_RESULT == cancelled ]]; then hold=failed job=screen
+            elif [ "$SCREEN_RESULT" = success ] && [ "${SCREEN_VERDICT:-}" != clean ]; then hold=screen
+            elif [[ $REVIEW_RESULT == failure || $REVIEW_RESULT == cancelled ]]; then hold=failed job=review
+            elif [ "$HELD" = true ] && [ "$HOLD_RESULT" != success ]; then hold=failed job=hold
+            elif [ "$REVIEW_RESULT" != success ]; then
+              # The gather job kept nothing: the head moved while it read, and the push started a run of its own.
+              echo "The gather job kept nothing, because the head moved from $HEAD_SHA: the run of the new head records the verdict."
+              exit 0
+            fi
+          fi
+          # The pull request now: only a run of its current head posts, since a run of an older head that finished later
+          # would replace the newer head's review; and parked put on it while this run worked holds it (a label's run
+          # waits for this one).
+          pull=$(gh api "repos/$REPO/pulls/$PR")
+          current=$(jq -r .head.sha <<< "$pull")
+          if [ "$KIND" = enrollment ] && [ "$hold" != parked ] \
+              && [ "$(jq '[.labels[]?.name | ascii_downcase] | index("parked") != null' <<< "$pull")" = true ]; then
+            hold=parked job=""
+          fi
+          conclusion=""
+          if [ "$KIND" = enrollment ]; then
+            if [ -n "$hold" ]; then
+              verdict=$(HOLD=$hold JOB=$job .github/scripts/review-verdict)
+            else
+              # The review's verdicts, as one line of JSON; what is not JSON is no verdict.
+              jq -c . <<< "${VERDICTS:-null}" > "$RUNNER_TEMP/verdicts.json" 2> /dev/null \
+                || echo null > "$RUNNER_TEMP/verdicts.json"
+              verdict=$(VERDICTS=$(< "$RUNNER_TEMP/verdicts.json") .github/scripts/review-verdict)
+            fi
+            conclusion=$(jq -r .conclusion <<< "$verdict")
+          fi
+          if [ -n "$hold" ]; then
+            echo "No comment: the review gave no verdicts ($hold${job:+, the $job job}), and an earlier comment stays."
+          elif [ "$current" != "$HEAD_SHA" ]; then
             echo "The pull request's head is now $current, not $HEAD_SHA: the run of $current posts the comment."
-            exit 0
-          fi
-          # The review job's body.md as it is: the marker first, which finds the comment again, then the verdict line.
-          # A job output drops the file's last line end, which this puts back.
-          printf '%s\n' "$BODY" > "$RUNNER_TEMP/comment.md"
-          # Ours is the oss-verify App's comment that starts with the marker.
-          existing=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-            --jq '.[] | select(.user.login == "oss-verify[bot]" and (.body | startswith("<!-- oss-verify-review -->"))) | .id')
-          existing=${existing%%$'\n'*}
-          if [ -n "$existing" ]; then
-            jq -n --rawfile body "$RUNNER_TEMP/comment.md" '{body: $body}' \
-              | gh api --method PATCH "repos/$REPO/issues/comments/$existing" --input - > /dev/null
           else
-            jq -n --rawfile body "$RUNNER_TEMP/comment.md" '{body: $body}' \
-              | gh api --method POST "repos/$REPO/issues/$PR/comments" --input - > /dev/null
+            rules=review-change.md
+            [ "$KIND" != enrollment ] || rules=review.md
+            CONCLUSION=$conclusion RULES=$rules .github/scripts/review-body > "$RUNNER_TEMP/comment.md"
+            # Ours is the oss-verify App's comment that starts with the marker.
+            existing=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+              --jq '.[] | select(.user.login == "oss-verify[bot]" and (.body | startswith("<!-- oss-verify-review -->"))) | .id')
+            existing=${existing%%$'\n'*}
+            if [ -n "$existing" ]; then
+              jq -n --rawfile body "$RUNNER_TEMP/comment.md" '{body: $body}' \
+                | gh api --method PATCH "repos/$REPO/issues/comments/$existing" --input - > /dev/null
+            else
+              jq -n --rawfile body "$RUNNER_TEMP/comment.md" '{body: $body}' \
+                | gh api --method POST "repos/$REPO/issues/$PR/comments" --input - > /dev/null
+            fi
+            echo "posted=true" >> "$GITHUB_OUTPUT"
           fi
-          echo "posted=true" >> "$GITHUB_OUTPUT"
+          [ "$KIND" = enrollment ] || exit 0
+          # The one record of the verdict, at the head this run reviewed. enroll-dispatch reads it.
+          jq -n --arg head "$HEAD_SHA" --arg url "$RUN_URL" --argjson verdict "$verdict" \
+            '{name: "Enrollment review", head_sha: $head, status: "completed", conclusion: $verdict.conclusion,
+              details_url: $url, output: {title: $verdict.title, summary: $verdict.summary}}' \
+            | gh api --method POST "repos/$REPO/check-runs" --input - > /dev/null
+          echo "Recorded the check run Enrollment review at $HEAD_SHA: $conclusion."
+          # The review comment stays the App's only comment on an enrollment pull request: a hold comment from before
+          # the check run goes, and so does the label review-held. One already gone is no error.
+          held=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq '.[] | select(.user.login == "oss-verify[bot]" and (.body | startswith("<!-- oss-verify-held -->"))) | .id')
+          while read -r id; do
+            [[ $id =~ ^[0-9]+$ ]] || continue
+            out=$(gh api --method DELETE "repos/$REPO/issues/comments/$id" 2>&1) \
+              || [[ $out == *"(HTTP 404)"* ]] || { echo "::error::the hold comment $id could not be deleted: $out"; exit 1; }
+          done <<< "$held"
+          out=$(gh api --method DELETE "repos/$REPO/issues/$PR/labels/$HELD_LABEL" 2>&1) \
+            || [[ $out == *"(HTTP 404)"* ]] || { echo "::error::the label $HELD_LABEL could not be taken off: $out"; exit 1; }
 
-      # A review replaces a hold: one a maintainer started, or a later push that the screen passed; for an issue, a
-      # review that made its draft. The label comes off, and the hold comment goes. Not when another run's hold came
-      # after this run started: a newer event of the pull request or the issue was held, in a run of its own. This
-      # run's own hold, from an attempt before a re-run of its failed jobs, counts as older whatever its time.
+      # A review replaces a hold of a change pull request or an issue: one a maintainer started, or a later push that
+      # the screen passed; for an issue, a review that made its draft. The label comes off, and the hold comment goes.
+      # Not when another run's hold came after this run started: a newer event of the pull request or the issue was
+      # held, in a run of its own. This run's own hold, from an attempt before a re-run of its failed jobs, counts as
+      # older whatever its time. An enrollment's step above takes its hold off.
       - name: Take the label review-held off
-        if: steps.post.outputs.posted == 'true' || (env.HOLDING != 'true' && env.KIND == 'issue')
+        if: (steps.post.outputs.posted == 'true' && env.KIND == 'change') || (env.HOLDING != 'true' && env.KIND == 'issue')
         env:
-          GH_TOKEN: ${{ steps.app.outputs.token || steps.app-hold.outputs.token }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
           REPO: ${{ github.repository }}
           NUMBER: ${{ github.event.pull_request.number || inputs.pr || inputs.issue || github.event.issue.number }}
           STARTED: ${{ needs.route.outputs.started }}
@@ -1944,16 +2042,16 @@ jobs:
           # Each of the others is asked for on its own job's condition: the record when the build passed and took a
           # project; gather when the build took a project or the kind is change or issue (the item is reviewable), it
           # is no label run, parked does not hold it, and route did not hold it at the daily cap; the screen on those
-          # three too, when gather kept the item (its output digest) and its output screen is not false; the review
-          # when gather kept it and its output screen is false, or the screen's verdict is clean; the session when the
-          # review kept one; hold when an enrollment's review ran; comment when the review wrote a comment (and, if it
-          # held a finding back, the hold job sent it) for a pull request, when the review of an issue made its draft
-          # (the comment job takes a hold off it), when a label run adds parked to an enrollment, or when a reviewable
-          # item is held (route's cap, a screen that held it or failed, a screened review that failed, or no gathered
-          # item to read). So a held item passes this check when the build passed (if asked) and the comment job
-          # labelled it and said so: it waits for a person, as the label says, and an enrollment's statements do not
-          # start without review verdicts. A gather or a screen job that failed fails it, held or not, and so does a
-          # screened review that failed.
+          # three too, when gather kept the item (its output digest) and its output screen is not false; the review on
+          # those three too, when gather kept it and its output screen is false, or the screen's verdict is clean; the
+          # session when the review kept one; hold when an enrollment's review ran; comment on every run of an
+          # enrollment whose build took the project and on the label run that adds parked to one (the check run
+          # Enrollment review), when the review wrote a change's comment, when the review of an issue made its draft
+          # (the comment job takes a hold off it), or when a change or an issue is held (route's cap, a screen that
+          # held it or failed, a screened review that failed, or no gathered item to read). So a held item passes this
+          # check when the build passed (if asked) and the comment job recorded the hold: a screen's hold, the daily
+          # cap, or parked on a push's run. A gather, screen, review (after its second attempt), hold or comment job
+          # that failed fails it, held or not.
           RECORD: ${{ needs.record.result }}
           ASKED_RECORD: ${{ needs.project-builds.result == 'success' && needs.project-builds.outputs.name != '' }}
           GATHER: ${{ needs.gather.result }}
@@ -1969,7 +2067,8 @@ jobs:
                 || needs.route.outputs.trust == 'measure') }}
           REVIEW: ${{ needs.review.result }}
           ASKED_REVIEW: >-
-            ${{ needs.gather.result == 'success' && needs.gather.outputs.digest != ''
+            ${{ needs.route.outputs.label_run != 'true' && needs.route.outputs.parked != 'true' && needs.route.outputs.trust != 'cap'
+            && needs.gather.result == 'success' && needs.gather.outputs.digest != ''
             && (needs.gather.outputs.screen == 'false'
                 || (needs.screen.result == 'success' && needs.screen.outputs.verdict == 'clean')) }}
           SESSION: ${{ needs.session.result }}
@@ -1978,12 +2077,11 @@ jobs:
           ASKED_HOLD: ${{ needs.review.result != 'skipped' && needs.route.outputs.kind == 'enrollment' }}
           COMMENT: ${{ needs.comment.result }}
           ASKED_COMMENT: >-
-            ${{ (needs.route.outputs.kind != 'issue'
-            && needs.review.result == 'success' && needs.review.outputs.comment != ''
-            && (needs.review.outputs.held_object == '' || needs.hold.result == 'success'))
+            ${{ (needs.route.outputs.kind == 'enrollment'
+                && (needs.project-builds.outputs.name != '' || (needs.route.outputs.label_run == 'true' && needs.route.outputs.parked == 'true')))
+            || (needs.route.outputs.kind == 'change' && needs.review.result == 'success' && needs.review.outputs.comment != '')
             || (needs.route.outputs.kind == 'issue' && needs.review.result == 'success')
-            || (needs.route.outputs.label_run == 'true' && needs.route.outputs.parked == 'true' && needs.route.outputs.kind == 'enrollment')
-            || ((needs.project-builds.outputs.name != '' || needs.route.outputs.kind == 'change' || needs.route.outputs.kind == 'issue')
+            || ((needs.route.outputs.kind == 'change' || needs.route.outputs.kind == 'issue')
                 && (needs.route.outputs.trust == 'cap'
                     || (needs.route.outputs.trust == 'screen' && needs.gather.result == 'failure')
                     || (needs.gather.result == 'success' && needs.gather.outputs.digest != '' && needs.gather.outputs.screen != 'false'
