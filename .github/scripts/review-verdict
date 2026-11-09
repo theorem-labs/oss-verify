@@ -52,9 +52,9 @@ SENTENCES = {
 JOBS = ("gather", "screen", "review", "hold")
 NO_VERDICT = "The review gave no verdict."
 NO_REASON = "The review gave no reason."
-# A reason's length, after review-neutralize, and the summary's: 31 reasons of REASON_LIMIT stay under SUMMARY_LIMIT.
+# A reason's length, after review-neutralize: 31 reasons of REASON_LIMIT keep the summary under the 65,535 characters
+# GitHub takes.
 REASON_LIMIT = 1500
-SUMMARY_LIMIT = 65000
 
 # No bytecode file beside the scripts: the job's checkout is main's, and only read.
 sys.dont_write_bytecode = True
@@ -100,8 +100,6 @@ def from_verdicts(verdicts, reasons):
     lines = [f"- **{check}** ({verdict}): {text}"
              for kind in ORDER for check, (verdict, text) in found.items() if verdict == kind]
     summary = sentence + ("\n\n" + "\n".join(lines) if lines else "")
-    if len(summary) > SUMMARY_LIMIT:
-        summary = summary[:SUMMARY_LIMIT] + "\n\n(cut here: GitHub takes no longer summary)"
     return conclusion, sentence, summary
 
 

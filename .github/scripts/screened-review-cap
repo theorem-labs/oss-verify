@@ -31,8 +31,11 @@ fail() {
   echo "::error::$1 Re-run this run."
   exit 1
 }
-# trusted <login>: 0 when <login> is one of the ALLOWED_BOTS, or an account that GitHub's collaborator permission API
-# gives admin or write; 1 when it is neither; 2 when the API could not say. As route's trust step decides.
+# The text between the two marks is the same as the copies in build.yaml's route and gather jobs, so that it decides as
+# route's trust step does.
+# trusted
+# trusted <login>: 0 when <login> is one of the ALLOWED_BOTS, or an account that GitHub's collaborator
+# permission API gives admin or write; 1 when it is neither; 2 when the API could not say.
 trusted() {
   local permission
   [[ $1 =~ ^[A-Za-z0-9-]+(\[bot\])?$ ]] || return 1
@@ -41,6 +44,7 @@ trusted() {
   permission=$(gh api "repos/$REPO/collaborators/$1/permission" --jq .permission) || return 2
   [[ $permission == admin || $permission == write ]]
 }
+# end of trusted
 [[ ${RUN_ID:-} =~ ^[0-9]+$ ]] || fail "Not a run id: ${RUN_ID:-}."
 [[ ${REVIEW_CAP:-} =~ ^[1-9][0-9]*$ && ${REVIEW_CAP_AUTHOR:-} =~ ^[1-9][0-9]*$ ]] \
   || fail "REVIEW_CAP or REVIEW_CAP_AUTHOR is not a number."

@@ -41,7 +41,7 @@ name: "Build"
 #            which a person puts on a pull request to hold it, is route's output `parked`: while it is on, the pull
 #            request gets no screen, no review and no review comment. The label run that adds it, and a push to a
 #            parked pull request, ask for the comment job, which records that a person holds it (below). The removal
-#            of parked is no label run: it runs as a push does, and reviews the head.
+#            of parked is no label run: it runs, and cancels, as a push does, and reviews the head.
 #   gather   gathers what the review reads, once, with .github/scripts/review-gather (below), and keeps it as the
 #            artifact review-data, which the screen and the review take only by its SHA-256
 #            (.github/scripts/take-review-data): the review reads exactly what the screen passed. It holds no model,
@@ -168,9 +168,9 @@ name: "Build"
 #            gathered or screened, whose screened review did not finish, or that route held at the daily cap, it puts
 #            the label review-held on it and posts one comment in fixed words (marker <!-- oss-verify-held -->) that
 #            says it was held and how a person with write access starts the review, and nothing of why; a hold at the
-#            cap says from when a push or a run by hand reviews it. A review it posts later, or for an issue a later
-#            review that made its draft, takes the label off and deletes that comment, unless a newer hold came after
-#            that review's run started.
+#            cap says from when a push (for an issue, an edit of it) or a run by hand reviews it. A review it posts
+#            later, or for an issue a later review that made its draft, takes the label off and deletes that comment,
+#            unless a newer hold came after that review's run started.
 #   required always runs, last, and reports the required check (below).
 #
 # project-builds is the required check, and the job required reports it (.github/scripts/collect). required runs on
@@ -209,9 +209,10 @@ name: "Build"
 # It runs on ready_for_review too: enroll-dispatch.yml starts no statements for a draft pull request, and the
 # completion of this run, when the draft is marked ready, is what has it decide again.
 # It runs on labeled and unlabeled too, for the label parked (route, above). Each such run but the removal of parked is
-# a label run, which copies the head's standing project-builds, waits for the run already going and cancels none
-# (concurrency, below). GitHub reads the required check from the newest run at the head, so after a re-run clears a
-# failed build, the newest label run at that head is re-run too, or the maintainer pushes.
+# a label run, which copies the head's standing project-builds and waits for the run already going: it cancels no
+# running run, but a newer event's run replaces it while it waits (concurrency, below). GitHub reads the required check
+# from the newest run at the head, so after a re-run clears a failed build, the newest label run at that head is re-run
+# too, or the maintainer pushes.
 # A failure is usually the project's, but it can be the runner's: GitHub's runner may run out of disk or time on a
 # build that works on a larger machine. A maintainer then reruns the failed job (gh run rerun <run> --failed). If it
 # fails again for the runner's reason, the maintainer builds the project with `tools/check --no-shell --twice <name>` on
@@ -402,10 +403,13 @@ concurrency:
   # every other (the top of this file), and each of those gets a group of its own run, so it never replaces a waiting
   # run of the author's own edit. An event that the author sent and route still skips (an owner, a member or an App
   # wrote the issue) is of an issue that never gets a draft. A label's event (labeled, unlabeled) shares the pull
-  # request's group and cancels nothing: it waits until the run already going finishes, so the job required of a
-  # label run copies the result of a finished run, and a push still cancels a label run that waits or runs.
+  # request's group and cancels no running run: it waits until the run already going finishes, so the job required of
+  # a label run copies the result of a finished run, and a push still cancels a label run that waits or runs. GitHub
+  # keeps one waiting run in a group, so a newer event's run replaces a label run that waits. The removal of parked
+  # (GitHub compares the label's name without case) is a full run and cancels as a push does, so that it never waits
+  # where a later label event's run could replace it and leave the head unreviewed.
   group: build-${{ github.event_name }}-${{ github.event.pull_request.number || inputs.pr || inputs.issue || (github.event.sender.login == github.event.issue.user.login && github.event.issue.number || format('{0}-run-{1}', github.event.issue.number, github.run_id)) }}
-  cancel-in-progress: ${{ github.event_name != 'issues' && github.event.action != 'labeled' && github.event.action != 'unlabeled' }}
+  cancel-in-progress: ${{ github.event_name != 'issues' && ((github.event.action != 'labeled' && github.event.action != 'unlabeled') || (github.event.action == 'unlabeled' && github.event.label.name == 'parked')) }}
 
 jobs:
   route:
@@ -1423,10 +1427,9 @@ jobs:
               > "$RUNNER_TEMP/issue-draft.md"
             exit 0
           fi
-          jq -r .comment <<< "$out" > "$RUNNER_TEMP/comment.md"
           # The job's comment output, which the comment job posts.
           delimiter="comment_$(openssl rand -hex 16)"
-          { echo "comment<<$delimiter"; cat "$RUNNER_TEMP/comment.md"; echo "$delimiter"; } >> "$GITHUB_OUTPUT"
+          { echo "comment<<$delimiter"; jq -r .comment <<< "$out"; echo "$delimiter"; } >> "$GITHUB_OUTPUT"
           # Only an enrollment's schema has reasons and a held finding, and only an enrollment's verdicts are read: the
           # comment job records them in the check run Enrollment review. jq -c writes each on one line.
           if [ "$KIND" = enrollment ]; then
@@ -1789,15 +1792,15 @@ jobs:
               exit 0
             fi
           fi
-          input="pr"
-          [ -n "${PR:-}" ] || input="issue"
+          input="pr" change="a push"
+          [ -n "${PR:-}" ] || input="issue" change="an edit of the issue"
           ask="A person with write access can start the review with \`gh workflow run build.yaml -R $REPO -f $input=$NUMBER\`."
           if [ "$TRUST" = cap ]; then
             [[ $FREE =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
               || { echo "::error::no time the daily cap frees: $FREE"; exit 1; }
             free=$(date -u -d "$FREE" '+%Y-%m-%d %H:%M UTC')
             why="It comes from an account without write access to this repository, and the automated reviews of such accounts reached their cap of $REVIEW_CAP in 24 hours, $REVIEW_CAP_AUTHOR for one author."
-            ask="From $free, a push or \`gh workflow run build.yaml -R $REPO -f $input=$NUMBER\` reviews it."
+            ask="From $free, $change or \`gh workflow run build.yaml -R $REPO -f $input=$NUMBER\` reviews it."
           elif [ "$REVIEW" = failure ] || [ "$REVIEW" = cancelled ]; then
             # A review that failed or ran out of time (cancelled: a newer push cancels the whole run, and then this job
             # does not run).

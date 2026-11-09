@@ -21,8 +21,8 @@ comment must carry no marker line but the job's own. This is gh-aw's output sani
    is written, so code such as `p = &x;` or `&lt;stdio.h&gt;` is unchanged.
 2. With --drop-markers, each line that holds oss-verify-verdict, oss-verify-review or oss-verify-meta, in any case, is
    dropped: oss-verify-review is the marker of the review comment, which the comment job reads, and only review-body
-   writes it. No job writes the other two any more; a forged verdict line goes still, because the stream's inbound
-   watcher (bin/ossv-pr-watch) reads that marker.
+   writes it. The stream's inbound watcher (bin/ossv-pr-watch) reads the verdict marker, so a forged verdict line is
+   dropped too.
 3. A word joiner (U+2060), which shows as nothing, goes after every @, so that no @ is followed by a name: GitHub then
    renders no mention, in code or out of it (an @ after a backtick that ends a code span is a mention too).
 4. A word joiner goes between # and a digit (#12, owner/repo#12), between GH- and a digit, and between the /issues/,

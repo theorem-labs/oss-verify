@@ -25,7 +25,7 @@ import validate  # noqa: E402
 
 # The workflow tests' expression evaluator and step runner with a stand-in gh.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from test_outside_screen import Runner, evaluate  # noqa: E402
+from test_outside_screen import Runner, evaluate, step  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -779,13 +779,11 @@ class PostingStep(Runner):
                  "TRUST": "writer", "FREE": "", "GATHER_RESULT": "success", "SCREEN_RESULT": "skipped",
                  "SCREEN_VERDICT": "", "REVIEW_RESULT": "success", "HELD": "false", "HOLD_RESULT": "success"}
         given.update(env)
-        step = [s for s in yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["jobs"]
-                ["comment"]["steps"] if s.get("name") == self.STEP]
-        # Exactly one, so this cannot run a same-name copy instead of the step the job really uses; and every value the
-        # step's env names is given here.
-        self.assertEqual(len(step), 1)
-        self.assertEqual(set(step[0]["env"]) - {"GH_TOKEN", "REPO"}, set(given))
-        rc, out, self.outputs = self.run_script(step[0]["run"], cwd=ROOT, KIND=kind, **given)
+        # step() finds exactly one, so this cannot run a same-name copy instead of the step the job really uses; and
+        # every value the step's env names is given here.
+        posting = step("comment", self.STEP)
+        self.assertEqual(set(posting["env"]) - {"GH_TOKEN", "REPO"}, set(given))
+        rc, out, self.outputs = self.run_script(posting["run"], cwd=ROOT, KIND=kind, **given)
         self.assertEqual(rc, status, out)
         requests = []
         for n, call in enumerate(self.calls(), 1):
@@ -2136,9 +2134,9 @@ class ReviewJob(unittest.TestCase):
         """The result step, on an execution file whose result carries `output` as its structured output, for a review
         of `kind` (the issue `issue` for an issue); with `retried`, the Review step's attempt gave `output` and failed,
         and "Review again" gave `retried`. The step's RESULT and SESSION are its env's expressions, on the outputs of
-        the attempts that ran. It returns the step's outputs as the runner reads them (the verdicts are its output
-        `verdicts`), and keeps the step summary in self.summary, an issue's draft file in self.issue_draft, and the
-        directory it ran in in self.ran_in."""
+        the attempts that ran. It returns the step's outputs as the runner reads them (the comment and the verdicts are
+        its outputs `comment` and `verdicts`), and keeps the step summary in self.summary, an issue's draft file in
+        self.issue_draft, and the directory it ran in in self.ran_in."""
         directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, directory)
         root = self.ran_in = pathlib.Path(directory)
@@ -2164,7 +2162,7 @@ class ReviewJob(unittest.TestCase):
         self.summary = read(root / "summary")
         self.issue_draft = read(root / "temp" / "issue-draft.md")
         outputs = self.outputs(read(root / "output"))
-        return (run, read(root / "temp" / "comment.md"), outputs.get("verdicts"),
+        return (run, outputs.get("comment"), outputs.get("verdicts"),
                 read(root / "temp" / "held-finding.md"), outputs, read(root / "home" / ".claude" / "ossv-last-review"))
 
     def store(self, issue="5", attempt="2", answer='{"generation": "1730000000000000"}',
@@ -2335,7 +2333,7 @@ class ReviewJob(unittest.TestCase):
             {"comment": "Thanks.\n\n1. Fix X.\n", "held": "", "verdicts": {"F2": "pass", "F7": "fail"},
              "reasons": {"F7": "Fix X.\nIn fuzz/x.c."}})
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(comment, "Thanks.\n\n1. Fix X.\n\n")
+        self.assertEqual(comment, "Thanks.\n\n1. Fix X.\n")
         # The verdicts and the reasons, each one line of JSON, for the comment job.
         self.assertEqual(output, {"comment": "Thanks.\n\n1. Fix X.\n", "verdicts": '{"F2":"pass","F7":"fail"}',
                                   "reasons": '{"F7":"Fix X.\\nIn fuzz/x.c."}'})
@@ -2385,7 +2383,7 @@ class ReviewJob(unittest.TestCase):
         run, comment, verdicts, _, output, last = self.result(
             None, retried={"comment": "Second.\n", "held": "", "verdicts": {"F2": "pass"}, "reasons": {}})
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual((comment, verdicts), ("Second.\n\n", '{"F2":"pass"}'))
+        self.assertEqual((comment, verdicts), ("Second.\n", '{"F2":"pass"}'))
         self.assertEqual(last, f"session=09227178-7bbf-4e5f-86db-8736e530ef02 head={'1' * 40}\n")
         # No step counts the attempts or writes a try line: the outputs are the review's alone.
         self.assertEqual(set(output), {"comment", "verdicts", "reasons"})

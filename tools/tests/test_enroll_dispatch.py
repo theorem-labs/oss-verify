@@ -569,10 +569,13 @@ class Review(unittest.TestCase):
         self.assertEqual(world.decide()["decision"], "dispatch")
 
     def test_a_parked_pull_request_sends_nothing(self):
-        # c2 (f): the review passed, and a person holds the pull request.
-        world = World()
-        world.pulls = [World.pull(labels=("parked",))]
-        self.assertNotSent(world, f"{self.WHERE}: a person holds it (parked)")
+        # c2 (f): the review passed, and a person holds the pull request. GitHub, and build.yaml's route, match the
+        # label's name in any case, so Parked holds it too.
+        for name in ("parked", "Parked"):
+            with self.subTest(name=name):
+                world = World()
+                world.pulls = [World.pull(labels=(name,))]
+                self.assertNotSent(world, f"{self.WHERE}: a person holds it (parked)")
 
     def test_a_pull_request_parked_while_its_files_were_listed_sends_nothing(self):
         world = World()

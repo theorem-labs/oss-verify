@@ -117,7 +117,8 @@ RECORD_SCHEMA = "oss-verify enrollment record v1"
 REVIEW_CHECK = "Enrollment review"
 REVIEW_APP = 5447700
 NOT_REVIEWED = "not yet reviewed"
-# The label a person puts on a pull request to hold it: no statements start for it while it is open.
+# The label a person puts on a pull request to hold it: no statements start for it while it is open. Its name matches in
+# any case, as build.yaml's route matches it.
 PARKED_LABEL = "parked"
 # The label that someone other than the author, who can label (a member of theorem-labs, or one of its Apps), puts on an enrollment whose author the maintainer check does not show (a
 # pull request that our bot opened at a maintainer's request, for one): with it, the check is skipped. Putting it on
@@ -236,18 +237,21 @@ def bound_checks(api: Api, runs: Runs, repo: str, sha: str, head: tuple) -> tupl
     return waiting, build_run
 
 
+def unexpired(api: Api, repo: str, run_id: int, name: str) -> list[dict]:
+    """Every unexpired artifact `name` of this run."""
+    return [a for page in api.pages(f"repos/{repo}/actions/runs/{run_id}/artifacts?name={name}&per_page=100")
+            for a in page.get("artifacts") or [] if a.get("name") == name and not a.get("expired")]
+
+
 def has_record(api: Api, repo: str, run_id: int) -> bool:
     """Whether this Build run uploaded an unexpired record: a full run, not one that a label event started."""
-    path = f"repos/{repo}/actions/runs/{run_id}/artifacts?name={RECORD_ARTIFACT}&per_page=100"
-    return any(a.get("name") == RECORD_ARTIFACT and not a.get("expired")
-               for page in api.pages(path) for a in page.get("artifacts") or [])
+    return bool(unexpired(api, repo, run_id, RECORD_ARTIFACT))
 
 
 def artifact_json(api: Api, repo: str, run_id: int, name: str, file: str, allowed: frozenset) -> tuple[object, str]:
     """The JSON file `file` of the artifact `name` of this run, which holds no file outside `allowed`, or None and
     why not."""
-    artifacts = [a for page in api.pages(f"repos/{repo}/actions/runs/{run_id}/artifacts?name={name}&per_page=100")
-                 for a in page.get("artifacts") or [] if a.get("name") == name and not a.get("expired")]
+    artifacts = unexpired(api, repo, run_id, name)
     if len(artifacts) != 1:
         return None, f"Build run {run_id} has {len(artifacts)} unexpired {name} artifacts, not one"
     if int(artifacts[0].get("size_in_bytes") or 0) > MAX_ARTIFACT_BYTES:
@@ -406,13 +410,18 @@ def standing(config: dict, login: str) -> str:
     return ""
 
 
+def label_names(pull: dict) -> set:
+    """The names of the pull request's labels, as GitHub writes them."""
+    return {(label or {}).get("name") for label in pull.get("labels") or []}
+
+
 def confirmed_by(api: Api, repo: str, number: int, pull: dict, author: str, since: str) -> str:
     """Who put CONFIRMED_LABEL on the pull request, when it carries it, that was someone other than its author, and it
     was put on after `since` (when the Build run of the head commit was created, so after that commit was pushed: a
     confirmation covers the commits it saw, not a later change of `repo`); else ''. Only an account with at least triage
     access to this repository can add a label (GitHub's permission model): a member of the organisation, or one of its
     Apps. The pull request's own author does not count."""
-    if CONFIRMED_LABEL not in {(label or {}).get("name") for label in pull.get("labels") or []}:
+    if CONFIRMED_LABEL not in label_names(pull):
         return ""
     try:
         events = [e for page in api.pages(f"repos/{repo}/issues/{number}/events?per_page=100") for e in page]
@@ -554,7 +563,7 @@ def decide(api: Api, repo: str, run_id: int, run_event: str, head_sha: str) -> d
                        number, project, sha)
     # Before the labels: a label that a person lifts by hand (size-review, say) must never be the only thing that
     # stands between a pull request that a person holds, or whose review did not pass, and its statements.
-    if PARKED_LABEL in {(label or {}).get("name") for label in pull.get("labels") or []}:
+    if PARKED_LABEL in {name.lower() for name in label_names(pull) if isinstance(name, str)}:
         return outcome("none", f"{where}: a person holds it ({PARKED_LABEL})", number, project, sha)
     conclusion = review_conclusion(api, repo, sha)
     if conclusion == NOT_REVIEWED:

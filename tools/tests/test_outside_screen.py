@@ -1171,8 +1171,10 @@ class Hold(Runner):
 
     def test_a_capped_item_is_told_the_cap_and_when_it_frees(self):
         """c3 (f), and an issue or a change pull request held at the daily cap: the cap and the time it frees, and
-        that a push or a run by hand reviews it from then. No marker that anything tries it again."""
-        for pr, number, start in (("", "9", "-f issue=9"), ("7", "7", "-f pr=7")):
+        that a push (for an issue, an edit of it) or a run by hand reviews it from then. No marker that anything tries
+        it again."""
+        for pr, number, start, change in (("", "9", "-f issue=9", "an edit of the issue"),
+                                          ("7", "7", "-f pr=7", "a push")):
             with self.subTest(number=number):
                 self.api.joinpath("args").unlink(missing_ok=True)
                 _calls, bodies, _ = self.hold("cap", pr=pr, number=number, free="2026-11-10T00:00:00Z")
@@ -1180,7 +1182,7 @@ class Hold(Runner):
                     "<!-- oss-verify-held -->\n**Automated review held.**\n\nIt comes from an account without write "
                     f"access to this repository, and the automated reviews of such accounts reached their cap of "
                     f"{WF['env']['REVIEW_CAP']} in 24 hours, {WF['env']['REVIEW_CAP_AUTHOR']} for one author. From "
-                    f"2026-11-10 00:00 UTC, a push or `gh workflow run build.yaml -R {REPO} {start}` reviews it.\n\n"
+                    f"2026-11-10 00:00 UTC, {change} or `gh workflow run build.yaml -R {REPO} {start}` reviews it.\n\n"
                     "<!-- oss-verify-held-run 100 -->\n"])
         # A cap with no time it frees holds nothing.
         rc, out, _ = self.run_script(step("comment", self.STEP)["run"], PR="", NUMBER="9", TRUST="cap", HEAD_SHA="a" * 40,
@@ -1477,12 +1479,14 @@ class OutsideText(Runner):
         got = self.run_script(step("gather", self.STEP)["run"], TRUST="screen", EVENT="pull_request_target")[2]
         self.assertEqual((got["screen"], got["writers"]), ("true", ""))
 
-    def test_both_copies_of_trusted_are_the_same(self):
+    def test_every_copy_of_trusted_is_the_same(self):
         def trusted(text):
             found = re.findall(r"# trusted\n(.*?)# end of trusted\n", text, re.S)
             self.assertEqual(len(found), 1)
             return found[0]
-        self.assertEqual(trusted(step("route", Trust.STEP)["run"]), trusted(step("gather", self.STEP)["run"]))
+        route = trusted(step("route", Trust.STEP)["run"])
+        self.assertEqual(trusted(step("gather", self.STEP)["run"]), route)
+        self.assertEqual(trusted((SCRIPTS / "screened-review-cap").read_text()), route)
 
 
 # git for the gather job's run: `fetch` takes the commit from the local repository $UPSTREAM in place of the project's
@@ -1936,8 +1940,8 @@ class LabelRun(Runner):
 
 
 class LabelEvents(unittest.TestCase):
-    """build.yaml starts on label events, and a label run shares the pull request's concurrency group and cancels
-    nothing, while a push cancels."""
+    """build.yaml starts on label events, and a label run shares the pull request's concurrency group and cancels no
+    running run, while a push, and the removal of parked, cancel."""
 
     @staticmethod
     def group(ctx):
@@ -1956,10 +1960,15 @@ class LabelEvents(unittest.TestCase):
 
     def test_a_label_run_waits_in_the_pull_requests_group_and_a_push_cancels(self):
         pr = {"github.event_name": "pull_request_target", "github.event.pull_request.number": 7}
-        for action in ("labeled", "unlabeled"):
-            with self.subTest(action=action):
-                ctx = dict(pr, **{"github.event.action": action})
+        for action, label in (("labeled", "size-review"), ("labeled", "parked"), ("unlabeled", "size-review")):
+            with self.subTest(action=action, label=label):
+                ctx = dict(pr, **{"github.event.action": action, "github.event.label.name": label})
                 self.assertEqual((self.group(ctx), self.cancels(ctx)), ("build-pull_request_target-7", False))
+        # The removal of parked is a full run, as a push is; GitHub compares the label's name without case.
+        for label in ("parked", "Parked"):
+            with self.subTest(action="unlabeled", label=label):
+                ctx = dict(pr, **{"github.event.action": "unlabeled", "github.event.label.name": label})
+                self.assertEqual((self.group(ctx), self.cancels(ctx)), ("build-pull_request_target-7", True))
         for action in ("opened", "reopened", "synchronize", "ready_for_review"):
             with self.subTest(action=action):
                 ctx = dict(pr, **{"github.event.action": action})
