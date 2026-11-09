@@ -802,10 +802,13 @@ jobs:
     # output `digest`: the screen job and the review job each take the file only by that digest
     # (.github/scripts/take-review-data), so the review reads exactly what the screen passed. One tar file, so that no
     # file name of the pull request can stop the upload. It runs for every review (the review job's condition, in
-    # route's kind), whoever wrote the pull request or the issue, except one that route held at the daily cap.
+    # route's kind), whoever wrote the pull request or the issue, except on a label run, for a pull request that parked
+    # holds, and for one that route held at the daily cap (route gives trust writer or screen to none of them, and
+    # this condition names each).
     needs: [route, project-builds]
     if: >-
       ${{ !cancelled() && (needs.project-builds.outputs.name != '' || needs.route.outputs.kind == 'change' || needs.route.outputs.kind == 'issue')
+      && needs.route.outputs.label_run != 'true' && needs.route.outputs.parked != 'true' && needs.route.outputs.trust != 'cap'
       && (needs.route.outputs.trust == 'writer' || needs.route.outputs.trust == 'screen') }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -836,11 +839,11 @@ jobs:
       # The ids of the comments the step below confirmed are this App's own, by the account type the REST API
       # gives for each: gh names an App without its [bot], and a user can take that name.
       app_comments: ${{ steps.outside.outputs.app_comments }}
-      # The session to resume and the commit it reviewed, from review-gather (empty for a fresh review). None for a
-      # screened item: no screen reads a session, which a review that read unscreened text, such as one started by
-      # hand, may have kept.
-      session: ${{ steps.outside.outputs.screen == 'false' && steps.gather.outputs.session || '' }}
-      last: ${{ steps.outside.outputs.screen == 'false' && steps.gather.outputs.last || '' }}
+      # The session to resume and the commit it reviewed, from review-gather (empty for a fresh review), for every
+      # item, screened or not. Only the review job takes the session from the file this job keeps; the screen job
+      # takes none (.github/scripts/take-review-data), and reads the new text first.
+      session: ${{ steps.gather.outputs.session }}
+      last: ${{ steps.gather.outputs.last }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with: {persist-credentials: false, fetch-depth: 0}
@@ -858,6 +861,10 @@ jobs:
         if: env.KIND == 'change'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
         with: {path: "~/.claude/projects\n~/.claude/ossv-last-review", key: "${{ env.CHANGE_KEY }}${{ github.run_id }}-${{ github.run_attempt }}", restore-keys: "${{ env.CHANGE_KEY }}"}
+      # For an enrollment whose build resolved a commit, review-gather fetches the project's repository at that commit
+      # as data (.review/source/), whoever wrote the pull request, and fails when the fetch fails: then this job fails,
+      # nothing is kept, and a re-run of the failed jobs fetches again. With no built commit there is no source to read,
+      # and .review/source.txt says so.
       - name: Gather what the review reads, and the diff since the last review
         id: gather
         timeout-minutes: 15
@@ -873,7 +880,10 @@ jobs:
           if [ "$KIND" = enrollment ]; then
             dpkg -s python3-yaml unzip > /dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml unzip; }
           fi
-          LAST_REVIEW=~/.claude/ossv-last-review .github/scripts/review-gather .review
+          LAST_REVIEW=~/.claude/ossv-last-review .github/scripts/review-gather .review || {
+            echo "::error::review-gather failed (its log above), so nothing is kept for the screen or the review. A re-run of this run's failed jobs gathers again."
+            exit 1
+          }
       # The files of projects/<name>/ and of head/ are HEAD_SHA's, and pr.json and pr.diff are what GitHub gave when
       # they were read: the head the pull request had then. When the head moved in between, the diff that the screen
       # reads may not hold every line of the files that the review reads. HEAD_SHA must be the head that pr.json names,
@@ -908,12 +918,13 @@ jobs:
       # that holds text of another account is screened for those texts (SCREEN_SCOPE comments). And whatever the
       # trust, the screen reads none of the writers' own text: it is this project's, not the outside text the
       # screen is for (its output writers, and .github/scripts/screen.py). The accounts come from the files the
-      # review reads. A run a person with write access started by hand of a writer's item is that person's request: it
-      # is not screened.
+      # review reads. A run started by hand is screened as an event's run is: route gives it trust writer only when
+      # the item's author and the person who started it both have write access, and then this step still has the
+      # screen read the text of any other account.
       - name: Whether the review reads text of an account without write access
         id: outside
         if: steps.head.outputs.moved != 'true'
-        env: {GH_TOKEN: "${{ github.token }}", REPO: "${{ github.repository }}", EVENT: "${{ github.event_name }}"}
+        env: {GH_TOKEN: "${{ github.token }}", REPO: "${{ github.repository }}"}
         run: |
           set -uo pipefail
           # trusted
@@ -943,62 +954,50 @@ jobs:
           screen=true writers="" app=""
           item=.review/pr.json
           [ -f "$item" ] || item=.review/issue.json
-          if [ "$TRUST" = writer ] && [ "$EVENT" = workflow_dispatch ]; then
-            screen=false
-          else
-            # keep()'s last line is the exit status; an account GitHub no longer names is "-". A read that cannot be
-            # parsed, or a pull request with no list of its review comments' authors, names no writer, and leaves
-            # screen true: then the screen reads every comment, as it did before any of them was told apart.
-            if accounts=$(sed '$d' "$item" | jq -r '((.comments // [])[] | [(.author.login // ""), (.url // "")]),
-                ((.reviews // [])[] | [(.author.login // ""), ""])
-                | (if .[0] == "" then "-" else .[0] end) + "\t" + .[1]' 2> /dev/null) \
-                && { [ "$item" = .review/issue.json ] || [ -f .review/review-comment-authors.txt ]; }; then
-              if [ -f .review/review-comment-authors.txt ]; then
-                accounts+=$'\n'$(sed '$d' .review/review-comment-authors.txt | sed 's/^$/-/')
+          # keep()'s last line is the exit status; an account GitHub no longer names is "-". A read that cannot be
+          # parsed, or a pull request with no list of its review comments' authors, names no writer, and leaves
+          # screen true: then the screen reads every comment, as it did before any of them was told apart.
+          if accounts=$(sed '$d' "$item" | jq -r '((.comments // [])[] | [(.author.login // ""), (.url // "")]),
+              ((.reviews // [])[] | [(.author.login // ""), ""])
+              | (if .[0] == "" then "-" else .[0] end) + "\t" + .[1]' 2> /dev/null) \
+              && { [ "$item" = .review/issue.json ] || [ -f .review/review-comment-authors.txt ]; }; then
+            if [ -f .review/review-comment-authors.txt ]; then
+              accounts+=$'\n'$(sed '$d' .review/review-comment-authors.txt | sed 's/^$/-/')
+            fi
+            outside=0
+            while IFS=$'\t' read -r login url; do
+              [ -n "$login$url" ] || continue
+              rc=0
+              trusted "${login:--}" || rc=$?
+              if (( rc == 0 )); then
+                # A login the collaborator API placed, or an App under the name the REST API gives it, with
+                # its [bot]: no other account can hold that name.
+                [[ ,$writers, == *",$login,"* ]] || writers+=",$login"
+              elif writer "${login:--}" "${url:-}" && [[ $url =~ \#issuecomment-([0-9]+)$ ]]; then
+                # gh names an App without its [bot], and a user can take that name: this comment alone is the
+                # App's, by the account type the REST API gives for it, so the screen is told its id, not a
+                # name.
+                app+=",${BASH_REMATCH[1]}"
+              else
+                outside=1
               fi
-              outside=0
-              while IFS=$'\t' read -r login url; do
-                [ -n "$login$url" ] || continue
-                rc=0
-                trusted "${login:--}" || rc=$?
-                if (( rc == 0 )); then
-                  # A login the collaborator API placed, or an App under the name the REST API gives it, with
-                  # its [bot]: no other account can hold that name.
-                  [[ ,$writers, == *",$login,"* ]] || writers+=",$login"
-                elif writer "${login:--}" "${url:-}" && [[ $url =~ \#issuecomment-([0-9]+)$ ]]; then
-                  # gh names an App without its [bot], and a user can take that name: this comment alone is the
-                  # App's, by the account type the REST API gives for it, so the screen is told its id, not a
-                  # name.
-                  app+=",${BASH_REMATCH[1]}"
-                else
-                  outside=1
-                fi
-              done < <(sort -u <<< "$accounts")
-              if [ "$TRUST" = writer ]; then
-                if (( outside )); then
-                  echo "The review reads text of an account without write access, or one GitHub cannot name: the screen reads it first."
-                else
-                  screen=false
-                fi
+            done < <(sort -u <<< "$accounts")
+            if [ "$TRUST" = writer ]; then
+              if (( outside )); then
+                echo "The review reads text of an account without write access, or one GitHub cannot name: the screen reads it first."
+              else
+                screen=false
               fi
             fi
           fi
           echo "screen=$screen" >> "$GITHUB_OUTPUT"
           echo "writers=${writers#,}" >> "$GITHUB_OUTPUT"
           echo "app_comments=${app#,}" >> "$GITHUB_OUTPUT"
-      # The project's repository at the built commit is far more text than the screen reads, and an enrollment of an
-      # account without write access names it: so that review reads none of it. Its source.txt says so, and the
-      # checks that need it are left to a person; a person with write access starts the full review by hand.
-      - name: A screened enrollment's review reads none of the project's repository
-        if: steps.head.outputs.moved != 'true' && env.KIND == 'enrollment' && env.TRUST == 'screen'
-        run: |
-          set -euo pipefail
-          rm -rf .review/source
-          echo "Not gathered: this pull request comes from an account without write access, and no screen reads the project's repository. A person with write access starts the review that reads it: gh workflow run build.yaml -f pr=$PR" > .review/source.txt
+      # The session goes with every item, screened or not: the review job takes it, and the screen job does not
+      # (.github/scripts/take-review-data).
       - name: Keep it for the screen and the review
         id: keep
         if: steps.head.outputs.moved != 'true'
-        env: {SCREEN: "${{ steps.outside.outputs.screen }}"}
         run: |
           set -euo pipefail
           mkdir "$RUNNER_TEMP/review-data"
@@ -1007,9 +1006,8 @@ jobs:
           if [ -n "$NAME" ] && [ -d "projects/$NAME" ]; then members+=("projects/$NAME"); fi
           tar -cf "$tar" "${members[@]}"
           session=()
-          # No session for a screened item (its output above).
           for path in .claude/projects .claude/ossv-last-review; do
-            if [ "$SCREEN" = false ] && [ -e "$HOME/$path" ]; then session+=("$path"); fi
+            if [ -e "$HOME/$path" ]; then session+=("$path"); fi
           done
           if (( ${#session[@]} )); then tar -rf "$tar" -C "$HOME" "${session[@]}"; fi
           digest=$(sha256sum "$tar" | cut -d' ' -f1)
@@ -1032,9 +1030,11 @@ jobs:
     # verdict, clean or held, and the names of the checks that ran; why goes to the private bucket REASON_BUCKET,
     # never to this public log or an output.
     needs: [route, project-builds, gather]
-    # A screen of what the gather job kept, or a measurement, which needs no gather job.
+    # A screen of what the gather job kept, or a measurement, which needs no gather job. Never on a label run, for a
+    # pull request that parked holds, or for one that route held at the daily cap.
     if: >-
-      ${{ !cancelled() && ((needs.gather.result == 'success' && needs.gather.outputs.digest != ''
+      ${{ !cancelled() && needs.route.outputs.label_run != 'true' && needs.route.outputs.parked != 'true' && needs.route.outputs.trust != 'cap'
+      && ((needs.gather.result == 'success' && needs.gather.outputs.digest != ''
           && needs.gather.outputs.screen != 'false') || needs.route.outputs.trust == 'measure') }}
     environment: {name: review-screen, deployment: false}
     runs-on: ubuntu-24.04
@@ -1143,7 +1143,7 @@ jobs:
     # Claude Code, through anthropics/claude-code-action, checks the enrollment against review.md, or a change against
     # review-change.md, or drafts the reply to an issue as review-issue.md says (the top of this file): route's kind.
     # It reads what the gather job kept. An item that the gather job's output screen says is not screened (a writer's
-    # with no text of others, or a run started by hand) is reviewed as it comes; another only when the screen's
+    # with no text of others) is reviewed as it comes; another only when the screen's
     # verdict is clean. A run whose gather job failed or kept nothing, or whose screen held it, failed or was
     # cancelled, has no review.
     needs: [route, project-builds, gather, screen]
@@ -1942,10 +1942,10 @@ jobs:
           BUILD: ${{ needs.project-builds.result }}
           ASKED_BUILD: ${{ needs.route.outputs.kind == 'enrollment' && needs.route.outputs.label_run != 'true' }}
           # Each of the others is asked for on its own job's condition: the record when the build passed and took a
-          # project; gather when the build took a project or the kind is change or issue (the item is reviewable), and
-          # route did not hold it at the daily cap; the screen when gather kept the item (its output digest)
-          # and its output screen is not false; the review when gather kept it and its output screen is false, or the
-          # screen's verdict is clean; the session when the
+          # project; gather when the build took a project or the kind is change or issue (the item is reviewable), it
+          # is no label run, parked does not hold it, and route did not hold it at the daily cap; the screen on those
+          # three too, when gather kept the item (its output digest) and its output screen is not false; the review
+          # when gather kept it and its output screen is false, or the screen's verdict is clean; the session when the
           # review kept one; hold when an enrollment's review ran; comment when the review wrote a comment (and, if it
           # held a finding back, the hold job sent it) for a pull request, when the review of an issue made its draft
           # (the comment job takes a hold off it), when a label run adds parked to an enrollment, or when a reviewable
@@ -1959,12 +1959,14 @@ jobs:
           GATHER: ${{ needs.gather.result }}
           ASKED_GATHER: >-
             ${{ (needs.project-builds.outputs.name != '' || needs.route.outputs.kind == 'change' || needs.route.outputs.kind == 'issue')
+            && needs.route.outputs.label_run != 'true' && needs.route.outputs.parked != 'true' && needs.route.outputs.trust != 'cap'
             && (needs.route.outputs.trust == 'writer' || needs.route.outputs.trust == 'screen') }}
           SCREEN: ${{ needs.screen.result }}
           # A measurement asks for the screen job alone (route's trust measure), and for no other job.
           ASKED_SCREEN: >-
-            ${{ (needs.gather.result == 'success' && needs.gather.outputs.digest != '' && needs.gather.outputs.screen != 'false')
-            || needs.route.outputs.trust == 'measure' }}
+            ${{ needs.route.outputs.label_run != 'true' && needs.route.outputs.parked != 'true' && needs.route.outputs.trust != 'cap'
+            && ((needs.gather.result == 'success' && needs.gather.outputs.digest != '' && needs.gather.outputs.screen != 'false')
+                || needs.route.outputs.trust == 'measure') }}
           REVIEW: ${{ needs.review.result }}
           ASKED_REVIEW: >-
             ${{ needs.gather.result == 'success' && needs.gather.outputs.digest != ''

@@ -7,17 +7,20 @@ route's trust step (who is screened, and the daily cap of .github/scripts/screen
 route and each answer of the screen (the jobs' conditions, evaluated as GitHub does), what the required check reports,
 a label run's copy of the head's standing project-builds, the run's concurrency, what each job holds, how the screen
 and the review take the gathered data (.github/scripts/take-review-data), the gather job's check that the head did not
-move, the comment job's hold, and the review comment's line on the checks that ran. .github/scripts/screen.py itself
-is tested in test_screen.py."""
+move, the gather job run step by step for an outside account's enrollment (the project's source, the failed fetch, and
+the session the review resumes), the comment job's hold, and the review comment's line on the checks that ran.
+.github/scripts/screen.py itself is tested in test_screen.py."""
 import datetime
 import hashlib
 import io
+import itertools
 import json
 import os
 import pathlib
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -656,6 +659,33 @@ class Routes(unittest.TestCase):
         _, ctx = self.ran(dict(self.ENROLLMENT, parked="true"), results={"project-builds": "failure"})
         self.assertEqual(required(ctx)[0], 1)
 
+    def test_a_label_run_a_parked_pull_request_and_the_cap_gather_and_screen_nothing(self):
+        """gather and screen each name the label run, parked and the daily cap themselves, whatever trust route
+        gave, and the job required asks for each on its own job's condition."""
+        collect = step("required", self.COLLECT)["env"]
+        reviewable = {"needs.project-builds.outputs.name": "libx", "needs.route.outputs.kind": "enrollment",
+                      "needs.gather.result": "success", "needs.gather.outputs.digest": "d" * 64,
+                      "needs.gather.outputs.screen": "true"}
+        for held in ({"needs.route.outputs.label_run": "true", "needs.route.outputs.trust": "screen"},
+                     {"needs.route.outputs.parked": "true", "needs.route.outputs.trust": "screen"},
+                     {"needs.route.outputs.trust": "cap"}):
+            with self.subTest(held=held):
+                ctx = dict(reviewable, **held)
+                for job, asked in (("gather", "ASKED_GATHER"), ("screen", "ASKED_SCREEN")):
+                    self.assertFalse(evaluate(JOBS[job]["if"], ctx), job)
+                    self.assertFalse(evaluate(collect[asked], ctx), asked)
+        # The same condition in each pair, over every route and gather the jobs can see.
+        for label_run, parked, trust, name, gathered, screen in itertools.product(
+                ("", "true"), ("", "true"), ("", "writer", "screen", "cap", "measure"), ("libx", ""),
+                ("success", "failure", "skipped"), ("true", "false")):
+            ctx = {"needs.route.outputs.label_run": label_run, "needs.route.outputs.parked": parked,
+                   "needs.route.outputs.trust": trust, "needs.route.outputs.kind": "enrollment",
+                   "needs.project-builds.outputs.name": name, "needs.gather.result": gathered,
+                   "needs.gather.outputs.digest": "d" * 64 if gathered == "success" else "",
+                   "needs.gather.outputs.screen": screen}
+            for job, asked in (("gather", "ASKED_GATHER"), ("screen", "ASKED_SCREEN")):
+                self.assertEqual(bool(evaluate(JOBS[job]["if"], ctx)), bool(evaluate(collect[asked], ctx)), (job, ctx))
+
     def test_a_measurement_runs_the_screen_job_alone(self):
         """The screen job measures, and the required check asks for it and nothing else."""
         jobs, ctx = self.ran({"kind": "", "trust": "measure"}, outputs={"gather": {}})
@@ -919,7 +949,8 @@ class TakeReviewData(Runner):
         self.assertNotEqual(rc, 0, out)
 
     def test_what_the_gather_jobs_keep_step_makes_is_taken(self):
-        """The gather job's own step, with GNU tar, and take-review-data on its file by the digest it gave."""
+        """The gather job's own step, with GNU tar, and take-review-data on its file by the digest it gave. A screened
+        item keeps its session as a writer's does: the review takes it, and the screen, given no home, does not."""
         gather = self.dir / "gather"
         (gather / ".review").mkdir(parents=True)
         (gather / ".review" / "pr.json").write_text("{}\n")
@@ -928,23 +959,33 @@ class TakeReviewData(Runner):
         home = self.dir / "gather-home"
         (home / ".claude" / "projects").mkdir(parents=True)
         (home / ".claude" / "ossv-last-review").write_text("session=x head=y\n")
-        rc, out, got = self.run_script(step("gather", "Keep it for the screen and the review")["run"], cwd=gather,
-                                       NAME="libx", HOME=str(home), SCREEN="false")
-        self.assertEqual(rc, 0, out)
-        rc, out, _ = self.take(self.temp / "review-data" / "review.tar", got["digest"], "libx", home=True)
-        self.assertEqual(rc, 0, out)
-        self.assertTrue((self.work / "projects" / "libx" / "build.sh").is_file())
-        self.assertTrue((self.dir / "home" / ".claude" / "ossv-last-review").is_file())
-        # A screened item: no session in the file.
-        shutil.rmtree(self.temp / "review-data")
-        rc, out, got = self.run_script(step("gather", "Keep it for the screen and the review")["run"], cwd=gather,
-                                       NAME="libx", HOME=str(home), SCREEN="true")
-        self.assertEqual(rc, 0, out)
-        with tarfile.open(self.temp / "review-data" / "review.tar") as t:
-            self.assertFalse([n for n in t.getnames() if n.startswith(".claude")])
-        for output in ("session", "last"):
-            self.assertEqual(JOBS["gather"]["outputs"][output],
-                             f"${{{{ steps.outside.outputs.screen == 'false' && steps.gather.outputs.{output} || '' }}}}")
+        for screened in ("true", "false"):
+            with self.subTest(screened=screened):
+                shutil.rmtree(self.temp / "review-data", ignore_errors=True)
+                shutil.rmtree(self.work / ".review", ignore_errors=True)
+                shutil.rmtree(self.dir / "home", ignore_errors=True)
+                rc, out, got = self.run_script(step("gather", "Keep it for the screen and the review")["run"],
+                                               cwd=gather, NAME="libx", HOME=str(home), SCREEN=screened)
+                self.assertEqual(rc, 0, out)
+                with tarfile.open(self.temp / "review-data" / "review.tar") as t:
+                    self.assertIn(".claude/ossv-last-review", t.getnames())
+                # The review's take: the session goes into its home.
+                rc, out, _ = self.take(self.temp / "review-data" / "review.tar", got["digest"], "libx", home=True)
+                self.assertEqual(rc, 0, out)
+                self.assertTrue((self.work / "projects" / "libx" / "build.sh").is_file())
+                self.assertEqual((self.dir / "home" / ".claude" / "ossv-last-review").read_text(), "session=x head=y\n")
+                # The screen's take, with no home: no session anywhere it reads.
+                shutil.rmtree(self.work / ".review")
+                shutil.rmtree(self.dir / "home")
+                rc, out, _ = self.take(self.temp / "review-data" / "review.tar", got["digest"], "libx")
+                self.assertEqual(rc, 0, out)
+                self.assertFalse((self.dir / "home" / ".claude").exists())
+                self.assertFalse((self.work / ".claude").exists())
+                # The job's outputs session and last are review-gather's, whatever the outside step said.
+                ctx = {"steps.outside.outputs.screen": screened, "steps.gather.outputs.session": "x",
+                       "steps.gather.outputs.last": "y"}
+                self.assertEqual({k: evaluate(JOBS["gather"]["outputs"][k], ctx) for k in ("session", "last")},
+                                 {"session": "x", "last": "y"})
 
     def test_it_takes_the_review_the_project_and_for_the_review_the_session(self):
         (self.work / "projects" / "libx").mkdir(parents=True)
@@ -1300,9 +1341,18 @@ class OutsideText(Runner):
                 self.assertEqual(lines[:-1], want)
                 self.assertRegex(lines[-1], r"^\(exit status \d+\)$")
 
-    def test_a_run_started_by_hand_is_not_screened(self):
-        self.assertEqual(self.screen(comments=[{"login": "mallory"}], event="workflow_dispatch"), "false")
+    def test_a_run_started_by_hand_is_screened_as_an_events_run(self):
+        """c1 (e3): a run started by hand (workflow_dispatch) is screened as an event's run is. An outside account's
+        item (route's trust screen, Trust.test_a_run_by_hand_of_an_outsiders_item_is_screened) is screened whole;
+        a writer's item is screened for the text of any other account it holds, and only for that (SCREEN_SCOPE
+        comments), and one that holds only writers' text is not screened."""
         self.assertEqual(self.screen(trust="screen", event="workflow_dispatch"), "true")
+        self.assertEqual(self.screen(comments=[{"login": "mallory"}], event="workflow_dispatch"), "true")
+        self.assertEqual(self.screen(comments=[{"login": "alice"}], review_authors=["root"], event="workflow_dispatch"),
+                         "false")
+        scope = step("screen", "Screen")["env"]["SCREEN_SCOPE"]
+        self.assertEqual([evaluate(scope, {"needs.route.outputs.trust": t}) for t in ("screen", "writer")],
+                         ["all", "comments"])
 
     def test_an_outsiders_item_is_screened_whatever_it_holds(self):
         self.assertEqual(self.screen(trust="screen"), "true")
@@ -1340,23 +1390,308 @@ class OutsideText(Runner):
         self.assertEqual(trusted(step("route", Trust.STEP)["run"]), trusted(step("gather", self.STEP)["run"]))
 
 
-class OutsidersEnrollment(Runner):
-    """An enrollment of an account without write access: its review gets none of the project's repository, which no
-    screen reads."""
+# git for the gather job's run: `fetch` takes the commit from the local repository $UPSTREAM in place of the project's
+# https URL, or fails as a fetch that cannot reach it does when $FETCH_FAILS is set; `ls-remote` answers nothing; every
+# other command is git's own ($REAL_GIT).
+FAKE_GIT = r"""#!/usr/bin/env bash
+args=("$@")
+for ((i = 0; i < $#; i++)); do
+  case ${args[i]} in
+    -C|-c) i=$((i + 1)) ;;
+    fetch)
+      [ -z "${FETCH_FAILS:-}" ] || { echo "fatal: unable to access the project's repository" >&2; exit 128; }
+      exec "$REAL_GIT" -C "$2" fetch -q "$UPSTREAM" "${args[$# - 1]}" ;;
+    ls-remote) exit 0 ;;
+    *) break ;;
+  esac
+done
+exec "$REAL_GIT" "$@"
+"""
 
-    STEP = "A screened enrollment's review reads none of the project's repository"
+# gh for the gather job's run: the pull request (gh pr view, gh pr diff) and the compare of this repository (its
+# status, and the diff) from files under $FAKE_GH; every other `gh api` from the stand-in FAKE_GH, here gh-api.
+GATHER_GH = r"""#!/usr/bin/env bash
+case "$1 $2" in
+  "pr view") case "$*" in *statusCheckRollup*) echo '{"statusCheckRollup": []}' ;; *) cat "$FAKE_GH/pr-view.json" ;; esac ;;
+  "pr diff") cat "$FAKE_GH/pr.diff" ;;
+  "pr list") exit 1 ;;
+  *) case "$*" in
+       *"/oss-verify/compare/"*"--jq .status"*) cat "$FAKE_GH/compare-status" ;;
+       *"/oss-verify/compare/"*) cat "$FAKE_GH/compare.diff" ;;
+       *) exec "$(dirname "$0")/gh-api" "$@" ;;
+     esac ;;
+esac
+"""
 
-    def test_the_source_goes_and_source_txt_says_why(self):
-        s = step("gather", self.STEP)
-        self.assertEqual(s["if"], "steps.head.outputs.moved != 'true' && env.KIND == 'enrollment' && env.TRUST == 'screen'")
-        (self.work / ".review" / "source").mkdir(parents=True)
-        (self.work / ".review" / "source" / "README").write_text("upstream\n")
-        rc, out, _ = self.run_script(s["run"], PR="7")
+
+class GatherJob(Runner):
+    """The gather job of an enrollment of mallory, an account without write access, run step by step from its step
+    "Gather what the review reads, and the diff since the last review", in a checkout of main with the real
+    review-gather and take-review-data, against a project repository that is a local git repository (FAKE_GIT); then
+    what the review job and the screen job each take of what it kept, and what the screen reads of it."""
+
+    GATHER = "Gather what the review reads, and the diff since the last review"
+    SESSION = "09227178-7bbf-4e5f-86db-8736e530ef01"
+    HEAD = "c" * 40
+    REVIEWED = "b" * 40
+
+    def setUp(self):
+        super().setUp()
+        git = shutil.which("git")
+        if not git:
+            self.skipTest("needs git")
+        bin_dir = self.dir / "bin"
+        (bin_dir / "gh-api").write_text(FAKE_GH)
+        for name, text in (("gh", GATHER_GH), ("git", FAKE_GIT), ("dpkg", "#!/bin/sh\nexit 0\n")):
+            (bin_dir / name).write_text(text)
+        for path in bin_dir.iterdir():
+            path.chmod(0o755)
+        # The project's repository, at the commit the build resolved: a fuzz target, files Claude Code would read as
+        # instructions, and a symbolic link out of it.
+        upstream = self.dir / "upstream"
+        (upstream / "lib").mkdir(parents=True)
+        (upstream / "fuzz.c").write_text("int LLVMFuzzerTestOneInput() { return 0; } /* UPSTREAM-SOURCE */\n")
+        (upstream / "CLAUDE.md").write_text("UPSTREAM-INSTRUCTIONS\n")
+        (upstream / "lib" / "AGENTS.md").write_text("UPSTREAM-INSTRUCTIONS\n")
+        (upstream / "link").symlink_to("/etc/passwd")
+        quiet = {"capture_output": True, "check": True, "cwd": upstream,
+                 "env": dict(os.environ, GIT_AUTHOR_NAME="u", GIT_AUTHOR_EMAIL="u@example.com",
+                             GIT_COMMITTER_NAME="u", GIT_COMMITTER_EMAIL="u@example.com")}
+        subprocess.run([git, "init", "-q"], **quiet)
+        subprocess.run([git, "add", "-A"], **quiet)
+        subprocess.run([git, "-c", "commit.gpgsign=false", "commit", "-qm", "x"], **quiet)
+        self.commit = subprocess.run([git, "rev-parse", "HEAD"], text=True, **quiet).stdout.strip()
+        # The checkout of main: review-gather and take-review-data are this repository's own, triage.py a stand-in
+        # (it reads GitHub), and projects/libx/ the pull request's, as take-project leaves it.
+        self.checkout = self.dir / "checkout"
+        scripts = self.checkout / ".github" / "scripts"
+        scripts.mkdir(parents=True)
+        for name in ("review-gather", "take-review-data"):
+            (scripts / name).symlink_to(SCRIPTS / name)
+        (scripts / "triage.py").write_text('print("| OK | triage |")\n')
+        (self.checkout / ".github" / "PULL_REQUEST_TEMPLATE.md").symlink_to(ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md")
+        (self.checkout / "tools").symlink_to(ROOT / "tools")
+        (self.checkout / "projects" / "libx").mkdir(parents=True)
+        (self.checkout / "projects" / "libx" / "project.yaml").write_text("repo: https://github.com/mallory/libx#v1\n")
+        self.home = self.dir / "gather-home"
+        self.home.mkdir()
+        (self.api / "pr-view.json").write_text(json.dumps({
+            "number": 7, "title": "Add libx", "author": {"login": "mallory"}, "isDraft": False,
+            "createdAt": "2026-11-01T00:00:00Z", "body": "MALLORY-BODY", "headRefOid": self.HEAD,
+            "files": [{"path": "projects/libx/project.yaml"}], "comments": [], "reviews": [],
+            "commits": [{"messageHeadline": "MALLORY-COMMIT", "messageBody": ""}]}) + "\n")
+        (self.api / "pr.diff").write_text("diff --git a/projects/libx/project.yaml b/projects/libx/project.yaml\n"
+                                          "+repo: https://github.com/mallory/libx#v1\n")
+        self.serve(f"repos/{REPO}/pulls/7/comments", [])
+        self.serve(f"repos/{REPO}/pulls/7", {"head": {"sha": self.HEAD}})
+        self.permissions(alice="write")
+        self.env.update(REAL_GIT=git, UPSTREAM=str(upstream), KIND="enrollment", PR="7", ISSUE="", NAME="libx",
+                        HEAD_SHA=self.HEAD, RUN_ID="900", BUILD="The Build check success: passed.", BINARIES="",
+                        CHECKS="", HOME=str(self.home))
+
+    def keep_session(self, last):
+        """What the gather job's step "Restore the last review's session and the head it reviewed" restores."""
+        (self.home / ".claude" / "projects" / "p").mkdir(parents=True)
+        (self.home / ".claude" / "projects" / "p" / f"{self.SESSION}.jsonl").write_text("{}\n")
+        (self.home / ".claude" / "ossv-last-review").write_text(last)
+
+    def gather_job(self, trust="screen", commit=None, fetch_fails=False, compare_status=None, compare_diff=""):
+        """The gather job's steps from GATHER on, each whose if holds, in a checkout with nothing gathered yet: (the
+        first failing step's exit status or 0, the log, the job's outputs)."""
+        shutil.rmtree(self.checkout / ".review", ignore_errors=True)
+        shutil.rmtree(self.temp / "review-data", ignore_errors=True)
+        (self.api / "compare-status").write_text(f"{compare_status}\n" if compare_status else "")
+        (self.api / "compare.diff").write_text(compare_diff)
+        env = {"TRUST": trust, "COMMIT": self.commit if commit is None else commit,
+               "FETCH_FAILS": "1" if fetch_fails else ""}
+        ctx = {"env.KIND": "enrollment", "env.TRUST": trust}
+        steps = JOBS["gather"]["steps"]
+        start = [s.get("name") for s in steps].index(self.GATHER)
+        log = ""
+        for s in steps[start:]:
+            if "run" not in s or ("if" in s and not evaluate(s["if"], ctx)):
+                continue
+            rc, out, got = self.run_script(s["run"], cwd=self.checkout, **env)
+            log += out
+            if rc:
+                return rc, log, {}
+            ctx.update({f"steps.{s['id']}.outputs.{k}": v for k, v in got.items()})
+        return 0, log, {k: as_text(evaluate(v, ctx)) for k, v in JOBS["gather"]["outputs"].items()}
+
+    def take(self, job, digest):
+        """take-review-data in a fresh checkout for `job`: the review job gives its home, the screen job none.
+        Return the checkout and the home."""
+        where, home = self.dir / f"{job}-checkout", self.dir / f"{job}-home"
+        for path in (where, home):
+            shutil.rmtree(path, ignore_errors=True)
+            path.mkdir()
+        args = f' "{home}"' if job == "review" else ""
+        rc, out, _ = self.run_script(f'{SCRIPTS / "take-review-data"} "{self.temp / "review-data" / "review.tar"}"{args}',
+                                     cwd=where, DIGEST=digest)
         self.assertEqual(rc, 0, out)
-        self.assertFalse((self.work / ".review" / "source").exists())
-        self.assertIn("gh workflow run build.yaml -f pr=7", (self.work / ".review" / "source.txt").read_text())
-        names = [x.get("name") for x in JOBS["gather"]["steps"]]
-        self.assertLess(names.index(self.STEP), names.index("Keep it for the screen and the review"))
+        return where, home
+
+    def screen_reads(self, where):
+        """What .github/scripts/screen.py sends to its checks of the screen job's checkout, as its Screen step runs it
+        for an outside account's item (SCREEN_SCOPE all): {source: text}, and what it cannot screen."""
+        code = ("import json, sys; sys.path.insert(0, sys.argv[1]); import screen; "
+                "found, unscreenable = screen.parts(sys.argv[2], sys.argv[3]); "
+                "print(json.dumps({'found': found, 'unscreenable': unscreenable}))")
+        run = subprocess.run([sys.executable, "-c", code, str(SCRIPTS), str(where / ".review"),
+                              str(where / "projects" / "libx")], capture_output=True, text=True,
+                             env=dict(os.environ, SCREEN_SCOPE="all", SCREEN_WRITERS="", SCREEN_APP_COMMENTS=""))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        got = json.loads(run.stdout)
+        return dict(got["found"]), got["unscreenable"]
+
+
+class OutsidersEnrollment(GatherJob):
+    """c1 (e), (e2): the project's source at the built commit for every enrollment, an outside account's included,
+    which the review reads once the screen passes and the screen does not read."""
+
+    def test_e_the_review_gets_the_source_and_the_screen_reads_only_the_pull_requests_text(self):
+        for trust in ("screen", "writer"):
+            with self.subTest(trust=trust):
+                rc, log, outputs = self.gather_job(trust=trust)
+                self.assertEqual(rc, 0, log)
+                self.assertEqual(outputs["screen"], "true" if trust == "screen" else "false")
+                self.assertRegex(outputs["digest"], r"^[0-9a-f]{64}$")
+                # The review's input: the repository at the built commit, as data: no CLAUDE.md, AGENTS.md or
+                # symbolic link, no .git, and no source.txt in its place.
+                review, _ = self.take("review", outputs["digest"])
+                source = review / ".review" / "source"
+                self.assertIn("UPSTREAM-SOURCE", (source / "fuzz.c").read_text())
+                self.assertEqual(sorted(str(p.relative_to(source)) for p in source.rglob("*")), ["fuzz.c", "lib"])
+                self.assertFalse((review / ".review" / "source.txt").exists())
+        # The outside account's item: the screen job's checkout holds the same file, and screen.py sends none of
+        # source/ to its checks, and the pull request's own text.
+        rc, log, outputs = self.gather_job(trust="screen")
+        self.assertEqual(rc, 0, log)
+        screen, _ = self.take("screen", outputs["digest"])
+        self.assertTrue((screen / ".review" / "source" / "fuzz.c").is_file())
+        sent, unscreenable = self.screen_reads(screen)
+        self.assertEqual(unscreenable, [])
+        self.assertFalse([s for s in sent if s.startswith("source")], sorted(sent))
+        text = "\n".join(sent.values())
+        self.assertNotIn("UPSTREAM-SOURCE", text)
+        for word in ("MALLORY-BODY", "MALLORY-COMMIT", "Add libx", "https://github.com/mallory/libx#v1"):
+            self.assertIn(word, text)
+        # The screen job runs before the review, which runs only on its clean verdict.
+        route = {"kind": "enrollment", "sha": "a" * 40, "trust": "screen"}
+        for verdict, reviewed in (("clean", "success"), ("held", "skipped")):
+            got, _ = run_graph(route, outputs={"gather": outputs, "screen": {"verdict": verdict, "checks": "claude"}})
+            self.assertEqual((got["screen"], got["review"]), ("success", reviewed))
+
+    def test_e2_a_failed_fetch_of_the_built_commit_fails_the_gather_job(self):
+        """Departure 2: the gather job fails, so a re-run of the failed jobs fetches again; nothing is kept, no screen
+        or review runs, and the required check fails, for any trust."""
+        rc, log, outputs = self.gather_job(trust="screen", fetch_fails=True)
+        self.assertNotEqual(rc, 0, log)
+        self.assertIn(f"review-gather: could not fetch {self.commit} from https://github.com/mallory/libx", log)
+        self.assertIn("::error::review-gather failed (its log above)", log)
+        self.assertFalse((self.temp / "review-data").exists())
+        for trust in ("screen", "writer"):
+            with self.subTest(trust=trust):
+                got, ctx = run_graph({"kind": "enrollment", "sha": "a" * 40, "trust": trust},
+                                     results={"gather": "failure"})
+                self.assertEqual((got["gather"], got["screen"], got["review"]), ("failure", "skipped", "skipped"))
+                self.assertEqual(required(ctx)[0], 1, required(ctx)[1])
+
+    def test_with_no_built_commit_the_review_runs_without_source(self):
+        """Decision 10: a build that failed before it resolved a commit leaves nothing to fetch; the job passes, and
+        source.txt says why the review has no source."""
+        rc, log, outputs = self.gather_job(trust="screen", commit="")
+        self.assertEqual(rc, 0, log)
+        review, _ = self.take("review", outputs["digest"])
+        self.assertFalse((review / ".review" / "source").exists())
+        self.assertEqual((review / ".review" / "source.txt").read_text(),
+                         "Not gathered: the build did not resolve a commit of the project's repository, so there is"
+                         " no source to read.\n")
+
+
+class OutsidersResume(GatherJob):
+    """c6: on a later push the review of an outside account's enrollment resumes the session of its last review, for
+    the diff since the commit that review reviewed; the screen still reads the new text first and never the session.
+    The gather job only restores the session (cache-mode read), and the session job alone saves it (cache-mode
+    write)."""
+
+    DIFF = ("diff --git a/projects/libx/build.sh b/projects/libx/build.sh\n+SINCE-DIFF-MARK\n"
+            "diff --git a/README.md b/README.md\n+OTHER-FILE\n")
+
+    def prompt(self, outputs):
+        """review-prompt as the review job runs it, after a clean screen, with the session the gather job gave."""
+        got, ctx = run_graph({"kind": "enrollment", "sha": self.HEAD, "trust": "screen"},
+                             outputs={"gather": outputs, "screen": {"verdict": "clean", "checks": "claude"},
+                                      "project-builds": {"name": "libx", "sha": self.HEAD}})
+        self.assertEqual((got["screen"], got["review"]), ("success", "success"))
+        env = {k: as_text(evaluate(v, ctx)) for k, v in step("review", "What the review reads and gives")["env"].items()}
+        rc, out, got = self.run_script(f"{SCRIPTS / 'review-prompt'}", cwd=ROOT, **env)
+        self.assertEqual(rc, 0, out)
+        return got
+
+    def test_a_a_push_that_descends_from_the_reviewed_commit_resumes_the_session_for_the_diff_since(self):
+        self.keep_session(f"session={self.SESSION} head={self.REVIEWED}\n")
+        rc, log, outputs = self.gather_job(compare_status="ahead", compare_diff=self.DIFF)
+        self.assertEqual(rc, 0, log)
+        self.assertIn(f"the review resumes the session {self.SESSION}, for the diff from {self.REVIEWED}", log)
+        self.assertEqual((outputs["screen"], outputs["session"], outputs["last"]), ("true", self.SESSION, self.REVIEWED))
+        review, home = self.take("review", outputs["digest"])
+        self.assertEqual((review / ".review" / "since-last-review.diff").read_text(),
+                         "diff --git a/projects/libx/build.sh b/projects/libx/build.sh\n+SINCE-DIFF-MARK\n"
+                         "(exit status 0)\n")
+        self.assertTrue((home / ".claude" / "projects" / "p" / f"{self.SESSION}.jsonl").is_file())
+        self.assertEqual((home / ".claude" / "ossv-last-review").read_text(),
+                         f"session={self.SESSION} head={self.REVIEWED}\n")
+        got = self.prompt(outputs)
+        self.assertTrue(got["arguments"].endswith(f" --resume {self.SESSION}"), got["arguments"])
+        # The screen reads the new diff, and no session reaches it.
+        screen, screen_home = self.take("screen", outputs["digest"])
+        self.assertEqual(list(screen_home.iterdir()), [])
+        self.assertFalse((screen / ".claude").exists())
+        sent, _ = self.screen_reads(screen)
+        self.assertIn("SINCE-DIFF-MARK", sent["since-last-review.diff"])
+
+    def test_b_a_force_push_gets_a_fresh_review(self):
+        self.keep_session(f"session={self.SESSION} head={self.REVIEWED}\n")
+        rc, log, outputs = self.gather_job(compare_status="diverged", compare_diff=self.DIFF)
+        self.assertEqual(rc, 0, log)
+        self.assertIn(f"no diff from {self.REVIEWED}", log)
+        self.assertIn("the review is fresh", log)
+        self.assertEqual((outputs["session"], outputs["last"]), ("", ""))
+        review, _ = self.take("review", outputs["digest"])
+        self.assertFalse((review / ".review" / "since-last-review.diff").exists())
+        self.assertNotIn("--resume", self.prompt(outputs)["arguments"])
+
+    def test_c_a_first_review_is_fresh(self):
+        rc, log, outputs = self.gather_job(compare_status="ahead", compare_diff=self.DIFF)
+        self.assertEqual(rc, 0, log)
+        self.assertNotIn("resumes the session", log)
+        self.assertEqual((outputs["session"], outputs["last"]), ("", ""))
+        review, home = self.take("review", outputs["digest"])
+        self.assertFalse((review / ".review" / "since-last-review.diff").exists())
+        self.assertEqual(list(home.iterdir()), [])
+        self.assertNotIn("--resume", self.prompt(outputs)["arguments"])
+
+    def test_the_gather_job_only_restores_and_the_session_job_alone_saves(self):
+        """What the tests above put in the gather job's home is what its restore step gives an enrollment, whatever
+        the trust; no job but the session job writes the cache, and it saves what a screened review kept
+        (SessionCache in test_check_checks.py checks its key against the restore's)."""
+        modes = {n: j.get("cache-mode", WF["cache-mode"]) for n, j in JOBS.items()}
+        self.assertEqual((WF["cache-mode"], modes["gather"], modes["session"]), ("none", "read", "write"))
+        self.assertEqual(sorted(n for n, m in modes.items() if m not in ("none", "read")), ["session"])
+        restore = step("gather", "Restore the last review's session and the head it reviewed")
+        self.assertEqual(restore["uses"].split("@")[0], "actions/cache/restore")
+        for trust in ("screen", "writer"):
+            self.assertTrue(evaluate(restore["if"], {"env.KIND": "enrollment", "env.TRUST": trust}))
+        self.assertEqual(restore["with"]["path"], "~/.claude/projects\n~/.claude/ossv-last-review")
+        self.assertEqual(restore["with"]["restore-keys"], "${{ env.SESSION_KEY }}")
+        saves = [(n, s) for n, j in JOBS.items() for s in j["steps"] if "actions/cache/save" in s.get("uses", "")]
+        self.assertEqual([n for n, _ in saves], ["session"])
+        self.assertEqual(saves[0][1]["with"]["path"], restore["with"]["path"])
+        got, _ = run_graph({"kind": "enrollment", "sha": self.HEAD, "trust": "screen"},
+                           outputs={"screen": {"verdict": "clean", "checks": "claude"},
+                                    "review": {"comment": "x", "held_object": "", "session": "41", "kind": "enrollment"}})
+        self.assertEqual((got["screen"], got["review"], got["session"]), ("success", "success", "success"))
 
 
 class TrustWiring(unittest.TestCase):
