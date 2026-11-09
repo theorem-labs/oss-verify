@@ -26,39 +26,31 @@ name: "Build"
 #            Its trust step then decides who goes first, its output `trust`. Write access is what GitHub's
 #            collaborator permission API answers, admin or write; membership of the organisation alone is not, and the
 #            Apps in ALLOWED_BOTS count as having it. `writer` when the author of the pull request or issue and the
-#            account that started the run (the one that pushed, opened, edited or reopened) both have write access, or
-#            the run was started by hand: the review runs as it comes, unless the gather job finds comments of others
-#            in it (below). `screen` otherwise: the screen job reads the pull request or issue first, and only a clean
-#            verdict lets the review run, with no person. `limit` when
-#            the account that started the run has no write access and its events started OUTSIDE_HOURLY_LIMIT runs of
-#            this file in the last hour: it is held without a screen, and screened again later with no person (the
-#            rescreen, below). `measure` for a run started by hand with -f measure=true and no pr or issue: the
-#            screen job alone runs, and measures its rules (below).
-#            A rescreen is a run that review-rescreen.yml starts, every 15 minutes, for each open pull request or issue
-#            whose newest hold is one that is tried again, over an hour old (.github/scripts/review-rescreen): at that
-#            limit; an outsider's screened review stopped at SCREENED_HOURLY_CAP; or one that failed or ran out of
-#            time, until it has failed REVIEW_TRIES times (the comment job's hold, below). It runs with
-#            -f rescreen=true and -f account=<the account the hold names>; a person with write access can start one
-#            too. The trust step accepts it only from github-actions[bot] (that workflow's dispatch) or a person
-#            with write access or an App of ALLOWED_BOTS, and never as a run by hand: it reads the item, its hold,
-#            the run the hold names and that run's account again from the API (.github/scripts/limit-hold), and the
-#            trust is `screen` unless the author and that account both have write access (`writer`, and the gather
-#            job still screens the text of others). The account's rescreens count toward OUTSIDE_HOURLY_LIMIT with
-#            its own events, so at the limit it is `limit` again, and the hold comment says from when it is tried
-#            next. A hold of the screen is never screened again this way: a person decides. A rescreen that settles
-#            nothing (no review posted, no new hold: its route could not read GitHub, say) leaves the hold as it was;
-#            the item is started again while fewer than REVIEW_TRIES rescreens of it ran since that hold, each once
-#            the one before is over an hour old, and at REVIEW_TRIES review-rescreen.yml rewrites the hold comment to
-#            say that a person with write access will look at it, with no marker that is tried again, and fails its
-#            run once so that someone sees it.
+#            account that started the run (the one that pushed, opened, edited or reopened, or started it by hand)
+#            both have write access: the review runs as it comes, unless the gather job finds comments of others in
+#            it (below). So a run started by hand is trusted as the item's author, as an event's run is. `screen`
+#            otherwise: the screen job reads the pull request or issue first, and only a clean verdict lets the
+#            review run, with no person. Before that, the daily cap (REVIEW_CAP and REVIEW_CAP_AUTHOR, below) counts
+#            this file's runs of the last 24 hours that screened an item for an account without write access
+#            (.github/scripts/screened-review-cap): over it the trust is `cap`, the item gets no screen and no
+#            review, and route's output `free` gives the time the cap lets it run. `measure` for a run started by
+#            hand with -f measure=true and no pr or issue: the screen job alone runs, and measures its rules (below).
+#            GitHub starts this file on the event of every label (labeled, unlabeled), and route makes each a label
+#            run (its output `label_run`): it builds, screens and reviews nothing, and its project-builds copies the
+#            newest project-builds of another Build run at the head (the job required, below). The label parked,
+#            which a person puts on a pull request to hold it, is route's output `parked`: while it is on, the pull
+#            request gets no screen, no review and no review comment. The label run that adds it, and a push to a
+#            parked pull request, ask for the comment job, which records that a person holds it (below). The removal
+#            of parked is no label run: it runs as a push does, and reviews the head.
 #   gather   gathers what the review reads, once, with .github/scripts/review-gather (below), and keeps it as the
 #            artifact review-data, which the screen and the review take only by its SHA-256
 #            (.github/scripts/take-review-data): the review reads exactly what the screen passed. It holds no model,
 #            no identity token and no write permission. Its output `screen` is true for route's trust `screen`, and
-#            for a writer's item, but a run started by hand, whose comments, reviews or review comments include one by
-#            an account without write access (or one GitHub cannot name; an App's own comment is told by the REST
-#            API's account type). A screened item gets no session to resume: no screen reads one. For an enrollment of
-#            an account without write access it gathers none of the project's repository (below).
+#            for a writer's item whose comments, reviews or review comments include one by an account without write
+#            access (or one GitHub cannot name; an App's own comment is told by the REST API's account type). Every
+#            item keeps the session of its last review, screened or not: the review job takes it, and the screen job
+#            does not. For every enrollment it gathers the project's repository at the built commit, and a fetch that
+#            fails fails this job (below).
 #   screen   when the gather job's output `screen` is true (.github/scripts/screen.py): independent checks, which
 #            SCREEN_CHECKS lists, read the text that the pull request or the issue carries (for a writer's item, its
 #            comments, reviews and review comments alone, SCREEN_SCOPE comments): Google Cloud Model Armor's prompt
@@ -77,8 +69,8 @@ name: "Build"
 #            two letters of a script that
 #            uses joiners or inside an emoji, a byte order mark at the start of a file, and a word joiner where
 #            .github/scripts/review-neutralize puts one in this App's own comments), or more text than the screen
-#            reads, holds it. A screened review runs at most SCREENED_HOURLY_CAP times an hour; one that fails, at
-#            the cap or not, is held and fails the required check, which a re-run of the failed jobs clears. It runs
+#            reads, holds it. A screen that fails, and a screened review that fails, fail the required check, which a
+#            re-run of the failed jobs clears; the daily cap stops an item before the screen (route, above). It runs
 #            in the environment
 #            review-screen, whose jobs alone reach the screen's Google, Azure and Anthropic identities. Why it held an
 #            item goes to the private bucket theorem-agent-infra-review-screen-reasons, as
@@ -102,10 +94,9 @@ name: "Build"
 #            template's history, the checks' names, the line that stands in for the project's repository, the
 #            build's result and binaries table -- which are addressed to a reviewer or to the review's model, so
 #            a check that reads them answers about main and not about the account; the project's repository at
-#            the built commit (.review/source/), far more text than a screen reads, which the review of a
-#            writer's enrollment reads as data, and the review of an outsider's enrollment does not get (its
-#            checks that need it are left to a person, who can start the full review by hand); and the last
-#            review's session that the review resumes, the model's own earlier context.
+#            the built commit (.review/source/), far more text than a screen reads, which the review of every
+#            enrollment reads as data, whoever wrote the pull request; and the last review's session that the review
+#            resumes, the model's own earlier context.
 #   project-builds
 #            the build above, under the check name build, when route asks for it; it passes with nothing to build
 #            when the pull request enrolls no project (below). Its job id stays project-builds, the name the other jobs
@@ -119,10 +110,13 @@ name: "Build"
 #            .github/scripts/review-gather gathered: the pull request, the project's source at the built commit, and
 #            the build's results, with .claude/skills/review-enrollment/SKILL.md for where those are. It gives a
 #            structured output: the comment that asks the maintainer for each fix, any finding held back (review.md,
-#            rule 6), and a verdict for each check. The comment, the verdicts and body.md, the whole comment as the
-#            comment job posts it (.github/scripts/review-body), are the artifact enroll-review-draft; body.md is also
-#            the job's output `body`, which the comment job posts as it is.
-#            On a later push it resumes the same Claude Code session as the last review, so it knows what it asked
+#            rule 6), and a verdict for each check of review.md (pass, fail, person, or optional for a weak F5 or F8)
+#            with the reason of each one that is not pass. The comment, the verdicts and the reasons
+#            are the job's outputs, from which the comment job writes the review comment and the check run Enrollment
+#            review (below); no file and no artifact holds them. When the Review step fails or runs out of its 45
+#            minutes, the step "Review again" runs once more with the same inputs; no step counts the attempts.
+#            On a later push it resumes the same Claude Code session as the last review, whoever wrote the pull
+#            request (the screen still reads the new text first), so it knows what it asked
 #            for and why, and reviews only the diff since the commit it reviewed then, with one exception: check D3 of
 #            review.md answers each failing result of this build's report of the new head. For a change it checks
 #            what review-change.md says, on the pull request's diff and files read as data; on a later push it
@@ -148,24 +142,33 @@ name: "Build"
 #            private bucket that only this job can read, and this job sends every finding stored there, a cancelled
 #            run's too. A finding never reaches a log, an output or an artifact. Its title and text go through
 #            .github/scripts/review-neutralize before they are posted, as the comment's do (below).
-#   comment  posts that comment, with the checks' report folded under it, or replaces
-#            the one already there. The comment starts with <!-- oss-verify-review -->, as the triage comment starts
-#            with its own marker, and its second line is the verdict line that the inbound watcher reads:
-#            <!-- oss-verify-verdict {"head":"<commit>","blocking":[...],"person":[...]} -->, the checks whose verdict
-#            is fail and those left to a person (.github/scripts/review-body; none when the review gave no verdicts,
-#            or gave one under a key that is not a check id).
+#   comment  writes, as the oss-verify App, what the run decided. For an enrollment pull request, on every run whose
+#            build took the project and on the label run that adds parked, its step "Post the comment and record the
+#            verdict" records one check run Enrollment review on the run's head (.github/scripts/review-verdict): the
+#            one record of the review's verdict, which enroll-dispatch.yml reads. Its conclusion is failure when one
+#            check is fail; success when each is pass or optional; and action_required when one is person, or when
+#            the screen held the pull request, the daily cap stopped it, parked holds it, or the gather, screen,
+#            review or hold job failed. Its summary lists each check that is not pass with the review's reason, or
+#            says why the review gave no verdicts. It is no check that the ruleset requires, so action_required never
+#            stops a person's merge. When the review gave its verdicts, the pull request is still at the run's head
+#            and parked is not on it, the same step posts the review comment, with the checks' report folded under
+#            it, or replaces the one already there; any other outcome posts nothing, and the comment of an earlier
+#            head stays. The step then deletes the App's hold comments from before and takes the label review-held
+#            off, so the review comment stays the App's only comment on an enrollment pull request. For a change pull
+#            request it posts the review comment the same way, with no check run. The comment starts with
+#            <!-- oss-verify-review -->, as the triage comment starts with its own marker; an enrollment's comment
+#            then gives the fixed first sentence of the check run's conclusion (.github/scripts/review-body).
 #            The review's text and the checks' report, which a pull request can steer, reach the comment only through
 #            .github/scripts/review-neutralize: with no mention, no reference to an issue or pull request, no unclosed
 #            HTML comment that hides what follows it, and no line that holds a marker of this comment, so no one else
-#            is notified as oss-verify[bot] and the verdict line is the job's own. It never posts an issue's draft: a
-#            person approves the exact text of each reply to an issue before anyone posts it.
-#            It also holds: for a pull request or an issue that the screen held, that could not be gathered or
-#            screened, whose screened review did not finish, or that route held at OUTSIDE_HOURLY_LIMIT, it puts the
-#            label review-held on it and posts one comment in fixed words (marker <!-- oss-verify-held -->) that says it
-#            was held and how a person with write access starts the review, and nothing of why. A hold at the limit
-#            says from when it is screened again with no person, and names, in the marker
-#            <!-- oss-verify-held-limit <run> -->, the run whose event the limit first held, by which
-#            .github/scripts/limit-hold finds it and the account. A review it posts later, or for an issue a later
+#            is notified as oss-verify[bot] and the comment's markers are the job's own. The reasons in the check
+#            run's summary go through it too. It never posts an issue's draft: a person approves the exact text of
+#            each reply to an issue before anyone posts it.
+#            It also holds a change pull request or an issue: for one that the screen held, that could not be
+#            gathered or screened, whose screened review did not finish, or that route held at the daily cap, it puts
+#            the label review-held on it and posts one comment in fixed words (marker <!-- oss-verify-held -->) that
+#            says it was held and how a person with write access starts the review, and nothing of why; a hold at the
+#            cap says from when a push or a run by hand reviews it. A review it posts later, or for an issue a later
 #            review that made its draft, takes the label off and deletes that comment, unless a newer hold came after
 #            that review's run started.
 #   required always runs, last, and reports the required check (below).
@@ -174,10 +177,12 @@ name: "Build"
 # every run, after all the other jobs whatever their results, and passes only if route passed and every job route asked
 # for passed: the build when route asked for it, and the record, gather, screen, review, session, hold and comment jobs
 # when their own conditions call for them (the screen and the review on the gather job's outputs screen and digest);
-# every other job must be skipped. A held item passes it when the build passed (if asked) and the comment job labelled
-# it: it waits for a person, as its label says, and an enrollment's statements do not start without the review's
-# verdicts. A gather or screen job that failed fails it, and so does a screened review that did not finish (at
-# SCREENED_HOURLY_CAP, say), which a re-run of the failed jobs clears. A skipped job counts as a pass
+# every other job must be skipped. A held item passes it when the build passed (if asked) and the comment job recorded
+# the hold: for an enrollment in the check run Enrollment review (the screen's hold, the daily cap, or parked), for a
+# change or an issue with the label review-held. An open enrollment's statements start only when that check run is
+# success (enroll-dispatch.yml). A gather, screen, review (after its second attempt), hold or comment job that failed
+# fails it, held or not, which a re-run of the failed jobs clears. A label run reports no result of its own: its job
+# required copies the newest project-builds of another Build run at the head. A skipped job counts as a pass
 # where a check is required, so the build job is never the required check itself. The build takes the project with
 # .github/scripts/take-project, for each commit on its own:
 #   - A pull request from a fork is judged on the files GitHub lists for it: one that changes a file under projects/
@@ -203,6 +208,10 @@ name: "Build"
 # its failed check. The review is of a commit too: an edit of the description alone is reviewed with the next push.
 # It runs on ready_for_review too: enroll-dispatch.yml starts no statements for a draft pull request, and the
 # completion of this run, when the draft is marked ready, is what has it decide again.
+# It runs on labeled and unlabeled too, for the label parked (route, above). Each such run but the removal of parked is
+# a label run, which copies the head's standing project-builds, waits for the run already going and cancels none
+# (concurrency, below). GitHub reads the required check from the newest run at the head, so after a re-run clears a
+# failed build, the newest label run at that head is re-run too, or the maintainer pushes.
 # A failure is usually the project's, but it can be the runner's: GitHub's runner may run out of disk or time on a
 # build that works on a larger machine. A maintainer then reruns the failed job (gh run rerun <run> --failed). If it
 # fails again for the runner's reason, the maintainer builds the project with `tools/check --no-shell --twice <name>` on
@@ -257,14 +266,16 @@ name: "Build"
 # stored key: Google's workload identity provider (Theorem's infrastructure code) trades the job's GitHub identity
 # token for a Google identity token of the service account oss-verify-ci, audience model-gateway-gce, which the gateway
 # serves as its team oss-verify-ci with model calls only, and which the Review step gives Claude Code as its API key.
-# Google's identity token lives one hour, longer than the Review step's 45 minutes, and the sign-in runs just before it.
+# Google's identity token lives one hour, longer than the Review step's 45 minutes, and the sign-in runs just before it;
+# "Review again" signs in again before it runs.
 # The provider admits this file, on refs/heads/main, from its own events. The review, screen, hold and comment jobs of
 # this file ask for an identity token; no other job of it does. The screen job's Anthropic token comes from its own
 # federation rule, oss-verify-screen, which admits the environment review-screen alone.
 # A review runs only on main: Google's provider and the tailnet identity below admit refs/heads/main alone, so a run on
 # another branch gets no Google token and no tailnet node. So a change to
-# the review is tried for real only once it is on main: run `gh workflow run build.yaml -f pr=<n>`, which posts the
-# comment on that pull request (its draft is also the review job's artifact enroll-review-draft), or `-f issue=<n>`
+# the review is tried for real only once it is on main: run `gh workflow run build.yaml -f pr=<n>`, which reviews the
+# pull request's head as its own runs do (screened first, and counted by the daily cap, when its author has no write
+# access), posts the comment and, for an enrollment, records the check run Enrollment review, or `-f issue=<n>`
 # for the reply to an issue, which posts nothing and stores the draft in the private bucket.
 # Before the merge, tools/tests runs the review's own steps with stand-ins.
 #
@@ -290,7 +301,8 @@ name: "Build"
 # the pull request and project; when the head descends from the commit that session reviewed, review-gather writes the
 # diff since then and the review resumes that session (claude --resume <id>, which keeps its id) to review only that
 # diff. When a session is kept, the log of the gather step says which: "the review resumes the session <id>", or "the
-# review is fresh"; it says neither on a first review.
+# review is fresh"; it says neither on a first review. It does so for every enrollment, whoever wrote it: the screen job
+# reads the new text of a push first, and never takes the session (.github/scripts/take-review-data).
 # Under pull_request_target GitHub gives a job read-only access to main's cache unless the job declares a
 # write-capable cache-mode, and such a job must process no untrusted input before it writes, or a run that later
 # restores the entry could act on what the pull request put there (GitHub's dependency caching reference,

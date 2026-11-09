@@ -43,8 +43,9 @@
 # skips a commit whose facts it already made or whose build an event started in the last 24 hours. A new commit on the
 # pull request is checked again, and dispatched again. To have a pull request looked at again (one whose checks passed
 # before build.yaml wrote records), a maintainer runs `gh workflow run build.yaml -f pr=<n>`: that Build run's record
-# names the pull request and its head, and its completion runs this. That run also reviews the pull request again and
-# updates its review comment, as each Build run of it does.
+# names the pull request and its head, and its completion runs this. That run also reviews the pull request again, as a
+# push's run does: it records a new check run Enrollment review, and updates the review comment when the review gives
+# its verdicts.
 #
 # It runs on workflow_run, so this file and the script are main's, whatever the pull request holds, and it runs no
 # code of the pull request: decide reads the API as data with a read-only token, this repository's and, for the
