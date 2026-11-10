@@ -118,6 +118,9 @@ MEMORY_OPCODES = frozenset((0x03, 0x07, 0x23, 0x27, 0x2F))
 # stores, with its 0b100, which Zcb gives C.LBU, C.LHU, C.LH, C.SB and C.SH and which is otherwise reserved; and
 # quadrant 2's stack-pointer loads and stores. Quadrant 1 holds no memory instruction. The Rust target of the Rust
 # toolchain image is riscv64gc, so a shim object may hold compressed instructions even where the C builds do not.
+# Quadrant 2's 0b100 is not here: on riscv64gc it is C.JR, C.MV, C.JALR, C.ADD and C.EBREAK, which a shim's tail
+# forwards use and none of which touches memory. An extension that puts a memory instruction there (Zcmp's CM.PUSH
+# and CM.POP) would have to be added to this set, and the ISA of the builds would have to change first.
 COMPRESSED_MEMORY = frozenset([(0, f) for f in (1, 2, 3, 4, 5, 6, 7)] + [(2, f) for f in (1, 2, 3, 5, 6, 7)])
 # The symbols that AddressSanitizer's module constructor, in every object it instruments, refers to.
 ASAN_MODULE = re.compile(r"__asan_init|__asan_version_mismatch_check_v[0-9]+")
