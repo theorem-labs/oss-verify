@@ -844,12 +844,14 @@ class Analyse(unittest.TestCase):
         self.assertEqual(result["instrumented"]["result"], "fail", result)
         self.assertFalse(check_links.object_facts(body).memory)
 
-    def test_the_shim_of_the_pinned_rust_toolchain_makes_no_memory_access(self):
-        """The member of a real asan link (fixtures/allocator-shim/README.md). Its code is what the exemption is
-        for, and the code check does not stand in its way; its v0-mangled names are not ones RUST_ALLOCATOR_SHIM
-        reads, which is why it is a finding here."""
+    def test_the_shim_of_the_pinned_rust_toolchain_is_exempt_and_listed(self):
+        """The member of a real asan link (fixtures/allocator-shim/README.md): the names this change adds, and a
+        code of 13 words with no load, store or atomic. It is the object the exemption is for, so it is exempt,
+        and the list names it."""
         result, body = self.shim_link("shim-rustc-v0.o")
-        self.assertEqual(result["instrumented"]["result"], "fail", result)
+        self.assertEqual(result["instrumented"]["result"], "pass", result)
+        self.assertIn({"name": "shim.o", "kind": "rust-allocator-shim",
+                       "sha256": hashlib.sha256(body).hexdigest()}, result["uninstrumented"])
         facts = check_links.object_facts(body)
         self.assertFalse(facts.memory)
         self.assertEqual(len(facts.functions), 7)
