@@ -21,7 +21,9 @@ target two results:
    sanitizer builds: {name: <file name>, kind: libc | compiler-rt | sanitizer-runtime | cxx-runtime | fortran-runtime
    | image-library, sha256}, sorted by the file's path in the image. A file is the toolchain image's when its path is
    under /opt and the toolchain image has those bytes at that path (tools/check reads them from the image). In an
-   AddressSanitizer build, an uninstrumented object is listed too, as {name, kind: assembly | fortran, source}, as
+   AddressSanitizer build, the one exempt allocator shim is listed too, as {name, kind: rust-allocator-shim, sha256}:
+   it is the project's own code that nothing instruments, so the list names it rather than leaving it out. An
+   uninstrumented object is listed as {name, kind: assembly | fortran, source}, as
    OSS-Fuzz allows, when its DWARF says it is assembly or Fortran and names a source in a checkout of the project
    image, or, for one assembled without DWARF, when a source of the project carries its name and names every global it
    defines. A ported build assembles a build directory's copy of the checkout, so the DWARF names the copy: such an
@@ -35,9 +37,11 @@ target two results:
    archive member the link took, with code in a loaded section of the binary (parse_map), that is neither the
    driver's nor the toolchain image's. In the AddressSanitizer
    builds (asan, asan-ubsan), each one with code must refer to __asan_init or __asan_version_mismatch_check_*, as the
-   constructor that AddressSanitizer adds to each instrumented object does. rustc's allocator shim, an object that only
-   forwards __rust_alloc and its siblings to the standard library, is the one exception (at most one such member), as
-   it makes no memory access for AddressSanitizer to check. The UndefinedBehaviorSanitizer runs in trap mode and
+   constructor that AddressSanitizer adds to each instrumented object does. rustc's allocator shim is the one
+   exception (at most one such member): an object that defines at least one global function, every function of which,
+   of any binding, is one of the shim's, and whose code neither reads nor writes memory, so AddressSanitizer has
+   nothing in it to check (is_rust_allocator_shim; the code is read, not only the names, so an object that carries
+   these names and makes an access is a finding like any other). The UndefinedBehaviorSanitizer runs in trap mode and
    leaves no symbol: its checks are trap instructions (`unimp`), and rustc's UB checks are precondition_check
    functions; and code with nothing to check compiles to the same bytes with its flags as without them. So in the
    ubsan and asan-ubsan builds, each object and archive member is judged first by the recorded compiles that wrote
@@ -106,6 +110,18 @@ SYSROOT_LIB = re.compile(r"/opt/[^/]+(/[^/]+)*/usr/lib/[^/]+\.a")
 # rustc's allocator shim defines only these, and forwards each to the standard library.
 RUST_ALLOCATOR_SHIM = re.compile(r"__rust_(alloc|dealloc|realloc|alloc_zeroed|alloc_error_handler|"
                                  r"no_alloc_shim_is_unstable)")
+# The major opcodes (the low seven bits) of the riscv64 instructions that read or write memory: a load, a
+# floating-point load, a store, a floating-point store and an atomic. AddressSanitizer instruments these and nothing
+# else, so code that holds none of them has nothing for it to check.
+MEMORY_OPCODES = frozenset((0x03, 0x07, 0x23, 0x27, 0x2F))
+# The compressed (16-bit) instructions that read or write memory, as (quadrant, funct3): quadrant 0's loads and
+# stores, with its 0b100, which Zcb gives C.LBU, C.LHU, C.LH, C.SB and C.SH and which is otherwise reserved; and
+# quadrant 2's stack-pointer loads and stores. Quadrant 1 holds no memory instruction. The Rust target of the Rust
+# toolchain image is riscv64gc, so a shim object may hold compressed instructions even where the C builds do not.
+# Quadrant 2's 0b100 is not here: on riscv64gc it is C.JR, C.MV, C.JALR, C.ADD and C.EBREAK, which a shim's tail
+# forwards use and none of which touches memory. An extension that puts a memory instruction there (Zcmp's CM.PUSH
+# and CM.POP) would have to be added to this set, and the ISA of the builds would have to change first.
+COMPRESSED_MEMORY = frozenset([(0, f) for f in (1, 2, 3, 4, 5, 6, 7)] + [(2, f) for f in (1, 2, 3, 5, 6, 7)])
 # The symbols that AddressSanitizer's module constructor, in every object it instruments, refers to.
 ASAN_MODULE = re.compile(r"__asan_init|__asan_version_mismatch_check_v[0-9]+")
 TRAP = 0xC0001073  # `unimp`, the word a trap-mode UndefinedBehaviorSanitizer check executes on riscv64
@@ -684,6 +700,8 @@ class ObjectFacts:
     files: list  # the names of its STT_FILE symbols
     compiled: bool  # a compiler's .comment or .llvm_addrsig: it was compiled from C, C++ or another language
     bitcode: bool  # LLVM bitcode, which this cannot read
+    functions: list = dataclasses.field(default_factory=list)  # every function it defines, of any binding
+    memory: bool = False  # its code reads or writes memory, or holds bytes this cannot decode
 
 
 def words(body):
@@ -693,6 +711,29 @@ def words(body):
     if sys.byteorder == "big":
         table.byteswap()
     return table
+
+
+def touches_memory(body):
+    """Whether the riscv64 code in `body` reads or writes memory, read instruction by instruction, since a
+    compressed instruction is 16 bits and the rest are 32. True also when the bytes cannot be read as instructions
+    (one longer than 32 bits, or a halfword left over at the end): what this cannot read, it does not pass."""
+    at = 0
+    while at + 2 <= len(body):
+        half, = struct.unpack_from("<H", body, at)
+        if (half & 3) != 3:
+            if (half & 3, half >> 13) in COMPRESSED_MEMORY:
+                return True
+            at += 2
+            continue
+        # A 32-bit instruction has 11 in its low two bits and not 111 in the three above them; anything else there is
+        # an instruction of 48 bits or more, which this does not read.
+        if at + 4 > len(body) or (half & 0x1C) == 0x1C:
+            return True
+        word, = struct.unpack_from("<I", body, at)
+        if (word & 0x7F) in MEMORY_OPCODES:
+            return True
+        at += 4
+    return at != len(body)
 
 
 def object_facts(data):
@@ -727,7 +768,7 @@ def object_facts(data):
         return names[offset:end if end >= 0 else len(names)].decode("latin-1")
 
     code = traps = 0
-    compiled = False
+    compiled = memory = False
     for index, (name, kind, flags, _, _, size, *_) in enumerate(sections):
         section = name_of(name)
         if section in (".comment", ".llvm_addrsig"):
@@ -736,7 +777,8 @@ def object_facts(data):
             body = raw(index)
             code += len(body)
             traps += words(body).count(TRAP)
-    asan, defined, files, ub_checks = False, [], [], 0
+            memory = memory or touches_memory(body)
+    asan, defined, functions, files, ub_checks = False, [], [], [], 0
     for index, (_, kind, _, _, _, _, link, _, _, entsize) in enumerate(sections):
         if kind != SHT_SYMTAB or entsize < 24 or link >= shnum:
             continue
@@ -752,9 +794,10 @@ def object_facts(data):
             elif (info & 0xF) == 2:  # a function this object defines
                 # rustc's UB checks: a precondition_check function, of any binding.
                 ub_checks += "precondition_check" in text
+                functions.append(text)
                 if (info >> 4) in (1, 2):  # global or weak
                     defined.append(text)
-    return ObjectFacts(code, asan, traps, ub_checks, defined, files, compiled, False)
+    return ObjectFacts(code, asan, traps, ub_checks, defined, files, compiled, False, functions, memory)
 
 
 # ── one target ───────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -774,6 +817,32 @@ def is_seal(facts):
     return (facts is not None and facts.defined and facts.files
             and all(pathlib.PurePosixPath(name).name in DRIVER_SEALS for name in facts.files)
             and all(name.startswith("__wrap_") for name in facts.defined))
+
+
+def is_rust_allocator_shim(facts):
+    """Whether an object is rustc's allocator shim, which an AddressSanitizer build may link uninstrumented
+    (docs/build-contract.md, "The checks of the binaries"). Three things, all of them read from the object:
+
+    - it defines at least one global function;
+    - every function it defines, of any binding, is one the shim defines (RUST_ALLOCATOR_SHIM), so a local function
+      cannot ride into the exemption beside them;
+    - its code neither reads nor writes memory (touches_memory), which is the reason the exemption exists: there is
+      nothing in it for AddressSanitizer to check. An object that carries the shim's names and makes an access is a
+      finding like any other.
+    """
+    return (bool(facts.defined) and not facts.memory
+            and all(RUST_ALLOCATOR_SHIM.fullmatch(name) for name in facts.functions))
+
+
+def shim_entry(c):
+    """The uninstrumented entry of the one exempt allocator shim: (entry, problem or None). It is the project's own
+    code that no sanitizer instruments, so the list names it, by the member's file name and the SHA-256 of its
+    bytes, as it names a file of the toolchain image."""
+    name = c.label.rsplit("(", 1)[-1].rstrip(")")
+    entry = {"name": name, "kind": "rust-allocator-shim", "sha256": hashlib.sha256(c.data).hexdigest()}
+    if not NAME.fullmatch(name):
+        return entry, f"{c.label}: its name is not one the facts can hold"
+    return entry, None
 
 
 def project_code(record, image):
@@ -1154,13 +1223,14 @@ def analyse(records, image, dwarf_units=None, checkouts=(), assembly_sources=Non
         compiles = records[build].compiles
         if compiles is not None and compiles.build != build:
             compiles = None
+        shim_note = None
         if build in ASAN_BUILDS:
             plain_c, shims, assembly = [], [], []
             for c in with_code:
                 if c.facts.bitcode or c.facts.asan:
                     continue
-                if c.facts.defined and all(RUST_ALLOCATOR_SHIM.fullmatch(n) for n in c.facts.defined):
-                    shims.append(c.label)
+                if is_rust_allocator_shim(c.facts):
+                    shims.append(c)
                 elif not c.facts.compiled and not any(C_FAMILY.search(n) for n in c.facts.files):
                     assembly.append(c)
                 else:
@@ -1190,11 +1260,22 @@ def analyse(records, image, dwarf_units=None, checkouts=(), assembly_sources=Non
                         result["uninstrumented"] = None
                     elif result["uninstrumented"] is not None:
                         result["uninstrumented"].append(entry)
-            plain_c += shims[1:]
+            if shims:
+                # The one exempt shim is the project's own code that nothing instruments: the list names it, and the
+                # verdict says so, rather than leaving a member of the binary out of both.
+                entry, problem = shim_entry(shims[0])
+                if problem:
+                    problems.append(problem)
+                    result["uninstrumented"] = None
+                elif result["uninstrumented"] is not None:
+                    result["uninstrumented"].append(entry)
+                shim_note = ("one of them is rustc's allocator shim, which this exempts because its code neither "
+                             f"reads nor writes memory, and lists as uninstrumented: {shims[0].label}")
+            plain_c += [c.label for c in shims[1:]]
             if plain_c:
                 found.append(f"{len(plain_c)} of {len(with_code)} objects with code refer to no AddressSanitizer "
                              "constructor: " + ", ".join(listed(plain_c)))
-        notes, shown = [], 0
+        notes, shown = ([shim_note] if shim_note else []), 0
         if build in UBSAN_BUILDS:
             # Each object and archive member is judged first by the compile that wrote its bytes, when the build
             # recorded one: one that carried the build's UBSan flags is instrumented, whatever its traps (code with
@@ -1274,8 +1355,11 @@ def analyse(records, image, dwarf_units=None, checkouts=(), assembly_sources=Non
         elif found:
             result["instrumented"] = {"result": "fail", "detail": "; ".join(found + notes)}
         else:
+            # "all instrumented" counts the exempt shim out: it is one of the objects with code, and it is not
+            # instrumented. Saying so is the point of listing it.
+            whole = "all instrumented" if shim_note is None else "all instrumented but the one named below"
             result["instrumented"] = {"result": "pass", "detail": "; ".join(
-                [f"{len(with_code)} objects with code, all instrumented"
+                [f"{len(with_code)} objects with code, {whole}"
                  + (f", {shown} of them by the compile that wrote them, which carried the build's "
                     "UndefinedBehaviorSanitizer flags" if shown else "")] + notes)}
     return results

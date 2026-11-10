@@ -342,6 +342,46 @@ class Objects(unittest.TestCase):
         self.assertIsNone(check_links.object_facts(b"not an object"))
         self.assertTrue(check_links.object_facts(b"BC\xc0\xde....").bitcode)
 
+    def test_touches_memory_reads_each_instruction(self):
+        """The exemption of rustc's allocator shim rests on its code making no memory access, so the check reads
+        the code. A compressed instruction is 16 bits and the rest are 32, so the words cannot simply be counted."""
+        def word(value):
+            return struct.pack("<I", value)
+
+        def half(value):
+            return struct.pack("<H", value)
+
+        # addi x0, x0, 0; jalr x0, 0(ra); auipc; c.nop; c.addi4spn: no access.
+        for name, body in (("empty", b""),
+                           ("nop", NOP),
+                           ("ret", word(0x00008067)),
+                           ("auipc and jalr, a tail call", word(0x00000017) + word(0x00000067)),
+                           ("the UBSan trap", UNIMP),
+                           ("c.nop", half(0x0001)),
+                           ("c.addi4spn", half(0x0040)),
+                           ("a compressed and a full instruction", half(0x0001) + NOP)):
+            self.assertFalse(check_links.touches_memory(body), name)
+        # One of each kind of access, by its major opcode, and the compressed loads and stores of quadrants 0 and 2.
+        for name, body in (("load", word(0x00000003)),
+                           ("floating-point load", word(0x00000007)),
+                           ("store", word(0x00000023)),
+                           ("floating-point store", word(0x00000027)),
+                           ("atomic", word(0x0000002F)),
+                           ("lw a0, 0(a0)", LW),
+                           ("c.lw", half(0x4000)),
+                           ("c.sw", half(0xC000)),
+                           ("c.ldsp", half(0x6002)),
+                           ("c.sdsp", half(0xE002)),
+                           ("c.lbu (Zcb), and the reserved funct3 beside it", half(0x8000)),
+                           ("an access after a compressed instruction", half(0x0001) + LW)):
+            self.assertTrue(check_links.touches_memory(body), name)
+        # Bytes this cannot read as instructions do not pass: an instruction of 48 bits or more, a 32-bit
+        # instruction cut short, and a byte left over.
+        for name, body in (("a 48-bit instruction", word(0x0000001F)),
+                           ("a 32-bit instruction cut short", NOP + half(0x0013)),
+                           ("one byte left over", NOP + b"\x13")):
+            self.assertTrue(check_links.touches_memory(body), name)
+
 
 class Kinds(unittest.TestCase):
     def test_runtime_kinds(self):
@@ -735,6 +775,69 @@ class Analyse(unittest.TestCase):
         self.assertEqual(result["instrumented"]["result"], "pass")
         result = self.analyse({"asan": self.record({"/work/l.a": {"a.o": good(), "shim.o": shim, "s2.o": shim}})})
         self.assertEqual(result["asan"]["instrumented"]["result"], "fail")
+
+    SHIMS = pathlib.Path(__file__).resolve().parent / "fixtures" / "allocator-shim"
+
+    def shim_link(self, name):
+        """(the asan result, the fixture's bytes) for a link of one instrumented object and the fixture `name`,
+        a real riscv64 object (fixtures/allocator-shim/README.md)."""
+        body = (self.SHIMS / name).read_bytes()
+        record = self.record({"/work/l.a": {"a.o": good(), "shim.o": body}},
+                             runtimes=(self.LIBC, self.ASAN_RT), build="asan")
+        return self.analyse({"asan": record})["asan"], body
+
+    def test_the_exempt_shim_makes_no_memory_access_and_is_listed(self):
+        """A real shim object whose six functions are tail forwards: exempt, named in the uninstrumented list, and
+        counted out of "all instrumented", because it is an object with code that nothing instruments."""
+        result, body = self.shim_link("shim-forwards.o")
+        self.assertEqual(result["instrumented"]["result"], "pass", result)
+        self.assertIn({"name": "shim.o", "kind": "rust-allocator-shim",
+                       "sha256": hashlib.sha256(body).hexdigest()}, result["uninstrumented"])
+        self.assertIn("all instrumented but the one named below", result["instrumented"]["detail"])
+        self.assertIn("l.a(shim.o)", result["instrumented"]["detail"])
+
+    def test_a_shim_whose_own_code_stores_is_not_exempt(self):
+        """The same names, and each function stores a byte. Before this check read the code, it was exempt."""
+        result, body = self.shim_link("shim-stores.o")
+        self.assertEqual(result["instrumented"]["result"], "fail", result)
+        self.assertIn("l.a(shim.o)", result["instrumented"]["detail"])
+        self.assertTrue(check_links.object_facts(body).memory)
+
+    def test_a_shim_whose_local_function_makes_an_access_is_not_exempt(self):
+        """One global, __rust_alloc; the loads and stores are in two local functions, which the symbol table of an
+        object shows and which the rule about global functions alone did not reach."""
+        result, body = self.shim_link("shim-local-access.o")
+        self.assertEqual(result["instrumented"]["result"], "fail", result)
+        facts = check_links.object_facts(body)
+        self.assertEqual(facts.defined, ["__rust_alloc"])
+        self.assertEqual(len(facts.functions), 3)
+
+    def test_a_local_function_of_another_name_is_not_exempt_either(self):
+        """No memory access at all: the rule that every function it defines, of any binding, is the shim's is what
+        refuses this one. An object may not carry a function into the exemption by making it local."""
+        result, body = self.shim_link("shim-local-call.o")
+        self.assertEqual(result["instrumented"]["result"], "fail", result)
+        self.assertFalse(check_links.object_facts(body).memory)
+
+    def test_the_shim_of_the_pinned_rust_toolchain_makes_no_memory_access(self):
+        """The member of a real asan link (fixtures/allocator-shim/README.md). Its code is what the exemption is
+        for, and the code check does not stand in its way; its v0-mangled names are not ones RUST_ALLOCATOR_SHIM
+        reads, which is why it is a finding here."""
+        result, body = self.shim_link("shim-rustc-v0.o")
+        self.assertEqual(result["instrumented"]["result"], "fail", result)
+        facts = check_links.object_facts(body)
+        self.assertFalse(facts.memory)
+        self.assertEqual(len(facts.functions), 7)
+
+    def test_the_allocator_names_do_not_exempt_a_c_object_that_makes_an_access(self):
+        """analyse reads no project.yaml: the exemption is not for Rust projects, it is for objects shaped like the
+        shim. One that is not, is not exempt, whatever it is called."""
+        body = elf_object(LW * 2, defined=["__rust_alloc"], files=["lib.c"], comment=True)
+        record = self.record({"/work/l.a": {"a.o": good(), "lib.c.o": body}},
+                             runtimes=(self.LIBC, self.ASAN_RT), build="asan")
+        result = self.analyse({"asan": record})["asan"]
+        self.assertEqual(result["instrumented"]["result"], "fail", result)
+        self.assertIn("l.a(lib.c.o)", result["instrumented"]["detail"])
 
     def test_a_seal_compiled_from_the_driver_sources_is_the_drivers(self):
         seal = elf_object(NOP, defined=["__wrap_getenv"], comment=True, files=["wrap_getenv.c"])
