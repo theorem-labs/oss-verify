@@ -5,9 +5,9 @@
 # Pinned to main at the window verbs (0.4.5), the last commit before the curve verbs, which need an omx-dsp that has not
 # landed: it has the fuzz/ written to the OSS Verify contract (FreeMixer/plugin-hostd-protocol#8), the fixes for #11 and
 # #12, and the session target fuzz_session (#10).
-repo: https://github.com/FreeMixer/plugin-hostd-protocol#6ee9a1e3cc0b26a9b6678e720afc86c3c80b319b
+repo: https://github.com/Open-Mixer/plugin-hostd-protocol#6ee9a1e3cc0b26a9b6678e720afc86c3c80b319b
 primary_contact: linuxnow@gmail.com
-homepage: https://github.com/FreeMixer/plugin-hostd-protocol
+homepage: https://github.com/Open-Mixer/plugin-hostd-protocol
 language: c
 sanitizers: [address, undefined]
 mutants: fuzz/sabotage
