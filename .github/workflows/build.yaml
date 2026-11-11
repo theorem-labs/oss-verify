@@ -140,19 +140,20 @@ name: "Build"
 #   comment  writes, as the oss-verify App, what the run decided. For an enrollment pull request, on every run whose
 #            build took the project, its step "Post the comment and record the verdict" records one check run
 #            Enrollment review on the run's head (.github/scripts/review-verdict): the one record of the review's
-#            verdict, which enroll-dispatch.yml reads. Its conclusion is failure when one check is fail; success when
-#            each is pass or optional; and action_required when one is person, or when the screen held the pull
-#            request, the daily cap stopped it, or the gather, screen, review or hold job failed. Its summary lists
-#            each check that is not pass with the review's reason, or says why the review gave no verdicts. It is no
-#            check that the ruleset requires, so action_required never stops a person's merge. When the review gave
-#            its verdicts and the pull request is still at the run's head, the same step posts the review comment,
-#            with the checks' report folded under it, or replaces the one already there; any other outcome posts
-#            nothing, and the comment of an earlier head stays. Its step "Take the label review-held off" then
-#            deletes the App's hold comments from before and takes the label review-held off, so the review comment
-#            stays the App's only comment on an enrollment pull request. For a change pull request it posts the review
-#            comment the same way, with no check run. The comment starts with <!-- oss-verify-review -->, as the
-#            triage comment starts with its own marker; an enrollment's comment then gives the fixed first sentence of
-#            the check run's conclusion (.github/scripts/review-body).
+#            verdict, which enroll-dispatch.yml reads. It names its pull request (its external_id is the pull
+#            request's number), so a second pull request at the same commit has its own. Its conclusion is failure
+#            when one check is fail; success when each is pass or optional; and action_required when one is person,
+#            or when the screen held the pull request, the daily cap stopped it, or the gather, screen, review or
+#            hold job failed. Its summary lists each check that is not pass with the review's reason, or says why the
+#            review gave no verdicts. It is no check that the ruleset requires, so action_required never stops a
+#            person's merge. When the review gave its verdicts and the pull request is still at the run's head, the
+#            same step posts the review comment, with the checks' report folded under it, or replaces the one already
+#            there; any other outcome posts nothing, and the comment of an earlier head stays. Its step "Take the
+#            label review-held off" then deletes the App's hold comments from before and takes the label review-held
+#            off, so the review comment stays the App's only comment on an enrollment pull request. For a change pull
+#            request it posts the review comment the same way, with no check run. The comment starts with
+#            <!-- oss-verify-review -->, as the triage comment starts with its own marker; an enrollment's comment
+#            then gives the fixed first sentence of the check run's conclusion (.github/scripts/review-body).
 #            The review's text and the checks' report, which a pull request can steer, reach the comment only through
 #            .github/scripts/review-neutralize: with no mention, no reference to an issue or pull request, no unclosed
 #            HTML comment that hides what follows it, and no line that holds a marker of this comment, so no one else
@@ -536,7 +537,7 @@ jobs:
           [[ $RUN_ID =~ ^[0-9]+$ ]] || { echo "::error::not a run id: $RUN_ID"; exit 1; }
           case $EVENT in
             # The daily cap charges the run to the account that opened, pushed, edited or reopened the item.
-            pull_request_target|issues) charged=$ACTOR started="Started by $ACTOR" ;;
+            pull_request_target|issues) charged=$ACTOR by="Started by $ACTOR" ;;
             # GitHub lets only an account with write access start a run by hand; an App must be one of ALLOWED_BOTS.
             # Such a run is trusted as the item's author, as an event's run is: it is screened unless the author has
             # write access, and the daily cap charges it to the author, so a person's re-runs never use up their own
@@ -552,13 +553,13 @@ jobs:
               [[ $NUMBER =~ ^[1-9][0-9]*$ ]] || { echo "::error::not a number: $NUMBER"; exit 1; }
               AUTHOR=$(gh api "repos/$REPO/issues/$NUMBER" --jq '.user.login // ""') \
                 || { echo "::error::GitHub did not say who wrote $NUMBER. Re-run this run."; exit 1; }
-              charged=$AUTHOR started="Started by hand by $ACTOR" ;;
+              charged=$AUTHOR by="Started by hand by $ACTOR" ;;
             *) echo "::error::not an event of this workflow: $EVENT"; exit 1 ;;
           esac
           author=0 actor=0
           known "$AUTHOR" || author=$?
           known "$ACTOR" || actor=$?
-          (( author != 0 || actor != 0 )) || trust writer "$started; the author, $AUTHOR, and $ACTOR have write access: no screen."
+          (( author != 0 || actor != 0 )) || trust writer "$by; the author, $AUTHOR, and $ACTOR have write access: no screen."
           # The daily cap, before the screen (.github/scripts/screened-review-cap). Its failure fails route.
           cap=$(ACCOUNT=$charged .github/scripts/screened-review-cap) || { printf '%s\n' "$cap"; exit 1; }
           count=$(sed -n 's/^count=//p' <<< "$cap") account_count=$(sed -n 's/^account_count=//p' <<< "$cap")
@@ -569,7 +570,7 @@ jobs:
             trust cap "Held without a screen or a review: the daily cap is reached, $count of $REVIEW_CAP runs of accounts without write access in 24 hours, $account_count of $REVIEW_CAP_AUTHOR charged to $charged. The cap lets it run from $free."
           fi
           echo "$RUN_ID" > "$RUNNER_TEMP/daily-cap"
-          trust screen "$started; the author, $AUTHOR, or $ACTOR has no write access: screened first. The daily cap counts $count of $REVIEW_CAP runs in 24 hours, $account_count of $REVIEW_CAP_AUTHOR charged to $charged."
+          trust screen "$by; the author, $AUTHOR, or $ACTOR has no write access: screened first. The daily cap counts $count of $REVIEW_CAP runs in 24 hours, $account_count of $REVIEW_CAP_AUTHOR charged to $charged."
 
       # The daily cap counts a run from the moment route lets it be screened (.github/scripts/screened-review-cap), so
       # that a burst of items is counted before their builds end, which can take hours. This artifact says that route
@@ -1622,12 +1623,13 @@ jobs:
     # Writes, as oss-verify[bot], what the run decided about the pull request or the issue. It runs no code of the
     # pull request.
     # For an enrollment pull request it runs on every run whose build took the project. Its step "Post the comment and
-    # record the verdict" records one check run Enrollment review at the run's head (.github/scripts/review-verdict):
-    # the review's verdicts, or that the screen held it, that the daily cap stopped it, or which job failed. With the
-    # review's verdicts and at the pull request's current head, the step also posts the review comment, or updates the
-    # one already there (.github/scripts/review-body); when the review held a finding back, only once the hold job sent
-    # it, because the comment says that it was sent. Any other outcome posts no comment and leaves the comment of an
-    # earlier head as it is: the review comment stays the App's only comment on an enrollment pull request.
+    # record the verdict" records one check run Enrollment review at the run's head (.github/scripts/review-verdict),
+    # which names the pull request by its number (external_id): the review's verdicts, or that the screen held it,
+    # that the daily cap stopped it, or which job failed. With the review's verdicts and at the pull request's current
+    # head, the step also posts the review comment, or updates the one already there (.github/scripts/review-body);
+    # when the review held a finding back, only once the hold job sent it, because the comment says that it was sent.
+    # Any other outcome posts no comment and leaves the comment of an earlier head as it is: the review comment stays
+    # the App's only comment on an enrollment pull request.
     # For a change pull request it posts the review's comment the same way, with no check run. For a change pull
     # request or an issue that the screen held, that could not be gathered or screened, whose screened review failed,
     # or that route held at the daily cap: it puts the label review-held on it and posts one comment that says so, in
@@ -1890,14 +1892,16 @@ jobs:
             echo "posted=true" >> "$GITHUB_OUTPUT"
           fi
           [ "$KIND" = enrollment ] || exit 0
-          # The one record of the verdict, at the head this run reviewed. enroll-dispatch reads it. jq reads the verdict
-          # on its standard input: as an argument it can be more than the 131,072 bytes Linux takes in one.
-          jq --arg head "$HEAD_SHA" --arg url "$RUN_URL" \
-            '{name: "Enrollment review", head_sha: $head, status: "completed", conclusion: .conclusion,
+          # The one record of the verdict, at the head this run reviewed. It names its pull request: external_id is
+          # the pull request's number, so that a second pull request at the same commit has a check run of its own.
+          # enroll-dispatch reads it. jq reads the verdict on its standard input: as an argument it can be more than
+          # the 131,072 bytes Linux takes in one.
+          jq --arg head "$HEAD_SHA" --arg pr "$PR" --arg url "$RUN_URL" \
+            '{name: "Enrollment review", head_sha: $head, external_id: $pr, status: "completed", conclusion: .conclusion,
               details_url: $url, output: {title: .title, summary: .summary}}' <<< "$verdict" \
             | gh api --method POST "repos/$REPO/check-runs" --input - > /dev/null
           echo "recorded=true" >> "$GITHUB_OUTPUT"
-          echo "Recorded the check run Enrollment review at $HEAD_SHA: $conclusion."
+          echo "Recorded the check run Enrollment review of #$PR at $HEAD_SHA: $conclusion."
 
       # A review replaces a hold of a change pull request or an issue: one a maintainer started, or a later push that
       # the screen passed; for an issue, a review that made its draft. The label comes off, and the hold comment goes.

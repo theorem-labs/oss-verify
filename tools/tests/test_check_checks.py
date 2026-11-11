@@ -757,12 +757,12 @@ class PostingStep(Runner):
     MARKER = "<!-- oss-verify-review -->"
 
     def post(self, kind="enrollment", verdicts=None, reasons=None, review="Thanks.\n\n1. Fix X.\n", head=HEAD,
-             pr_head=None, comments=(), label=True, status=0, started="2026-11-03T10:00:00Z", **env):
+             pr_head=None, comments=(), label=True, status=0, **env):
         """Run the step for a run of `kind` at `head` whose review gave `verdicts` and `reasons` (None: no verdicts),
         on pull request 8, whose head is now `pr_head` (by default `head`) and which carries `comments` (and
-        review-held, unless `label` is false); then the step after it, with route's output started `started`,
-        when its if holds. `env` replaces what the job gives the step. Return the steps' output and each request they
-        sent, as (method, endpoint, body)."""
+        review-held, unless `label` is false); then the step after it, with route's output started
+        2026-11-03T10:00:00Z, when its if holds. `env` replaces what the job gives the step. Return the steps' output
+        and each request they sent, as (method, endpoint, body)."""
         # Each run starts with no request recorded.
         self.api.joinpath("args").unlink(missing_ok=True)
         self.api.joinpath(f"repos_{self.REPO.replace('/', '_')}_issues_8_labels_review-held.json").unlink(
@@ -790,8 +790,8 @@ class PostingStep(Runner):
         self.assertEqual(set(take_off["env"]) - {"GH_TOKEN", "REPO"}, {"NUMBER", "STARTED", "RUN_ID"})
         if rc == 0 and evaluate(take_off["if"], {"env.KIND": kind, "env.HOLDING": "false", **{
                 f"steps.post.outputs.{k}": v for k, v in self.outputs.items()}}):
-            rc, more, _ = self.run_script(take_off["run"], cwd=ROOT, KIND=kind, NUMBER="8", STARTED=started,
-                                          RUN_ID="77")
+            rc, more, _ = self.run_script(take_off["run"], cwd=ROOT, KIND=kind, NUMBER="8",
+                                          STARTED="2026-11-03T10:00:00Z", RUN_ID="77")
             out += more
             self.assertEqual(rc, 0, out)
         requests = []
@@ -810,12 +810,14 @@ class PostingStep(Runner):
         return [(m, e, b["body"]) for m, e, b in requests if m in ("POST", "PATCH") and "/comments" in e]
 
     def record(self, requests):
-        """The one check run that the run sent, with the fields that are the same on every run."""
+        """The one check run that the run sent, with the fields that are the same on every run: it names pull request 8
+        by its number, as its external_id."""
         runs = [b for m, e, b in requests if (m, e) == ("POST", f"repos/{self.REPO}/check-runs")]
         self.assertEqual(len(runs), 1, runs)
         run = runs[0]
-        self.assertEqual((run["name"], run["head_sha"], run["status"], run["details_url"], sorted(run["output"])),
-                         ("Enrollment review", self.HEAD, "completed", self.RUN_URL, ["summary", "title"]))
+        self.assertEqual((run["name"], run["head_sha"], run["external_id"], run["status"], run["details_url"],
+                          sorted(run["output"])),
+                         ("Enrollment review", self.HEAD, "8", "completed", self.RUN_URL, ["summary", "title"]))
         return run
 
     def first_sentence(self, requests):
@@ -955,10 +957,9 @@ class PostingStep(Runner):
         label already gone is no error."""
         held = [{"id": 5, "user": {"login": "oss-verify[bot]"}, "body": "<!-- oss-verify-held -->\nheld"},
                 {"id": 6, "user": {"login": "mallory"}, "body": "<!-- oss-verify-held --> forged"}]
-        for env, started in (({"REVIEW_RESULT": "success"}, "2026-11-03T10:00:00Z"),
-                             ({"REVIEW_RESULT": "failure"}, "2026-11-03T10:00:00Z")):
+        for env in ({"REVIEW_RESULT": "success"}, {"REVIEW_RESULT": "failure"}):
             with self.subTest(env=env):
-                _, requests = self.post(verdicts=self.verdicts(), comments=held, started=started, **env)
+                _, requests = self.post(verdicts=self.verdicts(), comments=held, **env)
                 self.record(requests)
                 deleted = [e for m, e, _ in requests if m == "DELETE"]
                 self.assertEqual(deleted, [f"repos/{self.REPO}/issues/8/labels/review-held",

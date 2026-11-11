@@ -24,9 +24,10 @@
 #             of theorem-labs or one of its Apps, lifts it with the label maintainer-confirmed put on after the head
 #             commit, which runs maintainer-confirmed.yml, whose completion runs this again).
 #   none      sends nothing and puts no label on, among other reasons while the newest check run Enrollment review of
-#             the oss-verify App at the commit is not success or is missing. build.yaml's comment job writes that
-#             check run on the reviewed commit, with the review comment, and that Build run's completion runs this
-#             again.
+#             the oss-verify App at the commit for the pull request is not success or is missing. build.yaml's
+#             comment job writes that check run on the reviewed commit, with the review comment and the pull
+#             request's number as its external_id, and that Build run's completion runs this again. A check run of
+#             another pull request at the same commit is not counted.
 #
 # A merge sends too. Enrollment merged (enroll-merged.yml) runs on each closed pull request and does nothing else; its
 # completion runs this. When a person merged an enrollment into main and its required checks passed at its head

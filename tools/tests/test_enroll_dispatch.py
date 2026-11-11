@@ -123,10 +123,11 @@ class World:
                             "conclusion": conclusion,
                             "details_url": f"https://github.com/{repo}/actions/runs/{run_id}/job/{check_id + 9000}"})
 
-    def review(self, check_id, conclusion="success", app=OSS_VERIFY, status="completed"):
-        """A check run Enrollment review at SHA, as build.yaml's comment job writes it (another App's, with `app`)."""
+    def review(self, check_id, conclusion="success", app=OSS_VERIFY, status="completed", pr=PR):
+        """A check run Enrollment review at SHA, as build.yaml's comment job writes it for pull request `pr`, whose
+        number is its external_id (another App's, with `app`)."""
         self.review_runs.append({"id": check_id, "name": "Enrollment review", "app": {"id": app}, "status": status,
-                                 "conclusion": conclusion, "head_sha": SHA})
+                                 "conclusion": conclusion, "head_sha": SHA, "external_id": str(pr)})
 
     def run(self, run_id, path, event, head_sha=SHA, branch="add-plugin-hostd", head_repo="FreeREAC/oss-verify"):
         self.runs[run_id] = {"id": run_id, "path": path, "event": event, "head_sha": head_sha, "head_branch": branch,
@@ -546,6 +547,23 @@ class Review(unittest.TestCase):
         world.review(402, "success", app=ACTIONS)
         self.assertNotSent(world, f"{self.WHERE}: its newest Enrollment review check run is action_required, not "
                                   "success")
+
+    def test_another_pull_requests_review_at_the_same_commit_is_not_counted(self):
+        # A second pull request at the same commit has its own check run, external_id its number: the oss-verify App's
+        # newer success there does not stand over pull request 32's own failure, or stand in for its missing review.
+        for own, reason in ((("failure",), f"{self.WHERE}: its newest Enrollment review check run is failure, not "
+                                           "success"),
+                            ((), f"{self.WHERE}: not yet reviewed: the oss-verify App wrote no Enrollment review "
+                                 "check run on it")):
+            world = self.reviewed(*own)
+            world.review(402, "success", pr=77)
+            self.assertNotSent(world, reason)
+
+    def test_the_pull_requests_own_review_decides_over_another_pull_requests_newer_one(self):
+        world = self.reviewed("success")
+        world.review(402, "action_required", pr=77)
+        got = world.decide()
+        self.assertEqual((got["decision"], got["pr"], got["sha"]), ("dispatch", "32", SHA), got["reason"])
 
     def test_a_head_with_no_review_sends_nothing(self):
         self.assertNotSent(self.reviewed(), f"{self.WHERE}: not yet reviewed: the oss-verify App wrote no Enrollment "

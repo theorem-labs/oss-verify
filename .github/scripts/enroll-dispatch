@@ -25,9 +25,10 @@ which enroll-dispatch.yml adds to the event's client_payload. The decision is:
                                or one of its Apps, put maintainer-confirmed on after the head commit was pushed:
                                then the check is skipped)
   none      anything else; `reason` says what. Among them: the newest check run Enrollment review of the oss-verify
-            App (REVIEW_APP) at the commit is not success, or there is none (not yet reviewed); a project.yaml whose
-            language cannot be read. build.yaml's comment job writes that check run with the review comment; the Build
-            run's completion runs this again.
+            App (REVIEW_APP) at the commit for the pull request (its external_id is the pull request's number) is not
+            success, or there is none (not yet reviewed); a project.yaml whose language cannot be read. build.yaml's
+            comment job writes that check run with the review comment; the Build run's completion runs this again. A
+            check run of another pull request at the same commit is not counted.
 
 Which commit, whose pull request, and whose record. A run of a pull request (pull_request_target or pull_request) is
 about its head commit, and about the head it came from (the repository and branch of that run). A run of Build
@@ -107,8 +108,9 @@ BUILD_WORKFLOW = ".github/workflows/build.yaml"
 RECORD_ARTIFACT = "enrollment-record"
 RECORD_SCHEMA = "oss-verify enrollment record v1"
 # The review's verdict: the check run REVIEW_CHECK that build.yaml's comment job writes on the reviewed commit with the
-# review comment, as the oss-verify App (REVIEW_APP; gh api apps/oss-verify). A check run of the same name from any
-# other App is not counted. Only its conclusion success starts statements; a commit with no such check run is
+# review comment, as the oss-verify App (REVIEW_APP; gh api apps/oss-verify), with the pull request's number as its
+# external_id. A check run of the same name from any other App, or of another pull request at the same commit, is not
+# counted. Only its conclusion success starts statements; a pull request with no such check run at the commit is
 # NOT_REVIEWED.
 REVIEW_CHECK = "Enrollment review"
 REVIEW_APP = 5447700
@@ -225,16 +227,12 @@ def bound_checks(api: Api, runs: Runs, repo: str, sha: str, head: tuple) -> tupl
     return waiting, build_run
 
 
-def records(api: Api, repo: str, run_id: int) -> list[dict]:
-    """Every unexpired artifact RECORD_ARTIFACT of this Build run."""
-    return [a for page in api.pages(f"repos/{repo}/actions/runs/{run_id}/artifacts?name={RECORD_ARTIFACT}&per_page=100")
-            for a in page.get("artifacts") or [] if a.get("name") == RECORD_ARTIFACT and not a.get("expired")]
-
-
 def build_record(api: Api, repo: str, run_id: int) -> tuple[dict | None, str]:
     """The record build.yaml's record job uploaded in this run: the JSON of record.json, the one file of its artifact
     RECORD_ARTIFACT; or None and why not."""
-    artifacts = records(api, repo, run_id)
+    artifacts = [a for page in api.pages(f"repos/{repo}/actions/runs/{run_id}/artifacts?name={RECORD_ARTIFACT}"
+                                         "&per_page=100")
+                 for a in page.get("artifacts") or [] if a.get("name") == RECORD_ARTIFACT and not a.get("expired")]
     if len(artifacts) != 1:
         return None, f"Build run {run_id} has {len(artifacts)} unexpired {RECORD_ARTIFACT} artifacts, not one"
     if int(artifacts[0].get("size_in_bytes") or 0) > MAX_ARTIFACT_BYTES:
@@ -250,12 +248,14 @@ def build_record(api: Api, repo: str, run_id: int) -> tuple[dict | None, str]:
         return None, f"Build run {run_id}'s {RECORD_ARTIFACT} cannot be read: {error}"
 
 
-def review_conclusion(api: Api, repo: str, head: str) -> str:
-    """The conclusion of the newest check run REVIEW_CHECK of the oss-verify App at the commit `head` (its status
-    while it has none), or NOT_REVIEWED when there is none."""
+def review_conclusion(api: Api, repo: str, head: str, number: int) -> str:
+    """The conclusion of the newest check run REVIEW_CHECK of the oss-verify App at the commit `head` for pull request
+    `number` (its status while it has none), or NOT_REVIEWED when there is none. A check run whose external_id is not
+    `number`, another pull request's at the same commit, is not counted."""
     found = [c for page in api.pages(f"repos/{repo}/commits/{head}/check-runs?check_name={quote(REVIEW_CHECK)}"
                                      "&per_page=100")
-             for c in page.get("check_runs") or [] if (c.get("app") or {}).get("id") == REVIEW_APP]
+             for c in page.get("check_runs") or []
+             if (c.get("app") or {}).get("id") == REVIEW_APP and c.get("external_id") == str(number)]
     if not found:
         return NOT_REVIEWED
     newest = max(found, key=lambda c: c["id"])
@@ -532,7 +532,7 @@ def decide(api: Api, repo: str, run_id: int, run_event: str, head_sha: str) -> d
                        number, project, sha)
     # Before the labels: a label that a person lifts by hand (size-review, say) must never be the only thing that
     # stands between a pull request whose review did not pass and its statements.
-    conclusion = review_conclusion(api, repo, sha)
+    conclusion = review_conclusion(api, repo, sha, number)
     if conclusion == NOT_REVIEWED:
         return outcome("none", f"{where}: {NOT_REVIEWED}: the oss-verify App wrote no {REVIEW_CHECK} check run on it",
                        number, project, sha)
