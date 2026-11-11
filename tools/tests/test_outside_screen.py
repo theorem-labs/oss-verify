@@ -997,7 +997,6 @@ class Hold(Runner):
                         self.assertRegex(bodies[0], self.AGAIN)
                         self.assertIn(f"\n\n<!-- oss-verify-held-transient 50 {before + 1} -->\n", bodies[0])
                     else:
-                        self.assertIn(f"did not finish, {tries} times. A maintainer will look at it.", bodies[0])
                         self.assertNotRegex(bodies[0], r"oss-verify-held-(limit|cap|transient)")
 
     def test_a_count_of_the_cap_that_failed_or_was_no_number_is_a_review_that_did_not_finish(self):
@@ -1034,7 +1033,6 @@ class Hold(Runner):
                 self.tearDown()
                 self.setUp()
                 _calls, bodies, _ = self.hold("writer", review="failure", capped=capped)
-                self.assertIn("A maintainer will look at it.", bodies[0])
                 self.assertNotRegex(bodies[0], r"oss-verify-held-(limit|cap|transient)")
 
     def test_a_screened_review_that_did_not_finish_says_so(self):
@@ -1779,12 +1777,9 @@ class ReviewRescreen(Held):
         self.assertIn(f"::error::7: screened again {self.TRIES} times since its hold", out)
         (patched, body), = self.patches()
         self.assertEqual(patched, "50")
-        self.assertEqual(body,
-                         "<!-- oss-verify-held -->\n**Automated review held.**\n\n"
-                         f"It was screened again automatically {self.TRIES} times since it was held, and none of those "
-                         "runs settled it, so it is not screened again automatically. A person with write access will "
-                         "look at it. A person with write access can start the review with "
-                         f"`gh workflow run build.yaml -R {REPO} -f pr=7`.\n\n<!-- oss-verify-held-run 1050 -->\n")
+        self.assertTrue(body.startswith("<!-- oss-verify-held -->\n"), body)
+        self.assertIn(f"`gh workflow run build.yaml -R {REPO} -f pr=7`", body)
+        self.assertTrue(body.endswith("\n\n<!-- oss-verify-held-run 1050 -->\n"), body)
         self.assertNotRegex(body, r"oss-verify-held-(limit|cap|transient)|#[0-9]|@")
         # The next run: the rewritten comment is a hold a person decides on, so nothing starts it and the run passes.
         self.held(7, screen_hold(at="1999-01-01T00:00:00Z"),

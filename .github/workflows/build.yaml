@@ -49,7 +49,7 @@ name: "Build"
 #            nothing (no review posted, no new hold: its route could not read GitHub, say) leaves the hold as it was;
 #            the item is started again while fewer than REVIEW_TRIES rescreens of it ran since that hold, each once
 #            the one before is over an hour old, and at REVIEW_TRIES review-rescreen.yml rewrites the hold comment to
-#            say that a person with write access will look at it, with no marker that is tried again, and fails its
+#            say that Theorem decides the next step, with no marker that is tried again, and fails its
 #            run once so that someone sees it.
 #   gather   gathers what the review reads, once, with .github/scripts/review-gather (below), and keeps it as the
 #            artifact review-data, which the screen and the review take only by its SHA-256
@@ -1884,19 +1884,19 @@ jobs:
               || { echo "::warning::the jobs of this run could not be read: the hold counts as a review that did not finish."; capped=""; }
             if [ -n "$capped" ]; then
               why="It comes from, or holds the text of, an account without write access to this repository. The automated screen passed it, but the automated reviews of such items had reached their limit of $SCREENED_HOURLY_CAP an hour."
-              if [ "$TRUST" = screen ]; then kind=cap; why="$why $again"; else why="$why A maintainer will look at it."; fi
+              if [ "$TRUST" = screen ]; then kind=cap; why="$why $again"; else why="$why Theorem decides the next step."; fi
             elif [ "$TRUST" = screen ] && (( tries + 1 < REVIEW_TRIES )); then
               tries=$((tries + 1))
               kind=transient
               why="It comes from, or holds the text of, an account without write access to this repository. The automated screen passed it, but the automated review did not finish ($tries of the $REVIEW_TRIES times it is tried). $again"
             elif [ "$TRUST" = screen ]; then
               tries=$((tries + 1))
-              why="It comes from, or holds the text of, an account without write access to this repository. The automated screen passed it, but the automated review did not finish, $tries times. A maintainer will look at it."
+              why="It comes from, or holds the text of, an account without write access to this repository. The automated screen passed it, but the automated review did not finish, $tries times. Theorem decides the next step."
             else
-              why="It comes from, or holds the text of, an account without write access to this repository. The automated screen passed it, but the automated review did not finish. A maintainer will look at it."
+              why="It comes from, or holds the text of, an account without write access to this repository. The automated screen passed it, but the automated review did not finish. Theorem decides the next step."
             fi
           else
-            why="It comes from, or holds the text of, an account without write access to this repository, so an automated screen reads it before the automated review does, and the screen did not pass it or could not read it. A maintainer will look at it."
+            why="It comes from, or holds the text of, an account without write access to this repository, so an automated screen reads it before the automated review does, and the screen did not pass it or could not read it. Theorem decides the next step."
           fi
           marker=""
           if [ -n "$kind" ]; then

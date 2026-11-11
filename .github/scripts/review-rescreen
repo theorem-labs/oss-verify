@@ -23,7 +23,7 @@
 # or its comment job failed) leaves the hold as it was. So for each item that is due, this counts the finished
 # rescreens of it (`Rescreen <n> of ...`) made since its hold's time, however old the hold is, and starts it again only
 # while there are fewer than REVIEW_TRIES. At REVIEW_TRIES it rewrites the hold comment in fixed words: it was screened
-# again that many times without settling, a person with write access will look at it, and how such a person starts
+# again that many times without settling, Theorem decides the next step, and how a person with write access starts
 # the review. The rewrite has no marker that is tried again, so limit-hold reads it as a hold a person decides on and
 # neither this script nor build.yaml's route takes the item again until a new hold; it keeps the run marker that the
 # comment job's step "Take the label review-held off" reads. The script then prints `::error::` and exits 1 for that
@@ -60,7 +60,7 @@ stop_hold() {
   [[ -n ${at:-} && ${id:-} =~ ^[1-9][0-9]*$ ]] || return 1
   [ "$at" = "$4" ] || return 2
   body=$(printf '%s\n%s\n\n%s %s\n' '<!-- oss-verify-held -->' "**Automated review held.**" \
-    "It was screened again automatically $3 times since it was held, and none of those runs settled it, so it is not screened again automatically. A person with write access will look at it." \
+    "It was screened again automatically $3 times since it was held, and none of those runs settled it, so it is not screened again automatically. Theorem decides the next step." \
     "A person with write access can start the review with \`gh workflow run build.yaml -R $REPO -f $2=$1\`.") \
     || return 1
   if [[ $run =~ ^[0-9]+$ ]]; then body+=$'\n\n'"<!-- oss-verify-held-run $run -->"; fi
@@ -135,7 +135,7 @@ while read -r number input; do
     stop_hold "$number" "$input" "$unsettled" "$at" || stopped=$?
     case $stopped in
       0) echo "::error::$number: screened again $unsettled times since its hold at $at, and none settled it: its" \
-           "hold comment now says that a person with write access will look at it, and it is not screened again."
+           "hold comment now says that Theorem decides the next step, and it is not screened again."
          failed=1 ;;
       2) echo "$number: held again after $at, while this run read it: the newer hold stands, and the next run reads it." ;;
       *) echo "::error::$number: screened again $unsettled times since its hold at $at, and its hold comment could" \
