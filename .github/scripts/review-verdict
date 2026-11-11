@@ -4,7 +4,7 @@
 """The verdict of an enrollment's review, as the check run `Enrollment review` of the oss-verify App records it:
 
     VERDICTS=<json> REASONS=<json> .github/scripts/review-verdict
-    HOLD=screen|cap|parked|failed [FREE=<time>] [JOB=gather|screen|review|hold] RUN_URL=<run> REPO=<owner/repo> \\
+    HOLD=screen|cap|failed [FREE=<time>] [JOB=gather|screen|review|hold] RUN_URL=<run> REPO=<owner/repo> \\
       PR=<number> .github/scripts/review-verdict
     .github/scripts/review-verdict --ids
     .github/scripts/review-verdict --sentence success|failure|action_required
@@ -21,8 +21,7 @@ what a pull request can steer, so each goes through .github/scripts/review-neutr
 text does, and the summary stays under the 65,535 characters GitHub takes.
 
 HOLD gives no verdict of the review: the screen held the pull request, the daily cap stopped it (FREE, route's output
-free, the time the cap lets it run), the label parked holds it, or a job of the run failed (JOB). Each is
-`action_required`, with fixed words.
+free, the time the cap lets it run), or a job of the run failed (JOB). Each is `action_required`, with fixed words.
 
 --ids prints each check id of review.md, in its order, with the verdicts it takes, as one JSON object: the one list,
 which .github/scripts/review-prompt puts in the review's schema. --sentence prints the first sentence of the review
@@ -131,10 +130,6 @@ def from_hold(hold):
                    f" reviews of such accounts reached their cap of {cap} in 24 hours, {author} for one author. From"
                    f" {free:%Y-%m-%d %H:%M} UTC, a push or `gh workflow run build.yaml -R {repo} -f pr={pr}` reviews"
                    " it.")
-    elif hold == "parked":
-        title = "A person holds this pull request."
-        summary = (f"{title} While the label parked is on it, it is not screened or reviewed. When a person takes the"
-                   " label off, it is screened and reviewed at its head.")
     elif hold == "failed":
         job = os.environ.get("JOB", "")
         if job not in JOBS:
@@ -143,7 +138,7 @@ def from_hold(hold):
         summary = (f"The {job} job of [this run]({run_url}) failed, so the review gave no verdict."
                    f" `gh run rerun {run.group(1)} --failed -R {repo}` reviews it.")
     else:
-        die("HOLD is not screen, cap, parked or failed")
+        die("HOLD is not screen, cap or failed")
     return "action_required", title, summary
 
 

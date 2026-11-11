@@ -5,7 +5,7 @@ tools/tests
 
 route's trust step (who is screened, and the daily cap of .github/scripts/screened-review-cap), which jobs run for each
 route and each answer of the screen (the jobs' conditions, evaluated as GitHub does), what the required check reports,
-a label run's copy of the head's standing project-builds, the run's concurrency, what each job holds, how the screen
+the run's concurrency, what each job holds, how the screen
 and the review take the gathered data (.github/scripts/take-review-data), the gather job's check that the head did not
 move, the gather job run step by step for an outside account's enrollment (the project's source, the failed fetch, and
 the session the review resumes), the comment job's hold, and the review comment's line on the checks that ran.
@@ -207,11 +207,6 @@ def required(ctx):
     return run.returncode, run.stdout
 
 
-def required_steps(ctx):
-    """The names of the job required's steps that run on this run."""
-    return {s["name"] for s in JOBS["required"]["steps"] if "name" in s and ("if" not in s or evaluate(s["if"], ctx))}
-
-
 def step(job, name):
     found = [s for s in JOBS[job]["steps"] if s.get("name") == name]
     assert len(found) == 1, f"{len(found)} steps named {name!r} in {job}"
@@ -364,12 +359,9 @@ class Trust(Runner):
                 self.assertEqual((rc, got.get("measure")), want, out)
                 self.assertNotIn("kind", got)
         self.assertEqual(step("route", self.STEP)["if"],
-                         "steps.decide.outputs.measure == 'true' || (steps.decide.outputs.kind != '' && "
-                         "steps.decide.outputs.label_run != 'true' && steps.decide.outputs.parked != 'true')")
-        # A measurement passes the trust step; a label run and a pull request that parked holds do not.
-        for outputs, want in (({"measure": "true"}, True), ({"kind": "enrollment"}, True),
-                              ({"kind": "enrollment", "label_run": "true"}, False),
-                              ({"kind": "enrollment", "parked": "true"}, False), ({}, False)):
+                         "steps.decide.outputs.kind != '' || steps.decide.outputs.measure == 'true'")
+        # A measurement passes the trust step, and so does every item of a kind; a run with neither does not.
+        for outputs, want in (({"measure": "true"}, True), ({"kind": "enrollment"}, True), ({}, False)):
             ctx = {f"steps.decide.outputs.{k}": v for k, v in outputs.items()}
             self.assertEqual(bool(evaluate(step("route", self.STEP)["if"], ctx)), want, outputs)
 
@@ -396,7 +388,7 @@ class DailyCap(Runner):
     SCREENED = ("completed", True, True)  # route gave it trust screen, and its screen job started
     BUILDING = ("in_progress", True, False)  # route gave it trust screen, and its build still runs
     UNSTARTED = ("completed", True, False)  # cancelled before its screen job started
-    UNMARKED = ("completed", False, False)  # route gave it no trust screen: capped, a label run, a writer's trust
+    UNMARKED = ("completed", False, False)  # route gave it no trust screen: capped, a writer's trust
     MEASURED = ("completed", False, True)  # a screen job with no trust screen: a measurement
 
     def setUp(self):
@@ -509,7 +501,7 @@ class DailyCap(Runner):
 
     def test_only_earlier_screened_runs_of_outside_accounts_in_24_hours_count(self):
         self.runs((10, 25, "pull_request_target", "o0", self.SCREENED),  # over 24 hours old
-                  (11, 1, "pull_request_target", "o1", self.UNMARKED),  # no trust screen: capped, or a label run
+                  (11, 1, "pull_request_target", "o1", self.UNMARKED),  # no trust screen: capped, or a writer's trust
                   (12, 1, "pull_request_target", "alice", self.SCREENED),  # a writer's push to an outsider's item
                   (13, 1, "issues", "sjawhar-agent[bot]", self.SCREENED),  # an App of ALLOWED_BOTS
                   (14, 1, "workflow_dispatch", "alice", self.MEASURED, "Measure the screen"),  # a measurement
@@ -688,66 +680,25 @@ class Routes(unittest.TestCase):
         self.assertEqual(jobs, self.BUILT | {"comment"})
         self.assertEqual(required(ctx)[0], 0, required(ctx)[1])
 
-    STANDING = "The head's standing result, for a label run"
     COLLECT = "Every job route asked for passed, and no other ran"
 
-    def test_a_label_run_builds_screens_and_reviews_nothing(self):
-        """A label of another name asks for nothing; the label run that adds parked to an enrollment asks for the
-        comment job alone. The job required copies the head's standing project-builds and collects nothing."""
-        for route, want in (({"kind": "", "label_run": "true"}, set()),
-                            (dict(self.ENROLLMENT, label_run="true", parked="true"), {"comment"}),
-                            ({"kind": "change", "sha": "a" * 40, "label_run": "true", "parked": "true"}, set())):
-            with self.subTest(route=route):
-                jobs, ctx = self.ran(route)
-                self.assertEqual(jobs, want)
-                self.assertEqual(required_steps(ctx), {self.STANDING})
-                if want:
-                    # The comment job holds nothing on it: no label review-held and no hold comment; its post step
-                    # records the check run that says a person holds it, and once it has, the step after it takes off
-                    # any hold from before.
-                    env = {f"env.{k}": as_text(evaluate(JOBS["comment"]["env"][k], ctx)) for k in ("HOLDING", "KIND")}
-                    for recorded in ("", "true"):
-                        ran = {s.get("name") for s in JOBS["comment"]["steps"] if "if" not in s
-                               or evaluate(s["if"], dict(ctx, **env, **{"steps.post.outputs.recorded": recorded}))}
-                        self.assertNotIn("Label it review-held and say so", ran)
-                        self.assertIn("Post the comment and record the verdict", ran)
-                        self.assertEqual("Take the label review-held off" in ran, recorded == "true")
-        # Every other run collects, and copies nothing.
-        _, ctx = self.ran(dict(self.ENROLLMENT, trust="writer"))
-        self.assertEqual(required_steps(ctx), {self.COLLECT})
-
-    def test_parked_holds_a_push_run_after_the_build(self):
-        """c3 (a): a push to a pull request that parked holds builds it, and route gives no trust: no gather, screen or
-        review, and the comment job records that a person holds it. The required check passes on the build."""
-        jobs, ctx = self.ran(dict(self.ENROLLMENT, parked="true"))
-        self.assertEqual(jobs, self.BUILT | {"comment"})
-        self.assertEqual(required(ctx)[0], 0, required(ctx)[1])
-        _, ctx = self.ran(dict(self.ENROLLMENT, parked="true"), results={"project-builds": "failure"})
-        self.assertEqual(required(ctx)[0], 1)
-
-    def test_a_label_run_a_parked_pull_request_and_the_cap_gather_screen_and_review_nothing(self):
-        """gather, screen and review each name the label run, parked and the daily cap themselves, whatever trust route
-        gave, and the job required asks for each on its own job's condition."""
+    def test_at_the_daily_cap_gather_screen_and_review_run_nothing(self):
+        """gather, screen and review each name the daily cap themselves, whatever the gather and the screen gave, and
+        the job required asks for each on its own job's condition."""
         collect = step("required", self.COLLECT)["env"]
-        reviewable = {"needs.project-builds.outputs.name": "libx", "needs.route.outputs.kind": "enrollment",
-                      "needs.gather.result": "success", "needs.gather.outputs.digest": "d" * 64,
-                      "needs.gather.outputs.screen": "true", "needs.screen.result": "success",
-                      "needs.screen.outputs.verdict": "clean"}
-        for held in ({"needs.route.outputs.label_run": "true", "needs.route.outputs.trust": "screen"},
-                     {"needs.route.outputs.parked": "true", "needs.route.outputs.trust": "screen"},
-                     {"needs.route.outputs.trust": "cap"}):
-            with self.subTest(held=held):
-                ctx = dict(reviewable, **held)
-                for job, asked in (("gather", "ASKED_GATHER"), ("screen", "ASKED_SCREEN"), ("review", "ASKED_REVIEW")):
-                    self.assertFalse(evaluate(JOBS[job]["if"], ctx), job)
-                    self.assertFalse(evaluate(collect[asked], ctx), asked)
+        ctx = {"needs.project-builds.outputs.name": "libx", "needs.route.outputs.kind": "enrollment",
+               "needs.gather.result": "success", "needs.gather.outputs.digest": "d" * 64,
+               "needs.gather.outputs.screen": "true", "needs.screen.result": "success",
+               "needs.screen.outputs.verdict": "clean", "needs.route.outputs.trust": "cap"}
+        for job, asked in (("gather", "ASKED_GATHER"), ("screen", "ASKED_SCREEN"), ("review", "ASKED_REVIEW")):
+            self.assertFalse(evaluate(JOBS[job]["if"], ctx), job)
+            self.assertFalse(evaluate(collect[asked], ctx), asked)
         # The same condition in each pair, over every route and gather the jobs can see.
-        for route, label_run, parked, trust, name, gathered, screen in itertools.product(
-                ("success", "failure"), ("", "true"), ("", "true"), ("", "writer", "screen", "cap", "measure"),
+        for route, trust, name, gathered, screen in itertools.product(
+                ("success", "failure"), ("", "writer", "screen", "cap", "measure"),
                 ("libx", ""), ("success", "failure", "skipped"), ("true", "false")):
-            ctx = {"needs.route.result": route, "needs.route.outputs.label_run": label_run,
-                   "needs.route.outputs.parked": parked,
-                   "needs.route.outputs.trust": trust, "needs.route.outputs.kind": "enrollment",
+            ctx = {"needs.route.result": route, "needs.route.outputs.trust": trust,
+                   "needs.route.outputs.kind": "enrollment",
                    "needs.project-builds.outputs.name": name, "needs.gather.result": gathered,
                    "needs.gather.outputs.digest": "d" * 64 if gathered == "success" else "",
                    "needs.gather.outputs.screen": screen}
@@ -774,12 +725,11 @@ class Routes(unittest.TestCase):
         """Every condition change of the review and comment jobs is mirrored in the job required's ASKED_REVIEW and
         ASKED_COMMENT: the same answer over every route, gather, screen and review those jobs can see."""
         collect = step("required", self.COLLECT)["env"]
-        for label_run, parked, trust, kind, name, gathered, screened, review, comment in itertools.product(
-                ("", "true"), ("", "true"), ("", "writer", "screen", "cap"), ("enrollment", "change", "issue"),
+        for trust, kind, name, gathered, screened, review, comment in itertools.product(
+                ("", "writer", "screen", "cap"), ("enrollment", "change", "issue"),
                 ("libx", ""), ("success", "failure", "kept nothing"), ("false", "clean", "held", "failure"),
                 ("success", "failure", "cancelled", "skipped"), ("Thanks.", "")):
-            ctx = {"needs.route.outputs.label_run": label_run, "needs.route.outputs.parked": parked,
-                   "needs.route.outputs.trust": trust, "needs.route.outputs.kind": kind,
+            ctx = {"needs.route.outputs.trust": trust, "needs.route.outputs.kind": kind,
                    "needs.project-builds.outputs.name": name,
                    "needs.gather.result": "success" if gathered == "kept nothing" else gathered,
                    "needs.gather.outputs.digest": "d" * 64 if gathered == "success" else "",
@@ -792,18 +742,14 @@ class Routes(unittest.TestCase):
 
     def test_the_required_check_for_each_outcome_of_an_enrollment(self):
         """Decision 3: the comment job runs for every outcome of an enrollment whose build took the project, and the
-        required check passes for a screen's hold, the daily cap and parked on a push's run when the build passed, and
-        fails for a failed gather, screen, review (after its second attempt), hold or comment job."""
+        required check passes for a screen's hold and the daily cap when the build passed, and fails for a failed
+        gather, screen, review (after its second attempt), hold or comment job."""
         screened = {"screen": {"verdict": "clean", "checks": "model_armor"}}
         for name, route, results, outputs, want in (
                 ("reviewed", {"trust": "writer"}, {}, {}, 0),
                 ("screened and reviewed", {"trust": "screen"}, {}, screened, 0),
                 ("screen hold", {"trust": "screen"}, {}, {"screen": {"verdict": "held"}}, 0),
                 ("daily cap", {"trust": "cap", "free": "2026-11-10T00:00:00Z"}, {}, {}, 0),
-                ("parked on a push", {"parked": "true"}, {}, {}, 0),
-                # A failed job's outputs are those its steps wrote before it failed: the build took the project.
-                ("parked on a push, build failed", {"parked": "true"}, {"project-builds": "failure"},
-                 {"project-builds": {"name": "libx", "sha": "a" * 40}}, 1),
                 ("gather failed", {"trust": "screen"}, {"gather": "failure"}, {}, 1),
                 ("screen failed", {"trust": "screen"}, {"screen": "failure"}, {}, 1),
                 ("review failed", {"trust": "screen"}, {"review": "failure"}, screened, 1),
@@ -1389,15 +1335,11 @@ class Hold(Runner):
                 self.assertIn(["--method", "DELETE", f"repos/{REPO}/issues/comments/6"], calls)
 
     def test_an_enrollments_record_takes_every_hold_off(self):
-        """An enrollment gets no new hold comment, and a parked or label run has no start time: every hold comment
-        of the App and the label come off, whatever their time."""
-        for started in (self.STARTED, ""):
-            with self.subTest(started=started):
-                self.api.joinpath("args").unlink(missing_ok=True)
-                calls, _ = self.take_off("7", [dict(self.HELD[1], updated_at="2026-11-03T10:30:00Z")],
-                                         kind="enrollment", started=started)
-                self.assertIn(["--method", "DELETE", f"repos/{REPO}/issues/7/labels/review-held"], calls)
-                self.assertIn(["--method", "DELETE", f"repos/{REPO}/issues/comments/5"], calls)
+        """An enrollment gets no new hold comment: every hold comment of the App and the label come off, whatever their
+        time."""
+        calls, _ = self.take_off("7", [dict(self.HELD[1], updated_at="2026-11-03T10:30:00Z")], kind="enrollment")
+        self.assertIn(["--method", "DELETE", f"repos/{REPO}/issues/7/labels/review-held"], calls)
+        self.assertIn(["--method", "DELETE", f"repos/{REPO}/issues/comments/5"], calls)
 
     def test_a_hold_after_this_run_started_stays(self):
         """A newer event of the item, held in a run of its own while this run's review ran, keeps its hold."""
@@ -1927,118 +1869,9 @@ class ScreenedFooter(unittest.TestCase):
                 self.assertNotEqual(self.body(screened).returncode, 0)
 
 
-class LabelRun(Runner):
-    """The job required's step "The head's standing result, for a label run", with a stand-in check-runs and runs API:
-    a label run copies the newest project-builds of another Build run at the head, and never reports a pass of its
-    own."""
-
-    STEP = "The head's standing result, for a label run"
-    HEAD = "a" * 40
-    HEAD_REPO, HEAD_BRANCH = "mallory/oss-verify", "libx"
-    RUN_ID = "500"
-    CLEARS = "A push, or a re-run of this run after the head's build passes, clears it."
-
-    def checks(self, *checks):
-        """Serve the head's project-builds check runs: (check id, conclusion, the run its details_url names[, app id,
-        status, repository of its details_url])."""
-        self.serve(f"repos/{REPO}/commits/{self.HEAD}/check-runs", {"total_count": len(checks), "check_runs": [
-            {"id": c[0], "name": "project-builds", "status": c[4] if len(c) > 4 else "completed",
-             "conclusion": c[1] if (c[4] if len(c) > 4 else "completed") == "completed" else None,
-             "details_url": f"https://github.com/{c[5] if len(c) > 5 else REPO}/actions/runs/{c[2]}/job/{9000 + c[0]}",
-             "app": {"id": c[3] if len(c) > 3 else 15368}} for c in checks]})
-
-    def build_run(self, run_id, path=".github/workflows/build.yaml", event="pull_request_target", head=HEAD,
-                  repo=HEAD_REPO, branch=HEAD_BRANCH):
-        self.serve(f"repos/{REPO}/actions/runs/{run_id}", {"id": run_id, "path": path, "event": event, "head_sha": head,
-                                                         "head_repository": {"full_name": repo}, "head_branch": branch})
-
-    def standing(self):
-        return self.run_script(step("required", self.STEP)["run"], RUN_ID=self.RUN_ID, HEAD_SHA=self.HEAD,
-                               HEAD_REPO=self.HEAD_REPO, HEAD_BRANCH=self.HEAD_BRANCH)[:2]
-
-    def test_after_a_passing_full_run_it_passes(self):
-        self.checks((5, "success", 40))
-        self.build_run(40)
-        rc, out = self.standing()
-        self.assertEqual(rc, 0, out)
-        self.assertIn(f"project-builds passed at aaaaaaa in run https://github.com/{REPO}/actions/runs/40", out)
-
-    def test_after_a_failing_full_run_it_fails(self):
-        for conclusion in ("failure", "cancelled", "timed_out"):
-            with self.subTest(conclusion=conclusion):
-                self.checks((5, conclusion, 40))
-                self.build_run(40)
-                rc, out = self.standing()
-                self.assertEqual(rc, 1, out)
-                self.assertIn(f"::error::project-builds is {conclusion} at aaaaaaa in run "
-                              f"https://github.com/{REPO}/actions/runs/40, and this label run reports the same. "
-                              + self.CLEARS, out)
-
-    def test_with_none_it_fails(self):
-        for checks in ((), ((9, "success", int(self.RUN_ID)),)):
-            with self.subTest(checks=checks):
-                self.checks(*checks)
-                rc, out = self.standing()
-                self.assertEqual(rc, 1, out)
-                self.assertIn("::error::No other Build run reported project-builds at aaaaaaa, so this label run fails. "
-                              "A push clears it, or a re-run of the head's cancelled Build run and then of this run.",
-                              out)
-
-    def test_the_newest_bound_run_decides(self):
-        """A chain of label runs copies one result: an earlier label run is a pull_request_target run at the head too."""
-        self.build_run(40)
-        self.build_run(41)
-        self.checks((5, "failure", 40), (6, "success", 41))
-        self.assertEqual(self.standing()[0], 0)
-        self.checks((6, "failure", 40), (5, "success", 41))
-        self.assertEqual(self.standing()[0], 1)
-        # A newer run still going: its status, not a pass.
-        self.checks((5, "success", 40), (6, None, 41, 15368, "in_progress"))
-        rc, out = self.standing()
-        self.assertEqual(rc, 1, out)
-        self.assertIn("project-builds is in_progress at aaaaaaa", out)
-
-    def test_it_skips_its_own_run_and_runs_of_other_heads_or_workflows(self):
-        self.build_run(40)
-        self.build_run(42, head="b" * 40)
-        self.build_run(43, path=".github/workflows/validate.yaml")
-        self.build_run(44, event="workflow_dispatch")
-        self.build_run(45, repo="eve/oss-verify")
-        self.build_run(46, branch="other")
-        self.build_run(47)
-        newer = [(9, "success", int(self.RUN_ID)), (8, "success", 42), (7, "success", 43), (10, "success", 44),
-                 (11, "success", 45), (12, "success", 46), (13, "success", 47, 999), (14, "success", 47, 15368,
-                                                                                      "completed", "eve/oss-verify")]
-        for older, want in (("failure", 1), ("success", 0)):
-            with self.subTest(older=older):
-                self.checks((5, older, 40), *newer)
-                rc, out = self.standing()
-                self.assertEqual(rc, want, out)
-                self.assertIn(f"https://github.com/{REPO}/actions/runs/40,", out)
-
-    def test_a_read_that_fails_fails_it(self):
-        rc, out = self.standing()
-        self.assertEqual(rc, 1, out)
-        self.assertIn("::error::GitHub did not give the project-builds checks of aaaaaaa. Re-run this run.", out)
-        self.checks((5, "success", 40))
-        rc, out = self.standing()
-        self.assertEqual(rc, 1, out)
-        self.assertIn("::error::GitHub did not give run 40. Re-run this run.", out)
-
-    def test_the_required_job_keeps_its_static_name_and_reads_checks_and_runs(self):
-        job = JOBS["required"]
-        self.assertEqual(job["name"], "project-builds")
-        self.assertEqual(job["permissions"], {"contents": "read", "checks": "read", "actions": "read"})
-        e = step("required", self.STEP)["env"]
-        self.assertEqual((e["HEAD_SHA"], e["HEAD_REPO"], e["HEAD_BRANCH"], e["RUN_ID"]),
-                         ("${{ github.event.pull_request.head.sha }}",
-                          "${{ github.event.pull_request.head.repo.full_name }}",
-                          "${{ github.event.pull_request.head.ref }}", "${{ github.run_id }}"))
-
-
-class LabelEvents(unittest.TestCase):
-    """build.yaml starts on label events, and a label run shares the pull request's concurrency group and cancels no
-    running run, while a push, and the removal of parked, cancel."""
+class RunWiring(unittest.TestCase):
+    """The events build.yaml starts on and its concurrency, a screened review that ran out of time, and the Apps the
+    review admits."""
 
     @staticmethod
     def group(ctx):
@@ -2048,24 +1881,14 @@ class LabelEvents(unittest.TestCase):
     def cancels(ctx):
         return evaluate(WF["concurrency"]["cancel-in-progress"], ctx)
 
-    def test_it_starts_on_label_events(self):
+    def test_it_starts_on_no_label_event_and_a_push_cancels_the_run_going(self):
+        """A pull request starts it on these four events alone, none of them labeled or unlabeled. A pull request's
+        event and a run by hand cancel the run already going in their group; an issue's event waits for it."""
         on = WF.get("on", WF.get(True))
-        self.assertEqual(on["pull_request_target"]["types"],
-                         ["opened", "reopened", "synchronize", "ready_for_review", "labeled", "unlabeled"])
+        self.assertEqual(on["pull_request_target"]["types"], ["opened", "reopened", "synchronize", "ready_for_review"])
         self.assertEqual(sorted(on["workflow_dispatch"]["inputs"]),
                          ["issue", "measure", "measure_repeats", "measure_set", "pr"])
-
-    def test_a_label_run_waits_in_the_pull_requests_group_and_a_push_cancels(self):
         pr = {"github.event_name": "pull_request_target", "github.event.pull_request.number": 7}
-        for action, label in (("labeled", "size-review"), ("labeled", "parked"), ("unlabeled", "size-review")):
-            with self.subTest(action=action, label=label):
-                ctx = dict(pr, **{"github.event.action": action, "github.event.label.name": label})
-                self.assertEqual((self.group(ctx), self.cancels(ctx)), ("build-pull_request_target-7", False))
-        # The removal of parked is a full run, as a push is; GitHub compares the label's name without case.
-        for label in ("parked", "Parked"):
-            with self.subTest(action="unlabeled", label=label):
-                ctx = dict(pr, **{"github.event.action": "unlabeled", "github.event.label.name": label})
-                self.assertEqual((self.group(ctx), self.cancels(ctx)), ("build-pull_request_target-7", True))
         for action in ("opened", "reopened", "synchronize", "ready_for_review"):
             with self.subTest(action=action):
                 ctx = dict(pr, **{"github.event.action": action})

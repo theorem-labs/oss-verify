@@ -37,15 +37,6 @@ name: "Build"
 #            and no review, and route's output `free` gives the time the cap lets it run. `measure` for a run started
 #            by hand with -f measure=true and no pr or issue: the screen job alone runs, and measures its rules
 #            (below).
-#            GitHub starts this file on the event of every label (labeled, unlabeled), and route makes each a label
-#            run (its output `label_run`): it builds, screens and reviews nothing, and its project-builds copies the
-#            newest project-builds of another Build run at the head (the job required, below). The label parked,
-#            which a person puts on a pull request to hold it, is route's output `parked`: while it is on, the pull
-#            request gets no screen, no review and no review comment. The label run that adds it, and a push to a
-#            parked pull request, ask for the comment job, which records that a person holds it (below). The removal
-#            of parked is no label run: it runs, and cancels, as a push does, and reviews the head; while it waits
-#            for the run it cancelled to finish, a newer event's run, a label run included, replaces it (concurrency,
-#            below).
 #   gather   gathers what the review reads, once, with .github/scripts/review-gather (below), and keeps it as the
 #            artifact review-data, which the screen and the review take only by its SHA-256
 #            (.github/scripts/take-review-data): the review reads exactly what the screen passed. It holds no model,
@@ -147,22 +138,21 @@ name: "Build"
 #            run's too. A finding never reaches a log, an output or an artifact. Its title and text go through
 #            .github/scripts/review-neutralize before they are posted, as the comment's do (below).
 #   comment  writes, as the oss-verify App, what the run decided. For an enrollment pull request, on every run whose
-#            build took the project and on the label run that adds parked, its step "Post the comment and record the
-#            verdict" records one check run Enrollment review on the run's head (.github/scripts/review-verdict): the
-#            one record of the review's verdict, which enroll-dispatch.yml reads. Its conclusion is failure when one
-#            check is fail; success when each is pass or optional; and action_required when one is person, or when
-#            the screen held the pull request, the daily cap stopped it, parked holds it, or the gather, screen,
-#            review or hold job failed. Its summary lists each check that is not pass with the review's reason, or
-#            says why the review gave no verdicts. It is no check that the ruleset requires, so action_required never
-#            stops a person's merge. When the review gave its verdicts, the pull request is still at the run's head
-#            and parked is not on it, the same step posts the review comment, with the checks' report folded under
-#            it, or replaces the one already there; any other outcome posts nothing, and the comment of an earlier
-#            head stays. Its step "Take the label review-held off" then deletes the App's hold comments from before
-#            and takes the label review-held off, so the review comment stays the App's only comment on an enrollment
-#            pull request. For a change pull request it posts the review comment the same way, with no check run. The
-#            comment starts with
-#            <!-- oss-verify-review -->, as the triage comment starts with its own marker; an enrollment's comment
-#            then gives the fixed first sentence of the check run's conclusion (.github/scripts/review-body).
+#            build took the project, its step "Post the comment and record the verdict" records one check run
+#            Enrollment review on the run's head (.github/scripts/review-verdict): the one record of the review's
+#            verdict, which enroll-dispatch.yml reads. Its conclusion is failure when one check is fail; success when
+#            each is pass or optional; and action_required when one is person, or when the screen held the pull
+#            request, the daily cap stopped it, or the gather, screen, review or hold job failed. Its summary lists
+#            each check that is not pass with the review's reason, or says why the review gave no verdicts. It is no
+#            check that the ruleset requires, so action_required never stops a person's merge. When the review gave
+#            its verdicts and the pull request is still at the run's head, the same step posts the review comment,
+#            with the checks' report folded under it, or replaces the one already there; any other outcome posts
+#            nothing, and the comment of an earlier head stays. Its step "Take the label review-held off" then
+#            deletes the App's hold comments from before and takes the label review-held off, so the review comment
+#            stays the App's only comment on an enrollment pull request. For a change pull request it posts the review
+#            comment the same way, with no check run. The comment starts with <!-- oss-verify-review -->, as the
+#            triage comment starts with its own marker; an enrollment's comment then gives the fixed first sentence of
+#            the check run's conclusion (.github/scripts/review-body).
 #            The review's text and the checks' report, which a pull request can steer, reach the comment only through
 #            .github/scripts/review-neutralize: with no mention, no reference to an issue or pull request, no unclosed
 #            HTML comment that hides what follows it, and no line that holds a marker of this comment, so no one else
@@ -183,11 +173,10 @@ name: "Build"
 # for passed: the build when route asked for it, and the record, gather, screen, review, session, hold and comment jobs
 # when their own conditions call for them (the screen and the review on the gather job's outputs screen and digest);
 # every other job must be skipped. A held item passes it when the build passed (if asked) and the comment job recorded
-# the hold: for an enrollment in the check run Enrollment review (the screen's hold, the daily cap, or parked), for a
+# the hold: for an enrollment in the check run Enrollment review (the screen's hold or the daily cap), for a
 # change or an issue with the label review-held. An open enrollment's statements start only when that check run is
 # success (enroll-dispatch.yml). A gather, screen, review (after its second attempt), hold or comment job that failed
-# fails it, held or not, which a re-run of the failed jobs clears. A label run reports no result of its own: its job
-# required copies the newest project-builds of another Build run at the head. A skipped job counts as a pass
+# fails it, held or not, which a re-run of the failed jobs clears. A skipped job counts as a pass
 # where a check is required, so the build job is never the required check itself. The build takes the project with
 # .github/scripts/take-project, for each commit on its own:
 #   - A pull request from a fork is judged on the files GitHub lists for it: one that changes a file under projects/
@@ -213,14 +202,6 @@ name: "Build"
 # its failed check. The review is of a commit too: an edit of the description alone is reviewed with the next push.
 # It runs on ready_for_review too: enroll-dispatch.yml starts no statements for a draft pull request, and the
 # completion of this run, when the draft is marked ready, is what has it decide again.
-# It runs on labeled and unlabeled too, for the label parked (route, above). Each such run but the removal of parked is
-# a label run, which copies the head's standing project-builds and waits for the run already going: it cancels no
-# running run, but a newer event's run replaces it while it waits (concurrency, below). The removal of parked cancels
-# the running run as a push does; while either waits for that run to finish, a newer event's run, a label run
-# included, replaces it. GitHub reads the required check from the newest run at the head, so after a re-run clears a
-# failed build, the newest label run at that head is re-run too, or the maintainer pushes. When a label run replaced a
-# waiting push or removal of parked, the head has no build and no review: the maintainer re-runs the replaced run
-# (gh run rerun <run> -R theorem-labs/oss-verify), then the newest label run at that head; or pushes.
 # A failure is usually the project's, but it can be the runner's: GitHub's runner may run out of disk or time on a
 # build that works on a larger machine. A maintainer then reruns the failed job (gh run rerun <run> --failed). If it
 # fails again for the runner's reason, the maintainer builds the project with `tools/check --no-shell --twice <name>` on
@@ -354,9 +335,7 @@ run-name: ${{ inputs.measure && 'Measure the screen' || github.event.pull_reques
 
 on:
   pull_request_target:
-    # labeled and unlabeled for the label parked, by which a person holds a pull request: GitHub starts this file on
-    # every label's event, and route decides what a label's event asks for (its decide step).
-    types: [opened, reopened, synchronize, ready_for_review, labeled, unlabeled]
+    types: [opened, reopened, synchronize, ready_for_review]
   issues:
     types: [opened, edited, reopened]
   workflow_dispatch:
@@ -412,15 +391,9 @@ concurrency:
   # edit while a draft runs waits for it. Only the events that the issue's author sent share that group: route skips
   # every other (the top of this file), and each of those gets a group of its own run, so it never replaces a waiting
   # run of the author's own edit. An event that the author sent and route still skips (an owner, a member or an App
-  # wrote the issue) is of an issue that never gets a draft. A label's event (labeled, unlabeled) shares the pull
-  # request's group and cancels no running run: it waits until the run already going finishes, so the job required of
-  # a label run copies the result of a finished run, and a push still cancels a label run that waits or runs. GitHub
-  # keeps one waiting run in a group, so a newer event's run replaces a run that waits. The removal of parked (GitHub
-  # compares the label's name without case) is a full run and cancels the running run as a push does; while it waits
-  # for that run to finish (its job required has if: always()), a newer event's run, a label run included, replaces
-  # it, as it replaces a push's run that waits so. The top of this file says how to recover the head's build.
+  # wrote the issue) is of an issue that never gets a draft.
   group: build-${{ github.event_name }}-${{ github.event.pull_request.number || inputs.pr || inputs.issue || (github.event.sender.login == github.event.issue.user.login && github.event.issue.number || format('{0}-run-{1}', github.event.issue.number, github.run_id)) }}
-  cancel-in-progress: ${{ github.event_name != 'issues' && ((github.event.action != 'labeled' && github.event.action != 'unlabeled') || (github.event.action == 'unlabeled' && github.event.label.name == 'parked')) }}
+  cancel-in-progress: ${{ github.event_name != 'issues' }}
 
 jobs:
   route:
@@ -432,14 +405,7 @@ jobs:
     outputs:
       kind: ${{ steps.decide.outputs.kind }}
       sha: ${{ steps.decide.outputs.sha }}
-      # true for a label run (the decide step): no build, gather, screen, review, session or hold, and the job required
-      # copies the head's standing project-builds. Empty for every other run.
-      label_run: ${{ steps.decide.outputs.label_run }}
-      # true when the label parked holds the pull request: on it at the event, by the API for a run by hand, or added
-      # by the event. Empty otherwise.
-      parked: ${{ steps.decide.outputs.parked }}
-      # writer, screen, cap or measure (the trust step below); empty when kind is, for a label run, for a pull request
-      # that parked holds, and when no measurement was asked.
+      # writer, screen, cap or measure (the trust step below); empty when kind is and no measurement was asked.
       trust: ${{ steps.trust.outputs.trust }}
       # For trust cap: the time the daily cap lets the item run, as 2026-11-09T12:00:00Z (.github/scripts/screened-review-cap).
       free: ${{ steps.trust.outputs.free }}
@@ -467,10 +433,6 @@ jobs:
           AUTHOR: ${{ github.event.issue.user.login }}
           ASSOCIATION: ${{ github.event.issue.author_association }}
           MEASURE: ${{ inputs.measure }}
-          # A label's event: labeled or unlabeled, the label's name, and whether parked is on the pull request.
-          ACTION: ${{ github.event.action }}
-          LABEL: ${{ github.event.label.name }}
-          PARKED: ${{ contains(github.event.pull_request.labels.*.name, 'parked') }}
         run: |
           set -euo pipefail
           say() { echo "$1"; echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
@@ -481,24 +443,6 @@ jobs:
             echo "measure=true" >> "$GITHUB_OUTPUT"
             say "measurement of the screen: nothing is built or reviewed; the screen job measures its rules."
             exit 0
-          fi
-          # A label's event. GitHub starts this file on the event of every label and cannot start it for one alone, so
-          # each is a label run: it builds, screens and reviews nothing, and the job required copies the head's standing
-          # project-builds. The removal of parked is not a label run but a full run, like a push. Of the label runs,
-          # only the one that adds parked asks for a job: the comment job, which records that a person holds the pull
-          # request.
-          label=${LABEL:-} parked=false label_run=false
-          label=${label,,}
-          if [ "${EVENT:-}" = pull_request_target ]; then
-            if [[ ${PARKED:-} == true || ( ${ACTION:-} == labeled && $label == parked ) ]]; then parked=true; fi
-            if [[ ${ACTION:-} == labeled || ${ACTION:-} == unlabeled ]] && [[ $ACTION != unlabeled || $label != parked ]]; then
-              label_run=true
-              echo "label_run=true" >> "$GITHUB_OUTPUT"
-              if [[ $ACTION != labeled || $label != parked ]]; then
-                say "label $LABEL $ACTION: a label of another name, so nothing runs, and project-builds copies the head's standing result."
-                exit 0
-              fi
-            fi
           fi
           # An issue's event that is ours (the top of this file) asks for nothing: the issue does not wait for us.
           if [ "${EVENT:-}" = issues ]; then
@@ -528,12 +472,6 @@ jobs:
           sha=${HEAD_SHA:-$(jq -r .head.sha <<< "$pull")}
           [[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Could not read the pull request's head commit."; exit 1; }
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          # An event's run takes parked from the event; a run by hand from what GitHub says now.
-          if [ "${EVENT:-}" = workflow_dispatch ] \
-              && [ "$(jq '[.labels[]?.name | ascii_downcase] | index("parked") != null' <<< "$pull")" = true ]; then
-            parked=true
-          fi
-          [ "$parked" = false ] || echo "parked=true" >> "$GITHUB_OUTPUT"
           # Every path, a renamed file under both names. Over the 3000 files the API lists, the list decides nothing.
           paths=$(gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" \
             --jq '.[] | .filename, (.previous_filename // empty)')
@@ -550,20 +488,14 @@ jobs:
             fi
           fi
           echo "kind=$kind" >> "$GITHUB_OUTPUT"
-          if [ "$label_run" = true ]; then
-            message="label parked added: a person holds this pull request, so nothing is built, screened or reviewed, and project-builds copies the head's standing result."
-          elif [ "$parked" = true ]; then
-            message+=" The label parked holds it: nothing is screened or reviewed."
-          fi
           say "$message"
 
       # Whether the review may run on its own, or the screen reads the pull request or the issue first (the top of
       # this file). Write access is what GitHub's collaborator permission API answers: admin or write (maintain is
       # write). Membership of the organisation alone is not write access. The Apps in ALLOWED_BOTS count as having it.
-      # A label run and a pull request that parked holds get no trust: nothing of theirs is screened or reviewed.
       - name: Whether the author and the account that started the run have write access
         id: trust
-        if: steps.decide.outputs.measure == 'true' || (steps.decide.outputs.kind != '' && steps.decide.outputs.label_run != 'true' && steps.decide.outputs.parked != 'true')
+        if: steps.decide.outputs.kind != '' || steps.decide.outputs.measure == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -651,7 +583,7 @@ jobs:
     # Not the required check, which the job required reports (the top of this file).
     name: build
     needs: route
-    if: needs.route.outputs.kind == 'enrollment' && needs.route.outputs.label_run != 'true'
+    if: needs.route.outputs.kind == 'enrollment'
     runs-on: ubuntu-24.04
     # tools/check has no time limit of its own: this one is the runner's, the most it allows, for two builds and
     # --checks (at most 30 minutes of runs for the checks of the binaries, 2 x 20 minutes of seed runs on the unchanged
@@ -838,16 +770,16 @@ jobs:
     # output `digest`: the screen job and the review job each take the file only by that digest
     # (.github/scripts/take-review-data), so the review reads exactly what the screen passed. One tar file, so that no
     # file name of the pull request can stop the upload. It runs for every review (the review job's condition, in
-    # route's kind), whoever wrote the pull request or the issue, except on a label run, for a pull request that parked
-    # holds, and for one that route held at the daily cap (route gives trust writer or screen to none of them, and
-    # this condition names each). Never after a failed route: its trust step can have given trust screen before the
-    # step that keeps the daily cap's mark failed, and an item gathered then would be screened and reviewed with no
-    # count of the cap to see it (project-builds, which needs route, is skipped too).
+    # route's kind), whoever wrote the pull request or the issue, except for one that route held at the daily cap
+    # (route gives it neither trust writer nor screen, and this condition names it). Never after a failed route: its
+    # trust step can have given trust screen before the step that keeps the daily cap's mark failed, and an item
+    # gathered then would be screened and reviewed with no count of the cap to see it (project-builds, which needs
+    # route, is skipped too).
     needs: [route, project-builds]
     if: >-
       ${{ !cancelled() && needs.route.result == 'success'
       && (needs.project-builds.outputs.name != '' || needs.route.outputs.kind == 'change' || needs.route.outputs.kind == 'issue')
-      && needs.route.outputs.label_run != 'true' && needs.route.outputs.parked != 'true' && needs.route.outputs.trust != 'cap'
+      && needs.route.outputs.trust != 'cap'
       && (needs.route.outputs.trust == 'writer' || needs.route.outputs.trust == 'screen') }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -1069,10 +1001,10 @@ jobs:
     # verdict, clean or held, and the names of the checks that ran; why goes to the private bucket REASON_BUCKET,
     # never to this public log or an output.
     needs: [route, project-builds, gather]
-    # A screen of what the gather job kept, or a measurement, which needs no gather job. Never on a label run, for a
-    # pull request that parked holds, or for one that route held at the daily cap.
+    # A screen of what the gather job kept, or a measurement, which needs no gather job. Never for an item that route
+    # held at the daily cap.
     if: >-
-      ${{ !cancelled() && needs.route.outputs.label_run != 'true' && needs.route.outputs.parked != 'true' && needs.route.outputs.trust != 'cap'
+      ${{ !cancelled() && needs.route.outputs.trust != 'cap'
       && ((needs.gather.result == 'success' && needs.gather.outputs.digest != ''
           && needs.gather.outputs.screen != 'false') || needs.route.outputs.trust == 'measure') }}
     environment: {name: review-screen, deployment: false}
@@ -1192,11 +1124,11 @@ jobs:
     # It reads what the gather job kept. An item that the gather job's output screen says is not screened (a writer's
     # with no text of others) is reviewed as it comes; another only when the screen's
     # verdict is clean. A run whose gather job failed or kept nothing, or whose screen held it, failed or was
-    # cancelled, has no review, and neither has a label run, a pull request that parked holds, or an item that route
-    # held at the daily cap (each named here, as the gather job names them).
+    # cancelled, has no review, and neither has an item that route held at the daily cap (named here, as the gather
+    # job names it).
     needs: [route, project-builds, gather, screen]
     if: >-
-      ${{ !cancelled() && needs.route.outputs.label_run != 'true' && needs.route.outputs.parked != 'true' && needs.route.outputs.trust != 'cap'
+      ${{ !cancelled() && needs.route.outputs.trust != 'cap'
       && needs.gather.result == 'success' && needs.gather.outputs.digest != ''
       && (needs.gather.outputs.screen == 'false'
           || (needs.screen.result == 'success' && needs.screen.outputs.verdict == 'clean')) }}
@@ -1689,14 +1621,13 @@ jobs:
   comment:
     # Writes, as oss-verify[bot], what the run decided about the pull request or the issue. It runs no code of the
     # pull request.
-    # For an enrollment pull request it runs on every run whose build took the project, and on the label run that adds
-    # parked. Its step "Post the comment and record the verdict" records one check run Enrollment review at the run's
-    # head (.github/scripts/review-verdict): the review's verdicts, or that the screen held it, that the daily cap
-    # stopped it, that parked holds it, or which job failed. With the review's verdicts, at the pull request's current
-    # head and with no parked on it, the step also posts the review comment, or updates the one already there
-    # (.github/scripts/review-body); when the review held a finding back, only once the hold job sent it, because the
-    # comment says that it was sent. Any other outcome posts no comment and leaves the comment of an earlier head as it
-    # is: the review comment stays the App's only comment on an enrollment pull request.
+    # For an enrollment pull request it runs on every run whose build took the project. Its step "Post the comment and
+    # record the verdict" records one check run Enrollment review at the run's head (.github/scripts/review-verdict):
+    # the review's verdicts, or that the screen held it, that the daily cap stopped it, or which job failed. With the
+    # review's verdicts and at the pull request's current head, the step also posts the review comment, or updates the
+    # one already there (.github/scripts/review-body); when the review held a finding back, only once the hold job sent
+    # it, because the comment says that it was sent. Any other outcome posts no comment and leaves the comment of an
+    # earlier head as it is: the review comment stays the App's only comment on an enrollment pull request.
     # For a change pull request it posts the review's comment the same way, with no check run. For a change pull
     # request or an issue that the screen held, that could not be gathered or screened, whose screened review failed,
     # or that route held at the daily cap: it puts the label review-held on it and posts one comment that says so, in
@@ -1706,8 +1637,7 @@ jobs:
     # an issue: a person approves the exact text of each reply to an issue before anyone posts it.
     needs: [route, project-builds, gather, screen, review, hold]
     if: >-
-      ${{ !cancelled() && ((needs.route.outputs.kind == 'enrollment'
-          && (needs.project-builds.outputs.name != '' || (needs.route.outputs.label_run == 'true' && needs.route.outputs.parked == 'true')))
+      ${{ !cancelled() && ((needs.route.outputs.kind == 'enrollment' && needs.project-builds.outputs.name != '')
       || (needs.route.outputs.kind == 'change' && needs.review.result == 'success' && needs.review.outputs.comment != '')
       || (needs.route.outputs.kind == 'issue' && needs.review.result == 'success')
       || ((needs.route.outputs.kind == 'change' || needs.route.outputs.kind == 'issue')
@@ -1897,9 +1827,8 @@ jobs:
           CHECKS: ${{ needs.project-builds.outputs.checks }}
           # The checks the screen ran, when it screened this pull request first.
           SCREENED: ${{ needs.gather.outputs.screen != 'false' && needs.screen.outputs.checks || '' }}
-          # What the run decided, for an enrollment: route's hold (parked, or the daily cap and the time it frees), the
-          # result of each job, the screen's verdict, and whether the review held a finding back.
-          PARKED: ${{ needs.route.outputs.parked }}
+          # What the run decided, for an enrollment: route's hold (the daily cap and the time it frees), the result of
+          # each job, the screen's verdict, and whether the review held a finding back.
           TRUST: ${{ needs.route.outputs.trust }}
           FREE: ${{ needs.route.outputs.free }}
           GATHER_RESULT: ${{ needs.gather.result }}
@@ -1913,12 +1842,11 @@ jobs:
           # A pull request's comment only: a run for an issue has no pull request, and an issue's draft is never posted.
           [[ ${PR:-} =~ ^[0-9]+$ ]] || { echo "::error::This run has no pull request, so nothing is posted."; exit 1; }
           [[ ${HEAD_SHA:-} =~ ^[0-9a-f]{40}$ ]] || { echo "::error::This run names no head commit, so nothing is posted."; exit 1; }
-          # Why an enrollment has no verdicts of its review: parked holds it, the daily cap stopped it, a job failed
+          # Why an enrollment has no verdicts of its review: the daily cap stopped it, a job failed
           # (the hold job too, when the comment says that it sent the review's held finding), or the screen held it.
           hold="" job=""
           if [ "$KIND" = enrollment ]; then
-            if [ "${PARKED:-}" = true ]; then hold=parked
-            elif [ "${TRUST:-}" = cap ]; then hold=cap
+            if [ "${TRUST:-}" = cap ]; then hold=cap
             elif [[ $GATHER_RESULT == failure || $GATHER_RESULT == cancelled ]]; then hold=failed job=gather
             elif [[ $SCREEN_RESULT == failure || $SCREEN_RESULT == cancelled ]]; then hold=failed job=screen
             elif [ "$SCREEN_RESULT" = success ] && [ "${SCREEN_VERDICT:-}" != clean ]; then hold=screen
@@ -1931,14 +1859,9 @@ jobs:
             fi
           fi
           # The pull request now: only a run of its current head posts, since a run of an older head that finished later
-          # would replace the newer head's review; and parked put on it while this run worked holds it (a label's run
-          # waits for this one).
+          # would replace the newer head's review.
           pull=$(gh api "repos/$REPO/pulls/$PR")
           current=$(jq -r .head.sha <<< "$pull")
-          if [ "$KIND" = enrollment ] && [ "$hold" != parked ] \
-              && [ "$(jq '[.labels[]?.name | ascii_downcase] | index("parked") != null' <<< "$pull")" = true ]; then
-            hold=parked job=""
-          fi
           conclusion=""
           if [ "$KIND" = enrollment ]; then
             # review-verdict reads the review's VERDICTS and REASONS from this step's env, and none of them with HOLD.
@@ -1982,7 +1905,7 @@ jobs:
       # held, in a run of its own. This run's own hold, from an attempt before a re-run of its failed jobs, counts as
       # older whatever its time. For an enrollment pull request, every check run the step above records takes the
       # label and the App's hold comments from before off, so the review comment stays the App's only comment on it:
-      # an enrollment gets no new hold comment, so no newer hold is kept (and a parked or label run has no start time).
+      # an enrollment gets no new hold comment, so no newer hold is kept.
       # A hold comment or a label already gone is no error.
       - name: Take the label review-held off
         if: >-
@@ -1998,7 +1921,7 @@ jobs:
           set -uo pipefail
           [[ $NUMBER =~ ^[1-9][0-9]*$ ]] || { echo "::error::not a number: $NUMBER"; exit 1; }
           [[ $RUN_ID =~ ^[0-9]+$ ]] || { echo "::error::not a run id: $RUN_ID"; exit 1; }
-          [ "$KIND" = enrollment ] || [[ $STARTED =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
+          [[ $STARTED =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
             || { echo "::error::no start time of this run"; exit 1; }
           held=$(gh api "repos/$REPO/issues/$NUMBER/comments" --paginate \
             --jq '.[] | select(.user.login == "oss-verify[bot]" and (.body | startswith("<!-- oss-verify-held -->")))
@@ -2023,107 +1946,55 @@ jobs:
 
   required:
     # The required check project-builds (the top of this file), with .github/scripts/collect. A static name: GitHub
-    # reports the check under it on every run. A label run (route's output label_run) builds and reviews nothing, so it
-    # never reports a pass of its own: GitHub reads a required check from the newest run of this file at the head, and a
-    # pass of skipped jobs would stand over a failed build. Its step "The head's standing result, for a label run"
-    # copies the newest project-builds of another run at the head instead.
+    # reports the check under it on every run.
     name: project-builds
     needs: [route, project-builds, record, gather, screen, review, session, hold, comment]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
-      # For the checkout of .github/scripts.
+      # Only for the checkout of .github/scripts.
       contents: read
-      # For a label run: the head's project-builds check runs, and the runs they name.
-      checks: read
-      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with:
           persist-credentials: false
           sparse-checkout: .github/scripts
 
-      # The project-builds check runs of GitHub Actions (app 15368) at the head, bound as enroll-dispatch binds them:
-      # each names its run in its details_url, and only a pull_request_target run of build.yaml at this head, from the
-      # pull request's head repository and branch, and other than this run, counts. The newest one's conclusion is this
-      # run's: success passes; anything else, or none, fails. A label run waits for the run already going in its
-      # concurrency group, so the newest is of a finished run, and a chain of label runs copies one result.
-      - name: The head's standing result, for a label run
-        if: needs.route.outputs.label_run == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          RUN_ID: ${{ github.run_id }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
-        run: |
-          set -euo pipefail
-          say() { echo "$1"; echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
-          runs_url="https://github.com/$REPO/actions/runs/"
-          clears="A push, or a re-run of this run after the head's build passes, clears it."
-          [[ $HEAD_SHA =~ ^[0-9a-f]{40}$ && $RUN_ID =~ ^[0-9]+$ ]] \
-            || { echo "::error::This label run names no head commit, so it cannot report project-builds. $clears"; exit 1; }
-          checks=$(gh api --paginate "repos/$REPO/commits/$HEAD_SHA/check-runs?check_name=project-builds&filter=all&per_page=100" \
-            --jq '.check_runs[] | select(.name == "project-builds" and .app.id == 15368)
-              | "\(.id) \(.status) \(.conclusion // "none") \(.details_url // "-")"') \
-            || { echo "::error::GitHub did not give the project-builds checks of ${HEAD_SHA:0:7}. Re-run this run."; exit 1; }
-          while read -r _ status conclusion url; do
-            [[ ${url:-} == "$runs_url"* && ${url#"$runs_url"} =~ ^([0-9]+)/job/[0-9]+$ ]] || continue
-            run=${BASH_REMATCH[1]}
-            [ "$run" != "$RUN_ID" ] || continue
-            bound=$(gh api "repos/$REPO/actions/runs/$run" \
-              --jq '"\(.path) \(.event) \(.head_sha) \(.head_repository.full_name // "-") \(.head_branch // "-")"') \
-              || { echo "::error::GitHub did not give run $run. Re-run this run."; exit 1; }
-            [ "$bound" = ".github/workflows/build.yaml pull_request_target $HEAD_SHA $HEAD_REPO $HEAD_BRANCH" ] || continue
-            if [ "$status" = completed ] && [ "$conclusion" = success ]; then
-              say "project-builds passed at ${HEAD_SHA:0:7} in run $runs_url$run, and this label run reports the same."
-              exit 0
-            fi
-            [ "$status" = completed ] || conclusion=$status
-            echo "::error::project-builds is $conclusion at ${HEAD_SHA:0:7} in run $runs_url$run, and this label run reports the same. $clears"
-            exit 1
-          done < <(sort -k1,1nr <<< "$checks")
-          echo "::error::No other Build run reported project-builds at ${HEAD_SHA:0:7}, so this label run fails. A push clears it, or a re-run of the head's cancelled Build run and then of this run."
-          exit 1
-
       - name: Every job route asked for passed, and no other ran
-        if: needs.route.outputs.label_run != 'true'
         env:
           ROUTE: ${{ needs.route.result }}
           BUILD: ${{ needs.project-builds.result }}
-          ASKED_BUILD: ${{ needs.route.outputs.kind == 'enrollment' && needs.route.outputs.label_run != 'true' }}
+          ASKED_BUILD: ${{ needs.route.outputs.kind == 'enrollment' }}
           # Each of the others is asked for on its own job's condition: the record when the build passed and took a
-          # project; gather when the build took a project or the kind is change or issue (the item is reviewable), it
-          # is no label run, parked does not hold it, and route did not hold it at the daily cap; the screen on those
-          # three too, when gather kept the item (its output digest) and its output screen is not false; the review on
-          # those three too, when gather kept it and its output screen is false, or the screen's verdict is clean; the
-          # session when the review kept one; hold when an enrollment's review ran; comment on every run of an
-          # enrollment whose build took the project and on the label run that adds parked to one (the check run
-          # Enrollment review), when the review wrote a change's comment, when the review of an issue made its draft
-          # (the comment job takes a hold off it), or when a change or an issue is held (route's cap, a screen that
-          # held it or failed, a screened review that failed, or no gathered item to read). So a held item passes this
-          # check when the build passed (if asked) and the comment job recorded the hold: a screen's hold, the daily
-          # cap, or parked on a push's run. A gather, screen, review (after its second attempt), hold or comment job
-          # that failed fails it, held or not.
+          # project; gather when the build took a project or the kind is change or issue (the item is reviewable), and
+          # route did not hold it at the daily cap; the screen when route did not hold it at the daily cap either, and
+          # gather kept the item (its output digest) and its output screen is not false; the review when route did not
+          # hold it at the daily cap either, and gather kept it and its output screen is false, or the screen's verdict
+          # is clean; the session when the review kept one; hold when an enrollment's review ran; comment on every run
+          # of an enrollment whose build took the project (the check run Enrollment review), when the review wrote a
+          # change's comment, when the review of an issue made its draft (the comment job takes a hold off it), or when
+          # a change or an issue is held (route's cap, a screen that held it or failed, a screened review that failed,
+          # or no gathered item to read). So a held item passes this check when the build passed (if asked) and the
+          # comment job recorded the hold: a screen's hold or the daily cap. A gather, screen, review (after its second
+          # attempt), hold or comment job that failed fails it, held or not.
           RECORD: ${{ needs.record.result }}
           ASKED_RECORD: ${{ needs.project-builds.result == 'success' && needs.project-builds.outputs.name != '' }}
           GATHER: ${{ needs.gather.result }}
           ASKED_GATHER: >-
             ${{ needs.route.result == 'success'
             && (needs.project-builds.outputs.name != '' || needs.route.outputs.kind == 'change' || needs.route.outputs.kind == 'issue')
-            && needs.route.outputs.label_run != 'true' && needs.route.outputs.parked != 'true' && needs.route.outputs.trust != 'cap'
+            && needs.route.outputs.trust != 'cap'
             && (needs.route.outputs.trust == 'writer' || needs.route.outputs.trust == 'screen') }}
           SCREEN: ${{ needs.screen.result }}
           # A measurement asks for the screen job alone (route's trust measure), and for no other job.
           ASKED_SCREEN: >-
-            ${{ needs.route.outputs.label_run != 'true' && needs.route.outputs.parked != 'true' && needs.route.outputs.trust != 'cap'
+            ${{ needs.route.outputs.trust != 'cap'
             && ((needs.gather.result == 'success' && needs.gather.outputs.digest != '' && needs.gather.outputs.screen != 'false')
                 || needs.route.outputs.trust == 'measure') }}
           REVIEW: ${{ needs.review.result }}
           ASKED_REVIEW: >-
-            ${{ needs.route.outputs.label_run != 'true' && needs.route.outputs.parked != 'true' && needs.route.outputs.trust != 'cap'
+            ${{ needs.route.outputs.trust != 'cap'
             && needs.gather.result == 'success' && needs.gather.outputs.digest != ''
             && (needs.gather.outputs.screen == 'false'
                 || (needs.screen.result == 'success' && needs.screen.outputs.verdict == 'clean')) }}
@@ -2133,8 +2004,7 @@ jobs:
           ASKED_HOLD: ${{ needs.review.result != 'skipped' && needs.route.outputs.kind == 'enrollment' }}
           COMMENT: ${{ needs.comment.result }}
           ASKED_COMMENT: >-
-            ${{ (needs.route.outputs.kind == 'enrollment'
-                && (needs.project-builds.outputs.name != '' || (needs.route.outputs.label_run == 'true' && needs.route.outputs.parked == 'true')))
+            ${{ (needs.route.outputs.kind == 'enrollment' && needs.project-builds.outputs.name != '')
             || (needs.route.outputs.kind == 'change' && needs.review.result == 'success' && needs.review.outputs.comment != '')
             || (needs.route.outputs.kind == 'issue' && needs.review.result == 'success')
             || ((needs.route.outputs.kind == 'change' || needs.route.outputs.kind == 'issue')

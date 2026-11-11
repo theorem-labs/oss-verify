@@ -757,18 +757,17 @@ class PostingStep(Runner):
     MARKER = "<!-- oss-verify-review -->"
 
     def post(self, kind="enrollment", verdicts=None, reasons=None, review="Thanks.\n\n1. Fix X.\n", head=HEAD,
-             pr_head=None, labels=(), comments=(), label=True, status=0, started="2026-11-03T10:00:00Z", **env):
+             pr_head=None, comments=(), label=True, status=0, started="2026-11-03T10:00:00Z", **env):
         """Run the step for a run of `kind` at `head` whose review gave `verdicts` and `reasons` (None: no verdicts),
-        on pull request 8, whose head is now `pr_head` (by default `head`) and which carries `labels` and `comments`
-        (and review-held, unless `label` is false); then the step after it, with route's output started `started`,
+        on pull request 8, whose head is now `pr_head` (by default `head`) and which carries `comments` (and
+        review-held, unless `label` is false); then the step after it, with route's output started `started`,
         when its if holds. `env` replaces what the job gives the step. Return the steps' output and each request they
         sent, as (method, endpoint, body)."""
         # Each run starts with no request recorded.
         self.api.joinpath("args").unlink(missing_ok=True)
         self.api.joinpath(f"repos_{self.REPO.replace('/', '_')}_issues_8_labels_review-held.json").unlink(
             missing_ok=True)
-        self.serve(f"repos/{self.REPO}/pulls/8",
-                   {"head": {"sha": pr_head or head}, "labels": [{"name": n} for n in labels]})
+        self.serve(f"repos/{self.REPO}/pulls/8", {"head": {"sha": pr_head or head}})
         self.serve(f"repos/{self.REPO}/issues/8/comments", list(comments))
         for comment in comments:
             self.serve(f"repos/{self.REPO}/issues/comments/{comment['id']}", {})
@@ -777,7 +776,7 @@ class PostingStep(Runner):
             self.serve(f"repos/{self.REPO}/issues/8/labels/review-held", [])
         given = {"PR": "8", "HEAD_SHA": head, "RUN_URL": self.RUN_URL, "REVIEW": review,
                  "VERDICTS": "" if verdicts is None else json.dumps(verdicts), "REASONS": json.dumps(reasons or {}),
-                 "CHECKS": "### new report\n" if kind == "enrollment" else "", "SCREENED": "", "PARKED": "",
+                 "CHECKS": "### new report\n" if kind == "enrollment" else "", "SCREENED": "",
                  "TRUST": "writer", "FREE": "", "GATHER_RESULT": "success", "SCREEN_RESULT": "skipped",
                  "SCREEN_VERDICT": "", "REVIEW_RESULT": "success", "HELD": "false", "HOLD_RESULT": "success"}
         given.update(env)
@@ -886,27 +885,6 @@ class PostingStep(Runner):
                                   + self.RERUN}))
                 self.assertEqual(self.comments(requests), [])
 
-    def test_c3_a_parked_records_that_a_person_holds_it_and_posts_no_comment(self):
-        """The label run that adds parked (no build, so no checks' report), and a push to a pull request that parked
-        holds: neither has a review."""
-        for env in ({"PARKED": "true", "TRUST": "", "GATHER_RESULT": "skipped", "REVIEW_RESULT": "skipped",
-                     "HOLD_RESULT": "skipped", "CHECKS": ""},
-                    {"PARKED": "true", "TRUST": "", "GATHER_RESULT": "skipped", "REVIEW_RESULT": "skipped",
-                     "HOLD_RESULT": "skipped"}):
-            with self.subTest(env=env):
-                _, requests = self.post(review="", labels=["parked"], **env)
-                run = self.record(requests)
-                self.assertEqual(run["conclusion"], "action_required")
-                self.assertEqual(run["output"]["title"], "A person holds this pull request.")
-                self.assertIn("a person holds this pull request", run["output"]["summary"].lower())
-                self.assertEqual(self.comments(requests), [])
-
-    def test_c3_b_after_parked_comes_off_the_head_is_reviewed(self):
-        _, requests = self.post(verdicts=self.verdicts(), TRUST="screen", SCREEN_RESULT="success",
-                                SCREEN_VERDICT="clean", SCREENED="model_armor")
-        self.assertEqual(self.record(requests)["conclusion"], "success")
-        self.assertEqual(self.first_sentence(requests), SENTENCES["success"])
-
     def test_c3_c_d_a_capped_pull_request_is_told_the_cap_and_when_it_frees(self):
         _, requests = self.post(review="", TRUST="cap", FREE="2026-11-10T00:00:00Z", GATHER_RESULT="skipped",
                                 REVIEW_RESULT="skipped", HOLD_RESULT="skipped")
@@ -917,14 +895,6 @@ class PostingStep(Runner):
                        "write access to this repository, and the automated reviews of such accounts reached their cap "
                        "of 24 in 24 hours, 12 for one author. From 2026-11-10 00:00 UTC, a push or "
                        "`gh workflow run build.yaml -R theorem-labs/oss-verify -f pr=8` reviews it."}))
-        self.assertEqual(self.comments(requests), [])
-
-    def test_parked_put_on_while_the_run_worked_stops_the_comment(self):
-        """Decision 2: the label run that adds parked waits for this run, so this step reads the labels again."""
-        _, requests = self.post(verdicts=self.verdicts(F3="fail"), reasons={"F3": "x"}, labels=["Parked"])
-        run = self.record(requests)
-        self.assertEqual((run["conclusion"], run["output"]["title"]),
-                         ("action_required", "A person holds this pull request."))
         self.assertEqual(self.comments(requests), [])
 
     def test_a_review_replaces_the_posted_one(self):
@@ -982,11 +952,11 @@ class PostingStep(Runner):
 
     def test_every_record_takes_a_hold_comment_and_review_held_off(self):
         """Decision 9: the App's hold comments of the time before the check run go, another account's stay, and a
-        label already gone is no error. A parked or label run has no start time of route, and needs none."""
+        label already gone is no error."""
         held = [{"id": 5, "user": {"login": "oss-verify[bot]"}, "body": "<!-- oss-verify-held -->\nheld"},
                 {"id": 6, "user": {"login": "mallory"}, "body": "<!-- oss-verify-held --> forged"}]
         for env, started in (({"REVIEW_RESULT": "success"}, "2026-11-03T10:00:00Z"),
-                             ({"REVIEW_RESULT": "failure"}, "2026-11-03T10:00:00Z"), ({"PARKED": "true"}, "")):
+                             ({"REVIEW_RESULT": "failure"}, "2026-11-03T10:00:00Z")):
             with self.subTest(env=env):
                 _, requests = self.post(verdicts=self.verdicts(), comments=held, started=started, **env)
                 self.record(requests)
@@ -1135,10 +1105,7 @@ class ReviewVerdict(unittest.TestCase):
         self.assertLess(len(got["summary"]), 65_535)
         self.assertEqual(got["summary"].count("- **"), len(ids))
 
-    def test_a_hold_is_fixed_words_and_refuses_what_it_cannot_check(self):
-        self.assertEqual(self.verdict(HOLD="parked")["summary"],
-                         "A person holds this pull request. While the label parked is on it, it is not screened or "
-                         "reviewed. When a person takes the label off, it is screened and reviewed at its head.")
+    def test_a_hold_refuses_what_it_cannot_check(self):
         for env in ({"HOLD": "cap", "FREE": ""}, {"HOLD": "cap", "FREE": "tomorrow"}, {"HOLD": "failed", "JOB": "build"},
                     {"HOLD": "failed", "JOB": ""}, {"HOLD": "other"}, {"HOLD": "screen", "PR": "8; x"},
                     {"HOLD": "screen", "RUN_URL": "https://github.com/o/r/pull/8"}):

@@ -20,7 +20,7 @@
 # daily-cap-screen once a runner took the job. So a run counts when it has daily-cap-route and either it has not
 # completed (it may yet screen) or it has daily-cap-screen. It counts from the moment route gave its trust, so a burst
 # of items is counted before their builds end, which can take hours; and a run cancelled before its screen started
-# (a push that cancels a run still building) does not count, nor a run that route capped, a label run, or a run of a
+# (a push that cancels a run still building) does not count, nor a run that route capped or a run of a
 # writer's trust. Write access is what GitHub's collaborator permission API answers, admin or write, and the Apps of
 # ALLOWED_BOTS count as having it, with one read of each account's permission. It reads the runs, their status
 # included, and the two artifacts' lists, each in one paginated call, and no run's jobs.

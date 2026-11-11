@@ -14,13 +14,11 @@ import json
 import os
 import pathlib
 import re
-import shutil
 import subprocess
 
 import pytest
 import yaml
 
-from test_outside_screen import required_steps, run_graph
 from test_take_project import git, isolated_git_env
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -142,25 +140,18 @@ def literal_env(flow, decide):
     return {k: str(v) for k, v in pairs.items() if "${{" not in str(v)}
 
 
-def route_build(tmp_path, files, changed=None, base="main", actor="someone", event="", action="", label="",
-                parked="false", labels=()):
-    """Run build.yaml's route step, started by `actor` on `event` (a label's `action` of `label`, with `parked` whether
-    the event's pull request carries parked), with a fake gh whose pull request into `base` lists `files` (a path, or a
-    (new, old) pair for a rename; changed_files: `changed`, by default their number) and carries `labels`, and applies
-    the step's --jq filter as gh does. Return its outputs, one line each."""
+def route_build(tmp_path, files, changed=None, base="main", actor="someone"):
+    """Run build.yaml's route step, started by `actor`, with a fake gh whose pull request into `base` lists `files` (a
+    path, or a (new, old) pair for a rename; changed_files: `changed`, by default their number), and applies the step's
+    --jq filter as gh does. Return its outputs, one line each."""
     bin = tmp_path / "bin"
-    shutil.rmtree(bin, ignore_errors=True)
-    for name in ("output", "calls", "summary"):
-        (tmp_path / name).unlink(missing_ok=True)
     bin.mkdir()
     (tmp_path / "pull.json").write_text(json.dumps({"head": {"sha": "a" * 40},
                                                     "base": {"ref": base, "repo": {"default_branch": "main"}},
-                                                    "changed_files": len(files) if changed is None else changed,
-                                                    "labels": [{"name": n} for n in labels]}))
+                                                    "changed_files": len(files) if changed is None else changed}))
     (tmp_path / "files.json").write_text(json.dumps(
         [{"filename": f} if isinstance(f, str) else {"filename": f[0], "previous_filename": f[1]} for f in files]))
     (bin / "gh").write_text('#!/bin/bash\nfilter=""; for a; do [ "$prev" = --jq ] && filter=$a; prev=$a; done\n'
-                            f'echo "$*" >> {tmp_path}/calls\n'
                             f'case " $*" in {USERS_GH}  *"/files"*) jq -r "$filter" {tmp_path}/files.json ;;\n'
                             f'  *) cat {tmp_path}/pull.json ;; esac\n')
     (bin / "gh").chmod(0o755)
@@ -170,9 +161,8 @@ def route_build(tmp_path, files, changed=None, base="main", actor="someone", eve
     run = subprocess.run(["bash", "-e", "-c", decide["run"]], capture_output=True, text=True, cwd=ROOT,
                          env={**os.environ, **literal_env(flow, decide),
                               "PATH": f"{bin}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r",
-                              "PR": "8", "HEAD_SHA": "a" * 40 if event == "pull_request_target" else "",
-                              "ACTOR": actor, "EVENT": event,
-                              "ACTION": action, "LABEL": label, "PARKED": parked, "GITHUB_OUTPUT": str(written),
+                              "PR": "8", "HEAD_SHA": "", "ACTOR": actor,
+                              "GITHUB_OUTPUT": str(written),
                               "GITHUB_STEP_SUMMARY": str(tmp_path / "summary")})
     assert run.returncode == 0, run.stderr
     return written.read_text().splitlines()
@@ -208,63 +198,6 @@ def test_builds_route_reviews_a_pull_request_with_no_file_under_projects_as_a_ch
 ])
 def test_a_change_that_an_app_the_review_refuses_started_is_built_as_before(tmp_path, actor, want):
     assert route_build(tmp_path, [".github/workflows/build.yaml"], actor=actor)[-1] == want
-
-
-def graph_of(outputs, trust=""):
-    """The jobs that run after route gives these decide outputs (and, when the trust step runs, `trust`)."""
-    route = dict(line.split("=", 1) for line in outputs)
-    if trust:
-        route["trust"] = trust
-    got, _ = run_graph(route)
-    return {n for n, r in got.items() if r != "skipped"} - {"route", "required"}
-
-
-@pytest.mark.parametrize("action", ["labeled", "unlabeled"])
-@pytest.mark.parametrize("label", ["size-review", "maintainer-confirmed", "review-held", "checks-failing"])
-def test_a_label_of_another_name_asks_for_nothing(tmp_path, action, label):
-    """A label run: route reads nothing and asks for no job; the job required copies the head's standing result."""
-    outputs = route_build(tmp_path, ["projects/p/project.yaml"], event="pull_request_target", action=action,
-                          label=label)
-    assert outputs == ["label_run=true"]
-    assert not (tmp_path / "calls").exists()
-    assert "a label of another name, so nothing runs" in (tmp_path / "summary").read_text()
-    assert graph_of(outputs) == set()
-    _, ctx = run_graph(dict(line.split("=", 1) for line in outputs))
-    assert required_steps(ctx) == {"The head's standing result, for a label run"}
-
-
-def test_adding_parked_builds_nothing_and_asks_for_the_comment_job(tmp_path):
-    """c3 (a): a person puts parked on an outside enrollment: no build, no screen, no review, and the comment job
-    records the hold."""
-    outputs = route_build(tmp_path, ["projects/p/project.yaml"], event="pull_request_target", action="labeled",
-                          label="parked", parked="true", actor="alice")
-    assert outputs == ["label_run=true", f"sha={'a' * 40}", "parked=true", "kind=enrollment"]
-    assert graph_of(outputs) == {"comment"}
-    # parked on a change pull request asks for nothing.
-    outputs = route_build(tmp_path, ["README.md"], event="pull_request_target", action="labeled", label="parked",
-                          parked="true", actor="alice")
-    assert outputs[-1] == "kind=change" and graph_of(outputs) == set()
-
-
-def test_removing_parked_is_a_full_run(tmp_path):
-    """c3 (b): the unlabeled event that removes parked builds, screens and reviews the head, as a push does."""
-    outputs = route_build(tmp_path, ["projects/p/project.yaml"], event="pull_request_target", action="unlabeled",
-                          label="parked", parked="false", actor="alice")
-    assert outputs == [f"sha={'a' * 40}", "kind=enrollment"]
-    assert {"project-builds", "record", "gather", "screen"} <= graph_of(outputs, trust="screen")
-
-
-def test_parked_holds_a_push_and_a_run_by_hand(tmp_path):
-    """A push to a pull request that parked holds builds it and asks for no screen or review: the comment job records
-    that a person holds it. A run by hand reads the label from GitHub."""
-    outputs = route_build(tmp_path, ["projects/p/project.yaml"], event="pull_request_target", action="synchronize",
-                          parked="true")
-    assert outputs == [f"sha={'a' * 40}", "parked=true", "kind=enrollment"]
-    assert graph_of(outputs) == {"project-builds", "record", "comment"}
-    outputs = route_build(tmp_path, ["projects/p/project.yaml"], event="workflow_dispatch", labels=["Parked", "x"])
-    assert outputs == [f"sha={'a' * 40}", "parked=true", "kind=enrollment"]
-    outputs = route_build(tmp_path, ["projects/p/project.yaml"], event="workflow_dispatch", labels=["size-review"])
-    assert outputs == [f"sha={'a' * 40}", "kind=enrollment"]
 
 
 def actor_kind(tmp_path, login, allowed="sjawhar-agent[bot],oss-verify[bot]", answer=None):
