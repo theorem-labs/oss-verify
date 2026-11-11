@@ -151,15 +151,15 @@ jobs:
       deployment: false
     permissions:
       # Only for the GitHub identity token that Google's federation trades for an access token of
-      # ossv-app-comment@theorem-agent-infra, which reads the App's key. This job posts text and runs no code of the
+      # ossv-app-comment@theorem-agent-root, which reads the App's key. This job posts text and runs no code of the
       # pull request.
       id-token: write
     env:
       # Theorem's Google project, as Theorem's infrastructure code declares them. Public identifiers, not
       # credentials: the provider admits this file, build.yaml and enroll-dispatch.yml on refs/heads/main, and only a
       # job in the environment `comment` can act as this account.
-      GCP_WORKLOAD_IDENTITY_PROVIDER: projects/805240912354/locations/global/workloadIdentityPools/github/providers/github-ossv
-      GCP_SERVICE_ACCOUNT: ossv-app-comment@theorem-agent-infra.iam.gserviceaccount.com
+      GCP_WORKLOAD_IDENTITY_PROVIDER: projects/844532188053/locations/global/workloadIdentityPools/github/providers/github-ossv
+      GCP_SERVICE_ACCOUNT: ossv-app-comment@theorem-agent-root.iam.gserviceaccount.com
     steps:
       - name: Sign in to Google Cloud
         id: gcp

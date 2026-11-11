@@ -161,8 +161,8 @@ jobs:
     env:
       # Public identifiers, not credentials: the provider and the account that reads the App's key, as in build.yaml's
       # and triage.yaml's comment jobs.
-      GCP_WORKLOAD_IDENTITY_PROVIDER: projects/805240912354/locations/global/workloadIdentityPools/github/providers/github-ossv
-      GCP_SERVICE_ACCOUNT: ossv-app-comment@theorem-agent-infra.iam.gserviceaccount.com
+      GCP_WORKLOAD_IDENTITY_PROVIDER: projects/844532188053/locations/global/workloadIdentityPools/github/providers/github-ossv
+      GCP_SERVICE_ACCOUNT: ossv-app-comment@theorem-agent-root.iam.gserviceaccount.com
       # The private statements repository, by its id.
       INTERNAL_ID: "1425069221"
       DECISION: ${{ needs.decide.outputs.decision }}
