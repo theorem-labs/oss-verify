@@ -136,7 +136,15 @@ class World:
             f"repos/{REPO}/pulls/{PR}": Calls(*self.pulls),
             f"repos/{REPO}/pulls/{PR}/files?per_page=100": [self.files],
             f"repos/{REPO}/contents/projects/plugin-hostd/project.yaml?ref={SHA}": self.project_yaml,
+            # review-passed's reads: the pull request's events, and this repository's runs at SHA.
+            f"repos/{REPO}/issues/{PR}/events?per_page=100": [[]],
+            f"repos/{REPO}/actions/runs?head_sha={SHA}&per_page=100": [{"workflow_runs": [
+                run for run in self.runs.values() if run["head_sha"] == SHA]}],
         }
+        # The open pull request of each run's head, for a decision that names none: the last answer of the pull request.
+        for run in self.runs.values():
+            owner, branch = run["head_repository"]["full_name"].split("/")[0], run["head_branch"]
+            table[f"repos/{REPO}/pulls?state=open&base=main&head={owner}:{branch}&per_page=100"] = [self.pulls[-1:]]
         for run_id, run in self.runs.items():
             table[f"repos/{REPO}/actions/runs/{run_id}"] = run
             rec = self.artifacts.get(run_id)
