@@ -313,11 +313,6 @@ def review_verdicts(api: Api, repo: str, run_id: int) -> tuple[dict | None, str,
     return verdicts, "", ""
 
 
-def review_problem(api: Api, repo: str, run_id: int) -> tuple[str, str]:
-    """The (label, why) of review_verdicts, without the verdicts."""
-    return review_verdicts(api, repo, run_id)[1:]
-
-
 def size(value: object) -> bool:
     return value is None or (isinstance(value, int) and not isinstance(value, bool) and value >= 0)
 

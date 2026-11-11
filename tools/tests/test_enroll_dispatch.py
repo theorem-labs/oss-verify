@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for .github/scripts/enroll-dispatch and the jobs around it, offline, with a fake GitHub API:
 python3 -m pytest tools/tests/test_enroll_dispatch.py"""
+import calendar
 import copy
+import functools
 import importlib.machinery
 import importlib.util
 import io
@@ -14,12 +16,19 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+import urllib.parse
 import zipfile
 
 import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+# GitHub's expressions, evaluated as test_outside_screen.py evaluates them: the dispatch job's if and env, and its
+# steps' if and env.
+sys.path.insert(0, str(ROOT / "tools" / "tests"))
+from test_outside_screen import as_text, evaluate  # noqa: E402
+
 LOADER = importlib.machinery.SourceFileLoader("enroll_dispatch", str(ROOT / ".github" / "scripts" / "enroll-dispatch"))
 SPEC = importlib.util.spec_from_loader("enroll_dispatch", LOADER)
 dispatch = importlib.util.module_from_spec(SPEC)
@@ -92,21 +101,23 @@ class Calls:
 
 
 class World:
-    """One enrollment pull request whose four required checks passed at SHA, and Build run 101's record of it."""
+    """One enrollment pull request whose four required checks passed at its head commit (SHA unless one is given), and
+    Build run 101's record of it."""
 
-    def __init__(self):
-        self.checks = []  # check runs at SHA
+    def __init__(self, sha=SHA):
+        self.sha = sha
+        self.checks = []  # check runs at the commit
         self.runs = {}
         self.artifacts = {}
         for i, name in enumerate(REQUIRED):
             run_id, path, event = RUNS[name]
             self.check(500 + i, name, run_id)
-            self.run(run_id, path, event)
-        self.artifacts[101] = record()
+            self.run(run_id, path, event, head_sha=sha)
+        self.artifacts[101] = record(sha=sha)
         self.reviews = {101: {"F2": "pass", "F7": "pass", "A1": "fail"}}  # run -> verdicts.json
         self.files = [{"filename": "projects/plugin-hostd/project.yaml", "status": "added"},
                       {"filename": "projects/plugin-hostd/build.sh", "status": "added"}]
-        self.pulls = [self.pull()]
+        self.pulls = [self.pull(sha=sha)]
         self.project_yaml = b"repo: https://example.invalid/x\nlanguage: c\n"
         self.required = list(REQUIRED)
 
@@ -132,14 +143,14 @@ class World:
                 {"type": "pull_request"},
                 {"type": "required_status_checks", "parameters": {"required_status_checks": [
                     {"context": name, "integration_id": ACTIONS} for name in self.required]}}],
-            f"repos/{REPO}/commits/{SHA}/check-runs?filter=all&per_page=100": [{"check_runs": self.checks}],
+            f"repos/{REPO}/commits/{self.sha}/check-runs?filter=all&per_page=100": [{"check_runs": self.checks}],
             f"repos/{REPO}/pulls/{PR}": Calls(*self.pulls),
             f"repos/{REPO}/pulls/{PR}/files?per_page=100": [self.files],
-            f"repos/{REPO}/contents/projects/plugin-hostd/project.yaml?ref={SHA}": self.project_yaml,
-            # review-passed's reads: the pull request's events, and this repository's runs at SHA.
+            f"repos/{REPO}/contents/projects/plugin-hostd/project.yaml?ref={self.sha}": self.project_yaml,
+            # review-passed's reads: the pull request's events, and this repository's runs at the commit.
             f"repos/{REPO}/issues/{PR}/events?per_page=100": [[]],
-            f"repos/{REPO}/actions/runs?head_sha={SHA}&per_page=100": [{"workflow_runs": [
-                run for run in self.runs.values() if run["head_sha"] == SHA]}],
+            f"repos/{REPO}/actions/runs?head_sha={self.sha}&per_page=100": [{"workflow_runs": [
+                run for run in self.runs.values() if run["head_sha"] == self.sha]}],
         }
         # The open pull request of each run's head, for a decision that names none: the last answer of the pull request.
         for run in self.runs.values():
@@ -165,8 +176,8 @@ class World:
                     else zipped({"comment.md": "x", "verdicts.json": json.dumps(review)})
         return FakeApi(table)
 
-    def decide(self, event="pull_request_target", run_id=104, sha=SHA):
-        return dispatch.decide(self.api(), REPO, run_id, event, sha)
+    def decide(self, event="pull_request_target", run_id=104, sha=None):
+        return dispatch.decide(self.api(), REPO, run_id, event, self.sha if sha is None else sha)
 
 
 class Sends(unittest.TestCase):
@@ -568,7 +579,7 @@ class Review(unittest.TestCase):
         world = World()
         world.reviews[101] = zipped({"comment.md": "x", "verdicts.json": '{"F2":"pass","F7":"pass"}',
                                      "body.md": "<!-- oss-verify-review -->\n"})
-        self.assertEqual(dispatch.review_problem(world.api(), REPO, 101), ("", ""))
+        self.assertEqual(dispatch.review_verdicts(world.api(), REPO, 101)[1:], ("", ""))
 
 
 class Maintainer(unittest.TestCase):
@@ -724,16 +735,22 @@ class Merged(unittest.TestCase):
             self.assertEqual(got["reason"], "pull request 32 was merged by a-member: the merge decides the review and "
                                             "the maintainer check")
 
-    def test_a_pull_request_closed_without_a_merge_decides_nothing(self):
-        # Its job skips (the run does not succeed); and a replay of a pull request that was closed without a merge.
-        got = self.decide(self.world(conclusion="skipped"))
-        self.assertEqual((got["decision"], got["label"]), ("none", ""), got["reason"])
-        self.assertIn("not success", got["reason"])
-        world = self.world("workflow_dispatch")
-        world.pulls = [dict(World.pull(state="closed"), merged=False, merged_by=None)]
-        got = self.decide(world)
-        self.assertEqual((got["decision"], got["label"]), ("none", ""), got["reason"])
-        self.assertIn("pull request 32 is not merged", got["reason"])
+    def test_a_pull_request_closed_without_a_merge_sends_nothing_and_takes_off_review_passed(self):
+        # Its job skips (the run does not succeed); and a replay of a pull request that was closed without a merge. Each
+        # sends nothing, and takes review-passed off the closed pull request when it carries it.
+        for labels in ([{"name": "review-passed"}], []):
+            skipped = self.world(conclusion="skipped")
+            skipped.pulls = [dict(World.pull(state="closed"), merged=False, merged_by=None, labels=labels)]
+            replay = self.world("workflow_dispatch")
+            replay.pulls = [dict(World.pull(state="closed"), merged=False, merged_by=None, labels=labels)]
+            for world, why in ((skipped, "not success"), (replay, "pull request 32 is not merged")):
+                got = self.decide(world)
+                self.assertEqual((got["decision"], got["label"]), ("none", ""), got["reason"])
+                self.assertIn(why, got["reason"])
+                self.assertEqual((got["review_passed"], got["review_passed_at"], got["label_at"]),
+                                 ("off", "closed", "") if labels else ("", "", ""), (labels, got["reason"]))
+                if labels:
+                    self.assertEqual(got["pr"], "32", got["reason"])
 
     def test_a_merge_does_not_wait_for_the_review(self):
         for review in ({"F2": "person", "F7": "pass"}, {"F2": "fail", "F7": "fail"}, None):
@@ -945,6 +962,680 @@ class AppToken(unittest.TestCase):
                "PERMISSION": "contents", "ACCESS": "write", "GITHUB_OUTPUT": os.devnull, "GITHUB_REPOSITORY": REPO}
         run = subprocess.run([str(ROOT / ".github" / "scripts" / "app-token")], env=env, capture_output=True)
         self.assertEqual(run.returncode, 2)
+
+
+# review-passed (OSSV-496, check c1). The dispatch job's steps that check decide's values and write the label.
+CHECK, TAKE_OFF, PUT_ON = "Check the decision's values", "Take off review-passed", "Put on review-passed"
+REVIEW_PASSED = dispatch.REVIEW_PASSED
+DESCRIPTION = "Checks and CI review passed; statements started. No plan to merge or prove this project now."
+EPOCH = calendar.timegm((2026, 11, 11, 21, 0, 0))
+STAND_IN_GH = r'''
+"""A stand-in for `gh api`, for the steps of enroll-dispatch.yml that write review-passed and for build.yaml's bash
+function trusted. It keeps one JSON state file, $GH_STATE:
+
+    {"labels": [{"name", "color", "description"}, ...],   the repository's labels
+     "pulls": {"<n>": {"state", "head_sha", "labels": [<name>, ...]}},
+     "events": {"<n>": [{"event", "label": {"name"}, "actor": {"login"}, "created_at"}, ...]},
+     "collaborators": {"<login>": "<permission>"},
+     "clock": <the Unix time of the next event>,
+     "after_add": {"<n>": {"head_sha"}}   applied to the pull request just after a label is put on it: a push that
+                                          lands between the put-on and the read after it
+     "calls": ["<METHOD> <path>", ...]}   every request, in order
+
+What GitHub refuses it answers as gh does: the body on standard output, `gh: <message> (HTTP <status>)` on standard
+error, exit 1. --jq runs `jq -r` on the answer, on each page with --paginate (the events come two to a page). A request
+it does not know stops it."""
+import json
+import os
+import subprocess
+import sys
+import time
+
+APP = "oss-verify[bot]"   # the account whose token the steps write with
+MESSAGES = {404: "Not Found", 422: "Validation Failed"}
+with open(os.environ["GH_STATE"]) as file:
+    state = json.load(file)
+
+
+def save():
+    with open(os.environ["GH_STATE"], "w") as file:
+        json.dump(state, file)
+
+
+def refuse(status):
+    print(json.dumps({"message": MESSAGES[status], "status": str(status)}))
+    print(f"gh: {MESSAGES[status]} (HTTP {status})", file=sys.stderr)
+    save()
+    sys.exit(1)
+
+
+def stop(why):
+    save()
+    sys.exit(f"stand-in gh: {why}")
+
+
+def event(number, kind, name):
+    created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(state["clock"]))
+    state["clock"] += 1
+    state["events"].setdefault(number, []).append(
+        {"event": kind, "label": {"name": name}, "actor": {"login": APP}, "created_at": created})
+
+
+def label(name):
+    return next((found for found in state["labels"] if found["name"] == name), None)
+
+
+def pull(number):
+    found = state["pulls"][number]
+    return {"number": int(number), "state": found["state"], "head": {"sha": found["head_sha"]},
+            "labels": [label(name) or {"name": name} for name in found["labels"]]}
+
+
+args = sys.argv[1:]
+method, paginate, body, jq, path = "GET", False, None, None, None
+if args[:1] != ["api"]:
+    stop(f"not a gh api command: {args}")
+args.pop(0)
+while args:
+    arg = args.pop(0)
+    if arg == "--method":
+        method = args.pop(0)
+    elif arg == "--paginate":
+        paginate = True
+    elif arg == "--input" and args[:1] == ["-"]:
+        args.pop(0)
+        body = json.load(sys.stdin)
+    elif arg == "--jq":
+        jq = args.pop(0)
+    elif arg.startswith("-") or path is not None:
+        stop(f"an argument it does not know: {arg!r}")
+    else:
+        path = arg
+state["calls"].append(f"{method} {path}")
+prefix = "repos/theorem-labs/oss-verify/"
+if path is None or not path.startswith(prefix):
+    stop(f"no such request: {method} {path}")
+parts, pages = path[len(prefix):].split("?")[0].split("/"), None
+if parts[0] == "labels" and len(parts) == 2 and method in ("GET", "PATCH"):
+    answer = label(parts[1])
+    if answer is None:
+        refuse(404)
+    if method == "PATCH":
+        answer.update(body)
+elif parts == ["labels"] and method == "POST":
+    if label(body["name"]) is not None:
+        refuse(422)
+    answer = {"name": body["name"], "color": body.get("color", "ededed"), "description": body.get("description", "")}
+    state["labels"].append(answer)
+elif parts[0] == "pulls" and len(parts) == 2 and method == "GET":
+    answer = pull(parts[1])
+elif parts[0] == "issues" and parts[2:] == ["events"] and method == "GET":
+    events = state["events"].get(parts[1], [])
+    pages = [events[i:i + 2] for i in range(0, len(events), 2)] or [[]]
+    pages = pages if paginate else pages[:1]
+elif parts[0] == "issues" and parts[2:] == ["labels"] and method == "POST":
+    number = parts[1]
+    for name in body["labels"]:
+        if label(name) is None:   # GitHub makes a label it does not have, with no description
+            state["labels"].append({"name": name, "color": "ededed", "description": ""})
+        if name not in state["pulls"][number]["labels"]:
+            state["pulls"][number]["labels"].append(name)
+            event(number, "labeled", name)
+    state["pulls"][number].update(state["after_add"].pop(number, {}))
+    answer = pull(number)["labels"]
+elif parts[0] == "issues" and len(parts) == 4 and parts[2] == "labels" and method == "DELETE":
+    number, name = parts[1], parts[3]
+    if name not in state["pulls"][number]["labels"]:
+        refuse(404)
+    state["pulls"][number]["labels"].remove(name)
+    event(number, "unlabeled", name)
+    answer = pull(number)["labels"]
+elif parts[0] == "collaborators" and parts[2:] == ["permission"] and method == "GET":
+    if parts[1] not in state["collaborators"]:
+        refuse(404)
+    answer = {"permission": state["collaborators"][parts[1]]}
+else:
+    stop(f"no such request: {method} {path}")
+save()
+for page in [answer] if pages is None else pages:
+    if jq is None:
+        print(json.dumps(page))
+    else:
+        sys.stdout.write(subprocess.run(["jq", "-r", jq], input=json.dumps(page), capture_output=True, text=True,
+                                        check=True).stdout)
+'''
+
+
+def stand_in_gh(directory):
+    """Writes the stand-in gh into `directory`/bin, and gives that directory."""
+    bin = directory / "bin"
+    bin.mkdir()
+    (bin / "gh").write_text(f"#!{sys.executable}{STAND_IN_GH}")
+    (bin / "gh").chmod(0o755)
+    return bin
+
+
+@functools.cache
+def enroll_dispatch_jobs():
+    """enroll-dispatch.yml's decide and dispatch jobs."""
+    jobs = yaml.safe_load((ROOT / ".github" / "workflows" / "enroll-dispatch.yml").read_text())["jobs"]
+    names = [step.get("name") for step in jobs["dispatch"]["steps"]]
+    if any(names.count(name) != 1 for name in (CHECK, TAKE_OFF, PUT_ON)):
+        raise AssertionError(f"the dispatch job's steps are {names}")
+    return jobs["decide"], jobs["dispatch"]
+
+
+def at(seconds):
+    """A Unix time as GitHub gives a time."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(seconds))
+
+
+class LabelApi(FakeApi):
+    """FakeApi, where each path of `failing` fails as gh does, and the runs from a branch made at or after a time
+    (actions/runs?branch=<branch>&created=>=<time>) are those of `runs`."""
+    LATER = re.compile(rf"repos/{re.escape(REPO)}/actions/runs\?branch=([^&]+)&created=%3E%3D([^&]+)&per_page=100")
+
+    def __init__(self, table, runs=(), failing=()):
+        super().__init__(table)
+        self.runs, self.failing = runs, failing
+
+    def answer(self, path):
+        later = self.LATER.fullmatch(path)
+        if path not in self.failing and not later:
+            return super().answer(path)
+        self.calls.append(path)
+        if path in self.failing:
+            raise subprocess.CalledProcessError(1, ["gh", "api", path])
+        branch, since = urllib.parse.unquote(later.group(1)), later.group(2)
+        return [{"workflow_runs": [copy.deepcopy(run) for run in self.runs
+                                   if run["head_branch"] == branch and run["created_at"] >= since]}]
+
+    get = pages = raw = answer
+
+
+class Timeline:
+    """Pull request PR, from FreeREAC/oss-verify:add-plugin-hostd, over time: its head, state, labels, events and
+    author, the Actions runs from its head, and the repository's labels. One clock gives each run and event a later
+    time. decide reads a World of the completed run's commit, with the pull request, its events and the runs as they
+    are then. job runs the dispatch job's steps that write review-passed against the stand-in gh, whose state is made
+    from this one, and reads back what they wrote. Each labeled event starts a run of maintainer-confirmed.yml at the
+    head of that moment, a few seconds after it (fact 9 of the plan), unless confirmed_runs is False."""
+    BRANCH, HEAD_REPO = "add-plugin-hostd", "FreeREAC/oss-verify"
+
+    def __init__(self, author="linuxnow", permission="read", repo_labels=None, confirmed_runs=True):
+        self.clock = EPOCH
+        self.head, self.state, self.merged = None, "open", False
+        self.author = author
+        self.collaborators = {} if author.endswith("[bot]") else {author: permission}
+        self.repo_labels = [{"name": REVIEW_PASSED, "color": "0E8A16", "description": DESCRIPTION}] \
+            if repo_labels is None else repo_labels
+        self.labels, self.events, self.runs = [], [], []
+        self.failing = set()   # the paths whose read fails in decide
+        self.calls = []        # decide's paths, and the steps' "<METHOD> <path>"
+        self.confirmed_runs = confirmed_runs
+
+    def tick(self, seconds=1):
+        self.clock += seconds
+        return at(self.clock - seconds)
+
+    def add_run(self, sha, path, event):
+        self.runs.append({"id": 1000 + len(self.runs), "path": path, "event": event, "head_sha": sha,
+                          "head_branch": self.BRANCH, "head_repository": {"full_name": self.HEAD_REPO},
+                          "created_at": self.tick()})
+
+    def push(self, sha, force=False):
+        """The head becomes `sha`, by a force push or not, and the runs of the four required checks start."""
+        if force:
+            self.events.append({"event": "head_ref_force_pushed", "actor": {"login": self.author},
+                                "created_at": self.tick()})
+        self.head = sha
+        for name in REQUIRED:
+            self.add_run(sha, *RUNS[name][1:])
+
+    def confirmed_run(self):
+        if self.confirmed_runs:
+            self.tick(3)
+            self.add_run(self.head, dispatch.CONFIRMED_WORKFLOW, "pull_request_target")
+
+    def put_on(self, actor, name=REVIEW_PASSED):
+        """`actor` puts the label on, by the name `name` (it is review-passed now, whatever it was then)."""
+        self.events.append({"event": "labeled", "label": {"name": name}, "actor": {"login": actor},
+                            "created_at": self.tick()})
+        self.labels.append(REVIEW_PASSED)
+        self.confirmed_run()
+
+    def take_off(self, actor, name=REVIEW_PASSED):
+        self.events.append({"event": "unlabeled", "label": {"name": name}, "actor": {"login": actor},
+                            "created_at": self.tick()})
+        self.labels.remove(REVIEW_PASSED)
+
+    def close(self, merged):
+        self.state, self.merged = "closed", merged
+
+    def pull(self):
+        return dict(World.pull(sha=self.head, state=self.state), user={"login": self.author}, merged=self.merged,
+                    merged_by={"login": "a-member"} if self.merged else None,
+                    labels=[{"name": name} for name in self.labels])
+
+    def world(self, sha, verdicts=None, files=None, oversize=False, failed_check=False):
+        """A World of the commit `sha`: the review's verdicts (F2 and F7 pass unless given), the pull request's files,
+        a plain binary above the size line (oversize), or project-builds failed (failed_check)."""
+        world = World(sha)
+        created = max(run["created_at"] for run in self.runs if run["head_sha"] == sha)
+        for run in world.runs.values():
+            run["created_at"] = created
+        world.reviews[101] = {"F2": "pass", "F7": "pass", "A1": "pass"} if verdicts is None else verdicts
+        if files is not None:
+            world.files = files
+        if oversize:
+            world.artifacts[101] = record(sha=sha, sizes=sizes(plain_text=2_000_000))
+        if failed_check:
+            world.checks[1]["conclusion"] = "failure"
+        return world
+
+    def decide(self, sha=None, standing="", **change):
+        """What decide gives at the completion of the Tests run of `sha` (the head unless given), in a World of that
+        commit with `change` (world's), and with the maintainer check's answer `standing`."""
+        return self.run_decide(self.world(self.head if sha is None else sha, **change), 104, standing)
+
+    def decide_merged(self, conclusion="success", **change):
+        """What decide gives at the completion of an Enrollment merged run for the head, of that conclusion."""
+        world = self.world(self.head, **change)
+        world.run(MERGED_RUN, dispatch.MERGED_WORKFLOW, "pull_request_target", head_sha=self.head)
+        world.runs[MERGED_RUN].update(conclusion=conclusion, display_title=f"merged #{PR}", created_at=self.tick())
+        return self.run_decide(world, MERGED_RUN, "")
+
+    def run_decide(self, world, run_id, standing):
+        table = world.api().table
+        table[f"repos/{REPO}/pulls/{PR}"] = self.pull()
+        table[f"repos/{REPO}/pulls?state=open&base=main&head=FreeREAC:{self.BRANCH}&per_page=100"] = \
+            [[self.pull()] if self.state == "open" else []]
+        table[f"repos/{REPO}/issues/{PR}/events?per_page=100"] = \
+            [self.events[i:i + 2] for i in range(0, len(self.events), 2)] or [[]]
+        for sha in {run["head_sha"] for run in self.runs}:
+            table[f"repos/{REPO}/actions/runs?head_sha={sha}&per_page=100"] = \
+                [{"workflow_runs": [run for run in self.runs if run["head_sha"] == sha]}]
+        for login, permission in self.collaborators.items():
+            table[f"repos/{REPO}/collaborators/{login}/permission"] = {"permission": permission}
+        api = LabelApi(table, self.runs, self.failing)
+        old = dispatch.standing
+        dispatch.standing = lambda config, login: standing
+        try:
+            return dispatch.decide(api, REPO, run_id, "pull_request_target", world.sha)
+        finally:
+            dispatch.standing = old
+            self.calls += api.calls
+
+    def job(self, out, push_after_label=None):
+        """The dispatch job after decide gave `out`, as GitHub runs it: decide's outputs go through the decide job's
+        outputs into the dispatch job's env; the job runs when its if is true; and of its steps, in order, those that
+        check the values and write review-passed run when their if is true, until one fails. push_after_label is a
+        commit pushed just after a label is put on, which is recorded after the step. Gives (name, process) of each
+        step run."""
+        decide, job = enroll_dispatch_jobs()
+        ctx = {f"steps.decide.outputs.{key}": value for key, value in out.items()}
+        ctx = {f"needs.decide.outputs.{key}": as_text(evaluate(value, ctx)) for key, value in decide["outputs"].items()}
+        if not evaluate(job["if"], ctx):
+            return []
+        ctx.update({"github.repository": REPO, "steps.label-token.outputs.token": "stand-in"})
+
+        def values(env):
+            return {key: as_text(evaluate(value, ctx)) if "${{" in str(value) else str(value)
+                    for key, value in (env or {}).items()}
+        env = values(job["env"])
+        state = {"labels": self.repo_labels, "events": {str(PR): self.events}, "collaborators": self.collaborators,
+                 "pulls": {str(PR): {"state": self.state, "head_sha": self.head, "labels": self.labels}},
+                 "clock": self.clock, "calls": [],
+                 "after_add": {str(PR): {"head_sha": push_after_label}} if push_after_label else {}}
+        ran = []
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            bin = stand_in_gh(directory)
+            (directory / "state.json").write_text(json.dumps(state))
+            for step in job["steps"]:
+                if step.get("name") not in (CHECK, TAKE_OFF, PUT_ON) \
+                        or "if" in step and not evaluate(step["if"], {f"env.{k}": v for k, v in env.items()}):
+                    continue
+                ran.append((step["name"], subprocess.run(
+                    ["bash", "-c", step["run"]], capture_output=True, text=True,
+                    env={**os.environ, **env, **values(step.get("env")), "PATH": f"{bin}:{os.environ['PATH']}",
+                         "GH_STATE": str(directory / "state.json"),
+                         "GITHUB_STEP_SUMMARY": str(directory / "summary")})))
+                if ran[-1][1].returncode != 0:
+                    break
+            state = json.loads((directory / "state.json").read_text())
+        added = [e for e in state["events"][str(PR)][len(self.events):] if e["event"] == "labeled"]
+        pull = state["pulls"][str(PR)]
+        self.repo_labels, self.labels, self.events = state["labels"], pull["labels"], state["events"][str(PR)]
+        self.clock, self.calls = state["clock"], self.calls + state["calls"]
+        if pull["head_sha"] != self.head:
+            self.push(pull["head_sha"])
+        for _ in added:
+            self.confirmed_run()
+        return ran
+
+
+class ReviewPassed(unittest.TestCase):
+    """review-passed (check c1): each case runs decide on a Timeline of the pull request, and then, as the job would,
+    enroll-dispatch.yml's steps that check decide's values and write the label, against the stand-in gh. Each asserts
+    the pull request's labels after the runs, and that no request touched a comment."""
+    A, B, C, H = SHA, NEWER, "c" * 40, "d" * 40
+
+    def setUp(self):
+        if not shutil.which("jq"):
+            self.skipTest("jq is not installed")
+
+    def job(self, line, out, **change):
+        """The steps the job ran for `out`, each of which must succeed."""
+        ran = line.job(out, **change)
+        for name, run in ran:
+            self.assertEqual(run.returncode, 0, f"{name}: {run.stdout}{run.stderr}")
+        return [name for name, _ in ran]
+
+    def assertLabels(self, line, labels):
+        self.assertEqual(line.labels, labels, line.events)
+        self.assertEqual([call for call in line.calls if "comments" in call], [])
+
+    def labelled(self, **timeline):
+        """(a): the run for head A sends an enrollment whose author has no write access, and the label goes on."""
+        line = Timeline(**timeline)
+        line.push(self.A)
+        out = line.decide()
+        self.assertEqual((out["decision"], out["review_passed"], out["review_passed_at"]), ("dispatch", "on", ""),
+                         out["reason"])
+        self.assertEqual(self.job(line, out), [CHECK, PUT_ON])
+        self.assertLabels(line, [REVIEW_PASSED])
+        return line
+
+    def newest_label(self, line):
+        return max(e["created_at"] for e in line.events if e["event"] == "labeled")
+
+    def test_a_an_enrollment_sent_for_an_author_without_write_access_gets_the_label(self):
+        for permission in ("read", "none"):
+            with self.subTest(permission=permission):
+                self.labelled(permission=permission)
+
+    def test_b_a_new_pin_of_a_project_on_main_gets_the_label(self):
+        line = Timeline()
+        line.push(self.A)
+        out = line.decide(files=[{"filename": "projects/plugin-hostd/project.yaml", "status": "modified"}])
+        self.assertEqual((out["decision"], out["review_passed"]), ("dispatch", "on"), out["reason"])
+        self.assertEqual(self.job(line, out), [CHECK, PUT_ON])
+        self.assertLabels(line, [REVIEW_PASSED])
+
+    def test_c_a_new_head_labelled_for_a_person_loses_the_label(self):
+        for change, label in (({"oversize": True}, "size-review"),
+                              ({"verdicts": {"F2": "pass", "F7": "person"}}, "review-pending")):
+            with self.subTest(label=label):
+                line = self.labelled()
+                line.push(self.B)
+                out = line.decide(**change)
+                self.assertEqual((out["decision"], out["label"], out["review_passed"], out["review_passed_at"]),
+                                 ("label", label, "off", "head"), out["reason"])
+                self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF])
+                self.assertLabels(line, [])
+
+    def test_d_a_new_head_whose_required_check_failed_loses_the_label(self):
+        line = self.labelled()
+        line.push(self.B)
+        out = line.decide(failed_check=True)
+        self.assertEqual((out["decision"], out["project"], out["review_passed"]), ("none", "", "off"), out["reason"])
+        self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF])
+        self.assertLabels(line, [])
+
+    def test_e_a_new_head_that_is_sent_and_passes_again_has_the_label(self):
+        line = self.labelled()
+        line.push(self.B)
+        pushed = line.runs[-1]["created_at"]
+        out = line.decide()
+        self.assertEqual((out["decision"], out["review_passed"]), ("dispatch", "on"), out["reason"])
+        self.assertEqual(self.job(line, out), [CHECK, PUT_ON])
+        self.assertLabels(line, [REVIEW_PASSED])
+        self.assertGreater(self.newest_label(line), pushed)   # put on for B
+
+    def test_f_a_label_a_person_took_off_is_not_put_back(self):
+        for name in (REVIEW_PASSED, "passes-not-merging"):
+            with self.subTest(name=name):
+                line = Timeline()
+                line.push(self.A)
+                line.put_on(dispatch.APP_LOGIN, name)
+                line.take_off("sjawhar", name)
+                out = line.decide()
+                self.assertEqual((out["decision"], out["review_passed"]), ("dispatch", ""), out["reason"])
+                self.assertEqual(self.job(line, out), [CHECK])
+                self.assertLabels(line, [])
+
+    def test_f_negative_control_a_label_the_app_took_off_is_put_back(self):
+        line = Timeline()
+        line.push(self.A)
+        line.put_on(dispatch.APP_LOGIN)
+        line.take_off(dispatch.APP_LOGIN)
+        out = line.decide()
+        self.assertEqual((out["decision"], out["review_passed"]), ("dispatch", "on"), out["reason"])
+        self.assertEqual(self.job(line, out), [CHECK, PUT_ON])
+        self.assertLabels(line, [REVIEW_PASSED])
+
+    def test_g_a_trusted_author_does_not_get_the_label(self):
+        bots = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["env"]["ALLOWED_BOTS"]
+        self.assertIn("sjawhar-agent[bot]", bots.split(","))
+        for author, permission in (("a-writer", "write"), ("an-admin", "admin"), ("sjawhar-agent[bot]", None)):
+            with self.subTest(author=author):
+                line = Timeline(author=author, permission=permission)
+                line.push(self.A)
+                out = line.decide()
+                self.assertEqual((out["decision"], out["review_passed"]), ("dispatch", ""), out["reason"])
+                self.assertEqual(self.job(line, out), [CHECK])
+                self.assertLabels(line, [])
+
+    def test_h_a_merge_or_a_close_takes_the_label_off(self):
+        for merged, change, decision in ((True, {}, ("dispatch", "", "true")),
+                                         (True, {"oversize": True}, ("label", "size-review", "")),
+                                         (True, {"failed_check": True}, ("none", "", "")),
+                                         (False, {}, ("none", "", ""))):
+            with self.subTest(merged=merged, decision=decision):
+                line = self.labelled()
+                line.close(merged)
+                out = line.decide_merged("success" if merged else "skipped", **change)
+                self.assertEqual((out["decision"], out["label"], out.get("merged", "")), decision, out["reason"])
+                self.assertEqual((out["pr"], out["review_passed"], out["review_passed_at"]), (str(PR), "off", "closed"))
+                self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF])
+                self.assertLabels(line, [])
+
+    def test_i_the_label_is_made_or_given_its_description(self):
+        other = {"name": "size-review", "color": "ededed", "description": ""}
+        for repo_labels in ([other], [other, {"name": REVIEW_PASSED, "color": "0E8A16", "description": "Passes."}]):
+            with self.subTest(repo_labels=repo_labels):
+                line = self.labelled(repo_labels=copy.deepcopy(repo_labels))
+                self.assertEqual([label for label in line.repo_labels if label["name"] == REVIEW_PASSED],
+                                 [{"name": REVIEW_PASSED, "color": "0E8A16", "description": DESCRIPTION}])
+                self.assertIn(other, line.repo_labels)
+                self.assertLabels(line, [REVIEW_PASSED])
+
+    def test_j_a_review_with_another_fail_is_sent_without_the_label(self):
+        line = Timeline()
+        line.push(self.A)
+        out = line.decide(verdicts={"F2": "pass", "F7": "pass", "F5": "fail"})
+        self.assertEqual((out["decision"], out["review_passed"]), ("dispatch", ""), out["reason"])
+        self.assertEqual(self.job(line, out), [CHECK])
+        self.assertLabels(line, [])
+
+    def test_k_a_late_run_for_an_old_head_leaves_the_label(self):
+        line = self.labelled()
+        line.push(self.B)
+        out = line.decide()
+        self.assertEqual((out["decision"], out["review_passed"]), ("dispatch", "on"), out["reason"])
+        self.assertEqual(self.job(line, out), [CHECK, PUT_ON])
+        out = line.decide(sha=self.A)
+        self.assertEqual((out["decision"], out["review_passed"]), ("none", ""), out["reason"])
+        self.assertEqual(self.job(line, out), [])
+        self.assertLabels(line, [REVIEW_PASSED])
+
+    def test_l_a_label_that_lands_after_a_push_comes_off(self):
+        line = Timeline()
+        line.push(self.A)
+        out = line.decide()
+        self.assertEqual(out["review_passed"], "on", out["reason"])
+        self.assertEqual(self.job(line, out, push_after_label=self.B), [CHECK, PUT_ON])
+        self.assertEqual(line.head, self.B)
+        self.assertEqual([e["event"] for e in line.events], ["labeled", "unlabeled"])
+        self.assertLabels(line, [])
+
+    def test_m_a_new_head_sent_with_another_fail_loses_the_label(self):
+        line = self.labelled()
+        line.push(self.B)
+        out = line.decide(verdicts={"F2": "pass", "F7": "pass", "F5": "fail"})
+        self.assertEqual((out["decision"], out["review_passed"], out["review_passed_at"]), ("dispatch", "off", "head"),
+                         out["reason"])
+        self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF])
+        self.assertLabels(line, [])
+
+    def test_n_a_label_put_on_by_hand_under_its_former_name_stays_whatever_its_head_decides(self):
+        # Pull request #124: one labeled passes-not-merging by sjawhar-agent[bot] after its head's first run, and a
+        # review with F5 and F8 at fail.
+        line = Timeline()
+        line.push(self.A)
+        line.put_on("sjawhar-agent[bot]", "passes-not-merging")
+        verdicts = {"F2": "pass", "F7": "pass", "F5": "fail", "F8": "fail"}
+        for change, decision, steps in (({}, ("dispatch", ""), [CHECK]),
+                                        ({"standing": "not shown to maintain it"}, ("label", "maintainer-review"),
+                                         [CHECK]),
+                                        ({"failed_check": True}, ("none", ""), [])):
+            with self.subTest(decision=decision):
+                out = line.decide(verdicts=verdicts, **change)
+                self.assertEqual((out["decision"], out["label"], out["review_passed"]), (*decision, ""), out["reason"])
+                self.assertEqual(self.job(line, out), steps)
+                self.assertLabels(line, [REVIEW_PASSED])
+
+    def test_p_a_take_off_for_a_head_that_moved_meanwhile_leaves_the_label(self):
+        line = self.labelled()
+        line.push(self.B)
+        out = line.decide(failed_check=True)
+        self.assertEqual((out["sha"], out["review_passed"]), (self.B, "off"), out["reason"])
+        line.push(self.C)
+        self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF])
+        self.assertLabels(line, [REVIEW_PASSED])
+
+    def test_q_a_trusted_or_unknown_author_loses_the_label_at_a_new_head(self):
+        with self.subTest(author="trusted"):
+            line = Timeline(author="a-writer", permission="write")
+            line.push(self.A)
+            line.put_on(dispatch.APP_LOGIN)
+            line.push(self.B)
+            out = line.decide()
+            self.assertEqual((out["decision"], out["review_passed"]), ("dispatch", "off"), out["reason"])
+            self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF])
+            self.assertLabels(line, [])
+        with self.subTest(author="a trust read that fails"):
+            line = self.labelled()
+            line.push(self.B)
+            line.failing.add(f"repos/{REPO}/collaborators/linuxnow/permission")
+            out = line.decide()
+            self.assertEqual((out["decision"], out["review_passed"]), ("dispatch", "off"), out["reason"])
+            self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF])
+            self.assertLabels(line, [])
+
+    def test_r_a_new_head_with_a_file_outside_projects_loses_the_label(self):
+        line = self.labelled()
+        line.push(self.B)
+        out = line.decide(files=[{"filename": "projects/plugin-hostd/build.sh", "status": "added"},
+                                 {"filename": "README.md", "status": "modified"}])
+        self.assertEqual((out["decision"], out["review_passed"]), ("none", "off"), out["reason"])
+        self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF])
+        self.assertLabels(line, [])
+
+    def test_s_a_head_pushed_again_by_force_loses_the_label_of_the_head_between(self):
+        # No maintainer-confirmed.yml runs here: the force push alone shows that the label is older than A (v has the
+        # run that a label starts).
+        line = self.labelled(confirmed_runs=False)
+        line.push(self.B)
+        out = line.decide()
+        self.assertEqual(out["review_passed"], "on", out["reason"])
+        self.assertEqual(self.job(line, out), [CHECK, PUT_ON])
+        line.push(self.A, force=True)
+        out = line.decide(failed_check=True)
+        self.assertEqual((out["decision"], out["review_passed"]), ("none", "off"), out["reason"])
+        self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF])
+        self.assertLabels(line, [])
+
+    def test_t_a_take_off_decided_before_a_renewal_leaves_the_label(self):
+        line = self.labelled()
+        line.push(self.B)
+        none = line.decide(failed_check=True)
+        sent = line.decide()
+        self.assertEqual((none["review_passed"], sent["review_passed"]), ("off", "on"),
+                         (none["reason"], sent["reason"]))
+        self.assertEqual(self.job(line, sent), [CHECK, PUT_ON])
+        self.assertGreater(self.newest_label(line), none["label_at"])   # put on again
+        self.assertEqual(self.job(line, none), [CHECK, TAKE_OFF])
+        self.assertLabels(line, [REVIEW_PASSED])
+
+    def test_u_a_failed_read_of_the_events_changes_nothing(self):
+        events = f"repos/{REPO}/issues/{PR}/events?per_page=100"
+        with self.subTest(label="on, at a new head"):
+            line = self.labelled()
+            line.push(self.B)
+            line.failing.add(events)
+            out = line.decide(oversize=True)
+            self.assertEqual((out["decision"], out["review_passed"]), ("label", ""), out["reason"])
+            self.assertEqual(self.job(line, out), [CHECK])
+            self.assertLabels(line, [REVIEW_PASSED])
+        with self.subTest(label="off, on a passing run"):
+            line = Timeline()
+            line.push(self.A)
+            line.failing.add(events)
+            out = line.decide()
+            self.assertEqual((out["decision"], out["review_passed"]), ("dispatch", ""), out["reason"])
+            self.assertEqual(self.job(line, out), [CHECK])
+            self.assertLabels(line, [])
+
+    def test_v_a_head_pushed_again_without_a_force_push_loses_a_label_put_on_at_another_head(self):
+        # H, a force push back to A, A labelled (which starts a maintainer-confirmed.yml run at A), H pushed again.
+        line = Timeline()
+        line.push(self.H)
+        line.push(self.A, force=True)
+        out = line.decide()
+        self.assertEqual(out["review_passed"], "on", out["reason"])
+        self.assertEqual(self.job(line, out), [CHECK, PUT_ON])
+        self.assertTrue(any(run["head_sha"] == self.A and run["path"] == dispatch.CONFIRMED_WORKFLOW
+                            and run["created_at"] > self.newest_label(line) for run in line.runs))
+        line.push(self.H)
+        out = line.decide(failed_check=True)
+        self.assertEqual((out["decision"], out["review_passed"]), ("none", "off"), out["reason"])
+        self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF])
+        self.assertLabels(line, [])
+
+
+class TrustRule(unittest.TestCase):
+    """enroll-dispatch's trusted, the port of build.yaml's bash function trusted, gives its answers (case o)."""
+
+    def test_trusted_answers_as_build_yamls_trusted(self):
+        if not shutil.which("jq"):
+            self.skipTest("jq is not installed")
+        build = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
+        copies = {found for job in build["jobs"].values() for step in job.get("steps") or []
+                  for found in re.findall(r"# trusted\n(.*?)# end of trusted\n", step.get("run") or "", re.S)}
+        self.assertEqual(len(copies), 1, copies)
+        script = "set -uo pipefail\n" + copies.pop() + 'trusted "$1"\n'
+        bots = build["env"]["ALLOWED_BOTS"]
+        collaborators = {"an-admin": "admin", "a-writer": "write", "a-reader": "read", "no-access": "none"}
+        api = LabelApi({f"repos/{REPO}/collaborators/{login}/permission": {"permission": permission}
+                        for login, permission in collaborators.items()},
+                       failing={f"repos/{REPO}/collaborators/a-failure/permission"})
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            bin = stand_in_gh(directory)
+            (directory / "state.json").write_text(json.dumps({"labels": [], "pulls": {}, "events": {},
+                                                              "collaborators": collaborators, "calls": []}))
+            for login, want in (("sjawhar-agent[bot]", True), ("dependabot[bot]", False), ("Sjawhar-Agent[bot]", False),
+                                ("an-admin", True), ("a-writer", True), ("a-reader", False), ("no-access", False),
+                                ("not a login", False), ("x/y", False), ("", False), ("a-failure", None)):
+                with self.subTest(login=login):
+                    run = subprocess.run(["bash", "-c", script, "trusted", login], capture_output=True, text=True,
+                                         env={**os.environ, "PATH": f"{bin}:{os.environ['PATH']}", "REPO": REPO,
+                                              "GH_STATE": str(directory / "state.json"), "ALLOWED_BOTS": bots})
+                    self.assertIn(run.returncode, (0, 1, 2), run.stderr)
+                    self.assertEqual((dispatch.trusted(api, REPO, login), {0: True, 1: False, 2: None}[run.returncode]),
+                                     (want, want), run.stderr)
 
 
 if __name__ == "__main__":
