@@ -22,19 +22,18 @@
 #             take) or maintainer-review (the pull request's author is not shown to maintain the repository that
 #             `repo` names, by triage.py's maintainer check; someone other than the author who can label, a member
 #             of theorem-labs or one of its Apps, lifts it with the label maintainer-confirmed put on after the head
-#             commit, which runs maintainer-confirmed.yml, whose completion runs this again). It puts a label on only
-#             when the pull request lacks it: each label event starts a Build run, whose completion runs this again.
-#   none      sends nothing and puts no label on, among other reasons while the pull request carries the label parked
-#             (a person holds it), or while the newest check run Enrollment review of the oss-verify App at the commit
-#             is not success or is missing. build.yaml's comment job writes that check run on the reviewed commit,
-#             with the review comment, and that Build run's completion runs this again.
+#             commit, which runs maintainer-confirmed.yml, whose completion runs this again).
+#   none      sends nothing and puts no label on, among other reasons while the newest check run Enrollment review of
+#             the oss-verify App at the commit is not success or is missing. build.yaml's comment job writes that
+#             check run on the reviewed commit, with the review comment, and that Build run's completion runs this
+#             again.
 #
 # A merge sends too. Enrollment merged (enroll-merged.yml) runs on each closed pull request and does nothing else; its
 # completion runs this. When a person merged an enrollment into main and its required checks passed at its head
 # commit, decide gives dispatch for that commit, and dispatch adds merged: true to the event's client_payload. The
-# review (the check run Enrollment review), the label parked and the maintainer check are not asked, since the merge
-# decided them; the size line, a paused language and the name rule still label. A merge made before enroll-merged.yml
-# existed is replayed with `gh workflow run enroll-merged.yml -R theorem-labs/oss-verify -f pr=<n>`.
+# review (the check run Enrollment review) and the maintainer check are not asked, since the merge decided them; the
+# size line, a paused language and the name rule still label. A merge made before enroll-merged.yml existed is
+# replayed with `gh workflow run enroll-merged.yml -R theorem-labs/oss-verify -f pr=<n>`.
 #
 # Each required check's run starts this workflow, so the run of the last one to pass is the one that dispatches; a run
 # that sees a check not passed yet does nothing, and so does a run for a draft pull request: build.yaml runs again on
@@ -232,8 +231,6 @@ jobs:
           private-key: ${{ steps.key.outputs.key }}
           permission-pull-requests: write
 
-      # Only a label the pull request lacks is put on: each label event starts a Build run, whose completion runs this
-      # workflow again, so a decision made again must start no new one.
       - name: Label the pull request
         if: env.DECISION == 'label'
         env:
@@ -241,12 +238,6 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          labels=$(gh api "repos/$REPO/issues/$PR/labels?per_page=100" --jq '.[].name')
-          if grep -qxF -- "$LABEL" <<< "$labels"; then
-            echo "pull request $PR: already labelled $LABEL; no statements are started for $PROJECT at $SHA" \
-              | tee -a "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
           jq -n --arg label "$LABEL" '{labels: [$label]}' \
             | gh api --method POST "repos/$REPO/issues/$PR/labels" --input - > /dev/null
           echo "pull request $PR: labelled $LABEL; no statements are started for $PROJECT at $SHA" \

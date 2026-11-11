@@ -128,23 +128,14 @@ class World:
         self.review_runs.append({"id": check_id, "name": "Enrollment review", "app": {"id": app}, "status": status,
                                  "conclusion": conclusion, "head_sha": SHA})
 
-    def label_run(self, run_id, check_id, conclusion="success", status="completed", created_at=None):
-        """A Build run that a label event started at SHA: its project-builds copies the head's standing result, newer
-        than every check above, and it builds nothing, so it uploads no record."""
-        self.run(run_id, ".github/workflows/build.yaml", "pull_request_target")
-        if created_at:
-            self.runs[run_id]["created_at"] = created_at
-        self.check(check_id, "project-builds", run_id, conclusion=conclusion)
-        self.checks[-1]["status"] = status
-
     def run(self, run_id, path, event, head_sha=SHA, branch="add-plugin-hostd", head_repo="FreeREAC/oss-verify"):
         self.runs[run_id] = {"id": run_id, "path": path, "event": event, "head_sha": head_sha, "head_branch": branch,
                              "head_repository": {"full_name": head_repo}}
 
     @staticmethod
     def pull(number=PR, sha=SHA, state="open", base="main", head_repo="FreeREAC/oss-verify",
-             branch="add-plugin-hostd", draft=False, labels=()):
-        return {"number": number, "state": state, "draft": draft, "labels": [{"name": n} for n in labels],
+             branch="add-plugin-hostd", draft=False):
+        return {"number": number, "state": state, "draft": draft,
                 "head": {"sha": sha, "ref": branch, "repo": {"full_name": head_repo}, "label": f"x:{branch}"},
                 "base": {"ref": base, "repo": {"full_name": REPO}}}
 
@@ -250,7 +241,7 @@ class ForgedChecks(unittest.TestCase):
         world.artifacts[204] = record()
         got = world.decide()
         self.assertEqual(got["decision"], "none")
-        self.assertIn("no Build run of project-builds at this head wrote the artifact enrollment-record", got["reason"])
+        self.assertIn("Build run 101 has 0", got["reason"])
 
     def test_a_required_check_with_no_known_source_is_never_passed(self):
         world = World()
@@ -508,8 +499,8 @@ class Labels(unittest.TestCase):
 
 
 class Review(unittest.TestCase):
-    """c2: the newest check run Enrollment review of the oss-verify App at the head, and the label parked. Anything but
-    success, no such check run, or parked sends nothing, puts no label on, and names why in the run summary."""
+    """c2: the newest check run Enrollment review of the oss-verify App at the head. Anything but success, or no such
+    check run, sends nothing, puts no label on, and names why in the run summary."""
     WHERE = f"pull request 32: projects/plugin-hostd/ at {SHA[:7]}"
 
     def reviewed(self, *conclusions, app=OSS_VERIFY):
@@ -568,20 +559,6 @@ class Review(unittest.TestCase):
         world.review_runs.reverse()
         self.assertEqual(world.decide()["decision"], "dispatch")
 
-    def test_a_parked_pull_request_sends_nothing(self):
-        # c2 (f): the review passed, and a person holds the pull request. GitHub, and build.yaml's route, match the
-        # label's name in any case, so Parked holds it too.
-        for name in ("parked", "Parked"):
-            with self.subTest(name=name):
-                world = World()
-                world.pulls = [World.pull(labels=(name,))]
-                self.assertNotSent(world, f"{self.WHERE}: a person holds it (parked)")
-
-    def test_a_pull_request_parked_while_its_files_were_listed_sends_nothing(self):
-        world = World()
-        world.pulls = [World.pull(), World.pull(labels=("parked",))]
-        self.assertNotSent(world, f"{self.WHERE}: a person holds it (parked)")
-
     def test_a_binary_over_the_line_is_labelled_after_a_review_that_passed(self):
         # c2 (e)
         world = World()
@@ -591,18 +568,14 @@ class Review(unittest.TestCase):
         self.assertEqual(got["reason"], f"{self.WHERE} has a plain binary above 1,000,000 bytes: fuzz_command.plain "
                                         "(2,000,000 bytes of .text, 70,000 executable bytes)")
 
-    def test_the_hold_and_the_review_come_before_every_label(self):
-        # A label that a person lifts by hand is never put on a pull request that a person holds or whose review did
-        # not pass.
-        parked = World()
-        parked.pulls = [World.pull(labels=("parked", "size-review"))]
-        for world, why in ((parked, "a person holds it (parked)"),
-                           (self.reviewed("failure"), "its newest Enrollment review check run is failure")):
-            world.artifacts[101] = record(sizes=sizes(plain_text=2_000_000))
-            world.project_yaml = b"repo: https://example.invalid/x\nlanguage: go\n"
-            got = world.decide()
-            self.assertEqual((got["decision"], got["label"]), ("none", ""), got["reason"])
-            self.assertIn(why, got["reason"])
+    def test_the_review_comes_before_every_label(self):
+        # A label that a person lifts by hand is never put on a pull request whose review did not pass.
+        world = self.reviewed("failure")
+        world.artifacts[101] = record(sizes=sizes(plain_text=2_000_000))
+        world.project_yaml = b"repo: https://example.invalid/x\nlanguage: go\n"
+        got = world.decide()
+        self.assertEqual((got["decision"], got["label"]), ("none", ""), got["reason"])
+        self.assertIn("its newest Enrollment review check run is failure", got["reason"])
 
     def test_only_the_heads_review_is_read(self):
         api = World().api()
@@ -691,9 +664,12 @@ class Maintainer(unittest.TestCase):
         why, _ = self.standing(self.GITHUB, dispatch.triage.OK, meta={**self.META, "fork": None})
         self.assertIn("is a fork of another repository", why)
 
-    def confirmed(self, labeller, label="maintainer-confirmed", events=True, at="2026-10-28T05:00:00Z"):
+    def confirmed(self, labeller, label="maintainer-confirmed", events=True, at="2026-10-28T05:00:00Z", run_id=104):
         world = World()
         world.runs[101]["created_at"] = "2026-10-28T04:00:00Z"  # the Build run of the head commit, made at its push
+        # The run of maintainer-confirmed.yml that the label started, after the Build run.
+        world.run(700, dispatch.CONFIRMED_WORKFLOW, "pull_request_target")
+        world.runs[700].update(conclusion="success", created_at="2026-10-28T05:00:02Z")
         world.pulls = [dict(world.pull(), user={"login": "someone"}, labels=[{"name": label}])]
         api = world.api()
         api.table[f"repos/{REPO}/issues/{PR}/events?per_page=100"] = [[
@@ -702,7 +678,7 @@ class Maintainer(unittest.TestCase):
         old = dispatch.standing
         dispatch.standing = lambda config, login: f"{login} is not shown to maintain it"
         try:
-            return dispatch.decide(api, REPO, 104, "pull_request_target", SHA)
+            return dispatch.decide(api, REPO, run_id, "pull_request_target", SHA)
         finally:
             dispatch.standing = old
 
@@ -710,6 +686,17 @@ class Maintainer(unittest.TestCase):
         got = self.confirmed("a-member")
         self.assertEqual(got["decision"], "dispatch", got["reason"])
         self.assertIn("a-member labelled it maintainer-confirmed", got["reason"])
+
+    def test_the_maintainer_confirmed_run_after_the_build_run_dispatches(self):
+        # c2 (i): the author is not shown to maintain the project, a-member put maintainer-confirmed on after the head
+        # commit, and the newest Enrollment review is success. The run of maintainer-confirmed.yml completes after the
+        # head's Build run, and its completion sends the head.
+        got = self.confirmed("a-member", run_id=700)
+        self.assertEqual((got["decision"], got["label"], got["pr"], got["project"], got["sha"]),
+                         ("dispatch", "", "32", "plugin-hostd", SHA), got["reason"])
+        self.assertEqual(got["reason"], f"pull request 32: projects/plugin-hostd/ at {SHA[:7]} passed every required "
+                                        "check, each plain binary has at most 1,000,000 bytes of .text and of "
+                                        "executable segments, and a-member labelled it maintainer-confirmed")
 
     def test_the_label_put_by_the_author_or_with_no_record_or_another_label_does_not(self):
         for case in ({"labeller": "someone"}, {"labeller": "SomeOne"}, {"labeller": "a-member", "events": False},
@@ -719,7 +706,7 @@ class Maintainer(unittest.TestCase):
             got = self.confirmed(**case)
             self.assertEqual((got["decision"], got["label"]), ("label", "maintainer-review"), case)
 
-    def test_a_label_run_that_was_skipped_decides_nothing(self):
+    def test_a_skipped_maintainer_confirmed_run_decides_nothing(self):
         world = World()
         world.run(700, dispatch.CONFIRMED_WORKFLOW, "pull_request_target")
         world.runs[700]["conclusion"] = "skipped"
@@ -770,16 +757,13 @@ class Merged(unittest.TestCase):
         self.assertEqual((got["decision"], got["label"]), ("none", ""), got["reason"])
         self.assertIn("pull request 32 is not merged", got["reason"])
 
-    def test_a_merge_does_not_wait_for_the_review_or_a_persons_hold(self):
-        # c2 (d): the Enrollment review check run is not read, and the label parked holds no merge.
-        for case in ("action_required", "failure", None, "parked"):
+    def test_a_merge_does_not_wait_for_the_review(self):
+        # c2 (d): the Enrollment review check run is not read.
+        for case in ("action_required", "failure", None):
             world = self.world()
-            if case == "parked":
-                world.pulls = [dict(world.pulls[0], labels=[{"name": "parked"}])]
-            else:
-                world.review_runs = []
-                if case:
-                    world.review(401, case)
+            world.review_runs = []
+            if case:
+                world.review(401, case)
             api = world.api()
             got = dispatch.decide(api, REPO, MERGED_RUN, "pull_request_target", SHA)
             self.assertEqual((got["decision"], got["label"], got["sha"], got.get("merged")),
@@ -787,14 +771,6 @@ class Merged(unittest.TestCase):
             self.assertEqual(got["reason"], "pull request 32 was merged by a-member: the merge decides the review and "
                                             "the maintainer check")
             self.assertEqual([c for c in api.calls if "check_name=" in c], [], case)
-
-    def test_a_merge_whose_newest_build_run_is_a_label_run_is_sent_from_the_full_runs_record(self):
-        world = self.world()
-        world.label_run(106, 710)
-        api = world.api()
-        got = dispatch.decide(api, REPO, MERGED_RUN, "pull_request_target", SHA)
-        self.assertEqual((got["decision"], got["sha"], got.get("merged")), ("dispatch", SHA, "true"), got["reason"])
-        self.assertIn(f"repos/{REPO}/actions/artifacts/1010/zip", api.calls)
 
     def test_a_merge_does_not_wait_for_the_maintainer_check(self):
         asked = []
@@ -962,107 +938,6 @@ def concurrency_group(run):
                   ENROLL_DISPATCH["concurrency"]["group"], flags=re.S)
 
 
-class LabelRuns(unittest.TestCase):
-    """A Build run that a label event started (size-review, maintainer-confirmed, parked, ...) copies the head's
-    standing project-builds and writes no record. Its project-builds, the newest, says whether the check passed; the
-    record, and the time from which maintainer-confirmed counts, are the newest full run's; and its completion decides
-    as a full run's does."""
-    FULL_AT = "2026-10-28T04:00:00Z"        # Build run 101, at the push of SHA
-    CONFIRMED_AT = "2026-10-28T05:00:00Z"   # maintainer-confirmed is put on
-    LABEL_RUN_AT = "2026-10-28T05:00:03Z"   # the Build run that this label event started
-    CONFIRMED = "a-member labelled it maintainer-confirmed"
-
-    def world(self, label_run=True, created_at=LABEL_RUN_AT, **check):
-        """PR 32 by `someone`, labelled maintainer-confirmed by a-member after the push; Maintainer confirmed's run 700,
-        and the label event's Build run 106 with its project-builds check 710."""
-        world = World()
-        world.runs[101]["created_at"] = self.FULL_AT
-        world.run(700, dispatch.CONFIRMED_WORKFLOW, "pull_request_target")
-        world.runs[700]["conclusion"] = "success"
-        world.pulls = [dict(World.pull(labels=("maintainer-confirmed",)), user={"login": "someone"})]
-        if label_run:
-            world.label_run(106, 710, created_at=created_at, **check)
-        return world
-
-    def decide(self, world, run_id):
-        """(the decision, the API calls), with the maintainer check failing for the author: only maintainer-confirmed,
-        counted from the full run's time, sends."""
-        api = world.api()
-        api.table[f"repos/{REPO}/issues/{PR}/events?per_page=100"] = [[
-            {"event": "labeled", "label": {"name": "maintainer-confirmed"}, "actor": {"login": "a-member"},
-             "created_at": self.CONFIRMED_AT}]]
-        old = dispatch.standing
-        dispatch.standing = lambda config, login: f"{login} is not shown to maintain it"
-        try:
-            return dispatch.decide(api, REPO, run_id, "pull_request_target", SHA), api.calls
-        finally:
-            dispatch.standing = old
-
-    def test_a_newer_label_run_leaves_the_decision_the_record_and_the_confirmation_as_they_were(self):
-        before, _ = self.decide(self.world(label_run=False), 104)
-        self.assertEqual(before["decision"], "dispatch", before["reason"])
-        self.assertIn(self.CONFIRMED, before["reason"])
-        # Counted from run 106's time, the label would be older than the run, and the author's check would label
-        # maintainer-review.
-        for trigger in (104, 106):
-            got, calls = self.decide(self.world(), trigger)
-            self.assertEqual(got, before, trigger)
-            self.assertIn(f"repos/{REPO}/actions/artifacts/1010/zip", calls)
-
-    def test_a_maintainer_confirmed_pull_request_with_a_later_label_run_still_dispatches(self):
-        # size-review, say, put on an hour after maintainer-confirmed: its Build run copies project-builds' success.
-        world = self.world(created_at="2026-10-28T06:00:00Z")
-        for trigger in (700, 106):
-            got, _ = self.decide(world, trigger)
-            self.assertEqual((got["decision"], got["label"]), ("dispatch", ""), (trigger, got["reason"]))
-            self.assertIn(self.CONFIRMED, got["reason"])
-
-    def test_confirmed_while_the_label_runs_project_builds_waits_then_its_completion_dispatches(self):
-        for status in ("queued", "in_progress"):
-            world = self.world(conclusion=None, status=status)
-            got, _ = self.decide(world, 700)
-            self.assertEqual((got["decision"], got["label"]), ("none", ""), status)
-            self.assertEqual(got["reason"], f"required checks not passed at {SHA[:7]}: project-builds ({status})")
-            world.checks[-1].update(status="completed", conclusion="success")
-            got, _ = self.decide(world, 106)
-            self.assertEqual((got["decision"], got["label"]), ("dispatch", ""), (status, got["reason"]))
-            self.assertIn(self.CONFIRMED, got["reason"])
-
-    def test_a_label_runs_dispatch_run_that_replaces_a_pending_one_still_dispatches(self):
-        # Tests' run 104 and the label event's Build run 106 are of one head: the Enroll dispatch run of 106 replaces
-        # 104's while it waits, and decides as it would have.
-        world = self.world()
-        self.assertEqual(concurrency_group(world.runs[104]), concurrency_group(world.runs[106]))
-        pending, _ = self.decide(world, 104)
-        self.assertEqual(pending["decision"], "dispatch", pending["reason"])
-        replacing, _ = self.decide(world, 106)
-        self.assertEqual(replacing, pending)
-
-    def test_a_label_run_that_copies_a_failure_sends_nothing(self):
-        got, _ = self.decide(self.world(conclusion="failure"), 106)
-        self.assertEqual((got["decision"], got["label"]), ("none", ""), got["reason"])
-        self.assertEqual(got["reason"], f"required checks not passed at {SHA[:7]}: project-builds (failure)")
-
-    def test_a_head_whose_full_runs_wrote_no_record_sends_nothing(self):
-        world = self.world()
-        del world.artifacts[101]
-        got, _ = self.decide(world, 106)
-        self.assertEqual((got["decision"], got["label"]), ("none", ""), got["reason"])
-        self.assertEqual(got["reason"], "no Build run of project-builds at this head wrote the artifact "
-                                        "enrollment-record")
-
-    def test_the_newest_full_run_writes_the_record(self):
-        # A second full run at the head (reopened, say), older than the label run: its record decides, not 101's.
-        world = self.world()
-        world.run(105, ".github/workflows/build.yaml", "pull_request_target")
-        world.runs[105]["created_at"] = "2026-10-28T04:30:00Z"
-        world.check(705, "project-builds", 105)
-        world.artifacts[105] = record(sizes=sizes(plain_text=2_000_000))
-        got, calls = self.decide(world, 106)
-        self.assertEqual((got["decision"], got["label"]), ("label", "size-review"), got["reason"])
-        self.assertNotIn(f"repos/{REPO}/actions/artifacts/1010/zip", calls)
-
-
 class Concurrency(unittest.TestCase):
     """enroll-dispatch.yml's concurrency group, evaluated for the runs whose completion starts it."""
 
@@ -1117,24 +992,15 @@ class DispatchJob(Runner):
         """The calls that change the pull request: (method, endpoint)."""
         return [(c[c.index("--method") + 1], c[c.index("--method") + 2]) for c in self.calls() if "--method" in c]
 
-    def test_a_label_the_pull_request_has_is_not_put_on_again(self):
-        # A decision made again, by a label run's completion say, starts no new label event.
-        self.labelled("checks-failing", "maintainer-review")
-        code, out, _ = self.run_script(dispatch_step("Label the pull request"), DECISION="label",
-                                       LABEL="maintainer-review")
-        self.assertEqual(code, 0, out)
-        self.assertEqual(self.writes(), [])
-        self.assertEqual(self.summary.read_text(), f"pull request {PR}: already labelled maintainer-review; no "
-                                                   f"statements are started for plugin-hostd at {SHA}\n")
-
-    def test_a_label_the_pull_request_lacks_is_put_on(self):
-        self.labelled("size-review", "maintainer-review-old")
+    def test_the_decisions_label_is_put_on(self):
+        self.labelled("maintainer-review")  # GitHub's answer to the POST: the labels the pull request has now
         code, out, _ = self.run_script(dispatch_step("Label the pull request"), DECISION="label",
                                        LABEL="maintainer-review")
         self.assertEqual(code, 0, out)
         self.assertEqual(self.writes(), [("POST", self.LABELS)])
-        self.assertEqual(json.loads((self.api / "input.2").read_text()), {"labels": ["maintainer-review"]})
-        self.assertIn(f"pull request {PR}: labelled maintainer-review;", self.summary.read_text())
+        self.assertEqual(json.loads((self.api / "input.1").read_text()), {"labels": ["maintainer-review"]})
+        self.assertEqual(self.summary.read_text(), f"pull request {PR}: labelled maintainer-review; no statements are "
+                                                   f"started for plugin-hostd at {SHA}\n")
 
     def test_the_decisions_values_admit_only_this_workflows_labels(self):
         script = dispatch_step("Check the decision's values")
@@ -1142,13 +1008,13 @@ class DispatchJob(Runner):
                                 ("label", "name-review"), ("label", "maintainer-review")):
             code, out, _ = self.run_script(script, DECISION=decision, LABEL=label)
             self.assertEqual(code, 0, (label, out))
-        for label in ("review-pending", "review-blocking", "parked", "review-held"):
+        for label in ("review-pending", "review-blocking", "review-held"):
             code, out, _ = self.run_script(script, DECISION="label", LABEL=label)
             self.assertEqual(code, 1, label)
             self.assertIn(f"::error::not a decision: 'label' '{label}'", out)
 
     def test_a_send_takes_off_only_the_labels_this_workflow_puts_on(self):
-        names = ("size-review", "review-pending", "review-blocking", "parked", "maintainer-review", "checks-failing")
+        names = ("size-review", "review-pending", "review-blocking", "maintainer-review", "checks-failing")
         self.labelled(*names)
         for name in names:
             self.serve(f"{self.LABELS}/{name}", [])
