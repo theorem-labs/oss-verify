@@ -7,8 +7,10 @@
 #
 #   decide    .github/scripts/enroll-dispatch reads GitHub's API: the checks main's ruleset requires, each from the
 #             workflow and event that must make it, at the commit; the record that build.yaml's record job wrote for
-#             it (each binary's .text and executable bytes); the pull request the record names and its files. Its
-#             decision is dispatch, label or none (the script's header says when).
+#             it (each binary's .text and executable bytes); the pull request the record names and its files; and,
+#             for the label review-passed (below), the pull request's events, the runs from its head, and whether
+#             build.yaml's rule trusts its author (ALLOWED_BOTS, from main's .github/workflows/build.yaml, or write
+#             access). Its decision is dispatch, label or none (the script's header says when).
 #   dispatch  on dispatch: sends the repository_dispatch event enrollment-checked, with the pull request's number,
 #             its head commit and the project, to Theorem's private statements repository (repository id INTERNAL_ID
 #             below; its name is not published), whose enrollment workflow builds the project, writes its facts and
@@ -34,8 +36,22 @@
 # and the name rule still label. A merge made before enroll-merged.yml existed is replayed with
 # `gh workflow run enroll-merged.yml -R theorem-labs/oss-verify -f pr=<n>`.
 #
+# The label review-passed ("Checks and CI review passed; statements started. No plan to merge or prove this project
+# now.") says that an enrollment passed at its head commit. decide says what happens to it in review_passed (on, off,
+# or empty for no change), by the rule in the script's header: a run that sends an enrollment whose review gave no fail,
+# by an author build.yaml's rule does not trust, puts it on, unless an account other than the App took it off before;
+# a run for a new head that does not pass takes off a label older than that head; a close or a merge takes it off. So
+# dispatch runs also when the decision is none and the label changes. It writes the label with the token for this
+# repository's pull requests. Before it takes the label off at a new head, it reads the pull request and its events
+# again, and leaves the label when the head moved or the newest labeled event is not the one decide judged (label_at).
+# It puts the label on only while the pull request is open at the commit, after the send, and reads the pull request
+# again after: when the head moved or the pull request closed meanwhile, it takes the label off again. A label older
+# than the head is taken off and put on again, so that its labeled event is new. It makes the label when it is missing
+# (colour 0E8A16, that description), and sets the description when it differs. Each change is a line of the run's
+# summary; no step posts a comment.
+#
 # Each required check's run starts this workflow, so the run of the last one to pass is the one that dispatches; a run
-# that sees a check not passed yet does nothing, and so does a run for a draft pull request: build.yaml runs again on
+# that sees a check not passed yet sends nothing, and so does a run for a draft pull request: build.yaml runs again on
 # ready_for_review, and that run's completion decides once the pull request is ready. A later run for the same commit
 # (an edited title, a re-run) sends it again; the enrollment workflow runs the runs of one project one at a time, and
 # skips a commit whose facts it already made or whose build an event started in the last 24 hours. A new commit on the
@@ -51,7 +67,7 @@
 # Google workload identity federation, as build.yaml's and triage.yaml's comment jobs do. It declares the GitHub
 # Environment `comment`, whose claim is the only way to act as the account that reads the key; decide must never
 # be given id-token: write or that environment. Each token it makes holds one permission on one repository: pull
-# requests of this repository for the label (actions/create-github-app-token), contents of the private repository for
+# requests of this repository for the labels (actions/create-github-app-token), contents of the private repository for
 # the event (.github/scripts/app-token, which names it by id, so that the public log does not name it; GitHub's
 # repository_dispatch endpoint takes contents: write). It checks out .github/scripts alone and runs app-token alone.
 name: Enroll dispatch
@@ -96,11 +112,13 @@ jobs:
       contains(fromJSON('["pull_request_target", "pull_request", "workflow_dispatch"]'), github.event.workflow_run.event)
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # A collaborator's permission, which build.yaml's rule for trusted accounts reads, needs metadata: read alone, and
+    # GitHub gives it to every token that holds a permission.
     permissions:
-      actions: read        # the runs behind the check runs, and the Build run's artifact enrollment-record
+      actions: read        # the runs behind the check runs, the runs from the head, the Build run's enrollment-record
       checks: read         # the check runs at the commit
-      contents: read       # the checkout of .github/scripts and tools, main's rules (rules/branches/main), the project.yaml
-      pull-requests: read  # the pull request and its files
+      contents: read       # the checkout, main's rules (rules/branches/main), the project.yaml
+      pull-requests: read  # the pull request, its files and its events
     outputs:
       decision: ${{ steps.decide.outputs.decision }}
       label: ${{ steps.decide.outputs.label }}
@@ -108,14 +126,19 @@ jobs:
       project: ${{ steps.decide.outputs.project }}
       sha: ${{ steps.decide.outputs.sha }}
       merged: ${{ steps.decide.outputs.merged }}
+      review_passed: ${{ steps.decide.outputs.review_passed }}
+      review_passed_at: ${{ steps.decide.outputs.review_passed_at }}
+      label_at: ${{ steps.decide.outputs.label_at }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with:
           persist-credentials: false
-          # tools: triage.py, which the maintainer check comes from, imports tools/validate.py. Main's copy, read as
-          # code of this repository; nothing of the pull request is checked out.
+          # tools: triage.py, which the maintainer check comes from, imports tools/validate.py. .github/workflows:
+          # build.yaml's ALLOWED_BOTS, the Apps its rule for trusted accounts trusts. Main's copy, read as code of this
+          # repository; nothing of the pull request is checked out.
           sparse-checkout: |
             .github/scripts
+            .github/workflows
             tools
 
       - name: Install PyYAML
@@ -143,7 +166,10 @@ jobs:
 
   dispatch:
     needs: decide
-    if: needs.decide.outputs.decision == 'dispatch' || needs.decide.outputs.decision == 'label'
+    # A decision none runs it too when it takes review-passed off.
+    if: >-
+      needs.decide.outputs.decision == 'dispatch' || needs.decide.outputs.decision == 'label'
+      || needs.decide.outputs.review_passed != ''
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # Gets this job, and no other, the App's key: only a token with this environment's claim may act as the account
@@ -171,18 +197,43 @@ jobs:
       PROJECT: ${{ needs.decide.outputs.project }}
       SHA: ${{ needs.decide.outputs.sha }}
       MERGED: ${{ needs.decide.outputs.merged }}
+      REVIEW_PASSED: ${{ needs.decide.outputs.review_passed }}
+      REVIEW_PASSED_AT: ${{ needs.decide.outputs.review_passed_at }}
+      LABEL_AT: ${{ needs.decide.outputs.label_at }}
+      # The label review-passed's description, which it gets when it is made, or when its description differs.
+      REVIEW_PASSED_DESCRIPTION: >-
+        Checks and CI review passed; statements started. No plan to merge or prove this project now.
     steps:
       - name: Check the decision's values
         run: |
           set -euo pipefail
           [[ $PR =~ ^[1-9][0-9]*$ ]] || { echo "::error::not a pull request number: '$PR'"; exit 1; }
-          [[ $PROJECT =~ ^[a-z0-9][a-z0-9._-]{0,62}$ ]] || { echo "::error::not a project name: '$PROJECT'"; exit 1; }
-          [[ $SHA =~ ^[0-9a-f]{40}$ ]] || { echo "::error::not a commit id: '$SHA'"; exit 1; }
+          # A decision none that takes review-passed off may name no project, and at a close no commit either.
+          if [[ $DECISION != none || -n $PROJECT ]]; then
+            [[ $PROJECT =~ ^[a-z0-9][a-z0-9._-]{0,62}$ ]] || { echo "::error::not a project name: '$PROJECT'"; exit 1; }
+          fi
+          if [[ $DECISION != none || -n $SHA || $REVIEW_PASSED_AT == head ]]; then
+            [[ $SHA =~ ^[0-9a-f]{40}$ ]] || { echo "::error::not a commit id: '$SHA'"; exit 1; }
+          fi
           case $DECISION/$LABEL in
             dispatch/) ;;
             label/size-review|label/language-paused|label/name-review|label/maintainer-review|label/review-blocking|label/review-pending) ;;
+            none/) [[ $REVIEW_PASSED == off ]] || { echo "::error::a decision none that changes no label"; exit 1; } ;;
             *) echo "::error::not a decision: '$DECISION' '$LABEL'"; exit 1 ;;
           esac
+          [[ -z $LABEL_AT || $LABEL_AT =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
+            || { echo "::error::not a time: '$LABEL_AT'"; exit 1; }
+          # review-passed: no change; on, the first time (no labeled event to judge) or again at a new head (the time of
+          # the label older than it); off at a new head (the time of the label decide judged), or at a close or a merge.
+          case $REVIEW_PASSED/$REVIEW_PASSED_AT/${LABEL_AT:+time} in
+            //|on//|on/head/time|off/head/time|off/closed/) ;;
+            *) echo "::error::not a change of review-passed: '$REVIEW_PASSED' '$REVIEW_PASSED_AT' '$LABEL_AT'"
+               exit 1 ;;
+          esac
+          if [[ $REVIEW_PASSED == on && ( $DECISION != dispatch || $MERGED == true ) ]]; then
+            echo "::error::review-passed goes on only with a send for an open pull request: '$DECISION' '$MERGED'"
+            exit 1
+          fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         if: env.DECISION == 'dispatch'
@@ -228,6 +279,46 @@ jobs:
           client-id: Iv23liAWPMahJZYsw3un
           private-key: ${{ steps.key.outputs.key }}
           permission-pull-requests: write
+
+      # Before the send, so that a send that fails leaves no label that the head did not earn. At a new head, decide's
+      # reads may be old by now, so the pull request and its events are read again. The label stays when the head
+      # moved (the run for that head decides), or when its newest labeled event is not the one decide judged (a passing
+      # run for this head put it on again since). At a close or a merge it comes off with no read. A 404 says it is off
+      # already.
+      - name: Take off review-passed
+        if: env.REVIEW_PASSED == 'off'
+        env:
+          GH_TOKEN: ${{ steps.label-token.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          say() { echo "pull request $PR: $1" | tee -a "$GITHUB_STEP_SUMMARY"; }
+          if [[ $REVIEW_PASSED_AT == head ]]; then
+            head=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)
+            if [[ $head != "$SHA" ]]; then
+              say "review-passed stays: its head is $head now, not $SHA, and the run for that head decides"
+              exit 0
+            fi
+            # Its former name's events count as its own, as in the script.
+            newest=$(gh api --paginate "repos/$REPO/issues/$PR/events?per_page=100" --jq '.[]
+              | select(.event == "labeled" and (.label.name == "review-passed" or .label.name == "passes-not-merging"))
+              | .created_at' | sort | tail -n 1)
+            if [[ $newest != "$LABEL_AT" ]]; then
+              say "review-passed stays: its newest label is of ${newest:-no time}, not of $LABEL_AT, which was judged"
+              exit 0
+            fi
+            why="its label of $LABEL_AT is older than $SHA, which does not earn it (the decision's reason says why)"
+          else
+            why="it is closed"
+          fi
+          if out=$(gh api --method DELETE "repos/$REPO/issues/$PR/labels/review-passed" 2>&1); then
+            say "review-passed taken off, since $why"
+          elif [[ $out == *"(HTTP 404)"* ]]; then
+            say "review-passed was off already"
+          else
+            echo "::error::review-passed could not be taken off: $out"
+            exit 1
+          fi
 
       - name: Label the pull request
         if: env.DECISION == 'label'
@@ -281,6 +372,68 @@ jobs:
                 echo "pull request $PR: $old taken off, since $SHA is sent" | tee -a "$GITHUB_STEP_SUMMARY" ;;
             esac
           done
+
+      # Only after the send, and after the labels of an earlier commit come off: the label says that the statements are
+      # started. The pull request is read just before and just after, so that a label that lands after a new push or a
+      # close does not stay. A label older than the head is taken off and put on again, so that its labeled event is
+      # new: a run that decided to take it off for this head then stops (Take off review-passed).
+      - name: Put on review-passed
+        if: env.REVIEW_PASSED == 'on'
+        env:
+          GH_TOKEN: ${{ steps.label-token.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          say() { echo "$1" | tee -a "$GITHUB_STEP_SUMMARY"; }
+          # off <why>: takes the label off the pull request; a 404 says it is off already.
+          off() {
+            local out
+            if out=$(gh api --method DELETE "repos/$REPO/issues/$PR/labels/review-passed" 2>&1); then
+              say "pull request $PR: review-passed taken off, $1"
+            elif [[ $out == *"(HTTP 404)"* ]]; then
+              say "pull request $PR: review-passed was off already"
+            else
+              echo "::error::review-passed could not be taken off: $out"
+              exit 1
+            fi
+          }
+          # The label first: adding a label the repository does not have makes it with no description. A 422 says
+          # that another run made it meanwhile.
+          if ! description=$(gh api "repos/$REPO/labels/review-passed" --jq '.description // ""' 2>&1); then
+            [[ $description == *"(HTTP 404)"* ]] \
+              || { echo "::error::the label review-passed could not be read: $description"; exit 1; }
+            if out=$(jq -n --arg description "$REVIEW_PASSED_DESCRIPTION" \
+                '{name: "review-passed", color: "0E8A16", description: $description}' \
+                | gh api --method POST "repos/$REPO/labels" --input - --jq .name 2>&1); then
+              say "label review-passed made, with its description"
+              description=$REVIEW_PASSED_DESCRIPTION
+            elif [[ $out == *"(HTTP 422)"* ]]; then
+              description=$(gh api "repos/$REPO/labels/review-passed" --jq '.description // ""')
+            else
+              echo "::error::the label review-passed could not be made: $out"
+              exit 1
+            fi
+          fi
+          if [[ $description != "$REVIEW_PASSED_DESCRIPTION" ]]; then
+            jq -n --arg description "$REVIEW_PASSED_DESCRIPTION" '{description: $description}' \
+              | gh api --method PATCH "repos/$REPO/labels/review-passed" --input - > /dev/null
+            say "label review-passed: its description set"
+          fi
+          at=$(gh api "repos/$REPO/pulls/$PR" --jq '"\(.state) \(.head.sha)"')
+          if [[ $at != "open $SHA" ]]; then
+            say "pull request $PR: review-passed is not put on: it is ${at% *} at ${at#* }, not open at $SHA"
+            exit 0
+          fi
+          if [[ -n $LABEL_AT ]]; then
+            off "to be put on again: its label of $LABEL_AT is older than $SHA"
+          fi
+          jq -n '{labels: ["review-passed"]}' \
+            | gh api --method POST "repos/$REPO/issues/$PR/labels" --input - > /dev/null
+          say "pull request $PR: review-passed put on, for $SHA"
+          at=$(gh api "repos/$REPO/pulls/$PR" --jq '"\(.state) \(.head.sha)"')
+          if [[ $at != "open $SHA" ]]; then
+            off "since it is ${at% *} at ${at#* } now, not open at $SHA"
+          fi
 
       - name: Revoke the private repository's token
         if: always() && steps.dispatch-token.outputs.token != ''
