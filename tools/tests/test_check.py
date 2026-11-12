@@ -111,7 +111,7 @@ class Project(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             stack.enter_context(mock.patch.object(sys, "argv", argv))
             stack.enter_context(mock.patch.object(check_tool, "build_all", build_all))
-            stack.enter_context(mock.patch.object(check_build, "resolve", lambda repo, ref: COMMIT))
+            stack.enter_context(mock.patch.object(check_build, "resolve", lambda repo, ref, token=None: COMMIT))
             stack.enter_context(mock.patch.object(check_build, "image_id", lambda tag: f"sha256:{tag}"))
             stack.enter_context(mock.patch.object(check_build, "sources", lambda tag, *, labels: {}))
             stack.enter_context(mock.patch.object(check_build, "oss_verify_state", lambda job: None))
@@ -341,7 +341,7 @@ class ProjectTag(unittest.TestCase):
             record = home / check_build.IMAGES
             seen = []
 
-            def build_project(job, commit, builder, tag, work, no_cache=False):
+            def build_project(job, commit, builder, tag, work, no_cache=False, token=None):
                 seen.append(check_build.recorded_images(record))
                 raise check_build.Failed("stop here")
 

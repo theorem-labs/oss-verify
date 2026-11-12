@@ -1,0 +1,24 @@
+# The libraries whose repository a build fetches with a credential. Every other library is fetched with none, which
+# is what the builder's fetch-commit does by default and what the public enrollment build has always done: a row
+# here, and nothing else, makes a build ask for a token. This is a list and not a rule about an account on purpose.
+# Authenticating everything under one account would make every public build depend on the token service being up,
+# and would change how the whole fleet fails for the sake of the few repositories below.
+#
+# For a library listed here, tools/check mints a token for that one build, read-only (contents and metadata) and
+# narrowed to that one repository, and gives it to `docker build` as the BuildKit secret oss-verify-git-token. The
+# project's Dockerfile must mount it on the fetch step, and tools/check refuses the build if it does not:
+#
+#     RUN --mount=type=secret,id=oss-verify-git-token fetch-commit $SRC/<name>
+#
+# tools/check equally refuses a project that is NOT listed here whose Dockerfile asks for that mount.
+#
+# The token comes from the command in OSS_VERIFY_GIT_TOKEN_COMMAND, else infra/github-read-token. It is never a
+# stored credential, is never written into the image, a layer, the facts or the log, and no build has one unless its
+# repository is a row here. docs/build-contract.md, "A private library", describes the whole path.
+#
+# The enrollment build in .github/workflows/build.yaml has no token command and must never be given one: it builds
+# code from anyone. A library listed here is built on our own machines.
+#
+# repository	why it is private
+https://github.com/theorem-labs/cjson-ossv267	the calibration pair of the verified-SDLC eval: one feature built twice from one base, on cJSON v1.7.18 (dispatch://OSSV-267)
+https://github.com/theorem-labs/theorem-cli	the `theorem` CLI, which is ours and not published (dispatch://OSSV-518)

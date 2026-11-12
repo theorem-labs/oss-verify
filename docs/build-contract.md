@@ -139,6 +139,33 @@ Start from [templates/Dockerfile](../templates/Dockerfile). Two builds written b
 
 If the `Dockerfile` is in the project's repository (`dockerfile` in `project.yaml`), the build context is that repository at the commit that we build. Use `COPY . $SRC/<name>` to get the source.
 
+## A private library
+
+A library of ours whose repository is private is fetched with a credential; every other library is fetched with none. The list of such libraries is [infra/private-libraries.tsv](../infra/private-libraries.tsv), one repository a row, and a row there is the only thing that makes a build ask for a token. There is no rule about an account: authenticating everything under one owner would make every public build depend on a token service being up, for the sake of the few repositories in that file.
+
+For a listed library, `tools/check` mints one token for that build: read-only (`contents` and `metadata`), narrowed to that one repository, and short-lived. It comes from [infra/github-read-token](../infra/github-read-token), or from the command in `OSS_VERIFY_GIT_TOKEN_COMMAND`, which is run with `<owner> <repo>` and must print the token on standard output. A build host with neither mints nothing, and the build fails saying so. The enrollment workflow has no token command and must never be given one: it builds code from anyone.
+
+The project's `Dockerfile` mounts the token on its fetch step, in place of rule 3 above:
+
+    ARG REPO
+    ARG COMMIT
+    RUN --mount=type=secret,id=oss-verify-git-token fetch-commit $SRC/<name>
+
+`tools/check` refuses a build whose `Dockerfile` and whose library disagree: a listed library whose `Dockerfile` does not mount the secret (it would fetch with no credential and fail as an unauthorised one), and a library that is not listed whose `Dockerfile` asks for the mount (a project asking a build for a credential it is not meant to have). BuildKit gives such a `RUN` an empty mount and says nothing, so neither mistake shows itself.
+
+Where the token is while the build runs, and nowhere else:
+
+* It goes to `docker build` as `--secret id=oss-verify-git-token,env=…`, read out of the environment of `tools/check` itself. A **build argument** would be in `docker history`; a secret is not, and `docker build` writes nothing of it into the image.
+* Inside the build it is a **tmpfs file** that exists only while the `RUN` step that mounts it runs. It is in no layer.
+* `git` reads it through the credential helper [git-credential-oss-verify](../infra/base-builder/git-credential-oss-verify). A token in the URL would be written into `.git/config`, which is a layer, and printed by `git remote -v`; a token in `-c http.extraHeader` would be in a command line, which every other process on the host can read. A helper's answer goes down a pipe to `git`.
+* The remote in the checkout is `REPO` as `project.yaml` gives it. Nothing about the fetch reaches `manifest.yaml`: `commit` is the commit that was fetched, as for every other library.
+* What `git` writes when a fetch fails is the one message this repository does not author, so in this mode everything `git` writes goes through a filter that replaces the token, both in the container ([fetch-commit](../infra/base-builder/fetch-commit)) and on the host ([tools/check_build.py](../tools/check_build.py)).
+
+A fetch that fails says which of two things went wrong, because they used to be one message:
+
+* **Not authorised.** The server would not list the repository's refs at all, so the commit was never looked up. GitHub answers a private repository you may not read exactly as it answers one that is not there, so the message names both and does not guess.
+* **No such commit.** The server listed the refs, so the build may read the repository; the commit is not in it.
+
 ## What build.sh must do
 
 Start from [templates/build.sh](../templates/build.sh). Obey these rules:

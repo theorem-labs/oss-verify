@@ -1,0 +1,37 @@
+#!/bin/sh
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+#
+# github-read-token <owner> <repo>: print, on standard output, a GitHub token that may read that one repository and
+# nothing else. tools/check runs it for a library listed in infra/private-libraries.tsv, once per build, and gives
+# what it prints to `docker build` as a BuildKit secret (tools/check_build.py).
+#
+# This is the default; OSS_VERIFY_GIT_TOKEN_COMMAND replaces it with any other command, which is run with the same
+# two arguments and must print the token the same way. A build host that has neither has no token, and a build of a
+# private library fails saying so.
+#
+# What it must print: a token that can read the repository's contents, that is made for this build, and that nobody
+# has to store. It must NOT be an account-wide or long-lived credential: everything downstream keeps a token out of
+# the image and the log, but nothing downstream can make a wide token narrow.
+#
+# Theorem's fleet already mints exactly that, so this asks for it rather than inventing a store: `gh-app-token` is
+# the GitHub App credential helper on a Theorem machine, and `--owner`/`--repo`/`--read-only` have it ask its
+# credential broker for an installation token narrowed to that one repository with contents:read and metadata:read.
+# It prints the token on standard output and its one note on standard error.
+set -eu
+set +x
+
+[ $# -eq 2 ] || { echo "usage: github-read-token <owner> <repo>" >&2; exit 2; }
+
+command -v gh-app-token >/dev/null 2>&1 || {
+  echo "github-read-token: no gh-app-token on PATH, so there is no way to mint a read-only token for $1/$2 here." >&2
+  echo "  Run the build on a machine that has it, or set OSS_VERIFY_GIT_TOKEN_COMMAND to a command of your own" >&2
+  echo "  that takes <owner> <repo> and prints a token that may read only that repository." >&2
+  exit 1
+}
+
+# A build's fetch happens in its first step, but ask for a token that is good for half an hour so a queued or slow
+# build does not race its own expiry; the helper mints a fresh hour-long one rather than reuse a nearly spent token.
+GH_APP_TOKEN_MIN_LIFETIME=1800
+export GH_APP_TOKEN_MIN_LIFETIME
+exec gh-app-token agent --owner "$1" --repo "$2" --read-only

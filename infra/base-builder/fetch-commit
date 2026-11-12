@@ -9,9 +9,31 @@
 #     RUN fetch-commit $SRC/<name>
 #
 # tools/check passes REPO (project.yaml's repo, without its #ref) and COMMIT (the full commit the ref resolved to).
-# Only https is used, anonymously, as tools/check does. The checkout is verified to be exactly COMMIT.
+# Only https is used. The checkout is verified to be exactly COMMIT.
 # --submodules also checks out the submodules, at the commits the tree records.
+#
+# A public library is fetched anonymously, as tools/check resolves it: the emptied credential.helper below stops the
+# build from picking up whatever credential the host happens to have. That is the path every public library takes,
+# and nothing here reaches for a credential first.
+#
+# A private library of ours is fetched with a token, and only one that tools/check mounted on this RUN step for it:
+#
+#     ARG REPO
+#     ARG COMMIT
+#     RUN --mount=type=secret,id=oss-verify-git-token fetch-commit $SRC/<name>
+#
+# tools/check mints that token for this one build, read-only and narrowed to that one repository, and gives it to
+# docker build as a BuildKit secret (tools/check_build.py; infra/private-libraries.tsv lists the repositories that
+# get one). A BuildKit secret is a tmpfs file that exists only while the RUN step runs, so it is in no layer and in
+# no image history. Nothing here puts it anywhere else either: git reads it through the credential helper
+# git-credential-oss-verify, so it is in no command line, in no environment of git's own, and in no URL -- and the
+# remote this leaves in the checkout is REPO as it was given. The one remaining way out is what git prints when a
+# fetch fails, so in this mode everything git writes goes through redact() before it reaches the log.
+#
+# A fetch that fails says which of the two things went wrong: a repository this build cannot read at all, or a
+# repository it can read that does not have that commit. Before this they were one message, "not found".
 set -eu
+set +x
 
 submodules=0
 if [ "${1:-}" = --submodules ]; then submodules=1; shift; fi
@@ -27,22 +49,88 @@ esac
 [ ${#COMMIT} -eq 40 ] || [ ${#COMMIT} -eq 64 ] || { echo "fetch-commit: COMMIT must be a full commit id" >&2; exit 2; }
 
 export GIT_TERMINAL_PROMPT=0
+
+# Where tools/check mounts the token of a private library. The variable is for the tests, which run this script
+# outside a container; a build never sets it, and the mount is the only place a build's token comes from.
+token_file=${OSS_VERIFY_TOKEN_FILE:-/run/secrets/oss-verify-git-token}
+
+# git() is every local step (init, remote add, checkout, rev-parse): it needs no credential and prints what it
+# prints. net() is every step that reaches the server, and it is the only one that differs between a public library
+# and a private one.
 git() { command git -c credential.helper= -c protocol.allow=never -c protocol.https.allow=always "$@"; }
+
+if [ -s "$token_file" ]; then
+  credential="a read-only token minted for this build"
+  token=$(cat "$token_file")
+  OSS_VERIFY_TOKEN_FILE=$token_file
+  export OSS_VERIFY_TOKEN_FILE
+  # redact() replaces the token wherever it is, so one copy of it cannot reach the build log through a message this
+  # script did not write. It is shell string handling and no other program: a filter would need the token in its own
+  # command line, which is the thing being avoided.
+  redact() {
+    text=$1
+    while :; do
+      case $text in
+        *"$token"*) text="${text%%"$token"*}<redacted>${text#*"$token"}" ;;
+        *) break ;;
+      esac
+    done
+    printf '%s\n' "$text"
+  }
+  # The token is in no command line here: credential.helper names the helper, and the helper reads the file. Only
+  # what git writes to standard error is held back and redacted; its standard output passes through fd 3, so a
+  # caller that reads it ($(net ...)) still gets it.
+  net() {
+    status=0
+    exec 3>&1
+    message=$(command git -c credential.helper= -c credential.helper=oss-verify \
+                          -c protocol.allow=never -c protocol.https.allow=always "$@" 2>&1 1>&3) || status=$?
+    exec 3>&-
+    [ -z "$message" ] || redact "$message" >&2
+    return $status
+  }
+else
+  credential="no credential"
+  net() { git "$@"; }
+fi
+
+# readable: does the server let this build list the repository's refs at all? It asks for the refs and nothing about
+# the commit, and it needs exactly the authorisation the fetch needs, so its answer separates "you may not read this
+# repository" from "this repository has no such commit". GitHub answers a repository you may not read the same way it
+# answers one that is not there, so the two cannot be told apart here and the message does not claim to.
+readable() { net ls-remote "$REPO" >/dev/null 2>&1; }
+
+unreadable() {
+  echo "fetch-commit: not authorised to read $REPO, or it does not exist. This build fetched it with $credential." >&2
+  echo "  The server did not list the repository's refs, so $COMMIT was never looked up: this is not a missing" >&2
+  echo "  commit. GitHub answers a private repository you may not read exactly as it answers one that is not" >&2
+  echo "  there. A private repository of ours needs a row in infra/private-libraries.tsv and" >&2
+  echo "  --mount=type=secret,id=oss-verify-git-token on this RUN (docs/build-contract.md)." >&2
+  exit 1
+}
+
+no_such_commit() {
+  echo "fetch-commit: $REPO has no commit $COMMIT. The server listed the repository's refs for this build, so this" >&2
+  echo "  is not an authorisation failure: the commit is not in the repository (deleted, or never pushed, or a" >&2
+  echo "  branch that was force-pushed since the commit was recorded)." >&2
+  exit 1
+}
 
 git init -q "$dir"
 git -C "$dir" remote add origin "$REPO"
-if git -C "$dir" fetch -q --depth 1 origin "$COMMIT"; then
+if net -C "$dir" fetch -q --depth 1 origin "$COMMIT"; then
   git -C "$dir" checkout -q --detach FETCH_HEAD
 else
+  readable || unreadable
   # A server that will not serve one commit by its id, as a "dumb" HTTP server cannot: clone all of it, then check the
   # commit out.
   rm -rf "$dir"
-  git clone -q --no-checkout "$REPO" "$dir"
-  git -C "$dir" checkout -q --detach "$COMMIT"
+  net clone -q --no-checkout "$REPO" "$dir"
+  git -C "$dir" checkout -q --detach "$COMMIT" || no_such_commit
 fi
 head=$(git -C "$dir" rev-parse HEAD)
 [ "$head" = "$COMMIT" ] || { echo "fetch-commit: checked out $head, not $COMMIT" >&2; exit 1; }
 if [ "$submodules" = 1 ]; then
-  git -C "$dir" submodule update -q --init --recursive --depth 1
+  net -C "$dir" submodule update -q --init --recursive --depth 1
 fi
 echo "fetch-commit: $REPO at $COMMIT in $dir"

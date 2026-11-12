@@ -16,6 +16,7 @@ import hashlib
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -44,6 +45,27 @@ LIST_SOURCES = (
     'find "$SRC" -maxdepth 4 -name .git 2>/dev/null | sort | while read -r g; do d=${g%/.git}; '
     'c=$(git -C "$d" rev-parse HEAD 2>/dev/null) && printf "%s %s\\n" "$d" "$c"; done'
 )
+# The libraries a build fetches with a credential, one repository a row, and nothing else (private_libraries()).
+PRIVATE_LIBRARIES = ROOT / "infra" / "private-libraries.tsv"
+# The command that prints a read-only token for one repository, run with <owner> <repo>; OSS_VERIFY_GIT_TOKEN_COMMAND
+# replaces it (infra/github-read-token).
+TOKEN_COMMAND = ROOT / "infra" / "github-read-token"
+TOKEN_COMMAND_ENV = "OSS_VERIFY_GIT_TOKEN_COMMAND"
+# The BuildKit secret that carries that token into the build, and the host environment variable `docker build
+# --secret env=` reads it from. A secret is a tmpfs file in the RUN step that mounts it: it is in no layer, in no
+# image history and in no build argument. The project's Dockerfile must ask for it (build_project).
+GIT_TOKEN_SECRET = "oss-verify-git-token"
+GIT_TOKEN_ENV = "OSS_VERIFY_GIT_TOKEN"
+SECRET_MOUNT = f"--mount=type=secret,id={GIT_TOKEN_SECRET}"
+# How git reads that token on the host: the same helper the builder image installs, by its path here, with the token
+# in the environment of the git process alone (infra/base-builder/git-credential-oss-verify).
+CREDENTIAL_HELPER = BUILDER_DIR / "git-credential-oss-verify"
+# A GitHub token, for the one case where a message this file did not write may hold one: the standard error of a
+# token command, which is read before there is a token to compare against.
+TOKEN_SHAPE = re.compile(r"gh[a-z]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}")
+# What stands in a message for a credential that was wrong or missing, rather than for a request that never arrived.
+UNAUTHORISED = ("could not read username", "authentication failed", "repository not found", "terminal prompts "
+                "disabled", "403 forbidden", "invalid username or token", "remote: not found")
 
 
 class Failed(Exception):
@@ -86,21 +108,50 @@ def step(text):
     say(f"\n[{time.strftime('%H:%M:%S')}] {text}")
 
 
-def run(*argv, quiet=False):
+def redacted(text, token):
+    """`text` with every copy of `token` replaced, and with anything else shaped like a GitHub token replaced too.
+    With no token, only the shape is matched: a token command's standard error is read before there is a value to
+    compare against."""
+    if token:
+        text = text.replace(token, "<redacted>")
+    return TOKEN_SHAPE.sub("<redacted>", text)
+
+
+def run(*argv, quiet=False, env=None, token=None):
     """Run a command and return its exit code.
 
     `quiet` hides its output. Otherwise its output (the project's build, its git server's messages) reaches the
-    terminal through terminal_safe(), never raw. The command never reads what was piped into tools/check.
+    terminal through terminal_safe(), never raw. `env` replaces the command's whole environment. `token`, the
+    read-only token of a private library, is replaced wherever it appears in that output, across chunk boundaries
+    too: the build log is one of the four places a token must never end up, and what a git server or a failing
+    fetch writes is not this program's text. The command never reads what was piped into tools/check.
     """
     if quiet:
-        return subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
-    proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        return subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              env=env).returncode
+    proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
 
     def copy():
         decode = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        # With no token this is the stream as it always was: a public build's log is not filtered at all. With one,
+        # the buffer is redacted before any of it is written, and the last len(token)-1 characters are held back
+        # until the next chunk (or the end) says whether they begin a copy of it: a filter that looks at one chunk
+        # at a time lets through a token that straddles two reads.
+        clean = (lambda text: redacted(text, token)) if token else (lambda text: text)
+        keep = len(token) - 1 if token else 0
+        held = ""
+
+        def write(text):
+            if text:
+                sys.stdout.write(terminal_safe(text))
+                sys.stdout.flush()
+
         while chunk := os.read(proc.stdout.fileno(), 65536):
-            sys.stdout.write(terminal_safe(decode.decode(chunk)))
-            sys.stdout.flush()
+            held = clean(held + decode.decode(chunk))
+            if len(held) > keep:
+                write(held[:len(held) - keep])
+                held = held[len(held) - keep:]
+        write(clean(held))
 
     reader = threading.Thread(target=copy, daemon=True)
     reader.start()
@@ -110,30 +161,117 @@ def run(*argv, quiet=False):
     return code
 
 
-def output(*argv):
-    """Run a command quietly and return its standard output, or raise Failed with its error output."""
-    done = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace")
+def output(*argv, env=None, token=None):
+    """Run a command quietly and return its standard output, or raise Failed with its error output. `env` replaces
+    the command's whole environment; `token` is kept out of the message, as run() keeps it out of the log."""
+    done = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace", env=env)
     if done.returncode != 0:
-        raise Failed(f"{' '.join(argv[:3])} ... exited {done.returncode}: {done.stderr.strip()[-1500:]}")
+        raise Failed(f"{' '.join(argv[:3])} ... exited {done.returncode}: "
+                     f"{redacted(done.stderr.strip()[-1500:], token)}")
     return done.stdout
 
 
-def git(*args):
-    """git, anonymous and over https only, even if a URL or a server redirect asks for another protocol."""
+def git(*args, token=False):
+    """git, over https only, even if a URL or a server redirect asks for another protocol.
+
+    Anonymous, which is what a public library is fetched with and what keeps a build off whatever credential the
+    host happens to have. With `token`, one credential helper is put in place of that empty list: the builder's own,
+    which reads the token from OSS_VERIFY_GIT_TOKEN in the environment of this git process (git_environment()). The
+    token itself is in no command line.
+    """
     os.environ["GIT_TERMINAL_PROMPT"] = "0"
-    return ["git", "-c", "credential.helper=", "-c", "protocol.allow=never", "-c", "protocol.https.allow=always", *args]
+    helper = ["-c", "credential.helper="]
+    if token:
+        helper += ["-c", f"credential.helper=!{shlex.quote(str(CREDENTIAL_HELPER))}"]
+    return ["git", *helper, "-c", "protocol.allow=never", "-c", "protocol.https.allow=always", *args]
 
 
-def resolve(repo, ref):
+def git_environment(token):
+    """The environment of a git process that fetches with `token`: this one, with the token added for the credential
+    helper to read. None without a token, which leaves the process this one's environment as before."""
+    return {**os.environ, GIT_TOKEN_ENV: token} if token else None
+
+
+def private_libraries():
+    """The libraries a build fetches with a credential: {repository URL: why}, from infra/private-libraries.tsv.
+    Every other library is fetched with none. A missing file is an empty list, not an error: a checkout that has
+    removed it has no private library."""
+    try:
+        text = PRIVATE_LIBRARIES.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    rows = {}
+    for line in text.splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        repo, _, why = line.partition("\t")
+        rows[normalised_repo(repo)] = why.strip()
+    return rows
+
+
+def normalised_repo(repo):
+    """A repository URL as it is compared with infra/private-libraries.tsv: without its #ref, a trailing .git or a
+    trailing slash, so that one repository written three ways is one row and not three."""
+    return repo.strip().partition("#")[0].rstrip("/").removesuffix(".git").rstrip("/")
+
+
+def private_reason(repo):
+    """Why `repo` is fetched with a token, or None when it is fetched with none."""
+    return private_libraries().get(normalised_repo(repo))
+
+
+def owner_and_name(repo):
+    """The GitHub account and repository name in an https URL, for the token command."""
+    parts = normalised_repo(repo).split("/")
+    if len(parts) < 2:
+        raise Failed(f"{repo} is not <host>/<owner>/<name>, so there is no repository to narrow a token to")
+    return parts[-2], parts[-1]
+
+
+def mint_token(repo):
+    """A token that may read `repo` and nothing else, minted for this build by the token command (TOKEN_COMMAND, or
+    OSS_VERIFY_GIT_TOKEN_COMMAND). It is returned, never printed, never written to a file here, and never put in a
+    build argument; build_project() hands it to docker as a BuildKit secret.
+
+    Raise Failed if there is no token. The message holds the command and its standard error with anything
+    token-shaped taken out: a credential command's error text can quote what it was given.
+    """
+    owner, name = owner_and_name(repo)
+    command = os.environ.get(TOKEN_COMMAND_ENV, "").strip()
+    argv = [*shlex.split(command), owner, name] if command else [str(TOKEN_COMMAND), owner, name]
+    try:
+        done = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace")
+    except OSError as error:
+        raise Failed(f"the token command {argv[0]} for {owner}/{name} did not run: {error.strerror}") from None
+    token = done.stdout.strip()
+    if done.returncode != 0 or not token:
+        why = "printed no token" if done.returncode == 0 else f"exited {done.returncode}"
+        raise Failed(f"no read-only token for {owner}/{name}: {argv[0]} {why}. It said: "
+                     f"{redacted(done.stderr.strip()[-1000:], None) or '(nothing)'}")
+    if len(token.splitlines()) != 1:
+        raise Failed(f"the token command {argv[0]} printed more than one line for {owner}/{name}; a token is one line")
+    return token
+
+
+def resolve(repo, ref, token=None):
     """The full commit id that `repo#ref` names now: a branch, a tag (annotated tags are followed to their commit), a
-    full commit id (taken as it is), or "" for the default branch."""
+    full commit id (taken as it is), or "" for the default branch. `token`, for a private library, is read by the
+    credential helper out of this git process's environment and is in no command line."""
     if FULL_COMMIT.fullmatch(ref):
         return ref
     if ref.startswith("refs/"):
         names = [ref, f"{ref}^{{}}"]
     else:
         names = [f"refs/heads/{ref}", f"refs/tags/{ref}", f"refs/tags/{ref}^{{}}"]
-    listing = output(*git("ls-remote", "--", repo, *(names if ref else ["HEAD"])))
+    try:
+        listing = output(*git("ls-remote", "--", repo, *(names if ref else ["HEAD"]), token=bool(token)),
+                         env=git_environment(token), token=token)
+    except Failed as failure:
+        # A refused credential, and a repository the server will not admit exists, read alike; a bad host or no
+        # network does not, and keeps git's own message rather than being called an authorisation failure.
+        if not any(marker in str(failure).lower() for marker in UNAUTHORISED):
+            raise
+        raise Failed(unreadable(repo, token, str(failure))) from None
     refs = dict(reversed(line.split("\t", 1)) for line in listing.splitlines() if "\t" in line)
     if not ref:
         found = {refs["HEAD"]} if "HEAD" in refs else set()
@@ -151,13 +289,29 @@ def resolve(repo, ref):
     return found.pop()
 
 
-def clone(repo, commit, checkout):
-    """Check out `repo` at `commit` into `checkout`, anonymously, over https."""
+def unreadable(repo, token, said):
+    """What to say when git could not even list a repository's refs. A server that refuses a credential and one that
+    has no such repository answer alike, so this names what the build tried rather than claiming which it was; what
+    git said comes after it, so a failure that is neither (no network, a bad host) is still readable."""
+    with_what = ("with a read-only token minted for this build" if token else
+                 "with no credential, which is how every public library is fetched")
+    private = "" if private_reason(repo) else (
+        f" {normalised_repo(repo)} is not in infra/private-libraries.tsv, so no token was minted for it; a private "
+        "repository of ours needs a row there.")
+    return (f"cannot read {repo}: it is private, it does not exist, or the build may not read it. The build asked "
+            f"{with_what}, and the server listed no refs, so no commit of it was looked up: this is not a missing "
+            f"commit.{private} git said: {said}")
+
+
+def clone(repo, commit, checkout, token=None):
+    """Check out `repo` at `commit` into `checkout`, over https. Anonymously, unless `token` is the read-only token
+    of a private library, which the credential helper reads out of the git process's environment."""
     shutil.rmtree(checkout, ignore_errors=True)
     checkout.mkdir(parents=True)
+    environment = git_environment(token)
     for args in (["init", "-q", str(checkout)], ["-C", str(checkout), "fetch", "-q", "--depth", "1", "--", repo, commit],
                  ["-C", str(checkout), "checkout", "-q", "--detach", "FETCH_HEAD"]):
-        if run(*git(*args)) != 0:
+        if run(*git(*args, token=bool(token)), env=environment, token=token) != 0:
             raise Failed(f"cannot fetch {commit} from {repo}")
 
 
@@ -388,13 +542,42 @@ def recorded_images(record):
         return []
 
 
-def build_project(job, commit, builder, tag, work, no_cache=False):
-    """Build the project's Dockerfile on the builder, with network access, into image `tag`."""
+def check_secret_mount(dockerfile, text, token, where):
+    """Refuse a build whose Dockerfile and whose library disagree about the token.
+
+    A private library whose Dockerfile does not mount the secret would fetch with no credential and fail with "not
+    authorised", one step away from the message this whole path exists to remove. A library that is NOT private
+    whose Dockerfile asks for the mount is the other mistake: a project that asks a build for a credential it was
+    never meant to have. BuildKit gives such a RUN an empty mount and says nothing, so neither is caught by docker.
+    """
+    asks = SECRET_MOUNT in text
+    if token and not asks:
+        raise Failed(f"{where} is in infra/private-libraries.tsv, so this build minted a read-only token for it, but "
+                     f"{dockerfile} never mounts it, so the fetch would get no credential. Put the mount on the "
+                     f"fetch step:\n    RUN {SECRET_MOUNT} fetch-commit $SRC/<name>")
+    if asks and not token:
+        raise Failed(f"{dockerfile} asks for {SECRET_MOUNT}, but {where} is not in infra/private-libraries.tsv, so "
+                     "no token is minted for it and no build of it gets a credential. A public library is fetched "
+                     "with none: take the mount off.")
+
+
+def build_project(job, commit, builder, tag, work, no_cache=False, token=None):
+    """Build the project's Dockerfile on the builder, with network access, into image `tag`.
+
+    `token`, for a library in infra/private-libraries.tsv, goes to docker as the BuildKit secret oss-verify-git-token
+    and never as a build argument: a build argument is in `docker history`, a secret is a tmpfs file that exists
+    only while the RUN step that mounts it runs. docker reads it out of this process's environment, so it is in no
+    file of ours and in no command line either.
+    """
     args = ["--build-arg", f"BASE_BUILDER={builder}", "--build-arg", f"REPO={job.repo}", "--build-arg", f"COMMIT={commit}"]
+    environment = None
+    if token:
+        args += ["--secret", f"id={GIT_TOKEN_SECRET},env={GIT_TOKEN_ENV}"]
+        environment = {**os.environ, GIT_TOKEN_ENV: token}
     if job.dockerfile:
         checkout = work / "src"
         step(f"clone {job.repo} at {commit}")
-        clone(job.repo, commit, checkout)
+        clone(job.repo, commit, checkout, token)
         dockerfile = in_checkout(checkout, job.dockerfile)
         if not dockerfile.is_file():
             raise Failed(f"no Dockerfile at {job.dockerfile} in the repository")
@@ -403,11 +586,14 @@ def build_project(job, commit, builder, tag, work, no_cache=False):
         where = ["-f", str(dockerfile), str(checkout)]
         say(f"Dockerfile: the repository's own, {job.dockerfile}; the build context is the repository")
     else:
-        where = ["-f", str(job.directory / "Dockerfile"), str(job.directory)]
+        dockerfile = job.directory / "Dockerfile"
+        where = ["-f", str(dockerfile), str(job.directory)]
         say(f"Dockerfile: the one beside project.yaml; the build context is projects/{job.name}/")
+    check_secret_mount(dockerfile, dockerfile.read_text(encoding="utf-8", errors="replace"), token, job.repo)
     step(f"docker build: the project ({tag}); the network is available")
     cache = ["--no-cache"] if no_cache else []
-    if run("docker", "build", "--progress=plain", *cache, *args, "-t", tag, *where) != 0:
+    if run("docker", "build", "--progress=plain", *cache, *args, "-t", tag, *where,
+           env=environment, token=token) != 0:
         raise Failed("docker build of the project's Dockerfile failed")
 
 
