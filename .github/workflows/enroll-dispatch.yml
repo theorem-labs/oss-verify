@@ -298,7 +298,8 @@ jobs:
       # newest labeled event is not the one decide judged (a passing run for this head put it on again since). At a
       # close or a merge it comes off with no read. A 404 says it is off already. When a renewal's read or DELETE fails,
       # the label is left as it is with a warning and the step succeeds, so that the send runs (Put on review-passed
-      # then finds it on, and leaves it); any other failure fails the step.
+      # then finds it on with its labeled event of LABEL_AT, and takes it off and puts it on again); any other failure
+      # fails the step.
       - name: Take off review-passed
         if: env.REVIEW_PASSED == 'off' || (env.REVIEW_PASSED == 'on' && env.LABEL_AT != '')
         env:
@@ -410,8 +411,10 @@ jobs:
       # newest removal since LABEL_AT is not the App's, so that a person's removal after decide is not undone (one just
       # before that step's DELETE too); it puts it on when the newest is the App's (that step, or a run for this head
       # that did not pass), or when there is none. A person's removal before LABEL_AT is not asked: someone put the
-      # label on again after it. A renewal that finds the label on leaves it: someone put it on again since LABEL_AT,
-      # and that step left it.
+      # label on again after it. A renewal that finds the label on reads its newest labeled event: when it is not
+      # LABEL_AT, someone put the label on again since, and the step leaves it; when it is LABEL_AT, Take off
+      # review-passed failed and left it, so the step takes it off now (the send has worked) and goes on as for a label
+      # that is off, so that the label is tied to this head.
       - name: Put on review-passed
         if: env.REVIEW_PASSED == 'on'
         env:
@@ -478,10 +481,22 @@ jobs:
                 removed="$by took it off at $when"
               fi
             done <<< "$list"
-          elif [[ $on == true ]]; then
-            say "pull request $PR: review-passed is left as it is: it is on, put on again since its label of $LABEL_AT"
-            exit 0
           else
+            if [[ $on == true ]]; then
+              # Its former name's events count as its own, as in the script.
+              labeled=$(gh api --paginate "repos/$REPO/issues/$PR/events?per_page=100" --jq '.[]
+                | select(.event == "labeled"
+                  and (.label.name == "review-passed" or .label.name == "passes-not-merging"))
+                | .created_at')
+              newest=$(sort <<< "$labeled" | tail -n 1)
+              if [[ $newest != "$LABEL_AT" ]]; then
+                again="put on again at $newest, since its label of $LABEL_AT"
+                say "pull request $PR: review-passed is left as it is: it is on, $again"
+                exit 0
+              fi
+              # Take off review-passed did not take it off before the send: take it off now, for the renewal.
+              off "to be put on again for $SHA, since its label of $LABEL_AT was not taken off before the send"
+            fi
             # A renewal of a label that is off: the newest removal since LABEL_AT decides.
             newest=$(removals "$LABEL_AT" | tail -n 1)
             read -r when by <<< "$newest"

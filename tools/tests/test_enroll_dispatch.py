@@ -2244,13 +2244,15 @@ class ReviewPassed(unittest.TestCase):
         return (f"GET repos/{REPO}/pulls/{PR}", f"GET repos/{REPO}/issues/{PR}/events?per_page=100",
                 f"DELETE repos/{REPO}/issues/{PR}/labels/{REVIEW_PASSED}")
 
-    def test_aq_a_renewal_whose_take_off_fails_leaves_the_label_and_still_sends(self):
+    def test_aq_a_renewal_whose_take_off_fails_still_sends_and_renews_after(self):
         # A request of the renewal's take-off fails (HTTP 500): the step warns and succeeds, the job goes on past the
-        # send, and the put-on finds the label on and leaves it.
+        # send, and the put-on finds the label on with its labeled event of LABEL_AT, so it takes it off and puts it on
+        # again for B. A later run at B that does not send leaves it.
         for request in self.take_off_requests():
             with self.subTest(request=request):
                 line = self.labelled()
                 line.push(self.B)
+                pushed = line.runs[-1]["created_at"]
                 out = line.decide()
                 self.assertEqual((out["decision"], out["review_passed"], out["review_passed_at"]),
                                  ("dispatch", "on", "head"), out["reason"])
@@ -2259,7 +2261,11 @@ class ReviewPassed(unittest.TestCase):
                                  [(CHECK, 0), (TAKE_OFF, 0), (PUT_ON, 0)], [run.stdout + run.stderr for _, run in ran])
                 self.assertIn("::warning::", ran[1][1].stdout)
                 self.assertIn("review-passed is left as it is", ran[1][1].stdout)
-                self.assertEqual(self.newest_label(line), out["label_at"])   # the label of A, left on
+                self.assertGreater(self.newest_label(line), pushed)   # put on again, for B
+                self.assertLabels(line, [REVIEW_PASSED])
+                later = line.decide(failed_check=True)
+                self.assertEqual((later["decision"], later["review_passed"]), ("none", ""), later["reason"])
+                self.assertEqual(self.job(line, later), [])
                 self.assertLabels(line, [REVIEW_PASSED])
 
     def test_ar_a_take_off_at_a_new_head_that_fails_fails_the_step(self):
