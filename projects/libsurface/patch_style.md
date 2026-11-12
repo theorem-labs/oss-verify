@@ -1,6 +1,6 @@
 # Patch style and report preferences
 
-libsurface is FreeMixer's library for the device behaviour of a motorised control surface: the
+libsurface is OpenMixer's library for the device behaviour of a motorised control surface: the
 motor-fader policy (never fight the hand), touch with its self-heal and release debounce, the bank
 window, the board shadow and its replay, the meter step and the ring renderer. It speaks no wire
 and keeps no thread or clock. The five fuzz targets drive its core through the calls a backend and
@@ -11,7 +11,7 @@ table of the Control|24 (`src/diginet/c24_keys.c`).
 ## How findings and patches land
 
 Nothing from the pipeline enters libsurface as it is. A maintainer reads each finding,
-reproduces it against the libsurface harness and build, and writes the fix in FreeMixer/libsurface
+reproduces it against the libsurface harness and build, and writes the fix in Open-Mixer/libsurface
 as an ordinary change. A patch you send is a description of a fix, and we re-author it before it
 lands.
 
