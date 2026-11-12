@@ -245,7 +245,7 @@ class FetchCommit(unittest.TestCase):
                 code, said, _ = self.fetch(name, "f" * 40, token)
                 self.assertEqual(code, 1)
                 self.assertIn("has no commit", said)
-                self.assertIn("not an authorisation failure", said)
+                self.assertIn("neither an authorisation failure nor a transfer that broke", said)
                 self.assertNotIn("not authorised to read", said)
 
     def test_a_repository_that_is_not_there_reads_as_unreadable(self):
@@ -500,7 +500,7 @@ class TheMountAndTheList(unittest.TestCase):
 
     def test_a_mount_on_another_step_does_not_put_it_on_the_fetch(self):
         text = (f"FROM x\nRUN {check_build.SECRET_MOUNT} true\nRUN fetch-commit $SRC/x\n")
-        self.assertIn("not on the step that runs fetch-commit", self.refuses(text, TOKEN, self.PRIVATE))
+        self.assertIn("a fetch step in Dockerfile does not mount it", self.refuses(text, TOKEN, self.PRIVATE))
         # It is still a mount, so a public library may not have it either.
         self.assertIn("is not in infra/private-libraries.tsv", self.refuses(text, None, self.PUBLIC))
 
@@ -578,8 +578,11 @@ class NoTracing(unittest.TestCase):
         with mock.patch.dict(os.environ, {"GIT_TRACE_CURL": "/tmp/trace", "GIT_TRACE": "1",
                                           "GIT_TRACE_REDACT": "0", "GIT_CURL_VERBOSE": "1"}):
             environment = check_build.git_environment(TOKEN, "https://github.com/theorem-labs/theorem-cli")
+        # Set to 0, not removed: git reads trace2's targets from configuration too, and an environment variable
+        # of 0 turns a target off whatever the configuration says.
         for name in check_build.GIT_TRACING:
-            self.assertNotIn(name, environment)
+            self.assertEqual(environment[name], "0", name)
+        self.assertEqual(environment["GIT_TRACE2_ENV_VARS"], "")
         self.assertEqual(environment["GIT_TRACE_REDACT"], "1")
         self.assertEqual(environment["OSS_VERIFY_TOKEN_REPO"], "github.com/theorem-labs/theorem-cli")
 
@@ -588,7 +591,9 @@ class NoTracing(unittest.TestCase):
 
     def test_fetch_commit_clears_them_too(self):
         said = FETCH_COMMIT.read_text(encoding="utf-8")
-        self.assertIn("unset GIT_TRACE GIT_TRACE_CURL", said)
+        self.assertIn("for name in GIT_TRACE GIT_TRACE_CURL", said)
+        self.assertIn('eval "$name=0; export $name"', said)
+        self.assertIn("GIT_TRACE2_ENV_VARS=", said)
         self.assertIn("GIT_TRACE_REDACT=1", said)
 
 
@@ -654,11 +659,14 @@ class WhichFailure(unittest.TestCase):
                 self.assertNotIn("cannot read", message)
                 self.assertNotIn("has no commit", message)
 
-    def test_refs_listed_means_the_commit_is_missing(self):
+    def test_refs_listed_is_not_proof_that_the_commit_is_missing(self):
+        # The refs listing says the build may read the repository. It says nothing about whether the objects came,
+        # so the message names both and does not pick one.
         with mock.patch.object(check_build, "output", return_value="deadbeef\trefs/heads/main\n"):
             message = check_build.why_the_fetch_failed("https://github.com/theorem-labs/theorem-cli", "a" * 40, TOKEN)
-        self.assertIn("has no commit", message)
+        self.assertIn("could not fetch", message)
         self.assertIn("not an authorisation failure", message)
+        self.assertIn("the objects did not come", message)
 
     def test_the_container_tells_a_connection_failure_from_a_refusal(self):
         # A port nothing listens on: ls-remote fails, and the message must not say "not authorised".
@@ -712,6 +720,106 @@ class Unreadable(unittest.TestCase):
                 check_build.resolve("https://github.com/theorem-labs/theorem-cli", "main")
         self.assertIn("cannot read", str(refused.exception))
         self.assertIn("this is not a missing commit", str(refused.exception))
+
+
+class TheSecondReview(unittest.TestCase):
+    """What the second non-author review measured at 1eb1c2a, and what this change does about it."""
+
+    def test_a_configured_trace_target_is_emptied_on_the_command_line(self):
+        # Clearing GIT_TRACE* is not enough: trace2's targets are configuration, and trace2.envVars names
+        # environment variables to write INTO the trace, which GIT_TRACE_REDACT does not redact.
+        argv = check_build.git("ls-remote", "--", "https://example.invalid/x", token=True)
+        for setting in check_build.NO_TRACING:
+            self.assertIn(setting, argv)
+        self.assertNotIn("trace2.eventTarget=", check_build.git("ls-remote", "--", "https://example.invalid/x"))
+        said = FETCH_COMMIT.read_text(encoding="utf-8")
+        self.assertIn("for name in GIT_TRACE ", said)
+        self.assertIn("trace2.eventTarget=", said)
+
+    def test_a_real_configured_trace_holds_no_token(self):
+        with tempfile.TemporaryDirectory() as work:
+            trace = pathlib.Path(work) / "trace.json"
+            config = pathlib.Path(work) / "gitconfig"
+            config.write_text(f"[trace2]\n\teventTarget = {trace}\n\tenvVars = {check_build.GIT_TOKEN_ENV}\n",
+                              encoding="utf-8")
+            argv = check_build.git("ls-remote", "--", "https://127.0.0.1:1/x", token=True)
+            environment = {**check_build.git_environment(TOKEN, "https://127.0.0.1/x"),
+                           "GIT_CONFIG_GLOBAL": str(config), "GIT_CONFIG_SYSTEM": "/dev/null"}
+            subprocess.run(argv, capture_output=True, text=True, env=environment)
+            written = trace.read_text(encoding="utf-8", errors="replace") if trace.exists() else ""
+        self.assertNotIn(TOKEN, written)
+
+    def test_the_host_sends_the_path_so_the_helper_can_match_on_it(self):
+        # Without credential.useHttpPath the request carries no path, the helper can only match the host, and it
+        # answers for every repository on it.
+        self.assertIn("credential.useHttpPath=true", check_build.git("ls-remote", token=True))
+        self.assertNotIn("credential.useHttpPath=true", check_build.git("ls-remote"))
+
+    def test_a_tail_of_an_error_is_cut_after_the_token_is_taken_out_of_it(self):
+        # Cutting first left whatever of the token fell inside the last 1500 characters, with no marker for it.
+        # The token is read from a file, so it is not in the command line either: what is being measured is the
+        # cut of the error text, not the echo of the command.
+        with tempfile.TemporaryDirectory() as work:
+            secret = pathlib.Path(work) / "token"
+            secret.write_text(TOKEN + "y" * 1400, encoding="utf-8")
+            script = pathlib.Path(work) / "say.py"
+            script.write_text(f"import sys; sys.stderr.write(open({str(secret)!r}).read()); raise SystemExit(1)",
+                              encoding="utf-8")
+            with self.assertRaises(Failed) as refused:
+                check_build.output(sys.executable, str(script), token=TOKEN)
+        self.assertNotIn(TOKEN, str(refused.exception))
+        self.assertNotIn(TOKEN[-100:], str(refused.exception))
+
+    def test_a_server_fault_whose_text_says_permission_denied_is_still_a_server_fault(self):
+        said = "remote: upstream connection permission denied\nerror: The requested URL returned error: 503"
+        with mock.patch.object(check_build, "output", side_effect=Failed(said)):
+            message = check_build.why_the_fetch_failed("https://github.com/theorem-labs/theorem-cli", "a" * 40, TOKEN)
+        self.assertIn("could not reach", message)
+        self.assertNotIn("cannot read", message)
+
+    def test_a_run_option_before_the_mount_does_not_hide_it(self):
+        text = f"FROM x\nRUN --network=default {check_build.SECRET_MOUNT} fetch-commit $SRC/x\n"
+        check_build.check_secret_mount("Dockerfile", text, TOKEN, "https://x/y/z")
+
+    def test_a_continuation_inside_the_comma_fields_is_still_one_mount(self):
+        text = f"FROM x\nRUN --mount=type=secret,\\\n    id={check_build.GIT_TOKEN_SECRET} fetch-commit $SRC/x\n"
+        check_build.check_secret_mount("Dockerfile", text, TOKEN, "https://x/y/z")
+
+    def test_the_escape_directive_chooses_the_continuation_character(self):
+        text = f"# escape=`\nFROM x\nRUN {check_build.SECRET_MOUNT} `\n    fetch-commit $SRC/x\n"
+        check_build.check_secret_mount("Dockerfile", text, TOKEN, "https://x/y/z")
+
+    def test_echoing_the_name_is_not_running_the_program(self):
+        # `RUN --mount=… echo "fetch-commit"` beside a real unmounted fetch passed the guard, and the real fetch
+        # then ran with no credential.
+        text = f"FROM x\nRUN {check_build.SECRET_MOUNT} echo \"fetch-commit\"\nRUN fetch-commit $SRC/x\n"
+        with self.assertRaises(Failed) as refused:
+            check_build.check_secret_mount("Dockerfile", text, TOKEN, "https://x/y/z")
+        self.assertIn("does not mount it", str(refused.exception))
+        self.assertFalse(check_build.runs_fetch_commit('RUN echo "fetch-commit"'))
+        self.assertTrue(check_build.runs_fetch_commit("RUN fetch-commit $SRC/x"))
+        self.assertTrue(check_build.runs_fetch_commit("RUN /usr/local/bin/fetch-commit $SRC/x"))
+
+    def test_every_fetch_step_must_have_the_mount_not_one_of_them(self):
+        text = f"FROM x\nRUN {check_build.SECRET_MOUNT} fetch-commit $SRC/a\nRUN fetch-commit $SRC/b\n"
+        with self.assertRaises(Failed) as refused:
+            check_build.check_secret_mount("Dockerfile", text, TOKEN, "https://x/y/z")
+        self.assertIn("$SRC/b", str(refused.exception))
+
+    def test_a_dockerfile_that_cannot_be_split_is_read_on_the_safe_side(self):
+        # A heredoc or an unmatched quote: the mount is looked for in the text, which over-reports rather than
+        # under-reports, so a private library is not refused for a form this does not parse, and a public one is.
+        heredoc = f"FROM x\nRUN {check_build.SECRET_MOUNT} <<EOT\nfetch-commit $SRC/x\nEOT\n"
+        check_build.check_secret_mount("Dockerfile", heredoc, TOKEN, "https://x/y/z")
+        with self.assertRaises(Failed):
+            check_build.check_secret_mount("Dockerfile", heredoc, None, "https://x/y/z")
+        self.assertIsNone(check_build.words_of('RUN "unmatched'))
+
+    def test_a_transfer_that_broke_is_not_a_missing_commit(self):
+        said = FETCH_COMMIT.read_text(encoding="utf-8")
+        self.assertIn('net clone -q --no-checkout "$REPO" "$dir" || transfer_failed', said)
+        self.assertIn("it the whole repository", said)
+
 
 
 class Printed:

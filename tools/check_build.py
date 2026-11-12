@@ -66,9 +66,12 @@ TOKEN_SHAPE = re.compile(r"gh[a-z]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,
 # What stands in a message for a credential that was wrong or missing, or a repository the server will not admit
 # exists, rather than for a request that never arrived at all. git writes an HTTP status two ways, and both are
 # here: `403 Forbidden` from the remote, and its own `The requested URL returned error: 403`.
+# Nothing here is a bare `permission denied` or `access denied`: a review measured a 503 whose body read
+# `remote: upstream connection permission denied`, and a server fault that reads as a refusal is this change's own
+# bug in a new place.
 UNAUTHORISED = ("could not read username", "authentication failed", "repository not found", "terminal prompts "
                 "disabled", "403 forbidden", "401 unauthorized", "invalid username or token", "remote: not found",
-                "returned error: 401", "returned error: 403", "access denied", "permission denied")
+                "returned error: 401", "returned error: 403")
 
 
 class Failed(Exception):
@@ -184,33 +187,50 @@ def run(*argv, quiet=False, env=None, token=None):
 
 def output(*argv, env=None, token=None):
     """Run a command quietly and return its standard output, or raise Failed with its error output. `env` replaces
-    the command's whole environment; `token` is kept out of the message, as run() keeps it out of the log."""
+    the command's whole environment; `token` is kept out of the message, as run() keeps it out of the log.
+
+    The error is redacted BEFORE it is cut to its last characters: cutting first leaves whatever of the token was
+    in the last 1500 characters, with no replacement to show for it, which a review measured.
+    """
     done = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace", env=env)
     if done.returncode != 0:
-        raise Failed(f"{' '.join(argv[:3])} ... exited {done.returncode}: "
-                     f"{redacted(done.stderr.strip()[-1500:], token)}")
+        raise Failed(f"{redacted(' '.join(map(str, argv[:3])), token)} ... exited {done.returncode}: "
+                     f"{redacted(done.stderr.strip(), token)[-1500:]}")
     return done.stdout
+
+
+# What turns git's own tracing off on the command line, where it outranks any configuration file. The environment
+# is cleared too (GIT_TRACING), but that is not enough on its own: trace2's targets are configuration, and
+# `trace2.envVars` names environment variables to WRITE INTO the trace, which GIT_TRACE_REDACT does not redact. A
+# review measured a whole token in a trace file that way.
+NO_TRACING = ("trace2.eventTarget=", "trace2.normalTarget=", "trace2.perfTarget=", "trace2.envVars=",
+              "trace2.configParams=")
 
 
 def git(*args, token=False):
     """git, over https only, even if a URL or a server redirect asks for another protocol.
 
     Anonymous, which is what a public library is fetched with and what keeps a build off whatever credential the
-    host happens to have. With `token`, one credential helper is put in place of that empty list: the builder's own,
-    which reads the token from OSS_VERIFY_GIT_TOKEN in the environment of this git process (git_environment()). The
-    token itself is in no command line.
+    host happens to have. With `token`: one credential helper in place of that empty list, the builder's own, which
+    reads the token from OSS_VERIFY_GIT_TOKEN in the environment of this git process (git_environment()) and
+    answers for one repository; `credential.useHttpPath` so the request carries the path the helper matches on,
+    without which the helper can only match the host and answers for every repository on it; and every trace
+    target emptied. The token itself is in no command line.
     """
     os.environ["GIT_TERMINAL_PROMPT"] = "0"
     helper = ["-c", "credential.helper="]
     if token:
-        helper += ["-c", f"credential.helper=!{shlex.quote(str(CREDENTIAL_HELPER))}"]
+        helper += ["-c", f"credential.helper=!{shlex.quote(str(CREDENTIAL_HELPER))}",
+                   "-c", "credential.useHttpPath=true"]
+        helper += [argument for setting in NO_TRACING for argument in ("-c", setting)]
     return ["git", *helper, "-c", "protocol.allow=never", "-c", "protocol.https.allow=always", *args]
 
 
 # git's own tracing writes what it sends: GIT_TRACE_CURL with GIT_TRACE_REDACT=0 puts the Authorization header in a
 # file that outlives the build. Whatever the caller set, a fetch with a token does not trace.
 GIT_TRACING = ("GIT_TRACE", "GIT_TRACE_CURL", "GIT_TRACE_PACKET", "GIT_TRACE_CURL_NO_DATA", "GIT_CURL_VERBOSE",
-               "GIT_TRACE2", "GIT_TRACE2_EVENT", "GIT_TRACE2_PERF")
+               "GIT_TRACE2", "GIT_TRACE2_EVENT", "GIT_TRACE2_PERF", "GIT_TRACE_SETUP", "GIT_TRACE_SHALLOW",
+               "GIT_TRACE_PERFORMANCE", "GIT_TRACE_REFS", "GIT_TRACE_PACK_ACCESS", "GIT_TRACE_FSMONITOR")
 
 
 def git_environment(token, repo=None):
@@ -219,7 +239,11 @@ def git_environment(token, repo=None):
     token, which leaves the process this one's environment as before."""
     if not token:
         return None
-    environment = {key: value for key, value in os.environ.items() if key not in GIT_TRACING}
+    # Each is SET to 0, not removed: git reads trace2's targets from configuration as well, before `-c` is
+    # applied, and `trace2.envVars` names environment variables to write INTO the trace, which GIT_TRACE_REDACT
+    # does not redact. An environment variable of 0 turns that target off whatever the configuration says.
+    environment = {**os.environ, **{name: "0" for name in GIT_TRACING}}
+    environment["GIT_TRACE2_ENV_VARS"] = ""
     environment[GIT_TOKEN_ENV] = token
     environment["GIT_TRACE_REDACT"] = "1"
     if repo:
@@ -367,9 +391,11 @@ def why_the_fetch_failed(repo, commit, token):
             return unreadable(repo, token, str(failure))
         return (f"could not reach {repo} to list its refs, so nothing is known about {commit} yet: this is neither "
                 f"an authorisation failure nor a missing commit. git said: {failure}")
-    return (f"{repo} has no commit {commit}. The server listed its refs for this build, so this is not an "
-            "authorisation failure: the commit is not in the repository (deleted, or never pushed, or a branch "
-            "that was force-pushed since the commit was recorded).")
+    return (f"could not fetch {commit} from {repo}, although the server listed its refs for this build: this is "
+            "not an authorisation failure. Either the commit is not in the repository (deleted, never pushed, or "
+            "a branch force-pushed since it was recorded), or the objects did not come (upload-pack refused, a "
+            "server fault, a transfer that broke). A successful ref listing says the build may read the "
+            "repository and nothing about the transfer; git's own message for the fetch is above.")
 
 
 def in_checkout(checkout, path):
@@ -600,44 +626,107 @@ def recorded_images(record):
 
 
 def instructions(text):
-    """The Dockerfile's instructions, one a string, with its comments removed and its line continuations joined, as
-    a Dockerfile parser reads it: a `#` line is a comment wherever it is, including in the middle of a continued
-    instruction, and a line ending in a backslash continues into the next. Whitespace is squeezed, so an
-    instruction reads the same however it was laid out."""
+    """The Dockerfile's instructions, one a string, as a Dockerfile parser reads it: the `escape` directive chooses
+    the continuation character, a `#` line is a comment wherever it is (including in the middle of a continued
+    instruction), a line ending in that character continues into the next, and a continuation inside a word joins
+    it to what follows with no space, as BuildKit joins the comma fields of a `--mount`. Whitespace is otherwise
+    squeezed, so an instruction reads the same however it was laid out."""
+    text = text.replace("\r\n", "\n")
+    escape = "\\"
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        if line.lstrip().startswith("#"):
+            found = re.fullmatch(r"#\s*escape\s*=\s*(.)\s*", line.strip())
+            if found:
+                escape = found.group(1)
+            continue
+        break  # a parser directive comes before the first instruction and nowhere else
     joined, carry = [], ""
     for line in text.splitlines():
         if line.lstrip().startswith("#"):
-            continue  # a comment, even between the lines of a continued instruction
-        carry += line.rstrip()[:-1] + " " if line.rstrip().endswith("\\") else line
-        if not line.rstrip().endswith("\\"):
-            if carry.strip():
-                joined.append(" ".join(carry.split()))
-            carry = ""
+            continue
+        stripped = line.rstrip()
+        if stripped.endswith(escape):
+            # BuildKit joins the next line straight on: `--mount=type=secret,\` + `id=x` is one option.
+            head = stripped[:-1].rstrip()
+            # BuildKit joins the next line straight on after a comma, so the fields of one --mount stay one word.
+            carry += head if head.endswith(",") else head + "\n"
+            continue
+        carry += line.lstrip() if carry.endswith(",") else line
+        if carry.strip():
+            joined.append(" ".join(carry.split()))
+        carry = ""
     if carry.strip():
         joined.append(" ".join(carry.split()))
     return joined
 
 
+def words_of(instruction):
+    """An instruction's words as a shell would split them, or None when it cannot be split (an unmatched quote) or
+    carries a heredoc, which this does not parse. A caller that cannot read an instruction must not conclude that
+    it does nothing."""
+    if "<<" in instruction:
+        return None
+    try:
+        return shlex.split(instruction, comments=False, posix=True)
+    except ValueError:
+        return None
+
+
 def secret_mounts(instruction):
     """The ids of the BuildKit secrets one instruction mounts: every `--mount=` option of a RUN whose fields say
     `type=secret`, by the value of its `id=` field. The fields of a mount are comma-separated and in any order, and
-    an id is matched whole, so `id=oss-verify-git-token-other` is another secret and not this one."""
-    words = shlex.split(instruction, comments=False, posix=True) if instruction else []
+    an id is matched whole, so `id=oss-verify-git-token-other` is another secret and not this one. A RUN carries
+    other options too (`--network=`), so an option that is not a mount is stepped over rather than ending the
+    search; the options end at the first word that is not one.
+
+    An instruction that cannot be split is read for the mount by its text, which over-reports rather than under-
+    reports: the two callers both want the safe side of that.
+    """
+    words = words_of(instruction)
+    if words is None:
+        return re.findall(r"--mount=(?=[^\s]*type=secret)[^\s]*?id=([A-Za-z0-9._-]+)", instruction or "")
     if not words or words[0].upper() != "RUN":
         return []
     ids = []
     for word in words[1:]:
+        if not word.startswith("--"):
+            break  # the options end here; what follows is the command the step runs
         if not word.startswith("--mount="):
-            break  # the options come first; what follows is the command the step runs
+            continue  # another RUN option, such as --network=
         fields = dict(field.partition("=")[::2] for field in word[len("--mount="):].split(","))
         if fields.get("type") == "secret" and fields.get("id"):
             ids.append(fields["id"])
     return ids
 
 
+def runs_fetch_commit(instruction):
+    """Does this instruction RUN fetch-commit? The command's own words are read, so `echo "fetch-commit"` is not a
+    fetch and `/usr/local/bin/fetch-commit` is. An instruction that cannot be split is taken as a fetch if its text
+    names the program, which is the safe side for both callers."""
+    words = words_of(instruction)
+    if words is None:
+        return "fetch-commit" in (instruction or "")
+    if not words or words[0].upper() != "RUN":
+        return False
+    for word in words[1:]:
+        if word.startswith("--"):
+            continue
+        return word == "fetch-commit" or word.endswith("/fetch-commit")
+    return False
+
+
 def fetch_steps(text):
-    """The instructions of a Dockerfile that run fetch-commit: (instruction, the secret ids it mounts)."""
-    return [(line, secret_mounts(line)) for line in instructions(text) if "fetch-commit" in line]
+    """The instructions of a Dockerfile that RUN fetch-commit: (instruction, the secret ids it mounts).
+
+    A Dockerfile with a heredoc is not parsed instruction by instruction: a heredoc body is lines of its own, and
+    the command is in the body, not in the RUN. Such a file is read whole instead, which over-reports a mount and
+    over-reports a fetch -- the safe side for both callers, since one refuses without a mount and the other
+    refuses with one."""
+    if "<<" in text:
+        return [(" ".join(text.split())[:200], secret_mounts("<<" + text))] if "fetch-commit" in text else []
+    return [(line, secret_mounts(line)) for line in instructions(text) if runs_fetch_commit(line)]
 
 
 def check_secret_mount(dockerfile, text, token, where):
@@ -648,19 +737,22 @@ def check_secret_mount(dockerfile, text, token, where):
     whose Dockerfile asks for the mount is the other mistake: a project that asks a build for a credential it was
     never meant to have. BuildKit gives such a RUN an empty mount and says nothing, so neither shows itself.
 
-    The Dockerfile is parsed, not searched: a mention of the mount in a comment is not a mount, a mount on another
-    step does not put the token on the fetch, an id that merely starts with ours is another secret, and a mount
-    whose fields are reordered or whose line is continued is still a mount.
+    The Dockerfile is parsed, not searched: a mention of the mount in a comment is not a mount, `echo
+    "fetch-commit"` is not a fetch, a mount on another step does not put the token on the fetch, an id that merely
+    starts with ours is another secret, and a mount whose fields are reordered or whose line is continued is still
+    a mount. EVERY fetch step must have it, not one of them: a Dockerfile with a mounted fetch and an unmounted
+    one would fetch the second with no credential.
     """
     steps = fetch_steps(text)
-    mounted = [step for step, ids in steps if GIT_TOKEN_SECRET in ids]
-    asks = any(GIT_TOKEN_SECRET in ids for line in instructions(text) for ids in [secret_mounts(line)])
-    if token and not mounted:
+    bare = [step for step, ids in steps if GIT_TOKEN_SECRET not in ids]
+    asks = (GIT_TOKEN_SECRET in secret_mounts("<<" + text) if "<<" in text else
+            any(GIT_TOKEN_SECRET in secret_mounts(line) for line in instructions(text)))
+    if token and (bare or not steps):
         why = (f"{dockerfile} has no fetch-commit step at all" if not steps else
-               f"the fetch step in {dockerfile} does not mount it" if not asks else
-               f"{dockerfile} mounts it, but not on the step that runs fetch-commit")
+               f"a fetch step in {dockerfile} does not mount it: {bare[0][:120]}" if asks else
+               f"the fetch step in {dockerfile} does not mount it")
         raise Failed(f"{where} is in infra/private-libraries.tsv, so this build minted a read-only token for it, but "
-                     f"{why}, so the fetch would get no credential. Put the mount on the fetch step:\n"
+                     f"{why}, so that fetch would get no credential. Put the mount on every fetch step:\n"
                      f"    RUN {SECRET_MOUNT} fetch-commit $SRC/<name>")
     if asks and not token:
         raise Failed(f"{dockerfile} mounts the secret {GIT_TOKEN_SECRET}, but {where} is not in "

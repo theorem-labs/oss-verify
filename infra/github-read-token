@@ -10,9 +10,14 @@
 # two arguments and must print the token the same way. A build host that has neither has no token, and a build of a
 # private library fails saying so.
 #
-# What it must print: a token that can read the repository's contents, that is made for this build, and that nobody
-# has to store. It must NOT be an account-wide or long-lived credential: everything downstream keeps a token out of
-# the image and the log, but nothing downstream can make a wide token narrow.
+# What a replacement must print: a token that can read the repository's contents, that is made for this build, and
+# that nobody has to store. It must NOT be an account-wide or long-lived credential: everything downstream keeps a
+# token out of the image and the log, but nothing downstream can make a wide token narrow.
+#
+# **Those are obligations of the command, not properties anything checks.** tools/check reads one line of standard
+# output and uses it. It cannot tell a token minted now from one minted an hour ago, a repository-scoped one from
+# an account-wide one, or a read-only one from a writable one. A command that prints the same fixed token every
+# time is accepted, and then "minted for this build" is false however carefully the rest of the path behaves.
 #
 # Theorem's fleet already mints exactly that, so this asks for it rather than inventing a store: `gh-app-token` is
 # the GitHub App credential helper on a Theorem machine, and `--owner`/`--repo`/`--read-only` have it ask its
@@ -36,9 +41,13 @@ command -v gh-app-token >/dev/null 2>&1 || {
 #   - gh-app-token answers from a cache first, keyed by the account, the repository list and the permissions, and
 #     GH_APP_TOKEN_MIN_LIFETIME is the life a cached entry must still have to be reused. GitHub issues an
 #     installation token for exactly one hour, so an entry can never have more than an hour left, and asking for an
-#     hour means no entry is ever reusable: the helper asks its broker again and returns a token minted now. That
-#     is what 3600 is for. It is not a timeout to tune: lower it and two builds in the same hour share one token,
-#     and "minted for this build" stops being true.
+#     hour means no entry is reusable: the helper asks its broker again and returns a token minted now. That is
+#     what 3600 is for. It is not a timeout to tune: lower it and two builds in the same hour share one token, and
+#     "minted for this build" stops being true. Measured on this fleet: at 1800 two calls return one token, at
+#     3600 they return two. The one assumption is the build host's own clock -- gh-app-token compares an entry's
+#     expiry with the local wall clock, so a host running a minute or more BEHIND the mint server can still find
+#     an entry that looks fresh enough. A host whose clock is that wrong has larger problems; it is named here
+#     because the guarantee rests on it.
 #   - The token it mints is also written to the helper's own cache file on this host (mode 0600, under
 #     /mnt/nvme/<user>/gh-app-token or ~/.cache/gh-app-token). Nothing here can stop that, and nothing downstream
 #     needs to: the entry is unreadable by another account, is never reused by a later build because of the line

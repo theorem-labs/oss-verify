@@ -167,7 +167,10 @@ Where the token is while the build runs, and nowhere else:
 * The token is in the **environment** of the `git` and `docker build` processes `tools/check` starts, so `/proc/<pid>/environ` holds it for as long as they run, for the account that owns them and for root. An environment is the narrowest place that is not a file; a file in the build's own filesystem would be a layer.
 * A **core dump** of one of those processes, or of `git` inside the build, can hold it. Nothing here disables core dumps.
 * The mount is a file in the `RUN` step that asks for it, so **other code in that same `RUN`** can copy it. BuildKit does not prevent that, and for a private library of ours the `Dockerfile` is ours.
-* `gh-app-token`, which [infra/github-read-token](../infra/github-read-token) asks, writes the token it mints into its own mode-0600 cache file on the build host. Every build mints its own (that file says how), and the entry dies with the token in an hour.
+* `gh-app-token`, which [infra/github-read-token](../infra/github-read-token) asks, writes the token it mints into its own mode-0600 cache file on the build host. Every build mints its own (that file says how, and names the one assumption: the host's clock), and the entry dies with the token in an hour.
+* `OSS_VERIFY_GIT_TOKEN_COMMAND` replaces that command, and **nothing checks what a replacement prints**: freshness, repository scope and read-only are obligations of whoever sets it, not properties `tools/check` can establish from one line of output.
+* A `Dockerfile` with a **heredoc** is not parsed instruction by instruction — a heredoc body is lines of its own — so it is read whole, which over-reports both the mount and the fetch. That is the safe side of each refusal, not a parse.
+* A server that **lists a repository's refs** has said the build may read it. It has not said that `upload-pack` works or that the objects will arrive, so a fetch that fails after a successful listing is reported as exactly that, and not as a missing commit.
 
 A fetch that fails says which of **three** things went wrong, where before the first two were one message:
 

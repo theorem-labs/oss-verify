@@ -70,10 +70,22 @@ if [ -s "$token_file" ]; then
   export OSS_VERIFY_TOKEN_FILE OSS_VERIFY_TOKEN_REPO
   # git's own tracing writes what it sends, and GIT_TRACE_CURL with GIT_TRACE_REDACT=0 writes the Authorization
   # header to a file that outlives the build. Whatever the caller set, this fetch does not trace.
-  unset GIT_TRACE GIT_TRACE_CURL GIT_TRACE_PACKET GIT_TRACE_CURL_NO_DATA GIT_CURL_VERBOSE GIT_TRACE2 \
-        GIT_TRACE2_EVENT GIT_TRACE2_PERF 2>/dev/null || true
+  # Each is SET to 0, not removed: git reads trace2's targets from configuration as well, before a -c setting is
+  # applied, and trace2.envVars names environment variables to write INTO the trace, which GIT_TRACE_REDACT does
+  # not redact. An environment variable of 0 turns that target off whatever the configuration says.
+  for name in GIT_TRACE GIT_TRACE_CURL GIT_TRACE_PACKET GIT_TRACE_CURL_NO_DATA GIT_CURL_VERBOSE GIT_TRACE2 \
+              GIT_TRACE2_EVENT GIT_TRACE2_PERF GIT_TRACE_SETUP GIT_TRACE_SHALLOW GIT_TRACE_PERFORMANCE \
+              GIT_TRACE_REFS GIT_TRACE_PACK_ACCESS GIT_TRACE_FSMONITOR; do
+    eval "$name=0; export $name"
+  done
+  GIT_TRACE2_ENV_VARS=
   GIT_TRACE_REDACT=1
-  export GIT_TRACE_REDACT
+  export GIT_TRACE2_ENV_VARS GIT_TRACE_REDACT
+  # Clearing the environment is not enough: trace2's targets are configuration, and trace2.envVars names
+  # environment variables to write INTO the trace, which GIT_TRACE_REDACT does not redact -- a review measured a
+  # whole token in a trace file that way. net() empties every target on the command line, which outranks a file.
+  no_trace="-c trace2.eventTarget= -c trace2.normalTarget= -c trace2.perfTarget= -c trace2.envVars= \
+-c trace2.configParams="
   # redact() replaces every copy of the token. It walks the text once, keeping what it has already emitted out of
   # the search, so a token whose own characters spell the replacement cannot make it loop.
   redact() {
@@ -98,8 +110,9 @@ if [ -s "$token_file" ]; then
   # something removes it, which is the thing being avoided.
   net() {
     status=0
+    # $no_trace is deliberately unquoted: it is a fixed list of -c settings written just above, not input.
     said=$(command git -c credential.helper= -c credential.helper=oss-verify -c credential.useHttpPath=true \
-                       -c protocol.allow=never -c protocol.https.allow=always "$@" 2>&1) || status=$?
+                       $no_trace -c protocol.allow=never -c protocol.https.allow=always "$@" 2>&1) || status=$?
     [ -z "$said" ] || redact "$said" >&2
     return $status
   }
@@ -150,9 +163,21 @@ unreadable() {
 }
 
 no_such_commit() {
-  echo "fetch-commit: $REPO has no commit $COMMIT. The server listed the repository's refs for this build, so this" >&2
-  echo "  is not an authorisation failure: the commit is not in the repository (deleted, or never pushed, or a" >&2
-  echo "  branch that was force-pushed since the commit was recorded)." >&2
+  echo "fetch-commit: $REPO has no commit $COMMIT. The server listed the repository's refs for this build and sent" >&2
+  echo "  it the whole repository, so this is neither an authorisation failure nor a transfer that broke: the" >&2
+  echo "  commit is not in the repository (deleted, or never pushed, or a branch that was force-pushed since the" >&2
+  echo "  commit was recorded)." >&2
+  exit 1
+}
+
+# The refs listed, so the build may read the repository, but the objects did not come. That is not a missing
+# commit: a successful ref listing says nothing about whether upload-pack works or the transfer completes, and a
+# review measured a server that listed its refs and then answered the fetch with 503.
+transfer_failed() {
+  echo "fetch-commit: could not get $COMMIT from $REPO, although the server listed its refs for this build. This" >&2
+  echo "  is not an authorisation failure, and it is not a missing commit either: the repository could be read" >&2
+  echo "  and the objects did not come (upload-pack refused, a server fault, a transfer that broke). git's own" >&2
+  echo "  message for the fetch and for the clone is above." >&2
   exit 1
 }
 
@@ -163,9 +188,9 @@ if net -C "$dir" fetch -q --depth 1 origin "$COMMIT"; then
 else
   readable || { if denied; then unreadable; else unreachable; fi; }
   # A server that will not serve one commit by its id, as a "dumb" HTTP server cannot: clone all of it, then check
-  # the commit out.
+  # the commit out. Only a clone that SUCCEEDED makes a failed checkout mean the commit is not there.
   rm -rf "$dir"
-  net clone -q --no-checkout "$REPO" "$dir"
+  net clone -q --no-checkout "$REPO" "$dir" || transfer_failed
   git -C "$dir" checkout -q --detach "$COMMIT" || no_such_commit
 fi
 head=$(git -C "$dir" rev-parse HEAD)
