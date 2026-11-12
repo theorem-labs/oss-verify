@@ -637,9 +637,14 @@ def recorded_images(record):
 def instructions(text):
     """The Dockerfile's instructions, one a string, as a Dockerfile parser reads it: the `escape` directive chooses
     the continuation character, a `#` line is a comment wherever it is (including in the middle of a continued
-    instruction), a line ending in that character continues into the next, and a continuation inside a word joins
-    it to what follows with no space, as BuildKit joins the comma fields of a `--mount`. Whitespace is otherwise
-    squeezed, so an instruction reads the same however it was laid out."""
+    instruction), and a line ending in that character continues into the next.
+
+    A continuation takes away the escape character and the newline and NOTHING ELSE: what was before it stays, and
+    the next line arrives with its own indentation. So `fetch-\` + `commit` is one word and `--mount=… \` +
+    `    fetch-commit` is two, with no rule about commas -- the whitespace that is there decides, and the squeeze
+    below only collapses runs of it. Measured against real BuildKit on the third review's cases
+    `continued-word`, `continued-field-value`, `continued-fields` and `escape-backtick`.
+    """
     text = text.replace("\r\n", "\n")
     escape = "\\"
     for line in text.splitlines():
@@ -657,18 +662,41 @@ def instructions(text):
             continue
         stripped = line.rstrip()
         if stripped.endswith(escape):
-            # BuildKit joins the next line straight on: `--mount=type=secret,\` + `id=x` is one option.
-            head = stripped[:-1].rstrip()
-            # BuildKit joins the next line straight on after a comma, so the fields of one --mount stay one word.
-            carry += head if head.endswith(",") else head + "\n"
+            carry += stripped[:-1]
             continue
-        carry += line.lstrip() if carry.endswith(",") else line
+        carry += line
         if carry.strip():
             joined.append(" ".join(carry.split()))
         carry = ""
     if carry.strip():
         joined.append(" ".join(carry.split()))
     return joined
+
+
+def build_variables(lines):
+    """The ARG and ENV values a Dockerfile sets, in order, as a mount option sees them: {name: value}. BuildKit
+    expands `$NAME` and `${NAME}` in a `--mount`, so a Dockerfile can name the secret through a variable, and the
+    third review measured a build that really does get the secret that way."""
+    variables = {}
+    for line in lines:
+        words = words_of(line) or []
+        if not words or words[0].upper() not in ("ARG", "ENV"):
+            continue
+        rest = words[1:]
+        if words[0].upper() == "ENV" and len(rest) == 2 and "=" not in rest[0]:
+            variables[rest[0]] = rest[1]  # the old `ENV KEY value` form
+            continue
+        for pair in rest:
+            name, equals, value = pair.partition("=")
+            if equals:
+                variables[name] = expanded(value, variables)
+    return variables
+
+
+def expanded(word, variables):
+    """`word` with `$NAME` and `${NAME}` replaced, an unset name by nothing, as BuildKit expands a mount option."""
+    return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)",
+                  lambda found: variables.get(found.group(1) or found.group(2), ""), word)
 
 
 def words_of(instruction):
@@ -683,7 +711,7 @@ def words_of(instruction):
         return None
 
 
-def secret_mounts(instruction):
+def secret_mounts(instruction, variables=None):
     """The ids of the BuildKit secrets one instruction mounts: every `--mount=` option of a RUN whose fields say
     `type=secret`, by the value of its `id=` field. The fields of a mount are comma-separated and in any order, and
     an id is matched whole, so `id=oss-verify-git-token-other` is another secret and not this one. A RUN carries
@@ -695,7 +723,8 @@ def secret_mounts(instruction):
     """
     words = words_of(instruction)
     if words is None:
-        return re.findall(r"--mount=(?=[^\s]*type=secret)[^\s]*?id=([A-Za-z0-9._-]+)", instruction or "")
+        return re.findall(r"--mount=(?=[^\s]*type=secret)[^\s]*?id=([A-Za-z0-9._-]+)",
+                          expanded(instruction or "", variables or {}))
     if not words or words[0].upper() != "RUN":
         return []
     ids = []
@@ -704,7 +733,8 @@ def secret_mounts(instruction):
             break  # the options end here; what follows is the command the step runs
         if not word.startswith("--mount="):
             continue  # another RUN option, such as --network=
-        fields = dict(field.partition("=")[::2] for field in word[len("--mount="):].split(","))
+        option = expanded(word[len("--mount="):], variables or {})
+        fields = dict(field.partition("=")[::2] for field in option.split(","))
         if fields.get("type") == "secret" and fields.get("id"):
             ids.append(fields["id"])
     return ids
@@ -733,9 +763,11 @@ def fetch_steps(text):
     the command is in the body, not in the RUN. Such a file is read whole instead, which over-reports a mount and
     over-reports a fetch -- the safe side for both callers, since one refuses without a mount and the other
     refuses with one."""
+    lines = instructions(text)
+    variables = build_variables(lines)
     if "<<" in text:
-        return [(" ".join(text.split())[:200], secret_mounts("<<" + text))] if "fetch-commit" in text else []
-    return [(line, secret_mounts(line)) for line in instructions(text) if runs_fetch_commit(line)]
+        return [(" ".join(text.split())[:200], secret_mounts("<<" + text, variables))] if "fetch-commit" in text else []
+    return [(line, secret_mounts(line, variables)) for line in lines if runs_fetch_commit(line)]
 
 
 def check_secret_mount(dockerfile, text, token, where):
@@ -754,8 +786,10 @@ def check_secret_mount(dockerfile, text, token, where):
     """
     steps = fetch_steps(text)
     bare = [step for step, ids in steps if GIT_TOKEN_SECRET not in ids]
-    asks = (GIT_TOKEN_SECRET in secret_mounts("<<" + text) if "<<" in text else
-            any(GIT_TOKEN_SECRET in secret_mounts(line) for line in instructions(text)))
+    lines = instructions(text)
+    variables = build_variables(lines)
+    asks = (GIT_TOKEN_SECRET in secret_mounts("<<" + text, variables) if "<<" in text else
+            any(GIT_TOKEN_SECRET in secret_mounts(line, variables) for line in lines))
     if token and (bare or not steps):
         why = (f"{dockerfile} has no fetch-commit step at all" if not steps else
                f"a fetch step in {dockerfile} does not mount it: {bare[0][:120]}" if asks else

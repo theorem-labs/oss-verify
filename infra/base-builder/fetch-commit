@@ -138,11 +138,16 @@ readable() {
 # A refusal of the credential, and a repository the server will not admit exists, read alike; a host that cannot be
 # reached, a rate limit and a server fault do not, and are reported as themselves rather than as an authorisation
 # failure, which is the mistake this whole script exists to stop.
+#
+# Nothing here is a bare `permission denied` or `access denied`. A review measured an HTTP 503 whose body read
+# `remote: upstream connection permission denied`, which those two words turned into a refusal: a server fault
+# reported as a credential problem, which is this script's own bug in a new place. tools/check_build.py dropped
+# them for the same reason.
 denied() {
   case $(printf '%s' "$refs_said" | tr 'A-Z' 'a-z') in
     *"could not read username"* | *"authentication failed"* | *"invalid username or token"* \
-    | *"not found"* | *"returned error: 401"* | *"returned error: 403"* | *"403 forbidden"* \
-    | *"terminal prompts disabled"* | *"access denied"* | *"permission denied"*) return 0 ;;
+    | *"not found"* | *"returned error: 401"* | *"returned error: 403"* | *"401 unauthorized"* \
+    | *"403 forbidden"* | *"terminal prompts disabled"*) return 0 ;;
   esac
   return 1
 }

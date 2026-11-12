@@ -800,8 +800,15 @@ class TheSecondReview(unittest.TestCase):
         check_build.check_secret_mount("Dockerfile", text, TOKEN, "https://x/y/z")
 
     def test_a_continuation_inside_the_comma_fields_is_still_one_mount(self):
-        text = f"FROM x\nRUN --mount=type=secret,\\\n    id={check_build.GIT_TOKEN_SECRET} fetch-commit $SRC/x\n"
+        # The next line starts at column 0, which is the form real BuildKit accepts: a continuation removes the
+        # escape and the newline and nothing else, so an INDENTED next line would make `id=...` a separate word
+        # and the mount only `type=secret,`. This test asserted the indented form until the third review's
+        # measurements showed BuildKit does not read it that way either.
+        text = f"FROM x\nRUN --mount=type=secret,\\\nid={check_build.GIT_TOKEN_SECRET} fetch-commit $SRC/x\n"
         check_build.check_secret_mount("Dockerfile", text, TOKEN, "https://x/y/z")
+        indented = f"FROM x\nRUN --mount=type=secret,\\\n    id={check_build.GIT_TOKEN_SECRET} fetch-commit $SRC/x\n"
+        with self.assertRaises(Failed):
+            check_build.check_secret_mount("Dockerfile", indented, TOKEN, "https://x/y/z")
 
     def test_the_escape_directive_chooses_the_continuation_character(self):
         text = f"# escape=`\nFROM x\nRUN {check_build.SECRET_MOUNT} `\n    fetch-commit $SRC/x\n"
@@ -837,6 +844,121 @@ class TheSecondReview(unittest.TestCase):
         said = FETCH_COMMIT.read_text(encoding="utf-8")
         self.assertIn('net clone -q --no-checkout "$REPO" "$dir" || transfer_failed', said)
         self.assertIn("it the whole repository", said)
+
+
+class AServerFault(unittest.TestCase):
+    """An HTTP 503 whose body happens to say "permission denied" must not read as a refusal. A review measured
+    exactly that text from a real server (`remote: upstream connection permission denied`), and the two markers
+    that turned it into one are gone from both copies of the list. This drives the whole script against a server
+    that answers that way, not the markers on their own."""
+
+    @classmethod
+    def setUpClass(cls):
+        class Faulty(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.0"
+
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                body = b"remote: upstream connection permission denied\n"
+                self.send_response(503)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            do_POST = do_GET
+
+        cls.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Faulty)
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.base = f"http://127.0.0.1:{cls.server.server_address[1]}/"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def test_the_container_calls_it_a_server_it_could_not_reach(self):
+        with tempfile.TemporaryDirectory() as work:
+            secret = pathlib.Path(work) / "token"
+            secret.write_text(TOKEN, encoding="utf-8")
+            environment = {
+                "PATH": f"{HELPER.parent}:{os.environ['PATH']}", "HOME": work,
+                "REPO": HOST + "secret.git", "COMMIT": "a" * 40,
+                "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
+                "OSS_VERIFY_TOKEN_FILE": str(secret),
+                "OSS_VERIFY_TOKEN_REPO": f"{self.base.partition('//')[2].rstrip('/')}/secret.git",
+                "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "protocol.http.allow",
+                "GIT_CONFIG_VALUE_0": "always", "GIT_CONFIG_KEY_1": f"url.{self.base}.insteadOf",
+                "GIT_CONFIG_VALUE_1": HOST,
+            }
+            done = subprocess.run(["sh", str(FETCH_COMMIT), str(pathlib.Path(work) / "checkout")],
+                                  capture_output=True, text=True, env=environment)
+        said = done.stdout + done.stderr
+        self.assertEqual(done.returncode, 1, said)
+        self.assertIn("could not reach", said)
+        self.assertNotIn("not authorised to read", said)
+        self.assertNotIn("has no commit", said)
+        self.assertNotIn(TOKEN, said)
+
+    def test_neither_list_carries_the_two_words_any_more(self):
+        for marker in ("permission denied", "access denied"):
+            self.assertNotIn(marker, check_build.UNAUTHORISED)
+            self.assertNotIn(f'*"{marker}"*', FETCH_COMMIT.read_text(encoding="utf-8"))
+
+
+class TheParserAgainstBuildKit(unittest.TestCase):
+    """The forms real BuildKit accepts, from the third review's 24 cases. Both directions: a guard that refuses a
+    file BuildKit really mounts stops a build that should run, and one that accepts a file BuildKit leaves
+    unmounted lets a fetch go out with no credential."""
+
+    MOUNT = check_build.SECRET_MOUNT
+    PRIVATE = "https://github.com/theorem-labs/theorem-cli"
+
+    def mounts(self, text):
+        return [ids for _, ids in check_build.fetch_steps(text)]
+
+    def test_a_continuation_inside_a_word_joins_it(self):
+        # `fetch-\` + `commit` is one word to BuildKit, and the step really ran fetch-commit.
+        text = f"FROM x\nRUN {self.MOUNT} fetch-\\\ncommit /src/x\n"
+        self.assertEqual(self.mounts(text), [[check_build.GIT_TOKEN_SECRET]])
+        check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
+
+    def test_a_continuation_inside_a_field_value_joins_it(self):
+        text = "FROM x\nRUN --mount=type=secret,id=oss-verify-\\\ngit-token fetch-commit /src/x\n"
+        self.assertEqual(self.mounts(text), [[check_build.GIT_TOKEN_SECRET]])
+        check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
+
+    def test_a_continuation_before_an_indented_line_keeps_the_two_words_apart(self):
+        text = f"FROM x\nRUN {self.MOUNT} \\\n    fetch-commit /src/x\n"
+        self.assertEqual(self.mounts(text), [[check_build.GIT_TOKEN_SECRET]])
+
+    def test_the_secret_id_may_come_from_an_arg_or_an_env(self):
+        # BuildKit expands these and the step really gets the secret, so a guard that reads the literal
+        # `$SECRET_ID` refuses a working private build and lets a public one carry a real mount.
+        for setting in ("ARG SECRET_ID=oss-verify-git-token\nRUN --mount=type=secret,id=$SECRET_ID",
+                        "ENV SECRET_ID=oss-verify-git-token\nRUN --mount=type=secret,id=${SECRET_ID}",
+                        "ENV SECRET_ID oss-verify-git-token\nRUN --mount=type=secret,id=${SECRET_ID}"):
+            with self.subTest(setting=setting.splitlines()[0]):
+                text = f"FROM x\n{setting} fetch-commit /src/x\n"
+                check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
+                with self.assertRaises(Failed):
+                    check_build.check_secret_mount("Dockerfile", text, None, "https://x/y/z")
+
+    def test_an_unset_variable_names_no_secret(self):
+        self.assertEqual(self.mounts("FROM x\nRUN --mount=type=secret,id=$NOT_SET fetch-commit /src/x\n"), [[]])
+
+    def test_the_forms_that_already_worked_still_do(self):
+        for text in (f"FROM x\nRUN {self.MOUNT} fetch-commit /src/x\n",
+                     f"FROM x\nRUN --network=default {self.MOUNT} fetch-commit /src/x\n",
+                     f"FROM x\nRUN {self.MOUNT} --network=default fetch-commit /src/x\n",
+                     f"# escape=`\nFROM x\nRUN {self.MOUNT} `\n    fetch-commit /src/x\n",
+                     f"FROM x\r\nRUN {self.MOUNT} \\\r\n    fetch-commit /src/x\r\n",
+                     f'FROM x\nRUN {self.MOUNT} "fetch-commit" /src/x\n'):
+            with self.subTest(text=text.splitlines()[-1]):
+                check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
 
 
 
