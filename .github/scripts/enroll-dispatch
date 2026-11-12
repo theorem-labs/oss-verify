@@ -97,10 +97,10 @@ commit, another event). Then:
 
 The label is older than the commit when its newest labeled event is before the commit was pushed (the later of the
 commit's first Actions run from that head, or the completed run's creation when there is none, and the pull request's
-newest force push), or when a pull_request_target run from that head at another commit was made at or after that
-event. A run whose read of the pull request's events fails changes nothing. A run of Enrollment merged, a skipped one
-too, takes the label off the closed pull request its title names (merged or not) when it carries it, whatever else it
-decides, and never puts it on.
+newest force push), or when a pull_request_target run from that head at another of the pull request's commits (at any
+other commit, when GitHub lists 250 of them) was made at or after that event. A run whose read of the pull request's
+events fails changes nothing. A run of Enrollment merged, a skipped one too, takes the label off the closed pull
+request its title names (merged or not) when it carries it, whatever else it decides, and never puts it on.
 """
 from __future__ import annotations
 
@@ -539,17 +539,26 @@ def pull_of_head(api: Api, repo: str, sha: str, head: tuple) -> dict | None:
     return None
 
 
-def older_than_head(api: Api, repo: str, sha: str, head: tuple, label_at: str, events: list, created: object) -> bool:
-    """Whether the label put on at `label_at` is older than the run's head `sha`, from `head` (repository, branch):
-    put on before the head was pushed, or followed by a pull_request_target run from that head at another commit (each
-    label event starts a run of maintainer-confirmed.yml, on pull_request_target, at the head of that moment, so a label
-    put on while the pull request was at another commit is followed by a run of that commit). The head was pushed at
-    the later of its first run (the oldest of this repository's runs at `sha` from `head`; when there is none,
-    `created`, the completed run's) and the pull request's newest force push.
+def older_than_head(api: Api, repo: str, number: int, sha: str, head: tuple, label_at: str, events: list,
+                    created: object) -> bool:
+    """Whether the label put on at `label_at` is older than the run's head `sha`, from `head` (repository, branch), of
+    pull request `number`: put on before the head was pushed, or followed by a pull_request_target run from that head
+    at another of its commits (each label event starts a run of maintainer-confirmed.yml, on pull_request_target, at
+    the head of that moment, so a label put on while the pull request was at another commit is followed by a run of
+    that commit). The head was pushed at the later of its first run (the oldest of this repository's runs at `sha` from
+    `head`; when there is none, `created`, the completed run's) and the pull request's newest force push.
 
     The runs after the label are read by branch name and event: a branch of this repository by the same name (main)
     can have more runs than the API lists, but none on pull_request_target, which every run from a pull request's head
-    that counts here is on (build.yaml, validate.yaml, terms.yaml, maintainer-confirmed.yml, enroll-merged.yml)."""
+    that counts here is on (build.yaml, validate.yaml, terms.yaml, maintainer-confirmed.yml, enroll-merged.yml).
+
+    The same branch can be the head of another pull request, one closed before, say, whose runs at its own head (a
+    label event on a closed pull request starts one too) say nothing of this label. So a run at another commit counts
+    only when that commit is among the pull request's commits, which are read only when such a run exists. They hold
+    every earlier head reached without a force push, and a force push is the first test. GitHub lists at most 250
+    commits of a pull request: when it lists 250, every such run counts, which can take off a true label (the next
+    passing run puts it back) but never leaves a false one. A branch built on another pull request's commits that are
+    not in main still counts that pull request's runs at those commits, with the same effect."""
     first = [run["created_at"] for page in api.pages(f"repos/{repo}/actions/runs?head_sha={sha}&per_page=100")
              for run in page.get("workflow_runs") or []
              if run.get("head_sha") == sha and head_of(run) == head and time_of(run.get("created_at"))]
@@ -564,9 +573,14 @@ def older_than_head(api: Api, repo: str, sha: str, head: tuple, label_at: str, e
     branch = urllib.parse.quote(head[1], safe="")
     later = (f"repos/{repo}/actions/runs?branch={branch}&event=pull_request_target&created=%3E%3D{label_at}"
              "&per_page=100")
-    return any(head_of(run) == head and run.get("head_sha") != sha
-               and (time_of(run.get("created_at")) or "") >= label_at
-               for page in api.pages(later) for run in page.get("workflow_runs") or [])
+    others = {run.get("head_sha") for page in api.pages(later) for run in page.get("workflow_runs") or []
+              if head_of(run) == head and run.get("head_sha") != sha
+              and (time_of(run.get("created_at")) or "") >= label_at}
+    if not others:
+        return False
+    commits = {c["sha"] for page in api.pages(f"repos/{repo}/pulls/{number}/commits?per_page=100") for c in page
+               if isinstance(c, dict) and isinstance(c.get("sha"), str)}
+    return len(commits) >= 250 or bool(others & commits)
 
 
 def review_passed(api: Api, repo: str, result: dict, pull: dict | None = None, sha: str | None = None,
@@ -651,7 +665,7 @@ def review_passed(api: Api, repo: str, result: dict, pull: dict | None = None, s
         return say("is left as it is: no labeled event of it is found, so its age is not known")
     label_at = max(times)
     try:
-        older = older_than_head(api, repo, sha, head, label_at, events, created)
+        older = older_than_head(api, repo, number, sha, head, label_at, events, created)
     except (subprocess.CalledProcessError, ValueError):
         return say(f"is left as it is: the runs from that head could not be read, so whether its label of {label_at} "
                    f"is older than {sha[:7]} is not known")

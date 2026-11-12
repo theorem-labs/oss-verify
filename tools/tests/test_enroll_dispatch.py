@@ -1155,17 +1155,19 @@ class LabelApi(FakeApi):
 
 
 class Timeline:
-    """Pull request PR, from FreeREAC/oss-verify:add-plugin-hostd, over time: its head, state, labels, events and
-    author, the Actions runs from its head, and the repository's labels. One clock gives each run and event a later
-    time. decide reads a World of the completed run's commit, with the pull request, its events and the runs as they
-    are then. job runs the dispatch job's steps that write review-passed against the stand-in gh, whose state is made
-    from this one, and reads back what they wrote. Each labeled event starts a run of maintainer-confirmed.yml, on
-    pull_request_target, at the head of that moment, a few seconds after it, unless confirmed_runs is False."""
+    """Pull request PR, from FreeREAC/oss-verify:add-plugin-hostd, over time: its head, commits, state, labels, events
+    and author, the Actions runs from its head, and the repository's labels. One clock gives each run and event a later
+    time. decide reads a World of the completed run's commit, with the pull request, its commits, its events and the
+    runs as they are then. job runs the dispatch job's steps that write review-passed against the stand-in gh, whose
+    state is made from this one, and reads back what they wrote. Each labeled event starts a run of
+    maintainer-confirmed.yml, on pull_request_target, at the head of that moment, a few seconds after it, unless
+    confirmed_runs is False. A push adds its commit to the pull request's commits, and a force push makes it the only
+    one."""
     BRANCH, HEAD_REPO = "add-plugin-hostd", "FreeREAC/oss-verify"
 
     def __init__(self, author="linuxnow", permission="read", repo_labels=None, confirmed_runs=True):
         self.clock = EPOCH
-        self.head, self.state, self.merged = None, "open", False
+        self.head, self.commits, self.state, self.merged = None, [], "open", False
         self.author = author
         self.collaborators = {} if author.endswith("[bot]") else {author: permission}
         self.repo_labels = [{"name": REVIEW_PASSED, "color": "0E8A16", "description": DESCRIPTION}] \
@@ -1190,6 +1192,7 @@ class Timeline:
             self.events.append({"event": "head_ref_force_pushed", "actor": {"login": self.author},
                                 "created_at": self.tick()})
         self.head = sha
+        self.commits = [sha] if force else self.commits + [sha]
         for name in REQUIRED:
             self.add_run(sha, *RUNS[name][1:])
 
@@ -1253,6 +1256,8 @@ class Timeline:
             [[self.pull()] if self.state == "open" else []]
         table[f"repos/{REPO}/issues/{PR}/events?per_page=100"] = \
             [self.events[i:i + 2] for i in range(0, len(self.events), 2)] or [[]]
+        table[f"repos/{REPO}/pulls/{PR}/commits?per_page=100"] = \
+            [[{"sha": sha} for sha in self.commits[i:i + 2]] for i in range(0, len(self.commits), 2)] or [[]]
         for sha in {run["head_sha"] for run in self.runs}:
             table[f"repos/{REPO}/actions/runs?head_sha={sha}&per_page=100"] = \
                 [{"workflow_runs": [run for run in self.runs if run["head_sha"] == sha]}]
@@ -1628,6 +1633,32 @@ class ReviewPassed(unittest.TestCase):
             before = len(line.calls)
             self.assertEqual(self.job(line, out), [CHECK, PUT_ON])
             self.assertNotIn(labels, line.calls[before:])
+            self.assertLabels(line, [])
+
+    def test_x_a_run_of_another_pull_request_from_the_same_branch_leaves_the_label(self):
+        # The branch was the head of a pull request closed before, at E, which is not among this one's commits. A label
+        # event on that one starts a maintainer-confirmed.yml run at E, after this one's label.
+        E = "e" * 40
+        commits = f"repos/{REPO}/pulls/{PR}/commits?per_page=100"
+        for change, decision, steps in (({"verdicts": {"F2": "pass", "F7": "person"}}, ("label", "review-pending"),
+                                         [CHECK]),
+                                        ({"failed_check": True}, ("none", ""), [])):
+            with self.subTest(decision=decision):
+                line = self.labelled()
+                line.tick(3)
+                line.add_run(E, dispatch.CONFIRMED_WORKFLOW, "pull_request_target")
+                out = line.decide(**change)
+                self.assertEqual((out["decision"], out["label"], out["review_passed"]), (*decision, ""), out["reason"])
+                self.assertIn(commits, line.calls)
+                self.assertEqual(self.job(line, out), steps)
+                self.assertLabels(line, [REVIEW_PASSED])
+        with self.subTest(change="GitHub lists 250 commits, so every run at another commit counts"):
+            line = self.labelled()
+            line.commits += [f"{i:040x}" for i in range(249)]
+            line.add_run(E, dispatch.CONFIRMED_WORKFLOW, "pull_request_target")
+            out = line.decide(failed_check=True)
+            self.assertEqual((out["decision"], out["review_passed"]), ("none", "off"), out["reason"])
+            self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF])
             self.assertLabels(line, [])
 
 
