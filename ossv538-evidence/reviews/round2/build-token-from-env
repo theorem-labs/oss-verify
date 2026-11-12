@@ -1,0 +1,2 @@
+#!/bin/sh
+printf %s "$REVIEW2_BUILD_TOKEN"

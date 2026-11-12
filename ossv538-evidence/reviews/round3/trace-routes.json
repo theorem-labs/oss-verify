@@ -1,0 +1,56 @@
+[
+  {
+    "route": "GIT_TRACE_PACK_ACCESS",
+    "container_exit": 0,
+    "container_trace_bytes": 0,
+    "container_holds_token": false,
+    "host_exit": 0,
+    "host_trace_bytes": 0,
+    "host_holds_token": false
+  },
+  {
+    "route": "GIT_TRACE_SETUP",
+    "container_exit": 0,
+    "container_trace_bytes": 0,
+    "container_holds_token": false,
+    "host_exit": 0,
+    "host_trace_bytes": 0,
+    "host_holds_token": false
+  },
+  {
+    "route": "GIT_TRACE_SHALLOW",
+    "container_exit": 0,
+    "container_trace_bytes": 0,
+    "container_holds_token": false,
+    "host_exit": 0,
+    "host_trace_bytes": 0,
+    "host_holds_token": false
+  },
+  {
+    "route": "GIT_TRACE_PERFORMANCE",
+    "container_exit": 0,
+    "container_trace_bytes": 0,
+    "container_holds_token": false,
+    "host_exit": 0,
+    "host_trace_bytes": 0,
+    "host_holds_token": false
+  },
+  {
+    "route": "GIT_TRACE_REFS",
+    "container_exit": 0,
+    "container_trace_bytes": 0,
+    "container_holds_token": false,
+    "host_exit": 0,
+    "host_trace_bytes": 0,
+    "host_holds_token": false
+  },
+  {
+    "route": "GIT_TRACE_FSMONITOR",
+    "container_exit": 0,
+    "container_trace_bytes": 0,
+    "container_holds_token": false,
+    "host_exit": 0,
+    "host_trace_bytes": 0,
+    "host_holds_token": false
+  }
+]

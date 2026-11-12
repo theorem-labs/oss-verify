@@ -1,0 +1,119 @@
+cjson-nocommit: warning: primary_contact is n/a: only a project we seeded may say that, and only until a maintainer adopts it
+
+[02:52:48] mint a read-only token for https://github.com/theorem-labs/cjson-ossv267
+infra/private-libraries.tsv: the calibration pair of the verified-SDLC eval: one feature built twice from one base, on cJSON v1.7.18 (dispatch://OSSV-267)
+the token is read-only, is for this repository and this build only, and goes to docker build as the secret oss-verify-git-token; it is in no build argument, no layer, no manifest and no log
+
+[02:52:48] resolve https://github.com/theorem-labs/cjson-ossv267#0123456789abcdef0123456789abcdef01234567
+0123456789abcdef0123456789abcdef01234567 is 0123456789abcdef0123456789abcdef01234567
+toolchain: ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain@sha256:6a6b4816865c7ec61801ae0fcab6d9c81a599ffcb20616576a9c668abd8b0a7b (the newest for c)
+
+[02:52:48] docker build: the builder (oss-verify-base-builder:8917090ed8e4eafe-6a6b4816865c), FROM ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain@sha256:6a6b4816865c7ec61801ae0fcab6d9c81a599ffcb20616576a9c668abd8b0a7b
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 2.71kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain@sha256:6a6b4816865c7ec61801ae0fcab6d9c81a599ffcb20616576a9c668abd8b0a7b
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [stage-0  1/10] FROM ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain@sha256:6a6b4816865c7ec61801ae0fcab6d9c81a599ffcb20616576a9c668abd8b0a7b
+#4 resolve ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain@sha256:6a6b4816865c7ec61801ae0fcab6d9c81a599ffcb20616576a9c668abd8b0a7b 0.0s done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 1.75kB done
+#5 DONE 0.0s
+
+#6 [stage-0  8/10] COPY compile fetch-commit git-credential-oss-verify lay-out-sources /usr/local/bin/
+#6 CACHED
+
+#7 [stage-0  3/10] COPY toolchain.sh link-fuzz-target record-compile recipes.sh release-target.sh /usr/local/lib/oss-verify/
+#7 CACHED
+
+#8 [stage-0  2/10] RUN --mount=type=bind,source=distrust-roots.py,target=/tmp/distrust-roots.py python3 /tmp/distrust-roots.py
+#8 CACHED
+
+#9 [stage-0  9/10] RUN chmod 0755 /usr/local/bin/compile /usr/local/bin/fetch-commit /usr/local/bin/lay-out-sources                /usr/local/bin/git-credential-oss-verify                /usr/local/lib/oss-verify/link-fuzz-target /usr/local/lib/oss-verify/record-compile                /usr/local/lib/oss-verify/go/compile-go  && mkdir -p /src /work /out
+#9 CACHED
+
+#10 [stage-0  4/10] COPY driver/ /usr/local/lib/oss-verify/driver/
+#10 CACHED
+
+#11 [stage-0  6/10] COPY python/ /usr/local/lib/oss-verify/python/
+#11 CACHED
+
+#12 [stage-0  5/10] COPY rust/ /usr/local/lib/oss-verify/rust/
+#12 CACHED
+
+#13 [stage-0  7/10] COPY go/ /usr/local/lib/oss-verify/go/
+#13 CACHED
+
+#14 [stage-0 10/10] WORKDIR /src
+#14 CACHED
+
+#15 exporting to image
+#15 exporting layers done
+#15 exporting manifest sha256:c964918d6fbbc9775e15df1a6fad71f8c9f8544e523de3a20e00e3807b024c47 done
+#15 exporting config sha256:7dcaf450c173854aa2d7de79d7adbc645e8fcec4bff450869f9bedf64871c103 done
+#15 exporting attestation manifest sha256:0f205c36aed40cc485ddc6f42122a7342802c9500aa6bb31ce48c18f1b4d94a1 0.0s done
+#15 exporting manifest list sha256:248bd032082332936fa7d3b3cd23fd81640fe628f807f247007f194c5fae68dd
+#15 exporting manifest list sha256:248bd032082332936fa7d3b3cd23fd81640fe628f807f247007f194c5fae68dd 0.0s done
+#15 naming to docker.io/library/oss-verify-base-builder:8917090ed8e4eafe-6a6b4816865c done
+#15 unpacking to docker.io/library/oss-verify-base-builder:8917090ed8e4eafe-6a6b4816865c done
+#15 DONE 0.1s
+Dockerfile: the one beside project.yaml; the build context is projects/cjson-nocommit/
+
+[02:52:49] docker build: the project (oss-verify-check/cjson-nocommit:0123456789ab-37de7427c866); the network is available
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 506B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/oss-verify-base-builder:8917090ed8e4eafe-6a6b4816865c
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [stage-0 1/4] FROM docker.io/library/oss-verify-base-builder:8917090ed8e4eafe-6a6b4816865c@sha256:248bd032082332936fa7d3b3cd23fd81640fe628f807f247007f194c5fae68dd
+#4 resolve docker.io/library/oss-verify-base-builder:8917090ed8e4eafe-6a6b4816865c@sha256:248bd032082332936fa7d3b3cd23fd81640fe628f807f247007f194c5fae68dd 0.0s done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 1.57kB done
+#5 DONE 0.0s
+
+#6 [stage-0 2/4] RUN --mount=type=secret,id=oss-verify-git-token fetch-commit /src/cjson
+#6 1.573 fatal: remote error: upload-pack: not our ref 0123456789abcdef0123456789abcdef01234567
+#6 3.356 fatal: unable to read tree (0123456789abcdef0123456789abcdef01234567)
+#6 3.356 fetch-commit: https://github.com/theorem-labs/cjson-ossv267 has no commit 0123456789abcdef0123456789abcdef01234567. The server listed the repository's refs for this build, so this
+#6 3.356   is not an authorisation failure: the commit is not in the repository (deleted, or never pushed, or a
+#6 3.356   branch that was force-pushed since the commit was recorded).
+#6 ERROR: process "/bin/sh -c fetch-commit $SRC/cjson" did not complete successfully: exit code: 1
+------
+ > [stage-0 2/4] RUN --mount=type=secret,id=oss-verify-git-token fetch-commit /src/cjson:
+1.573 fatal: remote error: upload-pack: not our ref 0123456789abcdef0123456789abcdef01234567
+3.356 fatal: unable to read tree (0123456789abcdef0123456789abcdef01234567)
+3.356 fetch-commit: https://github.com/theorem-labs/cjson-ossv267 has no commit 0123456789abcdef0123456789abcdef01234567. The server listed the repository's refs for this build, so this
+3.356   is not an authorisation failure: the commit is not in the repository (deleted, or never pushed, or a
+3.356   branch that was force-pushed since the commit was recorded).
+------
+Dockerfile:10
+--------------------
+   8 |     ARG REPO
+   9 |     ARG COMMIT
+  10 | >>> RUN --mount=type=secret,id=oss-verify-git-token fetch-commit $SRC/cjson
+  11 |     COPY build.sh $SRC/
+  12 |     WORKDIR $SRC/cjson
+--------------------
+ERROR: failed to build: failed to solve: process "/bin/sh -c fetch-commit $SRC/cjson" did not complete successfully: exit code: 1
+
+BUILD FAILED: docker build of the project's Dockerfile failed

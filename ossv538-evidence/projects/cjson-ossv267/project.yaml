@@ -1,0 +1,7 @@
+# OSSV-538 acceptance: the calibration pair's private copy of cJSON, built through the private-library path.
+repo: https://github.com/theorem-labs/cjson-ossv267#master
+primary_contact: n/a
+homepage: https://github.com/theorem-labs/cjson-ossv267
+language: c
+sanitizers: [address, undefined]
+fuzz_targets: [cjson_read_fuzzer]

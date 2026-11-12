@@ -1,0 +1,320 @@
+[
+  {
+    "repository": "https://github.com/theorem-labs/cjson-ossv267",
+    "command": "PYTHONDONTWRITEBYTECODE=1 OSS_VERIFY_GIT_TOKEN_COMMAND=/mnt/nvme/sami/clones/ossv538-scratch/review2/build-token-from-env REVIEW2_BUILD_TOKEN=<inherited, never printed> /mnt/nvme/sami/clones/ossv538-scratch/venv/bin/python tools/check --no-shell --build plain --dir /mnt/nvme/sami/clones/ossv538-scratch/review2/private-cjson-ossv267 /mnt/nvme/sami/clones/ossv538-scratch/review2/private-projects/cjson-ossv267",
+    "cwd": "/mnt/nvme/sami/clones/ossv538",
+    "exit": 0,
+    "back_to_back_default_mints_differ": true,
+    "raw_log_contains_token": false,
+    "commit": "acc76239bee01d8e9c858ae2cab296704e52d916",
+    "sources": {
+      "/src/cjson": "acc76239bee01d8e9c858ae2cab296704e52d916"
+    },
+    "image": "sha256:8aa648688441887a2b3a6eb864d3d860b73ea25ff84752fb64ad393ffcc1d979",
+    "history": {
+      "bytes": 8729,
+      "contains_token": false
+    },
+    "inspect": {
+      "bytes": 3806,
+      "contains_token": false
+    },
+    "docker_save_exit": 0,
+    "saved_members": [
+      {
+        "name": "blobs/sha256/03741af6275e340d3096a40f03632f787a3d0b760ccd801e351b26cf4efd22c8",
+        "bytes": 2560,
+        "gzip_decoded": true,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/412c91b6c8881a324c94038b875c9e507b9dc95e25427268053d73c4fa18d2d9",
+        "bytes": 40448,
+        "gzip_decoded": true,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "bytes": 2,
+        "gzip_decoded": false,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/4b6a516bb07bd118c64340c5cbcc3d1f3fdb0df9318587025559ce47ee77ba9f",
+        "bytes": 3584,
+        "gzip_decoded": true,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/4f4fb700ef54461cfa02571ae0db9a0dc1e0cdb5577484a6d75e68dc38e8acc1",
+        "bytes": 1024,
+        "gzip_decoded": true,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/6817a47f73f4809c1dabad4595730c90c57c0aa21e3d5f3d1df6a506bcb21c2b",
+        "bytes": 1964544,
+        "gzip_decoded": true,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/681ec304e5e1cbbc26e833ef7ebbf8de3bdda7100dac677aff8ddbb8e6582ab0",
+        "bytes": 4817879040,
+        "gzip_decoded": true,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/708a26d8f75ff154efd7a218a902223095edc27060d589e44c5d988fa1b8571d",
+        "bytes": 94208,
+        "gzip_decoded": true,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/82abdd7a77a10145a2bfcca0ad101fb081fd0731d99810f217de16ad838d2310",
+        "bytes": 2755,
+        "gzip_decoded": false,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/8aa648688441887a2b3a6eb864d3d860b73ea25ff84752fb64ad393ffcc1d979",
+        "bytes": 856,
+        "gzip_decoded": false,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/8ee9412833a1a1cd1833d0b8e7f1e668234627b08277eac803e191cab0ad8326",
+        "bytes": 837,
+        "gzip_decoded": false,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/ae2ef55a48f0a8eec60c1412f7fda97bb36d202716fe71d275107df2306d087c",
+        "bytes": 2456576,
+        "gzip_decoded": true,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/c238972bf0889088f97a22b4ab9c31ceada8fe24337aa72591db15237376e353",
+        "bytes": 8704,
+        "gzip_decoded": true,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/c857b0a41c094bd097a2b869172333a554937cc7bd08091e1015fe72fa2fa577",
+        "bytes": 38912,
+        "gzip_decoded": true,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/cbbc3f764e96444e8d76ec828958e6d1f16ee354d20b00175862ee7d81f92a13",
+        "bytes": 5054,
+        "gzip_decoded": false,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/d4ed0a2a5d0b2ca77a8da2ce6a1b629951449598a6ce762487a7692b7a22699a",
+        "bytes": 1260,
+        "gzip_decoded": false,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/e3315c1465ae25b8982f34019f36d424161315b4a69238ae87968033af539580",
+        "bytes": 76288,
+        "gzip_decoded": true,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/e551c27480a3c9a3af712130c31be82714f0d755ba11aa6e224688fad763518e",
+        "bytes": 52224,
+        "gzip_decoded": true,
+        "contains_token": false
+      },
+      {
+        "name": "index.json",
+        "bytes": 237,
+        "gzip_decoded": false,
+        "contains_token": false
+      },
+      {
+        "name": "manifest.json",
+        "bytes": 1159,
+        "gzip_decoded": false,
+        "contains_token": false
+      },
+      {
+        "name": "oci-layout",
+        "bytes": 30,
+        "gzip_decoded": false,
+        "contains_token": false
+      }
+    ],
+    "saved_members_holding_token": 0,
+    "facts_files_holding_token": [],
+    "runtime": {
+      "exit": 0,
+      "contains_token": false,
+      "token_env_present": false,
+      "secrets_file_present": false,
+      "remote_contains_expected_url": true
+    }
+  },
+  {
+    "repository": "https://github.com/theorem-labs/theorem-cli",
+    "command": "PYTHONDONTWRITEBYTECODE=1 OSS_VERIFY_GIT_TOKEN_COMMAND=/mnt/nvme/sami/clones/ossv538-scratch/review2/build-token-from-env REVIEW2_BUILD_TOKEN=<inherited, never printed> /mnt/nvme/sami/clones/ossv538-scratch/venv/bin/python tools/check --no-shell --build plain --dir /mnt/nvme/sami/clones/ossv538-scratch/review2/private-theorem-cli /mnt/nvme/sami/clones/ossv538-scratch/review2/private-projects/theorem-cli",
+    "cwd": "/mnt/nvme/sami/clones/ossv538",
+    "exit": 0,
+    "back_to_back_default_mints_differ": true,
+    "raw_log_contains_token": false,
+    "commit": "b9e7947677f353c26a62980aaf6dffbcc57d1503",
+    "sources": {
+      "/src/theorem-cli": "b9e7947677f353c26a62980aaf6dffbcc57d1503"
+    },
+    "image": "sha256:03997371699b99f5ea1e9912a5bad4dd64807075fb95f25502da0c7889d9dc7b",
+    "history": {
+      "bytes": 8729,
+      "contains_token": false
+    },
+    "inspect": {
+      "bytes": 3808,
+      "contains_token": false
+    },
+    "docker_save_exit": 0,
+    "saved_members": [
+      {
+        "name": "blobs/sha256/03741af6275e340d3096a40f03632f787a3d0b760ccd801e351b26cf4efd22c8",
+        "bytes": 2560,
+        "gzip_decoded": true,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/03997371699b99f5ea1e9912a5bad4dd64807075fb95f25502da0c7889d9dc7b",
+        "bytes": 856,
+        "gzip_decoded": false,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/191db4faecaf172da3d1cbc8b3366460bfc0c027cf482e55133d423863b6655f",
+        "bytes": 2756,
+        "gzip_decoded": false,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/21016d25b032cc3f8a8c00796088dc26dd5f653ecc8a6dffa6be10fa92e6ecf5",
+        "bytes": 3072,
+        "gzip_decoded": true,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/399daac05b732a53b293942fc7d833d7ca038a5b4beed912d6cf5275a4d49225",
+        "bytes": 837,
+        "gzip_decoded": false,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/412c91b6c8881a324c94038b875c9e507b9dc95e25427268053d73c4fa18d2d9",
+        "bytes": 40448,
+        "gzip_decoded": true,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "bytes": 2,
+        "gzip_decoded": false,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/47eba439616aad3778f50d73c98bf057cf655492e37104c4346f89c4cdc467f2",
+        "bytes": 3554304,
+        "gzip_decoded": true,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/4f4fb700ef54461cfa02571ae0db9a0dc1e0cdb5577484a6d75e68dc38e8acc1",
+        "bytes": 1024,
+        "gzip_decoded": true,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/681ec304e5e1cbbc26e833ef7ebbf8de3bdda7100dac677aff8ddbb8e6582ab0",
+        "bytes": 4817879040,
+        "gzip_decoded": true,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/708a26d8f75ff154efd7a218a902223095edc27060d589e44c5d988fa1b8571d",
+        "bytes": 94208,
+        "gzip_decoded": true,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/ae2ef55a48f0a8eec60c1412f7fda97bb36d202716fe71d275107df2306d087c",
+        "bytes": 2456576,
+        "gzip_decoded": true,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/bb710d2611eb924c0aea99c4799f42fc8d156779ae1459ca97cd5b7ccad8d41e",
+        "bytes": 5063,
+        "gzip_decoded": false,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/c238972bf0889088f97a22b4ab9c31ceada8fe24337aa72591db15237376e353",
+        "bytes": 8704,
+        "gzip_decoded": true,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/c857b0a41c094bd097a2b869172333a554937cc7bd08091e1015fe72fa2fa577",
+        "bytes": 38912,
+        "gzip_decoded": true,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/e3315c1465ae25b8982f34019f36d424161315b4a69238ae87968033af539580",
+        "bytes": 76288,
+        "gzip_decoded": true,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/e551c27480a3c9a3af712130c31be82714f0d755ba11aa6e224688fad763518e",
+        "bytes": 52224,
+        "gzip_decoded": true,
+        "contains_token": false
+      },
+      {
+        "name": "blobs/sha256/f2c76de18666a2a62fc9fa6bcf0f44b142e09e62567813a2444f143052756dd0",
+        "bytes": 1259,
+        "gzip_decoded": false,
+        "contains_token": false
+      },
+      {
+        "name": "index.json",
+        "bytes": 237,
+        "gzip_decoded": false,
+        "contains_token": false
+      },
+      {
+        "name": "manifest.json",
+        "bytes": 1159,
+        "gzip_decoded": false,
+        "contains_token": false
+      },
+      {
+        "name": "oci-layout",
+        "bytes": 30,
+        "gzip_decoded": false,
+        "contains_token": false
+      }
+    ],
+    "saved_members_holding_token": 0,
+    "facts_files_holding_token": [],
+    "runtime": {
+      "exit": 0,
+      "contains_token": false,
+      "token_env_present": false,
+      "secrets_file_present": false,
+      "remote_contains_expected_url": true
+    }
+  }
+]

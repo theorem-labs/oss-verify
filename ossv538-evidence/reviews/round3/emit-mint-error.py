@@ -1,0 +1,1 @@
+import sys;sys.stderr.write('<synthetic token, redacted for this archive>');sys.exit(1)

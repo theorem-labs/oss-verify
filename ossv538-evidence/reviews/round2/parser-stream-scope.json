@@ -1,0 +1,405 @@
+[
+  {
+    "probe": "parser-normal",
+    "text": "RUN --mount=type=secret,id=oss-verify-git-token fetch-commit /src/x\n",
+    "public": {
+      "accepted": false,
+      "exception": "Failed",
+      "reason": "Dockerfile mounts the secret oss-verify-git-token, but https://github.com/theorem-labs/theorem-cli is not in infra/private-libraries.tsv, so no token is minted for it and no build of it gets a credential. A public library is fetched with none: take the mount off."
+    },
+    "private": {
+      "accepted": true
+    }
+  },
+  {
+    "probe": "parser-comment",
+    "text": "# RUN --mount=type=secret,id=oss-verify-git-token fetch-commit /src/x\nRUN fetch-commit /src/x\n",
+    "public": {
+      "accepted": true
+    },
+    "private": {
+      "accepted": false,
+      "exception": "Failed",
+      "reason": "https://github.com/theorem-labs/theorem-cli is in infra/private-libraries.tsv, so this build minted a read-only token for it, but the fetch step in Dockerfile does not mount it, so the fetch would get no credential. Put the mount on the fetch step:"
+    }
+  },
+  {
+    "probe": "parser-after-command",
+    "text": "RUN fetch-commit /src/x --mount=type=secret,id=oss-verify-git-token\n",
+    "public": {
+      "accepted": true
+    },
+    "private": {
+      "accepted": false,
+      "exception": "Failed",
+      "reason": "https://github.com/theorem-labs/theorem-cli is in infra/private-libraries.tsv, so this build minted a read-only token for it, but the fetch step in Dockerfile does not mount it, so the fetch would get no credential. Put the mount on the fetch step:"
+    }
+  },
+  {
+    "probe": "parser-quoted-option",
+    "text": "RUN \"--mount=type=secret,id=oss-verify-git-token\" fetch-commit /src/x\n",
+    "public": {
+      "accepted": false,
+      "exception": "Failed",
+      "reason": "Dockerfile mounts the secret oss-verify-git-token, but https://github.com/theorem-labs/theorem-cli is not in infra/private-libraries.tsv, so no token is minted for it and no build of it gets a credential. A public library is fetched with none: take the mount off."
+    },
+    "private": {
+      "accepted": true
+    }
+  },
+  {
+    "probe": "parser-quoted-command",
+    "text": "RUN --mount=type=secret,id=oss-verify-git-token \"fetch-commit\" /src/x\n",
+    "public": {
+      "accepted": false,
+      "exception": "Failed",
+      "reason": "Dockerfile mounts the secret oss-verify-git-token, but https://github.com/theorem-labs/theorem-cli is not in infra/private-libraries.tsv, so no token is minted for it and no build of it gets a credential. A public library is fetched with none: take the mount off."
+    },
+    "private": {
+      "accepted": true
+    }
+  },
+  {
+    "probe": "parser-string-only",
+    "text": "RUN --mount=type=secret,id=oss-verify-git-token echo \"fetch-commit\"\nRUN fetch-commit /src/x\n",
+    "public": {
+      "accepted": false,
+      "exception": "Failed",
+      "reason": "Dockerfile mounts the secret oss-verify-git-token, but https://github.com/theorem-labs/theorem-cli is not in infra/private-libraries.tsv, so no token is minted for it and no build of it gets a credential. A public library is fetched with none: take the mount off."
+    },
+    "private": {
+      "accepted": true
+    }
+  },
+  {
+    "probe": "parser-inline-comment",
+    "text": "RUN --mount=type=secret,id=oss-verify-git-token true # fetch-commit\nRUN fetch-commit /src/x\n",
+    "public": {
+      "accepted": false,
+      "exception": "Failed",
+      "reason": "Dockerfile mounts the secret oss-verify-git-token, but https://github.com/theorem-labs/theorem-cli is not in infra/private-libraries.tsv, so no token is minted for it and no build of it gets a credential. A public library is fetched with none: take the mount off."
+    },
+    "private": {
+      "accepted": true
+    }
+  },
+  {
+    "probe": "parser-mixed-fetches",
+    "text": "RUN --mount=type=secret,id=oss-verify-git-token fetch-commit /src/x\nRUN fetch-commit /src/y\n",
+    "public": {
+      "accepted": false,
+      "exception": "Failed",
+      "reason": "Dockerfile mounts the secret oss-verify-git-token, but https://github.com/theorem-labs/theorem-cli is not in infra/private-libraries.tsv, so no token is minted for it and no build of it gets a credential. A public library is fetched with none: take the mount off."
+    },
+    "private": {
+      "accepted": true
+    }
+  },
+  {
+    "probe": "parser-arg-id",
+    "text": "ARG SECRET_ID=oss-verify-git-token\nRUN --mount=type=secret,id=$SECRET_ID fetch-commit /src/x\n",
+    "public": {
+      "accepted": true
+    },
+    "private": {
+      "accepted": false,
+      "exception": "Failed",
+      "reason": "https://github.com/theorem-labs/theorem-cli is in infra/private-libraries.tsv, so this build minted a read-only token for it, but the fetch step in Dockerfile does not mount it, so the fetch would get no credential. Put the mount on the fetch step:"
+    }
+  },
+  {
+    "probe": "parser-env-id",
+    "text": "ENV SECRET_ID=oss-verify-git-token\nRUN --mount=type=secret,id=${SECRET_ID} fetch-commit /src/x\n",
+    "public": {
+      "accepted": true
+    },
+    "private": {
+      "accepted": false,
+      "exception": "Failed",
+      "reason": "https://github.com/theorem-labs/theorem-cli is in infra/private-libraries.tsv, so this build minted a read-only token for it, but the fetch step in Dockerfile does not mount it, so the fetch would get no credential. Put the mount on the fetch step:"
+    }
+  },
+  {
+    "probe": "parser-arg-command",
+    "text": "ARG FETCH=fetch-commit\nRUN --mount=type=secret,id=oss-verify-git-token $FETCH /src/x\n",
+    "public": {
+      "accepted": false,
+      "exception": "Failed",
+      "reason": "Dockerfile mounts the secret oss-verify-git-token, but https://github.com/theorem-labs/theorem-cli is not in infra/private-libraries.tsv, so no token is minted for it and no build of it gets a credential. A public library is fetched with none: take the mount off."
+    },
+    "private": {
+      "accepted": false,
+      "exception": "Failed",
+      "reason": "https://github.com/theorem-labs/theorem-cli is in infra/private-libraries.tsv, so this build minted a read-only token for it, but Dockerfile mounts it, but not on the step that runs fetch-commit, so the fetch would get no credential. Put the mount on the fetch step:"
+    }
+  },
+  {
+    "probe": "parser-network-option-first",
+    "text": "RUN --network=default --mount=type=secret,id=oss-verify-git-token fetch-commit /src/x\n",
+    "public": {
+      "accepted": true
+    },
+    "private": {
+      "accepted": false,
+      "exception": "Failed",
+      "reason": "https://github.com/theorem-labs/theorem-cli is in infra/private-libraries.tsv, so this build minted a read-only token for it, but the fetch step in Dockerfile does not mount it, so the fetch would get no credential. Put the mount on the fetch step:"
+    }
+  },
+  {
+    "probe": "parser-heredoc-mounted",
+    "text": "RUN --mount=type=secret,id=oss-verify-git-token <<EOF\nfetch-commit /src/x\nEOF\n",
+    "public": {
+      "accepted": false,
+      "exception": "Failed",
+      "reason": "Dockerfile mounts the secret oss-verify-git-token, but https://github.com/theorem-labs/theorem-cli is not in infra/private-libraries.tsv, so no token is minted for it and no build of it gets a credential. A public library is fetched with none: take the mount off."
+    },
+    "private": {
+      "accepted": false,
+      "exception": "Failed",
+      "reason": "https://github.com/theorem-labs/theorem-cli is in infra/private-libraries.tsv, so this build minted a read-only token for it, but Dockerfile mounts it, but not on the step that runs fetch-commit, so the fetch would get no credential. Put the mount on the fetch step:"
+    }
+  },
+  {
+    "probe": "parser-heredoc-text",
+    "text": "COPY <<EOF /example\nRUN --mount=type=secret,id=oss-verify-git-token fetch-commit /src/x\nEOF\nRUN fetch-commit /src/x\n",
+    "public": {
+      "accepted": false,
+      "exception": "Failed",
+      "reason": "Dockerfile mounts the secret oss-verify-git-token, but https://github.com/theorem-labs/theorem-cli is not in infra/private-libraries.tsv, so no token is minted for it and no build of it gets a credential. A public library is fetched with none: take the mount off."
+    },
+    "private": {
+      "accepted": true
+    }
+  },
+  {
+    "probe": "parser-syntax-directive",
+    "text": "# syntax=docker/dockerfile:1\nRUN --mount=type=secret,id=oss-verify-git-token fetch-commit /src/x\n",
+    "public": {
+      "accepted": false,
+      "exception": "Failed",
+      "reason": "Dockerfile mounts the secret oss-verify-git-token, but https://github.com/theorem-labs/theorem-cli is not in infra/private-libraries.tsv, so no token is minted for it and no build of it gets a credential. A public library is fetched with none: take the mount off."
+    },
+    "private": {
+      "accepted": true
+    }
+  },
+  {
+    "probe": "parser-crlf",
+    "text": "RUN --mount=type=secret,id=oss-verify-git-token \\\r\n  fetch-commit /src/x\r\n",
+    "public": {
+      "accepted": false,
+      "exception": "Failed",
+      "reason": "Dockerfile mounts the secret oss-verify-git-token, but https://github.com/theorem-labs/theorem-cli is not in infra/private-libraries.tsv, so no token is minted for it and no build of it gets a credential. A public library is fetched with none: take the mount off."
+    },
+    "private": {
+      "accepted": true
+    }
+  },
+  {
+    "probe": "parser-escape-backtick",
+    "text": "# escape=`\nRUN --mount=type=secret,id=oss-verify-git-token `\n fetch-commit /src/x\n",
+    "public": {
+      "accepted": false,
+      "exception": "Failed",
+      "reason": "Dockerfile mounts the secret oss-verify-git-token, but https://github.com/theorem-labs/theorem-cli is not in infra/private-libraries.tsv, so no token is minted for it and no build of it gets a credential. A public library is fetched with none: take the mount off."
+    },
+    "private": {
+      "accepted": false,
+      "exception": "Failed",
+      "reason": "https://github.com/theorem-labs/theorem-cli is in infra/private-libraries.tsv, so this build minted a read-only token for it, but Dockerfile mounts it, but not on the step that runs fetch-commit, so the fetch would get no credential. Put the mount on the fetch step:"
+    }
+  },
+  {
+    "probe": "parser-copy-mount",
+    "text": "COPY --mount=type=secret,id=oss-verify-git-token fetch-commit /src/x\n",
+    "public": {
+      "accepted": true
+    },
+    "private": {
+      "accepted": false,
+      "exception": "Failed",
+      "reason": "https://github.com/theorem-labs/theorem-cli is in infra/private-libraries.tsv, so this build minted a read-only token for it, but the fetch step in Dockerfile does not mount it, so the fetch would get no credential. Put the mount on the fetch step:"
+    }
+  },
+  {
+    "probe": "parser-continued-mount-fields",
+    "text": "RUN --mount=type=secret,\\\nid=oss-verify-git-token fetch-commit /src/x\n",
+    "public": {
+      "accepted": true
+    },
+    "private": {
+      "accepted": false,
+      "exception": "Failed",
+      "reason": "https://github.com/theorem-labs/theorem-cli is in infra/private-libraries.tsv, so this build minted a read-only token for it, but the fetch step in Dockerfile does not mount it, so the fetch would get no credential. Put the mount on the fetch step:"
+    }
+  },
+  {
+    "probe": "parser-unmatched-shell-quote",
+    "text": "RUN echo \"\n",
+    "public": {
+      "accepted": false,
+      "exception": "ValueError",
+      "reason": "No closing quotation"
+    },
+    "private": {
+      "accepted": false,
+      "exception": "ValueError",
+      "reason": "No closing quotation"
+    }
+  },
+  {
+    "probe": "stream-every-position",
+    "token_length": 44,
+    "positions": 43,
+    "incorrect_positions": []
+  },
+  {
+    "probe": "stream-every-position",
+    "token_length": 390,
+    "positions": 389,
+    "incorrect_positions": []
+  },
+  {
+    "probe": "stream-every-position",
+    "token_length": 8,
+    "positions": 7,
+    "incorrect_positions": []
+  },
+  {
+    "probe": "stream-every-position",
+    "token_length": 7,
+    "positions": 6,
+    "incorrect_positions": []
+  },
+  {
+    "probe": "stream-one-byte-reads",
+    "exact": true
+  },
+  {
+    "probe": "public-stream-byte-identity",
+    "exact": true
+  },
+  {
+    "probe": "anonymous-git-byte-identity",
+    "host": true,
+    "container": true
+  },
+  {
+    "probe": "helper-same",
+    "exit": 0,
+    "answered": true
+  },
+  {
+    "probe": "helper-other-path",
+    "exit": 0,
+    "answered": false
+  },
+  {
+    "probe": "helper-other-host",
+    "exit": 0,
+    "answered": false
+  },
+  {
+    "probe": "helper-port",
+    "exit": 0,
+    "answered": false
+  },
+  {
+    "probe": "helper-case-host",
+    "exit": 0,
+    "answered": false
+  },
+  {
+    "probe": "helper-case-path",
+    "exit": 0,
+    "answered": false
+  },
+  {
+    "probe": "helper-trailing-slash",
+    "exit": 0,
+    "answered": false
+  },
+  {
+    "probe": "helper-dotgit-slash",
+    "exit": 0,
+    "answered": false
+  },
+  {
+    "probe": "helper-no-path",
+    "exit": 0,
+    "answered": true
+  },
+  {
+    "probe": "helper-http-protocol",
+    "exit": 0,
+    "answered": true
+  },
+  {
+    "probe": "mint-cache",
+    "minimum": 1800,
+    "same_build_equivalent_token": true,
+    "broker_calls": 2,
+    "cache_files": 2,
+    "modes": [
+      "0o600",
+      "0o600"
+    ],
+    "scope": {
+      "repositories": [
+        "theorem-cli"
+      ],
+      "permissions": {
+        "contents": "read",
+        "metadata": "read"
+      }
+    }
+  },
+  {
+    "probe": "mint-cache",
+    "minimum": 3600,
+    "same_build_equivalent_token": false,
+    "broker_calls": 3,
+    "cache_files": 2,
+    "modes": [
+      "0o600",
+      "0o600"
+    ],
+    "scope": {
+      "repositories": [
+        "theorem-cli"
+      ],
+      "permissions": {
+        "contents": "read",
+        "metadata": "read"
+      }
+    }
+  },
+  {
+    "probe": "cli-twice",
+    "repo": "https://github.com/DaveGamble/cJSON",
+    "exit": 0,
+    "mint_calls": 0,
+    "builds": 2,
+    "tokens_differ": false
+  },
+  {
+    "probe": "cli-twice",
+    "repo": "https://github.com/theorem-labs/oss-verify",
+    "exit": 0,
+    "mint_calls": 0,
+    "builds": 2,
+    "tokens_differ": false
+  },
+  {
+    "probe": "cli-twice",
+    "repo": "https://github.com/theorem-labs/theorem-cli",
+    "exit": 0,
+    "mint_calls": 2,
+    "builds": 2,
+    "tokens_differ": true
+  },
+  {
+    "probe": "custom-command-reuses",
+    "same": true
+  }
+]

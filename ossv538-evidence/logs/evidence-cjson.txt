@@ -1,0 +1,30 @@
+image: oss-verify-check/cjson-ossv267:acc76239bee0-8a2f9c5fe742
+the token this build used: 390 bytes, read back from the recording token command
+
+$ docker history --no-trunc 'oss-verify-check/cjson-ossv267:acc76239bee0-8a2f9c5fe742' | grep -c -F -- "$(cat token-cjson.txt)"
+0
+
+$ docker image inspect 'oss-verify-check/cjson-ossv267:acc76239bee0-8a2f9c5fe742' | grep -c -F -- "$(cat token-cjson.txt)"
+0
+
+$ ls work/ev-cjson/layers/blobs/sha256 | wc -l
+18
+
+$ for b in work/ev-cjson/layers/blobs/sha256/*; do tar -xOf "$b" 2>/dev/null || cat "$b"; done | grep -c -F -- "$(cat token-cjson.txt)"
+0
+
+$ grep -c -F -- "$(cat token-cjson.txt)" work/ev-cjson/image.tar
+0
+
+$ docker run --rm --network=none --entrypoint sh 'oss-verify-check/cjson-ossv267:acc76239bee0-8a2f9c5fe742' -c 'printenv | grep -ci oss_verify_git_token; ls -A /run/secrets 2>/dev/null | wc -l'
+0
+0
+
+$ grep -rc -F -- "$(cat token-cjson.txt)" work/ev-cjson/manifest.yaml
+0
+
+$ find work/ev-cjson -type f ! -name image.tar ! -path 'work/ev-cjson/layers/*' -exec grep -l -F -- "$(cat token-cjson.txt)" {} + | wc -l
+0
+
+$ grep -c -F -- "$(cat token-cjson.txt)" ev-cjson.log
+0

@@ -1,0 +1,15 @@
+[
+  {
+    "probe": "known-token-error-tail",
+    "token_length": 390,
+    "leaked_token_suffix_characters": 100,
+    "complete_token_present": false,
+    "redaction_marker_present": false
+  },
+  {
+    "probe": "token-command-error-tail",
+    "leaked_token_suffix_characters": 100,
+    "complete_token_present": false,
+    "redaction_marker_present": false
+  }
+]

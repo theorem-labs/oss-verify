@@ -1,0 +1,408 @@
+cjson-ossv267: warning: primary_contact is n/a: only a project we seeded may say that, and only until a maintainer adopts it
+
+[04:29:16] mint a read-only token for https://github.com/theorem-labs/cjson-ossv267
+infra/private-libraries.tsv: the calibration pair of the verified-SDLC eval: one feature built twice from one base, on cJSON v1.7.18 (dispatch://OSSV-267)
+the token is read-only, is for this repository and this build only, and goes to docker build as the secret oss-verify-git-token; it is in no build argument, no layer, no manifest and no log
+
+[04:29:18] resolve https://github.com/theorem-labs/cjson-ossv267#master
+master is acc76239bee01d8e9c858ae2cab296704e52d916
+toolchain: ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain@sha256:6a6b4816865c7ec61801ae0fcab6d9c81a599ffcb20616576a9c668abd8b0a7b (the newest for c)
+
+[04:29:19] docker build: the builder (oss-verify-base-builder:580445086990b438-6a6b4816865c), FROM ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain@sha256:6a6b4816865c7ec61801ae0fcab6d9c81a599ffcb20616576a9c668abd8b0a7b
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 2.71kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain@sha256:6a6b4816865c7ec61801ae0fcab6d9c81a599ffcb20616576a9c668abd8b0a7b
+#2 DONE 0.5s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [stage-0  1/10] FROM ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain@sha256:6a6b4816865c7ec61801ae0fcab6d9c81a599ffcb20616576a9c668abd8b0a7b
+#4 resolve ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain@sha256:6a6b4816865c7ec61801ae0fcab6d9c81a599ffcb20616576a9c668abd8b0a7b done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 13.19kB done
+#5 DONE 0.0s
+
+#6 [stage-0  5/10] COPY rust/ /usr/local/lib/oss-verify/rust/
+#6 CACHED
+
+#7 [stage-0  4/10] COPY driver/ /usr/local/lib/oss-verify/driver/
+#7 CACHED
+
+#8 [stage-0  2/10] RUN --mount=type=bind,source=distrust-roots.py,target=/tmp/distrust-roots.py python3 /tmp/distrust-roots.py
+#8 CACHED
+
+#9 [stage-0  3/10] COPY toolchain.sh link-fuzz-target record-compile recipes.sh release-target.sh /usr/local/lib/oss-verify/
+#9 CACHED
+
+#10 [stage-0  6/10] COPY python/ /usr/local/lib/oss-verify/python/
+#10 CACHED
+
+#11 [stage-0  7/10] COPY go/ /usr/local/lib/oss-verify/go/
+#11 CACHED
+
+#12 [stage-0  8/10] COPY compile fetch-commit git-credential-oss-verify lay-out-sources /usr/local/bin/
+#12 DONE 0.2s
+
+#13 [stage-0  9/10] RUN chmod 0755 /usr/local/bin/compile /usr/local/bin/fetch-commit /usr/local/bin/lay-out-sources                /usr/local/bin/git-credential-oss-verify                /usr/local/lib/oss-verify/link-fuzz-target /usr/local/lib/oss-verify/record-compile                /usr/local/lib/oss-verify/go/compile-go  && mkdir -p /src /work /out
+#13 DONE 1.1s
+
+#14 [stage-0 10/10] WORKDIR /src
+#14 DONE 0.1s
+
+#15 exporting to image
+#15 exporting layers 0.1s done
+#15 exporting manifest sha256:0df59ff2eeed287d9c02f6a42d6a07d7dd3e7372958b07fb8e92583df425c9d8 0.0s done
+#15 exporting config sha256:cff3b82456883caf983bbc91891673476701068f7f607f1467e094eaf73d616d 0.0s done
+#15 exporting attestation manifest sha256:9612aa07c810e8a05159738239eccc2bb0e7dc22a6cc2a66566c848f5ceacf4e 0.0s done
+#15 exporting manifest list sha256:c42257105034a52d9743cb16c37247f82d770e7d12d2234d6ab2692fde15d9de 0.0s done
+#15 naming to docker.io/library/oss-verify-base-builder:580445086990b438-6a6b4816865c done
+#15 unpacking to docker.io/library/oss-verify-base-builder:580445086990b438-6a6b4816865c 0.1s done
+#15 DONE 0.4s
+Dockerfile: the one beside project.yaml; the build context is projects/cjson-ossv267/
+
+[04:29:21] docker build: the project (oss-verify-check/cjson-ossv267:acc76239bee0-f2ed55f213bc); the network is available
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 506B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/oss-verify-base-builder:580445086990b438-6a6b4816865c
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [internal] load build context
+#4 transferring context: 30B done
+#4 DONE 0.0s
+
+#5 [stage-0 1/4] FROM docker.io/library/oss-verify-base-builder:580445086990b438-6a6b4816865c@sha256:c42257105034a52d9743cb16c37247f82d770e7d12d2234d6ab2692fde15d9de
+#5 resolve docker.io/library/oss-verify-base-builder:580445086990b438-6a6b4816865c@sha256:c42257105034a52d9743cb16c37247f82d770e7d12d2234d6ab2692fde15d9de 0.0s done
+#5 DONE 0.1s
+
+#6 [stage-0 2/4] RUN --mount=type=secret,id=oss-verify-git-token fetch-commit /src/cjson
+#6 2.031 04:29:23.341083 http.c:877              == Info: Couldn't find host github.com in the .netrc file; using defaults
+#6 2.031 04:29:23.353909 http.c:877              == Info: Host github.com:443 was resolved.
+#6 2.031 04:29:23.353942 http.c:877              == Info: IPv6: (none)
+#6 2.031 04:29:23.353946 http.c:877              == Info: IPv4: 140.82.113.3
+#6 2.031 04:29:23.353981 http.c:877              == Info:   Trying 140.82.113.3:443...
+#6 2.031 04:29:23.423875 http.c:877              == Info: ALPN: curl offers h2,http/1.1
+#6 2.031 04:29:23.429170 http.c:877              == Info: TLSv1.3 (OUT), TLS handshake, Client hello (1):
+#6 2.031 04:29:23.443571 http.c:877              == Info:  CAfile: /etc/ssl/cert.pem
+#6 2.031 04:29:23.443587 http.c:877              == Info:  CApath: /etc/ssl/certs
+#6 2.031 04:29:23.489573 http.c:877              == Info: TLSv1.3 (IN), TLS handshake, Server hello (2):
+#6 2.031 04:29:23.490598 http.c:877              == Info: TLSv1.3 (IN), TLS change cipher, Change cipher spec (1):
+#6 2.031 04:29:23.492193 http.c:877              == Info: TLSv1.3 (IN), TLS handshake, Encrypted Extensions (8):
+#6 2.031 04:29:23.492230 http.c:877              == Info: TLSv1.3 (IN), TLS handshake, Certificate (11):
+#6 2.031 04:29:23.494664 http.c:877              == Info: TLSv1.3 (IN), TLS handshake, CERT verify (15):
+#6 2.031 04:29:23.494810 http.c:877              == Info: TLSv1.3 (IN), TLS handshake, Finished (20):
+#6 2.031 04:29:23.494904 http.c:877              == Info: TLSv1.3 (OUT), TLS change cipher, Change cipher spec (1):
+#6 2.031 04:29:23.495891 http.c:877              == Info: TLSv1.3 (OUT), TLS handshake, Finished (20):
+#6 2.031 04:29:23.496045 http.c:877              == Info: SSL connection using TLSv1.3 / TLS_AES_128_GCM_SHA256 / x25519 / id-ecPublicKey
+#6 2.031 04:29:23.496055 http.c:877              == Info: ALPN: server accepted h2
+#6 2.031 04:29:23.496063 http.c:877              == Info: Server certificate:
+#6 2.031 04:29:23.496072 http.c:877              == Info:  subject: CN=github.com
+#6 2.031 04:29:23.496080 http.c:877              == Info:  start date: Oct 30 00:00:00 2026 GMT
+#6 2.031 04:29:23.496085 http.c:877              == Info:  expire date: Jan 27 23:59:59 2027 GMT
+#6 2.031 04:29:23.496106 http.c:877              == Info:  subjectAltName: host "github.com" matched cert's "github.com"
+#6 2.031 04:29:23.496119 http.c:877              == Info:  issuer: C=GB; O=Sectigo Limited; CN=Sectigo Public Server Authentication CA DV E36
+#6 2.031 04:29:23.496127 http.c:877              == Info:  SSL certificate verify ok.
+#6 2.031 04:29:23.496140 http.c:877              == Info:   Certificate level 0: Public key type EC/prime256v1 (256/128 Bits/secBits), signed using ecdsa-with-SHA256
+#6 2.031 04:29:23.496146 http.c:877              == Info:   Certificate level 1: Public key type EC/prime256v1 (256/128 Bits/secBits), signed using ecdsa-with-SHA384
+#6 2.031 04:29:23.496151 http.c:877              == Info:   Certificate level 2: Public key type EC/secp384r1 (384/192 Bits/secBits), signed using ecdsa-with-SHA384
+#6 2.031 04:29:23.496220 http.c:877              == Info: Connected to github.com (140.82.113.3) port 443
+#6 2.031 04:29:23.496225 http.c:877              == Info: using HTTP/2
+#6 2.031 04:29:23.496272 http.c:877              == Info: [HTTP/2] [1] OPENED stream for https://github.com/theorem-labs/cjson-ossv267/info/refs?service=git-upload-pack
+#6 2.031 04:29:23.496277 http.c:877              == Info: [HTTP/2] [1] [:method: GET]
+#6 2.031 04:29:23.496280 http.c:877              == Info: [HTTP/2] [1] [:scheme: https]
+#6 2.031 04:29:23.496283 http.c:877              == Info: [HTTP/2] [1] [:authority: github.com]
+#6 2.031 04:29:23.496287 http.c:877              == Info: [HTTP/2] [1] [:path: /theorem-labs/cjson-ossv267/info/refs?service=git-upload-pack]
+#6 2.031 04:29:23.496290 http.c:877              == Info: [HTTP/2] [1] [user-agent: git/2.49.1]
+#6 2.031 04:29:23.496294 http.c:877              == Info: [HTTP/2] [1] [accept: */*]
+#6 2.031 04:29:23.496297 http.c:877              == Info: [HTTP/2] [1] [accept-encoding: deflate, gzip, br, zstd]
+#6 2.031 04:29:23.496303 http.c:877              == Info: [HTTP/2] [1] [pragma: no-cache]
+#6 2.031 04:29:23.496307 http.c:877              == Info: [HTTP/2] [1] [git-protocol: version=2]
+#6 2.031 04:29:23.496367 http.c:824              => Send header, 0000000216 bytes (0x000000d8)
+#6 2.031 04:29:23.496378 http.c:836              => Send header: GET /theorem-labs/cjson-ossv267/info/refs?service=git-upload-pack HTTP/2
+#6 2.031 04:29:23.496382 http.c:836              => Send header: Host: github.com
+#6 2.031 04:29:23.496384 http.c:836              => Send header: User-Agent: git/2.49.1
+#6 2.031 04:29:23.496387 http.c:836              => Send header: Accept: */*
+#6 2.031 04:29:23.496390 http.c:836              => Send header: Accept-Encoding: deflate, gzip, br, zstd
+#6 2.031 04:29:23.496393 http.c:836              => Send header: Pragma: no-cache
+#6 2.031 04:29:23.496396 http.c:836              => Send header: Git-Protocol: version=2
+#6 2.031 04:29:23.496399 http.c:836              => Send header:
+#6 2.031 04:29:23.496427 http.c:877              == Info: Request completely sent off
+#6 2.031 04:29:23.556000 http.c:877              == Info: TLSv1.3 (IN), TLS handshake, Newsession Ticket (4):
+#6 2.031 04:29:23.556161 http.c:877              == Info: TLSv1.3 (IN), TLS handshake, Newsession Ticket (4):
+#6 2.031 04:29:23.563658 http.c:824              <= Recv header, 0000000013 bytes (0x0000000d)
+#6 2.031 04:29:23.563672 http.c:836              <= Recv header: HTTP/2 401
+#6 2.031 04:29:23.563689 http.c:824              <= Recv header, 0000000026 bytes (0x0000001a)
+#6 2.031 04:29:23.563698 http.c:836              <= Recv header: server: GitHub-Babel/3.0
+#6 2.031 04:29:23.563706 http.c:824              <= Recv header, 0000000054 bytes (0x00000036)
+#6 2.031 04:29:23.563711 http.c:836              <= Recv header: content-security-policy: default-src 'none'; sandbox
+#6 2.031 04:29:23.563721 http.c:824              <= Recv header, 0000000041 bytes (0x00000029)
+#6 2.031 04:29:23.563724 http.c:836              <= Recv header: content-type: text/plain; charset=UTF-8
+#6 2.031 04:29:23.563730 http.c:824              <= Recv header, 0000000045 bytes (0x0000002d)
+#6 2.031 04:29:23.563739 http.c:836              <= Recv header: strict-transport-security: max-age=31536000
+#6 2.031 04:29:23.563747 http.c:824              <= Recv header, 0000000040 bytes (0x00000028)
+#6 2.031 04:29:23.563751 http.c:836              <= Recv header: www-authenticate: Basic realm="GitHub"
+#6 2.031 04:29:23.563757 http.c:824              <= Recv header, 0000000020 bytes (0x00000014)
+#6 2.031 04:29:23.563760 http.c:836              <= Recv header: content-length: 21
+#6 2.031 04:29:23.563766 http.c:824              <= Recv header, 0000000037 bytes (0x00000025)
+#6 2.031 04:29:23.563770 http.c:836              <= Recv header: date: Thu, 12 Nov 2026 04:29:23 GMT
+#6 2.031 04:29:23.563779 http.c:824              <= Recv header, 0000000058 bytes (0x0000003a)
+#6 2.031 04:29:23.563782 http.c:836              <= Recv header: x-github-request-id: CB56:351571:CA31D8:112C8AC:6AF540A3
+#6 2.031 04:29:23.563787 http.c:824              <= Recv header, 0000000027 bytes (0x0000001b)
+#6 2.031 04:29:23.563789 http.c:836              <= Recv header: x-github-edge-region: iad
+#6 2.031 04:29:23.563794 http.c:824              <= Recv header, 0000000023 bytes (0x00000017)
+#6 2.031 04:29:23.563802 http.c:836              <= Recv header: x-frame-options: DENY
+#6 2.031 04:29:23.563811 http.c:824              <= Recv header, 0000000002 bytes (0x00000002)
+#6 2.031 04:29:23.563815 http.c:836              <= Recv header:
+#6 2.031 04:29:23.563870 http.c:877              == Info: Connection #0 to host github.com left intact
+#6 2.031 04:29:23.571684 http.c:877              == Info: Re-using existing https: connection with host github.com
+#6 2.031 04:29:23.571735 http.c:877              == Info: Server auth using Basic with user 'x-access-token'
+#6 2.031 04:29:23.571800 http.c:877              == Info: [HTTP/2] [3] OPENED stream for https://github.com/theorem-labs/cjson-ossv267/info/refs?service=git-upload-pack
+#6 2.031 04:29:23.571808 http.c:877              == Info: [HTTP/2] [3] [:method: GET]
+#6 2.031 04:29:23.571811 http.c:877              == Info: [HTTP/2] [3] [:scheme: https]
+#6 2.031 04:29:23.571813 http.c:877              == Info: [HTTP/2] [3] [:authority: github.com]
+#6 2.031 04:29:23.571818 http.c:877              == Info: [HTTP/2] [3] [:path: /theorem-labs/cjson-ossv267/info/refs?service=git-upload-pack]
+#6 2.031 04:29:23.571823 http.c:877              == Info: [HTTP/2] [3] [authorization: Basic <redacted>]
+#6 2.031 04:29:23.571827 http.c:877              == Info: [HTTP/2] [3] [user-agent: git/2.49.1]
+#6 2.031 04:29:23.571832 http.c:877              == Info: [HTTP/2] [3] [accept: */*]
+#6 2.031 04:29:23.571837 http.c:877              == Info: [HTTP/2] [3] [accept-encoding: deflate, gzip, br, zstd]
+#6 2.031 04:29:23.571850 http.c:877              == Info: [HTTP/2] [3] [pragma: no-cache]
+#6 2.031 04:29:23.571853 http.c:877              == Info: [HTTP/2] [3] [git-protocol: version=2]
+#6 2.031 04:29:23.572049 http.c:824              => Send header, 0000000779 bytes (0x0000030b)
+#6 2.031 04:29:23.572058 http.c:836              => Send header: GET /theorem-labs/cjson-ossv267/info/refs?service=git-upload-pack HTTP/2
+#6 2.031 04:29:23.572067 http.c:836              => Send header: Host: github.com
+#6 2.031 04:29:23.572069 http.c:836              => Send header: Authorization: Basic <redacted>
+#6 2.031 04:29:23.572071 http.c:836              => Send header: User-Agent: git/2.49.1
+#6 2.031 04:29:23.572077 http.c:836              => Send header: Accept: */*
+#6 2.031 04:29:23.572080 http.c:836              => Send header: Accept-Encoding: deflate, gzip, br, zstd
+#6 2.031 04:29:23.572083 http.c:836              => Send header: Pragma: no-cache
+#6 2.031 04:29:23.572088 http.c:836              => Send header: Git-Protocol: version=2
+#6 2.031 04:29:23.572091 http.c:836              => Send header:
+#6 2.031 04:29:23.572140 http.c:877              == Info: Request completely sent off
+#6 2.031 04:29:23.703103 http.c:824              <= Recv header, 0000000013 bytes (0x0000000d)
+#6 2.031 04:29:23.703127 http.c:836              <= Recv header: HTTP/2 200
+#6 2.031 04:29:23.703148 http.c:824              <= Recv header, 0000000026 bytes (0x0000001a)
+#6 2.031 04:29:23.703151 http.c:836              <= Recv header: server: GitHub-Babel/3.0
+#6 2.031 04:29:23.703158 http.c:824              <= Recv header, 0000000059 bytes (0x0000003b)
+#6 2.031 04:29:23.703164 http.c:836              <= Recv header: content-type: application/x-git-upload-pack-advertisement
+#6 2.031 04:29:23.703170 http.c:824              <= Recv header, 0000000054 bytes (0x00000036)
+#6 2.031 04:29:23.703173 http.c:836              <= Recv header: content-security-policy: default-src 'none'; sandbox
+#6 2.031 04:29:23.703177 http.c:824              <= Recv header, 0000000040 bytes (0x00000028)
+#6 2.031 04:29:23.703180 http.c:836              <= Recv header: expires: Fri, 01 Jan 1980 00:00:00 GMT
+#6 2.031 04:29:23.703184 http.c:824              <= Recv header, 0000000018 bytes (0x00000012)
+#6 2.031 04:29:23.703187 http.c:836              <= Recv header: pragma: no-cache
+#6 2.031 04:29:23.703192 http.c:824              <= Recv header, 0000000053 bytes (0x00000035)
+#6 2.031 04:29:23.703195 http.c:836              <= Recv header: cache-control: no-cache, max-age=0, must-revalidate
+#6 2.031 04:29:23.703209 http.c:824              <= Recv header, 0000000023 bytes (0x00000017)
+#6 2.031 04:29:23.703215 http.c:836              <= Recv header: vary: Accept-Encoding
+#6 2.031 04:29:23.703221 http.c:824              <= Recv header, 0000000045 bytes (0x0000002d)
+#6 2.031 04:29:23.703225 http.c:836              <= Recv header: strict-transport-security: max-age=31536000
+#6 2.031 04:29:23.703233 http.c:824              <= Recv header, 0000000037 bytes (0x00000025)
+#6 2.031 04:29:23.703237 http.c:836              <= Recv header: date: Thu, 12 Nov 2026 04:29:23 GMT
+#6 2.031 04:29:23.703246 http.c:824              <= Recv header, 0000000058 bytes (0x0000003a)
+#6 2.031 04:29:23.703250 http.c:836              <= Recv header: x-github-request-id: CB56:351571:CA3204:112C8E8:6AF540A3
+#6 2.031 04:29:23.703260 http.c:824              <= Recv header, 0000000027 bytes (0x0000001b)
+#6 2.031 04:29:23.703264 http.c:836              <= Recv header: x-github-edge-region: iad
+#6 2.031 04:29:23.703271 http.c:824              <= Recv header, 0000000023 bytes (0x00000017)
+#6 2.031 04:29:23.703275 http.c:836              <= Recv header: x-frame-options: DENY
+#6 2.031 04:29:23.703285 http.c:824              <= Recv header, 0000000002 bytes (0x00000002)
+#6 2.031 04:29:23.703288 http.c:836              <= Recv header:
+#6 2.031 04:29:23.703332 http.c:877              == Info: Connection #0 to host github.com left intact
+#6 2.031 04:29:23.707852 http.c:877              == Info: Re-using existing https: connection with host github.com
+#6 2.031 04:29:23.707912 http.c:877              == Info: Server auth using Basic with user 'x-access-token'
+#6 2.031 04:29:23.707972 http.c:877              == Info: [HTTP/2] [5] OPENED stream for https://github.com/theorem-labs/cjson-ossv267/git-upload-pack
+#6 2.031 04:29:23.707978 http.c:877              == Info: [HTTP/2] [5] [:method: POST]
+#6 2.031 04:29:23.707981 http.c:877              == Info: [HTTP/2] [5] [:scheme: https]
+#6 2.031 04:29:23.707983 http.c:877              == Info: [HTTP/2] [5] [:authority: github.com]
+#6 2.031 04:29:23.707986 http.c:877              == Info: [HTTP/2] [5] [:path: /theorem-labs/cjson-ossv267/git-upload-pack]
+#6 2.031 04:29:23.707990 http.c:877              == Info: [HTTP/2] [5] [authorization: Basic <redacted>]
+#6 2.031 04:29:23.707993 http.c:877              == Info: [HTTP/2] [5] [user-agent: git/2.49.1]
+#6 2.031 04:29:23.708002 http.c:877              == Info: [HTTP/2] [5] [accept-encoding: deflate, gzip, br, zstd]
+#6 2.031 04:29:23.708005 http.c:877              == Info: [HTTP/2] [5] [content-type: application/x-git-upload-pack-request]
+#6 2.031 04:29:23.708008 http.c:877              == Info: [HTTP/2] [5] [accept: application/x-git-upload-pack-result]
+#6 2.031 04:29:23.708015 http.c:877              == Info: [HTTP/2] [5] [git-protocol: version=2]
+#6 2.031 04:29:23.708019 http.c:877              == Info: [HTTP/2] [5] [content-length: 108]
+#6 2.031 04:29:23.708155 http.c:824              => Send header, 0000000851 bytes (0x00000353)
+#6 2.031 04:29:23.708163 http.c:836              => Send header: POST /theorem-labs/cjson-ossv267/git-upload-pack HTTP/2
+#6 2.031 04:29:23.708166 http.c:836              => Send header: Host: github.com
+#6 2.031 04:29:23.708173 http.c:836              => Send header: Authorization: Basic <redacted>
+#6 2.031 04:29:23.708178 http.c:836              => Send header: User-Agent: git/2.49.1
+#6 2.031 04:29:23.708180 http.c:836              => Send header: Accept-Encoding: deflate, gzip, br, zstd
+#6 2.031 04:29:23.708183 http.c:836              => Send header: Content-Type: application/x-git-upload-pack-request
+#6 2.031 04:29:23.708185 http.c:836              => Send header: Accept: application/x-git-upload-pack-result
+#6 2.031 04:29:23.708190 http.c:836              => Send header: Git-Protocol: version=2
+#6 2.031 04:29:23.708195 http.c:836              => Send header: Content-Length: 108
+#6 2.031 04:29:23.708197 http.c:836              => Send header:
+#6 2.031 04:29:23.708202 http.c:877              == Info: upload completely sent off: 108 bytes
+#6 2.031 04:29:23.834828 http.c:824              <= Recv header, 0000000013 bytes (0x0000000d)
+#6 2.031 04:29:23.834850 http.c:836              <= Recv header: HTTP/2 200
+#6 2.031 04:29:23.834899 http.c:824              <= Recv header, 0000000026 bytes (0x0000001a)
+#6 2.031 04:29:23.834904 http.c:836              <= Recv header: server: GitHub-Babel/3.0
+#6 2.031 04:29:23.834912 http.c:824              <= Recv header, 0000000052 bytes (0x00000034)
+#6 2.031 04:29:23.834916 http.c:836              <= Recv header: content-type: application/x-git-upload-pack-result
+#6 2.031 04:29:23.834921 http.c:824              <= Recv header, 0000000054 bytes (0x00000036)
+#6 2.031 04:29:23.834927 http.c:836              <= Recv header: content-security-policy: default-src 'none'; sandbox
+#6 2.031 04:29:23.834942 http.c:824              <= Recv header, 0000000040 bytes (0x00000028)
+#6 2.031 04:29:23.834950 http.c:836              <= Recv header: expires: Fri, 01 Jan 1980 00:00:00 GMT
+#6 2.031 04:29:23.834956 http.c:824              <= Recv header, 0000000018 bytes (0x00000012)
+#6 2.031 04:29:23.834960 http.c:836              <= Recv header: pragma: no-cache
+#6 2.031 04:29:23.834966 http.c:824              <= Recv header, 0000000053 bytes (0x00000035)
+#6 2.031 04:29:23.834969 http.c:836              <= Recv header: cache-control: no-cache, max-age=0, must-revalidate
+#6 2.031 04:29:23.834977 http.c:824              <= Recv header, 0000000023 bytes (0x00000017)
+#6 2.031 04:29:23.834980 http.c:836              <= Recv header: vary: Accept-Encoding
+#6 2.031 04:29:23.834986 http.c:824              <= Recv header, 0000000045 bytes (0x0000002d)
+#6 2.031 04:29:23.834990 http.c:836              <= Recv header: strict-transport-security: max-age=31536000
+#6 2.031 04:29:23.834994 http.c:824              <= Recv header, 0000000037 bytes (0x00000025)
+#6 2.031 04:29:23.834999 http.c:836              <= Recv header: date: Thu, 12 Nov 2026 04:29:23 GMT
+#6 2.031 04:29:23.835003 http.c:824              <= Recv header, 0000000058 bytes (0x0000003a)
+#6 2.031 04:29:23.835007 http.c:836              <= Recv header: x-github-request-id: CB56:351571:CA325A:112C95C:6AF540A3
+#6 2.031 04:29:23.835011 http.c:824              <= Recv header, 0000000027 bytes (0x0000001b)
+#6 2.031 04:29:23.835015 http.c:836              <= Recv header: x-github-edge-region: iad
+#6 2.031 04:29:23.835018 http.c:824              <= Recv header, 0000000023 bytes (0x00000017)
+#6 2.031 04:29:23.835021 http.c:836              <= Recv header: x-frame-options: DENY
+#6 2.031 04:29:23.835031 http.c:824              <= Recv header, 0000000002 bytes (0x00000002)
+#6 2.031 04:29:23.835034 http.c:836              <= Recv header:
+#6 2.031 04:29:23.835089 http.c:877              == Info: Connection #0 to host github.com left intact
+#6 2.031 04:29:23.836304 http.c:877              == Info: Re-using existing https: connection with host github.com
+#6 2.031 04:29:23.836339 http.c:877              == Info: Server auth using Basic with user 'x-access-token'
+#6 2.031 04:29:23.836402 http.c:877              == Info: [HTTP/2] [7] OPENED stream for https://github.com/theorem-labs/cjson-ossv267/git-upload-pack
+#6 2.031 04:29:23.836409 http.c:877              == Info: [HTTP/2] [7] [:method: POST]
+#6 2.031 04:29:23.836413 http.c:877              == Info: [HTTP/2] [7] [:scheme: https]
+#6 2.031 04:29:23.836416 http.c:877              == Info: [HTTP/2] [7] [:authority: github.com]
+#6 2.031 04:29:23.836420 http.c:877              == Info: [HTTP/2] [7] [:path: /theorem-labs/cjson-ossv267/git-upload-pack]
+#6 2.031 04:29:23.836425 http.c:877              == Info: [HTTP/2] [7] [authorization: Basic <redacted>]
+#6 2.031 04:29:23.836429 http.c:877              == Info: [HTTP/2] [7] [user-agent: git/2.49.1]
+#6 2.031 04:29:23.836432 http.c:877              == Info: [HTTP/2] [7] [accept-encoding: deflate, gzip, br, zstd]
+#6 2.031 04:29:23.836435 http.c:877              == Info: [HTTP/2] [7] [content-type: application/x-git-upload-pack-request]
+#6 2.031 04:29:23.836440 http.c:877              == Info: [HTTP/2] [7] [accept: application/x-git-upload-pack-result]
+#6 2.031 04:29:23.836447 http.c:877              == Info: [HTTP/2] [7] [git-protocol: version=2]
+#6 2.031 04:29:23.836458 http.c:877              == Info: [HTTP/2] [7] [content-length: 185]
+#6 2.031 04:29:23.836599 http.c:824              => Send header, 0000000851 bytes (0x00000353)
+#6 2.031 04:29:23.836609 http.c:836              => Send header: POST /theorem-labs/cjson-ossv267/git-upload-pack HTTP/2
+#6 2.031 04:29:23.836612 http.c:836              => Send header: Host: github.com
+#6 2.031 04:29:23.836624 http.c:836              => Send header: Authorization: Basic <redacted>
+#6 2.031 04:29:23.836629 http.c:836              => Send header: User-Agent: git/2.49.1
+#6 2.031 04:29:23.836632 http.c:836              => Send header: Accept-Encoding: deflate, gzip, br, zstd
+#6 2.031 04:29:23.836634 http.c:836              => Send header: Content-Type: application/x-git-upload-pack-request
+#6 2.031 04:29:23.836638 http.c:836              => Send header: Accept: application/x-git-upload-pack-result
+#6 2.031 04:29:23.836641 http.c:836              => Send header: Git-Protocol: version=2
+#6 2.031 04:29:23.836643 http.c:836              => Send header: Content-Length: 185
+#6 2.031 04:29:23.836646 http.c:836              => Send header:
+#6 2.031 04:29:23.836652 http.c:877              == Info: upload completely sent off: 185 bytes
+#6 2.031 04:29:23.978415 http.c:824              <= Recv header, 0000000013 bytes (0x0000000d)
+#6 2.031 04:29:23.978436 http.c:836              <= Recv header: HTTP/2 200
+#6 2.031 04:29:23.978456 http.c:824              <= Recv header, 0000000026 bytes (0x0000001a)
+#6 2.031 04:29:23.978461 http.c:836              <= Recv header: server: GitHub-Babel/3.0
+#6 2.031 04:29:23.978484 http.c:824              <= Recv header, 0000000052 bytes (0x00000034)
+#6 2.031 04:29:23.978488 http.c:836              <= Recv header: content-type: application/x-git-upload-pack-result
+#6 2.031 04:29:23.978494 http.c:824              <= Recv header, 0000000054 bytes (0x00000036)
+#6 2.031 04:29:23.978497 http.c:836              <= Recv header: content-security-policy: default-src 'none'; sandbox
+#6 2.031 04:29:23.978502 http.c:824              <= Recv header, 0000000040 bytes (0x00000028)
+#6 2.031 04:29:23.978506 http.c:836              <= Recv header: expires: Fri, 01 Jan 1980 00:00:00 GMT
+#6 2.031 04:29:23.978510 http.c:824              <= Recv header, 0000000018 bytes (0x00000012)
+#6 2.031 04:29:23.978513 http.c:836              <= Recv header: pragma: no-cache
+#6 2.031 04:29:23.978516 http.c:824              <= Recv header, 0000000053 bytes (0x00000035)
+#6 2.031 04:29:23.978519 http.c:836              <= Recv header: cache-control: no-cache, max-age=0, must-revalidate
+#6 2.031 04:29:23.978522 http.c:824              <= Recv header, 0000000023 bytes (0x00000017)
+#6 2.031 04:29:23.978524 http.c:836              <= Recv header: vary: Accept-Encoding
+#6 2.031 04:29:23.978528 http.c:824              <= Recv header, 0000000045 bytes (0x0000002d)
+#6 2.031 04:29:23.978531 http.c:836              <= Recv header: strict-transport-security: max-age=31536000
+#6 2.031 04:29:23.978535 http.c:824              <= Recv header, 0000000037 bytes (0x00000025)
+#6 2.031 04:29:23.978538 http.c:836              <= Recv header: date: Thu, 12 Nov 2026 04:29:23 GMT
+#6 2.031 04:29:23.978546 http.c:824              <= Recv header, 0000000058 bytes (0x0000003a)
+#6 2.031 04:29:23.978549 http.c:836              <= Recv header: x-github-request-id: CB56:351571:CA32A0:112C9C4:6AF540A3
+#6 2.031 04:29:23.978552 http.c:824              <= Recv header, 0000000027 bytes (0x0000001b)
+#6 2.031 04:29:23.978554 http.c:836              <= Recv header: x-github-edge-region: iad
+#6 2.031 04:29:23.978559 http.c:824              <= Recv header, 0000000023 bytes (0x00000017)
+#6 2.031 04:29:23.978562 http.c:836              <= Recv header: x-frame-options: DENY
+#6 2.031 04:29:23.978569 http.c:824              <= Recv header, 0000000002 bytes (0x00000002)
+#6 2.031 04:29:23.978572 http.c:836              <= Recv header:
+#6 2.031 04:29:24.219214 http.c:877              == Info: Connection #0 to host github.com left intact
+#6 2.053 fetch-commit: https://github.com/theorem-labs/cjson-ossv267 at acc76239bee01d8e9c858ae2cab296704e52d916 in /src/cjson
+#6 DONE 2.1s
+
+#7 [stage-0 3/4] COPY build.sh /src/
+#7 DONE 0.1s
+
+#8 [stage-0 4/4] WORKDIR /src/cjson
+#8 DONE 0.1s
+
+#9 exporting to image
+#9 exporting layers
+#9 exporting layers 0.2s done
+#9 exporting manifest sha256:fb4db62cbb518af63213d1ef62c8fe2d8bf4cad86d9796879823a6e63c4399be done
+#9 exporting config sha256:9483912ce4bd00bef7218cc44b31ac35154d0c9b85b20e02430a7074d56149a3 done
+#9 exporting attestation manifest sha256:b04fba443239f4093b1354f4409d65d95064702e774825953fa8685344ad6292 0.0s done
+#9 exporting manifest list sha256:8d98f2df92747282d998f7f58f44af960c0b089d8a750afbd77ce20173d15014 0.0s done
+#9 naming to docker.io/oss-verify-check/cjson-ossv267:acc76239bee0-f2ed55f213bc done
+#9 unpacking to docker.io/oss-verify-check/cjson-ossv267:acc76239bee0-f2ed55f213bc
+#9 unpacking to docker.io/oss-verify-check/cjson-ossv267:acc76239bee0-f2ed55f213bc 0.2s done
+#9 DONE 0.4s
+
+[04:29:25] compile: the plain build (SANITIZER=none), with no network
+compile: the plain build (SANITIZER=none)
+clang: warning: argument unused during compilation: '-fno-plt' [-Wunused-command-line-argument]
+clang: warning: argument unused during compilation: '-fno-plt' [-Wunused-command-line-argument]
+clang: warning: argument unused during compilation: '-fno-plt' [-Wunused-command-line-argument]
+clang: warning: argument unused during compilation: '-fno-plt' [-Wunused-command-line-argument]
+clang: warning: argument unused during compilation: '-fno-plt' [-Wunused-command-line-argument]
+clang: warning: argument unused during compilation: '-fno-plt' [-Wunused-command-line-argument]
+clang: warning: argument unused during compilation: '-fno-plt' [-Wunused-command-line-argument]
+compile: CC=/tmp/ov/bin/riscv64-linux-musl-clang
+compile: CFLAGS=-march=rv64g -mabi=lp64d -Os -g -ffunction-sections -fdata-sections -fno-stack-protector -Wdate-time -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-reallocarray -fno-builtin-free -fno-builtin-aligned_alloc -fno-builtin-posix_memalign -fno-builtin-memalign -fno-builtin-valloc -fno-builtin-strdup -fno-builtin-strndup -Wno-unused-command-line-argument -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+compile: CXXFLAGS=-march=rv64g -mabi=lp64d -Os -g -ffunction-sections -fdata-sections -fno-stack-protector -Wdate-time -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-reallocarray -fno-builtin-free -fno-builtin-aligned_alloc -fno-builtin-posix_memalign -fno-builtin-memalign -fno-builtin-valloc -fno-builtin-strdup -fno-builtin-strndup -Wno-unused-command-line-argument -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION -stdlib=libc++
++ build=/src/cjson-cjson_read_fuzzer
++ mkdir -p /src/cjson-cjson_read_fuzzer/src /src/cjson-cjson_read_fuzzer/cmk
++ cp -a /src/cjson/. /src/cjson-cjson_read_fuzzer/src/
++ cd /src/cjson-cjson_read_fuzzer/cmk
++ cmake /src/cjson-cjson_read_fuzzer/src -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DENABLE_CJSON_TEST=OFF -DENABLE_CUSTOM_COMPILER_FLAGS=OFF
+CMake Deprecation Warning at CMakeLists.txt:2 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+
+
+-- The C compiler identification is Clang 20.1.8
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /tmp/ov/bin/riscv64-linux-musl-clang - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Performing Test FLAG_SUPPORTED_fvisibilityhidden
+-- Performing Test FLAG_SUPPORTED_fvisibilityhidden - Success
+-- Configuring done (1.0s)
+-- Generating done (0.0s)
+-- Build files have been written to: /src/cjson-cjson_read_fuzzer/cmk
+++ nproc
++ make -j288
+[ 50%] Building C object CMakeFiles/cjson.dir/cJSON.c.o
+[100%] Linking C static library libcjson.a
+[100%] Built target cjson
++ /tmp/ov/bin/riscv64-linux-musl-clang -march=rv64g -mabi=lp64d -Os -g -ffunction-sections -fdata-sections -fno-stack-protector -Wdate-time -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-reallocarray -fno-builtin-free -fno-builtin-aligned_alloc -fno-builtin-posix_memalign -fno-builtin-memalign -fno-builtin-valloc -fno-builtin-strdup -fno-builtin-strndup -Wno-unused-command-line-argument -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION -c /src/cjson-cjson_read_fuzzer/src/fuzzing/cjson_read_fuzzer.c -o /work/cjson_read_fuzzer.o
++ /tmp/ov/bin/riscv64-linux-musl-clang -march=rv64g -mabi=lp64d -Os -g -ffunction-sections -fdata-sections -fno-stack-protector -Wdate-time -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-reallocarray -fno-builtin-free -fno-builtin-aligned_alloc -fno-builtin-posix_memalign -fno-builtin-memalign -fno-builtin-valloc -fno-builtin-strdup -fno-builtin-strndup -Wno-unused-command-line-argument -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION /work/cjson_read_fuzzer.o -o /out/cjson_read_fuzzer /tmp/ov/libFuzzingEngine.a /src/cjson-cjson_read_fuzzer/cmk/libcjson.a
+compile: fuzz target cjson_read_fuzzer
+compile: 1 fuzz target(s) in /out, the plain build
+
+[04:29:30] find the fuzz targets
+plain: cjson_read_fuzzer
+
+[04:29:31] built
+  out/cjson_read_fuzzer/cjson_read_fuzzer.plain                      72,792 bytes      62,440 .text  static   sha256 b40ed189a37beb50da46f04a457ec144b05319a845fa3b0639d7a117ffd1696d
+manifest: /mnt/nvme/sami/clones/ossv538-scratch/work/ev3-c/manifest.yaml

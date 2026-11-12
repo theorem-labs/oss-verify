@@ -1,0 +1,27 @@
+{
+  "runs": [
+    {
+      "leg": "base",
+      "cwd": "/mnt/nvme/sami/clones/ossv538-base",
+      "command": "OSS_VERIFY_GIT_TOKEN_COMMAND=/nonexistent/review2-token-command PYTHONDONTWRITEBYTECODE=1 /mnt/nvme/sami/clones/ossv538-scratch/venv/bin/python tools/check --no-shell --build plain --dir /mnt/nvme/sami/clones/ossv538-scratch/review3/public-base projects/cjson",
+      "exit": 0,
+      "mint_lines": 0,
+      "secret_lines": 0
+    },
+    {
+      "leg": "head",
+      "cwd": "/mnt/nvme/sami/clones/ossv538",
+      "command": "OSS_VERIFY_GIT_TOKEN_COMMAND=/nonexistent/review2-token-command PYTHONDONTWRITEBYTECODE=1 /mnt/nvme/sami/clones/ossv538-scratch/venv/bin/python tools/check --no-shell --build plain --dir /mnt/nvme/sami/clones/ossv538-scratch/review3/public-head projects/cjson",
+      "exit": 0,
+      "mint_lines": 0,
+      "secret_lines": 0
+    }
+  ],
+  "base_files": {
+    "cjson_read_fuzzer/cjson_read_fuzzer.plain": "b40ed189a37beb50da46f04a457ec144b05319a845fa3b0639d7a117ffd1696d"
+  },
+  "head_files": {
+    "cjson_read_fuzzer/cjson_read_fuzzer.plain": "b40ed189a37beb50da46f04a457ec144b05319a845fa3b0639d7a117ffd1696d"
+  },
+  "byte_identical": true
+}

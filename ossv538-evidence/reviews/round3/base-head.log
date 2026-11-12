@@ -1,0 +1,13 @@
+
+==================================== ERRORS ====================================
+______________ ERROR collecting tools/tests/test_private_fetch.py ______________
+tools/tests/test_private_fetch.py:462: in <module>
+    class TheMountAndTheList(unittest.TestCase):
+tools/tests/test_private_fetch.py:469: in TheMountAndTheList
+    MOUNTED = f"FROM x\nRUN {check_build.SECRET_MOUNT} fetch-commit $SRC/x\n"
+                             ^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: module 'check_build' has no attribute 'SECRET_MOUNT'
+=========================== short test summary info ============================
+ERROR tools/tests/test_private_fetch.py - AttributeError: module 'check_build' has no attribute 'SECRET_MOUNT'
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error in 0.33s

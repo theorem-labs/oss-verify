@@ -1,0 +1,8 @@
+#!/bin/sh
+# OSSV-538 evidence only: mint the real read-only token with infra/github-read-token, and also write it to
+# $RECORD_TOKEN_TO so the checks afterwards know the exact bytes to look for. A build never uses this.
+set -eu
+token=$(/mnt/nvme/sami/clones/ossv538/infra/github-read-token "$1" "$2")
+printf '%s' "$token" > "$RECORD_TOKEN_TO"
+chmod 600 "$RECORD_TOKEN_TO"
+printf '%s\n' "$token"

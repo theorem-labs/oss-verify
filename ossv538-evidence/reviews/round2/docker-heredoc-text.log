@@ -1,0 +1,45 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile.heredoc-text
+#1 transferring dockerfile: 264B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/busybox:stable
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [internal] preparing inline document
+#4 DONE 0.0s
+
+#5 [1/4] FROM docker.io/library/busybox:stable@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+#5 resolve docker.io/library/busybox:stable@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 0.0s done
+#5 DONE 0.0s
+
+#6 [internal] load build context
+#6 transferring context: 33B done
+#6 DONE 0.0s
+
+#7 [2/4] COPY fetch-commit /usr/local/bin/fetch-commit
+#7 CACHED
+
+#8 [3/4] COPY <<EOF /example
+#8 CACHED
+
+#9 [4/4] RUN fetch-commit /src/x
+#9 1.218 fetch-has-no-secret
+#9 ERROR: process "/bin/sh -c fetch-commit /src/x" did not complete successfully: exit code: 19
+------
+ > [4/4] RUN fetch-commit /src/x:
+1.218 fetch-has-no-secret
+------
+Dockerfile.heredoc-text:7
+--------------------
+   5 |     RUN --mount=type=secret,id=oss-verify-git-token fetch-commit /src/x
+   6 |     EOF
+   7 | >>> RUN fetch-commit /src/x
+   8 |     
+--------------------
+ERROR: failed to build: failed to solve: process "/bin/sh -c fetch-commit /src/x" did not complete successfully: exit code: 19

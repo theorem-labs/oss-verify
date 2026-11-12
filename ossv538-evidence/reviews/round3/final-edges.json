@@ -1,0 +1,91 @@
+[
+  {
+    "probe": "extra-trace",
+    "route": "GIT_TRACE_PACKFILE",
+    "container_exit": 0,
+    "host_exit": 0,
+    "container_bytes": 204,
+    "host_bytes": 204,
+    "container_token": false,
+    "host_token": false
+  },
+  {
+    "probe": "extra-trace",
+    "route": "GIT_TRACE_BARE",
+    "container_exit": 0,
+    "host_exit": 0,
+    "container_bytes": 0,
+    "host_bytes": 0,
+    "container_token": false,
+    "host_token": false
+  },
+  {
+    "probe": "extra-trace",
+    "route": "GIT_TRACE_WORKING_TREE_ENCODING",
+    "container_exit": 0,
+    "host_exit": 0,
+    "container_bytes": 0,
+    "host_bytes": 0,
+    "container_token": false,
+    "host_token": false
+  },
+  {
+    "probe": "curl-verbose-presence",
+    "state": "forced-zero",
+    "exit": 0,
+    "stderr_bytes": 5333,
+    "curl_send_headers": true,
+    "raw_token": false,
+    "basic_token": false
+  },
+  {
+    "probe": "curl-verbose-presence",
+    "state": "unset-control",
+    "exit": 0,
+    "stderr_bytes": 0,
+    "curl_send_headers": false,
+    "raw_token": false,
+    "basic_token": false
+  },
+  {
+    "probe": "marker-edge",
+    "mode": "503-not-found",
+    "container_exit": 1,
+    "container_auth": true,
+    "container_transport": false,
+    "host_exit": 1,
+    "host_auth": true,
+    "host_transport": false,
+    "container_git_error": "    fatal: unable to access 'http://127.0.0.1:37589/secret.git/': The requested URL returned error: 503",
+    "host_git_error": "fatal: unable to access 'http://127.0.0.1:37589/secret.git/': The requested URL returned error: 503"
+  },
+  {
+    "probe": "marker-edge",
+    "mode": "503-access-denied",
+    "container_exit": 1,
+    "container_auth": true,
+    "container_transport": false,
+    "host_exit": 1,
+    "host_auth": false,
+    "host_transport": true,
+    "container_git_error": "    fatal: unable to access 'http://127.0.0.1:37589/secret.git/': The requested URL returned error: 503",
+    "host_git_error": "fatal: unable to access 'http://127.0.0.1:37589/secret.git/': The requested URL returned error: 503"
+  },
+  {
+    "probe": "marker-edge",
+    "mode": "200-refusal",
+    "container_exit": 1,
+    "container_auth": true,
+    "container_transport": false,
+    "host_exit": 1,
+    "host_auth": false,
+    "host_transport": true,
+    "container_git_error": "    fatal: remote error: access denied",
+    "host_git_error": "fatal: remote error: access denied"
+  },
+  {
+    "probe": "output-command-echo",
+    "raw_token": false,
+    "redaction_marker": true
+  }
+]

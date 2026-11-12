@@ -1,0 +1,186 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 716B done
+#1 WARN: InvalidDefaultArgInFrom: Default value for ARG ${BASE} results in empty or invalid base image name (line 2)
+#1 WARN: SecretsUsedInArgOrEnv: Do not use ARG or ENV instructions for sensitive data (ENV "GIT_CONFIG_KEY_0") (line 7)
+#1 WARN: SecretsUsedInArgOrEnv: Do not use ARG or ENV instructions for sensitive data (ENV "GIT_CONFIG_KEY_1") (line 7)
+#1 WARN: SecretsUsedInArgOrEnv: Do not use ARG or ENV instructions for sensitive data (ENV "OSS_VERIFY_TOKEN_REPO") (line 7)
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/oss-verify-base-builder:580445086990b438-6a6b4816865c
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [stage-0 1/3] FROM docker.io/library/oss-verify-base-builder:580445086990b438-6a6b4816865c@sha256:d8fdd048b6f6d1fb47c068815db4232cfd081e77a5211aae2d9ab3c0223b8c16
+#4 resolve docker.io/library/oss-verify-base-builder:580445086990b438-6a6b4816865c@sha256:d8fdd048b6f6d1fb47c068815db4232cfd081e77a5211aae2d9ab3c0223b8c16 0.0s done
+#4 CACHED
+
+#5 [stage-0 2/3] RUN mkdir /review-traces && printf '[trace2]\n eventTarget=/review-traces/event\n normalTarget=/review-traces/normal\n perfTarget=/review-traces/perf\n envVars=OSS_VERIFY_GIT_TOKEN,OSS_VERIFY_TOKEN_FILE,OSS_VERIFY_TOKEN_REPO\n' > /review-gitconfig
+#5 DONE 0.9s
+
+#6 [stage-0 3/3] RUN --mount=type=secret,id=oss-verify-git-token --network=host fetch-commit /src/review-secret
+#6 0.629 04:46:45.577990 http.c:877              == Info: Couldn't find host 127.0.0.1 in the .netrc file; using defaults
+#6 0.629 04:46:45.578061 http.c:877              == Info:   Trying 127.0.0.1:34879...
+#6 0.629 04:46:45.578175 http.c:877              == Info: Connected to 127.0.0.1 (127.0.0.1) port 34879
+#6 0.629 04:46:45.578180 http.c:877              == Info: using HTTP/1.x
+#6 0.629 04:46:45.578218 http.c:824              => Send header, 0000000207 bytes (0x000000cf)
+#6 0.629 04:46:45.578226 http.c:836              => Send header: GET /secret.git/info/refs?service=git-upload-pack HTTP/1.1
+#6 0.629 04:46:45.578229 http.c:836              => Send header: Host: 127.0.0.1:34879
+#6 0.629 04:46:45.578231 http.c:836              => Send header: User-Agent: git/2.49.1
+#6 0.629 04:46:45.578233 http.c:836              => Send header: Accept: */*
+#6 0.629 04:46:45.578235 http.c:836              => Send header: Accept-Encoding: deflate, gzip, br, zstd
+#6 0.629 04:46:45.578238 http.c:836              => Send header: Pragma: no-cache
+#6 0.629 04:46:45.578241 http.c:836              => Send header: Git-Protocol: version=2
+#6 0.629 04:46:45.578247 http.c:836              => Send header:
+#6 0.629 04:46:45.578259 http.c:877              == Info: Request completely sent off
+#6 0.629 04:46:45.579025 http.c:877              == Info: HTTP 1.0, assume close after body
+#6 0.629 04:46:45.579040 http.c:824              <= Recv header, 0000000027 bytes (0x0000001b)
+#6 0.629 04:46:45.579044 http.c:836              <= Recv header: HTTP/1.0 401 Unauthorized
+#6 0.629 04:46:45.579049 http.c:824              <= Recv header, 0000000036 bytes (0x00000024)
+#6 0.629 04:46:45.579053 http.c:836              <= Recv header: Server: BaseHTTP/0.6 Python/3.12.3
+#6 0.629 04:46:45.579057 http.c:824              <= Recv header, 0000000037 bytes (0x00000025)
+#6 0.629 04:46:45.579061 http.c:836              <= Recv header: Date: Thu, 12 Nov 2026 04:46:45 GMT
+#6 0.629 04:46:45.579065 http.c:824              <= Recv header, 0000000037 bytes (0x00000025)
+#6 0.629 04:46:45.579067 http.c:836              <= Recv header: WWW-Authenticate: Basic realm="git"
+#6 0.629 04:46:45.579075 http.c:824              <= Recv header, 0000000019 bytes (0x00000013)
+#6 0.629 04:46:45.579078 http.c:836              <= Recv header: Content-Length: 0
+#6 0.629 04:46:45.579085 http.c:824              <= Recv header, 0000000002 bytes (0x00000002)
+#6 0.629 04:46:45.579087 http.c:836              <= Recv header:
+#6 0.629 04:46:45.579100 http.c:877              == Info: shutting down connection #0
+#6 0.629 04:46:45.585287 http.c:877              == Info: Hostname 127.0.0.1 was found in DNS cache
+#6 0.629 04:46:45.585315 http.c:877              == Info:   Trying 127.0.0.1:34879...
+#6 0.629 04:46:45.585384 http.c:877              == Info: Connected to 127.0.0.1 (127.0.0.1) port 34879
+#6 0.629 04:46:45.585388 http.c:877              == Info: using HTTP/1.x
+#6 0.629 04:46:45.585398 http.c:877              == Info: Server auth using Basic with user 'x-access-token'
+#6 0.629 04:46:45.585429 http.c:824              => Send header, 0000000310 bytes (0x00000136)
+#6 0.629 04:46:45.585437 http.c:836              => Send header: GET /secret.git/info/refs?service=git-upload-pack HTTP/1.1
+#6 0.629 04:46:45.585440 http.c:836              => Send header: Host: 127.0.0.1:34879
+#6 0.629 04:46:45.585445 http.c:836              => Send header: Authorization: Basic <redacted>
+#6 0.629 04:46:45.585447 http.c:836              => Send header: User-Agent: git/2.49.1
+#6 0.629 04:46:45.585449 http.c:836              => Send header: Accept: */*
+#6 0.629 04:46:45.585454 http.c:836              => Send header: Accept-Encoding: deflate, gzip, br, zstd
+#6 0.629 04:46:45.585456 http.c:836              => Send header: Pragma: no-cache
+#6 0.629 04:46:45.585458 http.c:836              => Send header: Git-Protocol: version=2
+#6 0.629 04:46:45.585459 http.c:836              => Send header:
+#6 0.629 04:46:45.585475 http.c:877              == Info: Request completely sent off
+#6 0.629 04:46:45.598228 http.c:877              == Info: HTTP 1.0, assume close after body
+#6 0.629 04:46:45.598243 http.c:824              <= Recv header, 0000000017 bytes (0x00000011)
+#6 0.629 04:46:45.598247 http.c:836              <= Recv header: HTTP/1.0 200 OK
+#6 0.629 04:46:45.598253 http.c:824              <= Recv header, 0000000036 bytes (0x00000024)
+#6 0.629 04:46:45.598257 http.c:836              <= Recv header: Server: BaseHTTP/0.6 Python/3.12.3
+#6 0.629 04:46:45.598261 http.c:824              <= Recv header, 0000000037 bytes (0x00000025)
+#6 0.629 04:46:45.598264 http.c:836              <= Recv header: Date: Thu, 12 Nov 2026 04:46:45 GMT
+#6 0.629 04:46:45.598267 http.c:824              <= Recv header, 0000000040 bytes (0x00000028)
+#6 0.629 04:46:45.598269 http.c:836              <= Recv header: Expires: Fri, 01 Jan 1980 00:00:00 GMT
+#6 0.629 04:46:45.598272 http.c:824              <= Recv header, 0000000018 bytes (0x00000012)
+#6 0.629 04:46:45.598274 http.c:836              <= Recv header: Pragma: no-cache
+#6 0.629 04:46:45.598277 http.c:824              <= Recv header, 0000000053 bytes (0x00000035)
+#6 0.629 04:46:45.598280 http.c:836              <= Recv header: Cache-Control: no-cache, max-age=0, must-revalidate
+#6 0.629 04:46:45.598284 http.c:824              <= Recv header, 0000000059 bytes (0x0000003b)
+#6 0.629 04:46:45.598287 http.c:836              <= Recv header: Content-Type: application/x-git-upload-pack-advertisement
+#6 0.629 04:46:45.598290 http.c:824              <= Recv header, 0000000021 bytes (0x00000015)
+#6 0.629 04:46:45.598292 http.c:836              <= Recv header: Content-Length: 418
+#6 0.629 04:46:45.598296 http.c:824              <= Recv header, 0000000002 bytes (0x00000002)
+#6 0.629 04:46:45.598298 http.c:836              <= Recv header:
+#6 0.629 04:46:45.598310 http.c:877              == Info: shutting down connection #1
+#6 0.629 04:46:45.603823 http.c:877              == Info: NTLM-proxy picked AND auth done set, clear picked
+#6 0.629 04:46:45.603844 http.c:877              == Info: Hostname 127.0.0.1 was found in DNS cache
+#6 0.629 04:46:45.603896 http.c:877              == Info:   Trying 127.0.0.1:34879...
+#6 0.629 04:46:45.604018 http.c:877              == Info: Connected to 127.0.0.1 (127.0.0.1) port 34879
+#6 0.629 04:46:45.604025 http.c:877              == Info: using HTTP/1.x
+#6 0.629 04:46:45.604038 http.c:877              == Info: Server auth using Basic with user 'x-access-token'
+#6 0.629 04:46:45.604086 http.c:824              => Send header, 0000000357 bytes (0x00000165)
+#6 0.629 04:46:45.604096 http.c:836              => Send header: POST /secret.git/git-upload-pack HTTP/1.1
+#6 0.629 04:46:45.604100 http.c:836              => Send header: Host: 127.0.0.1:34879
+#6 0.629 04:46:45.604102 http.c:836              => Send header: Authorization: Basic <redacted>
+#6 0.629 04:46:45.604104 http.c:836              => Send header: User-Agent: git/2.49.1
+#6 0.629 04:46:45.604107 http.c:836              => Send header: Accept-Encoding: deflate, gzip, br, zstd
+#6 0.629 04:46:45.604109 http.c:836              => Send header: Content-Type: application/x-git-upload-pack-request
+#6 0.629 04:46:45.604122 http.c:836              => Send header: Accept: application/x-git-upload-pack-result
+#6 0.629 04:46:45.604139 http.c:836              => Send header: Content-Length: 186
+#6 0.629 04:46:45.604144 http.c:836              => Send header:
+#6 0.629 04:46:45.604151 http.c:877              == Info: upload completely sent off: 186 bytes
+#6 0.629 04:46:45.617101 http.c:877              == Info: HTTP 1.0, assume close after body
+#6 0.629 04:46:45.617120 http.c:824              <= Recv header, 0000000017 bytes (0x00000011)
+#6 0.629 04:46:45.617126 http.c:836              <= Recv header: HTTP/1.0 200 OK
+#6 0.629 04:46:45.617137 http.c:824              <= Recv header, 0000000036 bytes (0x00000024)
+#6 0.629 04:46:45.617140 http.c:836              <= Recv header: Server: BaseHTTP/0.6 Python/3.12.3
+#6 0.629 04:46:45.617147 http.c:824              <= Recv header, 0000000037 bytes (0x00000025)
+#6 0.629 04:46:45.617153 http.c:836              <= Recv header: Date: Thu, 12 Nov 2026 04:46:45 GMT
+#6 0.629 04:46:45.617161 http.c:824              <= Recv header, 0000000040 bytes (0x00000028)
+#6 0.629 04:46:45.617164 http.c:836              <= Recv header: Expires: Fri, 01 Jan 1980 00:00:00 GMT
+#6 0.629 04:46:45.617170 http.c:824              <= Recv header, 0000000018 bytes (0x00000012)
+#6 0.629 04:46:45.617173 http.c:836              <= Recv header: Pragma: no-cache
+#6 0.629 04:46:45.617175 http.c:824              <= Recv header, 0000000053 bytes (0x00000035)
+#6 0.629 04:46:45.617190 http.c:836              <= Recv header: Cache-Control: no-cache, max-age=0, must-revalidate
+#6 0.629 04:46:45.617205 http.c:824              <= Recv header, 0000000052 bytes (0x00000034)
+#6 0.629 04:46:45.617217 http.c:836              <= Recv header: Content-Type: application/x-git-upload-pack-result
+#6 0.629 04:46:45.617223 http.c:824              <= Recv header, 0000000020 bytes (0x00000014)
+#6 0.629 04:46:45.617228 http.c:836              <= Recv header: Content-Length: 56
+#6 0.629 04:46:45.617236 http.c:824              <= Recv header, 0000000002 bytes (0x00000002)
+#6 0.629 04:46:45.617238 http.c:836              <= Recv header:
+#6 0.629 04:46:45.617256 http.c:877              == Info: shutting down connection #2
+#6 0.629 04:46:45.617432 http.c:877              == Info: NTLM-proxy picked AND auth done set, clear picked
+#6 0.629 04:46:45.617437 http.c:877              == Info: Hostname 127.0.0.1 was found in DNS cache
+#6 0.629 04:46:45.617454 http.c:877              == Info:   Trying 127.0.0.1:34879...
+#6 0.629 04:46:45.617506 http.c:877              == Info: Connected to 127.0.0.1 (127.0.0.1) port 34879
+#6 0.629 04:46:45.617510 http.c:877              == Info: using HTTP/1.x
+#6 0.629 04:46:45.617519 http.c:877              == Info: Server auth using Basic with user 'x-access-token'
+#6 0.629 04:46:45.617539 http.c:824              => Send header, 0000000357 bytes (0x00000165)
+#6 0.629 04:46:45.617544 http.c:836              => Send header: POST /secret.git/git-upload-pack HTTP/1.1
+#6 0.629 04:46:45.617546 http.c:836              => Send header: Host: 127.0.0.1:34879
+#6 0.629 04:46:45.617548 http.c:836              => Send header: Authorization: Basic <redacted>
+#6 0.629 04:46:45.617550 http.c:836              => Send header: User-Agent: git/2.49.1
+#6 0.629 04:46:45.617551 http.c:836              => Send header: Accept-Encoding: deflate, gzip, br, zstd
+#6 0.629 04:46:45.617553 http.c:836              => Send header: Content-Type: application/x-git-upload-pack-request
+#6 0.629 04:46:45.617562 http.c:836              => Send header: Accept: application/x-git-upload-pack-result
+#6 0.629 04:46:45.617567 http.c:836              => Send header: Content-Length: 195
+#6 0.629 04:46:45.617572 http.c:836              => Send header:
+#6 0.629 04:46:45.617580 http.c:877              == Info: upload completely sent off: 195 bytes
+#6 0.629 04:46:45.630961 http.c:877              == Info: HTTP 1.0, assume close after body
+#6 0.629 04:46:45.630987 http.c:824              <= Recv header, 0000000017 bytes (0x00000011)
+#6 0.629 04:46:45.630996 http.c:836              <= Recv header: HTTP/1.0 200 OK
+#6 0.629 04:46:45.631010 http.c:824              <= Recv header, 0000000036 bytes (0x00000024)
+#6 0.629 04:46:45.631014 http.c:836              <= Recv header: Server: BaseHTTP/0.6 Python/3.12.3
+#6 0.629 04:46:45.631021 http.c:824              <= Recv header, 0000000037 bytes (0x00000025)
+#6 0.629 04:46:45.631036 http.c:836              <= Recv header: Date: Thu, 12 Nov 2026 04:46:45 GMT
+#6 0.629 04:46:45.631041 http.c:824              <= Recv header, 0000000040 bytes (0x00000028)
+#6 0.629 04:46:45.631048 http.c:836              <= Recv header: Expires: Fri, 01 Jan 1980 00:00:00 GMT
+#6 0.629 04:46:45.631058 http.c:824              <= Recv header, 0000000018 bytes (0x00000012)
+#6 0.629 04:46:45.631065 http.c:836              <= Recv header: Pragma: no-cache
+#6 0.629 04:46:45.631069 http.c:824              <= Recv header, 0000000053 bytes (0x00000035)
+#6 0.629 04:46:45.631086 http.c:836              <= Recv header: Cache-Control: no-cache, max-age=0, must-revalidate
+#6 0.629 04:46:45.631106 http.c:824              <= Recv header, 0000000052 bytes (0x00000034)
+#6 0.629 04:46:45.631116 http.c:836              <= Recv header: Content-Type: application/x-git-upload-pack-result
+#6 0.629 04:46:45.631121 http.c:824              <= Recv header, 0000000021 bytes (0x00000015)
+#6 0.629 04:46:45.631127 http.c:836              <= Recv header: Content-Length: 282
+#6 0.629 04:46:45.631135 http.c:824              <= Recv header, 0000000002 bytes (0x00000002)
+#6 0.629 04:46:45.631139 http.c:836              <= Recv header:
+#6 0.629 04:46:45.631178 http.c:877              == Info: shutting down connection #3
+#6 0.639 fetch-commit: https://private.test/secret.git at dc01a70f44e4bda08677623a38f61a8e641a755d in /src/review-secret
+#6 DONE 0.9s
+
+#7 exporting to image
+#7 exporting layers
+#7 exporting layers 0.5s done
+#7 exporting manifest sha256:bfc9581d6e7b7bc2cff9c592069dfea68ecbd17e0aa8e538e6773397dcdde80d 0.1s done
+#7 exporting config sha256:f5193488701739ea67e5674524ddac6d241286ed0f685c0b339c945288fae838
+#7 exporting config sha256:f5193488701739ea67e5674524ddac6d241286ed0f685c0b339c945288fae838 0.1s done
+#7 exporting attestation manifest sha256:c50bb492b7776a904f4dbb4fcbad2cf981ee580c4712b64fd7a9bb05cafb4b87
+#7 exporting attestation manifest sha256:c50bb492b7776a904f4dbb4fcbad2cf981ee580c4712b64fd7a9bb05cafb4b87 0.1s done
+#7 exporting manifest list sha256:ea71555ec54d06995c168a761bcb42aa1816a7c306fef533e6800270cb6069dd
+#7 exporting manifest list sha256:ea71555ec54d06995c168a761bcb42aa1816a7c306fef533e6800270cb6069dd 0.1s done
+#7 naming to docker.io/library/ossv538-review3-container-trace:latest done
+#7 unpacking to docker.io/library/ossv538-review3-container-trace:latest
+#7 unpacking to docker.io/library/ossv538-review3-container-trace:latest 0.2s done
+#7 DONE 1.4s
+
+ [33m4 warnings found (use docker --debug to expand):
+[0m - InvalidDefaultArgInFrom: Default value for ARG ${BASE} results in empty or invalid base image name (line 2)
+ - SecretsUsedInArgOrEnv: Do not use ARG or ENV instructions for sensitive data (ENV "GIT_CONFIG_KEY_0") (line 7)
+ - SecretsUsedInArgOrEnv: Do not use ARG or ENV instructions for sensitive data (ENV "GIT_CONFIG_KEY_1") (line 7)
+ - SecretsUsedInArgOrEnv: Do not use ARG or ENV instructions for sensitive data (ENV "OSS_VERIFY_TOKEN_REPO") (line 7)

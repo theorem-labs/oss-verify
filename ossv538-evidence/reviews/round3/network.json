@@ -1,0 +1,474 @@
+[
+  {
+    "probe": "failure-normal",
+    "container_exit": 0,
+    "container_auth": false,
+    "container_missing": false,
+    "container_transport": false,
+    "container_end": [
+      "04:40:22.177790 http.c:792              <= Recv header, 0000000002 bytes (0x00000002)",
+      "04:40:22.177791 http.c:804              <= Recv header:",
+      "04:40:22.177809 http.c:845              == Info: Closing connection"
+    ],
+    "host_exit": 0,
+    "host_message": "success",
+    "host_raw_end": [
+      "04:40:22.293667 http.c:804              <= Recv header:",
+      "04:40:22.293683 http.c:845              == Info: Closing connection"
+    ],
+    "container_requests": 4,
+    "host_requests": 4
+  },
+  {
+    "probe": "failure-401",
+    "container_exit": 1,
+    "container_auth": true,
+    "container_missing": false,
+    "container_transport": false,
+    "container_end": [
+      "    04:40:22.394417 http.c:804              <= Recv header:",
+      "    04:40:22.394421 http.c:845              == Info: Closing connection",
+      "    fatal: Authentication failed for 'http://127.0.0.1:45185/secret.git/'"
+    ],
+    "host_exit": 1,
+    "host_message": "cannot read https://private.test/secret.git: it is private, it does not exist, or the build may not read it. The build asked with a read-only token minted for this build, and the server listed no refs, so no commit of it was looked up: this is not a missing commit. https://private.test/secret is not in infra/private-libraries.tsv, so no token was minted for it; a private repository of ours needs a row there. git said: git -c credential.helper= ... exited 128: .c:804              => Send header: Pragma: no-cache\n04:40:22.476639 http.c:804              => Send header: Git-Protocol: version=2\n04:40:22.476639 http.c:804              => Send header:\n04:40:22.478062 http.c:845              == Info: HTTP 1.0, assume close after body\n04:40:22.478080 http.c:792              <= Recv header, 0000000027 bytes (0x0000001b)\n04:40:22.478083 http.c:804              <= Recv header: HTTP/1.0 401 Unauthorized\n04:40:22.478087 http.c:792              <= Recv header, 0000000036 bytes (0x00000024)\n04:40:22.478088 http.c:804              <= Recv header: Server: BaseHTTP/0.6 Python/3.12.3\n04:40:22.478090 http.c:792              <= Recv header, 0000000037 bytes (0x00000025)\n04:40:22.478091 http.c:804              <= Recv header: Date: Thu, 12 Nov 2026 04:40:22 GMT\n04:40:22.478094 http.c:845              == Info: Authentication problem. Ignoring this.\n04:40:22.478095 http.c:792              <= Recv header, 0000000037 bytes (0x00000025)\n04:40:22.478096 http.c:804              <= Recv header: WWW-Authenticate: Basic realm=\"git\"\n04:40:22.478099 http.c:792              <= Recv header, 0000000019 bytes (0x00000013)\n04:40:22.478100 http.c:804              <= Recv header: Content-Length: 0\n04:40:22.478102 http.c:792              <= Recv header, 0000000002 bytes (0x00000002)\n04:40:22.478102 http.c:804              <= Recv header:\n04:40:22.478110 http.c:845              == Info: Closing connection\nfatal: Authentication failed for 'http://127.0.0.1:45185/secret.git/'",
+    "host_raw_end": [
+      "04:40:22.443984 http.c:845              == Info: Closing connection",
+      "fatal: Authentication failed for 'http://127.0.0.1:45185/secret.git/'"
+    ],
+    "container_requests": 4,
+    "host_requests": 4
+  },
+  {
+    "probe": "failure-403",
+    "container_exit": 1,
+    "container_auth": true,
+    "container_missing": false,
+    "container_transport": false,
+    "container_end": [
+      "    04:40:22.538308 http.c:804              <= Recv header:",
+      "    04:40:22.538312 http.c:845              == Info: Closing connection",
+      "    fatal: unable to access 'http://127.0.0.1:45185/secret.git/': The requested URL returned error: 403"
+    ],
+    "host_exit": 1,
+    "host_message": "cannot read https://private.test/secret.git: it is private, it does not exist, or the build may not read it. The build asked with a read-only token minted for this build, and the server listed no refs, so no commit of it was looked up: this is not a missing commit. https://private.test/secret is not in infra/private-libraries.tsv, so no token was minted for it; a private repository of ours needs a row there. git said: git -c credential.helper= ... exited 128: 4              => Send header: User-Agent: git/2.43.0\n04:40:22.591941 http.c:804              => Send header: Accept: */*\n04:40:22.591942 http.c:804              => Send header: Accept-Encoding: deflate, gzip, br, zstd\n04:40:22.591945 http.c:804              => Send header: Pragma: no-cache\n04:40:22.591946 http.c:804              => Send header: Git-Protocol: version=2\n04:40:22.591947 http.c:804              => Send header:\n04:40:22.593744 http.c:845              == Info: HTTP 1.0, assume close after body\n04:40:22.593760 http.c:792              <= Recv header, 0000000024 bytes (0x00000018)\n04:40:22.593765 http.c:804              <= Recv header: HTTP/1.0 403 Forbidden\n04:40:22.593769 http.c:792              <= Recv header, 0000000036 bytes (0x00000024)\n04:40:22.593771 http.c:804              <= Recv header: Server: BaseHTTP/0.6 Python/3.12.3\n04:40:22.593774 http.c:792              <= Recv header, 0000000037 bytes (0x00000025)\n04:40:22.593775 http.c:804              <= Recv header: Date: Thu, 12 Nov 2026 04:40:22 GMT\n04:40:22.593779 http.c:792              <= Recv header, 0000000019 bytes (0x00000013)\n04:40:22.593785 http.c:804              <= Recv header: Content-Length: 0\n04:40:22.593788 http.c:792              <= Recv header, 0000000002 bytes (0x00000002)\n04:40:22.593790 http.c:804              <= Recv header:\n04:40:22.593800 http.c:845              == Info: Closing connection\nfatal: unable to access 'http://127.0.0.1:45185/secret.git/': The requested URL returned error: 403",
+    "host_raw_end": [
+      "04:40:22.573496 http.c:845              == Info: Closing connection",
+      "fatal: unable to access 'http://127.0.0.1:45185/secret.git/': The requested URL returned error: 403"
+    ],
+    "container_requests": 2,
+    "host_requests": 2
+  },
+  {
+    "probe": "failure-429",
+    "container_exit": 1,
+    "container_auth": false,
+    "container_missing": false,
+    "container_transport": true,
+    "container_end": [
+      "    04:40:22.639705 http.c:804              <= Recv header:",
+      "    04:40:22.639712 http.c:845              == Info: Closing connection",
+      "    fatal: unable to access 'http://127.0.0.1:45185/secret.git/': The requested URL returned error: 429"
+    ],
+    "host_exit": 1,
+    "host_message": "could not reach https://private.test/secret.git to list its refs, so nothing is known about ca48be3acd50d8105bf9df2247f694864fc38aab yet: this is neither an authorisation failure nor a missing commit. git said: git -c credential.helper= ... exited 128:        => Send header: User-Agent: git/2.43.0\n04:40:22.704578 http.c:804              => Send header: Accept: */*\n04:40:22.704579 http.c:804              => Send header: Accept-Encoding: deflate, gzip, br, zstd\n04:40:22.704581 http.c:804              => Send header: Pragma: no-cache\n04:40:22.704582 http.c:804              => Send header: Git-Protocol: version=2\n04:40:22.704583 http.c:804              => Send header:\n04:40:22.705198 http.c:845              == Info: HTTP 1.0, assume close after body\n04:40:22.705216 http.c:792              <= Recv header, 0000000032 bytes (0x00000020)\n04:40:22.705220 http.c:804              <= Recv header: HTTP/1.0 429 Too Many Requests\n04:40:22.705224 http.c:792              <= Recv header, 0000000036 bytes (0x00000024)\n04:40:22.705225 http.c:804              <= Recv header: Server: BaseHTTP/0.6 Python/3.12.3\n04:40:22.705227 http.c:792              <= Recv header, 0000000037 bytes (0x00000025)\n04:40:22.705228 http.c:804              <= Recv header: Date: Thu, 12 Nov 2026 04:40:22 GMT\n04:40:22.705232 http.c:792              <= Recv header, 0000000019 bytes (0x00000013)\n04:40:22.705233 http.c:804              <= Recv header: Content-Length: 0\n04:40:22.705234 http.c:792              <= Recv header, 0000000002 bytes (0x00000002)\n04:40:22.705235 http.c:804              <= Recv header:\n04:40:22.705242 http.c:845              == Info: Closing connection\nfatal: unable to access 'http://127.0.0.1:45185/secret.git/': The requested URL returned error: 429",
+    "host_raw_end": [
+      "04:40:22.684891 http.c:845              == Info: Closing connection",
+      "fatal: unable to access 'http://127.0.0.1:45185/secret.git/': The requested URL returned error: 429"
+    ],
+    "container_requests": 2,
+    "host_requests": 2
+  },
+  {
+    "probe": "failure-503",
+    "container_exit": 1,
+    "container_auth": false,
+    "container_missing": false,
+    "container_transport": true,
+    "container_end": [
+      "    04:40:22.748609 http.c:804              <= Recv header:",
+      "    04:40:22.748615 http.c:845              == Info: Closing connection",
+      "    fatal: unable to access 'http://127.0.0.1:45185/secret.git/': The requested URL returned error: 503"
+    ],
+    "host_exit": 1,
+    "host_message": "could not reach https://private.test/secret.git to list its refs, so nothing is known about ca48be3acd50d8105bf9df2247f694864fc38aab yet: this is neither an authorisation failure nor a missing commit. git said: git -c credential.helper= ... exited 128:      => Send header: User-Agent: git/2.43.0\n04:40:22.804745 http.c:804              => Send header: Accept: */*\n04:40:22.804745 http.c:804              => Send header: Accept-Encoding: deflate, gzip, br, zstd\n04:40:22.804748 http.c:804              => Send header: Pragma: no-cache\n04:40:22.804749 http.c:804              => Send header: Git-Protocol: version=2\n04:40:22.804749 http.c:804              => Send header:\n04:40:22.805573 http.c:845              == Info: HTTP 1.0, assume close after body\n04:40:22.805589 http.c:792              <= Recv header, 0000000034 bytes (0x00000022)\n04:40:22.805592 http.c:804              <= Recv header: HTTP/1.0 503 Service Unavailable\n04:40:22.805596 http.c:792              <= Recv header, 0000000036 bytes (0x00000024)\n04:40:22.805597 http.c:804              <= Recv header: Server: BaseHTTP/0.6 Python/3.12.3\n04:40:22.805598 http.c:792              <= Recv header, 0000000037 bytes (0x00000025)\n04:40:22.805600 http.c:804              <= Recv header: Date: Thu, 12 Nov 2026 04:40:22 GMT\n04:40:22.805602 http.c:792              <= Recv header, 0000000019 bytes (0x00000013)\n04:40:22.805603 http.c:804              <= Recv header: Content-Length: 0\n04:40:22.805605 http.c:792              <= Recv header, 0000000002 bytes (0x00000002)\n04:40:22.805606 http.c:804              <= Recv header:\n04:40:22.805613 http.c:845              == Info: Closing connection\nfatal: unable to access 'http://127.0.0.1:45185/secret.git/': The requested URL returned error: 503",
+    "host_raw_end": [
+      "04:40:22.784822 http.c:845              == Info: Closing connection",
+      "fatal: unable to access 'http://127.0.0.1:45185/secret.git/': The requested URL returned error: 503"
+    ],
+    "container_requests": 2,
+    "host_requests": 2
+  },
+  {
+    "probe": "failure-empty",
+    "container_exit": 1,
+    "container_auth": false,
+    "container_missing": true,
+    "container_transport": false,
+    "container_end": [
+      "  it the whole repository, so this is neither an authorisation failure nor a transfer that broke: the",
+      "  commit is not in the repository (deleted, or never pushed, or a branch that was force-pushed since the",
+      "  commit was recorded)."
+    ],
+    "host_exit": 1,
+    "host_message": "could not fetch ffffffffffffffffffffffffffffffffffffffff from https://private.test/empty.git, although the server listed its refs for this build: this is not an authorisation failure. Either the commit is not in the repository (deleted, never pushed, or a branch force-pushed since it was recorded), or the objects did not come (upload-pack refused, a server fault, a transfer that broke). A successful ref listing says the build may read the repository and nothing about the transfer; git's own message for the fetch is above.",
+    "host_raw_end": [
+      "04:40:22.963089 http.c:845              == Info: Closing connection",
+      "fatal: no matching remote head"
+    ],
+    "container_requests": 3,
+    "host_requests": 2
+  },
+  {
+    "probe": "failure-deny-upload",
+    "container_exit": 1,
+    "container_auth": false,
+    "container_missing": false,
+    "container_transport": false,
+    "container_end": [
+      "  is not an authorisation failure, and it is not a missing commit either: the repository could be read",
+      "  and the objects did not come (upload-pack refused, a server fault, a transfer that broke). git's own",
+      "  message for the fetch and for the clone is above."
+    ],
+    "host_exit": 1,
+    "host_message": "could not fetch ca48be3acd50d8105bf9df2247f694864fc38aab from https://private.test/secret.git, although the server listed its refs for this build: this is not an authorisation failure. Either the commit is not in the repository (deleted, never pushed, or a branch force-pushed since it was recorded), or the objects did not come (upload-pack refused, a server fault, a transfer that broke). A successful ref listing says the build may read the repository and nothing about the transfer; git's own message for the fetch is above.",
+    "host_raw_end": [
+      "error: RPC failed; HTTP 503 curl 22 The requested URL returned error: 503",
+      "fatal: the remote end hung up unexpectedly"
+    ],
+    "container_requests": 8,
+    "host_requests": 5
+  },
+  {
+    "probe": "failure-missing",
+    "container_exit": 1,
+    "container_auth": false,
+    "container_missing": true,
+    "container_transport": false,
+    "container_end": [
+      "  it the whole repository, so this is neither an authorisation failure nor a transfer that broke: the",
+      "  commit is not in the repository (deleted, or never pushed, or a branch that was force-pushed since the",
+      "  commit was recorded)."
+    ],
+    "host_exit": 1,
+    "host_message": "could not fetch ffffffffffffffffffffffffffffffffffffffff from https://private.test/secret.git, although the server listed its refs for this build: this is not an authorisation failure. Either the commit is not in the repository (deleted, never pushed, or a branch force-pushed since it was recorded), or the objects did not come (upload-pack refused, a server fault, a transfer that broke). A successful ref listing says the build may read the repository and nothing about the transfer; git's own message for the fetch is above.",
+    "host_raw_end": [
+      "fatal: remote error: upload-pack: not our ref ffffffffffffffffffffffffffffffffffffffff",
+      "fatal: the remote end hung up unexpectedly"
+    ],
+    "container_requests": 8,
+    "host_requests": 5
+  },
+  {
+    "probe": "failure-wrong-token",
+    "container_exit": 1,
+    "container_auth": true,
+    "container_missing": false,
+    "container_transport": false,
+    "container_end": [
+      "    04:40:23.803191 http.c:804              <= Recv header:",
+      "    04:40:23.803197 http.c:845              == Info: Closing connection",
+      "    fatal: Authentication failed for 'http://127.0.0.1:45185/secret.git/'"
+    ],
+    "host_exit": 1,
+    "host_message": "cannot read https://private.test/secret.git: it is private, it does not exist, or the build may not read it. The build asked with a read-only token minted for this build, and the server listed no refs, so no commit of it was looked up: this is not a missing commit. https://private.test/secret is not in infra/private-libraries.tsv, so no token was minted for it; a private repository of ours needs a row there. git said: git -c credential.helper= ... exited 128: .c:804              => Send header: Pragma: no-cache\n04:40:23.882117 http.c:804              => Send header: Git-Protocol: version=2\n04:40:23.882118 http.c:804              => Send header:\n04:40:23.885890 http.c:845              == Info: HTTP 1.0, assume close after body\n04:40:23.885904 http.c:792              <= Recv header, 0000000027 bytes (0x0000001b)\n04:40:23.885907 http.c:804              <= Recv header: HTTP/1.0 401 Unauthorized\n04:40:23.885911 http.c:792              <= Recv header, 0000000036 bytes (0x00000024)\n04:40:23.885912 http.c:804              <= Recv header: Server: BaseHTTP/0.6 Python/3.12.3\n04:40:23.885914 http.c:792              <= Recv header, 0000000037 bytes (0x00000025)\n04:40:23.885915 http.c:804              <= Recv header: Date: Thu, 12 Nov 2026 04:40:23 GMT\n04:40:23.885918 http.c:845              == Info: Authentication problem. Ignoring this.\n04:40:23.885919 http.c:792              <= Recv header, 0000000037 bytes (0x00000025)\n04:40:23.885919 http.c:804              <= Recv header: WWW-Authenticate: Basic realm=\"git\"\n04:40:23.885922 http.c:792              <= Recv header, 0000000019 bytes (0x00000013)\n04:40:23.885923 http.c:804              <= Recv header: Content-Length: 0\n04:40:23.885925 http.c:792              <= Recv header, 0000000002 bytes (0x00000002)\n04:40:23.885925 http.c:804              <= Recv header:\n04:40:23.885932 http.c:845              == Info: Closing connection\nfatal: Authentication failed for 'http://127.0.0.1:45185/secret.git/'",
+    "host_raw_end": [
+      "04:40:23.857571 http.c:845              == Info: Closing connection",
+      "fatal: Authentication failed for 'http://127.0.0.1:45185/secret.git/'"
+    ],
+    "container_requests": 4,
+    "host_requests": 4
+  },
+  {
+    "probe": "failure-dns",
+    "container_exit": 1,
+    "container_auth": false,
+    "container_missing": false,
+    "container_transport": true,
+    "container_end": [
+      "    04:40:24.100446 http.c:845              == Info: Could not resolve host: not-a-real-host.review2.invalid",
+      "    04:40:24.100483 http.c:845              == Info: Closing connection",
+      "    fatal: unable to access 'http://not-a-real-host.review2.invalid/secret.git/': Could not resolve host: not-a-real-host.review2.invalid"
+    ],
+    "host_exit": 1,
+    "host_message": "could not reach https://private.test/secret.git to list its refs, so nothing is known about ca48be3acd50d8105bf9df2247f694864fc38aab yet: this is neither an authorisation failure nor a missing commit. git said: git -c credential.helper= ... exited 128: 04:40:24.206421 http.c:845              == Info: Uses proxy env variable no_proxy == '*'\n04:40:24.206468 http.c:845              == Info: Couldn't find host not-a-real-host.review2.invalid in the .netrc file; using defaults\n04:40:24.236691 http.c:845              == Info: Could not resolve host: not-a-real-host.review2.invalid\n04:40:24.236737 http.c:845              == Info: Closing connection\nfatal: unable to access 'http://not-a-real-host.review2.invalid/secret.git/': Could not resolve host: not-a-real-host.review2.invalid",
+    "host_raw_end": [
+      "04:40:24.180815 http.c:845              == Info: Closing connection",
+      "fatal: unable to access 'http://not-a-real-host.review2.invalid/secret.git/': Could not resolve host: not-a-real-host.review2.invalid"
+    ],
+    "container_requests": 0,
+    "host_requests": 0
+  },
+  {
+    "probe": "failure-connection",
+    "container_exit": 1,
+    "container_auth": false,
+    "container_missing": false,
+    "container_transport": true,
+    "container_end": [
+      "    04:40:24.284321 http.c:845              == Info: Failed to connect to 127.0.0.1 port 54653 after 0 ms: Couldn't connect to server",
+      "    04:40:24.284325 http.c:845              == Info: Closing connection",
+      "    fatal: unable to access 'http://127.0.0.1:54653/secret.git/': Failed to connect to 127.0.0.1 port 54653 after 0 ms: Couldn't connect to server"
+    ],
+    "host_exit": 1,
+    "host_message": "could not reach https://private.test/secret.git to list its refs, so nothing is known about ca48be3acd50d8105bf9df2247f694864fc38aab yet: this is neither an authorisation failure nor a missing commit. git said: git -c credential.helper= ... exited 128: 04:40:24.347958 http.c:845              == Info: Uses proxy env variable no_proxy == '*'\n04:40:24.347990 http.c:845              == Info: Couldn't find host 127.0.0.1 in the .netrc file; using defaults\n04:40:24.348021 http.c:845              == Info:   Trying 127.0.0.1:54653...\n04:40:24.348078 http.c:845              == Info: connect to 127.0.0.1 port 54653 from 127.0.0.1 port 46454 failed: Connection refused\n04:40:24.348089 http.c:845              == Info: Failed to connect to 127.0.0.1 port 54653 after 0 ms: Couldn't connect to server\n04:40:24.348092 http.c:845              == Info: Closing connection\nfatal: unable to access 'http://127.0.0.1:54653/secret.git/': Failed to connect to 127.0.0.1 port 54653 after 0 ms: Couldn't connect to server",
+    "host_raw_end": [
+      "04:40:24.331972 http.c:845              == Info: Closing connection",
+      "fatal: unable to access 'http://127.0.0.1:54653/secret.git/': Failed to connect to 127.0.0.1 port 54653 after 0 ms: Couldn't connect to server"
+    ],
+    "container_requests": 0,
+    "host_requests": 0
+  },
+  {
+    "probe": "redirect-same-host",
+    "container_exit": 1,
+    "container_message": [
+      "  is not an authorisation failure, and it is not a missing commit either: the repository could be read",
+      "  and the objects did not come (upload-pack refused, a server fault, a transfer that broke). git's own",
+      "  message for the fetch and for the clone is above."
+    ],
+    "host_exit": 1,
+    "host_message": "could not fetch 5e628b809adc83b20315e69c1d63e671dd66a1d0 from https://private.test/secret.git, although the server listed its refs for this build: this is not an authorisation failure. Either the commit is not in the repository (deleted, never pushed, or a branch force-pushed since it was recorded), or the objects did not come (upload-pack refused, a server fault, a transfer that broke). A successful ref listing says the build may read the repository and nothing about the transfer; git's own message for the fetch is above.",
+    "container_other_path_authorized": true,
+    "host_other_path_authorized": true,
+    "container_requests": [
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        false
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/public.git/info/refs?service=git-upload-pack",
+        true
+      ],
+      [
+        "POST",
+        "/secret.git/git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        false
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/public.git/info/refs?service=git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        false
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/public.git/info/refs?service=git-upload-pack",
+        true
+      ],
+      [
+        "POST",
+        "/secret.git/git-upload-pack",
+        true
+      ]
+    ],
+    "host_requests": [
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        false
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/public.git/info/refs?service=git-upload-pack",
+        true
+      ],
+      [
+        "POST",
+        "/secret.git/git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        false
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/public.git/info/refs?service=git-upload-pack",
+        true
+      ]
+    ]
+  },
+  {
+    "probe": "redirect-port",
+    "container_exit": 1,
+    "container_message": [
+      "  is not an authorisation failure, and it is not a missing commit either: the repository could be read",
+      "  and the objects did not come (upload-pack refused, a server fault, a transfer that broke). git's own",
+      "  message for the fetch and for the clone is above."
+    ],
+    "host_exit": 1,
+    "host_message": "could not fetch 5e628b809adc83b20315e69c1d63e671dd66a1d0 from https://private.test/secret.git, although the server listed its refs for this build: this is not an authorisation failure. Either the commit is not in the repository (deleted, never pushed, or a branch force-pushed since it was recorded), or the objects did not come (upload-pack refused, a server fault, a transfer that broke). A successful ref listing says the build may read the repository and nothing about the transfer; git's own message for the fetch is above.",
+    "container_other_path_authorized": false,
+    "host_other_path_authorized": false,
+    "container_requests": [
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        false
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/public.git/info/refs?service=git-upload-pack",
+        false
+      ],
+      [
+        "POST",
+        "/secret.git/git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        false
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/public.git/info/refs?service=git-upload-pack",
+        false
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        false
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/public.git/info/refs?service=git-upload-pack",
+        false
+      ],
+      [
+        "POST",
+        "/secret.git/git-upload-pack",
+        true
+      ]
+    ],
+    "host_requests": [
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        false
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/public.git/info/refs?service=git-upload-pack",
+        false
+      ],
+      [
+        "POST",
+        "/secret.git/git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        false
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/public.git/info/refs?service=git-upload-pack",
+        false
+      ]
+    ]
+  },
+  {
+    "probe": "host-marker-collision",
+    "input": "fatal: unable to access 'https://x/y': error setting certificate file: /cert/permission denied.pem",
+    "message": "could not reach https://x/y to list its refs, so nothing is known about aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa yet: this is neither an authorisation failure nor a missing commit. git said: fatal: unable to access 'https://x/y': error setting certificate file: /cert/permission denied.pem"
+  },
+  {
+    "probe": "host-marker-collision",
+    "input": "fatal: unable to access 'https://x/y': Could not resolve host: repository not found.invalid",
+    "message": "cannot read https://x/y: it is private, it does not exist, or the build may not read it. The build asked with a read-only token minted for this build, and the server listed no refs, so no commit of it was looked up: this is not a missing commit. https://x/y is not in infra/private-libraries.tsv, so no token was minted for it; a private repository of ours needs a row there. git said: fatal: unable to access 'https://x/y': Could not resolve host: repository not found.invalid"
+  },
+  {
+    "probe": "tracing-environment",
+    "container_exit": 0,
+    "container_trace_bytes": 0,
+    "container_token_in_trace": false,
+    "host_exit": 0,
+    "host_trace_bytes": 0,
+    "host_token_in_trace": false,
+    "host_token_in_output": false,
+    "container_token_in_output": false
+  },
+  {
+    "probe": "tracing-config",
+    "container_exit": 0,
+    "container_trace_bytes": 0,
+    "container_token_in_trace": false,
+    "host_exit": 0,
+    "host_trace_bytes": 0,
+    "host_token_in_trace": false,
+    "host_token_in_output": false,
+    "container_token_in_output": false
+  },
+  {
+    "probe": "submodule-other-path",
+    "exit": 0,
+    "other_authorized": false,
+    "main_authorized": true
+  }
+]

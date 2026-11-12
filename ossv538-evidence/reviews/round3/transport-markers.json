@@ -1,0 +1,34 @@
+[
+  {
+    "mode": "body",
+    "container_exit": 1,
+    "container_auth": true,
+    "container_transport": false,
+    "container_end": [
+      "    04:40:28.936982 http.c:804              <= Recv header:",
+      "    04:40:28.936990 http.c:845              == Info: Closing connection",
+      "    remote: upstream connection permission denied",
+      "    fatal: unable to access 'http://127.0.0.1:42467/secret.git/': The requested URL returned error: 503"
+    ],
+    "container_other_path_got_token": false,
+    "host_exit": 1,
+    "host_message": "could not reach https://private.test/secret.git to list its refs, so nothing is known about 2b8e2249f89967131442e6a26a47a4236751a2b4 yet: this is neither an authorisation failure nor a missing commit. git said: git -c credential.helper= ... exited 128: :29.011720 http.c:804              => Send header: Pragma: no-cache\n04:40:29.011720 http.c:804              => Send header: Git-Protocol: version=2\n04:40:29.011721 http.c:804              => Send header:\n04:40:29.013947 http.c:845              == Info: HTTP 1.0, assume close after body\n04:40:29.013964 http.c:792              <= Recv header, 0000000034 bytes (0x00000022)\n04:40:29.013967 http.c:804              <= Recv header: HTTP/1.0 503 Service Unavailable\n04:40:29.013972 http.c:792              <= Recv header, 0000000036 bytes (0x00000024)\n04:40:29.013973 http.c:804              <= Recv header: Server: BaseHTTP/0.6 Python/3.12.3\n04:40:29.013974 http.c:792              <= Recv header, 0000000037 bytes (0x00000025)\n04:40:29.013975 http.c:804              <= Recv header: Date: Thu, 12 Nov 2026 04:40:29 GMT\n04:40:29.013977 http.c:792              <= Recv header, 0000000026 bytes (0x0000001a)\n04:40:29.013978 http.c:804              <= Recv header: Content-Type: text/plain\n04:40:29.013980 http.c:792              <= Recv header, 0000000020 bytes (0x00000014)\n04:40:29.013981 http.c:804              <= Recv header: Content-Length: 38\n04:40:29.013983 http.c:792              <= Recv header, 0000000002 bytes (0x00000002)\n04:40:29.013983 http.c:804              <= Recv header:\n04:40:29.013990 http.c:845              == Info: Closing connection\nremote: upstream connection permission denied\nfatal: unable to access 'http://127.0.0.1:42467/secret.git/': The requested URL returned error: 503",
+    "host_other_path_got_token": false
+  },
+  {
+    "mode": "redirect",
+    "container_exit": 1,
+    "container_auth": true,
+    "container_transport": false,
+    "container_end": [
+      "    04:40:29.079317 http.c:792              <= Recv header, 0000000002 bytes (0x00000002)",
+      "    04:40:29.079318 http.c:804              <= Recv header:",
+      "    04:40:29.079322 http.c:845              == Info: Closing connection",
+      "    fatal: could not read Username for 'http://127.0.0.1:42467/public.git': terminal prompts disabled"
+    ],
+    "container_other_path_got_token": false,
+    "host_exit": 1,
+    "host_message": "cannot read https://private.test/secret.git: it is private, it does not exist, or the build may not read it. The build asked with a read-only token minted for this build, and the server listed no refs, so no commit of it was looked up: this is not a missing commit. https://private.test/secret is not in infra/private-libraries.tsv, so no token was minted for it; a private repository of ours needs a row there. git said: git -c credential.helper= ... exited 128: c:804              => Send header: Pragma: no-cache\n04:40:29.171486 http.c:804              => Send header: Git-Protocol: version=2\n04:40:29.171487 http.c:804              => Send header:\n04:40:29.171962 http.c:845              == Info: HTTP 1.0, assume close after body\n04:40:29.171970 http.c:792              <= Recv header, 0000000027 bytes (0x0000001b)\n04:40:29.171971 http.c:804              <= Recv header: HTTP/1.0 401 Unauthorized\n04:40:29.171973 http.c:792              <= Recv header, 0000000036 bytes (0x00000024)\n04:40:29.171974 http.c:804              <= Recv header: Server: BaseHTTP/0.6 Python/3.12.3\n04:40:29.171976 http.c:792              <= Recv header, 0000000037 bytes (0x00000025)\n04:40:29.171976 http.c:804              <= Recv header: Date: Thu, 12 Nov 2026 04:40:29 GMT\n04:40:29.171978 http.c:792              <= Recv header, 0000000037 bytes (0x00000025)\n04:40:29.171979 http.c:804              <= Recv header: WWW-Authenticate: Basic realm=\"git\"\n04:40:29.171980 http.c:792              <= Recv header, 0000000019 bytes (0x00000013)\n04:40:29.171985 http.c:804              <= Recv header: Content-Length: 0\n04:40:29.171986 http.c:792              <= Recv header, 0000000002 bytes (0x00000002)\n04:40:29.171987 http.c:804              <= Recv header:\n04:40:29.171990 http.c:845              == Info: Closing connection\nerror: unable to read askpass response from '/usr/bin/false'\nfatal: could not read Username for 'http://127.0.0.1:42467/public.git': terminal prompts disabled",
+    "host_other_path_got_token": false
+  }
+]

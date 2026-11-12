@@ -1,0 +1,196 @@
+[
+  {
+    "probe": "anonymous-command-identity",
+    "host_argv_equal": true,
+    "shell_function_equal": true,
+    "head_argv": [
+      "git",
+      "-c",
+      "credential.helper=",
+      "-c",
+      "protocol.allow=never",
+      "-c",
+      "protocol.https.allow=always",
+      "ls-remote",
+      "--",
+      "https://example.invalid/x"
+    ]
+  },
+  {
+    "probe": "mount-comment-private",
+    "accepted": true
+  },
+  {
+    "probe": "mount-comment-public",
+    "accepted": false
+  },
+  {
+    "probe": "mount-continued-private",
+    "accepted": false
+  },
+  {
+    "probe": "mount-continued-public",
+    "accepted": true
+  },
+  {
+    "probe": "mount-reordered-public",
+    "accepted": true
+  },
+  {
+    "probe": "mount-wrong-id-private",
+    "accepted": true
+  },
+  {
+    "probe": "mount-unrelated-step-private",
+    "accepted": true
+  },
+  {
+    "probe": "dockerfile-selection",
+    "in_repository": false,
+    "selected": "project/Dockerfile",
+    "text": "FROM scratch\n# beside project.yaml"
+  },
+  {
+    "probe": "dockerfile-selection",
+    "in_repository": true,
+    "selected": "work/src/packaging/Customfile",
+    "text": "FROM scratch\n# repository Dockerfile"
+  },
+  {
+    "probe": "public-cli-no-token-command",
+    "repo": "https://github.com/DaveGamble/cJSON",
+    "exit_code": 0,
+    "mint_calls": 0,
+    "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "has_secret_fields": false
+  },
+  {
+    "probe": "public-cli-no-token-command",
+    "repo": "https://github.com/theorem-labs/oss-verify",
+    "exit_code": 0,
+    "mint_calls": 0,
+    "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "has_secret_fields": false
+  },
+  {
+    "probe": "stream-first-partial-token",
+    "split": 24,
+    "output": "before-<redacted>T0kenF0rTheBuildOnly-after",
+    "expected": "before-<redacted>-after",
+    "complete_token_present": false,
+    "leaked_suffix": true
+  },
+  {
+    "probe": "stream-boundary-enumeration",
+    "token_length": 44,
+    "splits_checked": 43,
+    "incorrect_splits": [
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43
+    ]
+  },
+  {
+    "probe": "stream-public-byte-preservation",
+    "matched": true
+  },
+  {
+    "probe": "shell-redact-metacharacters",
+    "terminates": true,
+    "token_in_stdout": false,
+    "token_in_stderr": false,
+    "exit_code": 1,
+    "marker_present": true
+  },
+  {
+    "probe": "shell-redact-stdout",
+    "terminates": true,
+    "token_in_stdout": true,
+    "token_in_stderr": false,
+    "exit_code": 1,
+    "marker_present": false
+  },
+  {
+    "probe": "shell-redact-replacement-reentry",
+    "terminates": false
+  },
+  {
+    "probe": "container-empty-repository",
+    "exit_code": 1,
+    "missing_commit": true,
+    "unauthorised": false
+  },
+  {
+    "probe": "container-failure-offline",
+    "exit_code": 1,
+    "custom_auth": true,
+    "custom_missing": false,
+    "end": "  --mount=type=secret,id=oss-verify-git-token on this RUN (docs/build-contract.md)."
+  },
+  {
+    "probe": "container-failure-limited",
+    "exit_code": 1,
+    "custom_auth": true,
+    "custom_missing": false,
+    "end": "  --mount=type=secret,id=oss-verify-git-token on this RUN (docs/build-contract.md)."
+  },
+  {
+    "probe": "container-failure-denied",
+    "exit_code": 1,
+    "custom_auth": true,
+    "custom_missing": false,
+    "end": "  --mount=type=secret,id=oss-verify-git-token on this RUN (docs/build-contract.md)."
+  },
+  {
+    "probe": "container-failure-deny-upload",
+    "exit_code": 128,
+    "custom_auth": false,
+    "custom_missing": false,
+    "end": "fatal: the remote end hung up unexpectedly"
+  },
+  {
+    "probe": "host-clone-wrong-token",
+    "exception": "cannot fetch fd6eee209e3e9a9d6df5f95f7d255d9d5920bc13 from https://private.test/secret.git",
+    "auth_explained": false,
+    "has_redacted_marker": false
+  },
+  {
+    "probe": "host-clone-missing-commit",
+    "exception": "cannot fetch ffffffffffffffffffffffffffffffffffffffff from https://private.test/secret.git",
+    "auth_explained": false,
+    "has_redacted_marker": false
+  },
+  {
+    "probe": "default-helper-build-reuse",
+    "same_token": true,
+    "broker_mint_calls": 1,
+    "durable_cache_files": 1,
+    "cache_contains_token": true,
+    "scope": {
+      "repositories": [
+        "theorem-cli"
+      ],
+      "permissions": {
+        "contents": "read",
+        "metadata": "read"
+      }
+    }
+  }
+]

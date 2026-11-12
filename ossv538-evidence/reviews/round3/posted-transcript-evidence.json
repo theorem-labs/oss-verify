@@ -1,0 +1,640 @@
+{
+  "through_jsonl_line": 283,
+  "sha256": "96d9fb7fe808bcd0729d3f3e430d1102d6cfad449e5d84007c792d6493326ce5",
+  "turns": [
+    {
+      "turn": 1,
+      "line": 11,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 5,
+      "parts": {
+        "call_": 5,
+        "fc_": 5
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 2,
+      "line": 22,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 6,
+      "parts": {
+        "call_": 6,
+        "fc_": 6
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 3,
+      "line": 35,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 6,
+      "parts": {
+        "call_": 6,
+        "fc_": 6
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 4,
+      "line": 48,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 6,
+      "parts": {
+        "call_": 6,
+        "fc_": 6
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 5,
+      "line": 61,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 6,
+      "parts": {
+        "call_": 6,
+        "fc_": 6
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 6,
+      "line": 74,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 7,
+      "line": 77,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 6,
+      "parts": {
+        "call_": 6,
+        "fc_": 6
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 8,
+      "line": 90,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 6,
+      "parts": {
+        "call_": 6,
+        "fc_": 6
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 9,
+      "line": 103,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 10,
+      "line": 106,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 6,
+      "parts": {
+        "call_": 6,
+        "fc_": 6
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 11,
+      "line": 119,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 12,
+      "line": 122,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 13,
+      "line": 125,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 6,
+      "parts": {
+        "call_": 6,
+        "fc_": 6
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 14,
+      "line": 138,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 5,
+      "parts": {
+        "call_": 5,
+        "fc_": 5
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 15,
+      "line": 149,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 16,
+      "line": 152,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 4,
+      "parts": {
+        "call_": 4,
+        "fc_": 4
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 17,
+      "line": 162,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 6,
+      "parts": {
+        "call_": 6,
+        "fc_": 6
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 18,
+      "line": 175,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 19,
+      "line": 178,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 20,
+      "line": 182,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 21,
+      "line": 186,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 22,
+      "line": 189,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 5,
+      "parts": {
+        "call_": 5,
+        "fc_": 5
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 23,
+      "line": 200,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 24,
+      "line": 203,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 25,
+      "line": 206,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 26,
+      "line": 209,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 27,
+      "line": 212,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 3,
+      "parts": {
+        "call_": 3,
+        "fc_": 3
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 28,
+      "line": 219,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 29,
+      "line": 222,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 30,
+      "line": 225,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 31,
+      "line": 228,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 3,
+      "parts": {
+        "call_": 3,
+        "fc_": 3
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 32,
+      "line": 235,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 33,
+      "line": 238,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 34,
+      "line": 241,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 35,
+      "line": 244,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 36,
+      "line": 247,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 37,
+      "line": 250,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 38,
+      "line": 253,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 2,
+      "parts": {
+        "call_": 2,
+        "fc_": 2
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 39,
+      "line": 258,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 40,
+      "line": 261,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 41,
+      "line": 264,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 42,
+      "line": 267,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 43,
+      "line": 270,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 44,
+      "line": 273,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 45,
+      "line": 276,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 46,
+      "line": 279,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    },
+    {
+      "turn": 47,
+      "line": 282,
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "slots": 1,
+      "parts": {
+        "call_": 1,
+        "fc_": 1
+      },
+      "absent_ids": 0
+    }
+  ],
+  "metadata_counts": [
+    {
+      "provider": "model-gateway-openai",
+      "api": "openai-responses",
+      "model": "openai/gpt-6.1-sol",
+      "count": 47
+    }
+  ],
+  "assistant_id_components": {
+    "call_": 112,
+    "fc_": 112
+  },
+  "tool_result_slots": 111,
+  "tool_result_components": {
+    "call_": 111,
+    "fc_": 111
+  },
+  "absent_fields": {
+    "provider": 0,
+    "api": 0,
+    "model": 0
+  },
+  "at": "2026-11-12T04:56:57.459613+00:00"
+}

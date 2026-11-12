@@ -1,0 +1,34 @@
+[
+  {
+    "mode": "body",
+    "container_exit": 1,
+    "container_auth": true,
+    "container_transport": false,
+    "container_end": [
+      "  there. A private repository of ours needs a row in infra/private-libraries.tsv and",
+      "  --mount=type=secret,id=oss-verify-git-token on this RUN (docs/build-contract.md). git said:",
+      "    remote: upstream connection permission denied",
+      "    fatal: unable to access 'http://127.0.0.1:32781/secret.git/': The requested URL returned error: 503"
+    ],
+    "container_other_path_got_token": false,
+    "host_exit": 1,
+    "host_message": "cannot read https://private.test/secret.git: it is private, it does not exist, or the build may not read it. The build asked with a read-only token minted for this build, and the server listed no refs, so no commit of it was looked up: this is not a missing commit. https://private.test/secret is not in infra/private-libraries.tsv, so no token was minted for it; a private repository of ours needs a row there. git said: git -c credential.helper= ... exited 128: remote: upstream connection permission denied\nfatal: unable to access 'http://127.0.0.1:32781/secret.git/': The requested URL returned error: 503",
+    "host_other_path_got_token": false
+  },
+  {
+    "mode": "redirect",
+    "container_exit": 1,
+    "container_auth": true,
+    "container_transport": false,
+    "container_end": [
+      "  commit. GitHub answers a private repository you may not read exactly as it answers one that is not",
+      "  there. A private repository of ours needs a row in infra/private-libraries.tsv and",
+      "  --mount=type=secret,id=oss-verify-git-token on this RUN (docs/build-contract.md). git said:",
+      "    fatal: could not read Username for 'http://127.0.0.1:32781/public.git': terminal prompts disabled"
+    ],
+    "container_other_path_got_token": false,
+    "host_exit": 0,
+    "host_message": "success",
+    "host_other_path_got_token": true
+  }
+]

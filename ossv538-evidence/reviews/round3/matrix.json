@@ -1,0 +1,53 @@
+[
+  {
+    "name": "base-base",
+    "cwd": "/mnt/nvme/sami/clones/ossv538-base",
+    "argv": [
+      "/mnt/nvme/sami/clones/ossv538-scratch/venv/bin/python",
+      "-P",
+      "-m",
+      "pytest",
+      "-q",
+      "-p",
+      "no:cacheprovider",
+      "tools/tests"
+    ],
+    "exit": 0,
+    "tail": "........................................................................ [  4%]\n.................................................................sss [  8%]\nss.............................................ss..ssssssssssssss..................................................................... [ 16%]\n.ss.......................................................... [ 20%]\n............................................................................... [ 25%]\n........................................................................ [ 29%]\n........................................................................................ [ 34%]\n.............................. [ 36%]\n................................... [ 38%]\n........................................................................ [ 43%]\n.................................................................................................ssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 52%]\nssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 56%]\nssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 60%]\nssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 65%]\nssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 69%]\nssssssssssssssssss.s..sssssssssssssssssssssssssssssssssssssssssssssss... [ 74%]\n.s.sssssssssssssssssssssssssssssssssssssssssssss.....sssss..ssssssssssss [ 78%]\nssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 82%]\nssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 87%]\nsssssssssssssssssssssssssssssssssssssss................................. [ 91%]\n........................................................................ [ 95%]\n....................................................................     [100%]\n973 passed, 677 skipped, 434 subtests passed in 297.56s (0:04:57)\n"
+  },
+  {
+    "name": "head-head",
+    "cwd": "/mnt/nvme/sami/clones/ossv538",
+    "argv": [
+      "/mnt/nvme/sami/clones/ossv538-scratch/venv/bin/python",
+      "-P",
+      "-m",
+      "pytest",
+      "-q",
+      "-p",
+      "no:cacheprovider",
+      "tools/tests"
+    ],
+    "exit": 0,
+    "tail": "........................................................................ [  4%]\n.................................................................sss [  8%]\nss.............................................ss..ssssssssssssss..................................................................... [ 15%]\n.ss.......................................................... [ 19%]\n............................................................................... [ 24%]\n........................................................................ [ 28%]\n........................................................................................ [ 33%]\n.............................. [ 35%]\n................................... [ 37%]\n............................................................................ [ 41%]\n........................................................................ [ 45%]\n............................................................................... [ 50%]\n..........ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 54%]\nssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 58%]\nssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 62%]\nssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 67%]\nssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 71%]\nssssssssss.s..sssssssssssssssssssssssssssssssssssssssssssssss....s.sssss [ 75%]\nssssssssssssssssssssssssssssssssssssssss.....sssss..ssssssssssssssssssss [ 79%]\nssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 83%]\nssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 88%]\nsssssssssssssssssssssssssssssss......................................... [ 92%]\n........................................................................ [ 96%]\n............................................................             [100%]\n1041 passed, 677 skipped, 502 subtests passed in 325.66s (0:05:25)\n"
+  },
+  {
+    "name": "base-head",
+    "cwd": "/mnt/nvme/sami/clones/ossv538-scratch/review3/base-code-head-tests",
+    "argv": [
+      "/mnt/nvme/sami/clones/ossv538-scratch/venv/bin/python",
+      "-P",
+      "-m",
+      "pytest",
+      "-q",
+      "-p",
+      "no:cacheprovider",
+      "tools/tests/test_private_fetch.py",
+      "tools/tests/test_check.py",
+      "tools/tests/test_print_toolchain.py",
+      "tools/tests/test_source_pinning.py"
+    ],
+    "exit": 2,
+    "tail": "\n==================================== ERRORS ====================================\n______________ ERROR collecting tools/tests/test_private_fetch.py ______________\ntools/tests/test_private_fetch.py:462: in <module>\n    class TheMountAndTheList(unittest.TestCase):\ntools/tests/test_private_fetch.py:469: in TheMountAndTheList\n    MOUNTED = f\"FROM x\\nRUN {check_build.SECRET_MOUNT} fetch-commit $SRC/x\\n\"\n                             ^^^^^^^^^^^^^^^^^^^^^^^^\nE   AttributeError: module 'check_build' has no attribute 'SECRET_MOUNT'\n=========================== short test summary info ============================\nERROR tools/tests/test_private_fetch.py - AttributeError: module 'check_build' has no attribute 'SECRET_MOUNT'\n!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\n1 error in 0.33s\n"
+  }
+]

@@ -1,0 +1,7 @@
+#!/bin/sh
+# OSSV-538 evidence only: a token command that prints a well-formed but wrong token, so the fetch fails inside the
+# build and the failed fetch's own error text can be searched for it. It records what it printed.
+set -eu
+token="ghs_WRONGTOKEN$(printf '%s' "$1$2" | sha256sum | cut -c1-40)"
+printf '%s' "$token" > "$RECORD_TOKEN_TO"
+printf '%s\n' "$token"

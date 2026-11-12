@@ -1,0 +1,43 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile.wrapped-fetch
+#1 transferring dockerfile: 246B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/busybox:stable
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [stage-0 1/4] FROM docker.io/library/busybox:stable@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+#4 resolve docker.io/library/busybox:stable@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 0.0s done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 33B done
+#5 DONE 0.0s
+
+#6 [stage-0 2/4] COPY fetch-commit /usr/local/bin/fetch-commit
+#6 CACHED
+
+#7 [stage-0 3/4] RUN --mount=type=secret,id=oss-verify-git-token fetch-commit /src/x
+#7 1.368 fetch-saw-secret
+#7 DONE 1.4s
+
+#8 [stage-0 4/4] RUN env fetch-commit /src/y
+#8 1.186 fetch-has-no-secret
+#8 ERROR: process "/bin/sh -c env fetch-commit /src/y" did not complete successfully: exit code: 19
+------
+ > [stage-0 4/4] RUN env fetch-commit /src/y:
+1.186 fetch-has-no-secret
+------
+Dockerfile.wrapped-fetch:5
+--------------------
+   3 |     ENV REVIEW3_CASE=wrapped-fetch
+   4 |     RUN --mount=type=secret,id=oss-verify-git-token fetch-commit /src/x
+   5 | >>> RUN env fetch-commit /src/y
+   6 |     
+--------------------
+ERROR: failed to build: failed to solve: process "/bin/sh -c env fetch-commit /src/y" did not complete successfully: exit code: 19

@@ -1,0 +1,127 @@
+cjson-badtoken: warning: primary_contact is n/a: only a project we seeded may say that, and only until a maintainer adopts it
+
+[03:40:56] mint a read-only token for https://github.com/theorem-labs/cjson-ossv267
+infra/private-libraries.tsv: the calibration pair of the verified-SDLC eval: one feature built twice from one base, on cJSON v1.7.18 (dispatch://OSSV-267)
+the token is read-only, is for this repository and this build only, and goes to docker build as the secret oss-verify-git-token; it is in no build argument, no layer, no manifest and no log
+
+[03:40:56] resolve https://github.com/theorem-labs/cjson-ossv267#acc76239bee01d8e9c858ae2cab296704e52d916
+acc76239bee01d8e9c858ae2cab296704e52d916 is acc76239bee01d8e9c858ae2cab296704e52d916
+toolchain: ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain@sha256:6a6b4816865c7ec61801ae0fcab6d9c81a599ffcb20616576a9c668abd8b0a7b (the newest for c)
+
+[03:40:56] docker build: the builder (oss-verify-base-builder:c1a617e41f3df00e-6a6b4816865c), FROM ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain@sha256:6a6b4816865c7ec61801ae0fcab6d9c81a599ffcb20616576a9c668abd8b0a7b
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 2.71kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain@sha256:6a6b4816865c7ec61801ae0fcab6d9c81a599ffcb20616576a9c668abd8b0a7b
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [stage-0  1/10] FROM ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain@sha256:6a6b4816865c7ec61801ae0fcab6d9c81a599ffcb20616576a9c668abd8b0a7b
+#4 resolve ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain@sha256:6a6b4816865c7ec61801ae0fcab6d9c81a599ffcb20616576a9c668abd8b0a7b 0.0s done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 1.75kB done
+#5 DONE 0.0s
+
+#6 [stage-0  8/10] COPY compile fetch-commit git-credential-oss-verify lay-out-sources /usr/local/bin/
+#6 CACHED
+
+#7 [stage-0  2/10] RUN --mount=type=bind,source=distrust-roots.py,target=/tmp/distrust-roots.py python3 /tmp/distrust-roots.py
+#7 CACHED
+
+#8 [stage-0  7/10] COPY go/ /usr/local/lib/oss-verify/go/
+#8 CACHED
+
+#9 [stage-0  6/10] COPY python/ /usr/local/lib/oss-verify/python/
+#9 CACHED
+
+#10 [stage-0  3/10] COPY toolchain.sh link-fuzz-target record-compile recipes.sh release-target.sh /usr/local/lib/oss-verify/
+#10 CACHED
+
+#11 [stage-0  5/10] COPY rust/ /usr/local/lib/oss-verify/rust/
+#11 CACHED
+
+#12 [stage-0  9/10] RUN chmod 0755 /usr/local/bin/compile /usr/local/bin/fetch-commit /usr/local/bin/lay-out-sources                /usr/local/bin/git-credential-oss-verify                /usr/local/lib/oss-verify/link-fuzz-target /usr/local/lib/oss-verify/record-compile                /usr/local/lib/oss-verify/go/compile-go  && mkdir -p /src /work /out
+#12 CACHED
+
+#13 [stage-0  4/10] COPY driver/ /usr/local/lib/oss-verify/driver/
+#13 CACHED
+
+#14 [stage-0 10/10] WORKDIR /src
+#14 CACHED
+
+#15 exporting to image
+#15 exporting layers done
+#15 exporting manifest sha256:3555fd45900a567539ff9c33521c570df04db83aaf7fd49ffa94306c22de24cf done
+#15 exporting config sha256:a1ecb4979bd06f2d6b6516d4ff09f63ce0167f729ef4767a57643bf6a588c18e done
+#15 exporting attestation manifest sha256:f4ca4ea03ccd4ca3b30db602b72ff79db272d2e3151af12dc74a93eed4c60ca9 0.0s done
+#15 exporting manifest list sha256:64ec798f90edbcca04999286f40af8692925a7cea8f4fc6913fe39cbda48219e
+#15 exporting manifest list sha256:64ec798f90edbcca04999286f40af8692925a7cea8f4fc6913fe39cbda48219e 0.0s done
+#15 naming to docker.io/library/oss-verify-base-builder:c1a617e41f3df00e-6a6b4816865c done
+#15 unpacking to docker.io/library/oss-verify-base-builder:c1a617e41f3df00e-6a6b4816865c done
+#15 DONE 0.1s
+Dockerfile: the one beside project.yaml; the build context is projects/cjson-badtoken/
+
+[03:40:57] docker build: the project (oss-verify-check/cjson-badtoken:acc76239bee0-da2703a5e24d); the network is available
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 506B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/oss-verify-base-builder:c1a617e41f3df00e-6a6b4816865c
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [internal] load build context
+#4 transferring context: 30B done
+#4 DONE 0.0s
+
+#5 [stage-0 1/4] FROM docker.io/library/oss-verify-base-builder:c1a617e41f3df00e-6a6b4816865c@sha256:64ec798f90edbcca04999286f40af8692925a7cea8f4fc6913fe39cbda48219e
+#5 resolve docker.io/library/oss-verify-base-builder:c1a617e41f3df00e-6a6b4816865c@sha256:64ec798f90edbcca04999286f40af8692925a7cea8f4fc6913fe39cbda48219e 0.0s done
+#5 DONE 0.0s
+
+#6 [stage-0 2/4] RUN --mount=type=secret,id=oss-verify-git-token fetch-commit /src/cjson
+#6 1.189 remote: Invalid username or token. Password authentication is not supported for Git operations.
+#6 1.189 fatal: Authentication failed for 'https://github.com/theorem-labs/cjson-ossv267/'
+#6 1.486 fetch-commit: not authorised to read https://github.com/theorem-labs/cjson-ossv267, or it does not exist. This build fetched it with a read-only token minted for this build.
+#6 1.486   The server did not list the repository's refs, so acc76239bee01d8e9c858ae2cab296704e52d916 was never looked up: this is not a missing
+#6 1.486   commit. GitHub answers a private repository you may not read exactly as it answers one that is not
+#6 1.486   there. A private repository of ours needs a row in infra/private-libraries.tsv and
+#6 1.486   --mount=type=secret,id=oss-verify-git-token on this RUN (docs/build-contract.md). git said:
+#6 1.489     remote: Invalid username or token. Password authentication is not supported for Git operations.
+#6 1.489     fatal: Authentication failed for 'https://github.com/theorem-labs/cjson-ossv267/'
+#6 ERROR: process "/bin/sh -c fetch-commit $SRC/cjson" did not complete successfully: exit code: 1
+------
+ > [stage-0 2/4] RUN --mount=type=secret,id=oss-verify-git-token fetch-commit /src/cjson:
+1.189 remote: Invalid username or token. Password authentication is not supported for Git operations.
+1.189 fatal: Authentication failed for 'https://github.com/theorem-labs/cjson-ossv267/'
+1.486 fetch-commit: not authorised to read https://github.com/theorem-labs/cjson-ossv267, or it does not exist. This build fetched it with a read-only token minted for this build.
+1.486   The server did not list the repository's refs, so acc76239bee01d8e9c858ae2cab296704e52d916 was never looked up: this is not a missing
+1.486   commit. GitHub answers a private repository you may not read exactly as it answers one that is not
+1.486   there. A private repository of ours needs a row in infra/private-libraries.tsv and
+1.486   --mount=type=secret,id=oss-verify-git-token on this RUN (docs/build-contract.md). git said:
+1.489     remote: Invalid username or token. Password authentication is not supported for Git operations.
+1.489     fatal: Authentication failed for 'https://github.com/theorem-labs/cjson-ossv267/'
+------
+Dockerfile:10
+--------------------
+   8 |     ARG REPO
+   9 |     ARG COMMIT
+  10 | >>> RUN --mount=type=secret,id=oss-verify-git-token fetch-commit $SRC/cjson
+  11 |     COPY build.sh $SRC/
+  12 |     WORKDIR $SRC/cjson
+--------------------
+ERROR: failed to build: failed to solve: process "/bin/sh -c fetch-commit $SRC/cjson" did not complete successfully: exit code: 1
+
+BUILD FAILED: docker build of the project's Dockerfile failed

@@ -1,0 +1,7 @@
+{
+  "container_exit_code": 1,
+  "container_calls_network_refusal_unauthorised": true,
+  "container_keeps_raw_connect_failure": true,
+  "host_preserves_connect_failure": true,
+  "host_calls_it_auth": false
+}

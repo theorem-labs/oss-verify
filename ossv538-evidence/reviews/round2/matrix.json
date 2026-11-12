@@ -1,0 +1,26 @@
+[
+  {
+    "leg": "base-base",
+    "cwd": "/mnt/nvme/sami/clones/ossv538-base",
+    "command": "env PYTHONDONTWRITEBYTECODE=1 TMPDIR=/mnt/nvme/sami/clones/ossv538-scratch/review2/tmp /mnt/nvme/sami/clones/ossv538-scratch/venv/bin/python -P -m pytest -q -p no:cacheprovider tools/tests",
+    "exit": 0,
+    "elapsed": 446.2495266830083,
+    "summary": "973 passed, 677 skipped, 434 subtests passed in 445.76s (0:07:25)"
+  },
+  {
+    "leg": "head-head",
+    "cwd": "/mnt/nvme/sami/clones/ossv538",
+    "command": "env PYTHONDONTWRITEBYTECODE=1 TMPDIR=/mnt/nvme/sami/clones/ossv538-scratch/review2/tmp /mnt/nvme/sami/clones/ossv538-scratch/venv/bin/python -P -m pytest -q -p no:cacheprovider tools/tests",
+    "exit": 0,
+    "elapsed": 278.28642473206855,
+    "summary": "1029 passed, 677 skipped, 502 subtests passed in 277.52s (0:04:37)"
+  },
+  {
+    "leg": "base-head",
+    "cwd": "/mnt/nvme/sami/clones/ossv538-scratch/review2/base-code-head-tests",
+    "command": "env PYTHONDONTWRITEBYTECODE=1 TMPDIR=/mnt/nvme/sami/clones/ossv538-scratch/review2/tmp /mnt/nvme/sami/clones/ossv538-scratch/venv/bin/python -P -m pytest -q -p no:cacheprovider tools/tests/test_private_fetch.py tools/tests/test_check.py tools/tests/test_print_toolchain.py tools/tests/test_source_pinning.py",
+    "exit": 2,
+    "elapsed": 0.9832957619801164,
+    "summary": "1 error in 0.57s"
+  }
+]

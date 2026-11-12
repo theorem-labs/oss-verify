@@ -1,0 +1,15 @@
+[
+  {
+    "probe": "real-stream-split",
+    "split": 24,
+    "exit_code": 0,
+    "exact_redaction": false,
+    "unredacted_suffix_length": 20
+  },
+  {
+    "probe": "inherited-git-trace-file",
+    "resolved_expected_commit": true,
+    "trace_created": true,
+    "recoverable_basic_credential_in_trace": true
+  }
+]

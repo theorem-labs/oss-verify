@@ -1,0 +1,164 @@
+cjson: warning: primary_contact is n/a: only a project we seeded may say that, and only until a maintainer adopts it
+
+[04:42:10] resolve https://github.com/DaveGamble/cJSON#v1.7.18
+v1.7.18 is acc76239bee01d8e9c858ae2cab296704e52d916
+toolchain: ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain@sha256:6a6b4816865c7ec61801ae0fcab6d9c81a599ffcb20616576a9c668abd8b0a7b (the newest for c)
+
+[04:42:10] docker build: the builder (oss-verify-base-builder:63aeed05fba747cf-6a6b4816865c), FROM ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain@sha256:6a6b4816865c7ec61801ae0fcab6d9c81a599ffcb20616576a9c668abd8b0a7b
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 2.63kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain@sha256:6a6b4816865c7ec61801ae0fcab6d9c81a599ffcb20616576a9c668abd8b0a7b
+#2 DONE 0.5s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [stage-0  1/10] FROM ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain@sha256:6a6b4816865c7ec61801ae0fcab6d9c81a599ffcb20616576a9c668abd8b0a7b
+#4 resolve ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain@sha256:6a6b4816865c7ec61801ae0fcab6d9c81a599ffcb20616576a9c668abd8b0a7b done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 259.99kB 0.0s done
+#5 DONE 0.0s
+
+#6 [stage-0  2/10] RUN --mount=type=bind,source=distrust-roots.py,target=/tmp/distrust-roots.py python3 /tmp/distrust-roots.py
+#6 CACHED
+
+#7 [stage-0  5/10] COPY rust/ /usr/local/lib/oss-verify/rust/
+#7 CACHED
+
+#8 [stage-0  9/10] RUN chmod 0755 /usr/local/bin/compile /usr/local/bin/fetch-commit /usr/local/bin/lay-out-sources                /usr/local/lib/oss-verify/link-fuzz-target /usr/local/lib/oss-verify/record-compile                /usr/local/lib/oss-verify/go/compile-go  && mkdir -p /src /work /out
+#8 CACHED
+
+#9 [stage-0  6/10] COPY python/ /usr/local/lib/oss-verify/python/
+#9 CACHED
+
+#10 [stage-0  7/10] COPY go/ /usr/local/lib/oss-verify/go/
+#10 CACHED
+
+#11 [stage-0  8/10] COPY compile fetch-commit lay-out-sources /usr/local/bin/
+#11 CACHED
+
+#12 [stage-0  3/10] COPY toolchain.sh link-fuzz-target record-compile recipes.sh release-target.sh /usr/local/lib/oss-verify/
+#12 CACHED
+
+#13 [stage-0  4/10] COPY driver/ /usr/local/lib/oss-verify/driver/
+#13 CACHED
+
+#14 [stage-0 10/10] WORKDIR /src
+#14 CACHED
+
+#15 exporting to image
+#15 exporting layers done
+#15 exporting manifest sha256:380e06b0e6d86befea6ea2a8a04f7f0b1ec33fdca61ab1b49cc643248207fe67 done
+#15 exporting config sha256:07e8bc7113a564a7555b6de5e5221cf9f546d7d28fbd538db909d4afabaad539 done
+#15 exporting attestation manifest sha256:4ccd34a29d6c03714f5ff05c84a25d2c1e3c1d80518482c3337eed47fcd72afb
+#15 exporting attestation manifest sha256:4ccd34a29d6c03714f5ff05c84a25d2c1e3c1d80518482c3337eed47fcd72afb 0.0s done
+#15 exporting manifest list sha256:e91e177c2b1a9278a4e8ee61270beacc34f1e67a801e49ea9d527f9e91fcf93a 0.0s done
+#15 naming to docker.io/library/oss-verify-base-builder:63aeed05fba747cf-6a6b4816865c done
+#15 unpacking to docker.io/library/oss-verify-base-builder:63aeed05fba747cf-6a6b4816865c done
+#15 DONE 0.1s
+Dockerfile: the one beside project.yaml; the build context is projects/cjson/
+
+[04:42:11] docker build: the project (oss-verify-check/cjson:acc76239bee0-7819172e73b3); the network is available
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 348B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/oss-verify-base-builder:63aeed05fba747cf-6a6b4816865c
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [internal] load build context
+#4 transferring context: 1.57kB done
+#4 DONE 0.0s
+
+#5 [1/4] FROM docker.io/library/oss-verify-base-builder:63aeed05fba747cf-6a6b4816865c@sha256:e91e177c2b1a9278a4e8ee61270beacc34f1e67a801e49ea9d527f9e91fcf93a
+#5 resolve docker.io/library/oss-verify-base-builder:63aeed05fba747cf-6a6b4816865c@sha256:e91e177c2b1a9278a4e8ee61270beacc34f1e67a801e49ea9d527f9e91fcf93a 0.0s done
+#5 DONE 0.1s
+
+#6 [2/4] RUN fetch-commit /src/cjson
+#6 1.947 fetch-commit: https://github.com/DaveGamble/cJSON at acc76239bee01d8e9c858ae2cab296704e52d916 in /src/cjson
+#6 DONE 2.0s
+
+#7 [3/4] COPY build.sh /src/
+#7 DONE 0.1s
+
+#8 [4/4] WORKDIR /src/cjson
+#8 DONE 0.1s
+
+#9 exporting to image
+#9 exporting layers
+#9 exporting layers 0.2s done
+#9 exporting manifest sha256:cdcf35d5089e77984f97105ffd18d46ef27b9ea033afb021460faa5588aee4a4 0.0s done
+#9 exporting config sha256:2c107d4a5e8c6355532c9c4d9616c1f55bd4172d487dea548c73a4a8329e9322 0.0s done
+#9 exporting attestation manifest sha256:f4f05c6f015fae9c67356e6b951175cd4c2013d61f088e8bf6917beedc259df4 0.0s done
+#9 exporting manifest list sha256:69be30ec1518c0a461b38595da9d1bce72d63cfdfa584a5ff55b6707b3d63de1 0.0s done
+#9 naming to docker.io/oss-verify-check/cjson:acc76239bee0-7819172e73b3 done
+#9 unpacking to docker.io/oss-verify-check/cjson:acc76239bee0-7819172e73b3
+#9 unpacking to docker.io/oss-verify-check/cjson:acc76239bee0-7819172e73b3 0.2s done
+#9 DONE 0.5s
+
+[04:42:15] compile: the plain build (SANITIZER=none), with no network
+compile: the plain build (SANITIZER=none)
+clang: warning: argument unused during compilation: '-fno-plt' [-Wunused-command-line-argument]
+clang: warning: argument unused during compilation: '-fno-plt' [-Wunused-command-line-argument]
+clang: warning: argument unused during compilation: '-fno-plt' [-Wunused-command-line-argument]
+clang: warning: argument unused during compilation: '-fno-plt' [-Wunused-command-line-argument]
+clang: warning: argument unused during compilation: '-fno-plt' [-Wunused-command-line-argument]
+clang: warning: argument unused during compilation: '-fno-plt' [-Wunused-command-line-argument]
+clang: warning: argument unused during compilation: '-fno-plt' [-Wunused-command-line-argument]
+compile: CC=/tmp/ov/bin/riscv64-linux-musl-clang
+compile: CFLAGS=-march=rv64g -mabi=lp64d -Os -g -ffunction-sections -fdata-sections -fno-stack-protector -Wdate-time -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-reallocarray -fno-builtin-free -fno-builtin-aligned_alloc -fno-builtin-posix_memalign -fno-builtin-memalign -fno-builtin-valloc -fno-builtin-strdup -fno-builtin-strndup -Wno-unused-command-line-argument -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+compile: CXXFLAGS=-march=rv64g -mabi=lp64d -Os -g -ffunction-sections -fdata-sections -fno-stack-protector -Wdate-time -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-reallocarray -fno-builtin-free -fno-builtin-aligned_alloc -fno-builtin-posix_memalign -fno-builtin-memalign -fno-builtin-valloc -fno-builtin-strdup -fno-builtin-strndup -Wno-unused-command-line-argument -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION -stdlib=libc++
++ build=/src/cjson-cjson_read_fuzzer
++ mkdir -p /src/cjson-cjson_read_fuzzer/src /src/cjson-cjson_read_fuzzer/cmk
++ cp -a /src/cjson/. /src/cjson-cjson_read_fuzzer/src/
++ cd /src/cjson-cjson_read_fuzzer/cmk
++ cmake /src/cjson-cjson_read_fuzzer/src -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DENABLE_CJSON_TEST=OFF -DENABLE_CUSTOM_COMPILER_FLAGS=OFF
+CMake Deprecation Warning at CMakeLists.txt:2 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+
+
+-- The C compiler identification is Clang 20.1.8
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /tmp/ov/bin/riscv64-linux-musl-clang - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Performing Test FLAG_SUPPORTED_fvisibilityhidden
+-- Performing Test FLAG_SUPPORTED_fvisibilityhidden - Success
+-- Configuring done (1.0s)
+-- Generating done (0.0s)
+-- Build files have been written to: /src/cjson-cjson_read_fuzzer/cmk
+++ nproc
++ make -j288
+[ 50%] Building C object CMakeFiles/cjson.dir/cJSON.c.o
+[100%] Linking C static library libcjson.a
+[100%] Built target cjson
++ /tmp/ov/bin/riscv64-linux-musl-clang -march=rv64g -mabi=lp64d -Os -g -ffunction-sections -fdata-sections -fno-stack-protector -Wdate-time -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-reallocarray -fno-builtin-free -fno-builtin-aligned_alloc -fno-builtin-posix_memalign -fno-builtin-memalign -fno-builtin-valloc -fno-builtin-strdup -fno-builtin-strndup -Wno-unused-command-line-argument -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION -c /src/cjson-cjson_read_fuzzer/src/fuzzing/cjson_read_fuzzer.c -o /work/cjson_read_fuzzer.o
++ /tmp/ov/bin/riscv64-linux-musl-clang -march=rv64g -mabi=lp64d -Os -g -ffunction-sections -fdata-sections -fno-stack-protector -Wdate-time -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-reallocarray -fno-builtin-free -fno-builtin-aligned_alloc -fno-builtin-posix_memalign -fno-builtin-memalign -fno-builtin-valloc -fno-builtin-strdup -fno-builtin-strndup -Wno-unused-command-line-argument -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION /work/cjson_read_fuzzer.o -o /out/cjson_read_fuzzer /tmp/ov/libFuzzingEngine.a /src/cjson-cjson_read_fuzzer/cmk/libcjson.a
+compile: fuzz target cjson_read_fuzzer
+compile: 1 fuzz target(s) in /out, the plain build
+
+[04:42:21] find the fuzz targets
+plain: cjson_read_fuzzer
+
+[04:42:22] built
+  out/cjson_read_fuzzer/cjson_read_fuzzer.plain                      72,792 bytes      62,440 .text  static   sha256 b40ed189a37beb50da46f04a457ec144b05319a845fa3b0639d7a117ffd1696d
+manifest: /mnt/nvme/sami/clones/ossv538-scratch/review3/public-base/manifest.yaml

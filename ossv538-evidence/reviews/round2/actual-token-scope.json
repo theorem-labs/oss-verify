@@ -1,0 +1,32 @@
+[
+  {
+    "repository": "cjson-ossv267",
+    "installation_repositories_status": 200,
+    "total_count": 1,
+    "only_expected_repository": true,
+    "own_repository_status": 200,
+    "own_permissions": {
+      "admin": false,
+      "maintain": false,
+      "push": false,
+      "triage": false,
+      "pull": false
+    },
+    "other_private_repository_status": 404
+  },
+  {
+    "repository": "theorem-cli",
+    "installation_repositories_status": 200,
+    "total_count": 1,
+    "only_expected_repository": true,
+    "own_repository_status": 200,
+    "own_permissions": {
+      "admin": false,
+      "maintain": false,
+      "push": false,
+      "triage": false,
+      "pull": false
+    },
+    "other_private_repository_status": 404
+  }
+]

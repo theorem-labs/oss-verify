@@ -1,0 +1,15 @@
+{
+  "comment_url": "https://github.com/theorem-labs/oss-verify/pull/186#issuecomment-6813305547",
+  "live_head": "9137f1b3c812bd6dbf8a894550670fc7310332ed",
+  "body_exact_match": true,
+  "body_sha256": "57532724477d7cd3bd8aa0e4db740874423b89ba60323e4e349037ab301750f0",
+  "assistant_turns_in_snapshot": 34,
+  "tool_id_shapes": {
+    "tool_calls": 96,
+    "call_prefix": 96,
+    "fc_component": 96,
+    "toolu_prefix": 0,
+    "absent_id": 0,
+    "other_shape": 0
+  }
+}

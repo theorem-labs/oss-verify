@@ -1,0 +1,170 @@
+[
+  {
+    "case": "normal",
+    "command": "REVIEW2_SYNTHETIC_SECRET=synthetic-secret docker build --progress=plain --secret id=oss-verify-git-token,env=REVIEW2_SYNTHETIC_SECRET -f /mnt/nvme/sami/clones/ossv538-scratch/review2/docker-parser/Dockerfile.normal /mnt/nvme/sami/clones/ossv538-scratch/review2/docker-parser",
+    "private_guard_accepted": true,
+    "docker_exit": 0,
+    "saw_secret": true,
+    "no_secret": false,
+    "end": [
+      "#8 unpacking to moby-dangling@sha256:45292040a97fda82a6936f56fac919ee15874549d8a8001d217193d850288229 0.1s done",
+      "#8 DONE 0.3s"
+    ]
+  },
+  {
+    "case": "string-only",
+    "command": "REVIEW2_SYNTHETIC_SECRET=synthetic-secret docker build --progress=plain --secret id=oss-verify-git-token,env=REVIEW2_SYNTHETIC_SECRET -f /mnt/nvme/sami/clones/ossv538-scratch/review2/docker-parser/Dockerfile.string-only /mnt/nvme/sami/clones/ossv538-scratch/review2/docker-parser",
+    "private_guard_accepted": true,
+    "docker_exit": 1,
+    "saw_secret": false,
+    "no_secret": true,
+    "end": [
+      "--------------------",
+      "ERROR: failed to build: failed to solve: process \"/bin/sh -c fetch-commit /src/x\" did not complete successfully: exit code: 19"
+    ]
+  },
+  {
+    "case": "heredoc-mounted",
+    "command": "REVIEW2_SYNTHETIC_SECRET=synthetic-secret docker build --progress=plain --secret id=oss-verify-git-token,env=REVIEW2_SYNTHETIC_SECRET -f /mnt/nvme/sami/clones/ossv538-scratch/review2/docker-parser/Dockerfile.heredoc-mounted /mnt/nvme/sami/clones/ossv538-scratch/review2/docker-parser",
+    "private_guard_accepted": false,
+    "docker_exit": 0,
+    "saw_secret": true,
+    "no_secret": false,
+    "end": [
+      "#8 unpacking to moby-dangling@sha256:4134bbc0f87d46c70100e55b1ae75aeb44ae1cfd41706f4a6cfe80b496b2b530 0.1s done",
+      "#8 DONE 0.3s"
+    ]
+  },
+  {
+    "case": "heredoc-text",
+    "command": "REVIEW2_SYNTHETIC_SECRET=synthetic-secret docker build --progress=plain --secret id=oss-verify-git-token,env=REVIEW2_SYNTHETIC_SECRET -f /mnt/nvme/sami/clones/ossv538-scratch/review2/docker-parser/Dockerfile.heredoc-text /mnt/nvme/sami/clones/ossv538-scratch/review2/docker-parser",
+    "private_guard_accepted": true,
+    "docker_exit": 1,
+    "saw_secret": false,
+    "no_secret": true,
+    "end": [
+      "--------------------",
+      "ERROR: failed to build: failed to solve: process \"/bin/sh -c fetch-commit /src/x\" did not complete successfully: exit code: 19"
+    ]
+  },
+  {
+    "case": "network-first",
+    "command": "REVIEW2_SYNTHETIC_SECRET=synthetic-secret docker build --progress=plain --secret id=oss-verify-git-token,env=REVIEW2_SYNTHETIC_SECRET -f /mnt/nvme/sami/clones/ossv538-scratch/review2/docker-parser/Dockerfile.network-first /mnt/nvme/sami/clones/ossv538-scratch/review2/docker-parser",
+    "private_guard_accepted": false,
+    "docker_exit": 0,
+    "saw_secret": true,
+    "no_secret": false,
+    "end": [
+      "#8 unpacking to moby-dangling@sha256:50a0b1c30ff852187c1357395f0b44897c9d1d81eca38c793fc6c8d7b53496c2 0.1s done",
+      "#8 DONE 0.4s"
+    ]
+  },
+  {
+    "case": "arg-id",
+    "command": "REVIEW2_SYNTHETIC_SECRET=synthetic-secret docker build --progress=plain --secret id=oss-verify-git-token,env=REVIEW2_SYNTHETIC_SECRET -f /mnt/nvme/sami/clones/ossv538-scratch/review2/docker-parser/Dockerfile.arg-id /mnt/nvme/sami/clones/ossv538-scratch/review2/docker-parser",
+    "private_guard_accepted": false,
+    "docker_exit": 0,
+    "saw_secret": true,
+    "no_secret": false,
+    "end": [
+      " \u001b[33m1 warning found (use docker --debug to expand):",
+      "\u001b[0m - SecretsUsedInArgOrEnv: Do not use ARG or ENV instructions for sensitive data (ARG \"SECRET_ID\") (line 4)"
+    ]
+  },
+  {
+    "case": "env-id",
+    "command": "REVIEW2_SYNTHETIC_SECRET=synthetic-secret docker build --progress=plain --secret id=oss-verify-git-token,env=REVIEW2_SYNTHETIC_SECRET -f /mnt/nvme/sami/clones/ossv538-scratch/review2/docker-parser/Dockerfile.env-id /mnt/nvme/sami/clones/ossv538-scratch/review2/docker-parser",
+    "private_guard_accepted": false,
+    "docker_exit": 0,
+    "saw_secret": true,
+    "no_secret": false,
+    "end": [
+      " \u001b[33m1 warning found (use docker --debug to expand):",
+      "\u001b[0m - SecretsUsedInArgOrEnv: Do not use ARG or ENV instructions for sensitive data (ENV \"SECRET_ID\") (line 4)"
+    ]
+  },
+  {
+    "case": "quoted-option",
+    "command": "REVIEW2_SYNTHETIC_SECRET=synthetic-secret docker build --progress=plain --secret id=oss-verify-git-token,env=REVIEW2_SYNTHETIC_SECRET -f /mnt/nvme/sami/clones/ossv538-scratch/review2/docker-parser/Dockerfile.quoted-option /mnt/nvme/sami/clones/ossv538-scratch/review2/docker-parser",
+    "private_guard_accepted": true,
+    "docker_exit": 1,
+    "saw_secret": false,
+    "no_secret": false,
+    "end": [
+      "--------------------",
+      "ERROR: failed to build: failed to solve: process \"/bin/sh -c \\\"--mount=type=secret,id=oss-verify-git-token\\\" fetch-commit /src/x\" did not complete successfully: exit code: 127"
+    ]
+  },
+  {
+    "case": "quoted-command",
+    "command": "REVIEW2_SYNTHETIC_SECRET=synthetic-secret docker build --progress=plain --secret id=oss-verify-git-token,env=REVIEW2_SYNTHETIC_SECRET -f /mnt/nvme/sami/clones/ossv538-scratch/review2/docker-parser/Dockerfile.quoted-command /mnt/nvme/sami/clones/ossv538-scratch/review2/docker-parser",
+    "private_guard_accepted": true,
+    "docker_exit": 0,
+    "saw_secret": true,
+    "no_secret": false,
+    "end": [
+      "#8 unpacking to moby-dangling@sha256:79e7a976ad74e5b99cf4a602750c44382b83c02fb16f0ab802a8df47200c2054 0.1s done",
+      "#8 DONE 0.3s"
+    ]
+  },
+  {
+    "case": "after-command",
+    "command": "REVIEW2_SYNTHETIC_SECRET=synthetic-secret docker build --progress=plain --secret id=oss-verify-git-token,env=REVIEW2_SYNTHETIC_SECRET -f /mnt/nvme/sami/clones/ossv538-scratch/review2/docker-parser/Dockerfile.after-command /mnt/nvme/sami/clones/ossv538-scratch/review2/docker-parser",
+    "private_guard_accepted": false,
+    "docker_exit": 1,
+    "saw_secret": false,
+    "no_secret": true,
+    "end": [
+      "--------------------",
+      "ERROR: failed to build: failed to solve: process \"/bin/sh -c fetch-commit /src/x --mount=type=secret,id=oss-verify-git-token\" did not complete successfully: exit code: 19"
+    ]
+  },
+  {
+    "case": "continued-fields",
+    "command": "REVIEW2_SYNTHETIC_SECRET=synthetic-secret docker build --progress=plain --secret id=oss-verify-git-token,env=REVIEW2_SYNTHETIC_SECRET -f /mnt/nvme/sami/clones/ossv538-scratch/review2/docker-parser/Dockerfile.continued-fields /mnt/nvme/sami/clones/ossv538-scratch/review2/docker-parser",
+    "private_guard_accepted": false,
+    "docker_exit": 0,
+    "saw_secret": true,
+    "no_secret": false,
+    "end": [
+      "#8 unpacking to moby-dangling@sha256:87cd50473a42829bb7e5701164db8cd998509e3ff38cf54b95546fed157966ed 0.1s done",
+      "#8 DONE 0.3s"
+    ]
+  },
+  {
+    "case": "escape-backtick",
+    "command": "REVIEW2_SYNTHETIC_SECRET=synthetic-secret docker build --progress=plain --secret id=oss-verify-git-token,env=REVIEW2_SYNTHETIC_SECRET -f /mnt/nvme/sami/clones/ossv538-scratch/review2/docker-parser/Dockerfile.escape-backtick /mnt/nvme/sami/clones/ossv538-scratch/review2/docker-parser",
+    "private_guard_accepted": false,
+    "docker_exit": 0,
+    "saw_secret": true,
+    "no_secret": false,
+    "end": [
+      "#8 unpacking to moby-dangling@sha256:8a07732286393879522d1249c834c7694ddef50440d7b751b6a765217595e822 0.1s done",
+      "#8 DONE 0.3s"
+    ]
+  },
+  {
+    "case": "copy-mount",
+    "command": "REVIEW2_SYNTHETIC_SECRET=synthetic-secret docker build --progress=plain --secret id=oss-verify-git-token,env=REVIEW2_SYNTHETIC_SECRET -f /mnt/nvme/sami/clones/ossv538-scratch/review2/docker-parser/Dockerfile.copy-mount /mnt/nvme/sami/clones/ossv538-scratch/review2/docker-parser",
+    "private_guard_accepted": false,
+    "docker_exit": 1,
+    "saw_secret": false,
+    "no_secret": false,
+    "end": [
+      "--------------------",
+      "ERROR: failed to build: failed to solve: dockerfile parse error on line 4: unknown flag: --mount"
+    ]
+  },
+  {
+    "case": "crlf",
+    "command": "REVIEW2_SYNTHETIC_SECRET=synthetic-secret docker build --progress=plain --secret id=oss-verify-git-token,env=REVIEW2_SYNTHETIC_SECRET -f /mnt/nvme/sami/clones/ossv538-scratch/review2/docker-parser/Dockerfile.crlf /mnt/nvme/sami/clones/ossv538-scratch/review2/docker-parser",
+    "private_guard_accepted": true,
+    "docker_exit": 0,
+    "saw_secret": true,
+    "no_secret": false,
+    "end": [
+      "#8 unpacking to moby-dangling@sha256:68800f55e41ec26bcd6f0793aebf8c77f6535d6def1df6881864b17fff8dcb73 0.1s done",
+      "#8 DONE 0.3s"
+    ]
+  }
+]

@@ -1,0 +1,557 @@
+.FF.FFF.FFFFFFFFFFFFFFFFFFF.FFFF.FFF............................. [ 62%]
+............s..........................                       [100%]
+=================================== FAILURES ===================================
+_ FetchCommit.test_a_commit_that_is_not_there_is_not_an_authorisation_failure (name='public.git') _
+
+self = <test_private_fetch.FetchCommit testMethod=test_a_commit_that_is_not_there_is_not_an_authorisation_failure>
+
+    def test_a_commit_that_is_not_there_is_not_an_authorisation_failure(self):
+        for name, token in (("public.git", None), ("secret.git", TOKEN)):
+            with self.subTest(name=name):
+                code, said, _ = self.fetch(name, "f" * 40, token)
+>               self.assertEqual(code, 1)
+E               AssertionError: 128 != 1
+
+tools/tests/test_private_fetch.py:241: AssertionError
+_ FetchCommit.test_a_commit_that_is_not_there_is_not_an_authorisation_failure (name='secret.git') _
+
+self = <test_private_fetch.FetchCommit testMethod=test_a_commit_that_is_not_there_is_not_an_authorisation_failure>
+
+    def test_a_commit_that_is_not_there_is_not_an_authorisation_failure(self):
+        for name, token in (("public.git", None), ("secret.git", TOKEN)):
+            with self.subTest(name=name):
+                code, said, _ = self.fetch(name, "f" * 40, token)
+>               self.assertEqual(code, 1)
+E               AssertionError: 128 != 1
+
+tools/tests/test_private_fetch.py:241: AssertionError
+_ FetchCommit.test_a_private_library_with_no_token_says_it_was_not_authorised __
+
+self = <test_private_fetch.FetchCommit testMethod=test_a_private_library_with_no_token_says_it_was_not_authorised>
+
+    def test_a_private_library_with_no_token_says_it_was_not_authorised(self):
+        code, said, _ = self.fetch("secret.git", self.commits["secret"])
+>       self.assertEqual(code, 1)
+E       AssertionError: 128 != 1
+
+tools/tests/test_private_fetch.py:208: AssertionError
+_________ FetchCommit.test_a_private_library_with_the_token_is_fetched _________
+
+self = <test_private_fetch.FetchCommit testMethod=test_a_private_library_with_the_token_is_fetched>
+
+    def test_a_private_library_with_the_token_is_fetched(self):
+        code, said, head = self.fetch("secret.git", self.commits["secret"], TOKEN)
+>       self.assertEqual(code, 0, said)
+E       AssertionError: 128 != 0 : fatal: could not read Username for 'http://127.0.0.1:35103': terminal prompts disabled
+E       fatal: could not read Username for 'http://127.0.0.1:35103': terminal prompts disabled
+
+tools/tests/test_private_fetch.py:215: AssertionError
+_____ FetchCommit.test_a_repository_that_is_not_there_reads_as_unreadable ______
+
+self = <test_private_fetch.FetchCommit testMethod=test_a_repository_that_is_not_there_reads_as_unreadable>
+
+    def test_a_repository_that_is_not_there_reads_as_unreadable(self):
+        code, said, _ = self.fetch("absent.git", self.commits["public"])
+>       self.assertEqual(code, 1)
+E       AssertionError: 128 != 1
+
+tools/tests/test_private_fetch.py:248: AssertionError
+_ FetchCommit.test_a_wrong_token_says_it_was_not_authorised_and_names_the_token _
+
+self = <test_private_fetch.FetchCommit testMethod=test_a_wrong_token_says_it_was_not_authorised_and_names_the_token>
+
+    def test_a_wrong_token_says_it_was_not_authorised_and_names_the_token(self):
+        code, said, _ = self.fetch("secret.git", self.commits["secret"], OTHER_TOKEN)
+>       self.assertEqual(code, 1)
+E       AssertionError: 128 != 1
+
+tools/tests/test_private_fetch.py:232: AssertionError
+______________ FetchCommit.test_the_checkout_keeps_no_credential _______________
+
+self = <test_private_fetch.FetchCommit testMethod=test_the_checkout_keeps_no_credential>
+
+    def test_the_checkout_keeps_no_credential(self):
+        with tempfile.TemporaryDirectory() as work:
+            secret = pathlib.Path(work) / "token"
+            secret.write_text(TOKEN, encoding="utf-8")
+            checkout = pathlib.Path(work) / "checkout"
+            environment = {
+                "PATH": f"{HELPER.parent}:{os.environ['PATH']}", "HOME": work, "REPO": HOST + "secret.git",
+                "COMMIT": self.commits["secret"], "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_SYSTEM": "/dev/null", "OSS_VERIFY_TOKEN_FILE": str(secret),
+                "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "protocol.http.allow",
+                "GIT_CONFIG_VALUE_0": "always", "GIT_CONFIG_KEY_1": f"url.{self.base}.insteadOf",
+                "GIT_CONFIG_VALUE_1": HOST,
+            }
+            done = subprocess.run(["sh", str(FETCH_COMMIT), str(checkout)], capture_output=True, text=True,
+                                  env=environment)
+>           self.assertEqual(done.returncode, 0, done.stderr)
+E           AssertionError: 128 != 0 : fatal: could not read Username for 'http://127.0.0.1:35103': terminal prompts disabled
+E           fatal: could not read Username for 'http://127.0.0.1:35103': terminal prompts disabled
+
+tools/tests/test_private_fetch.py:267: AssertionError
+_ FetchCommit.test_the_token_is_in_nothing_the_fetch_writes (name='secret.git', ok=True) _
+
+self = <test_private_fetch.FetchCommit testMethod=test_the_token_is_in_nothing_the_fetch_writes>
+
+    def test_the_token_is_in_nothing_the_fetch_writes(self):
+        for name, commit, token, ok in (("secret.git", self.commits["secret"], TOKEN, True),
+                                        ("secret.git", self.commits["secret"], OTHER_TOKEN, False),
+                                        ("secret.git", "f" * 40, TOKEN, False)):
+            with self.subTest(name=name, ok=ok):
+                code, said, _ = self.fetch(name, commit, token)
+>               self.assertEqual(code == 0, ok, said)
+E               AssertionError: False != True : fatal: could not read Username for 'http://127.0.0.1:35103': terminal prompts disabled
+E               fatal: could not read Username for 'http://127.0.0.1:35103': terminal prompts disabled
+
+tools/tests/test_private_fetch.py:226: AssertionError
+________ CredentialHelper.test_it_reads_the_token_from_the_environment _________
+
+self = <test_private_fetch.CredentialHelper testMethod=test_it_reads_the_token_from_the_environment>
+
+    def test_it_reads_the_token_from_the_environment(self):
+        code, said = self.answer(OSS_VERIFY_GIT_TOKEN=TOKEN)
+>       self.assertEqual(code, 0)
+E       AssertionError: 2 != 0
+
+tools/tests/test_private_fetch.py:286: AssertionError
+________ CredentialHelper.test_it_reads_the_token_from_the_secret_mount ________
+
+self = <test_private_fetch.CredentialHelper testMethod=test_it_reads_the_token_from_the_secret_mount>
+
+    def test_it_reads_the_token_from_the_secret_mount(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".token") as secret:
+            secret.write(TOKEN)
+            secret.flush()
+            code, said = self.answer(OSS_VERIFY_TOKEN_FILE=secret.name)
+>       self.assertEqual(code, 0)
+E       AssertionError: 2 != 0
+
+tools/tests/test_private_fetch.py:294: AssertionError
+___________________ CredentialHelper.test_it_stores_nothing ____________________
+
+self = <test_private_fetch.CredentialHelper testMethod=test_it_stores_nothing>
+
+    def test_it_stores_nothing(self):
+        for operation in ("store", "erase"):
+            done = subprocess.run(["sh", str(HELPER), operation], input="protocol=https\nhost=github.com\n\n",
+                                  capture_output=True, text=True,
+                                  env={"PATH": os.environ["PATH"], "OSS_VERIFY_GIT_TOKEN": TOKEN})
+>           self.assertEqual((done.returncode, done.stdout), (0, ""), operation)
+E           AssertionError: Tuples differ: (2, '') != (0, '')
+E           
+E           First differing element 0:
+E           2
+E           0
+E           
+E           - (2, '')
+E           ?  ^
+E           
+E           + (0, '')
+E           ?  ^
+E            : store
+
+tools/tests/test_private_fetch.py:306: AssertionError
+_ CredentialHelper.test_with_no_token_it_answers_nothing_rather_than_prompting _
+
+self = <test_private_fetch.CredentialHelper testMethod=test_with_no_token_it_answers_nothing_rather_than_prompting>
+
+    def test_with_no_token_it_answers_nothing_rather_than_prompting(self):
+        code, said = self.answer()
+>       self.assertEqual((code, said), (0, ""))
+E       AssertionError: Tuples differ: (2, '') != (0, '')
+E       
+E       First differing element 0:
+E       2
+E       0
+E       
+E       - (2, '')
+E       ?  ^
+E       
+E       + (0, '')
+E       ?  ^
+
+tools/tests/test_private_fetch.py:299: AssertionError
+__________________ TheList.test_a_public_library_is_not_in_it __________________
+
+self = <test_private_fetch.TheList testMethod=test_a_public_library_is_not_in_it>
+
+    def test_a_public_library_is_not_in_it(self):
+>       self.assertIsNone(check_build.private_reason("https://github.com/DaveGamble/cJSON"))
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'check_build' has no attribute 'private_reason'
+
+tools/tests/test_private_fetch.py:320: AttributeError
+_____________ TheList.test_every_row_is_a_repository_with_a_reason _____________
+
+self = <test_private_fetch.TheList testMethod=test_every_row_is_a_repository_with_a_reason>
+
+    def test_every_row_is_a_repository_with_a_reason(self):
+>       text = check_build.PRIVATE_LIBRARIES.read_text(encoding="utf-8")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'check_build' has no attribute 'PRIVATE_LIBRARIES'
+
+tools/tests/test_private_fetch.py:331: AttributeError
+_______________ TheList.test_it_lists_the_two_private_libraries ________________
+
+self = <test_private_fetch.TheList testMethod=test_it_lists_the_two_private_libraries>
+
+    def test_it_lists_the_two_private_libraries(self):
+>       listed = check_build.private_libraries()
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'check_build' has no attribute 'private_libraries'
+
+tools/tests/test_private_fetch.py:313: AttributeError
+__________ TheList.test_one_repository_written_three_ways_is_one_row ___________
+
+self = <test_private_fetch.TheList testMethod=test_one_repository_written_three_ways_is_one_row>
+
+    def test_one_repository_written_three_ways_is_one_row(self):
+        for written in ("https://github.com/theorem-labs/theorem-cli",
+                        "https://github.com/theorem-labs/theorem-cli.git",
+                        "https://github.com/theorem-labs/theorem-cli/",
+                        "https://github.com/theorem-labs/theorem-cli#main"):
+>           self.assertIsNotNone(check_build.private_reason(written), written)
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           AttributeError: module 'check_build' has no attribute 'private_reason'
+
+tools/tests/test_private_fetch.py:328: AttributeError
+_______ TheList.test_the_owner_and_name_are_what_a_token_is_narrowed_to ________
+
+self = <test_private_fetch.TheList testMethod=test_the_owner_and_name_are_what_a_token_is_narrowed_to>
+
+    def test_the_owner_and_name_are_what_a_token_is_narrowed_to(self):
+>       self.assertEqual(check_build.owner_and_name("https://github.com/theorem-labs/theorem-cli.git"),
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+                         ("theorem-labs", "theorem-cli"))
+E       AttributeError: module 'check_build' has no attribute 'owner_and_name'
+
+tools/tests/test_private_fetch.py:341: AttributeError
+______ Minting.test_a_command_that_fails_says_so_without_quoting_a_token _______
+
+self = <test_private_fetch.Minting testMethod=test_a_command_that_fails_says_so_without_quoting_a_token>
+
+    def test_a_command_that_fails_says_so_without_quoting_a_token(self):
+>       with self.command(f'echo "refused, the token was {TOKEN}" >&2; exit 1'):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tools/tests/test_private_fetch.py:365: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <test_private_fetch.Minting testMethod=test_a_command_that_fails_says_so_without_quoting_a_token>
+script = 'echo "refused, the token was <synthetic token, redacted for this archive>" >&2; exit 1'
+
+    def command(self, script):
+        """Point OSS_VERIFY_GIT_TOKEN_COMMAND at a shell script, and return the environment patcher."""
+        path = pathlib.Path(self.temporary.name) / "token-command"
+        path.write_text(f"#!/bin/sh\n{script}\n", encoding="utf-8")
+        path.chmod(0o755)
+>       return mock.patch.dict(os.environ, {check_build.TOKEN_COMMAND_ENV: str(path)})
+                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'check_build' has no attribute 'TOKEN_COMMAND_ENV'
+
+tools/tests/test_private_fetch.py:353: AttributeError
+_____________ Minting.test_a_command_that_is_not_there_says_which ______________
+
+self = <test_private_fetch.Minting testMethod=test_a_command_that_is_not_there_says_which>
+
+    def test_a_command_that_is_not_there_says_which(self):
+>       with mock.patch.dict(os.environ, {check_build.TOKEN_COMMAND_ENV: "/nonexistent/mint"}):
+                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'check_build' has no attribute 'TOKEN_COMMAND_ENV'
+
+tools/tests/test_private_fetch.py:379: AttributeError
+__________ Minting.test_a_command_that_prints_nothing_is_not_a_token ___________
+
+self = <test_private_fetch.Minting testMethod=test_a_command_that_prints_nothing_is_not_a_token>
+
+    def test_a_command_that_prints_nothing_is_not_a_token(self):
+>       with self.command("exit 0"):
+             ^^^^^^^^^^^^^^^^^^^^^^
+
+tools/tests/test_private_fetch.py:373: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <test_private_fetch.Minting testMethod=test_a_command_that_prints_nothing_is_not_a_token>
+script = 'exit 0'
+
+    def command(self, script):
+        """Point OSS_VERIFY_GIT_TOKEN_COMMAND at a shell script, and return the environment patcher."""
+        path = pathlib.Path(self.temporary.name) / "token-command"
+        path.write_text(f"#!/bin/sh\n{script}\n", encoding="utf-8")
+        path.chmod(0o755)
+>       return mock.patch.dict(os.environ, {check_build.TOKEN_COMMAND_ENV: str(path)})
+                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'check_build' has no attribute 'TOKEN_COMMAND_ENV'
+
+tools/tests/test_private_fetch.py:353: AttributeError
+_________ Minting.test_it_runs_the_command_with_the_owner_and_the_name _________
+
+self = <test_private_fetch.Minting testMethod=test_it_runs_the_command_with_the_owner_and_the_name>
+
+    def test_it_runs_the_command_with_the_owner_and_the_name(self):
+>       with self.command(f'echo "$1/$2 {TOKEN}"'):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tools/tests/test_private_fetch.py:360: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <test_private_fetch.Minting testMethod=test_it_runs_the_command_with_the_owner_and_the_name>
+script = 'echo "$1/$2 <synthetic token, redacted for this archive>"'
+
+    def command(self, script):
+        """Point OSS_VERIFY_GIT_TOKEN_COMMAND at a shell script, and return the environment patcher."""
+        path = pathlib.Path(self.temporary.name) / "token-command"
+        path.write_text(f"#!/bin/sh\n{script}\n", encoding="utf-8")
+        path.chmod(0o755)
+>       return mock.patch.dict(os.environ, {check_build.TOKEN_COMMAND_ENV: str(path)})
+                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'check_build' has no attribute 'TOKEN_COMMAND_ENV'
+
+tools/tests/test_private_fetch.py:353: AttributeError
+___ WhereTheTokenIsNot.test_a_public_fetch_takes_the_same_git_it_always_did ____
+
+self = <test_private_fetch.WhereTheTokenIsNot testMethod=test_a_public_fetch_takes_the_same_git_it_always_did>
+
+    def test_a_public_fetch_takes_the_same_git_it_always_did(self):
+        self.assertEqual(check_build.git("ls-remote", "--", "https://example.invalid/x"),
+                         ["git", "-c", "credential.helper=", "-c", "protocol.allow=never",
+                          "-c", "protocol.https.allow=always", "ls-remote", "--", "https://example.invalid/x"])
+>       self.assertIsNone(check_build.git_environment(None))
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'check_build' has no attribute 'git_environment'
+
+tools/tests/test_private_fetch.py:392: AttributeError
+_ WhereTheTokenIsNot.test_a_token_is_in_the_environment_and_not_the_command_line _
+
+self = <test_private_fetch.WhereTheTokenIsNot testMethod=test_a_token_is_in_the_environment_and_not_the_command_line>
+
+    def test_a_token_is_in_the_environment_and_not_the_command_line(self):
+>       argv = check_build.git("ls-remote", "--", "https://example.invalid/x", token=True)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: git() got an unexpected keyword argument 'token'
+
+tools/tests/test_private_fetch.py:395: TypeError
+_ WhereTheTokenIsNot.test_anything_token_shaped_is_replaced_even_with_no_token_to_compare _
+
+self = <test_private_fetch.WhereTheTokenIsNot testMethod=test_anything_token_shaped_is_replaced_even_with_no_token_to_compare>
+
+    def test_anything_token_shaped_is_replaced_even_with_no_token_to_compare(self):
+>       self.assertEqual(check_build.redacted(f"said {TOKEN} loudly", None), "said <redacted> loudly")
+                         ^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'check_build' has no attribute 'redacted'
+
+tools/tests/test_private_fetch.py:418: AttributeError
+_ WhereTheTokenIsNot.test_the_build_of_a_private_library_passes_a_secret_and_no_build_argument _
+
+self = <test_private_fetch.WhereTheTokenIsNot testMethod=test_the_build_of_a_private_library_passes_a_secret_and_no_build_argument>
+
+    def test_the_build_of_a_private_library_passes_a_secret_and_no_build_argument(self):
+>       argv, environment = self.build(private=True, mount=True)
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tools/tests/test_private_fetch.py:423: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <test_private_fetch.WhereTheTokenIsNot testMethod=test_the_build_of_a_private_library_passes_a_secret_and_no_build_argument>
+private = True, mount = True
+
+    def build(self, *, private, mount):
+        """Run build_project with docker stubbed out, and return the argv and environment it would have used."""
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        directory = pathlib.Path(temporary.name)
+>       fetch = f"RUN {check_build.SECRET_MOUNT} fetch-commit $SRC/x" if mount else "RUN fetch-commit $SRC/x"
+                       ^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'check_build' has no attribute 'SECRET_MOUNT'
+
+tools/tests/test_private_fetch.py:440: AttributeError
+_ WhereTheTokenIsNot.test_the_build_of_a_public_library_passes_no_secret_and_no_environment _
+
+self = <test_private_fetch.WhereTheTokenIsNot testMethod=test_the_build_of_a_public_library_passes_no_secret_and_no_environment>
+
+    def test_the_build_of_a_public_library_passes_no_secret_and_no_environment(self):
+>       argv, environment = self.build(private=False, mount=False)
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tools/tests/test_private_fetch.py:431: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <test_private_fetch.WhereTheTokenIsNot testMethod=test_the_build_of_a_public_library_passes_no_secret_and_no_environment>
+private = False, mount = False
+
+    def build(self, *, private, mount):
+        """Run build_project with docker stubbed out, and return the argv and environment it would have used."""
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        directory = pathlib.Path(temporary.name)
+        fetch = f"RUN {check_build.SECRET_MOUNT} fetch-commit $SRC/x" if mount else "RUN fetch-commit $SRC/x"
+        (directory / "Dockerfile").write_text(f"FROM ${{BASE_BUILDER}}\nARG REPO\nARG COMMIT\n{fetch}\n",
+                                              encoding="utf-8")
+        job = Job(name="x", directory=directory, repo="https://github.com/theorem-labs/theorem-cli", ref="",
+                  dockerfile="", builds=["plain"], fuzz_targets=None)
+        seen = {}
+    
+        def stub(*argv, quiet=False, env=None, token=None):
+            seen["argv"], seen["env"] = list(argv), env
+            return 0
+    
+        with mock.patch.object(check_build, "run", stub), contextlib.redirect_stdout(io.StringIO()):
+>           check_build.build_project(job, "a" * 40, "builder", "tag", directory, token=TOKEN if private else None)
+E           TypeError: build_project() got an unexpected keyword argument 'token'
+
+tools/tests/test_private_fetch.py:452: TypeError
+_ WhereTheTokenIsNot.test_the_log_of_a_build_has_the_token_replaced_even_across_a_read _
+
+self = <test_private_fetch.WhereTheTokenIsNot testMethod=test_the_log_of_a_build_has_the_token_replaced_even_across_a_read>
+
+    def test_the_log_of_a_build_has_the_token_replaced_even_across_a_read(self):
+        # The token straddles the boundary of the 64 KiB reads that run() makes, which is where a filter that looks
+        # at one chunk at a time lets it through.
+        script = f"import sys; sys.stdout.write('x' * 65534 + {TOKEN!r} + 'y')"
+        with mock.patch("sys.stdout", new_callable=Printed) as printed:
+>           code = check_build.run(sys.executable, "-c", script, token=TOKEN)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           TypeError: run() got an unexpected keyword argument 'token'
+
+tools/tests/test_private_fetch.py:407: TypeError
+_ TheMountAndTheList.test_a_library_that_is_not_private_may_not_ask_for_the_mount _
+
+self = <test_private_fetch.TheMountAndTheList testMethod=test_a_library_that_is_not_private_may_not_ask_for_the_mount>
+
+    def test_a_library_that_is_not_private_may_not_ask_for_the_mount(self):
+        with self.assertRaises(Failed) as refused:
+>           check_build.check_secret_mount("Dockerfile", f"RUN {check_build.SECRET_MOUNT} fetch-commit $SRC/x\n",
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                                           None, "https://github.com/DaveGamble/cJSON")
+E           AttributeError: module 'check_build' has no attribute 'check_secret_mount'
+
+tools/tests/test_private_fetch.py:469: AttributeError
+_ TheMountAndTheList.test_a_private_library_whose_dockerfile_does_not_mount_the_secret_is_refused _
+
+self = <test_private_fetch.TheMountAndTheList testMethod=test_a_private_library_whose_dockerfile_does_not_mount_the_secret_is_refused>
+
+    def test_a_private_library_whose_dockerfile_does_not_mount_the_secret_is_refused(self):
+        with self.assertRaises(Failed) as refused:
+>           check_build.check_secret_mount("Dockerfile", "RUN fetch-commit $SRC/x\n", TOKEN,
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                                           "https://github.com/theorem-labs/theorem-cli")
+E           AttributeError: module 'check_build' has no attribute 'check_secret_mount'
+
+tools/tests/test_private_fetch.py:461: AttributeError
+___ TheMountAndTheList.test_no_project_in_this_repository_asks_for_the_mount ___
+
+self = <test_private_fetch.TheMountAndTheList testMethod=test_no_project_in_this_repository_asks_for_the_mount>
+
+    def test_no_project_in_this_repository_asks_for_the_mount(self):
+        # Every library enrolled here is public, so none of their Dockerfiles may ask for a credential.
+        asking = [str(path.relative_to(ROOT)) for path in (ROOT / "projects").rglob("Dockerfile")
+>                 if check_build.SECRET_MOUNT in path.read_text(encoding="utf-8", errors="replace")
+                     ^^^^^^^^^^^^^^^^^^^^^^^^
+                  and check_build.private_reason(repo_of(path)) is None]
+E       AttributeError: module 'check_build' has no attribute 'SECRET_MOUNT'
+
+tools/tests/test_private_fetch.py:481: AttributeError
+____________ TheMountAndTheList.test_the_two_that_agree_are_allowed ____________
+
+self = <test_private_fetch.TheMountAndTheList testMethod=test_the_two_that_agree_are_allowed>
+
+    def test_the_two_that_agree_are_allowed(self):
+>       check_build.check_secret_mount("Dockerfile", "RUN fetch-commit $SRC/x\n", None, "https://x/y/z")
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'check_build' has no attribute 'check_secret_mount'
+
+tools/tests/test_private_fetch.py:474: AttributeError
+____________ Unreadable.test_an_authorisation_failure_is_rewritten _____________
+
+self = <test_private_fetch.Unreadable testMethod=test_an_authorisation_failure_is_rewritten>
+
+    def test_an_authorisation_failure_is_rewritten(self):
+        with mock.patch.object(check_build, "output",
+                               side_effect=Failed("remote: Repository not found.\nfatal: repository not found")):
+            with self.assertRaises(Failed) as refused:
+                check_build.resolve("https://github.com/theorem-labs/theorem-cli", "main")
+>       self.assertIn("cannot read", str(refused.exception))
+E       AssertionError: 'cannot read' not found in 'remote: Repository not found.\nfatal: repository not found'
+
+tools/tests/test_private_fetch.py:511: AssertionError
+_______ Unreadable.test_it_names_authorisation_and_not_a_missing_commit ________
+
+self = <test_private_fetch.Unreadable testMethod=test_it_names_authorisation_and_not_a_missing_commit>
+
+    def test_it_names_authorisation_and_not_a_missing_commit(self):
+>       said = check_build.unreadable("https://github.com/theorem-labs/theorem-cli", TOKEN, "remote: Not Found")
+               ^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'check_build' has no attribute 'unreadable'
+
+tools/tests/test_private_fetch.py:490: AttributeError
+________ Unreadable.test_it_says_when_the_repository_is_not_on_the_list ________
+
+self = <test_private_fetch.Unreadable testMethod=test_it_says_when_the_repository_is_not_on_the_list>
+
+    def test_it_says_when_the_repository_is_not_on_the_list(self):
+>       said = check_build.unreadable("https://github.com/theorem-labs/not-listed", None, "remote: Not Found")
+               ^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'check_build' has no attribute 'unreadable'
+
+tools/tests/test_private_fetch.py:496: AttributeError
+=========================== short test summary info ============================
+SUBFAILED(name='public.git') tools/tests/test_private_fetch.py::FetchCommit::test_a_commit_that_is_not_there_is_not_an_authorisation_failure - AssertionError: 128 != 1
+SUBFAILED(name='secret.git') tools/tests/test_private_fetch.py::FetchCommit::test_a_commit_that_is_not_there_is_not_an_authorisation_failure - AssertionError: 128 != 1
+FAILED tools/tests/test_private_fetch.py::FetchCommit::test_a_private_library_with_no_token_says_it_was_not_authorised - AssertionError: 128 != 1
+FAILED tools/tests/test_private_fetch.py::FetchCommit::test_a_private_library_with_the_token_is_fetched - AssertionError: 128 != 0 : fatal: could not read Username for 'http://127.0.0.1:35103': terminal prompts disabled
+fatal: could not read Username for 'http://127.0.0.1:35103': terminal prompts disabled
+FAILED tools/tests/test_private_fetch.py::FetchCommit::test_a_repository_that_is_not_there_reads_as_unreadable - AssertionError: 128 != 1
+FAILED tools/tests/test_private_fetch.py::FetchCommit::test_a_wrong_token_says_it_was_not_authorised_and_names_the_token - AssertionError: 128 != 1
+FAILED tools/tests/test_private_fetch.py::FetchCommit::test_the_checkout_keeps_no_credential - AssertionError: 128 != 0 : fatal: could not read Username for 'http://127.0.0.1:35103': terminal prompts disabled
+fatal: could not read Username for 'http://127.0.0.1:35103': terminal prompts disabled
+SUBFAILED(name='secret.git', ok=True) tools/tests/test_private_fetch.py::FetchCommit::test_the_token_is_in_nothing_the_fetch_writes - AssertionError: False != True : fatal: could not read Username for 'http://127.0.0.1:35103': terminal prompts disabled
+fatal: could not read Username for 'http://127.0.0.1:35103': terminal prompts disabled
+FAILED tools/tests/test_private_fetch.py::CredentialHelper::test_it_reads_the_token_from_the_environment - AssertionError: 2 != 0
+FAILED tools/tests/test_private_fetch.py::CredentialHelper::test_it_reads_the_token_from_the_secret_mount - AssertionError: 2 != 0
+FAILED tools/tests/test_private_fetch.py::CredentialHelper::test_it_stores_nothing - AssertionError: Tuples differ: (2, '') != (0, '')
+
+First differing element 0:
+2
+0
+
+- (2, '')
+?  ^
+
++ (0, '')
+?  ^
+ : store
+FAILED tools/tests/test_private_fetch.py::CredentialHelper::test_with_no_token_it_answers_nothing_rather_than_prompting - AssertionError: Tuples differ: (2, '') != (0, '')
+
+First differing element 0:
+2
+0
+
+- (2, '')
+?  ^
+
++ (0, '')
+?  ^
+FAILED tools/tests/test_private_fetch.py::TheList::test_a_public_library_is_not_in_it - AttributeError: module 'check_build' has no attribute 'private_reason'
+FAILED tools/tests/test_private_fetch.py::TheList::test_every_row_is_a_repository_with_a_reason - AttributeError: module 'check_build' has no attribute 'PRIVATE_LIBRARIES'
+FAILED tools/tests/test_private_fetch.py::TheList::test_it_lists_the_two_private_libraries - AttributeError: module 'check_build' has no attribute 'private_libraries'
+FAILED tools/tests/test_private_fetch.py::TheList::test_one_repository_written_three_ways_is_one_row - AttributeError: module 'check_build' has no attribute 'private_reason'
+FAILED tools/tests/test_private_fetch.py::TheList::test_the_owner_and_name_are_what_a_token_is_narrowed_to - AttributeError: module 'check_build' has no attribute 'owner_and_name'
+FAILED tools/tests/test_private_fetch.py::Minting::test_a_command_that_fails_says_so_without_quoting_a_token - AttributeError: module 'check_build' has no attribute 'TOKEN_COMMAND_ENV'
+FAILED tools/tests/test_private_fetch.py::Minting::test_a_command_that_is_not_there_says_which - AttributeError: module 'check_build' has no attribute 'TOKEN_COMMAND_ENV'
+FAILED tools/tests/test_private_fetch.py::Minting::test_a_command_that_prints_nothing_is_not_a_token - AttributeError: module 'check_build' has no attribute 'TOKEN_COMMAND_ENV'
+FAILED tools/tests/test_private_fetch.py::Minting::test_it_runs_the_command_with_the_owner_and_the_name - AttributeError: module 'check_build' has no attribute 'TOKEN_COMMAND_ENV'
+FAILED tools/tests/test_private_fetch.py::WhereTheTokenIsNot::test_a_public_fetch_takes_the_same_git_it_always_did - AttributeError: module 'check_build' has no attribute 'git_environment'
+FAILED tools/tests/test_private_fetch.py::WhereTheTokenIsNot::test_a_token_is_in_the_environment_and_not_the_command_line - TypeError: git() got an unexpected keyword argument 'token'
+FAILED tools/tests/test_private_fetch.py::WhereTheTokenIsNot::test_anything_token_shaped_is_replaced_even_with_no_token_to_compare - AttributeError: module 'check_build' has no attribute 'redacted'
+FAILED tools/tests/test_private_fetch.py::WhereTheTokenIsNot::test_the_build_of_a_private_library_passes_a_secret_and_no_build_argument - AttributeError: module 'check_build' has no attribute 'SECRET_MOUNT'
+FAILED tools/tests/test_private_fetch.py::WhereTheTokenIsNot::test_the_build_of_a_public_library_passes_no_secret_and_no_environment - TypeError: build_project() got an unexpected keyword argument 'token'
+FAILED tools/tests/test_private_fetch.py::WhereTheTokenIsNot::test_the_log_of_a_build_has_the_token_replaced_even_across_a_read - TypeError: run() got an unexpected keyword argument 'token'
+FAILED tools/tests/test_private_fetch.py::TheMountAndTheList::test_a_library_that_is_not_private_may_not_ask_for_the_mount - AttributeError: module 'check_build' has no attribute 'check_secret_mount'
+FAILED tools/tests/test_private_fetch.py::TheMountAndTheList::test_a_private_library_whose_dockerfile_does_not_mount_the_secret_is_refused - AttributeError: module 'check_build' has no attribute 'check_secret_mount'
+FAILED tools/tests/test_private_fetch.py::TheMountAndTheList::test_no_project_in_this_repository_asks_for_the_mount - AttributeError: module 'check_build' has no attribute 'SECRET_MOUNT'
+FAILED tools/tests/test_private_fetch.py::TheMountAndTheList::test_the_two_that_agree_are_allowed - AttributeError: module 'check_build' has no attribute 'check_secret_mount'
+FAILED tools/tests/test_private_fetch.py::Unreadable::test_an_authorisation_failure_is_rewritten - AssertionError: 'cannot read' not found in 'remote: Repository not found.\nfatal: repository not found'
+FAILED tools/tests/test_private_fetch.py::Unreadable::test_it_names_authorisation_and_not_a_missing_commit - AttributeError: module 'check_build' has no attribute 'unreadable'
+FAILED tools/tests/test_private_fetch.py::Unreadable::test_it_says_when_the_repository_is_not_on_the_list - AttributeError: module 'check_build' has no attribute 'unreadable'
+34 failed, 72 passed, 1 skipped, 15 subtests passed in 8.13s

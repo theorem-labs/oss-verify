@@ -1,0 +1,461 @@
+[
+  {
+    "probe": "failure-normal",
+    "container_exit": 0,
+    "container_auth": false,
+    "container_missing": false,
+    "container_transport": false,
+    "container_end": [
+      "fetch-commit: https://private.test/secret.git at b49edc49b52d988e0be8323d10ab7baa1a0d6674 in /mnt/nvme/sami/clones/ossv538-scratch/review2/tmpw5jn4k_e/checkout"
+    ],
+    "host_exit": 0,
+    "host_message": "success",
+    "host_raw_end": [],
+    "container_requests": 4,
+    "host_requests": 4
+  },
+  {
+    "probe": "failure-401",
+    "container_exit": 1,
+    "container_auth": true,
+    "container_missing": false,
+    "container_transport": false,
+    "container_end": [
+      "  there. A private repository of ours needs a row in infra/private-libraries.tsv and",
+      "  --mount=type=secret,id=oss-verify-git-token on this RUN (docs/build-contract.md). git said:",
+      "    fatal: Authentication failed for 'http://127.0.0.1:36363/secret.git/'"
+    ],
+    "host_exit": 1,
+    "host_message": "cannot read https://private.test/secret.git: it is private, it does not exist, or the build may not read it. The build asked with a read-only token minted for this build, and the server listed no refs, so no commit of it was looked up: this is not a missing commit. https://private.test/secret is not in infra/private-libraries.tsv, so no token was minted for it; a private repository of ours needs a row there. git said: git -c credential.helper= ... exited 128: fatal: Authentication failed for 'http://127.0.0.1:36363/secret.git/'",
+    "host_raw_end": [
+      "fatal: Authentication failed for 'http://127.0.0.1:36363/secret.git/'"
+    ],
+    "container_requests": 4,
+    "host_requests": 4
+  },
+  {
+    "probe": "failure-403",
+    "container_exit": 1,
+    "container_auth": true,
+    "container_missing": false,
+    "container_transport": false,
+    "container_end": [
+      "  there. A private repository of ours needs a row in infra/private-libraries.tsv and",
+      "  --mount=type=secret,id=oss-verify-git-token on this RUN (docs/build-contract.md). git said:",
+      "    fatal: unable to access 'http://127.0.0.1:36363/secret.git/': The requested URL returned error: 403"
+    ],
+    "host_exit": 1,
+    "host_message": "cannot read https://private.test/secret.git: it is private, it does not exist, or the build may not read it. The build asked with a read-only token minted for this build, and the server listed no refs, so no commit of it was looked up: this is not a missing commit. https://private.test/secret is not in infra/private-libraries.tsv, so no token was minted for it; a private repository of ours needs a row there. git said: git -c credential.helper= ... exited 128: fatal: unable to access 'http://127.0.0.1:36363/secret.git/': The requested URL returned error: 403",
+    "host_raw_end": [
+      "fatal: unable to access 'http://127.0.0.1:36363/secret.git/': The requested URL returned error: 403"
+    ],
+    "container_requests": 2,
+    "host_requests": 2
+  },
+  {
+    "probe": "failure-429",
+    "container_exit": 1,
+    "container_auth": false,
+    "container_missing": false,
+    "container_transport": true,
+    "container_end": [
+      "  an authorisation failure and not a missing commit: the server did not answer one way or the other",
+      "  (no route, a refused connection, a rate limit, a server fault). git said:",
+      "    fatal: unable to access 'http://127.0.0.1:36363/secret.git/': The requested URL returned error: 429"
+    ],
+    "host_exit": 1,
+    "host_message": "could not reach https://private.test/secret.git to list its refs, so nothing is known about b49edc49b52d988e0be8323d10ab7baa1a0d6674 yet: this is neither an authorisation failure nor a missing commit. git said: git -c credential.helper= ... exited 128: fatal: unable to access 'http://127.0.0.1:36363/secret.git/': The requested URL returned error: 429",
+    "host_raw_end": [
+      "fatal: unable to access 'http://127.0.0.1:36363/secret.git/': The requested URL returned error: 429"
+    ],
+    "container_requests": 2,
+    "host_requests": 2
+  },
+  {
+    "probe": "failure-503",
+    "container_exit": 1,
+    "container_auth": false,
+    "container_missing": false,
+    "container_transport": true,
+    "container_end": [
+      "  an authorisation failure and not a missing commit: the server did not answer one way or the other",
+      "  (no route, a refused connection, a rate limit, a server fault). git said:",
+      "    fatal: unable to access 'http://127.0.0.1:36363/secret.git/': The requested URL returned error: 503"
+    ],
+    "host_exit": 1,
+    "host_message": "could not reach https://private.test/secret.git to list its refs, so nothing is known about b49edc49b52d988e0be8323d10ab7baa1a0d6674 yet: this is neither an authorisation failure nor a missing commit. git said: git -c credential.helper= ... exited 128: fatal: unable to access 'http://127.0.0.1:36363/secret.git/': The requested URL returned error: 503",
+    "host_raw_end": [
+      "fatal: unable to access 'http://127.0.0.1:36363/secret.git/': The requested URL returned error: 503"
+    ],
+    "container_requests": 2,
+    "host_requests": 2
+  },
+  {
+    "probe": "failure-empty",
+    "container_exit": 1,
+    "container_auth": false,
+    "container_missing": true,
+    "container_transport": false,
+    "container_end": [
+      "fetch-commit: https://private.test/empty.git has no commit ffffffffffffffffffffffffffffffffffffffff. The server listed the repository's refs for this build, so this",
+      "  is not an authorisation failure: the commit is not in the repository (deleted, or never pushed, or a",
+      "  branch that was force-pushed since the commit was recorded)."
+    ],
+    "host_exit": 1,
+    "host_message": "https://private.test/empty.git has no commit ffffffffffffffffffffffffffffffffffffffff. The server listed its refs for this build, so this is not an authorisation failure: the commit is not in the repository (deleted, or never pushed, or a branch that was force-pushed since the commit was recorded).",
+    "host_raw_end": [
+      "fatal: no matching remote head"
+    ],
+    "container_requests": 3,
+    "host_requests": 2
+  },
+  {
+    "probe": "failure-deny-upload",
+    "container_exit": 128,
+    "container_auth": false,
+    "container_missing": false,
+    "container_transport": false,
+    "container_end": [
+      "fatal: the remote end hung up unexpectedly",
+      "error: RPC failed; HTTP 503 curl 22 The requested URL returned error: 503",
+      "fatal: the remote end hung up unexpectedly"
+    ],
+    "host_exit": 1,
+    "host_message": "https://private.test/secret.git has no commit b49edc49b52d988e0be8323d10ab7baa1a0d6674. The server listed its refs for this build, so this is not an authorisation failure: the commit is not in the repository (deleted, or never pushed, or a branch that was force-pushed since the commit was recorded).",
+    "host_raw_end": [
+      "error: RPC failed; HTTP 503 curl 22 The requested URL returned error: 503",
+      "fatal: the remote end hung up unexpectedly"
+    ],
+    "container_requests": 8,
+    "host_requests": 5
+  },
+  {
+    "probe": "failure-missing",
+    "container_exit": 1,
+    "container_auth": false,
+    "container_missing": true,
+    "container_transport": false,
+    "container_end": [
+      "fetch-commit: https://private.test/secret.git has no commit ffffffffffffffffffffffffffffffffffffffff. The server listed the repository's refs for this build, so this",
+      "  is not an authorisation failure: the commit is not in the repository (deleted, or never pushed, or a",
+      "  branch that was force-pushed since the commit was recorded)."
+    ],
+    "host_exit": 1,
+    "host_message": "https://private.test/secret.git has no commit ffffffffffffffffffffffffffffffffffffffff. The server listed its refs for this build, so this is not an authorisation failure: the commit is not in the repository (deleted, or never pushed, or a branch that was force-pushed since the commit was recorded).",
+    "host_raw_end": [
+      "fatal: remote error: upload-pack: not our ref ffffffffffffffffffffffffffffffffffffffff",
+      "fatal: the remote end hung up unexpectedly"
+    ],
+    "container_requests": 8,
+    "host_requests": 5
+  },
+  {
+    "probe": "failure-wrong-token",
+    "container_exit": 1,
+    "container_auth": true,
+    "container_missing": false,
+    "container_transport": false,
+    "container_end": [
+      "  there. A private repository of ours needs a row in infra/private-libraries.tsv and",
+      "  --mount=type=secret,id=oss-verify-git-token on this RUN (docs/build-contract.md). git said:",
+      "    fatal: Authentication failed for 'http://127.0.0.1:36363/secret.git/'"
+    ],
+    "host_exit": 1,
+    "host_message": "cannot read https://private.test/secret.git: it is private, it does not exist, or the build may not read it. The build asked with a read-only token minted for this build, and the server listed no refs, so no commit of it was looked up: this is not a missing commit. https://private.test/secret is not in infra/private-libraries.tsv, so no token was minted for it; a private repository of ours needs a row there. git said: git -c credential.helper= ... exited 128: fatal: Authentication failed for 'http://127.0.0.1:36363/secret.git/'",
+    "host_raw_end": [
+      "fatal: Authentication failed for 'http://127.0.0.1:36363/secret.git/'"
+    ],
+    "container_requests": 4,
+    "host_requests": 4
+  },
+  {
+    "probe": "failure-dns",
+    "container_exit": 1,
+    "container_auth": false,
+    "container_missing": false,
+    "container_transport": true,
+    "container_end": [
+      "  an authorisation failure and not a missing commit: the server did not answer one way or the other",
+      "  (no route, a refused connection, a rate limit, a server fault). git said:",
+      "    fatal: unable to access 'http://not-a-real-host.review2.invalid/secret.git/': Could not resolve host: not-a-real-host.review2.invalid"
+    ],
+    "host_exit": 1,
+    "host_message": "could not reach https://private.test/secret.git to list its refs, so nothing is known about b49edc49b52d988e0be8323d10ab7baa1a0d6674 yet: this is neither an authorisation failure nor a missing commit. git said: git -c credential.helper= ... exited 128: fatal: unable to access 'http://not-a-real-host.review2.invalid/secret.git/': Could not resolve host: not-a-real-host.review2.invalid",
+    "host_raw_end": [
+      "fatal: unable to access 'http://not-a-real-host.review2.invalid/secret.git/': Could not resolve host: not-a-real-host.review2.invalid"
+    ],
+    "container_requests": 0,
+    "host_requests": 0
+  },
+  {
+    "probe": "failure-connection",
+    "container_exit": 1,
+    "container_auth": false,
+    "container_missing": false,
+    "container_transport": true,
+    "container_end": [
+      "  an authorisation failure and not a missing commit: the server did not answer one way or the other",
+      "  (no route, a refused connection, a rate limit, a server fault). git said:",
+      "    fatal: unable to access 'http://127.0.0.1:38801/secret.git/': Failed to connect to 127.0.0.1 port 38801 after 0 ms: Couldn't connect to server"
+    ],
+    "host_exit": 1,
+    "host_message": "could not reach https://private.test/secret.git to list its refs, so nothing is known about b49edc49b52d988e0be8323d10ab7baa1a0d6674 yet: this is neither an authorisation failure nor a missing commit. git said: git -c credential.helper= ... exited 128: fatal: unable to access 'http://127.0.0.1:38801/secret.git/': Failed to connect to 127.0.0.1 port 38801 after 0 ms: Couldn't connect to server",
+    "host_raw_end": [
+      "fatal: unable to access 'http://127.0.0.1:38801/secret.git/': Failed to connect to 127.0.0.1 port 38801 after 0 ms: Couldn't connect to server"
+    ],
+    "container_requests": 0,
+    "host_requests": 0
+  },
+  {
+    "probe": "redirect-same-host",
+    "container_exit": 128,
+    "container_message": [
+      "fatal: the remote end hung up unexpectedly",
+      "error: RPC failed; HTTP 302 curl 22 The requested URL returned error: 302",
+      "fatal: the remote end hung up unexpectedly"
+    ],
+    "host_exit": 1,
+    "host_message": "https://private.test/secret.git has no commit 7ad40c02adebfc522bf0789d11b3081575b2c93c. The server listed its refs for this build, so this is not an authorisation failure: the commit is not in the repository (deleted, or never pushed, or a branch that was force-pushed since the commit was recorded).",
+    "container_other_path_authorized": true,
+    "host_other_path_authorized": true,
+    "container_requests": [
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        false
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/public.git/info/refs?service=git-upload-pack",
+        true
+      ],
+      [
+        "POST",
+        "/secret.git/git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        false
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/public.git/info/refs?service=git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        false
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/public.git/info/refs?service=git-upload-pack",
+        true
+      ],
+      [
+        "POST",
+        "/secret.git/git-upload-pack",
+        true
+      ]
+    ],
+    "host_requests": [
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        false
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/public.git/info/refs?service=git-upload-pack",
+        true
+      ],
+      [
+        "POST",
+        "/secret.git/git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        false
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/public.git/info/refs?service=git-upload-pack",
+        true
+      ]
+    ]
+  },
+  {
+    "probe": "redirect-port",
+    "container_exit": 128,
+    "container_message": [
+      "fatal: the remote end hung up unexpectedly",
+      "error: RPC failed; HTTP 302 curl 22 The requested URL returned error: 302",
+      "fatal: the remote end hung up unexpectedly"
+    ],
+    "host_exit": 1,
+    "host_message": "https://private.test/secret.git has no commit 7ad40c02adebfc522bf0789d11b3081575b2c93c. The server listed its refs for this build, so this is not an authorisation failure: the commit is not in the repository (deleted, or never pushed, or a branch that was force-pushed since the commit was recorded).",
+    "container_other_path_authorized": false,
+    "host_other_path_authorized": false,
+    "container_requests": [
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        false
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/public.git/info/refs?service=git-upload-pack",
+        false
+      ],
+      [
+        "POST",
+        "/secret.git/git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        false
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/public.git/info/refs?service=git-upload-pack",
+        false
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        false
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/public.git/info/refs?service=git-upload-pack",
+        false
+      ],
+      [
+        "POST",
+        "/secret.git/git-upload-pack",
+        true
+      ]
+    ],
+    "host_requests": [
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        false
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/public.git/info/refs?service=git-upload-pack",
+        false
+      ],
+      [
+        "POST",
+        "/secret.git/git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        false
+      ],
+      [
+        "GET",
+        "/secret.git/info/refs?service=git-upload-pack",
+        true
+      ],
+      [
+        "GET",
+        "/public.git/info/refs?service=git-upload-pack",
+        false
+      ]
+    ]
+  },
+  {
+    "probe": "host-marker-collision",
+    "input": "fatal: unable to access 'https://x/y': error setting certificate file: /cert/permission denied.pem",
+    "message": "cannot read https://x/y: it is private, it does not exist, or the build may not read it. The build asked with a read-only token minted for this build, and the server listed no refs, so no commit of it was looked up: this is not a missing commit. https://x/y is not in infra/private-libraries.tsv, so no token was minted for it; a private repository of ours needs a row there. git said: fatal: unable to access 'https://x/y': error setting certificate file: /cert/permission denied.pem"
+  },
+  {
+    "probe": "host-marker-collision",
+    "input": "fatal: unable to access 'https://x/y': Could not resolve host: repository not found.invalid",
+    "message": "cannot read https://x/y: it is private, it does not exist, or the build may not read it. The build asked with a read-only token minted for this build, and the server listed no refs, so no commit of it was looked up: this is not a missing commit. https://x/y is not in infra/private-libraries.tsv, so no token was minted for it; a private repository of ours needs a row there. git said: fatal: unable to access 'https://x/y': Could not resolve host: repository not found.invalid"
+  },
+  {
+    "probe": "tracing-environment",
+    "container_exit": 0,
+    "container_trace_bytes": 0,
+    "container_token_in_trace": false,
+    "host_exit": 0,
+    "host_trace_bytes": 0,
+    "host_token_in_trace": false,
+    "host_token_in_output": false,
+    "container_token_in_output": false
+  },
+  {
+    "probe": "tracing-config",
+    "container_exit": 0,
+    "container_trace_bytes": 47261,
+    "container_token_in_trace": false,
+    "host_exit": 0,
+    "host_trace_bytes": 41520,
+    "host_token_in_trace": true,
+    "host_token_in_output": false,
+    "container_token_in_output": false
+  },
+  {
+    "probe": "submodule-other-path",
+    "exit": 0,
+    "other_authorized": false,
+    "main_authorized": true
+  }
+]

@@ -1,0 +1,218 @@
+[
+  {
+    "probe": "git-credential-url",
+    "useHttpPath": false,
+    "url": "https://github.com/theorem-labs/theorem-cli",
+    "want": "github.com/theorem-labs/theorem-cli",
+    "exit": 0,
+    "answered": true,
+    "request": "protocol=https\nhost=github.com\n",
+    "listed_private": true
+  },
+  {
+    "probe": "git-credential-url",
+    "useHttpPath": false,
+    "url": "https://github.com/theorem-labs/theorem-cli/",
+    "want": "github.com/theorem-labs/theorem-cli",
+    "exit": 0,
+    "answered": true,
+    "request": "protocol=https\nhost=github.com\n",
+    "listed_private": true
+  },
+  {
+    "probe": "git-credential-url",
+    "useHttpPath": false,
+    "url": "https://github.com/theorem-labs/theorem-cli.git/",
+    "want": "github.com/theorem-labs/theorem-cli",
+    "exit": 0,
+    "answered": true,
+    "request": "protocol=https\nhost=github.com\n",
+    "listed_private": true
+  },
+  {
+    "probe": "git-credential-url",
+    "useHttpPath": false,
+    "url": "https://GITHUB.COM/theorem-labs/theorem-cli",
+    "want": "GITHUB.COM/theorem-labs/theorem-cli",
+    "exit": 0,
+    "answered": true,
+    "request": "protocol=https\nhost=GITHUB.COM\n",
+    "listed_private": false
+  },
+  {
+    "probe": "git-credential-url",
+    "useHttpPath": false,
+    "url": "https://github.com/Theorem-Labs/Theorem-CLI",
+    "want": "github.com/Theorem-Labs/Theorem-CLI",
+    "exit": 0,
+    "answered": true,
+    "request": "protocol=https\nhost=github.com\n",
+    "listed_private": false
+  },
+  {
+    "probe": "git-credential-url",
+    "useHttpPath": false,
+    "url": "https://github.com:443/theorem-labs/theorem-cli",
+    "want": "github.com:443/theorem-labs/theorem-cli",
+    "exit": 0,
+    "answered": true,
+    "request": "protocol=https\nhost=github.com:443\n",
+    "listed_private": false
+  },
+  {
+    "probe": "git-credential-url",
+    "useHttpPath": false,
+    "url": "https://user@github.com/theorem-labs/theorem-cli",
+    "want": "user@github.com/theorem-labs/theorem-cli",
+    "exit": 128,
+    "answered": false,
+    "request": "protocol=https\nhost=github.com\nusername=user\n",
+    "listed_private": false
+  },
+  {
+    "probe": "git-credential-url",
+    "useHttpPath": false,
+    "url": "https://github.com/theorem-labs/some-other-repo",
+    "want": "github.com/theorem-labs/theorem-cli",
+    "exit": 0,
+    "answered": true,
+    "request": "protocol=https\nhost=github.com\n",
+    "listed_private": false
+  },
+  {
+    "probe": "git-credential-url",
+    "useHttpPath": true,
+    "url": "https://github.com/theorem-labs/theorem-cli",
+    "want": "github.com/theorem-labs/theorem-cli",
+    "exit": 0,
+    "answered": true,
+    "request": "protocol=https\nhost=github.com\npath=theorem-labs/theorem-cli\n",
+    "listed_private": true
+  },
+  {
+    "probe": "git-credential-url",
+    "useHttpPath": true,
+    "url": "https://github.com/theorem-labs/theorem-cli/",
+    "want": "github.com/theorem-labs/theorem-cli",
+    "exit": 0,
+    "answered": true,
+    "request": "protocol=https\nhost=github.com\npath=theorem-labs/theorem-cli\n",
+    "listed_private": true
+  },
+  {
+    "probe": "git-credential-url",
+    "useHttpPath": true,
+    "url": "https://github.com/theorem-labs/theorem-cli.git/",
+    "want": "github.com/theorem-labs/theorem-cli",
+    "exit": 0,
+    "answered": true,
+    "request": "protocol=https\nhost=github.com\npath=theorem-labs/theorem-cli.git\n",
+    "listed_private": true
+  },
+  {
+    "probe": "git-credential-url",
+    "useHttpPath": true,
+    "url": "https://GITHUB.COM/theorem-labs/theorem-cli",
+    "want": "GITHUB.COM/theorem-labs/theorem-cli",
+    "exit": 0,
+    "answered": true,
+    "request": "protocol=https\nhost=GITHUB.COM\npath=theorem-labs/theorem-cli\n",
+    "listed_private": false
+  },
+  {
+    "probe": "git-credential-url",
+    "useHttpPath": true,
+    "url": "https://github.com/Theorem-Labs/Theorem-CLI",
+    "want": "github.com/Theorem-Labs/Theorem-CLI",
+    "exit": 0,
+    "answered": true,
+    "request": "protocol=https\nhost=github.com\npath=Theorem-Labs/Theorem-CLI\n",
+    "listed_private": false
+  },
+  {
+    "probe": "git-credential-url",
+    "useHttpPath": true,
+    "url": "https://github.com:443/theorem-labs/theorem-cli",
+    "want": "github.com:443/theorem-labs/theorem-cli",
+    "exit": 0,
+    "answered": true,
+    "request": "protocol=https\nhost=github.com:443\npath=theorem-labs/theorem-cli\n",
+    "listed_private": false
+  },
+  {
+    "probe": "git-credential-url",
+    "useHttpPath": true,
+    "url": "https://user@github.com/theorem-labs/theorem-cli",
+    "want": "user@github.com/theorem-labs/theorem-cli",
+    "exit": 128,
+    "answered": false,
+    "request": "protocol=https\nhost=github.com\npath=theorem-labs/theorem-cli\nusername=user\n",
+    "listed_private": false
+  },
+  {
+    "probe": "git-credential-url",
+    "useHttpPath": true,
+    "url": "https://github.com/theorem-labs/some-other-repo",
+    "want": "github.com/theorem-labs/theorem-cli",
+    "exit": 128,
+    "answered": false,
+    "request": "protocol=https\nhost=github.com\npath=theorem-labs/some-other-repo\n",
+    "listed_private": false
+  },
+  {
+    "probe": "real-marker-collision",
+    "repo": "https://not-found.invalid/x",
+    "auth_classified": false,
+    "message": "could not reach https://not-found.invalid/x to list its refs, so nothing is known about aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa yet: this is neither an authorisation failure nor a missing commit. git said: git -c credential.helper= ... exited 128: fatal: unable to access 'https://not-found.invalid/x/': Could not resolve host: not-found.invalid",
+    "raw": "fatal: unable to access 'https://not-found.invalid/x/': Could not resolve host: not-found.invalid\n"
+  },
+  {
+    "probe": "real-marker-collision",
+    "repo": "https://repository-not-found.invalid/x",
+    "auth_classified": false,
+    "message": "could not reach https://repository-not-found.invalid/x to list its refs, so nothing is known about aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa yet: this is neither an authorisation failure nor a missing commit. git said: git -c credential.helper= ... exited 128: fatal: unable to access 'https://repository-not-found.invalid/x/': Could not resolve host: repository-not-found.invalid",
+    "raw": "fatal: unable to access 'https://repository-not-found.invalid/x/': Could not resolve host: repository-not-found.invalid\n"
+  },
+  {
+    "probe": "real-marker-collision",
+    "repo": "https://github.com/theorem-labs/theorem-cli",
+    "auth_classified": false,
+    "message": "could not reach https://github.com/theorem-labs/theorem-cli to list its refs, so nothing is known about aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa yet: this is neither an authorisation failure nor a missing commit. git said: git -c credential.helper= ... exited 128: fatal: unable to access 'https://github.com/theorem-labs/theorem-cli/': Problem with the SSL CA cert (path? access rights?)",
+    "raw": "fatal: unable to access 'https://github.com/theorem-labs/theorem-cli/': Problem with the SSL CA cert (path? access rights?)\n"
+  },
+  {
+    "probe": "shell-both-streams",
+    "token_length": 44,
+    "exit": 1,
+    "exact_original_output_absent": true,
+    "redacted_stdout": true,
+    "redacted_stderr": true
+  },
+  {
+    "probe": "shell-both-streams",
+    "token_length": 8,
+    "exit": 1,
+    "exact_original_output_absent": true,
+    "redacted_stdout": true,
+    "redacted_stderr": true
+  },
+  {
+    "probe": "shell-both-streams",
+    "token_length": 23,
+    "exit": 1,
+    "exact_original_output_absent": true,
+    "redacted_stdout": true,
+    "redacted_stderr": true
+  },
+  {
+    "probe": "default-wrapper",
+    "exit": 0,
+    "dependency_received": "3600|agent --owner theorem-labs --repo theorem-cli --read-only"
+  },
+  {
+    "probe": "mint-client-clock-behind",
+    "clock_behind_seconds": 60,
+    "mint_calls": 1,
+    "reused": true
+  }
+]

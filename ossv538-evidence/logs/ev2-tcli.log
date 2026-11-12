@@ -1,0 +1,159 @@
+theorem-cli: warning: primary_contact is n/a: only a project we seeded may say that, and only until a maintainer adopts it
+
+[03:37:56] mint a read-only token for https://github.com/theorem-labs/theorem-cli
+infra/private-libraries.tsv: the `theorem` CLI, which is ours and not published (dispatch://OSSV-518)
+the token is read-only, is for this repository and this build only, and goes to docker build as the secret oss-verify-git-token; it is in no build argument, no layer, no manifest and no log
+
+[03:37:57] resolve https://github.com/theorem-labs/theorem-cli#main
+main is b9e7947677f353c26a62980aaf6dffbcc57d1503
+toolchain: ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain@sha256:6a6b4816865c7ec61801ae0fcab6d9c81a599ffcb20616576a9c668abd8b0a7b (the newest for c)
+
+[03:37:57] docker build: the builder (oss-verify-base-builder:c1a617e41f3df00e-6a6b4816865c), FROM ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain@sha256:6a6b4816865c7ec61801ae0fcab6d9c81a599ffcb20616576a9c668abd8b0a7b
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 2.71kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain@sha256:6a6b4816865c7ec61801ae0fcab6d9c81a599ffcb20616576a9c668abd8b0a7b
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [stage-0  1/10] FROM ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain@sha256:6a6b4816865c7ec61801ae0fcab6d9c81a599ffcb20616576a9c668abd8b0a7b
+#4 resolve ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain@sha256:6a6b4816865c7ec61801ae0fcab6d9c81a599ffcb20616576a9c668abd8b0a7b 0.0s done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 1.75kB done
+#5 DONE 0.0s
+
+#6 [stage-0  7/10] COPY go/ /usr/local/lib/oss-verify/go/
+#6 CACHED
+
+#7 [stage-0  5/10] COPY rust/ /usr/local/lib/oss-verify/rust/
+#7 CACHED
+
+#8 [stage-0  9/10] RUN chmod 0755 /usr/local/bin/compile /usr/local/bin/fetch-commit /usr/local/bin/lay-out-sources                /usr/local/bin/git-credential-oss-verify                /usr/local/lib/oss-verify/link-fuzz-target /usr/local/lib/oss-verify/record-compile                /usr/local/lib/oss-verify/go/compile-go  && mkdir -p /src /work /out
+#8 CACHED
+
+#9 [stage-0  3/10] COPY toolchain.sh link-fuzz-target record-compile recipes.sh release-target.sh /usr/local/lib/oss-verify/
+#9 CACHED
+
+#10 [stage-0  2/10] RUN --mount=type=bind,source=distrust-roots.py,target=/tmp/distrust-roots.py python3 /tmp/distrust-roots.py
+#10 CACHED
+
+#11 [stage-0  4/10] COPY driver/ /usr/local/lib/oss-verify/driver/
+#11 CACHED
+
+#12 [stage-0  6/10] COPY python/ /usr/local/lib/oss-verify/python/
+#12 CACHED
+
+#13 [stage-0  8/10] COPY compile fetch-commit git-credential-oss-verify lay-out-sources /usr/local/bin/
+#13 CACHED
+
+#14 [stage-0 10/10] WORKDIR /src
+#14 CACHED
+
+#15 exporting to image
+#15 exporting layers done
+#15 exporting manifest sha256:3555fd45900a567539ff9c33521c570df04db83aaf7fd49ffa94306c22de24cf done
+#15 exporting config sha256:a1ecb4979bd06f2d6b6516d4ff09f63ce0167f729ef4767a57643bf6a588c18e done
+#15 exporting attestation manifest sha256:557e556190dd76541667470e3a7d5d68c30619615fd1f6fc0bfe94091d484a84 0.0s done
+#15 exporting manifest list sha256:b978f0c09aa392987877a6cb2fd780858fa8fe9576f0a5fef0ed46da8f4f06ad 0.0s done
+#15 naming to docker.io/library/oss-verify-base-builder:c1a617e41f3df00e-6a6b4816865c
+#15 naming to docker.io/library/oss-verify-base-builder:c1a617e41f3df00e-6a6b4816865c done
+#15 unpacking to docker.io/library/oss-verify-base-builder:c1a617e41f3df00e-6a6b4816865c done
+#15 DONE 0.1s
+Dockerfile: the one beside project.yaml; the build context is projects/theorem-cli/
+
+[03:37:58] docker build: the project (oss-verify-check/theorem-cli:b9e7947677f3-92187cf3565f); the network is available
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 518B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/oss-verify-base-builder:c1a617e41f3df00e-6a6b4816865c
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [internal] load build context
+#4 transferring context: 30B done
+#4 DONE 0.0s
+
+#5 [stage-0 1/4] FROM docker.io/library/oss-verify-base-builder:c1a617e41f3df00e-6a6b4816865c@sha256:b978f0c09aa392987877a6cb2fd780858fa8fe9576f0a5fef0ed46da8f4f06ad
+#5 resolve docker.io/library/oss-verify-base-builder:c1a617e41f3df00e-6a6b4816865c@sha256:b978f0c09aa392987877a6cb2fd780858fa8fe9576f0a5fef0ed46da8f4f06ad 0.0s done
+#5 DONE 0.1s
+
+#6 [stage-0 2/4] RUN --mount=type=secret,id=oss-verify-git-token fetch-commit /src/theorem-cli
+#6 2.104 fetch-commit: https://github.com/theorem-labs/theorem-cli at b9e7947677f353c26a62980aaf6dffbcc57d1503 in /src/theorem-cli
+#6 DONE 2.2s
+
+#7 [stage-0 3/4] COPY build.sh /src/
+#7 DONE 0.1s
+
+#8 [stage-0 4/4] WORKDIR /src/theorem-cli
+#8 DONE 0.1s
+
+#9 exporting to image
+#9 exporting layers
+#9 exporting layers 0.2s done
+#9 exporting manifest sha256:488664df119e4b69b46697c4111a8a36ba6dff439b2080de6073a3f2471fed1e 0.0s done
+#9 exporting config sha256:ecd00c3522330c6144b134c3cdf4361560adfacd3a1d908628db34902b25416f 0.0s done
+#9 exporting attestation manifest sha256:f0ec5d094f973f63e844908485baa3280bb1afd97fd6f12d93481ba7f1af1c89 0.0s done
+#9 exporting manifest list sha256:3a5578bff55a60dd63e55e935bd8112278f6391d9a5743a535ee978c670bc3d7 0.0s done
+#9 naming to docker.io/oss-verify-check/theorem-cli:b9e7947677f3-92187cf3565f done
+#9 unpacking to docker.io/oss-verify-check/theorem-cli:b9e7947677f3-92187cf3565f
+#9 unpacking to docker.io/oss-verify-check/theorem-cli:b9e7947677f3-92187cf3565f 0.4s done
+#9 DONE 0.7s
+
+[03:38:02] compile: the plain build (SANITIZER=none), with no network
+compile: the plain build (SANITIZER=none)
+clang: warning: argument unused during compilation: '-fno-plt' [-Wunused-command-line-argument]
+clang: warning: argument unused during compilation: '-fno-plt' [-Wunused-command-line-argument]
+clang: warning: argument unused during compilation: '-fno-plt' [-Wunused-command-line-argument]
+clang: warning: argument unused during compilation: '-fno-plt' [-Wunused-command-line-argument]
+clang: warning: argument unused during compilation: '-fno-plt' [-Wunused-command-line-argument]
+clang: warning: argument unused during compilation: '-fno-plt' [-Wunused-command-line-argument]
+clang: warning: argument unused during compilation: '-fno-plt' [-Wunused-command-line-argument]
+compile: CC=/tmp/ov/bin/riscv64-linux-musl-clang
+compile: CFLAGS=-march=rv64g -mabi=lp64d -Os -g -ffunction-sections -fdata-sections -fno-stack-protector -Wdate-time -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-reallocarray -fno-builtin-free -fno-builtin-aligned_alloc -fno-builtin-posix_memalign -fno-builtin-memalign -fno-builtin-valloc -fno-builtin-strdup -fno-builtin-strndup -Wno-unused-command-line-argument -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+compile: CXXFLAGS=-march=rv64g -mabi=lp64d -Os -g -ffunction-sections -fdata-sections -fno-stack-protector -Wdate-time -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-reallocarray -fno-builtin-free -fno-builtin-aligned_alloc -fno-builtin-posix_memalign -fno-builtin-memalign -fno-builtin-valloc -fno-builtin-strdup -fno-builtin-strndup -Wno-unused-command-line-argument -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION -stdlib=libc++
++ cd /src/theorem-cli
++ ALLOC_DEFS='-Dmalloc=theorem_malloc -Dcalloc=theorem_calloc -Drealloc=theorem_realloc -Dstrdup=theorem_strdup -Dstrndup=theorem_strndup'
++ CLI_CFLAGS='-std=c11 -D_POSIX_C_SOURCE=200809L -Iinclude -Icore -Dmalloc=theorem_malloc -Dcalloc=theorem_calloc -Drealloc=theorem_realloc -Dstrdup=theorem_strdup -Dstrndup=theorem_strndup'
++ objects=()
++ for source in fuzz/core_argv_fuzzer.c core/core.c core/alloc.c
+++ echo fuzz/core_argv_fuzzer.c
+++ tr / _
++ object=/work/fuzz_core_argv_fuzzer.c.o
++ /tmp/ov/bin/riscv64-linux-musl-clang -march=rv64g -mabi=lp64d -Os -g -ffunction-sections -fdata-sections -fno-stack-protector -Wdate-time -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-reallocarray -fno-builtin-free -fno-builtin-aligned_alloc -fno-builtin-posix_memalign -fno-builtin-memalign -fno-builtin-valloc -fno-builtin-strdup -fno-builtin-strndup -Wno-unused-command-line-argument -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION -std=c11 -D_POSIX_C_SOURCE=200809L -Iinclude -Icore -Dmalloc=theorem_malloc -Dcalloc=theorem_calloc -Drealloc=theorem_realloc -Dstrdup=theorem_strdup -Dstrndup=theorem_strndup -c fuzz/core_argv_fuzzer.c -o /work/fuzz_core_argv_fuzzer.c.o
++ objects+=("$object")
++ for source in fuzz/core_argv_fuzzer.c core/core.c core/alloc.c
+++ echo core/core.c
+++ tr / _
++ object=/work/core_core.c.o
++ /tmp/ov/bin/riscv64-linux-musl-clang -march=rv64g -mabi=lp64d -Os -g -ffunction-sections -fdata-sections -fno-stack-protector -Wdate-time -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-reallocarray -fno-builtin-free -fno-builtin-aligned_alloc -fno-builtin-posix_memalign -fno-builtin-memalign -fno-builtin-valloc -fno-builtin-strdup -fno-builtin-strndup -Wno-unused-command-line-argument -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION -std=c11 -D_POSIX_C_SOURCE=200809L -Iinclude -Icore -Dmalloc=theorem_malloc -Dcalloc=theorem_calloc -Drealloc=theorem_realloc -Dstrdup=theorem_strdup -Dstrndup=theorem_strndup -c core/core.c -o /work/core_core.c.o
++ objects+=("$object")
++ for source in fuzz/core_argv_fuzzer.c core/core.c core/alloc.c
+++ echo core/alloc.c
+++ tr / _
++ object=/work/core_alloc.c.o
++ /tmp/ov/bin/riscv64-linux-musl-clang -march=rv64g -mabi=lp64d -Os -g -ffunction-sections -fdata-sections -fno-stack-protector -Wdate-time -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-reallocarray -fno-builtin-free -fno-builtin-aligned_alloc -fno-builtin-posix_memalign -fno-builtin-memalign -fno-builtin-valloc -fno-builtin-strdup -fno-builtin-strndup -Wno-unused-command-line-argument -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION -std=c11 -D_POSIX_C_SOURCE=200809L -Iinclude -Icore -Dmalloc=theorem_malloc -Dcalloc=theorem_calloc -Drealloc=theorem_realloc -Dstrdup=theorem_strdup -Dstrndup=theorem_strndup -c core/alloc.c -o /work/core_alloc.c.o
++ objects+=("$object")
++ /tmp/ov/bin/riscv64-linux-musl-clang -march=rv64g -mabi=lp64d -Os -g -ffunction-sections -fdata-sections -fno-stack-protector -Wdate-time -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-reallocarray -fno-builtin-free -fno-builtin-aligned_alloc -fno-builtin-posix_memalign -fno-builtin-memalign -fno-builtin-valloc -fno-builtin-strdup -fno-builtin-strndup -Wno-unused-command-line-argument -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION /work/fuzz_core_argv_fuzzer.c.o /work/core_core.c.o /work/core_alloc.c.o -o /out/core_argv_fuzzer /tmp/ov/libFuzzingEngine.a
+compile: fuzz target core_argv_fuzzer
+compile: 1 fuzz target(s) in /out, the plain build
+
+[03:38:04] find the fuzz targets
+plain: core_argv_fuzzer
+
+[03:38:05] built
+  out/core_argv_fuzzer/core_argv_fuzzer.plain                       54,640 bytes      44,216 .text  static   sha256 69a99ebf14c2f34d24475e0b371884f5ad3eb806e785de38053947f36987fba7
+manifest: /mnt/nvme/sami/clones/ossv538-scratch/work/ev2-theorem-cli/manifest.yaml

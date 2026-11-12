@@ -1,0 +1,39 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile.after-command
+#1 transferring dockerfile: 218B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/busybox:stable
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [1/3] FROM docker.io/library/busybox:stable@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+#4 resolve docker.io/library/busybox:stable@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 0.0s done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 33B done
+#5 DONE 0.0s
+
+#6 [2/3] COPY fetch-commit /usr/local/bin/fetch-commit
+#6 CACHED
+
+#7 [3/3] RUN fetch-commit /src/x --mount=type=secret,id=oss-verify-git-token
+#7 1.100 fetch-has-no-secret
+#7 ERROR: process "/bin/sh -c fetch-commit /src/x --mount=type=secret,id=oss-verify-git-token" did not complete successfully: exit code: 19
+------
+ > [3/3] RUN fetch-commit /src/x --mount=type=secret,id=oss-verify-git-token:
+1.100 fetch-has-no-secret
+------
+Dockerfile.after-command:4
+--------------------
+   2 |     COPY fetch-commit /usr/local/bin/fetch-commit
+   3 |     ENV REVIEW2_CASE=after-command
+   4 | >>> RUN fetch-commit /src/x --mount=type=secret,id=oss-verify-git-token
+   5 |     
+--------------------
+ERROR: failed to build: failed to solve: process "/bin/sh -c fetch-commit /src/x --mount=type=secret,id=oss-verify-git-token" did not complete successfully: exit code: 19

@@ -1,0 +1,38 @@
+{
+  "url": "https://github.com/theorem-labs/oss-verify/pull/186#issuecomment-6814323825",
+  "created_at": "2026-11-12T04:15:20Z",
+  "head_before_read": "1eb1c2adcf61ed60f874a6c84367f5b174af9897",
+  "head_after_read": "1eb1c2adcf61ed60f874a6c84367f5b174af9897",
+  "body_matches_byte_for_byte": true,
+  "body_sha256": "bda68fbb251e44ac4f37c2bb13c2be577fc4998c0a35032cae595c7fb2614161",
+  "body_bytes": 28586,
+  "first_two_lines": [
+    "VERDICT: REQUEST CHANGES at 1eb1c2adcf61ed60f874a6c84367f5b174af9897",
+    "Reviewed by model: openai/gpt-6.1-sol"
+  ],
+  "transcript": {
+    "through_jsonl_line": 395,
+    "metadata_counts": [
+      {
+        "provider": "model-gateway-openai",
+        "api": "openai-responses",
+        "model": "openai/gpt-6.1-sol",
+        "count": 67
+      }
+    ],
+    "assistant_id_components": {
+      "call_": 155,
+      "fc_": 155
+    },
+    "tool_result_slots": 154,
+    "tool_result_id_components": {
+      "call_": 154,
+      "fc_": 154
+    },
+    "absent_assistant_fields": {
+      "provider": 0,
+      "api": 0,
+      "model": 0
+    }
+  }
+}

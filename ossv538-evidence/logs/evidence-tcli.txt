@@ -1,0 +1,30 @@
+image: oss-verify-check/theorem-cli:b9e7947677f3-da5c696ae3d5
+the token this build used: 390 bytes, read back from the recording token command
+
+$ docker history --no-trunc 'oss-verify-check/theorem-cli:b9e7947677f3-da5c696ae3d5' | grep -c -F -- "$(cat token-tcli.txt)"
+0
+
+$ docker image inspect 'oss-verify-check/theorem-cli:b9e7947677f3-da5c696ae3d5' | grep -c -F -- "$(cat token-tcli.txt)"
+0
+
+$ ls work/ev-tcli/layers/blobs/sha256 | wc -l
+18
+
+$ for b in work/ev-tcli/layers/blobs/sha256/*; do tar -xOf "$b" 2>/dev/null || cat "$b"; done | grep -c -F -- "$(cat token-tcli.txt)"
+0
+
+$ grep -c -F -- "$(cat token-tcli.txt)" work/ev-tcli/image.tar
+0
+
+$ docker run --rm --network=none --entrypoint sh 'oss-verify-check/theorem-cli:b9e7947677f3-da5c696ae3d5' -c 'printenv | grep -ci oss_verify_git_token; ls -A /run/secrets 2>/dev/null | wc -l'
+0
+0
+
+$ grep -rc -F -- "$(cat token-tcli.txt)" work/ev-tcli/manifest.yaml
+0
+
+$ find work/ev-tcli -type f ! -name image.tar ! -path 'work/ev-tcli/layers/*' -exec grep -l -F -- "$(cat token-tcli.txt)" {} + | wc -l
+0
+
+$ grep -c -F -- "$(cat token-tcli.txt)" ev-tcli.log
+0

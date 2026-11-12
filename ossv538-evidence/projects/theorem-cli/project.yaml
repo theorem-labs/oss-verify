@@ -1,0 +1,8 @@
+# OSSV-538 acceptance: the private `theorem` CLI, built through the private-library path. OSSV-518 owns the
+# enrolled project; this builds one of its fuzz targets to show the fetch and the recorded commit.
+repo: https://github.com/theorem-labs/theorem-cli#main
+primary_contact: n/a
+homepage: https://github.com/theorem-labs/theorem-cli
+language: c
+sanitizers: [address, undefined]
+fuzz_targets: [core_argv_fuzzer]

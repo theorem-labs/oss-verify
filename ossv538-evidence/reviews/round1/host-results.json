@@ -1,0 +1,37 @@
+[
+  {
+    "http_status": 401,
+    "host_diagnostic": "cannot read https://private.test/public.git: it is private, it does not exist, or the build may not read it. The build asked with a read-only token minted for this build, and the server listed no refs, so no commit of it was looked up: this is not a missing commit. https://private.test/public is not in infra/private-libraries.tsv, so no token was minted for it; a private repository of ours needs a row there. git said: git -c credential.helper= ... exited 128: fatal: Authentication failed for 'http://127.0.0.1:42529/public.git/'",
+    "authorisation_explained": true,
+    "missing_ref": false
+  },
+  {
+    "http_status": 403,
+    "host_diagnostic": "git -c credential.helper= ... exited 128: fatal: unable to access 'http://127.0.0.1:42529/public.git/': The requested URL returned error: 403",
+    "authorisation_explained": false,
+    "missing_ref": false
+  },
+  {
+    "http_status": 429,
+    "host_diagnostic": "git -c credential.helper= ... exited 128: fatal: unable to access 'http://127.0.0.1:42529/public.git/': The requested URL returned error: 429",
+    "authorisation_explained": false,
+    "missing_ref": false
+  },
+  {
+    "http_status": 503,
+    "host_diagnostic": "git -c credential.helper= ... exited 128: fatal: unable to access 'http://127.0.0.1:42529/public.git/': The requested URL returned error: 503",
+    "authorisation_explained": false,
+    "missing_ref": false
+  },
+  {
+    "http_status": null,
+    "host_diagnostic": "https://private.test/public.git has no branch or tag 'missing'",
+    "authorisation_explained": false,
+    "missing_ref": true
+  },
+  {
+    "probe": "credential-recipient",
+    "exit_code": 0,
+    "answers_unrelated_host_with_token": true
+  }
+]

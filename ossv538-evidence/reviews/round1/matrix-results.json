@@ -1,0 +1,65 @@
+[
+  {
+    "label": "base-base",
+    "cwd": "/mnt/nvme/sami/clones/ossv538-base",
+    "command": [
+      "/mnt/nvme/sami/clones/ossv538-scratch/venv/bin/python",
+      "-P",
+      "-m",
+      "pytest",
+      "-q",
+      "-p",
+      "no:cacheprovider",
+      "tools/tests"
+    ],
+    "environment": {
+      "PYTHONDONTWRITEBYTECODE": "1"
+    },
+    "exit_code": 0,
+    "log": "/mnt/nvme/sami/clones/ossv538-scratch/non-author-review/base-base.log",
+    "summary": "973 passed, 677 skipped, 434 subtests passed in 278.45s (0:04:38)"
+  },
+  {
+    "label": "head-head",
+    "cwd": "/mnt/nvme/sami/clones/ossv538",
+    "command": [
+      "/mnt/nvme/sami/clones/ossv538-scratch/venv/bin/python",
+      "-P",
+      "-m",
+      "pytest",
+      "-q",
+      "-p",
+      "no:cacheprovider",
+      "tools/tests"
+    ],
+    "environment": {
+      "PYTHONDONTWRITEBYTECODE": "1"
+    },
+    "exit_code": 0,
+    "log": "/mnt/nvme/sami/clones/ossv538-scratch/non-author-review/head-head.log",
+    "summary": "1009 passed, 677 skipped, 439 subtests passed in 277.99s (0:04:37)"
+  },
+  {
+    "label": "base-code-head-tests",
+    "cwd": "/mnt/nvme/sami/clones/ossv538-scratch/non-author-review/base-code-head-tests",
+    "command": [
+      "/mnt/nvme/sami/clones/ossv538-scratch/venv/bin/python",
+      "-P",
+      "-m",
+      "pytest",
+      "-q",
+      "-p",
+      "no:cacheprovider",
+      "tools/tests/test_private_fetch.py",
+      "tools/tests/test_check.py",
+      "tools/tests/test_print_toolchain.py",
+      "tools/tests/test_source_pinning.py"
+    ],
+    "environment": {
+      "PYTHONDONTWRITEBYTECODE": "1"
+    },
+    "exit_code": 1,
+    "log": "/mnt/nvme/sami/clones/ossv538-scratch/non-author-review/base-code-head-tests.log",
+    "summary": "34 failed, 72 passed, 1 skipped, 15 subtests passed in 8.13s"
+  }
+]
