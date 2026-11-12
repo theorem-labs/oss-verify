@@ -111,10 +111,23 @@ def step(text):
 def redacted(text, token):
     """`text` with every copy of `token` replaced, and with anything else shaped like a GitHub token replaced too.
     With no token, only the shape is matched: a token command's standard error is read before there is a value to
-    compare against."""
+    compare against. For a stream, use stream_redacted(), which never replaces part of a token it has not seen the
+    end of."""
     if token:
         text = text.replace(token, "<redacted>")
     return TOKEN_SHAPE.sub("<redacted>", text)
+
+
+def held_back(text, token):
+    """How many characters at the end of `text` must be kept until more of the stream arrives: the length of the
+    longest suffix of `text` that is the beginning of `token`, and so may turn into a copy of it. Only the token
+    itself is matched, never TOKEN_SHAPE: a shape matches the first 24 characters of a 44-character token, so
+    replacing by shape as the bytes arrive would turn the first half into <redacted> and print the second half
+    (a 20-character suffix of a real token, measured in review)."""
+    for length in range(min(len(token), len(text) + 1) - 1, 0, -1):
+        if token.startswith(text[-length:]):
+            return length
+    return 0
 
 
 def run(*argv, quiet=False, env=None, token=None):
@@ -133,12 +146,13 @@ def run(*argv, quiet=False, env=None, token=None):
 
     def copy():
         decode = codecs.getincrementaldecoder("utf-8")(errors="replace")
-        # With no token this is the stream as it always was: a public build's log is not filtered at all. With one,
-        # the buffer is redacted before any of it is written, and the last len(token)-1 characters are held back
-        # until the next chunk (or the end) says whether they begin a copy of it: a filter that looks at one chunk
-        # at a time lets through a token that straddles two reads.
-        clean = (lambda text: redacted(text, token)) if token else (lambda text: text)
-        keep = len(token) - 1 if token else 0
+        # With no token this is the stream as it always was: a public build's log is not filtered at all.
+        #
+        # With one: every whole copy of the token in what has arrived is replaced, and the tail that could still
+        # become one -- the longest suffix of the buffer that is a beginning of the token -- is held back until the
+        # next read, or the end of the stream, settles it. Only the token's own characters are matched here, and
+        # the tail is taken from the text as it arrived: a filter that replaced by shape as the bytes came in would
+        # turn a token's first half into <redacted> and then print its second half.
         held = ""
 
         def write(text):
@@ -147,11 +161,15 @@ def run(*argv, quiet=False, env=None, token=None):
                 sys.stdout.flush()
 
         while chunk := os.read(proc.stdout.fileno(), 65536):
-            held = clean(held + decode.decode(chunk))
-            if len(held) > keep:
-                write(held[:len(held) - keep])
-                held = held[len(held) - keep:]
-        write(clean(held))
+            held += decode.decode(chunk)
+            if not token:
+                write(held)
+                held = ""
+                continue
+            keep = held_back(held.replace(token, "\0" * len(token)), token)
+            write(redacted(held[:len(held) - keep], token))
+            held = held[len(held) - keep:]
+        write(redacted(held, token) if token else held)
 
     reader = threading.Thread(target=copy, daemon=True)
     reader.start()
