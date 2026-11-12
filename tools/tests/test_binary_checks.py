@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 import zipfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -229,6 +230,23 @@ class MapParsing(unittest.TestCase):
             ("/opt/musl-sysroot/usr/lib/libc++.a", "iostream.cpp.o", ".init_array.100", 0x8),
         ], 3))
 
+    def test_read_counts_the_shape_and_not_the_loading(self):
+        """`read` counts the lines in the shape of an input section, loaded or not, and <internal> ones too. A line
+        that is not in that shape is not counted, but its address still decides where the loaded part ends."""
+        text = "\n".join([
+            map_line(0x10000, 0x10, "/opt/musl-sysroot/usr/lib/crt1.o:(.text)"),
+            map_line(0x10010, 0x8, "/work/build/libfoo.a(foo.c.o).text.foo"),  # no ":("
+            map_line(0x10018, 0x8, "/work/build/libfoo.a(foo.c.o):(.text.foo"),  # no ")" at the end
+            map_line(0x10020, 0x8, ":(.text.bar)"),  # ":(" is its first character
+            map_line(0x10028, 0x8, "<internal>:(.rodata.str1.1)"),
+            # Not in the shape, at the address 0: the output section it begins is not loaded.
+            map_line(0, 0x10, "/work/build/libfoo.a(bar.c.o)"),
+            map_line(0x10, 0x10, "/work/build/libfoo.a(bar.c.o):(.debug_info)"),
+        ])
+        self.assertEqual(check_links.parse_map(text), ([
+            ("/opt/musl-sysroot/usr/lib/crt1.o", None, ".text", 0x10),
+        ], 3))
+
 
 class RealRecord(unittest.TestCase):
     """The reading of a record that a build wrote, not one written here: tools/tests/fixtures/link-record/.
@@ -305,6 +323,150 @@ class RealRecord(unittest.TestCase):
                                 if pathlib.PurePosixPath(p).name in self.IN_BINARY))
         self.assertEqual(sorted(pathlib.PurePosixPath(p).name for p, _s in provided), self.IN_BINARY)
         self.assertTrue(all(check_links.runtime_kind(p) for p, _s in provided))
+
+
+class ReaderKeptNothing(unittest.TestCase):
+    """A map with lines of which the reader keeps no input section: the record that a build wrote, or parts of it.
+
+    read_record puts the problem on the Record, with the counts and the map's first line. analyse then gives that
+    build no list and the problem as its whole detail, and a plain build with it is no baseline for ubsan. The
+    record's files that are not under /opt are named in its driver file, so the reader skips them; the toolchain
+    image is the record's files under /opt.
+    """
+
+    RECORD = RealRecord.RECORD
+    DIGEST = "a" * 64
+    PLAIN = "the plain build instruments nothing, by design"
+    FIRST = "10270            10270       24     4         <internal>:(.note.gnu.build-id)"
+
+    def setUp(self):
+        with gzip.open(self.RECORD / "map.gz", "rt") as stream:
+            self.map = stream.read()
+        self.inputs = (self.RECORD / "inputs.tsv").read_text().splitlines()
+        self.image, self.other = {}, []
+        for row in self.inputs:
+            _path, real, sha256, _size = row.split("\t")
+            if real.startswith("/opt/"):
+                self.image[real] = sha256
+            else:
+                self.other.append(real)
+        # The part of the map that the linker does not load, as RealRecord reads it.
+        lines = self.map.splitlines()
+        at = min(n for n, line in enumerate(lines)
+                 if n and check_links.MAP_COLUMNS.match(line)
+                 and int(check_links.MAP_COLUMNS.match(line).group(1), 16) == 0)
+        self.tail = "\n".join(lines[at:])
+        # The <internal> lines of the loaded part.
+        self.internal = [line for line in lines[:at]
+                         if line[check_links.MAP_COLUMNS.match(line).end():].lstrip(" ").startswith("<internal>")]
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = pathlib.Path(tmp.name)
+
+    def read(self, mapping, name="plain", drop=None):
+        """read_record on a record with this map and the fixture's inputs and driver, in its own $OUT `name`.
+        `drop` is a file of the record to leave out."""
+        raw = self.tmp / name
+        directory = raw / ".records" / self.DIGEST
+        directory.mkdir(parents=True)
+        files = {"map": mapping, "inputs.tsv": "\n".join(self.inputs) + "\n",
+                 "driver": (self.RECORD / "driver").read_text() + "\n".join(self.other) + "\n"}
+        for file, text in files.items():
+            if file != drop:
+                (directory / file).write_text(text)
+        return check_links.read_record(raw, self.DIGEST)
+
+    def analyse(self, records):
+        return check_links.analyse(records, self.image)
+
+    def problem(self, lines, read, first):
+        return (f"the reader kept no input section of the link's map: {lines} non-blank lines, {read} read as input "
+                f"sections, 0 kept; the first line: {first}")
+
+    def error(self, build, problem):
+        """The result of a build whose record has this problem."""
+        detail = f"{self.PLAIN}; {problem}" if build == "plain" else problem
+        return {"uninstrumented": None, "instrumented": {"result": "error", "detail": detail}}
+
+    def test_the_unloaded_part_alone(self):
+        first = "0                0       30     1         <internal>:(.comment)"
+        self.assertEqual(self.tail.splitlines()[0].strip(" \t"), first)
+        for build in ("plain", "ubsan", "asan", "asan-ubsan"):
+            with self.subTest(build=build):
+                result = self.analyse({build: self.read(self.tail, build)})[build]
+                self.assertEqual(result, self.error(build, self.problem(7632, 7632, first)))
+
+    def test_a_parse_map_that_keeps_nothing(self):
+        """The check is outside parse_map: a parse_map that keeps nothing, for any reason, is reported too."""
+        self.assertEqual(self.map.splitlines()[0].strip(" \t"), self.FIRST)
+        with unittest.mock.patch.object(check_links, "parse_map", return_value=([], 0)):
+            for build in ("plain", "ubsan", "asan", "asan-ubsan"):
+                with self.subTest(build=build):
+                    result = self.analyse({build: self.read(self.map, build)})[build]
+                    self.assertEqual(result, self.error(build, self.problem(7865, 0, self.FIRST)))
+
+    def test_a_map_of_internal_lines_alone(self):
+        """A map whose loaded lines are all of <internal>: the reader keeps none of them."""
+        self.assertEqual(len(self.internal), 9)
+        self.assertEqual(self.internal[0].strip(" \t"), self.FIRST)
+        for build in ("plain", "ubsan", "asan", "asan-ubsan"):
+            with self.subTest(build=build):
+                result = self.analyse({build: self.read("\n".join(self.internal) + "\n", build)})[build]
+                self.assertEqual(result, self.error(build, self.problem(9, 9, self.FIRST)))
+
+    def test_a_ubsan_build_beside_a_plain_build_with_the_problem(self):
+        """A plain build with the problem is no baseline: the ubsan build reads as it does with no plain build."""
+        plain, ubsan = self.read(self.tail, "plain"), self.read(self.map, "ubsan")
+        beside = self.analyse({"plain": plain, "ubsan": ubsan})["ubsan"]
+        self.assertEqual(beside, self.analyse({"ubsan": ubsan})["ubsan"])
+        self.assertIn("no plain build to compare the UndefinedBehaviorSanitizer's checks with",
+                      beside["instrumented"]["detail"])
+
+    def test_the_problem_is_on_the_record(self):
+        record = self.read(self.tail)
+        self.assertEqual(record.taken, [])
+        self.assertEqual(record.problem,
+                         self.problem(7632, 7632, "0                0       30     1         <internal>:(.comment)"))
+
+    def test_an_empty_map_and_a_blank_map(self):
+        """A map with no non-blank line has no problem: the detail is the one it had before."""
+        for mapping in ("", "\n  \n\t\n"):
+            with self.subTest(mapping=mapping):
+                record = self.read(mapping, name=f"map{len(mapping)}")
+                self.assertIsNone(record.problem)
+                self.assertEqual(self.analyse({"plain": record})["plain"]["instrumented"], {
+                    "result": "error", "detail": f"{self.PLAIN}; the link took no file of the toolchain image, and "
+                                                 "every static link takes its C library"})
+
+    def test_an_incomplete_record(self):
+        for drop in ("driver", "inputs.tsv"):
+            with self.subTest(drop=drop):
+                with self.assertRaises(check_links.RecordError) as caught:
+                    self.read(self.map, name=drop, drop=drop)
+                self.assertEqual(str(caught.exception), f"the link record is incomplete: {drop} is not there")
+
+    def test_a_link_with_no_map_file(self):
+        """A record with no map, as check_binaries.record_of reads it: no link record, as before."""
+        body = b"not an executable"
+        raw = self.tmp / "out"
+        directory = raw / ".records" / hashlib.sha256(body).hexdigest()
+        directory.mkdir(parents=True)
+        (raw / "t").write_bytes(body)
+        (raw / "t").chmod(0o755)
+        (directory / "inputs.tsv").write_text("\n".join(self.inputs) + "\n")
+        (directory / "driver").write_text((self.RECORD / "driver").read_text())
+        reason, _quiet = check_binaries.record_of(raw, "t")
+        result = self.analyse({"plain": reason})["plain"]["instrumented"]
+        self.assertEqual(result["result"], "error")
+        self.assertTrue(result["detail"].startswith("no link record: its link has no map, and it is not a Go program"),
+                        result["detail"])
+
+    def test_the_real_record_is_plain(self):
+        record = self.read(self.map)
+        self.assertIsNone(record.problem)
+        result = self.analyse({"plain": record})["plain"]
+        self.assertEqual(sorted(entry["name"] for entry in result["uninstrumented"]), RealRecord.IN_BINARY)
+        self.assertEqual(result["instrumented"], {"result": "plain", "detail": self.PLAIN})
 
 
 class Archives(unittest.TestCase):
