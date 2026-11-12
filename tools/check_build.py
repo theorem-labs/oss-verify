@@ -63,9 +63,12 @@ CREDENTIAL_HELPER = BUILDER_DIR / "git-credential-oss-verify"
 # A GitHub token, for the one case where a message this file did not write may hold one: the standard error of a
 # token command, which is read before there is a token to compare against.
 TOKEN_SHAPE = re.compile(r"gh[a-z]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}")
-# What stands in a message for a credential that was wrong or missing, rather than for a request that never arrived.
+# What stands in a message for a credential that was wrong or missing, or a repository the server will not admit
+# exists, rather than for a request that never arrived at all. git writes an HTTP status two ways, and both are
+# here: `403 Forbidden` from the remote, and its own `The requested URL returned error: 403`.
 UNAUTHORISED = ("could not read username", "authentication failed", "repository not found", "terminal prompts "
-                "disabled", "403 forbidden", "invalid username or token", "remote: not found")
+                "disabled", "403 forbidden", "401 unauthorized", "invalid username or token", "remote: not found",
+                "returned error: 401", "returned error: 403", "access denied", "permission denied")
 
 
 class Failed(Exception):
@@ -204,10 +207,25 @@ def git(*args, token=False):
     return ["git", *helper, "-c", "protocol.allow=never", "-c", "protocol.https.allow=always", *args]
 
 
-def git_environment(token):
-    """The environment of a git process that fetches with `token`: this one, with the token added for the credential
-    helper to read. None without a token, which leaves the process this one's environment as before."""
-    return {**os.environ, GIT_TOKEN_ENV: token} if token else None
+# git's own tracing writes what it sends: GIT_TRACE_CURL with GIT_TRACE_REDACT=0 puts the Authorization header in a
+# file that outlives the build. Whatever the caller set, a fetch with a token does not trace.
+GIT_TRACING = ("GIT_TRACE", "GIT_TRACE_CURL", "GIT_TRACE_PACKET", "GIT_TRACE_CURL_NO_DATA", "GIT_CURL_VERBOSE",
+               "GIT_TRACE2", "GIT_TRACE2_EVENT", "GIT_TRACE2_PERF")
+
+
+def git_environment(token, repo=None):
+    """The environment of a git process that fetches `repo` with `token`: this one, with the token added for the
+    credential helper to read, the repository the helper may answer for, and git's tracing off. None without a
+    token, which leaves the process this one's environment as before."""
+    if not token:
+        return None
+    environment = {key: value for key, value in os.environ.items() if key not in GIT_TRACING}
+    environment[GIT_TOKEN_ENV] = token
+    environment["GIT_TRACE_REDACT"] = "1"
+    if repo:
+        # The helper answers for this repository alone: a submodule on another server must not be offered it.
+        environment["OSS_VERIFY_TOKEN_REPO"] = normalised_repo(repo).partition("://")[2]
+    return environment
 
 
 def private_libraries():
@@ -283,7 +301,7 @@ def resolve(repo, ref, token=None):
         names = [f"refs/heads/{ref}", f"refs/tags/{ref}", f"refs/tags/{ref}^{{}}"]
     try:
         listing = output(*git("ls-remote", "--", repo, *(names if ref else ["HEAD"]), token=bool(token)),
-                         env=git_environment(token), token=token)
+                         env=git_environment(token, repo), token=token)
     except Failed as failure:
         # A refused credential, and a repository the server will not admit exists, read alike; a bad host or no
         # network does not, and keeps git's own message rather than being called an authorisation failure.
@@ -323,14 +341,35 @@ def unreadable(repo, token, said):
 
 def clone(repo, commit, checkout, token=None):
     """Check out `repo` at `commit` into `checkout`, over https. Anonymously, unless `token` is the read-only token
-    of a private library, which the credential helper reads out of the git process's environment."""
+    of a private library, which the credential helper reads out of the git process's environment.
+
+    A fetch that fails is told apart the way fetch-commit tells it apart in the container: the refs are asked for,
+    which needs the fetch's authorisation and nothing about the commit. Refs listed means the commit is missing;
+    no refs and an answer that names a credential or an absent repository means the build may not read it; no refs
+    and anything else is the transport failure it is, reported as itself.
+    """
     shutil.rmtree(checkout, ignore_errors=True)
     checkout.mkdir(parents=True)
-    environment = git_environment(token)
+    environment = git_environment(token, repo)
     for args in (["init", "-q", str(checkout)], ["-C", str(checkout), "fetch", "-q", "--depth", "1", "--", repo, commit],
                  ["-C", str(checkout), "checkout", "-q", "--detach", "FETCH_HEAD"]):
         if run(*git(*args, token=bool(token)), env=environment, token=token) != 0:
-            raise Failed(f"cannot fetch {commit} from {repo}")
+            raise Failed(why_the_fetch_failed(repo, commit, token))
+
+
+def why_the_fetch_failed(repo, commit, token):
+    """Which of the three it was, after a fetch of `commit` from `repo` failed: the repository cannot be read, it
+    can be read and has no such commit, or it could not be reached at all."""
+    try:
+        output(*git("ls-remote", "--", repo, token=bool(token)), env=git_environment(token, repo), token=token)
+    except Failed as failure:
+        if any(marker in str(failure).lower() for marker in UNAUTHORISED):
+            return unreadable(repo, token, str(failure))
+        return (f"could not reach {repo} to list its refs, so nothing is known about {commit} yet: this is neither "
+                f"an authorisation failure nor a missing commit. git said: {failure}")
+    return (f"{repo} has no commit {commit}. The server listed its refs for this build, so this is not an "
+            "authorisation failure: the commit is not in the repository (deleted, or never pushed, or a branch "
+            "that was force-pushed since the commit was recorded).")
 
 
 def in_checkout(checkout, path):
@@ -560,23 +599,73 @@ def recorded_images(record):
         return []
 
 
+def instructions(text):
+    """The Dockerfile's instructions, one a string, with its comments removed and its line continuations joined, as
+    a Dockerfile parser reads it: a `#` line is a comment wherever it is, including in the middle of a continued
+    instruction, and a line ending in a backslash continues into the next. Whitespace is squeezed, so an
+    instruction reads the same however it was laid out."""
+    joined, carry = [], ""
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue  # a comment, even between the lines of a continued instruction
+        carry += line.rstrip()[:-1] + " " if line.rstrip().endswith("\\") else line
+        if not line.rstrip().endswith("\\"):
+            if carry.strip():
+                joined.append(" ".join(carry.split()))
+            carry = ""
+    if carry.strip():
+        joined.append(" ".join(carry.split()))
+    return joined
+
+
+def secret_mounts(instruction):
+    """The ids of the BuildKit secrets one instruction mounts: every `--mount=` option of a RUN whose fields say
+    `type=secret`, by the value of its `id=` field. The fields of a mount are comma-separated and in any order, and
+    an id is matched whole, so `id=oss-verify-git-token-other` is another secret and not this one."""
+    words = shlex.split(instruction, comments=False, posix=True) if instruction else []
+    if not words or words[0].upper() != "RUN":
+        return []
+    ids = []
+    for word in words[1:]:
+        if not word.startswith("--mount="):
+            break  # the options come first; what follows is the command the step runs
+        fields = dict(field.partition("=")[::2] for field in word[len("--mount="):].split(","))
+        if fields.get("type") == "secret" and fields.get("id"):
+            ids.append(fields["id"])
+    return ids
+
+
+def fetch_steps(text):
+    """The instructions of a Dockerfile that run fetch-commit: (instruction, the secret ids it mounts)."""
+    return [(line, secret_mounts(line)) for line in instructions(text) if "fetch-commit" in line]
+
+
 def check_secret_mount(dockerfile, text, token, where):
     """Refuse a build whose Dockerfile and whose library disagree about the token.
 
-    A private library whose Dockerfile does not mount the secret would fetch with no credential and fail with "not
+    A private library whose fetch step does not mount the secret would fetch with no credential and fail with "not
     authorised", one step away from the message this whole path exists to remove. A library that is NOT private
     whose Dockerfile asks for the mount is the other mistake: a project that asks a build for a credential it was
-    never meant to have. BuildKit gives such a RUN an empty mount and says nothing, so neither is caught by docker.
+    never meant to have. BuildKit gives such a RUN an empty mount and says nothing, so neither shows itself.
+
+    The Dockerfile is parsed, not searched: a mention of the mount in a comment is not a mount, a mount on another
+    step does not put the token on the fetch, an id that merely starts with ours is another secret, and a mount
+    whose fields are reordered or whose line is continued is still a mount.
     """
-    asks = SECRET_MOUNT in text
-    if token and not asks:
+    steps = fetch_steps(text)
+    mounted = [step for step, ids in steps if GIT_TOKEN_SECRET in ids]
+    asks = any(GIT_TOKEN_SECRET in ids for line in instructions(text) for ids in [secret_mounts(line)])
+    if token and not mounted:
+        why = (f"{dockerfile} has no fetch-commit step at all" if not steps else
+               f"the fetch step in {dockerfile} does not mount it" if not asks else
+               f"{dockerfile} mounts it, but not on the step that runs fetch-commit")
         raise Failed(f"{where} is in infra/private-libraries.tsv, so this build minted a read-only token for it, but "
-                     f"{dockerfile} never mounts it, so the fetch would get no credential. Put the mount on the "
-                     f"fetch step:\n    RUN {SECRET_MOUNT} fetch-commit $SRC/<name>")
+                     f"{why}, so the fetch would get no credential. Put the mount on the fetch step:\n"
+                     f"    RUN {SECRET_MOUNT} fetch-commit $SRC/<name>")
     if asks and not token:
-        raise Failed(f"{dockerfile} asks for {SECRET_MOUNT}, but {where} is not in infra/private-libraries.tsv, so "
-                     "no token is minted for it and no build of it gets a credential. A public library is fetched "
-                     "with none: take the mount off.")
+        raise Failed(f"{dockerfile} mounts the secret {GIT_TOKEN_SECRET}, but {where} is not in "
+                     "infra/private-libraries.tsv, so no token is minted for it and no build of it gets a "
+                     "credential. A public library is fetched with none: take the mount off.")
 
 
 def build_project(job, commit, builder, tag, work, no_cache=False, token=None):

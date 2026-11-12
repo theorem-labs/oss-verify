@@ -15,6 +15,7 @@ import io
 import os
 import pathlib
 import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -179,6 +180,10 @@ class FetchCommit(unittest.TestCase):
                 "GIT_CONFIG_VALUE_0": "always",
                 "GIT_CONFIG_KEY_1": f"url.{self.base}.insteadOf",
                 "GIT_CONFIG_VALUE_1": HOST,
+                # git rewrites the URL, so the repository the credential helper is told to answer for must be the
+                # one it is really asked about. A build sets neither this nor the token file: fetch-commit derives
+                # the scope from REPO, and nothing rewrites a build's URL.
+                "OSS_VERIFY_TOKEN_REPO": f"{self.base.partition('//')[2].rstrip('/')}/{repository}",
             }
             if token is not None:
                 secret = pathlib.Path(work) / "token"
@@ -261,6 +266,7 @@ class FetchCommit(unittest.TestCase):
                 "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "protocol.http.allow",
                 "GIT_CONFIG_VALUE_0": "always", "GIT_CONFIG_KEY_1": f"url.{self.base}.insteadOf",
                 "GIT_CONFIG_VALUE_1": HOST,
+                "OSS_VERIFY_TOKEN_REPO": f"{self.base.partition('//')[2].rstrip('/')}/secret.git",
             }
             done = subprocess.run(["sh", str(FETCH_COMMIT), str(checkout)], capture_output=True, text=True,
                                   env=environment)
@@ -454,33 +460,229 @@ class WhereTheTokenIsNot(unittest.TestCase):
 
 
 class TheMountAndTheList(unittest.TestCase):
-    """A build is refused when the Dockerfile and infra/private-libraries.tsv disagree."""
+    """A build is refused when the Dockerfile and infra/private-libraries.tsv disagree. The Dockerfile is parsed,
+    not searched: before it was, a comment counted as a mount, an id that merely started with ours counted, a
+    mount on another step counted, and a reordered or continued one did not count at all."""
 
-    def test_a_private_library_whose_dockerfile_does_not_mount_the_secret_is_refused(self):
+    PRIVATE = "https://github.com/theorem-labs/theorem-cli"
+    PUBLIC = "https://github.com/DaveGamble/cJSON"
+    MOUNTED = f"FROM x\nRUN {check_build.SECRET_MOUNT} fetch-commit $SRC/x\n"
+
+    def refuses(self, text, token, where):
         with self.assertRaises(Failed) as refused:
-            check_build.check_secret_mount("Dockerfile", "RUN fetch-commit $SRC/x\n", TOKEN,
-                                           "https://github.com/theorem-labs/theorem-cli")
-        self.assertIn("never mounts it", str(refused.exception))
-        self.assertIn(check_build.SECRET_MOUNT, str(refused.exception))
+            check_build.check_secret_mount("Dockerfile", text, token, where)
         self.assertNotIn(TOKEN, str(refused.exception))
+        return str(refused.exception)
 
-    def test_a_library_that_is_not_private_may_not_ask_for_the_mount(self):
-        with self.assertRaises(Failed) as refused:
-            check_build.check_secret_mount("Dockerfile", f"RUN {check_build.SECRET_MOUNT} fetch-commit $SRC/x\n",
-                                           None, "https://github.com/DaveGamble/cJSON")
-        self.assertIn("is not in infra/private-libraries.tsv", str(refused.exception))
+    def test_a_private_library_whose_fetch_step_does_not_mount_the_secret_is_refused(self):
+        said = self.refuses("FROM x\nRUN fetch-commit $SRC/x\n", TOKEN, self.PRIVATE)
+        self.assertIn("does not mount it", said)
+        self.assertIn(check_build.SECRET_MOUNT, said)
+
+    def test_a_library_that_is_not_private_may_not_mount_the_secret(self):
+        self.assertIn("is not in infra/private-libraries.tsv", self.refuses(self.MOUNTED, None, self.PUBLIC))
 
     def test_the_two_that_agree_are_allowed(self):
-        check_build.check_secret_mount("Dockerfile", "RUN fetch-commit $SRC/x\n", None, "https://x/y/z")
-        check_build.check_secret_mount("Dockerfile", f"RUN {check_build.SECRET_MOUNT} fetch-commit $SRC/x\n", TOKEN,
-                                       "https://x/y/z")
+        check_build.check_secret_mount("Dockerfile", "FROM x\nRUN fetch-commit $SRC/x\n", None, self.PUBLIC)
+        check_build.check_secret_mount("Dockerfile", self.MOUNTED, TOKEN, self.PRIVATE)
 
-    def test_no_project_in_this_repository_asks_for_the_mount(self):
+    def test_a_comment_is_not_a_mount(self):
+        # Both directions: a public Dockerfile may say in a comment what the mount would be, and a private one
+        # that only says it in a comment has no mount.
+        documented = f"FROM x\n# RUN {check_build.SECRET_MOUNT} fetch-commit $SRC/x\nRUN fetch-commit $SRC/x\n"
+        check_build.check_secret_mount("Dockerfile", documented, None, self.PUBLIC)
+        self.assertIn("does not mount it", self.refuses(documented, TOKEN, self.PRIVATE))
+
+    def test_another_secret_whose_id_begins_with_ours_is_another_secret(self):
+        text = f"FROM x\nRUN --mount=type=secret,id={check_build.GIT_TOKEN_SECRET}-other fetch-commit $SRC/x\n"
+        check_build.check_secret_mount("Dockerfile", text, None, self.PUBLIC)
+        self.assertIn("does not mount it", self.refuses(text, TOKEN, self.PRIVATE))
+
+    def test_a_mount_on_another_step_does_not_put_it_on_the_fetch(self):
+        text = (f"FROM x\nRUN {check_build.SECRET_MOUNT} true\nRUN fetch-commit $SRC/x\n")
+        self.assertIn("not on the step that runs fetch-commit", self.refuses(text, TOKEN, self.PRIVATE))
+        # It is still a mount, so a public library may not have it either.
+        self.assertIn("is not in infra/private-libraries.tsv", self.refuses(text, None, self.PUBLIC))
+
+    def test_a_reordered_or_continued_mount_is_still_a_mount(self):
+        for text in (f"FROM x\nRUN --mount=id={check_build.GIT_TOKEN_SECRET},type=secret fetch-commit $SRC/x\n",
+                     f"FROM x\nRUN {check_build.SECRET_MOUNT} \\\n    fetch-commit $SRC/x\n",
+                     f"FROM x\nRUN \\\n  {check_build.SECRET_MOUNT} \\\n  fetch-commit $SRC/x\n",
+                     f"FROM x\nRUN {check_build.SECRET_MOUNT},required=true fetch-commit $SRC/x\n"):
+            with self.subTest(text=text):
+                check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
+                self.assertIn("is not in infra/private-libraries.tsv", self.refuses(text, None, self.PUBLIC))
+
+    def test_a_comment_between_the_lines_of_a_continued_instruction_is_a_comment(self):
+        text = f"FROM x\nRUN {check_build.SECRET_MOUNT} \\\n# a comment docker skips\n    fetch-commit $SRC/x\n"
+        check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
+
+    def test_a_private_dockerfile_with_no_fetch_step_at_all_says_so(self):
+        self.assertIn("no fetch-commit step at all", self.refuses("FROM x\nRUN true\n", TOKEN, self.PRIVATE))
+
+    def test_no_project_in_this_repository_mounts_the_secret(self):
         # Every library enrolled here is public, so none of their Dockerfiles may ask for a credential.
         asking = [str(path.relative_to(ROOT)) for path in (ROOT / "projects").rglob("Dockerfile")
-                  if check_build.SECRET_MOUNT in path.read_text(encoding="utf-8", errors="replace")
+                  if any(check_build.GIT_TOKEN_SECRET in check_build.secret_mounts(line)
+                         for line in check_build.instructions(path.read_text(encoding="utf-8", errors="replace")))
                   and check_build.private_reason(repo_of(path)) is None]
         self.assertEqual(asking, [])
+
+
+class TheScopeOfTheHelper(unittest.TestCase):
+    """The helper answers for one repository. git asks a helper for every server it reaches, and
+    `git submodule update --recursive` reaches whatever servers the tree names."""
+
+    def answer(self, request, **environment):
+        done = subprocess.run(["sh", str(HELPER), "get"], input=request, capture_output=True, text=True,
+                              env={"PATH": os.environ["PATH"], "OSS_VERIFY_GIT_TOKEN": TOKEN, **environment})
+        return done.returncode, done.stdout
+
+    def request(self, host, path=None):
+        return f"protocol=https\nhost={host}\n" + (f"path={path}\n" if path is not None else "") + "\n"
+
+    def test_it_answers_for_the_repository_it_was_given(self):
+        for path in ("theorem-labs/theorem-cli", "theorem-labs/theorem-cli.git", "/theorem-labs/theorem-cli"):
+            with self.subTest(path=path):
+                code, said = self.answer(self.request("github.com", path),
+                                         OSS_VERIFY_TOKEN_REPO="github.com/theorem-labs/theorem-cli")
+                self.assertEqual(code, 0)
+                self.assertIn(f"password={TOKEN}", said)
+
+    def test_it_answers_nothing_for_another_repository_or_another_host(self):
+        for host, path in (("github.com", "theorem-labs/something-else"),
+                           ("github.com", "someone/theorem-cli"),
+                           ("gitlab.example.invalid", "theorem-labs/theorem-cli")):
+            with self.subTest(host=host, path=path):
+                code, said = self.answer(self.request(host, path),
+                                         OSS_VERIFY_TOKEN_REPO="github.com/theorem-labs/theorem-cli")
+                self.assertEqual((code, said), (0, ""))
+
+    def test_with_no_path_the_host_alone_decides(self):
+        # credential.useHttpPath off at the caller: there is nothing more to match on, and refusing every request
+        # would leave no way to fetch at all.
+        code, said = self.answer(self.request("github.com"), OSS_VERIFY_TOKEN_REPO="github.com")
+        self.assertIn(f"password={TOKEN}", said)
+
+    def test_fetch_commit_scopes_the_helper_to_its_own_repository(self):
+        said = FETCH_COMMIT.read_text(encoding="utf-8")
+        self.assertIn("OSS_VERIFY_TOKEN_REPO=${OSS_VERIFY_TOKEN_REPO:-${REPO#https://}}", said)
+        self.assertIn("credential.useHttpPath=true", said)
+
+
+class NoTracing(unittest.TestCase):
+    """git's own tracing writes what it sends. GIT_TRACE_CURL with GIT_TRACE_REDACT=0 puts the Authorization
+    header in a file that outlives the build, so a fetch with a token does not trace, whatever the caller set."""
+
+    def test_the_host_environment_has_no_tracing_and_redacts(self):
+        with mock.patch.dict(os.environ, {"GIT_TRACE_CURL": "/tmp/trace", "GIT_TRACE": "1",
+                                          "GIT_TRACE_REDACT": "0", "GIT_CURL_VERBOSE": "1"}):
+            environment = check_build.git_environment(TOKEN, "https://github.com/theorem-labs/theorem-cli")
+        for name in check_build.GIT_TRACING:
+            self.assertNotIn(name, environment)
+        self.assertEqual(environment["GIT_TRACE_REDACT"], "1")
+        self.assertEqual(environment["OSS_VERIFY_TOKEN_REPO"], "github.com/theorem-labs/theorem-cli")
+
+    def test_a_public_fetch_keeps_the_environment_it_had(self):
+        self.assertIsNone(check_build.git_environment(None))
+
+    def test_fetch_commit_clears_them_too(self):
+        said = FETCH_COMMIT.read_text(encoding="utf-8")
+        self.assertIn("unset GIT_TRACE GIT_TRACE_CURL", said)
+        self.assertIn("GIT_TRACE_REDACT=1", said)
+
+
+class EverySplit(unittest.TestCase):
+    """A token that arrives in two reads is still redacted, at every place it can be cut. The first filter replaced
+    the buffer by TOKEN_SHAPE before holding the tail back, and that shape matches a 44-character token's first 24
+    characters, so the first half became <redacted> and the second half was printed."""
+
+    def test_no_split_of_a_token_across_two_writes_leaks_any_of_it(self):
+        for split in range(1, len(TOKEN)):
+            with self.subTest(split=split):
+                script = (f"import sys, time; sys.stdout.write('x' * 10 + {TOKEN[:split]!r}); sys.stdout.flush(); "
+                          f"time.sleep(0.02); sys.stdout.write({TOKEN[split:]!r} + '|end')")
+                printed = Printed()
+                with mock.patch("sys.stdout", printed):
+                    check_build.run(sys.executable, "-c", script, token=TOKEN)
+                self.assertEqual(printed.text, "x" * 10 + "<redacted>|end")
+
+    def test_held_back_is_the_longest_beginning_of_the_token(self):
+        self.assertEqual(check_build.held_back("nothing here", TOKEN), 0)
+        self.assertEqual(check_build.held_back("xx" + TOKEN[:7], TOKEN), 7)
+        # A whole token is replaced before the tail is measured, which is what run() does with it: what is left
+        # cannot be the beginning of another one.
+        self.assertEqual(check_build.held_back("xx" + "\0" * len(TOKEN), TOKEN), 0)
+
+    def test_a_public_build_is_not_filtered_at_all(self):
+        printed = Printed()
+        with mock.patch("sys.stdout", printed):
+            check_build.run(sys.executable, "-c", f"print({TOKEN!r})")
+        self.assertEqual(printed.text.strip(), TOKEN)
+
+
+class WhichFailure(unittest.TestCase):
+    """A cause reported as a different cause is the bug this change exists to remove, so a host that cannot be
+    reached must not read as a host that refused."""
+
+    def failed(self, said):
+        return mock.patch.object(check_build, "output", side_effect=Failed(said))
+
+    def test_a_refused_credential_or_an_absent_repository_is_an_authorisation_failure(self):
+        for said in ("remote: Repository not found.", "fatal: Authentication failed for 'https://github.com/x/y'",
+                     "remote: Invalid username or token.", "fatal: could not read Username for 'https://github.com'",
+                     "error: The requested URL returned error: 403",
+                     "error: The requested URL returned error: 401"):
+            with self.subTest(said=said):
+                with self.failed(said):
+                    message = check_build.why_the_fetch_failed("https://github.com/theorem-labs/theorem-cli",
+                                                               "a" * 40, TOKEN)
+                self.assertIn("cannot read", message)
+                self.assertNotIn("has no commit", message)
+
+    def test_a_host_that_cannot_be_reached_is_not_called_an_authorisation_failure(self):
+        for said in ("fatal: unable to access 'https://github.com/x/y': Failed to connect to github.com port 443: "
+                     "Connection refused",
+                     "error: The requested URL returned error: 429",
+                     "error: The requested URL returned error: 503",
+                     "fatal: unable to access: Could not resolve host: github.com"):
+            with self.subTest(said=said):
+                with self.failed(said):
+                    message = check_build.why_the_fetch_failed("https://github.com/theorem-labs/theorem-cli",
+                                                               "a" * 40, TOKEN)
+                self.assertIn("could not reach", message)
+                self.assertNotIn("cannot read", message)
+                self.assertNotIn("has no commit", message)
+
+    def test_refs_listed_means_the_commit_is_missing(self):
+        with mock.patch.object(check_build, "output", return_value="deadbeef\trefs/heads/main\n"):
+            message = check_build.why_the_fetch_failed("https://github.com/theorem-labs/theorem-cli", "a" * 40, TOKEN)
+        self.assertIn("has no commit", message)
+        self.assertIn("not an authorisation failure", message)
+
+    def test_the_container_tells_a_connection_failure_from_a_refusal(self):
+        # A port nothing listens on: ls-remote fails, and the message must not say "not authorised".
+        with tempfile.TemporaryDirectory() as work:
+            secret = pathlib.Path(work) / "token"
+            secret.write_text(TOKEN, encoding="utf-8")
+            environment = {
+                "PATH": f"{HELPER.parent}:{os.environ['PATH']}", "HOME": work,
+                "REPO": "https://private.test/secret.git", "COMMIT": "a" * 40,
+                "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
+                "OSS_VERIFY_TOKEN_FILE": str(secret), "OSS_VERIFY_TOKEN_REPO": "127.0.0.1/secret.git",
+                "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "protocol.http.allow",
+                "GIT_CONFIG_VALUE_0": "always",
+                "GIT_CONFIG_KEY_1": f"url.http://127.0.0.1:{closed_port()}/.insteadOf",
+                "GIT_CONFIG_VALUE_1": "https://private.test/",
+            }
+            done = subprocess.run(["sh", str(FETCH_COMMIT), str(pathlib.Path(work) / "checkout")],
+                                  capture_output=True, text=True, env=environment)
+        said = done.stdout + done.stderr
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("could not reach", said)
+        self.assertNotIn("not authorised to read", said)
+        self.assertNotIn("has no commit", said)
+        self.assertNotIn(TOKEN, said)
 
 
 class Unreadable(unittest.TestCase):
@@ -532,6 +734,13 @@ def repo_of(dockerfile):
         return ""
     found = re.search(r"^repo:\s*(\S+)", config.read_text(encoding="utf-8", errors="replace"), re.MULTILINE)
     return found.group(1) if found else ""
+
+
+def closed_port():
+    """A loopback port nothing listens on: bound and closed, so a connection to it is refused."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
 
 
 if __name__ == "__main__":

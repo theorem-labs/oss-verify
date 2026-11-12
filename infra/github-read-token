@@ -30,8 +30,20 @@ command -v gh-app-token >/dev/null 2>&1 || {
   exit 1
 }
 
-# A build's fetch happens in its first step, but ask for a token that is good for half an hour so a queued or slow
-# build does not race its own expiry; the helper mints a fresh hour-long one rather than reuse a nearly spent token.
-GH_APP_TOKEN_MIN_LIFETIME=1800
+# **Every build mints its own token, and gh-app-token keeps a copy on the host.** Both halves of that matter, so
+# neither is left to be discovered:
+#
+#   - gh-app-token answers from a cache first, keyed by the account, the repository list and the permissions, and
+#     GH_APP_TOKEN_MIN_LIFETIME is the life a cached entry must still have to be reused. GitHub issues an
+#     installation token for exactly one hour, so an entry can never have more than an hour left, and asking for an
+#     hour means no entry is ever reusable: the helper asks its broker again and returns a token minted now. That
+#     is what 3600 is for. It is not a timeout to tune: lower it and two builds in the same hour share one token,
+#     and "minted for this build" stops being true.
+#   - The token it mints is also written to the helper's own cache file on this host (mode 0600, under
+#     /mnt/nvme/<user>/gh-app-token or ~/.cache/gh-app-token). Nothing here can stop that, and nothing downstream
+#     needs to: the entry is unreadable by another account, is never reused by a later build because of the line
+#     above, and dies with the token in an hour. What the build keeps out of the image, a layer, the facts and the
+#     log is a different question, and that part is this repository's (docs/build-contract.md).
+GH_APP_TOKEN_MIN_LIFETIME=3600
 export GH_APP_TOKEN_MIN_LIFETIME
 exec gh-app-token agent --owner "$1" --repo "$2" --read-only

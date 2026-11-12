@@ -151,20 +151,29 @@ The project's `Dockerfile` mounts the token on its fetch step, in place of rule 
     ARG COMMIT
     RUN --mount=type=secret,id=oss-verify-git-token fetch-commit $SRC/<name>
 
-`tools/check` refuses a build whose `Dockerfile` and whose library disagree: a listed library whose `Dockerfile` does not mount the secret (it would fetch with no credential and fail as an unauthorised one), and a library that is not listed whose `Dockerfile` asks for the mount (a project asking a build for a credential it is not meant to have). BuildKit gives such a `RUN` an empty mount and says nothing, so neither mistake shows itself.
+`tools/check` refuses a build whose `Dockerfile` and whose library disagree: a listed library whose fetch step does not mount the secret (it would fetch with no credential and fail as an unauthorised one), and a library that is not listed whose `Dockerfile` mounts it (a project asking a build for a credential it is not meant to have). BuildKit gives such a `RUN` an empty mount and says nothing, so neither mistake shows itself. The `Dockerfile` is parsed rather than searched: a mention in a comment is not a mount, a mount on another step is not a mount on the fetch, an id that merely begins with ours is another secret, and a mount whose fields are reordered or whose line is continued is still a mount.
 
 Where the token is while the build runs, and nowhere else:
 
 * It goes to `docker build` as `--secret id=oss-verify-git-token,env=…`, read out of the environment of `tools/check` itself. A **build argument** would be in `docker history`; a secret is not, and `docker build` writes nothing of it into the image.
 * Inside the build it is a **tmpfs file** that exists only while the `RUN` step that mounts it runs. It is in no layer.
-* `git` reads it through the credential helper [git-credential-oss-verify](../infra/base-builder/git-credential-oss-verify). A token in the URL would be written into `.git/config`, which is a layer, and printed by `git remote -v`; a token in `-c http.extraHeader` would be in a command line, which every other process on the host can read. A helper's answer goes down a pipe to `git`.
+* `git` reads it through the credential helper [git-credential-oss-verify](../infra/base-builder/git-credential-oss-verify), which answers for **that one repository**: `git` asks a helper for every server it reaches, and `git submodule update --recursive` reaches whatever servers the tree names, so a helper that answered all of them would hand the token to a third party. A token in the URL would be written into `.git/config`, which is a layer, and printed by `git remote -v`; a token in `-c http.extraHeader` would be in a command line, which every other process on the host can read. A helper's answer goes down a pipe to `git`.
 * The remote in the checkout is `REPO` as `project.yaml` gives it. Nothing about the fetch reaches `manifest.yaml`: `commit` is the commit that was fetched, as for every other library.
-* What `git` writes when a fetch fails is the one message this repository does not author, so in this mode everything `git` writes goes through a filter that replaces the token, both in the container ([fetch-commit](../infra/base-builder/fetch-commit)) and on the host ([tools/check_build.py](../tools/check_build.py)).
+* Everything `git` writes, on both of its streams, goes through a filter that replaces the token, in the container ([fetch-commit](../infra/base-builder/fetch-commit)) and on the host ([tools/check_build.py](../tools/check_build.py)). What `git` writes when a fetch fails is the one message this repository does not author.
+* `git`'s own tracing is turned off for the fetch and `GIT_TRACE_REDACT` is forced on, whatever the caller set: `GIT_TRACE_CURL` with `GIT_TRACE_REDACT=0` writes the `Authorization` header into a file that outlives the build.
 
-A fetch that fails says which of two things went wrong, because they used to be one message:
+**What this does not close**, stated rather than claimed away:
 
-* **Not authorised.** The server would not list the repository's refs at all, so the commit was never looked up. GitHub answers a private repository you may not read exactly as it answers one that is not there, so the message names both and does not guess.
+* The token is in the **environment** of the `git` and `docker build` processes `tools/check` starts, so `/proc/<pid>/environ` holds it for as long as they run, for the account that owns them and for root. An environment is the narrowest place that is not a file; a file in the build's own filesystem would be a layer.
+* A **core dump** of one of those processes, or of `git` inside the build, can hold it. Nothing here disables core dumps.
+* The mount is a file in the `RUN` step that asks for it, so **other code in that same `RUN`** can copy it. BuildKit does not prevent that, and for a private library of ours the `Dockerfile` is ours.
+* `gh-app-token`, which [infra/github-read-token](../infra/github-read-token) asks, writes the token it mints into its own mode-0600 cache file on the build host. Every build mints its own (that file says how), and the entry dies with the token in an hour.
+
+A fetch that fails says which of **three** things went wrong, where before the first two were one message:
+
+* **Not authorised.** The server answered, and would not list the repository's refs, so the commit was never looked up. GitHub answers a private repository you may not read exactly as it answers one that is not there, so the message names both and does not guess.
 * **No such commit.** The server listed the refs, so the build may read the repository; the commit is not in it.
+* **Could not be reached.** The server did not answer either way: no route, a refused connection, a rate limit, a server fault. This is neither of the other two, and saying it was one of them would be the same bug in a new place. What `git` said comes with each message.
 
 ## What build.sh must do
 

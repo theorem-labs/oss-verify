@@ -49,7 +49,6 @@ esac
 [ ${#COMMIT} -eq 40 ] || [ ${#COMMIT} -eq 64 ] || { echo "fetch-commit: COMMIT must be a full commit id" >&2; exit 2; }
 
 export GIT_TERMINAL_PROMPT=0
-
 # Where tools/check mounts the token of a private library. The variable is for the tests, which run this script
 # outside a container; a build never sets it, and the mount is the only place a build's token comes from.
 token_file=${OSS_VERIFY_TOKEN_FILE:-/run/secrets/oss-verify-git-token}
@@ -63,49 +62,90 @@ if [ -s "$token_file" ]; then
   credential="a read-only token minted for this build"
   token=$(cat "$token_file")
   OSS_VERIFY_TOKEN_FILE=$token_file
-  export OSS_VERIFY_TOKEN_FILE
-  # redact() replaces the token wherever it is, so one copy of it cannot reach the build log through a message this
-  # script did not write. It is shell string handling and no other program: a filter would need the token in its own
-  # command line, which is the thing being avoided.
+  # The helper answers for this repository and no other: `git submodule update --recursive` reaches whatever
+  # servers the tree names, and a helper that answered all of them would hand our token to a third party. The
+  # variable is derived from REPO; it can be preset, as the token file can, for the tests, which reach a server
+  # of their own.
+  OSS_VERIFY_TOKEN_REPO=${OSS_VERIFY_TOKEN_REPO:-${REPO#https://}}
+  export OSS_VERIFY_TOKEN_FILE OSS_VERIFY_TOKEN_REPO
+  # git's own tracing writes what it sends, and GIT_TRACE_CURL with GIT_TRACE_REDACT=0 writes the Authorization
+  # header to a file that outlives the build. Whatever the caller set, this fetch does not trace.
+  unset GIT_TRACE GIT_TRACE_CURL GIT_TRACE_PACKET GIT_TRACE_CURL_NO_DATA GIT_CURL_VERBOSE GIT_TRACE2 \
+        GIT_TRACE2_EVENT GIT_TRACE2_PERF 2>/dev/null || true
+  GIT_TRACE_REDACT=1
+  export GIT_TRACE_REDACT
+  # redact() replaces every copy of the token. It walks the text once, keeping what it has already emitted out of
+  # the search, so a token whose own characters spell the replacement cannot make it loop.
   redact() {
-    text=$1
+    rest=$1
+    done_=""
     while :; do
-      case $text in
-        *"$token"*) text="${text%%"$token"*}<redacted>${text#*"$token"}" ;;
+      case $rest in
+        *"$token"*)
+          done_="$done_${rest%%"$token"*}<redacted>"
+          rest=${rest#*"$token"}
+          ;;
         *) break ;;
       esac
     done
-    printf '%s\n' "$text"
+    printf '%s\n' "$done_$rest"
   }
-  # The token is in no command line here: credential.helper names the helper, and the helper reads the file. Only
-  # what git writes to standard error is held back and redacted; its standard output passes through fd 3, so a
-  # caller that reads it ($(net ...)) still gets it.
+  # The token is in no command line here: credential.helper names the helper, and the helper reads the file.
+  # Everything git writes, on either stream, is held until the command ends and then written out redacted, so
+  # "what git writes" has no exception. It all leaves on standard error: of the commands net() runs, only
+  # ls-remote writes to standard output at all, and readable() is the one caller that reads it. Holding it in a
+  # shell variable and not a file is deliberate -- a temporary file holding a token is a file in the layer until
+  # something removes it, which is the thing being avoided.
   net() {
     status=0
-    exec 3>&1
-    message=$(command git -c credential.helper= -c credential.helper=oss-verify \
-                          -c protocol.allow=never -c protocol.https.allow=always "$@" 2>&1 1>&3) || status=$?
-    exec 3>&-
-    [ -z "$message" ] || redact "$message" >&2
+    said=$(command git -c credential.helper= -c credential.helper=oss-verify -c credential.useHttpPath=true \
+                       -c protocol.allow=never -c protocol.https.allow=always "$@" 2>&1) || status=$?
+    [ -z "$said" ] || redact "$said" >&2
     return $status
   }
 else
   credential="no credential"
+  redact() { printf '%s\n' "$1"; }
   net() { git "$@"; }
 fi
 
-# readable: does the server let this build list the repository's refs at all? It asks for the refs and nothing about
-# the commit, and it needs exactly the authorisation the fetch needs, so its answer separates "you may not read this
-# repository" from "this repository has no such commit". GitHub answers a repository you may not read the same way it
-# answers one that is not there, so the two cannot be told apart here and the message does not claim to.
-readable() { net ls-remote "$REPO" >/dev/null 2>&1; }
+# readable: can this build list the repository's refs? That asks for the refs and nothing about the commit, and it
+# needs exactly the authorisation the fetch needs, so its answer separates "you may not read this repository" from
+# "this repository has no such commit". Its own message is kept: a server that refused a credential and one that
+# could not be reached at all are not the same failure, and only the message tells them apart. refs_said holds it.
+refs_said=
+readable() {
+  refs_said=$(net ls-remote "$REPO" 2>&1 >/dev/null) && return 0
+  return 1
+}
+
+# A refusal of the credential, and a repository the server will not admit exists, read alike; a host that cannot be
+# reached, a rate limit and a server fault do not, and are reported as themselves rather than as an authorisation
+# failure, which is the mistake this whole script exists to stop.
+denied() {
+  case $(printf '%s' "$refs_said" | tr 'A-Z' 'a-z') in
+    *"could not read username"* | *"authentication failed"* | *"invalid username or token"* \
+    | *"not found"* | *"returned error: 401"* | *"returned error: 403"* | *"403 forbidden"* \
+    | *"terminal prompts disabled"* | *"access denied"* | *"permission denied"*) return 0 ;;
+  esac
+  return 1
+}
+
+unreachable() {
+  echo "fetch-commit: could not reach $REPO to list its refs, so nothing is known about $COMMIT yet. This is not" >&2
+  echo "  an authorisation failure and not a missing commit: the server did not answer one way or the other" >&2
+  echo "  (no route, a refused connection, a rate limit, a server fault). git said:" >&2
+  redact "$refs_said" | sed 's/^/    /' >&2
+  exit 1
+}
 
 unreadable() {
   echo "fetch-commit: not authorised to read $REPO, or it does not exist. This build fetched it with $credential." >&2
   echo "  The server did not list the repository's refs, so $COMMIT was never looked up: this is not a missing" >&2
   echo "  commit. GitHub answers a private repository you may not read exactly as it answers one that is not" >&2
   echo "  there. A private repository of ours needs a row in infra/private-libraries.tsv and" >&2
-  echo "  --mount=type=secret,id=oss-verify-git-token on this RUN (docs/build-contract.md)." >&2
+  echo "  --mount=type=secret,id=oss-verify-git-token on this RUN (docs/build-contract.md). git said:" >&2
+  redact "$refs_said" | sed 's/^/    /' >&2
   exit 1
 }
 
@@ -121,9 +161,9 @@ git -C "$dir" remote add origin "$REPO"
 if net -C "$dir" fetch -q --depth 1 origin "$COMMIT"; then
   git -C "$dir" checkout -q --detach FETCH_HEAD
 else
-  readable || unreadable
-  # A server that will not serve one commit by its id, as a "dumb" HTTP server cannot: clone all of it, then check the
-  # commit out.
+  readable || { if denied; then unreadable; else unreachable; fi; }
+  # A server that will not serve one commit by its id, as a "dumb" HTTP server cannot: clone all of it, then check
+  # the commit out.
   rm -rf "$dir"
   net clone -q --no-checkout "$REPO" "$dir"
   git -C "$dir" checkout -q --detach "$COMMIT" || no_such_commit
