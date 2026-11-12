@@ -74,8 +74,10 @@ The label review-passed says that an enrollment passed at its head commit: its s
 has no plan to merge or prove it now. enroll-dispatch.yml puts it on and takes it off, as review_passed says: on, off,
 or empty for no change. review_passed_at is head for a change at a new head and for a renewal, closed for a close or a
 merge, and else empty. label_at is the time of the newest labeled event that the decision judged, for a change at a
-new head and for a renewal; the workflow takes the label off only when that event is still the newest. Events of its
-former name, passes-not-merging, count as its own. The reason says why the label changes, or why it does not.
+new head and for a renewal; the workflow takes the label off at a new head only when that event is still the newest.
+For a renewal it takes it off before the send and puts it on again after (unless the newest removal since label_at is
+a person's), so that a send that fails leaves it off. Events of its former name, passes-not-merging, count as its own.
+The reason says why the label changes, or why it does not.
 
 The run's pull request is the one the decision names; when a decision none names none (required checks not passed,
 say), it is the open pull request into main from the run's head at its commit. A run changes the label only when its
@@ -91,8 +93,8 @@ commit, another event). Then:
   author, with a clear answer (a read that fails is not one), unless an account other than the oss-verify App took
   it off that pull request before (an unlabeled event, at any time). When the label is on and older than the run's
   commit, a run that passes puts it on again, whoever the author is (the trust is not read), so that its labeled
-  event is new and the label is for that commit; any other run takes it off. A label that is not older than the
-  run's commit stays, whatever that run decides.
+  event is new and the label is for that commit (the workflow takes it off before the send and puts it on after);
+  any other run takes it off. A label that is not older than the run's commit stays, whatever that run decides.
 
 The label is for the head the pull request was at when its newest labeled event was made. Each labeled event starts a
 run of maintainer-confirmed.yml (CONFIRMED_WORKFLOW, on pull_request_target) at that head, by the account that put the
@@ -607,8 +609,9 @@ def review_passed(api: Api, repo: str, result: dict, pull: dict | None = None, s
     are under one projects/<name>/ and whose author is not trusted (trusted, with a clear answer), puts the label on,
     unless an account other than APP_LOGIN took it off before. When the label is on and older than the head
     (older_than_head, `created` the completed run's creation), a run that passes puts it on again, for the head,
-    whoever the author is (the trust is not read), and any other run takes it off; a label that is not older stays.
-    When the pull request's events (or the runs that tell its age) cannot be read, nothing changes."""
+    whoever the author is (the trust is not read): a renewal, which the workflow takes off before the send and puts on
+    after it. Any other run takes it off; a label that is not older stays. When the pull request's events (or the
+    runs that tell its age) cannot be read, nothing changes."""
     def say(clause: str, state: str = "", at: str = "", label_at: str = "", number: object = None) -> dict:
         out = dict(result, reason=" ".join(f"{result['reason']}; {REVIEW_PASSED} {clause}".split()))
         if state:

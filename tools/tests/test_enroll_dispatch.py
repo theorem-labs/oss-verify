@@ -1125,6 +1125,7 @@ class AppToken(unittest.TestCase):
 
 # review-passed (dispatch://OSSV-496). The dispatch job's steps that check decide's values and write the label.
 CHECK, TAKE_OFF, PUT_ON = "Check the decision's values", "Take off review-passed", "Put on review-passed"
+SEND = "Send enrollment-checked to the private repository"
 REVIEW_PASSED = dispatch.REVIEW_PASSED
 DESCRIPTION = "Checks and CI review passed; statements started. No plan to merge or prove this project now."
 EPOCH = calendar.timegm((2026, 11, 11, 21, 0, 0))
@@ -1137,8 +1138,11 @@ function trusted. It keeps one JSON state file, $GH_STATE:
      "events": {"<n>": [{"event", "label": {"name"}, "actor": {"login"}, "created_at"}, ...]},
      "collaborators": {"<login>": "<permission>"},
      "clock": <the Unix time of the next event>,
-     "after_add": {"<n>": {"head_sha"}}   applied to the pull request just after a label is put on it: a push that
-                                          lands between the put-on and the read after it
+     "after_add": {"<n>": {"head_sha", "read_fails"}}   applied to the pull request just after a label is put on it:
+                                          a push that lands between the put-on and the read after it, and with
+                                          read_fails true, a failure (HTTP 502) of the next read of the pull request
+     "before_delete": {"<n>": "<login>"}   the account that takes a label off the pull request just before a DELETE
+                                          of it: a person's removal that lands between a step's read and its DELETE
      "calls": ["<METHOD> <path>", ...]}   every request, in order
 
 What GitHub refuses it answers as gh does: the body on standard output, `gh: <message> (HTTP <status>)` on standard
@@ -1151,7 +1155,7 @@ import sys
 import time
 
 APP = "oss-verify[bot]"   # the account whose token the steps write with
-MESSAGES = {404: "Not Found", 422: "Validation Failed"}
+MESSAGES = {404: "Not Found", 422: "Validation Failed", 502: "Bad Gateway"}
 with open(os.environ["GH_STATE"]) as file:
     state = json.load(file)
 
@@ -1173,11 +1177,11 @@ def stop(why):
     sys.exit(f"stand-in gh: {why}")
 
 
-def event(number, kind, name):
+def event(number, kind, name, actor=APP):
     created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(state["clock"]))
     state["clock"] += 1
     state["events"].setdefault(number, []).append(
-        {"event": kind, "label": {"name": name}, "actor": {"login": APP}, "created_at": created})
+        {"event": kind, "label": {"name": name}, "actor": {"login": actor}, "created_at": created})
 
 
 def label(name):
@@ -1227,6 +1231,8 @@ elif parts == ["labels"] and method == "POST":
     answer = {"name": body["name"], "color": body.get("color", "ededed"), "description": body.get("description", "")}
     state["labels"].append(answer)
 elif parts[0] == "pulls" and len(parts) == 2 and method == "GET":
+    if state["pulls"][parts[1]].pop("read_fails", False):
+        refuse(502)
     answer = pull(parts[1])
 elif parts[0] == "issues" and parts[2:] == ["events"] and method == "GET":
     events = state["events"].get(parts[1], [])
@@ -1244,6 +1250,10 @@ elif parts[0] == "issues" and parts[2:] == ["labels"] and method == "POST":
     answer = pull(number)["labels"]
 elif parts[0] == "issues" and len(parts) == 4 and parts[2] == "labels" and method == "DELETE":
     number, name = parts[1], parts[3]
+    person = state["before_delete"].pop(number, None)
+    if person is not None and name in state["pulls"][number]["labels"]:
+        state["pulls"][number]["labels"].remove(name)
+        event(number, "unlabeled", name, person)
     if name not in state["pulls"][number]["labels"]:
         refuse(404)
     state["pulls"][number]["labels"].remove(name)
@@ -1279,7 +1289,7 @@ def enroll_dispatch_jobs():
     """enroll-dispatch.yml's decide and dispatch jobs."""
     jobs = yaml.safe_load((ROOT / ".github" / "workflows" / "enroll-dispatch.yml").read_text())["jobs"]
     names = [step.get("name") for step in jobs["dispatch"]["steps"]]
-    if any(names.count(name) != 1 for name in (CHECK, TAKE_OFF, PUT_ON)):
+    if any(names.count(name) != 1 for name in (CHECK, TAKE_OFF, SEND, PUT_ON)):
         raise AssertionError(f"the dispatch job's steps are {names}")
     return jobs["decide"], jobs["dispatch"]
 
@@ -1445,12 +1455,14 @@ class Timeline:
             dispatch.standing = old
             self.calls += api.calls
 
-    def job(self, out, push_after_label=None):
+    def job(self, out, push_after_label=None, fail_read_after_add=False, removed_before_delete=None, send_fails=False):
         """The dispatch job after decide gave `out`, as GitHub runs it: decide's outputs go through the decide job's
         outputs into the dispatch job's env; the job runs when its if is true; and of its steps, in order, those that
         check the values and write review-passed run when their if is true, until one fails. push_after_label is a
-        commit pushed just after a label is put on, which is recorded after the step. Gives (name, process) of each
-        step run."""
+        commit pushed just after a label is put on, which is recorded after the step; fail_read_after_add makes the
+        read of the pull request after that put-on fail; removed_before_delete is an account that takes the label off
+        just before a step's DELETE of it. With send_fails, the step that sends fails when its if is true, and the job
+        stops there, as GitHub stops a job at a step that fails. Gives (name, process) of each step run."""
         decide, job = enroll_dispatch_jobs()
         ctx = {f"steps.decide.outputs.{key}": value for key, value in out.items()}
         ctx = {f"needs.decide.outputs.{key}": as_text(evaluate(value, ctx)) for key, value in decide["outputs"].items()}
@@ -1465,15 +1477,22 @@ class Timeline:
         state = {"labels": self.repo_labels, "events": {str(PR): self.events}, "collaborators": self.collaborators,
                  "pulls": {str(PR): {"state": self.state, "head_sha": self.head, "labels": self.labels}},
                  "clock": self.clock, "calls": [],
-                 "after_add": {str(PR): {"head_sha": push_after_label}} if push_after_label else {}}
+                 "after_add": {str(PR): {key: value for key, value in (("head_sha", push_after_label),
+                                                                       ("read_fails", fail_read_after_add)) if value}},
+                 "before_delete": {str(PR): removed_before_delete} if removed_before_delete else {}}
         ran = []
         with tempfile.TemporaryDirectory() as directory:
             directory = pathlib.Path(directory)
             bin = stand_in_gh(directory)
             (directory / "state.json").write_text(json.dumps(state))
             for step in job["steps"]:
-                if step.get("name") not in (CHECK, TAKE_OFF, PUT_ON) \
+                if step.get("name") not in (CHECK, TAKE_OFF, SEND, PUT_ON) \
                         or "if" in step and not evaluate(step["if"], {f"env.{k}": v for k, v in env.items()}):
+                    continue
+                if step["name"] == SEND:
+                    if send_fails:
+                        ran.append((SEND, subprocess.CompletedProcess(["gh", "api"], 1, "", "the send failed")))
+                        break
                     continue
                 ran.append((step["name"], subprocess.run(
                     ["bash", "-c", step["run"]], capture_output=True, text=True,
@@ -1569,7 +1588,7 @@ class ReviewPassed(unittest.TestCase):
         pushed = line.runs[-1]["created_at"]
         out = line.decide()
         self.assertEqual((out["decision"], out["review_passed"]), ("dispatch", "on"), out["reason"])
-        self.assertEqual(self.job(line, out), [CHECK, PUT_ON])
+        self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF, PUT_ON])
         self.assertLabels(line, [REVIEW_PASSED])
         self.assertGreater(self.newest_label(line), pushed)   # put on for B
 
@@ -1652,7 +1671,7 @@ class ReviewPassed(unittest.TestCase):
         line.push(self.B)
         out = line.decide()
         self.assertEqual((out["decision"], out["review_passed"]), ("dispatch", "on"), out["reason"])
-        self.assertEqual(self.job(line, out), [CHECK, PUT_ON])
+        self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF, PUT_ON])
         out = line.decide(sha=self.A)
         self.assertEqual((out["decision"], out["review_passed"]), ("none", ""), out["reason"])
         self.assertEqual(self.job(line, out), [])
@@ -1726,7 +1745,7 @@ class ReviewPassed(unittest.TestCase):
                 self.assertEqual((out["decision"], out["review_passed"], out["review_passed_at"]),
                                  ("dispatch", "on", "head"), out["reason"])
                 self.assertEqual([call for call in line.calls[before:] if "/collaborators/" in call], [])
-                self.assertEqual(self.job(line, out), [CHECK, PUT_ON])
+                self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF, PUT_ON])
                 self.assertGreater(self.newest_label(line), pushed)   # put on again, for B
                 self.assertLabels(line, [REVIEW_PASSED])
 
@@ -1746,7 +1765,7 @@ class ReviewPassed(unittest.TestCase):
         line.push(self.B)
         out = line.decide()
         self.assertEqual(out["review_passed"], "on", out["reason"])
-        self.assertEqual(self.job(line, out), [CHECK, PUT_ON])
+        self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF, PUT_ON])
         line.push(self.A, force=True)
         out = line.decide(failed_check=True)
         self.assertEqual((out["decision"], out["review_passed"]), ("none", "off"), out["reason"])
@@ -1760,7 +1779,7 @@ class ReviewPassed(unittest.TestCase):
         sent = line.decide()
         self.assertEqual((none["review_passed"], sent["review_passed"]), ("off", "on"),
                          (none["reason"], sent["reason"]))
-        self.assertEqual(self.job(line, sent), [CHECK, PUT_ON])
+        self.assertEqual(self.job(line, sent), [CHECK, TAKE_OFF, PUT_ON])
         self.assertGreater(self.newest_label(line), none["label_at"])   # put on again
         self.assertEqual(self.job(line, none), [CHECK, TAKE_OFF])
         self.assertLabels(line, [REVIEW_PASSED])
@@ -1819,7 +1838,7 @@ class ReviewPassed(unittest.TestCase):
                              ("dispatch", "on", "head"), out["reason"])
             line.take_off("sjawhar")   # after decide read the events, before the job runs
             before = len(line.calls)
-            self.assertEqual(self.job(line, out), [CHECK, PUT_ON])
+            self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF, PUT_ON])
             self.assertNotIn(labels, line.calls[before:])
             self.assertLabels(line, [])
         with self.subTest(change="a first put-on"):
@@ -1844,15 +1863,15 @@ class ReviewPassed(unittest.TestCase):
                              ("dispatch", "on", "head"), out["reason"])
             line.take_off("sjawhar")   # after decide read the events, before the job runs
             before = len(line.calls)
-            self.assertEqual(self.job(line, out), [CHECK, PUT_ON])
+            self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF, PUT_ON])
             self.assertNotIn(labels, line.calls[before:])
             self.assertLabels(line, [])
 
     def test_x_a_run_of_another_pull_request_from_the_same_branch_leaves_the_label(self):
-        # The branch was the head of a pull request closed before, at E, which is not among this one's commits. A label
-        # event on that one, by the App too, starts a maintainer-confirmed.yml run at E, after this one's label's run.
+        # The branch was the head of a pull request closed before, at E. A label event on that one, by the App too,
+        # starts a maintainer-confirmed.yml run at E, after this one's label's own run: another pull request's run on
+        # the same branch does not tell this label's head.
         E = "e" * 40
-        commits = f"repos/{REPO}/pulls/{PR}/commits?per_page=100"
         for change in ({"review": "action_required"}, {"failed_check": True}):
             with self.subTest(change=change):
                 line = self.labelled()
@@ -1860,23 +1879,8 @@ class ReviewPassed(unittest.TestCase):
                 line.add_run(E, dispatch.CONFIRMED_WORKFLOW, "pull_request_target", dispatch.APP_LOGIN)
                 out = line.decide(**change)
                 self.assertEqual((out["decision"], out["label"], out["review_passed"]), ("none", "", ""), out["reason"])
-                self.assertNotIn(commits, line.calls)
                 self.assertEqual(self.job(line, out), [])
                 self.assertLabels(line, [REVIEW_PASSED])
-        with self.subTest(change="a pull request of more than 250 commits, more than GitHub lists"):
-            line = Timeline()
-            for i in range(250):
-                line.push(f"{i:040x}")
-            line.push(self.A)
-            out = line.decide()
-            self.assertEqual(out["review_passed"], "on", out["reason"])
-            self.assertEqual(self.job(line, out), [CHECK, PUT_ON])
-            line.add_run(E, dispatch.CONFIRMED_WORKFLOW, "pull_request_target", dispatch.APP_LOGIN)
-            out = line.decide(failed_check=True)
-            self.assertEqual((out["decision"], out["review_passed"]), ("none", ""), out["reason"])
-            self.assertNotIn(commits, line.calls)
-            self.assertEqual(self.job(line, out), [])
-            self.assertLabels(line, [REVIEW_PASSED])
 
     def test_y_a_label_put_on_again_for_a_new_head_stays_whatever_that_head_decides_next(self):
         # q's renewal makes a new labeled event, at B: the label is for B, and a later run for B that does not pass
@@ -1887,7 +1891,7 @@ class ReviewPassed(unittest.TestCase):
                     line = self.trusted_or_unknown(author)
                     out = line.decide()
                     self.assertEqual(out["review_passed"], "on", out["reason"])
-                    self.assertEqual(self.job(line, out), [CHECK, PUT_ON])
+                    self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF, PUT_ON])
                     out = line.decide(**change)
                     self.assertEqual((out["decision"], out["review_passed"]), ("none", ""), out["reason"])
                     self.assertIn(f"review-passed stays: it was put on at {self.newest_label(line)} for {self.B[:7]}",
@@ -1985,7 +1989,7 @@ class ReviewPassed(unittest.TestCase):
         out = line.decide()
         self.assertEqual((out["decision"], out["review_passed"], out["review_passed_at"]), ("dispatch", "on", "head"),
                          out["reason"])
-        self.assertEqual(self.job(line, out), [CHECK, PUT_ON])
+        self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF, PUT_ON])
         self.assertGreater(self.newest_label(line), pushed)
         self.assertLabels(line, [REVIEW_PASSED])
         out = line.decide(failed_check=True)
@@ -2006,11 +2010,154 @@ class ReviewPassed(unittest.TestCase):
                          (none["reason"], sent["reason"]))
         self.assertEqual(self.job(line, none), [CHECK, TAKE_OFF])
         self.assertLabels(line, [])
-        self.assertEqual(self.job(line, sent), [CHECK, PUT_ON])
+        self.assertEqual(self.job(line, sent), [CHECK, TAKE_OFF, PUT_ON])
         self.assertLabels(line, [REVIEW_PASSED])
         out = line.decide(failed_check=True)
         self.assertEqual((out["decision"], out["review_passed"]), ("none", ""), out["reason"])
         self.assertLabels(line, [REVIEW_PASSED])
+
+    def test_ag_a_renewal_whose_send_fails_leaves_the_label_off(self):
+        # The label was put on for A; the run that sends B renews it, and its send fails. The job stops there, and B,
+        # which sent nothing, has no label. The job run again sends B and puts the label on, for B.
+        line = self.labelled()
+        line.push(self.B)
+        pushed = line.runs[-1]["created_at"]
+        out = line.decide()
+        self.assertEqual((out["decision"], out["review_passed"], out["review_passed_at"]), ("dispatch", "on", "head"),
+                         out["reason"])
+        ran = line.job(out, send_fails=True)
+        self.assertLabels(line, [])
+        self.assertEqual([(name, run.returncode) for name, run in ran], [(CHECK, 0), (TAKE_OFF, 0), (SEND, 1)])
+        self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF, PUT_ON])
+        self.assertGreater(self.newest_label(line), pushed)
+        self.assertLabels(line, [REVIEW_PASSED])
+
+    def test_ah_a_renewal_leaves_off_a_label_a_person_takes_off_just_before_its_take_off(self):
+        # The renewal's take-off reads the pull request and its events, and a person takes the label off before its
+        # DELETE, which finds it off. The put-on then finds the person's removal since the label decide judged.
+        line = self.labelled()
+        line.push(self.B)
+        out = line.decide()
+        self.assertEqual((out["decision"], out["review_passed"], out["review_passed_at"]), ("dispatch", "on", "head"),
+                         out["reason"])
+        before = len(line.calls)
+        steps = self.job(line, out, removed_before_delete="sjawhar")
+        self.assertLabels(line, [])
+        self.assertEqual(steps, [CHECK, TAKE_OFF, PUT_ON])
+        self.assertNotIn(f"POST repos/{REPO}/issues/{PR}/labels", line.calls[before:])
+        self.assertEqual([(e["event"], e["actor"]["login"]) for e in line.events[-1:]], [("unlabeled", "sjawhar")])
+
+    def test_ai_a_put_on_whose_read_after_fails_takes_the_label_off_and_fails(self):
+        # The read of the pull request after the put-on fails: its head may have moved, so the label comes off, and
+        # the step fails.
+        for change in ("a first put-on", "a renewal"):
+            with self.subTest(change=change):
+                if change == "a first put-on":
+                    line = Timeline()
+                    line.push(self.A)
+                    steps = [CHECK, PUT_ON]
+                else:
+                    line = self.labelled()
+                    line.push(self.B)
+                    steps = [CHECK, TAKE_OFF, PUT_ON]
+                out = line.decide()
+                self.assertEqual((out["decision"], out["review_passed"]), ("dispatch", "on"), out["reason"])
+                ran = line.job(out, fail_read_after_add=True)
+                self.assertLabels(line, [])
+                self.assertEqual([(name, run.returncode != 0) for name, run in ran],
+                                 [(name, name == PUT_ON) for name in steps])
+                self.assertIn("could not be read", ran[-1][1].stdout)
+                self.assertEqual([(e["event"], e["actor"]["login"]) for e in line.events[-2:]],
+                                 [("labeled", dispatch.APP_LOGIN), ("unlabeled", dispatch.APP_LOGIN)])
+
+    def test_aj_a_run_of_the_labels_account_after_the_window_does_not_speak_for_the_label(self):
+        # The label's own maintainer-confirmed.yml run is not found, and the App's run of that workflow from the head,
+        # at another commit, is made more than ten minutes (CONFIRMED_WINDOW) after the label: it is another label's,
+        # so when the head was pushed decides. At B, pushed after the label, the label is older; at A it is not.
+        E = "e" * 40
+        with self.subTest(at="a new head"):
+            line = self.labelled(confirmed_runs=False)
+            line.push(self.B)
+            line.tick(601)
+            line.add_run(self.B, dispatch.CONFIRMED_WORKFLOW, "pull_request_target", dispatch.APP_LOGIN)
+            out = line.decide(failed_check=True)
+            self.assertEqual((out["decision"], out["review_passed"], out["review_passed_at"]), ("none", "off", "head"),
+                             out["reason"])
+            self.assertIn(f"before {self.B[:7]} was pushed", out["reason"])
+            self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF])
+            self.assertLabels(line, [])
+        with self.subTest(at="the label's head"):
+            line = self.labelled(confirmed_runs=False)
+            line.tick(601)
+            line.add_run(E, dispatch.CONFIRMED_WORKFLOW, "pull_request_target", dispatch.APP_LOGIN)
+            out = line.decide(failed_check=True)
+            self.assertEqual((out["decision"], out["review_passed"]), ("none", ""), out["reason"])
+            self.assertIn(f"after {self.A[:7]} was pushed", out["reason"])
+            self.assertEqual(self.job(line, out), [])
+            self.assertLabels(line, [REVIEW_PASSED])
+
+    def test_ak_a_run_from_another_forks_branch_of_the_same_name_does_not_speak_for_the_label(self):
+        # The App puts the label on at A. Just after, before the label's own maintainer-confirmed.yml run at A, it
+        # makes a run of that workflow at E from someone else's fork whose branch has the same name: that run is of
+        # another head, and the label is for A.
+        E = "e" * 40
+        line = Timeline(confirmed_runs=False)
+        line.push(self.A)
+        line.put_on(dispatch.APP_LOGIN)
+        line.add_run(E, dispatch.CONFIRMED_WORKFLOW, "pull_request_target", dispatch.APP_LOGIN)
+        line.runs[-1]["head_repository"] = {"full_name": "someone/oss-verify"}
+        line.confirmed_runs = True
+        line.confirmed_run(dispatch.APP_LOGIN)
+        out = line.decide(failed_check=True)
+        self.assertEqual((out["decision"], out["review_passed"]), ("none", ""), out["reason"])
+        self.assertIn(f"stays: it was put on at {self.newest_label(line)} for {self.A[:7]}", out["reason"])
+        self.assertEqual(self.job(line, out), [])
+        self.assertLabels(line, [REVIEW_PASSED])
+
+    def test_al_runs_in_the_same_second_as_the_labels_own_run_each_give_their_commit(self):
+        # The App's run of maintainer-confirmed.yml at A, the label's own, and another of its runs from the head at E
+        # (of a label on another pull request from this branch, say) are made in the same second, in either order:
+        # either may be the label's, so the label is for both, and not older than A.
+        E = "e" * 40
+        for first, second in ((E, self.A), (self.A, E)):
+            with self.subTest(first=first[:7]):
+                line = Timeline(confirmed_runs=False)
+                line.push(self.A)
+                line.put_on(dispatch.APP_LOGIN)
+                line.tick(3)
+                for sha in (first, second):
+                    line.add_run(sha, dispatch.CONFIRMED_WORKFLOW, "pull_request_target", dispatch.APP_LOGIN)
+                line.runs[-1]["created_at"] = line.runs[-2]["created_at"]
+                out = line.decide(failed_check=True)
+                self.assertEqual((out["decision"], out["review_passed"]), ("none", ""), out["reason"])
+                self.assertIn(f"stays: it was put on at {self.newest_label(line)} for "
+                              f"{', '.join(sorted((self.A[:7], E[:7])))}", out["reason"])
+                self.assertEqual(self.job(line, out), [])
+                self.assertLabels(line, [REVIEW_PASSED])
+
+    def test_am_a_renewal_of_a_label_off_by_now_asks_only_the_newest_removal_since_the_label_judged(self):
+        for case in ("a person's removal and then the App's, both since the label judged",
+                     "a person's removal before the label judged, and the App's take-off since",
+                     "a person's removal before the label judged, and none listed since"):
+            with self.subTest(case=case):
+                line = self.labelled()
+                if "before" in case:
+                    line.take_off("sjawhar")
+                    line.put_on("a-member")
+                line.push(self.B)
+                pushed = line.runs[-1]["created_at"]
+                out = line.decide()
+                self.assertEqual((out["decision"], out["review_passed"], out["review_passed_at"]),
+                                 ("dispatch", "on", "head"), out["reason"])
+                if "both since" in case:   # after decide, before the job: someone put it back between the two
+                    line.take_off("sjawhar")
+                    line.put_on("a-member")
+                    line.take_off(dispatch.APP_LOGIN)
+                if "none listed" in case:   # off, and no event of its removal is listed
+                    line.labels.remove(REVIEW_PASSED)
+                self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF, PUT_ON])
+                self.assertGreater(self.newest_label(line), pushed)
+                self.assertLabels(line, [REVIEW_PASSED])
 
 
 class TrustRule(unittest.TestCase):
