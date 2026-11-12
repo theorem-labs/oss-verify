@@ -27,7 +27,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 # GitHub's expressions, evaluated as test_outside_screen.py evaluates them: the dispatch job's if and env, and its
 # steps' if and env.
 sys.path.insert(0, str(ROOT / "tools" / "tests"))
-from test_outside_screen import as_text, evaluate  # noqa: E402
+from test_outside_screen import WF, as_text, evaluate  # noqa: E402
 
 LOADER = importlib.machinery.SourceFileLoader("enroll_dispatch", str(ROOT / ".github" / "scripts" / "enroll-dispatch"))
 SPEC = importlib.util.spec_from_loader("enroll_dispatch", LOADER)
@@ -883,7 +883,6 @@ class TheRecord(unittest.TestCase):
     def test_binary_sizes_and_the_record_job_make_a_record_enroll_dispatch_takes(self):
         if not shutil.which("jq"):
             self.skipTest("jq is not installed")
-        sys.path.insert(0, str(ROOT / "tools" / "tests"))
         from test_manifest import elf, PT_LOAD
         with tempfile.TemporaryDirectory() as directory:
             work = pathlib.Path(directory, "work")
@@ -964,7 +963,7 @@ class AppToken(unittest.TestCase):
         self.assertEqual(run.returncode, 2)
 
 
-# review-passed (OSSV-496, check c1). The dispatch job's steps that check decide's values and write the label.
+# review-passed (dispatch://OSSV-496). The dispatch job's steps that check decide's values and write the label.
 CHECK, TAKE_OFF, PUT_ON = "Check the decision's values", "Take off review-passed", "Put on review-passed"
 REVIEW_PASSED = dispatch.REVIEW_PASSED
 DESCRIPTION = "Checks and CI review passed; statements started. No plan to merge or prove this project now."
@@ -1131,9 +1130,10 @@ def at(seconds):
 
 
 class LabelApi(FakeApi):
-    """FakeApi, where each path of `failing` fails as gh does, and the runs from a branch made at or after a time
-    (actions/runs?branch=<branch>&created=>=<time>) are those of `runs`."""
-    LATER = re.compile(rf"repos/{re.escape(REPO)}/actions/runs\?branch=([^&]+)&created=%3E%3D([^&]+)&per_page=100")
+    """FakeApi, where each path of `failing` fails as gh does, and the pull_request_target runs from a branch made at or
+    after a time (actions/runs?branch=<branch>&event=pull_request_target&created=>=<time>) are those of `runs`."""
+    LATER = re.compile(rf"repos/{re.escape(REPO)}/actions/runs\?branch=([^&]+)&event=pull_request_target"
+                       r"&created=%3E%3D([^&]+)&per_page=100")
 
     def __init__(self, table, runs=(), failing=()):
         super().__init__(table)
@@ -1148,7 +1148,8 @@ class LabelApi(FakeApi):
             raise subprocess.CalledProcessError(1, ["gh", "api", path])
         branch, since = urllib.parse.unquote(later.group(1)), later.group(2)
         return [{"workflow_runs": [copy.deepcopy(run) for run in self.runs
-                                   if run["head_branch"] == branch and run["created_at"] >= since]}]
+                                   if run["head_branch"] == branch and run["event"] == "pull_request_target"
+                                   and run["created_at"] >= since]}]
 
     get = pages = raw = answer
 
@@ -1158,8 +1159,8 @@ class Timeline:
     author, the Actions runs from its head, and the repository's labels. One clock gives each run and event a later
     time. decide reads a World of the completed run's commit, with the pull request, its events and the runs as they
     are then. job runs the dispatch job's steps that write review-passed against the stand-in gh, whose state is made
-    from this one, and reads back what they wrote. Each labeled event starts a run of maintainer-confirmed.yml at the
-    head of that moment, a few seconds after it (fact 9 of the plan), unless confirmed_runs is False."""
+    from this one, and reads back what they wrote. Each labeled event starts a run of maintainer-confirmed.yml, on
+    pull_request_target, at the head of that moment, a few seconds after it, unless confirmed_runs is False."""
     BRANCH, HEAD_REPO = "add-plugin-hostd", "FreeREAC/oss-verify"
 
     def __init__(self, author="linuxnow", permission="read", repo_labels=None, confirmed_runs=True):
@@ -1316,7 +1317,7 @@ class Timeline:
 
 
 class ReviewPassed(unittest.TestCase):
-    """review-passed (check c1): each case runs decide on a Timeline of the pull request, and then, as the job would,
+    """review-passed: each case runs decide on a Timeline of the pull request, and then, as the job would,
     enroll-dispatch.yml's steps that check decide's values and write the label, against the stand-in gh. Each asserts
     the pull request's labels after the runs, and that no request touched a comment."""
     A, B, C, H = SHA, NEWER, "c" * 40, "d" * 40
@@ -1416,8 +1417,7 @@ class ReviewPassed(unittest.TestCase):
         self.assertLabels(line, [REVIEW_PASSED])
 
     def test_g_a_trusted_author_does_not_get_the_label(self):
-        bots = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["env"]["ALLOWED_BOTS"]
-        self.assertIn("sjawhar-agent[bot]", bots.split(","))
+        self.assertIn("sjawhar-agent[bot]", WF["env"]["ALLOWED_BOTS"].split(","))
         for author, permission in (("a-writer", "write"), ("an-admin", "admin"), ("sjawhar-agent[bot]", None)):
             with self.subTest(author=author):
                 line = Timeline(author=author, permission=permission)
@@ -1604,19 +1604,44 @@ class ReviewPassed(unittest.TestCase):
         self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF])
         self.assertLabels(line, [])
 
+    def test_w_a_label_a_person_takes_off_after_decide_is_not_put_back(self):
+        labels = f"POST repos/{REPO}/issues/{PR}/labels"
+        with self.subTest(change="a renewal"):
+            line = self.labelled()
+            line.push(self.B)
+            out = line.decide()
+            self.assertEqual((out["decision"], out["review_passed"], out["review_passed_at"]),
+                             ("dispatch", "on", "head"), out["reason"])
+            line.take_off("sjawhar")   # after decide read the events, before the job runs
+            before = len(line.calls)
+            self.assertEqual(self.job(line, out), [CHECK, PUT_ON])
+            self.assertNotIn(labels, line.calls[before:])
+            self.assertLabels(line, [])
+        with self.subTest(change="a first put-on"):
+            line = Timeline()
+            line.push(self.A)
+            out = line.decide()
+            self.assertEqual((out["decision"], out["review_passed"], out["review_passed_at"]), ("dispatch", "on", ""),
+                             out["reason"])
+            line.put_on("a-member")   # after decide, someone puts it on and a person takes it off
+            line.take_off("sjawhar")
+            before = len(line.calls)
+            self.assertEqual(self.job(line, out), [CHECK, PUT_ON])
+            self.assertNotIn(labels, line.calls[before:])
+            self.assertLabels(line, [])
+
 
 class TrustRule(unittest.TestCase):
-    """enroll-dispatch's trusted, the port of build.yaml's bash function trusted, gives its answers (case o)."""
+    """enroll-dispatch's trusted, the port of build.yaml's bash function trusted, gives its answers."""
 
     def test_trusted_answers_as_build_yamls_trusted(self):
         if not shutil.which("jq"):
             self.skipTest("jq is not installed")
-        build = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
-        copies = {found for job in build["jobs"].values() for step in job.get("steps") or []
+        copies = {found for job in WF["jobs"].values() for step in job.get("steps") or []
                   for found in re.findall(r"# trusted\n(.*?)# end of trusted\n", step.get("run") or "", re.S)}
         self.assertEqual(len(copies), 1, copies)
         script = "set -uo pipefail\n" + copies.pop() + 'trusted "$1"\n'
-        bots = build["env"]["ALLOWED_BOTS"]
+        bots = WF["env"]["ALLOWED_BOTS"]
         collaborators = {"an-admin": "admin", "a-writer": "write", "a-reader": "read", "no-access": "none"}
         api = LabelApi({f"repos/{REPO}/collaborators/{login}/permission": {"permission": permission}
                         for login, permission in collaborators.items()},

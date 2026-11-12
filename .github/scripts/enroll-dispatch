@@ -8,7 +8,7 @@ merged completes.
       .github/scripts/enroll-dispatch
 
 RUN_ID, RUN_EVENT and HEAD_SHA are the completed run's. It reads GitHub's API only, with a read-only token: nothing of
-the pull request is checked out or run. It writes eight lines to $GITHUB_OUTPUT (and to standard output): decision,
+the pull request is checked out or run. It writes nine lines to $GITHUB_OUTPUT (and to standard output): decision,
 label, pr, project and sha; one line, reason, that says why; and review_passed, review_passed_at and label_at, which
 say what happens to the label review-passed (below). A dispatch for a merge writes one more, merged=true, which
 enroll-dispatch.yml adds to the event's client_payload. The decision is:
@@ -97,9 +97,10 @@ commit, another event). Then:
 
 The label is older than the commit when its newest labeled event is before the commit was pushed (the later of the
 commit's first Actions run from that head, or the completed run's creation when there is none, and the pull request's
-newest force push), or when a run from that head at another commit was made at or after that event. A run whose read of
-the pull request's events fails changes nothing. A run of Enrollment merged, a skipped one too, takes the label off the
-closed pull request its title names (merged or not) when it carries it, whatever else it decides, and never puts it on.
+newest force push), or when a pull_request_target run from that head at another commit was made at or after that
+event. A run whose read of the pull request's events fails changes nothing. A run of Enrollment merged, a skipped one
+too, takes the label off the closed pull request its title names (merged or not) when it carries it, whatever else it
+decides, and never puts it on.
 """
 from __future__ import annotations
 
@@ -233,6 +234,12 @@ def required_checks(api: Api, repo: str) -> list[tuple[str, int | None]]:
 def head_of(run: dict) -> tuple[object, object]:
     """The repository and branch a run's pull request came from."""
     return (run.get("head_repository") or {}).get("full_name"), run.get("head_branch")
+
+
+def head_of_pull(pull: dict) -> tuple[object, object]:
+    """The repository and branch a pull request comes from."""
+    at = pull.get("head") or {}
+    return (at.get("repo") or {}).get("full_name"), at.get("ref")
 
 
 def bound_checks(api: Api, runs: Runs, repo: str, sha: str, head: tuple) -> tuple[list[str], int | None]:
@@ -388,7 +395,7 @@ def open_at(pull: dict, repo: str, sha: str, head: tuple | None) -> str:
         return f"it targets {base.get('ref')!r}, not {DEFAULT_BRANCH}"
     if at.get("sha") != sha:
         return f"its head is {at.get('sha')}, not {sha}: the run for its head decides"
-    if head is not None and ((at.get("repo") or {}).get("full_name"), at.get("ref")) != head:
+    if head is not None and head_of_pull(pull) != head:
         return f"it comes from {at.get('label')!r}, not from the head the checks were run for"
     return ""
 
@@ -441,7 +448,7 @@ def confirmed_by(api: Api, repo: str, number: int, pull: dict, author: str, sinc
     confirmation covers the commits it saw, not a later change of `repo`); else ''. Only an account with at least triage
     access to this repository can add a label (GitHub's permission model): a member of the organisation, or one of its
     Apps. The pull request's own author does not count."""
-    if CONFIRMED_LABEL not in {(label or {}).get("name") for label in pull.get("labels") or []}:
+    if not labelled(pull, CONFIRMED_LABEL):
         return ""
     try:
         events = [e for page in api.pages(f"repos/{repo}/issues/{number}/events?per_page=100") for e in page]
@@ -471,11 +478,10 @@ def label_for_a_person(where: str, lang: str, record: dict, number: int, project
 def passes(result: dict, verdicts: dict | None) -> str:
     """'' when the run passes for REVIEW_PASSED, else why not: its decision is dispatch, and no verdict of the review it
     read is fail. Every fail counts, since verdicts.json cannot tell an optional fail from a blocking one; person (the
-    review could not decide) and optional do not."""
+    review could not decide) and optional do not. A decision dispatch always has its verdicts: decision gives it only
+    after review_verdicts read them."""
     if result["decision"] != "dispatch":
         return "the run sends nothing"
-    if not isinstance(verdicts, dict):
-        return "the run read no review verdicts"
     failed = sorted(f"{check:.20}" for check, verdict in verdicts.items() if verdict == "fail")
     return f"the review gave {' and '.join(failed)} the verdict fail" if failed else ""
 
@@ -505,9 +511,9 @@ def trusted(api: Api, repo: str, login: str) -> bool | None:
     return answer.get("permission") in ("admin", "write")
 
 
-def labelled(pull: dict) -> bool:
-    """Whether the pull request carries REVIEW_PASSED."""
-    return REVIEW_PASSED in {(label or {}).get("name") for label in pull.get("labels") or []}
+def labelled(pull: dict, name: str = REVIEW_PASSED) -> bool:
+    """Whether the pull request carries the label `name`."""
+    return name in {(label or {}).get("name") for label in pull.get("labels") or []}
 
 
 def time_of(value: object) -> str | None:
@@ -528,28 +534,36 @@ def pull_of_head(api: Api, repo: str, sha: str, head: tuple) -> dict | None:
         base, at = pull.get("base") or {}, pull.get("head") or {}
         if pull.get("state") == "open" and base.get("ref") == DEFAULT_BRANCH \
                 and (base.get("repo") or {}).get("full_name") == repo and at.get("sha") == sha \
-                and ((at.get("repo") or {}).get("full_name"), at.get("ref")) == head:
+                and head_of_pull(pull) == head:
             return pull
     return None
 
 
 def older_than_head(api: Api, repo: str, sha: str, head: tuple, label_at: str, events: list, created: object) -> bool:
     """Whether the label put on at `label_at` is older than the run's head `sha`, from `head` (repository, branch):
-    put on before the head was pushed, or followed by a run from that head at another commit (each label event starts
-    a run of maintainer-confirmed.yml at the head of that moment, so a label put on while the pull request was at
-    another commit is followed by a run of that commit). The head was pushed at the later of its first run (the oldest
-    of this repository's runs at `sha` from `head`; when there is none, `created`, the completed run's) and the pull
-    request's newest force push."""
+    put on before the head was pushed, or followed by a pull_request_target run from that head at another commit (each
+    label event starts a run of maintainer-confirmed.yml, on pull_request_target, at the head of that moment, so a label
+    put on while the pull request was at another commit is followed by a run of that commit). The head was pushed at
+    the later of its first run (the oldest of this repository's runs at `sha` from `head`; when there is none,
+    `created`, the completed run's) and the pull request's newest force push.
+
+    The runs after the label are read by branch name and event: a branch of this repository by the same name (main)
+    can have more runs than the API lists, but none on pull_request_target, which every run from a pull request's head
+    that counts here is on (build.yaml, validate.yaml, terms.yaml, maintainer-confirmed.yml, enroll-merged.yml)."""
     first = [run["created_at"] for page in api.pages(f"repos/{repo}/actions/runs?head_sha={sha}&per_page=100")
              for run in page.get("workflow_runs") or []
              if run.get("head_sha") == sha and head_of(run) == head and time_of(run.get("created_at"))]
-    pushed = [min(first)] if first else [time for time in [time_of(created)] if time]
+    if first:
+        pushed = [min(first)]
+    else:
+        pushed = [created] if time_of(created) else []
     pushed += [e["created_at"] for e in events
                if e.get("event") == "head_ref_force_pushed" and time_of(e.get("created_at"))]
     if pushed and label_at < max(pushed):
         return True
     branch = urllib.parse.quote(head[1], safe="")
-    later = f"repos/{repo}/actions/runs?branch={branch}&created=%3E%3D{label_at}&per_page=100"
+    later = (f"repos/{repo}/actions/runs?branch={branch}&event=pull_request_target&created=%3E%3D{label_at}"
+             "&per_page=100")
     return any(head_of(run) == head and run.get("head_sha") != sha
                and (time_of(run.get("created_at")) or "") >= label_at
                for page in api.pages(later) for run in page.get("workflow_runs") or [])
@@ -572,7 +586,7 @@ def review_passed(api: Api, repo: str, result: dict, pull: dict | None = None, s
     account other than APP_LOGIN took it off before; and puts it on again when it is older than the head
     (older_than_head, `created` the completed run's creation). Any other run takes it off only when it is older than
     the head. When the pull request's events (or its head's runs) cannot be read, nothing changes."""
-    def say(clause: str, state: str = "", at: str = "", label_at: str = "") -> dict:
+    def say(clause: str, state: str = "", at: str = "", label_at: str = "", number: object = None) -> dict:
         out = dict(result, reason=" ".join(f"{result['reason']}; {REVIEW_PASSED} {clause}".split()))
         if state:
             out.update(pr=str(number), review_passed=state, review_passed_at=at, label_at=label_at)
@@ -582,7 +596,7 @@ def review_passed(api: Api, repo: str, result: dict, pull: dict | None = None, s
         number = (pull or {}).get("number")
         if pull is None or pull.get("state") != "closed" or not labelled(pull) or not isinstance(number, int):
             return result
-        return say(f"comes off: pull request {number} is closed", "off", "closed")
+        return say(f"comes off: pull request {number} is closed", "off", "closed", number=number)
     if sha is None or head is None:
         return result   # the run binds no head
     if pull is None:
@@ -592,20 +606,30 @@ def review_passed(api: Api, repo: str, result: dict, pull: dict | None = None, s
             return say(f"is left as it is: the open pull request from that head at {sha[:7]} could not be read")
         if pull is None:
             return result
-    number, at, on = pull.get("number"), pull.get("head") or {}, labelled(pull)
-    if not isinstance(number, int) or pull.get("state") != "open" or at.get("sha") != sha \
-            or ((at.get("repo") or {}).get("full_name"), at.get("ref")) != head:
+    number, on = pull.get("number"), labelled(pull)
+    if not isinstance(number, int) or pull.get("state") != "open" or (pull.get("head") or {}).get("sha") != sha \
+            or head_of_pull(pull) != head:
         return say(f"is left as it is: the pull request is not open at {sha[:7]} from that head, and the run for its "
                    "head decides") if on else result
-    why = passes(result, verdicts)
     author = str((pull.get("user") or {}).get("login") or "")
-    trust = None if why else trusted(api, repo, author)
-    if trust is True:
-        why = f"its author {author} is trusted by build.yaml's rule (write access, or an App of ALLOWED_BOTS)"
-    elif not why and trust is None:
-        why = f"whether its author {author} is trusted could not be read"
-    if not on and why:
-        return say(f"is not put on: {why}") if result["decision"] == "dispatch" else result
+
+    def unearned() -> str:
+        """Why the run does not earn the label (it does not pass, or build.yaml's rule trusts the author, or whether
+        it does could not be read), or ''. The trust read is made only when the answer decides something."""
+        why = passes(result, verdicts)
+        if why:
+            return why
+        trust = trusted(api, repo, author)
+        if trust is True:
+            return f"its author {author} is trusted by build.yaml's rule (write access, or an App of ALLOWED_BOTS)"
+        if trust is None:
+            return f"whether its author {author} is trusted could not be read"
+        return ""
+
+    if not on:
+        why = unearned()
+        if why:
+            return say(f"is not put on: {why}") if result["decision"] == "dispatch" else result
     try:
         events = [e for page in api.pages(f"repos/{repo}/issues/{number}/events?per_page=100") for e in page
                   if isinstance(e, dict)]
@@ -620,7 +644,7 @@ def review_passed(api: Api, repo: str, result: dict, pull: dict | None = None, s
             return say(f"is not put on: {remover} took it off at {removed[-1].get('created_at')}, and the run does "
                        "not put it back")
         return say(f"goes on: {sha[:7]} is sent, its review gave no fail, and its author {author} is not trusted",
-                   "on")
+                   "on", number=number)
     times = [e["created_at"] for e in events if e.get("event") == "labeled"
              and (e.get("label") or {}).get("name") in REVIEW_PASSED_NAMES and time_of(e.get("created_at"))]
     if not times:
@@ -633,10 +657,11 @@ def review_passed(api: Api, repo: str, result: dict, pull: dict | None = None, s
                    f"is older than {sha[:7]} is not known")
     if not older:
         return say(f"stays: it was put on at {label_at}, for {sha[:7]}")
+    why = unearned()
     if not why:
         return say(f"is put on again: it was put on at {label_at}, before {sha[:7]}, which passes", "on", "head",
-                   label_at)
-    return say(f"comes off: it was put on at {label_at}, before {sha[:7]}, and {why}", "off", "head", label_at)
+                   label_at, number)
+    return say(f"comes off: it was put on at {label_at}, before {sha[:7]}, and {why}", "off", "head", label_at, number)
 
 
 def decide_merged(api: Api, repo: str, runs: Runs, run: dict) -> dict:
@@ -668,13 +693,13 @@ def merged_decision(api: Api, repo: str, runs: Runs, run: dict, number: int, pul
         return outcome("none", f"run {run_id} of {MERGED_WORKFLOW} is {run.get('conclusion')}, not success: its job "
                        "runs for a merge or a replay alone")
     replay = f"gh workflow run {os.path.basename(MERGED_WORKFLOW)} -f pr={number}"
-    base, at = pull.get("base") or {}, pull.get("head") or {}
+    base = pull.get("base") or {}
     if pull.get("merged") is not True:
         return outcome("none", f"pull request {number} is not merged", number)
     if base.get("ref") != DEFAULT_BRANCH or (base.get("repo") or {}).get("full_name") != repo:
         return outcome("none", f"pull request {number} was merged into {base.get('ref')!r}, not {DEFAULT_BRANCH}",
                        number)
-    sha, head = at.get("sha"), ((at.get("repo") or {}).get("full_name"), at.get("ref"))
+    sha, head = (pull.get("head") or {}).get("sha"), head_of_pull(pull)
     if not isinstance(sha, str) or not SHA.fullmatch(sha):
         return outcome("none", f"pull request {number}'s head {sha!r:.50} is not a commit id", number)
     files = [f for page in api.pages(f"repos/{repo}/pulls/{number}/files?per_page=100") for f in page]
@@ -711,7 +736,8 @@ def decide(api: Api, repo: str, run_id: int, run_event: str, head_sha: str) -> d
             and runs.get(run_id).get("path") == MERGED_WORKFLOW:
         return decide_merged(api, repo, runs, runs.get(run_id))
     bound = {}
-    return review_passed(api, repo, decision(api, repo, runs, run_id, run_event, head_sha, bound), **bound)
+    result = decision(api, repo, runs, run_id, run_event, head_sha, bound)
+    return review_passed(api, repo, result, **bound)
 
 
 def decision(api: Api, repo: str, runs: Runs, run_id: int, run_event: str, head_sha: str, bound: dict) -> dict:
@@ -739,8 +765,7 @@ def decision(api: Api, repo: str, runs: Runs, run_id: int, run_event: str, head_
             return outcome("none", f"run {run_id}: {why}")
         sha = record["sha"]
         pull = api.get(f"repos/{repo}/pulls/{record['pr']}")
-        at = pull.get("head") or {}
-        head = ((at.get("repo") or {}).get("full_name"), at.get("ref"))
+        head = head_of_pull(pull)
         bound.update(sha=sha, head=head, created=run.get("created_at"), pull=pull)
     else:
         return outcome("none", f"the run that completed was started by {run_event}, not by a pull request")
