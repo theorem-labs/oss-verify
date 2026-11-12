@@ -831,11 +831,15 @@ class TheSecondReview(unittest.TestCase):
             check_build.check_secret_mount("Dockerfile", text, TOKEN, "https://x/y/z")
         self.assertIn("$SRC/b", str(refused.exception))
 
-    def test_a_dockerfile_that_cannot_be_split_is_read_on_the_safe_side(self):
-        # A heredoc or an unmatched quote: the mount is looked for in the text, which over-reports rather than
-        # under-reports, so a private library is not refused for a form this does not parse, and a public one is.
+    def test_a_fetch_the_guard_cannot_read_is_refused_for_a_private_library(self):
+        # This test asserted the opposite until the fourth review measured five valid Dockerfiles of these
+        # shapes whose real fetch ran with NO secret while the guard said they were mounted. There is no safe
+        # side to read them on: the guard refuses and says to write the fetch as its own step.
         heredoc = f"FROM x\nRUN {check_build.SECRET_MOUNT} <<EOT\nfetch-commit $SRC/x\nEOT\n"
-        check_build.check_secret_mount("Dockerfile", heredoc, TOKEN, "https://x/y/z")
+        with self.assertRaises(Failed) as refused:
+            check_build.check_secret_mount("Dockerfile", heredoc, TOKEN, "https://x/y/z")
+        self.assertIn("cannot read", str(refused.exception))
+        # A public library is refused only for mounting the secret, and this one does mount it.
         with self.assertRaises(Failed):
             check_build.check_secret_mount("Dockerfile", heredoc, None, "https://x/y/z")
         self.assertIsNone(check_build.words_of('RUN "unmatched'))
@@ -959,6 +963,132 @@ class TheParserAgainstBuildKit(unittest.TestCase):
                      f'FROM x\nRUN {self.MOUNT} "fetch-commit" /src/x\n'):
             with self.subTest(text=text.splitlines()[-1]):
                 check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
+
+
+class TheStatusDecides(unittest.TestCase):
+    """Which failure it was is read from the HTTP status first, and from the words only when there is none. A
+    body can say anything: the fourth review measured a 503 saying `upstream connection permission denied` and
+    another saying `repository not found`, and the round before it a real protocol refusal with no status at
+    all. Reading the words first gets one of those wrong whichever words are in the list."""
+
+    def because(self, said):
+        with mock.patch.object(check_build, "output", side_effect=Failed(said)):
+            return check_build.why_the_fetch_failed("https://github.com/theorem-labs/theorem-cli", "a" * 40, TOKEN)
+
+    def test_a_status_outranks_the_body(self):
+        for said in ("remote: upstream connection permission denied\nerror: The requested URL returned error: 503",
+                     "remote: repository not found\nerror: The requested URL returned error: 503",
+                     "error: The requested URL returned error: 429",
+                     "fatal: unable to access: 502 Bad Gateway"):
+            with self.subTest(said=said.splitlines()[-1]):
+                self.assertIn("could not reach", self.because(said))
+                self.assertFalse(check_build.refused(said))
+
+    def test_a_refusing_status_is_a_refusal_whatever_the_body(self):
+        for said in ("error: The requested URL returned error: 403",
+                     "error: The requested URL returned error: 401",
+                     "error: The requested URL returned error: 404",
+                     "fatal: unable to access: 403 Forbidden"):
+            with self.subTest(said=said):
+                self.assertIn("cannot read", self.because(said))
+                self.assertTrue(check_build.refused(said))
+
+    def test_a_protocol_refusal_with_no_status_is_still_a_refusal(self):
+        # git's own wording when the server refuses over the protocol rather than over HTTP. Dropping the bare
+        # `access denied` marker made these read as a server that did not answer.
+        for said in ("fatal: remote error: access denied",
+                     "remote: access denied\nfatal: the remote end hung up unexpectedly",
+                     "fatal: remote error: permission denied",
+                     "remote: Repository not found.",
+                     "fatal: Authentication failed for 'https://github.com/x/y'",
+                     "fatal: could not read Username for 'https://github.com': terminal prompts disabled"):
+            with self.subTest(said=said.splitlines()[0]):
+                self.assertTrue(check_build.refused(said), said)
+                self.assertIn("cannot read", self.because(said))
+
+    def test_a_message_that_is_neither_keeps_being_neither(self):
+        for said in ("fatal: unable to access: Could not resolve host: github.com",
+                     "fatal: unable to access: Failed to connect to github.com port 443: Connection refused"):
+            with self.subTest(said=said):
+                self.assertFalse(check_build.refused(said))
+                self.assertIn("could not reach", self.because(said))
+
+
+class WhatTheGuardWillNotRead(unittest.TestCase):
+    """The forms where whether a fetch happens, and whether it gets the secret, are inside a string. The fourth
+    review measured five valid Dockerfiles of these shapes whose real fetch ran with no credential while the
+    guard said they were mounted. They are refused for a private library and named, not guessed at."""
+
+    MOUNT = check_build.SECRET_MOUNT
+    PRIVATE = "https://github.com/theorem-labs/theorem-cli"
+
+    def refuses(self, text):
+        with self.assertRaises(Failed) as refused:
+            check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
+        return str(refused.exception)
+
+    def test_a_fetch_inside_a_heredoc_body_is_not_read(self):
+        self.assertIn("cannot read", self.refuses(f"FROM x\nRUN {self.MOUNT} <<EOT\nfetch-commit /src/x\nEOT\n"))
+
+    def test_a_fetch_behind_a_command_that_runs_a_command_is_not_read(self):
+        for command in ('sh -c "fetch-commit /src/x"', "env fetch-commit /src/x",
+                        '/bin/sh -c "fetch-commit /src/x"', 'bash -c "fetch-commit /src/x"'):
+            with self.subTest(command=command):
+                self.assertIn("cannot read", self.refuses(f"FROM x\nRUN {self.MOUNT} {command}\n"))
+
+    def test_the_exec_form_is_read_as_the_program_it_names(self):
+        # RUN ["fetch-commit", "/src/y"] is a fetch; a mounted fetch beside it does not excuse it.
+        self.assertTrue(check_build.runs_fetch_commit('RUN ["fetch-commit", "/src/y"]'))
+        self.assertFalse(check_build.runs_fetch_commit('RUN ["echo", "fetch-commit"]'))
+        text = f'FROM x\nRUN {self.MOUNT} fetch-commit /src/x\nRUN ["fetch-commit", "/src/y"]\n'
+        self.assertIn("does not mount it", self.refuses(text))
+
+    def test_a_double_angle_in_a_comment_is_not_a_heredoc(self):
+        text = f"# << not a heredoc\n# RUN {self.MOUNT} fetch-commit /src/x\nFROM x\nRUN fetch-commit /src/y\n"
+        self.assertIn("does not mount it", self.refuses(text))
+        check_build.check_secret_mount("Dockerfile", text, None, "https://x/y/z")  # and it mounts nothing
+
+    def test_a_public_library_is_refused_only_for_a_mount_it_really_has(self):
+        # Three valid public Dockerfiles that mount nothing: a heredoc BODY quoting a mount, an id that merely
+        # begins with ours, and a mount named in a comment. Looking for the id in the text refused all three.
+        for text in (f"FROM x\nCOPY <<EOF /example\nRUN {self.MOUNT} fetch-commit /src/x\nEOF\nRUN fetch-commit /src/x\n",
+                     "FROM x\nRUN --mount=type=secret,id=oss-verify-git-token-other fetch-commit /src/x\n",
+                     f"# RUN {self.MOUNT} fetch-commit /src/x\nFROM x\nRUN fetch-commit /src/y\n"):
+            with self.subTest(text=text.splitlines()[0]):
+                check_build.check_secret_mount("Dockerfile", text, None, "https://x/y/z")
+
+
+class VariablesAsOfTheInstruction(unittest.TestCase):
+    """BuildKit expands a mount with the values set ABOVE it, and every value of one ENV against what was set
+    before that ENV. One dictionary for the whole file gets both wrong, and the fourth review measured a file
+    where that difference decided whether the fetch got a token."""
+
+    PRIVATE = "https://github.com/theorem-labs/theorem-cli"
+
+    def test_one_env_does_not_see_its_own_assignments(self):
+        # BuildKit gives SID the OLD value of FIRST, so this fetch gets nothing and must be refused.
+        text = ("FROM x\nENV FIRST=old\nENV FIRST=oss-verify-git-token SID=$FIRST\n"
+                "RUN --mount=type=secret,id=$SID fetch-commit /x\n")
+        with self.assertRaises(Failed):
+            check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
+        check_build.check_secret_mount("Dockerfile", text, None, "https://x/y/z")
+
+    def test_a_later_assignment_does_not_reach_back(self):
+        text = ("FROM x\nENV SID=oss-verify-git-token\nRUN --mount=type=secret,id=$SID fetch-commit /x\n"
+                "ENV SID=other\n")
+        check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
+
+    def test_an_arg_with_no_default_names_no_secret(self):
+        text = "FROM x\nARG SID\nRUN --mount=type=secret,id=$SID fetch-commit /x\n"
+        self.assertEqual([ids for _, ids in check_build.fetch_steps(text)], [[]])
+
+    def test_the_old_env_form_takes_the_rest_of_the_line(self):
+        text = "FROM x\nENV SID oss-verify-git-token\nRUN --mount=type=secret,id=${SID} fetch-commit /x\n"
+        check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
+
+    def test_a_chain_of_assignments_reads_in_order(self):
+        text = ("FROM x\nENV A=oss-verify-git-token\nENV B=$A\nRUN --mount=type=secret,id=$B fetch-commit /x\n")
+        check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
 
 
 

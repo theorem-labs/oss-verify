@@ -63,15 +63,23 @@ CREDENTIAL_HELPER = BUILDER_DIR / "git-credential-oss-verify"
 # A GitHub token, for the one case where a message this file did not write may hold one: the standard error of a
 # token command, which is read before there is a token to compare against.
 TOKEN_SHAPE = re.compile(r"gh[a-z]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}")
-# What stands in a message for a credential that was wrong or missing, or a repository the server will not admit
-# exists, rather than for a request that never arrived at all. git writes an HTTP status two ways, and both are
-# here: `403 Forbidden` from the remote, and its own `The requested URL returned error: 403`.
-# Nothing here is a bare `permission denied` or `access denied`: a review measured a 503 whose body read
-# `remote: upstream connection permission denied`, and a server fault that reads as a refusal is this change's own
-# bug in a new place.
-UNAUTHORISED = ("could not read username", "authentication failed", "repository not found", "terminal prompts "
-                "disabled", "403 forbidden", "401 unauthorized", "invalid username or token", "remote: not found",
-                "returned error: 401", "returned error: 403")
+# An explicit HTTP status in what git said, both ways git writes one: its own `The requested URL returned error:
+# 503`, and `503 Service Unavailable` from the remote. **The status is read before any body text**, because a
+# server fault can carry whatever words it likes in its body -- a review measured a 503 whose body said
+# `upstream connection permission denied`, and another whose body said `repository not found`. A status decides;
+# a body only speaks when there is no status.
+HTTP_STATUS = re.compile(r"returned error:\s*(\d{3})|\b(4\d\d|5\d\d)\s+[A-Za-z]")
+# The statuses that mean the server answered and would not let this build read the repository. Every other
+# status is the server failing, not refusing: 429 and the whole 5xx range are transport.
+DENIED_STATUS = ("401", "403", "404")
+# What stands in a message with NO HTTP status for a credential that was wrong or missing, or a repository the
+# server will not admit exists. Each is a phrase git or the remote writes in that situation and in no other: a
+# bare `permission denied` is not here, because a server fault's body can say it, and `remote error: access
+# denied` is, because that is git's protocol refusal and carries its own context.
+UNAUTHORISED = ("could not read username", "authentication failed", "terminal prompts disabled",
+                "invalid username or token", "repository not found", "remote: not found",
+                "remote error: access denied", "remote: access denied", "remote error: permission denied",
+                "remote: permission denied", "403 forbidden", "401 unauthorized")
 
 
 class Failed(Exception):
@@ -336,9 +344,10 @@ def resolve(repo, ref, token=None):
         listing = output(*git("ls-remote", "--", repo, *(names if ref else ["HEAD"]), token=bool(token)),
                          env=git_environment(token, repo), token=token)
     except Failed as failure:
-        # A refused credential, and a repository the server will not admit exists, read alike; a bad host or no
-        # network does not, and keeps git's own message rather than being called an authorisation failure.
-        if not any(marker in str(failure).lower() for marker in UNAUTHORISED):
+        # A refused credential, and a repository the server will not admit exists, read alike; a bad host, no
+        # network, a rate limit and a server fault do not, and keep git's own message rather than being called an
+        # authorisation failure.
+        if not refused(str(failure)):
             raise
         raise Failed(unreadable(repo, token, str(failure))) from None
     refs = dict(reversed(line.split("\t", 1)) for line in listing.splitlines() if "\t" in line)
@@ -356,6 +365,17 @@ def resolve(repo, ref, token=None):
     if not found:
         raise Failed(f"{repo} has no branch or tag {ref!r}" if ref else f"{repo} has no default branch")
     return found.pop()
+
+
+def refused(said):
+    """Did the server answer and refuse, rather than fail to answer? An explicit HTTP status decides on its own:
+    401, 403 and 404 are a refusal, and every other status -- 429, 500, 502, 503 -- is the server failing,
+    whatever its body says. Only a message with no status at all is read for one of the phrases above."""
+    lowered = said.lower()
+    found = HTTP_STATUS.search(lowered)
+    if found:
+        return (found.group(1) or found.group(2)) in DENIED_STATUS
+    return any(marker in lowered for marker in UNAUTHORISED)
 
 
 def unreadable(repo, token, said):
@@ -377,9 +397,10 @@ def clone(repo, commit, checkout, token=None):
     of a private library, which the credential helper reads out of the git process's environment.
 
     A fetch that fails is told apart the way fetch-commit tells it apart in the container: the refs are asked for,
-    which needs the fetch's authorisation and nothing about the commit. Refs listed means the commit is missing;
-    no refs and an answer that names a credential or an absent repository means the build may not read it; no refs
-    and anything else is the transport failure it is, reported as itself.
+    which needs the fetch's authorisation and nothing about the commit. No refs and a refusal means the build may
+    not read the repository; no refs and anything else is the transport failure it is. Refs listed means the
+    build MAY read it, and no more than that: the objects can still fail to arrive, so that case names both
+    possibilities rather than calling the commit missing (why_the_fetch_failed).
     """
     shutil.rmtree(checkout, ignore_errors=True)
     checkout.mkdir(parents=True)
@@ -396,7 +417,7 @@ def why_the_fetch_failed(repo, commit, token):
     try:
         output(*git("ls-remote", "--", repo, token=bool(token)), env=git_environment(token, repo), token=token)
     except Failed as failure:
-        if any(marker in str(failure).lower() for marker in UNAUTHORISED):
+        if refused(str(failure)):
             return unreadable(repo, token, str(failure))
         return (f"could not reach {repo} to list its refs, so nothing is known about {commit} yet: this is neither "
                 f"an authorisation failure nor a missing commit. git said: {failure}")
@@ -634,8 +655,13 @@ def recorded_images(record):
         return []
 
 
+# `<<EOT`, `<<"EOT"`, `<<-EOT`: what ends a heredoc body. The body is the content of a file or of a script and
+# holds no instruction of its own.
+HEREDOC = re.compile(r"<<-?\s*([\"']?[A-Za-z_][A-Za-z0-9_]*[\"']?)")
+
+
 def instructions(text):
-    """The Dockerfile's instructions, one a string, as a Dockerfile parser reads it: the `escape` directive chooses
+    r"""The Dockerfile's instructions, one a string, as a Dockerfile parser reads it: the `escape` directive chooses
     the continuation character, a `#` line is a comment wherever it is (including in the middle of a continued
     instruction), and a line ending in that character continues into the next.
 
@@ -656,8 +682,15 @@ def instructions(text):
                 escape = found.group(1)
             continue
         break  # a parser directive comes before the first instruction and nowhere else
-    joined, carry = [], ""
+    joined, carry, ending = [], "", []
     for line in text.splitlines():
+        if ending:
+            # Inside a heredoc body: these lines are the content of a file or a script, not instructions. A
+            # review measured a COPY heredoc whose body quoted a mounted RUN, which read as a real mount and
+            # refused a public Dockerfile that mounts nothing.
+            if line.strip() == ending[0] or (ending[0].startswith("-") and line.strip() == ending[0][1:]):
+                ending.pop(0)
+            continue
         if line.lstrip().startswith("#"):
             continue
         stripped = line.rstrip()
@@ -666,37 +699,60 @@ def instructions(text):
             continue
         carry += line
         if carry.strip():
-            joined.append(" ".join(carry.split()))
+            instruction = " ".join(carry.split())
+            joined.append(instruction)
+            ending = [word.strip("\"'") for word in HEREDOC.findall(instruction)]
         carry = ""
     if carry.strip():
         joined.append(" ".join(carry.split()))
     return joined
 
 
-def build_variables(lines):
-    """The ARG and ENV values a Dockerfile sets, in order, as a mount option sees them: {name: value}. BuildKit
-    expands `$NAME` and `${NAME}` in a `--mount`, so a Dockerfile can name the secret through a variable, and the
-    third review measured a build that really does get the secret that way."""
-    variables = {}
-    for line in lines:
-        words = words_of(line) or []
-        if not words or words[0].upper() not in ("ARG", "ENV"):
-            continue
-        rest = words[1:]
-        if words[0].upper() == "ENV" and len(rest) == 2 and "=" not in rest[0]:
-            variables[rest[0]] = rest[1]  # the old `ENV KEY value` form
-            continue
-        for pair in rest:
-            name, equals, value = pair.partition("=")
-            if equals:
-                variables[name] = expanded(value, variables)
-    return variables
+def after_assignment(line, variables):
+    """`variables` as they are after one ARG or ENV instruction, unchanged for anything else.
+
+    Every value on one instruction is expanded against the variables as they were BEFORE it, not against each
+    other left to right: in `ENV FIRST=new SID=$FIRST`, BuildKit gives SID the OLD value of FIRST. A review
+    measured that, and the sequential reading accepted a private build whose fetch gets nothing.
+    """
+    words = words_of(line) or []
+    if not words or words[0].upper() not in ("ARG", "ENV"):
+        return variables
+    rest = words[1:]
+    if words[0].upper() == "ENV" and len(rest) >= 2 and "=" not in rest[0]:
+        # The old `ENV KEY value...` form: everything after the name is the value.
+        return {**variables, rest[0]: expanded(" ".join(rest[1:]), variables)}
+    added = {}
+    for pair in rest:
+        name, equals, value = pair.partition("=")
+        if equals:
+            added[name] = expanded(value, variables)
+        elif words[0].upper() == "ARG" and name not in variables:
+            added[name] = ""  # an ARG with no default is empty unless the build gives one
+    return {**variables, **added}
+
+
+def mounts_and_fetches(text):
+    """Walk a Dockerfile once and return [(instruction, the secret ids it mounts, whether it fetches)], with each
+    instruction's variables as they are AT it, not at the end of the file: a mount is expanded with what was set
+    above it, and a later ENV of the same name does not reach back. `whether it fetches` is True, False, or None
+    for a form this does not parse (runs_fetch_commit)."""
+    rows, variables = [], {}
+    for line in instructions(text):
+        rows.append((line, secret_mounts(line, variables), runs_fetch_commit(line)))
+        variables = after_assignment(line, variables)
+    return rows
 
 
 def expanded(word, variables):
     """`word` with `$NAME` and `${NAME}` replaced, an unset name by nothing, as BuildKit expands a mount option."""
     return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)",
                   lambda found: variables.get(found.group(1) or found.group(2), ""), word)
+
+
+# A command that runs another command: what follows is a shell string, and whether it fetches cannot be read from
+# the words of the RUN.
+SHELL_WRAPPERS = ("sh", "bash", "ash", "dash", "env", "eval", "xargs", "/bin/sh", "/bin/bash", "/usr/bin/env")
 
 
 def words_of(instruction):
@@ -741,33 +797,56 @@ def secret_mounts(instruction, variables=None):
 
 
 def runs_fetch_commit(instruction):
-    """Does this instruction RUN fetch-commit? The command's own words are read, so `echo "fetch-commit"` is not a
-    fetch and `/usr/local/bin/fetch-commit` is. An instruction that cannot be split is taken as a fetch if its text
-    names the program, which is the safe side for both callers."""
+    """Whether this instruction runs fetch-commit: True, False, or None for "cannot be read".
+
+    The command's own first word decides, so `echo "fetch-commit"` is not a fetch and `/usr/local/bin/fetch-commit`
+    is. None is for the forms this does not parse and must not guess at: an instruction that cannot be split or
+    carries a heredoc, and a command that runs another command (`sh -c "... fetch-commit ..."`), where whether a
+    fetch happens is inside a shell string. A review measured five valid Dockerfiles of those shapes whose real
+    fetch ran with no secret while the guard said they were mounted, so None is refused rather than assumed.
+    """
     words = words_of(instruction)
     if words is None:
-        return "fetch-commit" in (instruction or "")
+        return None if "fetch-commit" in (instruction or "") else False
     if not words or words[0].upper() != "RUN":
         return False
-    for word in words[1:]:
-        if word.startswith("--"):
-            continue
-        return word == "fetch-commit" or word.endswith("/fetch-commit")
-    return False
+    rest = [word for word in words[1:] if not word.startswith("--")]
+    if not rest:
+        return False
+    program = rest[0]
+    if program.startswith("["):
+        # RUN ["fetch-commit", "/src/x"]: the exec form, whose first element is the program and which no shell
+        # reads. A review measured an unmounted fetch written this way that the word test missed. The quotes are
+        # already gone -- words_of splits as a shell does -- so what is left is `[fetch-commit,`.
+        program = program.lstrip("[").strip().strip('",')
+    if program in SHELL_WRAPPERS or program.rsplit("/", 1)[-1] in SHELL_WRAPPERS:
+        return None if "fetch-commit" in instruction else False
+    return program == "fetch-commit" or program.endswith("/fetch-commit")
 
 
 def fetch_steps(text):
-    """The instructions of a Dockerfile that RUN fetch-commit: (instruction, the secret ids it mounts).
+    """The instructions of a Dockerfile that run fetch-commit, with the secret ids each mounts."""
+    return [(line, ids) for line, ids, fetches in mounts_and_fetches(text) if fetches]
 
-    A Dockerfile with a heredoc is not parsed instruction by instruction: a heredoc body is lines of its own, and
-    the command is in the body, not in the RUN. Such a file is read whole instead, which over-reports a mount and
-    over-reports a fetch -- the safe side for both callers, since one refuses without a mount and the other
-    refuses with one."""
+
+def unreadable_steps(text):
+    """The instructions this cannot read: a heredoc, an unmatched quote, or a command that runs another command,
+    where whether a fetch happens and whether it gets the secret are inside a shell string. They are listed, not
+    guessed at: a review measured five valid Dockerfiles of those shapes whose real fetch ran with no secret.
+
+    A heredoc is judged on the whole file, because its body is lines of its own: the `RUN … <<EOT` carries the
+    mount and the body carries the command, and neither instruction on its own says a fetch is happening. A `<<`
+    in a comment is not a heredoc and does not count -- comments are gone by the time instructions() returns.
+    """
     lines = instructions(text)
-    variables = build_variables(lines)
-    if "<<" in text:
-        return [(" ".join(text.split())[:200], secret_mounts("<<" + text, variables))] if "fetch-commit" in text else []
-    return [(line, secret_mounts(line, variables)) for line in lines if runs_fetch_commit(line)]
+    unreadable = [line for line, _, fetches in mounts_and_fetches(text) if fetches is None]
+    # A heredoc BODY is skipped when the instructions are read, so a fetch written inside one appears in no
+    # instruction at all. The raw text is what says it is there, and the instruction that opened the heredoc is
+    # what to name.
+    heredocs = [line for line in lines if "<<" in line]
+    if heredocs and "fetch-commit" in text:
+        unreadable = list(dict.fromkeys(unreadable + heredocs))
+    return unreadable
 
 
 def check_secret_mount(dockerfile, text, token, where):
@@ -786,10 +865,18 @@ def check_secret_mount(dockerfile, text, token, where):
     """
     steps = fetch_steps(text)
     bare = [step for step, ids in steps if GIT_TOKEN_SECRET not in ids]
-    lines = instructions(text)
-    variables = build_variables(lines)
-    asks = (GIT_TOKEN_SECRET in secret_mounts("<<" + text, variables) if "<<" in text else
-            any(GIT_TOKEN_SECRET in secret_mounts(line, variables) for line in lines))
+    unreadable = unreadable_steps(text)
+    # Parsed mounts only. Looking for the id in the text as well refused three valid public Dockerfiles that
+    # mount nothing: one whose heredoc BODY quotes a mount, one that mounts `…-token-other`, and one that names
+    # the mount in a comment. A heredoc body is a shell script; a mount is on the RUN line, which is parsed.
+    asks = any(GIT_TOKEN_SECRET in ids for _, ids, _ in mounts_and_fetches(text))
+    if token and unreadable:
+        raise Failed(f"{where} is in infra/private-libraries.tsv, so its fetch must mount the token, and "
+                     f"{dockerfile} writes a step this check cannot read:\n    {unreadable[0][:160]}\n"
+                     "A heredoc, an unmatched quote, and a command that runs another command (`sh -c \"…\"`) all "
+                     "put the fetch inside a string, and whether BuildKit gives THAT fetch the secret cannot be "
+                     "read from the instruction. Write the fetch as its own step:\n"
+                     f"    RUN {SECRET_MOUNT} fetch-commit $SRC/<name>")
     if token and (bare or not steps):
         why = (f"{dockerfile} has no fetch-commit step at all" if not steps else
                f"a fetch step in {dockerfile} does not mount it: {bare[0][:120]}" if asks else

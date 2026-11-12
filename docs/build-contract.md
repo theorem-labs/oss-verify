@@ -169,14 +169,16 @@ Where the token is while the build runs, and nowhere else:
 * The mount is a file in the `RUN` step that asks for it, so **other code in that same `RUN`** can copy it. BuildKit does not prevent that, and for a private library of ours the `Dockerfile` is ours.
 * `gh-app-token`, which [infra/github-read-token](../infra/github-read-token) asks, writes the token it mints into its own mode-0600 cache file on the build host. Every build mints its own (that file says how, and names the one assumption: the host's clock), and the entry dies with the token in an hour.
 * `OSS_VERIFY_GIT_TOKEN_COMMAND` replaces that command, and **nothing checks what a replacement prints**: freshness, repository scope and read-only are obligations of whoever sets it, not properties `tools/check` can establish from one line of output.
-* A `Dockerfile` with a **heredoc** is not parsed instruction by instruction — a heredoc body is lines of its own — so it is read whole, which over-reports both the mount and the fetch. That is the safe side of each refusal, not a parse.
+* **The fetch must be its own step.** The guard reads the command of each `RUN`, and refuses a private library whose fetch it cannot read: inside a heredoc body, behind `sh -c "…"` or another command that runs a command, or in an instruction with an unmatched quote. Those are valid `Dockerfile`s, and BuildKit may well mount the secret on them — but whether it mounts it on *that* fetch cannot be read from the instruction, and a review measured five files of those shapes whose real fetch ran with no credential while the guard said they were fine. This is a restriction on how a private library writes its fetch, not a claim about what BuildKit does.
 * A server that **lists a repository's refs** has said the build may read it. It has not said that `upload-pack` works or that the objects will arrive, so a fetch that fails after a successful listing is reported as exactly that, and not as a missing commit.
 
 A fetch that fails says which of **three** things went wrong, where before the first two were one message:
 
 * **Not authorised.** The server answered, and would not list the repository's refs, so the commit was never looked up. GitHub answers a private repository you may not read exactly as it answers one that is not there, so the message names both and does not guess.
-* **No such commit.** The server listed the refs, so the build may read the repository; the commit is not in it.
+* **No such commit.** The server listed the refs **and sent the whole repository**, so the build may read it and the transfer worked; the commit is not in it. In the container that conclusion is drawn only after a clone that succeeded. On the host there is no second attempt to draw it from, so the host says the two possibilities it really has — the commit is absent, or the objects did not come — and leaves git's own message for the fetch above it.
 * **Could not be reached.** The server did not answer either way: no route, a refused connection, a rate limit, a server fault. This is neither of the other two, and saying it was one of them would be the same bug in a new place. What `git` said comes with each message.
+
+Which of the three it was is decided by **the HTTP status first, and the words of the message only when there is no status**: 401, 403 and 404 are a refusal and every other status is the server failing. A 503 can say `upstream connection permission denied` or `repository not found` in its body, and both were measured; a body does not outrank a status.
 
 ## What build.sh must do
 
