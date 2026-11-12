@@ -999,6 +999,15 @@ class BothClassifiersAgree(unittest.TestCase):
         ("fatal: unable to access 'http://127.0.0.1:44037/x.git/': Failed to connect to 127.0.0.1 port 44037 "
          "after 0 ms: Connection refused", False),
         ("fatal: unable to access: Could not resolve host: not-a-real-host.invalid", False),
+        # The LAST status is git's own; a body can quote the status of an earlier request.
+        ("remote: your earlier request returned error: 403\nerror: The requested URL returned error: 503", False),
+        ("remote: a previous call returned error: 503\nerror: The requested URL returned error: 403", True),
+        # A status outside any list of codes is still a status: enumerating them left 505 and 507 to fall
+        # through to the phrases, so a server fault whose body said `access denied` read as a refusal.
+        ("error: The requested URL returned error: 505", False),
+        ("remote: access denied\nerror: The requested URL returned error: 507", False),
+        # Three digits in a URL are not a status.
+        ("fatal: unable to access 'http://127.0.0.1/404/x.git/': Could not resolve host", False),
     )
 
     def container(self, said):

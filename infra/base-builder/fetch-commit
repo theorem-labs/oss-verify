@@ -145,14 +145,14 @@ readable() {
 # them for the same reason.
 denied() {
   lower=$(printf '%s' "$refs_said" | tr 'A-Z' 'a-z')
-  # The status git itself reports, which is the one to believe.
-  status=
-  for code in 400 401 402 403 404 405 408 409 410 422 429 500 501 502 503 504; do
-    case $lower in
-      *"returned error: $code"* | *"http/1.0 $code"* | *"http/1.1 $code"* | *"http/2 $code"* | *"http $code"*)
-        status=$code; break ;;
-    esac
-  done
+  # The status git itself reports, which is the one to believe, and the LAST one in the message: git writes its
+  # own diagnostic after whatever the server's body said, and a body can quote the status of an earlier request.
+  # The digits are read, not matched against a list of codes: a list leaves 505 and 507 to fall through to the
+  # phrases below, which is a server fault read as a refusal.
+  status=$(printf '%s\n' "$lower" | sed -n 's/.*returned error:[ ]*\([0-9][0-9][0-9]\).*/\1/p' | tail -n 1)
+  [ -n "$status" ] || status=$(printf '%s\n' "$lower" |
+    sed -n 's|.*http/[0-9.]*[ ]*\([0-9][0-9][0-9]\).*|\1|p' | tail -n 1)
+  [ -n "$status" ] || status=$(printf '%s\n' "$lower" | sed -n 's/.*http[ ]*\([0-9][0-9][0-9]\).*/\1/p' | tail -n 1)
   # A status written with its reason, when git reported none of its own. The reason must be one of these: a
   # three-digit number and any word also matches `access denied after 503 bytes`.
   if [ -z "$status" ]; then
@@ -171,7 +171,8 @@ denied() {
     case $status in 401 | 403 | 404) return 0 ;; *) return 1 ;; esac
   fi
   # No status at all: the phrases git or the remote writes when it refuses, and in no other situation.
-  # `'\'' not found` is git's wording for a 404 with an empty body: `repository '''https://…/x.git/''' not found`.
+  # `repository ... not found` covers both of git's wordings: GitHub's `repository not found`, and the one for a
+  # 404 with an empty body, which puts the URL in between. Neither can fire when a status was found above.
   case $lower in
     *"could not read username"* | *"authentication failed"* | *"invalid username or token"* \
     | *"terminal prompts disabled"* | *"repository "*"not found"* | *"remote: not found"* \

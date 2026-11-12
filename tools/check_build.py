@@ -384,9 +384,13 @@ def refused(said):
     which are read only when there is no status at all. infra/base-builder/fetch-commit's denied() is the same
     rule in shell, and the two are kept together by tests that give both the same messages."""
     lowered = said.lower()
-    found = EXPLICIT_STATUS.search(lowered) or NAMED_STATUS.search(lowered)
+    # The LAST status in the message, not the first: git writes its own diagnostic after whatever the server's
+    # body said, and a body can quote the status of some earlier request. A review measured a body carrying
+    # `returned error: 403` ahead of git's real 503.
+    found = EXPLICIT_STATUS.findall(lowered) or NAMED_STATUS.findall(lowered)
     if found:
-        return (found.group(1) or found.group(2)) in DENIED_STATUS
+        last = found[-1]
+        return (last[0] or last[1]) in DENIED_STATUS
     return any(marker in lowered for marker in UNAUTHORISED)
 
 
