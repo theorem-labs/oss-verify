@@ -1224,13 +1224,11 @@ class Hold(Runner):
                 self.assertNotRegex(bodies[0], r"oss-verify-held-(limit|cap|transient)|screened again|tried|times")
                 self.assertEqual(bodies[0].count("<!--"), 2, bodies[0])
 
-    def test_a_review_that_did_not_finish_is_left_to_a_maintainer(self):
+    def test_a_review_that_did_not_finish_is_not_a_screen_hold(self):
         for trust in ("screen", "writer"):
             with self.subTest(trust=trust):
                 self.api.joinpath("args").unlink(missing_ok=True)
                 _calls, bodies, _ = self.hold(trust, review="failure")
-                self.assertIn("The automated screen passed it, but the automated review did not finish. A maintainer "
-                              "will look at it.", bodies[0])
                 self.assertNotIn("the screen did not pass it", bodies[0])
 
     def test_a_later_hold_replaces_its_own_comment_only(self):

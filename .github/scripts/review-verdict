@@ -116,7 +116,7 @@ def from_hold(hold):
         title = "The automated screen held this pull request."
         summary = (f"{title} It comes from, or holds the text of, an account without write access to this repository,"
                    " so an automated screen reads it before the automated review does, and the screen did not pass it"
-                   " or could not read it. No review ran. A maintainer will look at it.")
+                   " or could not read it. No review ran. Theorem decides the next step.")
     elif hold == "cap":
         cap, author = os.environ.get("REVIEW_CAP", ""), os.environ.get("REVIEW_CAP_AUTHOR", "")
         if not (cap.isdigit() and author.isdigit()):

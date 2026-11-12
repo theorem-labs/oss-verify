@@ -1783,9 +1783,9 @@ jobs:
           elif [ "$REVIEW" = failure ] || [ "$REVIEW" = cancelled ]; then
             # A review that failed or ran out of time (cancelled: a newer push cancels the whole run, and then this job
             # does not run).
-            why="It comes from, or holds the text of, an account without write access to this repository. The automated screen passed it, but the automated review did not finish. A maintainer will look at it."
+            why="It comes from, or holds the text of, an account without write access to this repository. The automated screen passed it, but the automated review did not finish. Theorem decides the next step."
           else
-            why="It comes from, or holds the text of, an account without write access to this repository, so an automated screen reads it before the automated review does, and the screen did not pass it or could not read it. A maintainer will look at it."
+            why="It comes from, or holds the text of, an account without write access to this repository, so an automated screen reads it before the automated review does, and the screen did not pass it or could not read it. Theorem decides the next step."
           fi
           [[ $RUN_ID =~ ^[0-9]+$ ]] || { echo "::error::not a run id: $RUN_ID"; exit 1; }
           printf '%s\n%s\n\n%s %s\n\n%s\n' '<!-- oss-verify-held -->' "**Automated review held.**" "$why" "$ask" \
