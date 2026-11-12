@@ -251,9 +251,10 @@ def build_record(api: Api, repo: str, run_id: int) -> tuple[dict | None, str]:
 def review_conclusion(api: Api, repo: str, head: str, number: int) -> str:
     """The conclusion of the newest check run REVIEW_CHECK of the oss-verify App at the commit `head` for pull request
     `number` (its status while it has none), or NOT_REVIEWED when there is none. A check run whose external_id is not
-    `number`, another pull request's at the same commit, is not counted."""
+    `number`, another pull request's at the same commit, is not counted. filter=all: GitHub's default, latest, can
+    give only another pull request's newer check run, and this pull request's own would not be read."""
     found = [c for page in api.pages(f"repos/{repo}/commits/{head}/check-runs?check_name={quote(REVIEW_CHECK)}"
-                                     "&per_page=100")
+                                     "&filter=all&per_page=100")
              for c in page.get("check_runs") or []
              if (c.get("app") or {}).get("id") == REVIEW_APP and c.get("external_id") == str(number)]
     if not found:

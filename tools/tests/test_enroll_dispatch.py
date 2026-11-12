@@ -147,8 +147,11 @@ class World:
                 {"type": "required_status_checks", "parameters": {"required_status_checks": [
                     {"context": name, "integration_id": ACTIONS} for name in self.required]}}],
             f"repos/{REPO}/commits/{SHA}/check-runs?filter=all&per_page=100": [{"check_runs": self.checks}],
-            f"repos/{REPO}/commits/{SHA}/check-runs?check_name=Enrollment%20review&per_page=100":
+            # As GitHub answers: every check run with filter=all, and only the newest with its default, latest.
+            f"repos/{REPO}/commits/{SHA}/check-runs?check_name=Enrollment%20review&filter=all&per_page=100":
                 [{"check_runs": self.review_runs}],
+            f"repos/{REPO}/commits/{SHA}/check-runs?check_name=Enrollment%20review&per_page=100":
+                [{"check_runs": sorted(self.review_runs, key=lambda c: c["id"])[-1:]}],
             f"repos/{REPO}/pulls/{PR}": Calls(*self.pulls),
             f"repos/{REPO}/pulls/{PR}/files?per_page=100": [self.files],
             f"repos/{REPO}/contents/projects/plugin-hostd/project.yaml?ref={SHA}": self.project_yaml,
@@ -420,7 +423,8 @@ class ByHand(unittest.TestCase):
         got = dispatch.decide(api, REPO, HAND_RUN, "workflow_dispatch", MAIN)
         self.assertEqual((got["decision"], got["label"], got["sha"]), ("none", "", SHA), got["reason"])
         self.assertIn("its newest Enrollment review check run is action_required, not success", got["reason"])
-        self.assertIn(f"repos/{REPO}/commits/{SHA}/check-runs?check_name=Enrollment%20review&per_page=100", api.calls)
+        self.assertIn(f"repos/{REPO}/commits/{SHA}/check-runs?check_name=Enrollment%20review&filter=all&per_page=100",
+                      api.calls)
 
     def test_a_build_by_hand_on_main_sends_the_pull_request_it_names(self):
         got = self.world().decide(event="workflow_dispatch", run_id=HAND_RUN, sha=MAIN)
@@ -598,8 +602,9 @@ class Review(unittest.TestCase):
     def test_only_the_heads_review_is_read(self):
         api = World().api()
         dispatch.decide(api, REPO, 104, "pull_request_target", SHA)
-        self.assertEqual([c for c in api.calls if "check_name=" in c],
-                         [f"repos/{REPO}/commits/{SHA}/check-runs?check_name=Enrollment%20review&per_page=100"])
+        self.assertEqual(
+            [c for c in api.calls if "check_name=" in c],
+            [f"repos/{REPO}/commits/{SHA}/check-runs?check_name=Enrollment%20review&filter=all&per_page=100"])
 
 
 class Maintainer(unittest.TestCase):
