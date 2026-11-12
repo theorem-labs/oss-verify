@@ -127,7 +127,7 @@ COMPRESSED_MEMORY = frozenset([(0, f) for f in (1, 2, 3, 4, 5, 6, 7)] + [(2, f) 
 # The symbols that AddressSanitizer's module constructor, in every object it instruments, refers to.
 ASAN_MODULE = re.compile(r"__asan_init|__asan_version_mismatch_check_v[0-9]+")
 TRAP = 0xC0001073  # `unimp`, the word a trap-mode UndefinedBehaviorSanitizer check executes on riscv64
-# The words that open every plain build's detail.
+# The words in every plain build's detail: at its start, or at the end of a Go program's.
 PLAIN_DETAIL = "the plain build instruments nothing, by design"
 SANITIZER_BUILDS = ("ubsan", "asan", "asan-ubsan")
 ASAN_BUILDS = ("asan", "asan-ubsan")
