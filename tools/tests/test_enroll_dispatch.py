@@ -1289,45 +1289,55 @@ def at(seconds):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(seconds))
 
 
+def confirmed_runs_read(label_at):
+    """enroll-dispatch's read of the maintainer-confirmed.yml runs from Timeline's head that a labeled event at
+    `label_at` started: those made in the ten minutes after it."""
+    until = at(calendar.timegm(time.strptime(label_at, "%Y-%m-%dT%H:%M:%SZ")) + 600)
+    return (f"repos/{REPO}/actions/workflows/maintainer-confirmed.yml/runs?branch={Timeline.BRANCH}"
+            f"&event=pull_request_target&created={urllib.parse.quote(f'{label_at}..{until}', safe='')}&per_page=100")
+
+
 class LabelApi(FakeApi):
-    """FakeApi, where each path of `failing` fails as gh does, and the pull_request_target runs from a branch made at or
-    after a time (actions/runs?branch=<branch>&event=pull_request_target&created=>=<time>) are those of `runs`."""
-    LATER = re.compile(rf"repos/{re.escape(REPO)}/actions/runs\?branch=([^&]+)&event=pull_request_target"
-                       r"&created=%3E%3D([^&]+)&per_page=100")
+    """FakeApi, where each path of `failing` fails as gh does, and the pull_request_target runs of
+    maintainer-confirmed.yml from a branch made in a range of time
+    (actions/workflows/maintainer-confirmed.yml/runs?branch=<branch>&event=pull_request_target&created=<from>..<to>)
+    are those of `runs`."""
+    CONFIRMED = re.compile(rf"repos/{re.escape(REPO)}/actions/workflows/maintainer-confirmed\.yml/runs\?branch=([^&]+)"
+                           r"&event=pull_request_target&created=([^&]+)&per_page=100")
 
     def __init__(self, table, runs=(), failing=()):
         super().__init__(table)
         self.runs, self.failing = runs, failing
 
     def answer(self, path):
-        later = self.LATER.fullmatch(path)
-        if path not in self.failing and not later:
+        confirmed = self.CONFIRMED.fullmatch(path)
+        if path not in self.failing and not confirmed:
             return super().answer(path)
         self.calls.append(path)
         if path in self.failing:
             raise subprocess.CalledProcessError(1, ["gh", "api", path])
-        branch, since = urllib.parse.unquote(later.group(1)), later.group(2)
+        branch, (since, until) = urllib.parse.unquote(confirmed.group(1)), \
+            urllib.parse.unquote(confirmed.group(2)).split("..")
         return [{"workflow_runs": [copy.deepcopy(run) for run in self.runs
-                                   if run["head_branch"] == branch and run["event"] == "pull_request_target"
-                                   and run["created_at"] >= since]}]
+                                   if run["path"] == dispatch.CONFIRMED_WORKFLOW and run["head_branch"] == branch
+                                   and run["event"] == "pull_request_target" and since <= run["created_at"] <= until]}]
 
     get = pages = raw = answer
 
 
 class Timeline:
-    """Pull request PR, from FreeREAC/oss-verify:add-plugin-hostd, over time: its head, commits, state, labels, events
-    and author, the Actions runs from its head, and the repository's labels. One clock gives each run and event a later
-    time. decide reads a World of the completed run's commit, with the pull request, its commits, its events and the
-    runs as they are then. job runs the dispatch job's steps that write review-passed against the stand-in gh, whose
-    state is made from this one, and reads back what they wrote. Each labeled event starts a run of
-    maintainer-confirmed.yml, on pull_request_target, at the head of that moment, a few seconds after it, unless
-    confirmed_runs is False. A push adds its commit to the pull request's commits, and a force push makes it the only
-    one."""
+    """Pull request PR, from FreeREAC/oss-verify:add-plugin-hostd, over time: its head, state, labels, events and
+    author, the Actions runs from its head, and the repository's labels. One clock gives each run and event a later
+    time. decide reads a World of the completed run's commit, with the pull request, its events and the runs as they
+    are then. job runs the dispatch job's steps that write review-passed against the stand-in gh, whose state is made
+    from this one, and reads back what they wrote. Each labeled event starts a run of maintainer-confirmed.yml, on
+    pull_request_target, at the head of that moment, a few seconds after it, by the account that put the label on,
+    unless confirmed_runs is False."""
     BRANCH, HEAD_REPO = "add-plugin-hostd", "FreeREAC/oss-verify"
 
     def __init__(self, author="linuxnow", permission="read", repo_labels=None, confirmed_runs=True):
         self.clock = EPOCH
-        self.head, self.commits, self.state, self.merged = None, [], "open", False
+        self.head, self.state, self.merged = None, "open", False
         self.author = author
         self.collaborators = {} if author.endswith("[bot]") else {author: permission}
         self.repo_labels = [{"name": REVIEW_PASSED, "color": "0E8A16", "description": DESCRIPTION}] \
@@ -1341,10 +1351,12 @@ class Timeline:
         self.clock += seconds
         return at(self.clock - seconds)
 
-    def add_run(self, sha, path, event):
+    def add_run(self, sha, path, event, actor=None):
+        """A run from the head at `sha`, started by `actor` (the author unless given)."""
+        login = {"login": actor or self.author}
         self.runs.append({"id": 1000 + len(self.runs), "path": path, "event": event, "head_sha": sha,
                           "head_branch": self.BRANCH, "head_repository": {"full_name": self.HEAD_REPO},
-                          "created_at": self.tick()})
+                          "created_at": self.tick(), "actor": login, "triggering_actor": login})
 
     def push(self, sha, force=False):
         """The head becomes `sha`, by a force push or not, and the runs of the four required checks start."""
@@ -1352,21 +1364,21 @@ class Timeline:
             self.events.append({"event": "head_ref_force_pushed", "actor": {"login": self.author},
                                 "created_at": self.tick()})
         self.head = sha
-        self.commits = [sha] if force else self.commits + [sha]
         for name in REQUIRED:
             self.add_run(sha, *RUNS[name][1:])
 
-    def confirmed_run(self):
+    def confirmed_run(self, actor):
+        """The run of maintainer-confirmed.yml that a label `actor` put on starts, at the head, a few seconds after."""
         if self.confirmed_runs:
             self.tick(3)
-            self.add_run(self.head, dispatch.CONFIRMED_WORKFLOW, "pull_request_target")
+            self.add_run(self.head, dispatch.CONFIRMED_WORKFLOW, "pull_request_target", actor)
 
     def put_on(self, actor, name=REVIEW_PASSED):
         """`actor` puts the label on, by the name `name` (it is review-passed now, whatever it was then)."""
         self.events.append({"event": "labeled", "label": {"name": name}, "actor": {"login": actor},
                             "created_at": self.tick()})
         self.labels.append(REVIEW_PASSED)
-        self.confirmed_run()
+        self.confirmed_run(actor)
 
     def take_off(self, actor, name=REVIEW_PASSED):
         self.events.append({"event": "unlabeled", "label": {"name": name}, "actor": {"login": actor},
@@ -1419,8 +1431,6 @@ class Timeline:
             [[self.pull()] if self.state == "open" else []]
         table[f"repos/{REPO}/issues/{PR}/events?per_page=100"] = \
             [self.events[i:i + 2] for i in range(0, len(self.events), 2)] or [[]]
-        table[f"repos/{REPO}/pulls/{PR}/commits?per_page=100"] = \
-            [[{"sha": sha} for sha in self.commits[i:i + 2]] for i in range(0, len(self.commits), 2)] or [[]]
         for sha in {run["head_sha"] for run in self.runs}:
             table[f"repos/{REPO}/actions/runs?head_sha={sha}&per_page=100"] = \
                 [{"workflow_runs": [run for run in self.runs if run["head_sha"] == sha]}]
@@ -1477,10 +1487,10 @@ class Timeline:
         pull = state["pulls"][str(PR)]
         self.repo_labels, self.labels, self.events = state["labels"], pull["labels"], state["events"][str(PR)]
         self.clock, self.calls = state["clock"], self.calls + state["calls"]
+        for added_event in added:   # at the head the label was put on at
+            self.confirmed_run(added_event["actor"]["login"])
         if pull["head_sha"] != self.head:
             self.push(pull["head_sha"])
-        for _ in added:
-            self.confirmed_run()
         return ran
 
 
@@ -1693,24 +1703,32 @@ class ReviewPassed(unittest.TestCase):
         self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF])
         self.assertLabels(line, [REVIEW_PASSED])
 
-    def test_q_a_trusted_or_unknown_author_loses_the_label_at_a_new_head(self):
-        with self.subTest(author="trusted"):
+    def trusted_or_unknown(self, author):
+        """The label put on for A, then head B, of an author build.yaml's rule trusts (author "trusted": write access)
+        or whose trust cannot be read ("unknown": the read fails)."""
+        if author == "trusted":
             line = Timeline(author="a-writer", permission="write")
             line.push(self.A)
             line.put_on(dispatch.APP_LOGIN)
-            line.push(self.B)
-            out = line.decide()
-            self.assertEqual((out["decision"], out["review_passed"]), ("dispatch", "off"), out["reason"])
-            self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF])
-            self.assertLabels(line, [])
-        with self.subTest(author="a trust read that fails"):
+        else:
             line = self.labelled()
-            line.push(self.B)
             line.failing.add(f"repos/{REPO}/collaborators/linuxnow/permission")
-            out = line.decide()
-            self.assertEqual((out["decision"], out["review_passed"]), ("dispatch", "off"), out["reason"])
-            self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF])
-            self.assertLabels(line, [])
+        line.push(self.B)
+        return line
+
+    def test_q_a_trusted_or_unknown_author_keeps_the_label_at_a_new_head_that_is_sent(self):
+        # The run that sends B puts the label on again, for B; whether the author is trusted is not read.
+        for author in ("trusted", "unknown"):
+            with self.subTest(author=author):
+                line = self.trusted_or_unknown(author)
+                pushed, before = line.runs[-1]["created_at"], len(line.calls)
+                out = line.decide()
+                self.assertEqual((out["decision"], out["review_passed"], out["review_passed_at"]),
+                                 ("dispatch", "on", "head"), out["reason"])
+                self.assertEqual([call for call in line.calls[before:] if "/collaborators/" in call], [])
+                self.assertEqual(self.job(line, out), [CHECK, PUT_ON])
+                self.assertGreater(self.newest_label(line), pushed)   # put on again, for B
+                self.assertLabels(line, [REVIEW_PASSED])
 
     def test_r_a_new_head_with_a_file_outside_projects_loses_the_label(self):
         line = self.labelled()
@@ -1747,7 +1765,7 @@ class ReviewPassed(unittest.TestCase):
         self.assertEqual(self.job(line, none), [CHECK, TAKE_OFF])
         self.assertLabels(line, [REVIEW_PASSED])
 
-    def test_u_a_failed_read_of_the_events_changes_nothing(self):
+    def test_u_a_failed_read_of_the_events_or_of_the_labels_runs_changes_nothing(self):
         events = f"repos/{REPO}/issues/{PR}/events?per_page=100"
         with self.subTest(label="on, at a new head"):
             line = self.labelled()
@@ -1765,6 +1783,15 @@ class ReviewPassed(unittest.TestCase):
             self.assertEqual((out["decision"], out["review_passed"]), ("dispatch", ""), out["reason"])
             self.assertEqual(self.job(line, out), [CHECK])
             self.assertLabels(line, [])
+        with self.subTest(label="on, and the runs its labeled event started cannot be read"):
+            line = self.labelled()
+            line.push(self.B)
+            line.failing.add(confirmed_runs_read(self.newest_label(line)))
+            out = line.decide(failed_check=True)
+            self.assertEqual((out["decision"], out["review_passed"]), ("none", ""), out["reason"])
+            self.assertIn("review-passed is left as it is", out["reason"])
+            self.assertEqual(self.job(line, out), [])
+            self.assertLabels(line, [REVIEW_PASSED])
 
     def test_v_a_head_pushed_again_without_a_force_push_loses_a_label_put_on_at_another_head(self):
         # H, a force push back to A, A labelled (which starts a maintainer-confirmed.yml run at A), H pushed again.
@@ -1807,31 +1834,183 @@ class ReviewPassed(unittest.TestCase):
             self.assertEqual(self.job(line, out), [CHECK, PUT_ON])
             self.assertNotIn(labels, line.calls[before:])
             self.assertLabels(line, [])
+        with self.subTest(change="a renewal of a label a person once took off and someone put back"):
+            line = self.labelled()
+            line.take_off("sjawhar")
+            line.put_on("a-member")
+            line.push(self.B)
+            out = line.decide()
+            self.assertEqual((out["decision"], out["review_passed"], out["review_passed_at"]),
+                             ("dispatch", "on", "head"), out["reason"])
+            line.take_off("sjawhar")   # after decide read the events, before the job runs
+            before = len(line.calls)
+            self.assertEqual(self.job(line, out), [CHECK, PUT_ON])
+            self.assertNotIn(labels, line.calls[before:])
+            self.assertLabels(line, [])
 
     def test_x_a_run_of_another_pull_request_from_the_same_branch_leaves_the_label(self):
         # The branch was the head of a pull request closed before, at E, which is not among this one's commits. A label
-        # event on that one starts a maintainer-confirmed.yml run at E, after this one's label.
+        # event on that one, by the App too, starts a maintainer-confirmed.yml run at E, after this one's label's run.
         E = "e" * 40
         commits = f"repos/{REPO}/pulls/{PR}/commits?per_page=100"
-        for change, decision, steps in (({"review": "action_required"}, ("none", ""), []),
-                                        ({"failed_check": True}, ("none", ""), [])):
+        for change in ({"review": "action_required"}, {"failed_check": True}):
             with self.subTest(change=change):
                 line = self.labelled()
                 line.tick(3)
-                line.add_run(E, dispatch.CONFIRMED_WORKFLOW, "pull_request_target")
+                line.add_run(E, dispatch.CONFIRMED_WORKFLOW, "pull_request_target", dispatch.APP_LOGIN)
                 out = line.decide(**change)
-                self.assertEqual((out["decision"], out["label"], out["review_passed"]), (*decision, ""), out["reason"])
-                self.assertIn(commits, line.calls)
+                self.assertEqual((out["decision"], out["label"], out["review_passed"]), ("none", "", ""), out["reason"])
+                self.assertNotIn(commits, line.calls)
+                self.assertEqual(self.job(line, out), [])
+                self.assertLabels(line, [REVIEW_PASSED])
+        with self.subTest(change="a pull request of more than 250 commits, more than GitHub lists"):
+            line = Timeline()
+            for i in range(250):
+                line.push(f"{i:040x}")
+            line.push(self.A)
+            out = line.decide()
+            self.assertEqual(out["review_passed"], "on", out["reason"])
+            self.assertEqual(self.job(line, out), [CHECK, PUT_ON])
+            line.add_run(E, dispatch.CONFIRMED_WORKFLOW, "pull_request_target", dispatch.APP_LOGIN)
+            out = line.decide(failed_check=True)
+            self.assertEqual((out["decision"], out["review_passed"]), ("none", ""), out["reason"])
+            self.assertNotIn(commits, line.calls)
+            self.assertEqual(self.job(line, out), [])
+            self.assertLabels(line, [REVIEW_PASSED])
+
+    def test_y_a_label_put_on_again_for_a_new_head_stays_whatever_that_head_decides_next(self):
+        # q's renewal makes a new labeled event, at B: the label is for B, and a later run for B that does not pass
+        # leaves it.
+        for author in ("trusted", "unknown"):
+            for change in ({"failed_check": True}, {"review": "failure"}):
+                with self.subTest(author=author, change=change):
+                    line = self.trusted_or_unknown(author)
+                    out = line.decide()
+                    self.assertEqual(out["review_passed"], "on", out["reason"])
+                    self.assertEqual(self.job(line, out), [CHECK, PUT_ON])
+                    out = line.decide(**change)
+                    self.assertEqual((out["decision"], out["review_passed"]), ("none", ""), out["reason"])
+                    self.assertIn(f"review-passed stays: it was put on at {self.newest_label(line)} for {self.B[:7]}",
+                                  out["reason"])
+                    self.assertEqual(self.job(line, out), [])
+                    self.assertLabels(line, [REVIEW_PASSED])
+
+    def test_z_a_force_push_away_and_back_leaves_the_label_of_that_head(self):
+        # The label was put on for A; A is the head again after a force push to C and one back to A, both after the
+        # label, and no run for C decided meanwhile.
+        line = self.labelled()
+        line.push(self.C, force=True)
+        line.push(self.A, force=True)
+        out = line.decide(failed_check=True)
+        self.assertEqual((out["decision"], out["review_passed"]), ("none", ""), out["reason"])
+        self.assertIn(f"stays: it was put on at {self.newest_label(line)} for {self.A[:7]}", out["reason"])
+        self.assertEqual(self.job(line, out), [])
+        self.assertLabels(line, [REVIEW_PASSED])
+
+    def test_aa_a_run_at_an_earlier_commit_of_the_branch_leaves_the_label(self):
+        # The branch is built on P, the head of another pull request from this branch, which main lacks. A label event
+        # on that one starts a maintainer-confirmed.yml run at P after this one's label: by another account, or by the
+        # same account after the ten minutes in which a label's own run is looked for.
+        P = "f" * 40
+        for actor, wait in (("a-member", 0), (dispatch.APP_LOGIN, 601)):
+            with self.subTest(actor=actor):
+                line = Timeline()
+                line.push(P)
+                line.push(self.A)
+                out = line.decide()
+                self.assertEqual(out["review_passed"], "on", out["reason"])
+                self.assertEqual(self.job(line, out), [CHECK, PUT_ON])
+                line.tick(wait)
+                line.add_run(P, dispatch.CONFIRMED_WORKFLOW, "pull_request_target", actor)
+                out = line.decide(failed_check=True)
+                self.assertEqual((out["decision"], out["review_passed"]), ("none", ""), out["reason"])
+                self.assertEqual(self.job(line, out), [])
+                self.assertLabels(line, [REVIEW_PASSED])
+
+    def test_ab_a_label_a_person_took_off_and_put_back_stays_at_its_head(self):
+        line = self.labelled()
+        line.take_off("sjawhar")
+        line.put_on("sjawhar")
+        for change, decision, steps in (({"failed_check": True}, "none", []), ({}, "dispatch", [CHECK])):
+            with self.subTest(decision=decision):
+                out = line.decide(**change)
+                self.assertEqual((out["decision"], out["review_passed"]), (decision, ""), out["reason"])
                 self.assertEqual(self.job(line, out), steps)
                 self.assertLabels(line, [REVIEW_PASSED])
-        with self.subTest(change="GitHub lists 250 commits, so every run at another commit counts"):
-            line = self.labelled()
-            line.commits += [f"{i:040x}" for i in range(249)]
-            line.add_run(E, dispatch.CONFIRMED_WORKFLOW, "pull_request_target")
-            out = line.decide(failed_check=True)
-            self.assertEqual((out["decision"], out["review_passed"]), ("none", "off"), out["reason"])
-            self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF])
-            self.assertLabels(line, [])
+
+    def test_ac_a_label_whose_run_is_not_found_is_judged_by_its_time(self):
+        # No maintainer-confirmed.yml run of the label's account is found, or the labeled event names no account: the
+        # label is older than B, which was pushed after it, and not older than A.
+        for case in ("no run", "a run of another account", "no account"):
+            with self.subTest(case=case):
+                line = self.labelled(confirmed_runs=case == "no account")
+                if case == "a run of another account":
+                    line.add_run(self.A, dispatch.CONFIRMED_WORKFLOW, "pull_request_target", "a-member")
+                if case == "no account":
+                    del line.events[-1]["actor"]
+                out = line.decide(failed_check=True)
+                self.assertEqual((out["decision"], out["review_passed"]), ("none", ""), out["reason"])
+                self.assertIn(f"after {self.A[:7]} was pushed", out["reason"])
+                line.push(self.B)
+                out = line.decide(failed_check=True)
+                self.assertEqual((out["decision"], out["review_passed"], out["review_passed_at"]),
+                                 ("none", "off", "head"), out["reason"])
+                self.assertIn(f"before {self.B[:7]} was pushed", out["reason"])
+                self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF])
+                self.assertLabels(line, [])
+
+    def test_ad_a_later_label_by_the_same_account_at_a_new_head_does_not_speak_for_the_label(self):
+        # A minute after it put review-passed on at A, and after B was pushed, the App puts another label on
+        # (build.yaml's held label, say), which starts a maintainer-confirmed.yml run at B: the first run is the label's.
+        line = self.labelled()
+        line.push(self.B)
+        line.tick(60)
+        line.events.append({"event": "labeled", "label": {"name": "oss-verify-held"},
+                            "actor": {"login": dispatch.APP_LOGIN}, "created_at": line.tick()})
+        line.confirmed_run(dispatch.APP_LOGIN)
+        out = line.decide(failed_check=True)
+        self.assertEqual((out["decision"], out["review_passed"]), ("none", "off"), out["reason"])
+        self.assertIn(f"for {self.A[:7]}, not {self.B[:7]}", out["reason"])
+        self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF])
+        self.assertLabels(line, [])
+
+    def test_ae_a_label_a_person_once_took_off_is_put_on_again_at_a_new_head_that_is_sent(self):
+        # A person took it off and someone put it back, at A; B is sent. The renewal makes a new labeled event, at B, so
+        # a later run for B that does not pass leaves the label.
+        line = self.labelled()
+        line.take_off("sjawhar")
+        line.put_on("a-member")
+        line.push(self.B)
+        pushed = line.runs[-1]["created_at"]
+        out = line.decide()
+        self.assertEqual((out["decision"], out["review_passed"], out["review_passed_at"]), ("dispatch", "on", "head"),
+                         out["reason"])
+        self.assertEqual(self.job(line, out), [CHECK, PUT_ON])
+        self.assertGreater(self.newest_label(line), pushed)
+        self.assertLabels(line, [REVIEW_PASSED])
+        out = line.decide(failed_check=True)
+        self.assertEqual((out["decision"], out["review_passed"]), ("none", ""), out["reason"])
+        self.assertEqual(self.job(line, out), [])
+        self.assertLabels(line, [REVIEW_PASSED])
+
+    def test_af_a_renewal_after_the_apps_take_off_for_the_same_head_puts_the_label_back(self):
+        # t's two runs for B, in the other order, on a label a person once took off and someone put back: the take-off
+        # runs first, and the renewal then finds the label off, taken off by the App since decide, and puts it on.
+        line = self.labelled()
+        line.take_off("sjawhar")
+        line.put_on("a-member")
+        line.push(self.B)
+        none = line.decide(failed_check=True)
+        sent = line.decide()
+        self.assertEqual((none["review_passed"], sent["review_passed"]), ("off", "on"),
+                         (none["reason"], sent["reason"]))
+        self.assertEqual(self.job(line, none), [CHECK, TAKE_OFF])
+        self.assertLabels(line, [])
+        self.assertEqual(self.job(line, sent), [CHECK, PUT_ON])
+        self.assertLabels(line, [REVIEW_PASSED])
+        out = line.decide(failed_check=True)
+        self.assertEqual((out["decision"], out["review_passed"]), ("none", ""), out["reason"])
+        self.assertLabels(line, [REVIEW_PASSED])
 
 
 class TrustRule(unittest.TestCase):

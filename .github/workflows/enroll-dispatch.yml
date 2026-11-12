@@ -42,18 +42,20 @@
 # now.") says that an enrollment passed at its head commit. decide says what happens to it in review_passed (on, off,
 # or empty for no change), by the rule in the script's header: a run that sends an enrollment (which it does only when
 # the check run Enrollment review at the commit is success), by an author build.yaml's rule does not trust, puts it on,
-# unless an account other than the App took it off before; a run for a new head that does not pass takes off a label
-# older than that head; a close or a merge takes it off. So dispatch runs also when the decision is none and the label
-# changes. It writes the label with the token for this repository's pull requests. Before it takes the label off at a
-# new head, it reads the pull request and its events again, and leaves the label when the head moved or the newest
-# labeled event is not the one decide judged (label_at).
+# unless an account other than the App took it off before; at a head other than the one the label was put on for (the
+# head at which its labeled event started a run of maintainer-confirmed.yml), a run that sends puts it on again,
+# whoever the author is, and any other run takes it off; a close or a merge takes it off. So dispatch runs also when
+# the decision is none and the label changes. It writes the label with the token for this repository's pull requests.
+# Before it takes the label off at a new head, it reads the pull request and its events again, and leaves the label
+# when the head moved or the newest labeled event is not the one decide judged (label_at).
 # It puts the label on only while the pull request is open at the commit, after the send, and reads the pull request
 # again after: when the head moved or the pull request closed meanwhile, it takes the label off again. Just before, it
-# reads the pull request's events again, and leaves the label as it is when an account other than the App took it off
-# (at any time, as decide judges), so that a person's removal since decide is not undone. A label older than the head
-# is taken off and put on again, so that its labeled event is new. It makes the label when it is missing (colour
-# 0E8A16, that description), and sets the description when it differs. Each change is a line of the run's summary; no
-# step posts a comment.
+# reads the pull request and, but for a renewal of a label that is still on, its events: a first put-on leaves the
+# label off when an account other than the App took it off at any time, as decide judges, and a renewal of a label
+# that is off by now leaves it off when the newest removal since label_at is not the App's, so that a person's removal
+# since decide is not undone. A renewal takes the label off and puts it on again, so that its labeled event is new. It
+# makes the label when it is missing (colour 0E8A16, that description), and sets the description when it differs.
+# Each change is a line of the run's summary; no step posts a comment.
 #
 # Each required check's run starts this workflow, so the run of the last one to pass is the one that dispatches; a run
 # that sees a check not passed yet sends nothing, and so does a run for a draft pull request: build.yaml runs again on
@@ -381,10 +383,14 @@ jobs:
 
       # Only after the send, and after the labels of an earlier commit come off: the label says that the statements are
       # started. The pull request is read just before and just after, so that a label that lands after a new push or a
-      # close does not stay. Its events are read just before too: when an account other than the App took the label off
-      # (or its former name), at any time, the label is left as it is, as decide leaves it, so that a person's removal
-      # after decide read the events is not undone. A label older than the head is taken off and put on again, so that
-      # its labeled event is new: a run that decided to take it off for this head then stops (Take off review-passed).
+      # close does not stay. A first put-on (no LABEL_AT) reads the events too, and leaves the label off when an account
+      # other than the App took it off (or its former name) at any time, as decide leaves it. A renewal (LABEL_AT, the
+      # time of the label decide judged older than the head) takes the label off and puts it on again, so that its
+      # labeled event is new, for this head: a run that decided to take it off for this head then stops (Take off
+      # review-passed). When that label is off by now, the renewal reads the events: it leaves the label off when the
+      # newest removal since LABEL_AT is not the App's, so that a person's removal after decide is not undone, and puts
+      # it on when the App took it off (a run for this head that did not pass, say). A person's removal before LABEL_AT
+      # is not asked: someone put the label on again after it.
       - name: Put on review-passed
         if: env.REVIEW_PASSED == 'on'
         env:
@@ -427,21 +433,35 @@ jobs:
               | gh api --method PATCH "repos/$REPO/labels/review-passed" --input - > /dev/null
             say "label review-passed: its description set"
           fi
-          at=$(gh api "repos/$REPO/pulls/$PR" --jq '"\(.state) \(.head.sha)"')
-          if [[ $at != "open $SHA" ]]; then
-            say "pull request $PR: review-passed is not put on: it is ${at% *} at ${at#* }, not open at $SHA"
+          at=$(gh api "repos/$REPO/pulls/$PR" \
+            --jq '"\(.state) \(.head.sha) \(any(.labels[]; .name == "review-passed"))"')
+          read -r state head on <<< "$at"
+          if [[ $state/$head != "open/$SHA" ]]; then
+            say "pull request $PR: review-passed is not put on: it is $state at $head, not open at $SHA"
             exit 0
           fi
-          # Its former name's events count as its own, as in the script.
-          removed=$(gh api --paginate "repos/$REPO/issues/$PR/events?per_page=100" --jq '.[]
-            | select(.event == "unlabeled" and (.label.name == "review-passed" or .label.name == "passes-not-merging")
-              and ((.actor.login // "") | ascii_downcase) != "oss-verify[bot]")
-            | "\(.actor.login // "an account") took it off at \(.created_at)"' | tail -n 1)
+          # A first put-on asks whether an account other than the App ever took the label off; a renewal of a label
+          # that is off by now asks whether the newest removal since LABEL_AT is not the App's. Each removal is
+          # "<time> <account>"; its former name's events count as its own, as in the script.
+          removed=
+          if [[ -z $LABEL_AT || $on != true ]]; then
+            removals=$(gh api --paginate "repos/$REPO/issues/$PR/events?per_page=100" --jq '.[]
+              | select(.event == "unlabeled" and (.label.name == "review-passed" or .label.name == "passes-not-merging")
+                and .created_at >= (env.LABEL_AT // ""))
+              | "\(.created_at) \(.actor.login // "an account")"' | sort)
+            while read -r when by; do
+              if [[ -n $when && ${by,,} != "oss-verify[bot]" ]]; then
+                removed="$by took it off at $when"
+              elif [[ -n $LABEL_AT ]]; then
+                removed=
+              fi
+            done <<< "$removals"
+          fi
           if [[ -n $removed ]]; then
             say "pull request $PR: review-passed is left as it is: $removed, and the run does not put it back"
             exit 0
           fi
-          if [[ -n $LABEL_AT ]]; then
+          if [[ $on == true && -n $LABEL_AT ]]; then
             off "to be put on again: its label of $LABEL_AT is older than $SHA"
           fi
           jq -n '{labels: ["review-passed"]}' \
