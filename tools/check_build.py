@@ -68,7 +68,14 @@ TOKEN_SHAPE = re.compile(r"gh[a-z]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,
 # server fault can carry whatever words it likes in its body -- a review measured a 503 whose body said
 # `upstream connection permission denied`, and another whose body said `repository not found`. A status decides;
 # a body only speaks when there is no status.
-HTTP_STATUS = re.compile(r"returned error:\s*(\d{3})|\b(4\d\d|5\d\d)\s+[A-Za-z]")
+# The status git itself reports, which is the one to believe: `The requested URL returned error: 503`, and the
+# status line of a response (`HTTP/1.1 503`, `HTTP 404`).
+EXPLICIT_STATUS = re.compile(r"returned error:\s*(\d{3})\b|\bhttp(?:/[\d.]+)?\s+(\d{3})\b")
+# A status written with its reason, when git reported no status of its own. The reason must be one of these
+# words: `\d{3} [A-Za-z]` also matches `503 bytes` and `500 today`, and a review measured a real refusal that
+# said `access denied after 503 bytes` being called a server fault because of it.
+NAMED_STATUS = re.compile(r"\b(\d{3})\s+(unauthorized|forbidden|not found|too many requests|"
+                          r"internal server error|bad gateway|service unavailable|gateway timeout)\b")
 # The statuses that mean the server answered and would not let this build read the repository. Every other
 # status is the server failing, not refusing: 429 and the whole 5xx range are transport.
 DENIED_STATUS = ("401", "403", "404")
@@ -76,10 +83,13 @@ DENIED_STATUS = ("401", "403", "404")
 # server will not admit exists. Each is a phrase git or the remote writes in that situation and in no other: a
 # bare `permission denied` is not here, because a server fault's body can say it, and `remote error: access
 # denied` is, because that is git's protocol refusal and carries its own context.
+# `' not found` is git's own wording for a 404 with an empty body: `fatal: repository 'https://…/x.git/' not
+# found`, which carries no status and no other phrase. A review measured the host calling that a transport
+# failure.
 UNAUTHORISED = ("could not read username", "authentication failed", "terminal prompts disabled",
-                "invalid username or token", "repository not found", "remote: not found",
+                "invalid username or token", "repository not found", "remote: not found", "' not found",
                 "remote error: access denied", "remote: access denied", "remote error: permission denied",
-                "remote: permission denied", "403 forbidden", "401 unauthorized")
+                "remote: permission denied")
 
 
 class Failed(Exception):
@@ -368,11 +378,13 @@ def resolve(repo, ref, token=None):
 
 
 def refused(said):
-    """Did the server answer and refuse, rather than fail to answer? An explicit HTTP status decides on its own:
-    401, 403 and 404 are a refusal, and every other status -- 429, 500, 502, 503 -- is the server failing,
-    whatever its body says. Only a message with no status at all is read for one of the phrases above."""
+    """Did the server answer and refuse, rather than fail to answer? A status decides on its own: 401, 403 and
+    404 are a refusal, and every other status -- 429, 500, 502, 503 -- is the server failing, whatever its body
+    says. The status git reported is preferred to one written with its reason, and that to the phrases above,
+    which are read only when there is no status at all. infra/base-builder/fetch-commit's denied() is the same
+    rule in shell, and the two are kept together by tests that give both the same messages."""
     lowered = said.lower()
-    found = HTTP_STATUS.search(lowered)
+    found = EXPLICIT_STATUS.search(lowered) or NAMED_STATUS.search(lowered)
     if found:
         return (found.group(1) or found.group(2)) in DENIED_STATUS
     return any(marker in lowered for marker in UNAUTHORISED)

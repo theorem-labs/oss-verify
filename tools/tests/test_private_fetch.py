@@ -965,6 +965,60 @@ class TheParserAgainstBuildKit(unittest.TestCase):
                 check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
 
 
+class BothClassifiersAgree(unittest.TestCase):
+    """The host's refused() and the container's denied() are the same rule in two languages. A review found them
+    apart -- the host corrected, the shell not -- so they are given the same messages here and must answer alike.
+    Each message is one a real server produced in that review, or one of its lookalikes."""
+
+    # (what git said, whether the server answered and refused)
+    MESSAGES = (
+        ("error: The requested URL returned error: 401", True),
+        ("error: The requested URL returned error: 403", True),
+        ("error: The requested URL returned error: 404", True),
+        # A 404 with an empty body: git puts the URL between `repository` and `not found`, and writes no status.
+        ("fatal: repository 'http://127.0.0.1:45677/secret.git/' not found", True),
+        ("remote: Repository not found.\nfatal: repository not found", True),
+        ("fatal: Authentication failed for 'http://127.0.0.1/x.git/'", True),
+        ("fatal: could not read Username for 'https://github.com': terminal prompts disabled", True),
+        ("fatal: remote error: access denied", True),
+        ("fatal: remote error: permission denied", True),
+        # A refusal whose text happens to carry three digits: `\d{3} [A-Za-z]` called these server faults.
+        ("fatal: remote error: access denied after 503 bytes", True),
+        ("fatal: remote error: access denied on port 500 today", True),
+        ("fatal: remote error: access denied on 2026-11-12", True),
+        ("error: RPC failed; HTTP 404 curl 22", True),
+        ("error: The requested URL returned error: 429", False),
+        ("error: The requested URL returned error: 500", False),
+        ("error: The requested URL returned error: 502", False),
+        ("error: The requested URL returned error: 503", False),
+        # A server fault may say anything in its body; the status outranks it.
+        ("remote: upstream connection permission denied\nerror: The requested URL returned error: 503", False),
+        ("remote: repository not found\nerror: The requested URL returned error: 503", False),
+        ("remote: repository not found; 404 bytes retained\nerror: The requested URL returned error: 503", False),
+        ("error: RPC failed; HTTP/1.1 503 curl 22", False),
+        ("fatal: unable to access 'http://127.0.0.1:44037/x.git/': Failed to connect to 127.0.0.1 port 44037 "
+         "after 0 ms: Connection refused", False),
+        ("fatal: unable to access: Could not resolve host: not-a-real-host.invalid", False),
+    )
+
+    def container(self, said):
+        """The container's denied(), read out of fetch-commit and run on its own."""
+        source = FETCH_COMMIT.read_text(encoding="utf-8")
+        start = source.index("denied() {")
+        body = source[start:source.index("\n}\n", start) + 3]
+        script = f"refs_said=$(cat)\n{body}\nif denied; then echo refusal; else echo transport; fi\n"
+        done = subprocess.run(["sh", "-c", script], input=said, capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stdout.strip()
+
+    def test_the_two_answer_alike_and_answer_rightly(self):
+        for said, refusal in self.MESSAGES:
+            with self.subTest(said=said.splitlines()[-1][:60]):
+                want = "refusal" if refusal else "transport"
+                self.assertEqual("refusal" if check_build.refused(said) else "transport", want, "the host")
+                self.assertEqual(self.container(said), want, "the container")
+
+
 class TheStatusDecides(unittest.TestCase):
     """Which failure it was is read from the HTTP status first, and from the words only when there is none. A
     body can say anything: the fourth review measured a 503 saying `upstream connection permission denied` and
