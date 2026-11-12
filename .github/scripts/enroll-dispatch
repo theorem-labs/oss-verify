@@ -24,12 +24,11 @@ which enroll-dispatch.yml adds to the event's client_payload. The decision is:
                                (not when someone other than the author who can label, a member of theorem-labs
                                or one of its Apps, put maintainer-confirmed on after the head commit was pushed:
                                then the check is skipped)
-              review-blocking  the review of the commit gave review.md's check F2 (return values and exits) or F7
-                               (suitable for a proof) the verdict fail
-              review-pending   the Build run has no review verdicts for the commit, or F2 or F7 is not pass or fail
-                               (person: the review could not decide). A later Build run of the commit, a re-run
-                               included, completes and runs this again, and sends it once neither holds
-  none      anything else, a project.yaml whose language cannot be read included; `reason` says what
+  none      anything else; `reason` says what. Among them: the newest check run Enrollment review of the oss-verify
+            App (REVIEW_APP) at the commit for the pull request (its external_id is the pull request's number) is not
+            success, or there is none (not yet reviewed); a project.yaml whose language cannot be read. build.yaml's
+            comment job writes that check run with the review comment; the Build run's completion runs this again. A
+            check run of another pull request at the same commit is not counted.
 
 Which commit, whose pull request, and whose record. A run of a pull request (pull_request_target or pull_request) is
 about its head commit, and about the head it came from (the repository and branch of that run). A run of Build
@@ -41,9 +40,9 @@ A merge. A run of Enrollment merged (MERGED_WORKFLOW: on pull_request_target, th
 for a pull request into main; or a replay by hand on main, gh workflow run enroll-merged.yml -f pr=<n>) is about the
 pull request its title names ("merged #<n>"), and is decided by decide_merged: that pull request must be merged into
 main and its files all under one projects/<name>/; every required check must have passed at its head commit, bound as
-below to the head it came from; and the record of the bound project-builds run must be of that commit, pull request and
-project. Then the size line, a paused language and the name rule label as above, and else the head commit is sent, with
-merged=true. The review (review-blocking, review-pending) and the maintainer check (maintainer-review) are not asked:
+below to the head it came from; and the record (below) must be of that commit, pull request and project. Then the size
+line, a paused language and the name rule label as above, and else the head commit is sent, with merged=true. The
+review (the check run Enrollment review) and the maintainer check (maintainer-review) are not asked:
 the person who merged decided them. A run that did not succeed (its job runs for a merge or a replay alone), of another
 file, event or branch, or whose title names no pull request, is none. A merge after the statements started is sent
 too: the statements repository skips a commit whose facts it made or whose build started in the last 24 hours.
@@ -79,6 +78,7 @@ import re
 import subprocess
 import sys
 import zipfile
+from urllib.parse import quote
 
 import yaml
 
@@ -107,11 +107,14 @@ ACTIONS_APP = 15368  # GitHub Actions, the app of every check run above
 BUILD_WORKFLOW = ".github/workflows/build.yaml"
 RECORD_ARTIFACT = "enrollment-record"
 RECORD_SCHEMA = "oss-verify enrollment record v1"
-# The review job's artifact: the draft comment and the verdict of each check of review.md, as the action's structured
-# output gives them (verdicts.json, {"A1": "pass", ..., "F2": "fail", ...}), and body.md, the comment as build.yaml's
-# comment job would post it. F2 and F7 keep statements from starting.
-REVIEW_ARTIFACT = "enroll-review-draft"
-REVIEW_FILES = frozenset({"body.md", "comment.md", "verdicts.json"})
+# The review's verdict: the check run REVIEW_CHECK that build.yaml's comment job writes on the reviewed commit with the
+# review comment, as the oss-verify App (REVIEW_APP; gh api apps/oss-verify), with the pull request's number as its
+# external_id. A check run of the same name from any other App, or of another pull request at the same commit, is not
+# counted. Only its conclusion success starts statements; a pull request with no such check run at the commit is
+# NOT_REVIEWED.
+REVIEW_CHECK = "Enrollment review"
+REVIEW_APP = 5447700
+NOT_REVIEWED = "not yet reviewed"
 # The label that someone other than the author, who can label (a member of theorem-labs, or one of its Apps), puts on an enrollment whose author the maintainer check does not show (a
 # pull request that our bot opened at a maintainer's request, for one): with it, the check is skipped. Putting it on
 # runs .github/workflows/maintainer-confirmed.yml, whose completion runs this again.
@@ -224,48 +227,40 @@ def bound_checks(api: Api, runs: Runs, repo: str, sha: str, head: tuple) -> tupl
     return waiting, build_run
 
 
-def artifact_json(api: Api, repo: str, run_id: int, name: str, file: str, allowed: frozenset) -> tuple[object, str]:
-    """The JSON file `file` of the artifact `name` of this run, which holds no file outside `allowed`, or None and
-    why not."""
-    artifacts = [a for page in api.pages(f"repos/{repo}/actions/runs/{run_id}/artifacts?name={name}&per_page=100")
-                 for a in page.get("artifacts") or [] if a.get("name") == name and not a.get("expired")]
+def build_record(api: Api, repo: str, run_id: int) -> tuple[dict | None, str]:
+    """The record build.yaml's record job uploaded in this run: the JSON of record.json, the one file of its artifact
+    RECORD_ARTIFACT; or None and why not."""
+    artifacts = [a for page in api.pages(f"repos/{repo}/actions/runs/{run_id}/artifacts?name={RECORD_ARTIFACT}"
+                                         "&per_page=100")
+                 for a in page.get("artifacts") or [] if a.get("name") == RECORD_ARTIFACT and not a.get("expired")]
     if len(artifacts) != 1:
-        return None, f"Build run {run_id} has {len(artifacts)} unexpired {name} artifacts, not one"
+        return None, f"Build run {run_id} has {len(artifacts)} unexpired {RECORD_ARTIFACT} artifacts, not one"
     if int(artifacts[0].get("size_in_bytes") or 0) > MAX_ARTIFACT_BYTES:
-        return None, f"Build run {run_id}'s {name} is larger than {MAX_ARTIFACT_BYTES} bytes"
+        return None, f"Build run {run_id}'s {RECORD_ARTIFACT} is larger than {MAX_ARTIFACT_BYTES} bytes"
     data = api.raw(f"repos/{repo}/actions/artifacts/{artifacts[0]['id']}/zip")
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             names = archive.namelist()
-            if file not in names or not set(names) <= allowed \
-                    or archive.getinfo(file).file_size > MAX_ARTIFACT_BYTES:
-                return None, f"Build run {run_id}'s {name} holds {names}, not {file} with {sorted(allowed)} only"
-            return json.loads(archive.read(file)), ""
+            if set(names) != {"record.json"} or archive.getinfo("record.json").file_size > MAX_ARTIFACT_BYTES:
+                return None, f"Build run {run_id}'s {RECORD_ARTIFACT} holds {names}, not record.json alone"
+            return json.loads(archive.read("record.json")), ""
     except (zipfile.BadZipFile, ValueError) as error:
-        return None, f"Build run {run_id}'s {name} cannot be read: {error}"
+        return None, f"Build run {run_id}'s {RECORD_ARTIFACT} cannot be read: {error}"
 
 
-def build_record(api: Api, repo: str, run_id: int) -> tuple[dict | None, str]:
-    """The record build.yaml's record job uploaded in this run, or None and why not."""
-    return artifact_json(api, repo, run_id, RECORD_ARTIFACT, "record.json", frozenset({"record.json"}))
-
-
-def review_problem(api: Api, repo: str, run_id: int) -> tuple[str, str]:
-    """(label, why) when the review in this Build run, the run whose record names the commit, keeps statements from
-    starting, else ('', ''): F2 or F7 fail gives review-blocking; no verdicts, or F2 or F7 not pass or fail, gives
-    review-pending."""
-    verdicts, why = artifact_json(api, repo, run_id, REVIEW_ARTIFACT, "verdicts.json", REVIEW_FILES)
-    if why:
-        return "review-pending", f"no review verdicts: {why}"
-    if not isinstance(verdicts, dict):
-        return "review-pending", f"Build run {run_id}'s review verdicts are not a table of checks"
-    failed = [check for check in ("F2", "F7") if verdicts.get(check) == "fail"]
-    if failed:
-        return "review-blocking", f"the review gave {' and '.join(failed)} the verdict fail"
-    other = [f"{check} is {verdicts.get(check)!r:.20}" for check in ("F2", "F7") if verdicts.get(check) != "pass"]
-    if other:
-        return "review-pending", f"the review did not pass {', '.join(other)}"
-    return "", ""
+def review_conclusion(api: Api, repo: str, head: str, number: int) -> str:
+    """The conclusion of the newest check run REVIEW_CHECK of the oss-verify App at the commit `head` for pull request
+    `number` (its status while it has none), or NOT_REVIEWED when there is none. A check run whose external_id is not
+    `number`, another pull request's at the same commit, is not counted. filter=all: GitHub's default, latest, can
+    give only another pull request's newer check run, and this pull request's own would not be read."""
+    found = [c for page in api.pages(f"repos/{repo}/commits/{head}/check-runs?check_name={quote(REVIEW_CHECK)}"
+                                     "&filter=all&per_page=100")
+             for c in page.get("check_runs") or []
+             if (c.get("app") or {}).get("id") == REVIEW_APP and c.get("external_id") == str(number)]
+    if not found:
+        return NOT_REVIEWED
+    newest = max(found, key=lambda c: c["id"])
+    return str(newest.get("conclusion") or newest.get("status"))
 
 
 def size(value: object) -> bool:
@@ -511,9 +506,6 @@ def decide(api: Api, repo: str, run_id: int, run_event: str, head_sha: str) -> d
     waiting, build_run = bound_checks(api, runs, repo, sha, head)
     if waiting:
         return outcome("none", f"required checks not passed at {sha[:7]}: {', '.join(waiting)}", sha=sha)
-    # The Build run whose record decides (the run started by hand, or the bound project-builds check's run) holds the
-    # review of that same commit.
-    record_run = run_id if record is not None else build_run
     if record is None:
         record, why = build_record(api, repo, build_run)
         why = why or record_problem(record, sha)
@@ -539,10 +531,15 @@ def decide(api: Api, repo: str, run_id: int, run_event: str, head_sha: str) -> d
     if lang is None:
         return outcome("none", f"{where}: its project.yaml cannot be read for its language; the next run decides",
                        number, project, sha)
-    # First of the labels: one that a person lifts by hand (size-review, say) must never hide a review that holds.
-    label, why = review_problem(api, repo, record_run)
-    if label:
-        return outcome("label", f"{where}: {why}", number, project, sha, label)
+    # Before the labels: a label that a person lifts by hand (size-review, say) must never be the only thing that
+    # stands between a pull request whose review did not pass and its statements.
+    conclusion = review_conclusion(api, repo, sha, number)
+    if conclusion == NOT_REVIEWED:
+        return outcome("none", f"{where}: {NOT_REVIEWED}: the oss-verify App wrote no {REVIEW_CHECK} check run on it",
+                       number, project, sha)
+    if conclusion != "success":
+        return outcome("none", f"{where}: its newest {REVIEW_CHECK} check run is {conclusion}, not success", number,
+                       project, sha)
     label = label_for_a_person(where, lang, record, number, project, sha)
     if label:
         return label

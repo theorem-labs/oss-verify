@@ -22,17 +22,19 @@
 #             take) or maintainer-review (the pull request's author is not shown to maintain the repository that
 #             `repo` names, by triage.py's maintainer check; someone other than the author who can label, a member
 #             of theorem-labs or one of its Apps, lifts it with the label maintainer-confirmed put on after the head
-#             commit, which runs maintainer-confirmed.yml, whose completion runs this again), review-blocking (the
-#             review of the commit, in the Build run whose record names it, gave F2 or F7 the verdict fail) or
-#             review-pending (that run has no verdicts.json in its artifact enroll-review-draft, or F2 or F7 is
-#             neither pass nor fail; a re-run of the review job completes Build again, which runs this again).
+#             commit, which runs maintainer-confirmed.yml, whose completion runs this again).
+#   none      sends nothing and puts no label on, among other reasons while the newest check run Enrollment review of
+#             the oss-verify App at the commit for the pull request is not success or is missing. build.yaml's
+#             comment job writes that check run on the reviewed commit, with the review comment and the pull
+#             request's number as its external_id, and that Build run's completion runs this again. A check run of
+#             another pull request at the same commit is not counted.
 #
 # A merge sends too. Enrollment merged (enroll-merged.yml) runs on each closed pull request and does nothing else; its
 # completion runs this. When a person merged an enrollment into main and its required checks passed at its head
 # commit, decide gives dispatch for that commit, and dispatch adds merged: true to the event's client_payload. The
-# review (F2, F7) and the maintainer check are not asked, since the merge decided them; the size line, a paused language
-# and the name rule still label. A merge made before enroll-merged.yml existed is replayed with
-# `gh workflow run enroll-merged.yml -R theorem-labs/oss-verify -f pr=<n>`.
+# review (the check run Enrollment review) and the maintainer check are not asked, since the merge decided them; the
+# size line, a paused language and the name rule still label. A merge made before enroll-merged.yml existed is
+# replayed with `gh workflow run enroll-merged.yml -R theorem-labs/oss-verify -f pr=<n>`.
 #
 # Each required check's run starts this workflow, so the run of the last one to pass is the one that dispatches; a run
 # that sees a check not passed yet does nothing, and so does a run for a draft pull request: build.yaml runs again on
@@ -41,8 +43,9 @@
 # skips a commit whose facts it already made or whose build an event started in the last 24 hours. A new commit on the
 # pull request is checked again, and dispatched again. To have a pull request looked at again (one whose checks passed
 # before build.yaml wrote records), a maintainer runs `gh workflow run build.yaml -f pr=<n>`: that Build run's record
-# names the pull request and its head, and its completion runs this. That run also reviews the pull request again and
-# updates its review comment, as each Build run of it does.
+# names the pull request and its head, and its completion runs this. That run also reviews the pull request again, as a
+# push's run does: it records a new check run Enrollment review, and updates the review comment when the review gives
+# its verdicts.
 #
 # It runs on workflow_run, so this file and the script are main's, whatever the pull request holds, and it runs no
 # code of the pull request: decide reads the API as data with a read-only token, this repository's and, for the
@@ -180,7 +183,7 @@ jobs:
           [[ $SHA =~ ^[0-9a-f]{40}$ ]] || { echo "::error::not a commit id: '$SHA'"; exit 1; }
           case $DECISION/$LABEL in
             dispatch/) ;;
-            label/size-review|label/language-paused|label/name-review|label/maintainer-review|label/review-blocking|label/review-pending) ;;
+            label/size-review|label/language-paused|label/name-review|label/maintainer-review) ;;
             *) echo "::error::not a decision: '$DECISION' '$LABEL'"; exit 1 ;;
           esac
 
@@ -276,7 +279,7 @@ jobs:
           set -euo pipefail
           for old in $(gh api "repos/$REPO/issues/$PR/labels" --jq '.[].name'); do
             case $old in
-              size-review|language-paused|name-review|maintainer-review|review-blocking|review-pending)
+              size-review|language-paused|name-review|maintainer-review)
                 gh api --method DELETE "repos/$REPO/issues/$PR/labels/$old" > /dev/null
                 echo "pull request $PR: $old taken off, since $SHA is sent" | tee -a "$GITHUB_STEP_SUMMARY" ;;
             esac
