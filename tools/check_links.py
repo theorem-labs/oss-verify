@@ -127,6 +127,8 @@ COMPRESSED_MEMORY = frozenset([(0, f) for f in (1, 2, 3, 4, 5, 6, 7)] + [(2, f) 
 # The symbols that AddressSanitizer's module constructor, in every object it instruments, refers to.
 ASAN_MODULE = re.compile(r"__asan_init|__asan_version_mismatch_check_v[0-9]+")
 TRAP = 0xC0001073  # `unimp`, the word a trap-mode UndefinedBehaviorSanitizer check executes on riscv64
+# The words that open every plain build's detail.
+PLAIN_DETAIL = "the plain build instruments nothing, by design"
 SANITIZER_BUILDS = ("ubsan", "asan", "asan-ubsan")
 ASAN_BUILDS = ("asan", "asan-ubsan")
 UBSAN_BUILDS = ("ubsan", "asan-ubsan")
@@ -1197,7 +1199,7 @@ def analyse(records, image, dwarf_units=None, checkouts=(), assembly_sources=Non
                 "detail": (f"a Go program ({record.version}), linked by Go's own linker from Go code only (its build "
                            "information: " + ", ".join(f"{k}={record.settings[k]}" for k in GO_ONLY_SETTINGS)
                            + "), which writes no map; no uninstrumented list, as it links no C library or other file "
-                           "of a C toolchain" + ("; the plain build instruments nothing, by design" if plain
+                           "of a C toolchain" + (f"; {PLAIN_DETAIL}" if plain
                                                  else "; no sanitizer instruments Go code"))}}
             continue
         if not isinstance(record, Record):
@@ -1211,7 +1213,7 @@ def analyse(records, image, dwarf_units=None, checkouts=(), assembly_sources=Non
             # build with this problem is no baseline for the UndefinedBehaviorSanitizer's comparison.
             detail = record.problem
             if build not in SANITIZER_BUILDS:
-                detail = "the plain build instruments nothing, by design; " + detail
+                detail = f"{PLAIN_DETAIL}; {detail}"
             results[build] = {"uninstrumented": None, "instrumented": {"result": "error", "detail": detail}}
             continue
         code, provided, problems = project_code(record, image)
@@ -1238,7 +1240,7 @@ def analyse(records, image, dwarf_units=None, checkouts=(), assembly_sources=Non
     for build, problems in problems_of.items():
         result, code = results[build], scanned[build]
         if build not in SANITIZER_BUILDS:
-            detail = "the plain build instruments nothing, by design"
+            detail = PLAIN_DETAIL
             if problems:
                 detail += "; " + "; ".join(listed(problems))
             result["instrumented"] = {"result": "error" if result.pop("incomplete") else "plain", "detail": detail}

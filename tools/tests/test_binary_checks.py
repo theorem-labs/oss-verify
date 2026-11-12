@@ -259,6 +259,7 @@ class RealRecord(unittest.TestCase):
     """
 
     RECORD = pathlib.Path(__file__).resolve().parent / "fixtures/link-record/curl-fuzz_bufq.plain"
+    DIGEST = "a" * 64
     # The files of the toolchain image this link took whose code --gc-sections left in the binary, ...
     IN_BINARY = ["clang_rt.crtbegin.o", "crt1.o", "libc++.a", "libc.a", "libclang_rt.builtins.a"]
     # ... and the image archives it took a member of and left no code of: not listed (dispatch://OSSV-332).
@@ -266,9 +267,47 @@ class RealRecord(unittest.TestCase):
                "libzstd.a"]
 
     def setUp(self):
-        with gzip.open(self.RECORD / "map.gz", "rt") as stream:
-            self.map = stream.read()
-        self.inputs = (self.RECORD / "inputs.tsv").read_text().splitlines()
+        self.map, self.inputs = self.fixture()
+
+    @classmethod
+    def fixture(cls):
+        """The record's map, and the rows of its inputs.tsv."""
+        with gzip.open(cls.RECORD / "map.gz", "rt") as stream:
+            mapping = stream.read()
+        return mapping, (cls.RECORD / "inputs.tsv").read_text().splitlines()
+
+    @staticmethod
+    def unloaded(lines):
+        """Where the part of a map's lines that the linker does not load starts: the first line at the address 0,
+        after the map's first line."""
+        return min(n for n, line in enumerate(lines)
+                   if n and check_links.MAP_COLUMNS.match(line)
+                   and int(check_links.MAP_COLUMNS.match(line).group(1), 16) == 0)
+
+    @staticmethod
+    def split(inputs):
+        """The rows of an inputs.tsv: the toolchain image's files as {real path: sha256}, and the other real paths."""
+        image, other = {}, []
+        for row in inputs:
+            _path, real, sha256, _size = row.split("\t")
+            if real.startswith("/opt/"):
+                image[real] = sha256
+            else:
+                other.append(real)
+        return image, other
+
+    @classmethod
+    def written(cls, raw, mapping, inputs, skipped=(), drop=None):
+        """read_record on a record written in the $OUT `raw`: this map, these inputs.tsv rows, and the fixture's
+        driver with the paths `skipped` after it. `drop` is a file of the record to leave out."""
+        directory = raw / ".records" / cls.DIGEST
+        directory.mkdir(parents=True)
+        files = {"map": mapping, "inputs.tsv": "\n".join(inputs) + "\n",
+                 "driver": (cls.RECORD / "driver").read_text() + "".join(f"{path}\n" for path in skipped)}
+        for file, text in files.items():
+            if file != drop:
+                (directory / file).write_text(text)
+        return check_links.read_record(raw, cls.DIGEST)
 
     def names(self, taken):
         """The names of the toolchain image's files among some input sections."""
@@ -291,10 +330,8 @@ class RealRecord(unittest.TestCase):
     def test_the_sections_that_are_not_loaded_are_read_and_dropped(self):
         """The control: the part of the same record that the linker does not load, from the first line at the
         address 0, is 7,632 real lines naming the seven archives, and not one of them is taken."""
-        at = min(n for n, line in enumerate(self.map.splitlines())
-                 if n and check_links.MAP_COLUMNS.match(line)
-                 and int(check_links.MAP_COLUMNS.match(line).group(1), 16) == 0)
-        tail = "\n".join(self.map.splitlines()[at:])
+        lines = self.map.splitlines()
+        tail = "\n".join(lines[self.unloaded(lines):])
         self.assertEqual(len(tail.splitlines()), 7632)
         self.assertTrue(all(any(f"/{name}(" in line for line in tail.splitlines()) for name in self.EMPTIED))
         self.assertEqual(check_links.parse_map(tail), ([], 7632))
@@ -302,21 +339,11 @@ class RealRecord(unittest.TestCase):
     def test_the_list_of_the_toolchain_image_s_files(self):
         """The uninstrumented list this record gives: the five files of the image whose code is in the binary,
         with the bytes the build recorded, and none of the seven archives it took and left no code of."""
-        image, took = {}, set()
-        for row in self.inputs:
-            path, real, sha256, _size = row.split("\t")
-            took.add(pathlib.PurePosixPath(path).name)
-            if real.startswith("/opt/"):
-                image[real] = sha256
+        image, _other = self.split(self.inputs)
+        took = {pathlib.PurePosixPath(row.split("\t")[0]).name for row in self.inputs}
         self.assertTrue(set(self.EMPTIED) <= took, "the link took the archives the list must leave out")
         with tempfile.TemporaryDirectory() as tmp:
-            raw = pathlib.Path(tmp)
-            directory = raw / ".records" / ("a" * 64)
-            directory.mkdir(parents=True)
-            (directory / "map").write_text(self.map)
-            (directory / "inputs.tsv").write_text("\n".join(self.inputs) + "\n")
-            (directory / "driver").write_text((self.RECORD / "driver").read_text())
-            record = check_links.read_record(raw, "a" * 64)
+            record = self.written(pathlib.Path(tmp), self.map, self.inputs)
             _code, provided, _problems = check_links.project_code(record, image)
         self.assertEqual(sorted((pathlib.PurePosixPath(p).name, s) for p, s in provided),
                          sorted((pathlib.PurePosixPath(p).name, s) for p, s in image.items()
@@ -335,27 +362,16 @@ class ReaderKeptNothing(unittest.TestCase):
     """
 
     RECORD = RealRecord.RECORD
-    DIGEST = "a" * 64
     PLAIN = "the plain build instruments nothing, by design"
     FIRST = "10270            10270       24     4         <internal>:(.note.gnu.build-id)"  # the map's first line
     TAIL_FIRST = "0                0       30     1         <internal>:(.comment)"  # the unloaded part's first line
 
     def setUp(self):
-        with gzip.open(self.RECORD / "map.gz", "rt") as stream:
-            self.map = stream.read()
-        self.inputs = (self.RECORD / "inputs.tsv").read_text().splitlines()
-        self.image, self.other = {}, []
-        for row in self.inputs:
-            _path, real, sha256, _size = row.split("\t")
-            if real.startswith("/opt/"):
-                self.image[real] = sha256
-            else:
-                self.other.append(real)
-        # The part of the map that the linker does not load, as RealRecord reads it.
+        self.map, self.inputs = RealRecord.fixture()
+        self.image, self.other = RealRecord.split(self.inputs)
+        # The part of the map that the linker does not load.
         lines = self.map.splitlines()
-        at = min(n for n, line in enumerate(lines)
-                 if n and check_links.MAP_COLUMNS.match(line)
-                 and int(check_links.MAP_COLUMNS.match(line).group(1), 16) == 0)
+        at = RealRecord.unloaded(lines)
         self.tail = "\n".join(lines[at:])
         # The <internal> lines of the loaded part.
         self.internal = [line for line in lines[:at]
@@ -367,15 +383,7 @@ class ReaderKeptNothing(unittest.TestCase):
     def read(self, mapping, name="plain", drop=None):
         """read_record on a record with this map and the fixture's inputs and driver, in its own $OUT `name`.
         `drop` is a file of the record to leave out."""
-        raw = self.tmp / name
-        directory = raw / ".records" / self.DIGEST
-        directory.mkdir(parents=True)
-        files = {"map": mapping, "inputs.tsv": "\n".join(self.inputs) + "\n",
-                 "driver": (self.RECORD / "driver").read_text() + "\n".join(self.other) + "\n"}
-        for file, text in files.items():
-            if file != drop:
-                (directory / file).write_text(text)
-        return check_links.read_record(raw, self.DIGEST)
+        return RealRecord.written(self.tmp / name, mapping, self.inputs, self.other, drop)
 
     def analyse(self, records):
         return check_links.analyse(records, self.image)
@@ -426,6 +434,12 @@ class ReaderKeptNothing(unittest.TestCase):
         record = self.read(self.tail)
         self.assertEqual(record.taken, [])
         self.assertEqual(record.problem, self.problem(7632, 7632, self.TAIL_FIRST))
+
+    def test_the_first_line_is_the_first_non_blank_line(self):
+        """A map that starts with blank lines: the problem names its first non-blank line, not its first line, without
+        its leading and trailing blanks. With those blanks after it, that line does not read as an input section."""
+        record = self.read("\n  \n\t\n" + self.tail.replace("\n", " \t\n", 1))
+        self.assertEqual(record.problem, self.problem(7632, 7631, self.TAIL_FIRST))
 
     def test_an_empty_map_and_a_blank_map(self):
         """A map with no non-blank line has no problem: the detail is the one it had before."""
