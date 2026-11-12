@@ -261,8 +261,11 @@ def run_all(tag, binaries, inputs, names, build, results, *, labels, total=0):
             if not status.is_file() or status.is_symlink():
                 runs.append(Run(target, seed, NOT_RUN, build, n))
                 continue
-            text = status.read_text()[:16].strip()
-            runs.append(Run(target, seed, int(text) if text.isdigit() and text != str(KILLED) else None, build, n))
+            # The fuzz target runs in the container that writes the status, so the file may hold anything: a status
+            # is ASCII digits (isdigit() takes "²" too, which int() refuses).
+            text = status.read_text(errors="replace")[:16].strip()
+            known = text.isascii() and text.isdigit() and text != str(KILLED)
+            runs.append(Run(target, seed, int(text) if known else None, build, n))
     return runs
 
 
