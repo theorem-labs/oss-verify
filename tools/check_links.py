@@ -20,7 +20,9 @@ target two results:
    list. No sanitizer instruments these files in any build, as in OSS-Fuzz's
    sanitizer builds: {name: <file name>, kind: libc | compiler-rt | sanitizer-runtime | cxx-runtime | fortran-runtime
    | image-library, sha256}, sorted by the file's path in the image. A file is the toolchain image's when its path is
-   under /opt and the toolchain image has those bytes at that path (tools/check reads them from the image). In an
+   under /opt and the toolchain image has those bytes at that path (tools/check reads them from the image). A map
+   with non-blank lines of which the reader kept no input section gives no list either, and an error that names the
+   number of the map's non-blank lines, the number read as input sections, 0 kept and the first line. In an
    AddressSanitizer build, the one exempt allocator shim is listed too, as {name, kind: rust-allocator-shim, sha256}:
    it is the project's own code that nothing instruments, so the list names it rather than leaving it out. An
    uninstrumented object is listed as {name, kind: assembly | fortran, source}, as
@@ -67,10 +69,10 @@ target two results:
    alone, as before.
 
 The plain build instruments nothing, by design; its result is "plain" when its record is complete, and "error"
-when it has no record or an incomplete one. A Go program has no record (Go's linker writes no map): its result is
-"plain" when its own build information says Go's linker linked it with no cgo, and its function table gives every
-function of its code a line table, as Go's compiler and assembler do (a .syso file's C code has none), and "error"
-otherwise.
+when it has no record or an incomplete one, or when the reader kept no input section of a map with non-blank
+lines. A Go program has no record (Go's linker writes no map): its result is "plain" when its own build information
+says Go's linker linked it with no cgo, and its function table gives every function of its code a line table, as
+Go's compiler and assembler do (a .syso file's C code has none), and "error" otherwise.
 
 What this catches: a build whose sanitizer flags did not reach some of its code, by mistake; with the compile
 records, also a member compiled without the flags whose archive's other members hold checks, and a member with no
@@ -125,6 +127,9 @@ COMPRESSED_MEMORY = frozenset([(0, f) for f in (1, 2, 3, 4, 5, 6, 7)] + [(2, f) 
 # The symbols that AddressSanitizer's module constructor, in every object it instruments, refers to.
 ASAN_MODULE = re.compile(r"__asan_init|__asan_version_mismatch_check_v[0-9]+")
 TRAP = 0xC0001073  # `unimp`, the word a trap-mode UndefinedBehaviorSanitizer check executes on riscv64
+# The words of a plain build's detail when it has a link record or is a Go program: at the start, or at the end of a
+# Go program's.
+PLAIN_DETAIL = "the plain build instruments nothing, by design"
 SANITIZER_BUILDS = ("ubsan", "asan", "asan-ubsan")
 ASAN_BUILDS = ("asan", "asan-ubsan")
 UBSAN_BUILDS = ("ubsan", "asan-ubsan")
@@ -272,6 +277,8 @@ class Record:
     raw: pathlib.Path  # the build's $OUT, whose .records/store holds the bytes of the inputs
     quiet: pathlib.Path | None  # the quiet twin, if the link made one
     compiles: "Compiles | None" = None  # the build's compile records, if it has them
+    # The reader's own problem with the record: a map with non-blank lines of which it kept no input section, or None
+    problem: str | None = None
 
     def store(self, sha256):
         """The bytes of the input with this SHA-256, checked. Raise RecordError if they were not kept."""
@@ -559,7 +566,8 @@ def go_program(data):
 
 
 def parse_map(text):
-    """The input sections of an lld map that reach the binary: [(file, member or None, section, size)]. A link's
+    """The pair (taken, read) for an lld map. `taken` is the input sections that reach the binary: [(file, member or
+    None, section, size)]. `read` is the number of lines that read as input sections (below). A link's
     record holds the map's input section lines alone (infra/base-builder/link-fuzz-target): four columns of
     numbers — address, load address, size, alignment — then eight blanks and <file>:(<section>) or
     <archive>(<member>):(<section>). The line that starts an output section is not in the record, so which output
@@ -575,8 +583,13 @@ def parse_map(text):
     is: lld overlaps a .tbss input section with what follows it, so the address falls between two sections the
     linker loads. Three things the link gives this reading: it is -static -no-pie (link-fuzz-target), so no output
     section the linker loads is at the address 0; lld writes the sections it does not load last, so none of them
-    is followed by one it loads; and it starts each of them at 0."""
-    taken = []
+    is followed by one it loads; and it starts each of them at 0.
+
+    `read` counts the lines in the full shape of an input section: four columns of numbers, eight spaces, then text
+    that ends in ")" and holds ":(" after its first character. It counts them whether or not their output section is
+    loaded, and whether or not they are <internal>. read_record gives the count when the reader kept no input section
+    of a map."""
+    taken, read = [], 0
     loaded, previous = False, None
     for line in text.splitlines():
         found = MAP_COLUMNS.match(line)
@@ -589,11 +602,12 @@ def parse_map(text):
         if previous is None or address < previous:
             loaded = address != 0
         previous = address
-        if not loaded:
-            continue
         rest = rest[8:]
         at = rest.rfind(":(")
-        if at <= 0 or not rest.endswith(")"):
+        shaped = at > 0 and rest.endswith(")")
+        if shaped:
+            read += 1
+        if not loaded or not shaped:
             continue
         file, section = rest[:at], rest[at + 2:-1]
         if file == "<internal>":
@@ -603,13 +617,14 @@ def parse_map(text):
             open_at = file.rindex("(")
             file, member = file[:open_at], file[open_at + 1:-1]
         taken.append((file, member, section, int(found.group(2), 16)))
-    return taken
+    return taken, read
 
 
 def read_record(raw, sha256, compiles=None):
     """The record of the link whose unstripped output has this SHA-256, in the build's $OUT `raw`
     ($OUT/.records/<sha256>/), with the build's compile records `compiles` (read_compiles). Raise RecordError if it is
-    not there, is incomplete, or holds a symbolic link."""
+    not there, is incomplete, or holds a symbolic link. A map with non-blank lines gives a Record with a problem
+    (Record.problem) when the reader kept no input section of it; the problem names the counts and the first line."""
     directory = below(raw, ".records", sha256)
 
     def text(name):
@@ -636,7 +651,15 @@ def read_record(raw, sha256, compiles=None):
             quiet = None
     except RecordError:
         quiet = None
-    return Record(parse_map(mapping), inputs, set(driver), renamed, pathlib.Path(raw), quiet, compiles)
+    taken, read = parse_map(mapping)
+    problem = None
+    if not taken:
+        lines = [line for line in mapping.split("\n") if line.strip(" \t")]
+        if lines:
+            first = lines[0].strip(" \t")
+            problem = (f"the reader kept no input section of the link's map: {len(lines)} non-blank lines, {read} "
+                       f"read as input sections, 0 kept; the first line: {first}")
+    return Record(taken, inputs, set(driver), renamed, pathlib.Path(raw), quiet, compiles, problem)
 
 
 def runtime_kind(path):
@@ -1177,13 +1200,22 @@ def analyse(records, image, dwarf_units=None, checkouts=(), assembly_sources=Non
                 "detail": (f"a Go program ({record.version}), linked by Go's own linker from Go code only (its build "
                            "information: " + ", ".join(f"{k}={record.settings[k]}" for k in GO_ONLY_SETTINGS)
                            + "), which writes no map; no uninstrumented list, as it links no C library or other file "
-                           "of a C toolchain" + ("; the plain build instruments nothing, by design" if plain
+                           "of a C toolchain" + (f"; {PLAIN_DETAIL}" if plain
                                                  else "; no sanitizer instruments Go code"))}}
             continue
         if not isinstance(record, Record):
             # With no record, nothing says what the link took, in the plain build as in the others.
             results[build] = {"uninstrumented": None,
                               "instrumented": {"result": "error", "detail": f"no link record: {record}"}}
+            continue
+        if record.problem:
+            # The reader examined nothing of the link, so the problem is the build's whole detail: no note about the
+            # toolchain image and no finding about the project's code. The build is left out of `scanned`, as a plain
+            # build with this problem is no baseline for the UndefinedBehaviorSanitizer's comparison.
+            detail = record.problem
+            if build not in SANITIZER_BUILDS:
+                detail = f"{PLAIN_DETAIL}; {detail}"
+            results[build] = {"uninstrumented": None, "instrumented": {"result": "error", "detail": detail}}
             continue
         code, provided, problems = project_code(record, image)
         scanned[build] = code
@@ -1209,7 +1241,7 @@ def analyse(records, image, dwarf_units=None, checkouts=(), assembly_sources=Non
     for build, problems in problems_of.items():
         result, code = results[build], scanned[build]
         if build not in SANITIZER_BUILDS:
-            detail = "the plain build instruments nothing, by design"
+            detail = PLAIN_DETAIL
             if problems:
                 detail += "; " + "; ".join(listed(problems))
             result["instrumented"] = {"result": "error" if result.pop("incomplete") else "plain", "detail": detail}
