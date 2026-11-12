@@ -1,6 +1,6 @@
 # Patch style and report preferences
 
-omx-clap-core is FreeMixer's in-process CLAP hosting library, with a JACK worker, a plugin scanner and an LV2-to-CLAP
+omx-clap-core is OpenMixer's in-process CLAP hosting library, with a JACK worker, a plugin scanner and an LV2-to-CLAP
 adapter. Three readers parse bytes that people and other programs write: the preset file (`pj_parse` and the writer
 `pj_write` in `src/preset_file.c`), the base64 state body a preset carries (`preset_base64_decode` and
 `preset_base64_encode`), and the `manifest.ttl` of every bundle on the LV2 path (`lv2_locate_manifest_names` in
@@ -9,7 +9,7 @@ adapter. Three readers parse bytes that people and other programs write: the pre
 ## How findings and patches land
 
 Nothing from the pipeline enters omx-clap-core as it is. A maintainer reads each finding, reproduces it against the
-omx-clap-core harness and build, and writes the fix in FreeMixer/omx-clap-core as an ordinary change. A patch you send
+omx-clap-core harness and build, and writes the fix in Open-Mixer/omx-clap-core as an ordinary change. A patch you send
 is a description of a fix, and we re-author it before it lands.
 
 Every commit in omx-clap-core is signed. No attribution line, trailer, or generated-by marker enters the history. When
