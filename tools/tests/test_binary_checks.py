@@ -326,7 +326,7 @@ class RealRecord(unittest.TestCase):
 
 
 class ReaderKeptNothing(unittest.TestCase):
-    """A map with lines of which the reader keeps no input section: the record that a build wrote, or parts of it.
+    """A map with non-blank lines of which the reader keeps no input section: the record a build wrote, or its parts.
 
     read_record puts the problem on the Record, with the counts and the map's first line. analyse then gives that
     build no list and the problem as its whole detail, and a plain build with it is no baseline for ubsan. The
@@ -337,7 +337,8 @@ class ReaderKeptNothing(unittest.TestCase):
     RECORD = RealRecord.RECORD
     DIGEST = "a" * 64
     PLAIN = "the plain build instruments nothing, by design"
-    FIRST = "10270            10270       24     4         <internal>:(.note.gnu.build-id)"
+    FIRST = "10270            10270       24     4         <internal>:(.note.gnu.build-id)"  # the map's first line
+    TAIL_FIRST = "0                0       30     1         <internal>:(.comment)"  # the unloaded part's first line
 
     def setUp(self):
         with gzip.open(self.RECORD / "map.gz", "rt") as stream:
@@ -389,12 +390,11 @@ class ReaderKeptNothing(unittest.TestCase):
         return {"uninstrumented": None, "instrumented": {"result": "error", "detail": detail}}
 
     def test_the_unloaded_part_alone(self):
-        first = "0                0       30     1         <internal>:(.comment)"
-        self.assertEqual(self.tail.splitlines()[0].strip(" \t"), first)
+        self.assertEqual(self.tail.splitlines()[0].strip(" \t"), self.TAIL_FIRST)
         for build in ("plain", "ubsan", "asan", "asan-ubsan"):
             with self.subTest(build=build):
                 result = self.analyse({build: self.read(self.tail, build)})[build]
-                self.assertEqual(result, self.error(build, self.problem(7632, 7632, first)))
+                self.assertEqual(result, self.error(build, self.problem(7632, 7632, self.TAIL_FIRST)))
 
     def test_a_parse_map_that_keeps_nothing(self):
         """The check is outside parse_map: a parse_map that keeps nothing, for any reason, is reported too."""
@@ -425,8 +425,7 @@ class ReaderKeptNothing(unittest.TestCase):
     def test_the_problem_is_on_the_record(self):
         record = self.read(self.tail)
         self.assertEqual(record.taken, [])
-        self.assertEqual(record.problem,
-                         self.problem(7632, 7632, "0                0       30     1         <internal>:(.comment)"))
+        self.assertEqual(record.problem, self.problem(7632, 7632, self.TAIL_FIRST))
 
     def test_an_empty_map_and_a_blank_map(self):
         """A map with no non-blank line has no problem: the detail is the one it had before."""

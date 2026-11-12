@@ -17,12 +17,12 @@ target two results:
    each file of the toolchain image whose code is in the binary: an object, or an archive at least one of whose
    members has an input section that the linker's map puts in a loaded section (one that --gc-sections kept; an
    archive whose members left only debug information is not listed). The map is required: a link with none has no
-   list. A map that has lines and of which the reader kept no input section gives no list either, and an error that
-   names the map's non-blank lines, the lines read as input sections, 0 kept and the first line. No sanitizer
-   instruments these files in any build, as in OSS-Fuzz's
+   list. No sanitizer instruments these files in any build, as in OSS-Fuzz's
    sanitizer builds: {name: <file name>, kind: libc | compiler-rt | sanitizer-runtime | cxx-runtime | fortran-runtime
    | image-library, sha256}, sorted by the file's path in the image. A file is the toolchain image's when its path is
-   under /opt and the toolchain image has those bytes at that path (tools/check reads them from the image). In an
+   under /opt and the toolchain image has those bytes at that path (tools/check reads them from the image). A map
+   with non-blank lines of which the reader kept no input section gives no list either, and an error that names the
+   number of the map's non-blank lines, the number read as input sections, 0 kept and the first line. In an
    AddressSanitizer build, the one exempt allocator shim is listed too, as {name, kind: rust-allocator-shim, sha256}:
    it is the project's own code that nothing instruments, so the list names it rather than leaving it out. An
    uninstrumented object is listed as {name, kind: assembly | fortran, source}, as
@@ -69,11 +69,10 @@ target two results:
    alone, as before.
 
 The plain build instruments nothing, by design; its result is "plain" when its record is complete, and "error"
-when it has no record or an incomplete one, or when the reader kept no input section of a map that has lines. A Go
-program has no record (Go's linker writes no map): its result is
-"plain" when its own build information says Go's linker linked it with no cgo, and its function table gives every
-function of its code a line table, as Go's compiler and assembler do (a .syso file's C code has none), and "error"
-otherwise.
+when it has no record or an incomplete one, or when the reader kept no input section of a map with non-blank
+lines. A Go program has no record (Go's linker writes no map): its result is "plain" when its own build information
+says Go's linker linked it with no cgo, and its function table gives every function of its code a line table, as
+Go's compiler and assembler do (a .syso file's C code has none), and "error" otherwise.
 
 What this catches: a build whose sanitizer flags did not reach some of its code, by mistake; with the compile
 records, also a member compiled without the flags whose archive's other members hold checks, and a member with no
@@ -275,7 +274,7 @@ class Record:
     raw: pathlib.Path  # the build's $OUT, whose .records/store holds the bytes of the inputs
     quiet: pathlib.Path | None  # the quiet twin, if the link made one
     compiles: "Compiles | None" = None  # the build's compile records, if it has them
-    # The reader's own problem with the record: a map with lines of which it kept no input section; None otherwise.
+    # The reader's own problem with the record: a map with non-blank lines of which it kept no input section, or None
     problem: str | None = None
 
     def store(self, sha256):
@@ -585,8 +584,8 @@ def parse_map(text):
 
     `read` counts the lines in the full shape of an input section: four columns of numbers, eight spaces, then text
     that ends in ")" and holds ":(" after its first character. It counts them whether or not their output section is
-    loaded, and whether or not they are <internal>. read_record uses the count to report a map of which it
-    kept no input section."""
+    loaded, and whether or not they are <internal>. read_record gives the count when the reader kept no input section
+    of a map."""
     taken, read = [], 0
     loaded, previous = False, None
     for line in text.splitlines():
@@ -621,9 +620,8 @@ def parse_map(text):
 def read_record(raw, sha256, compiles=None):
     """The record of the link whose unstripped output has this SHA-256, in the build's $OUT `raw`
     ($OUT/.records/<sha256>/), with the build's compile records `compiles` (read_compiles). Raise RecordError if it is
-    not there, is incomplete, or holds a symbolic link. A map with non-blank lines of which the reader
-    kept no input section gives a Record with that problem (Record.problem), which names the counts and the map's
-    first line."""
+    not there, is incomplete, or holds a symbolic link. A map with non-blank lines gives a Record with a problem
+    (Record.problem) when the reader kept no input section of it; the problem names the counts and the first line."""
     directory = below(raw, ".records", sha256)
 
     def text(name):
@@ -651,12 +649,13 @@ def read_record(raw, sha256, compiles=None):
     except RecordError:
         quiet = None
     taken, read = parse_map(mapping)
-    lines = [line for line in mapping.split("\n") if line.strip(" \t")]
     problem = None
-    if lines and not taken:
-        first = lines[0].strip(" \t")
-        problem = (f"the reader kept no input section of the link's map: {len(lines)} non-blank lines, {read} read as "
-                   f"input sections, 0 kept; the first line: {first}")
+    if not taken:
+        lines = [line for line in mapping.split("\n") if line.strip(" \t")]
+        if lines:
+            first = lines[0].strip(" \t")
+            problem = (f"the reader kept no input section of the link's map: {len(lines)} non-blank lines, {read} "
+                       f"read as input sections, 0 kept; the first line: {first}")
     return Record(taken, inputs, set(driver), renamed, pathlib.Path(raw), quiet, compiles, problem)
 
 
