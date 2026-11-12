@@ -34,11 +34,30 @@ for row in rows:
         print(f"{case:<26} (no Dockerfile)")
         continue
     text = path.read_text(encoding="utf-8", errors="replace")
-    built, saw = row["docker_exit"] == 0, row["saw_secret"]
+    saw = row["saw_secret"]
+    # The fetch step RAN whenever BuildKit reported either that it saw the secret or that it did not; a build
+    # that then failed because the fetch had no credential is exactly a case to score, not one to skip. Only a
+    # file whose fetch step never ran at all is outside the guard's business. (The first version of this scorer
+    # excluded every failed build, which hid five wrong answers -- the fourth review found that.)
+    ran = row["saw_secret"] or row.get("no_secret")
+    built = row["docker_exit"] == 0
     private, public = accepts(text, TOKEN), accepts(text, None)
-    # What the guard should do. A file BuildKit refuses outright is not the guard's business either way.
-    want_private = saw if built else None
-    want_public = (not saw) if built else None
+    # Two fetch steps, one mounted and one not: the third review measured that for these three. `saw_secret` is
+    # one boolean and cannot say it, so it is written here. The private guard must refuse them -- the unmounted
+    # fetch would go out with no credential.
+    if case in ("mixed-fetches", "heredoc-mixed-fetches", "wrapped-fetch", "exec-fetch"):
+        saw = False
+    # The one refusal this repository accepts on purpose: a valid file whose fetch is inside a heredoc body. The
+    # guard cannot read whether THAT fetch gets the secret, so it refuses and says to write the fetch as its own
+    # step. It is a restriction, written down in docs/build-contract.md, not a parse.
+    if case == "heredoc-mounted":
+        want_private = False
+    else:
+        want_private = saw if ran else None
+    # The public direction is scored for the dangerous answer only: accepting a file whose fetch really gets the
+    # secret. A refusal is reported, not counted wrong -- whether a public Dockerfile that mounts our secret
+    # somewhere else should be refused is this repository's rule, not something BuildKit measured.
+    want_public = False if (ran and saw) else None
     marks = []
     for name, got, want in (("private", private, want_private), ("public", public, want_public)):
         if want is None:
