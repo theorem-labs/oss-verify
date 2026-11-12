@@ -82,8 +82,9 @@ The reason says why the label changes, or why it does not.
 The run's pull request is the one the decision names; when a decision none names none (required checks not passed,
 say), it is the open pull request into main from the run's head at its commit. A run changes the label only when its
 commit is that pull request's head commit and the pull request is open; a late run for an older head changes nothing,
-and nor does a none that binds no head (no commit id, a label other than maintainer-confirmed, a run of another
-commit, another event). Then:
+and nor does a none that binds no head (no commit id, a run of another commit, another event). A run of
+maintainer-confirmed.yml for a label other than maintainer-confirmed binds its head: it is the first run for a new
+head when that label is put on before any other run completes, and it takes off a label older than that head. Then:
 
   The run passes: its decision is dispatch, which it gives only when the review's check run Enrollment review at the
   commit is success (an optional fail of F5 or F8 still gives success), and the pull request is an enrollment: its
@@ -98,12 +99,12 @@ commit, another event). Then:
 
 The label is for the head the pull request was at when its newest labeled event was made. Each labeled event starts a
 run of maintainer-confirmed.yml (CONFIRMED_WORKFLOW, on pull_request_target) at that head, by the account that put the
-label on, a few seconds after the event. Of those runs from the pull request's head made by that account in the ten
-minutes after the event (CONFIRMED_WINDOW), the first one's commit is the one the label was put on for, and the label
-is older than the run's commit when it is another. When no such run is found, or the event names no account, the
-label is older when its event is before the commit was pushed (the later of the commit's first Actions run from that
-head, or the completed run's creation when there is none, and the pull request's newest force push). A run whose read
-of the pull request's events, or of those runs, fails changes nothing. A run of Enrollment merged, a skipped one too,
+label on, a few seconds after the event. The runs from the pull request's head made by that account in the ten minutes
+after the event (CONFIRMED_WINDOW) give the commits the label may be for. When they give exactly one, the label is for
+it, and older than the run's commit when it is another. When they give none (the run was deleted or made late, or the
+event names no account), or more than one (that account put a label on at another head in those ten minutes), the
+label is older than the run's commit: a true label may come off, and a false one never stays. A run whose read of the
+pull request's events, or of those runs, fails changes nothing. A run of Enrollment merged, a skipped one too,
 takes the label off the closed pull request its title names (merged or not) when it carries it, whatever else it
 decides, and never puts it on.
 """
@@ -541,13 +542,13 @@ def pull_of_head(api: Api, repo: str, sha: str, head: tuple) -> dict | None:
 
 
 def label_heads(api: Api, repo: str, head: tuple, label: dict) -> set[str]:
-    """The commit the pull request from `head` (repository, branch) was at when `label`, the newest labeled event of
-    REVIEW_PASSED, was made, as the run of CONFIRMED_WORKFLOW that the event started gives it; an empty set when no
-    such run is found, or the event names no account. That run is on pull_request_target, from `head`, at the head of
-    that moment, and its actor (its triggering actor too, but after a re-run by another account) is the account that
-    put the label on. Of that account's runs of the workflow from `head` made in CONFIRMED_WINDOW after the event, the
-    first is the event's: a later one is of another label that the account put on after it (build.yaml's held label,
-    say), maybe at a later head. Runs made in the same second each give their commit."""
+    """The commits the pull request from `head` (repository, branch) may have been at when `label`, the newest labeled
+    event of REVIEW_PASSED, was made, as the runs of CONFIRMED_WORKFLOW that the event may have started give them; an
+    empty set when no such run is found, or the event names no account. The event's run is on pull_request_target,
+    from `head`, at the head of that moment, and its actor (its triggering actor too, but after a re-run by another
+    account) is the account that put the label on. Each run of that account's of the workflow from `head` made in
+    CONFIRMED_WINDOW after the event gives its commit: a run of another label that the account put on in that time
+    (build.yaml's held label, say) may be at another head, and is not told apart from the label's own."""
     actor = str((label.get("actor") or {}).get("login") or "").lower()
     if not actor or not isinstance(head[1], str):
         return set()
@@ -556,46 +557,39 @@ def label_heads(api: Api, repo: str, head: tuple, label: dict) -> set[str]:
     path = (f"repos/{repo}/actions/workflows/{os.path.basename(CONFIRMED_WORKFLOW)}/runs"
             f"?branch={urllib.parse.quote(head[1], safe='')}&event=pull_request_target"
             f"&created={urllib.parse.quote(f'{since}..{until}', safe='')}&per_page=100")
-    found: dict[str, set[str]] = {}
+    found = set()
     for run in (r for page in api.pages(path) for r in page.get("workflow_runs") or []):
         made, commit = time_of(run.get("created_at")), run.get("head_sha")
         logins = {str((run.get(key) or {}).get("login") or "").lower() for key in ("actor", "triggering_actor")}
         if (run.get("path"), run.get("event")) == (CONFIRMED_WORKFLOW, "pull_request_target") \
                 and head_of(run) == head and made and since <= made <= until and actor in logins \
                 and isinstance(commit, str) and SHA.fullmatch(commit):
-            found.setdefault(made, set()).add(commit)
-    return found[min(found)] if found else set()
+            found.add(commit)
+    return found
 
 
-def older_than_head(api: Api, repo: str, sha: str, head: tuple, label: dict, events: list,
-                    created: object) -> tuple[bool, str]:
+def older_than_head(api: Api, repo: str, sha: str, head: tuple, label: dict) -> tuple[bool, str]:
     """Whether the label whose newest labeled event is `label` is older than the run's head `sha`, from `head`
-    (repository, branch), and how that is known, in words for the reason. When label_heads finds the commit the label
-    was put on for, the label is older exactly when that commit is not `sha`: a force push away from `sha` and back
-    leaves a label put on for `sha`. Else the label is older when it was put on before `sha` was pushed, at the later
-    of its first run (the oldest of this repository's runs at `sha` from `head`; when there is none, `created`, the
-    completed run's) and the pull request's newest force push."""
+    (repository, branch), and how that is known, in words for the reason. The label is for a commit only when
+    label_heads finds exactly one: then it is older exactly when that commit is not `sha` (a force push away from `sha`
+    and back leaves a label put on for `sha`). When it finds none (the run was deleted or made late, or the event
+    names no account), or more than one (the same account put a label on at another head in CONFIRMED_WINDOW), the
+    label is older: a true label may come off, and a false one never stays."""
     heads = label_heads(api, repo, head, label)
-    if heads:
-        older = sha not in heads
-        return older, f"for {', '.join(sorted(h[:7] for h in heads))}" + (f", not {sha[:7]}" if older else "")
-    first = [run["created_at"] for page in api.pages(f"repos/{repo}/actions/runs?head_sha={sha}&per_page=100")
-             for run in page.get("workflow_runs") or []
-             if run.get("head_sha") == sha and head_of(run) == head and time_of(run.get("created_at"))]
-    if first:
-        pushed = [min(first)]
-    else:
-        pushed = [created] if time_of(created) else []
-    pushed += [e["created_at"] for e in events
-               if e.get("event") == "head_ref_force_pushed" and time_of(e.get("created_at"))]
-    if not pushed:
-        return False, f"and when {sha[:7]} was pushed is not known"
-    older = label["created_at"] < max(pushed)
-    return older, f"{'before' if older else 'after'} {sha[:7]} was pushed"
+    workflow = os.path.basename(CONFIRMED_WORKFLOW)
+    if not heads:
+        return True, f"and no run of {workflow} that its labeled event started is found, so it counts as older than " \
+                     f"{sha[:7]}"
+    if len(heads) > 1:
+        found = ", ".join(sorted(h[:7] for h in heads))
+        return True, f"and its account's runs of {workflow} after it are at {found}, so its head is ambiguous and " \
+                     f"it counts as older than {sha[:7]}"
+    [commit] = heads
+    return commit != sha, f"for {commit[:7]}" + (f", not {sha[:7]}" if commit != sha else "")
 
 
 def review_passed(api: Api, repo: str, result: dict, pull: dict | None = None, sha: str | None = None,
-                  head: tuple | None = None, created: object = None, merged: bool = False) -> dict:
+                  head: tuple | None = None, merged: bool = False) -> dict:
     """`result` with what happens to REVIEW_PASSED: review_passed (on, off, or '' for no change), review_passed_at
     (head for a change at a new head or a renewal, closed for a close or a merge, else ''), label_at (the time of the
     newest labeled event judged, for a change at a new head or a renewal), the pull request's number when it changes,
@@ -608,8 +602,8 @@ def review_passed(api: Api, repo: str, result: dict, pull: dict | None = None, s
     when the label is off, a run that passes (passes) for an enrollment, whose files the decision dispatch has shown
     are under one projects/<name>/ and whose author is not trusted (trusted, with a clear answer), puts the label on,
     unless an account other than APP_LOGIN took it off before. When the label is on and older than the head
-    (older_than_head, `created` the completed run's creation), a run that passes puts it on again, for the head,
-    whoever the author is (the trust is not read): a renewal, which the workflow takes off before the send and puts on
+    (older_than_head: not shown to be for the head), a run that passes puts it on again, for the head, whoever the
+    author is (the trust is not read): a renewal, which the workflow takes off before the send and puts on
     after it. Any other run takes it off; a label that is not older stays. When the pull request's events (or the
     runs that tell its age) cannot be read, nothing changes."""
     def say(clause: str, state: str = "", at: str = "", label_at: str = "", number: object = None) -> dict:
@@ -670,7 +664,7 @@ def review_passed(api: Api, repo: str, result: dict, pull: dict | None = None, s
         return say("is left as it is: no labeled event of it is found, so its age is not known")
     label_at = labeled[-1]["created_at"]
     try:
-        older, how = older_than_head(api, repo, sha, head, labeled[-1], events, created)
+        older, how = older_than_head(api, repo, sha, head, labeled[-1])
     except (subprocess.CalledProcessError, ValueError):
         return say(f"is left as it is: the runs from that head could not be read, so whether its label of {label_at} "
                    f"is older than {sha[:7]} is not known")
@@ -761,18 +755,19 @@ def decide(api: Api, repo: str, run_id: int, run_event: str, head_sha: str) -> d
 
 def decision(api: Api, repo: str, runs: Runs, run_id: int, run_event: str, head_sha: str, bound: dict) -> dict:
     """decide's decision for a run that is not a merge's. It puts in `bound` what review_passed needs, once it has
-    read it: the commit and head the run is about (sha, head), the completed run's creation (created), and the pull
-    request as it read it last (pull)."""
+    read it: the commit and head the run is about (sha, head), and the pull request as it read it last (pull)."""
     if run_event in ("pull_request_target", "pull_request"):
         if not SHA.fullmatch(head_sha):
             return outcome("none", f"{head_sha!r} is not a commit id")
         trigger = runs.get(run_id)
-        if trigger.get("path") == CONFIRMED_WORKFLOW and trigger.get("conclusion") != "success":
-            return outcome("none", f"run {run_id} is a label other than {CONFIRMED_LABEL}")
         if trigger.get("head_sha") != head_sha:
             return outcome("none", f"run {run_id} is of {trigger.get('head_sha')}, not {head_sha}")
         sha, record, head = head_sha, None, head_of(trigger)
-        bound.update(sha=sha, head=head, created=trigger.get("created_at"))
+        bound.update(sha=sha, head=head)
+        # Bound first: a run of a label other than CONFIRMED_LABEL, the first of a new head too, still takes off a label
+        # older than that head (review_passed).
+        if trigger.get("path") == CONFIRMED_WORKFLOW and trigger.get("conclusion") != "success":
+            return outcome("none", f"run {run_id} is a label other than {CONFIRMED_LABEL}", sha=sha)
     elif run_event == "workflow_dispatch":
         run = runs.get(run_id)
         if (run.get("path"), run.get("head_branch"), (run.get("head_repository") or {}).get("full_name")) \
@@ -785,7 +780,7 @@ def decision(api: Api, repo: str, runs: Runs, run_id: int, run_event: str, head_
         sha = record["sha"]
         pull = api.get(f"repos/{repo}/pulls/{record['pr']}")
         head = head_of_pull(pull)
-        bound.update(sha=sha, head=head, created=run.get("created_at"), pull=pull)
+        bound.update(sha=sha, head=head, pull=pull)
     else:
         return outcome("none", f"the run that completed was started by {run_event}, not by a pull request")
     waiting, build_run = bound_checks(api, runs, repo, sha, head)

@@ -43,11 +43,13 @@
 # or empty for no change), by the rule in the script's header: a run that sends an enrollment (which it does only when
 # the check run Enrollment review at the commit is success), by an author build.yaml's rule does not trust, puts it on,
 # unless an account other than the App took it off before; at a head other than the one the label was put on for (the
-# head at which its labeled event started a run of maintainer-confirmed.yml), a run that sends puts it on again,
-# whoever the author is, and any other run takes it off; a close or a merge takes it off. So dispatch runs also when
-# the decision is none and the label changes. It writes the label with the token for this repository's pull requests.
-# Before the send, it takes the label off at a new head, when the run does not pass and for a renewal (a run that sends
-# puts it on again after the send), so that a send that fails leaves no label that the head did not earn. It reads the
+# head at which its labeled event started a run of maintainer-confirmed.yml; when no such run is found, or the runs of
+# that account in the ten minutes after it are at more than one head, every head counts as other), a run that sends
+# puts it on again, whoever the author is, and any other run takes it off; a close or a merge takes it off. So
+# dispatch runs also when the decision is none and the label changes. It writes the label with the token for this
+# repository's pull requests. Before the send, it takes the label off at a new head, when the run does not pass and
+# for a renewal (a run that sends puts it on again after the send), so that a send that fails leaves no label that
+# the head did not earn; a renewal whose take-off fails leaves the label as it is, and still sends. It reads the
 # pull request and its events again first, and leaves the label when the head moved or the newest labeled event is not
 # the one decide judged (label_at). It puts the label on only while the pull request is open at the commit, after the
 # send, and reads the pull request again after: when the head moved or the pull request closed meanwhile, or that read
@@ -294,7 +296,9 @@ jobs:
       # after the send (Put on review-passed). At a new head, decide's reads may be old by now, so the pull request and
       # its events are read again. The label stays when the head moved (the run for that head decides), or when its
       # newest labeled event is not the one decide judged (a passing run for this head put it on again since). At a
-      # close or a merge it comes off with no read. A 404 says it is off already.
+      # close or a merge it comes off with no read. A 404 says it is off already. When a renewal's read or DELETE fails,
+      # the label is left as it is with a warning and the step succeeds, so that the send runs (Put on review-passed
+      # then finds it on, and leaves it); any other failure fails the step.
       - name: Take off review-passed
         if: env.REVIEW_PASSED == 'off' || (env.REVIEW_PASSED == 'on' && env.LABEL_AT != '')
         env:
@@ -303,16 +307,27 @@ jobs:
         run: |
           set -euo pipefail
           say() { echo "pull request $PR: $1" | tee -a "$GITHUB_STEP_SUMMARY"; }
+          # failed <what> <output>: a renewal leaves the label and goes on to the send; anything else fails here.
+          failed() {
+            if [[ $REVIEW_PASSED == on ]]; then
+              echo "::warning::$1, so review-passed is left as it is: $2"
+              say "review-passed is left as it is, since $1; the send runs"
+              exit 0
+            fi
+            echo "::error::$1: $2"
+            exit 1
+          }
           if [[ $REVIEW_PASSED_AT == head ]]; then
-            head=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)
+            head=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha) || failed "the pull request could not be read" "$head"
             if [[ $head != "$SHA" ]]; then
               say "review-passed stays: its head is $head now, not $SHA, and the run for that head decides"
               exit 0
             fi
             # Its former name's events count as its own, as in the script.
-            newest=$(gh api --paginate "repos/$REPO/issues/$PR/events?per_page=100" --jq '.[]
+            labeled=$(gh api --paginate "repos/$REPO/issues/$PR/events?per_page=100" --jq '.[]
               | select(.event == "labeled" and (.label.name == "review-passed" or .label.name == "passes-not-merging"))
-              | .created_at' | sort | tail -n 1)
+              | .created_at') || failed "the pull request's events could not be read" "$labeled"
+            newest=$(sort <<< "$labeled" | tail -n 1)
             if [[ $newest != "$LABEL_AT" ]]; then
               say "review-passed stays: its newest label is of ${newest:-no time}, not of $LABEL_AT, which was judged"
               exit 0
@@ -329,8 +344,7 @@ jobs:
           elif [[ $out == *"(HTTP 404)"* ]]; then
             say "review-passed was off already"
           else
-            echo "::error::review-passed could not be taken off: $out"
-            exit 1
+            failed "review-passed could not be taken off" "$out"
           fi
 
       - name: Label the pull request
