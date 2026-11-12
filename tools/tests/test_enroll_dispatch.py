@@ -169,10 +169,11 @@ class World:
             # review-passed's read: the pull request's events.
             f"repos/{REPO}/issues/{PR}/events?per_page=100": [[]],
         }
-        # The open pull request of each run's head, for a decision that names none: the last answer of the pull request.
+        # The pull request of each run's head (open or closed), for a decision that names none: the last answer of the
+        # pull request.
         for run in self.runs.values():
             owner, branch = run["head_repository"]["full_name"].split("/")[0], run["head_branch"]
-            table[f"repos/{REPO}/pulls?state=open&base=main&head={owner}:{branch}&per_page=100"] = [self.pulls[-1:]]
+            table[f"repos/{REPO}/pulls?state=all&base=main&head={owner}:{branch}&per_page=100"] = [self.pulls[-1:]]
         # The author of each answer of the pull request has no write access (build.yaml's rule for trusted accounts).
         for pull in self.pulls:
             login = (pull.get("user") or {}).get("login")
@@ -1443,11 +1444,19 @@ class Timeline:
         world.runs[run["id"]] = dict(run, conclusion="skipped")
         return self.run_decide(world, run["id"], "")
 
-    def run_decide(self, world, run_id, standing):
+    def decide_by_hand(self):
+        """What decide gives at the completion of a Build run started by hand on main, whose record names the pull
+        request at its head (gh workflow run build.yaml -f pr=<n>)."""
+        world = self.world(self.head)
+        world.run(HAND_RUN, dispatch.BUILD_WORKFLOW, "workflow_dispatch", head_sha=MAIN, branch="main", head_repo=REPO)
+        world.artifacts[HAND_RUN] = record(sha=self.head)
+        return self.run_decide(world, HAND_RUN, "", "workflow_dispatch", MAIN)
+
+    def run_decide(self, world, run_id, standing, event="pull_request_target", sha=None):
         table = world.api().table
         table[f"repos/{REPO}/pulls/{PR}"] = self.pull()
-        table[f"repos/{REPO}/pulls?state=open&base=main&head=FreeREAC:{self.BRANCH}&per_page=100"] = \
-            [[self.pull()] if self.state == "open" else []]
+        # As GitHub answers state=all: the pull request, open or closed.
+        table[f"repos/{REPO}/pulls?state=all&base=main&head=FreeREAC:{self.BRANCH}&per_page=100"] = [[self.pull()]]
         table[f"repos/{REPO}/issues/{PR}/events?per_page=100"] = \
             [self.events[i:i + 2] for i in range(0, len(self.events), 2)] or [[]]
         for login, permission in self.collaborators.items():
@@ -1456,7 +1465,7 @@ class Timeline:
         old = dispatch.standing
         dispatch.standing = lambda config, login: standing
         try:
-            return dispatch.decide(api, REPO, run_id, "pull_request_target", world.sha)
+            return dispatch.decide(api, REPO, run_id, event, world.sha if sha is None else sha)
         finally:
             dispatch.standing = old
             self.calls += api.calls
@@ -2280,6 +2289,54 @@ class ReviewPassed(unittest.TestCase):
                 self.assertEqual([(name, run.returncode != 0) for name, run in ran], [(CHECK, False), (TAKE_OFF, True)])
                 self.assertNotIn("::warning::", ran[-1][1].stdout)
                 self.assertLabels(line, [REVIEW_PASSED])
+
+    def test_as_another_label_of_the_labels_account_makes_its_head_ambiguous_when_its_own_run_is_missing(self):
+        # The label was put on for A, and its own maintainer-confirmed.yml run at A was deleted. B is pushed, and a
+        # minute later the App puts review-held on, whose run at B is the one run of the App's in the label's ten
+        # minutes. The App's other labeled event in that time makes the label's head ambiguous: a run for B that does
+        # not send takes it off, and the next one leaves it off.
+        line = self.labelled()
+        line.runs = [run for run in line.runs if run["path"] != dispatch.CONFIRMED_WORKFLOW]
+        line.push(self.B)
+        line.tick(60)
+        line.events.append({"event": "labeled", "label": {"name": "review-held"},
+                            "actor": {"login": dispatch.APP_LOGIN}, "created_at": line.tick()})
+        line.confirmed_run(dispatch.APP_LOGIN)
+        out = line.decide(failed_check=True)
+        self.assertEqual((out["decision"], out["review_passed"], out["review_passed_at"]), ("none", "off", "head"),
+                         out["reason"])
+        self.assertIn(f"its account put another label, 'review-held', on at {self.newest_label(line)}", out["reason"])
+        self.assertIn(f"found, at {self.B[:7]}, may be that label's: its head is ambiguous and it counts as older than "
+                      f"{self.B[:7]}", out["reason"])
+        self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF])
+        self.assertLabels(line, [])
+        out = line.decide(failed_check=True)
+        self.assertEqual((out["decision"], out["review_passed"]), ("none", ""), out["reason"])
+        self.assertEqual(self.job(line, out), [])
+        self.assertLabels(line, [])
+
+    def test_at_a_later_run_takes_the_label_off_a_closed_pull_request(self):
+        # The labelled pull request is closed, merged or not, and its Enrollment merged run decides nothing (its decide
+        # failed), so the label is still on. A later run that finds the pull request closed takes it off: the skipped
+        # maintainer-confirmed.yml run of a label put on the closed pull request, or a Build run started by hand that
+        # names it.
+        for merged in (True, False):
+            for later in ("a label", "a Build run by hand"):
+                with self.subTest(merged=merged, later=later):
+                    line = self.labelled()
+                    line.close(merged)
+                    if later == "a label":
+                        line.events.append({"event": "labeled", "label": {"name": "review-pending"},
+                                            "actor": {"login": "a-member"}, "created_at": line.tick()})
+                        line.confirmed_run("a-member")
+                        out = line.decide_confirmed()
+                    else:
+                        out = line.decide_by_hand()
+                    self.assertEqual((out["decision"], out["pr"], out["review_passed"], out["review_passed_at"]),
+                                     ("none", str(PR), "off", "closed"), out["reason"])
+                    self.assertIn(f"review-passed comes off: pull request {PR} is closed", out["reason"])
+                    self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF])
+                    self.assertLabels(line, [])
 
 
 class TrustRule(unittest.TestCase):

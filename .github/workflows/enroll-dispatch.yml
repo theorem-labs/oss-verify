@@ -44,8 +44,9 @@
 # the check run Enrollment review at the commit is success), by an author build.yaml's rule does not trust, puts it on,
 # unless an account other than the App took it off before; at a head other than the one the label was put on for (the
 # head at which its labeled event started a run of maintainer-confirmed.yml; when no such run is found, or the runs of
-# that account in the ten minutes after it are at more than one head, every head counts as other), a run that sends
-# puts it on again, whoever the author is, and any other run takes it off; a close or a merge takes it off. So
+# that account in the ten minutes after it are at more than one head, or that account put another label on in those
+# ten minutes, every head counts as other), a run that sends puts it on again, whoever the author is, and any other run
+# takes it off; a close or a merge takes it off, in any later run that finds the pull request closed too. So
 # dispatch runs also when the decision is none and the label changes. It writes the label with the token for this
 # repository's pull requests. Before the send, it takes the label off at a new head, when the run does not pass and
 # for a renewal (a run that sends puts it on again after the send), so that a send that fails leaves no label that
