@@ -17,7 +17,9 @@ target two results:
    each file of the toolchain image whose code is in the binary: an object, or an archive at least one of whose
    members has an input section that the linker's map puts in a loaded section (one that --gc-sections kept; an
    archive whose members left only debug information is not listed). The map is required: a link with none has no
-   list. No sanitizer instruments these files in any build, as in OSS-Fuzz's
+   list. A map that has lines and of which the reader kept no input section gives no list either, and an error that
+   names the map's non-blank lines, the lines read as input sections, 0 kept and the first line. No sanitizer
+   instruments these files in any build, as in OSS-Fuzz's
    sanitizer builds: {name: <file name>, kind: libc | compiler-rt | sanitizer-runtime | cxx-runtime | fortran-runtime
    | image-library, sha256}, sorted by the file's path in the image. A file is the toolchain image's when its path is
    under /opt and the toolchain image has those bytes at that path (tools/check reads them from the image). In an
@@ -67,7 +69,8 @@ target two results:
    alone, as before.
 
 The plain build instruments nothing, by design; its result is "plain" when its record is complete, and "error"
-when it has no record or an incomplete one. A Go program has no record (Go's linker writes no map): its result is
+when it has no record or an incomplete one, or when the reader kept no input section of a map that has lines. A Go
+program has no record (Go's linker writes no map): its result is
 "plain" when its own build information says Go's linker linked it with no cgo, and its function table gives every
 function of its code a line table, as Go's compiler and assembler do (a .syso file's C code has none), and "error"
 otherwise.
@@ -272,6 +275,8 @@ class Record:
     raw: pathlib.Path  # the build's $OUT, whose .records/store holds the bytes of the inputs
     quiet: pathlib.Path | None  # the quiet twin, if the link made one
     compiles: "Compiles | None" = None  # the build's compile records, if it has them
+    # The reader's own problem with the record: a map with lines of which it kept no input section; None otherwise.
+    problem: str | None = None
 
     def store(self, sha256):
         """The bytes of the input with this SHA-256, checked. Raise RecordError if they were not kept."""
@@ -559,7 +564,8 @@ def go_program(data):
 
 
 def parse_map(text):
-    """The input sections of an lld map that reach the binary: [(file, member or None, section, size)]. A link's
+    """The pair (taken, read) for an lld map. `taken` is the input sections that reach the binary: [(file, member or
+    None, section, size)]. `read` is the number of lines that read as input sections (below). A link's
     record holds the map's input section lines alone (infra/base-builder/link-fuzz-target): four columns of
     numbers — address, load address, size, alignment — then eight blanks and <file>:(<section>) or
     <archive>(<member>):(<section>). The line that starts an output section is not in the record, so which output
@@ -575,8 +581,13 @@ def parse_map(text):
     is: lld overlaps a .tbss input section with what follows it, so the address falls between two sections the
     linker loads. Three things the link gives this reading: it is -static -no-pie (link-fuzz-target), so no output
     section the linker loads is at the address 0; lld writes the sections it does not load last, so none of them
-    is followed by one it loads; and it starts each of them at 0."""
-    taken = []
+    is followed by one it loads; and it starts each of them at 0.
+
+    `read` counts the lines in the full shape of an input section: four columns of numbers, eight spaces, then text
+    that ends in ")" and holds ":(" after its first character. It counts them whether or not their output section is
+    loaded, and whether or not they are <internal>. read_record uses the count to report a map of which it
+    kept no input section."""
+    taken, read = [], 0
     loaded, previous = False, None
     for line in text.splitlines():
         found = MAP_COLUMNS.match(line)
@@ -589,11 +600,12 @@ def parse_map(text):
         if previous is None or address < previous:
             loaded = address != 0
         previous = address
-        if not loaded:
-            continue
         rest = rest[8:]
         at = rest.rfind(":(")
-        if at <= 0 or not rest.endswith(")"):
+        shaped = at > 0 and rest.endswith(")")
+        if shaped:
+            read += 1
+        if not loaded or not shaped:
             continue
         file, section = rest[:at], rest[at + 2:-1]
         if file == "<internal>":
@@ -603,13 +615,15 @@ def parse_map(text):
             open_at = file.rindex("(")
             file, member = file[:open_at], file[open_at + 1:-1]
         taken.append((file, member, section, int(found.group(2), 16)))
-    return taken
+    return taken, read
 
 
 def read_record(raw, sha256, compiles=None):
     """The record of the link whose unstripped output has this SHA-256, in the build's $OUT `raw`
     ($OUT/.records/<sha256>/), with the build's compile records `compiles` (read_compiles). Raise RecordError if it is
-    not there, is incomplete, or holds a symbolic link."""
+    not there, is incomplete, or holds a symbolic link. A map with non-blank lines of which the reader
+    kept no input section gives a Record with that problem (Record.problem), which names the counts and the map's
+    first line."""
     directory = below(raw, ".records", sha256)
 
     def text(name):
@@ -636,7 +650,14 @@ def read_record(raw, sha256, compiles=None):
             quiet = None
     except RecordError:
         quiet = None
-    return Record(parse_map(mapping), inputs, set(driver), renamed, pathlib.Path(raw), quiet, compiles)
+    taken, read = parse_map(mapping)
+    lines = [line for line in mapping.split("\n") if line.strip(" \t")]
+    problem = None
+    if lines and not taken:
+        first = lines[0].strip(" \t")
+        problem = (f"the reader kept no input section of the link's map: {len(lines)} non-blank lines, {read} read as "
+                   f"input sections, 0 kept; the first line: {first}")
+    return Record(taken, inputs, set(driver), renamed, pathlib.Path(raw), quiet, compiles, problem)
 
 
 def runtime_kind(path):
@@ -1184,6 +1205,15 @@ def analyse(records, image, dwarf_units=None, checkouts=(), assembly_sources=Non
             # With no record, nothing says what the link took, in the plain build as in the others.
             results[build] = {"uninstrumented": None,
                               "instrumented": {"result": "error", "detail": f"no link record: {record}"}}
+            continue
+        if record.problem:
+            # The reader examined nothing of the link, so the problem is the build's whole detail: no note about the
+            # toolchain image and no finding about the project's code. The build is left out of `scanned`, as a plain
+            # build with this problem is no baseline for the UndefinedBehaviorSanitizer's comparison.
+            detail = record.problem
+            if build not in SANITIZER_BUILDS:
+                detail = "the plain build instruments nothing, by design; " + detail
+            results[build] = {"uninstrumented": None, "instrumented": {"result": "error", "detail": detail}}
             continue
         code, provided, problems = project_code(record, image)
         scanned[build] = code

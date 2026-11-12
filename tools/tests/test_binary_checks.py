@@ -211,10 +211,10 @@ class MapParsing(unittest.TestCase):
             map_line(0, 0x2b, "/opt/rt/libclang_rt.asan_static.a(asan_rtl_static.cpp.o):(.debug_info)"),
             map_line(0x2b, 0x15, "/work/build/libfoo.a(bar.c.o):(.debug_info)"),
         ])
-        self.assertEqual(check_links.parse_map(text), [
+        self.assertEqual(check_links.parse_map(text), ([
             ("/opt/musl-sysroot/usr/lib/crt1.o", None, ".text", 0x10),
             ("/work/build/libfoo.a", "foo.c.o", ".text.foo", 0x20),
-        ])
+        ], 5))
 
     def test_a_tbss_overlap_does_not_end_the_loaded_part(self):
         """lld overlaps a .tbss input section with what follows it, so the address falls between two sections the
@@ -224,10 +224,10 @@ class MapParsing(unittest.TestCase):
             map_line(0x4551b0, 0x8, "/opt/musl-sysroot/usr/lib/libc++.a(iostream.cpp.o):(.init_array.100)"),
             map_line(0, 0x20, "/opt/musl-sysroot/usr/lib/libc++.a(iostream.cpp.o):(.debug_info)"),
         ])
-        self.assertEqual(check_links.parse_map(text), [
+        self.assertEqual(check_links.parse_map(text), ([
             ("/work/build/liboft.a", "shim.o", ".tbss.state", 0x10),
             ("/opt/musl-sysroot/usr/lib/libc++.a", "iostream.cpp.o", ".init_array.100", 0x8),
-        ])
+        ], 3))
 
 
 class RealRecord(unittest.TestCase):
@@ -265,9 +265,10 @@ class RealRecord(unittest.TestCase):
         self.assertEqual((len(self.map.splitlines()), len(lines), len(starts)), (7865, 7865, 0))
 
     def test_the_sections_that_reach_the_binary(self):
-        taken = check_links.parse_map(self.map)
+        taken, read = check_links.parse_map(self.map)
         self.assertEqual(len(taken), 224)
         self.assertEqual(self.names(taken), self.IN_BINARY)
+        self.assertEqual(read, 7865)
 
     def test_the_sections_that_are_not_loaded_are_read_and_dropped(self):
         """The control: the part of the same record that the linker does not load, from the first line at the
@@ -278,7 +279,7 @@ class RealRecord(unittest.TestCase):
         tail = "\n".join(self.map.splitlines()[at:])
         self.assertEqual(len(tail.splitlines()), 7632)
         self.assertTrue(all(any(f"/{name}(" in line for line in tail.splitlines()) for name in self.EMPTIED))
-        self.assertEqual(check_links.parse_map(tail), [])
+        self.assertEqual(check_links.parse_map(tail), ([], 7632))
 
     def test_the_list_of_the_toolchain_image_s_files(self):
         """The uninstrumented list this record gives: the five files of the image whose code is in the binary,
