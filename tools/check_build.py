@@ -228,9 +228,15 @@ def git(*args, token=False):
 
 # git's own tracing writes what it sends: GIT_TRACE_CURL with GIT_TRACE_REDACT=0 puts the Authorization header in a
 # file that outlives the build. Whatever the caller set, a fetch with a token does not trace.
-GIT_TRACING = ("GIT_TRACE", "GIT_TRACE_CURL", "GIT_TRACE_PACKET", "GIT_TRACE_CURL_NO_DATA", "GIT_CURL_VERBOSE",
+# A trace variable git reads as a false/true word: 0 turns it off, and 0 OVERRIDES a configured target, which
+# removing it would not.
+GIT_TRACING = ("GIT_TRACE", "GIT_TRACE_CURL", "GIT_TRACE_PACKET", "GIT_TRACE_CURL_NO_DATA",
                "GIT_TRACE2", "GIT_TRACE2_EVENT", "GIT_TRACE2_PERF", "GIT_TRACE_SETUP", "GIT_TRACE_SHALLOW",
                "GIT_TRACE_PERFORMANCE", "GIT_TRACE_REFS", "GIT_TRACE_PACK_ACCESS", "GIT_TRACE_FSMONITOR")
+# A trace variable whose mere presence turns it on, or whose value is a file name. `GIT_CURL_VERBOSE=0` ENABLES
+# curl's tracing, and `GIT_TRACE_PACKFILE=0` writes a packfile to a file called 0. These are removed instead; a
+# review measured the first, which this file had set to 0 and so turned ON.
+GIT_TRACING_REMOVED = ("GIT_CURL_VERBOSE", "GIT_TRACE_PACKFILE")
 
 
 def git_environment(token, repo=None):
@@ -242,7 +248,8 @@ def git_environment(token, repo=None):
     # Each is SET to 0, not removed: git reads trace2's targets from configuration as well, before `-c` is
     # applied, and `trace2.envVars` names environment variables to write INTO the trace, which GIT_TRACE_REDACT
     # does not redact. An environment variable of 0 turns that target off whatever the configuration says.
-    environment = {**os.environ, **{name: "0" for name in GIT_TRACING}}
+    environment = {key: value for key, value in os.environ.items() if key not in GIT_TRACING_REMOVED}
+    environment.update({name: "0" for name in GIT_TRACING})
     environment["GIT_TRACE2_ENV_VARS"] = ""
     environment[GIT_TOKEN_ENV] = token
     environment["GIT_TRACE_REDACT"] = "1"
@@ -306,8 +313,10 @@ def mint_token(repo):
     token = done.stdout.strip()
     if done.returncode != 0 or not token:
         why = "printed no token" if done.returncode == 0 else f"exited {done.returncode}"
+        # Redacted first and cut after: cutting first leaves whatever of a token fell inside the last 1000
+        # characters, with no marker to show for it.
         raise Failed(f"no read-only token for {owner}/{name}: {argv[0]} {why}. It said: "
-                     f"{redacted(done.stderr.strip()[-1000:], None) or '(nothing)'}")
+                     f"{redacted(done.stderr.strip(), None)[-1000:] or '(nothing)'}")
     if len(token.splitlines()) != 1:
         raise Failed(f"the token command {argv[0]} printed more than one line for {owner}/{name}; a token is one line")
     return token

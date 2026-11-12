@@ -576,12 +576,17 @@ class NoTracing(unittest.TestCase):
 
     def test_the_host_environment_has_no_tracing_and_redacts(self):
         with mock.patch.dict(os.environ, {"GIT_TRACE_CURL": "/tmp/trace", "GIT_TRACE": "1",
-                                          "GIT_TRACE_REDACT": "0", "GIT_CURL_VERBOSE": "1"}):
+                                          "GIT_TRACE_REDACT": "0", "GIT_CURL_VERBOSE": "1",
+                                          "GIT_TRACE_PACKFILE": "/tmp/pack"}):
             environment = check_build.git_environment(TOKEN, "https://github.com/theorem-labs/theorem-cli")
         # Set to 0, not removed: git reads trace2's targets from configuration too, and an environment variable
         # of 0 turns a target off whatever the configuration says.
         for name in check_build.GIT_TRACING:
             self.assertEqual(environment[name], "0", name)
+        # GIT_CURL_VERBOSE=0 ENABLES curl's tracing and GIT_TRACE_PACKFILE=0 writes a packfile to a file called 0,
+        # so those two are removed instead of set.
+        for name in check_build.GIT_TRACING_REMOVED:
+            self.assertNotIn(name, environment)
         self.assertEqual(environment["GIT_TRACE2_ENV_VARS"], "")
         self.assertEqual(environment["GIT_TRACE_REDACT"], "1")
         self.assertEqual(environment["OSS_VERIFY_TOKEN_REPO"], "github.com/theorem-labs/theorem-cli")
@@ -593,6 +598,7 @@ class NoTracing(unittest.TestCase):
         said = FETCH_COMMIT.read_text(encoding="utf-8")
         self.assertIn("for name in GIT_TRACE GIT_TRACE_CURL", said)
         self.assertIn('eval "$name=0; export $name"', said)
+        self.assertIn("unset GIT_CURL_VERBOSE GIT_TRACE_PACKFILE", said)
         self.assertIn("GIT_TRACE2_ENV_VARS=", said)
         self.assertIn("GIT_TRACE_REDACT=1", said)
 
@@ -767,6 +773,18 @@ class TheSecondReview(unittest.TestCase):
                               encoding="utf-8")
             with self.assertRaises(Failed) as refused:
                 check_build.output(sys.executable, str(script), token=TOKEN)
+        self.assertNotIn(TOKEN, str(refused.exception))
+        self.assertNotIn(TOKEN[-100:], str(refused.exception))
+
+    def test_a_failed_token_command_is_redacted_before_its_message_is_cut(self):
+        with tempfile.TemporaryDirectory() as work:
+            command = pathlib.Path(work) / "mint"
+            command.write_text(f"#!/bin/sh\nprintf '%s' '{TOKEN}'>&2\nprintf 'y%.0s' $(seq 1 1400) >&2\nexit 1\n",
+                               encoding="utf-8")
+            command.chmod(0o755)
+            with mock.patch.dict(os.environ, {check_build.TOKEN_COMMAND_ENV: str(command)}):
+                with self.assertRaises(Failed) as refused:
+                    check_build.mint_token("https://github.com/theorem-labs/theorem-cli")
         self.assertNotIn(TOKEN, str(refused.exception))
         self.assertNotIn(TOKEN[-100:], str(refused.exception))
 

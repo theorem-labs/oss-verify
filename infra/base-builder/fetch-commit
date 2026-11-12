@@ -73,11 +73,14 @@ if [ -s "$token_file" ]; then
   # Each is SET to 0, not removed: git reads trace2's targets from configuration as well, before a -c setting is
   # applied, and trace2.envVars names environment variables to write INTO the trace, which GIT_TRACE_REDACT does
   # not redact. An environment variable of 0 turns that target off whatever the configuration says.
-  for name in GIT_TRACE GIT_TRACE_CURL GIT_TRACE_PACKET GIT_TRACE_CURL_NO_DATA GIT_CURL_VERBOSE GIT_TRACE2 \
+  for name in GIT_TRACE GIT_TRACE_CURL GIT_TRACE_PACKET GIT_TRACE_CURL_NO_DATA GIT_TRACE2 \
               GIT_TRACE2_EVENT GIT_TRACE2_PERF GIT_TRACE_SETUP GIT_TRACE_SHALLOW GIT_TRACE_PERFORMANCE \
               GIT_TRACE_REFS GIT_TRACE_PACK_ACCESS GIT_TRACE_FSMONITOR; do
     eval "$name=0; export $name"
   done
+  # Not these two: GIT_CURL_VERBOSE=0 ENABLES curl's tracing (its presence is what counts), and
+  # GIT_TRACE_PACKFILE=0 writes a packfile to a file called 0. They are removed rather than set.
+  unset GIT_CURL_VERBOSE GIT_TRACE_PACKFILE 2>/dev/null || true
   GIT_TRACE2_ENV_VARS=
   GIT_TRACE_REDACT=1
   export GIT_TRACE2_ENV_VARS GIT_TRACE_REDACT
