@@ -1,10 +1,10 @@
 # libdiginet: the DigiNet protocol of the Digidesign Control|24 and ProControl control surfaces, raw Ethernet frames
-# (EtherType 0x885F), for FreeMixer. The fuzz targets drive the readers of every byte a desk sends: the frame, the
+# (EtherType 0x885F), for OpenMixer. The fuzz targets drive the readers of every byte a desk sends: the frame, the
 # command stream, the controls in it, the session they drive and the desk mux that hands each desk its own. Pinned to
-# the merge of FreeMixer/libdiginet#55 on main.
-repo: https://github.com/FreeMixer/libdiginet#d0a7ad188ef609667944be86cd5cb575c83fee57
+# the merge of Open-Mixer/libdiginet#55 on main.
+repo: https://github.com/Open-Mixer/libdiginet#d0a7ad188ef609667944be86cd5cb575c83fee57
 primary_contact: linuxnow@gmail.com
-homepage: https://github.com/FreeMixer/libdiginet
+homepage: https://github.com/Open-Mixer/libdiginet
 language: c
 sanitizers: [address, undefined]
 mutants: fuzz/sabotage

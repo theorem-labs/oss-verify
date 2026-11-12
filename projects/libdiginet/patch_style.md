@@ -1,6 +1,6 @@
 # Patch style and report preferences
 
-libdiginet is FreeMixer's library for the DigiNet protocol, the raw Ethernet protocol that the
+libdiginet is OpenMixer's library for the DigiNet protocol, the raw Ethernet protocol that the
 Digidesign Control|24 and ProControl control surfaces speak (EtherType 0x885F). It reads every
 byte a desk sends: the frame and its header (`diginet_frame_parse` and `diginet_announce_parse`
 in `src/diginet_frame.c`), the command stream of a data frame (`diginet_msg_next` in
@@ -14,7 +14,7 @@ fuzz targets drive them, with the encoders of `src/diginet_codec.c`.
 
 Nothing from the pipeline enters libdiginet as it is. A maintainer reads each finding,
 reproduces it against the libdiginet harness and build, and writes the fix in
-FreeMixer/libdiginet as an ordinary change. A patch you send is a description of a fix, and we
+Open-Mixer/libdiginet as an ordinary change. A patch you send is a description of a fix, and we
 re-author it before it lands.
 
 Every commit in libdiginet is signed. No attribution line, trailer, or generated-by marker
