@@ -24,15 +24,16 @@ import zipfile
 import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-# GitHub's expressions, evaluated as test_outside_screen.py evaluates them: the dispatch job's if and env, and its
-# steps' if and env.
+# The workflow tests' expression evaluator and step runner with a stand-in gh: GitHub's expressions, evaluated as
+# test_outside_screen.py evaluates them (the dispatch job's if and env, and its steps' if and env).
 sys.path.insert(0, str(ROOT / "tools" / "tests"))
-from test_outside_screen import WF, as_text, evaluate  # noqa: E402
+from test_outside_screen import WF, Runner, as_text, evaluate  # noqa: E402
 
 LOADER = importlib.machinery.SourceFileLoader("enroll_dispatch", str(ROOT / ".github" / "scripts" / "enroll-dispatch"))
 SPEC = importlib.util.spec_from_loader("enroll_dispatch", LOADER)
 dispatch = importlib.util.module_from_spec(SPEC)
 LOADER.exec_module(dispatch)
+ENROLL_DISPATCH = yaml.safe_load((ROOT / ".github" / "workflows" / "enroll-dispatch.yml").read_text())
 # The maintainer check reads the network; every test but those of the class Maintainer sees it pass, and Maintainer
 # tests the real one with a stand-in API.
 REAL_STANDING = dispatch.standing
@@ -45,6 +46,7 @@ NEWER = "1" * 40
 MAIN = "8" * 40
 PR = 32
 ACTIONS = 15368
+OSS_VERIFY = 5447700  # the oss-verify App, gh api apps/oss-verify
 REQUIRED = ["enrollment", "project-builds", "terms-accepted", "tests"]
 # The run of each required check: its id, and the workflow file and event that make it.
 RUNS = {"project-builds": (101, ".github/workflows/build.yaml", "pull_request_target"),
@@ -75,6 +77,11 @@ def record(**change):
     return out
 
 
+def decision_reason(got):
+    """decide's reason without the clause that review_passed adds about review-passed."""
+    return got["reason"].split(f"; {dispatch.REVIEW_PASSED} ", 1)[0]
+
+
 class FakeApi:
     """GitHub's API from a table: a path's answer, or a list of answers given one per call (the last one repeats)."""
 
@@ -101,8 +108,8 @@ class Calls:
 
 
 class World:
-    """One enrollment pull request whose four required checks passed at its head commit (SHA unless one is given), and
-    Build run 101's record of it."""
+    """One enrollment pull request whose four required checks passed at its head commit (SHA unless one is given),
+    Build run 101's record of it, and the oss-verify App's check run Enrollment review at that commit, success."""
 
     def __init__(self, sha=SHA):
         self.sha = sha
@@ -114,7 +121,8 @@ class World:
             self.check(500 + i, name, run_id)
             self.run(run_id, path, event, head_sha=sha)
         self.artifacts[101] = record(sha=sha)
-        self.reviews = {101: {"F2": "pass", "F7": "pass", "A1": "fail"}}  # run -> verdicts.json
+        self.review_runs = []  # check runs Enrollment review at the commit
+        self.review(400)
         self.files = [{"filename": "projects/plugin-hostd/project.yaml", "status": "added"},
                       {"filename": "projects/plugin-hostd/build.sh", "status": "added"}]
         self.pulls = [self.pull(sha=sha)]
@@ -125,6 +133,12 @@ class World:
         self.checks.append({"id": check_id, "name": name, "app": {"id": app}, "status": "completed",
                             "conclusion": conclusion,
                             "details_url": f"https://github.com/{repo}/actions/runs/{run_id}/job/{check_id + 9000}"})
+
+    def review(self, check_id, conclusion="success", app=OSS_VERIFY, status="completed", pr=PR):
+        """A check run Enrollment review at the commit, as build.yaml's comment job writes it for pull request `pr`,
+        whose number is its external_id (another App's, with `app`)."""
+        self.review_runs.append({"id": check_id, "name": "Enrollment review", "app": {"id": app}, "status": status,
+                                 "conclusion": conclusion, "head_sha": self.sha, "external_id": str(pr)})
 
     def run(self, run_id, path, event, head_sha=SHA, branch="add-plugin-hostd", head_repo="FreeREAC/oss-verify"):
         self.runs[run_id] = {"id": run_id, "path": path, "event": event, "head_sha": head_sha, "head_branch": branch,
@@ -144,6 +158,11 @@ class World:
                 {"type": "required_status_checks", "parameters": {"required_status_checks": [
                     {"context": name, "integration_id": ACTIONS} for name in self.required]}}],
             f"repos/{REPO}/commits/{self.sha}/check-runs?filter=all&per_page=100": [{"check_runs": self.checks}],
+            # As GitHub answers: every check run with filter=all, and only the newest with its default, latest.
+            f"repos/{REPO}/commits/{self.sha}/check-runs?check_name=Enrollment%20review&filter=all&per_page=100":
+                [{"check_runs": self.review_runs}],
+            f"repos/{REPO}/commits/{self.sha}/check-runs?check_name=Enrollment%20review&per_page=100":
+                [{"check_runs": sorted(self.review_runs, key=lambda c: c["id"])[-1:]}],
             f"repos/{REPO}/pulls/{PR}": Calls(*self.pulls),
             f"repos/{REPO}/pulls/{PR}/files?per_page=100": [self.files],
             f"repos/{REPO}/contents/projects/plugin-hostd/project.yaml?ref={self.sha}": self.project_yaml,
@@ -156,6 +175,11 @@ class World:
         for run in self.runs.values():
             owner, branch = run["head_repository"]["full_name"].split("/")[0], run["head_branch"]
             table[f"repos/{REPO}/pulls?state=open&base=main&head={owner}:{branch}&per_page=100"] = [self.pulls[-1:]]
+        # The author of each answer of the pull request has no write access (build.yaml's rule for trusted accounts).
+        for pull in self.pulls:
+            login = (pull.get("user") or {}).get("login")
+            if login:
+                table[f"repos/{REPO}/collaborators/{login}/permission"] = {"permission": "read"}
         for run_id, run in self.runs.items():
             table[f"repos/{REPO}/actions/runs/{run_id}"] = run
             rec = self.artifacts.get(run_id)
@@ -166,14 +190,6 @@ class World:
             if rec is not None:
                 table[f"repos/{REPO}/actions/artifacts/{run_id * 10}/zip"] = \
                     rec if isinstance(rec, bytes) else zipped({"record.json": json.dumps(rec)})
-            review = self.reviews.get(run_id)
-            arts = [] if review is None else [{"id": run_id * 10 + 1, "name": dispatch.REVIEW_ARTIFACT,
-                                               "expired": False, "size_in_bytes": 300}]
-            table[f"repos/{REPO}/actions/runs/{run_id}/artifacts?name={dispatch.REVIEW_ARTIFACT}&per_page=100"] = \
-                [{"artifacts": arts}]
-            if review is not None:
-                table[f"repos/{REPO}/actions/artifacts/{run_id * 10 + 1}/zip"] = review if isinstance(review, bytes) \
-                    else zipped({"comment.md": "x", "verdicts.json": json.dumps(review)})
         return FakeApi(table)
 
     def decide(self, event="pull_request_target", run_id=104, sha=None):
@@ -335,7 +351,6 @@ class ThePullRequest(unittest.TestCase):
         world.run(105, ".github/workflows/build.yaml", "pull_request_target")
         world.check(700, "project-builds", 105)
         world.artifacts[105] = record()
-        world.reviews[105] = world.reviews[101]
         got = world.decide(run_id=105)
         self.assertEqual((got["decision"], got["pr"], got["sha"]), ("dispatch", "32", SHA), got["reason"])
 
@@ -422,14 +437,18 @@ class ByHand(unittest.TestCase):
         world.run(HAND_RUN, run.get("path", ".github/workflows/build.yaml"), "workflow_dispatch", head_sha=MAIN,
                   branch=run.get("branch", "main"), head_repo=run.get("repo", REPO))
         world.artifacts[HAND_RUN] = record()
-        world.reviews[HAND_RUN] = world.reviews.pop(101)
         return world
 
-    def test_the_review_read_is_the_run_started_by_hand(self):
+    def test_the_review_read_is_of_the_commit_the_record_names(self):
+        # The run started by hand ran on main; the review that decides is the check run at the pull request's head.
         world = self.world()
-        world.reviews[HAND_RUN] = {"F2": "fail", "F7": "pass"}
-        got = world.decide(event="workflow_dispatch", run_id=HAND_RUN, sha=MAIN)
-        self.assertEqual((got["decision"], got["label"]), ("label", "review-blocking"), got["reason"])
+        world.review(401, "action_required")
+        api = world.api()
+        got = dispatch.decide(api, REPO, HAND_RUN, "workflow_dispatch", MAIN)
+        self.assertEqual((got["decision"], got["label"], got["sha"]), ("none", "", SHA), got["reason"])
+        self.assertIn("its newest Enrollment review check run is action_required, not success", got["reason"])
+        self.assertIn(f"repos/{REPO}/commits/{SHA}/check-runs?check_name=Enrollment%20review&filter=all&per_page=100",
+                      api.calls)
 
     def test_a_build_by_hand_on_main_sends_the_pull_request_it_names(self):
         got = self.world().decide(event="workflow_dispatch", run_id=HAND_RUN, sha=MAIN)
@@ -509,77 +528,107 @@ class Labels(unittest.TestCase):
 
 
 class Review(unittest.TestCase):
-    """The review's verdicts in the Build run whose record names the commit: F2 or F7 fail labels review-blocking;
-    no verdicts, or F2 or F7 neither pass nor fail, labels review-pending. Any other check's verdict changes nothing."""
+    """c2: the newest check run Enrollment review of the oss-verify App at the head. Anything but success, or no such
+    check run, sends nothing, puts no label on, and names why in the run summary."""
+    WHERE = f"pull request 32: projects/plugin-hostd/ at {SHA[:7]}"
 
-    def decide(self, review):
+    def reviewed(self, *conclusions, app=OSS_VERIFY):
+        """A world whose only Enrollment review check runs are these, oldest first."""
         world = World()
-        if review is None:
-            del world.reviews[101]
-        else:
-            world.reviews[101] = review
-        return world.decide()
+        world.review_runs = []
+        for i, conclusion in enumerate(conclusions):
+            world.review(401 + i, conclusion, app=app)
+        return world
 
-    def test_f2_or_f7_fail_labels_review_blocking(self):
-        for review in ({"F2": "fail", "F7": "pass"}, {"F2": "pass", "F7": "fail"}, {"F2": "fail", "F7": "person"}):
-            got = self.decide(review)
-            self.assertEqual((got["decision"], got["label"]), ("label", "review-blocking"), review)
+    def assertNotSent(self, world, reason):
+        got = world.decide()
+        self.assertEqual((got["decision"], got["label"], got["pr"], got["sha"]), ("none", "", "32", SHA), got["reason"])
+        self.assertEqual(got["reason"], reason)
 
-    def test_no_verdict_for_the_commit_labels_review_pending(self):
-        for review in (None, {"F2": "pass"}, {"F2": "pass", "F7": "person"}, {"F2": "Pass", "F7": "pass"},
-                       ["F2", "pass"], b"not a zip", zipped({"verdicts.json": "{"}),
-                       zipped({"comment.md": "x"}),
-                       zipped({"verdicts.json": '{"F2": "pass", "F7": "pass"}', "other": ""})):
-            got = self.decide(review)
-            self.assertEqual((got["decision"], got["label"]), ("label", "review-pending"), review)
+    def test_a_review_that_passed_is_sent(self):
+        # c2 (a)
+        got = World().decide()
+        self.assertEqual((got["decision"], got["label"], got["pr"], got["project"], got["sha"]),
+                         ("dispatch", "", "32", "plugin-hostd", SHA), got["reason"])
+        self.assertEqual(decision_reason(got), f"{self.WHERE} passed every required check, each plain binary has at "
+                                               "most 1,000,000 bytes of .text and of executable segments, and its "
+                                               "author maintains its repository")
 
-    def test_a_review_that_holds_comes_before_every_other_label(self):
+    def test_a_review_that_is_not_success_sends_nothing(self):
+        # c2 (b), and every other conclusion a check run can have
+        for conclusion in ("action_required", "failure", "neutral", "cancelled", "timed_out", "skipped", "stale"):
+            self.assertNotSent(self.reviewed(conclusion), f"{self.WHERE}: its newest Enrollment review check run is "
+                                                          f"{conclusion}, not success")
+
+    def test_a_review_still_running_sends_nothing(self):
         world = World()
-        world.reviews[101] = {"F2": "fail", "F7": "pass"}
+        world.review(401, None, status="in_progress")
+        self.assertNotSent(world, f"{self.WHERE}: its newest Enrollment review check run is in_progress, not success")
+
+    def test_another_apps_check_run_of_the_same_name_is_not_counted(self):
+        # c2 (c): another App's success alone is no review ...
+        self.assertNotSent(self.reviewed("success", app=ACTIONS),
+                           f"{self.WHERE}: not yet reviewed: the oss-verify App wrote no Enrollment review check run "
+                           "on it")
+        # ... and a newer one does not stand over the oss-verify App's action_required.
+        world = self.reviewed("action_required")
+        world.review(402, "success", app=ACTIONS)
+        self.assertNotSent(world, f"{self.WHERE}: its newest Enrollment review check run is action_required, not "
+                                  "success")
+
+    def test_another_pull_requests_review_at_the_same_commit_is_not_counted(self):
+        # A second pull request at the same commit has its own check run, external_id its number: the oss-verify App's
+        # newer success there does not stand over pull request 32's own failure, or stand in for its missing review.
+        for own, reason in ((("failure",), f"{self.WHERE}: its newest Enrollment review check run is failure, not "
+                                           "success"),
+                            ((), f"{self.WHERE}: not yet reviewed: the oss-verify App wrote no Enrollment review "
+                                 "check run on it")):
+            world = self.reviewed(*own)
+            world.review(402, "success", pr=77)
+            self.assertNotSent(world, reason)
+
+    def test_the_pull_requests_own_review_decides_over_another_pull_requests_newer_one(self):
+        world = self.reviewed("success")
+        world.review(402, "action_required", pr=77)
+        got = world.decide()
+        self.assertEqual((got["decision"], got["pr"], got["sha"]), ("dispatch", "32", SHA), got["reason"])
+
+    def test_a_head_with_no_review_sends_nothing(self):
+        self.assertNotSent(self.reviewed(), f"{self.WHERE}: not yet reviewed: the oss-verify App wrote no Enrollment "
+                                            "review check run on it")
+
+    def test_the_newest_review_decides(self):
+        # By id, not by the order the API lists them in.
+        self.assertNotSent(self.reviewed("success", "action_required"),
+                           f"{self.WHERE}: its newest Enrollment review check run is action_required, not success")
+        world = self.reviewed("action_required", "success")
+        world.review_runs.reverse()
+        self.assertEqual(world.decide()["decision"], "dispatch")
+
+    def test_a_binary_over_the_line_is_labelled_after_a_review_that_passed(self):
+        # c2 (e)
+        world = World()
+        world.artifacts[101] = record(sizes=sizes(plain_text=2_000_000))
+        got = world.decide()
+        self.assertEqual((got["decision"], got["label"], got["pr"], got["sha"]), ("label", "size-review", "32", SHA))
+        self.assertEqual(got["reason"], f"{self.WHERE} has a plain binary above 1,000,000 bytes: fuzz_command.plain "
+                                        "(2,000,000 bytes of .text, 70,000 executable bytes)")
+
+    def test_the_review_comes_before_every_label(self):
+        # A label that a person lifts by hand is never put on a pull request whose review did not pass.
+        world = self.reviewed("failure")
         world.artifacts[101] = record(sizes=sizes(plain_text=2_000_000))
         world.project_yaml = b"repo: https://example.invalid/x\nlanguage: go\n"
         got = world.decide()
-        self.assertEqual((got["decision"], got["label"]), ("label", "review-blocking"), got["reason"])
+        self.assertEqual((got["decision"], got["label"]), ("none", ""), got["reason"])
+        self.assertIn("its newest Enrollment review check run is failure", got["reason"])
 
-    def test_f2_and_f7_pass_send_whatever_the_other_checks_say(self):
-        got = self.decide({"F2": "pass", "F7": "pass", "A1": "fail", "G5": "person"})
-        self.assertEqual(got["decision"], "dispatch", got["reason"])
-
-    def test_the_build_workflow_writes_the_verdicts_the_gate_reads(self):
-        # build.yaml's review of an enrollment, run as it is: review-prompt's schema requires the two checks the gate
-        # reads, and the result step and the body step write the files of the artifact the gate opens, the verdicts as
-        # the review gave.
-        with tempfile.TemporaryDirectory() as directory:
-            root = pathlib.Path(directory)
-            subprocess.run([str(ROOT / ".github/scripts/review-prompt")], check=True,
-                           env={**os.environ, "KIND": "enrollment", "PR": "8", "NAME": "libreac",
-                                "GITHUB_OUTPUT": str(root / "prompt")})
-            arguments = dict(line.split("=", 1) for line in (root / "prompt").read_text().splitlines())["arguments"]
-            schema = json.loads(re.search(r"--json-schema '([^']*)'", arguments).group(1))
-            self.assertEqual(schema["properties"]["verdicts"]["required"], ["F2", "F7"])
-            verdicts = {"F2": "fail", "F7": "pass", "A1": "person"}
-            (root / "execution.json").write_text(json.dumps([{"type": "result", "structured_output": {
-                "comment": "x", "held": "", "verdicts": verdicts}}]))
-            (root / "temp").mkdir()
-            jobs = yaml.safe_load((ROOT / ".github/workflows/build.yaml").read_text())["jobs"]
-            [result] = [s for s in jobs["review"]["steps"] if s.get("id") == "result"]
-            subprocess.run(["bash", "-e", "-c", result["run"]], check=True, cwd=root,
-                           env={**os.environ, "HOME": str(root), "RUNNER_TEMP": str(root / "temp"), "KIND": "enrollment",
-                                "RESULT": str(root / "execution.json"), "GITHUB_OUTPUT": str(root / "output"),
-                                "SESSION": "", "HEAD_SHA": ""})
-            [body] = [s for s in jobs["review"]["steps"] if s.get("id") == "body"]
-            subprocess.run(["bash", "-e", "-c", body["run"]], check=True, cwd=ROOT,
-                           env={**os.environ, "RUNNER_TEMP": str(root / "temp"), "GITHUB_OUTPUT": str(root / "output"),
-                                "HEAD_SHA": "b" * 40, "REVIEW": "x", "CHECKS": "", "RULES": "review.md"})
-            self.assertEqual({p.name for p in (root / "temp" / "draft").iterdir()}, dispatch.REVIEW_FILES)
-            self.assertEqual(json.loads((root / "temp" / "draft" / "verdicts.json").read_text()), verdicts)
-
-    def test_a_draft_with_body_md_is_read(self):
-        # build.yaml's review job also uploads body.md, the comment as the comment job would post it.
-        world = World()
-        world.reviews[101] = zipped({"comment.md": "x", "verdicts.json": '{"F2":"pass","F7":"pass"}',
-                                     "body.md": "<!-- oss-verify-review -->\n"})
-        self.assertEqual(dispatch.review_verdicts(world.api(), REPO, 101)[1:], ("", ""))
+    def test_only_the_heads_review_is_read(self):
+        api = World().api()
+        dispatch.decide(api, REPO, 104, "pull_request_target", SHA)
+        self.assertEqual(
+            [c for c in api.calls if "check_name=" in c],
+            [f"repos/{REPO}/commits/{SHA}/check-runs?check_name=Enrollment%20review&filter=all&per_page=100"])
 
 
 class Maintainer(unittest.TestCase):
@@ -653,11 +702,6 @@ class Maintainer(unittest.TestCase):
         self.assertEqual(world.decide()["decision"], "dispatch")
         self.assertEqual(STANDING_CALLS, [({"repo": "https://example.invalid/x", "language": "c"}, "linuxnow")])
 
-    def test_the_workflow_takes_the_label_and_takes_it_off_when_sent(self):
-        text = (ROOT / ".github" / "workflows" / "enroll-dispatch.yml").read_text()
-        self.assertIn("label/maintainer-review|label/review-blocking|label/review-pending)", text)
-        self.assertIn("size-review|language-paused|name-review|maintainer-review|review-blocking|review-pending)", text)
-
     def test_a_fork_does_not_pass_whoever_owns_it(self):
         fork = {"full_name": "someone/plugin-hostd", "owner": {"login": "someone"}, "fork": True,
                 "parent": {"full_name": "FreeREAC/plugin-hostd"}}
@@ -667,9 +711,12 @@ class Maintainer(unittest.TestCase):
         why, _ = self.standing(self.GITHUB, dispatch.triage.OK, meta={**self.META, "fork": None})
         self.assertIn("is a fork of another repository", why)
 
-    def confirmed(self, labeller, label="maintainer-confirmed", events=True, at="2026-10-28T05:00:00Z"):
+    def confirmed(self, labeller, label="maintainer-confirmed", events=True, at="2026-10-28T05:00:00Z", run_id=104):
         world = World()
         world.runs[101]["created_at"] = "2026-10-28T04:00:00Z"  # the Build run of the head commit, made at its push
+        # The run of maintainer-confirmed.yml that the label started, after the Build run.
+        world.run(700, dispatch.CONFIRMED_WORKFLOW, "pull_request_target")
+        world.runs[700].update(conclusion="success", created_at="2026-10-28T05:00:02Z")
         world.pulls = [dict(world.pull(), user={"login": "someone"}, labels=[{"name": label}])]
         api = world.api()
         api.table[f"repos/{REPO}/issues/{PR}/events?per_page=100"] = [[
@@ -678,7 +725,7 @@ class Maintainer(unittest.TestCase):
         old = dispatch.standing
         dispatch.standing = lambda config, login: f"{login} is not shown to maintain it"
         try:
-            return dispatch.decide(api, REPO, 104, "pull_request_target", SHA)
+            return dispatch.decide(api, REPO, run_id, "pull_request_target", SHA)
         finally:
             dispatch.standing = old
 
@@ -686,6 +733,18 @@ class Maintainer(unittest.TestCase):
         got = self.confirmed("a-member")
         self.assertEqual(got["decision"], "dispatch", got["reason"])
         self.assertIn("a-member labelled it maintainer-confirmed", got["reason"])
+
+    def test_the_maintainer_confirmed_run_after_the_build_run_dispatches(self):
+        # c2 (i): the author is not shown to maintain the project, a-member put maintainer-confirmed on after the head
+        # commit, and the newest Enrollment review is success. The run of maintainer-confirmed.yml completes after the
+        # head's Build run, and its completion sends the head.
+        got = self.confirmed("a-member", run_id=700)
+        self.assertEqual((got["decision"], got["label"], got["pr"], got["project"], got["sha"]),
+                         ("dispatch", "", "32", "plugin-hostd", SHA), got["reason"])
+        self.assertEqual(decision_reason(got), f"pull request 32: projects/plugin-hostd/ at {SHA[:7]} passed every "
+                                               "required check, each plain binary has at most 1,000,000 bytes of "
+                                               ".text and of executable segments, and a-member labelled it "
+                                               "maintainer-confirmed")
 
     def test_the_label_put_by_the_author_or_with_no_record_or_another_label_does_not(self):
         for case in ({"labeller": "someone"}, {"labeller": "SomeOne"}, {"labeller": "a-member", "events": False},
@@ -695,7 +754,7 @@ class Maintainer(unittest.TestCase):
             got = self.confirmed(**case)
             self.assertEqual((got["decision"], got["label"]), ("label", "maintainer-review"), case)
 
-    def test_a_label_run_that_was_skipped_decides_nothing(self):
+    def test_a_skipped_maintainer_confirmed_run_decides_nothing(self):
         world = World()
         world.run(700, dispatch.CONFIRMED_WORKFLOW, "pull_request_target")
         world.runs[700]["conclusion"] = "skipped"
@@ -753,14 +812,19 @@ class Merged(unittest.TestCase):
                     self.assertEqual(got["pr"], "32", got["reason"])
 
     def test_a_merge_does_not_wait_for_the_review(self):
-        for review in ({"F2": "person", "F7": "pass"}, {"F2": "fail", "F7": "fail"}, None):
+        # c2 (d): the Enrollment review check run is not read.
+        for case in ("action_required", "failure", None):
             world = self.world()
-            if review is None:
-                del world.reviews[101]
-            else:
-                world.reviews[101] = review
-            got = self.decide(world)
-            self.assertEqual((got["decision"], got["label"]), ("dispatch", ""), (review, got["reason"]))
+            world.review_runs = []
+            if case:
+                world.review(401, case)
+            api = world.api()
+            got = dispatch.decide(api, REPO, MERGED_RUN, "pull_request_target", SHA)
+            self.assertEqual((got["decision"], got["label"], got["sha"], got.get("merged")),
+                             ("dispatch", "", SHA, "true"), (case, got["reason"]))
+            self.assertEqual(got["reason"], "pull request 32 was merged by a-member: the merge decides the review and "
+                                            "the maintainer check")
+            self.assertEqual([c for c in api.calls if "check_name=" in c], [], case)
 
     def test_a_merge_does_not_wait_for_the_maintainer_check(self):
         asked = []
@@ -917,6 +981,102 @@ class Jobs(unittest.TestCase):
         text = (ROOT / ".github" / "workflows" / "enroll-dispatch.yml").read_text()
         named = set(re.findall(r"theorem-labs/([A-Za-z0-9._-]+)", text))
         self.assertLessEqual(named, {"oss-verify"}, named)
+
+
+def concurrency_group(run):
+    """enroll-dispatch.yml's concurrency group for the run whose completion starts it, as GitHub evaluates it."""
+    ctx = {f"github.event.workflow_run.{key}": value for key, value in run.items() if not isinstance(value, dict)}
+    ctx["github.event.workflow_run.head_repository.full_name"] = (run.get("head_repository") or {}).get("full_name")
+    return re.sub(r"\$\{\{(.*?)\}\}", lambda m: as_text(evaluate(m.group(1), ctx)),
+                  ENROLL_DISPATCH["concurrency"]["group"], flags=re.S)
+
+
+class Concurrency(unittest.TestCase):
+    """enroll-dispatch.yml's concurrency group, evaluated for the runs whose completion starts it."""
+
+    def test_two_pull_requests_at_once_run_both(self):
+        # c2 (h): Build runs of two pull requests complete together. Their Enroll dispatch runs are in two groups, and
+        # no run in a group cancels one in progress: neither is cancelled.
+        world = World()
+        world.run(301, ".github/workflows/build.yaml", "pull_request_target", head_sha=NEWER, branch="add-libx",
+                  head_repo="someone/oss-verify")
+        first, second = concurrency_group(world.runs[101]), concurrency_group(world.runs[301])
+        self.assertEqual(first, f"enroll-dispatch:{SHA}:FreeREAC/oss-verify:add-plugin-hostd")
+        self.assertEqual(second, f"enroll-dispatch:{NEWER}:someone/oss-verify:add-libx")
+        self.assertIs(ENROLL_DISPATCH["concurrency"]["cancel-in-progress"], False)
+
+    def test_a_pull_requests_runs_share_a_group_and_another_head_at_the_same_commit_does_not(self):
+        world = World()
+        world.run(301, ".github/workflows/build.yaml", "pull_request_target", head_repo="someone/oss-verify",
+                  branch="copy")
+        self.assertEqual({concurrency_group(world.runs[run_id]) for run_id in (101, 102, 103, 104)},
+                         {f"enroll-dispatch:{SHA}:FreeREAC/oss-verify:add-plugin-hostd"})
+        self.assertEqual(concurrency_group(world.runs[301]), f"enroll-dispatch:{SHA}:someone/oss-verify:copy")
+
+    def test_a_merge_and_a_build_by_hand_each_have_a_group_of_their_own(self):
+        world = World()
+        world.run(MERGED_RUN, ".github/workflows/enroll-merged.yml", "pull_request_target")
+        world.run(HAND_RUN, ".github/workflows/build.yaml", "workflow_dispatch", head_sha=MAIN, branch="main",
+                  head_repo=REPO)
+        self.assertEqual(concurrency_group(world.runs[MERGED_RUN]), f"enroll-dispatch:{MERGED_RUN}")
+        self.assertEqual(concurrency_group(world.runs[HAND_RUN]), f"enroll-dispatch:{HAND_RUN}")
+
+
+def dispatch_step(name):
+    [found] = [s for s in ENROLL_DISPATCH["jobs"]["dispatch"]["steps"] if s.get("name") == name]
+    return found["run"]
+
+
+class DispatchJob(Runner):
+    """enroll-dispatch.yml's dispatch job: its label steps, run with a stand-in gh."""
+    LABELS = f"repos/{REPO}/issues/{PR}/labels"
+
+    def setUp(self):
+        if not shutil.which("jq"):
+            self.skipTest("jq is not installed")
+        super().setUp()
+        self.summary = self.dir / "summary"
+        # GitHub sets each env value of the job, empty when decide gave no such output.
+        self.env.update(PR=str(PR), PROJECT="plugin-hostd", SHA=SHA, GITHUB_STEP_SUMMARY=str(self.summary), MERGED="",
+                        REVIEW_PASSED="", REVIEW_PASSED_AT="", LABEL_AT="")
+
+    def labelled(self, *names):
+        self.serve(self.LABELS, [{"name": name} for name in names])
+
+    def writes(self):
+        """The calls that change the pull request: (method, endpoint)."""
+        return [(c[c.index("--method") + 1], c[c.index("--method") + 2]) for c in self.calls() if "--method" in c]
+
+    def test_the_decisions_label_is_put_on(self):
+        self.labelled("maintainer-review")  # GitHub's answer to the POST: the labels the pull request has now
+        code, out, _ = self.run_script(dispatch_step("Label the pull request"), DECISION="label",
+                                       LABEL="maintainer-review")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.writes(), [("POST", self.LABELS)])
+        self.assertEqual(json.loads((self.api / "input.1").read_text()), {"labels": ["maintainer-review"]})
+        self.assertEqual(self.summary.read_text(), f"pull request {PR}: labelled maintainer-review; no statements are "
+                                                   f"started for plugin-hostd at {SHA}\n")
+
+    def test_the_decisions_values_admit_only_this_workflows_labels(self):
+        script = dispatch_step("Check the decision's values")
+        for decision, label in (("dispatch", ""), ("label", "size-review"), ("label", "language-paused"),
+                                ("label", "name-review"), ("label", "maintainer-review")):
+            code, out, _ = self.run_script(script, DECISION=decision, LABEL=label)
+            self.assertEqual(code, 0, (label, out))
+        for label in ("review-pending", "review-blocking", "review-held"):
+            code, out, _ = self.run_script(script, DECISION="label", LABEL=label)
+            self.assertEqual(code, 1, label)
+            self.assertIn(f"::error::not a decision: 'label' '{label}'", out)
+
+    def test_a_send_takes_off_only_the_labels_this_workflow_puts_on(self):
+        names = ("size-review", "review-pending", "review-blocking", "maintainer-review", "checks-failing")
+        self.labelled(*names)
+        for name in names:
+            self.serve(f"{self.LABELS}/{name}", [])
+        code, out, _ = self.run_script(dispatch_step("Take off the labels an earlier commit got"), DECISION="dispatch")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.writes(), [("DELETE", f"{self.LABELS}/size-review"),
+                                         ("DELETE", f"{self.LABELS}/maintainer-review")])
 
 
 class AppToken(unittest.TestCase):
@@ -1221,14 +1381,17 @@ class Timeline:
                     merged_by={"login": "a-member"} if self.merged else None,
                     labels=[{"name": name} for name in self.labels])
 
-    def world(self, sha, verdicts=None, files=None, oversize=False, failed_check=False):
-        """A World of the commit `sha`: the review's verdicts (F2 and F7 pass unless given), the pull request's files,
-        a plain binary above the size line (oversize), or project-builds failed (failed_check)."""
+    def world(self, sha, review="success", files=None, oversize=False, failed_check=False):
+        """A World of the commit `sha`: the conclusion of the review's check run Enrollment review (success unless
+        given; None: there is none), the pull request's files, a plain binary above the size line (oversize), or
+        project-builds failed (failed_check)."""
         world = World(sha)
         created = max(run["created_at"] for run in self.runs if run["head_sha"] == sha)
         for run in world.runs.values():
             run["created_at"] = created
-        world.reviews[101] = {"F2": "pass", "F7": "pass", "A1": "pass"} if verdicts is None else verdicts
+        world.review_runs = []
+        if review is not None:
+            world.review(400, review)
         if files is not None:
             world.files = files
         if oversize:
@@ -1369,15 +1532,16 @@ class ReviewPassed(unittest.TestCase):
         self.assertEqual(self.job(line, out), [CHECK, PUT_ON])
         self.assertLabels(line, [REVIEW_PASSED])
 
-    def test_c_a_new_head_labelled_for_a_person_loses_the_label(self):
-        for change, label in (({"oversize": True}, "size-review"),
-                              ({"verdicts": {"F2": "pass", "F7": "person"}}, "review-pending")):
-            with self.subTest(label=label):
+    def test_c_a_new_head_labelled_for_a_person_or_whose_review_is_not_success_loses_the_label(self):
+        # After pull request #177, a review that is not success is the decision none, as in (d).
+        for change, decision in (({"oversize": True}, ("label", "size-review")),
+                                 ({"review": "action_required"}, ("none", ""))):
+            with self.subTest(decision=decision):
                 line = self.labelled()
                 line.push(self.B)
                 out = line.decide(**change)
                 self.assertEqual((out["decision"], out["label"], out["review_passed"], out["review_passed_at"]),
-                                 ("label", label, "off", "head"), out["reason"])
+                                 (*decision, "off", "head"), out["reason"])
                 self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF])
                 self.assertLabels(line, [])
 
@@ -1456,13 +1620,22 @@ class ReviewPassed(unittest.TestCase):
                 self.assertIn(other, line.repo_labels)
                 self.assertLabels(line, [REVIEW_PASSED])
 
-    def test_j_a_review_with_another_fail_is_sent_without_the_label(self):
-        line = Timeline()
-        line.push(self.A)
-        out = line.decide(verdicts={"F2": "pass", "F7": "pass", "F5": "fail"})
-        self.assertEqual((out["decision"], out["review_passed"]), ("dispatch", ""), out["reason"])
-        self.assertEqual(self.job(line, out), [CHECK])
-        self.assertLabels(line, [])
+    def test_j_a_review_that_is_not_success_gets_no_label_and_an_optional_fail_does(self):
+        for review in ("failure", "action_required", None):
+            with self.subTest(review=review):
+                line = Timeline()
+                line.push(self.A)
+                out = line.decide(review=review)
+                self.assertEqual((out["decision"], out["review_passed"]), ("none", ""), out["reason"])
+                self.assertEqual(self.job(line, out), [])
+                self.assertLabels(line, [])
+        with self.subTest(review="success, with an optional fail of F5 or F8"):
+            line = Timeline()
+            line.push(self.A)
+            out = line.decide(review="success")
+            self.assertEqual((out["decision"], out["review_passed"]), ("dispatch", "on"), out["reason"])
+            self.assertEqual(self.job(line, out), [CHECK, PUT_ON])
+            self.assertLabels(line, [REVIEW_PASSED])
 
     def test_k_a_late_run_for_an_old_head_leaves_the_label(self):
         line = self.labelled()
@@ -1485,28 +1658,28 @@ class ReviewPassed(unittest.TestCase):
         self.assertEqual([e["event"] for e in line.events], ["labeled", "unlabeled"])
         self.assertLabels(line, [])
 
-    def test_m_a_new_head_sent_with_another_fail_loses_the_label(self):
+    def test_m_a_new_head_whose_review_is_not_success_loses_the_label(self):
         line = self.labelled()
         line.push(self.B)
-        out = line.decide(verdicts={"F2": "pass", "F7": "pass", "F5": "fail"})
-        self.assertEqual((out["decision"], out["review_passed"], out["review_passed_at"]), ("dispatch", "off", "head"),
+        out = line.decide(review="failure")
+        self.assertEqual((out["decision"], out["review_passed"], out["review_passed_at"]), ("none", "off", "head"),
                          out["reason"])
         self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF])
         self.assertLabels(line, [])
 
     def test_n_a_label_put_on_by_hand_under_its_former_name_stays_whatever_its_head_decides(self):
         # Pull request #124: one labeled passes-not-merging by sjawhar-agent[bot] after its head's first run, and a
-        # review with F5 and F8 at fail.
+        # review whose F5 and F8 fails are optional, so its check run Enrollment review is success.
         line = Timeline()
         line.push(self.A)
         line.put_on("sjawhar-agent[bot]", "passes-not-merging")
-        verdicts = {"F2": "pass", "F7": "pass", "F5": "fail", "F8": "fail"}
         for change, decision, steps in (({}, ("dispatch", ""), [CHECK]),
                                         ({"standing": "not shown to maintain it"}, ("label", "maintainer-review"),
                                          [CHECK]),
-                                        ({"failed_check": True}, ("none", ""), [])):
-            with self.subTest(decision=decision):
-                out = line.decide(verdicts=verdicts, **change)
+                                        ({"failed_check": True}, ("none", ""), []),
+                                        ({"review": "action_required"}, ("none", ""), [])):
+            with self.subTest(decision=decision, change=change):
+                out = line.decide(**change)
                 self.assertEqual((out["decision"], out["label"], out["review_passed"]), (*decision, ""), out["reason"])
                 self.assertEqual(self.job(line, out), steps)
                 self.assertLabels(line, [REVIEW_PASSED])
@@ -1640,10 +1813,9 @@ class ReviewPassed(unittest.TestCase):
         # event on that one starts a maintainer-confirmed.yml run at E, after this one's label.
         E = "e" * 40
         commits = f"repos/{REPO}/pulls/{PR}/commits?per_page=100"
-        for change, decision, steps in (({"verdicts": {"F2": "pass", "F7": "person"}}, ("label", "review-pending"),
-                                         [CHECK]),
+        for change, decision, steps in (({"review": "action_required"}, ("none", ""), []),
                                         ({"failed_check": True}, ("none", ""), [])):
-            with self.subTest(decision=decision):
+            with self.subTest(change=change):
                 line = self.labelled()
                 line.tick(3)
                 line.add_run(E, dispatch.CONFIRMED_WORKFLOW, "pull_request_target")

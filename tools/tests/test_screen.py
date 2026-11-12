@@ -660,8 +660,7 @@ class ScreenTest(unittest.TestCase):
         "checklist.txt": "ticked   OURS-CHECKLIST-BOX\n(exit status 0)\n",
         "description.md": "OURS-DESCRIPTION-AGAIN\n",
         "review-comment-authors.txt": "OURS-LOGIN\n(exit status 0)\n",
-        "source.txt": "Not gathered: OURS-SOURCE-NOTE. A person with write access starts the review that reads it: "
-                      "gh workflow run build.yaml -f pr=7\n",
+        "source.txt": "Not gathered: OURS-SOURCE-NOTE, so there is no source to read.\n",
         "template-history.txt": "0000000 2026-11-01T00:00:00Z OURS-TEMPLATE-LOG\n(exit status 0)\n",
         "triage-comment.md": "<!-- oss-verify-triage -->\nOURS-TRIAGE-COMMENT\n",
         "triage-today.md": "| OK | OURS-TRIAGE-ROW | passes |\n<sub>Every check, for the reviewers: OURS-TRIAGE-FOOTER."

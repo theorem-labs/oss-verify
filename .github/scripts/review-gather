@@ -17,8 +17,10 @@
 # tools/validate.py and .github/scripts/triage.py on them, as the validate and triage workflows do. The directory gets
 # the files that the section "In CI" of .claude/skills/review-enrollment/SKILL.md lists, the build's results (BUILD,
 # BINARIES and CHECKS) among them. A failed read leaves its file with the error in it, and the review says what it could
-# not check. LAST_REVIEW is the file the review job keeps beside the last review's session in the Actions cache, and the
-# gather job restores, one line
+# not check, with one exception: when COMMIT is a commit id and the project's repository cannot be fetched at it, this
+# exits 1, so that the gather job fails and a re-run of its failed jobs fetches again. With no COMMIT (the build did
+# not get as far as resolving it), source.txt says that there is no source. LAST_REVIEW is the file the review job
+# keeps beside the last review's session in the Actions cache, and the gather job restores, one line
 # `session=<id> head=<commit>`: when the head descends from that commit, this writes the diff since it and, to
 # GITHUB_OUTPUT, `session` and `last`, so that the review resumes that session for the diff alone.
 # KIND is route's decision in build.yaml, and this chooses its path on it once, here at its top.
@@ -257,8 +259,12 @@ if [[ ${COMMIT:-} =~ ^[0-9a-f]{40}$ ]]; then
     find "$source" \( -iname 'CLAUDE*.md' -o -iname 'AGENTS*.md' -o -name .claude \) -prune -exec rm -rf {} +
   else
     rm -rf "$source"
-    echo "review-gather: could not fetch $COMMIT from $repo" > "$out/source.txt"
+    echo "review-gather: could not fetch $COMMIT from $repo" >&2
+    exit 1
   fi
+else
+  echo "Not gathered: the build did not resolve a commit of the project's repository, so there is no source to read." \
+    > "$out/source.txt"
 fi
 # The changes to projects/<name>/ since the commit of the last review (LAST_REVIEW), whose session the review then
 # resumes: HEAD_SHA is the head commit the build took. GitHub's compare diffs from the merge base, which is the last
