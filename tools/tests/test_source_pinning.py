@@ -66,7 +66,7 @@ class GitRepository(unittest.TestCase):
             text=True, stderr=subprocess.PIPE,
         ).strip()
 
-    def local_transport(self, *args):
+    def local_transport(self, *args, token=False):
         return ["git", "-c", "credential.helper=", "-c", "protocol.allow=never", "-c", "protocol.file.allow=always",
                 *(self.remote.as_uri() if arg == REPO else arg for arg in args)]
 

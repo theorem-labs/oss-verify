@@ -56,7 +56,7 @@ def built_from(directory, monkeypatch):
         raise Stop
 
     monkeypatch.setattr(check_tool, "build_all", build_all)
-    monkeypatch.setattr(check_build, "resolve", lambda repo, ref: "a" * 40)
+    monkeypatch.setattr(check_build, "resolve", lambda repo, ref, token=None: "a" * 40)
     monkeypatch.setattr(sys, "argv", ["tools/check", "--no-shell", "--dir", str(directory.parent / "work"),
                                       str(directory)])
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):

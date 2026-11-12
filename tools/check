@@ -28,31 +28,36 @@ Build a project's fuzz targets the way we do, collect the binaries, and write th
 It runs these steps:
 
     1. Check projects/<name>/ against the enrollment rules (tools/validate.py).
-    2. Resolve repo#ref to a full commit id (git ls-remote), unless the ref is one. With --lock, the lock's commit.
-    3. Build the builder image from infra/base-builder, FROM a toolchain image: the lock's, with --lock; else the newest
+    2. For a library in infra/private-libraries.tsv, and for no other, mint a read-only token for that one
+       repository and this one build (infra/github-read-token, or OSS_VERIFY_GIT_TOKEN_COMMAND). Every other
+       library is read with no credential at all, as it always has been.
+    3. Resolve repo#ref to a full commit id (git ls-remote), unless the ref is one. With --lock, the lock's commit.
+    4. Build the builder image from infra/base-builder, FROM a toolchain image: the lock's, with --lock; else the newest
        for the project's language in infra/toolchains.tsv (docs/build-contract.md, "Toolchains").
-    4. Build the project's Dockerfile on it with --build-arg COMMIT=<commit> (and REPO, BASE_BUILDER). The network
+    5. Build the project's Dockerfile on it with --build-arg COMMIT=<commit> (and REPO, BASE_BUILDER). The network
        is available. The build context is projects/<name>/, or your repository at that commit if dockerfile: is set.
-    5. Run `compile` once per build, each in a fresh container with no network (docker run --network=none). With
+       A private library's token goes with it as the BuildKit secret oss-verify-git-token, which its Dockerfile
+       mounts on the fetch step; it is in no build argument, no layer and no log.
+    6. Run `compile` once per build, each in a fresh container with no network (docker run --network=none). With
        --checks, the first build also records each fuzz target's link (infra/base-builder/link-fuzz-target).
-    6. Find the fuzz targets: executables in $OUT whose symbol table defines LLVMFuzzerTestOneInput, present in every
+    7. Find the fuzz targets: executables in $OUT whose symbol table defines LLVMFuzzerTestOneInput, present in every
        build (or those fuzz_targets lists). Collect each one's published (stripped) bytes as
        out/<target>/<target>.<build>, and read the size of its .text section and whether it is statically linked (no
        PT_INTERP or PT_DYNAMIC program header).
-    7. Write manifest.yaml: the repository, ref and commit, this repository's commit, the builder and the toolchain
+    8. Write manifest.yaml: the repository, ref and commit, this repository's commit, the builder and the toolchain
        image it was built FROM, the git checkouts in the image, and the file, size and SHA-256 of every target in
        every build, with the .text size and linkage of each one. List each binary with these values; stop if one is
        not statically linked.
-    8. With --twice, build everything again from scratch (steps 3 to 6, with docker build --no-cache), compare every
+    9. With --twice, build everything again from scratch (steps 4 to 7, with docker build --no-cache), compare every
        byte, and only then add the rebuild block to manifest.yaml: this host, the time, the second builder, the file,
        size and SHA-256 of every binary the second build made, and result: identical or differs.
-    9. With --checks, check each binary (tools/check_binaries.py; docs/build-contract.md, "The checks of the
+   10. With --checks, check each binary (tools/check_binaries.py; docs/build-contract.md, "The checks of the
        binaries"): its ELF header and instructions, its system calls against the process model of the published
        proofs, its quiet twin, and the code it links uninstrumented. Write the results into manifest.yaml (each
        build's uninstrumented list, and the binary_checks block). Then measure the fuzz targets' checks on their seed
        inputs (tools/check_checks.py; docs/build-contract.md, "The checks of a fuzz target"). What --checks finds
        changes no exit code.
-   10. Open a shell in the project image with no network and out/ at /out, unless --no-shell.
+   11. Open a shell in the project image with no network and out/ at /out, unless --no-shell.
 
 Everything is kept in ~/.cache/oss-verify-check/<name>, or in --dir if given. Each run replaces out/ there, so the
 binaries of an earlier run's other builds are gone after a run with --build.
@@ -168,11 +173,12 @@ def ubsan_settings(job, toolchain):
     return (list(checks), sorted(set(validate.TRAP_EXCEPTIONS) - set(checks)), c_left_out)
 
 
-def build_all(job, commit, work, toolchain, home, suffix="", no_cache=False, record=False):
+def build_all(job, commit, work, toolchain, home, suffix="", no_cache=False, record=False, token=None):
     """Build the images, FROM the toolchain image `toolchain`, compile every build and collect the fuzz targets into
     work/out. `home` is the run's work directory: the project image's tag names it and is added to home/images before
     the image is built, and every container carries its work_label(). With `record`, each build records its links for
-    the checks of the binaries (check_build.compile_build).
+    the checks of the binaries (check_build.compile_build). `token`, for a library in infra/private-libraries.tsv, is
+    the read-only token this build fetches it with; it reaches docker as a BuildKit secret and nothing else.
 
     Return (builder tag, project tag, targets, entries). Raise Failed if any step fails.
     """
@@ -180,7 +186,7 @@ def build_all(job, commit, work, toolchain, home, suffix="", no_cache=False, rec
     builder = check_build.build_builder(toolchain, suffix, no_cache)
     tag = check_build.project_tag(job, commit, builder, home, suffix)
     check_build.record_image(home / check_build.IMAGES, tag)
-    check_build.build_project(job, commit, builder, tag, work, no_cache)
+    check_build.build_project(job, commit, builder, tag, work, no_cache, token)
     raw = {}
     for build in job.builds:
         raw[build] = work / "raw" / build
@@ -298,15 +304,28 @@ def main():
         sys.exit(f"tools/check: {failure}")
 
     try:
+        # A library in infra/private-libraries.tsv, and no other, is fetched with a credential: one token, minted
+        # here for this build alone, read-only and narrowed to that one repository. Nothing is minted for every
+        # other project, so a public build takes the no-credential path it has always taken and never waits on a
+        # token service.
+        token = None
+        why_private = check_build.private_reason(job.repo)
+        if why_private is not None:
+            step(f"mint a read-only token for {check_build.normalised_repo(job.repo)}")
+            token = check_build.mint_token(job.repo)
+            say(f"infra/private-libraries.tsv: {why_private}")
+            say("the token is read-only, is for this repository and this build only, and goes to docker build as "
+                "the secret oss-verify-git-token; it is in no build argument, no layer, no manifest and no log")
         if locked:
             commit = locked
             step(f"build {job.repo} at locked commit {commit}")
         else:
             step(f"resolve {job.repo}" + (f"#{job.ref}" if job.ref else " (default branch)"))
-            commit = check_build.resolve(job.repo, job.ref)
+            commit = check_build.resolve(job.repo, job.ref, token)
             say(f"{job.ref or 'the default branch'} is {commit}")
         say(f"toolchain: {toolchain} ({why})")
-        builder, tag, targets, entries = build_all(job, commit, work, toolchain, work, record=bool(options.checks))
+        builder, tag, targets, entries = build_all(job, commit, work, toolchain, work, record=bool(options.checks),
+                                                   token=token)
     except Failed as failure:
         say(f"\nBUILD FAILED: {failure}")
         return 1
@@ -343,8 +362,11 @@ def main():
     if options.twice:
         try:
             step("--twice: everything again, from scratch")
+            # A fresh token: the first build's may have been minted an hour ago, and a token that expires mid-build
+            # fails as an authorisation error, which is the one failure this path must not invent.
             builder_again, tag_again, targets_again, again = build_all(
-                job, commit, work / "twice", toolchain, work, "-twice", no_cache=True)
+                job, commit, work / "twice", toolchain, work, "-twice", no_cache=True,
+                token=check_build.mint_token(job.repo) if token else None)
             builder_ids = {"toolchain": toolchain, "image": check_build.image_id(builder_again),
                            "project_image": check_build.image_id(tag_again)}
         except Failed as failure:

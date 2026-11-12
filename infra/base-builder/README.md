@@ -5,7 +5,8 @@ Every project's `Dockerfile` starts `FROM` this image. It is a toolchain image p
 | path in the image | what it is |
 |---|---|
 | `/usr/local/bin/compile` | [compile](compile): runs `$SRC/build.sh` for the build `$SANITIZER` names, with that build's compilers and flags |
-| `/usr/local/bin/fetch-commit` | [fetch-commit](fetch-commit): checks out `$REPO` at `$COMMIT`, for a project's Dockerfile |
+| `/usr/local/bin/fetch-commit` | [fetch-commit](fetch-commit): checks out `$REPO` at `$COMMIT`, for a project's Dockerfile. A public library is fetched with no credential; a private library of ours with the read-only token `tools/check` mounted for that one build ([docs/build-contract.md](../../docs/build-contract.md#a-private-library)) |
+| `/usr/local/bin/git-credential-oss-verify` | [git-credential-oss-verify](git-credential-oss-verify): how `git` gets that token, and the only place it is read: from the secret mount `/run/secrets/oss-verify-git-token`, never from a URL or a command line |
 | `/usr/local/lib/oss-verify/toolchain.sh` | [toolchain.sh](toolchain.sh): the compiler wrappers and flags of each build |
 | `/usr/local/lib/oss-verify/link-fuzz-target` | [link-fuzz-target](link-fuzz-target): how a fuzz target is linked |
 | `/usr/local/lib/oss-verify/record-compile` | [record-compile](record-compile): with `tools/check --checks`, a front before each compiler shim that records each compile (the object's SHA-256, its source, the source's SHA-256, language and `no_sanitize` attributes, and the compiler's arguments) in `$OUT/.records/compiles.jsonl`, with the objects compiled again without the sources' `no_sanitize` attributes in `$OUT/.records/nosan/<sha256>`, beside the build's sanitizer flags in `$OUT/.records/flags.json` ([compile](compile)), for the check that the UndefinedBehaviorSanitizer reached the project's code |
