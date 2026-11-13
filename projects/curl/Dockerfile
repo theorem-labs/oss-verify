@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Modified 2026 by Theorem Labs, PBC: the step that runs curl-fuzz_proto_gen.sh, which writes the message code of the
 # structured fuzz targets one time for every build.
-# Generated from the build recipe of the oss-fuzz-theorems 2026.10 release; do not edit.
+#
+# Generated from the build recipe of the oss-fuzz-theorems 2026.10 release.
 #
 # curl on the OSS Verify builder, laid out as the release built it (lay-out-sources reads the sources file).
 # tools/check passes REPO, COMMIT and BASE_BUILDER.

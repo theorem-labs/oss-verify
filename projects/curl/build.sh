@@ -11,7 +11,8 @@
 [ -z "${BASH_VERSION:-}" ] || exec sh -e "$0"
 . /usr/local/lib/oss-verify/release-target.sh
 
-# fuzz_bufq: the release's target curl-fuzz_bufq, its harness patched by curl-fuzz_bufq.0001-no-syscalls.patch (sources)
+# fuzz_bufq: the release's target curl-fuzz_bufq, its harness patched by curl-fuzz_bufq.0001-no-syscalls.patch and
+# curl-fuzz_bufq.0002-mayfail-harness-fixes.patch (sources)
 (
 ov_target_begin curl-fuzz_bufq
 build_lib() {
@@ -178,13 +179,13 @@ ov_target_build fuzz_netrc
 # (pf_proto_target). What they share:
 # - OpenLDAP 2.6.13 without TLS, as curl-fuzzer builds it (:393-435): its options, its headers, liblber and libldap,
 #   cross-compiled with the build's compilers and flags.
-# - libcurl with curl-fuzzer's options that apply without TLS (CURL_COMMON_CMAKE_ARGS, :486-540), among them that
-#   OpenLDAP: a debug build, with UNITTESTS in its own compiles only.
+# - libcurl with curl-fuzzer's options that apply without TLS (CURL_COMMON_CMAKE_ARGS, :486-536), among them that
+#   OpenLDAP: a debug build, with UNITTESTS in its own compiles only (:538-544).
 # - libprotobuf-mutator v1.5, on the toolchain's protobuf 3.21.12 (the sysroot's headers and libprotobuf.a), which its
 #   port/protobuf.h supports, in place of the protobuf that v1.5's CMake downloads.
 # - the runtime: the objects of curl_fuzzer_proto_runtime (:1837-1876, less its TLS sources, which it compiles only
 #   with an OpenSSL target) and curl_fuzzer_proto_runner (:1908-1910), with the zstd and nghttp2 contract shims, each
-#   compiled with COMMON_FLAGS only (:816), as de8de303d3e0 gives no target a FUZZ_PROTOCOLS_* definition.
+#   compiled with COMMON_FLAGS only (:816).
 # The message code (:1652-1789) is the same in each build: curl-fuzz_proto_gen.sh writes it in PF_GEN when the
 # Dockerfile runs, with the toolchain's protoc 3.21.12. Each target links the archives of libprotobuf-mutator and its
 # protobuf in one group (:1793-1814), OpenLDAP's libldap.a and liblber.a, and the shims' wraps
@@ -224,14 +225,15 @@ pf_profile() {
   return 1
 }
 
-# pf_bg <command> [<argument> ...]: the command in the background, with at most $(oft_jobs) such commands at a time.
-# pf_wait waits for those that still run. A command that fails stops the build (sh -e) when it is waited for.
+# pf_bg <command> [<argument> ...]: the command in the background, with at most $(oft_jobs) such commands at a time
+# (pf_jobs, read once). pf_wait waits for those that still run. A command that fails stops the build (sh -e) when it is
+# waited for.
 pf_bg() {
   "$@" &
   pf_running="${pf_running:-} $!"
   # shellcheck disable=SC2086 # the process ids
   set -- $pf_running
-  if [ "$#" -ge "$(oft_jobs)" ]; then
+  if [ "$#" -ge "${pf_jobs:=$(oft_jobs)}" ]; then
     wait "$1"
     shift
     pf_running="$*"
@@ -251,6 +253,14 @@ pf_proto_lib() {
   pf_lpm=/work/ext/libprotobuf-mutator-1.5
   pf_ol=$BUILDDIR/openldap
   pf_p=$BUILDDIR/proto
+  # every profile of PF_TARGETS has its message code, before anything is built
+  for pf_row in $PF_TARGETS; do
+    pf_s=${pf_row#*:}
+    [ -f "$PF_GEN/schema_eligibility/profiles/$pf_s/generated/$pf_s/$pf_s.pb.cc" ] || {
+      echo "build.sh: no message code for the profile $pf_s: add it to PROFILES of curl-fuzz_proto_gen.sh" >&2
+      exit 1
+    }
+  done
   # OpenLDAP, and each compile below, get the flags that oft_build_cmake gives libcurl (whose compiles add UNITTESTS).
   oft_suppress_unused_arg_werror
   oft_define_fuzzing_build_mode
@@ -259,8 +269,9 @@ pf_proto_lib() {
   # answers that they give on Linux: select() yields to other threads (configure stops without an answer), and memcmp
   # works (else libldap calls lutil_memcmp, a replacement that only liblutil has). Its headers are installed in
   # $OFT_PREFIX/include and its two archives copied to $OFT_PREFIX/lib, as curl-fuzzer installs them, and the copy of
-  # its tree is removed, so that oft_build_cmake merges none of its archives into liboft.a.
-  rm -rf "$pf_ol" "$OFT_PREFIX/include" "$OFT_PREFIX/lib"
+  # its tree is removed, so that oft_build_cmake merges none of its archives into liboft.a (nor any archive that an
+  # earlier run of this block left in proto/).
+  rm -rf "$pf_ol" "$pf_p" "$OFT_PREFIX/include" "$OFT_PREFIX/lib"
   mkdir -p "$pf_ol" "$OFT_PREFIX/lib"
   cp -a /work/ext/openldap-2.6.13/. "$pf_ol/"
   ( cd "$pf_ol" && CC="$CC" CFLAGS="$CFLAGS" AR="$CHOST-ar" ./configure --host="$CHOST" \
@@ -273,6 +284,7 @@ pf_proto_lib() {
   cp "$pf_ol/libraries/liblber/.libs/liblber.a" "$pf_ol/libraries/libldap/.libs/libldap.a" "$OFT_PREFIX/lib/"
   rm -rf "$pf_ol"
   # libcurl, with curl-fuzzer's options that apply without TLS, that OpenLDAP, and UNITTESTS in its own compiles only
+  pf_cflags=$CFLAGS
   CFLAGS="$CFLAGS -DUNITTESTS"
   oft_build_cmake -DCURL_USE_LIBPSL=OFF -DCURL_USE_OPENSSL=OFF -DCURL_USE_GNUTLS=OFF -DCURL_USE_MBEDTLS=OFF \
     -DENABLE_DEBUG=ON -DCMAKE_BUILD_TYPE=Debug -DCURL_DISABLE_INSTALL=ON -DCURL_HIDDEN_SYMBOLS=OFF \
@@ -281,12 +293,9 @@ pf_proto_lib() {
     -DCURL_DISABLE_TFTP=OFF -DCURL_DISABLE_GOPHER=OFF -DCURL_USE_GSASL=OFF \
     -DUSE_HTTPSRR=ON -DCURL_BROTLI=ON -DLDAP_INCLUDE_DIR="$OFT_PREFIX/include" \
     -DLDAP_LIBRARY="$OFT_PREFIX/lib/libldap.a" -DLDAP_LBER_LIBRARY="$OFT_PREFIX/lib/liblber.a"
-  pf_kept=""
-  for pf_f in $CFLAGS; do [ "$pf_f" = -DUNITTESTS ] || pf_kept="$pf_kept $pf_f"; done
-  CFLAGS=${pf_kept# }
+  CFLAGS=$pf_cflags
   # libprotobuf-mutator v1.5: its two libraries, with the flags its CMakeLists gives them (by hand: its CMake would
   # download a protobuf), and its installed headers
-  rm -rf "$pf_p"
   mkdir -p "$pf_p/obj" "$pf_p/lpm/include/libprotobuf-mutator" "$pf_p/lpm/lib"
   pf_flags="-fno-exceptions -Wall -Wstring-conversion -O3 -DNDEBUG -fsanitize-coverage=0 -I$pf_lpm"
   for pf_s in binary_format mutator text_format utf8_fix libfuzzer/libfuzzer_mutator libfuzzer/libfuzzer_macro; do
@@ -301,10 +310,13 @@ pf_proto_lib() {
     mkdir -p "$pf_p/lpm/include/libprotobuf-mutator/${pf_h%/*}"
     cp "$pf_lpm/$pf_h" "$pf_p/lpm/include/libprotobuf-mutator/$pf_h"
   done
-  # the runtime, its message code and the shims, compiled as curl-fuzzer compiles them, and archived after libcurl, in
-  # the order of their object names; in the same queue, the two objects of each target (pf_proto_compile), which stay
-  # out of this archive
+  # the two objects of each target (pf_proto_compile), the longest compiles, queued first; then the runtime, its
+  # message code and the shims, compiled as curl-fuzzer compiles them, and archived after libcurl, in the order of their
+  # object names (the two objects of each target stay out of this archive)
   pf_inc="-I$SRCDIR/include -I$PF_GEN -I$pf_tree -I$pf_p/lpm/include -I$pf_p/lpm/include/libprotobuf-mutator"
+  for pf_row in $PF_TARGETS; do
+    pf_bg pf_proto_compile "${pf_row%%:*}" "${pf_row#*:}"
+  done
   for pf_s in proto_fuzzer/allocation_fault_injection proto_fuzzer/api_lifecycle proto_fuzzer/curl_global_lifecycle \
       proto_fuzzer/dict_mock_server proto_fuzzer/fuzzer_main proto_fuzzer/ftp_mock_server \
       proto_fuzzer/gopher_mock_server proto_fuzzer/h2_cleartext_mock_server proto_fuzzer/h2_plan \
@@ -325,14 +337,6 @@ pf_proto_lib() {
     esac
     pf_bg "$CXX" $CFLAGS -g -DCURL_DISABLE_DEPRECATION $pf_inc -c "$pf_src" -o "$pf_p/obj/${pf_s##*/}.o"
   done
-  for pf_row in $PF_TARGETS; do
-    pf_s=${pf_row#*:}
-    [ -f "$PF_GEN/schema_eligibility/profiles/$pf_s/generated/$pf_s/$pf_s.pb.cc" ] || {
-      echo "build.sh: no message code for the profile $pf_s: add it to PROFILES of curl-fuzz_proto_gen.sh" >&2
-      exit 1
-    }
-    pf_bg pf_proto_compile "${pf_row%%:*}" "$pf_s"
-  done
   pf_wait
   # shellcheck disable=SC2046 # the object names, which hold no space
   "$CHOST-ar" r "$BUILDDIR/lib/liboft.a" $(find "$pf_p/obj" -name '*.o' | LC_ALL=C sort)
@@ -350,8 +354,7 @@ pf_proto_compile() {
   "$CHOST-ar" rc "$BUILDDIR/lib/liboft.a" "$BUILDDIR/$2.pb.o"
   # the same-named entry point; it reads its profile's traits
   OFT_CXX_STD=-std=gnu++17
-  OFT_HARNESS_CFLAGS="-DCURL_DISABLE_DEPRECATION -I$SRCDIR/include -I$PF_GEN -I$pf_tree -I$pf_p/lpm/include"
-  OFT_HARNESS_CFLAGS="$OFT_HARNESS_CFLAGS -I$pf_p/lpm/include/libprotobuf-mutator -I$pf_prof"
+  OFT_HARNESS_CFLAGS="-DCURL_DISABLE_DEPRECATION $pf_inc -I$pf_prof"
   oft_build_harness "fuzzer_entrypoints/$1.cc"
 }
 
@@ -370,8 +373,7 @@ pf_proto_target() {
   cp "$pf_obj/harness.o" "$BUILDDIR/harness.o"
   "$CHOST-ar" r "$BUILDDIR/lib/liboft.a" "$pf_obj/$pf_prof.pb.o" "$BUILDDIR/harness.o"
   oft_add_sysroot_deps
-  # the C++ runtime, as oft_build_harness adds it for a C++ harness
-  oft_require_target_cxx
+  # the C++ runtime, as oft_build_harness adds it for a C++ harness (build_lib's oft_require_target_cxx sets it)
   LIB_EXTRA="${LIB_EXTRA:-} $OFT_CXX_RUNTIME"
   # the link: the archives of libprotobuf-mutator and the sysroot's libprotobuf.a in one group, OpenLDAP's libraries,
   # the shims' wraps, and the sysroot's other libraries but libprotobuf-lite.a, whose code libprotobuf.a holds
