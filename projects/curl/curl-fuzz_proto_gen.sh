@@ -26,9 +26,10 @@ CURL_H=/work/ext/curl-fuzz_bufq/src/include/curl/curl.h
 PROTOC_INCLUDE=/opt/oft/host-protobuf/include
 GEN=/work/gen/curl-fuzz_proto
 SE=$GEN/schema_eligibility
-# The profiles of the structured fuzz targets that build.sh builds. compatibility comes first: it also writes the
-# runtime schema and the option manifest.
-PROFILES="compatibility fast_http2 fast_ldap"
+# The profiles of the structured fuzz targets that build.sh builds: each profile of build.sh's list PF_TARGETS, which
+# names the fuzz target of each. compatibility comes first: it also writes the runtime schema and the option manifest.
+PROFILES="compatibility fast_file fast_http fast_http2 proxy_transport fast_websocket fast_telnet fast_smtp fast_imap
+  fast_pop3 fast_mqtt fast_dict fast_ldap fast_rtsp fast_ipfs fast_gopher api multi timing"
 
 rm -rf "$GEN"
 mkdir -p "$SE/runtime" "$GEN/schemas"

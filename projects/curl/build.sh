@@ -173,8 +173,9 @@ ov_target_build fuzz_netrc
 # Not of the release: the structured fuzz targets of curl-fuzzer de8de303d3e0 (curl_add_proto_fuzzer, its
 # CMakeLists.txt:1973-2049), on curl-fuzz_fnmatch's pin, built as that CMakeLists.txt builds them, with TLS off. The
 # block curl-fuzz_proto_lib builds what they share, one time for each build, in its own directory (pf_proto_lib), and
-# builds no fuzz target. The block of each target compiles its profile's message code and its entry point, and links
-# them with what curl-fuzz_proto_lib built (pf_proto_target). What they share:
+# compiles, in parallel with the runtime, the message code of each target's profile and each target's entry point
+# (pf_proto_compile); it links no fuzz target. The block of each target links its two objects with what they share
+# (pf_proto_target). What they share:
 # - OpenLDAP 2.6.13 without TLS, as curl-fuzzer builds it (:393-435): its options, its headers, liblber and libldap,
 #   cross-compiled with the build's compilers and flags.
 # - libcurl with curl-fuzzer's options that apply without TLS (CURL_COMMON_CMAKE_ARGS, :486-540), among them that
@@ -189,6 +190,39 @@ ov_target_build fuzz_netrc
 # protobuf in one group (:1793-1814), OpenLDAP's libldap.a and liblber.a, and the shims' wraps
 # (cmake/ZstdContractApis.cmake, cmake/Nghttp2ContractApis.cmake).
 PF_GEN=/work/gen/curl-fuzz_proto
+# The structured fuzz targets, one row each: <fuzz target>:<profile> (CMakeLists.txt:2054-2123). The entry point of a
+# target is fuzzer_entrypoints/<fuzz target>.cc, as curl_add_proto_fuzzer names it, and its block is
+# curl-fuzz_proto<what follows curl_fuzzer_proto in its name>. PROFILES of curl-fuzz_proto_gen.sh holds each profile.
+PF_TARGETS="
+  curl_fuzzer_proto_file:fast_file
+  curl_fuzzer_proto:compatibility
+  curl_fuzzer_proto_http:fast_http
+  curl_fuzzer_proto_http2:fast_http2
+  curl_fuzzer_proto_socks4:proxy_transport
+  curl_fuzzer_proto_ws:fast_websocket
+  curl_fuzzer_proto_telnet:fast_telnet
+  curl_fuzzer_proto_smtp:fast_smtp
+  curl_fuzzer_proto_imap:fast_imap
+  curl_fuzzer_proto_pop3:fast_pop3
+  curl_fuzzer_proto_mqtt:fast_mqtt
+  curl_fuzzer_proto_dict:fast_dict
+  curl_fuzzer_proto_ldap:fast_ldap
+  curl_fuzzer_proto_rtsp:fast_rtsp
+  curl_fuzzer_proto_ipfs:fast_ipfs
+  curl_fuzzer_proto_gopher:fast_gopher
+  curl_fuzzer_proto_api:api
+  curl_fuzzer_proto_multi:multi
+  curl_fuzzer_proto_timing:timing
+"
+
+# pf_profile <fuzz target>: its profile, from its row of PF_TARGETS.
+pf_profile() {
+  for pf_row in $PF_TARGETS; do
+    if [ "${pf_row%%:*}" = "$1" ]; then echo "${pf_row#*:}"; return 0; fi
+  done
+  echo "build.sh: PF_TARGETS has no row for $1" >&2
+  return 1
+}
 
 # pf_bg <command> [<argument> ...]: the command in the background, with at most $(oft_jobs) such commands at a time.
 # pf_wait waits for those that still run. A command that fails stops the build (sh -e) when it is waited for.
@@ -208,15 +242,16 @@ pf_wait() {
   pf_running=""
 }
 
-# pf_proto_lib: what the structured fuzz targets share, from the block curl-fuzz_proto_lib, in its directory $BUILDDIR
-# (which $OFT_PREFIX names): OpenLDAP in include/ and lib/, libprotobuf-mutator in proto/lpm/, and lib/liboft.a, the
-# archive of libcurl and the runtime, which each target's block copies.
+# pf_proto_lib: from the block curl-fuzz_proto_lib, in its directory $BUILDDIR (which $OFT_PREFIX names): what the
+# structured fuzz targets share, OpenLDAP in include/ and lib/, libprotobuf-mutator in proto/lpm/, and lib/liboft.a, the
+# archive of libcurl and the runtime, which each target's block copies; and the two objects of each target, its message
+# code and its entry point, in proto/t/<fuzz target>/ (pf_proto_compile), which its block adds to that copy.
 pf_proto_lib() {
   pf_tree=/work/targets/$T
   pf_lpm=/work/ext/libprotobuf-mutator-1.5
   pf_ol=$BUILDDIR/openldap
   pf_p=$BUILDDIR/proto
-  # OpenLDAP gets the flags that oft_build_cmake gives libcurl.
+  # OpenLDAP, and each compile below, get the flags that oft_build_cmake gives libcurl (whose compiles add UNITTESTS).
   oft_suppress_unused_arg_werror
   oft_define_fuzzing_build_mode
   # OpenLDAP, as curl-fuzzer builds it: in a copy of its tree, configured with curl-fuzzer's options, and for this
@@ -267,7 +302,8 @@ pf_proto_lib() {
     cp "$pf_lpm/$pf_h" "$pf_p/lpm/include/libprotobuf-mutator/$pf_h"
   done
   # the runtime, its message code and the shims, compiled as curl-fuzzer compiles them, and archived after libcurl, in
-  # the order of their object names
+  # the order of their object names; in the same queue, the two objects of each target (pf_proto_compile), which stay
+  # out of this archive
   pf_inc="-I$SRCDIR/include -I$PF_GEN -I$pf_tree -I$pf_p/lpm/include -I$pf_p/lpm/include/libprotobuf-mutator"
   for pf_s in proto_fuzzer/allocation_fault_injection proto_fuzzer/api_lifecycle proto_fuzzer/curl_global_lifecycle \
       proto_fuzzer/dict_mock_server proto_fuzzer/fuzzer_main proto_fuzzer/ftp_mock_server \
@@ -281,38 +317,62 @@ pf_proto_lib() {
       proto_fuzzer/multi_transfer_runner proto_fuzzer/transfer_session proto_fuzzer/target_policy \
       proto_fuzzer/telnet_mock_server proto_fuzzer/telnet_scenario proto_fuzzer/tftp_mock_server \
       proto_fuzzer/websocket_mock_server proto_fuzzer/ws_frame gen/curl_fuzzer.pb \
-      proto_fuzzer/bounded_anonymous_input_file proto_fuzzer/scenario_runner zstd_contract_shim nghttp2_contract_shim; do
+      proto_fuzzer/bounded_anonymous_input_file proto_fuzzer/scenario_runner zstd_contract_shim \
+      nghttp2_contract_shim; do
     case "$pf_s" in
       gen/*) pf_src=$PF_GEN/${pf_s#gen/}.cc ;;
       *) pf_src=$pf_tree/$pf_s.cc ;;
     esac
     pf_bg "$CXX" $CFLAGS -g -DCURL_DISABLE_DEPRECATION $pf_inc -c "$pf_src" -o "$pf_p/obj/${pf_s##*/}.o"
   done
+  for pf_row in $PF_TARGETS; do
+    pf_s=${pf_row#*:}
+    [ -f "$PF_GEN/schema_eligibility/profiles/$pf_s/generated/$pf_s/$pf_s.pb.cc" ] || {
+      echo "build.sh: no message code for the profile $pf_s: add it to PROFILES of curl-fuzz_proto_gen.sh" >&2
+      exit 1
+    }
+    pf_bg pf_proto_compile "${pf_row%%:*}" "$pf_s"
+  done
   pf_wait
   # shellcheck disable=SC2046 # the object names, which hold no space
   "$CHOST-ar" r "$BUILDDIR/lib/liboft.a" $(find "$pf_p/obj" -name '*.o' | LC_ALL=C sort)
 }
 
-# pf_proto_target <profile> <entry point>: from build_lib of a structured fuzz target's block: a copy of the archive of
-# curl-fuzz_proto_lib, with the profile's message code and the entry point (the harness) added, and the link.
+# pf_proto_compile <fuzz target> <profile>: from pf_proto_lib, in the background: the profile's message code and the
+# target's entry point, compiled as curl-fuzzer compiles them, in proto/t/<fuzz target>/. The entry point is the
+# harness: oft_build_harness compiles and checks it with that directory as its BUILDDIR, and adds harness.o to the
+# lib/liboft.a there, which holds the message code.
+pf_proto_compile() {
+  BUILDDIR=$pf_p/t/$1
+  pf_prof=$PF_GEN/schema_eligibility/profiles/$2
+  mkdir -p "$BUILDDIR/lib"
+  "$CXX" $CFLAGS -g -DCURL_DISABLE_DEPRECATION -I"$pf_prof" -c "$pf_prof/generated/$2/$2.pb.cc" -o "$BUILDDIR/$2.pb.o"
+  "$CHOST-ar" rc "$BUILDDIR/lib/liboft.a" "$BUILDDIR/$2.pb.o"
+  # the same-named entry point; it reads its profile's traits
+  OFT_CXX_STD=-std=gnu++17
+  OFT_HARNESS_CFLAGS="-DCURL_DISABLE_DEPRECATION -I$SRCDIR/include -I$PF_GEN -I$pf_tree -I$pf_p/lpm/include"
+  OFT_HARNESS_CFLAGS="$OFT_HARNESS_CFLAGS -I$pf_p/lpm/include/libprotobuf-mutator -I$pf_prof"
+  oft_build_harness "fuzzer_entrypoints/$1.cc"
+}
+
+# pf_proto_target: from build_lib of a structured fuzz target's block, for the fuzz target that the block's name ($T)
+# names, with the profile of its row of PF_TARGETS: a copy of the archive of curl-fuzz_proto_lib, with the target's
+# message code and entry point (the harness, also as $BUILDDIR/harness.o) added, in that order, from what
+# pf_proto_compile compiled for it, and the link.
 pf_proto_target() {
   pf_lib=$LIBROOT/curl-fuzz_proto_lib
-  pf_tree=/work/targets/$T
-  pf_prof=$PF_GEN/schema_eligibility/profiles/$1
-  # the flags that oft_build_cmake gives the harness of a target that builds its library
-  oft_suppress_unused_arg_werror
-  oft_define_fuzzing_build_mode
+  pf_name=curl_fuzzer_proto${T#curl-fuzz_proto}
+  pf_prof=$(pf_profile "$pf_name")
+  pf_obj=$pf_lib/proto/t/$pf_name
   rm -rf "$BUILDDIR/lib"
   mkdir -p "$BUILDDIR/lib"
   cp "$pf_lib/lib/liboft.a" "$BUILDDIR/lib/liboft.a"
-  "$CXX" $CFLAGS -g -DCURL_DISABLE_DEPRECATION -I"$pf_prof" -c "$pf_prof/generated/$1/$1.pb.cc" -o "$BUILDDIR/$1.pb.o"
-  "$CHOST-ar" r "$BUILDDIR/lib/liboft.a" "$BUILDDIR/$1.pb.o"
+  cp "$pf_obj/harness.o" "$BUILDDIR/harness.o"
+  "$CHOST-ar" r "$BUILDDIR/lib/liboft.a" "$pf_obj/$pf_prof.pb.o" "$BUILDDIR/harness.o"
   oft_add_sysroot_deps
-  # the same-named entry point is the harness; it reads its profile's traits
-  OFT_CXX_STD=-std=gnu++17
-  OFT_HARNESS_CFLAGS="-DCURL_DISABLE_DEPRECATION -I$SRCDIR/include -I$PF_GEN -I$pf_tree -I$pf_lib/proto/lpm/include"
-  OFT_HARNESS_CFLAGS="$OFT_HARNESS_CFLAGS -I$pf_lib/proto/lpm/include/libprotobuf-mutator -I$pf_prof"
-  oft_build_harness "$2"
+  # the C++ runtime, as oft_build_harness adds it for a C++ harness
+  oft_require_target_cxx
+  LIB_EXTRA="${LIB_EXTRA:-} $OFT_CXX_RUNTIME"
   # the link: the archives of libprotobuf-mutator and the sysroot's libprotobuf.a in one group, OpenLDAP's libraries,
   # the shims' wraps, and the sysroot's other libraries but libprotobuf-lite.a, whose code libprotobuf.a holds
   pf_link="-Wl,--start-group $pf_lib/proto/lpm/lib/libprotobuf-mutator-libfuzzer.a"
@@ -345,45 +405,238 @@ pf_proto_target() {
   oft_seal_getpid
 }
 
-# curl-fuzz_proto_lib: what the structured fuzz targets below share (pf_proto_lib); it builds no fuzz target
+# curl-fuzz_proto_lib: what the structured fuzz targets below share, and the objects of each (pf_proto_lib); it links
+# no fuzz target
 (
 ov_target_begin curl-fuzz_proto_lib
 oft_require_target_cxx
 pf_proto_lib
 )
 
-# curl_fuzzer_proto: curl-fuzzer de8de303d3e0's structured fuzz target (profile compatibility), with pf_proto_target
+# curl_fuzzer_proto_file: curl-fuzzer de8de303d3e0's structured fuzz target (profile fast_file)
+(
+ov_target_begin curl-fuzz_proto_file
+LIB_ARCHIVE="lib/liboft.a"
+LIB_CFLAGS=""
+build_lib() {
+  oft_require_target_cxx
+  pf_proto_target
+}
+ov_target_build curl_fuzzer_proto_file
+)
+
+# curl_fuzzer_proto: curl-fuzzer de8de303d3e0's structured fuzz target (profile compatibility)
 (
 ov_target_begin curl-fuzz_proto
 LIB_ARCHIVE="lib/liboft.a"
 LIB_CFLAGS=""
 build_lib() {
   oft_require_target_cxx
-  pf_proto_target compatibility fuzzer_entrypoints/curl_fuzzer_proto.cc
+  pf_proto_target
 }
 ov_target_build curl_fuzzer_proto
 )
 
-# curl_fuzzer_proto_http2: curl-fuzzer de8de303d3e0's structured fuzz target (profile fast_http2), with pf_proto_target
+# curl_fuzzer_proto_http: curl-fuzzer de8de303d3e0's structured fuzz target (profile fast_http)
+(
+ov_target_begin curl-fuzz_proto_http
+LIB_ARCHIVE="lib/liboft.a"
+LIB_CFLAGS=""
+build_lib() {
+  oft_require_target_cxx
+  pf_proto_target
+}
+ov_target_build curl_fuzzer_proto_http
+)
+
+# curl_fuzzer_proto_http2: curl-fuzzer de8de303d3e0's structured fuzz target (profile fast_http2)
 (
 ov_target_begin curl-fuzz_proto_http2
 LIB_ARCHIVE="lib/liboft.a"
 LIB_CFLAGS=""
 build_lib() {
   oft_require_target_cxx
-  pf_proto_target fast_http2 fuzzer_entrypoints/curl_fuzzer_proto_http2.cc
+  pf_proto_target
 }
 ov_target_build curl_fuzzer_proto_http2
 )
 
-# curl_fuzzer_proto_ldap: curl-fuzzer de8de303d3e0's structured fuzz target (profile fast_ldap), with pf_proto_target
+# curl_fuzzer_proto_socks4: curl-fuzzer de8de303d3e0's structured fuzz target (profile proxy_transport)
+(
+ov_target_begin curl-fuzz_proto_socks4
+LIB_ARCHIVE="lib/liboft.a"
+LIB_CFLAGS=""
+build_lib() {
+  oft_require_target_cxx
+  pf_proto_target
+}
+ov_target_build curl_fuzzer_proto_socks4
+)
+
+# curl_fuzzer_proto_ws: curl-fuzzer de8de303d3e0's structured fuzz target (profile fast_websocket)
+(
+ov_target_begin curl-fuzz_proto_ws
+LIB_ARCHIVE="lib/liboft.a"
+LIB_CFLAGS=""
+build_lib() {
+  oft_require_target_cxx
+  pf_proto_target
+}
+ov_target_build curl_fuzzer_proto_ws
+)
+
+# curl_fuzzer_proto_telnet: curl-fuzzer de8de303d3e0's structured fuzz target (profile fast_telnet)
+(
+ov_target_begin curl-fuzz_proto_telnet
+LIB_ARCHIVE="lib/liboft.a"
+LIB_CFLAGS=""
+build_lib() {
+  oft_require_target_cxx
+  pf_proto_target
+}
+ov_target_build curl_fuzzer_proto_telnet
+)
+
+# curl_fuzzer_proto_smtp: curl-fuzzer de8de303d3e0's structured fuzz target (profile fast_smtp)
+(
+ov_target_begin curl-fuzz_proto_smtp
+LIB_ARCHIVE="lib/liboft.a"
+LIB_CFLAGS=""
+build_lib() {
+  oft_require_target_cxx
+  pf_proto_target
+}
+ov_target_build curl_fuzzer_proto_smtp
+)
+
+# curl_fuzzer_proto_imap: curl-fuzzer de8de303d3e0's structured fuzz target (profile fast_imap)
+(
+ov_target_begin curl-fuzz_proto_imap
+LIB_ARCHIVE="lib/liboft.a"
+LIB_CFLAGS=""
+build_lib() {
+  oft_require_target_cxx
+  pf_proto_target
+}
+ov_target_build curl_fuzzer_proto_imap
+)
+
+# curl_fuzzer_proto_pop3: curl-fuzzer de8de303d3e0's structured fuzz target (profile fast_pop3)
+(
+ov_target_begin curl-fuzz_proto_pop3
+LIB_ARCHIVE="lib/liboft.a"
+LIB_CFLAGS=""
+build_lib() {
+  oft_require_target_cxx
+  pf_proto_target
+}
+ov_target_build curl_fuzzer_proto_pop3
+)
+
+# curl_fuzzer_proto_mqtt: curl-fuzzer de8de303d3e0's structured fuzz target (profile fast_mqtt)
+(
+ov_target_begin curl-fuzz_proto_mqtt
+LIB_ARCHIVE="lib/liboft.a"
+LIB_CFLAGS=""
+build_lib() {
+  oft_require_target_cxx
+  pf_proto_target
+}
+ov_target_build curl_fuzzer_proto_mqtt
+)
+
+# curl_fuzzer_proto_dict: curl-fuzzer de8de303d3e0's structured fuzz target (profile fast_dict)
+(
+ov_target_begin curl-fuzz_proto_dict
+LIB_ARCHIVE="lib/liboft.a"
+LIB_CFLAGS=""
+build_lib() {
+  oft_require_target_cxx
+  pf_proto_target
+}
+ov_target_build curl_fuzzer_proto_dict
+)
+
+# curl_fuzzer_proto_ldap: curl-fuzzer de8de303d3e0's structured fuzz target (profile fast_ldap)
 (
 ov_target_begin curl-fuzz_proto_ldap
 LIB_ARCHIVE="lib/liboft.a"
 LIB_CFLAGS=""
 build_lib() {
   oft_require_target_cxx
-  pf_proto_target fast_ldap fuzzer_entrypoints/curl_fuzzer_proto_ldap.cc
+  pf_proto_target
 }
 ov_target_build curl_fuzzer_proto_ldap
+)
+
+# curl_fuzzer_proto_rtsp: curl-fuzzer de8de303d3e0's structured fuzz target (profile fast_rtsp)
+(
+ov_target_begin curl-fuzz_proto_rtsp
+LIB_ARCHIVE="lib/liboft.a"
+LIB_CFLAGS=""
+build_lib() {
+  oft_require_target_cxx
+  pf_proto_target
+}
+ov_target_build curl_fuzzer_proto_rtsp
+)
+
+# curl_fuzzer_proto_ipfs: curl-fuzzer de8de303d3e0's structured fuzz target (profile fast_ipfs)
+(
+ov_target_begin curl-fuzz_proto_ipfs
+LIB_ARCHIVE="lib/liboft.a"
+LIB_CFLAGS=""
+build_lib() {
+  oft_require_target_cxx
+  pf_proto_target
+}
+ov_target_build curl_fuzzer_proto_ipfs
+)
+
+# curl_fuzzer_proto_gopher: curl-fuzzer de8de303d3e0's structured fuzz target (profile fast_gopher)
+(
+ov_target_begin curl-fuzz_proto_gopher
+LIB_ARCHIVE="lib/liboft.a"
+LIB_CFLAGS=""
+build_lib() {
+  oft_require_target_cxx
+  pf_proto_target
+}
+ov_target_build curl_fuzzer_proto_gopher
+)
+
+# curl_fuzzer_proto_api: curl-fuzzer de8de303d3e0's structured fuzz target (profile api)
+(
+ov_target_begin curl-fuzz_proto_api
+LIB_ARCHIVE="lib/liboft.a"
+LIB_CFLAGS=""
+build_lib() {
+  oft_require_target_cxx
+  pf_proto_target
+}
+ov_target_build curl_fuzzer_proto_api
+)
+
+# curl_fuzzer_proto_multi: curl-fuzzer de8de303d3e0's structured fuzz target (profile multi)
+(
+ov_target_begin curl-fuzz_proto_multi
+LIB_ARCHIVE="lib/liboft.a"
+LIB_CFLAGS=""
+build_lib() {
+  oft_require_target_cxx
+  pf_proto_target
+}
+ov_target_build curl_fuzzer_proto_multi
+)
+
+# curl_fuzzer_proto_timing: curl-fuzzer de8de303d3e0's structured fuzz target (profile timing)
+(
+ov_target_begin curl-fuzz_proto_timing
+LIB_ARCHIVE="lib/liboft.a"
+LIB_CFLAGS=""
+build_lib() {
+  oft_require_target_cxx
+  pf_proto_target
+}
+ov_target_build curl_fuzzer_proto_timing
 )

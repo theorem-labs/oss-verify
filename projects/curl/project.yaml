@@ -5,8 +5,13 @@ primary_contact: n/a
 homepage: https://curl.haxx.se
 language: c++
 sanitizers: [address, undefined]
-# build.sh also builds fuzz_doh and fuzz_netrc. They are not listed yet: each makes system calls that the process
-# model of the statements does not accept yet. curl_fuzzer_proto_file is not built at all: it is not listed either,
-# and building libprotobuf-mutator and its protobuf for every sanitizer took about an hour each, past the time the
-# enrollment build is given.
-fuzz_targets: [fuzz_bufq, fuzz_fnmatch, fuzz_url]
+# build.sh builds the 24 fuzz targets below. fuzz_bufq and fuzz_fnmatch keep the release's build: their binaries reach
+# no TLS code, and a build with TLS off changes fuzz_bufq's plain and UBSan code. Every other target is built with TLS
+# off. The structured targets (curl_fuzzer_proto_file and the 18 after it) share one build of libcurl, OpenLDAP and
+# libprotobuf-mutator in each build, on the toolchain's protobuf 3.21.12.
+fuzz_targets: [fuzz_bufq, fuzz_fnmatch, fuzz_url, fuzz_doh, fuzz_netrc, curl_fuzzer_proto_file, curl_fuzzer_proto,
+  curl_fuzzer_proto_http, curl_fuzzer_proto_http2, curl_fuzzer_proto_socks4, curl_fuzzer_proto_ws,
+  curl_fuzzer_proto_telnet, curl_fuzzer_proto_smtp, curl_fuzzer_proto_imap, curl_fuzzer_proto_pop3,
+  curl_fuzzer_proto_mqtt, curl_fuzzer_proto_dict, curl_fuzzer_proto_ldap, curl_fuzzer_proto_rtsp,
+  curl_fuzzer_proto_ipfs, curl_fuzzer_proto_gopher, curl_fuzzer_proto_api, curl_fuzzer_proto_multi,
+  curl_fuzzer_proto_timing]
