@@ -1,8 +1,8 @@
 # libmackie: the Mackie Control Universal (MCU) wire protocol, the language a Behringer X-Touch speaks over MIDI, for
 # FreeMixer. The fuzz targets drive the readers of every byte a surface sends and every string a host shows on it: the
 # channel messages, the handshake SysEx, the scribble and seven-segment text, the control map and the encoders. Pinned
-# to main after the merge of the fuzz contract.
-repo: https://github.com/Open-Mixer/libmackie#a458e737495d3c3acc0158194748cae3794dfeb9
+# to main after the merge of the four stronger checks of the enrollment review (libmackie#3).
+repo: https://github.com/Open-Mixer/libmackie#a56646327d02a8568f86f8f02ccdf456aa5298a7
 primary_contact: linuxnow@gmail.com
 homepage: https://github.com/Open-Mixer/libmackie
 language: c
