@@ -4,7 +4,7 @@
 #
 # The other lines own each file that changes what a workflow runs, whoever opens the pull request:
 #   /.github/                     the workflows and the scripts they run.
-#   /tools/                       the tools the workflows run (tools/check, tools/validate.py) and their tests.
+#   /tools/                       the tools the workflows run (tools/check, tools/validate.py).
 #   /infra/                       the toolchains tools/check builds with (infra/toolchains.tsv, infra/base-builder/).
 #   .claude/, CLAUDE*.md,         what Claude Code loads in the review job, which holds an identity token: settings
 #   AGENTS*.md (at any depth),    and hooks, skills, instructions and MCP servers.
@@ -18,7 +18,8 @@
 # The ruleset of main requires a code owner's approval, so a change to any of these files, or to this file, which says
 # who owns them, needs the approval of a member of @theorem-labs/engineering, a team of people. No other file has an
 # owner, so no other pull request needs a code owner. These lines stay the last patterns of the file: the last pattern
-# that matches a file decides its owner.
+# that matches a file decides its owner. The tests in tests/ have no owner: only tests.yaml runs them, with a read-only
+# token and no secret, so a change to them changes nothing that a workflow with a token or a secret runs.
 /.github/ @theorem-labs/engineering
 /tools/ @theorem-labs/engineering
 /infra/ @theorem-labs/engineering

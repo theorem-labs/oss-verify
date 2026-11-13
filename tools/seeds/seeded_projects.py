@@ -15,7 +15,7 @@ The table holds no fact of its own. It is made from these files only:
 A seeded project's fuzz targets are in its project.yaml (tools/seeds/<name>/, or projects/<name>/ for one whose
 proofs we publish), and not in the table: a maintainer who adopts a project in projects/ changes that file.
 
-tools/tests/test_seeded_projects.py fails when docs/seeded-projects.tsv is not what this writes. After a change to
+tests/test_seeded_projects.py fails when docs/seeded-projects.tsv is not what this writes. After a change to
 one of those files, run this, and commit docs/seeded-projects.tsv with the change.
 """
 import argparse

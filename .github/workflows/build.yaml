@@ -268,7 +268,7 @@ name: "Build"
 # pull request's head as its own runs do (screened first, and counted by the daily cap, when its author has no write
 # access), posts the comment and, for an enrollment, records the check run Enrollment review, or `-f issue=<n>`
 # for the reply to an issue, which posts nothing and stores the draft in the private bucket.
-# Before the merge, tools/tests runs the review's own steps with stand-ins.
+# Before the merge, the tests in tests/ run the review's own steps with stand-ins.
 #
 # The review's Claude Code exports its usage by OpenTelemetry to Theorem's cost collector, over Theorem's tailnet, at
 # the collector's tailnet address on port 80 (SPEND_COLLECTOR_URL below; an address, not a secret). The collector

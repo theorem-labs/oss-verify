@@ -28,7 +28,7 @@ whole diff, as on a first review.
 ## Checks
 
 1. **It is correct.** The change does what its description says, and breaks nothing that calls the code it changes.
-2. **It is tested.** A change to a script or a program comes with a test in `tools/tests` that runs it and fails
+2. **It is tested.** A change to a script or a program comes with a test in `tests/` that runs it and fails
    without the change. A change that only a workflow's YAML holds (a trigger, an `if:`, a permission, a concurrency
    key) needs no test: a test that reads the YAML proves nothing, and a real run after the merge proves it. Never ask
    for a test whose only oracle is a workflow file's text.

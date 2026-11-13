@@ -126,7 +126,7 @@ The driver's seals also use `--wrap`, in all four builds: `getenv`, `getpid`, `g
 
 ## What the Dockerfile must do
 
-Start from [templates/Dockerfile](../templates/Dockerfile). Two builds written by hand are small examples. [projects/cjson/](../projects/cjson/) builds cJSON's own fuzz target with CMake; its `Dockerfile` also copies the checkout to the path where the oss-fuzz-theorems release built it and makes that copy the `WORKDIR`, and its `build.sh` builds that copy, which only a build that must match the release's bytes needs. Make such a copy in the `Dockerfile`, not in `build.sh`: a file that `build.sh` makes exists only in the container of that build, so a compile command that names it cannot run again in a new container of the project image. Make it the `WORKDIR` too, because a breakage patch of `tools/check --checks` changes the files under the `WORKDIR` ([below](#the-checks-of-a-fuzz-target)). [tools/tests/fixtures/example/](../tools/tests/fixtures/example/) is a test project, whose `Dockerfile` takes the source from the build context, as a `Dockerfile` in your repository does, and whose `fuzz/` subdirectory a project directory cannot have. Obey these rules:
+Start from [templates/Dockerfile](../templates/Dockerfile). Two builds written by hand are small examples. [projects/cjson/](../projects/cjson/) builds cJSON's own fuzz target with CMake; its `Dockerfile` also copies the checkout to the path where the oss-fuzz-theorems release built it and makes that copy the `WORKDIR`, and its `build.sh` builds that copy, which only a build that must match the release's bytes needs. Make such a copy in the `Dockerfile`, not in `build.sh`: a file that `build.sh` makes exists only in the container of that build, so a compile command that names it cannot run again in a new container of the project image. Make it the `WORKDIR` too, because a breakage patch of `tools/check --checks` changes the files under the `WORKDIR` ([below](#the-checks-of-a-fuzz-target)). [tests/fixtures/example/](../tests/fixtures/example/) is a test project, whose `Dockerfile` takes the source from the build context, as a `Dockerfile` in your repository does, and whose `fuzz/` subdirectory a project directory cannot have. Obey these rules:
 
 1. Start with `FROM ${BASE_BUILDER}`, after `ARG BASE_BUILDER=oss-verify-base-builder`. `tools/check` gives the builder that it made.
 2. Declare `ARG REPO` and `ARG COMMIT`.
@@ -272,7 +272,7 @@ With today's driver, a statement accepts only the statuses 0 and 2 ([what-gets-p
 
 A sanitizer detection writes nothing. AddressSanitizer aborts silently. UndefinedBehaviorSanitizer has no runtime and traps ([above](#the-builds)).
 
-`tools/tests/test_builder.py` checks each status in all four builds, on a C fuzz target and a C++ fuzz target. It also shows a special case: UndefinedBehaviorSanitizer does not check a `volatile` access for a null pointer. Thus a load through a `volatile` null pointer crashes with 139 in each build. A load through a pointer that is not `volatile` traps with 132 in the UBSan builds.
+`tests/test_builder.py` checks each status in all four builds, on a C fuzz target and a C++ fuzz target. It also shows a special case: UndefinedBehaviorSanitizer does not check a `volatile` access for a null pointer. Thus a load through a `volatile` null pointer crashes with 139 in each build. A load through a pointer that is not `volatile` traps with 132 in the UBSan builds.
 
 ### What the driver does not intercept
 
@@ -328,7 +328,7 @@ A fuzz target linked with `$LIB_FUZZING_ENGINE` counts nothing. In counting mode
 
 To find which allocations an input makes, link a sweep or test build with `$LIB_ALLOCATION_COUNTING_ENGINE`. We never publish such a build. It is the same as `$LIB_ALLOCATION_FAILURE_ENGINE`, with one difference. In counting mode, it exits with the number of calls that it counted, or 251 if there were more.
 
-`tools/tests/test_builder.py` checks the mask, counting mode and `std::bad_alloc` in all four builds, with each engine. It also builds cJSON's fuzz target with both engines ([tools/tests/fixtures/cjson](../tools/tests/fixtures/cjson/build.sh)). The test shows three results. The fuzz target keeps the release's bytes. An input that makes 21 allocations gets the same count in each build. If any one allocation fails, or all fail, the fuzz target still exits with 0.
+`tests/test_builder.py` checks the mask, counting mode and `std::bad_alloc` in all four builds, with each engine. It also builds cJSON's fuzz target with both engines ([tests/fixtures/cjson](../tests/fixtures/cjson/build.sh)). The test shows three results. The fuzz target keeps the release's bytes. An input that makes 21 allocations gets the same count in each build. If any one allocation fails, or all fail, the fuzz target still exits with 0.
 
 ## The fuzz targets
 

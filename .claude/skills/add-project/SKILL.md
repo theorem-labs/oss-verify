@@ -164,7 +164,7 @@ For a `python` project, the fuzz targets are atheris harnesses. Write the build 
 
 For a `go` project, the fuzz targets are its OSS-Fuzz Go fuzz targets, and `build.sh` is its OSS-Fuzz `build.sh`, as it is (`docs/build-contract.md`, "Go fuzz targets"). Write the build files in the form of a ported Go build, for example `tools/seeds/go-toml/`. Pin the modules in a `go.lock`, and get them with a `gomodules` line in `sources`. Leave out `sanitizers`, or give `sanitizers: []`.
 
-Copy `templates/Dockerfile` and `templates/build.sh` into `projects/<name>/`, and give them their licence lines (3.8). Port the project's build (`docs/build-contract.md`). Two builds written by hand are small examples (`docs/build-contract.md`, "What the Dockerfile must do"): `projects/cjson/`, and the test project `tools/tests/fixtures/example/`. The other projects in `projects/` and `tools/seeds/` are mostly ports of a release build, which use the helpers of `release-target.sh`. For a `c` or `c++` project, do not copy their form for a new build.
+Copy `templates/Dockerfile` and `templates/build.sh` into `projects/<name>/`, and give them their licence lines (3.8). Port the project's build (`docs/build-contract.md`). Two builds written by hand are small examples (`docs/build-contract.md`, "What the Dockerfile must do"): `projects/cjson/`, and the test project `tests/fixtures/example/`. The other projects in `projects/` and `tools/seeds/` are mostly ports of a release build, which use the helpers of `release-target.sh`. For a `c` or `c++` project, do not copy their form for a new build.
 
 - In the `Dockerfile`, start with `FROM ${BASE_BUILDER}`.
 - Declare `ARG REPO` and `ARG COMMIT`.

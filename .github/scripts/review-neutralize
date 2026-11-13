@@ -34,7 +34,7 @@ comment must carry no marker line but the job's own. This is gh-aw's output sani
 
 GitHub's markdown API renders &#64;octocat, &commat;octocat, `x`@octocat, #1, GH-1 and an issue URL as a mention or an
 issue link, hides what follows an unclosed <!--, <!DOCTYPE, <![CDATA[ or <?, and does none of these with the word
-joiners of steps 3 to 5 (measured on 2026-11-02; tools/tests/test_check_checks.py, ModelText). The text is cut after
+joiners of steps 3 to 5 (measured on 2026-11-02; tests/test_check_checks.py, ModelText). The text is cut after
 these steps, so that the joiners cannot take the text over a limit that GitHub sets."""
 import html
 import re
