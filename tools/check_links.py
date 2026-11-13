@@ -109,9 +109,11 @@ FORTRAN_RUNTIME = re.compile(r"lib(Fortran[A-Za-z]*|flang[A-Za-z_.]*|gfortran|qu
 # musl's C library: its start files, libc.a, its empty stub archives, and libssp_nonshared.a.
 LIBC = re.compile(r"(crt1|crti|crtn|Scrt1|rcrt1)\.o|lib(c|m|rt|pthread|crypt|util|xnet|resolv|dl|ssp_nonshared)\.a")
 SYSROOT_LIB = re.compile(r"/opt/[^/]+(/[^/]+)*/usr/lib/[^/]+\.a")
-# rustc's allocator shim defines only these, and forwards each to the standard library.
+# rustc's allocator shim defines only these: allocator forwards and marker functions.
 RUST_ALLOCATOR_SHIM = re.compile(r"__rust_(alloc|dealloc|realloc|alloc_zeroed|alloc_error_handler|"
-                                 r"no_alloc_shim_is_unstable)")
+                                 r"no_alloc_shim_is_unstable(?:_v2)?|alloc_error_handler_should_panic_v2)")
+# The v0 spelling of a function in rustc's synthetic __rustc crate, with an optional crate disambiguator.
+RUSTC_V0 = re.compile(r"_RNvC(?:s[0-9A-Za-z]+_)?7___rustc([0-9]+)_(__rust_[a-z0-9_]+)")
 # The major opcodes (the low seven bits) of the riscv64 instructions that read or write memory: a load, a
 # floating-point load, a store, a floating-point store and an atomic. AddressSanitizer instruments these and nothing
 # else, so code that holds none of them has nothing for it to check.
@@ -843,19 +845,29 @@ def is_seal(facts):
             and all(name.startswith("__wrap_") for name in facts.defined))
 
 
+def is_rust_allocator_symbol(name):
+    """Whether a global function is one of rustc's allocator shim functions, unmangled or v0-mangled."""
+    mangled = RUSTC_V0.fullmatch(name)
+    if mangled:
+        length, name = mangled.groups()
+        if length != str(len(name)):
+            return False
+    return RUST_ALLOCATOR_SHIM.fullmatch(name) is not None
+
+
 def is_rust_allocator_shim(facts):
     """Whether an object is rustc's allocator shim, which an AddressSanitizer build may link uninstrumented
     (docs/build-contract.md, "The checks of the binaries"). Three things, all of them read from the object:
 
     - it defines at least one global function;
-    - every function it defines, of any binding, is one the shim defines (RUST_ALLOCATOR_SHIM), so a local function
-      cannot ride into the exemption beside them;
+    - every function it defines, of any binding, is one the shim defines (is_rust_allocator_symbol), so a local
+      function cannot ride into the exemption beside them;
     - its code neither reads nor writes memory (touches_memory), which is the reason the exemption exists: there is
       nothing in it for AddressSanitizer to check. An object that carries the shim's names and makes an access is a
       finding like any other.
     """
     return (bool(facts.defined) and not facts.memory
-            and all(RUST_ALLOCATOR_SHIM.fullmatch(name) for name in facts.functions))
+            and all(is_rust_allocator_symbol(name) for name in facts.functions))
 
 
 def shim_entry(c):

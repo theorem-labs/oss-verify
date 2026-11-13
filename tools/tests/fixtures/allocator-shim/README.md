@@ -8,11 +8,11 @@ claim about an object's **code**, and a synthetic symbol table cannot test it.
 
 | object | what it is | the check |
 |---|---|---|
-| `shim-forwards.o` | the shim's six functions, each a tail forward, no memory access | exempt |
-| `shim-stores.o` | the same names, and `__rust_alloc`/`__rust_dealloc` each store a byte | a finding |
+| `shim-forwards.o` | the shim's six functions: five tail forwards and one empty marker, no memory access | exempt |
+| `shim-stores.o` | two of those names, `__rust_alloc` and `__rust_dealloc`, and each stores a byte | a finding |
 | `shim-local-access.o` | one global, `__rust_alloc`; the loads and stores are in two local functions | a finding |
 | `shim-local-call.o` | one global, `__rust_alloc`, and a local function of another name; no memory access at all | a finding |
-| `shim-rustc-v0.o` | the shim that the pinned Rust toolchain writes, taken from a real `asan` link | no memory access; its v0 names are not ones this recognises |
+| `shim-rustc-v0.o` | the shim that the pinned Rust toolchain writes, taken from a real `asan` link | exempt |
 
 `main` before this change exempted the first four: it read the names and not the code, and
 it never looked at a local function.
