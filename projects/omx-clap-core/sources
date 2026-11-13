@@ -1,0 +1,3 @@
+# omx-clap-core's preset reader (src/preset_file.c) includes omx-contract's JSON writer, include/omxcontract/omx_json_write.h:
+# that release of omx-contract, its headers only used.
+git	omx-contract	https://github.com/Open-Mixer/omx-contract	9cdfd6d4da640992a90141048e6fbc0fcde54ec9
