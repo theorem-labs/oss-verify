@@ -1,6 +1,6 @@
-# plugin-hostd's one dependency, mod-host's protocol headers (host-errors.h, mod-host.h, socket.h and what they
-# include), as FreeMixer ships them in mod-host-protocol-devel 0.10.6.f14a230-11.1: mod-host at the upstream commit
-# packaging/mod-host/mod-host.spec of FreeMixer/.github names, with that spec's patches, which the Dockerfile applies.
+# plugin-hostd's two dependencies, as the fuzz targets read them: plugin-hostd-protocol at v0.5.7 (its headers, mod-host's
+# protocol headers among them, the socket and utils sources of its library, and the JSON of the protocol that
+# src/reply_words.h is written from), and plugin-db at v0.4.1 (its headers: plugin_db_constants.h, which includes nothing).
 # kind	path	arguments: see lay-out-sources
-git	freemixer	https://github.com/FreeMixer/.github	89e5eb4e49255be2cab73429db41ab6ea3bba584
-git	mod-host	https://github.com/mod-audio/mod-host	f14a230bf48b42035406d2b2dca038efa4d2abca
+git	plugin-hostd-protocol	https://github.com/Open-Mixer/plugin-hostd-protocol	f9ba58415d54425bf30caaa138096e7371711209
+git	plugin-db	https://github.com/Open-Mixer/plugin-db	678118a88b2e21b15606f6f19ed19759ac6eae12
