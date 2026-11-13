@@ -23,9 +23,10 @@
 #   - #47 (issue #35): struct pcap_source gains skipped_oversized, the count of the records larger than the buffer
 #     that pcap_source_next skips, and LIBREAC_ABI becomes 7. fuzz_pcap checks the count, the new mutant
 #     pcap-skipped.patch breaks it, and pcap.patch and fuzz_pcap's mutant records cite the moved pcap_source.c lines.
-#   - #46: reac_master_rx answers only to the bound box's source once a box is latched or established
-#     (reac_master_peer_accepts), reac_disco_entry counts its frames in what was padding, and the hunt takes a
-#     rival's role into account only once it has streamed (REAC_HUNT_RIVAL_*).
+#   - #46: once a box is latched or established, reac_master_rx refuses a box frame from any other source, except a
+#     JOIN while the box is only latched (reac_master_peer_accepts); reac_disco_entry counts its frames in what was
+#     padding; the hunt takes a rival's role into account only once it has streamed (REAC_HUNT_RIVAL_*); and a
+#     comment in reac_master_fsm.c moves the lines below it down by six.
 #   - #48: LIBREAC_VERSION_MINOR becomes 11, and comments in reac.h and reac_facts_master_cadence.h move the lines
 #     below them down by nine and by two.
 # The other changes are fuzz tooling, tests, the build system and packaging, CI, documentation, and code that build.sh
