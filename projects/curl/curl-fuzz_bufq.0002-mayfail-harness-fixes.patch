@@ -1,0 +1,42 @@
+curl-fuzz_bufq.0002-mayfail-harness-fixes.patch
+Harness bug fix.
+
+Two fixes to fuzz_bufq.cc after curl-fuzz_bufq.0001-no-syscalls.patch (sha256 296a1729698087b0... before, 4aea4fee794c2b95...
+after), for the fuzz target fuzz_bufq. Both are faults of the harness when an allocation fails; curl's bufq does what
+its documentation says in both. Each input below is a driver input file: the 6-byte header (no allocation mask) then the
+harness's bytes.
+
+1. READ: the harness passes malloc()'s result to Curl_bufq_read() unchecked. When malloc(op_size) fails, curl copies
+   the queue's bytes to address 0. Input 000000000000 0000040101000000000000000000 (max_chunks 1, chunk_size 1, no
+   pool; WRITE 1 byte; READ 262144) with the 262,164-byte mmap that malloc makes for the READ refused: SIGSEGV in
+   memcpy. The fix skips the operation when malloc() returns NULL.
+2. WRITE: Curl_bufq_write() can append part of its input and then return CURLE_OUT_OF_MEMORY when a later chunk cannot
+   be allocated; *pnwritten holds the bytes it appended (lib/bufq.c:375-391). The harness's error branch dropped them,
+   so its count of queued bytes fell behind the queue, and the asserts at the top of its loop
+   (Curl_bufq_is_empty(&q) == !buffer_bytes, then Curl_bufq_len(&q) == buffer_bytes) aborted on the next operation.
+   Input 000000000000 0300800000000000ff3f01 (max_chunks 2, chunk_size 16384, no pool; WRITE 32768; RESET) with the
+   second chunk's mmap refused: SIGABRT. The fix counts them, as the SLURP branch's error path already does.
+
+diff --git a/fuzz_bufq.cc b/fuzz_bufq.cc
+index aeb5a1141aef0ca4a2985e67553ddcee9b9fef10..2d901f03a0892537380a2bcb0dd4be8f90e1eca3 100644
+--- a/fuzz_bufq.cc
++++ b/fuzz_bufq.cc
+@@ -217,6 +217,8 @@ int fuzz_handle_bufq(FuzzedDataProvider *fuzz)
+         size_t op_size = fuzz->ConsumeIntegralInRange(0, FUZZ_MAX_RW_SIZE);
+         FV_PRINTF(verbose, "OP: read, size %zu\n", op_size);
+         unsigned char *buf = (unsigned char *)malloc(op_size * sizeof(*buf));
++        if (!buf)
++          break;
+         size_t read;
+         CURLcode result = Curl_bufq_read(&q, buf, op_size, &read);
+         if (!result) {
+@@ -311,6 +313,9 @@ int fuzz_handle_bufq(FuzzedDataProvider *fuzz)
+           assert(buffer_bytes <= chunk_size * max_chunks);
+         } else {
+           FV_PRINTF(verbose, "OP: write, error\n");
++          /* it may still have written something, adjust for that */
++          next_byte_write += written;
++          buffer_bytes += written;
+         }
+         break;
+       }
