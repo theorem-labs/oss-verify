@@ -3,7 +3,7 @@
 """Write docs/seeded-projects.tsv: each project of OSS-Fuzz at the commit of the oss-fuzz-theorems 2026.10 release,
 whether we seeded it, what oss-verify check found of its seeded build, and why we did not seed it.
 
-    src/oss_verify/seeded_projects.py    write docs/seeded-projects.tsv
+    uv run python3 -m oss_verify.seeded_projects    write docs/seeded-projects.tsv
 
 The table holds no fact of its own. It is made from these files only:
   - seeds/oss-fuzz-projects.tsv: each project of OSS-Fuzz at that commit, and what the release's data says of
@@ -15,7 +15,7 @@ A seeded project's fuzz targets are in its project.yaml (seeds/<name>/, or proje
 proofs we publish), and not in the table: a maintainer who adopts a project in projects/ changes that file.
 
 tests/test_seeded_projects.py fails when docs/seeded-projects.tsv is not what this writes. After a change to
-one of those files, run this, and commit docs/seeded-projects.tsv with the change.
+one of those files, run it, and commit docs/seeded-projects.tsv with the change.
 """
 import argparse
 import pathlib

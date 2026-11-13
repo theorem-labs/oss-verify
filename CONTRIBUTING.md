@@ -3,7 +3,7 @@
 
 This page tells which contributions this repository accepts. It is for maintainers who want to enroll a project.
 
-Most pull requests enroll, change, pause or remove one project under `projects/<name>/`. Such a pull request changes nothing else. A pull request that changes no file under `projects/`, for example a fix to `tools/`, `templates/`, `infra/` or `docs/`, gets a change review, and a maintainer decides whether to merge it. It does not need the box that accepts the [OSS Verify terms](https://theorem.dev/oss-verify/terms/): the terms are for the enrollment of a project.
+Most pull requests enroll, change, pause or remove one project under `projects/<name>/`. Such a pull request changes nothing else. A pull request that changes no file under `projects/`, for example a fix to `src/oss_verify/`, `templates/`, `infra/` or `docs/`, gets a change review, and a maintainer decides whether to merge it. It does not need the box that accepts the [OSS Verify terms](https://theorem.dev/oss-verify/terms/): the terms are for the enrollment of a project.
 
 To enroll a project, follow the [README](README.md), or give a coding agent the prompt in [Enroll with a coding agent](README.md#enroll-with-a-coding-agent). To adopt a project that we seeded, follow [docs/project-yaml.md](docs/project-yaml.md#seeded-projects).
 
