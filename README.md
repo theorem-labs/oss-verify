@@ -14,7 +14,7 @@ We accept an established open-source project ([theorem.dev/oss-verify](https://t
 5. Our builder can build the project. The [language table](docs/project-yaml.md#language) tells which languages it builds today.
 6. The enrollment names, in `primary_contact`, the one address that gets findings.
 
-A project of any size can enroll. Because of our capacity, we are most likely to respond quickly to a project in C whose plain binaries (`<target>.plain`) are statically linked and have less than 1 MB of code: the larger of their `.text` section, the size that `tools/check` shows, and their executable segments (which can hold read-only data too). If your organisation wants to help us increase that capacity, so that we can take on more projects now, write to [oss-verify@theorem.dev](mailto:oss-verify@theorem.dev). We are interested in corporate partners and sponsorship.
+A project of any size can enroll. Because of our capacity, we are most likely to respond quickly to a project in C whose plain binaries (`<target>.plain`) are statically linked and have less than 1 MB of code: the larger of their `.text` section, the size that `oss-verify check` shows, and their executable segments (which can hold read-only data too). If your organisation wants to help us increase that capacity, so that we can take on more projects now, write to [oss-verify@theorem.dev](mailto:oss-verify@theorem.dev). We are interested in corporate partners and sponsorship.
 
 We seeded some projects already, and a maintainer can adopt one ([docs/project-yaml.md](docs/project-yaml.md#seeded-projects)).
 
@@ -29,19 +29,19 @@ https://raw.githubusercontent.com/theorem-labs/oss-verify/refs/heads/main/AGENTS
 
 The agent asks you what "correct" means for your code, and which findings and patches you want. Then it makes `projects/<name>/` and runs the checks, on a machine that has what [Enroll a project](#enroll-a-project) lists. You push its branch to your fork of this repository, and you open the pull request.
 
-> **WARNING:** The agent runs `tools/check`. `tools/check` builds the project's `Dockerfile` with network access. Use the agent only on a project that you trust ([SECURITY.md](SECURITY.md)).
+> **WARNING:** The agent runs `oss-verify check`. `oss-verify check` builds the project's `Dockerfile` with network access. Use the agent only on a project that you trust ([SECURITY.md](SECURITY.md)).
 
 ## Enroll a project
 
-> **WARNING:** `tools/check` builds the project's `Dockerfile` with network access. Use it only on a project that you trust ([SECURITY.md](SECURITY.md)).
+> **WARNING:** `oss-verify check` builds the project's `Dockerfile` with network access. Use it only on a project that you trust ([SECURITY.md](SECURITY.md)).
 
-You need a Linux x86-64 machine with Docker and its buildx plugin, git, and Python 3 with PyYAML (on Ubuntu, `apt install docker.io docker-buildx python3-yaml`), and about 10 GB of free disk. The first run of `tools/check` downloads a toolchain image of about 1.1 GB, which unpacks to about 5 GB.
+You need a Linux x86-64 machine with Docker and its buildx plugin, git, and [uv](https://docs.astral.sh/uv/getting-started/installation/), and about 10 GB of free disk. Run each command below from the top of your clone of this repository: `uv run` installs the Python and PyYAML that this repository's `pyproject.toml` asks for, the first time. The first run of `oss-verify check` downloads a toolchain image of about 1.1 GB, which unpacks to about 5 GB.
 
 1. Fork this repository.
 2. Make `projects/<name>/` from [templates/](templates/): `project.yaml` ([docs/project-yaml.md](docs/project-yaml.md)), a `Dockerfile` and a `build.sh` ([docs/build-contract.md](docs/build-contract.md)).
 3. Optional: write a `patch_style.md`. Tell us which findings, reports and patches you want, and how they must look.
-4. Run `tools/validate.py projects/<name>`. Correct each problem that it shows.
-5. Run `tools/check --no-shell --twice <name>`. Make sure that it builds each fuzz target, and that the second build has the same bytes. Without `--no-shell`, `tools/check` opens a shell in the build image when it finishes.
+4. Run `uv run oss-verify validate projects/<name>`. Correct each problem that it shows.
+5. Run `uv run oss-verify check --no-shell --twice <name>`. Make sure that it builds each fuzz target, and that the second build has the same bytes. Without `--no-shell`, `oss-verify check` opens a shell in the build image when it finishes.
 6. Open a pull request. Complete its checklist.
 
 ## When the checks pass

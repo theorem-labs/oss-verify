@@ -1,0 +1,20 @@
+# Ported from the Rust build of the oss-fuzz-theorems 2026.10 release (seeds/languages.tsv); do not edit.
+# kind	path	arguments: see lay-out-sources
+tree	ext/httparse-parse_chunk_size/src	upstream/httparse
+copy	targets/httparse-parse_chunk_size/Cargo.lock	Cargo.lock
+crates	ext/httparse-parse_chunk_size/vendor	targets/httparse-parse_chunk_size/Cargo.lock	ext/httparse-parse_chunk_size/src	fuzz	parse_chunk_size
+tree	ext/httparse-parse_headers/src	upstream/httparse
+copy	targets/httparse-parse_headers/Cargo.lock	Cargo.lock
+link	ext/httparse-parse_headers/vendor	ext/httparse-parse_chunk_size/vendor
+tree	ext/httparse-parse_request/src	upstream/httparse
+copy	targets/httparse-parse_request/Cargo.lock	Cargo.lock
+link	ext/httparse-parse_request/vendor	ext/httparse-parse_chunk_size/vendor
+tree	ext/httparse-parse_request_multspaces/src	upstream/httparse
+copy	targets/httparse-parse_request_multspaces/Cargo.lock	Cargo.lock
+link	ext/httparse-parse_request_multspaces/vendor	ext/httparse-parse_chunk_size/vendor
+tree	ext/httparse-parse_response/src	upstream/httparse
+copy	targets/httparse-parse_response/Cargo.lock	Cargo.lock
+link	ext/httparse-parse_response/vendor	ext/httparse-parse_chunk_size/vendor
+tree	ext/httparse-parse_response_multspaces/src	upstream/httparse
+copy	targets/httparse-parse_response_multspaces/Cargo.lock	Cargo.lock
+link	ext/httparse-parse_response_multspaces/vendor	ext/httparse-parse_chunk_size/vendor

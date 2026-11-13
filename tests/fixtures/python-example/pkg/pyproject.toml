@@ -1,0 +1,10 @@
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+[build-system]
+requires = ["flit_core >=3.2,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "example"
+version = "0.1.0"
+description = "A library for tests/test_builder.py"

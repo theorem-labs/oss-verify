@@ -1,0 +1,8 @@
+# Ported from the Rust build of the oss-fuzz-theorems 2026.10 release (seeds/languages.tsv); do not edit.
+# kind	path	arguments: see lay-out-sources
+tree	ext/tokio-fuzz_linked_list/src	upstream/tokio
+copy	targets/tokio-fuzz_linked_list/Cargo.lock	fuzz_linked_list.Cargo.lock
+crates	ext/tokio-fuzz_linked_list/vendor	targets/tokio-fuzz_linked_list/Cargo.lock	ext/tokio-fuzz_linked_list/src	tokio/fuzz	fuzz_linked_list
+tree	ext/tokio-fuzz_stream_map/src	upstream/tokio
+copy	targets/tokio-fuzz_stream_map/Cargo.lock	fuzz_stream_map.Cargo.lock
+crates	ext/tokio-fuzz_stream_map/vendor	targets/tokio-fuzz_stream_map/Cargo.lock	ext/tokio-fuzz_stream_map/src	tokio-stream/fuzz	fuzz_stream_map

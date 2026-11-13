@@ -1,5 +1,0 @@
-# Ported from the Rust build of the oss-fuzz-theorems 2026.10 release (tools/seeds/languages.tsv); do not edit.
-# kind	path	arguments: see lay-out-sources
-tree	ext/ryu-fuzz_ryu/src	upstream/ryu
-copy	targets/ryu-fuzz_ryu/Cargo.lock	Cargo.lock
-crates	ext/ryu-fuzz_ryu/vendor	targets/ryu-fuzz_ryu/Cargo.lock	ext/ryu-fuzz_ryu/src	fuzz	fuzz_ryu

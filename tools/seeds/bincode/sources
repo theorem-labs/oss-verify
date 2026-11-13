@@ -1,8 +1,0 @@
-# Ported from the Rust build of the oss-fuzz-theorems 2026.10 release (tools/seeds/languages.tsv); do not edit.
-# kind	path	arguments: see lay-out-sources
-tree	ext/bincode-compat/src	upstream/bincode
-copy	targets/bincode-compat/Cargo.lock	Cargo.lock
-crates	ext/bincode-compat/vendor	targets/bincode-compat/Cargo.lock	ext/bincode-compat/src	fuzz	compat
-tree	ext/bincode-roundtrip/src	upstream/bincode
-copy	targets/bincode-roundtrip/Cargo.lock	Cargo.lock
-link	ext/bincode-roundtrip/vendor	ext/bincode-compat/vendor

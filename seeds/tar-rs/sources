@@ -1,0 +1,8 @@
+# Ported from the Rust build of the oss-fuzz-theorems 2026.10 release (seeds/languages.tsv); do not edit.
+# kind	path	arguments: see lay-out-sources
+tree	ext/tar-rs-archive/src	upstream/tar-rs
+copy	targets/tar-rs-archive/Cargo.lock	Cargo.lock
+crates	ext/tar-rs-archive/vendor	targets/tar-rs-archive/Cargo.lock	ext/tar-rs-archive/src	fuzz	archive
+tree	ext/tar-rs-tar/src	upstream/tar-rs
+copy	targets/tar-rs-tar/Cargo.lock	Cargo.lock
+link	ext/tar-rs-tar/vendor	ext/tar-rs-archive/vendor

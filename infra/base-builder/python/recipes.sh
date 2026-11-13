@@ -201,7 +201,7 @@ oft_py_harness() {
   "$DRVCC" $BASE_CFLAGS -c -I/usr/local/lib/oss-verify/driver -I"$SRCDIR" ${LIB_CFLAGS:-} \
       /usr/local/lib/oss-verify/driver/adapter_python.c -o "$BUILDDIR/plugin.o" || return 1
   OV_ADAPTER=$BUILDDIR/plugin.o; export OV_ADAPTER
-  # When compile records the links (OV_RECORDS, for tools/check --checks): the quiet adapter, for the quiet twin.
+  # When compile records the links (OV_RECORDS, for oss-verify check --checks): the quiet adapter, for the quiet twin.
   if [ -n "${OV_RECORDS:-}" ]; then
     # shellcheck disable=SC2086 # flag lists
     "$DRVCC" $BASE_CFLAGS -DHARNESS_QUIET -c -I/usr/local/lib/oss-verify/driver -I"$SRCDIR" ${LIB_CFLAGS:-} \

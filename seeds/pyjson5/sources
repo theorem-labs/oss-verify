@@ -1,0 +1,6 @@
+# Ported from the Python build of the oss-fuzz-theorems 2026.10 release (seeds/languages.tsv); do not edit.
+# kind	path	arguments: see lay-out-sources
+tree	ext/pyjson5-fuzz_json/src	upstream/pyjson5
+copy	targets/pyjson5-fuzz_json/fuzz_json.py	fuzz_json.py
+corpus	targets/pyjson5-fuzz_json/seeds	fuzz_json_seed_corpus.zip
+file	ext/pyjson5-fuzz_json/pydist/setuptools-84.0.0-py3-none-any.whl	https://files.pythonhosted.org/packages/95/9c/c510029fc6ef33a6275cd2c5d3cecd6613dfd6aa401d57c54f1c18852ccf/setuptools-84.0.0-py3-none-any.whl	51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670

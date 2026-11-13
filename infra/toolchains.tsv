@@ -1,5 +1,5 @@
-# The toolchain images a project can be built with, oldest first. tools/check builds the builder FROM the one a lock
-# names (with --lock), else FROM the newest for the project's language: the last row that lists it. A row is added
+# The toolchain images a project can be built with, oldest first. oss-verify check builds the builder FROM the one a
+# lock names (with --lock), else FROM the newest for the project's language: the last row that lists it. A row is added
 # only once its image is published.
 # ubsan says how its UBSan builds choose their checks: fixed, the release's fixed flags (a project may not set
 # ubsan_checks), or checks, the project's ubsan_checks or the default (docs/project-yaml.md#ubsan_checks).

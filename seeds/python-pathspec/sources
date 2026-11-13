@@ -1,0 +1,6 @@
+# Ported from the Python build of the oss-fuzz-theorems 2026.10 release (seeds/languages.tsv); do not edit.
+# kind	path	arguments: see lay-out-sources
+tree	ext/python-pathspec-fuzz_pathspec/src	upstream/python-pathspec
+copy	targets/python-pathspec-fuzz_pathspec/fuzz_pathspec.py	fuzz_pathspec.py
+corpus	targets/python-pathspec-fuzz_pathspec/seeds	fuzz_pathspec_seed_corpus.zip
+file	ext/python-pathspec-fuzz_pathspec/pydist/flit_core-4.1.0-py3-none-any.whl	https://files.pythonhosted.org/packages/38/2a/8ea4bd54734f0fcbb507c28cb6b79d72f528e40498178a01cb35fc5d686f/flit_core-4.1.0-py3-none-any.whl	17398cdd2c38b24047a5a9c93089ec5c0bf12ec3d1469bbf69c27ed7965299db
