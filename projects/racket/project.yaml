@@ -1,0 +1,16 @@
+# The harness is in this directory; session-key.patch is the change that
+# makes two builds give the same bytes, until it is in racket/racket.
+repo: https://github.com/racket/racket#5308d34676fc93b96a4ea555aed8ff697e8d93de
+primary_contact: samth@racket-lang.org
+homepage: https://racket-lang.org
+language: c
+sanitizers: [address]
+mutants: fuzz/mutants
+fuzz_targets:
+  - racket_read_fuzzer
+  - racket_print-roundtrip_fuzzer
+  - racket_number_fuzzer
+  - racket_regexp_fuzzer
+  - racket_fasl_fuzzer
+  - racket_eval_fuzzer
+  - racket_heap-eval_fuzzer

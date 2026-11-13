@@ -1,0 +1,15 @@
+# kind	path	arguments: see lay-out-sources
+patch	racket	session-key.patch
+copy	racket/fuzz/driver.c	driver.c
+copy	racket/fuzz/embed-data.S	embed-data.S
+copy	racket/fuzz/embed-modules.rkt	embed-modules.rkt
+copy	racket/fuzz/libs.rkt	libs.rkt
+copy	racket/fuzz/safe-eval.rkt	safe-eval.rkt
+copy	racket/fuzz/mutants/exact-number.patch	mutant-exact-number.diff
+copy	racket/fuzz/mutants/fasl-raise.patch	mutant-fasl-raise.diff
+copy	racket/fuzz/mutants/fasl-roundtrip.patch	mutant-fasl-roundtrip.diff
+copy	racket/fuzz/mutants/heap-check.patch	mutant-heap-check.diff
+copy	racket/fuzz/mutants/inexact-number.patch	mutant-inexact-number.diff
+copy	racket/fuzz/mutants/internal-error.patch	mutant-internal-error.diff
+copy	racket/fuzz/mutants/print-roundtrip.patch	mutant-print-roundtrip.diff
+copy	racket/fuzz/mutants/regexp-positions.patch	mutant-regexp-positions.diff

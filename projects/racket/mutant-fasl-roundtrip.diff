@@ -1,0 +1,15 @@
+Breaks the check "A value that `fasl->s-exp` decodes encodes with `s-exp->fasl` to bytes that decode to an equal value." in fuzz/driver.c.
+Caught by the seed input "fasl-keyword" of racket_fasl_fuzzer.
+
+diff --git a/racket/collects/racket/fasl.rkt b/racket/collects/racket/fasl.rkt
+--- a/racket/collects/racket/fasl.rkt
++++ b/racket/collects/racket/fasl.rkt
+@@ -275,7 +275,7 @@
+            (write-fasl-integer (bytes-length bstr) o)
+            (write-bytes bstr o)]
+           [(keyword? v)
+-           (write-byte fasl-keyword-type o)
++           (write-byte fasl-symbol-type o)
+            (define bstr (string->bytes/utf-8 (keyword->string v)))
+            (write-fasl-integer (bytes-length bstr) o)
+            (write-bytes bstr o)]
