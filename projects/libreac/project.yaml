@@ -13,7 +13,26 @@
 # the tests, the build system and packaging, and removes the vendored copies of reac-pw's reac_rate_cfg.h and
 # reac_role_cfg.h, which reac_pacer.h and reac_role_swap.h no longer include.
 # Every number except issue #28 is a FreeREAC/libreac pull request.
-repo: https://github.com/FreeREAC/libreac#d16f3f4eba605ee2cb9e7a70bf72685f1b7b5d25
+#
+# The pin moves again, from v1.9.0 to 4e09c7d (the merge of #52, the head of upstream main on 2026-11-06). Upstream
+# rewrote its history after 1.9.0: d16f3f4 is not an ancestor of 4e09c7d, and the tag v1.9.0 now names fd1dbbc, which
+# has the same tree. The changes to built or fuzzed code between fd1dbbc and 4e09c7d are:
+#   - #43: LIBREAC_VERSION_MINOR becomes 10, and a comment in reac.h moves the lines below it down by eight.
+#   - #45: fuzz_ctrl's round trip requires that reac_ctrl_build_as emits a block of a catalogue row exactly when the
+#     row has it.
+#   - #47 (issue #35): struct pcap_source gains skipped_oversized, the count of the records larger than the buffer
+#     that pcap_source_next skips, and LIBREAC_ABI becomes 7. fuzz_pcap checks the count, the new mutant
+#     pcap-skipped.patch breaks it, and pcap.patch and fuzz_pcap's mutant records cite the moved pcap_source.c lines.
+#   - #46: reac_master_rx answers only to the bound box's source once a box is latched or established
+#     (reac_master_peer_accepts), reac_disco_entry counts its frames in what was padding, and the hunt takes a
+#     rival's role into account only once it has streamed (REAC_HUNT_RIVAL_*).
+#   - #48: LIBREAC_VERSION_MINOR becomes 11, and comments in reac.h and reac_facts_master_cadence.h move the lines
+#     below them down by nine and by two.
+# The other changes are fuzz tooling, tests, the build system and packaging, CI, documentation, and code that build.sh
+# does not build: #41 (three codes in reac_code.h, which no built file includes), #43's new fuzz target fuzz_qdisc
+# (not enrolled here) with its netlink.h, its mutant qdisc.patch and its fix of the qdisc dump in transport/, #46's
+# peer-replay tools and its changes to transport/, and #52.
+repo: https://github.com/FreeREAC/libreac#4e09c7d811313828e0aa9ed4d21215cf1c851689
 primary_contact: linuxnow@gmail.com
 homepage: https://github.com/FreeREAC/libreac
 language: c
