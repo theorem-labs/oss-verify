@@ -2,7 +2,7 @@
 # is what the builder's fetch-commit does by default and what the public enrollment build has always done: a row
 # here, and nothing else, makes a build ask for a token. This is a list and not a rule about an account on purpose.
 # Authenticating everything under one account would make every public build depend on the token service being up,
-# and would change how the whole fleet fails for the sake of the few repositories below.
+# and would change how every build fails for the sake of the few repositories below.
 #
 # For a library listed here, oss-verify check mints a token for that one build, read-only (contents and metadata) and
 # narrowed to that one repository, and gives it to `docker build` as the BuildKit secret oss-verify-git-token. The

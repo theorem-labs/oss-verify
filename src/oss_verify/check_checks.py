@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The step of `oss-verify check --checks`: what the checks of a project's fuzz targets catch, on its own seed inputs.
 
-A property of a fuzz target is a check that calls abort() (step 3.2 of .claude/skills/add-project/SKILL.md), and a
+A property of a fuzz target is a check that calls abort() (step 3.2 of the add-project skill), and a
 proof says no more than its checks. This step measures what steps 3.3 and 3.4 of that skill ask for:
 
 1. Reach. It builds the fuzz targets again with coverage (infra/checks/compile-check), runs each one on each input of

@@ -13,7 +13,7 @@ RUN lay-out-sources $WORK/project/sources $WORK
 # checkout at COMMIT in place of its git clone, and its other RUN lines not run.
 # not run: RUN apt-get update && apt-get install -y make autoconf automake libtool
 RUN fetch-commit $SRC/mxj
-# not run: RUN wget https://go.dev/dl/go1.24.6.linux-amd64.tar.gz && mkdir temp-go && rm -rf /root/.go/* && tar ...
+# not run: RUN wget https://go.dev/dl/go1.24.6.linux-amd64.tar.gz && mkdir temp-go && ...
 COPY build.sh $SRC/
 COPY fuzz.go $SRC/mxj
 WORKDIR $SRC/mxj
