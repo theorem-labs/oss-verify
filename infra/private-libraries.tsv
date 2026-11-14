@@ -4,13 +4,13 @@
 # Authenticating everything under one account would make every public build depend on the token service being up,
 # and would change how the whole fleet fails for the sake of the few repositories below.
 #
-# For a library listed here, tools/check mints a token for that one build, read-only (contents and metadata) and
+# For a library listed here, oss-verify check mints a token for that one build, read-only (contents and metadata) and
 # narrowed to that one repository, and gives it to `docker build` as the BuildKit secret oss-verify-git-token. The
-# project's Dockerfile must mount it on the fetch step, and tools/check refuses the build if it does not:
+# project's Dockerfile must mount it on the fetch step, and oss-verify check refuses the build if it does not:
 #
 #     RUN --mount=type=secret,id=oss-verify-git-token fetch-commit $SRC/<name>
 #
-# tools/check equally refuses a project that is NOT listed here whose Dockerfile asks for that mount.
+# oss-verify check equally refuses a project that is NOT listed here whose Dockerfile asks for that mount.
 #
 # The token comes from the command in OSS_VERIFY_GIT_TOKEN_COMMAND, else infra/github-read-token. It is never a
 # stored credential, is never written into the image, a layer, the facts or the log, and no build has one unless its

@@ -1,0 +1,11 @@
+# Ported from the Rust build of the oss-fuzz-theorems 2026.10 release (seeds/languages.tsv); do not edit.
+# kind	path	arguments: see lay-out-sources
+tree	ext/quick-xml-fuzz_chunked_reader/src	upstream/quick-xml
+copy	targets/quick-xml-fuzz_chunked_reader/Cargo.lock	Cargo.lock
+crates	ext/quick-xml-fuzz_chunked_reader/vendor	targets/quick-xml-fuzz_chunked_reader/Cargo.lock	ext/quick-xml-fuzz_chunked_reader/src	fuzz	fuzz_chunked_reader
+tree	ext/quick-xml-fuzz_target_1/src	upstream/quick-xml
+copy	targets/quick-xml-fuzz_target_1/Cargo.lock	Cargo.lock
+link	ext/quick-xml-fuzz_target_1/vendor	ext/quick-xml-fuzz_chunked_reader/vendor
+tree	ext/quick-xml-structured_roundtrip/src	upstream/quick-xml
+copy	targets/quick-xml-structured_roundtrip/Cargo.lock	Cargo.lock
+link	ext/quick-xml-structured_roundtrip/vendor	ext/quick-xml-fuzz_chunked_reader/vendor

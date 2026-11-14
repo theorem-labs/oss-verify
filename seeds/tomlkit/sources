@@ -1,0 +1,12 @@
+# Ported from the Python build of the oss-fuzz-theorems 2026.10 release (seeds/languages.tsv); do not edit.
+# kind	path	arguments: see lay-out-sources
+tree	ext/tomlkit-fuzz_dumps/src	upstream/tomlkit
+copy	targets/tomlkit-fuzz_dumps/fuzz_dumps.py	fuzz_dumps.py
+corpus	targets/tomlkit-fuzz_dumps/seeds	fuzz_dumps_seed_corpus.zip
+file	ext/tomlkit-fuzz_dumps/pydist/dictgen-0.1-py3-none-any.whl	https://files.pythonhosted.org/packages/67/b1/02b1b6c7ae1857d58384e8bd1007aaf94c0914c37ece29f7548bde5f142b/dictgen-0.1-py3-none-any.whl	1bb61114552f8c604511ae392ce6049f4719498ee50bfde0c192f9e763d0dac1
+file	ext/tomlkit-fuzz_dumps/pydist/poetry_core-2.5.0-py3-none-any.whl	https://files.pythonhosted.org/packages/b7/25/7ed0a2ea4fe12f7fd0394387b5debbcd6fdbd06e5ac9daab96ba11471da8/poetry_core-2.5.0-py3-none-any.whl	98ee465b66f7e14bb9fbe68fb5e00d0cff184f036993ec94610ae4b5612f3add
+tree	ext/tomlkit-fuzz_parser/src	upstream/tomlkit
+copy	targets/tomlkit-fuzz_parser/fuzz_parser.py	fuzz_parser.py
+corpus	targets/tomlkit-fuzz_parser/seeds	fuzz_parser_seed_corpus.zip
+file	ext/tomlkit-fuzz_parser/pydist/dictgen-0.1-py3-none-any.whl	https://files.pythonhosted.org/packages/67/b1/02b1b6c7ae1857d58384e8bd1007aaf94c0914c37ece29f7548bde5f142b/dictgen-0.1-py3-none-any.whl	1bb61114552f8c604511ae392ce6049f4719498ee50bfde0c192f9e763d0dac1
+file	ext/tomlkit-fuzz_parser/pydist/poetry_core-2.5.0-py3-none-any.whl	https://files.pythonhosted.org/packages/b7/25/7ed0a2ea4fe12f7fd0394387b5debbcd6fdbd06e5ac9daab96ba11471da8/poetry_core-2.5.0-py3-none-any.whl	98ee465b66f7e14bb9fbe68fb5e00d0cff184f036993ec94610ae4b5612f3add

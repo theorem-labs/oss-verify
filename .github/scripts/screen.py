@@ -369,7 +369,7 @@ SPAN = re.compile(r"`([^`\n]*)`")
 #   source.txt                  review-gather's fixed line in place of the project's repository when the build
 #                               resolved no commit of it: there is no source to read.
 #   template-history.txt        git log of this repository's pull request template.
-#   validate.txt                tools/validate.py on projects/<name>/, every line of which the diff adds.
+#   validate.txt                oss-verify validate on projects/<name>/, every line of which the diff adds.
 #   build/result.md             the build job's own one-line result.
 # Five more files keep only our shape, and the project decides text inside them that no other source carries,
 # so each is read: triage-today.md, triage-comment.md and build/binaries.md through their code spans (IN_SPANS),

@@ -64,8 +64,8 @@ for name in $(cut -f1 "$OV/oftgo-targets.tsv" | LC_ALL=C sort -u); do
   [ -f "$OUT/$name-repro" ] || { echo "compile: the Go helper wrote no $OUT/$name-repro" >&2; exit 1; }
   mv -f "$OUT/$name-repro" "$OUT/$name"
   sum=$(sha256sum "$OUT/$name" | cut -d' ' -f1)
-  # With OV_RECORD=1 (tools/check --checks), the quiet program is kept as the quiet twin of the record. A Go program
-  # is linked by Go's linker, so its record has no map.
+  # With OV_RECORD=1 (oss-verify check --checks), the quiet program is kept as the quiet twin of the record. A Go
+  # program is linked by Go's linker, so its record has no map.
   if [ "${OV_RECORD:-}" = 1 ] && [ -f "$OUT/$name-repro-quiet" ]; then
     mkdir -p "$OUT/.records/$sum"
     mv -f "$OUT/$name-repro-quiet" "$OUT/.records/$sum/quiet"

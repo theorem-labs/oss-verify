@@ -1,7 +1,7 @@
 # Copyright 2026 Pau Aliagas <linuxnow@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 #
-# plugin-hostd on the OSS Verify builder. tools/check passes REPO, COMMIT and BASE_BUILDER.
+# plugin-hostd on the OSS Verify builder. oss-verify check passes REPO, COMMIT and BASE_BUILDER.
 # The fuzz targets are plugin-hostd's own, in fuzz/ of the checkout. The one dependency is mod-host's protocol headers
 # as FreeMixer ships them: the sources file pins FreeMixer/.github and the mod-host commit its mod-host.spec names, and
 # the spec's patches are applied here in the spec's order, as packaging/mod-host/prepare-source.sh applies them.
