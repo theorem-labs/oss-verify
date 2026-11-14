@@ -14,7 +14,7 @@
 # build.yaml's gather job runs it from the base branch's checkout, after take-project has put the pull request's
 # projects/<name>/ into that checkout. It runs no code of the pull request or of the project: it reads the pull request
 # through the API, clones the project's repository at the built commit as data, and runs this repository's own
-# tools/validate.py and .github/scripts/triage.py on them, as the validate and triage workflows do. The directory gets
+# oss-verify validate and .github/scripts/triage.py on them, as the validate and triage workflows do. The directory gets
 # the files that the section "In CI" of .claude/skills/review-enrollment/SKILL.md lists, the build's results (BUILD,
 # BINARIES and CHECKS) among them. A failed read leaves its file with the error in it, and the review says what it could
 # not check, with one exception: when COMMIT is a commit id and the project's repository cannot be fetched at it, this
@@ -38,6 +38,9 @@ resume=$(openssl rand -hex 16) && echo "::stop-commands::$resume"
 trap 'echo "::$resume::"' EXIT
 set -uo pipefail
 export LC_ALL=C
+# This repository's package, for python3 -P -m oss_verify and the import below: -P keeps the top of the checkout off
+# sys.path, and PYTHONPATH names its src/ alone.
+export PYTHONPATH="$PWD/src"
 
 out=${1:?usage: review-gather <directory>}
 # Run a command, and keep its standard output and error in a file, whatever its status.
@@ -152,7 +155,7 @@ jq -r '[.comments[]? | select(.author.login == "oss-verify")]
 # triage.py reads GITHUB_TOKEN from the environment; the assignment prefix exports it to python3 without it becoming an
 # argument of any process (env put it in the argument vector, which another user on the machine can read).
 GITHUB_TOKEN="${GH_TOKEN:-}" keep triage-today.md python3 .github/scripts/triage.py --repo "$REPO" --pr "$PR" --full
-keep validate.txt python3 tools/validate.py "$dir"
+keep validate.txt python3 -P -m oss_verify validate "$dir"
 # Claude Code reads a CLAUDE.md beside a file that it reads as instructions. The pull request's are data, so they go
 # from the checkout once the validator has reported them (rule 1 of review.md).
 find "$dir" -maxdepth 1 \( -iname 'CLAUDE*.md' -o -iname 'AGENTS*.md' \) -delete
@@ -193,12 +196,11 @@ EOF
 done
 
 # The project's repository: the facts of check G1, and its source at the built commit, as data.
-# repo comes from the pull request: it is used only if tools/validate.py's rule for it holds, and its ref is used in
+# repo comes from the pull request: it is used only if oss-verify validate's rule for it holds, and its ref is used in
 # an API path only if it has no `..` part.
-url=$(python3 - "$dir/project.yaml" <<'EOF' 2>/dev/null
+url=$(python3 -P - "$dir/project.yaml" <<'EOF' 2>/dev/null
 import sys
-sys.path.insert(0, "tools")
-import validate
+from oss_verify import validate
 url = validate.yaml.safe_load(open(sys.argv[1])).get("repo")
 print(url if validate.is_https_url(url) else "")
 EOF
@@ -208,7 +210,7 @@ repo=${url%%#*} ref=${url#*#}
 [[ $ref =~ (^|/)\.\.?(/|$) ]] && ref=""
 {
   if [ -z "$url" ]; then
-    echo "repo: not read: project.yaml's repo does not follow the rule of tools/validate.py"
+    echo "repo: not read: project.yaml's repo does not follow the rule of oss-verify validate"
   fi
   echo "repo: $repo"
   echo "ref: ${ref:-(the default branch)}"

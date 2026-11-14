@@ -19,7 +19,7 @@ where it had them, and says what was changed:
 
   README.md, CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md
   templates/project.yaml, templates/Dockerfile, templates/patch_style.md (from its templates/threat_model.md)
-  tools/validate.py, tools/check, tools/check_build.py
+  src/oss_verify/validate.py, src/oss_verify/check.py, src/oss_verify/check_build.py
   .github/PULL_REQUEST_TEMPLATE.md, .github/dependabot.yml
   .github/workflows/validate.yaml, .github/workflows/build.yaml, .github/workflows/triage.yaml,
   .github/workflows/terms.yaml, .github/scripts/triage.py, .github/scripts/take-project
@@ -30,20 +30,20 @@ infra/base-builder/ takes its driver (driver/), its compiler wrappers and flags 
 fuzz target's link (link-fuzz-target), the release's recipes (recipes.sh) and the steps of its build around a target
 (release-target.sh) from the build recipe of the oss-fuzz-theorems 2026.10 release, Copyright 2026 Theorem Labs, PBC.
 
-The files we generated under projects/<name>/ and tools/seeds/<name>/ from the build recipe, and every copy of them, come from that
-same build recipe: the pins in build.sh, a target's own files, and the build-only patches. Where such a file holds a
-project's own text (for example a copy of its harness that the release edited, a file generated from its sources, or
+The files we generated under projects/<name>/ and seeds/<name>/ from the build recipe, and every copy of them, come from
+that same build recipe: the pins in build.sh, a target's own files, and the build-only patches. Where such a file holds
+a project's own text (for example a copy of its harness that the release edited, a file generated from its sources, or
 a patch that writes one), that text keeps the project's licence. The recipe's UPSTREAM-CARRIED.tsv, copied byte for
-byte to tools/seeds/UPSTREAM-CARRIED.tsv, names each, with its origin and licence.
+byte to seeds/UPSTREAM-CARRIED.tsv, names each, with its origin and licence.
 
-The build files of tools/seeds/<name>/ were generated from the build recipe, which carries no licence line
+The build files of seeds/<name>/ were generated from the build recipe, which carries no licence line
 for them, and a maintainer who adopts a seeded project copies them byte for byte into projects/<name>/. So for the
 two below, this notice states the licence by what the lines are. It is Theorem's grant, and it holds for these lines
-wherever they are copied: in tools/seeds/<name>/, and in projects/<name>/ once the project is enrolled. The line
+wherever they are copied: in seeds/<name>/, and in projects/<name>/ once the project is enrolled. The line
 numbers are those of the copies on main.
 
 wazuh is under version 2 of the GNU GPL only, and its fuzz target fuzz_xml is built with two files of ours that the
-port's build.sh writes: the header file_op.h (lines 63-68 of tools/seeds/wazuh/build.sh) and the shim
+port's build.sh writes: the header file_op.h (lines 63-68 of seeds/wazuh/build.sh) and the shim
 oft_file_op_shim.c (lines 71-86), which defines wfopen() as a call of fopen() and w_file_cloexec() as doing nothing.
 Both are under MIT OR Apache-2.0, but for five lines that are wazuh's and keep wazuh's licence: the declarations of
 wfopen() and w_file_cloexec() in the header (lines 66 and 67), which are lines 498 and 597 of wazuh's
@@ -54,11 +54,11 @@ wfopen() (line 75), which is line 2479 of file_op.c (https://github.com/wazuh/wa
 The binary of fuzz_xml also links its harness, which defines LLVMFuzzerTestOneInput(): OSS-Fuzz's
 projects/wazuh/fuzz_xml.c, byte for byte (https://github.com/google/oss-fuzz at
 955c6866c152471d78c7472c0f1f354343548b9f, Copyright 2021 Google LLC, licensed under the Apache License, Version 2.0;
-tools/seeds/wazuh/sources fetches it). So this fuzz target links Google's harness, which Theorem cannot relicense,
+seeds/wazuh/sources fetches it). So this fuzz target links Google's harness, which Theorem cannot relicense,
 into a program under version 2 of the GNU GPL only, and the oss-fuzz-theorems release withholds its binaries.
 
 mariadb is under version 2 of the GNU GPL only too, and its fuzz target fuzz_json links the port's
-mariadb.fuzz_json_mdev32854.c (in tools/seeds/mariadb/). That file is OSS-Fuzz's projects/mariadb/fuzz_json.c
+mariadb.fuzz_json_mdev32854.c (in seeds/mariadb/). That file is OSS-Fuzz's projects/mariadb/fuzz_json.c
 (https://github.com/google/oss-fuzz at 955c6866c152471d78c7472c0f1f354343548b9f, Copyright 2023 Google LLC,
 licensed under the Apache License, Version 2.0), which keeps Google's licence, with lines 65-75, 77-78 and 80 added
 or changed by Theorem: they declare, set up and free the json_engine_t and the MEM_ROOT behind its stack, and pass
@@ -92,6 +92,6 @@ under the MIT licence. Here the driver and the lines of the wazuh and mariadb fu
 Apache-2.0, wherever they are copied, and the rest of what comes from the recipe is under the Apache License, Version
 2.0.
 
-A file under projects/<name>/ or tools/seeds/<name>/ copied from a project's own repository or from OSS-Fuzz
+A file under projects/<name>/ or seeds/<name>/ copied from a project's own repository or from OSS-Fuzz
 (https://github.com/google/oss-fuzz) keeps its licence: the one its header names, or for a file with no header, that
 of the repository it was copied from (for OSS-Fuzz, the Apache License, Version 2.0).

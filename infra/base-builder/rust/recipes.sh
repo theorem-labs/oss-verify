@@ -234,8 +234,8 @@ oft_build_cargo_shim() {
   "$DRVCC" $BASE_CFLAGS -c -I/usr/local/lib/oss-verify/driver -I"$SRCDIR" ${LIB_CFLAGS:-} \
       /usr/local/lib/oss-verify/driver/adapter_rust.c -o "$BUILDDIR/plugin.o" || return 1
   OV_ADAPTER=$BUILDDIR/plugin.o; export OV_ADAPTER
-  # When compile records the links (OV_RECORDS, for tools/check --checks): the quiet adapter, for the quiet twin. With
-  # the stdio seal, its byte is 1 (plugin_rust.h), so the twin's standard library writes nothing either.
+  # When compile records the links (OV_RECORDS, for oss-verify check --checks): the quiet adapter, for the quiet twin.
+  # With the stdio seal, its byte is 1 (plugin_rust.h), so the twin's standard library writes nothing either.
   if [ -n "${OV_RECORDS:-}" ]; then
     # shellcheck disable=SC2086 # flag lists
     "$DRVCC" $BASE_CFLAGS -DHARNESS_QUIET -c -I/usr/local/lib/oss-verify/driver -I"$SRCDIR" ${LIB_CFLAGS:-} \

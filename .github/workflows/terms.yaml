@@ -7,7 +7,7 @@ name: "Terms"
 # description. This check fails until it is, and runs again whenever the description is edited. A branch of this
 # repository needs no box: only an account with write access, including a GitHub App, can push one.
 #
-# A pull request that changes no file under projects/ (a change to tools/ or docs/, say) enrolls nothing, and needs no
+# A pull request that changes no file under projects/ (a change to src/ or docs/, say) enrolls nothing, and needs no
 # box either: the terms govern the enrollment of a project. They say so in their first paragraph: "This OSS Verify
 # Agreement (the "Agreement") governs your ("Participant") enrollment of a project in OSS Verify", accepted "by ticking
 # "I accept the OSS Verify terms" in an enrollment pull request" (https://theorem.dev/oss-verify/terms/). Any other

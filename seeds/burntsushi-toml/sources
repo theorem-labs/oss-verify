@@ -1,0 +1,3 @@
+# Ported from the Go build of the oss-fuzz-theorems 2026.10 release (seeds/languages.tsv); do not edit.
+# kind	path	arguments: see lay-out-sources
+gomodules	go-modules	go.lock

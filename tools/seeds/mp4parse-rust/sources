@@ -1,8 +1,0 @@
-# Ported from the Rust build of the oss-fuzz-theorems 2026.10 release (tools/seeds/languages.tsv); do not edit.
-# kind	path	arguments: see lay-out-sources
-tree	ext/mp4parse-rust-avif/src	upstream/mp4parse-rust
-copy	targets/mp4parse-rust-avif/Cargo.lock	Cargo.lock
-crates	ext/mp4parse-rust-avif/vendor	targets/mp4parse-rust-avif/Cargo.lock	ext/mp4parse-rust-avif/src	mp4parse_capi/fuzz	avif
-tree	ext/mp4parse-rust-mp4/src	upstream/mp4parse-rust
-copy	targets/mp4parse-rust-mp4/Cargo.lock	Cargo.lock
-link	ext/mp4parse-rust-mp4/vendor	ext/mp4parse-rust-avif/vendor

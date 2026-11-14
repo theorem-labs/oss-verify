@@ -1,14 +1,14 @@
 # Adapted from OSS Scanner's .github/workflows/build.yaml (https://github.com/anthropics/oss-scanner), Copyright 2026
-# Anthropic PBC, Apache-2.0. Modified 2026 by Theorem Labs, PBC: builds twice with OSS Verify's tools/check, maps its
+# Anthropic PBC, Apache-2.0. Modified 2026 by Theorem Labs, PBC: builds twice with `oss-verify check`, maps its
 # exit codes, accepts OSS Verify's file names, measures the fuzz targets' checks, and adds the review and its comment.
 name: "Build"
-# Builds the project an enrollment pull request adds or changes with tools/check --twice: everything is built a second
-# time from scratch, and the two builds must have the same bytes, as they must before we pin a binary. The output is in
-# the run's log; the step summary also has one row for each binary: its target, build, file size, .text size and whether
-# it is statically linked. With --checks, tools/check also measures what the fuzz targets' checks catch on their seed
-# inputs (docs/build-contract.md, "The checks of a fuzz target"), and does four checks on each binary: its instructions,
-# its system calls against the process model of the published proofs, its quiet twin, and the code it links
-# uninstrumented (docs/build-contract.md, "The checks of the binaries"). The step summary has both reports too.
+# Builds the project an enrollment pull request adds or changes with oss-verify check --twice: everything is built a
+# second time from scratch, and the two builds must have the same bytes, as they must before we pin a binary. The output
+# is in the run's log; the step summary also has one row for each binary: its target, build, file size, .text size and
+# whether it is statically linked. With --checks, oss-verify check also measures what the fuzz targets' checks catch on
+# their seed inputs (docs/build-contract.md, "The checks of a fuzz target"), and does four checks on each binary: its
+# instructions, its system calls against the process model of the published proofs, its quiet twin, and the code it
+# links uninstrumented (docs/build-contract.md, "The checks of the binaries"). The step summary has both reports too.
 #
 # The jobs, each run:
 #   route    decides the kind of the run, its output `kind`: enrollment, change or issue, or nothing. A pull request
@@ -205,19 +205,20 @@ name: "Build"
 # completion of this run, when the draft is marked ready, is what has it decide again.
 # A failure is usually the project's, but it can be the runner's: GitHub's runner may run out of disk or time on a
 # build that works on a larger machine. A maintainer then reruns the failed job (gh run rerun <run> --failed). If it
-# fails again for the runner's reason, the maintainer builds the project with `tools/check --no-shell --twice <name>` on
-# a larger machine and says so in the pull request; the check stays red until a rerun passes, so merging before then
-# needs a bypass of the ruleset that requires it.
+# fails again for the runner's reason, the maintainer builds the project with `oss-verify check --no-shell --twice
+# <name>` on a larger machine and says so in the pull request; the check stays red until a rerun passes, so merging
+# before then needs a bypass of the ruleset that requires it.
 #
-# pull_request_target, not pull_request, so the pull request cannot edit this workflow or tools/check:
+# pull_request_target, not pull_request, so the pull request cannot edit this workflow or oss-verify check:
 #   - The checkout is the base branch, never the pull request, so a project is built with the base branch's tools.
 #   - Only the files directly inside the one projects/<name>/ are taken from it, as regular files written from git's
 #     object store.
 #   - Its Dockerfile runs only inside `docker build`, and its build.sh and the fuzz targets only inside
-#     `docker run --network=none` or qemu-riscv64 (tools/check --checks), never as a step of their own on the runner.
+#     `docker run --network=none` or qemu-riscv64 (oss-verify check --checks), never as a step of their own on the
+#     runner.
 #
 # project-builds builds code from anyone. The toolchain images in infra/toolchains.tsv are public, so the job pulls the
-# one image tools/check will build FROM without signing in, for every pull request, before the pull request's
+# one image oss-verify check will build FROM without signing in, for every pull request, before the pull request's
 # Dockerfile or build.sh runs. Never add a secret, a cache, an artifact, an identity token or a write permission to that
 # job. Its results reach the other jobs only as job outputs, which this repository's tools write: text, never code.
 # The review job runs no code of the pull request or the project. It, the screen job and the comment job hold identity
@@ -268,7 +269,7 @@ name: "Build"
 # pull request's head as its own runs do (screened first, and counted by the daily cap, when its author has no write
 # access), posts the comment and, for an enrollment, records the check run Enrollment review, or `-f issue=<n>`
 # for the reply to an issue, which posts nothing and stores the draft in the private bucket.
-# Before the merge, tools/tests runs the review's own steps with stand-ins.
+# Before the merge, tests runs the review's own steps with stand-ins.
 #
 # The review's Claude Code exports its usage by OpenTelemetry to Theorem's cost collector, over Theorem's tailnet, at
 # the collector's tailnet address on port 80 (SPEND_COLLECTOR_URL below; an address, not a secret). The collector
@@ -369,10 +370,10 @@ cache-mode: none
 
 env:
   # The Apps whose runs the review's action admits (its allowed_bots): our automation's, which opens enrollments and
-  # starts this file by hand, and the oss-verify App's. The one list: route reads it through .github/scripts/actor-kind,
-  # which decides as the action does, and the Review step gives it to the action. route's trust step counts these
-  # Apps as accounts with write access.
-  ALLOWED_BOTS: sjawhar-agent[bot],oss-verify[bot]
+  # starts this file by hand, the oss-verify App's, and Legion's implementer App, which opens the pull requests of
+  # Legion's workers. The one list: route reads it through .github/scripts/actor-kind, which decides as the action does,
+  # and the Review step gives it to the action. route's trust step counts these Apps as accounts with write access.
+  ALLOWED_BOTS: sjawhar-agent[bot],oss-verify[bot],legion-implementer[bot]
   # The daily cap on the screens and model reviews of accounts without write access: at most REVIEW_CAP runs in any 24
   # hours over all pull requests and issues, and at most REVIEW_CAP_AUTHOR of them charged to one account. route's
   # trust step counts them with .github/scripts/screened-review-cap for every item whose trust is screen, before the
@@ -586,13 +587,17 @@ jobs:
     needs: route
     if: needs.route.outputs.kind == 'enrollment'
     runs-on: ubuntu-24.04
-    # tools/check has no time limit of its own: this one is the runner's, the most it allows, for two builds and
+    # oss-verify check has no time limit of its own: this one is the runner's, the most it allows, for two builds and
     # --checks (at most 30 minutes of runs for the checks of the binaries, 2 x 20 minutes of seed runs on the unchanged
     # code, and the 45-minute budget of the breakages).
     timeout-minutes: 360
     permissions:
       contents: read
       pull-requests: read
+    # This repository's package, for python3 -P -m oss_verify and .github/scripts/binary-sizes: -P keeps the top of the
+    # checkout off sys.path, and PYTHONPATH names its src/ alone.
+    env:
+      PYTHONPATH: ${{ github.workspace }}/src
     # Text that this repository's tools wrote, for the review, comment and record jobs.
     outputs:
       name: ${{ steps.project.outputs.name }}
@@ -625,14 +630,14 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
           dpkg -s python3-yaml > /dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
-          # qemu-riscv64-static runs the fuzz targets for tools/check --checks, inside a container of the project image.
-          # It is taken out of its package, not installed: the package registers qemu with the kernel for riscv64
+          # qemu-riscv64-static runs the fuzz targets for oss-verify check --checks, inside a container of the project
+          # image. It is taken out of its package, not installed: the package registers qemu with the kernel for riscv64
           # programs (binfmt_misc), and a build.sh could then run the riscv64 programs that it makes. (From #24.)
-          # Without it, --checks says that it could not measure, and the build is checked as before.
-          # The check of system calls reads the runs of qemu 10.0.11 only (tools/check_binaries.py QEMU_VERSIONS), so this
-          # is Debian 13's qemu-user 1:10.0.11+ds-0+deb13u1, pinned by its SHA-256 at its snapshot.debian.org address:
-          # the build theorem-labs/oss-verify-proofs's toolchain/runner.Dockerfile runs counterexamples with. Its
-          # qemu-riscv64 is a static binary; the -static name is the one tools/check looks for.
+          # Without it, --checks says that it could not measure, and the build is checked as before. The check of system
+          # calls reads the runs of qemu 10.0.11 only (src/oss_verify/check_binaries.py QEMU_VERSIONS), so this is
+          # Debian 13's qemu-user 1:10.0.11+ds-0+deb13u1, pinned by its SHA-256 at its snapshot.debian.org address: the
+          # build theorem-labs/oss-verify-proofs's toolchain/runner.Dockerfile runs counterexamples with. Its
+          # qemu-riscv64 is a static binary; the -static name is the one oss-verify check looks for.
           mkdir "$RUNNER_TEMP/qemu" && cd "$RUNNER_TEMP/qemu"
           deb=qemu-user_10.0.11+ds-0+deb13u1_amd64.deb
           if curl -fsSL --retry 3 -o "$deb" https://snapshot.debian.org/file/a0eaa62f815efb2361d43b1e3f8011c17ad9123a \
@@ -641,7 +646,7 @@ jobs:
               && usr/bin/qemu-riscv64-static --version | grep -q 'version 10\.0\.11'; then
             echo "$RUNNER_TEMP/qemu/usr/bin" >> "$GITHUB_PATH"
           else
-            echo "::warning::No qemu-riscv64-static 10.0.11: tools/check --checks cannot run the fuzz targets."
+            echo "::warning::No qemu-riscv64-static 10.0.11: oss-verify check --checks cannot run the fuzz targets."
           fi
 
       - name: Pull the pinned toolchain image
@@ -650,16 +655,16 @@ jobs:
           NAME: ${{ steps.project.outputs.name }}
         run: |
           set -euo pipefail
-          # Until the token is printed again, the runner reads none of tools/check's output about the project as a
+          # Until the token is printed again, the runner reads none of oss-verify check's output about the project as a
           # workflow command.
           resume="$(openssl rand -hex 16)"
           echo "::stop-commands::$resume"
-          image=$(python3 tools/check --print-toolchain "projects/$NAME" < /dev/null)
+          image=$(python3 -P -m oss_verify check --print-toolchain "projects/$NAME" < /dev/null)
           echo "::$resume::"
           [[ $image == *@sha256:* ]] || { echo "::error::Unpinned toolchain image: $image"; exit 1; }
           docker pull "$image"
 
-      - name: Build the project twice with tools/check, and measure its checks
+      - name: Build the project twice with oss-verify check, and measure its checks
         id: build
         if: steps.project.outputs.name != ''
         env:
@@ -672,10 +677,10 @@ jobs:
           code=0
           summary="$RUNNER_TEMP/binaries.md"
           checks="$RUNNER_TEMP/checks.md"
-          # The path, as in the pull step, never the bare name: tools/check reads a bare name as a directory of the
+          # The path, as in the pull step, never the bare name: oss-verify check reads a bare name as a directory of the
           # checkout's root when that directory has a project.yaml, as templates/ does. Its table shows a target name,
           # which the pull request chooses, in code with every unusual byte as %XX. --checks changes no exit status.
-          python3 tools/check --no-shell --twice --summary "$summary" --checks "$checks" --checks-budget 45 \
+          python3 -P -m oss_verify check --no-shell --twice --summary "$summary" --checks "$checks" --checks-budget 45 \
             "projects/$NAME" < /dev/null \
             || code=$?
           echo "::$resume::"
@@ -685,7 +690,7 @@ jobs:
             1) result="does not build (the log says which step failed)" ;;
             2) result="breaks the enrollment rules (the log lists them)" ;;
             3) result="builds, but a second build from scratch has different bytes (the log says which)" ;;
-            *) result="could not be checked: tools/check exited $code" ;;
+            *) result="could not be checked: oss-verify check exited $code" ;;
           esac
           echo "\`projects/$NAME/\` at \`${SHA:0:7}\` $result." >> "$GITHUB_STEP_SUMMARY"
           for file in "$summary" "$checks"; do
@@ -695,8 +700,8 @@ jobs:
             fi
           done
 
-          # For the review: the commit the build fetched, from the manifest tools/check wrote, and the three texts. -P
-          # keeps the top of the checkout off sys.path, so no file or directory there shadows yaml.
+          # For the review: the commit the build fetched, from the manifest oss-verify check wrote, and the three texts.
+          # -P keeps the top of the checkout off sys.path, so no file or directory there shadows yaml.
           commit=$(python3 -P -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["commit"])' \
             ~/.cache/oss-verify-check/"$NAME"/manifest.yaml 2> /dev/null || true)
           [[ $commit =~ ^[0-9a-f]{40}$ ]] || commit=""

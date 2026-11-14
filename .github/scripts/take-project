@@ -23,7 +23,7 @@
 # project included, is outside it.
 #   - A pull request that changes no file, or removes its one project, passes with nothing to build or validate.
 #   - A pull request from a fork, a deleted fork included, is judged on the files GitHub lists for it.
-#       - No listed path under projects/ (a change to tools/, docs/ or a workflow, say): it is not an enrollment. It
+#       - No listed path under projects/ (a change to src/, docs/ or a workflow, say): it is not an enrollment. It
 #         passes with nothing to build or validate, and the log and step summary say so. The tests check
 #         (tests.yaml) runs this repository's tests on it, build.yaml gives it a change review, and a maintainer
 #         decides whether to merge it.
@@ -230,7 +230,7 @@ else
   source=$sha
   from="at $sha"
 fi
-# Same rule as NAME in tools/validate.py.
+# Same rule as NAME in oss-verify validate.
 [[ $name =~ ^[a-z0-9][a-z0-9._-]{0,62}$ ]] || fail "The directory name under projects/ must be a-z 0-9 . _ - (starting with a letter or digit, at most 63)."
 
 git ls-tree -r -z "$source" -- "projects/$name/" > "$RUNNER_TEMP/tree"
@@ -246,7 +246,7 @@ while IFS= read -r -d '' entry; do
   file=${entry#*$'\t'}
   file=${file#"projects/$name/"}
   # 100644 and 100755 are regular files. A file in a subdirectory has a / in its name. Same rule as FILE_NAME in
-  # tools/validate.py.
+  # oss-verify validate.
   if [[ $mode != 100644 && $mode != 100755 ]] || ! [[ $file =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$ ]]; then
     fail "projects/$name/ may hold only regular files with plain names: no directories, symbolic links or submodules."
   fi

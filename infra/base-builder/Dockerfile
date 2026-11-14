@@ -8,9 +8,9 @@
 # docs/build-contract.md describes it.
 #
 # The toolchain image is a build argument with no default, so the build fails without one ("base name (${TOOLCHAIN})
-# should not be blank"). tools/check passes it (--build-arg TOOLCHAIN=<image>): the image --toolchain gives, else the
-# one the project's lock names, else the newest for the project's language in infra/toolchains.tsv, the one file that
-# lists the toolchains (docs/build-contract.md, "Toolchains"). The parser directive on line 1 keeps BuildKit from
+# should not be blank"). oss-verify check passes it (--build-arg TOOLCHAIN=<image>): the image --toolchain gives, else
+# the one the project's lock names, else the newest for the project's language in infra/toolchains.tsv, the one file
+# that lists the toolchains (docs/build-contract.md, "Toolchains"). The parser directive on line 1 keeps BuildKit from
 # warning, on every build, that the argument has no default.
 ARG TOOLCHAIN
 FROM ${TOOLCHAIN}

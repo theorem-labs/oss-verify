@@ -135,7 +135,7 @@ import triage  # noqa: E402
 # The size line for statements that start with no person's decision, "Up to 1 MB" of a plain binary
 # (dispatch://OSSV-141/ask/7c73eb21), the README's "less than 1 MB of code": 1 MB is 1,000,000 bytes here. It is
 # applied to the larger of the .text section's size and the bytes the loader maps executable, which renaming or
-# resizing a section does not change (tools/manifest.py, executable_bytes); the executable segments can hold
+# resizing a section does not change (src/oss_verify/manifest.py, executable_bytes); the executable segments can hold
 # read-only data too, so the measure errs toward a person's review, never away from it.
 SIZE_LIMIT = 1_000_000
 # Languages whose projects are paused for now. Go builds, but our tools write no theorem statements for it yet
@@ -178,7 +178,7 @@ DEFAULT_BRANCH = "main"
 MAX_LISTED_FILES = 3000
 MAX_ARTIFACT_BYTES = 1 << 20
 MAX_PROJECT_YAML_BYTES = 256 * 1024
-# A project's directory name, as tools/validate.py's NAME takes it, and the statements repository's project names,
+# A project's directory name, as oss-verify validate's NAME takes it, and the statements repository's project names,
 # which have no dot.
 NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,62}")
 STATEMENTS_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,62}")

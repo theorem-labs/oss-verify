@@ -2,20 +2,20 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 #
-# record-compile: the compile records of tools/check --checks, for its check that the UndefinedBehaviorSanitizer
-# reached the project's code (tools/check_links.py). The sanitizer runs in trap mode and leaves no symbol, and code
-# that it has nothing to check in compiles to the same bytes with its flags as without them, so an object cannot say
-# which flags made it. The compile says so here, as it runs.
+# record-compile: the compile records of oss-verify check --checks, for its check that the UndefinedBehaviorSanitizer
+# reached the project's code (src/oss_verify/check_links.py). The sanitizer runs in trap mode and leaves no symbol, and
+# code that it has nothing to check in compiles to the same bytes with its flags as without them, so an object cannot
+# say which flags made it. The compile says so here, as it runs.
 #
 #     record-compile --front <records> <shim>...    put a front before each compiler shim
 #     record-compile <records> <shim> <arguments>   what a front runs: the shim with the arguments, then the records
 #
 # compile, and release-target.sh for the shims of a ported build, call --front only when compile records the build
-# ($OV_RECORDS, which compile sets when tools/check --checks gives OV_RECORD=1, for its first build). Without records
-# no shim has a front, and no compile changes. --front copies each shim to .recorded/ beside it and puts at its path a
-# front that hands every argument, unchanged, to this script. Each compile of the project's code goes through a shim:
-# $CC and $CXX (compile's wrappers run the shims), a shim named by its path (a ported build), and $DRVCC. A build that
-# runs a compiler by its own name (clang) goes round them, and its objects have no record.
+# ($OV_RECORDS, which compile sets when oss-verify check --checks gives OV_RECORD=1, for its first build). Without
+# records no shim has a front, and no compile changes. --front copies each shim to .recorded/ beside it and puts at its
+# path a front that hands every argument, unchanged, to this script. Each compile of the project's code goes through a
+# shim: $CC and $CXX (compile's wrappers run the shims), a shim named by its path (a ported build), and $DRVCC. A build
+# that runs a compiler by its own name (clang) goes round them, and its objects have no record.
 #
 # The shim runs with the same arguments, working directory, open files (standard streams and any other) and
 # environment as without a front (but for SHLVL and _, which bash sets and no compiler reads; -p keeps BASH_ENV and
@@ -40,16 +40,16 @@
 # forms), for a step with arguments in a response file (@file) or that takes a precompiled header or clang modules,
 # and when the source cannot be preprocessed again. When the source has one, the object compiled from the
 # preprocessed source with every such attribute taken out is saved as <records>/nosan/<SHA-256>, which compile
-# copies to $OUT/.records/nosan/. tools/check_links.py reads both: an object with no UBSan trap is not shown to be
-# instrumented by a compile whose attributes took traps out of it.
+# copies to $OUT/.records/nosan/. src/oss_verify/check_links.py reads both: an object with no UBSan trap is not shown to
+# be instrumented by a compile whose attributes took traps out of it.
 #
 # The language is clang's name for what the step took the source as: -x's, else that of its extension (.c c, .cc and
 # .cpp c++, .m objective-c, .s assembler, .S assembler-with-cpp, ...), and a C++ shim (clang++) takes C as C++.
 # A step's input of no such extension, and no -x, is an input of a link (an object, an archive) and has no record. An
 # object older than the step (a file the step did not write) has none either. Recording writes nothing to standard
 # output or standard error: a configure test that reads what the compiler says sees the same as without records. A
-# record that cannot be written is left out, and tools/check_links.py then judges that object as it judges one with no
-# record.
+# record that cannot be written is left out, and src/oss_verify/check_links.py then judges that object as it judges one
+# with no record.
 shopt -u patsub_replacement 2>/dev/null
 
 if [ "${1:-}" = --front ]; then
@@ -153,8 +153,8 @@ isolated() {
 # `no_sanitize...` word that the result holds, with its parenthesised arguments, once each, or null when it cannot be
 # read. When there is one, the shim also compiles the preprocessed source with every such attribute taken out, with
 # the same arguments (but the sources, -include and -imacros, which the preprocessed source already holds), and NOSAN
-# is the SHA-256 of that object, saved as <records>/nosan/<SHA-256>: tools/check_links.py counts its UBSan traps,
-# which are those that the attributes took out of this object. NOSAN is null when there is no attribute or that
+# is the SHA-256 of that object, saved as <records>/nosan/<SHA-256>: src/oss_verify/check_links.py counts its UBSan
+# traps, which are those that the attributes took out of this object. NOSAN is null when there is no attribute or that
 # compile fails. None of this writes anything that the build reads.
 no_sanitize() {
   local source=$1 language=$2 a f skip="" work list="" separator="" word name sum other
@@ -319,10 +319,10 @@ record() {
     json "${languages[$i]}"; line="$line, \"language\": $REPLY"
     # The source's no_sanitize attributes, and the object without them: for a C or C++ source (or one preprocessed
     # already, .i or .ii) from a file, else null. Null too for a step that the second runs cannot see the whole source
-    # of: one with arguments in a response file (@file), whose compile record decides nothing (tools/check_links.py),
-    # and one that takes a precompiled header or clang modules, whose text -E does not print. That covers the
-    # precompiled header that clang's driver finds by itself beside a header given with -include (<header>.pch, or
-    # <header>.gch as a file or a directory).
+    # of: one with arguments in a response file (@file), whose compile record decides nothing
+    # (src/oss_verify/check_links.py), and one that takes a precompiled header or clang modules, whose text -E does not
+    # print. That covers the precompiled header that clang's driver finds by itself beside a header given with -include
+    # (<header>.pch, or <header>.gch as a file or a directory).
     REPLY=null NOSAN=null
     unseen="" include=""
     for a in "$@"; do
