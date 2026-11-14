@@ -182,7 +182,7 @@ jobs:
     if: >-
       needs.decide.outputs.decision == 'dispatch' || needs.decide.outputs.decision == 'label'
       || needs.decide.outputs.review_passed != ''
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     timeout-minutes: 5
     # Gets this job, and no other, the App's key: only a token with this environment's claim may act as the account
     # that reads it, as for build.yaml's and triage.yaml's comment jobs. Removing this line does not weaken the job; it

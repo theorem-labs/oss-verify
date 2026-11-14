@@ -65,7 +65,7 @@ concurrency:
 
 jobs:
   route:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     timeout-minutes: 5
     permissions:
       pull-requests: read
@@ -136,7 +136,7 @@ jobs:
   comment:
     needs: gather
     if: needs.gather.outputs.comment != ''
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     timeout-minutes: 2
     # The GitHub Environment is what gets this job the App's key and keeps it from every other job: its identity
     # token carries an `environment` claim, and only a token with that claim may act as ossv-app-comment, the
@@ -221,7 +221,7 @@ jobs:
     name: triage
     needs: [route, gather, comment]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     timeout-minutes: 5
     permissions:
       # Only for the checkout of .github/scripts.

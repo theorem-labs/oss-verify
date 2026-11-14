@@ -70,7 +70,7 @@ concurrency:
 
 jobs:
   route:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     timeout-minutes: 5
     permissions:
       contents: read
@@ -232,7 +232,7 @@ jobs:
     name: tests
     needs: [route, suite, docs]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     timeout-minutes: 5
     permissions:
       # Only for the checkout of .github/scripts.

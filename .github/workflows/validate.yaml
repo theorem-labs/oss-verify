@@ -52,7 +52,7 @@ concurrency:
 
 jobs:
   route:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     timeout-minutes: 5
     permissions: {}
     outputs:
@@ -119,7 +119,7 @@ jobs:
     name: enrollment
     needs: [route, validate]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     timeout-minutes: 5
     permissions:
       # Only for the checkout of .github/scripts.

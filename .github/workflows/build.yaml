@@ -398,7 +398,7 @@ concurrency:
 
 jobs:
   route:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-slim
     timeout-minutes: 5
     # contents: read only for the checkout of .github/scripts, main's (actor-kind, screened-review-cap). actions: read
     # for the daily cap, which reads this workflow's runs and the artifacts that mark them for it.
@@ -737,7 +737,7 @@ jobs:
     # is how a maintainer has enroll-dispatch.yml look again at a pull request.
     needs: project-builds
     if: ${{ !cancelled() && needs.project-builds.result == 'success' && needs.project-builds.outputs.name != '' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -1492,7 +1492,7 @@ jobs:
     # earlier run left (so a flood of issues cannot fill this job's one queue below).
     needs: [route, project-builds, review]
     if: ${{ !cancelled() && needs.review.result != 'skipped' && needs.route.outputs.kind == 'enrollment' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     timeout-minutes: 5
     # One hold job at a time in the repository, whatever pull request: two sweeps at once could each send the same
     # stored finding before either filed its issue. Every waiting hold job keeps its place (queue: max, up to 100), so
@@ -1650,7 +1650,7 @@ jobs:
                       || (needs.screen.result == 'success'
                           && (needs.screen.outputs.verdict != 'clean' || needs.review.result == 'failure'
                               || needs.review.result == 'cancelled'))))))) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     timeout-minutes: 5
     # The GitHub Environment is what gets this job the App's key and keeps it from every other job: its identity
     # token carries an `environment` claim, and only a token with that claim may act as ossv-app-comment, the
@@ -1954,7 +1954,7 @@ jobs:
     name: project-builds
     needs: [route, project-builds, record, gather, screen, review, session, hold, comment]
     if: always()
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-slim
     timeout-minutes: 5
     permissions:
       # Only for the checkout of .github/scripts.

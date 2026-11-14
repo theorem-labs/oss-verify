@@ -38,7 +38,7 @@ concurrency:
 jobs:
   terms-accepted:
     name: terms-accepted
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     timeout-minutes: 2
     steps:
       - name: The description accepts the OSS Verify terms
