@@ -12,6 +12,6 @@ RUN lay-out-sources $WORK/project/sources $WORK
 # From here, OSS-Fuzz's projects/go-coredns/Dockerfile (oss-fuzz 10625fc98598) as the release's build carried it out: the
 # checkout at COMMIT in place of its git clone, and its other RUN lines not run.
 ENV GO111MODULE=on
-RUN fetch-commit /root/go/src/github.com/coredns/coredns
+RUN fetch-commit $HOME/go/src/github.com/coredns/coredns
 COPY build.sh $SRC/
 WORKDIR $SRC/

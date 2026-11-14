@@ -29,12 +29,14 @@ set -euo pipefail
 : "${OFTGO:?the Go toolchain image sets OFTGO}"
 OV=/tmp/ov
 rm -rf "$OV"
-mkdir -p "$OV" /src /out /work /root/go/pkg/mod
+mkdir -p "$OV" /src /out /work
 
 # The environment that OSS-Fuzz's compile gives a Go project's build.sh: its build of a Go project is the address
 # build, for x86-64, with libFuzzer. Build scripts test these variables. The helpers build for riscv64 with no cgo, so
 # CC and CFLAGS reach no program.
-export SRC=/src OUT=/out WORK=/work HOME=/root GOPATH=/root/go
+export SRC=/src OUT=/out WORK=/work HOME=/root
+export GOPATH="$HOME/go"
+mkdir -p "$GOPATH/pkg/mod"
 export SANITIZER=address FUZZING_ENGINE=libfuzzer ARCHITECTURE=x86_64 FUZZING_LANGUAGE=go
 export CC=clang CXX=clang++ CFLAGS="-O1 -fno-omit-frame-pointer -gline-tables-only" \
   CXXFLAGS="-O1 -fno-omit-frame-pointer -gline-tables-only"

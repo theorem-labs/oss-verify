@@ -19,7 +19,7 @@
 # an account-wide one, or a read-only one from a writable one. A command that prints the same fixed token every
 # time is accepted, and then "minted for this build" is false however carefully the rest of the path behaves.
 #
-# Theorem's fleet already mints exactly that, so this asks for it rather than inventing a store: `gh-app-token` is
+# Theorem's machines already mint exactly that, so this asks for it rather than inventing a store: `gh-app-token` is
 # the GitHub App credential helper on a Theorem machine, and `--owner`/`--repo`/`--read-only` have it ask its
 # credential broker for an installation token narrowed to that one repository with contents:read and metadata:read.
 # It prints the token on standard output and its one note on standard error.
@@ -43,13 +43,13 @@ command -v gh-app-token >/dev/null 2>&1 || {
 #     installation token for exactly one hour, so an entry can never have more than an hour left, and asking for an
 #     hour means no entry is reusable: the helper asks its broker again and returns a token minted now. That is
 #     what 3600 is for. It is not a timeout to tune: lower it and two builds in the same hour share one token, and
-#     "minted for this build" stops being true. Measured on this fleet: at 1800 two calls return one token, at
+#     "minted for this build" stops being true. Measured on Theorem's machines: at 1800 two calls return one token, at
 #     3600 they return two. The one assumption is the build host's own clock -- gh-app-token compares an entry's
 #     expiry with the local wall clock, so a host running a minute or more BEHIND the mint server can still find
 #     an entry that looks fresh enough. A host whose clock is that wrong has larger problems; it is named here
 #     because the guarantee rests on it.
-#   - The token it mints is also written to the helper's own cache file on this host (mode 0600, under
-#     /mnt/nvme/<user>/gh-app-token or ~/.cache/gh-app-token). Nothing here can stop that, and nothing downstream
+#   - The token it mints is also written to the helper's own cache file on this host (mode 0600, in its cache
+#     directory, such as ~/.cache/gh-app-token). Nothing here can stop that, and nothing downstream
 #     needs to: the entry is unreadable by another account, is never reused by a later build because of the line
 #     above, and dies with the token in an hour. What the build keeps out of the image, a layer, the facts and the
 #     log is a different question, and that part is this repository's (docs/build-contract.md).

@@ -12,7 +12,7 @@ RUN lay-out-sources $WORK/project/sources $WORK
 # From here, OSS-Fuzz's projects/json-patch/Dockerfile (oss-fuzz 10625fc98598) as the release's build carried it out: the
 # checkout at COMMIT in place of its git clone, and its other RUN lines not run.
 RUN fetch-commit $SRC/json-patch
-# not run: RUN wget https://go.dev/dl/go1.23.4.linux-amd64.tar.gz && mkdir temp-go && rm -rf /root/.go/* && tar ...
+# not run: RUN wget https://go.dev/dl/go1.23.4.linux-amd64.tar.gz && mkdir temp-go && ...
 COPY fuzz_*.go $SRC/json-patch/
 COPY build.sh $SRC/
 WORKDIR $SRC/json-patch

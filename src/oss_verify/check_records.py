@@ -4,7 +4,7 @@
 (src/oss_verify/check_checks.py).
 
 Each abort() call is a check. This finds what decides whether it runs (its guard), and reads its comment: the
-`mutant:` and `input:` records of step 3.4 of .claude/skills/add-project/SKILL.md, and `not a property: <reason>`
+`mutant:` and `input:` records of step 3.4 of the add-project skill, and `not a property: <reason>`
 (docs/build-contract.md, "The checks of a fuzz target"). Written for theorem-labs/oss-verify#24, by the agent that
 wrote it, and moved here when that pull request folded into this step.
 """
