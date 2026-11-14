@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -143,6 +144,11 @@ class ScreenTest(unittest.TestCase):
         a["/v1/messages"] = lambda _b: message()
         self._sleep = screen.time.sleep
         screen.time.sleep = lambda _s: None
+        # The workflow runs the screen in a process of its own, so its deadline starts with the screen. Here the module
+        # was loaded when pytest collected this file, so each test starts the deadline afresh: a suite that spends more
+        # than DEADLINE_SECONDS before reaching these tests (the Docker builds can) would otherwise find it gone.
+        self._deadline = screen.DEADLINE
+        screen.DEADLINE = time.monotonic() + screen.DEADLINE_SECONDS
 
     def fresh(self):
         """New services and a new .review/, for one subtest."""
@@ -150,6 +156,7 @@ class ScreenTest(unittest.TestCase):
         self.setUp()
 
     def tearDown(self):
+        screen.DEADLINE = self._deadline
         screen.time.sleep = self._sleep
         self.services.close()
         self._tmp.cleanup()
