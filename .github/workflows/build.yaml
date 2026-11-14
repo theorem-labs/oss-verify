@@ -369,10 +369,10 @@ cache-mode: none
 
 env:
   # The Apps whose runs the review's action admits (its allowed_bots): our automation's, which opens enrollments and
-  # starts this file by hand, and the oss-verify App's. The one list: route reads it through .github/scripts/actor-kind,
-  # which decides as the action does, and the Review step gives it to the action. route's trust step counts these
-  # Apps as accounts with write access.
-  ALLOWED_BOTS: sjawhar-agent[bot],oss-verify[bot]
+  # starts this file by hand, the oss-verify App's, and Legion's implementer App, which opens the pull requests of
+  # Legion's workers. The one list: route reads it through .github/scripts/actor-kind, which decides as the action does,
+  # and the Review step gives it to the action. route's trust step counts these Apps as accounts with write access.
+  ALLOWED_BOTS: sjawhar-agent[bot],oss-verify[bot],legion-implementer[bot]
   # The daily cap on the screens and model reviews of accounts without write access: at most REVIEW_CAP runs in any 24
   # hours over all pull requests and issues, and at most REVIEW_CAP_AUTHOR of them charged to one account. route's
   # trust step counts them with .github/scripts/screened-review-cap for every item whose trust is screen, before the
