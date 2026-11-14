@@ -1,6 +1,6 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for oss-verify validate:  uv run pytest"""
+"""Tests for oss-verify validate: uv run pytest"""
 import contextlib
 import io
 import os
