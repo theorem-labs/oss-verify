@@ -3,7 +3,7 @@
 # EQ, the sample-rate converter and the delay lines, and a stream of MIDI messages through the note map.
 # Pinned to the merge of omx-dsp#314 on main: each fuzz check read against its comment (docs/fuzz-checks.md),
 # and the records of the two slew checks of fuzz_laws.c directly above their checks.
-repo: https://github.com/Open-Mixer/omx-dsp#321821e1d70dc7a7763f493b43ef1c90816f1b13
+repo: https://github.com/Open-Mixer/omx-dsp#82ca2ea0fd339a1ac0d89ea4676319768d2b56cd
 primary_contact: linuxnow@gmail.com
 homepage: https://github.com/Open-Mixer/omx-dsp
 language: c
