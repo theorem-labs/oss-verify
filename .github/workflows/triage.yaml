@@ -3,7 +3,7 @@
 name: "Triage"
 # Triages an enrollment pull request with what a reviewer would otherwise look up by hand. The comment on the pull
 # request is public and carries only whether the repository is a fork, the license, whether whoever opened it looks like
-# an active maintainer, the pull request's scope, tools/validate.py and the checklist. The full table, for Theorem's
+# an active maintainer, the pull request's scope, oss-verify validate and the checklist. The full table, for Theorem's
 # reviewers, is gather's job summary:
 # it adds the project's standing, stars and forks, outside participants, criticality score, OSS-Fuzz, .oss-verify/ in
 # its repository and its status in the proofs index. Both inform the review and decide nothing. A pull request that
@@ -122,6 +122,8 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number || inputs.pr }}
+          # triage.py imports oss_verify.validate, from this repository's src/.
+          PYTHONPATH: ${{ github.workspace }}/src
         run: |
           dpkg -s python3-yaml > /dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
           # A random delimiter, so that no text in the comment can end the output early.

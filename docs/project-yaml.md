@@ -2,7 +2,7 @@
 
 This page describes each field of `projects/<name>/project.yaml` and each file in the project directory. It is for a maintainer, or a coding agent, who writes a project directory.
 
-Start from [templates/project.yaml](../templates/project.yaml). `tools/validate.py` checks each rule on this page. We use the same rules when we import a project.
+Start from [templates/project.yaml](../templates/project.yaml). `oss-verify validate` checks each rule on this page. We use the same rules when we import a project.
 
 The field names come from OSS Scanner if it has the field, then from OSS-Fuzz. We made new names only for fields that neither has.
 
@@ -27,7 +27,7 @@ The field names come from OSS Scanner if it has the field, then from OSS-Fuzz. W
 | `proofs` | no | where we publish the proofs ([below](#proofs)) | the proofs repository |
 | `publish` | no | when we publish the proofs: `eager`, `after_fixes` or `never` ([below](#publish)) | `after_fixes` |
 
-`tools/validate.py` refuses each field that is not in this table.
+`oss-verify validate` refuses each field that is not in this table.
 
 ### repo
 
@@ -38,7 +38,7 @@ After `#`, give one of these:
 * A branch or a tag. Each build uses the commit that the branch or tag names when the build starts. We do not build again each time the branch moves ([what-gets-proven.md](what-gets-proven.md#when)).
 * A full commit id: 40 hexadecimal digits, or 64 for a SHA-256 repository. Each build then uses exactly that commit.
 
-The lock in the proofs repository records the commit of each build. It is the only place that records it. `tools/validate.py` warns you about a ref that looks like a shortened commit id.
+The lock in the proofs repository records the commit of each build. It is the only place that records it. `oss-verify validate` warns you about a ref that looks like a shortened commit id.
 
 ### primary_contact, auto_ccs and pgp
 
@@ -48,7 +48,7 @@ These fields work as they do in OSS Scanner.
 * `auto_ccs` lists more addresses. Each report goes to them too.
 * `pgp` holds your armored OpenPGP public key. We then encrypt each report to this key, and send it to `primary_contact` only. Thus you cannot use `pgp` with `auto_ccs`.
 
-The addresses are public. Use an address that you are glad to publish, such as a security alias. We send each finding privately to these addresses ([what-gets-proven.md](what-gets-proven.md#findings)). `tools/validate.py` warns about an address at a domain that is reserved for examples, such as `example.org` or `.invalid`, because no report reaches it.
+The addresses are public. Use an address that you are glad to publish, such as a security alias. We send each finding privately to these addresses ([what-gets-proven.md](what-gets-proven.md#findings)). `oss-verify validate` warns about an address at a domain that is reserved for examples, such as `example.org` or `.invalid`, because no report reaches it.
 
 A seeded project has `primary_contact: n/a` until a maintainer adopts it ([below](#seeded-projects)).
 
@@ -67,11 +67,11 @@ This table is the only list of languages in these documents. It gives the status
 | `go` | Go | builds today (plain build only, no cgo); our tools do not write theorem statements for Go yet | `*.go` |
 | `jvm` | Java, Kotlin and the other JVM languages | halts statements only; JVM binaries are not byte-reproducible yet | `*.java` `*.kt` |
 | `javascript` | JavaScript | held | `*.js` `*.mjs` `*.cjs` `*.ts` |
-| | Ruby, Lua | in progress: `tools/validate.py` does not accept them yet | |
-| | R | pending (likely address-only): `tools/validate.py` does not accept it yet | |
+| | Ruby, Lua | in progress: `oss-verify validate` does not accept them yet | |
+| | R | pending (likely address-only): `oss-verify validate` does not accept it yet | |
 | | Swift | not possible: RISC-V LLVM has no Swift calling convention | |
 
-Our builder builds `c`, `c++`, `rust`, `python` and `go` projects today. `tools/validate.py` warns about the other languages, and `tools/check` refuses them. The builders of the other languages are pending. We add each one to [infra/toolchains.tsv](../infra/toolchains.tsv) after its image is published.
+Our builder builds `c`, `c++`, `rust`, `python` and `go` projects today. `oss-verify validate` warns about the other languages, and `oss-verify check` refuses them. The builders of the other languages are pending. We add each one to [infra/toolchains.tsv](../infra/toolchains.tsv) after its image is published.
 
 A `rust` project has all four builds. Its `ubsan` build uses rustc's UB checks, not UndefinedBehaviorSanitizer ([build-contract.md](build-contract.md#rust-fuzz-targets)). A `python` project has all four builds: each build compiles CPython with its own flags.
 
@@ -86,7 +86,7 @@ Use `dockerfile` only if the `Dockerfile` is in your repository. We recommend th
 * If the `Dockerfile` and `build.sh` are in the project directory, do not set `dockerfile`. The build context is then the project directory.
 * If you set `dockerfile`, the build context is your repository at the commit that we build. Put `build.sh` next to the `Dockerfile`, unless the `Dockerfile` makes `$SRC/build.sh`. Then put your fuzz target sources, build patches and `sources` file in your repository too. Only `project.yaml`, `patch_style.md` and seed corpora can then be in the project directory.
 
-A seeded project can have no build files yet. `tools/validate.py` warns about it, and `tools/check` refuses it, because there is nothing to build.
+A seeded project can have no build files yet. `oss-verify validate` warns about it, and `oss-verify check` refuses it, because there is nothing to build.
 
 ### sanitizers
 
@@ -107,7 +107,7 @@ Change the UndefinedBehaviorSanitizer checks of the `ubsan` and `asan-ubsan` bui
 
 **The format of this field is provisional.** It can change before the next toolchain version applies it.
 
-> **WARNING:** Today's toolchain vintage does not apply this field. Its builds keep the fixed UBSan flags of the release ([build-contract.md](build-contract.md#the-builds)), so that its binaries are the release's. With this vintage, `tools/check` refuses a project that sets the field. The field applies with the next toolchain version.
+> **WARNING:** Today's toolchain vintage does not apply this field. Its builds keep the fixed UBSan flags of the release ([build-contract.md](build-contract.md#the-builds)), so that its binaries are the release's. With this vintage, `oss-verify check` refuses a project that sets the field. The field applies with the next toolchain version.
 
 If you leave out the field, the builds make the checks that OSS-Fuzz makes fatal, which are those of its `-fno-sanitize-recover` list, with `strict-flex-arrays`, and for a `c++` project also libc++'s hardening. For a `c++` project, these are the checks:
 
@@ -119,7 +119,7 @@ OSS-Fuzz leaves out `function` when it compiles C code, and when it compiles a P
 
 * `vptr` needs the UBSan runtime, which trap mode does not have. The `ubsan` build makes it through the toolchain image's trap-only handler (`/opt/ubsan-vptr-trap/libclang_rt.ubsan_vptr_trap.a`), which traps on a mismatch as the other checks do. A compile with `-fno-rtti` has no vptr check: the compiler shim adds `-fno-sanitize=vptr` to it, so a project built without RTTI needs no change. The `asan-ubsan` build leaves `vptr` out.
 * `libcxx-hardening` is not a clang check. It is libc++'s extensive hardening mode: the `ubsan` build compiles and links the project's C++ against the toolchain image's hardened libc++ (`/opt/asan-static/musl-hardened.cfg`). libc++ then checks its preconditions, for example an index past the end of a `std::span`, `std::string_view` or `std::vector`, or `*` of an empty `std::optional`, in the headers and in `libc++.a`, and a failed check traps with no output. The other builds keep the default libc++. To leave it out, write `remove: [libcxx-hardening]`, as for any check.
-* `strict-flex-arrays` is not a clang check. It is `-fstrict-flex-arrays=1`, which changes what `array-bounds` checks, in the `ubsan` and `asan-ubsan` builds. Without it, clang takes the last array of a struct to be of unknown size, whatever its declared size, so `array-bounds` does not check an index into it: `p->buf[20]` with `char buf[16]` as the last member is not caught, and AddressSanitizer does not catch it either while it stays inside the allocation. With it, a trailing array whose declared size is 2 or more is checked. A trailing `[1]`, `[0]` or `[]` is not, because that is how C writes a flexible array, allocated with room for more elements: older code writes `[1]`, and indexes past it as intended. If a struct's last array is indexed past its declared size on purpose and that size is 2 or more, write `remove: [strict-flex-arrays]`, as for any check. It adds no check without `array-bounds`, though it still changes how clang optimizes the code of the two UBSan builds. A compile of the project whose last `-fstrict-flex-arrays=` gives a lower level than the build's, or that hands a lower one to the front end, counts as not instrumented in the checks of `tools/check --checks`.
+* `strict-flex-arrays` is not a clang check. It is `-fstrict-flex-arrays=1`, which changes what `array-bounds` checks, in the `ubsan` and `asan-ubsan` builds. Without it, clang takes the last array of a struct to be of unknown size, whatever its declared size, so `array-bounds` does not check an index into it: `p->buf[20]` with `char buf[16]` as the last member is not caught, and AddressSanitizer does not catch it either while it stays inside the allocation. With it, a trailing array whose declared size is 2 or more is checked. A trailing `[1]`, `[0]` or `[]` is not, because that is how C writes a flexible array, allocated with room for more elements: older code writes `[1]`, and indexes past it as intended. If a struct's last array is indexed past its declared size on purpose and that size is 2 or more, write `remove: [strict-flex-arrays]`, as for any check. It adds no check without `array-bounds`, though it still changes how clang optimizes the code of the two UBSan builds. A compile of the project whose last `-fstrict-flex-arrays=` gives a lower level than the build's, or that hands a lower one to the front end, counts as not instrumented in the checks of `uv run oss-verify check --checks`.
 * OSS-Fuzz also instruments `unsigned-integer-overflow`, but it silences the reports (`silence_unsigned_overflow=1`). Trap mode cannot silence a check. Thus the default does not contain it.
 
 The field changes the default, and tells why:
@@ -136,7 +136,7 @@ ubsan_checks:
   reason: "the decoder reads packed structures, and must never read them misaligned"
 ```
 
-`tools/validate.py` refuses a name that clang does not know, a check that the field both adds and removes, and a change without a reason. In these lists, `null` needs no quotes.
+`oss-verify validate` refuses a name that clang does not know, a check that the field both adds and removes, and a change without a reason. In these lists, `null` needs no quotes.
 
 ### fuzz_targets
 
@@ -218,13 +218,13 @@ With `never`, we publish neither the proofs nor the theorem statements. With eac
 
 ## Seeded projects
 
-We seeded some projects ourselves. A project whose proofs we publish in [oss-verify-proofs](https://github.com/theorem-labs/oss-verify-proofs) is in `projects/<name>/`. Each other one is in [tools/seeds/](../tools/seeds/)`<name>/`: its `project.yaml`, and its build files if it has any. We used the build data of the oss-fuzz-theorems 2026.10 release. A seeded project has `primary_contact: n/a`. Its `project.yaml` starts with two comment lines that tell that we seeded it. `tools/validate.py` warns about `n/a`, and the `tools/validate.py` row of the triage comment on a pull request shows that warning.
+We seeded some projects ourselves. A project whose proofs we publish in [oss-verify-proofs](https://github.com/theorem-labs/oss-verify-proofs) is in `projects/<name>/`. Each other one is in [seeds/](../seeds/)`<name>/`: its `project.yaml`, and its build files if it has any. We used the build data of the oss-fuzz-theorems 2026.10 release. A seeded project has `primary_contact: n/a`. Its `project.yaml` starts with two comment lines that tell that we seeded it. `oss-verify validate` warns about `n/a`, and the `oss-verify validate` row of the triage comment on a pull request shows that warning.
 
 From [this commit of OSS-Fuzz](https://github.com/google/oss-fuzz/tree/bd2ce21991a94a362b92fb1bf25f86d5a1a60842), we seeded each project that our builder can build and that we can describe honestly. A seeded `project.yaml` gives only what the recorded build data tells, and no guess. [seeded-projects.tsv](seeded-projects.tsv) lists each of the 1,381 projects of OSS-Fuzz at that commit. For a project that we did not seed, it gives the reason.
 
 A core maintainer can adopt a seeded project:
 
-1. Copy its `projects/<name>/`, or its `tools/seeds/<name>/`, to `projects/<name>/` in a branch of your fork.
+1. Copy its `projects/<name>/`, or its `seeds/<name>/`, to `projects/<name>/` in a branch of your fork.
 2. Remove each patch that fixes a bug. The directory of a seeded project whose proofs we publish can hold such a patch, but the directory of an enrolled project cannot ([above](#build-patches)). For each one, delete the patch file, its line in `series`, its `patch` line in `sources`, and its name where the `Dockerfile` or `build.sh` copies or applies it. `lay-out-sources` applies each `patch` line of `sources` in turn, and stops when those lines are not the patches that `series` lists, in the same order. So keep the patches that remain in their order in both files.
 3. Set `primary_contact` to the address that gets findings.
 4. Remove the two comment lines.
@@ -254,7 +254,7 @@ A seed corpus is a zip file of example inputs of one fuzz target. Together, its 
 * It holds at most 1,024 inputs.
 * Its size is at most 1 MiB, and at most 16 MiB when uncompressed.
 
-The seed corpus of a `python` project is an input of the build of its fuzz target. The build gives the seeds to `pyclosure.py`, which runs the harness on each one, and the modules that these runs reach go into the frozen module set of the binary ([infra/base-builder/python/recipes.sh](../infra/base-builder/python/recipes.sh), `oft_py_freeze`). Thus a change to such a seed corpus can change the bytes of the binaries. For each other language, no build reads the seeds. `tools/check --checks` runs the seeds of a `c` or `c++` project to measure its checks, and that run changes no binary ([build-contract.md](build-contract.md#the-checks-of-a-fuzz-target)).
+The seed corpus of a `python` project is an input of the build of its fuzz target. The build gives the seeds to `pyclosure.py`, which runs the harness on each one, and the modules that these runs reach go into the frozen module set of the binary ([infra/base-builder/python/recipes.sh](../infra/base-builder/python/recipes.sh), `oft_py_freeze`). Thus a change to such a seed corpus can change the bytes of the binaries. For each other language, no build reads the seeds. `uv run oss-verify check --checks` runs the seeds of a `c` or `c++` project to measure its checks, and that run changes no binary ([build-contract.md](build-contract.md#the-checks-of-a-fuzz-target)).
 
 ### Build patches
 

@@ -1,5 +1,0 @@
-# Ported from the Rust build of the oss-fuzz-theorems 2026.10 release (tools/seeds/languages.tsv); do not edit.
-# kind	path	arguments: see lay-out-sources
-tree	ext/zstd-safe-zstd_fuzzer/src	upstream/zstd-rs
-copy	targets/zstd-safe-zstd_fuzzer/Cargo.lock	Cargo.lock
-crates	ext/zstd-safe-zstd_fuzzer/vendor	targets/zstd-safe-zstd_fuzzer/Cargo.lock	ext/zstd-safe-zstd_fuzzer/src	zstd-safe/fuzz	zstd_fuzzer

@@ -1,5 +1,0 @@
-# Ported from the Rust build of the oss-fuzz-theorems 2026.10 release (tools/seeds/languages.tsv); do not edit.
-# kind	path	arguments: see lay-out-sources
-tree	ext/harfrust-fuzz_shape/src	upstream/harfrust
-copy	targets/harfrust-fuzz_shape/Cargo.lock	Cargo.lock
-crates	ext/harfrust-fuzz_shape/vendor	targets/harfrust-fuzz_shape/Cargo.lock	ext/harfrust-fuzz_shape/src	fuzz	fuzz_shape

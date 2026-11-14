@@ -90,7 +90,7 @@ write_cc_shim "$SHIM/$CHOST-clang++-sealed" \
 # The driver is compiled without a sanitizer in every build. The library and the harness get the build's own.
 DRVCC=$SHIM/$CHOST-clang-plain
 DRVCXX=$SHIM/$CHOST-clang++-plain
-# The UBSan checks: the release's fixed flags, unless tools/check gives a project's checks in OV_UBSAN_CHECKS (and
+# The UBSan checks: the release's fixed flags, unless oss-verify check gives a project's checks in OV_UBSAN_CHECKS (and
 # those that trap mode leaves out in OV_UBSAN_EXCLUDE; compile leaves OV_UBSAN_C_EXCLUDE out of the C compiles of a
 # c++ project), which it does only on a toolchain whose infra/toolchains.tsv
 # row says so (docs/project-yaml.md#ubsan_checks).

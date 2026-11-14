@@ -28,7 +28,7 @@
 # A recipe that compiles its own adapter (rust/recipes.sh, with plugin_rust.h; python/recipes.sh, with
 # python_tier_plugin.h) names it in OV_ADAPTER: it takes the place of adapter.o.
 #
-# With OV_RECORDS set (compile sets it for tools/check --checks), it also records the link for the checks of the
+# With OV_RECORDS set (compile sets it for oss-verify check --checks), it also records the link for the checks of the
 # binaries: the linker's map, the files the link took, and a quiet twin linked with the quiet driver (below, at the
 # end). None of this changes a byte of the two outputs.
 set -euo pipefail
@@ -111,7 +111,7 @@ link() {
     ${tail[@]+"${tail[@]}"}
 }
 
-# With OV_RECORDS (tools/check --checks), the first link also writes the linker's map: every input section the link
+# With OV_RECORDS (oss-verify check --checks), the first link also writes the linker's map: every input section the link
 # took, with the object or archive member it came from. It is the last argument, so that it is the map the linker
 # writes even when the link names one of its own. The map changes no byte of either output.
 [ -z "${OV_RECORDS:-}" ] || tail=("-Wl,-Map=$OV_RECORDS/map.$$")
@@ -122,10 +122,11 @@ link -Wl,--strip-all -o "$OV_TWINS/$sum.tmp"
 mv -f "$OV_TWINS/$sum.tmp" "$OV_TWINS/$sum"
 
 [ -n "${OV_RECORDS:-}" ] || exit 0
-# The record of this link, for the checks of tools/check --checks (tools/check_links.py), in $OV_RECORDS/<sum>/:
+# The record of this link, for the checks of oss-verify check --checks (src/oss_verify/check_links.py), in
+# $OV_RECORDS/<sum>/:
 #   map         the input sections of the linker's map, in the map's own order. The reader takes the output section
 #               each one belongs to, and whether the linker loads it, from that order and from the addresses
-#               (tools/check_links.py, parse_map), so keep both: never sort or re-order the lines below.
+#               (src/oss_verify/check_links.py, parse_map), so keep both: never sort or re-order the lines below.
 #   driver      the driver's objects and the seals, one a line: compiled without a sanitizer in every build, by design
 #   inputs.tsv  each file the map names: <path as the map names it> <real path> <sha256> <bytes>
 #   renamed     for an allocation-failure link, each copy it made: <copy> <real path of the original> <its sha256>

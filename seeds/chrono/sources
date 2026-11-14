@@ -1,0 +1,8 @@
+# Ported from the Rust build of the oss-fuzz-theorems 2026.10 release (seeds/languages.tsv); do not edit.
+# kind	path	arguments: see lay-out-sources
+tree	ext/chrono-fuzz_format/src	upstream/chrono
+copy	targets/chrono-fuzz_format/Cargo.lock	Cargo.lock
+crates	ext/chrono-fuzz_format/vendor	targets/chrono-fuzz_format/Cargo.lock	ext/chrono-fuzz_format/src	fuzz	fuzz_format
+tree	ext/chrono-fuzz_reader/src	upstream/chrono
+copy	targets/chrono-fuzz_reader/Cargo.lock	Cargo.lock
+link	ext/chrono-fuzz_reader/vendor	ext/chrono-fuzz_format/vendor

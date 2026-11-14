@@ -1,9 +1,9 @@
 # Adapted from OSS Scanner's .github/workflows/build.yaml (https://github.com/anthropics/oss-scanner), Copyright 2026
-# Anthropic PBC, Apache-2.0. Modified 2026 by Theorem Labs, PBC: a new workflow that runs tools/validate.py on the
+# Anthropic PBC, Apache-2.0. Modified 2026 by Theorem Labs, PBC: a new workflow that runs oss-verify validate on the
 # projects/<name>/ of an enrollment pull request, taken from it as build.yaml takes it.
 name: "Validate"
 # enrollment checks the projects/<name>/ a pull request adds or changes against the enrollment rules, with the base
-# branch's tools/validate.py. It is a required check: it runs on every pull request, and takes the project as
+# branch's oss-verify validate. It is a required check: it runs on every pull request, and takes the project as
 # build.yaml does (.github/scripts/take-project): the one project a fork's file list names, or the one project that
 # merging a branch of this repository into the base branch changes. A fork that changes a file under projects/ fails if
 # it changes anything but one project, and a branch of this repository fails if its merge conflicts. It passes with
@@ -17,7 +17,7 @@ name: "Validate"
 # pull request into another branch keeps its failed check. This repository's own tests are tests.yaml.
 #
 # The jobs: route asks for validate on every event this workflow takes, since each is a commit to judge; validate takes
-# the project with take-project and runs tools/validate.py on it, or passes with nothing to validate; required always
+# the project with take-project and runs oss-verify validate on it, or passes with nothing to validate; required always
 # runs, after both, and reports the required check enrollment with .github/scripts/collect, so that the check is never
 # a job that could be skipped.
 #
@@ -90,24 +90,26 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: .github/scripts/take-project validate
 
-      - name: Check projects/<name>/ with tools/validate.py
+      - name: Check projects/<name>/ with oss-verify validate
         if: steps.project.outputs.name != ''
         env:
           NAME: ${{ steps.project.outputs.name }}
           SHA: ${{ steps.project.outputs.sha }}
+          # This repository's package: -P keeps the top of the checkout off sys.path, and PYTHONPATH names src/ alone.
+          PYTHONPATH: ${{ github.workspace }}/src
         run: |
           dpkg -s python3-yaml > /dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
           # Until the token is printed again, the runner reads none of the validator's output as a workflow command.
           resume="$(openssl rand -hex 16)"
           echo "::stop-commands::$resume"
           code=0
-          python3 tools/validate.py "projects/$NAME" < /dev/null || code=$?
+          python3 -P -m oss_verify validate "projects/$NAME" < /dev/null || code=$?
           echo "::$resume::"
 
           case $code in
-            0) result="passes tools/validate.py" ;;
+            0) result="passes oss-verify validate" ;;
             1) result="breaks the enrollment rules (the log lists them)" ;;
-            *) result="could not be checked: tools/validate.py exited $code" ;;
+            *) result="could not be checked: oss-verify validate exited $code" ;;
           esac
           echo "\`projects/$NAME/\` at \`${SHA:0:7}\` $result." >> "$GITHUB_STEP_SUMMARY"
           [ "$code" = 0 ] || echo "::error::projects/$NAME/ $result."

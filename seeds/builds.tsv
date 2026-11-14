@@ -1,0 +1,399 @@
+# The result of oss-verify check --twice --lock on each seeded project's port, one row per project, from its
+# latest check
+project	result	detail
+abseil-cpp	reproduces	all binaries match the release's
+ada-url	reproduces	all binaries match the release's
+arduinojson	reproduces	all binaries match the release's
+args	reproduces	all binaries match the release's
+arrow	reproduces	all binaries match the release's
+asn1crypto	reproducible	4 binaries; a second build is identical; the release has none to compare
+aspell	reproduces	all binaries match the release's
+astc-encoder	reproduces	all binaries match the release's
+astro-compiler	reproduces	all binaries match the release's
+atomic	reproduces	all binaries match the release's
+augeas	reproduces	all binaries match the release's
+avahi	reproduces	all binaries match the release's
+bazel-rules-fuzzing-test	reproduces	all binaries match the release's
+behaviortreecpp	reproduces	all binaries match the release's
+bincode	reproducible	8 binaries; a second build is identical; the release has none to compare
+binutils	reproduces	all binaries match the release's
+blackfriday	reproduces	all binaries match the release's
+bluez	reproduces	all binaries match the release's
+boost-beast	reproduces	all binaries match the release's
+boost-json	reproduces	all binaries match the release's
+boringssl	reproduces	all binaries match the release's
+botan	reproduces	all binaries match the release's
+brotli	reproduces	all binaries match the release's
+brunsli	reproduces	all binaries match the release's
+burntsushi-toml	reproduces	all binaries match the release's
+bzip2	reproduces	all binaries match the release's
+c-ares	reproduces	all binaries match the release's
+c-blosc	reproduces	all binaries match the release's
+cascadia	reproduces	all binaries match the release's
+cctz	reproduces	all binaries match the release's
+cfengine	reproduces	all binaries match the release's
+cgif	reproduces	all binaries match the release's
+chardet	reproducible	4 binaries; a second build is identical; the release has none to compare
+chrono	reproducible	8 binaries; a second build is identical; the release has none to compare
+cjson	reproduces	all binaries match the release's
+clib	reproduces	all binaries match the release's
+cmake	reproduces	all binaries match the release's
+cmark	reproduces	all binaries match the release's
+coturn	reproduces	all binaries match the release's
+cpp-httplib	reproduces	all binaries match the release's
+cppcheck	reproduces	all binaries match the release's
+cppitertools	reproduces	all binaries match the release's
+cpuinfo	reproduces	all binaries match the release's
+croaring	reproduces	all binaries match the release's
+crow	reproduces	all binaries match the release's
+cssselect	reproducible	8 binaries; a second build is identical; the release has none to compare
+curl	reproduces	all binaries match the release's
+cxxopts	reproduces	all binaries match the release's
+data-encoding	reproducible	48 binaries; a second build is identical; the release has none to compare
+dav1d	reproduces	all binaries match the release's
+dbus-broker	reproduces	all binaries match the release's
+dbus-sensors	reproduces	all binaries match the release's
+defusedxml	reproducible	8 binaries; a second build is identical; the release has none to compare
+demangle	reproduces	all binaries match the release's
+dlplibs	reproduces	all binaries match the release's
+dnsmasq	reproduces	all binaries match the release's
+double-conversion	reproduces	all binaries match the release's
+dovecot	reproduces	all binaries match the release's
+easywsclient	reproduces	all binaries match the release's
+eigen	reproduces	all binaries match the release's
+espeak-ng	reproduces	all binaries match the release's
+estoraged	reproduces	all binaries match the release's
+exiv2	reproduces	all binaries match the release's
+expat	reproduces	all binaries match the release's
+expr	reproduces	all binaries match the release's
+faad2	reproduces	all binaries match the release's
+fast_float	reproduces	all binaries match the release's
+fastjson	reproduces	all binaries match the release's
+ffms2	reproduces	all binaries match the release's
+fips203	reproducible	4 binaries; a second build is identical; the release has none to compare
+firestore	reproduces	all binaries match the release's
+flac	reproduces	all binaries match the release's
+flatbuffers	reproduces	all binaries match the release's
+flate2-rs	reproducible	4 binaries; a second build is identical; the release has none to compare
+flex	reproduces	all binaries match the release's
+fluent-bit	reproduces	all binaries match the release's
+fmt	reproduces	all binaries match the release's
+freerdp	reproduces	all binaries match the release's
+freetype2	reproduces	all binaries match the release's
+fribidi	reproduces	all binaries match the release's
+gbmc-pacemaker	reproduces	all binaries match the release's
+gdk-pixbuf	reproduces	all binaries match the release's
+geos	reproduces	all binaries match the release's
+ghostscript	reproduces	all binaries match the release's
+giflib	reproduces	all binaries match the release's
+glaze	reproduces	all binaries match the release's
+glib	reproduces	all binaries match the release's
+glog	reproduces	all binaries match the release's
+go-cmp	reproduces	all binaries match the release's
+go-coredns	reproduces	all binaries match the release's
+go-dns	reproduces	all binaries match the release's
+go-humanize	reproduces	all binaries match the release's
+go-toml	reproduces	all binaries match the release's
+go-yaml	reproduces	all binaries match the release's
+gobgp	reproduces	all binaries match the release's
+gogo-protobuf	reproduces	all binaries match the release's
+gpsd	reproduces	all binaries match the release's
+grpc-httpjson-transcoding	reproduces	all binaries match the release's
+h2	reproducible	12 binaries; a second build is identical; the release has none to compare
+h2o	reproduces	all binaries match the release's
+harfbuzz	reproduces	all binaries match the release's
+harfrust	reproducible	4 binaries; a second build is identical; the release has none to compare
+highwayhash	reproduces	all binaries match the release's
+hoextdown	reproduces	all binaries match the release's
+hothd	reproduces	all binaries match the release's
+http	reproducible	4 binaries; a second build is identical; the release has none to compare
+httparse	reproducible	24 binaries; a second build is identical; the release has none to compare
+httrack	reproduces	all binaries match the release's
+hunspell	reproduces	all binaries match the release's
+hwloc	reproduces	all binaries match the release's
+idna	reproduces	all binaries match the release's
+igraph	reproduces	all binaries match the release's
+image-png	reproducible	12 binaries; a second build is identical; the release has none to compare
+inchi	reproduces	all binaries match the release's
+iniconfig	reproducible	4 binaries; a second build is identical; the release has none to compare
+inih	reproduces	all binaries match the release's
+iperf	reproduces	all binaries match the release's
+isodate	reproducible	4 binaries; a second build is identical; the release has none to compare
+itoa	reproducible	4 binaries; a second build is identical; the release has none to compare
+janet	reproduces	all binaries match the release's
+jansson	reproduces	all binaries match the release's
+janus-gateway	reproduces	all binaries match the release's
+jbig2dec	reproduces	all binaries match the release's
+jmespathpy	reproducible	4 binaries; a second build is identical; the release has none to compare
+jpegoptim	reproduces	all binaries match the release's
+jq	reproduces	all binaries match the release's
+json	reproduces	all binaries match the release's
+json-c	reproduces	all binaries match the release's
+json-patch	reproduces	all binaries match the release's
+json5format	reproducible	4 binaries; a second build is identical; the release has none to compare
+jsoncons	reproduces	all binaries match the release's
+jsoncpp	reproduces	all binaries match the release's
+kamailio	reproduces	all binaries match the release's
+kea	reproduces	all binaries match the release's
+knot-dns	reproduces	all binaries match the release's
+krb5	reproduces	all binaries match the release's
+lcms	reproduces	all binaries match the release's
+leptonica	reproduces	all binaries match the release's
+libarchive	reproduces	all binaries match the release's
+libavc	reproduces	all binaries match the release's
+libbpf	reproduces	all binaries match the release's
+libcacard	reproduces	all binaries match the release's
+libcbor	reproduces	all binaries match the release's
+libcoap	reproduces	all binaries match the release's
+libconfig	reproduces	all binaries match the release's
+libcue	reproduces	all binaries match the release's
+libcups	reproduces	all binaries match the release's
+libdwarf	reproduces	all binaries match the release's
+libevent	reproduces	all binaries match the release's
+libexif	reproduces	all binaries match the release's
+libfdk-aac	reproduces	all binaries match the release's
+libfuse	reproduces	all binaries match the release's
+libgd	reproduces	all binaries match the release's
+libgit2	reproduces	all binaries match the release's
+libheif	reproduces	all binaries match the release's
+libhevc	reproduces	all binaries match the release's
+libhtp	reproduces	all binaries match the release's
+libical	reproduces	all binaries match the release's
+libidn	reproduces	all binaries match the release's
+libidn2	reproduces	all binaries match the release's
+libiec61850	reproduces	all binaries match the release's
+libigl	reproduces	all binaries match the release's
+libjpeg-turbo	reproduces	all binaries match the release's
+libjxl	reproduces	all binaries match the release's
+libldac	reproduces	all binaries match the release's
+liblouis	reproduces	all binaries match the release's
+libmpeg2	reproduces	all binaries match the release's
+liboqs	reproduces	all binaries match the release's
+libpcap	reproduces	all binaries match the release's
+libpg_query	reproduces	all binaries match the release's
+libplist	reproduces	all binaries match the release's
+libpng	reproduces	all binaries match the release's
+libpng-proto	reproduces	all binaries match the release's
+libpsl	reproduces	all binaries match the release's
+librawspeed	reproduces	all binaries match the release's
+librdkafka	reproduces	all binaries match the release's
+libressl	reproduces	all binaries match the release's
+libsndfile	reproduces	all binaries match the release's
+libsodium	reproduces	all binaries match the release's
+libsoup	reproduces	all binaries match the release's
+libspdm	reproduces	all binaries match the release's
+libspng	reproduces	all binaries match the release's
+libsrtp	reproduces	all binaries match the release's
+libtasn1	reproduces	all binaries match the release's
+libtorrent	reproduces	all binaries match the release's
+libtpms	reproduces	all binaries match the release's
+libtsm	reproduces	all binaries match the release's
+libucl	reproduces	all binaries match the release's
+libunwind	reproduces	all binaries match the release's
+libusb	reproduces	all binaries match the release's
+libvpx	reproduces	all binaries match the release's
+libwebsockets	reproduces	all binaries match the release's
+libxls	reproduces	all binaries match the release's
+libxlsxwriter	reproduces	all binaries match the release's
+libxml2	reproduces	all binaries match the release's
+libxslt	reproduces	all binaries match the release's
+libyaml	reproduces	all binaries match the release's
+libzip	reproduces	all binaries match the release's
+libzmq	reproduces	all binaries match the release's
+lighttpd	reproduces	all binaries match the release's
+lldpd	reproduces	all binaries match the release's
+llhttp	reproduces	all binaries match the release's
+lodepng	reproduces	all binaries match the release's
+lua	reproduces	all binaries match the release's
+lz4	reproduces	all binaries match the release's
+lz4_flex	reproducible	24 binaries; a second build is identical; the release has none to compare
+magic-enum	reproduces	all binaries match the release's
+mariadb	reproduces	all binaries match the release's
+matio	reproduces	all binaries match the release's
+mbedtls	reproduces	all binaries match the release's
+md4c	reproduces	all binaries match the release's
+mdbtools	reproduces	all binaries match the release's
+mdurl	reproduces	all binaries match the release's
+memcached	reproduces	all binaries match the release's
+meshoptimizer	reproduces	all binaries match the release's
+miniz	reproduces	all binaries match the release's
+more-itertools	reproducible	4 binaries; a second build is identical; the release has none to compare
+mosh	reproduces	all binaries match the release's
+mp4parse-rust	reproducible	8 binaries; a second build is identical; the release has none to compare
+mpv	reproduces	all binaries match the release's
+msgpack-c	reproduces	all binaries match the release's
+multierr	reproduces	all binaries match the release's
+muparser	reproduces	all binaries match the release's
+mupdf	reproduces	all binaries match the release's
+mxj	reproduces	all binaries match the release's
+myanmar-tools	reproduces	all binaries match the release's
+mysql-server	reproduces	all binaries match the release's
+nanopb	reproduces	all binaries match the release's
+nccl	reproduces	all binaries match the release's
+ndpi	reproduces	all binaries match the release's
+neomutt	reproduces	all binaries match the release's
+nestegg	reproduces	all binaries match the release's
+netaddr-py	reproducible	4 binaries; a second build is identical; the release has none to compare
+netcdf	reproduces	all binaries match the release's
+nettle	reproduces	all binaries match the release's
+nghttp2	reproduces	all binaries match the release's
+ninja	reproduces	all binaries match the release's
+njs	reproduces	all binaries match the release's
+nokogiri	reproduces	all binaries match the release's
+nom	reproducible	4 binaries; a second build is identical; the release has none to compare
+nsmd	reproduces	all binaries match the release's
+ntpsec	reproduces	all binaries match the release's
+numactl	reproduces	all binaries match the release's
+oatpp	reproduces	all binaries match the release's
+ocudu	reproduces	all binaries match the release's
+open5gs	reproduces	all binaries match the release's
+open62541	reproduces	all binaries match the release's
+opencensus-cpp	reproduces	all binaries match the release's
+opendnp3	reproduces	all binaries match the release's
+openh264	reproduces	all binaries match the release's
+openjpeg	reproduces	all binaries match the release's
+openjph	reproduces	all binaries match the release's
+opensc	reproduces	all binaries match the release's
+openssh	reproduces	all binaries match the release's
+openssl	reproduces	all binaries match the release's
+openvpn	reproduces	all binaries match the release's
+openvswitch	reproduces	all binaries match the release's
+opus	reproduces	all binaries match the release's
+opusfile	reproduces	all binaries match the release's
+oss-fuzz-example	reproduces	all binaries match the release's
+ostree	reproduces	all binaries match the release's
+ots	reproduces	all binaries match the release's
+p11-kit	reproduces	all binaries match the release's
+packaging	reproducible	4 binaries; a second build is identical; the release has none to compare
+parse	reproducible	4 binaries; a second build is identical; the release has none to compare
+pborman-uuid	reproduces	all binaries match the release's
+pcre2	reproduces	all binaries match the release's
+pffft	reproduces	all binaries match the release's
+phmap	reproduces	all binaries match the release's
+phosphor-certificate-manager	reproduces	all binaries match the release's
+phosphor-networkd	reproduces	all binaries match the release's
+phosphor-state-manager	reproduces	all binaries match the release's
+picotls	reproduces	all binaries match the release's
+piex	reproduces	all binaries match the release's
+plan9port	reproduces	all binaries match the release's
+poco	reproduces	all binaries match the release's
+postgis	reproduces	all binaries match the release's
+powerdns	reproduces	all binaries match the release's
+proftpd	reproduces	all binaries match the release's
+protobuf-c	reproduces	all binaries match the release's
+protocompile	reproduces	all binaries match the release's
+pugixml	reproduces	all binaries match the release's
+pupnp	reproduces	all binaries match the release's
+pyasn1	reproducible	4 binaries; a second build is identical; the release has none to compare
+pycparser	reproducible	4 binaries; a second build is identical; the release has none to compare
+pycryptodome	reproduces	all binaries match the release's
+pyjson5	reproducible	4 binaries; a second build is identical; the release has none to compare
+pyparsing	reproducible	4 binaries; a second build is identical; the release has none to compare
+python-markdown	reproducible	4 binaries; a second build is identical; the release has none to compare
+python-pathspec	reproducible	4 binaries; a second build is identical; the release has none to compare
+python-rison	reproducible	8 binaries; a second build is identical; the release has none to compare
+python-tabulate	reproducible	4 binaries; a second build is identical; the release has none to compare
+qpdf	reproduces	all binaries match the release's
+qpid-proton	reproduces	all binaries match the release's
+quantlib	reproduces	all binaries match the release's
+qubes-os	reproduces	all binaries match the release's
+quick-xml	reproducible	12 binaries; a second build is identical; the release has none to compare
+quickjs	reproduces	all binaries match the release's
+rabbitmq-c	reproduces	all binaries match the release's
+radon	reproduces	all binaries match the release's
+radvd	reproduces	all binaries match the release's
+rapidjson	reproduces	all binaries match the release's
+re2	reproduces	all binaries match the release's
+readstat	reproduces	all binaries match the release's
+ron	reproducible	4 binaries; a second build is identical; the release has none to compare
+rtpproxy	reproduces	all binaries match the release's
+rust-regex	reproducible	32 binaries; a second build is identical; the release has none to compare
+rust-semver-parser	reproducible	4 binaries; a second build is identical; the release has none to compare
+rustls	reproducible	28 binaries; a second build is identical; the release has none to compare
+ryu	reproducible	4 binaries; a second build is identical; the release has none to compare
+s2opc	reproduces	all binaries match the release's
+samba	reproduces	all binaries match the release's
+selinux	reproduces	all binaries match the release's
+serde_json	reproducible	4 binaries; a second build is identical; the release has none to compare
+serenity	reproduces	all binaries match the release's
+simdjson	reproduces	all binaries match the release's
+six	reproducible	4 binaries; a second build is identical; the release has none to compare
+skcms	reproduces	all binaries match the release's
+skia	reproduces	all binaries match the release's
+sleuthkit	reproduces	all binaries match the release's
+snappy	reproduces	all binaries match the release's
+spdk	reproduces	all binaries match the release's
+spdlog	reproduces	all binaries match the release's
+speex	reproduces	all binaries match the release's
+spice-usbredir	reproduces	all binaries match the release's
+spirv-cross	reproduces	all binaries match the release's
+spirv-tools	reproduces	all binaries match the release's
+spotify-json	reproduces	all binaries match the release's
+sqlparse	reproducible	8 binaries; a second build is identical; the release has none to compare
+stb	reproduces	all binaries match the release's
+sudoers	reproduces	all binaries match the release's
+systemd	reproduces	all binaries match the release's
+taglib	reproduces	all binaries match the release's
+tar-rs	reproducible	8 binaries; a second build is identical; the release has none to compare
+tcpreplay	reproduces	all binaries match the release's
+thrift-c_glib	reproduces	all binaries match the release's
+thrift-cpp	reproduces	all binaries match the release's
+tidy-html5	reproduces	all binaries match the release's
+tink-cc	reproduces	all binaries match the release's
+tinycss2	reproducible	8 binaries; a second build is identical; the release has none to compare
+tinygltf	reproduces	all binaries match the release's
+tinyobjloader	reproduces	all binaries match the release's
+tinyxml2	reproduces	all binaries match the release's
+tmux	reproduces	all binaries match the release's
+tokio	reproducible	8 binaries; a second build is identical; the release has none to compare
+toml_edit	reproducible	4 binaries; a second build is identical; the release has none to compare
+tomlkit	reproducible	8 binaries; a second build is identical; the release has none to compare
+toolz	reproducible	4 binaries; a second build is identical; the release has none to compare
+tremor	reproduces	all binaries match the release's
+trust-dns	reproducible	4 binaries; a second build is identical; the release has none to compare
+tungstenite-rs	reproducible	12 binaries; a second build is identical; the release has none to compare
+typing_extensions	reproducible	4 binaries; a second build is identical; the release has none to compare
+unicode-normalization	reproducible	12 binaries; a second build is identical; the release has none to compare
+unicode-segmentation	reproducible	4 binaries; a second build is identical; the release has none to compare
+unit	reproduces	all binaries match the release's
+unsafe-libyaml	reproducible	12 binaries; a second build is identical; the release has none to compare
+uriparser	reproduces	all binaries match the release's
+uritemplate	reproducible	4 binaries; a second build is identical; the release has none to compare
+usrsctp	reproduces	all binaries match the release's
+utf8proc	reproduces	all binaries match the release's
+validators	reproducible	4 binaries; a second build is identical; the release has none to compare
+valijson	reproduces	all binaries match the release's
+varnish	fails	docker build of the project's Dockerfile failed | 11.66 error: Unable to find 5177f315088f383b2505bbfe9f4bd6d161165b5e under https://code.vinyl-cache.org/vinyl-cache/vinyl-cache | 11.66 error: fetch failed. | ERROR: failed to build: failed to solve: process "/bin/sh -c fetch-commit $SRC/upstream/varnish" did not complete successfully: exit code: 128 | BUILD FAILED: docker build of the project's Do
+vorbis	reproduces	all binaries match the release's
+vulkan-loader	reproduces	all binaries match the release's
+w3lib	reproducible	12 binaries; a second build is identical; the release has none to compare
+w3m	reproduces	all binaries match the release's
+wabt	reproduces	all binaries match the release's
+wasm3	reproduces	all binaries match the release's
+wavpack	reproduces	all binaries match the release's
+wazuh	reproduces	all binaries match the release's
+wget	reproduces	all binaries match the release's
+wget2	reproduces	all binaries match the release's
+woff2	reproduces	all binaries match the release's
+wolfboot	reproduces	all binaries match the release's
+wolfmqtt	reproduces	all binaries match the release's
+wolfssh	reproduces	all binaries match the release's
+wolfssl	reproduces	all binaries match the release's
+wolftpm	reproduces	all binaries match the release's
+wuffs	reproduces	all binaries match the release's
+wxwidgets	reproduces	all binaries match the release's
+xz	reproduces	all binaries match the release's
+yajl-ruby	reproduces	all binaries match the release's
+yaml-cpp	reproduces	all binaries match the release's
+yara	reproduces	all binaries match the release's
+yoga	reproduces	all binaries match the release's
+yyjson	reproduces	all binaries match the release's
+zip	reproduces	all binaries match the release's
+zipp	reproducible	4 binaries; a second build is identical; the release has none to compare
+zlib	reproduces	all binaries match the release's
+zlib-ng	reproduces	all binaries match the release's
+zopfli	reproduces	all binaries match the release's
+zstd	reproduces	all binaries match the release's
+zstd-safe	reproducible	4 binaries; a second build is identical; the release has none to compare
+zxc	reproduces	all binaries match the release's
+zydis	reproduces	all binaries match the release's

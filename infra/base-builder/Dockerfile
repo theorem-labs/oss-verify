@@ -8,9 +8,9 @@
 # docs/build-contract.md describes it.
 #
 # The toolchain image is a build argument with no default, so the build fails without one ("base name (${TOOLCHAIN})
-# should not be blank"). tools/check passes it (--build-arg TOOLCHAIN=<image>): the image --toolchain gives, else the
-# one the project's lock names, else the newest for the project's language in infra/toolchains.tsv, the one file that
-# lists the toolchains (docs/build-contract.md, "Toolchains"). The parser directive on line 1 keeps BuildKit from
+# should not be blank"). oss-verify check passes it (--build-arg TOOLCHAIN=<image>): the image --toolchain gives, else
+# the one the project's lock names, else the newest for the project's language in infra/toolchains.tsv, the one file
+# that lists the toolchains (docs/build-contract.md, "Toolchains"). The parser directive on line 1 keeps BuildKit from
 # warning, on every build, that the argument has no default.
 ARG TOOLCHAIN
 FROM ${TOOLCHAIN}
@@ -29,8 +29,9 @@ COPY driver/ /usr/local/lib/oss-verify/driver/
 COPY rust/ /usr/local/lib/oss-verify/rust/
 COPY python/ /usr/local/lib/oss-verify/python/
 COPY go/ /usr/local/lib/oss-verify/go/
-COPY compile fetch-commit lay-out-sources /usr/local/bin/
+COPY compile fetch-commit git-credential-oss-verify lay-out-sources /usr/local/bin/
 RUN chmod 0755 /usr/local/bin/compile /usr/local/bin/fetch-commit /usr/local/bin/lay-out-sources \
+               /usr/local/bin/git-credential-oss-verify \
                /usr/local/lib/oss-verify/link-fuzz-target /usr/local/lib/oss-verify/record-compile \
                /usr/local/lib/oss-verify/go/compile-go \
  && mkdir -p /src /work /out

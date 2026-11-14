@@ -1,0 +1,5 @@
+# Ported from the Rust build of the oss-fuzz-theorems 2026.10 release (seeds/languages.tsv); do not edit.
+# kind	path	arguments: see lay-out-sources
+tree	ext/hyperium-fuzz_http/src	upstream/http
+copy	targets/hyperium-fuzz_http/Cargo.lock	Cargo.lock
+crates	ext/hyperium-fuzz_http/vendor	targets/hyperium-fuzz_http/Cargo.lock	ext/hyperium-fuzz_http/src	fuzz	fuzz_http

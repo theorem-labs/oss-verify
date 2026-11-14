@@ -1,8 +1,8 @@
 # Copyright 2026 Vishal Sachdev
 # SPDX-License-Identifier: Apache-2.0
 #
-# canvas-mcp on the OSS Verify builder, in the form of a ported Python build (tools/seeds/mdurl/): lay-out-sources
-# reads the sources file. tools/check passes REPO, COMMIT and BASE_BUILDER.
+# canvas-mcp on the OSS Verify builder, in the form of a ported Python build (seeds/mdurl/): lay-out-sources
+# reads the sources file. oss-verify check passes REPO, COMMIT and BASE_BUILDER.
 ARG BASE_BUILDER=oss-verify-base-builder
 FROM ${BASE_BUILDER}
 ARG REPO

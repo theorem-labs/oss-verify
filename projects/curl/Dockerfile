@@ -6,7 +6,7 @@
 # Generated from the build recipe of the oss-fuzz-theorems 2026.10 release.
 #
 # curl on the OSS Verify builder, laid out as the release built it (lay-out-sources reads the sources file).
-# tools/check passes REPO, COMMIT and BASE_BUILDER.
+# oss-verify check passes REPO, COMMIT and BASE_BUILDER.
 ARG BASE_BUILDER=oss-verify-base-builder
 FROM ${BASE_BUILDER}
 ARG REPO

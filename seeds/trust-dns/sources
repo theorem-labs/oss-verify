@@ -1,0 +1,5 @@
+# Ported from the Rust build of the oss-fuzz-theorems 2026.10 release (seeds/languages.tsv); do not edit.
+# kind	path	arguments: see lay-out-sources
+tree	ext/trust-dns-message/src	upstream/hickory-dns
+copy	targets/trust-dns-message/Cargo.lock	Cargo.lock
+crates	ext/trust-dns-message/vendor	targets/trust-dns-message/Cargo.lock	ext/trust-dns-message/src	fuzz	message

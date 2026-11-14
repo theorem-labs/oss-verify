@@ -2,30 +2,24 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 #
-# Prints the review comment of a pull request. build.yaml's review job writes it as body.md, into the artifact
-# enroll-review-draft and into its output `body`, and the comment job posts that output as it is, so the draft is
-# exactly what is posted.
+# Prints the review comment of a pull request. build.yaml's comment job runs it in its step "Post the comment and record
+# the verdict", and posts what it prints as it is.
 #
 #   HEAD_SHA=<reviewed commit> REVIEW=<the review's comment> CHECKS=<the checks' report, or empty> \
-#     VERDICTS=<the review's verdicts.json> RULES=<review.md or review-change.md> \
+#     RULES=<review.md or review-change.md> [CONCLUSION=<success, failure or action_required>] \
 #     [SCREENED=<the screen's checks that ran, comma-separated>] .github/scripts/review-body
 #
 # Line 1 is the marker <!-- oss-verify-review -->, by which the comment job finds its comment again; the last line is
-# <!-- oss-verify-review-head <commit> -->, the whole reviewed commit, which the comment job reads before it holds an
-# item. Line 2 is the
-# verdict line, which the inbound watcher reads (the stream's bin/ossv-pr-watch, verdict_line):
-#   <!-- oss-verify-verdict {"head":"<commit>","blocking":[<ids whose verdict is fail>],"person":[<ids whose verdict is person>]} -->
-# with the ids sorted. VERDICTS empty, null, {} or anything but one JSON object gives no verdict line, so a missing
-# verdict never reads as "nothing blocks". The model chooses the keys of VERDICTS, so a key that is not a check id
-# also gives no verdict line: an id is a section's letter with an optional item number (A1, B, F7) in review.md, or a
-# number (1 to 5) in review-change.md, and nothing else, so no key of the line can close the HTML comment or hold a
-# mention or a reference. The schemas of .github/scripts/review-prompt ask for the same keys. Then the footer that
-# names the commit and the rules file, the review's first 50,000 characters and, when CHECKS is not empty, the first
-# 12,000 of the checks' report folded under it: GitHub refuses a comment over 65,536 characters. The review and the
-# report are what a pull request can steer, so each goes through .github/scripts/review-neutralize first: no mention,
-# no reference to an issue or pull request, no unclosed HTML comment that hides what follows it, and no line of
-# theirs that holds a marker of this comment (so the review's and the report's text hold no marker line: the first two
-# lines and the last are this script's own).
+# <!-- oss-verify-review-head <commit> -->, the whole reviewed commit, which the comment job reads before it holds a
+# change pull request. For an enrollment (RULES review.md), line 2 is the first sentence: the fixed sentence of
+# CONCLUSION, the conclusion of the check run Enrollment review that the same step records from the same verdicts
+# (.github/scripts/review-verdict --sentence). A change review has none. Then the footer that names the commit and the
+# rules file, the review's first 50,000 characters and, when CHECKS is not empty, the first 12,000 of the checks'
+# report folded under it: GitHub refuses a comment over 65,536 characters. The review and the report are what a pull
+# request can steer, so each goes through .github/scripts/review-neutralize first: no mention, no reference to an issue
+# or pull request, no unclosed HTML comment that hides what follows it, and no line of theirs that holds a marker of
+# this comment (so the review's and the report's text hold no marker line: the first line and the last are this
+# script's own).
 # When the screen read the pull request first (SCREENED, the screen job's output `checks`), the footer names the checks
 # that ran, so a clean verdict from fewer checks does not read as one from all three. SCREENED is a list of names from
 # .github/scripts/screen.py, or this fails.
@@ -33,17 +27,15 @@ set -euo pipefail
 
 [[ ${HEAD_SHA:-} =~ ^[0-9a-f]{40}$ ]] || { echo "review-body: HEAD_SHA is not a commit id" >&2; exit 2; }
 REVIEW=${REVIEW:-} CHECKS=${CHECKS:-} RULES=${RULES:-}
-neutralize="$(dirname "${BASH_SOURCE[0]}")/review-neutralize"
-# -s: two JSON values are not one object. A VERDICTS that is not JSON gives no line. \A and \z, not ^ and $: jq's $
-# also matches before a newline at the end of a key.
-verdict=$(jq -sc --arg head "$HEAD_SHA" '
-  select(length == 1) | .[0] | select(type == "object" and length > 0)
-  | select(keys | map(test("\\A(?:[A-G][0-9]*|[0-9]+)\\z")) | all)
-  | {head: $head, blocking: ([to_entries[] | select(.value == "fail") | .key] | sort),
-     person: ([to_entries[] | select(.value == "person") | .key] | sort)}' <<< "${VERDICTS:-}" 2> /dev/null) \
-  || verdict=""
+here=$(dirname "${BASH_SOURCE[0]}")
+neutralize="$here/review-neutralize"
+sentence=""
+if [ "$RULES" = review.md ]; then
+  # Its own assignment, so that a CONCLUSION review-verdict refuses fails this script (set -e).
+  sentence=$("$here/review-verdict" --sentence "${CONCLUSION:-}")
+fi
 printf '<!-- oss-verify-review -->\n'
-if [ -n "$verdict" ]; then printf '<!-- oss-verify-verdict %s -->\n' "$verdict"; fi
+if [ -n "$sentence" ]; then printf '%s\n\n' "$sentence"; fi
 screened=""
 if [ -n "${SCREENED:-}" ]; then
   [[ $SCREENED =~ ^(model_armor|prompt_shields|claude)(,(model_armor|prompt_shields|claude))*$ ]] \
@@ -63,6 +55,7 @@ if [ -n "$CHECKS" ]; then
   printf '%s' "$CHECKS" | "$neutralize" --drop-markers 12000
   printf '\n\n</details>\n'
 fi
-# The last line names the whole reviewed commit, for the comment job, which holds no item whose head a posted review
-# names. Only this script writes it: --drop-markers takes every line that holds oss-verify-review out of the text above.
+# The last line names the whole reviewed commit, for the comment job, which holds no change pull request whose head a
+# posted review names. Only this script writes it: --drop-markers takes every line that holds oss-verify-review out of
+# the text above.
 printf '\n<!-- oss-verify-review-head %s -->\n' "$HEAD_SHA"

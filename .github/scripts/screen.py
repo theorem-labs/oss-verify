@@ -166,8 +166,8 @@ KEPT_STATUS = re.compile(r"\(exit status (\d+)\)\n?\Z")
 #   head/    each file a change changes, as the pull request has it: pr.diff holds every line the pull request
 #            changed in it, and pr.diff must be a diff that shows it as text, so each file here need only be text.
 #   source/  the project's repository at the built commit: the repository an enrollment names, not text the pull
-#            request carries, and far more text than MAX_CHARS. build.yaml's header says that it is not screened, and
-#            that the review of an enrollment of an account without write access does not get it.
+#            request carries, and far more text than MAX_CHARS. build.yaml's header says that it is not screened; the
+#            review of every enrollment reads it, whoever wrote the pull request.
 NOT_SENT_DIRECTORIES = ("head", "source")
 # A seed corpus's listing of its inputs in hexadecimal (review-gather): a row is an offset, 16 bytes and their text.
 SEED_ROW = re.compile(r"[0-9a-f]{4}  ((?:[0-9a-f]{2} ){0,15}[0-9a-f]{2}) *  .{1,16}")
@@ -366,10 +366,10 @@ SPAN = re.compile(r"`([^`\n]*)`")
 #   review-comment-authors.txt  review-gather's list of the review comments' logins, one a line, which the gather
 #                               job and all_review_comments_are_ours() read; a login is letters, digits and
 #                               hyphens, and carries no prose.
-#   source.txt                  the line build.yaml writes in place of the project's repository for a screened
-#                               enrollment; it tells a person how to start the full review.
+#   source.txt                  review-gather's fixed line in place of the project's repository when the build
+#                               resolved no commit of it: there is no source to read.
 #   template-history.txt        git log of this repository's pull request template.
-#   validate.txt                tools/validate.py on projects/<name>/, every line of which the diff adds.
+#   validate.txt                oss-verify validate on projects/<name>/, every line of which the diff adds.
 #   build/result.md             the build job's own one-line result.
 # Five more files keep only our shape, and the project decides text inside them that no other source carries,
 # so each is read: triage-today.md, triage-comment.md and build/binaries.md through their code spans (IN_SPANS),

@@ -7,7 +7,7 @@ This page tells what security our tools give, and how to report a vulnerability 
 
 Our tools treat a project's build files and source as trusted data. They build what the project tells them to build.
 
-* `tools/check` builds a project's `Dockerfile` with network access, as `docker build` does. The `Dockerfile` can run any command.
+* `oss-verify check` builds a project's `Dockerfile` with network access, as `docker build` does. The `Dockerfile` can run any command.
 * `build.sh` runs in a container with no network (`docker run --network=none`).
 * A binary that you run yourself runs on your machine, with your permissions.
 
@@ -17,7 +17,7 @@ The GitHub workflows of this repository build pull requests on GitHub's runners,
 
 ## Report a vulnerability in this repository
 
-Theorem maintains this repository. To report a vulnerability in this repository, in its tools (`tools/`), its builder (`infra/base-builder/`) or its workflows (`.github/`):
+Theorem maintains this repository. To report a vulnerability in this repository, in its tools (`src/oss_verify/`), its builder (`infra/base-builder/`) or its workflows (`.github/`):
 
 1. Open a [private security advisory](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability) on this repository.
 2. Do not open a public issue or pull request for the vulnerability.
