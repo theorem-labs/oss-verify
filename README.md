@@ -1,7 +1,7 @@
 <!-- Adapted from OSS Scanner (https://github.com/anthropics/oss-scanner), Copyright 2026 Anthropic PBC, under the Apache License 2.0. Modified 2026 by Theorem Labs, PBC: rewritten for OSS Verify, which proves theorems about fuzz targets instead of scanning. -->
 # OSS Verify
 
-OSS Verify is a Theorem program that verifies open-source software. We prove theorems about the compiled fuzz targets of a project. For example, we prove that no input makes a fuzz target crash, hang or fail a sanitizer check. This page tells a maintainer how to enroll a project. A coding agent starts at [AGENTS.md](AGENTS.md).
+OSS Verify is a Theorem initiative for free verification of open-source software. We prove theorems about the compiled fuzz targets of a project. For example, we prove that no input makes a fuzz target crash, hang or fail a sanitizer check. This page tells a maintainer how to enroll a project. A coding agent starts at [AGENTS.md](AGENTS.md).
 
 ## Who can enroll
 
