@@ -43,6 +43,19 @@ A new toolchain image changes the bytes of each binary that it builds, and a pro
 * Without a lock, `tools/check` builds with the newest toolchain for the project's language: the last row that lists it. `--toolchain <image>` overrides the lock and the newest toolchain.
 * The lock of a project pins its vintage. A project with published proofs stays on the toolchain that its lock names, so its binaries keep their bytes. A project with no lock, for example a seeded project in `tools/seeds/`, uses the newest toolchain.
 
+### Frame pointers
+
+The release's toolchain images build without frame pointers: the common flags have no `-fno-omit-frame-pointer`, so many functions use the register `s0` for data. AddressSanitizer's fast unwinder follows the frame records in `s0` when it records the stack of an allocation. In such a function, it can read data as a frame record, so a recorded trace is not always a call chain.
+
+A toolchain image with frame pointers is a release image with one change: its configuration sets the environment variable `OFT_FRAME_POINTERS=1`. Its layers are the release image's layers, so each file of it, the musl sysroot and the AddressSanitizer runtime too, has the same bytes. [.github/workflows/toolchain-images.yaml](../.github/workflows/toolchain-images.yaml) makes one from each of the C and C++, Rust and Python images and checks this. On such an image:
+
+* [toolchain.sh](../infra/base-builder/toolchain.sh) adds `-fno-omit-frame-pointer` to the common flags. Thus the library, the fuzz target, the driver and the C code of a Rust or Python build keep their frame records.
+* [rust/recipes.sh](../infra/base-builder/rust/recipes.sh) gives rustc `-Cforce-frame-pointers=yes`. The build compiles the standard library from source with the same flags (`-Zbuild-std`), so its functions keep their frame records too.
+
+The code that the link takes from the toolchain image is the same as on the release's image, without frame pointers: the C library, compiler-rt, the C++ runtime and the libraries of the sysroot. The AddressSanitizer runtime keeps its frame records. A Go build already has `-fno-omit-frame-pointer` ([go/compile-go](../infra/base-builder/go/compile-go)), so no Go image with frame pointers is needed.
+
+A row of [infra/toolchains.tsv](../infra/toolchains.tsv) whose name ends in `-frame-pointers` names a toolchain image with frame pointers. These rows come after the release's rows, so a project with no lock builds with frame pointers, and a project with a lock keeps the toolchain that its lock names.
+
 We check builds ported from oss-fuzz-theorems against the release's binaries, on the release's toolchain. Their `harness.yaml` locks name it.
 
 ## What build.sh gets
@@ -75,6 +88,8 @@ These are the common compile flags:
     -fno-builtin-strdup -fno-builtin-strndup
 
 The `-fno-builtin-*` flags keep each allocation an ordinary call in all four builds. Thus the optimizer cannot remove or merge an allocation in one build and keep it in a different build.
+
+On a toolchain image with frame pointers, the common flags also have `-fno-omit-frame-pointer` ([Frame pointers](#frame-pointers)).
 
 `compile` builds the driver with these flags and `-fno-plt`. clang does not use `-fno-plt` for this target. Thus each C, C++, Rust and Python build writes `warning: argument unused during compilation: '-fno-plt'` seven times, before `build.sh` starts. You can ignore this warning. `$CFLAGS` does not have `-fno-plt`.
 
