@@ -20,3 +20,32 @@ file	targets/curl-fuzz_netrc/proto_fuzzer/bounded_anonymous_input_file.h	https:/
 file	targets/curl-fuzz_netrc/proto_fuzzer/bounded_anonymous_input_file.cc	https://raw.githubusercontent.com/curl/curl-fuzzer/de8de303d3e0d54e5ce235fd95d562154970ebf9/proto_fuzzer/bounded_anonymous_input_file.cc	29beca8f00d5ae4689cf264fb56b524703d6db19c787eaf610667b72549ab11a
 # Not of the release: fuzz_bufq's harness as the OSS Verify proofs build it, without the three system calls of its first call that the process model declines
 patch	targets/curl-fuzz_bufq	curl-fuzz_bufq.0001-no-syscalls.patch
+# Not of the release: two fixes to fuzz_bufq's harness, for two faults it has when an allocation fails
+patch	targets/curl-fuzz_bufq	curl-fuzz_bufq.0002-mayfail-harness-fixes.patch
+# Not of the release: the structured fuzz targets of the curl-fuzzer de8de303d3e0 tree above, on the curl tree of curl-fuzz_bufq's pin, and the stack they share (curl-fuzz_proto_lib): OpenLDAP 2.6.13 (tag OPENLDAP_REL_ENG_2_6_13, from the OpenLDAP project's mirror of git.openldap.org), as curl-fuzzer builds it, and libprotobuf-mutator v1.5, on the toolchain's protobuf 3.21.12. Only curl-fuzz_proto_lib gets the curl-fuzzer tree as its targets/ directory: it compiles the files of every structured fuzz target from there, and the block of each target links them
+git	ext/openldap-2.6.13	https://github.com/openldap/openldap.git	d172686d3d270bc961b78f3ff00d7019c8dfb094
+git	ext/libprotobuf-mutator-1.5	https://github.com/google/libprotobuf-mutator.git	dc4ced337a9fb4047e2dc727268fbac55ca82f73
+link	ext/curl-fuzz_proto_lib/src	ext/curl-fuzz_bufq/src
+link	targets/curl-fuzz_proto_lib	ext/curl-fuzzer-de8de303d3e0
+link	ext/curl-fuzz_proto_file/src	ext/curl-fuzz_bufq/src
+link	ext/curl-fuzz_proto/src	ext/curl-fuzz_bufq/src
+link	ext/curl-fuzz_proto_http/src	ext/curl-fuzz_bufq/src
+link	ext/curl-fuzz_proto_http2/src	ext/curl-fuzz_bufq/src
+link	ext/curl-fuzz_proto_socks4/src	ext/curl-fuzz_bufq/src
+link	ext/curl-fuzz_proto_ws/src	ext/curl-fuzz_bufq/src
+link	ext/curl-fuzz_proto_telnet/src	ext/curl-fuzz_bufq/src
+link	ext/curl-fuzz_proto_smtp/src	ext/curl-fuzz_bufq/src
+link	ext/curl-fuzz_proto_imap/src	ext/curl-fuzz_bufq/src
+link	ext/curl-fuzz_proto_pop3/src	ext/curl-fuzz_bufq/src
+link	ext/curl-fuzz_proto_mqtt/src	ext/curl-fuzz_bufq/src
+link	ext/curl-fuzz_proto_dict/src	ext/curl-fuzz_bufq/src
+link	ext/curl-fuzz_proto_ldap/src	ext/curl-fuzz_bufq/src
+link	ext/curl-fuzz_proto_rtsp/src	ext/curl-fuzz_bufq/src
+link	ext/curl-fuzz_proto_ipfs/src	ext/curl-fuzz_bufq/src
+link	ext/curl-fuzz_proto_gopher/src	ext/curl-fuzz_bufq/src
+link	ext/curl-fuzz_proto_api/src	ext/curl-fuzz_bufq/src
+link	ext/curl-fuzz_proto_multi/src	ext/curl-fuzz_bufq/src
+link	ext/curl-fuzz_proto_timing/src	ext/curl-fuzz_bufq/src
+# Not of the release: the message code of the structured fuzz targets, which the Dockerfile writes one time for every build with curl-fuzz_proto_gen.sh, and the pure-Python protobuf 7.36.2 that curl-fuzzer's uv.lock pins, for its schema_eligibility.py
+copy	gen/curl-fuzz_proto_gen.sh	curl-fuzz_proto_gen.sh
+archive	ext/python-protobuf-7.36.2	https://files.pythonhosted.org/packages/e4/04/d52c7016b04b6c5108f26691f9d33ec82a9b65d041f1a9c771137693d618/protobuf-7.36.2-py3-none-any.whl	bdb3a345d48db958e6ce1f18e508beb0cc981d64f24088427549c866cd039f1e	0	google/
