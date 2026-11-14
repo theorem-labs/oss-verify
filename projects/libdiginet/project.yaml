@@ -2,7 +2,7 @@
 # (EtherType 0x885F), for OpenMixer. The fuzz targets drive the readers of every byte a desk sends: the frame, the
 # command stream, the controls in it, the session they drive and the desk mux that hands each desk its own. Pinned to
 # the merge of Open-Mixer/libdiginet#55 on main.
-repo: https://github.com/Open-Mixer/libdiginet#d0a7ad188ef609667944be86cd5cb575c83fee57
+repo: https://github.com/Open-Mixer/libdiginet#d1c8bfdc400a67346fb96bd6b87dda87429a30f3
 primary_contact: linuxnow@gmail.com
 homepage: https://github.com/Open-Mixer/libdiginet
 language: c
