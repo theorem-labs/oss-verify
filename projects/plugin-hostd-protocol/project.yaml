@@ -1,0 +1,18 @@
+# plugin-hostd-protocol: the command protocol library that plugin-hostd and FreeMixer's mod-host speak to their
+# controller, from mod-host's protocol layer: the command parser, the dispatcher that maps each verb onto a host backend,
+# and the scenario reader. The fuzz targets read each reply from a buffer (fuzz/socket_fuzz.c in place of src/socket.c)
+# and compare values, each check in a check_<property> function with its mutant and input records.
+# Pinned to main at the window verbs (0.4.5), the last commit before the curve verbs, which need an omx-dsp that has not
+# landed: it has the fuzz/ written to the OSS Verify contract (FreeMixer/plugin-hostd-protocol#8), the fixes for #11 and
+# #12, and the session target fuzz_session (#10).
+repo: https://github.com/Open-Mixer/plugin-hostd-protocol#6ee9a1e3cc0b26a9b6678e720afc86c3c80b319b
+primary_contact: linuxnow@gmail.com
+homepage: https://github.com/Open-Mixer/plugin-hostd-protocol
+language: c
+sanitizers: [address, undefined]
+mutants: fuzz/sabotage
+fuzz_targets:
+  - fuzz_protocol
+  - fuzz_dispatch
+  - fuzz_scenario
+  - fuzz_session
