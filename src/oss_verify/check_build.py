@@ -679,7 +679,8 @@ HEREDOC = re.compile(r"<<-?\s*([\"']?[A-Za-z_][A-Za-z0-9_]*[\"']?)")
 def instructions(text):
     r"""The Dockerfile's instructions, one a string, as a Dockerfile parser reads it: the `escape` directive chooses
     the continuation character, a `#` line is a comment wherever it is (including in the middle of a continued
-    instruction), and a line ending in that character continues into the next.
+    instruction), and a line ending in that character continues into the next, unless the character before it is
+    the escape too. A blank line inside a continued instruction is stepped over, as a comment line is.
 
     A continuation takes away the escape character and the newline and NOTHING ELSE: what was before it stays, and
     the next line arrives with its own indentation. So `fetch-\` + `commit` is one word and `--mount=… \` +
@@ -699,6 +700,7 @@ def instructions(text):
             continue
         break  # a parser directive comes before the first instruction and nowhere else
     joined, carry, ending = [], "", []
+    continuing = False
     for line in text.splitlines():
         if ending:
             # Inside a heredoc body: these lines are the content of a file or a script, not instructions. A
@@ -709,11 +711,16 @@ def instructions(text):
             continue
         if line.lstrip().startswith("#"):
             continue
-        stripped = line.rstrip()
-        if stripped.endswith(escape):
-            carry += stripped[:-1]
+        if continuing and not line.strip():
+            continue  # BuildKit steps over a blank line inside a continued instruction and keeps joining
+        end = re.search(rf"{re.escape(escape)}[ \t]*$", line)
+        if end and not line[:end.start()].endswith(escape):
+            # An escape at the end of the line continues it, unless it is itself escaped (`C:\\`).
+            carry += line[:end.start()]
+            continuing = True
             continue
         carry += line
+        continuing = False
         if carry.strip():
             instruction = " ".join(carry.split())
             joined.append(instruction)
