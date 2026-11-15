@@ -708,7 +708,9 @@ def load(directory):
         raise ValueError(f"project.yaml is larger than {MAX_CONFIG_BYTES // 1024} KiB")
     try:
         return yaml.safe_load(config_file.read_text(encoding="utf-8")) or {}
-    except (yaml.YAMLError, UnicodeDecodeError, RecursionError) as error:
+    # ValueError covers UnicodeDecodeError, and what PyYAML's scalar constructors raise for a value such as the date
+    # 2024-13-45, which is not a YAMLError.
+    except (yaml.YAMLError, ValueError, RecursionError) as error:
         raise ValueError(f"project.yaml does not parse: {type(error).__name__}: {str(error)[:300]}") from None
 
 

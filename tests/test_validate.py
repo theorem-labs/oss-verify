@@ -440,6 +440,9 @@ class Problems(unittest.TestCase):
     def test_directory(self):
         self.assertProblem(MINIMAL, "the directory name must be", name="Bad_Name")
         self.assertProblem("repo: [unclosed\n", "does not parse")
+        # PyYAML raises a plain ValueError, not a YAMLError, for a date or a timestamp that does not exist.
+        self.assertProblem(MINIMAL + "homepage: 2024-13-45\n", "project.yaml does not parse: ValueError")
+        self.assertProblem(MINIMAL + "x: 2024-01-01T25:00:00\n", "project.yaml does not parse: ValueError")
         self.assertProblem(MINIMAL + "#" * (validate.MAX_CONFIG_BYTES + 1) + "\n", "project.yaml is larger than")
 
     def test_symbolic_links_and_directories(self):
