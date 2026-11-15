@@ -963,7 +963,8 @@ class TheParserAgainstBuildKit(unittest.TestCase):
                 check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
         # A heredoc is still one, with a file descriptor or a dash before its word.
         for opener, word in (("<<EOT", "EOT"), ("<<-EOT", "EOT"), ("2<<EOT", "EOT"), ('<<"EOT"', "EOT"),
-                             ("<<1EOT", "1EOT"), ("<<.EOT", ".EOT"), ("<<'9'", "9"), ("<< EOT", "EOT")):
+                             ("<<1EOT", "1EOT"), ("<<.EOT", ".EOT"), ("<<'9'", "9"), ("<< EOT", "EOT"),
+                             ("sh $X<<EOT", "EOT"), ("sh ${X}2<<EOT", "EOT"), ("sh ${X:-${Y}}<<EOT", "EOT")):
             with self.subTest(opener=opener):
                 text = f"FROM x\nRUN {self.MOUNT} {opener}\nfetch-commit /src/x\n{word}\n"
                 with self.assertRaises(Failed) as refused:

@@ -674,9 +674,10 @@ def recorded_images(record):
 # `<<EOT`, `<<"EOT"`, `<<-EOT`, `2<<EOT`: what ends a heredoc body. The body is the content of a file or of a script
 # and holds no instruction of its own. BuildKit takes a heredoc only from a word that starts with it and has no
 # other `<` (`^(\d*)<<(-?)\s*([^<]*)$`), so a here-string `<<<`, a shift `$((1<<4))` and `cat<<EOT` open none. Its
-# name may be any word (`<<1EOT`, `<<.EOT`). `<< EOT`, which BuildKit splits into two words, is read as one too: a
-# heredoc read where there is none makes the guard refuse, never accept.
-HEREDOC = re.compile(r"(?<!\S)\d*<<(?!<)-?\s*([^\s<]+)")
+# name may be any word (`<<1EOT`, `<<.EOT`). `<< EOT`, which BuildKit splits into two words, is read as one too, and
+# so is a word that starts with expansions (`$X<<EOT`, `${X}2<<EOT`), which BuildKit keeps as they are and does not
+# read as a heredoc: a heredoc read where there is none makes the guard refuse, never accept.
+HEREDOC = re.compile(r"(?<!\S)(?:\$(?:\{[^}]*\}+|\w+|[@*#?$!-]))*\d*<<(?!<)-?\s*([^\s<]+)")
 
 
 def instructions(text):
