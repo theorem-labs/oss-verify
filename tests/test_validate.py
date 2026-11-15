@@ -433,6 +433,9 @@ class Problems(unittest.TestCase):
         self.assertProblem(MINIMAL, "series lists 'b.patch'", {**base, "a.patch": patch, "series": "a.patch\nb.patch\n"})
         self.assertProblem(MINIMAL, "more than once", {**base, "a.patch": patch, "series": "a.patch\na.patch\n"})
         self.assertProblem(MINIMAL, "a.patch is not listed", {**base, "a.patch": patch, "series": "# none\n"})
+        # lay-out-sources reads a # after a space as part of a patch name, so validate does too.
+        self.assertProblem(MINIMAL, "series lists '# old.patch'",
+                           {**base, "a.patch": patch, "series": "a.patch\n  # old.patch\n"})
         problems, warnings, _ = check(MINIMAL, {**base, "a.patch": "not a diff\n", "series": "a.patch\n"})
         self.assertEqual(problems, [])
         self.assertTrue(any("does not look like a patch" in warning for warning in warnings))
