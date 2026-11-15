@@ -212,8 +212,14 @@ def members(data, strip, patterns):
             elif member.islnk():
                 if keep(member.linkname) is None:
                     raise Failed(f"hard link {member.name!r} points outside what is taken")
-                content = tar.extractfile(tar.getmember(member.linkname)).read()
-                found.append((rel, "file", content, bool(member.mode & 0o111)))
+                # A hard link takes the bytes of the member it names, so that member must be a file in the archive.
+                try:
+                    linked = tar.extractfile(member.linkname)
+                except KeyError:
+                    linked = None
+                if linked is None:
+                    raise Failed(f"hard link {member.name!r} points to {member.linkname!r}, not a file in the archive")
+                found.append((rel, "file", linked.read(), bool(member.mode & 0o111)))
     return found
 
 
