@@ -953,6 +953,23 @@ class TheParserAgainstBuildKit(unittest.TestCase):
     def test_an_unset_variable_names_no_secret(self):
         self.assertEqual(self.mounts("FROM x\nRUN --mount=type=secret,id=$NOT_SET fetch-commit /src/x\n"), [[]])
 
+    def test_a_here_string_or_a_shift_opens_no_heredoc(self):
+        # A private library's correctly mounted fetch was refused as unreadable for `<<<` or `1<<4` elsewhere.
+        for line in ('RUN read -r v <<< "$X"', "RUN read -r v <<<EOT", "RUN echo $((1<<4))", "RUN cat<<EOT"):
+            with self.subTest(line=line):
+                text = f"FROM x\n{line}\nRUN {self.MOUNT} fetch-commit /src/x\nRUN echo EOT\n"
+                self.assertEqual(check_build.unreadable_steps(text), [])
+                self.assertEqual(self.mounts(text), [[check_build.GIT_TOKEN_SECRET]])
+                check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
+        # A heredoc is still one, with a file descriptor or a dash before its word.
+        for opener, word in (("<<EOT", "EOT"), ("<<-EOT", "EOT"), ("2<<EOT", "EOT"), ('<<"EOT"', "EOT"),
+                             ("<<1EOT", "1EOT"), ("<<.EOT", ".EOT"), ("<<'9'", "9"), ("<< EOT", "EOT")):
+            with self.subTest(opener=opener):
+                text = f"FROM x\nRUN {self.MOUNT} {opener}\nfetch-commit /src/x\n{word}\n"
+                with self.assertRaises(Failed) as refused:
+                    check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
+                self.assertIn("cannot read", str(refused.exception))
+
     def test_the_forms_that_already_worked_still_do(self):
         for text in (f"FROM x\nRUN {self.MOUNT} fetch-commit /src/x\n",
                      f"FROM x\nRUN --network=default {self.MOUNT} fetch-commit /src/x\n",
