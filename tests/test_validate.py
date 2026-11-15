@@ -486,6 +486,23 @@ class Output(unittest.TestCase):
             self.assertIn("bad: ", err)
             self.assertNotIn("\x1b", err)
 
+    def test_main_from_inside_the_project(self):
+        """`oss-verify validate .` in projects/<name>/ checks <name>, not the empty name of "." or ".."."""
+        with ProjectDir({"project.yaml": MINIMAL, "Dockerfile": "FROM x", "build.sh": "x"}) as directory:
+            cwd = os.getcwd()
+            try:
+                os.chdir(directory)
+                code, out, err = self.run_main(".")
+                self.assertEqual((code, err), (0, ""))
+                self.assertIn("example ", out)
+                (directory / "sub").mkdir()
+                os.chdir(directory / "sub")
+                code, out, err = self.run_main("..")
+                self.assertEqual(code, 1)
+                self.assertIn("example: only regular files are accepted", err)
+            finally:
+                os.chdir(cwd)
+
     def test_repository_projects_pass(self):
         """Every project in this repository passes, so a pull request starts from a clean tree."""
         code, out, err = self.run_main()

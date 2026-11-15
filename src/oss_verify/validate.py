@@ -42,6 +42,7 @@ build.sh, harness sources and patches belong there instead; a seed corpus may st
 """
 import argparse
 import io
+import os
 import pathlib
 import re
 import stat
@@ -774,7 +775,9 @@ def main(argv=None):
     parser.add_argument("directories", nargs="*", type=pathlib.Path, help="projects/<name> directories (default: all)")
     options = parser.parse_args(argv)
 
-    directories = options.directories or sorted(
+    # The name of "." or ".." is "", which is not a project name. abspath() takes away "." and ".." by the text of the
+    # path and follows no symbolic link, so check_project still sees one.
+    directories = [pathlib.Path(os.path.abspath(directory)) for directory in options.directories] or sorted(
         path for path in PROJECTS.glob("*") if path.is_dir() or path.is_symlink()
     )
     problems, warnings, summaries = [], [], []
