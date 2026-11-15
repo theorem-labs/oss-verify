@@ -252,7 +252,7 @@ name: "Build"
 # Runs do not wait for a maintainer's approval. To build only on request, remove pull_request_target below.
 #
 # The review reaches Claude through Theorem's model gateway (INFRA-481), a proxy of Anthropic's API on Theorem's
-# tailnet alone, at the URL in the repository variable OSSV_MODEL_GATEWAY_URL (ANTHROPIC_BASE_URL below). The step
+# tailnet alone, at the URL in the repository variable MODEL_GATEWAY_URL (ANTHROPIC_BASE_URL below). The step
 # "Check the model gateway's URL" stops the job before the sign-in unless that value is exactly https://<host>: with
 # no base URL, Claude Code would send the gateway's token to Anthropic's own API. The review job signs in with no
 # stored key: Google's workload identity provider (Theorem's infrastructure code) trades the job's GitHub identity
@@ -1159,7 +1159,7 @@ jobs:
       # Theorem's model gateway on the tailnet (the top of this file), from the repository variable. Claude Code reads
       # it here, from the job's environment, and the action passes it on (its action.yml, ANTHROPIC_BASE_URL:
       # env.ANTHROPIC_BASE_URL).
-      ANTHROPIC_BASE_URL: ${{ vars.OSSV_MODEL_GATEWAY_URL }}
+      ANTHROPIC_BASE_URL: ${{ vars.MODEL_GATEWAY_URL }}
       # The gateway serves Claude Code's small helper model by its bare id alone, and refuses the dated id the tool
       # asks for by default. The action's step inherits this from the job's environment, as Claude Code does.
       ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-4-5
@@ -1313,7 +1313,7 @@ jobs:
       - name: Check the model gateway's URL
         run: |
           [[ $ANTHROPIC_BASE_URL =~ ^https://[A-Za-z0-9.-]+$ ]] \
-            || { echo "::error::the repository variable OSSV_MODEL_GATEWAY_URL is not https://<host>"; exit 1; }
+            || { echo "::error::the repository variable MODEL_GATEWAY_URL is not https://<host>"; exit 1; }
       # The model gateway's sign-in: a Google identity token of oss-verify-ci, audience model-gateway-gce, with the
       # email claim the gateway reads, from Google's workload identity provider. It lives one hour, and this step runs
       # just before the Review step, whose 45 minutes it outlasts.

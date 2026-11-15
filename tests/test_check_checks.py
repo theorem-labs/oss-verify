@@ -2545,7 +2545,7 @@ class ReviewJob(unittest.TestCase):
         # the tailnet's MagicDNS domain, which linux28-agents-1, a sender that joins with --accept-dns=false,
         # cannot resolve. The model gateway's URL is the repository variable's, not this file's.
         self.assertNotIn("ts.net", text)
-        self.assertEqual(self.jobs["review"]["env"]["ANTHROPIC_BASE_URL"], "${{ vars.OSSV_MODEL_GATEWAY_URL }}")
+        self.assertEqual(self.jobs["review"]["env"]["ANTHROPIC_BASE_URL"], "${{ vars.MODEL_GATEWAY_URL }}")
         self.assertEqual(self.jobs["review"]["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "claude-haiku-4-5")
 
     def test_the_review_stops_before_the_sign_in_on_any_other_gateway_url(self):
@@ -2562,7 +2562,7 @@ class ReviewJob(unittest.TestCase):
                                      env={**os.environ, "ANTHROPIC_BASE_URL": value})
                 self.assertEqual(run.returncode == 0, passes, run.stdout + run.stderr)
                 if not passes:
-                    self.assertIn("::error::the repository variable OSSV_MODEL_GATEWAY_URL is not https://<host>",
+                    self.assertIn("::error::the repository variable MODEL_GATEWAY_URL is not https://<host>",
                                   run.stdout)
 
     def test_the_review_signs_in_to_the_model_gateway_with_no_stored_key(self):
