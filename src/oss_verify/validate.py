@@ -33,6 +33,7 @@ Fields allowed in project.yaml:
     budgets: {halts: ..., agrees: ...}  optional   memory budgets (docs/what-gets-proven.md)
     proofs: {repo: ..., path: ...}      optional   where the proofs are published (docs/project-yaml.md)
     publish: eager | after_fixes | never  optional  when the proofs are published (default after_fixes)
+    mutants: <path from WORKDIR>        optional   the directory of breakage patches (docs/project-yaml.md#mutants)
 
 Files allowed next to project.yaml: a Dockerfile with its build.sh (unless dockerfile: is set), a patch_style.md
 (unless patch_style: is set), harness sources (*.c *.cc *.cpp *.h *.hh *.hpp, and those of the project's language),
