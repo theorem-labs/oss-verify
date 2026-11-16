@@ -1,6 +1,6 @@
 # Patch style and report preferences
 
-libmackie is FreeMixer's library for the Mackie Control Universal (MCU) wire protocol, the
+libmackie is OpenMixer's library for the Mackie Control Universal (MCU) wire protocol, the
 language a Behringer X-Touch speaks over MIDI. It decodes what the surface sends (the channel
 messages in `src/mackie_codec.c`, the handshake SysEx in `src/mackie_sysex.c`), reads the text
 the host puts on its displays (`src/mackie_text.c`, `src/mackie_display.c`), checks the control
@@ -10,7 +10,7 @@ the code that matters most here, and the five fuzz targets drive them.
 ## How findings and patches land
 
 Nothing from the pipeline enters libmackie as it is. A maintainer reads each finding, reproduces
-it against the libmackie harness and build, and writes the fix in FreeMixer/libmackie as an
+it against the libmackie harness and build, and writes the fix in Open-Mixer/libmackie as an
 ordinary change. A patch you send is a description of a fix, and we re-author it before it lands.
 
 No attribution line, trailer, or generated-by marker enters the history. When a finding leads to
