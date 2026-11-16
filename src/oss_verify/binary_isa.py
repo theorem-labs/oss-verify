@@ -231,8 +231,8 @@ def mapping_symbols(data, secs):
 
 def aligned_parity(base):
     """Which parcels of a region at address `base` sit at a multiple of 4: those whose index has this parity (0 or
-    1), or none (-1) when `base` is odd. walk(), isa_census() and outside_sites() all read words by it, so the words
-    the census reads are the steps the walk counted."""
+    1), or none (-1) when `base` is odd. walk() and isa_census() both read words by it, so the words the census
+    reads are the steps the walk counted."""
     return -1 if base & 1 else (base >> 1) & 1
 
 
@@ -773,22 +773,10 @@ def unwinder_vlenb_idiom(buf, off):
     return u32(buf, off) >> 20 == 0xC22
 
 
-def outside_sites(buf, base, clean, outw, pairs_fn):
-    """Every (address, word) of the region whose word is in `outw`, in address order. A region without a finding (at
-    an even address, see isa_census()) is searched with bytes.find, and only hits at aligned words are kept."""
-    if not clean:
-        return [(a, w) for a, w in pairs_fn() if w in outw]
-    res = []
-    lead = 2 * aligned_parity(base)
-    for w in outw:
-        pat = struct.pack("<I", w)
-        i = buf.find(pat, lead)
-        while i >= 0:
-            if (i - lead) % 4 == 0:
-                res.append((base + i, w))
-            i = buf.find(pat, i + 1)
-    res.sort()
-    return res
+def outside_sites(outw, pairs_fn):
+    """Every (address, word) of the region whose word is in `outw`, in address order. It is one pass over the
+    census's words, clean region or not. A bytes.find per word would read the region once per distinct word."""
+    return [(a, w) for a, w in pairs_fn() if w in outw]
 
 
 # The two notes Go's linker writes in front of .text: the Go build id (name "Go", type 4) and the GNU build id (name
@@ -932,7 +920,9 @@ def scan(data):
             fam = outside(w)
             if fam:
                 outw[w] = fam
-        sites = outside_sites(buf, r["addr"], clean, outw, word_addrs) if outw else []
+        sites = outside_sites(outw, word_addrs) if outw else []
+        # The census and outside_sites() both read word_addrs(), so the count equals the number of sites;
+        # kept as an invariant guard.
         if sum(cnt[w] for w in outw) != len(sites):
             raise Unexamined(f"region at {r['addr']:#x}: {sum(cnt[w] for w in outw)} outside-model "
                              f"words counted but {len(sites)} located")
