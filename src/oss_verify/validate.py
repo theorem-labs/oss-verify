@@ -441,8 +441,11 @@ def check_proofs(config):
 
 
 def series_entries(text):
-    """The patch names a series file lists, in order: one per line, ignoring blank lines and # comments."""
-    return [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("#")]
+    """The patch names a series file lists, in order: one per line, ignoring blank lines and lines that start with #.
+
+    As lay-out-sources reads it: a # after a space starts no comment, so "  # x" names the patch "# x".
+    """
+    return [line.strip() for line in text.splitlines() if line.strip() and not line.startswith("#")]
 
 
 def copied_by_sources(files):
