@@ -1,9 +1,9 @@
 # omx-dsp: the DSP library of OpenMixer, linked statically by the engine and the omx plugins. The fuzz targets drive what
 # reaches it from outside: a host's port words and a block's samples through every instance face, the scalar laws, the
 # EQ, the sample-rate converter and the delay lines, and a stream of MIDI messages through the note map.
-# Pinned to the merge of omx-dsp#314 on main: each fuzz check read against its comment (docs/fuzz-checks.md),
-# and the records of the two slew checks of fuzz_laws.c directly above their checks.
-repo: https://github.com/Open-Mixer/omx-dsp#82ca2ea0fd339a1ac0d89ea4676319768d2b56cd
+# Pinned to the head of omx-dsp's main: each fuzz check read against its comment (docs/fuzz-checks.md), the records
+# of each check directly above it, and the placement code of the harmonic resonance processor in src/.
+repo: https://github.com/Open-Mixer/omx-dsp#d22d4a0d856eb1bf9117ad5932781daaabffac24
 primary_contact: linuxnow@gmail.com
 homepage: https://github.com/Open-Mixer/omx-dsp
 language: c
