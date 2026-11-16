@@ -1,0 +1,7 @@
+# plugin-hostd-protocol's dependencies, at fixed commits: omx-dsp at the tag v0.32.3, of which the curve verbs use the
+# header-only omx_curve.h (the Makefile asks for 0.32.1 or later and below 0.33), and omx-contract at the tag v3.18.1,
+# whose limits header omx-dsp includes (omx-dsp asks for 3.18.0 or later and below 4). Headers only: nothing of either
+# is compiled here.
+# kind	path	arguments: see lay-out-sources
+git	omx-dsp	https://github.com/Open-Mixer/omx-dsp	57c4635012c9b889baa502758a509d3978d3e880
+git	omx-contract	https://github.com/Open-Mixer/omx-contract	a45f31b035faff36f97cacc432efbd7a0f653db7
