@@ -1,0 +1,225 @@
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+name: Held runs
+# Starts the screen of a pull request whose runs GitHub holds. With the repository's default setting, GitHub holds
+# each run of a first-time contributor's pull request (status action_required) until someone with write access
+# approves it. A schedule runs the default branch's copy of this file, main's, every 15 minutes. Its one step lists
+# every held run of the event pull_request, and groups the runs by head repository, head branch and head commit: a
+# head. For each head, it finds the pull request into the default branch from that repository and branch:
+#   open, at the head        When a held run of the head is not screened (below), the step starts a run by hand of
+#                            review.yml on main:
+#                              gh workflow run review.yml -R theorem-labs/oss-verify --ref main -f pr=<n>
+#                            That run screens the pull request from the API. When the screen passes, the run approves
+#                            the held runs of the head (review.yml, the table of a run by hand).
+#   merged, at the head or   When a held run of the head is of .github/workflows/enroll-merged.yml, and no replay of
+#   at its merge commit      that file for the pull request (event workflow_dispatch, title merged #<n>) started after
+#                            it, the step replays the merge with that file's workflow_dispatch:
+#                              gh workflow run enroll-merged.yml -R theorem-labs/oss-verify --ref main -f pr=<n>
+# Any other head gets nothing: no pull request has it, its pull request closed without a merge, the head moved, or no
+# held run of a merged head is of enroll-merged.yml. In one run of this file, the step starts at most one run of each
+# workflow for each pull request. Its summary has one line for each head: what it started, or why it left the head.
+# When a read of GitHub fails, the step fails: the run is red, and the next schedule tries again.
+#
+# A held run counts as screened when a workflow_dispatch run of review.yml for its pull request (title Pull request
+# <n>, the only kind of run that approves) was created after it and gave a verdict of the screen, passed or held: its
+# job screen ended success. A workflow_run run of Review (title Review of run <id>) screens too, but it approves
+# nothing, so it does not count. While a run of review.yml for the pull request is not complete, the step starts
+# nothing for it. A run that ended before the screen gave a verdict does not count. Examples are a sign-in that fails
+# until dispatch://INFRA-3746 admits review.yml, and a run that the daily cap stopped. The step starts such a head
+# again at most once an hour, also when a new held run comes in that hour.
+# So each new held event at a head gets one screen, and the schedule alone gets none: the step starts a head again
+# only while no run gave a verdict after its newest held run. A head that the screen held keeps its held runs, all
+# older than that screen, and gets no new screen. This is no rescreen loop of a held item (dispatch://OSSV-202's
+# rule). A new event at that head that GitHub holds (an edit of the description runs Terms, a label runs Maintainer
+# confirmed) has a held run newer than the screen, and gets one more screen.
+#
+# The job holds no identity and no secret, so no admission of dispatch://INFRA-3369 covers it. Its token is the job's
+# GITHUB_TOKEN, with two permissions and no other: actions: write, to start runs and to read runs and their jobs, and
+# pull-requests: read, to read pull requests. (actions: write also lets a token cancel, re-run and delete runs. The step
+# does none of these.) The job checks out nothing and runs no code of a pull request. GitHub creates a
+# workflow_dispatch run that a job's GITHUB_TOKEN starts (docs.github.com, "Triggering a workflow from a workflow").
+# The run of review.yml that the step starts has the actor github-actions[bot]. review.yml gives such a run only its
+# held path: the screen, then the approval of the held runs or the record of the hold. Such a run writes no triage
+# comment, and it does nothing when the head is no longer held (the top of review.yml).
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+
+permissions: {}
+
+concurrency:
+  # One run at a time: a new run waits for the run in progress, and does not cancel it.
+  group: held-runs
+  cancel-in-progress: false
+
+jobs:
+  held-runs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # actions: write to start runs and to read runs and their jobs, pull-requests: read to read pull requests.
+    permissions: {actions: write, pull-requests: read}
+    steps:
+      - name: Start a screen for each held head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          say() { echo "$1"; echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
+          now=$EPOCHSECONDS
+          # A schedule's event names no repository, so the default branch comes from the API.
+          default=$(gh api "repos/$REPO" --jq .default_branch)
+          [[ $default =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "::error::GitHub gave no default branch of $REPO."; exit 1; }
+          base=$(jq -rn --arg b "$default" '$b | @uri')
+
+          # The held runs: id, file, head commit, head repository, head branch, and created_at in seconds, split at
+          # U+001F. A head is its repository, branch and commit, split at U+001F. newest: the newest created_at of
+          # the head's held runs. merge: the newest created_at of its held runs of enroll-merged.yml. heads: each head
+          # once, in the order GitHub lists their runs, newest first.
+          held=$(gh api --paginate "repos/$REPO/actions/runs?status=action_required&event=pull_request&per_page=100" \
+            --jq '.workflow_runs[] | [(.id | tostring), .path // "", .head_sha // "", .head_repository.full_name // "",
+                                      .head_branch // "", (.created_at | fromdateiso8601 | tostring)] | join("\u001f")')
+          declare -A newest=() merge=()
+          heads=()
+          while IFS=$'\x1f' read -r id path sha repository branch created; do
+            [ -n "${id:-}" ] || continue
+            # A deleted fork gives no head repository.
+            if ! [[ $id =~ ^[0-9]+$ && $sha =~ ^[0-9a-f]{40}$ && $repository =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$
+                    && -n $branch && $created =~ ^[0-9]+$ ]]; then
+              say "Held run $id: left. GitHub gives no head commit, head repository or head branch of it."
+              continue
+            fi
+            head=$repository$'\x1f'$branch$'\x1f'$sha
+            if [ -z "${newest[$head]:-}" ]; then heads+=("$head"); newest[$head]=$created; fi
+            if (( created > ${newest[$head]} )); then newest[$head]=$created; fi
+            if [ "$path" = .github/workflows/enroll-merged.yml ] && (( created > ${merge[$head]:-0} )); then
+              merge[$head]=$created
+            fi
+          done <<< "$held"
+          if (( ${#heads[@]} == 0 )); then say "No run is held."; exit 0; fi
+
+          # by_hand <file>: listed[<file>] gets the runs by hand of .github/workflows/<file> (event
+          # workflow_dispatch): id, title, status and created_at in seconds, split at U+001F. It reads them once for
+          # the whole step.
+          declare -A listed=()
+          by_hand() {
+            if [ -z "${listed[$1]+read}" ]; then
+              listed[$1]=$(gh api --paginate "repos/$REPO/actions/workflows/$1/runs?event=workflow_dispatch&per_page=100" \
+                --jq '.workflow_runs[] | select(.event == "workflow_dispatch") | [(.id | tostring), .display_title // "",
+                        .status // "", (.created_at | fromdateiso8601 | tostring)] | join("\u001f")')
+            fi
+          }
+          # screened <run id>: passed[<run id>] gets true when the run's job screen concluded success, else false.
+          # screen.py exits 0 with each verdict, clean or held, so success is a verdict. When the sign-in before it
+          # fails, the job is a failure, and a run that the daily cap stopped has no job screen.
+          declare -A passed=()
+          screened() {
+            local jobs
+            if [ -z "${passed[$1]:-}" ]; then
+              jobs=$(gh api --paginate "repos/$REPO/actions/runs/$1/jobs?per_page=100" \
+                --jq '.jobs[] | select(.name == "screen" and .conclusion == "success") | .id')
+              passed[$1]=false
+              if [ -n "$jobs" ]; then passed[$1]=true; fi
+            fi
+          }
+          # The pull requests whose merge this run replayed.
+          declare -A replayed=()
+
+          # one <head>: what the head gets (the top of this file), and its line of the summary.
+          one() {
+            local repository branch sha at of pulls n state merged into to ref from at_sha at_merge number="" kind=""
+            local latest since id title status created last="" i replay=""
+            local -a ids=() statuses=() times=()
+            IFS=$'\x1f' read -r repository branch sha <<< "$1"
+            at="Head ${sha:0:7} of $repository:$branch"
+            # The pull requests into the default branch from the head's repository and branch, with route's filter
+            # head=<owner>:<branch> (review.yml): number, state, merged, base, base repository, head branch, head
+            # repository, head commit and merge commit, split at U+001F.
+            of="${repository%%/*}:$(jq -rn --arg b "$branch" '$b | @uri')"
+            pulls=$(gh api --paginate "repos/$REPO/pulls?state=all&base=$base&head=$of&per_page=100" \
+              --jq '.[] | [(.number | tostring), .state // "", (.merged_at != null | tostring), .base.ref // "",
+                           .base.repo.full_name // "", .head.ref // "", .head.repo.full_name // "", .head.sha // "",
+                           .merge_commit_sha // ""] | join("\u001f")')
+            # The open one at the head, else a merged one whose head commit or merge commit is the head's commit.
+            while IFS=$'\x1f' read -r n state merged into to ref from at_sha at_merge; do
+              [[ ${n:-} =~ ^[1-9][0-9]*$ && $into == "$default" && $to == "$REPO" && $ref == "$branch" ]] || continue
+              if [[ $state == open && $at_sha == "$sha" && $from == "$repository" ]]; then
+                number=$n kind=open
+                break
+              fi
+              if [[ -z $kind && $merged == true && ($at_sha == "$sha" || $at_merge == "$sha") ]]; then
+                number=$n kind=merged
+              fi
+            done <<< "$pulls"
+
+            if [ "$kind" = merged ]; then
+              at+=", merged pull request $number"
+              if [ -z "${merge[$1]:-}" ]; then
+                say "$at: left. No held run of this head is of enroll-merged.yml."
+                return
+              fi
+              if [ -n "${replayed[$number]:-}" ]; then
+                say "$at: left. This run started enroll-merged.yml for the pull request already."
+                return
+              fi
+              since=${merge[$1]}
+              by_hand enroll-merged.yml
+              while IFS=$'\x1f' read -r id title status created; do
+                [[ ${id:-} =~ ^[0-9]+$ && $title == "merged #$number" && $created =~ ^[0-9]+$ ]] || continue
+                if (( created >= since )); then replay=$id; break; fi
+              done <<< "${listed[enroll-merged.yml]}"
+              if [ -n "$replay" ]; then
+                say "$at: left. Run $replay of enroll-merged.yml replayed the merge after the held run."
+                return
+              fi
+              gh workflow run enroll-merged.yml -R "$REPO" --ref main -f "pr=$number"
+              replayed[$number]=true
+              say "$at: started enroll-merged.yml, which replays the merge for enroll-dispatch.yml."
+              return
+            fi
+            if [ "$kind" != open ]; then
+              say "$at: left. No open pull request into $default is at this head, and no merged one has it as its head or merge commit: the head moved, or the pull request is closed."
+              return
+            fi
+
+            at+=", pull request $number"
+            latest=${newest[$1]}
+            # The runs by hand of review.yml for this pull request. A run of another title is not one of them: a
+            # workflow_run run (Review of run <id>) approves nothing.
+            by_hand review.yml
+            while IFS=$'\x1f' read -r id title status created; do
+              [[ ${id:-} =~ ^[0-9]+$ && $title == "Pull request $number" && $created =~ ^[0-9]+$ ]] || continue
+              ids+=("$id") statuses+=("$status") times+=("$created")
+            done <<< "${listed[review.yml]}"
+            # Screened: a run created at or after the newest held run gave a verdict.
+            for i in "${!ids[@]}"; do
+              if (( times[i] >= latest )); then
+                screened "${ids[i]}"
+                if [ "${passed[${ids[i]}]}" = true ]; then
+                  say "$at: left. Run ${ids[i]} of review.yml screened the head after its newest held run."
+                  return
+                fi
+              fi
+            done
+            for i in "${!ids[@]}"; do
+              if [ "${statuses[i]}" != completed ]; then
+                say "$at: left. Run ${ids[i]} of review.yml for the pull request is not complete."
+                return
+              fi
+              if [ -z "$last" ] || (( times[i] > times[last] )); then last=$i; fi
+            done
+            # When the newest run gave no verdict and was created less than an hour ago, the head waits: at most one
+            # start an hour.
+            if [ -n "$last" ] && (( now - times[last] < 3600 )); then
+              screened "${ids[last]}"
+              if [ "${passed[${ids[last]}]}" != true ]; then
+                say "$at: left. Run ${ids[last]} of review.yml ended before the screen gave a verdict, less than an hour ago. The step starts the head again an hour after that run."
+                return
+              fi
+            fi
+            gh workflow run review.yml -R "$REPO" --ref main -f "pr=$number"
+            say "$at: started review.yml. No run by hand of review.yml screened the head after its newest held run."
+          }
+
+          for head in "${heads[@]}"; do one "$head"; done
