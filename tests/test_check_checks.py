@@ -737,6 +737,85 @@ class WorkflowArguments(unittest.TestCase):
                             f"comment with environment {shape!r} was not refused")
 
 
+class GoogleIdentities(unittest.TestCase):
+    """The Google identities of the jobs of every workflow. A job signs in through the provider github-ossv of the pool
+    github, in theorem-agent-root (project 844532188053), and acts only as accounts of that project. The screen job
+    signs in through the pool review-screen, in theorem-agent-infra (project 805240912354), and acts only as
+    review-screen@theorem-agent-infra (Holdings in test_outside_screen keeps the other jobs of review.yml and build.yaml
+    off that pool). No other pool or project is allowed. #171 moved the pool github from theorem-agent-infra to
+    theorem-agent-root: when the identities move again, this test names each job that stays behind."""
+
+    # Each pool that a job can sign in through: the number of its project, its one provider, and the accounts that its
+    # jobs can act as (any account of a project, as "*@<the project's domain>", or one account).
+    POOLS = {"github": ("844532188053", "github-ossv", "*@theorem-agent-root.iam.gserviceaccount.com"),
+             "review-screen": ("805240912354", "github", "review-screen@theorem-agent-infra.iam.gserviceaccount.com")}
+    PROVIDER = r"projects/([0-9]+)/locations/global/workloadIdentityPools/([^/]+)/providers/([^/]+)"
+    # Where a job names a provider or an account: these environment variables, and these inputs of a step
+    # (google-github-actions/auth's).
+    VARIABLES = {"GCP_WORKLOAD_IDENTITY_PROVIDER": "provider", "GCP_SERVICE_ACCOUNT": "account",
+                 "GATEWAY_SERVICE_ACCOUNT": "account"}
+    INPUTS = {"workload_identity_provider": "provider", "service_account": "account"}
+    # The jobs that sign in to Google, by file. The test must find each of them, so that it cannot pass on no job.
+    JOBS = {("review.yml", "screen"), ("review.yml", "review"), ("review.yml", "hold"), ("review.yml", "comment"),
+            ("review.yml", "triage"), ("enroll-dispatch.yml", "dispatch")}
+
+    def identities(self, directory):
+        """The (file, job) pairs of the workflows in `directory` that name a provider or an account, and each way that
+        one of these jobs breaks the rules of POOLS, as "<file> <job>: <why>"."""
+        checked, problems = set(), []
+        for path in sorted([*directory.glob("*.yml"), *directory.glob("*.yaml")]):
+            workflow = yaml.safe_load(path.read_text())
+            for name, job in (workflow.get("jobs") or {}).items():
+                job_env = {**(workflow.get("env") or {}), **(job.get("env") or {})}
+                named, why = {"provider": set(), "account": set()}, []
+                # The job's environment, then each step's environment with the inputs that the step gives.
+                for env, inputs in [(job_env, {})] + [({**job_env, **(step.get("env") or {})}, step.get("with") or {})
+                                                      for step in job.get("steps") or []]:
+                    for variable, kind in self.VARIABLES.items():
+                        if variable in env:
+                            named[kind].add(str(env[variable]))
+                    for key, kind in self.INPUTS.items():
+                        if key not in inputs:
+                            continue
+                        value = str(inputs[key])
+                        reference = re.fullmatch(r"\$\{\{\s*env\.(\w+)\s*\}\}", value)
+                        if reference and reference[1] not in env:
+                            why.append(f"{key} reads env.{reference[1]}, which the step does not set")
+                        else:
+                            named[kind].add(str(env[reference[1]]) if reference else value)
+                if not (named["provider"] or named["account"] or why):
+                    continue
+                checked.add((path.name, name))
+                if not named["provider"]:
+                    why.append("it names an account but no provider")
+                pools = set()
+                for provider in sorted(named["provider"]):
+                    parts = re.fullmatch(self.PROVIDER, provider)
+                    if not parts:
+                        why.append(f"{provider!r} is not a provider of the form {self.PROVIDER}")
+                    elif parts[2] not in self.POOLS:
+                        why.append(f"the pool {parts[2]} ({provider}) is not one of {', '.join(self.POOLS)}")
+                    else:
+                        project, provider_id, _ = self.POOLS[parts[2]]
+                        pools.add(parts[2])
+                        if parts[1] != project:
+                            why.append(f"the pool {parts[2]} is in project {project}, not {parts[1]} ({provider})")
+                        if parts[3] != provider_id:
+                            why.append(f"the provider of the pool {parts[2]} is {provider_id}, not {parts[3]}")
+                for account in sorted(named["account"]):
+                    for pool in sorted(pools):
+                        accounts = self.POOLS[pool][2]
+                        if not re.fullmatch(re.escape(accounts).replace(r"\*", "[a-z][a-z0-9-]*"), account):
+                            why.append(f"{account} is not {accounts}, the accounts of the pool {pool}")
+                problems += [f"{path.name} {name}: {reason}" for reason in why]
+        return checked, problems
+
+    def test_each_job_signs_in_through_its_pools_project_and_accounts(self):
+        checked, problems = self.identities(ROOT / ".github" / "workflows")
+        self.assertEqual(problems, [], "these jobs break the rules of POOLS")
+        self.assertEqual(checked, self.JOBS, "the (file, job) pairs that name a provider or an account")
+
+
 HEAD40 = "0123456789abcdef0123456789abcdef01234567"
 
 
