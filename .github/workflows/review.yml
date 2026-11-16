@@ -1231,8 +1231,9 @@ jobs:
       # asks for by default. The action's step inherits this from the job's environment, as Claude Code does.
       ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-4-5
       # The client id Tailscale gives the federated identity ossv-review-yml-github, which dispatch://INFRA-3746 (a part
-      # of dispatch://INFRA-3369) makes for this file. The identity ossv-review-github stays for build.yaml only. The
-      # id comes from the apply of root/ that dispatch://INFRA-3746 makes, which records it on that issue, and it is
+      # of dispatch://INFRA-3369) makes for this file. The old identity, ossv-review-github, admits build.yaml alone,
+      # which joins no tailnet now, and dispatch://INFRA-3755 removes the old admissions after this file is on main.
+      # The id comes from the apply of root/ that dispatch://INFRA-3746 makes, which records it on that issue, and it is
       # not known yet: until it is written here, the join to the tailnet fails, and so does the review. The id is
       # public, not a secret, and this is the one place this file names it.
       TAILNET_CLIENT_ID: ""

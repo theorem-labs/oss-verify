@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
-"""The screen of .github/workflows/build.yaml: whether the text of a pull request or an issue from an account without
+"""The screen of .github/workflows/review.yml: whether the text of a pull request or an issue from an account without
 write access may go to the review without a person.
 
     python3 .github/scripts/screen.py <the .review directory> [<the projects/<name> directory>]
@@ -29,7 +29,7 @@ GITHUB_OUTPUT and one line to its standard output, and nothing more, so the run'
 hold the reason. No check can act on the text: the text is sent to each service as data, the model has no tool, and
 what comes back is read for its one word and nothing else.
 
-Every setting is an environment variable that build.yaml sets; the tokens come from GitHub's identity token, which
+Every setting is an environment variable that review.yml sets; the tokens come from GitHub's identity token, which
 the job's environment review-screen alone can exchange for them.
 
 This is the screen of theorem-labs/rocq-linux-process-semantics's review.yml, with the same checks, limits and
@@ -166,7 +166,7 @@ KEPT_STATUS = re.compile(r"\(exit status (\d+)\)\n?\Z")
 #   head/    each file a change changes, as the pull request has it: pr.diff holds every line the pull request
 #            changed in it, and pr.diff must be a diff that shows it as text, so each file here need only be text.
 #   source/  the project's repository at the built commit: the repository an enrollment names, not text the pull
-#            request carries, and far more text than MAX_CHARS. build.yaml's header says that it is not screened; the
+#            request carries, and far more text than MAX_CHARS. review.yml's header says that it is not screened; the
 #            review of every enrollment reads it, whoever wrote the pull request.
 NOT_SENT_DIRECTORIES = ("head", "source")
 # A seed corpus's listing of its inputs in hexadecimal (review-gather): a row is an offset, 16 bytes and their text.
@@ -391,7 +391,7 @@ GENERATED = frozenset({"checks.json", "checklist.txt", "description.md", "review
 
 def writers():
     """The logins of the item's comments', reviews' and review comments' authors that have write access, which
-    build.yaml's gather job asked GitHub about (SCREEN_WRITERS). Their text is this project's own: an agent of
+    review.yml's gather job asked GitHub about (SCREEN_WRITERS). Their text is this project's own: an agent of
     ours answering the review, or a maintainer asking the author for a change, is not the outside text this
     screen is for, and it is written to be read by the review. Empty when the gather job could not tell them
     apart, and then every comment is read, as before."""

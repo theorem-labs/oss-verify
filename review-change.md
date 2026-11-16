@@ -1,6 +1,6 @@
 # What the change review checks
 
-The review job of `.github/workflows/build.yaml` reads this file from `main` for a pull request into the default
+The review job of `.github/workflows/review.yml` reads this file from `main` for a pull request into the default
 branch that changes no file under `projects/`. `.github/CODEOWNERS` names its owner, as for `review.md`. The workflow's
 gather job gathers the pull request into `.review/`: `pr.json` (description, files, commits, comments), `pr.diff`,
 `checks.json`, `review-comments.txt` and its authors in `review-comment-authors.txt`, and `head/<path>`, each changed

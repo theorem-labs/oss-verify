@@ -1,7 +1,7 @@
 # What the enrollment review checks
 
 This file says what the enrollment review checks, and how it writes its comment. The review job of
-`.github/workflows/build.yaml` reads this file from `main`, never from the pull request: the job checks out `main`
+`.github/workflows/review.yml` reads this file from `main`, never from the pull request: the job checks out `main`
 and takes only `projects/<name>/` from the pull request. `.github/CODEOWNERS` names the team @theorem-labs/engineering,
 people only, as the owner of this file, and the ruleset of `main` requires the approval of a code owner, so a change to
 this file needs the approval of one of them.
@@ -155,7 +155,7 @@ Read each fuzz target's source: in `DIR`, or in the project's repository at the 
 
 Write `$WORK/comment.md` as `.claude/skills/write-to-maintainer/SKILL.md` says. Its items are the **fail** verdicts, each with the facts that the maintainer needs (the file, the line, the commit, the limit) and the fix. The one sentence of check D3 is in the comment too, although it is no request and its verdict is **pass**: that skill's rule 4, which says not to restate what the checks show, does not reach it. Do not put these in the comment: the size, the rubric, a **person** verdict, the verdict table, or a guess about whether we will accept the project.
 
-- A program writes the comment's first sentence: build.yaml's comment job, from the conclusion of the check `Enrollment review` (`.github/scripts/review-body`), for example "The changes below are needed." Your text begins after it, and does not repeat it. When there are requests, the first sentence of your text gives only their number, for example "Three changes are needed in the fuzz targets of `<owner>/<repo>`." That sentence never uses the words merge, publish or prove.
+- A program writes the comment's first sentence: review.yml's comment job, from the conclusion of the check `Enrollment review` (`.github/scripts/review-body`), for example "The changes below are needed." Your text begins after it, and does not repeat it. When there are requests, the first sentence of your text gives only their number, for example "Three changes are needed in the fuzz targets of `<owner>/<repo>`." That sentence never uses the words merge, publish or prove.
 - The optional items go in the collapsed block, under one line that says that they are optional and not a condition of the merge.
 - An item that comes from a rule of the build contract names that rule and links https://github.com/theorem-labs/oss-verify/blob/main/docs/build-contract.md, for example "`/tmp` is empty in each run".
 - When a check is **fail**, one sentence says that the check `Enrollment review` of this commit has the conclusion `failure` because of it, and that no statements start by themselves until the review of a later commit gives the conclusion `success`.

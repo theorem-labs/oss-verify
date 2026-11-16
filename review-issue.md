@@ -1,6 +1,6 @@
 # What the draft reply to an issue says
 
-The review job of `.github/workflows/build.yaml` reads this file from `main` for an issue of this repository.
+The review job of `.github/workflows/review.yml` reads this file from `main` for an issue of this repository.
 `.github/CODEOWNERS` names its owner, as for `review.md`. The job gathers the issue into `.review/issue.json` (title,
 body, author, comments). The checkout around it is `main`. The reply is a draft: no job posts it, and a person approves
 its exact text before anyone does.

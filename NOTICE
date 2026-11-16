@@ -22,7 +22,8 @@ where it had them, and says what was changed:
   src/oss_verify/validate.py, src/oss_verify/check.py, src/oss_verify/check_build.py
   .github/PULL_REQUEST_TEMPLATE.md, .github/dependabot.yml
   .github/workflows/validate.yaml, .github/workflows/build.yaml, .github/workflows/triage.yaml,
-  .github/workflows/terms.yaml, .github/scripts/triage.py, .github/scripts/take-project
+  .github/workflows/terms.yaml, .github/workflows/review.yml, .github/scripts/triage.py,
+  .github/scripts/take-project
 
 CODE_OF_CONDUCT.md is the Contributor Covenant, version 2.0 (https://www.contributor-covenant.org).
 

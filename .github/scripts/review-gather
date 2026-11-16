@@ -261,7 +261,7 @@ if [[ ${COMMIT:-} =~ ^[0-9a-f]{40}$ ]]; then
     exit 1
   fi
 else
-  echo "Not gathered: the build did not resolve a commit of the project's repository, so there is no source to read." \
+  echo "Not gathered: no commit of the project's repository came from the Build run, so there is no source to read." \
     > "$out/source.txt"
 fi
 # The changes to projects/<name>/ since the commit of the last review (LAST_REVIEW), whose session the review then
