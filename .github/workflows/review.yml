@@ -240,9 +240,10 @@ name: "Review"
 # the action then prints the whole conversation, a held finding too, to the public log. The comment job and the triage
 # job alone write to this repository: they post as the oss-verify GitHub App (oss-verify[bot]), with an installation
 # token that can write pull requests in this repository only. The comment job's token can also write its checks and
-# issues (the check run, the label and the hold comment) and its runs (the approval of held runs). Each job makes its
-# token from the App's client id below and its private key, which it reads at run time from Secret Manager
-# (oss-verify-github-app-key), and runs no code of the pull request or the project.
+# issues (the check run, the label and the hold comment). For the approval of held runs alone, the comment job makes a
+# second token, which can write the runs of this repository and nothing else. Each job makes its tokens from the App's
+# client id below and its private key, which it reads at run time from Secret Manager (oss-verify-github-app-key), and
+# runs no code of the pull request or the project.
 #
 # This repository stores no long-lived credential for any of that. dispatch://INFRA-3746 (a part of
 # dispatch://INFRA-3369) makes Theorem's identities admit this file, on refs/heads/main and only from its own events
@@ -1815,10 +1816,8 @@ jobs:
           delimiter="key-$(openssl rand -hex 16)"
           { echo "key<<$delimiter"; builtin printf '%s\n' "$key"; echo "$delimiter"; } >> "$GITHUB_OUTPUT"
 
-      # One token for every step below: checks for the check run Enrollment review, pull requests for the review
-      # comment, issues for the label review-held and its comment, an issue's too, and actions for the approval of
-      # held runs. Its cost: with actions: write this token can also cancel, re-run and start the runs of this
-      # repository. No step below does that, and each step runs only main's .github/scripts.
+      # One token for every step below but the approval: checks for the check run Enrollment review, pull requests for
+      # the review comment, and issues for the label review-held and its comment, an issue's too.
       - name: Get the oss-verify App's token
         id: app
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0 (sha-pinned)
@@ -1828,6 +1827,19 @@ jobs:
           permission-checks: write
           permission-pull-requests: write
           permission-issues: write
+
+      # A token of its own for the approval, with actions: write alone, made only when the screen passed a held head
+      # (APPROVE). The App's configuration has actions: write (gh api apps/oss-verify), but whether its installation
+      # accepted it is not known before the first approval. A refusal fails this step alone, and every other step of
+      # this job keeps the token above. The cost of actions: write: this token can also cancel, re-run and start the
+      # runs of this repository, so it exists only on this path, and only the next step uses it.
+      - name: Get the oss-verify App's token to approve the held runs
+        id: approve
+        if: env.APPROVE == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0 (sha-pinned)
+        with:
+          client-id: Iv23liAWPMahJZYsw3un
+          private-key: ${{ steps.key.outputs.key }}
           permission-actions: write
 
       # Only on a run by hand for a held head whose screen gave the verdict clean (APPROVE): every held run of the
@@ -1838,7 +1850,7 @@ jobs:
       - name: Approve the held runs
         if: env.APPROVE == 'true'
         env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_TOKEN: ${{ steps.approve.outputs.token }}
           REPO: ${{ github.repository }}
           PR: ${{ needs.route.outputs.pr }}
           HEAD_SHA: ${{ needs.route.outputs.sha }}
