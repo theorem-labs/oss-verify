@@ -218,7 +218,8 @@ def members(data, strip, patterns):
                 except KeyError:
                     linked = None
                 if linked is None:
-                    raise Failed(f"hard link {member.name!r} points to {member.linkname!r}, not a file in the archive")
+                    raise Failed(f"hard link {member.name!r} points to {member.linkname!r}, which leads to no file "
+                                 "in the archive")
                 found.append((rel, "file", linked.read(), bool(member.mode & 0o111)))
     return found
 

@@ -56,14 +56,14 @@ class Errors(unittest.TestCase):
     def test_a_hard_link_to_a_member_the_archive_lacks_is_refused_by_its_line(self):
         data = tar(("top/a", tarfile.LNKTYPE, "top/gone"))
         said = self.refused(f"archive\tvendor\thttps://example.com/a.tar\t{SHA256}\t1\n", data)
-        self.assertEqual(said, f"lay-out-sources: {self.sources}:1: hard link 'top/a' points to 'top/gone', not a "
-                               "file in the archive")
+        self.assertEqual(said, f"lay-out-sources: {self.sources}:1: hard link 'top/a' points to 'top/gone', which "
+                               "leads to no file in the archive")
 
     def test_a_hard_link_to_a_directory_is_refused_by_its_line(self):
         data = tar(("top/dir", tarfile.DIRTYPE, ""), ("top/a", tarfile.LNKTYPE, "top/dir"))
         said = self.refused(f"archive\tvendor\thttps://example.com/a.tar\t{SHA256}\t1\n", data)
-        self.assertEqual(said, f"lay-out-sources: {self.sources}:1: hard link 'top/a' points to 'top/dir', not a "
-                               "file in the archive")
+        self.assertEqual(said, f"lay-out-sources: {self.sources}:1: hard link 'top/a' points to 'top/dir', which "
+                               "leads to no file in the archive")
 
     def test_a_hard_link_to_a_file_takes_its_bytes(self):
         made = io.BytesIO()
