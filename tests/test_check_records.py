@@ -132,10 +132,10 @@ class Reader(unittest.TestCase):
         self.assertEqual([record.line for record in found.records], [999999999])
 
 
-# A harness source is the project's to write, and check --checks reads each one in the directory of a fuzz target, up
-# to 16 MiB (check_checks.MAX_IMAGE_FILE_BYTES): the reader must take time linear in it. Each case here took more than
-# a minute with the reader that read back over the source for each separator, abort() or case label; the bound leaves
-# room for a slow machine.
+# A harness source is the project's to write, and check --checks reads each one the coverage build compiled in the
+# directory of a fuzz target, up to 16 MiB (check_checks.MAX_IMAGE_FILE_BYTES). The reader that read back over the
+# source for each separator, abort() or case label took from 46 seconds to over 4 minutes on the first four cases here,
+# and the long line's copies took 1.4 GB; the bound leaves room for a slow machine.
 LINEAR_SECONDS = 10
 
 
