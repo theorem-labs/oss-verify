@@ -15,24 +15,29 @@ name: "Terms"
 # box is not ticked, every page of them, renames under both names, as build.yaml's route reads them. A pull request
 # that changes more files than the 3000 the API lists, or whose head moves while they are read, needs the box.
 #
-# pull_request_target, not pull_request: with pull_request the workflow file is taken from the pull request itself, so
-# a contributor could edit this check away. This job reads only the event's description and the list of the files the
-# pull request changes, never the pull request's code. Its token has no permission (permissions: {} below): the API
+# pull_request: the workflow file comes from the merge commit, so a pull request that changes it controls this run and
+# its check: a contributor could edit this check away in their own pull request. The code-owner rule on /.github/ of
+# .github/CODEOWNERS guards the merge of such a pull request. enroll-dispatch.yml sends no pull request for its
+# theorem statements unless all its files are under one projects/<name>/ (the_project() of
+# .github/scripts/enroll-dispatch), and none that changes a steering file (.github/scripts/steering.py) until a person
+# approves its head. This job reads only the event's description and the list of the files the pull request changes,
+# never the pull request's code. Its token has no permission (permissions: {} below): the API
 # gives a public repository's pull request and its files to any token ("This endpoint can be used without
 # authentication or the aforementioned permissions if only public resources are requested",
 # https://docs.github.com/en/rest/pulls/pulls#list-pull-requests-files), and a token is used, not none, for the
 # authenticated rate limit. The description reaches the script through an environment variable, never by ${{ }}
 # substitution into the script, so its text cannot become shell.
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, edited, reopened, synchronize]
 
 permissions: {}
 
 concurrency:
   # One run per pull request: an edit or a push while a run is going supersedes it, so the newest description is
-  # the one this check reports on.
-  group: terms-${{ github.event.pull_request.number }}
+  # the one this check reports on. By event too, so that the runs of this file's copy from before the move to
+  # pull_request (on pull_request_target) and the runs of this copy never cancel each other.
+  group: terms-${{ github.event_name }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
