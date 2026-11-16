@@ -23,6 +23,14 @@ failed, text that holds characters that hide it (HIDING), or more text than MAX_
 text joined, each source under its label, so that text split over several comments or fields is read together. A
 held item gets no review; a person decides.
 
+A sign-in that fails is the one exception: it gives no verdict. The screen signs in with three token reads:
+GitHub's identity token (identity_token), Microsoft Entra's access token (prompt_shields) and Anthropic's token
+exchange (claude). When one of them refuses, cannot reach its endpoint, or gives no token (SignInError), the screen
+stops there. It writes nothing to GITHUB_OUTPUT, stores no reason, prints which sign-in failed, and exits 1, so the
+Screen step fails. review.yml then holds the item as for a screen that failed. For a held head, that run does not
+count as a screen, and .github/workflows/held-runs.yml starts the screen again. A setting that is missing, and no
+time left, are not such a failure: they hold the item, as for a check.
+
 What each check answered, and why the text could not be screened, is the reason. It goes as one JSON object to the
 private bucket REASON_BUCKET, and nowhere else: this file writes the verdict and the names of the checks that ran to
 GITHUB_OUTPUT and one line to its standard output, and nothing more, so the run's public log and its outputs never
@@ -126,6 +134,12 @@ SCHEMA = {"type": "object", "additionalProperties": False, "required": ["verdict
 
 class CheckError(Exception):
     """A check that could not answer. Its message goes to the reason only."""
+
+
+class SignInError(Exception):
+    """A sign-in that failed: one of the three token reads refused, could not reach its endpoint, or gave no token. It
+    stops the screen, with no verdict. Its message names the sign-in and the kind of failure, never a token, and goes
+    to the public log."""
 
 
 def env(name):
@@ -604,9 +618,10 @@ def pieces(text, size, overlap):
 
 # --- HTTP ---------------------------------------------------------------------------------------------------------
 
-def http(method, url, body=None, headers=None, form=False, attempts=4):
-    """The JSON answer of one request. Retries a 429 or a 5xx, and a connection that fails; any other answer that is
-    not 2xx, an answer that is not JSON, and a request after DEADLINE, is a CheckError."""
+def http(method, url, body=None, headers=None, form=False, attempts=4, fail=CheckError):
+    """The JSON answer of one request. Retries a 429 or a 5xx, and a connection that fails. Any other answer that is
+    not 2xx, an answer that is not JSON, and a request that still fails after the last attempt raise fail: a
+    CheckError, or a SignInError for a sign-in. A request after DEADLINE is a CheckError, also for a sign-in."""
     data = None
     headers = dict(headers or {})
     if body is not None:
@@ -635,26 +650,36 @@ def http(method, url, body=None, headers=None, form=False, attempts=4):
                 if retry.isdigit():
                     time.sleep(min(int(retry), 30))
                 continue
-            raise CheckError(last) from None
+            raise fail(last) from None
         except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
             last = f"{type(e).__name__} reaching {urllib.parse.urlsplit(url).netloc}: {e}"
             continue
         try:
             return json.loads(raw)
         except ValueError:
-            raise CheckError(f"an answer from {urllib.parse.urlsplit(url).netloc} that is not JSON") from None
-    raise CheckError(last)
+            raise fail(f"an answer from {urllib.parse.urlsplit(url).netloc} that is not JSON") from None
+    raise fail(last)
+
+
+def sign_in(service, field, method, url, body=None, headers=None, form=False):
+    """The token of one sign-in, the string at field of its answer, or a SignInError that names service and the kind
+    of failure. The caller reads the settings of the request first, so a missing one is a CheckError."""
+    try:
+        answer = http(method, url, body, headers, form, fail=SignInError)
+    except SignInError as e:
+        raise SignInError(f"{service}: {outcome('error', str(e))}") from None
+    token = answer.get(field) if isinstance(answer, dict) else None
+    if not isinstance(token, str) or not token:
+        raise SignInError(f"{service}: an answer with no token")
+    return token
 
 
 def identity_token(audience):
     """A GitHub Actions identity token for audience: the job's environment review-screen is in its claims."""
     url = env("ACTIONS_ID_TOKEN_REQUEST_URL")
     url += ("&" if "?" in url else "?") + urllib.parse.urlencode({"audience": audience})
-    answer = http("GET", url, headers={"Authorization": "Bearer " + env("ACTIONS_ID_TOKEN_REQUEST_TOKEN")})
-    token = answer.get("value") if isinstance(answer, dict) else None
-    if not isinstance(token, str) or not token:
-        raise CheckError("GitHub gave no identity token")
-    return token
+    return sign_in("GitHub's identity token", "value", "GET", url,
+                   headers={"Authorization": "Bearer " + env("ACTIONS_ID_TOKEN_REQUEST_TOKEN")})
 
 
 # --- the three checks ---------------------------------------------------------------------------------------------
@@ -695,15 +720,14 @@ def prompt_shields(found):
     """Prompt Shields, with the text as its documents: up to five pieces and 10,000 characters a request. An attack
     found in any document is a match. The service answers for each document it was sent, and for the fixed user
     prompt, which must never be an attack."""
-    token = http("POST", f"{env('AZURE_LOGIN_URL')}/{env('AZURE_TENANT_ID')}/oauth2/v2.0/token", {
-        "client_id": env("AZURE_CLIENT_ID"),
-        "scope": "https://cognitiveservices.azure.com/.default",
-        "grant_type": "client_credentials",
-        "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
-        "client_assertion": identity_token("api://AzureADTokenExchange"),
-    }, form=True).get("access_token")
-    if not isinstance(token, str) or not token:
-        raise CheckError("Microsoft Entra gave no access token")
+    token = sign_in("Microsoft Entra's access token", "access_token", "POST",
+                    f"{env('AZURE_LOGIN_URL')}/{env('AZURE_TENANT_ID')}/oauth2/v2.0/token", {
+                        "client_id": env("AZURE_CLIENT_ID"),
+                        "scope": "https://cognitiveservices.azure.com/.default",
+                        "grant_type": "client_credentials",
+                        "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+                        "client_assertion": identity_token("api://AzureADTokenExchange"),
+                    }, form=True)
     url = f"{env('CONTENT_SAFETY_URL')}/contentsafety/text:shieldPrompt?api-version={SHIELD_API_VERSION}"
     labelled = list(enumerate(pieces(joined(found), SHIELD_PIECE, SHIELD_OVERLAP), 1))
     batches, batch = [], []
@@ -774,16 +798,14 @@ def claude(found):
     model answers at its own temperature (the gateway's model takes no other) and one answer on a long ordinary
     text is a coin with a small bias. Either question's word suspicious holds the item."""
     base = env("ANTHROPIC_URL")
-    token = http("POST", f"{base}/v1/oauth/token", {
+    token = sign_in("Anthropic's token exchange", "access_token", "POST", f"{base}/v1/oauth/token", {
         "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
         "assertion": identity_token("https://api.anthropic.com"),
         "federation_rule_id": env("ANTHROPIC_FEDERATION_RULE_ID"),
         "organization_id": env("ANTHROPIC_ORGANIZATION_ID"),
         "service_account_id": env("ANTHROPIC_SERVICE_ACCOUNT_ID"),
         "workspace_id": env("ANTHROPIC_WORKSPACE_ID"),
-    }).get("access_token")
-    if not isinstance(token, str) or not token:
-        raise CheckError("Anthropic gave no access token")
+    })
     style = [(s, t) for s, t in found if PATCH_STYLE_PATH.fullmatch(s)]
     questions = [("the text", [(s, t) for s, t in found if not PATCH_STYLE_PATH.fullmatch(s)], None)]
     if style:
@@ -820,7 +842,8 @@ def listed():
 
 # --- the verdict --------------------------------------------------------------------------------------------------
 
-# How the checks' words make the verdict. Whatever the rule, a check that cannot answer holds the item.
+# How the checks' words make the verdict. Whatever the rule, a check that cannot answer holds the item. A sign-in that
+# fails gives no words and no verdict (SignInError).
 #   any                        held when any check answers suspicious.
 #   two_of_three               held when two of the three answer suspicious: the two detectors decide when they
 #                              agree, and the model breaks a tie.
@@ -866,12 +889,17 @@ def combine(words, name):
     return "held" if RULES[name][1](words) else "clean"
 
 
-def run_checks(found, ran):
-    """Each check's result, as the reason records it."""
+def run_checks(found, ran, sign_in_stops=True):
+    """Each check's result, as the reason records it. A sign-in that fails (SignInError) stops the screen there. With
+    sign_in_stops false, as for a measurement, it is that check's error instead."""
     results = {}
     for name in ran:
         try:
             word, detail = CHECKS[name](found)
+        except SignInError as e:
+            if sign_in_stops:
+                raise
+            word, detail = "error", {"error": str(e)[:2000]}
         except CheckError as e:
             word, detail = "error", {"error": str(e)[:2000]}
         except Exception as e:   # a fault of this file: no answer, and so held
@@ -881,8 +909,9 @@ def run_checks(found, ran):
 
 
 def screen(review, project=None):
-    """The verdict, the names of the checks that ran, and the reason. Each check SCREEN_CHECKS names runs; one that
-    cannot answer, or a setting of it that is missing, holds the item; SCREEN_RULE makes the verdict of their words."""
+    """The verdict, the names of the checks that ran, and the reason. Each check SCREEN_CHECKS names runs. One that
+    cannot answer, or a setting of it that is missing, holds the item. A sign-in that fails stops the screen, with no
+    verdict (SignInError). SCREEN_RULE makes the verdict of the checks' words."""
     found, unscreenable = parts(review, project)
     reason = {"sources": [[s, len(t)] for s, t in found], "unscreenable": unscreenable, "checks": {}}
     try:
@@ -925,7 +954,7 @@ def measure():
         found = [(s, t) for s, t in item["parts"]]
         hidden = [c for c in (hiding(t) for _s, t in found) if c]
         for _ in range(repeats):
-            words = {} if hidden else {c: r["word"] for c, r in run_checks(found, ran).items()}
+            words = {} if hidden else {c: r["word"] for c, r in run_checks(found, ran, sign_in_stops=False).items()}
             results.append({"name": item["name"], "label": item["label"], "words": words, "hidden": hidden})
     table = {}
     for name, (needs, _f) in RULES.items():
@@ -1012,6 +1041,9 @@ def main():
         return 2
     try:
         verdict, ran, reason = screen(*sys.argv[1:])
+    except SignInError as e:   # no verdict and no reason: the step fails, and the message holds no token
+        print(f"::error::The screen could not sign in, and gives no verdict ({e}).")
+        return 1
     except Exception as e:   # a fault of this file before the checks: held, and the fault goes to the reason only
         verdict, ran, reason = "held", [], {"fault": f"{type(e).__name__}: {str(e)[:2000]}"}
     reason.update(verdict=verdict, ran=ran, repository=os.environ.get("REPOSITORY", ""),

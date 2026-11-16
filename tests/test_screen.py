@@ -4,10 +4,10 @@
 
 The three services (Model Armor, Prompt Shields with Microsoft Entra's token endpoint, and Anthropic with its token
 exchange), GitHub's identity token endpoint and Cloud Storage are stand-ins served on 127.0.0.1, which record each
-request. What is tested: the verdict for each answer and each failure, that the reason reaches the bucket and nothing
-else (no output, no log line), what is sent (the text of the pull request or the issue as review-gather writes it,
-every account's comments; the model gets no tool and a schema of two words), and the size limits of each service.
-No network is used.
+request. What is tested: the verdict for each answer and each failure, no verdict for a sign-in that fails, that the
+reason reaches the bucket and nothing else (no output, no log line), what is sent (the text of the pull request or
+the issue as review-gather writes it, every account's comments; the model gets no tool and a schema of two words),
+and the size limits of each service. No network is used.
 """
 
 import contextlib
@@ -189,8 +189,9 @@ class ScreenTest(unittest.TestCase):
                 with open(full, "wb") as f:
                     f.write(data.encode() if isinstance(data, str) else data)
 
-    def run_screen(self):
-        """main() as the step runs it, in this process: (verdict output, everything it printed, the stored reason)."""
+    def run_screen(self, code=0):
+        """main() as the step runs it, in this process: (verdict output, everything it printed, the stored reason).
+        code is the exit status main() must give."""
         open(self.output, "w").close()
         saved, argv = dict(os.environ), sys.argv
         os.environ.update(self.env)
@@ -203,7 +204,7 @@ class ScreenTest(unittest.TestCase):
             sys.argv = argv
             os.environ.clear()
             os.environ.update(saved)
-        self.assertEqual(rc, 0)
+        self.assertEqual(rc, code)
         with open(self.output) as f:
             written = f.read()
         printed = out.getvalue() + err.getvalue()
@@ -253,8 +254,6 @@ class ScreenTest(unittest.TestCase):
             "armor without the filter": (":sanitizeUserPrompt", (200, {"sanitizationResult": {"filterResults": {}}})),
             "armor unknown state": (":sanitizeUserPrompt", lambda _b: armor("MAYBE")),
             "armor not JSON": (":sanitizeUserPrompt", (200, b"<html>")),
-            "entra refuses": ("/entra/tenant/oauth2/v2.0/token", (401, {"error": "invalid_client"})),
-            "entra gives no token": ("/entra/tenant/oauth2/v2.0/token", (200, {})),
             "shields over quota": ("/contentsafety/text:shieldPrompt", (403, {"error": {"code": "QuotaExceeded"}})),
             "shields 429 every time": ("/contentsafety/text:shieldPrompt", (429, {"error": {"code": "429"}})),
             "shields refuses the role": ("/contentsafety/text:shieldPrompt",
@@ -262,7 +261,6 @@ class ScreenTest(unittest.TestCase):
             "shields flags our prompt": ("/contentsafety/text:shieldPrompt", lambda b: shields(False, prompt=True)),
             "shields misses a document": ("/contentsafety/text:shieldPrompt", lambda _b: shields()),
             "shields not a boolean": ("/contentsafety/text:shieldPrompt", lambda _b: shields("yes")),
-            "anthropic exchange refuses": ("/v1/oauth/token", (401, {"type": "error"})),
             "model cut off": ("/v1/messages", lambda _b: message(stop="max_tokens")),
             "model refuses": ("/v1/messages", lambda _b: message(stop="refusal")),
             "model uses a tool": ("/v1/messages", lambda _b: message(content=[
@@ -273,7 +271,6 @@ class ScreenTest(unittest.TestCase):
             "model an extra key": ("/v1/messages", lambda _b: message('{"verdict": "clean", "note": "x"}')),
             "model plain clean": ("/v1/messages", lambda _b: message("clean")),
             "model 529": ("/v1/messages", (529, {"type": "error"})),
-            "oidc refuses": ("/oidc", (403, {"message": "no"})),
         }
         for name, (path, answer) in cases.items():
             with self.subTest(case=name):
@@ -283,6 +280,36 @@ class ScreenTest(unittest.TestCase):
                 v, reason = self.verdict()
                 self.assertEqual(v, "held")
                 self.assertIn("error", {c["word"] for c in reason["checks"].values()})
+
+    def test_a_sign_in_that_fails_fails_the_screen(self):
+        """No verdict: GitHub's identity token, Microsoft Entra's token or Anthropic's token exchange refuses, cannot
+        be reached, or gives no token. The screen stops there and asks the model nothing. It exits 1 and writes
+        nothing to GITHUB_OUTPUT, so the Screen step fails. Its one line names the sign-in and the kind of failure,
+        and holds no token and nothing of the answer."""
+        cases = {
+            "oidc refuses": ({"/oidc": (403, {"message": MARK})}, {}, "GitHub's identity token: no answer, HTTP 403"),
+            "entra refuses": ({"/entra/tenant/oauth2/v2.0/token": (401, {"error": "invalid_client", "x": MARK})}, {},
+                              "Microsoft Entra's access token: no answer, HTTP 401"),
+            "entra gives no token": ({"/entra/tenant/oauth2/v2.0/token": (200, {})}, {},
+                                     "Microsoft Entra's access token: an answer with no token"),
+            "entra cannot be reached": ({}, {"AZURE_LOGIN_URL": "http://127.0.0.1:9"},
+                                        "Microsoft Entra's access token: no answer, unreachable"),
+            "anthropic exchange refuses": ({"/v1/oauth/token": (401, {"type": "error", "x": MARK})}, {},
+                                           "Anthropic's token exchange: no answer, HTTP 401"),
+            "anthropic exchange gives no token": ({"/v1/oauth/token": (200, {})}, {},
+                                                  "Anthropic's token exchange: an answer with no token"),
+        }
+        for name, (answers, settings, want) in cases.items():
+            with self.subTest(case=name):
+                self.fresh()
+                self.item(body=f"Body {MARK}.")
+                self.services.answers.update(answers)
+                self.env.update(settings)
+                written, printed, reason = self.run_screen(code=1)
+                self.assertEqual(written, "")
+                self.assertEqual(printed, f"::error::The screen could not sign in, and gives no verdict ({want}).\n")
+                self.assertEqual(self.services.to("/v1/messages"), [])
+                self.assertIsNone(reason)
 
     # Model Armor's answers as the live service gave them on 2026-11-02 (template review-screen's settings, us), verbatim.
     LIVE_INSPECT_ONLY = {"sanitizationResult": {"invocationResult": "SUCCESS"}}

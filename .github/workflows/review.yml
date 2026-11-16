@@ -81,7 +81,11 @@ name: "Review"
 #            two letters of a script that
 #            uses joiners or inside an emoji, a byte order mark at the start of a file, and a word joiner where
 #            .github/scripts/review-neutralize puts one in this App's own comments), or more text than the screen
-#            reads, holds it. A screen that fails, and a screened review that fails, fail the check review jobs
+#            reads, holds it. A screen that cannot sign in or cannot get a model token (GitHub's identity token,
+#            Microsoft Entra's token, Anthropic's token exchange) is the one exception: screen.py fails the screen
+#            job, with no verdict. The comment job then records the hold as for a screen that failed, and Held runs
+#            (.github/workflows/held-runs.yml) starts the screen of a held head again, at most once an hour. A screen
+#            that fails, and a screened review that fails, fail the check review jobs
 #            (collect, below), which a re-run of the failed jobs clears. The daily cap stops an item before the screen
 #            (route, above). It runs in the environment
 #            review-screen, whose jobs alone reach the screen's Google, Azure and Anthropic identities. Why it held an
@@ -1068,6 +1072,9 @@ jobs:
     # Its GitHub token can only read, no key is stored, and it runs only main's .github/scripts. Its outputs are the
     # verdict, clean or held, and the names of the checks that ran; why goes to the private bucket REASON_BUCKET,
     # never to this public log or an output.
+    # A screen that cannot sign in or cannot get a model token (GitHub's identity token, Microsoft Entra's token,
+    # Anthropic's token exchange) fails this job and gives no verdict. The comment job then records the hold as for a
+    # screen that failed, and Held runs starts the screen of a held head again, at most once an hour.
     needs: [route, gather]
     # A screen of what the gather job kept, or a measurement, which needs no gather job. Never for an item that route
     # held at the daily cap, and never on a run by hand on another branch than main.
@@ -1719,6 +1726,8 @@ jobs:
     # (APPROVE below), and nothing is posted or recorded. Any other outcome of such a run is recorded by the rules
     # above: RECORD for an enrollment whose project the gather job took, or one at the daily cap, and else the label
     # and the hold comment.
+    # Its sign-in, key and token steps have no continue-on-error: when one of them fails, this job and the run fail, so
+    # Held runs does not count the run as a screen.
     needs: [route, gather, screen, review, hold]
     if: >-
       ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')

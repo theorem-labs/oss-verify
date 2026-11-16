@@ -21,15 +21,19 @@ name: Held runs
 # When a read of GitHub fails, the step fails: the run is red, and the next schedule tries again.
 #
 # A held run counts as screened when a workflow_dispatch run of review.yml for its pull request (title Pull request
-# <n>, the only kind of run that approves) was created after it and gave a verdict of the screen, passed or held: its
-# job screen ended success. A workflow_run run of Review (title Review of run <id>) screens too, but it approves
-# nothing, so it does not count. While a run of review.yml for the pull request is not complete, the step starts
-# nothing for it. A run that ended before the screen gave a verdict does not count. Examples are a sign-in that fails
-# until dispatch://INFRA-3746 admits review.yml, and a run that the daily cap stopped. The step starts such a head
-# again at most once an hour, also when a new held run comes in that hour.
-# So each new held event at a head gets one screen, and the schedule alone gets none: the step starts a head again
-# only while no run gave a verdict after its newest held run. A head that the screen held keeps its held runs, all
-# older than that screen, and gets no new screen. This is no rescreen loop of a held item (dispatch://OSSV-202's
+# <n>, the only kind of run that approves) was created after it, and that run counts. A workflow_run run of Review
+# (title Review of run <id>) screens too, but it approves nothing, so it does not count. A run counts only when it
+# ended in success and its job screen ended in success. Then its screen gave a verdict from the model, passed or
+# held, and when that verdict passed, its approval step approved the held runs. A run that failed does not count.
+# Examples are a screen that cannot sign in or cannot get a model token (.github/scripts/screen.py then fails and
+# gives no verdict), a comment job that cannot sign in, and an approval that failed. A run that the daily cap stopped
+# has no job screen, so it does not count either. While a run of review.yml for the pull request is not complete, the
+# step starts nothing for it. When the newest run does not count, the step starts the head again at most once an hour,
+# also when a new held run comes in that hour. So a head started before the three applies of dispatch://INFRA-3746,
+# which admit review.yml's sign-ins at different times, is screened again after the last of them, with no person.
+# Each new held event at a head gets one screen that counts, and the schedule alone gets no more: the step starts
+# a head again only while no run after its newest held run counts. A head that the screen held keeps its held runs,
+# all older than that screen, and gets no new screen. This is no rescreen loop of a held item (dispatch://OSSV-202's
 # rule). A new event at that head that GitHub holds (an edit of the description runs Terms, a label runs Maintainer
 # confirmed) has a held run newer than the screen, and gets one more screen.
 #
@@ -100,27 +104,32 @@ jobs:
           if (( ${#heads[@]} == 0 )); then say "No run is held."; exit 0; fi
 
           # by_hand <file>: listed[<file>] gets the runs by hand of .github/workflows/<file> (event
-          # workflow_dispatch): id, title, status and created_at in seconds, split at U+001F. It reads them once for
-          # the whole step.
+          # workflow_dispatch): id, title, status, conclusion and created_at in seconds, split at U+001F. It reads
+          # them once for the whole step.
           declare -A listed=()
           by_hand() {
             if [ -z "${listed[$1]+read}" ]; then
               listed[$1]=$(gh api --paginate "repos/$REPO/actions/workflows/$1/runs?event=workflow_dispatch&per_page=100" \
                 --jq '.workflow_runs[] | select(.event == "workflow_dispatch") | [(.id | tostring), .display_title // "",
-                        .status // "", (.created_at | fromdateiso8601 | tostring)] | join("\u001f")')
+                        .status // "", .conclusion // "", (.created_at | fromdateiso8601 | tostring)] | join("\u001f")')
             fi
           }
-          # screened <run id>: passed[<run id>] gets true when the run's job screen concluded success, else false.
-          # screen.py exits 0 with each verdict, clean or held, so success is a verdict. When the sign-in before it
-          # fails, the job is a failure, and a run that the daily cap stopped has no job screen.
-          declare -A passed=()
-          screened() {
+          # counts <run id> <its conclusion>: counted[<run id>] gets true when the run counts as a screen (the top
+          # of this file), else false. It counts when the run ended success and its job screen concluded success.
+          # screen.py exits 0 with each verdict, clean or held, and exits 1 when a sign-in fails, so a job screen
+          # that ended success gave a verdict. A run that the daily cap stopped has no job screen. A run ends success
+          # only when none of its jobs failed, so a comment job that cannot sign in or approve makes it a failure.
+          # The step reads the jobs only of a run that ended success.
+          declare -A counted=()
+          counts() {
             local jobs
-            if [ -z "${passed[$1]:-}" ]; then
-              jobs=$(gh api --paginate "repos/$REPO/actions/runs/$1/jobs?per_page=100" \
-                --jq '.jobs[] | select(.name == "screen" and .conclusion == "success") | .id')
-              passed[$1]=false
-              if [ -n "$jobs" ]; then passed[$1]=true; fi
+            if [ -z "${counted[$1]:-}" ]; then
+              counted[$1]=false
+              if [ "$2" = success ]; then
+                jobs=$(gh api --paginate "repos/$REPO/actions/runs/$1/jobs?per_page=100" \
+                  --jq '.jobs[] | select(.name == "screen" and .conclusion == "success") | .id')
+                if [ -n "$jobs" ]; then counted[$1]=true; fi
+              fi
             fi
           }
           # The pull requests whose merge this run replayed.
@@ -129,8 +138,8 @@ jobs:
           # one <head>: what the head gets (the top of this file), and its line of the summary.
           one() {
             local repository branch sha at of pulls n state merged into to ref from at_sha at_merge number="" kind=""
-            local latest since id title status created last="" i replay=""
-            local -a ids=() statuses=() times=()
+            local latest since id title status conclusion created last="" i replay=""
+            local -a ids=() statuses=() conclusions=() times=()
             IFS=$'\x1f' read -r repository branch sha <<< "$1"
             at="Head ${sha:0:7} of $repository:$branch"
             # The pull requests into the default branch from the head's repository and branch, with route's filter
@@ -165,7 +174,7 @@ jobs:
               fi
               since=${merge[$1]}
               by_hand enroll-merged.yml
-              while IFS=$'\x1f' read -r id title status created; do
+              while IFS=$'\x1f' read -r id title status conclusion created; do
                 [[ ${id:-} =~ ^[0-9]+$ && $title == "merged #$number" && $created =~ ^[0-9]+$ ]] || continue
                 if (( created >= since )); then replay=$id; break; fi
               done <<< "${listed[enroll-merged.yml]}"
@@ -188,16 +197,16 @@ jobs:
             # The runs by hand of review.yml for this pull request. A run of another title is not one of them: a
             # workflow_run run (Review of run <id>) approves nothing.
             by_hand review.yml
-            while IFS=$'\x1f' read -r id title status created; do
+            while IFS=$'\x1f' read -r id title status conclusion created; do
               [[ ${id:-} =~ ^[0-9]+$ && $title == "Pull request $number" && $created =~ ^[0-9]+$ ]] || continue
-              ids+=("$id") statuses+=("$status") times+=("$created")
+              ids+=("$id") statuses+=("$status") conclusions+=("$conclusion") times+=("$created")
             done <<< "${listed[review.yml]}"
-            # Screened: a run created at or after the newest held run gave a verdict.
+            # Screened: a run created at or after the newest held run counts.
             for i in "${!ids[@]}"; do
               if (( times[i] >= latest )); then
-                screened "${ids[i]}"
-                if [ "${passed[${ids[i]}]}" = true ]; then
-                  say "$at: left. Run ${ids[i]} of review.yml screened the head after its newest held run."
+                counts "${ids[i]}" "${conclusions[i]}"
+                if [ "${counted[${ids[i]}]}" = true ]; then
+                  say "$at: left. Run ${ids[i]} of review.yml screened the head after its newest held run, and ended success."
                   return
                 fi
               fi
@@ -209,17 +218,17 @@ jobs:
               fi
               if [ -z "$last" ] || (( times[i] > times[last] )); then last=$i; fi
             done
-            # When the newest run gave no verdict and was created less than an hour ago, the head waits: at most one
+            # When the newest run does not count and was created less than an hour ago, the head waits: at most one
             # start an hour.
             if [ -n "$last" ] && (( now - times[last] < 3600 )); then
-              screened "${ids[last]}"
-              if [ "${passed[${ids[last]}]}" != true ]; then
-                say "$at: left. Run ${ids[last]} of review.yml ended before the screen gave a verdict, less than an hour ago. The step starts the head again an hour after that run."
+              counts "${ids[last]}" "${conclusions[last]}"
+              if [ "${counted[${ids[last]}]}" != true ]; then
+                say "$at: left. Run ${ids[last]} of review.yml does not count as a screen: the run or its job screen did not end success. The run is less than an hour old, and the step starts the head again an hour after it."
                 return
               fi
             fi
             gh workflow run review.yml -R "$REPO" --ref main -f "pr=$number"
-            say "$at: started review.yml. No run by hand of review.yml screened the head after its newest held run."
+            say "$at: started review.yml. No run by hand of review.yml after the newest held run of the head counts as a screen."
           }
 
           for head in "${heads[@]}"; do one "$head"; done
