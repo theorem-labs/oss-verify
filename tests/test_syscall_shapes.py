@@ -1484,6 +1484,12 @@ def test_the_record_splitter():
     assert S.parse_ret(" = -1 errno=2 (No such file)") == -1 and S.parse_ret(" = 0x7fff7000") == 0x7FFF7000
     ((*_, closed),) = S.split_records('1 openat(AT_FDCWD,"a')
     assert not closed
+    ((_, _, args, tail, closed),) = S.split_records(r'7 openat(AT_FDCWD,"a\")b",O_RDONLY) = 3')
+    assert (args, S.parse_ret(tail), closed) == (["AT_FDCWD", r'"a\")b"', "O_RDONLY"], 3, True)
+    ((_, _, args, _, _),) = S.split_records(r'1 write(1,"a \",\" b",10) = 10')
+    assert args == ["1", r'"a \",\" b"', "10"]
+    ((_, _, args, _, closed),) = S.split_records(r'1 openat(AT_FDCWD,"a\\",O_RDONLY) = 3')
+    assert (args, closed) == (["AT_FDCWD", r'"a\\"', "O_RDONLY"], True)
 
 
 def test_the_32_bit_argument_reader():

@@ -394,7 +394,13 @@ def scan_call(text, start=0):
         if quoted:
             cur.append(ch)
             if ch == '"':
-                quoted = False
+                slashes = 0
+                for k in range(len(cur) - 2, -1, -1):
+                    if cur[k] != "\\":
+                        break
+                    slashes += 1
+                if slashes % 2 == 0:
+                    quoted = False
             continue
         if ch == '"':
             quoted = True
