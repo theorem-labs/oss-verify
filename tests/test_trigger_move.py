@@ -26,7 +26,7 @@ The held runs (each test name holds the word held):
   route finds the held runs of a head on a run by hand. The comment job approves them with a token of the oss-verify
   App that can write runs, only when the screen passed that head. A screen that cannot sign in fails with no verdict,
   before the mark of the daily cap. Held runs (.github/workflows/held-runs.yml) starts a run by hand of review.yml for
-  each held head that no run screened.
+  each held head that no run screened, and re-runs the failed jobs of a run whose screen gave a verdict.
 A review that passes: the paragraph of review.md that says what happens next, and the comment that says it.
 
 Each case runs the steps and the scripts of the workflows with stand-ins: this file's gh, which gives the API's answers
@@ -1270,7 +1270,7 @@ class HeldRuns(Stand):
         super().setUp()
         self.need(ROOT, ".github/workflows/held-runs.yml")
         self.workflow_text = (ROOT / ".github" / "workflows" / "held-runs.yml").read_text()
-        self.held, self.pulls, self.reviews, self.replays, self.jobs = [], [], [], [], {}
+        self.held, self.pulls, self.reviews, self.replays, self.jobs, self.comment = [], [], [], [], {}, {}
 
     @staticmethod
     def held_run(run_id, sha, repository, branch, minutes, path=".github/workflows/build.yaml"):
@@ -1285,12 +1285,17 @@ class HeldRuns(Stand):
                 "merge_commit_sha": merge or "e" * 40}
 
     @staticmethod
-    def by_hand(run_id, title, minutes, status="completed", conclusion="success", event="workflow_dispatch"):
+    def by_hand(run_id, title, minutes, status="completed", conclusion="success", event="workflow_dispatch",
+                started=None):
+        """A run by hand created `minutes` ago, whose latest attempt started `started` minutes ago (at its creation
+        when None)."""
         return {"id": run_id, "display_title": title, "status": status, "event": event,
-                "conclusion": conclusion if status == "completed" else None, "created_at": ago(minutes)}
+                "conclusion": conclusion if status == "completed" else None, "created_at": ago(minutes),
+                "run_started_at": ago(minutes if started is None else started)}
 
     def go(self):
-        """One run of the step: the runs it started, as the arguments of gh."""
+        """One run of the step: the runs it started, as the arguments of gh, then the runs whose failed jobs it re-ran
+        (reruns)."""
         for path in self.api.glob("*.json"):
             path.unlink()
         self.serve(f"repos/{REPO}", {"default_branch": "main"})
@@ -1302,16 +1307,30 @@ class HeldRuns(Stand):
             jobs = [{"id": run_id * 10 + 1, "name": "route", "conclusion": "success"}]
             if screen is not None:
                 jobs.append({"id": run_id * 10 + 2, "name": "screen", "conclusion": screen})
+            if run_id in self.comment:
+                # The comment job, and its step that failed.
+                jobs.append({"id": run_id * 10 + 3, "name": "comment", "conclusion": "failure",
+                             "steps": [{"name": self.comment[run_id], "conclusion": "failure"}]})
             self.serve(f"repos/{REPO}/actions/runs/{run_id}/jobs", {"total_count": len(jobs), "jobs": jobs})
+        # GitHub's answer to a re-run of the failed jobs of a run: 201, with an empty object.
+        for run in self.reviews:
+            self.serve(f"repos/{REPO}/actions/runs/{run['id']}/rerun-failed-jobs", {})
         since = len(self.calls())
         workflow = yaml.safe_load(self.workflow_text)
         rc, log, _ = self.run_step(workflow, "held-runs", self.STEP,
                                    {"github.token": WORKFLOW_TOKEN, "github.repository": REPO}, self.temp)
         self.assertEqual(rc, 0, log)
         calls = self.calls()[since:]
-        # It only reads, but for the runs it starts, each with the job's own token.
-        written = [r["endpoint"] for r in self.requests(since) if r["method"] != "GET" or "--input" in r["args"]]
-        self.assertEqual(written, [])
+        # It only reads, but for the runs it starts and the runs whose failed jobs it re-runs, each with the job's own
+        # token.
+        reran = []
+        for r in self.requests(since):
+            if r["method"] == "GET" and "--input" not in r["args"]:
+                continue
+            rerun = re.fullmatch(f"repos/{REPO}/actions/runs/([0-9]+)/rerun-failed-jobs", r["endpoint"] or "")
+            self.assertTrue(rerun and r["method"] == "POST" and "--input" not in r["args"], r)
+            self.assertEqual(r["token"], WORKFLOW_TOKEN, r)
+            reran.append(self.reruns(int(rerun.group(1))))
         # Each read of the runs by hand asks GitHub only for the runs created from a time. No run that the case serves
         # is before that time, so GitHub's answer is the stand-in's, which ignores the filter.
         for r in self.requests(since):
@@ -1324,11 +1343,15 @@ class HeldRuns(Stand):
         started = [(token, " ".join(args)) for token, args in calls if args[:2] == ["workflow", "run"]]
         self.assertEqual({token for token, _ in started} - {WORKFLOW_TOKEN}, set())
         self.log = log
-        return [run for _, run in started]
+        return [run for _, run in started] + reran
 
     @staticmethod
     def starts(file, number):
         return f"workflow run {file} -R {REPO} --ref main -f pr={number}"
+
+    @staticmethod
+    def reruns(run_id):
+        return f"POST repos/{REPO}/actions/runs/{run_id}/rerun-failed-jobs"
 
     def test_held_runs_starts_a_screen_of_the_head_that_no_run_screened_and_then_nothing(self):
         a, b = "1" * 40, "2" * 40
@@ -1394,15 +1417,30 @@ class HeldRuns(Stand):
         self.jobs = {941: "failure", 942: "failure"}
         self.assertEqual(self.go(), [], self.log)
 
-    def test_held_runs_a_run_that_failed_after_a_screen_that_passed_starts_the_head_again(self):
+    def test_held_runs_a_run_that_failed_after_a_screen_that_passed_reruns_its_failed_jobs_at_most_once_an_hour(self):
         sha = "7" * 40
-        for minutes, again in ((90, True), (30, False)):
-            self.pulls = [self.pull(121, "pat/oss-verify", "s", sha)]
-            self.held = [self.held_run(12101, sha, "pat/oss-verify", "s", 180)]
-            # Its job screen succeeded, and its comment job could not sign in.
-            self.reviews = [self.by_hand(971, "Pull request 121", minutes, conclusion="failure")]
-            self.jobs = {971: "success"}
-            self.assertEqual(self.go(), [self.starts("review.yml", 121)] if again else [], (minutes, self.log))
+        # Its job screen succeeded, and then its comment job failed: it could not sign in, or GitHub refused the
+        # approval (the App's installation has not accepted actions: write).
+        for failed in ("Sign in to Google Cloud", "Get the oss-verify App's token to approve the held runs"):
+            for label, minutes, started, again in (
+                    ("run 90 minutes old", 90, None, True),
+                    ("run 30 minutes old", 30, None, False),
+                    ("run 150 minutes old, its latest attempt 30 minutes ago", 150, 30, False),
+                    ("run 150 minutes old, its latest attempt 70 minutes ago", 150, 70, True)):
+                self.pulls = [self.pull(121, "pat/oss-verify", "s", sha)]
+                self.held = [self.held_run(12101, sha, "pat/oss-verify", "s", 180)]
+                self.reviews = [self.by_hand(971, "Pull request 121", minutes, conclusion="failure", started=started)]
+                self.jobs, self.comment = {971: "success"}, {971: failed}
+                self.assertEqual(self.go(), [self.reruns(971)] if again else [], (failed, label, self.log))
+                if again:
+                    self.assertIn("re-ran the failed jobs of run 971 of review.yml", self.log)
+                    self.assertIn("The verdict stands, and nothing screens the head again.", self.log)
+        # The next schedule, while the re-run runs: nothing. Then the re-run failed too, 15 minutes after its start:
+        # nothing in that hour.
+        self.reviews = [self.by_hand(971, "Pull request 121", 150, status="in_progress", started=0)]
+        self.assertEqual(self.go(), [], self.log)
+        self.reviews = [self.by_hand(971, "Pull request 121", 150, conclusion="failure", started=15)]
+        self.assertEqual(self.go(), [], self.log)
 
     def test_held_runs_a_run_that_ended_success_with_its_screen_counts_as_a_screen(self):
         sha = "8" * 40

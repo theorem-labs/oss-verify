@@ -1743,7 +1743,8 @@ jobs:
     # above: RECORD for an enrollment whose project the gather job took, or one at the daily cap, and else the label
     # and the hold comment.
     # Its sign-in, key and token steps have no continue-on-error: when one of them fails, this job and the run fail, so
-    # Held runs does not count the run as a screen.
+    # Held runs does not count the run as a screen. When the screen gave a verdict, Held runs re-runs the failed jobs of
+    # the run, at most once an hour, and the verdict stands (.github/workflows/held-runs.yml).
     needs: [route, gather, screen, review, hold]
     if: >-
       ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
