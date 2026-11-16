@@ -1293,9 +1293,10 @@ class HeldRuns(Stand):
                 "conclusion": conclusion if status == "completed" else None, "created_at": ago(minutes),
                 "run_started_at": ago(minutes if started is None else started)}
 
-    def go(self):
+    def go(self, refused=()):
         """One run of the step: the runs it started, as the arguments of gh, then the runs whose failed jobs it re-ran
-        (reruns)."""
+        (reruns). `refused`: the runs whose re-run GitHub refuses. The stand-in serves no answer for those, so gh fails
+        on them as on GitHub's refusal, and the step's exit status is not checked."""
         for path in self.api.glob("*.json"):
             path.unlink()
         self.serve(f"repos/{REPO}", {"default_branch": "main"})
@@ -1314,12 +1315,14 @@ class HeldRuns(Stand):
             self.serve(f"repos/{REPO}/actions/runs/{run_id}/jobs", {"total_count": len(jobs), "jobs": jobs})
         # GitHub's answer to a re-run of the failed jobs of a run: 201, with an empty object.
         for run in self.reviews:
-            self.serve(f"repos/{REPO}/actions/runs/{run['id']}/rerun-failed-jobs", {})
+            if run["id"] not in refused:
+                self.serve(f"repos/{REPO}/actions/runs/{run['id']}/rerun-failed-jobs", {})
         since = len(self.calls())
         workflow = yaml.safe_load(self.workflow_text)
         rc, log, _ = self.run_step(workflow, "held-runs", self.STEP,
                                    {"github.token": WORKFLOW_TOKEN, "github.repository": REPO}, self.temp)
-        self.assertEqual(rc, 0, log)
+        if not refused:
+            self.assertEqual(rc, 0, log)
         calls = self.calls()[since:]
         # It only reads, but for the runs it starts and the runs whose failed jobs it re-runs, each with the job's own
         # token.
@@ -1480,6 +1483,40 @@ class HeldRuns(Stand):
         self.pulls = [self.pull(91, "max/oss-verify", "q", "0" * 40)]
         self.held = [self.held_run(9101, "1" * 40, "max/oss-verify", "q", 30)]
         self.assertEqual(self.go(), [], self.log)
+
+    def test_held_runs_a_held_run_of_the_apps_own_label_gets_no_screen(self):
+        # The screen held head 5555555 of pull request 41 an hour ago (run 931 counts). The comment job then put the
+        # label review-held on the pull request with the oss-verify App's token. That label starts a run of Maintainer
+        # confirmed, which GitHub holds as it holds a person's label (the top of held-runs.yml). The App's own label is
+        # no new event at the head, so the head that the screen held is not screened again (R2, dispatch://OSSV-202's
+        # rule). A person's label after the hold still gets one more screen.
+        sha = "5" * 40
+        for who, kind, again in (("oss-verify[bot]", "Bot", False), ("sjawhar", "User", True)):
+            pull = self.pull(41, "erin/oss-verify", "f", sha)
+            pull["user"] = {"login": "erin", "type": "User"}
+            self.pulls = [pull]
+            label = self.held_run(4103, sha, "erin/oss-verify", "f", 58, ".github/workflows/maintainer-confirmed.yml")
+            label["actor"] = label["triggering_actor"] = {"login": who, "type": kind}
+            pushed = self.held_run(4101, sha, "erin/oss-verify", "f", 180)
+            pushed["actor"] = pushed["triggering_actor"] = {"login": "erin", "type": "User"}
+            self.held = [label, pushed]
+            self.reviews = [self.by_hand(931, "Pull request 41", 60)]
+            self.jobs = {931: "success"}
+            self.assertEqual(self.go(), [self.starts("review.yml", 41)] if again else [], (who, self.log))
+
+    def test_held_runs_a_rerun_that_github_refuses_leaves_the_other_heads_their_screen(self):
+        # GitHub refuses a re-run of a run that was re-run 50 times, or that started more than 30 days ago
+        # (https://github.blog/changelog/2026-04-10-actions-workflows-are-limited-to-50-reruns/). Pull request 301 is
+        # due a re-run of run 971 (its screen gave a verdict, its comment job failed, its latest attempt started 70
+        # minutes ago), and GitHub refuses it. Pull request 302, held before 301, was never screened. The refusal of
+        # one head's re-run does not keep the other head from its screen.
+        p, q = "7" * 40, "2" * 40
+        self.pulls = [self.pull(301, "pat/oss-verify", "s", p), self.pull(302, "rob/oss-verify", "u", q)]
+        self.held = [self.held_run(30101, p, "pat/oss-verify", "s", 200),
+                     self.held_run(30201, q, "rob/oss-verify", "u", 300)]
+        self.reviews = [self.by_hand(971, "Pull request 301", 190, conclusion="failure", started=70)]
+        self.jobs, self.comment = {971: "success"}, {971: "Sign in to Google Cloud"}
+        self.assertIn(self.starts("review.yml", 302), self.go(refused={971}), self.log)
 
     def test_held_runs_workflow_holds_no_identity_and_starts_on_its_schedule_alone(self):
         workflow = yaml.safe_load(self.workflow_text)
