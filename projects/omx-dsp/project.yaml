@@ -3,7 +3,7 @@
 # EQ, the sample-rate converter and the delay lines, and a stream of MIDI messages through the note map.
 # Pinned to the head of omx-dsp's main: each fuzz check read against its comment (docs/fuzz-checks.md), the records
 # of each check directly above it, and the placement code of the harmonic resonance processor in src/.
-repo: https://github.com/Open-Mixer/omx-dsp#d22d4a0d856eb1bf9117ad5932781daaabffac24
+repo: https://github.com/Open-Mixer/omx-dsp#c9221b09e46672ae99237569e739297766574da6
 primary_contact: linuxnow@gmail.com
 homepage: https://github.com/Open-Mixer/omx-dsp
 language: c
