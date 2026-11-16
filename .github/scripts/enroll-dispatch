@@ -536,11 +536,23 @@ def passes(result: dict) -> str:
     return "" if result["decision"] == "dispatch" else "the run sends nothing"
 
 
+def write_access(api: Api, repo: str, login: str) -> bool | None:
+    """Whether GitHub's collaborator permission API gives `login` admin or write; None when the read fails or its
+    answer is not an object."""
+    try:
+        answer = api.get(f"repos/{repo}/collaborators/{login}/permission")
+    except (subprocess.CalledProcessError, ValueError):
+        return None
+    if not isinstance(answer, dict):
+        return None
+    return answer.get("permission") in ("admin", "write")
+
+
 def trusted(api: Api, repo: str, login: str) -> bool | None:
     """review.yml's rule for trusted accounts (the bash function trusted of its route's trust step), with the same
-    answers: True for an App of ALLOWED_BOTS, or an account that GitHub's collaborator permission API gives admin or
-    write; False for any other account, and for a login of another shape; None when it could not be read. ALLOWED_BOTS
-    is read from the env of review.yml in this checkout, so that there is one list."""
+    answers: True for an App of ALLOWED_BOTS, or an account that has write access (write_access); False for any other
+    account, and for a login of another shape; None when it could not be read. ALLOWED_BOTS is read from the env of
+    review.yml in this checkout, so that there is one list."""
     if not LOGIN.fullmatch(login):
         return False
     try:
@@ -552,21 +564,16 @@ def trusted(api: Api, repo: str, login: str) -> bool | None:
         return True
     if login.endswith("[bot]"):
         return False
-    try:
-        answer = api.get(f"repos/{repo}/collaborators/{login}/permission")
-    except (subprocess.CalledProcessError, ValueError):
-        return None
-    if not isinstance(answer, dict):
-        return None
-    return answer.get("permission") in ("admin", "write")
+    return write_access(api, repo, login)
 
 
 def person_approval(api: Api, repo: str, number: int, pull: dict, sha: str) -> str | None:
     """The login of a person who approved the commit `sha` of pull request `number` (`pull`), or None. A person
     approval is a review in state APPROVED with commit_id `sha`, by a user of type User who is not the pull request's
-    author and whose collaborator permission is admin or write (the API that trusted reads, with no ALLOWED_BOTS). That
-    user's newest review in a state of DECIDING_STATES (by submitted_at, then id) must be that approval: a later
-    CHANGES_REQUESTED, or the dismissal of the approval, takes it back. A read that fails gives no approval."""
+    author and whose collaborator permission is admin or write (write_access, as trusted reads it, but with no
+    ALLOWED_BOTS). That user's newest review in a state of DECIDING_STATES (by submitted_at, then id) must be that
+    approval: a later CHANGES_REQUESTED, or the dismissal of the approval, takes it back. A read that fails gives no
+    approval."""
     author = str((pull.get("user") or {}).get("login") or "").lower()
     try:
         reviews = [r for page in api.pages(f"repos/{repo}/pulls/{number}/reviews?per_page=100") for r in page
@@ -587,20 +594,17 @@ def person_approval(api: Api, repo: str, number: int, pull: dict, sha: str) -> s
         if review.get("state") != "APPROVED" or review.get("commit_id") != sha or user.get("type") != "User" \
                 or login.lower() == author or not LOGIN.fullmatch(login):
             continue
-        try:
-            answer = api.get(f"repos/{repo}/collaborators/{login}/permission")
-        except (subprocess.CalledProcessError, ValueError):
-            continue
-        if isinstance(answer, dict) and answer.get("permission") in ("admin", "write"):
+        if write_access(api, repo, login) is True:
             return login
     return None
 
 
 def steering_gate(api: Api, repo: str, number: int, pull: dict, files: list[dict], sha: str) -> tuple[str, str]:
     """The steering-file gate for pull request `number` (`pull`) at the commit `sha`, whose files are `files`: (why,
-    approved). When no file (by its name or its previous name) is a steering file (steering.is_steering), both are ''.
-    When one is, and a person approved `sha` (person_approval), why is '' and approved says who. Else why says which
-    file, and the run is none."""
+    approval). When no file (by its name or its previous name) is a steering file (steering.is_steering), both are ''.
+    When one is, and a person approved `sha` (person_approval), why is '' and approval is the end of the reason that
+    says who: " (<login> approved <sha7>, which changes the steering file <path>)". Else why says which file, and the
+    run is none."""
     path = next((str(name) for f in files for name in (f.get("filename"), f.get("previous_filename"))
                  if name is not None and steering.is_steering(str(name))), None)
     if path is None:
@@ -608,7 +612,7 @@ def steering_gate(api: Api, repo: str, number: int, pull: dict, files: list[dict
     login = person_approval(api, repo, number, pull, sha)
     if login is None:
         return f"changes the steering file {path}; no person's approval of {sha[:7]}", ""
-    return "", f"{login} approved {sha[:7]}, which changes the steering file {path}"
+    return "", f" ({login} approved {sha[:7]}, which changes the steering file {path})"
 
 
 def labelled(pull: dict, name: str = REVIEW_PASSED) -> bool:
@@ -853,10 +857,9 @@ def merged_decision(api: Api, repo: str, runs: Runs, run: dict, number: int, pul
     project, why = the_project(files)
     if project is None:
         return outcome("none", f"pull request {number} is not one enrollment: {why}", number, sha=sha)
-    why, approved = steering_gate(api, repo, number, pull, files, sha)
+    why, approval = steering_gate(api, repo, number, pull, files, sha)
     if why:
         return outcome("none", f"pull request {number}: {why}", number, project, sha)
-    approval = f" ({approved})" if approved else ""
     waiting, build_run = bound_checks(api, runs, repo, sha, head)
     if waiting:
         return outcome("none", f"required checks not passed at {sha[:7]}{approval}: {', '.join(waiting)}; once they "
@@ -883,7 +886,7 @@ def merged_decision(api: Api, repo: str, runs: Runs, run: dict, number: int, pul
 def decide(api: Api, repo: str, run_id: int, run_event: str, head_sha: str) -> dict:
     """What the completed run decides (the module's header says how), with what happens to REVIEW_PASSED."""
     runs = Runs(api, repo)
-    if run_event in ("pull_request_target", "pull_request", "workflow_dispatch") \
+    if run_event in PULL_EVENTS | {"workflow_dispatch"} \
             and runs.get(run_id).get("path") == MERGED_WORKFLOW:
         return decide_merged(api, repo, runs, runs.get(run_id))
     bound = {}
@@ -894,13 +897,13 @@ def decide(api: Api, repo: str, run_id: int, run_event: str, head_sha: str) -> d
 def decision(api: Api, repo: str, runs: Runs, run_id: int, run_event: str, head_sha: str, bound: dict) -> dict:
     """decide's decision for a run that is not a merge's. It puts in `bound` what review_passed needs, once it has
     read it: the commit and head the run is about (sha, head), and the pull request as it read it last (pull)."""
-    if run_event in ("pull_request_target", "pull_request"):
+    if run_event in PULL_EVENTS:
         if not SHA.fullmatch(head_sha):
             return outcome("none", f"{head_sha!r} is not a commit id")
         trigger = runs.get(run_id)
         if trigger.get("head_sha") != head_sha:
             return outcome("none", f"run {run_id} is of {trigger.get('head_sha')}, not {head_sha}")
-        sha, record, head = head_sha, None, head_of(trigger)
+        sha, head = head_sha, head_of(trigger)
         bound.update(sha=sha, head=head)
         # Bound first: a run of a label other than CONFIRMED_LABEL, the first of a new head too, still takes off a label
         # older than that head (review_passed).
@@ -917,7 +920,7 @@ def decision(api: Api, repo: str, runs: Runs, run_id: int, run_event: str, head_
         if title is None:
             return outcome("none", f"run {run_id}'s title {run.get('display_title')!r:.40} names no run")
         reviewed = runs.get(int(title.group(1)))
-        sha, record, head = reviewed.get("head_sha"), None, head_of(reviewed)
+        sha, head = reviewed.get("head_sha"), head_of(reviewed)
         if (reviewed.get("path"), reviewed.get("event")) != (BUILD_WORKFLOW, "pull_request") \
                 or not isinstance(sha, str) or not SHA.fullmatch(sha):
             return outcome("none", f"run {run_id} reviewed run {title.group(1)}, which is not a run of "
@@ -933,7 +936,7 @@ def decision(api: Api, repo: str, runs: Runs, run_id: int, run_event: str, head_
             return outcome("none", f"run {run_id}'s title {run.get('display_title')!r:.40} names no pull request: a "
                            "review of an issue or a measurement sends nothing")
         pull = api.get(f"repos/{repo}/pulls/{title.group(1)}")
-        sha, record, head = (pull.get("head") or {}).get("sha"), None, head_of_pull(pull)
+        sha, head = (pull.get("head") or {}).get("sha"), head_of_pull(pull)
         if not isinstance(sha, str) or not SHA.fullmatch(sha):
             return outcome("none", f"pull request {title.group(1)}'s head {sha!r:.50} is not a commit id")
         bound.update(sha=sha, head=head, pull=pull)
@@ -942,11 +945,10 @@ def decision(api: Api, repo: str, runs: Runs, run_id: int, run_event: str, head_
     waiting, build_run = bound_checks(api, runs, repo, sha, head)
     if waiting:
         return outcome("none", f"required checks not passed at {sha[:7]}: {', '.join(waiting)}", sha=sha)
-    if record is None:
-        record, why = build_record(api, repo, build_run)
-        why = why or record_problem(record, sha)
-        if why:
-            return outcome("none", why, sha=sha)
+    record, why = build_record(api, repo, build_run)
+    why = why or record_problem(record, sha)
+    if why:
+        return outcome("none", why, sha=sha)
     number, project = record["pr"], record["project"]
     bound["pull"] = api.get(f"repos/{repo}/pulls/{number}")
     why = open_at(bound["pull"], repo, sha, head)
@@ -962,10 +964,10 @@ def decision(api: Api, repo: str, runs: Runs, run_id: int, run_event: str, head_
     why = open_at(pull, repo, sha, head)
     if why:
         return outcome("none", f"pull request {number}: {why}", number, project, sha)
-    why, approved = steering_gate(api, repo, number, pull, files, sha)
+    why, approval = steering_gate(api, repo, number, pull, files, sha)
     if why:
         return outcome("none", f"pull request {number}: {why}", number, project, sha)
-    where = f"pull request {number}: projects/{project}/ at {sha[:7]}" + (f" ({approved})" if approved else "")
+    where = f"pull request {number}: projects/{project}/ at {sha[:7]}{approval}"
     config = project_yaml(api, repo, project, sha)
     lang = language(config)
     if lang is None:

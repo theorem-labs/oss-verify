@@ -283,7 +283,7 @@ name: "Review"
 # pull request's head as its own runs do (screened first, and counted by the daily cap, when its author has no write
 # access), posts the comment and, for an enrollment, records the check run Enrollment review, or `-f issue=<n>`
 # for the reply to an issue, which posts nothing and stores the draft in the private bucket.
-# Before the merge, tests runs the review's own steps with stand-ins.
+# Before a change to this file merges, tests runs the review's own steps with stand-ins.
 #
 # The review's Claude Code exports its usage by OpenTelemetry to Theorem's cost collector, over Theorem's tailnet, at
 # the collector's tailnet address on port 80 (SPEND_COLLECTOR_URL below; an address, not a secret). The collector
@@ -726,7 +726,8 @@ jobs:
             # GitHub lets only an account with write access start a run by hand; an App must be one of ALLOWED_BOTS.
             # Such a run is trusted as the item's author, as an event's run is: it is screened unless the author has
             # write access, and the daily cap charges it to the author, so a person's re-runs never use up their own
-            # share.
+            # share. The decide step read a pull request's author already. For an issue (-f issue), the author comes
+            # from the API here.
             workflow_dispatch)
               if [ "$MEASURE" = true ]; then
                 if [[ $ACTOR == *'[bot]' ]] && ! known "$ACTOR"; then
@@ -736,8 +737,10 @@ jobs:
                 trust measure "A measurement of the screen, started by hand by $ACTOR: the screen job alone runs."
               fi
               [[ $NUMBER =~ ^[1-9][0-9]*$ ]] || { echo "::error::not a number: $NUMBER"; exit 1; }
-              AUTHOR=$(gh api "repos/$REPO/issues/$NUMBER" --jq '.user.login // ""') \
-                || { echo "::error::GitHub did not say who wrote $NUMBER. Re-run this run."; exit 1; }
+              if [ -z "$AUTHOR" ]; then
+                AUTHOR=$(gh api "repos/$REPO/issues/$NUMBER" --jq '.user.login // ""') \
+                  || { echo "::error::GitHub did not say who wrote $NUMBER. Re-run this run."; exit 1; }
+              fi
               charged=$AUTHOR by="Started by hand by $ACTOR" ;;
             *) echo "::error::not an event of this workflow: $EVENT"; exit 1 ;;
           esac
@@ -1153,10 +1156,12 @@ jobs:
         with: {workload_identity_provider: "${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}", service_account: "${{ env.GCP_SERVICE_ACCOUNT }}", token_format: access_token, access_token_lifetime: "${{ needs.route.outputs.trust == 'measure' && '3600s' || '600s' }}", create_credentials_file: false, export_environment_variables: false}
       # The sign-ins of the checks in SCREEN_CHECKS that sign in (.github/scripts/screen.py --sign-in): Microsoft
       # Entra's token for Prompt Shields and Anthropic's token exchange for the model, each with GitHub's identity
-      # token, as the Screen and Measure steps make them later. It reads no text of the item, and it keeps no token. A
-      # sign-in that is refused fails this job before the mark below. A setting that is missing does not fail it: the
-      # Screen step holds the item for it.
+      # token, as the Screen step makes them later. It reads no text of the item, and it keeps no token. A sign-in
+      # that is refused fails this job before the mark below. A setting that is missing does not fail it: the Screen
+      # step holds the item for it. A measurement does not run this step: the Measure step records a sign-in that is
+      # refused as the error of that check, and does not stop.
       - name: Sign in to the screen's services
+        if: needs.route.outputs.trust != 'measure'
         timeout-minutes: 2
         run: python3 .github/scripts/screen.py --sign-in
       # The daily cap counts a run whose screen job signed in to each service it uses, whatever the job does next
@@ -1838,9 +1843,13 @@ jobs:
           { echo "key<<$delimiter"; builtin printf '%s\n' "$key"; echo "$delimiter"; } >> "$GITHUB_OUTPUT"
 
       # One token for every step below but the approval: checks for the check run Enrollment review, pull requests for
-      # the review comment, and issues for the label review-held and its comment, an issue's too.
+      # the review comment, and issues for the label review-held and its comment, an issue's too. On the approval path
+      # (APPROVE) no step uses it: the label step needs HOLDING, the post step does not run on that path, and the step
+      # that takes the label off needs a posted comment, a recorded check run or an issue. So the job makes it on the
+      # other paths alone.
       - name: Get the oss-verify App's token
         id: app
+        if: env.APPROVE != 'true'
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0 (sha-pinned)
         with:
           client-id: Iv23liAWPMahJZYsw3un
@@ -1851,9 +1860,9 @@ jobs:
 
       # A token of its own for the approval, with actions: write alone, made only when the screen passed a held head
       # (APPROVE). The App's configuration has actions: write (gh api apps/oss-verify), but whether its installation
-      # accepted it is not known before the first approval. A refusal fails this step alone, and every other step of
-      # this job keeps the token above. The cost of actions: write: this token can also cancel, re-run and start the
-      # runs of this repository, so it exists only on this path, and only the next step uses it.
+      # accepted it is not known before the first approval. A refusal fails this step alone: the other paths of this
+      # job use the token above. The cost of actions: write: this token can also cancel, re-run and start the runs of
+      # this repository, so it exists only on this path, and only the next step uses it.
       - name: Get the oss-verify App's token to approve the held runs
         id: approve
         if: env.APPROVE == 'true'

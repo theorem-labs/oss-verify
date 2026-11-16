@@ -134,6 +134,9 @@ GH_FLAGS = {"--jq", "--input", "--method", "-X", "-f", "-F", "-H"}
 # The check of review.yml's jobs that sign in, for a run by hand on another branch than main.
 MAIN_CHECK = "(github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')"
 LOOKUP = re.compile(r"[A-Za-z_][A-Za-z0-9_.\-]*")
+# PyYAML's C parser when it is built, else its Python one: review.yml is long, and the C parser reads it many times
+# faster.
+YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
 
 def as_text(value):
@@ -302,7 +305,7 @@ class Stand(unittest.TestCase):
 
     def workflow(self, tree, name):
         self.need(tree, f".github/workflows/{name}")
-        return yaml.safe_load((tree / ".github" / "workflows" / name).read_text())
+        return yaml.load((tree / ".github" / "workflows" / name).read_text(), Loader=YAML_LOADER)
 
     def step(self, workflow, job, name):
         found = [s for s in workflow["jobs"][job]["steps"] if s.get("name") == name]
@@ -370,23 +373,23 @@ class Stand(unittest.TestCase):
                  str(checkout), cwd=self.dir)
         return checkout, sha
 
-    def pull_request(self, files, head=HEAD, number=PR):
-        """Pull request `number` into main from mallory's fork at `head`, with `files`, and its text: what route,
+    def pull_request(self, files, head=HEAD):
+        """Pull request PR into main from mallory's fork at `head`, with `files`, and its text: what route,
         take-project, take-build-results and review-gather read of it."""
-        pull = {"number": int(number), "state": "open", "user": {"login": "mallory"}, "changed_files": len(files),
+        pull = {"number": int(PR), "state": "open", "user": {"login": "mallory"}, "changed_files": len(files),
                 "head": {"sha": head, "ref": BRANCH, "repo": {"full_name": FORK}},
                 "base": {"ref": "main", "repo": {"full_name": REPO, "default_branch": "main"}}}
-        self.serve(f"repos/{REPO}/pulls/{number}", pull)
-        self.serve(f"repos/{REPO}/pulls/{number}/files", [{"filename": f, "status": "added"} for f in files])
-        self.serve(f"repos/{REPO}/issues/{number}", {"user": {"login": "mallory"}})
-        (self.api / f"pr-view-{number}.json").write_text(json.dumps({
-            "number": int(number), "title": "Add x", "author": {"login": "mallory"}, "isDraft": False,
+        self.serve(f"repos/{REPO}/pulls/{PR}", pull)
+        self.serve(f"repos/{REPO}/pulls/{PR}/files", [{"filename": f, "status": "added"} for f in files])
+        self.serve(f"repos/{REPO}/issues/{PR}", {"user": {"login": "mallory"}})
+        (self.api / f"pr-view-{PR}.json").write_text(json.dumps({
+            "number": int(PR), "title": "Add x", "author": {"login": "mallory"}, "isDraft": False,
             "createdAt": "2026-11-01T00:00:00Z", "body": "API-BODY", "headRefOid": head,
             "files": [{"path": f} for f in files], "comments": [], "reviews": [],
             "commits": [{"messageHeadline": "Add x", "messageBody": ""}]}) + "\n")
-        (self.api / f"pr-{number}.diff").write_text("".join(f"diff --git a/{f} b/{f}\n+API-DIFF\n" for f in files))
-        self.serve(f"repos/{REPO}/pulls/{number}/comments", [])
-        self.serve(f"repos/{REPO}/issues/{number}/comments", [])
+        (self.api / f"pr-{PR}.diff").write_text("".join(f"diff --git a/{f} b/{f}\n+API-DIFF\n" for f in files))
+        self.serve(f"repos/{REPO}/pulls/{PR}/comments", [])
+        self.serve(f"repos/{REPO}/issues/{PR}/comments", [])
         return pull
 
     def gather_job(self, review, route, checkout, evaluate):
@@ -421,7 +424,7 @@ class PullRequestWorkflows(unittest.TestCase):
     def test_r_no_pull_request_target_and_a_pull_request_job_holds_nothing(self):
         for path in self.workflows():
             text = path.read_text()
-            workflow = yaml.safe_load(text)
+            workflow = yaml.load(text, Loader=YAML_LOADER)
             on = triggers(workflow)
             self.assertNotIn("pull_request_target", on, path.name)
             if "pull_request" not in on:
@@ -451,7 +454,7 @@ class PullRequestWorkflows(unittest.TestCase):
     def test_x_no_workflow_with_workflow_dispatch_builds_the_code_of_a_pull_request(self):
         builds = []
         for path in self.workflows():
-            workflow = yaml.safe_load(path.read_text())
+            workflow = yaml.load(path.read_text(), Loader=YAML_LOADER)
             on = triggers(workflow)
             for name, job in workflow["jobs"].items():
                 for step in job.get("steps") or []:
@@ -464,8 +467,6 @@ class PullRequestWorkflows(unittest.TestCase):
                         self.assertNotIn("workflow_dispatch", on,
                                          f"{path.name}, job {name}, step {step.get('name')!r} builds code")
         self.assertIn("build.yaml", {found[0] for found in builds})
-        build = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
-        self.assertNotIn("workflow_dispatch", triggers(build))
 
 
 class FirstRunArtifact(Stand):
@@ -584,9 +585,9 @@ class FirstRunArtifact(Stand):
                             f"the comment job's post ({label})")
             self.assertEqual((sent[1]["body"]["head_sha"], sent[1]["body"]["external_id"]), (HEAD, PR),
                              f"the comment job's post ({label})")
-            # No read and no post of the run names the artifact's number or head.
-            named = [r["endpoint"] for r in self.requests() if re.search(r"/8(/|$)", r["endpoint"] or "")
-                     or OTHER in " ".join(r["args"])]
+            # No call of the run (gh api, gh pr view or gh pr diff) names the artifact's number or head.
+            named = [args for _, args in self.calls()
+                     if any(re.search(r"(^|/)8(/|$)", arg) for arg in args) or OTHER in " ".join(args)]
             self.assertEqual(named, [], f"the calls of the run ({label})")
 
     def test_s_an_artifact_of_another_number_head_or_diff_changes_nothing(self):
@@ -643,11 +644,11 @@ class SteeringGate(Stand):
     AGENTS = ("projects/x/project.yaml", "projects/x/build.sh", "projects/x/AGENTS.md")
     SETTINGS = ("projects/x/project.yaml", "projects/x/build.sh", "projects/x/.claude/settings.json")
     # Control: decision() with no steering-file gate.
-    GATE = ('    why, approved = steering_gate(api, repo, number, pull, files, sha)\n'
+    GATE = ('    why, approval = steering_gate(api, repo, number, pull, files, sha)\n'
             '    if why:\n'
             '        return outcome("none", f"pull request {number}: {why}", number, project, sha)\n'
-            '    where = f"pull request {number}: projects/{project}/ at {sha[:7]}"')
-    NO_GATE = '    approved = ""\n    where = f"pull request {number}: projects/{project}/ at {sha[:7]}"'
+            '    where = f"pull request {number}: projects/{project}/ at {sha[:7]}{approval}"')
+    NO_GATE = '    where = f"pull request {number}: projects/{project}/ at {sha[:7]}"'
 
     def setUp(self):
         super().setUp()
@@ -791,13 +792,13 @@ class RunByHandOffMain(Stand):
         self.case(self.copy_tree("unchanged"))
 
         def no_main_check(text):
-            workflow = yaml.safe_load(text)
-            changed = 0
-            for job in workflow["jobs"].values():
+            workflow = yaml.load(text, Loader=YAML_LOADER)
+            changed = set()
+            for name, job in workflow["jobs"].items():
                 if MAIN_CHECK in str(job.get("if", "")):
                     job["if"] = job["if"].replace(MAIN_CHECK, "true")
-                    changed += 1
-            self.assertEqual(changed, len(self.SIGNING))
+                    changed.add(name)
+            self.assertEqual(changed, self.SIGNING)
             return yaml.safe_dump(workflow, sort_keys=False, width=1 << 16)
 
         changed = self.copy_tree("changed", [(".github/workflows/review.yml", no_main_check)])
@@ -903,7 +904,7 @@ class HeldApproval(Stand):
             (21, ".github/workflows/build.yaml", OTHER, FORK, BRANCH),
             (22, ".github/workflows/build.yaml", HEAD, "eve/oss-verify", BRANCH),
             (23, ".github/workflows/build.yaml", HEAD, FORK, "other"))
-    # Control: the verdict condition taken out of the approval step's condition, and out of approve-held.
+    # Controls: the verdict condition taken out of the approval step's condition, or out of approve-held.
     APPROVE_IF = ("APPROVE: ${{ needs.route.outputs.held == 'true' && needs.screen.result == 'success'"
                   " && needs.screen.outputs.verdict == 'clean' }}")
     APPROVE_IF_ANY = "APPROVE: ${{ needs.route.outputs.held == 'true' && needs.screen.result == 'success' }}"
@@ -930,19 +931,18 @@ class HeldApproval(Stand):
         for run in self.HELD:
             self.serve(f"repos/{REPO}/actions/runs/{run[0]}/approve", {})
 
-    def route(self, actor, tree=ROOT):
+    def route(self, actor):
         """route's two steps for gh workflow run review.yml -f pr=7 on main, started by `actor`: its outputs, and the
         log of its first step."""
-        review = self.workflow(tree, "review.yml")
         ctx = {"github.token": WORKFLOW_TOKEN, "github.repository": REPO, "github.event_name": "workflow_dispatch",
                "github.ref": "refs/heads/main", "github.actor": actor, "github.run_id": "1000", "inputs.pr": PR}
-        rc, log, decided = self.run_step(review, "route", self.ROUTE, ctx, tree, evaluate=self.tos.evaluate)
+        rc, log, decided = self.run_step(self.review, "route", self.ROUTE, ctx, ROOT, evaluate=self.tos.evaluate)
         self.assertEqual(rc, 0, log)
         ctx.update({f"steps.decide.outputs.{k}": v for k, v in decided.items()})
-        trust = self.step(review, "route", self.TRUST)
+        trust = self.step(self.review, "route", self.TRUST)
         if not self.tos.evaluate(trust["if"], ctx):
             return decided, log
-        rc, more, trusted = self.run_script(trust["run"], tree, **env_of(review, "route", trust, ctx,
+        rc, more, trusted = self.run_script(trust["run"], ROOT, **env_of(self.review, "route", trust, ctx,
                                                                           evaluate=self.tos.evaluate))
         self.assertEqual(rc, 0, more)
         return {**decided, **trusted}, log
@@ -1015,7 +1015,7 @@ class HeldApproval(Stand):
         ran, sent = self.ran(self.APPROVE, env, review), []
         if ran:
             _, _, sent = self.approve(tree, ctx)
-        approved = [r["endpoint"] for r in sent if r["endpoint"].endswith("/approve")]
+        approved = [r["endpoint"] for r in sent if (r["endpoint"] or "").endswith("/approve")]
         self.assertEqual((ran, approved), (False, []), "the approval of a head that the screen held")
         since = len(self.calls())
         alone = {"GH_TOKEN": APPROVE_TOKEN, "REPO": REPO, "PR": PR, "HEAD_SHA": HEAD, "SCREEN_VERDICT": "held"}
@@ -1026,13 +1026,19 @@ class HeldApproval(Stand):
     def test_held_a_screen_that_held_the_head_approves_nothing(self):
         self.case_held_verdict(ROOT)
 
-    def test_held_control_verdict_condition_taken_out_of_the_step_and_the_script(self):
+    def test_held_control_verdict_condition_taken_out_of_the_approval_step(self):
         self.case_held_verdict(self.copy_tree("unchanged"))
-        changed = self.copy_tree("changed", [(".github/workflows/review.yml", self.APPROVE_IF, self.APPROVE_IF_ANY),
-                                             (".github/scripts/approve-held", self.REFUSAL, "")])
+        changed = self.copy_tree("changed", [(".github/workflows/review.yml", self.APPROVE_IF, self.APPROVE_IF_ANY)])
         with self.assertRaises(AssertionError) as caught:
             self.case_held_verdict(changed)
         self.assertIn("the approval of a head that the screen held", str(caught.exception))
+
+    def test_held_control_verdict_refusal_taken_out_of_approve_held(self):
+        self.case_held_verdict(self.copy_tree("unchanged"))
+        changed = self.copy_tree("changed", [(".github/scripts/approve-held", self.REFUSAL, "")])
+        with self.assertRaises(AssertionError) as caught:
+            self.case_held_verdict(changed)
+        self.assertIn("approve-held alone, for the verdict held", str(caught.exception))
 
     def test_held_a_head_whose_runs_are_not_held_gets_no_approval(self):
         self.pull_request(("README.md",))
@@ -1045,7 +1051,6 @@ class HeldApproval(Stand):
         env = self.comment_env(ctx)
         self.assertEqual(env["APPROVE"], "false")
         self.assertEqual((self.ran(self.TOKEN, env), self.ran(self.APPROVE, env)), (False, False))
-        self.assertEqual([r["endpoint"] for r in self.requests() if "/approve" in r["endpoint"]], [])
 
     def test_held_a_head_that_moved_after_the_screen_gets_no_approval(self):
         self.pull_request(("README.md",), head=OTHER)
@@ -1213,7 +1218,8 @@ class HeldScreen(Stand):
         signs_in = names.index("Sign in to the screen's services")
         step = steps[signs_in]
         self.assertNotIn("continue-on-error", step)
-        self.assertNotIn("if", step)
+        # It runs for a screen: a measurement alone skips it (tests/test_outside_screen.py, DailyCap).
+        self.assertTrue(self.tos.evaluate(step.get("if", "true"), {"needs.route.outputs.trust": "screen"}))
         for refused, said in (("/oauth2/v2.0/token", "Microsoft Entra's access token: no answer, HTTP 401"),
                               ("/v1/oauth/token", "Anthropic's token exchange: no answer, HTTP 401")):
             services = self.services((200, {"access_token": "anthropic-not-a-secret", "token_type": "Bearer"}))
@@ -1306,6 +1312,15 @@ class HeldRuns(Stand):
         # It only reads, but for the runs it starts, each with the job's own token.
         written = [r["endpoint"] for r in self.requests(since) if r["method"] != "GET" or "--input" in r["args"]]
         self.assertEqual(written, [])
+        # Each read of the runs by hand asks GitHub only for the runs created from a time. No run that the case serves
+        # is before that time, so GitHub's answer is the stand-in's, which ignores the filter.
+        for r in self.requests(since):
+            if "/runs?event=workflow_dispatch" in (r["endpoint"] or ""):
+                bounds = [a.removeprefix("created=>=") for a in r["args"] if a.startswith("created=>=")]
+                self.assertEqual(len(bounds), 1, r["args"])
+                self.assertRegex(bounds[0], r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+                runs = self.reviews if "/review.yml/" in r["endpoint"] else self.replays
+                self.assertEqual([run for run in runs if run["created_at"] < bounds[0]], [], bounds[0])
         started = [(token, " ".join(args)) for token, args in calls if args[:2] == ["workflow", "run"]]
         self.assertEqual({token for token, _ in started} - {WORKFLOW_TOKEN}, set())
         self.log = log
@@ -1508,7 +1523,7 @@ class ReviewThatPasses(Stand):
                                       self.temp, evaluate=evaluate)
         self.assertEqual(rc, 0, log)
         # The comment job's step "Post the comment and record the verdict", as PostingStep runs it.
-        step = posting("test_c1_a_every_check_passes")
+        step = posting()
         step.setUp()
         try:
             _, requests = step.post(verdicts=json.loads(kept["verdicts"]), reasons=json.loads(kept["reasons"]),

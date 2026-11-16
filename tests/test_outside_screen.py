@@ -237,6 +237,16 @@ def step(job, name, workflow=REVIEW):
     return found[0]
 
 
+def comment_job_env(ctx):
+    """The comment job's own env (KIND, APPROVE, HOLDING, RECORD), as its expressions give it for the run of ctx."""
+    return {k: as_text(evaluate(v, ctx)) for k, v in REVIEW_JOBS["comment"]["env"].items() if "${{" in str(v)}
+
+
+def interpolated(value, ctx):
+    """A value with ${{ }} expressions in its text, as the runner gives it for ctx."""
+    return re.sub(r"\$\{\{(.*?)\}\}", lambda m: as_text(evaluate(m.group(1), ctx)), value)
+
+
 def outputs_of(path):
     """The name=value pairs a step wrote to GITHUB_OUTPUT."""
     got = {}
@@ -631,10 +641,11 @@ class DailyCap(Runner):
     def test_route_marks_a_screened_run_and_the_screen_job_marks_itself_after_its_sign_ins(self):
         """The marks the count reads: route keeps daily-cap-route for trust screen alone, from the file its trust step
         writes then, and the screen job keeps daily-cap-screen in the two steps right after "Sign in to the screen's
-        services", which comes right after "Sign in to Google Cloud", whatever the job does next (decision 12). A
-        sign-in to Google, Microsoft Entra or Anthropic that is refused fails the job before them: such a run ended
-        before its screen, and the count does not count it. The sign-ins of the second step are the Screen step's,
-        with the same settings, for a screen and a measurement alike."""
+        services", which comes right after "Sign in to Google Cloud", whatever the job does next (OSSV-679's plan,
+        decision 12). A sign-in to Google, Microsoft Entra or Anthropic that is refused fails the job before them: such
+        a run ended before its screen, and the count does not count it. The sign-ins of the second step are the Screen
+        step's, with the same settings. A measurement does not run that step: the Measure step records a sign-in that
+        is refused as the error of that check (screen.py, measure)."""
         mark = step("route", "Mark this run for the daily cap")
         for trust in ("screen", "writer", "cap", "measure", ""):
             self.assertEqual(evaluate(mark["if"], {"steps.trust.outputs.trust": trust}), trust == "screen", trust)
@@ -649,8 +660,11 @@ class DailyCap(Runner):
         google = names.index("Sign in to Google Cloud")
         sign_in = names.index("Sign in to the screen's services")
         self.assertEqual(sign_in, google + 1)
+        self.assertNotIn("if", steps[google])
+        for trust in ("screen", "writer", "measure"):
+            self.assertEqual(bool(evaluate(steps[sign_in]["if"], {"needs.route.outputs.trust": trust})),
+                             trust != "measure", trust)
         for name in ("Sign in to Google Cloud", "Sign in to the screen's services"):
-            self.assertNotIn("if", steps[names.index(name)], name)
             self.assertNotIn("continue-on-error", steps[names.index(name)], name)
         self.assertEqual(steps[sign_in]["run"], "python3 .github/scripts/screen.py --sign-in")
         # The settings come from the job's env, which the Screen and Measure steps read too: neither those steps nor
@@ -1042,9 +1056,9 @@ class Holdings(unittest.TestCase):
 
     def test_the_comment_job_reads_main_s_scripts_and_writes_with_the_apps_tokens(self):
         """Its own token reads the checkout of .github/scripts and nothing else. The App's first token writes the
-        check run, the review comment and the hold of a change pull request or an issue. Its second token can write
-        the runs and nothing else: the job makes it only to approve the held runs of a head that the screen passed
-        (APPROVE), and only the step "Approve the held runs", right after it, uses it."""
+        check run, the review comment and the hold of a change pull request or an issue. The job makes it on every
+        path but the approval of the held runs (APPROVE), where no step writes these. The second token, the
+        approval's, is a case of tests/test_trigger_move.py (d7)."""
         job = REVIEW_JOBS["comment"]
         self.assertEqual(job["permissions"], {"contents": "read", "id-token": "write"})
         checkout = job["steps"][0]
@@ -1052,19 +1066,13 @@ class Holdings(unittest.TestCase):
         self.assertEqual(checkout["with"], {"persist-credentials": False, "sparse-checkout": ".github/scripts"})
         tokens = {s["id"]: s for s in job["steps"] if "create-github-app-token" in s.get("uses", "")}
         self.assertEqual(sorted(tokens), ["app", "approve"])
-        self.assertNotIn("if", tokens["app"])
+        self.assertEqual(tokens["app"]["if"], "env.APPROVE != 'true'")
         self.assertEqual({k: v for k, v in tokens["app"]["with"].items() if k.startswith("permission-")},
                          {"permission-checks": "write", "permission-pull-requests": "write",
                           "permission-issues": "write"})
-        self.assertEqual({k: v for k, v in tokens["approve"]["with"].items() if k.startswith("permission-")},
-                         {"permission-actions": "write"})
-        approve = step("comment", "Approve the held runs")
-        self.assertEqual((tokens["approve"]["if"], approve["if"]), ("env.APPROVE == 'true'", "env.APPROVE == 'true'"))
-        self.assertIs(job["steps"][job["steps"].index(tokens["approve"]) + 1], approve)
         for s in job["steps"]:
-            if "GH_TOKEN" in s.get("env", {}):
-                token = "approve" if s is approve else "app"
-                self.assertEqual(s["env"]["GH_TOKEN"], f"${{{{ steps.{token}.outputs.token }}}}", s["name"])
+            if "GH_TOKEN" in s.get("env", {}) and s["name"] != "Approve the held runs":
+                self.assertEqual(s["env"]["GH_TOKEN"], "${{ steps.app.outputs.token }}", s["name"])
 
     def test_the_gather_job_holds_no_model_and_writes_nothing(self):
         job = REVIEW_JOBS["gather"]
@@ -1293,8 +1301,7 @@ class Hold(Runner):
     @staticmethod
     def comment_env(ctx):
         """The comment job's env that its steps' ifs read (env.<name>), for the run of ctx."""
-        return {f"env.{k}": as_text(evaluate(v, ctx)) for k, v in REVIEW_JOBS["comment"]["env"].items()
-                if "${{" in str(v)}
+        return {f"env.{k}": v for k, v in comment_job_env(ctx).items()}
 
     def hold(self, trust, pr="7", number="7", comments=(), head="a" * 40, review="skipped", free=""):
         """free: route's output free, the time the daily cap frees, for trust cap."""
@@ -1402,11 +1409,11 @@ class Hold(Runner):
                                      kind != "enrollment")
 
     def test_a_held_head_that_the_screen_did_not_pass_is_held_by_the_same_rule(self):
-        """Decision 16: a run by hand for a head whose runs GitHub holds (route's held) has no review. A screen that
-        held it or failed, a gather job that failed, or the daily cap: the comment job records the hold, and approves
-        nothing. An enrollment at the cap, or one whose project the gather job took, gets the check run Enrollment
-        review; any other item the label and the hold comment (this step), an enrollment whose project the gather
-        job did not take too. The check review jobs reports as for any held item."""
+        """OSSV-679's plan, decision 16: a run by hand for a head whose runs GitHub holds (route's held) has no
+        review. A screen that held it or failed, a gather job that failed, or the daily cap: the comment job records
+        the hold, and approves nothing. An enrollment at the cap, or one whose project the gather job took, gets the
+        check run Enrollment review; any other item the label and the hold comment (this step), an enrollment whose
+        project the gather job did not take too. The check review jobs reports as for any held item."""
         for kind, name in (("enrollment", "libx"), ("enrollment", ""), ("change", "")):
             for route, results, outputs, want in (
                     ({"trust": "screen"}, {}, {"screen": {"verdict": "held"}}, 0),
@@ -1783,7 +1790,7 @@ class GatherJob(Runner):
         self.serve(f"repos/{REPO}/pulls/7", {"head": {"sha": self.HEAD}})
         self.permissions(alice="write")
         self.env.update(REAL_GIT=git, UPSTREAM=str(upstream), KIND="enrollment", PR="7", ISSUE="", NAME="libx",
-                        HEAD_SHA=self.HEAD, RUN_ID="900", BUILD="The Build check success: passed.", BINARIES="",
+                        HEAD_SHA=self.HEAD, BUILD="The Build check success: passed.", BINARIES="",
                         CHECKS="", HOME=str(self.home))
 
     def keep_session(self, last):
@@ -2040,8 +2047,7 @@ class RunWiring(unittest.TestCase):
 
     @staticmethod
     def group(ctx, workflow=REVIEW):
-        group = workflow["concurrency"]["group"]
-        return re.sub(r"\$\{\{(.*?)\}\}", lambda m: as_text(evaluate(m.group(1), ctx)), group)
+        return interpolated(workflow["concurrency"]["group"], ctx)
 
     @staticmethod
     def cancels(ctx, workflow=REVIEW):

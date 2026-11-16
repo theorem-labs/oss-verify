@@ -22,8 +22,9 @@ from oss_verify import check_checks
 from oss_verify import check_records
 from oss_verify import validate
 
-# The workflow tests' expression evaluator and step runner with a stand-in gh, and review.yml's jobs.
-from test_outside_screen import REVIEW_JOBS, Runner, as_text, evaluate, step  # noqa: E402
+# The workflow tests' expression evaluator and step runner with a stand-in gh, and review.yml and its jobs.
+from test_outside_screen import (REVIEW, REVIEW_JOBS, Runner, comment_job_env, evaluate, interpolated,  # noqa: E402
+                                 step)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -816,7 +817,7 @@ class PostingStep(Runner):
                  "needs.route.outputs.held": "false", "needs.gather.outputs.name": name,
                  "needs.review.result": given["REVIEW_RESULT"], "needs.screen.result": given["SCREEN_RESULT"],
                  "needs.screen.outputs.verdict": given["SCREEN_VERDICT"]}
-        job = self.job_env(needs)
+        job = comment_job_env(needs)
         # step() finds exactly one, so this cannot run a same-name copy instead of the step the job really uses; and
         # every value the step's env names is given here.
         posting = step("comment", self.STEP)
@@ -841,11 +842,6 @@ class PostingStep(Runner):
         for _, _, text in self.comments(requests):
             self.assertTrue(text.startswith(self.MARKER + "\n"), text[:80])
         return out, requests
-
-    @staticmethod
-    def job_env(needs):
-        """The comment job's own env (KIND, APPROVE, HOLDING, RECORD), as its expressions give it for `needs`."""
-        return {k: as_text(evaluate(v, needs)) for k, v in REVIEW_JOBS["comment"]["env"].items() if "${{" in str(v)}
 
     def comments(self, requests):
         """The comments the step posted or updated: (method, endpoint, body)."""
@@ -874,19 +870,20 @@ class PostingStep(Runner):
         return dict({check: "pass" for check in check_ids("review.md")}, **changed)
 
     def test_an_approval_of_a_held_head_posts_nothing_and_records_nothing(self):
-        """Decision 6: on a run by hand for a head whose runs GitHub holds (route's held), a screen that passed it has
-        the comment job approve the held runs, and no step of the job posts the review comment, records the check run
-        Enrollment review, holds the item or takes a hold off: for an enrollment whose project the gather job took, or
-        a change."""
+        """OSSV-679's plan, decision 6: on a run by hand for a head whose runs GitHub holds (route's held), a screen
+        that passed it has the comment job approve the held runs, and no step of the job posts the review comment,
+        records the check run Enrollment review or holds the item: for an enrollment whose project the gather job took,
+        or a change. So no step takes a hold off either: the step that does reads what the post step posted or
+        recorded."""
         for kind, name in (("enrollment", "libreac"), ("change", "")):
             with self.subTest(kind=kind):
-                env = {f"env.{k}": v for k, v in self.job_env({
+                env = {f"env.{k}": v for k, v in comment_job_env({
                     "needs.route.outputs.kind": kind, "needs.route.outputs.trust": "screen",
                     "needs.route.outputs.held": "true", "needs.gather.outputs.name": name,
                     "needs.review.result": "skipped", "needs.screen.result": "success",
                     "needs.screen.outputs.verdict": "clean"}).items()}
                 self.assertEqual((env["env.APPROVE"], env["env.HOLDING"]), ("true", "false"))
-                for title in (self.STEP, "Label it review-held and say so", "Take the label review-held off"):
+                for title in (self.STEP, "Label it review-held and say so"):
                     self.assertFalse(evaluate(step("comment", title)["if"], env), title)
 
     def test_c1_a_every_check_passes(self):
@@ -2073,10 +2070,8 @@ class ReviewJob(unittest.TestCase):
     """review.yml's review job: its own small steps, and the scripts it runs (review-gather, review-prompt), run with
     stand-ins."""
 
-    def setUp(self):
-        self.workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "review.yml").read_text())
-        self.jobs = self.workflow["jobs"]
-        self.steps = {s.get("name"): s for s in self.jobs["review"]["steps"]}
+    jobs = REVIEW_JOBS
+    steps = {s.get("name"): s for s in REVIEW_JOBS["review"]["steps"]}
 
     def gather(self, root, gh, **env):
         """review-gather, from this checkout, into root/out, with the stand-in gh script `gh` and `env`."""
@@ -2479,8 +2474,8 @@ class ReviewJob(unittest.TestCase):
         self.assertEqual(last, f"session=09227178-7bbf-4e5f-86db-8736e530ef02 head={'1' * 40}\n")
         # No step counts the attempts or writes a try line: the outputs are the review's alone.
         self.assertEqual(set(output), {"comment", "verdicts", "reasons"})
-        self.assertNotRegex(json.dumps(self.workflow["jobs"]), r"(?i)REVIEW_TRIES|oss-verify-held-(try|limit|cap|transient)"
-                                                               r"|\btries\b|\btry [0-9]")
+        self.assertNotRegex(json.dumps(self.jobs), r"(?i)REVIEW_TRIES|oss-verify-held-(try|limit|cap|transient)"
+                                                    r"|\btries\b|\btry [0-9]")
 
     def test_c3_g_the_job_outlasts_both_attempts(self):
         job = self.jobs["review"]
@@ -2691,17 +2686,10 @@ class SessionCache(unittest.TestCase):
     WRITERS = {"actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333",
                "actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"}
 
-    def setUp(self):
-        self.workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "review.yml").read_text())
-        self.jobs = self.workflow["jobs"]
+    workflow, jobs = REVIEW, REVIEW_JOBS
 
     def mode(self, job):
         return job.get("cache-mode", self.workflow.get("cache-mode"))
-
-    @staticmethod
-    def interpolated(value, ctx):
-        """A value with ${{ }} expressions in its text, as the runner gives it for ctx."""
-        return re.sub(r"\$\{\{(.*?)\}\}", lambda m: as_text(evaluate(m.group(1), ctx)), value)
 
     def test_the_gather_job_only_restores_the_cache_and_the_review_job_does_not_touch_it(self):
         self.assertEqual(self.mode(self.jobs["gather"]), "read")
@@ -2747,8 +2735,8 @@ class SessionCache(unittest.TestCase):
                 saved = evaluate(session["env"]["SESSION_KEY"], {"needs.review.outputs.kind": kind,
                                                                  "needs.route.outputs.pr": "7",
                                                                  "needs.gather.outputs.name": "libreac"})
-                self.assertEqual(saved, self.interpolated(key, {"needs.route.outputs.pr": "7",
-                                                                "steps.project.outputs.name": "libreac"}))
+                self.assertEqual(saved, interpolated(key, {"needs.route.outputs.pr": "7",
+                                                           "steps.project.outputs.name": "libreac"}))
         self.assertEqual(enrollment_restore["key"],
                          "${{ env.SESSION_KEY }}${{ github.run_id }}-${{ github.run_attempt }}")
         self.assertEqual(change_restore["key"], "${{ env.CHANGE_KEY }}${{ github.run_id }}-${{ github.run_attempt }}")

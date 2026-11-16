@@ -98,7 +98,7 @@ name: "Build"
 # the pull request from the API, and this run's results only as data, the artifact build-results. The jobs that sign
 # in are there, and none is here.
 #
-# A run by hand of the build is gone: a push, or closing and reopening the pull request, builds it again.
+# There is no run by hand of the build: a push, or closing and reopening the pull request, builds it again.
 
 run-name: ${{ github.event.pull_request.title }}
 

@@ -103,13 +103,22 @@ jobs:
           done <<< "$held"
           if (( ${#heads[@]} == 0 )); then say "No run is held."; exit 0; fi
 
+          # created_from: two days before the oldest newest or merge time of the heads, in GitHub's form
+          # (2026-11-16T10:00:00Z). A run that counts (below) comes at or after the newest or merge time of its head.
+          # No run of review.yml or enroll-merged.yml stays incomplete for two days, and a run before created_from is
+          # more than an hour old. So a run before created_from changes nothing that the step decides.
+          oldest=$now
+          for seconds in "${newest[@]}" "${merge[@]}"; do (( seconds >= oldest )) || oldest=$seconds; done
+          created_from=$(jq -rn --argjson t "$(( oldest - 2 * 86400 ))" '$t | todate')
+
           # by_hand <file>: listed[<file>] gets the runs by hand of .github/workflows/<file> (event
-          # workflow_dispatch): id, title, status, conclusion and created_at in seconds, split at U+001F. It reads
-          # them once for the whole step.
+          # workflow_dispatch) created at or after created_from: id, title, status, conclusion and created_at in
+          # seconds, split at U+001F. It reads them once for the whole step.
           declare -A listed=()
           by_hand() {
             if [ -z "${listed[$1]+read}" ]; then
-              listed[$1]=$(gh api --paginate "repos/$REPO/actions/workflows/$1/runs?event=workflow_dispatch&per_page=100" \
+              listed[$1]=$(gh api --paginate --method GET -f "created=>=$created_from" \
+                "repos/$REPO/actions/workflows/$1/runs?event=workflow_dispatch&per_page=100" \
                 --jq '.workflow_runs[] | select(.event == "workflow_dispatch") | [(.id | tostring), .display_title // "",
                         .status // "", .conclusion // "", (.created_at | fromdateiso8601 | tostring)] | join("\u001f")')
             fi
@@ -134,22 +143,27 @@ jobs:
           }
           # The pull requests whose merge this run replayed.
           declare -A replayed=()
+          # pulled[<owner>:<branch>]: the pull requests that one (below) reads for a head repository's owner and branch.
+          # The step reads each list once, so the heads of one branch make one read.
+          declare -A pulled=()
 
           # one <head>: what the head gets (the top of this file), and its line of the summary.
           one() {
-            local repository branch sha at of pulls n state merged into to ref from at_sha at_merge number="" kind=""
+            local repository branch sha at of n state merged into to ref from at_sha at_merge number="" kind=""
             local latest since id title status conclusion created last="" i replay=""
             local -a ids=() statuses=() conclusions=() times=()
             IFS=$'\x1f' read -r repository branch sha <<< "$1"
             at="Head ${sha:0:7} of $repository:$branch"
             # The pull requests into the default branch from the head's repository and branch, with route's filter
             # head=<owner>:<branch> (review.yml): number, state, merged, base, base repository, head branch, head
-            # repository, head commit and merge commit, split at U+001F.
+            # repository, head commit and merge commit, split at U+001F. Once for each <owner>:<branch> (pulled).
             of="${repository%%/*}:$(jq -rn --arg b "$branch" '$b | @uri')"
-            pulls=$(gh api --paginate "repos/$REPO/pulls?state=all&base=$base&head=$of&per_page=100" \
-              --jq '.[] | [(.number | tostring), .state // "", (.merged_at != null | tostring), .base.ref // "",
-                           .base.repo.full_name // "", .head.ref // "", .head.repo.full_name // "", .head.sha // "",
-                           .merge_commit_sha // ""] | join("\u001f")')
+            if [ -z "${pulled[$of]+read}" ]; then
+              pulled[$of]=$(gh api --paginate "repos/$REPO/pulls?state=all&base=$base&head=$of&per_page=100" \
+                --jq '.[] | [(.number | tostring), .state // "", (.merged_at != null | tostring), .base.ref // "",
+                             .base.repo.full_name // "", .head.ref // "", .head.repo.full_name // "", .head.sha // "",
+                             .merge_commit_sha // ""] | join("\u001f")')
+            fi
             # The open one at the head, else a merged one whose head commit or merge commit is the head's commit.
             while IFS=$'\x1f' read -r n state merged into to ref from at_sha at_merge; do
               [[ ${n:-} =~ ^[1-9][0-9]*$ && $into == "$default" && $to == "$REPO" && $ref == "$branch" ]] || continue
@@ -160,7 +174,7 @@ jobs:
               if [[ -z $kind && $merged == true && ($at_sha == "$sha" || $at_merge == "$sha") ]]; then
                 number=$n kind=merged
               fi
-            done <<< "$pulls"
+            done <<< "${pulled[$of]}"
 
             if [ "$kind" = merged ]; then
               at+=", merged pull request $number"

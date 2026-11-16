@@ -25,16 +25,15 @@ import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 # The workflow tests' expression evaluator and step runner with a stand-in gh: GitHub's expressions, evaluated as
-# test_outside_screen.py evaluates them (the dispatch job's if and env, and its steps' if and env).
-from test_outside_screen import Runner, as_text, evaluate  # noqa: E402
+# test_outside_screen.py evaluates them (the dispatch job's if and env, and its steps' if and env). REVIEW is
+# review.yml, whose env holds ALLOWED_BOTS and whose route holds the bash function trusted, the rule that trusted ports.
+from test_outside_screen import REVIEW, Runner, as_text, evaluate  # noqa: E402
 
 LOADER = importlib.machinery.SourceFileLoader("enroll_dispatch", str(ROOT / ".github" / "scripts" / "enroll-dispatch"))
 SPEC = importlib.util.spec_from_loader("enroll_dispatch", LOADER)
 dispatch = importlib.util.module_from_spec(SPEC)
 LOADER.exec_module(dispatch)
 ENROLL_DISPATCH = yaml.safe_load((ROOT / ".github" / "workflows" / "enroll-dispatch.yml").read_text())
-# review.yml, whose env holds ALLOWED_BOTS and whose route holds the bash function trusted, the rule that trusted ports.
-REVIEW_WF = yaml.safe_load((ROOT / ".github" / "workflows" / "review.yml").read_text())
 # The maintainer check reads the network; every test but those of the class Maintainer sees it pass, and Maintainer
 # tests the real one with a stand-in API.
 REAL_STANDING = dispatch.standing
@@ -146,10 +145,11 @@ class World:
         self.runs[run_id] = {"id": run_id, "path": path, "event": event, "head_sha": head_sha, "head_branch": branch,
                              "head_repository": {"full_name": head_repo}}
 
-    def review_run(self, title, run_id=REVIEW_RUN, event="workflow_run", path=".github/workflows/review.yml"):
-        """A run of Review on main whose title is `title`: after a run (workflow_run, "Review of run <id>"), or by hand
-        (workflow_dispatch, "Pull request <n>")."""
-        self.run(run_id, path, event, head_sha=MAIN, branch="main", head_repo=REPO)
+    def review_run(self, title, run_id=REVIEW_RUN, event="workflow_run", path=".github/workflows/review.yml",
+                   branch="main", head_repo=REPO):
+        """A run of Review whose title is `title`, from `branch` of `head_repo` (main of this repository): after a run
+        (workflow_run, "Review of run <id>"), or by hand (workflow_dispatch, "Pull request <n>")."""
+        self.run(run_id, path, event, head_sha=MAIN, branch=branch, head_repo=head_repo)
         self.runs[run_id]["display_title"] = title
 
     @staticmethod
@@ -237,8 +237,7 @@ class Sends(unittest.TestCase):
             self.assertIn(why, got["reason"], title)
         # A run on workflow_run of another file, or of review.yml on another branch.
         for path, branch in ((".github/workflows/held-runs.yml", "main"), (".github/workflows/review.yml", "other")):
-            world.review_run("Review of run 101", path=path)
-            world.runs[REVIEW_RUN]["head_branch"] = branch
+            world.review_run("Review of run 101", path=path, branch=branch)
             got = world.decide(event="workflow_run", run_id=REVIEW_RUN, sha=MAIN)
             self.assertEqual(got["decision"], "none", (path, branch))
             self.assertIn("is not a run of main's .github/workflows/review.yml on workflow_run", got["reason"])
@@ -474,9 +473,8 @@ class ByHand(unittest.TestCase):
 
     def world(self, title=f"Pull request {PR}", **run):
         world = World()
-        world.review_run(title, HAND_RUN, "workflow_dispatch", run.get("path", ".github/workflows/review.yml"))
-        world.runs[HAND_RUN].update(head_branch=run.get("branch", "main"),
-                                    head_repository={"full_name": run.get("repo", REPO)})
+        world.review_run(title, HAND_RUN, "workflow_dispatch", run.get("path", ".github/workflows/review.yml"),
+                         run.get("branch", "main"), run.get("repo", REPO))
         return world
 
     def decide(self, world):
@@ -498,7 +496,7 @@ class ByHand(unittest.TestCase):
         self.assertEqual((got["decision"], got["pr"], got["sha"]), ("dispatch", "32", SHA), got["reason"])
 
     def test_a_run_by_hand_of_another_file_branch_or_repository_sends_nothing(self):
-        # A Build run by hand among them: build.yaml has no workflow_dispatch now, and such a run sends nothing.
+        # A Build run by hand among them: build.yaml has no workflow_dispatch, and such a run sends nothing.
         for change in ({"path": ".github/workflows/build.yaml"}, {"path": ".github/workflows/validate.yaml"},
                        {"branch": "ci-test/x"}, {"repo": "someone/oss-verify"}):
             got = self.decide(self.world(**change))
@@ -1725,7 +1723,7 @@ class ReviewPassed(unittest.TestCase):
         self.assertLabels(line, [REVIEW_PASSED])
 
     def test_g_a_trusted_author_does_not_get_the_label(self):
-        self.assertIn("sjawhar-agent[bot]", REVIEW_WF["env"]["ALLOWED_BOTS"].split(","))
+        self.assertIn("sjawhar-agent[bot]", REVIEW["env"]["ALLOWED_BOTS"].split(","))
         for author, permission in (("a-writer", "write"), ("an-admin", "admin"), ("sjawhar-agent[bot]", None)):
             with self.subTest(author=author):
                 line = Timeline(author=author, permission=permission)
@@ -2432,8 +2430,9 @@ class ReviewPassed(unittest.TestCase):
 
 
 class BeforeTheMove(unittest.TestCase):
-    """Decision 5: build.yaml, validate.yaml, terms.yaml and maintainer-confirmed.yml ran on pull_request_target before
-    they moved to pull_request. Such a run always ran main's copy of its file, so it still counts."""
+    """OSSV-679's plan, decision 5: build.yaml, validate.yaml, terms.yaml and maintainer-confirmed.yml ran on
+    pull_request_target before they moved to pull_request. Such a run always ran main's copy of its file, so it still
+    counts."""
 
     def test_a_pull_request_target_run_of_the_three_moved_files_is_still_bound(self):
         for names in (["project-builds"], ["enrollment"], ["terms-accepted"],
@@ -2480,11 +2479,11 @@ class TrustRule(unittest.TestCase):
     def test_trusted_answers_as_review_ymls_trusted(self):
         if not shutil.which("jq"):
             self.skipTest("jq is not installed")
-        copies = {found for job in REVIEW_WF["jobs"].values() for step in job.get("steps") or []
+        copies = {found for job in REVIEW["jobs"].values() for step in job.get("steps") or []
                   for found in re.findall(r"# trusted\n(.*?)# end of trusted\n", step.get("run") or "", re.S)}
         self.assertEqual(len(copies), 1, copies)
         script = "set -uo pipefail\n" + copies.pop() + 'trusted "$1"\n'
-        bots = REVIEW_WF["env"]["ALLOWED_BOTS"]
+        bots = REVIEW["env"]["ALLOWED_BOTS"]
         collaborators = {"an-admin": "admin", "a-writer": "write", "a-reader": "read", "no-access": "none"}
         api = LabelApi({f"repos/{REPO}/collaborators/{login}/permission": {"permission": permission}
                         for login, permission in collaborators.items()},

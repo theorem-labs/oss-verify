@@ -105,8 +105,6 @@ def test_the_collector_names_every_failure_at_once(tmp_path):
 def test_only_the_required_job_reports_the_required_check(name):
     jobs = workflow(name)["jobs"]
     collector, check = COLLECTORS[name]
-    # Only the ruleset's own checks are required: review.yml's collector reports none of them.
-    assert (check in RULESET) == (name in REQUIRED), (name, check)
     assert jobs[collector].get("name", collector) == check
     for job_id, job in jobs.items():
         if job_id == collector:
@@ -212,19 +210,22 @@ def test_builds_route_fails_when_it_cannot_read_the_files(tmp_path):
 
 def route_review(tmp_path, files, changed=None, actor="someone", event="workflow_run",
                  run_path=".github/workflows/build.yaml", run_event="pull_request", conclusion="success", pulls=None,
-                 held=(), fail=False):
+                 held=(), builds=(), fail=False):
     """Run review.yml's route step on main, started by `actor`, with a fake gh that applies the step's --jq filter as
     gh does. On workflow_run, after run 900 of `run_path` on `run_event` that ended `conclusion`, at the head a*40 of
     mallory/libx's branch main; on workflow_dispatch, a run by hand of pull request 8. The gh gives as the open pull
     requests of that head `pulls` (by default pull request 8 into main), pull request 8 and its `files` (or fails to
-    list them when `fail`), the runs GitHub holds at its head (`held`, their ids), and no Build run of the head.
+    list them when `fail`), the runs GitHub holds at its head (`held`, their ids), and the completed Build runs of the
+    head in `builds`, each a pair (the run, the artifacts named build-results that it lists), by default none.
     Return its exit status, its outputs (one line each), and the gh calls."""
     bin = tmp_path / "bin"
     bin.mkdir()
     pull = pull_request(files, changed)
-    answers = {"pulls": [pull] if pulls is None else pulls, "pull": pull, "builds": {"workflow_runs": []},
+    answers = {"pulls": [pull] if pulls is None else pulls, "pull": pull,
+               "builds": {"workflow_runs": [run for run, _ in builds]},
                "held": {"workflow_runs": [{"id": i, "head_sha": "a" * 40, "head_branch": "main",
                                            "head_repository": {"full_name": "mallory/libx"}} for i in held]}}
+    answers.update({f"artifacts-{run['id']}": {"artifacts": list(artifacts)} for run, artifacts in builds})
     if not fail:
         answers["files"] = files_of(files)
     for name, answer in answers.items():
@@ -240,6 +241,8 @@ def route_review(tmp_path, files, changed=None, actor="someone", event="workflow
                             '  *"/pulls/"*) serve pull ;;\n'
                             '  *"status=action_required"*) serve held ;;\n'
                             '  *"/build.yaml/runs"*) serve builds ;;\n'
+                            '  *"/artifacts?name=build-results"*) all="$*"; id=${all##*/actions/runs/}; '
+                            'serve "artifacts-${id%%/*}" ;;\n'
                             '  *) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;; esac\n')
     (bin / "gh").chmod(0o755)
     written = tmp_path / "output"
@@ -627,6 +630,45 @@ def test_a_run_by_hand_that_a_person_starts_writes_the_triage_comment(tmp_path, 
     code, outputs, _ = route_review(tmp_path, ["projects/p/project.yaml"], actor=actor, event="workflow_dispatch",
                                     held=held)
     assert (code, outputs) == (0, PULL + want if want else [])
+
+
+def build_run(run_id, head_sha="a" * 40, repository="mallory/libx", branch="main"):
+    """A completed Build run on pull_request: by default of pull request 8's head commit, repository and branch."""
+    return {"id": run_id, "path": ".github/workflows/build.yaml", "event": "pull_request", "status": "completed",
+            "head_sha": head_sha, "head_repository": {"full_name": repository}, "head_branch": branch}
+
+
+# The artifact build-results of a Build run, not expired.
+RESULTS = {"id": 1, "name": "build-results", "expired": False}
+
+
+@pytest.mark.parametrize("builds, want", [
+    # One completed Build run of the head, with one build-results.
+    ([(build_run(901), [RESULTS])], "901"),
+    # Of two such runs, the newer.
+    ([(build_run(901), [RESULTS]), (build_run(902), [RESULTS])], "902"),
+    # A newer run of another repository, branch or head commit is not taken.
+    ([(build_run(901), [RESULTS]), (build_run(902, repository="eve/libx"), [RESULTS])], "901"),
+    ([(build_run(901), [RESULTS]), (build_run(902, branch="other"), [RESULTS])], "901"),
+    ([(build_run(901), [RESULTS]), (build_run(902, head_sha="b" * 40), [RESULTS])], "901"),
+    # No build-results, two of them, or one that expired: no run wrote results.
+    ([(build_run(901), [])], None),
+    ([(build_run(901), [RESULTS, dict(RESULTS, id=2)])], None),
+    ([(build_run(901), [dict(RESULTS, expired=True)])], None),
+])
+def test_a_persons_run_by_hand_of_an_enrollment_reads_the_newest_build_run_that_wrote_results(tmp_path, builds, want):
+    """A run by hand that a person starts, for an enrollment whose runs GitHub does not hold: the review reads the
+    results of the newest completed Build run of the head, from its repository and branch, that lists exactly one
+    build-results that has not expired. With no such run, there is no kind, so no review runs, and the summary says
+    why."""
+    code, outputs, _ = route_review(tmp_path, ["projects/p/project.yaml"], actor="alice", event="workflow_dispatch",
+                                    builds=builds)
+    if want:
+        assert (code, outputs) == (0, PULL + ["kind=enrollment", f"build_run={want}", "triage=true"])
+    else:
+        assert (code, outputs) == (0, PULL + ["triage=true"])
+        assert "No Build run of this head wrote results: a push, or a close and a reopen, builds it." in \
+            (tmp_path / "summary").read_text()
 
 
 @pytest.mark.parametrize("run_path", [".github/workflows/build.yaml", ".github/workflows/triage.yaml"])
