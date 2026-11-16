@@ -50,7 +50,7 @@ The review job of `.github/workflows/review.yml` runs this skill with Claude Cod
 | the build result (C3) and each binary's size and linkage (D1, D2) | `$IN/build/result.md` and `$IN/build/binaries.md`, the Build check's step summary |
 | the reach and breakage measurements (F3, F4), and the table "The checks of the binaries" with "What each failure is" under it (D3) | `$IN/build/checks.md`, the report of `uv run oss-verify check --checks` |
 | the repository's facts: `git ls-remote`, the contributors, the comparisons of G1, and its pull requests | `$IN/repository.txt` |
-| the seed corpora (F3) | `$IN/seeds/<target>.listing.txt` (`unzip -l`) and `$IN/seeds/<target>.hex.txt` (the first 512 bytes of each of the first 200 inputs) |
+| the seed corpora (F3) | `$IN/seeds/<target>.listing.txt` (`unzip -l`) and `$IN/seeds/<target>.hex.txt` (the first 512 bytes of each of the first 200 inputs; an input that is not stored or deflated is not read, and its line says so) |
 | the review comments of other reviewers (G5) | `$IN/review-comments.txt`, and `.reviews` in `$IN/pr.json` |
 | the changes since the last review (a later push) | `$IN/since-last-review.diff` |
 

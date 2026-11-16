@@ -25,13 +25,12 @@ First it reads every page of the pull request's files, and checks each name and 
 MAX_LISTED_FILES files or more is not the whole change, so then it reads nothing.
 
 The artifact is ARTIFACT of BUILD_RUN, which build.yaml's results job writes. The run must have exactly one unexpired
-artifact of that name, of at most 1 MiB. Its zip must hold exactly one member, MEMBER, of at most 1 MiB by its header
-and by the bytes read: the header is the zip's own word, so this reads at most 1 MiB and one byte of the member, and
-refuses it when that byte came. That member must be JSON with the schema SCHEMA and the fields of FIELDS, each of its
-type, shape and size. Its pr, sha and project must be PR, HEAD_SHA and NAME: the pull request and the head that route
-read from the API, and the project that the gather job's own take-project took. The artifact never gives the number,
-the head, the diff or the files that review.yml reads or posts to. This reads the zip in memory and writes no file but
-GITHUB_OUTPUT: nothing goes into the working directory.
+artifact of that name, of at most 1 MiB. Its zip must hold exactly one member, MEMBER, stored or deflated, of at most
+1 MiB by its header and by the bytes read. That member must be JSON with the schema SCHEMA and the fields of FIELDS,
+each of its type, shape and size. Its pr, sha and project must be PR, HEAD_SHA and NAME: the pull request and the head
+that route read from the API, and the project that the gather job's own take-project took. The artifact never gives
+the number, the head, the diff or the files that review.yml reads or posts to. This reads the zip in memory and writes
+no file but GITHUB_OUTPUT: nothing goes into the working directory.
 
 When a read or a check fails, build is the fixed line NO_RESULT, and binaries, checks and commit are empty. The log
 says why, with no text of the artifact. The exit status is then 0, so the review continues with no result of the
@@ -185,7 +184,14 @@ def take(api: Api, repo: str, run: int, pr: int, head: str, name: str) -> tuple[
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         if archive.namelist() != [MEMBER] or archive.getinfo(MEMBER).file_size > MAX_ARTIFACT_BYTES:
             return nothing(NO_RESULT), f"Build run {run}'s {ARTIFACT} does not hold {MEMBER} alone"
-        with archive.open(MEMBER) as member:
+        info = archive.getinfo(MEMBER)
+        # read() with no size decompresses the whole member before it cuts the member to the header's size. zipfile
+        # decompresses bzip2 and lzma with no bound, also for a read with a size. So this reads only a stored or
+        # deflated member, and at most one byte more than the limit.
+        if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+            return nothing(NO_RESULT), (f"Build run {run}'s {MEMBER} has the compression method {info.compress_type}, "
+                                        "not stored or deflated")
+        with archive.open(info) as member:
             text = member.read(MAX_ARTIFACT_BYTES + 1)
     if len(text) > MAX_ARTIFACT_BYTES:
         return nothing(NO_RESULT), f"Build run {run}'s {MEMBER} holds more than {MAX_ARTIFACT_BYTES} bytes"

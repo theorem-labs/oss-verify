@@ -611,25 +611,74 @@ class FirstRunArtifact(Stand):
             self.case(changed)
         self.assertIn("take-build-results' outputs (another number)", str(caught.exception))
 
-    def test_s_a_member_that_holds_more_than_its_header_says_gives_no_result(self):
-        """The header of results.json says that it holds the results of this head alone; it holds them and more than
-        1 MiB after them. take-build-results gives its no-result line."""
-        import test_enroll_dispatch
-        review = self.workflow(ROOT, "review.yml")
-        no_result = re.search(r'^NO_RESULT = "(.*)"$', (ROOT / ".github/scripts/take-build-results").read_text(),
-                              re.M).group(1)
+    @staticmethod
+    def understated(name, text, method):
+        """A zip of one member `name`, compressed with `method`, that holds the text `text` and then 64 MiB of spaces.
+        Its local file header and its central directory entry say that it holds `text` alone. The uncompressed size is
+        22 bytes into the local file header (at the start of the zip) and 24 bytes into the entry. The end of central
+        directory record (the last 22 bytes) gives the offset of the entry 16 bytes into it."""
+        import struct
+        data, spaces = text.encode(), b" " * (1 << 20)
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", method) as archive, archive.open(name, "w") as member:
+            member.write(data)
+            for _ in range(64):
+                member.write(spaces)
+        out = bytearray(buffer.getvalue())
+        struct.pack_into("<I", out, 22, len(data))
+        struct.pack_into("<I", out, struct.unpack_from("<I", out, len(out) - 22 + 16)[0] + 24, len(data))
+        return bytes(out)
+
+    def test_s_a_member_that_holds_more_than_its_header_says_gives_no_result_in_little_memory(self):
+        """The header of results.json says that it holds the results of this head alone. It holds them and 64 MiB of
+        spaces after them, deflated or in bzip2. take-build-results gives its no-result line, and takes less than
+        16 MiB of memory: a read of the whole member takes about 128 MiB. Its main runs in this process, so that
+        tracemalloc sees its memory. A deflated results.json that holds what its header says gives its results."""
+        import contextlib
+        import tracemalloc
+        from unittest import mock
+        self.need(ROOT, ".github/scripts/take-build-results", ".github/scripts/steering.py")
+        saved = list(sys.path)
+        try:
+            loader = importlib.machinery.SourceFileLoader("take_build_results_of_this_test",
+                                                          str(ROOT / ".github" / "scripts" / "take-build-results"))
+            take = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+            loader.exec_module(take)
+        finally:
+            sys.path[:] = saved
+        env = {**self.env, "GH_TOKEN": WORKFLOW_TOKEN, "REPO": REPO, "BUILD_RUN": self.RUN, "PR": PR,
+               "HEAD_SHA": HEAD, "NAME": "x"}
         text = json.dumps(self.results({}))
-        data = test_enroll_dispatch.understated("results.json", text + " " * (1 << 20), len(text))
-        self.assertLess(len(data), 1 << 20)
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            self.assertEqual(archive.getinfo("results.json").file_size, len(text))
-        self.fixture({}, data)
-        ctx = {"github.token": WORKFLOW_TOKEN, "github.repository": REPO, "needs.route.outputs.pr": PR,
-               "needs.route.outputs.sha": HEAD, "needs.route.outputs.build_run": self.RUN,
-               "steps.project.outputs.name": "x"}
-        rc, log, build = self.run_step(review, "gather", self.TAKE, ctx, ROOT)
-        self.assertEqual(rc, 0, log)
-        self.assertEqual(build, {"build": no_result, "binaries": "", "checks": "", "commit": ""}, log)
+        honest = io.BytesIO()
+        with zipfile.ZipFile(honest, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("results.json", text)
+        no_result = {"build": take.NO_RESULT, "binaries": "", "checks": "", "commit": ""}
+        for label, data, want, said in (
+                ("deflated", self.understated("results.json", text, zipfile.ZIP_DEFLATED), no_result,
+                 "the read failed (BadZipFile)"),
+                ("bzip2", self.understated("results.json", text, zipfile.ZIP_BZIP2), no_result,
+                 f"Build run {self.RUN}'s results.json has the compression method 12, not stored or deflated."),
+                ("honest and deflated", honest.getvalue(),
+                 {"build": "The Build check success: ARTIFACT-RESULT.", "binaries": "ARTIFACT-BINARIES",
+                  "checks": "ARTIFACT-CHECKS", "commit": ""}, f"read the results of Build run {self.RUN}")):
+            self.assertLess(len(data), 1 << 20, label)
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                self.assertEqual(archive.getinfo("results.json").file_size, len(text), label)
+            self.fixture({}, data)
+            self.output.write_text("")
+            printed = io.StringIO()
+            with mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(printed):
+                tracemalloc.start()
+                try:
+                    baseline = tracemalloc.get_traced_memory()[0]
+                    code = take.main()
+                    peak = tracemalloc.get_traced_memory()[1] - baseline
+                finally:
+                    tracemalloc.stop()
+            self.assertLess(peak, 16 << 20, f"the peak of the memory ({label})")
+            self.assertEqual(code, 0, printed.getvalue())
+            self.assertEqual(outputs(self.output.read_text()), want, f"take-build-results' outputs ({label})")
+            self.assertIn(f"take-build-results: {said}", printed.getvalue(), label)
 
 
 class SteeringFiles(unittest.TestCase):

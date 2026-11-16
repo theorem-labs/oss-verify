@@ -2145,6 +2145,61 @@ class SinceLastReview(unittest.TestCase):
                 self.assertEqual((output, run.stdout), ("", ""))
 
 
+class SeedHex(unittest.TestCase):
+    """review-gather's seeds/<target>.hex.txt: the first 512 bytes of each of the first 200 inputs of a seed corpus, in
+    hexadecimal. The seed corpus is a zip in the pull request's projects/<name>/."""
+
+    def test_a_member_of_64_mib_in_a_small_zip_is_read_in_little_memory(self):
+        """A deflated member and a bzip2 member each hold 64 MiB of spaces, in a zip of less than 1 MiB. The script of
+        review-gather runs in this process, so that tracemalloc sees its memory. It takes less than 16 MiB: a read of
+        a whole member takes about 128 MiB. It gives the first 512 bytes of a stored member, of a deflated member and
+        of the deflated 64 MiB. It does not read the bzip2 member: zipfile decompresses bzip2 with no bound."""
+        import tracemalloc
+        from unittest import mock
+        gather = (ROOT / ".github" / "scripts" / "review-gather").read_text()
+        opener = "python3 - \"$zip\" \"$out/seeds/$target.hex.txt\" <<'EOF'\n"
+        start = gather.index(opener) + len(opener)
+        script = gather[start:gather.index("\nEOF\n", start) + 1]
+        stored, deflated, spaces, size = bytes(range(256)) * 3, b"seed " * 200, b" " * (1 << 20), 64 << 20
+        with tempfile.TemporaryDirectory() as directory:
+            corpus, hex_file = pathlib.Path(directory) / "x_seed_corpus.zip", pathlib.Path(directory) / "x.hex.txt"
+            with zipfile.ZipFile(corpus, "w") as archive:
+                archive.writestr("stored", stored)
+                archive.writestr("deflated", deflated, compress_type=zipfile.ZIP_DEFLATED)
+                for name, method in (("deflated-64-mib", zipfile.ZIP_DEFLATED), ("bzip2-64-mib", zipfile.ZIP_BZIP2)):
+                    info = zipfile.ZipInfo(name)
+                    info.compress_type = method
+                    with archive.open(info, "w") as member:
+                        for _ in range(size // len(spaces)):
+                            member.write(spaces)
+            self.assertLess(corpus.stat().st_size, 1 << 20)
+            with mock.patch.object(sys, "argv", ["-", str(corpus), str(hex_file)]):
+                tracemalloc.start()
+                try:
+                    baseline = tracemalloc.get_traced_memory()[0]
+                    exec(compile(script, "review-gather's seed script", "exec"), {"__name__": "__main__"})
+                    peak = tracemalloc.get_traced_memory()[1] - baseline
+                finally:
+                    tracemalloc.stop()
+            lines = hex_file.read_text().splitlines()
+        self.assertLess(peak, 16 << 20)
+        # Each member: its line "== <name>: <size> bytes", then its rows. A row is its offset, two spaces, and 47
+        # characters of hexadecimal.
+        members = {}
+        for line in lines:
+            if line.startswith("== "):
+                rows = members.setdefault(line, [])
+            else:
+                rows.append(line)
+        self.assertEqual(list(members), ["== 'stored': 768 bytes", "== 'deflated': 1000 bytes",
+                                         f"== 'deflated-64-mib': {size} bytes", f"== 'bzip2-64-mib': {size} bytes"])
+        for name, data in (("== 'stored': 768 bytes", stored), ("== 'deflated': 1000 bytes", deflated),
+                           (f"== 'deflated-64-mib': {size} bytes", spaces)):
+            self.assertEqual(b"".join(bytes.fromhex(row[6:53]) for row in members[name]), data[:512], name)
+        self.assertEqual(members[f"== 'bzip2-64-mib': {size} bytes"],
+                         ["(not read: compression method 12, not stored or deflated)"])
+
+
 class ReviewJob(unittest.TestCase):
     """review.yml's review job: its own small steps, and the scripts it runs (review-gather, review-prompt), run with
     stand-ins."""

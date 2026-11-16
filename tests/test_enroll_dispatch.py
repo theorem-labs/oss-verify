@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tracemalloc
 import unittest
 import urllib.parse
 import zipfile
@@ -59,24 +60,28 @@ MERGED_RUN = 800
 REVIEW_RUN = 1900
 
 
-def zipped(files):
+def zipped(files, method=zipfile.ZIP_STORED):
     buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w") as archive:
+    with zipfile.ZipFile(buffer, "w", method) as archive:
         for name, data in files.items():
             archive.writestr(name, data)
     return buffer.getvalue()
 
 
-def understated(name, data, size):
-    """A zip of one member `name` that holds `data`, compressed, whose local file header and central directory entry
-    each say that it holds `size` bytes: the uncompressed size, 22 bytes into the local file header (at the start)
-    and 24 bytes into the entry, which the end of central directory record (the last 22 bytes) gives the offset of."""
+def understated(name, text, method):
+    """A zip of one member `name`, compressed with `method`, that holds the text `text` and then 64 MiB of spaces. Its
+    local file header and its central directory entry say that it holds `text` alone. The uncompressed size is 22
+    bytes into the local file header (at the start of the zip) and 24 bytes into the entry. The end of central
+    directory record (the last 22 bytes) gives the offset of the entry 16 bytes into it."""
+    data, spaces = text.encode(), b" " * (1 << 20)
     buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(name, data)
+    with zipfile.ZipFile(buffer, "w", method) as archive, archive.open(name, "w") as member:
+        member.write(data)
+        for _ in range(64):
+            member.write(spaces)
     out = bytearray(buffer.getvalue())
-    struct.pack_into("<I", out, 22, size)
-    struct.pack_into("<I", out, struct.unpack_from("<I", out, len(out) - 22 + 16)[0] + 24, size)
+    struct.pack_into("<I", out, 22, len(data))
+    struct.pack_into("<I", out, struct.unpack_from("<I", out, len(out) - 22 + 16)[0] + 24, len(data))
     return bytes(out)
 
 
@@ -475,18 +480,35 @@ class ThePullRequest(unittest.TestCase):
             world.artifacts[101] = rec
             self.assertEqual(world.decide()["decision"], "none")
 
-    def test_a_record_that_holds_more_than_its_header_says_is_no_record(self):
-        # The header says record.json holds the record alone; it holds the record and more than 1 MiB after it.
+    def test_a_record_that_holds_more_than_its_header_says_is_no_record_and_takes_little_memory(self):
+        # The header says that record.json holds the record alone. It holds the record and 64 MiB of spaces after it,
+        # deflated or in bzip2. A read of the whole member takes about 128 MiB of memory.
         text = json.dumps(record())
-        data = understated("record.json", text + " " * dispatch.MAX_ARTIFACT_BYTES, len(text))
-        self.assertLess(len(data), dispatch.MAX_ARTIFACT_BYTES)
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            self.assertEqual(archive.getinfo("record.json").file_size, len(text))
+        for method, said in ((zipfile.ZIP_DEFLATED, "enrollment-record cannot be read"),
+                             (zipfile.ZIP_BZIP2, "record.json has the compression method 12, not stored or deflated")):
+            with self.subTest(method=method):
+                data = understated("record.json", text, method)
+                self.assertLess(len(data), dispatch.MAX_ARTIFACT_BYTES)
+                with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                    self.assertEqual(archive.getinfo("record.json").file_size, len(text))
+                world = World()
+                world.artifacts[101] = data
+                api = world.api()
+                tracemalloc.start()
+                try:
+                    baseline = tracemalloc.get_traced_memory()[0]
+                    rec, why = dispatch.build_record(api, REPO, 101)
+                    peak = tracemalloc.get_traced_memory()[1] - baseline
+                finally:
+                    tracemalloc.stop()
+                self.assertLess(peak, 16 << 20)
+                self.assertIsNone(rec, why)
+                self.assertIn(said, why)
+                self.assertEqual(world.decide()["decision"], "none")
+        # A deflated record that holds what its header says is read, as the record job's artifact is.
         world = World()
-        world.artifacts[101] = data
-        rec, why = dispatch.build_record(world.api(), REPO, 101)
-        self.assertIsNone(rec, why)
-        self.assertEqual(world.decide()["decision"], "none")
+        world.artifacts[101] = zipped({"record.json": text}, zipfile.ZIP_DEFLATED)
+        self.assertEqual(dispatch.build_record(world.api(), REPO, 101), (record(), ""))
 
     def test_the_reason_is_one_line(self):
         world = World()
