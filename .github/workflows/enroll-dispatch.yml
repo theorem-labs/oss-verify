@@ -3,13 +3,13 @@
 # The decision on dispatch://OSSV-141 starts the theorem statements once the enrollment check passes, and OSSV-202 sets
 # no daily limit on them: statement work is automatic, and proof work is limited by which enrollments are merged. Only
 # a failed ELF and instructions check or a failed quiet and loud check stops the statements repository's run (OSSV-202,
-# decision D12). So, each time a run of Build, Validate, Terms or Tests completes:
+# decision D12). So, each time a run of Review, Validate, Terms or Tests completes:
 #
 #   decide    .github/scripts/enroll-dispatch reads GitHub's API: the checks main's ruleset requires, each from the
 #             workflow and event that must make it, at the commit; the record that build.yaml's record job wrote for
 #             it (each binary's .text and executable bytes); the pull request the record names and its files; and,
 #             for the label review-passed (below), the pull request's events, the runs from its head, and whether
-#             build.yaml's rule trusts its author (ALLOWED_BOTS, from main's .github/workflows/build.yaml, or write
+#             review.yml's rule trusts its author (ALLOWED_BOTS, from main's .github/workflows/review.yml, or write
 #             access). Its decision is dispatch, label or none (the script's header says when).
 #   dispatch  on dispatch: sends the repository_dispatch event enrollment-checked, with the pull request's number,
 #             its head commit and the project, to Theorem's private statements repository (repository id INTERNAL_ID
@@ -26,9 +26,9 @@
 #             of theorem-labs or one of its Apps, lifts it with the label maintainer-confirmed put on after the head
 #             commit, which runs maintainer-confirmed.yml, whose completion runs this again).
 #   none      sends nothing and puts no label on, among other reasons while the newest check run Enrollment review of
-#             the oss-verify App at the commit for the pull request is not success or is missing. build.yaml's
+#             the oss-verify App at the commit for the pull request is not success or is missing. review.yml's
 #             comment job writes that check run on the reviewed commit, with the review comment and the pull
-#             request's number as its external_id, and that Build run's completion runs this again. A check run of
+#             request's number as its external_id, and that Review run's completion runs this again. A check run of
 #             another pull request at the same commit is not counted.
 #
 # A merge sends too. Enrollment merged (enroll-merged.yml) runs on each closed pull request and does nothing else; its
@@ -41,7 +41,7 @@
 # The label review-passed ("Checks and CI review passed; statements started. No plan to merge or prove this project
 # now.") says that an enrollment passed at its head commit. decide says what happens to it in review_passed (on, off,
 # or empty for no change), by the rule in the script's header: a run that sends an enrollment (which it does only when
-# the check run Enrollment review at the commit is success), by an author build.yaml's rule does not trust, puts it on,
+# the check run Enrollment review at the commit is success), by an author review.yml's rule does not trust, puts it on,
 # unless an account other than the App took it off before; at a head other than the one the label was put on for (the
 # head at which its labeled event started a run of maintainer-confirmed.yml; when no such run is found, or the runs of
 # that account in the ten minutes after it are at more than one head, or that account put another label on in those
@@ -61,22 +61,23 @@
 # makes the label when it is missing (colour 0E8A16, that description), and sets the description when it differs.
 # Each change is a line of the run's summary; no step posts a comment.
 #
-# Each required check's run starts this workflow, so the run of the last one to pass is the one that dispatches; a run
-# that sees a check not passed yet sends nothing, and so does a run for a draft pull request: build.yaml runs again on
-# ready_for_review, and that run's completion decides once the pull request is ready. A later run for the same commit
-# (an edited title, a re-run) sends it again; the enrollment workflow runs the runs of one project one at a time, and
-# skips a commit whose facts it already made or whose build an event started in the last 24 hours. A new commit on the
-# pull request is checked again, and dispatched again. To have a pull request looked at again (one whose checks passed
-# before build.yaml wrote records), a maintainer runs `gh workflow run build.yaml -f pr=<n>`: that Build run's record
-# names the pull request and its head, and its completion runs this. That run also reviews the pull request again, as a
-# push's run does: it records a new check run Enrollment review, and updates the review comment when the review gives
-# its verdicts.
+# The runs of Validate, Terms and Tests start this workflow, and for project-builds the Review run after that Build run
+# does, which writes the check run Enrollment review. So the run of the last one to pass is the one that dispatches; a
+# run that sees a check not passed yet sends nothing, and so does a run for a draft pull request: build.yaml runs again
+# on ready_for_review, and the Review run after it decides once the pull request is ready. A later run for the same
+# commit (an edited title, a re-run) sends it again; the enrollment workflow runs the runs of one project one at a
+# time, and skips a commit whose facts it already made or whose build an event started in the last 24 hours. A new
+# commit on the pull request is checked again, and dispatched again. To have a pull request looked at again, a
+# maintainer runs `gh workflow run review.yml -f pr=<n>`: that Review run's title names the pull request, which gives
+# its head, and its completion runs this. That run also reviews the pull request again, with the results of its
+# head's Build run, as the review after a push does: it records a new check run Enrollment review, and updates the
+# review comment when the review gives its verdicts.
 #
 # It runs on workflow_run, so this file and the script are main's, whatever the pull request holds, and it runs no
 # code of the pull request: decide reads the API as data with a read-only token, this repository's and, for the
 # maintainer check, the public repository that the project's `repo` names. dispatch alone holds a credential:
 # the OSS Verify App's installation token, made from the App's key, which it reads at run time from Secret Manager by
-# Google workload identity federation, as build.yaml's and triage.yaml's comment jobs do. It declares the GitHub
+# Google workload identity federation, as review.yml's comment and triage jobs do. It declares the GitHub
 # Environment `comment`, whose claim is the only way to act as the account that reads the key; decide must never
 # be given id-token: write or that environment. Each token it makes holds one permission on one repository: pull
 # requests of this repository for the labels (actions/create-github-app-token), contents of the private repository for
@@ -94,9 +95,10 @@ run-name: >-
   Enroll dispatch for run ${{ github.event.workflow_run.id }} attempt ${{ github.event.workflow_run.run_attempt }}
 on:
   workflow_run:
+    # Review: a review of a pull request's head, whose comment job writes the check run Enrollment review.
     # Maintainer confirmed: a member put the label maintainer-confirmed on a pull request; the decision runs again.
     # Enrollment merged: a pull request was closed; a merged enrollment is sent for its head commit.
-    workflows: [Build, Validate, Terms, Tests, Maintainer confirmed, Enrollment merged]
+    workflows: [Review, Validate, Terms, Tests, Maintainer confirmed, Enrollment merged]
     types: [completed]
 permissions: {}
 concurrency:
@@ -105,15 +107,17 @@ concurrency:
   # cancels no run of this one (one from the same head shares the group, and the run that replaces a pending one
   # decides on the same commit and branch); `:`, which neither a repository's name nor a branch's can hold (git
   # check-ref-format refuses it in a ref, and a GitHub repository name is letters, digits, `.`, `_` and `-`), keeps the
-  # parts apart. A Build run started by hand is about the pull request its record names, not the main commit it ran
-  # on: each has a group of its own. So has each run of Enrollment merged (enroll-merged.yml, by its path): in its
-  # head's group, a later run of that head (an edited title, a label) would replace it while it waits, and decide the
-  # closed pull request by the path of an open one, which sends nothing. A merge's run and an open pull request's run
-  # for the same head can then both send it; the statements repository skips the second (a build of that commit
-  # started in the last 24 hours).
+  # parts apart. A run of Review (review.yml, by its path) is about the head of the pull request it reviewed, not the
+  # main commit it ran on: each has a group of its own. So has a run by hand of any other file, and each run of
+  # Enrollment merged (enroll-merged.yml, by its path): in its head's group, a later run of that head (an edited title,
+  # a label) would replace it while it waits, and decide the closed pull request by the path of an open one, which
+  # sends nothing. Two runs for the same head (two Review runs, or a merge's run and an open pull request's run) can
+  # then both send it; the statements repository skips the second (a build of that commit started in the last 24
+  # hours).
   group: >-
     enroll-dispatch:${{ (github.event.workflow_run.event == 'workflow_dispatch'
-    || github.event.workflow_run.path == '.github/workflows/enroll-merged.yml') && github.event.workflow_run.id
+    || github.event.workflow_run.path == '.github/workflows/enroll-merged.yml'
+    || github.event.workflow_run.path == '.github/workflows/review.yml') && github.event.workflow_run.id
     || format('{0}:{1}:{2}', github.event.workflow_run.head_sha,
     github.event.workflow_run.head_repository.full_name, github.event.workflow_run.head_branch) }}
   cancel-in-progress: false
@@ -121,16 +125,17 @@ concurrency:
 jobs:
   decide:
     if: >-
-      contains(fromJSON('["pull_request_target", "pull_request", "workflow_dispatch"]'), github.event.workflow_run.event)
+      contains(fromJSON('["pull_request_target", "pull_request", "workflow_dispatch", "workflow_run"]'),
+      github.event.workflow_run.event)
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # A collaborator's permission, which build.yaml's rule for trusted accounts reads, needs metadata: read alone, and
+    # A collaborator's permission, which review.yml's rule for trusted accounts reads, needs metadata: read alone, and
     # GitHub gives it to every token that holds a permission.
     permissions:
       actions: read        # the runs behind the check runs, the runs from the head, the Build run's enrollment-record
       checks: read         # the check runs at the commit
       contents: read       # the checkout, main's rules (rules/branches/main), the project.yaml
-      pull-requests: read  # the pull request, its files and its events
+      pull-requests: read  # the pull request, its files, its events and its reviews
     outputs:
       decision: ${{ steps.decide.outputs.decision }}
       label: ${{ steps.decide.outputs.label }}
@@ -146,7 +151,7 @@ jobs:
         with:
           persist-credentials: false
           # src: triage.py, which the maintainer check comes from, imports oss_verify.validate. .github/workflows:
-          # build.yaml's ALLOWED_BOTS, the Apps its rule for trusted accounts trusts. Main's copy, read as code of this
+          # review.yml's ALLOWED_BOTS, the Apps its rule for trusted accounts trusts. Main's copy, read as code of this
           # repository; nothing of the pull request is checked out.
           sparse-checkout: |
             .github/scripts
@@ -187,7 +192,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # Gets this job, and no other, the App's key: only a token with this environment's claim may act as the account
-    # that reads it, as for build.yaml's and triage.yaml's comment jobs. Removing this line does not weaken the job; it
+    # that reads it, as for review.yml's comment and triage jobs. Removing this line does not weaken the job; it
     # stops it working. deployment: false, as there, so that a run posts no deployment; the claim is in the token
     # either way.
     environment:
@@ -199,8 +204,8 @@ jobs:
       # reads the App's key.
       id-token: write
     env:
-      # Public identifiers, not credentials: the provider and the account that reads the App's key, as in build.yaml's
-      # and triage.yaml's comment jobs.
+      # Public identifiers, not credentials: the provider and the account that reads the App's key, as in review.yml's
+      # comment and triage jobs.
       GCP_WORKLOAD_IDENTITY_PROVIDER: projects/805240912354/locations/global/workloadIdentityPools/github/providers/github-ossv
       GCP_SERVICE_ACCOUNT: ossv-app-comment@theorem-agent-infra.iam.gserviceaccount.com
       # The private statements repository, by its id.
@@ -267,7 +272,7 @@ jobs:
           create_credentials_file: false
           export_environment_variables: false
 
-      # The App's private key, from Secret Manager, as build.yaml's and triage.yaml's comment jobs read it. Each
+      # The App's private key, from Secret Manager, as review.yml's comment and triage jobs read it. Each
       # non-blank line of the key is masked, and so is its base64 form.
       - name: Read the oss-verify App's key
         id: key

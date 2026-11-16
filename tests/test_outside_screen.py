@@ -29,7 +29,7 @@ import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / ".github" / "scripts"
-WF = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
+WF = yaml.safe_load((ROOT / ".github" / "workflows" / "review.yml").read_text())
 JOBS = WF["jobs"]
 REPO = "theorem-labs/oss-verify"
 
