@@ -170,7 +170,7 @@ The `publish` field tells us when to publish the proofs, and the `proofs` field 
 * the binaries and the source archives that we built them from;
 * each patch a proof needed, once its finding is public (below).
 
-We write the lock from the manifest of `tools/check` ([build-contract.md](build-contract.md#the-manifest)). Each value of `publish` obeys these rules:
+We write the lock from the manifest of `oss-verify check` ([build-contract.md](build-contract.md#the-manifest)). Each value of `publish` obeys these rules:
 
 * We publish nothing that shows a finding that is not public yet. We hold back the statements that the finding affects until it is public. What we publish does not tell why.
 * We publish a seeded project only while none of its findings is private.
@@ -187,4 +187,4 @@ Each public claim rests on three pinned inputs, and on a fourth when a proof of 
 
 We pin only binaries that two clean builds reproduce ([build-contract.md](build-contract.md#reproducibility)). A published proof uses the released version of LPS, these build files, and the project's source. For an enrolled project, it uses the source as it is, or with the published patch. For a seeded project whose proofs we publish, the build files can also apply patches that fix bugs ([build-contract.md](build-contract.md#build-patches)). A published proof of such a project can thus be about a build that has patches.
 
-To check a binary yourself, follow [build-contract.md](build-contract.md#check-a-binary-against-a-lock). It tells how to rebuild the binary and compare it with the lock, and which checkout of this repository to use with it: the commit in `oss_verifier.commit` for a lock that has that field, and `main` for a `harness.yaml` of the oss-fuzz-theorems 2026.10 release, which has none. At that checkout, the build files apply the patches that they hold. Thus `tools/check` can rebuild a binary of a seeded project whose proofs we publish. It does not apply a patch that is outside the project directory, so it does not rebuild a binary of an enrolled project that needed a patch to the project's code.
+To check a binary yourself, follow [build-contract.md](build-contract.md#check-a-binary-against-a-lock). It tells how to rebuild the binary and compare it with the lock, and which checkout of this repository to use with it: the commit in `oss_verifier.commit` for a lock that has that field, and `main` for a `harness.yaml` of the oss-fuzz-theorems 2026.10 release, which has none. At that checkout, the build files apply the patches that they hold. Thus `oss-verify check` can rebuild a binary of a seeded project whose proofs we publish. It does not apply a patch that is outside the project directory, so it does not rebuild a binary of an enrolled project that needed a patch to the project's code.

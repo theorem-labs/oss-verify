@@ -1,0 +1,6 @@
+# Ported from the Python build of the oss-fuzz-theorems 2026.10 release (seeds/languages.tsv); do not edit.
+# kind	path	arguments: see lay-out-sources
+tree	ext/mdurl-fuzz_mdurl/src	upstream/mdurl
+copy	targets/mdurl-fuzz_mdurl/fuzz_mdurl.py	fuzz_mdurl.py
+corpus	targets/mdurl-fuzz_mdurl/seeds	fuzz_mdurl_seed_corpus.zip
+file	ext/mdurl-fuzz_mdurl/pydist/flit_core-3.12.0-py3-none-any.whl	https://files.pythonhosted.org/packages/f2/65/b6ba90634c984a4fcc02c7e3afe523fef500c4980fec67cc27536ee50acf/flit_core-3.12.0-py3-none-any.whl	e7a0304069ea895172e3c7bb703292e992c5d1555dd1233ab7b5621b5b69e62c

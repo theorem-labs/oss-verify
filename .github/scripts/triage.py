@@ -8,8 +8,10 @@
 """Write the triage of an enrollment pull request: the comment for the pull request, and the full table for Theorem's
 reviewers, as Markdown.
 
-    GITHUB_TOKEN=... python3 .github/scripts/triage.py --repo theorem-labs/oss-verify --pr 123 [--summary <file>] [--full]
-    python3 .github/scripts/triage.py --repo theorem-labs/oss-verify --local projects/<name> --login <you> [--body <file>]
+    GITHUB_TOKEN=... uv run python3 .github/scripts/triage.py --repo theorem-labs/oss-verify --pr 123 \
+        [--summary <file>] [--full]
+    uv run python3 .github/scripts/triage.py --repo theorem-labs/oss-verify --local projects/<name> --login <you> \
+        [--body <file>]
 
 Run by .github/workflows/triage.yaml, or by hand to see what it would say. Prints nothing when the pull request
 does not touch projects/. With --local, it writes the comment for a projects/<name>/ on this machine before any pull
@@ -18,7 +20,7 @@ unticked). Without GITHUB_TOKEN, GitHub limits anonymous requests, and the rows 
 checked".
 
 The comment on the pull request is public, and carries only the rows in PUBLIC_ROWS: whether the repository is a fork,
-the license, whether an active maintainer opened it, its scope, tools/validate.py and the checklist. The full table
+the license, whether an active maintainer opened it, its scope, oss-verify validate and the checklist. The full table
 has every row, and is for Theorem's reviewers: --summary appends it to a file (the workflow's job summary) in the
 same run, so that no API request is made twice, and --full prints it instead of the comment (the review reads it).
 
@@ -30,7 +32,7 @@ Not ported from OSS Scanner's triage: the row that ranks the repository's packag
 PyPI, npm and crates.io. The builder builds only the languages docs/project-yaml.md lists, whose libraries those
 registries do not carry today.
 
-Requires PyYAML, as tools/validate.py does.
+Requires PyYAML, as oss-verify validate does.
 """
 from __future__ import annotations
 
@@ -51,9 +53,8 @@ from datetime import datetime, timedelta, timezone
 from typing import NamedTuple
 from urllib.parse import quote, urlencode
 
-# tools/validate.py holds the enrollment rules (and imports PyYAML).
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "tools"))
-import validate
+# oss-verify validate holds the enrollment rules (and imports PyYAML).
+from oss_verify import validate
 
 API = "https://api.github.com"
 RAW = "application/vnd.github.raw"
@@ -65,7 +66,7 @@ MAX_TEXT_BYTES = 256 * 1024
 MARKER = "<!-- oss-verify-triage -->"
 # The rows the public comment carries, by their check's name, in the order of the full table. The full table has every
 # row, and goes to Theorem's reviewers alone (--summary, --full).
-PUBLIC_ROWS = ("Fork", "License", "Opened by an active maintainer", "Pull request scope", "`tools/validate.py`",
+PUBLIC_ROWS = ("Fork", "License", "Opened by an active maintainer", "Pull request scope", "`oss-verify validate`",
                "Checklist")
 COMMENT_FOOTER = "<sub>Automated, from public data. It decides nothing.</sub>\n"
 
@@ -374,7 +375,7 @@ def accepted_limit(name: str, copied: frozenset[str] = frozenset()) -> int | Non
 
 
 def fetch_project(gh: GitHub, repo: str, sha: str, name: str, directory: pathlib.Path) -> bool:
-    """Recreate projects/<name>/ as it is at commit `sha` in `directory`, so tools/validate.py can check it like a
+    """Recreate projects/<name>/ as it is at commit `sha` in `directory`, so oss-verify validate can check it like a
     checkout. Return False if the pull request has no such directory (it withdraws the project).
 
     In a directory with more files than validate.py accepts, only project.yaml is downloaded and the other files are
@@ -882,7 +883,7 @@ def report(gh: GitHub, repo: str, name: str, directory: pathlib.Path, login: str
     rows += [
         row("Proofs index", proofs_index_row, gh, name),
         row("Pull request scope", scope_row, names, outside, changed_files),
-        row("`tools/validate.py`", validate_row, problems, warnings),
+        row("`oss-verify validate`", validate_row, problems, warnings),
         row("Checklist", checklist_row, body),
     ]
     opened = f"Repository: {described} · opened by {code(login)}\n\n"

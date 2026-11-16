@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 Make the builder trust no root of eMudhra's emSign CAs or of Comodo's AAA Certificate Services. The Dockerfile runs
-this once, as root, in the builder image (python3 distrust-roots.py); tools/tests/test_distrust_roots.py tests it.
+this once, as root, in the builder image (python3 distrust-roots.py); tests/test_distrust_roots.py tests it.
 
     1. Disable the roots in Alpine's store: prefix their lines in /etc/ca-certificates.conf with "!" and run
        update-ca-certificates, which writes /etc/ssl/certs/ca-certificates.crt again, removes their links in

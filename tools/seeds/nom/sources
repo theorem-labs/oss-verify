@@ -1,5 +1,0 @@
-# Ported from the Rust build of the oss-fuzz-theorems 2026.10 release (tools/seeds/languages.tsv); do not edit.
-# kind	path	arguments: see lay-out-sources
-tree	ext/nom-fuzz_arithmetic/src	upstream/nom
-copy	targets/nom-fuzz_arithmetic/Cargo.lock	Cargo.lock
-crates	ext/nom-fuzz_arithmetic/vendor	targets/nom-fuzz_arithmetic/Cargo.lock	ext/nom-fuzz_arithmetic/src	fuzz	fuzz_arithmetic

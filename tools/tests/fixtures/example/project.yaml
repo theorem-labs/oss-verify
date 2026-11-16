@@ -1,4 +1,0 @@
-# A test project for tools/tests/test_builder.py. Its source is in this directory, not in a repository.
-repo: https://example.invalid/example
-primary_contact: n/a
-language: c++

@@ -1,4 +1,4 @@
-# Written by tools/seeds/seeded_projects.py; do not edit. Every OSS-Fuzz project at the commit of the oss-fuzz-theorems 2026.10 release: whether we seeded it, whether its seeded build reproduces the release's binaries (tools/seeds/builds.tsv), and why not. A seeded project's fuzz targets are in its project.yaml, in tools/seeds/<name>/ or projects/<name>/.
+# Written by src/oss_verify/seeded_projects.py; do not edit. Every OSS-Fuzz project at the commit of the oss-fuzz-theorems 2026.10 release: whether we seeded it, whether its seeded build reproduces the release's binaries (seeds/builds.tsv), and why not. A seeded project's fuzz targets are in its project.yaml, in seeds/<name>/ or projects/<name>/.
 project	seedable	build	build notes	reason or notes
 abseil-cpp	yes	reproduces	all binaries match the release's	string_escape_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; string_utilities_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
 abseil-py	no	-	-	the release did not build it (status language-pending: python)

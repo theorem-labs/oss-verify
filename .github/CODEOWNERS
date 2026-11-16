@@ -2,26 +2,31 @@
 # the draft reply to an issue says (.github/workflows/build.yaml reads main's copies), and
 # .claude/skills/write-to-maintainer/ says how every message to a maintainer is written and checked.
 #
-# The other lines own each file that changes what a workflow runs, whoever opens the pull request:
+# The other lines own each file that changes what a workflow runs or what a verdict is, whoever opens the pull request:
 #   /.github/                     the workflows and the scripts they run.
-#   /tools/                       the tools the workflows run (tools/check, tools/validate.py) and their tests.
-#   /infra/                       the toolchains tools/check builds with (infra/toolchains.tsv, infra/base-builder/).
+#   /src/                         the oss_verify package: `oss-verify check` and `oss-verify validate`.
+#   /infra/                       the toolchains `oss-verify check` builds with (infra/toolchains.tsv,
+#                                 infra/base-builder/), and the code it runs in build containers (infra/checks/).
+#   /seeds/                       the seeded projects, which `oss-verify check` builds as it builds projects/.
 #   .claude/, CLAUDE*.md,         what Claude Code loads in the review job, which holds an identity token: settings
 #   AGENTS*.md (at any depth),    and hooks, skills, instructions and MCP servers.
 #   /.mcp.json
-#   /*.py and pytest's            what python3 -m pytest in tests.yaml loads from the top of the checkout. Each
-#   configuration files           python3 -c and -m of the workflows runs with -P, so no new directory at the top
-#                                 shadows a module.
+#   /*.py, /pyproject.toml,       what python3 and pytest load from the top of the checkout, and the Python and
+#   /uv.lock, /.python-version    dependency versions that `uv run oss-verify` installs. Each python3 -c and -m of
+#   and pytest's configuration    the workflows runs with -P, so no new directory at the top shadows a module, and
+#   files                         tests.yaml runs pytest with -c pyproject.toml, so it reads no other configuration
+#                                 file.
 # A pull request from a fork that changes no file under projects/ passes the enrollment checks, and tests.yaml runs the
 # fork's own copy of itself, so these lines are what keeps such a change from merging on one person's reading.
 #
 # The ruleset of main requires a code owner's approval, so a change to any of these files, or to this file, which says
 # who owns them, needs the approval of a member of @theorem-labs/engineering, a team of people. No other file has an
-# owner, so no other pull request needs a code owner. These lines stay the last patterns of the file: the last pattern
-# that matches a file decides its owner.
+# owner, so no other pull request needs a code owner: a change to tests/, docs/ or one projects/<name>/ needs none.
+# These lines stay the last patterns of the file: the last pattern that matches a file decides its owner.
 /.github/ @theorem-labs/engineering
-/tools/ @theorem-labs/engineering
+/src/ @theorem-labs/engineering
 /infra/ @theorem-labs/engineering
+/seeds/ @theorem-labs/engineering
 .claude/ @theorem-labs/engineering
 CLAUDE*.md @theorem-labs/engineering
 AGENTS*.md @theorem-labs/engineering
@@ -30,6 +35,8 @@ AGENTS*.md @theorem-labs/engineering
 /pytest.ini @theorem-labs/engineering
 /.pytest.ini @theorem-labs/engineering
 /pyproject.toml @theorem-labs/engineering
+/uv.lock @theorem-labs/engineering
+/.python-version @theorem-labs/engineering
 /setup.cfg @theorem-labs/engineering
 /tox.ini @theorem-labs/engineering
 /review.md @theorem-labs/engineering

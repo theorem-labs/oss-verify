@@ -1,0 +1,5 @@
+# Ported from the Rust build of the oss-fuzz-theorems 2026.10 release (seeds/languages.tsv); do not edit.
+# kind	path	arguments: see lay-out-sources
+tree	ext/rust-semver-parser-parse/src	upstream/semver-parser
+copy	targets/rust-semver-parser-parse/Cargo.lock	Cargo.lock
+crates	ext/rust-semver-parser-parse/vendor	targets/rust-semver-parser-parse/Cargo.lock	ext/rust-semver-parser-parse/src	fuzz	parse

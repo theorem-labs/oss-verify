@@ -1,0 +1,448 @@
+# Copyright 2026 Anthropic PBC
+# SPDX-License-Identifier: Apache-2.0
+# Modified 2026 by Theorem Labs, PBC: builds a project's fuzz targets for OSS Verify (each build compiled with no
+# network, the fuzz targets found by their symbol table, a build manifest written), with --twice and --lock; the
+# virtual machine mode (--qemu) is not ported.
+"""
+Build a project's fuzz targets the way we do, collect the binaries, and write the build manifest.
+
+    oss-verify check <name>                    build projects/<name>: every build its project.yaml asks for
+    oss-verify check --build asan <name>       only some builds (repeat --build; plain, ubsan, asan, asan-ubsan); out/
+                                               then holds only these builds' binaries
+    oss-verify check --twice <name>            then build it all again from scratch, and compare every byte
+    oss-verify check --lock <file> <name>      compare with a lock: a manifest from an earlier check, or a harness.yaml
+                                               (repeat --lock to compare with several, such as one harness.yaml each)
+    oss-verify check --toolchain <image> <name>
+                                               build FROM this toolchain image, not the lock's or the newest
+    oss-verify check --no-shell <name>         stop after the build instead of opening a shell
+    oss-verify check --summary <file> <name>   also write the binaries of the first build as a Markdown table to <file>
+    oss-verify check --checks <file> <name>    then measure what the fuzz targets' checks catch, and check every binary,
+                                               and write it as Markdown to <file>: which abort() checks no seed input
+                                               reaches, which breakage patches (project.yaml's mutants) no seed input
+                                               catches (src/oss_verify/check_checks.py), and the four checks of each
+                                               binary (src/oss_verify/check_binaries.py)
+    oss-verify check --print-toolchain <name>  print the toolchain image `oss-verify check <name>` builds FROM, and
+                                               build nothing
+
+It runs these steps:
+
+    1. Check projects/<name>/ against the enrollment rules (oss-verify validate).
+    2. For a library in infra/private-libraries.tsv, and for no other, mint a read-only token for that one
+       repository and this one build (infra/github-read-token, or OSS_VERIFY_GIT_TOKEN_COMMAND). Every other
+       library is read with no credential at all, as it always has been.
+    3. Resolve repo#ref to a full commit id (git ls-remote), unless the ref is one. With --lock, the lock's commit.
+    4. Build the builder image from infra/base-builder, FROM a toolchain image: the lock's, with --lock; else the newest
+       for the project's language in infra/toolchains.tsv (docs/build-contract.md, "Toolchains").
+    5. Build the project's Dockerfile on it with --build-arg COMMIT=<commit> (and REPO, BASE_BUILDER). The network
+       is available. The build context is projects/<name>/, or your repository at that commit if dockerfile: is set.
+       A private library's token goes with it as the BuildKit secret oss-verify-git-token, which its Dockerfile
+       mounts on the fetch step; it is in no build argument, no layer and no log.
+    6. Run `compile` once per build, each in a fresh container with no network (docker run --network=none). With
+       --checks, the first build also records each fuzz target's link (infra/base-builder/link-fuzz-target).
+    7. Find the fuzz targets: executables in $OUT whose symbol table defines LLVMFuzzerTestOneInput, present in every
+       build (or those fuzz_targets lists). Collect each one's published (stripped) bytes as
+       out/<target>/<target>.<build>, and read the size of its .text section and whether it is statically linked (no
+       PT_INTERP or PT_DYNAMIC program header).
+    8. Write manifest.yaml: the repository, ref and commit, this repository's commit, the builder and the toolchain
+       image it was built FROM, the git checkouts in the image, and the file, size and SHA-256 of every target in
+       every build, with the .text size and linkage of each one. List each binary with these values; stop if one is
+       not statically linked.
+    9. With --twice, build everything again from scratch (steps 4 to 7, with docker build --no-cache), compare every
+       byte, and only then add the rebuild block to manifest.yaml: this host, the time, the second builder, the file,
+       size and SHA-256 of every binary the second build made, and result: identical or differs.
+   10. With --checks, check each binary (src/oss_verify/check_binaries.py; docs/build-contract.md, "The checks of the
+       binaries"): its ELF header and instructions, its system calls against the process model of the published
+       proofs, its quiet twin, and the code it links uninstrumented. Write the results into manifest.yaml (each
+       build's uninstrumented list, and the binary_checks block). Then measure the fuzz targets' checks on their seed
+       inputs (src/oss_verify/check_checks.py; docs/build-contract.md, "The checks of a fuzz target"). What --checks
+       finds changes no exit code.
+   11. Open a shell in the project image with no network and out/ at /out, unless --no-shell.
+
+Everything is kept in ~/.cache/oss-verify-check/<name>, or in --dir if given. Each run replaces out/ there, so the
+binaries of an earlier run's other builds are gone after a run with --build.
+
+When it ends, however it ends (Ctrl-C, SIGTERM and SIGHUP among them), it removes each container it started that is
+still there: a container outlives its docker run client. Its containers keep no log on the Docker host.
+
+Security note: the project's Dockerfile is built with network access, as `docker build` would. Check a project from
+someone you don't trust on a machine with nothing to lose.
+
+Exit codes: 0 if the project builds (and, with --twice or --lock, every byte matches); 1 if it does not build; 2 if
+projects/<name>/ breaks the enrollment rules, or a fuzz target is not statically linked; 3 if it builds but the bytes
+differ (--twice or --lock).
+
+Requires git, Docker (with the toolchain image available) and PyYAML (on Ubuntu, apt install python3-yaml).
+"""
+import argparse
+import contextlib
+import datetime
+import os
+import pathlib
+import socket
+import subprocess
+import sys
+
+from . import check_binaries
+from . import check_build
+from . import check_checks
+from . import manifest
+from . import validate
+from .check_build import Failed, Job, say, step
+
+DIFFERENT = 3
+# The bytes of a target name that the step summary shows as they are. Every other byte is shown as %XX.
+MARKDOWN_NAME = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._+-")
+
+
+def load(project):
+    """Validate a project and return its Job. Exit with code 2 if it breaks the enrollment rules.
+
+    `project` is either a name under projects/ or the path of a directory containing a project.yaml.
+    """
+    directory = pathlib.Path(project)
+    if not (directory / "project.yaml").exists() and len(directory.parts) == 1:
+        directory = validate.PROJECTS / project
+    directory = directory.absolute()
+    problems, warnings, _ = validate.check_project(directory)
+    if problems:
+        for problem in problems:
+            print(validate.printable(f"{directory.name}: {problem}"), file=sys.stderr)
+        sys.exit(2)
+    for warning in warnings:
+        say(f"{directory.name}: warning: {warning}")
+
+    config = validate.load(directory)
+    if config["language"] not in validate.BUILT_TODAY:
+        sys.exit(f"oss-verify check: {directory.name} is in {config['language']}, which the builder cannot build yet "
+                 "(docs/project-yaml.md#language)")
+    repo, _, ref = config["repo"].partition("#")
+    beside = {path.name for path in directory.iterdir()}
+    # A seeded project (primary_contact n/a) may have no build files yet: oss-verify validate only warns about it, and
+    # there is nothing to build. Like a language with no builder yet, that is not a broken enrollment rule: exit 1.
+    if "Dockerfile" not in beside and config.get("dockerfile") is None:
+        sys.exit(f"oss-verify check: {directory.name} has no Dockerfile, beside project.yaml or as dockerfile:, so "
+                 "there is nothing to build (a seeded project)")
+    return Job(
+        name=directory.name,
+        directory=directory,
+        repo=repo,
+        ref=ref,
+        dockerfile="" if "Dockerfile" in beside else config["dockerfile"],
+        builds=validate.builds_of(config),
+        fuzz_targets=config.get("fuzz_targets"),
+        # The checks in effect, if the project changes the default: the default, less what it removes, with what it adds.
+        ubsan_checks=validate.ubsan_checks_in_effect(config) if config.get("ubsan_checks") is not None else None,
+        language=config["language"],
+        mutants=config.get("mutants"),
+    )
+
+
+def toolchain_for(project):
+    """The toolchain image that `oss-verify check <project>`, with no --lock or --toolchain, builds FROM: the newest for
+    the project's language. For a project that it refuses before it builds anything (one that breaks the enrollment
+    rules, one in a language with no builder or no toolchain yet, or a seeded project with no build files yet), the
+    newest for C in infra/toolchains.tsv, so that the caller still has an image to pull."""
+    try:
+        # load() prints its warnings on standard output, which holds only the image here.
+        with contextlib.redirect_stdout(sys.stderr):
+            job = load(project)
+        return check_build.newest_toolchain(job.language)
+    except (SystemExit, Failed):
+        print(f"oss-verify check refuses {project} before it builds anything: the newest C toolchain "
+              "(infra/toolchains.tsv)", file=sys.stderr)
+        return check_build.newest_toolchain()
+
+
+def ubsan_settings(job, toolchain):
+    """(checks, left out, left out of C compiles) for the UBSan builds on this toolchain, or None for its fixed flags.
+    The checks keep those of validate.TRAP_EXCEPTIONS that they name, which the toolchain makes through its trap-only
+    handler in the ubsan build (infra/base-builder/toolchain.sh); those they do not name are left out.
+    Exit with code 2 if the project sets ubsan_checks and the toolchain keeps the release's fixed flags."""
+    if check_build.ubsan_mode(toolchain) == "fixed":
+        if job.ubsan_checks is not None:
+            print(f"{job.name}: project.yaml sets ubsan_checks, but the toolchain {toolchain} keeps the release's "
+                  "fixed UBSan flags, so that its binaries are the release's. Leave out ubsan_checks, or build with a "
+                  "toolchain whose row in infra/toolchains.tsv says checks (docs/project-yaml.md#ubsan_checks).",
+                  file=sys.stderr)
+            sys.exit(2)
+        return None
+    checks = job.ubsan_checks or validate.default_ubsan_checks(job.language)
+    # As OSS-Fuzz does, a c++ project's C compiles leave out function (those of a c or python project do not have it).
+    c_left_out = [check for check in validate.C_COMPILE_EXCLUDED if check in checks] if job.language == "c++" else []
+    return (list(checks), sorted(set(validate.TRAP_EXCEPTIONS) - set(checks)), c_left_out)
+
+
+def build_all(job, commit, work, toolchain, home, suffix="", no_cache=False, record=False, token=None):
+    """Build the images, FROM the toolchain image `toolchain`, compile every build and collect the fuzz targets into
+    work/out. `home` is the run's work directory: the project image's tag names it and is added to home/images before
+    the image is built, and every container carries its work_label(). With `record`, each build records its links for
+    the checks of the binaries (check_build.compile_build). `token`, for a library in infra/private-libraries.tsv, is
+    the read-only token this build fetches it with; it reaches docker as a BuildKit secret and nothing else.
+
+    Return (builder tag, project tag, targets, entries). Raise Failed if any step fails.
+    """
+    ubsan = ubsan_settings(job, toolchain)
+    builder = check_build.build_builder(toolchain, suffix, no_cache)
+    tag = check_build.project_tag(job, commit, builder, home, suffix)
+    check_build.record_image(home / check_build.IMAGES, tag)
+    check_build.build_project(job, commit, builder, tag, work, no_cache, token)
+    raw = {}
+    for build in job.builds:
+        raw[build] = work / "raw" / build
+        check_build.compile_build(tag, build, validate.BUILDS[build], raw[build], ubsan,
+                                  labels=check_build.work_label(home), record=record)
+
+    step("find the fuzz targets")
+    found = {build: manifest.discover(directory) for build, directory in raw.items()}
+    targets, problems = manifest.resolve_targets(found, job.fuzz_targets)
+    for build, names in found.items():
+        say(f"{build}: {', '.join(names) or 'no fuzz target'}")
+    entries, missing = manifest.collect(raw, targets, work / "out")
+    if problems or missing:
+        raise Failed("\n  ".join(["the fuzz targets are not right:", *problems, *missing]))
+    return builder, tag, targets, entries
+
+
+def shell(tag, out, home):
+    """Open bash in the project image, as compile sees it, with no network and the collected binaries at /out."""
+    say(f"\n── a shell in {tag}, with no network; /out holds the binaries collected. exit or Ctrl-D ends it ──\n")
+    container = ["--rm", "-i", "--init", "--network", "none", *check_build.work_label(home), "-v", f"{out}:/out:ro"]
+    if sys.stdin.isatty():
+        container.append("-t")
+    subprocess.call(["docker", "run", *container, tag, "bash"])
+
+
+def text_size(layout):
+    """A binary's .text size, with thousands separators, or unknown."""
+    return "unknown" if layout["text_bytes"] is None else f"{layout['text_bytes']:,}"
+
+
+def markdown_name(name):
+    """A target name as Markdown code. A pull request chooses it, so every byte but A-Z a-z 0-9 . _ + - is shown as
+    %XX: no name can end the code span, split the table row or become markup."""
+    encoded = "".join(chr(byte) if byte in MARKDOWN_NAME else f"%{byte:02X}" for byte in os.fsencode(name))
+    return f"`{encoded}`"
+
+
+def summary_table(targets, builds, entries, layouts):
+    """A Markdown table with one row for each binary: target, build, file bytes, .text bytes, and whether it is static."""
+    rows = ["| target | build | file bytes | `.text` bytes | static |", "|---|---|---:|---:|---|"]
+    for target in targets:
+        for build in builds:
+            layout = layouts[target][build]
+            static = {True: "yes", False: "no"}.get(layout["static"], "unknown")
+            rows.append(f"| {markdown_name(target)} | {build} | {entries[target][build]['bytes']:,} | "
+                        f"{text_size(layout)} | {static} |")
+    return "\n".join(rows) + "\n"
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="oss-verify check", description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("project", help="a name under projects/, or the path of a directory with a project.yaml")
+    parser.add_argument("--build", action="append", choices=list(validate.BUILDS), help="only this build (repeatable)")
+    parser.add_argument("--twice", action="store_true", help="build everything a second time from scratch and compare")
+    parser.add_argument("--lock", type=pathlib.Path, action="append",
+                        help="compare with this lock (a manifest or a harness.yaml); repeatable")
+    parser.add_argument("--toolchain", help="build FROM this toolchain image (default: the lock's, else the newest)")
+    parser.add_argument("--no-shell", action="store_true", help="stop after the build")
+    parser.add_argument("--summary", type=pathlib.Path,
+                        help="also write the binaries of the first build to this file, as a Markdown table")
+    parser.add_argument("--checks", type=pathlib.Path,
+                        help="then measure what the fuzz targets' checks catch, and write it to this file as Markdown")
+    parser.add_argument("--checks-budget", type=int, default=check_checks.BUDGET_MINUTES, metavar="MINUTES",
+                        help="the most time the breakages of --checks may take together (default: %(default)s)")
+    parser.add_argument("--dir", type=pathlib.Path, help=f"where to work (default: {check_build.CACHE}/<name>)")
+    parser.add_argument("--print-toolchain", action="store_true",
+                        help="print the toolchain image the build is FROM, and build nothing (exit 0)")
+    options = parser.parse_args(argv)
+
+    if options.print_toolchain:
+        print(toolchain_for(options.project))
+        return 0
+
+    job = load(options.project)
+    if options.build:
+        unknown = [build for build in options.build if build not in job.builds]
+        if unknown:
+            sys.exit(f"oss-verify check: {job.name} has no {', '.join(unknown)} build (it has {', '.join(job.builds)})")
+        job.builds = [build for build in job.builds if build in options.build]
+    work = (options.dir or check_build.CACHE / job.name).absolute()
+    work.mkdir(parents=True, exist_ok=True, mode=0o700)
+    (work / check_build.IMAGES).unlink(missing_ok=True)  # the tags of this run's images only
+
+    pins, locked, locked_toolchain = None, None, None
+    for lock in options.lock or []:
+        try:
+            commit, more, image = manifest.load_lock(lock)
+        except manifest.LockError as error:
+            sys.exit(f"oss-verify check: {error}")
+        if commit and locked and commit != locked:
+            sys.exit(f"oss-verify check: the locks name two commits, {locked} and {commit}")
+        if image and locked_toolchain and image != locked_toolchain:
+            sys.exit(f"oss-verify check: the locks name two toolchains, {locked_toolchain} and {image}")
+        for (target, build), pin in more.items():
+            previous = (pins or {}).get((target, build))
+            if previous is not None and previous["sha256"] != pin["sha256"]:
+                sys.exit(f"oss-verify check: the locks name two sha256 values for {target}.{build}: "
+                         f"{previous['sha256']} and {pin['sha256']}")
+        locked = commit or locked
+        locked_toolchain = image or locked_toolchain
+        pins = {**(pins or {}), **more}
+    try:
+        toolchain = options.toolchain or locked_toolchain or check_build.newest_toolchain(job.language)
+        languages = check_build.languages_of(toolchain)
+    except Failed as failure:
+        sys.exit(f"oss-verify check: {failure}")
+    if languages is not None and job.language not in languages:
+        sys.exit(f"oss-verify check: the toolchain {toolchain} builds {', '.join(languages)}, not {job.language} "
+                 "(infra/toolchains.tsv)")
+    why = "--toolchain" if options.toolchain else "the lock's" if locked_toolchain else f"the newest for {job.language}"
+    try:
+        ubsan_settings(job, toolchain)  # before anything is fetched or built: it exits if the toolchain refuses them
+    except Failed as failure:
+        sys.exit(f"oss-verify check: {failure}")
+
+    try:
+        # A library in infra/private-libraries.tsv, and no other, is fetched with a credential: one token, minted
+        # here for this build alone, read-only and narrowed to that one repository. Nothing is minted for every
+        # other project, so a public build takes the no-credential path it has always taken and never waits on a
+        # token service.
+        token = None
+        why_private = check_build.private_reason(job.repo)
+        if why_private is not None:
+            step(f"mint a read-only token for {check_build.normalised_repo(job.repo)}")
+            token = check_build.mint_token(job.repo)
+            say(f"infra/private-libraries.tsv: {why_private}")
+            say("the token is read-only, is for this repository and this build only, and goes to docker build as "
+                "the secret oss-verify-git-token; it is in no build argument, no layer, no manifest and no log")
+        if locked:
+            commit = locked
+            step(f"build {job.repo} at locked commit {commit}")
+        else:
+            step(f"resolve {job.repo}" + (f"#{job.ref}" if job.ref else " (default branch)"))
+            commit = check_build.resolve(job.repo, job.ref, token)
+            say(f"{job.ref or 'the default branch'} is {commit}")
+        say(f"toolchain: {toolchain} ({why})")
+        builder, tag, targets, entries = build_all(job, commit, work, toolchain, work, record=bool(options.checks),
+                                                   token=token)
+    except Failed as failure:
+        say(f"\nBUILD FAILED: {failure}")
+        return 1
+
+    layouts = manifest.layouts(work / "out", entries)
+    data = manifest.manifest(
+        project=job.name, repo=job.repo, ref=job.ref, commit=commit, oss_verify=check_build.oss_verify_state(job),
+        builder={"toolchain": toolchain, "image": check_build.image_id(builder),
+                 "project_image": check_build.image_id(tag)},
+        sources=check_build.sources(tag, labels=check_build.work_label(work)), builds=job.builds, targets=targets,
+        entries=entries, layouts=layouts,
+    )
+    manifest.write_manifest(work / "manifest.yaml", data)
+    step("built")
+    for target in targets:
+        for build in job.builds:
+            entry, layout = entries[target][build], layouts[target][build]
+            linkage = {True: "static", False: "dynamic"}.get(layout["static"], "unknown")
+            say(f"  out/{target}/{entry['file']:<40} {entry['bytes']:>10,} bytes  {text_size(layout):>10} .text  "
+                f"{linkage:<7}  sha256 {entry['sha256']}")
+    say(f"manifest: {work / 'manifest.yaml'}")
+    if options.summary:
+        options.summary.write_text(summary_table(targets, job.builds, entries, layouts), encoding="utf-8")
+    not_static = [(f"out/{target}/{entries[target][build]['file']}", layouts[target][build]["static"])
+                  for target in targets for build in job.builds if layouts[target][build]["static"] is not True]
+    for binary, static in not_static:
+        why = "is dynamically linked" if static is False else "has program headers that cannot be read"
+        print(validate.printable(f"{job.name}: {binary} {why}: a fuzz target must be statically linked (no PT_INTERP "
+                                 "or PT_DYNAMIC program header)"), file=sys.stderr)
+    if not_static:
+        return 2
+
+    code = 0
+    if options.twice:
+        try:
+            step("--twice: everything again, from scratch")
+            # A fresh token: the first build's may have been minted an hour ago, and a token that expires mid-build
+            # fails as an authorisation error, which is the one failure this path must not invent.
+            builder_again, tag_again, targets_again, again = build_all(
+                job, commit, work / "twice", toolchain, work, "-twice", no_cache=True,
+                token=check_build.mint_token(job.repo) if token else None)
+            builder_ids = {"toolchain": toolchain, "image": check_build.image_id(builder_again),
+                           "project_image": check_build.image_id(tag_again)}
+        except Failed as failure:
+            say(f"\nTHE SECOND BUILD FAILED: {failure}")
+            return 1
+        # The rebuild block is written only now, after the comparison, and also when the builds differ.
+        data["rebuild"], differences, matched = manifest.rebuild(
+            entries, again, targets_again, host=socket.gethostname(),
+            at=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            builder=builder_ids, builds=job.builds)
+        manifest.write_manifest(work / "manifest.yaml", data)
+        say(f"manifest: {work / 'manifest.yaml'}, with the rebuild block (result: {data['rebuild']['result']})")
+        if differences:
+            say("\nNOT REPRODUCIBLE: the second build differs:\n  " + "\n  ".join(differences))
+            code = DIFFERENT
+        else:
+            say(f"\nreproducible: all {matched} binaries are byte for byte the same in the second build")
+    if pins is not None:
+        differences, extras, matched = manifest.compare(entries, pins, job.builds)
+        if extras:
+            say("\nnot in the lock (not compared):\n  " + "\n  ".join(extras))
+        if differences:
+            say(f"\nDIFFERENT FROM THE LOCK ({', '.join(map(str, options.lock))}):\n  " + "\n  ".join(differences))
+            code = DIFFERENT
+        elif matched:
+            say(f"\nmatches the lock: all {matched} binaries it pins for these builds are byte for byte the same")
+        else:
+            say(f"\nTHE LOCK PINS NONE OF THESE BUILDS ({', '.join(map(str, options.lock))})")
+            code = DIFFERENT
+
+    if options.checks:
+        # The checks of the binaries, into the manifest: per build, the uninstrumented list in the harness.yaml shape,
+        # and the four results in its binary_checks block.
+        try:
+            block, uninstrumented = check_binaries.binary_checks(job, tag, toolchain, targets, entries,
+                                                                 data["sources"], work,
+                                                                 labels=check_build.work_label(work))
+            for target, by_build in uninstrumented.items():
+                for build, listing in by_build.items():
+                    # No list where the check could not make a whole one: the facts must never say that a build links
+                    # less uninstrumented code than it does, and the schema asks for at least one entry.
+                    if listing:
+                        data["targets"][target]["builds"][build]["uninstrumented"] = listing
+            data["binary_checks"] = block
+            manifest.write_manifest(work / "manifest.yaml", data)
+            binaries = check_binaries.report(block, uninstrumented, job.builds)
+        # Any error: the step must never change oss-verify check's exit status.
+        except Exception as failure:
+            binaries = ("### The checks of the binaries\n\n`oss-verify check --checks` could not run them: "
+                        f"{check_checks.code(f'{type(failure).__name__}: {failure}', 1500)}\n")
+        try:
+            report = check_checks.checks(job, tag, targets, work, work / "raw", labels=check_build.work_label(work),
+                                         ubsan=ubsan_settings(job, toolchain), budget=options.checks_budget)
+        # Any error: the step must never change oss-verify check's exit status.
+        except Exception as failure:
+            report = ("### The checks of the fuzz targets\n\n`oss-verify check --checks` could not measure them: "
+                      f"{check_checks.code(f'{type(failure).__name__}: {failure}', 1500)}\n")
+        report = f"{report.rstrip()}\n\n{binaries}"
+        step("--checks: what the fuzz targets' checks catch, and the checks of the binaries")
+        say(report)
+        options.checks.write_text(report, encoding="utf-8")
+
+    if not options.no_shell:
+        shell(tag, work / "out", work)
+    return code
+
+
+def run(argv=None):
+    """main() as a command runs it: every container that the run started is stopped when it ends, and an interrupt
+    exits 130."""
+    with check_build.containers_stopped():
+        try:
+            return main(argv)
+        except KeyboardInterrupt:
+            return 130
+
+
+if __name__ == "__main__":
+    sys.exit(run())

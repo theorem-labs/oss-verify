@@ -44,7 +44,7 @@ sanitizers: [address, undefined]
 #   reason: "why the project's checks differ from the default"
 
 # Optional. The fuzz targets to verify, as build.sh names them in $OUT. Omit it to verify every fuzz target the build
-# produces; tools/check lists them.
+# produces; oss-verify check lists them.
 fuzz_targets:
   - example_fuzzer
 

@@ -7,20 +7,22 @@ may carry it, cut at LIMIT characters when LIMIT is given:
     .github/scripts/review-neutralize [--drop-markers] [LIMIT] < text
 
 .github/scripts/review-body runs it, with --drop-markers, on the review's text and on the checks' report, which shows
-names that the pull request chooses; the comment job posts that comment as oss-verify[bot]. .github/scripts/review-held
-runs it on the title and the text of each held finding, which the hold job posts as the same App in the private
-repository of the disclosure route. Each must notify no one, link no issue or pull request, and hide nothing that
-follows it, and the comment must carry no verdict line but the job's own. This is gh-aw's output sanitization
-("@mention Neutralization" and "Bot Trigger Protection", https://github.github.com/gh-aw/introduction/architecture/),
-in five steps:
+names that the pull request chooses; the comment job posts that comment as oss-verify[bot].
+.github/scripts/review-verdict runs it, with --drop-markers, on each reason of the review's verdicts, which the comment
+job posts in the summary of the check run Enrollment review as the same App. .github/scripts/review-held runs it on the
+title and the text of each held finding, which the hold job posts as the same App in the private repository of the
+disclosure route. Each must notify no one, link no issue or pull request, and hide nothing that follows it, and the
+comment must carry no marker line but the job's own. This is gh-aw's output sanitization ("@mention Neutralization" and
+"Bot Trigger Protection", https://github.github.com/gh-aw/introduction/architecture/), in five steps:
 
 1. Each character reference (&#64; &#x40; &commat;, and a numeric one with no `;`, which an HTML parser decodes in a
    raw HTML block) whose characters are ASCII letters or digits or @ # / : . _ - is written as those characters, until
    none is left. Steps 3 to 5 then see each @, # and URL that GitHub would render. Every other reference stays as it
    is written, so code such as `p = &x;` or `&lt;stdio.h&gt;` is unchanged.
 2. With --drop-markers, each line that holds oss-verify-verdict, oss-verify-review or oss-verify-meta, in any case, is
-   dropped: those are the marker and header lines of the review comment, which the comment job and the inbound watcher
-   read, and only review-body writes them.
+   dropped: oss-verify-review is the marker of the review comment, which the comment job reads, and only review-body
+   writes it. The stream's inbound watcher (bin/ossv-pr-watch) reads the verdict marker, so a forged verdict line is
+   dropped too.
 3. A word joiner (U+2060), which shows as nothing, goes after every @, so that no @ is followed by a name: GitHub then
    renders no mention, in code or out of it (an @ after a backtick that ends a code span is a mention too).
 4. A word joiner goes between # and a digit (#12, owner/repo#12), between GH- and a digit, and between the /issues/,
@@ -32,7 +34,7 @@ in five steps:
 
 GitHub's markdown API renders &#64;octocat, &commat;octocat, `x`@octocat, #1, GH-1 and an issue URL as a mention or an
 issue link, hides what follows an unclosed <!--, <!DOCTYPE, <![CDATA[ or <?, and does none of these with the word
-joiners of steps 3 to 5 (measured on 2026-11-02; tools/tests/test_check_checks.py, ModelText). The text is cut after
+joiners of steps 3 to 5 (measured on 2026-11-02; tests/test_check_checks.py, ModelText). The text is cut after
 these steps, so that the joiners cannot take the text over a limit that GitHub sets."""
 import html
 import re

@@ -35,7 +35,8 @@
 #      "sanitizer": {"c": [<each word of the flags a C compile gets>], "c++": [<a C++ compile's>]},
 #      "ubsan": {"c": [<those of them that are the UndefinedBehaviorSanitizer's>], "c++": [...]}}
 #
-# tools/check --checks sets it for its first build. A build that records makes the same binaries as one that does not.
+# oss-verify check --checks sets it for its first build. A build that records makes the same binaries as one that does
+# not.
 set -euo pipefail
 
 LIB=/usr/local/lib/oss-verify
@@ -93,9 +94,9 @@ done
 "$CHOST-ar" rcs "$OV/libFuzzingEngine.a" "$OV/cli.o" "$OV/adapter.o"
 LIB_FUZZING_ENGINE=$OV/libFuzzingEngine.a
 
-# With OV_RECORD=1 (tools/check --checks), link-fuzz-target records each link for the checks of the binaries and links
-# a quiet twin with the quiet driver: each driver object compiled again with -DHARNESS_QUIET, as <object>-quiet.o, so
-# that cli.c's DIAG and the adapter's emit_printf (emit.h) write nothing; and record-compile, through a front before
+# With OV_RECORD=1 (oss-verify check --checks), link-fuzz-target records each link for the checks of the binaries and
+# links a quiet twin with the quiet driver: each driver object compiled again with -DHARNESS_QUIET, as <object>-quiet.o,
+# so that cli.c's DIAG and the adapter's emit_printf (emit.h) write nothing; and record-compile, through a front before
 # each compiler shim, records each compile of build.sh (below, before build.sh runs). The records reach $OUT/.records/
 # at the end. They change no byte of the binaries.
 OV_RECORDS=""
@@ -107,8 +108,9 @@ if [ "${OV_RECORD:-}" = 1 ]; then
   done
   "$DRVCC" $BASE_CFLAGS -DHARNESS_QUIET -DOV_ALLOCATION_COUNTING -c -I"$LIB/driver" "$LIB/driver/allocation_failure.c" \
     -o "$OV/allocation_counting-quiet.o"
-  # The build's own sanitizer flags, by language, which tools/check_links.py judges each recorded compile by ($SAN,
-  # with c_exclude for C), and of them the UndefinedBehaviorSanitizer's ($UBSAN, in the ubsan and asan-ubsan builds).
+  # The build's own sanitizer flags, by language, which src/oss_verify/check_links.py judges each recorded compile by
+  # ($SAN, with c_exclude for C), and of them the UndefinedBehaviorSanitizer's ($UBSAN, in the ubsan and asan-ubsan
+  # builds).
   json_words() {
     local word list="" separator=""
     for word in $1; do

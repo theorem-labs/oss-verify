@@ -1,5 +1,0 @@
-# Ported from the Rust build of the oss-fuzz-theorems 2026.10 release (tools/seeds/languages.tsv); do not edit.
-# kind	path	arguments: see lay-out-sources
-tree	ext/flate2-rs-fuzz_gz_roundtrip/src	upstream/flate2-rs
-copy	targets/flate2-rs-fuzz_gz_roundtrip/Cargo.lock	Cargo.lock
-crates	ext/flate2-rs-fuzz_gz_roundtrip/vendor	targets/flate2-rs-fuzz_gz_roundtrip/Cargo.lock	ext/flate2-rs-fuzz_gz_roundtrip/src	fuzz	fuzz_gz_roundtrip

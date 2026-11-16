@@ -3,13 +3,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Print each binary's two sizes, as one line of JSON, for build.yaml's record of a build:
 
-    python3 .github/scripts/binary-sizes <tools/check's work directory>
+    uv run python3 .github/scripts/binary-sizes <oss-verify check's work directory>
 
 {target: {build: {"text": <the .text section's bytes>, "exec": <the bytes the loader maps executable>}}}, from the
-manifest.yaml tools/check wrote there and the files in its out/. A value that cannot be read is null. The enrollment
-size line (1 MB of a plain binary, enroll-dispatch) is applied to the larger of the two: the .text section's size is
-what tools/check shows, and the executable segments' size is what a build cannot shrink by renaming or resizing a
-section (tools/manifest.py, executable_bytes).
+manifest.yaml oss-verify check wrote there and the files in its out/. A value that cannot be read is null. The
+enrollment size line (1 MB of a plain binary, enroll-dispatch) is applied to the larger of the two: the .text section's
+size is what oss-verify check shows, and the executable segments' size is what a build cannot shrink by renaming or
+resizing a section (src/oss_verify/manifest.py, executable_bytes).
 """
 import json
 import pathlib
@@ -17,8 +17,7 @@ import sys
 
 import yaml
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "tools"))
-import manifest  # noqa: E402
+from oss_verify import manifest
 
 
 def sizes(work):

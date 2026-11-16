@@ -1,0 +1,23 @@
+[project]
+name = "oss-verify"
+version = "0"
+description = "Build the fuzz targets of a project enrolled in OSS Verify, check them and its files."
+license = "Apache-2.0"
+requires-python = ">=3.12"
+dependencies = ["pyyaml"]
+
+[project.scripts]
+oss-verify = "oss_verify.__main__:main"
+
+# What the tests need besides the package: `uv run pytest` installs them. tests.yaml installs the same from Ubuntu's
+# packages (python3-pytest; the runner image has python3-cryptography).
+[dependency-groups]
+dev = ["pytest", "cryptography"]
+
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

@@ -1,5 +1,0 @@
-# Ported from the Rust build of the oss-fuzz-theorems 2026.10 release (tools/seeds/languages.tsv); do not edit.
-# kind	path	arguments: see lay-out-sources
-tree	ext/serde_json-from_slice/src	upstream/json
-copy	targets/serde_json-from_slice/Cargo.lock	Cargo.lock
-crates	ext/serde_json-from_slice/vendor	targets/serde_json-from_slice/Cargo.lock	ext/serde_json-from_slice/src	fuzz	from_slice

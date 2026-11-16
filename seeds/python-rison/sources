@@ -1,0 +1,16 @@
+# Ported from the Python build of the oss-fuzz-theorems 2026.10 release (seeds/languages.tsv); do not edit.
+# kind	path	arguments: see lay-out-sources
+tree	ext/python-rison-fuzz_decode/src	upstream/python-rison
+copy	targets/python-rison-fuzz_decode/fuzz_decode.py	fuzz_decode.py
+corpus	targets/python-rison-fuzz_decode/seeds	fuzz_decode_seed_corpus.zip
+file	ext/python-rison-fuzz_decode/pydist/packaging-26.3-py3-none-any.whl	https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl	d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+file	ext/python-rison-fuzz_decode/pydist/setuptools-84.0.0-py3-none-any.whl	https://files.pythonhosted.org/packages/95/9c/c510029fc6ef33a6275cd2c5d3cecd6613dfd6aa401d57c54f1c18852ccf/setuptools-84.0.0-py3-none-any.whl	51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670
+file	ext/python-rison-fuzz_decode/pydist/six-1.17.0-py2.py3-none-any.whl	https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl	4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274
+file	ext/python-rison-fuzz_decode/pydist/wheel-0.48.0-py3-none-any.whl	https://files.pythonhosted.org/packages/2e/29/69cfbb602cd91690c55d38ba9fe53e6a7e76a6fa647bf38f19c138d25449/wheel-0.48.0-py3-none-any.whl	3217dcc807155e45db462d7ef2431f5ddda0d7273b700d05a67b271ceb1287ab
+tree	ext/python-rison-fuzz_roundtrip/src	upstream/python-rison
+copy	targets/python-rison-fuzz_roundtrip/fuzz_roundtrip.py	fuzz_roundtrip.py
+corpus	targets/python-rison-fuzz_roundtrip/seeds	fuzz_roundtrip_seed_corpus.zip
+file	ext/python-rison-fuzz_roundtrip/pydist/packaging-26.3-py3-none-any.whl	https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl	d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+file	ext/python-rison-fuzz_roundtrip/pydist/setuptools-84.0.0-py3-none-any.whl	https://files.pythonhosted.org/packages/95/9c/c510029fc6ef33a6275cd2c5d3cecd6613dfd6aa401d57c54f1c18852ccf/setuptools-84.0.0-py3-none-any.whl	51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670
+file	ext/python-rison-fuzz_roundtrip/pydist/six-1.17.0-py2.py3-none-any.whl	https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl	4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274
+file	ext/python-rison-fuzz_roundtrip/pydist/wheel-0.48.0-py3-none-any.whl	https://files.pythonhosted.org/packages/2e/29/69cfbb602cd91690c55d38ba9fe53e6a7e76a6fa647bf38f19c138d25449/wheel-0.48.0-py3-none-any.whl	3217dcc807155e45db462d7ef2431f5ddda0d7273b700d05a67b271ceb1287ab

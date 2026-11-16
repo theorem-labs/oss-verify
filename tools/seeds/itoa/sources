@@ -1,5 +1,0 @@
-# Ported from the Rust build of the oss-fuzz-theorems 2026.10 release (tools/seeds/languages.tsv); do not edit.
-# kind	path	arguments: see lay-out-sources
-tree	ext/itoa-fuzz_itoa/src	upstream/itoa
-copy	targets/itoa-fuzz_itoa/Cargo.lock	Cargo.lock
-crates	ext/itoa-fuzz_itoa/vendor	targets/itoa-fuzz_itoa/Cargo.lock	ext/itoa-fuzz_itoa/src	fuzz	fuzz_itoa

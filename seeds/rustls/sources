@@ -1,0 +1,23 @@
+# Ported from the Rust build of the oss-fuzz-theorems 2026.10 release (seeds/languages.tsv); do not edit.
+# kind	path	arguments: see lay-out-sources
+tree	ext/rustls-client/src	upstream/rustls
+copy	targets/rustls-client/Cargo.lock	Cargo.lock
+crates	ext/rustls-client/vendor	targets/rustls-client/Cargo.lock	ext/rustls-client/src	fuzz	client
+tree	ext/rustls-deframer/src	upstream/rustls
+copy	targets/rustls-deframer/Cargo.lock	Cargo.lock
+link	ext/rustls-deframer/vendor	ext/rustls-client/vendor
+tree	ext/rustls-fragment/src	upstream/rustls
+copy	targets/rustls-fragment/Cargo.lock	Cargo.lock
+link	ext/rustls-fragment/vendor	ext/rustls-client/vendor
+tree	ext/rustls-message/src	upstream/rustls
+copy	targets/rustls-message/Cargo.lock	Cargo.lock
+link	ext/rustls-message/vendor	ext/rustls-client/vendor
+tree	ext/rustls-persist/src	upstream/rustls
+copy	targets/rustls-persist/Cargo.lock	Cargo.lock
+link	ext/rustls-persist/vendor	ext/rustls-client/vendor
+tree	ext/rustls-server/src	upstream/rustls
+copy	targets/rustls-server/Cargo.lock	Cargo.lock
+link	ext/rustls-server/vendor	ext/rustls-client/vendor
+tree	ext/rustls-server_name/src	upstream/rustls
+copy	targets/rustls-server_name/Cargo.lock	Cargo.lock
+link	ext/rustls-server_name/vendor	ext/rustls-client/vendor

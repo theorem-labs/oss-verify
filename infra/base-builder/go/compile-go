@@ -29,12 +29,14 @@ set -euo pipefail
 : "${OFTGO:?the Go toolchain image sets OFTGO}"
 OV=/tmp/ov
 rm -rf "$OV"
-mkdir -p "$OV" /src /out /work /root/go/pkg/mod
+mkdir -p "$OV" /src /out /work
 
 # The environment that OSS-Fuzz's compile gives a Go project's build.sh: its build of a Go project is the address
 # build, for x86-64, with libFuzzer. Build scripts test these variables. The helpers build for riscv64 with no cgo, so
 # CC and CFLAGS reach no program.
-export SRC=/src OUT=/out WORK=/work HOME=/root GOPATH=/root/go
+export SRC=/src OUT=/out WORK=/work HOME=/root
+export GOPATH="$HOME/go"
+mkdir -p "$GOPATH/pkg/mod"
 export SANITIZER=address FUZZING_ENGINE=libfuzzer ARCHITECTURE=x86_64 FUZZING_LANGUAGE=go
 export CC=clang CXX=clang++ CFLAGS="-O1 -fno-omit-frame-pointer -gline-tables-only" \
   CXXFLAGS="-O1 -fno-omit-frame-pointer -gline-tables-only"
@@ -64,8 +66,8 @@ for name in $(cut -f1 "$OV/oftgo-targets.tsv" | LC_ALL=C sort -u); do
   [ -f "$OUT/$name-repro" ] || { echo "compile: the Go helper wrote no $OUT/$name-repro" >&2; exit 1; }
   mv -f "$OUT/$name-repro" "$OUT/$name"
   sum=$(sha256sum "$OUT/$name" | cut -d' ' -f1)
-  # With OV_RECORD=1 (tools/check --checks), the quiet program is kept as the quiet twin of the record. A Go program
-  # is linked by Go's linker, so its record has no map.
+  # With OV_RECORD=1 (oss-verify check --checks), the quiet program is kept as the quiet twin of the record. A Go
+  # program is linked by Go's linker, so its record has no map.
   if [ "${OV_RECORD:-}" = 1 ] && [ -f "$OUT/$name-repro-quiet" ]; then
     mkdir -p "$OUT/.records/$sum"
     mv -f "$OUT/$name-repro-quiet" "$OUT/.records/$sum/quiet"

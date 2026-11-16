@@ -2,7 +2,7 @@
 # Copyright 2026 Vishal Sachdev
 # SPDX-License-Identifier: Apache-2.0
 #
-# Builds the fuzz targets of canvas-mcp into $OUT, in the form of a ported Python build (tools/seeds/mdurl/build.sh).
+# Builds the fuzz targets of canvas-mcp into $OUT, in the form of a ported Python build (seeds/mdurl/build.sh).
 # compile runs build.sh with bash; the Python recipe runs under sh -e, and so does this.
 [ -z "${BASH_VERSION:-}" ] || exec sh -e "$0"
 . /usr/local/lib/oss-verify/release-target.sh

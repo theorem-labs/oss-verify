@@ -1,0 +1,38 @@
+# Ported from the Rust build of the oss-fuzz-theorems 2026.10 release (seeds/languages.tsv); do not edit.
+# kind	path	arguments: see lay-out-sources
+tree	ext/data-encoding-fuzz_any_spec/src	upstream/data-encoding
+copy	targets/data-encoding-fuzz_any_spec/Cargo.lock	Cargo.lock
+crates	ext/data-encoding-fuzz_any_spec/vendor	targets/data-encoding-fuzz_any_spec/Cargo.lock	ext/data-encoding-fuzz_any_spec/src	lib/fuzz	fuzz_any_spec
+tree	ext/data-encoding-impl_decode/src	upstream/data-encoding
+copy	targets/data-encoding-impl_decode/Cargo.lock	Cargo.lock
+link	ext/data-encoding-impl_decode/vendor	ext/data-encoding-fuzz_any_spec/vendor
+tree	ext/data-encoding-impl_decode_len/src	upstream/data-encoding
+copy	targets/data-encoding-impl_decode_len/Cargo.lock	Cargo.lock
+link	ext/data-encoding-impl_decode_len/vendor	ext/data-encoding-fuzz_any_spec/vendor
+tree	ext/data-encoding-impl_encode/src	upstream/data-encoding
+copy	targets/data-encoding-impl_encode/Cargo.lock	Cargo.lock
+link	ext/data-encoding-impl_encode/vendor	ext/data-encoding-fuzz_any_spec/vendor
+tree	ext/data-encoding-impl_encode_append/src	upstream/data-encoding
+copy	targets/data-encoding-impl_encode_append/Cargo.lock	Cargo.lock
+link	ext/data-encoding-impl_encode_append/vendor	ext/data-encoding-fuzz_any_spec/vendor
+tree	ext/data-encoding-impl_encode_len/src	upstream/data-encoding
+copy	targets/data-encoding-impl_encode_len/Cargo.lock	Cargo.lock
+link	ext/data-encoding-impl_encode_len/vendor	ext/data-encoding-fuzz_any_spec/vendor
+tree	ext/data-encoding-impl_encode_mut_str/src	upstream/data-encoding
+copy	targets/data-encoding-impl_encode_mut_str/Cargo.lock	Cargo.lock
+link	ext/data-encoding-impl_encode_mut_str/vendor	ext/data-encoding-fuzz_any_spec/vendor
+tree	ext/data-encoding-impl_encode_write_buffer/src	upstream/data-encoding
+copy	targets/data-encoding-impl_encode_write_buffer/Cargo.lock	Cargo.lock
+link	ext/data-encoding-impl_encode_write_buffer/vendor	ext/data-encoding-fuzz_any_spec/vendor
+tree	ext/data-encoding-impl_new_encoder/src	upstream/data-encoding
+copy	targets/data-encoding-impl_new_encoder/Cargo.lock	Cargo.lock
+link	ext/data-encoding-impl_new_encoder/vendor	ext/data-encoding-fuzz_any_spec/vendor
+tree	ext/data-encoding-spec_decode_encode/src	upstream/data-encoding
+copy	targets/data-encoding-spec_decode_encode/Cargo.lock	Cargo.lock
+link	ext/data-encoding-spec_decode_encode/vendor	ext/data-encoding-fuzz_any_spec/vendor
+tree	ext/data-encoding-spec_encode_decode/src	upstream/data-encoding
+copy	targets/data-encoding-spec_encode_decode/Cargo.lock	Cargo.lock
+link	ext/data-encoding-spec_encode_decode/vendor	ext/data-encoding-fuzz_any_spec/vendor
+tree	ext/data-encoding-spec_spec_base/src	upstream/data-encoding
+copy	targets/data-encoding-spec_spec_base/Cargo.lock	Cargo.lock
+link	ext/data-encoding-spec_spec_base/vendor	ext/data-encoding-fuzz_any_spec/vendor

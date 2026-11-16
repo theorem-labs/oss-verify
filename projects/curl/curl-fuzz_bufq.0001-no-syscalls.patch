@@ -1,0 +1,172 @@
+curl-fuzz_bufq.0001-no-syscalls.patch
+Platform adaptation.
+
+fuzz_bufq.cc of curl-fuzzer 4768d8de6f3209bb5dd761cd24ff7ccbfbb6b5b8 (sha256 b3caf628a0f010b9...), for the fuzz target
+fuzz_bufq, as the OSS Verify proofs of fuzz_bufq build it (the result has sha256 296a1729698087b0...). On its first
+call the harness built its reference
+pattern with signal(SIGPIPE, SIG_IGN), an anonymous MAP_SHARED mmap and an mprotect to PROT_READ, three calls the
+process model the statements are judged in declines. The patch makes the pattern a static const table in read-only
+data, built at compile time, and removes the three calls and the two asserts that checked them.
+
+--- a/fuzz_bufq.cc	2026-10-31 19:10:56.000000000 +0000
++++ b/fuzz_bufq.cc	2026-10-31 19:11:39.000000000 +0000
+@@ -22,9 +22,7 @@
+ 
+ #include <assert.h>
+ #include <stdlib.h>
+-#include <signal.h>
+ #include <string.h>
+-#include <sys/mman.h>
+ #include <unistd.h>
+ #include <curl/curl.h>
+ 
+@@ -36,39 +34,47 @@
+ }
+ 
+ /**
+- * Allocate template buffer.  This buffer is precomputed for performance and
+- * used as a cyclic pattern when reading and writing. It can be useful to
+- * detect unexpected data shifting or corruption. The buffer is marked
+- * read-only so it cannot be written by mistake.
++ * Template buffer.  This buffer is precomputed for performance and used as a
++ * cyclic pattern of 0, 1, ..., 255, 0, ... when reading and writing. It can be
++ * useful to detect unexpected data shifting or corruption. It is a constant
++ * table, so it lives in read-only program data and cannot be written by
++ * mistake: a write to it faults, as a write to a read-only mapping would.
++ * Building it at compile time also means the harness needs no system call to
++ * set it up.
+  */
+-static unsigned char *allocate_template_buffer(void)
+-{
+-  size_t sz = FUZZ_MAX_RW_SIZE + 256;
+-  unsigned char *buf = (unsigned char *)mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, -1, 0);
+-  assert(buf != (unsigned char *)-1);
++#define TEMPLATE_4(n)  (n), (n) + 1, (n) + 2, (n) + 3
++#define TEMPLATE_16(n) TEMPLATE_4(n), TEMPLATE_4((n) + 4), \
++                       TEMPLATE_4((n) + 8), TEMPLATE_4((n) + 12)
++#define TEMPLATE_64(n) TEMPLATE_16(n), TEMPLATE_16((n) + 16), \
++                       TEMPLATE_16((n) + 32), TEMPLATE_16((n) + 48)
++#define TEMPLATE_256   TEMPLATE_64(0), TEMPLATE_64(64), \
++                       TEMPLATE_64(128), TEMPLATE_64(192)
++#define TEMPLATE_X2(...)    __VA_ARGS__, __VA_ARGS__
++#define TEMPLATE_X4(...)    TEMPLATE_X2(TEMPLATE_X2(__VA_ARGS__))
++#define TEMPLATE_X16(...)   TEMPLATE_X4(TEMPLATE_X4(__VA_ARGS__))
++#define TEMPLATE_X256(...)  TEMPLATE_X16(TEMPLATE_X16(__VA_ARGS__))
++#define TEMPLATE_X1024(...) TEMPLATE_X4(TEMPLATE_X256(__VA_ARGS__))
+ 
+-  /* Fill in with a cyclic pattern of 0, 1, ..., 255, 0, ... */
+-  unsigned char next_byte = 0;
+-  for (size_t i = 0; i < sz; i++) {
+-    buf[i] = next_byte++;
+-  }
++static_assert(FUZZ_MAX_RW_SIZE == 1024 * 256,
++              "template_buffer holds FUZZ_MAX_RW_SIZE + 256 bytes "
++              "as 1025 copies of 0..255");
+ 
+-  int err = mprotect(buf, sz, PROT_READ);
+-  assert(err == 0);
+-  return buf;
+-}
++static const unsigned char template_buffer[FUZZ_MAX_RW_SIZE + 256] = {
++  TEMPLATE_X1024(TEMPLATE_256), TEMPLATE_256
++};
+ 
+ /*
+  * Compute a pointer to a read-only buffer with our pattern, knowing that the
+  * first byte to appear is next_byte.
+  */
+-static unsigned char *compute_buffer(unsigned char next_byte, unsigned char *buf) {
++static const unsigned char *compute_buffer(unsigned char next_byte,
++                                           const unsigned char *buf) {
+   return buf + next_byte;
+ }
+ 
+ struct writer_cb_ctx {
+   bool verbose;
+-  unsigned char *template_buf;
++  const unsigned char *template_buf;
+   size_t read_len;
+   unsigned char next_byte_read;
+ };
+@@ -90,7 +96,7 @@
+ 
+   *pnwritten = len > ctx->read_len ? ctx->read_len : len;
+ 
+-  unsigned char *compare = compute_buffer(ctx->next_byte_read, ctx->template_buf);
++  const unsigned char *compare = compute_buffer(ctx->next_byte_read, ctx->template_buf);
+   assert(memcmp(buf, compare, *pnwritten) == 0);
+   ctx->next_byte_read += *pnwritten;
+   ctx->read_len -= *pnwritten;
+@@ -100,7 +106,7 @@
+ 
+ struct reader_cb_ctx {
+   bool verbose;
+-  unsigned char *template_buf;
++  const unsigned char *template_buf;
+   size_t write_len;
+   unsigned char next_byte_write;
+ };
+@@ -122,7 +128,7 @@
+ 
+   *pnread = len > ctx->write_len ? ctx->write_len : len;
+ 
+-  unsigned char *compare = compute_buffer(ctx->next_byte_write, ctx->template_buf);
++  const unsigned char *compare = compute_buffer(ctx->next_byte_write, ctx->template_buf);
+   memcpy(buf, compare, *pnread);
+   ctx->next_byte_write += *pnread;
+   ctx->write_len -= *pnread;
+@@ -136,7 +142,7 @@
+ int fuzz_handle_bufq(FuzzedDataProvider *fuzz)
+ {
+   static bool verbose = (getenv("FUZZ_VERBOSE") != NULL);
+-  static unsigned char *template_buf = allocate_template_buffer();
++  const unsigned char *template_buf = template_buffer;
+ 
+   struct bufq q;
+   struct bufc_pool pool;
+@@ -184,7 +190,7 @@
+         size_t plen;
+         bool avail = Curl_bufq_peek(&q, &pbuf, &plen);
+         if (avail) {
+-          unsigned char *compare = compute_buffer(next_byte_read, template_buf);
++          const unsigned char *compare = compute_buffer(next_byte_read, template_buf);
+           assert(memcmp(pbuf, compare, plen) == 0);
+         } else {
+           FV_PRINTF(verbose, "OP: peek, error\n");
+@@ -199,7 +205,7 @@
+         size_t plen;
+         bool avail = Curl_bufq_peek_at(&q, op_size, &pbuf, &plen);
+         if (avail) {
+-          unsigned char *compare = compute_buffer(next_byte_read + op_size, template_buf);
++          const unsigned char *compare = compute_buffer(next_byte_read + op_size, template_buf);
+           assert(memcmp(pbuf, compare, plen) == 0);
+         } else {
+           FV_PRINTF(verbose, "OP: peek at, error\n");
+@@ -217,7 +223,7 @@
+           FV_PRINTF(verbose, "OP: read, success, read %zu, expect begins with %x\n", read, next_byte_read);
+           buffer_bytes -= read;
+           assert(buffer_bytes >= 0);
+-          unsigned char *compare = compute_buffer(next_byte_read, template_buf);
++          const unsigned char *compare = compute_buffer(next_byte_read, template_buf);
+           next_byte_read += read;
+           assert(memcmp(buf, compare, read) == 0);
+         } else {
+@@ -295,7 +301,7 @@
+       case OP_TYPE_WRITE: {
+         size_t op_size = fuzz->ConsumeIntegralInRange(0, FUZZ_MAX_RW_SIZE);
+         FV_PRINTF(verbose, "OP: write, size %zu, begins with %x\n", op_size, next_byte_write);
+-        unsigned char *buf = compute_buffer(next_byte_write, template_buf);
++        const unsigned char *buf = compute_buffer(next_byte_write, template_buf);
+         size_t written;
+         CURLcode result = Curl_bufq_write(&q, buf, op_size, &written);
+         if (!result) {
+@@ -333,9 +339,6 @@
+ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+ {
+   FuzzedDataProvider fuzzed_data(data, size);
+-
+-  /* Ignore SIGPIPE errors. We'll handle the errors ourselves. */
+-  signal(SIGPIPE, SIG_IGN);
+ 
+   /* Run the operations */
+   fuzz_handle_bufq(&fuzzed_data);

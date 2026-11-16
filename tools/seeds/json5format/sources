@@ -1,5 +1,0 @@
-# Ported from the Rust build of the oss-fuzz-theorems 2026.10 release (tools/seeds/languages.tsv); do not edit.
-# kind	path	arguments: see lay-out-sources
-tree	ext/json5format-fuzz_parse/src	upstream/json5format
-copy	targets/json5format-fuzz_parse/Cargo.lock	Cargo.lock
-crates	ext/json5format-fuzz_parse/vendor	targets/json5format-fuzz_parse/Cargo.lock	ext/json5format-fuzz_parse/src	fuzz	fuzz_parse
