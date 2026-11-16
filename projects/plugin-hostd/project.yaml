@@ -1,7 +1,7 @@
 # plugin-hostd: the daemon that hosts CLAP and LV2 plugins out of process, each in a worker of its own, behind
 # mod-host's command protocol: its command parser and dispatcher, and the relay of its workers' feedback. Pinned to a
-# commit of Open-Mixer/plugin-hostd's fuzz records (Open-Mixer/plugin-hostd#159, #166, #53, #54).
-repo: https://github.com/Open-Mixer/plugin-hostd#ff62531789e05302147746dfe8567f756ec8beea
+# commit of Open-Mixer/plugin-hostd's main (its fuzz records: Open-Mixer/plugin-hostd#159, #166, #53, #54).
+repo: https://github.com/Open-Mixer/plugin-hostd#cf623dc9654b6bf2eb3cffda3d7bd18e507e7446
 primary_contact: linuxnow@gmail.com
 homepage: https://github.com/Open-Mixer/plugin-hostd
 language: c
