@@ -54,7 +54,7 @@
 #   GH_TOKEN=<token that can write issues in HELD_FINDINGS_REPO> HELD_FINDINGS_REPO=<owner/name> REPO=<owner/name> \
 #     READ_TOKEN=<token that can read REPO's issues> HELD_OBJECT=<name> .github/scripts/review-held <directory>
 #
-# It reads <directory>/object, as build.yaml's review job stored it: six lines that the workflow wrote, not the model
+# It reads <directory>/object, as review.yml's review job stored it: six lines that the workflow wrote, not the model
 # (`oss-verify held finding v1`, then `pr:`, `head:`, `project:` and `run:`, then `---`), and then the `held` field of
 # the review's structured output: each finding starts with a marker line (`<!-- held finding -->`, in any case and
 # spacing), then `key: value` lines (`title:` is the issue's title), then free text.
@@ -65,7 +65,7 @@
 # issue URL and after a < that opens an HTML comment, so that no member or team is mentioned, no issue is linked and no
 # part of the text is hidden. The key and the hash of the text are of the finding as the review stored it.
 #
-# .github/scripts/review-hold runs it, in build.yaml's hold job, with a token of the oss-verify App for
+# .github/scripts/review-hold runs it, in review.yml's hold job, with a token of the oss-verify App for
 # HELD_FINDINGS_REPO only, with issues: write only. The review job, which runs the model, never holds the App's key: it
 # stores the finding in a private bucket where it can only create objects, and only the hold job can read it. A
 # finding cannot pass between jobs any other way without reaching the public log: the runner prints a step's env and

@@ -13,11 +13,11 @@ reviewers, as Markdown.
     uv run python3 .github/scripts/triage.py --repo theorem-labs/oss-verify --local projects/<name> --login <you> \
         [--body <file>]
 
-Run by .github/workflows/triage.yaml, or by hand to see what it would say. Prints nothing when the pull request
-does not touch projects/. With --local, it writes the comment for a projects/<name>/ on this machine before any pull
-request exists, as opened by --login with the description in --body (default: .github/PULL_REQUEST_TEMPLATE.md,
-unticked). Without GITHUB_TOKEN, GitHub limits anonymous requests, and the rows that need GraphQL say "could not be
-checked".
+Run by .github/workflows/review.yml's triage-gather job, or by hand to see what it would say. Prints nothing when the
+pull request does not touch projects/. With --local, it writes the comment for a projects/<name>/ on this machine
+before any pull request exists, as opened by --login with the description in --body (default:
+.github/PULL_REQUEST_TEMPLATE.md, unticked). Without GITHUB_TOKEN, GitHub limits anonymous requests, and the rows
+that need GraphQL say "could not be checked".
 
 The comment on the pull request is public, and carries only the rows in PUBLIC_ROWS: whether the repository is a fork,
 the license, whether an active maintainer opened it, its scope, oss-verify validate and the checklist. The full table

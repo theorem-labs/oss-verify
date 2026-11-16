@@ -9,10 +9,10 @@
 # It prints `person` for an account whose type the Users API gives as User; `allowed` for any other account (an App,
 # an organisation) that ALLOWED_BOTS names, or that the API does not find (an App with no user account, as Copilot,
 # whose login has no [bot]) and ALLOWED_BOTS names; and `refused` for every other. That is the rule of
-# anthropics/claude-code-action at the commit build.yaml pins (src/github/validation/actor.ts, checkHumanActor and
+# anthropics/claude-code-action at the commit review.yml pins (src/github/validation/actor.ts, checkHumanActor and
 # isAllowedBot): names compared without case and without a [bot] at the end, and `*` admits every App. A read that
 # fails for another reason exits 1, as the action then fails the run.
-# build.yaml's route runs it: a change that an App the action refuses started is built, not reviewed, and an issue's
+# review.yml's route runs it: a change that an App the action refuses started is built, not reviewed, and an issue's
 # event that any App sent starts nothing.
 set -uo pipefail
 login=${1:?usage: actor-kind <login>}

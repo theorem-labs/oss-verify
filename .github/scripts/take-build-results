@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+"""Read the results of a Build run, as data, for the review of an enrollment:
+
+    GH_TOKEN=<read-only token> REPO=<owner>/<name> BUILD_RUN=<run id> PR=<number> HEAD_SHA=<commit> NAME=<project> \\
+      GITHUB_OUTPUT=<file> .github/scripts/take-build-results
+
+review.yml's gather job runs it, from the checkout of main, before .github/scripts/review-gather, for an enrollment
+whose Build run route found (route's output build_run). It writes four outputs to GITHUB_OUTPUT, and the gather job
+gives them to review-gather as BUILD, BINARIES, CHECKS and COMMIT:
+
+  build     one line: "The Build check success: <result>." when the check's exit status (code) is 0, else "The Build
+            check failure: <result>.".
+  binaries  the table of the binaries that the build wrote.
+  checks    the report of the checks of the fuzz targets.
+  commit    the commit of the project's repository that the build fetched, or empty.
+
+The build step cuts binaries and checks at 60,000 bytes each, and adds the line CUT after a cut.
+
+The Build run ran on pull_request, so the merge commit's workflow file and scripts made its artifact. For a pull
+request that changes no steering file (.github/scripts/steering.py), these are main's, and the artifact is the output
+of main's code. For any other pull request this reads nothing of the artifact, and build is the fixed line STEERED.
+First it reads every page of the pull request's files, and checks each name and each previous name. A list of
+MAX_LISTED_FILES files or more is not the whole change, so then it reads nothing.
+
+The artifact is ARTIFACT of BUILD_RUN, which build.yaml's results job writes. The run must have exactly one unexpired
+artifact of that name, of at most 1 MiB. Its zip must hold exactly one member, MEMBER, of at most 1 MiB. That member
+must be JSON with the schema SCHEMA and the fields of FIELDS, each of its type, shape and size. Its pr, sha and project
+must be PR, HEAD_SHA and NAME: the pull request and the head that route read from the API, and the project that the
+gather job's own take-project took. The artifact never gives the number, the head, the diff or the files that
+review.yml reads or posts to. This reads the zip in memory and writes no file but GITHUB_OUTPUT: nothing goes into the
+working directory.
+
+When a read or a check fails, build is the fixed line NO_RESULT, and binaries, checks and commit are empty. The log
+says why, with no text of the artifact. The exit status is then 0, so the review continues with no result of the
+build. The exit status is 2 only when an input variable is missing or malformed.
+"""
+from __future__ import annotations
+
+import io
+import json
+import os
+import re
+import secrets
+import subprocess
+import sys
+import zipfile
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import steering  # noqa: E402
+
+ARTIFACT = "build-results"
+MEMBER = "results.json"
+SCHEMA = "oss-verify build results v1"
+FIELDS = frozenset({"schema", "pr", "project", "sha", "commit", "code", "result", "binaries", "checks"})
+MAX_ARTIFACT_BYTES = 1 << 20
+# The API lists at most 3,000 files of a pull request; above that, the list is not the whole change.
+MAX_LISTED_FILES = 3000
+# The build step's cut of binaries and checks, and the line it adds after a cut. A cut can split a character: the
+# runner reads its bytes as one U+FFFD, 3 bytes in place of 1 or 2, so a text that was cut can hold 2 bytes more.
+MAX_TEXT_BYTES = 60000
+CUT = "\n(Cut at 60,000 bytes: the rest is in the Build check's step summary.)"
+# The build step writes a result of less than 200 bytes. This limit keeps BUILD far below the 131,072 bytes that Linux
+# takes in one environment variable of the gather step.
+MAX_RESULT_BYTES = 1000
+STEERED = "The Build run's results are not read: this pull request changes a file that steers the workflows."
+NO_RESULT = "The Build run of this head gave no result that this review can read."
+# A project's directory name, as oss-verify validate's NAME takes it.
+NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,62}")
+SHA = re.compile(r"[0-9a-f]{40}")
+REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+NUMBER = re.compile(r"[1-9][0-9]*")
+
+
+class Api:
+    """GitHub's REST API through the gh command-line tool, which reads GH_TOKEN."""
+
+    def run(self, path: str, *flags: str) -> bytes:
+        return subprocess.run(["gh", "api", *flags, "--", path], check=True, capture_output=True).stdout
+
+    def pages(self, path: str) -> list:
+        """Every page of a paginated answer, as a list of pages."""
+        return json.loads(self.run(path, "--paginate", "--slurp"))
+
+    def raw(self, path: str) -> bytes:
+        return self.run(path, "-H", "Accept: application/vnd.github.raw")
+
+
+def nothing(build: str) -> dict:
+    return {"build": build, "binaries": "", "checks": "", "commit": ""}
+
+
+def whole(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def text(value: object) -> bool:
+    """Whether `value` is a text of the build step: at most MAX_TEXT_BYTES, then CUT after a cut, and no NUL, which no
+    environment variable can hold."""
+    if not isinstance(value, str) or "\0" in value:
+        return False
+    body = value.removesuffix(CUT)
+    try:
+        size = len(body.encode("utf-8"))
+    except UnicodeEncodeError:  # a surrogate that JSON can give and no file holds
+        return False
+    return size <= MAX_TEXT_BYTES + (2 if body != value else 0)
+
+
+def steering_change(files: list) -> tuple[bool | None, str]:
+    """True and the first steering file the pull request changes; False when it changes none; None and why not when
+    the list cannot tell."""
+    if len(files) >= MAX_LISTED_FILES:
+        return None, f"the pull request changes {len(files)} files or more, more than the API lists"
+    for f in files:
+        if not isinstance(f, dict) or not isinstance(f.get("filename"), str):
+            return None, "the API gave a file of the pull request with no name"
+        for path in (f["filename"], f.get("previous_filename")):
+            if path is None:
+                continue
+            if not isinstance(path, str):
+                return None, "the API gave a file of the pull request with no name"
+            if steering.is_steering(path):
+                return True, f"the pull request changes the steering file {path!r}"
+    return False, ""
+
+
+def problem(results: object, pr: int, head: str, name: str) -> str:
+    """Why the results cannot be read for pull request `pr` at `head`, project `name`, or ''. The reason names no
+    value of the results."""
+    if not isinstance(results, dict) or set(results) != FIELDS or results["schema"] != SCHEMA:
+        return f"{MEMBER} does not have the shape of {SCHEMA!r}"
+    if not whole(results["pr"]) or results["pr"] < 1:
+        return f"{MEMBER} names no pull request"
+    if not isinstance(results["project"], str) or not NAME.fullmatch(results["project"]):
+        return f"{MEMBER} names no project"
+    if not isinstance(results["sha"], str) or not SHA.fullmatch(results["sha"]):
+        return f"{MEMBER} names no head commit"
+    if not isinstance(results["commit"], str) or not (results["commit"] == "" or SHA.fullmatch(results["commit"])):
+        return f"{MEMBER} gives a built commit that is not a commit id"
+    if not whole(results["code"]) or not 0 <= results["code"] <= 255:
+        return f"{MEMBER} gives a code that is not an exit status"
+    # isprintable: no line break, no other control character and no surrogate.
+    result = results["result"]
+    if not isinstance(result, str) or not result.isprintable() \
+            or not 0 < len(result.encode("utf-8")) <= MAX_RESULT_BYTES:
+        return f"{MEMBER} gives a result that is not one line of at most {MAX_RESULT_BYTES} bytes"
+    for field in ("binaries", "checks"):
+        if not text(results[field]):
+            return f"{MEMBER} gives {field} that is not a text of the build step"
+    if results["pr"] != pr:
+        return f"{MEMBER} is of another pull request, not {pr}"
+    if results["sha"] != head:
+        return f"{MEMBER} is of another head, not {head}"
+    if results["project"] != name:
+        return f"{MEMBER} is of another project, not {name}"
+    return ""
+
+
+def take(api: Api, repo: str, run: int, pr: int, head: str, name: str) -> tuple[dict, str]:
+    """The four outputs, and what the output says about them."""
+    pages = api.pages(f"repos/{repo}/pulls/{pr}/files?per_page=100")
+    if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages):
+        return nothing(NO_RESULT), "the API did not give the pull request's files as a list"
+    steered, why = steering_change([f for page in pages for f in page])
+    if steered is None:
+        return nothing(NO_RESULT), why
+    if steered:
+        return nothing(STEERED), why
+    pages = api.pages(f"repos/{repo}/actions/runs/{run}/artifacts?name={ARTIFACT}&per_page=100")
+    artifacts = [a for page in pages for a in page.get("artifacts") or []
+                 if a.get("name") == ARTIFACT and not a.get("expired")]
+    if len(artifacts) != 1:
+        return nothing(NO_RESULT), f"Build run {run} has {len(artifacts)} unexpired {ARTIFACT} artifacts, not one"
+    artifact = artifacts[0]
+    if not whole(artifact.get("id")) or not whole(artifact.get("size_in_bytes")):
+        return nothing(NO_RESULT), f"the API gave Build run {run}'s {ARTIFACT} with no id or size"
+    if artifact["size_in_bytes"] > MAX_ARTIFACT_BYTES:
+        return nothing(NO_RESULT), f"Build run {run}'s {ARTIFACT} is larger than {MAX_ARTIFACT_BYTES} bytes"
+    data = api.raw(f"repos/{repo}/actions/artifacts/{artifact['id']}/zip")
+    if len(data) > MAX_ARTIFACT_BYTES:
+        return nothing(NO_RESULT), f"Build run {run}'s {ARTIFACT} is larger than {MAX_ARTIFACT_BYTES} bytes"
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        if archive.namelist() != [MEMBER] or archive.getinfo(MEMBER).file_size > MAX_ARTIFACT_BYTES:
+            return nothing(NO_RESULT), f"Build run {run}'s {ARTIFACT} does not hold {MEMBER} alone"
+        results = json.loads(archive.read(MEMBER))
+    why = problem(results, pr, head, name)
+    if why:
+        return nothing(NO_RESULT), why
+    outcome = "success" if results["code"] == 0 else "failure"
+    return ({"build": f"The Build check {outcome}: {results['result']}.", "binaries": results["binaries"],
+             "checks": results["checks"], "commit": results["commit"]},
+            f"read the results of Build run {run} for pull request {pr} at {head}, project {name}")
+
+
+def write(path: str, outputs: dict) -> None:
+    """Append the outputs to GITHUB_OUTPUT: a value of one line as name=value, any other between two lines of a
+    random delimiter that no value holds."""
+    delimiter = f"results-{secrets.token_hex(16)}"
+    while any(delimiter in value for value in outputs.values()):
+        delimiter = f"results-{secrets.token_hex(16)}"
+    with open(path, "a", encoding="utf-8") as out:
+        for key, value in outputs.items():
+            if "\n" in value or "\r" in value:
+                out.write(f"{key}<<{delimiter}\n{value}\n{delimiter}\n")
+            else:
+                out.write(f"{key}={value}\n")
+
+
+def main() -> int:
+    env = os.environ.get
+    for key, shape in (("REPO", REPO), ("BUILD_RUN", NUMBER), ("PR", NUMBER), ("HEAD_SHA", SHA), ("NAME", NAME)):
+        if not shape.fullmatch(env(key) or ""):
+            print(f"::error::take-build-results: {key} is missing or malformed.")
+            return 2
+    for key in ("GH_TOKEN", "GITHUB_OUTPUT"):
+        if not env(key):
+            print(f"::error::take-build-results: {key} is missing.")
+            return 2
+    run, pr, head, name = int(env("BUILD_RUN")), int(env("PR")), env("HEAD_SHA"), env("NAME")
+    try:
+        outputs, why = take(Api(), env("REPO"), run, pr, head, name)
+    except subprocess.CalledProcessError as error:
+        # gh's error names the request and GitHub's answer to it, never the artifact's text.
+        said = error.stderr.decode("utf-8", "replace").strip().splitlines()
+        outputs, why = nothing(NO_RESULT), f"gh exited {error.returncode}: {said[-1][:200] if said else ''!r}"
+    except Exception as error:  # noqa: BLE001 - a bad artifact never fails the job, whatever it holds
+        outputs, why = nothing(NO_RESULT), f"the read failed ({type(error).__name__})"
+    print(f"take-build-results: {why}.")
+    if outputs["build"] in (STEERED, NO_RESULT):
+        print(f"take-build-results: the review reads this line in place of the build's results: {outputs['build']}")
+    write(env("GITHUB_OUTPUT"), outputs)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

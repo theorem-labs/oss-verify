@@ -9,7 +9,7 @@
     .github/scripts/review-verdict --ids
     .github/scripts/review-verdict --sentence success|failure|action_required
 
-build.yaml's comment job runs it in its step "Post the comment and record the verdict", which posts the check run
+review.yml's comment job runs it in its step "Post the comment and record the verdict", which posts the check run
 from what it prints: one JSON object with `conclusion`, `title` and `summary`.
 
 VERDICTS is the review's structured output `verdicts`, the id of each check of review.md to `pass`, `fail`, `person`
@@ -128,7 +128,7 @@ def from_hold(hold):
         title = "The daily cap of automated reviews held this pull request."
         summary = (f"{title} It comes from an account without write access to this repository, and the automated"
                    f" reviews of such accounts reached their cap of {cap} in 24 hours, {author} for one author. From"
-                   f" {free:%Y-%m-%d %H:%M} UTC, a push or `gh workflow run build.yaml -R {repo} -f pr={pr}` reviews"
+                   f" {free:%Y-%m-%d %H:%M} UTC, a push or `gh workflow run review.yml -R {repo} -f pr={pr}` reviews"
                    " it.")
     elif hold == "failed":
         job = os.environ.get("JOB", "")

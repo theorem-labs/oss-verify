@@ -2,26 +2,29 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 #
-# The daily cap on the screens and model reviews of accounts without write access (build.yaml, route's trust step,
+# The daily cap on the screens and model reviews of accounts without write access (review.yml, route's trust step,
 # for every item whose trust is screen, a run started by hand included):
 #
 #   GH_TOKEN=<token with actions: read> REPO=<owner>/<name> RUN_ID=<this run's id> ACCOUNT=<the account this run is
 #     charged to> ALLOWED_BOTS=<the Apps that count as having write access> REVIEW_CAP=<runs in 24 hours> \
 #     REVIEW_CAP_AUTHOR=<runs of one account in 24 hours> [NOW=<the time, for tests>] .github/scripts/screened-review-cap
 #
-# It reads this workflow's runs made in the 24 hours before NOW (by default the time it runs) that are older than this
-# run, and charges each to one account: a run started by an event (pull_request_target, issues) to the run's actor,
-# the account that opened, pushed, edited or reopened the item; a run started by hand to the author of the item that
-# its name gives (`Pull request <n>` or `Issue <n>`, build.yaml's run-name), so that a person's re-runs use up the
-# author's share and never the starter's. A run by hand that names no item (a measurement of the screen) is charged to
-# no one. A run counts when it is charged to an account without write access, route gave it trust screen, and its
-# screen job ran or may still run. Two artifacts that build.yaml keeps for 2 days tell this: route's step "Mark this
-# run for the daily cap" keeps daily-cap-route when its trust is screen, and the first steps of the screen job keep
-# daily-cap-screen once a runner took the job. So a run counts when it has daily-cap-route and either it has not
-# completed (it may yet screen) or it has daily-cap-screen. It counts from the moment route gave its trust, so a burst
-# of items is counted before their builds end, which can take hours; and a run cancelled before its screen started
-# (a push that cancels a run still building) does not count, nor a run that route capped or a run of a
-# writer's trust. Write access is what GitHub's collaborator permission API answers, admin or write, and the Apps of
+# It reads review.yml's runs made in the 24 hours before NOW (by default the time it runs) that are older than this
+# run, and charges each to one account: a run started by an event (workflow_run, issues) to the run's actor, the
+# account that opened, pushed, edited or reopened the item (a workflow_run run's actor is the actor of the Build or
+# Triage run that started it); a run started by hand to the author of the item that its name gives (`Pull request <n>`
+# or `Issue <n>`, review.yml's run-name), so that a person's re-runs use up the author's share and never the
+# starter's. A run by hand that names no item (a measurement of the screen) is charged to no one. Only review.yml's
+# runs count: no review runs in build.yaml after the merge that moved the review into review.yml, so the count started
+# again at that merge. A run counts when it is charged to an account without write access, route gave it trust
+# screen, and its screen job ran or may still run. Two artifacts that review.yml keeps for 2 days tell this: route's
+# step "Mark this run for the daily cap" keeps daily-cap-route when its trust is screen, and the screen job keeps
+# daily-cap-screen in its steps after "Sign in to Google Cloud". So a run counts when it has daily-cap-route and
+# either it has not completed (it may yet screen) or it has daily-cap-screen. A run whose sign-in to Google Cloud is
+# refused ends before its screen starts, and it does not count. It counts from the moment route gave its trust, so a
+# burst of items is counted before their screens start; and a run cancelled before its screen started (the review of
+# an older head, which a newer push cancels) does not count, nor a run that route capped or a run of a writer's
+# trust. Write access is what GitHub's collaborator permission API answers, admin or write, and the Apps of
 # ALLOWED_BOTS count as having it, with one read of each account's permission. It reads the runs, their status
 # included, and the two artifacts' lists, each in one paginated call, and no run's jobs.
 # A known limit: route reads this count in its trust step and keeps its mark in the step after, so routes that run in
@@ -41,7 +44,7 @@ fail() {
   echo "::error::$1 Re-run this run."
   exit 1
 }
-# The text between the two marks is the same as the copies in build.yaml's route and gather jobs, so that it decides as
+# The text between the two marks is the same as the copies in review.yml's route and gather jobs, so that it decides as
 # route's trust step does.
 # trusted
 # trusted <login>: 0 when <login> is one of the ALLOWED_BOTS, or an account that GitHub's collaborator
@@ -65,7 +68,7 @@ SINCE=$(date -u -d "@$((now - 86400))" +%Y-%m-%dT%H:%M:%SZ)
 export SINCE
 # id, creation time, status, event, actor, and for a run by hand the number of the item its name gives.
 # shellcheck disable=SC2016 # $ENV is jq's, read from this script's environment
-runs=$(gh api --method GET --paginate "repos/$REPO/actions/workflows/build.yaml/runs" -f created=">=$SINCE" \
+runs=$(gh api --method GET --paginate "repos/$REPO/actions/workflows/review.yml/runs" -f created=">=$SINCE" \
   -F per_page=100 --jq '.workflow_runs[] | select(.id < ($ENV.RUN_ID | tonumber) and .created_at >= $ENV.SINCE)
     | "\(.id) \(.created_at) \(.status // "-") \(.event) \(.actor.login // "-")"
       + " \((.display_title // "" | capture("^(Pull request|Issue) (?<n>[1-9][0-9]*)$").n) // "-")"') \
@@ -87,7 +90,7 @@ while read -r id created status event actor number; do
   [ -n "${routed[$id]+set}" ] || continue
   [ "$status" != completed ] || [ -n "${screened[$id]+set}" ] || continue
   case $event in
-    pull_request_target|issues) account=$actor ;;
+    workflow_run|issues) account=$actor ;;
     workflow_dispatch)
       [ "$number" != - ] || continue
       if [ -z "${author_of[$number]+set}" ]; then

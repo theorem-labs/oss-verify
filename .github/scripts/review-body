@@ -2,7 +2,7 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 #
-# Prints the review comment of a pull request. build.yaml's comment job runs it in its step "Post the comment and record
+# Prints the review comment of a pull request. review.yml's comment job runs it in its step "Post the comment and record
 # the verdict", and posts what it prints as it is.
 #
 #   HEAD_SHA=<reviewed commit> REVIEW=<the review's comment> CHECKS=<the checks' report, or empty> \

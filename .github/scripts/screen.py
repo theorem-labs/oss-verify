@@ -351,6 +351,12 @@ def joined(found):
 # fuzz target the project's build script wrote, in a span too. code() turns a backtick in that text into an
 # apostrophe, so nothing in it can end its span: every such string is one span, and the screen reads the spans
 # of these three files and nothing else of them.
+# The files under build/ come from a Build run that ran main's code: review.yml takes them from a Build run
+# (.github/scripts/take-build-results) only for a pull request that changes no steering file
+# (.github/scripts/steering.py), and the merge commit of such a pull request holds main's .github/, src/, infra/ and
+# seeds/. When it takes nothing, build/result.md holds a fixed line of take-build-results or nothing, and the other
+# two are empty. So the shape of build/binaries.md here, and of build/result.md below, is the shape that main's code
+# writes.
 IN_SPANS = ("triage-today.md", "triage-comment.md", os.path.join("build", "binaries.md"))
 SPAN = re.compile(r"`([^`\n]*)`")
 # The files of .review that main's own scripts write, which the screen does not read. Each is addressed to a
@@ -366,11 +372,12 @@ SPAN = re.compile(r"`([^`\n]*)`")
 #   review-comment-authors.txt  review-gather's list of the review comments' logins, one a line, which the gather
 #                               job and all_review_comments_are_ours() read; a login is letters, digits and
 #                               hyphens, and carries no prose.
-#   source.txt                  review-gather's fixed line in place of the project's repository when the build
-#                               resolved no commit of it: there is no source to read.
+#   source.txt                  review-gather's fixed line in place of the project's repository when no built
+#                               commit of it came from the Build run: there is no source to read.
 #   template-history.txt        git log of this repository's pull request template.
 #   validate.txt                oss-verify validate on projects/<name>/, every line of which the diff adds.
-#   build/result.md             the build job's own one-line result.
+#   build/result.md             the build job's own one-line result, or the fixed line of take-build-results when
+#                               it read none (the comment above IN_SPANS).
 # Five more files keep only our shape, and the project decides text inside them that no other source carries,
 # so each is read: triage-today.md, triage-comment.md and build/binaries.md through their code spans (IN_SPANS),
 # and these two whole:

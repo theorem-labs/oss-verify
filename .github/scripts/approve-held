@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+#
+# Approves the held runs of a pull request's head, after the screen passed that head:
+#
+#   GH_TOKEN=<the oss-verify App's token, with actions: write> REPO=<owner>/<name> PR=<number> HEAD_SHA=<commit> \
+#     SCREEN_VERDICT=<the screen job's verdict> .github/scripts/approve-held
+#
+# GitHub holds each run of a first-time contributor's pull request (status action_required) until an account with
+# write access approves it. review.yml's comment job runs this in its step "Approve the held runs", with the oss-verify
+# App's token, on a run by hand whose route found held runs at the head (held=true), and only after the screen job
+# gave the verdict clean for HEAD_SHA. This script refuses too unless SCREEN_VERDICT is clean: it prints `::error::`,
+# exits 1 and calls no API. It refuses in the same way when PR, HEAD_SHA or REPO does not have its shape.
+#
+# It approves each run with status action_required and event pull_request whose head commit is HEAD_SHA, the head that
+# the screen read, and whose head repository and branch are the pull request's, of any workflow, as GitHub's own
+# button does. It reads the pull request first: when its head is no longer HEAD_SHA, it approves nothing and exits 0
+# (the new head gets a screen of its own). It lists every page of the held runs at HEAD_SHA, and prints the id of each
+# run that it approves, and of each run that it does not approve, with the reason. An approval that fails makes this
+# script exit 1, after it tried to approve each other run.
+set -uo pipefail
+fail() {
+  echo "::error::approve-held: $1"
+  exit 1
+}
+[ "${SCREEN_VERDICT:-}" = clean ] || fail "the screen's verdict is not clean: no run is approved."
+[[ ${PR:-} =~ ^[1-9][0-9]*$ ]] || fail "PR is not a number: no run is approved."
+[[ ${HEAD_SHA:-} =~ ^[0-9a-f]{40}$ ]] || fail "HEAD_SHA is not a commit id: no run is approved."
+[[ ${REPO:-} =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "REPO is not <owner>/<name>: no run is approved."
+[ -n "${GH_TOKEN:-}" ] || fail "GH_TOKEN is empty: no run is approved."
+
+# The pull request now: its head commit, and the repository and branch that head comes from. The fields are split at
+# U+001F, which no commit id, repository name, branch name or workflow path holds. read takes two tabs in a row as
+# one, so a tab after an empty field would move each field after it.
+pull=$(gh api "repos/$REPO/pulls/$PR" \
+  --jq '[.head.sha // "", .head.repo.full_name // "", .head.ref // ""] | join("\u001f")') \
+  || fail "GitHub did not give pull request $PR: no run is approved."
+IFS=$'\x1f' read -r now fork branch <<< "$pull"
+if [ "${now:-}" != "$HEAD_SHA" ]; then
+  echo "The head of pull request $PR is now ${now:-unknown}, not $HEAD_SHA, the head that the screen read: no run is" \
+    "approved."
+  exit 0
+fi
+[[ -n ${fork:-} && -n ${branch:-} ]] \
+  || fail "pull request $PR names no head repository or branch (a deleted fork, say): no run is approved."
+
+# id, head commit, head repository, head branch and workflow file of each held run at HEAD_SHA.
+runs=$(gh api --paginate \
+  "repos/$REPO/actions/runs?event=pull_request&status=action_required&head_sha=$HEAD_SHA&per_page=100" \
+  --jq '.workflow_runs[] | [(.id | tostring), .head_sha // "", .head_repository.full_name // "", .head_branch // "",
+                            .path // ""] | join("\u001f")') \
+  || fail "GitHub did not give the held runs of $HEAD_SHA: no run is approved."
+approved=0 failed=()
+while IFS=$'\x1f' read -r id sha repository ref path; do
+  [ -n "${id:-}" ] || continue
+  if ! [[ $id =~ ^[0-9]+$ ]]; then
+    echo "Not approved: a run whose id is not a number."
+  elif [ "$sha" != "$HEAD_SHA" ]; then
+    echo "Not approved: run $id ($path), whose head commit is $sha, not $HEAD_SHA."
+  elif [ "$repository" != "$fork" ] || [ "$ref" != "$branch" ]; then
+    echo "Not approved: run $id ($path), which comes from $repository:$ref, not from $fork:$branch."
+  elif gh api --method POST "repos/$REPO/actions/runs/$id/approve" < /dev/null > /dev/null; then
+    echo "Approved: run $id ($path)."
+    approved=$((approved + 1))
+  else
+    echo "::error::approve-held: GitHub did not approve run $id ($path)."
+    failed+=("$id")
+  fi
+done <<< "$runs"
+echo "Held runs approved for pull request $PR at $HEAD_SHA, from $fork:$branch: $approved."
+(( ${#failed[@]} == 0 )) || fail "GitHub did not approve the runs ${failed[*]}."
