@@ -813,6 +813,19 @@ class TheSecondReview(unittest.TestCase):
         text = f"# escape=`\nFROM x\nRUN {check_build.SECRET_MOUNT} `\n    fetch-commit $SRC/x\n"
         check_build.check_secret_mount("Dockerfile", text, TOKEN, "https://x/y/z")
 
+    def test_an_escape_directive_after_a_blank_or_a_comment_line_is_a_comment(self):
+        # BuildKit reads directives from the first lines only. Taking this backtick as the escape split the
+        # continued, mounted fetch below in two.
+        for before in ("\n", "# a comment\n", "# unknown=directive\n", "FROM x\n"):
+            with self.subTest(before=before):
+                text = f"{before}# escape=`\nFROM x\nRUN {check_build.SECRET_MOUNT} \\\n    fetch-commit /src/x\n"
+                self.assertEqual([ids for _, ids in check_build.fetch_steps(text)], [[check_build.GIT_TOKEN_SECRET]])
+        # Directives may come in any order, their names in any case, and after spaces.
+        for directives in ("# syntax=docker/dockerfile:1\n# ESCAPE=`\n", "  # escape=`\n"):
+            with self.subTest(directives=directives):
+                text = f"{directives}FROM x\nRUN {check_build.SECRET_MOUNT} `\n    fetch-commit /src/x\n"
+                self.assertEqual([ids for _, ids in check_build.fetch_steps(text)], [[check_build.GIT_TOKEN_SECRET]])
+
     def test_echoing_the_name_is_not_running_the_program(self):
         # `RUN --mount=… echo "fetch-commit"` beside a real unmounted fetch passed the guard, and the real fetch
         # then ran with no credential.
