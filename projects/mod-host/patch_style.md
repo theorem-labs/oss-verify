@@ -1,7 +1,7 @@
 # Patch style and report preferences
 
 mod-host is the LV2 host that MOD and Zynthian drive over a text command protocol on a local socket. OpenMixer
-carries it on the branch `freemixer` of Open-Mixer/mod-host: the upstream code, a few patches OpenMixer offers
+carries it on the branch `openmixer` of Open-Mixer/mod-host: the upstream code, a few patches OpenMixer offers
 upstream, and a host backend layer that other hosts share. The commands of any local client reach the command parser
 (`src/protocol.c`), the dispatcher that maps each verb onto a host backend (`src/host-dispatch.c`), and, for the state
 verbs, the state paths below the host's directory (`src/state-paths.c`). The scenario reader (`src/host-scenario.c`)
@@ -14,7 +14,7 @@ Nothing from the pipeline enters mod-host as it is. A maintainer reads each find
 mod-host harness and build, and writes the fix in Open-Mixer/mod-host as an ordinary change; a fix in upstream code is
 also offered to mod-audio/mod-host. A patch you send is a description of a fix, and we re-author it before it lands.
 
-Every commit on the `freemixer` branch is signed. No attribution line, trailer, or generated-by marker enters the
+Every commit on the `openmixer` branch is signed. No attribution line, trailer, or generated-by marker enters the
 history. When a finding leads to a fix, we quote its id in the issue that tracks the fix, not in a commit.
 
 ## Which findings to report
