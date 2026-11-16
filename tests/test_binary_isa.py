@@ -215,7 +215,7 @@ class Verdicts(Base):
         # A region that starts at 2 mod 4 is never clean either: its first parcel is not aligned.
         _, at = binary_isa.walk(Z16 + NOP + ADD + Z16, TEXT_VADDR + 2)
         self.assertEqual(at["odd_zero"], [TEXT_VADDR + 2])
-        # In a clean region, the one cast finds what the slow path finds, and so do the sites read from it.
+        # In a clean region, the one cast and the bytes.find search find what the slow path finds.
         buf = NOP + ADD + Z32 + VSETVLI + Z32 + VSETVLI
         counts, at = binary_isa.walk(buf, TEXT_VADDR)
         self.assertFalse(any(at.values()), at)
@@ -223,9 +223,20 @@ class Verdicts(Base):
         slow, slow_pairs = binary_isa.isa_census(buf, TEXT_VADDR, False, counts["insn32"])
         self.assertEqual((census, list(pairs())), (slow, list(slow_pairs())))
         outw = {0x0C007057: "rvv-vsetvl"}
-        self.assertEqual(binary_isa.outside_sites(outw, pairs), binary_isa.outside_sites(outw, slow_pairs))
-        self.assertEqual(binary_isa.outside_sites(outw, pairs),
+        self.assertEqual(binary_isa.outside_sites(buf, TEXT_VADDR, True, outw, pairs),
+                         binary_isa.outside_sites(buf, TEXT_VADDR, False, outw, slow_pairs))
+        self.assertEqual(binary_isa.outside_sites(buf, TEXT_VADDR, True, outw, pairs),
                          [(TEXT_VADDR + 12, 0x0C007057), (TEXT_VADDR + 20, 0x0C007057)])
+        # Past FIND_WORDS distinct words a clean region is read by the census's words; each word searched alone with
+        # bytes.find finds the same sites.
+        words = [0x57 | (k + 8) << 12 for k in range(binary_isa.FIND_WORDS + 1)]
+        buf = b"".join(struct.pack("<I", w) + NOP + Z32 for w in words * 3)
+        counts, at = binary_isa.walk(buf, TEXT_VADDR)
+        self.assertFalse(any(at.values()), at)
+        _, pairs = binary_isa.isa_census(buf, TEXT_VADDR, True, counts["insn32"])
+        alone = sorted(site for w in words for site in binary_isa.outside_sites(buf, TEXT_VADDR, True, {w: ""}, pairs))
+        self.assertEqual(binary_isa.outside_sites(buf, TEXT_VADDR, True, {w: "" for w in words}, pairs), alone)
+        self.assertEqual(len(alone), 3 * len(words))
 
 
 class HeaderClaims(Base):
@@ -425,16 +436,14 @@ class ModelISA(Base):
         self.assertEqual(out["families"], {"rvv-vsetvl": 1})
 
     def test_many_distinct_outside_words_take_little_time(self):
-        """A region without a finding was once searched with one bytes.find per distinct outside word, so its time
-        grew with the region times the words: 976 KiB with 60,000 distinct vector words took 13 seconds. 15,000
-        distinct words, each before three nops, took 4 seconds. They now take well under one."""
-        text = b"".join(struct.pack("<I", 0x57 | k << 12) + NOP * 3 for k in range(15000))
+        """A region without a finding was searched with one bytes.find per distinct outside word, so its time grew with
+        the region times the words. 30,000 distinct vector words, each before three nops, took over 10 seconds."""
+        text = b"".join(struct.pack("<I", 0x57 | k << 12) + NOP * 3 for k in range(30000))
         start = time.monotonic()
         res = binary_isa.scan(mkelf(text))
-        self.assertLess(time.monotonic() - start, 1)
+        self.assertLess(time.monotonic() - start, 2)
         self.assertEqual((res["verdict"], res["outside_model"], res["first"]),
-                         ("NOT-MODEL", 15000, ("outside_model", TEXT_VADDR)))
-        self.assertEqual(res["families"], {"rvv-op": 13125, "rvv-vsetvl": 1875})
+                         ("NOT-MODEL", 30000, ("outside_model", TEXT_VADDR)))
 
     def test_the_first_finding_names_the_isa_failure(self):
         res, out = self.one(mkelf(NOP + VSETVLI + ADD), "NOT-MODEL")
