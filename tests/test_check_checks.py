@@ -646,7 +646,7 @@ class WorkflowArguments(unittest.TestCase):
                 for value in (secret, auth):
                     self.assertNotIn(value, path.read_text(), path.name)
 
-    APP_ACCOUNT = "ossv-app-comment@theorem-agent-infra.iam.gserviceaccount.com"
+    APP_ACCOUNT = "ossv-app-comment@theorem-agent-root.iam.gserviceaccount.com"
 
     def app_key_jobs_problems(self, jobs, key_jobs=("comment",)):
         """Why these jobs could let a job other than `key_jobs` read the App's key, or [] if they cannot.
@@ -2612,7 +2612,7 @@ class ReviewJob(unittest.TestCase):
             "id_token_audience": "model-gateway-gce", "id_token_include_email": True,
             "create_credentials_file": False, "export_environment_variables": False})
         self.assertEqual(self.jobs["review"]["env"]["GATEWAY_SERVICE_ACCOUNT"],
-                         "oss-verify-ci@theorem-agent-infra.iam.gserviceaccount.com")
+                         "oss-verify-ci@theorem-agent-root.iam.gserviceaccount.com")
         review = self.steps["Review"]["with"]
         self.assertEqual(review["anthropic_api_key"], "${{ steps.gateway.outputs.id_token }}")
         self.assertFalse([k for k in review if k.startswith("anthropic_") and k != "anthropic_api_key"], review)

@@ -277,8 +277,16 @@ class Buildkit(unittest.TestCase):
             self.calls.append(argv)
             return probe_status if argv == self.PROBE else 0
 
-        with mock.patch.object(check_build, "run", run), mock.patch.object(check_build, "step"):
+        with mock.patch.object(check_build, "run", run), mock.patch.object(check_build, "step"), \
+                mock.patch.object(check_build.shutil, "which", lambda name: f"/usr/bin/{name}"):
             check_build.build_builder(TOOLCHAIN)
+
+    def test_no_docker_command_stops_with_a_message_not_a_traceback(self):
+        with tempfile.TemporaryDirectory() as empty, mock.patch.dict(os.environ, {"PATH": empty}), \
+                mock.patch.object(check_build, "step"):
+            with self.assertRaises(check_build.Failed) as failed:
+                check_build.build_builder(TOOLCHAIN)
+        self.assertIn("no docker command on PATH", str(failed.exception))
 
     def test_a_legacy_builder_stops_before_the_builder_is_built(self):
         with self.assertRaises(check_build.Failed) as failed:

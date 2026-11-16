@@ -363,8 +363,10 @@ def main():
     for number, line in enumerate(sources.read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip() or line.startswith("#"):
             continue
-        kind, where, *args = line.split("\t")
         try:
+            if "\t" not in line:
+                raise Failed(f"not a directive this tool knows, with these fields: {line!r}")
+            kind, where, *args = line.split("\t")
             destination = under(root, where)
             if kind == "tree" and len(args) == 1:
                 tree(destination, *args)

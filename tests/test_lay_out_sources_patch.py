@@ -70,6 +70,20 @@ class PatchDirective(unittest.TestCase):
             self.lay_out(text)
         return str(stopped.exception.code)
 
+    def test_a_patch_row_written_with_spaces_is_refused_by_its_line(self):
+        """A row's fields are separated by tabs. A row with none ended the build with a ValueError traceback that
+        named neither the file nor the line."""
+        (self.project / "demo.patch").write_text(EDIT)
+        (self.project / "series").write_text("demo.patch\n")
+        sources = self.project / "sources"
+        sources.write_text("# the demo patch\npatch ext/demo/src demo.patch\n")
+        with mock.patch.object(sys, "argv", ["lay-out-sources", str(sources), str(self.root)]), \
+                self.assertRaises(SystemExit) as stopped:
+            lay_out_sources.main()
+        self.assertEqual(str(stopped.exception.code),
+                         f"lay-out-sources: {sources}:2: not a directive this tool knows, with these fields: "
+                         "'patch ext/demo/src demo.patch'")
+
     def test_a_patch_of_regular_files_applies(self):
         self.lay_out(EDIT)
         self.assertEqual((self.tree / "one.c").read_text(), "int one(void) { return 2; }\n")

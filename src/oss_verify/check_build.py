@@ -543,7 +543,11 @@ def image_id(tag):
 def require_buildkit():
     """Refuse to start when `docker build` refuses `--progress=plain`, which oss-verify check gives each build. Docker
     23 and later refuse it with the legacy builder: without the buildx plugin (Ubuntu's docker.io package alone), or
-    with DOCKER_BUILDKIT set to a false value. The probe asks for the help text, so it builds nothing."""
+    with DOCKER_BUILDKIT set to a false value. The probe asks for the help text, so it builds nothing. Without a docker
+    command at all, the probe would end oss-verify check with a FileNotFoundError traceback."""
+    if shutil.which("docker") is None:
+        raise Failed("oss-verify check needs Docker with BuildKit, and there is no docker command on PATH. Install "
+                     "Docker and its buildx plugin, then run oss-verify check again.")
     if run("docker", "build", "--progress=plain", "--help", quiet=True) != 0:
         raise Failed("oss-verify check needs Docker with BuildKit, and `docker build --progress=plain --help` fails. "
                      "Install the buildx plugin (on Ubuntu, `apt install docker-buildx`; from Docker's own "
@@ -690,14 +694,14 @@ def instructions(text):
     text = text.replace("\r\n", "\n")
     escape = "\\"
     for line in text.splitlines():
-        if not line.strip():
-            continue
-        if line.lstrip().startswith("#"):
-            found = re.fullmatch(r"#\s*escape\s*=\s*(.)\s*", line.strip())
-            if found:
-                escape = found.group(1)
-            continue
-        break  # a parser directive comes before the first instruction and nowhere else
+        # Parser directives are the first lines of the file and nothing else: the first line that is not one, be
+        # it blank, another comment, a directive BuildKit does not know or an instruction, ends them, and a
+        # `# escape=` after it is a comment. BuildKit refuses an escape other than \ and `.
+        found = re.fullmatch(r"#\s*([A-Za-z][A-Za-z0-9]*)\s*=\s*(.+?)\s*", line.lstrip())
+        if not found or found.group(1).lower() not in ("syntax", "escape", "check"):
+            break
+        if found.group(1).lower() == "escape" and found.group(2) in ("\\", "`"):
+            escape = found.group(2)
     joined, carry, ending = [], "", []
     for line in text.splitlines():
         if ending:

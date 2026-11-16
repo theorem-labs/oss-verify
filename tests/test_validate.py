@@ -433,6 +433,9 @@ class Problems(unittest.TestCase):
         self.assertProblem(MINIMAL, "series lists 'b.patch'", {**base, "a.patch": patch, "series": "a.patch\nb.patch\n"})
         self.assertProblem(MINIMAL, "more than once", {**base, "a.patch": patch, "series": "a.patch\na.patch\n"})
         self.assertProblem(MINIMAL, "a.patch is not listed", {**base, "a.patch": patch, "series": "# none\n"})
+        # lay-out-sources reads a # after a space as part of a patch name, so validate does too.
+        self.assertProblem(MINIMAL, "series lists '# old.patch'",
+                           {**base, "a.patch": patch, "series": "a.patch\n  # old.patch\n"})
         problems, warnings, _ = check(MINIMAL, {**base, "a.patch": "not a diff\n", "series": "a.patch\n"})
         self.assertEqual(problems, [])
         self.assertTrue(any("does not look like a patch" in warning for warning in warnings))
@@ -440,6 +443,9 @@ class Problems(unittest.TestCase):
     def test_directory(self):
         self.assertProblem(MINIMAL, "the directory name must be", name="Bad_Name")
         self.assertProblem("repo: [unclosed\n", "does not parse")
+        # PyYAML raises a plain ValueError, not a YAMLError, for a date or a timestamp that does not exist.
+        self.assertProblem(MINIMAL + "homepage: 2024-13-45\n", "project.yaml does not parse: ValueError")
+        self.assertProblem(MINIMAL + "x: 2024-01-01T25:00:00\n", "project.yaml does not parse: ValueError")
         self.assertProblem(MINIMAL + "#" * (validate.MAX_CONFIG_BYTES + 1) + "\n", "project.yaml is larger than")
 
     def test_symbolic_links_and_directories(self):
@@ -465,6 +471,11 @@ class Problems(unittest.TestCase):
 class Output(unittest.TestCase):
     def test_printable(self):
         self.assertEqual(validate.printable("a\x1b[31mb\n\x07"), "a\\x1b[31mb\\x0a\\x07")
+
+    def test_help_names_each_field(self):
+        """`oss-verify validate --help` prints the module's docstring, which lists the fields of project.yaml."""
+        for key in validate.ALLOWED_KEYS:
+            self.assertRegex(validate.__doc__, rf"\n    {key}: ", key)
 
     def run_main(self, *args):
         out, err = io.StringIO(), io.StringIO()

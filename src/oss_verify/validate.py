@@ -33,6 +33,7 @@ Fields allowed in project.yaml:
     budgets: {halts: ..., agrees: ...}  optional   memory budgets (docs/what-gets-proven.md)
     proofs: {repo: ..., path: ...}      optional   where the proofs are published (docs/project-yaml.md)
     publish: eager | after_fixes | never  optional  when the proofs are published (default after_fixes)
+    mutants: <path from WORKDIR>        optional   the directory of breakage patches (docs/project-yaml.md#mutants)
 
 Files allowed next to project.yaml: a Dockerfile with its build.sh (unless dockerfile: is set), a patch_style.md
 (unless patch_style: is set), harness sources (*.c *.cc *.cpp *.h *.hh *.hpp, and those of the project's language),
@@ -441,8 +442,11 @@ def check_proofs(config):
 
 
 def series_entries(text):
-    """The patch names a series file lists, in order: one per line, ignoring blank lines and # comments."""
-    return [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("#")]
+    """The patch names a series file lists, in order: one per line, ignoring blank lines and lines that start with #.
+
+    As lay-out-sources reads it: a # after a space starts no comment, so "  # x" names the patch "# x".
+    """
+    return [line.strip() for line in text.splitlines() if line.strip() and not line.startswith("#")]
 
 
 def copied_by_sources(files):
@@ -708,7 +712,9 @@ def load(directory):
         raise ValueError(f"project.yaml is larger than {MAX_CONFIG_BYTES // 1024} KiB")
     try:
         return yaml.safe_load(config_file.read_text(encoding="utf-8")) or {}
-    except (yaml.YAMLError, UnicodeDecodeError, RecursionError) as error:
+    # ValueError covers UnicodeDecodeError, and what PyYAML's scalar constructors raise for a value such as the date
+    # 2024-13-45, which is not a YAMLError.
+    except (yaml.YAMLError, ValueError, RecursionError) as error:
         raise ValueError(f"project.yaml does not parse: {type(error).__name__}: {str(error)[:300]}") from None
 
 
