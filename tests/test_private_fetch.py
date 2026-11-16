@@ -314,7 +314,7 @@ class CredentialHelper(unittest.TestCase):
 class TheList(unittest.TestCase):
     """infra/private-libraries.tsv: the only thing that makes a build ask for a token."""
 
-    def test_it_lists_the_two_private_libraries(self):
+    def test_it_lists_the_private_libraries(self):
         listed = check_build.private_libraries()
         for repository in ("https://github.com/theorem-labs/cjson-ossv267",
                            "https://github.com/theorem-labs/theorem-cli"):
