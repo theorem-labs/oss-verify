@@ -622,11 +622,19 @@ class DailyCap(Runner):
         self.assertEqual(self.route("workflow_run", "mallory", "mallory"), ("cap", self.freed(0.1 * 12)))
         self.assertNoJobsRead()
 
-    def test_route_marks_a_screened_run_and_the_screen_job_marks_itself_after_its_sign_in(self):
+    # What the sign-ins of screen.py --sign-in read, besides GitHub's identity token request, which the runner gives
+    # every step of a job with id-token: write.
+    SIGN_IN_SETTINGS = ("SCREEN_CHECKS", "AZURE_LOGIN_URL", "AZURE_TENANT_ID", "AZURE_CLIENT_ID", "ANTHROPIC_URL",
+                        "ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_ORGANIZATION_ID", "ANTHROPIC_SERVICE_ACCOUNT_ID",
+                        "ANTHROPIC_WORKSPACE_ID")
+
+    def test_route_marks_a_screened_run_and_the_screen_job_marks_itself_after_its_sign_ins(self):
         """The marks the count reads: route keeps daily-cap-route for trust screen alone, from the file its trust step
-        writes then, and the screen job keeps daily-cap-screen in the two steps right after "Sign in to Google Cloud",
-        whatever the job does next (decision 12). A sign-in that is refused fails the job before them: such a run
-        ended before its screen, and the count does not count it."""
+        writes then, and the screen job keeps daily-cap-screen in the two steps right after "Sign in to the screen's
+        services", which comes right after "Sign in to Google Cloud", whatever the job does next (decision 12). A
+        sign-in to Google, Microsoft Entra or Anthropic that is refused fails the job before them: such a run ended
+        before its screen, and the count does not count it. The sign-ins of the second step are the Screen step's,
+        with the same settings, for a screen and a measurement alike."""
         mark = step("route", "Mark this run for the daily cap")
         for trust in ("screen", "writer", "cap", "measure", ""):
             self.assertEqual(evaluate(mark["if"], {"steps.trust.outputs.trust": trust}), trust == "screen", trust)
@@ -638,9 +646,20 @@ class DailyCap(Runner):
             self.assertEqual(self.temp.joinpath("daily-cap").exists(), trust == "screen", author)
         steps = REVIEW_JOBS["screen"]["steps"]
         names = [s.get("name") or s["uses"].split("@")[0] for s in steps]
-        sign_in = names.index("Sign in to Google Cloud")
-        self.assertNotIn("if", steps[sign_in])
-        self.assertNotIn("continue-on-error", steps[sign_in])
+        google = names.index("Sign in to Google Cloud")
+        sign_in = names.index("Sign in to the screen's services")
+        self.assertEqual(sign_in, google + 1)
+        for name in ("Sign in to Google Cloud", "Sign in to the screen's services"):
+            self.assertNotIn("if", steps[names.index(name)], name)
+            self.assertNotIn("continue-on-error", steps[names.index(name)], name)
+        self.assertEqual(steps[sign_in]["run"], "python3 .github/scripts/screen.py --sign-in")
+        # The settings come from the job's env, which the Screen and Measure steps read too: neither those steps nor
+        # this one sets one of its own.
+        self.assertNotIn("env", steps[sign_in])
+        for setting in self.SIGN_IN_SETTINGS:
+            self.assertIn(setting, REVIEW_JOBS["screen"]["env"])
+            for name in ("Screen", "Measure"):
+                self.assertNotIn(setting, step("screen", name).get("env", {}), name)
         write, upload = steps[sign_in + 1:sign_in + 3]
         self.assertLess(sign_in + 2, min(names.index("Screen"), names.index("Measure")))
         self.assertNotIn("if", write)
@@ -992,11 +1011,12 @@ class Holdings(unittest.TestCase):
         self.assertEqual(uses, ["actions/checkout", "actions/download-artifact", "google-github-actions/auth",
                                 "actions/upload-artifact"])
         runs = [s["run"] for s in job["steps"] if "run" in s]
-        self.assertEqual(runs[:3], ['.github/scripts/take-review-data "$RUNNER_TEMP/review-data/review.tar"',
+        self.assertEqual(runs[:4], ['.github/scripts/take-review-data "$RUNNER_TEMP/review-data/review.tar"',
+                                    "python3 .github/scripts/screen.py --sign-in",
                                     'echo "$GITHUB_RUN_ID" > "$RUNNER_TEMP/daily-cap"',
                                     'python3 .github/scripts/screen.py .review ${NAME:+"projects/$NAME"}'])
-        self.assertEqual(len(runs), 4)
-        self.assertTrue(runs[3].endswith("python3 .github/scripts/screen.py --measure\n"))
+        self.assertEqual(len(runs), 5)
+        self.assertTrue(runs[4].endswith("python3 .github/scripts/screen.py --measure\n"))
 
     def test_only_the_screen_job_reaches_the_screens_identities(self):
         for workflow in (REVIEW, BUILD):

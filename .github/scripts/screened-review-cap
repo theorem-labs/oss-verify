@@ -19,9 +19,10 @@
 # again at that merge. A run counts when it is charged to an account without write access, route gave it trust
 # screen, and its screen job ran or may still run. Two artifacts that review.yml keeps for 2 days tell this: route's
 # step "Mark this run for the daily cap" keeps daily-cap-route when its trust is screen, and the screen job keeps
-# daily-cap-screen in its steps after "Sign in to Google Cloud". So a run counts when it has daily-cap-route and
-# either it has not completed (it may yet screen) or it has daily-cap-screen. A run whose sign-in to Google Cloud is
-# refused ends before its screen starts, and it does not count. It counts from the moment route gave its trust, so a
+# daily-cap-screen in its steps after its sign-ins ("Sign in to Google Cloud", then "Sign in to the screen's services",
+# for Microsoft Entra and Anthropic). So a run counts when it has daily-cap-route and either it has not completed (it
+# may yet screen) or it has daily-cap-screen. A run whose sign-in to Google, Microsoft Entra or Anthropic is refused
+# ends before its screen starts, and it does not count. It counts from the moment route gave its trust, so a
 # burst of items is counted before their screens start; and a run cancelled before its screen started (the review of
 # an older head, which a newer push cancels) does not count, nor a run that route capped or a run of a writer's
 # trust. Write access is what GitHub's collaborator permission API answers, admin or write, and the Apps of

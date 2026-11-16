@@ -4,10 +4,11 @@
 
 The three services (Model Armor, Prompt Shields with Microsoft Entra's token endpoint, and Anthropic with its token
 exchange), GitHub's identity token endpoint and Cloud Storage are stand-ins served on 127.0.0.1, which record each
-request. What is tested: the verdict for each answer and each failure, no verdict for a sign-in that fails, that the
-reason reaches the bucket and nothing else (no output, no log line), what is sent (the text of the pull request or
-the issue as review-gather writes it, every account's comments; the model gets no tool and a schema of two words),
-and the size limits of each service. No network is used.
+request. What is tested: the verdict for each answer and each failure, no verdict for a sign-in that fails, the
+sign-ins alone (--sign-in, the same requests and failures, and no text sent), that the reason reaches the bucket and
+nothing else (no output, no log line), what is sent (the text of the pull request or the issue as review-gather
+writes it, every account's comments; the model gets no tool and a schema of two words), and the size limits of each
+service. No network is used.
 """
 
 import contextlib
@@ -189,16 +190,16 @@ class ScreenTest(unittest.TestCase):
                 with open(full, "wb") as f:
                     f.write(data.encode() if isinstance(data, str) else data)
 
-    def run_screen(self, code=0):
+    def run_screen(self, code=0, args=None):
         """main() as the step runs it, in this process: (verdict output, everything it printed, the stored reason).
-        code is the exit status main() must give."""
+        code is the exit status main() must give. args are screen.py's arguments, by default the Screen step's."""
         open(self.output, "w").close()
         saved, argv = dict(os.environ), sys.argv
         os.environ.update(self.env)
         out, err = io.StringIO(), io.StringIO()
         try:
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                sys.argv = ["screen.py", self.review, os.path.join(self.dir, "projects", "p")]
+                sys.argv = ["screen.py", *(args or [self.review, os.path.join(self.dir, "projects", "p")])]
                 rc = screen.main()
         finally:
             sys.argv = argv
@@ -281,25 +282,28 @@ class ScreenTest(unittest.TestCase):
                 self.assertEqual(v, "held")
                 self.assertIn("error", {c["word"] for c in reason["checks"].values()})
 
+    # Each sign-in that fails: the stand-ins' answers and the settings that make it fail, and the words of the line that
+    # names it.
+    SIGN_IN_FAILURES = {
+        "oidc refuses": ({"/oidc": (403, {"message": MARK})}, {}, "GitHub's identity token: no answer, HTTP 403"),
+        "entra refuses": ({"/entra/tenant/oauth2/v2.0/token": (401, {"error": "invalid_client", "x": MARK})}, {},
+                          "Microsoft Entra's access token: no answer, HTTP 401"),
+        "entra gives no token": ({"/entra/tenant/oauth2/v2.0/token": (200, {})}, {},
+                                 "Microsoft Entra's access token: an answer with no token"),
+        "entra cannot be reached": ({}, {"AZURE_LOGIN_URL": "http://127.0.0.1:9"},
+                                    "Microsoft Entra's access token: no answer, unreachable"),
+        "anthropic exchange refuses": ({"/v1/oauth/token": (401, {"type": "error", "x": MARK})}, {},
+                                       "Anthropic's token exchange: no answer, HTTP 401"),
+        "anthropic exchange gives no token": ({"/v1/oauth/token": (200, {})}, {},
+                                              "Anthropic's token exchange: an answer with no token"),
+    }
+
     def test_a_sign_in_that_fails_fails_the_screen(self):
         """No verdict: GitHub's identity token, Microsoft Entra's token or Anthropic's token exchange refuses, cannot
         be reached, or gives no token. The screen stops there and asks the model nothing. It exits 1 and writes
         nothing to GITHUB_OUTPUT, so the Screen step fails. Its one line names the sign-in and the kind of failure,
         and holds no token and nothing of the answer."""
-        cases = {
-            "oidc refuses": ({"/oidc": (403, {"message": MARK})}, {}, "GitHub's identity token: no answer, HTTP 403"),
-            "entra refuses": ({"/entra/tenant/oauth2/v2.0/token": (401, {"error": "invalid_client", "x": MARK})}, {},
-                              "Microsoft Entra's access token: no answer, HTTP 401"),
-            "entra gives no token": ({"/entra/tenant/oauth2/v2.0/token": (200, {})}, {},
-                                     "Microsoft Entra's access token: an answer with no token"),
-            "entra cannot be reached": ({}, {"AZURE_LOGIN_URL": "http://127.0.0.1:9"},
-                                        "Microsoft Entra's access token: no answer, unreachable"),
-            "anthropic exchange refuses": ({"/v1/oauth/token": (401, {"type": "error", "x": MARK})}, {},
-                                           "Anthropic's token exchange: no answer, HTTP 401"),
-            "anthropic exchange gives no token": ({"/v1/oauth/token": (200, {})}, {},
-                                                  "Anthropic's token exchange: an answer with no token"),
-        }
-        for name, (answers, settings, want) in cases.items():
+        for name, (answers, settings, want) in self.SIGN_IN_FAILURES.items():
             with self.subTest(case=name):
                 self.fresh()
                 self.item(body=f"Body {MARK}.")
@@ -589,6 +593,107 @@ class ScreenTest(unittest.TestCase):
             return (503, {"error": "busy"}) if len(calls) < 3 else armor()
         self.services.answers[":sanitizeUserPrompt"] = flaky
         self.assertEqual(self.verdict()[0], "clean")
+
+    # --- the sign-ins alone (screen.py --sign-in) -------------------------------------------------------------
+
+    # The checks' own endpoints, which the sign-ins alone never reach.
+    CHECK_ENDPOINTS = (":sanitizeUserPrompt", "/contentsafety/text:shieldPrompt", "/v1/messages")
+
+    def sign_ins(self, code):
+        """screen.py --sign-in as the step "Sign in to the screen's services" runs it, in this process, with an item in
+        .review/ that holds MARK: the one line it printed. code is the exit status it must give. It writes nothing to
+        GITHUB_OUTPUT, stores nothing, sends no request to a check's endpoint or to the bucket, and sends nothing of
+        the item."""
+        self.item(body=f"Body {MARK}.")
+        written, printed, _reason = self.run_screen(code, ["--sign-in"])
+        self.assertEqual(written, "")
+        self.assertEqual(self.services.objects, {})
+        self.assertEqual([r["path"] for r in self.services.requests
+                          if r["path"].startswith("/storage/") or r["path"].endswith(self.CHECK_ENDPOINTS)], [])
+        self.assertNotIn(MARK, json.dumps(self.services.requests))
+        self.assertEqual(printed.count("\n"), 1, printed)
+        return printed
+
+    def signed_in(self):
+        """The sign-in requests the stand-ins received, in order, with what each sent."""
+        return [(r["method"], r["path"], r["query"], r["body"], r["headers"].get("Authorization"))
+                for r in self.services.requests if r["path"].endswith(("/oidc", "/oauth2/v2.0/token", "/oauth/token"))]
+
+    def test_the_sign_ins_alone_are_the_screens_own(self):
+        """The same requests as the checks make, in the same order, and no other: GitHub's identity token for
+        Microsoft Entra, Entra's token, GitHub's identity token for Anthropic, and Anthropic's token exchange. Each
+        token is discarded. All of them pass, so it exits 0."""
+        self.item()
+        self.assertEqual(self.verdict()[0], "clean")
+        screens = self.signed_in()
+        self.assertEqual([r[1] for r in screens], ["/oidc", "/entra/tenant/oauth2/v2.0/token", "/oidc",
+                                                   "/anthropic/v1/oauth/token"])
+        self.fresh()
+        self.assertEqual(self.sign_ins(0), "The screen's sign-ins: prompt_shields: signed in; claude: signed in.\n")
+        self.assertEqual(self.signed_in(), screens)
+        self.assertEqual(len(self.services.requests), len(screens))
+        # As a process, as the step runs it: no .review/ at all, and no GITHUB_OUTPUT file after it either.
+        self.fresh()
+        os.rmdir(self.review)
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("ACTIONS_", "GITHUB_", "ANTHROPIC_"))}
+        env.update(self.env)
+        r = subprocess.run([sys.executable, str(SCRIPTS / "screen.py"), "--sign-in"], env=env,
+                           capture_output=True, text=True, timeout=120)
+        self.assertEqual((r.returncode, r.stderr, r.stdout),
+                         (0, "", "The screen's sign-ins: prompt_shields: signed in; claude: signed in.\n"))
+        self.assertFalse(os.path.exists(self.output))
+        self.assertEqual(self.signed_in(), screens)
+        self.assertEqual(self.services.objects, {})
+
+    def test_the_sign_ins_alone_fail_as_the_screen_does(self):
+        """Each sign-in that fails the screen fails --sign-in too: the same line, exit status 1, and no sign-in after
+        the first that fails. So the step fails before the screen job's mark for the daily cap."""
+        for name, (answers, settings, want) in self.SIGN_IN_FAILURES.items():
+            with self.subTest(case=name):
+                self.fresh()
+                self.services.answers.update(answers)
+                self.env.update(settings)
+                self.assertEqual(self.sign_ins(1),
+                                 f"::error::The screen could not sign in, and gives no verdict ({want}).\n")
+                if not name.startswith("anthropic"):
+                    self.assertEqual(self.services.to("/v1/oauth/token"), [])
+
+    def test_the_sign_ins_alone_pass_a_setting_that_is_missing(self):
+        """A setting that is missing stops that check's sign-in alone, as it holds the item in the screen: exit 0, and
+        the line gives the kind of failure, not the setting. The other check still signs in, and a sign-in of it
+        that fails still fails the step."""
+        for check, setting, other in (("prompt_shields", "AZURE_CLIENT_ID", "claude"),
+                                      ("prompt_shields", "AZURE_TENANT_ID", "claude"),
+                                      ("claude", "ANTHROPIC_FEDERATION_RULE_ID", "prompt_shields"),
+                                      ("claude", "ANTHROPIC_SERVICE_ACCOUNT_ID", "prompt_shields")):
+            with self.subTest(setting=setting):
+                self.fresh()
+                del self.env[setting]
+                printed = self.sign_ins(0)
+                self.assertIn(f"{check}: not signed in (no answer, a setting is missing)", printed)
+                self.assertIn(f"{other}: signed in", printed)
+                self.assertNotIn(setting, printed)
+        self.fresh()
+        del self.env["AZURE_CLIENT_ID"]
+        self.services.answers["/v1/oauth/token"] = (401, {"type": "error"})
+        self.assertEqual(self.sign_ins(1), "::error::The screen could not sign in, and gives no verdict "
+                                           "(Anthropic's token exchange: no answer, HTTP 401).\n")
+
+    def test_the_sign_ins_alone_are_those_of_the_listed_checks(self):
+        """Only a listed check that signs in signs in. A list that is not valid signs in to nothing and exits 0: the
+        Screen step holds the item for it."""
+        not_valid = "none, since SCREEN_CHECKS is not a list the screen takes"
+        for listed, want, paths in (
+                ("model_armor,claude", "claude: signed in", ["/oidc", "/anthropic/v1/oauth/token"]),
+                ("model_armor,prompt_shields", "prompt_shields: signed in",
+                 ["/oidc", "/entra/tenant/oauth2/v2.0/token"]),
+                ("model_armor", "none, since no listed check signs in", []),
+                ("prompt_shields,claude", not_valid, []), ("", not_valid, [])):
+            with self.subTest(listed=listed):
+                self.fresh()
+                self.env["SCREEN_CHECKS"] = listed
+                self.assertEqual(self.sign_ins(0), f"The screen's sign-ins: {want}.\n")
+                self.assertEqual([r["path"] for r in self.services.requests], paths)
 
     # --- the reason reaches the bucket and nothing else -------------------------------------------------------
 

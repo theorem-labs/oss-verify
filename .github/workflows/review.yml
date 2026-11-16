@@ -45,7 +45,7 @@ name: "Review"
 #            review run, with no person. Before that, the daily cap (REVIEW_CAP and REVIEW_CAP_AUTHOR, below) counts
 #            this file's runs of the last 24 hours that route let screen for an account without write access, from
 #            the moment route did (its step "Mark this run for the daily cap"), unless they ended before their screen
-#            job signed in (.github/scripts/screened-review-cap). The count started again at the merge that moved the
+#            job's sign-ins (.github/scripts/screened-review-cap). The count started again at the merge that moved the
 #            review to this file. Over it the trust is `cap`, the item gets no screen and no review, and route's output
 #            `free` gives the time the cap lets it run. `measure` for a run started by hand with -f measure=true and no
 #            pr or issue: the screen job alone runs, and measures its rules (below).
@@ -422,7 +422,7 @@ env:
   # hours over all pull requests and issues, and at most REVIEW_CAP_AUTHOR of them charged to one account. route's
   # trust step counts them with .github/scripts/screened-review-cap for every item whose trust is screen, before the
   # screen: the runs that route let screen (its step "Mark this run for the daily cap"), from that moment, unless they
-  # ended before their screen job signed in. A run started by an event is charged to the account that opened, pushed,
+  # ended before their screen job's sign-ins. A run started by an event is charged to the account that opened, pushed,
   # edited or reopened the item, and a run started by hand to the item's author. An item over the cap gets trust cap:
   # no screen and no model call, and route's output free gives the time the cap lets it run. A count that cannot read
   # GitHub fails route.
@@ -759,7 +759,7 @@ jobs:
 
       # The daily cap counts a run from the moment route lets it be screened (.github/scripts/screened-review-cap), so
       # that a burst of items is counted before their screens start. This artifact says that route gave this run trust
-      # screen. The screen job keeps daily-cap-screen after it signed in.
+      # screen. The screen job keeps daily-cap-screen after its sign-ins.
       - name: Mark this run for the daily cap
         if: steps.trust.outputs.trust == 'screen'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (sha-pinned)
@@ -1074,7 +1074,9 @@ jobs:
     # never to this public log or an output.
     # A screen that cannot sign in or cannot get a model token (GitHub's identity token, Microsoft Entra's token,
     # Anthropic's token exchange) fails this job and gives no verdict. The comment job then records the hold as for a
-    # screen that failed, and Held runs starts the screen of a held head again, at most once an hour.
+    # screen that failed, and Held runs starts the screen of a held head again, at most once an hour. The step "Sign in
+    # to the screen's services" makes these sign-ins before the mark for the daily cap, so the cap does not count such
+    # a run.
     needs: [route, gather]
     # A screen of what the gather job kept, or a measurement, which needs no gather job. Never for an item that route
     # held at the daily cap, and never on a run by hand on another branch than main.
@@ -1149,10 +1151,19 @@ jobs:
         timeout-minutes: 2
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0 (sha-pinned)
         with: {workload_identity_provider: "${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}", service_account: "${{ env.GCP_SERVICE_ACCOUNT }}", token_format: access_token, access_token_lifetime: "${{ needs.route.outputs.trust == 'measure' && '3600s' || '600s' }}", create_credentials_file: false, export_environment_variables: false}
-      # The daily cap counts a run whose screen job signed in (.github/scripts/screened-review-cap), whatever the job
-      # does next, so these come right after the sign-in. A run whose sign-in is refused (before dispatch://INFRA-3746
-      # admits this file, say) ends before it marks, and the cap does not count it. A measurement's mark counts
-      # nothing: route kept no daily-cap-route for it.
+      # The sign-ins of the checks in SCREEN_CHECKS that sign in (.github/scripts/screen.py --sign-in): Microsoft
+      # Entra's token for Prompt Shields and Anthropic's token exchange for the model, each with GitHub's identity
+      # token, as the Screen and Measure steps make them later. It reads no text of the item, and it keeps no token. A
+      # sign-in that is refused fails this job before the mark below. A setting that is missing does not fail it: the
+      # Screen step holds the item for it.
+      - name: Sign in to the screen's services
+        timeout-minutes: 2
+        run: python3 .github/scripts/screen.py --sign-in
+      # The daily cap counts a run whose screen job signed in to each service it uses, whatever the job does next
+      # (.github/scripts/screened-review-cap), so these come right after the sign-ins. A run whose sign-in to Google,
+      # Microsoft Entra or Anthropic is refused ends before it marks, and the cap does not count it. Such a run comes,
+      # say, before the last of the three applies of dispatch://INFRA-3746, which admit this file at different times.
+      # A measurement's mark counts nothing: route kept no daily-cap-route for it.
       - name: Mark this run's screen for the daily cap
         timeout-minutes: 1
         run: echo "$GITHUB_RUN_ID" > "$RUNNER_TEMP/daily-cap"
