@@ -499,15 +499,18 @@ class FirstRunArtifact(Stand):
                   '    if results["project"] != name:\n'
                   '        return f"{MEMBER} is of another project, not {name}"\n')
 
-    def fixture(self, change):
-        """The API: pull request 7 at HEAD, and Build run 900 whose artifact holds the results with `change`."""
+    def results(self, change):
+        """The results of Build run 900 of pull request 7 at HEAD, with `change`."""
+        return {"schema": "oss-verify build results v1", "pr": 7, "project": "x", "sha": HEAD, "commit": "", "code": 0,
+                "result": "ARTIFACT-RESULT", "binaries": "ARTIFACT-BINARIES", "checks": "ARTIFACT-CHECKS", **change}
+
+    def fixture(self, change, data=None):
+        """The API: pull request 7 at HEAD, and Build run 900 whose artifact holds the results with `change`, or is the
+        zip `data`."""
         self.clear()
         pull = self.pull_request(self.FILES)
         self.serve(f"repos/{REPO}/pulls?state=open&base=main&head=mallory:{BRANCH}&per_page=100", [pull])
-        results = {"schema": "oss-verify build results v1", "pr": 7, "project": "x", "sha": HEAD, "commit": "",
-                   "code": 0, "result": "ARTIFACT-RESULT", "binaries": "ARTIFACT-BINARIES", "checks": "ARTIFACT-CHECKS",
-                   **change}
-        data = zipped({"results.json": json.dumps(results)})
+        data = data or zipped({"results.json": json.dumps(self.results(change))})
         self.serve(f"repos/{REPO}/actions/runs/{self.RUN}/artifacts", {"artifacts": [
             {"id": self.ARTIFACT, "name": "build-results", "expired": False, "size_in_bytes": len(data)}]})
         self.serve_raw(f"repos/{REPO}/actions/artifacts/{self.ARTIFACT}/zip", data)
@@ -607,6 +610,26 @@ class FirstRunArtifact(Stand):
         with self.assertRaises(AssertionError) as caught:
             self.case(changed)
         self.assertIn("take-build-results' outputs (another number)", str(caught.exception))
+
+    def test_s_a_member_that_holds_more_than_its_header_says_gives_no_result(self):
+        """The header of results.json says that it holds the results of this head alone; it holds them and more than
+        1 MiB after them. take-build-results gives its no-result line."""
+        import test_enroll_dispatch
+        review = self.workflow(ROOT, "review.yml")
+        no_result = re.search(r'^NO_RESULT = "(.*)"$', (ROOT / ".github/scripts/take-build-results").read_text(),
+                              re.M).group(1)
+        text = json.dumps(self.results({}))
+        data = test_enroll_dispatch.understated("results.json", text + " " * (1 << 20), len(text))
+        self.assertLess(len(data), 1 << 20)
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            self.assertEqual(archive.getinfo("results.json").file_size, len(text))
+        self.fixture({}, data)
+        ctx = {"github.token": WORKFLOW_TOKEN, "github.repository": REPO, "needs.route.outputs.pr": PR,
+               "needs.route.outputs.sha": HEAD, "needs.route.outputs.build_run": self.RUN,
+               "steps.project.outputs.name": "x"}
+        rc, log, build = self.run_step(review, "gather", self.TAKE, ctx, ROOT)
+        self.assertEqual(rc, 0, log)
+        self.assertEqual(build, {"build": no_result, "binaries": "", "checks": "", "commit": ""}, log)
 
 
 class SteeringFiles(unittest.TestCase):
@@ -757,7 +780,8 @@ class RunByHandOffMain(Stand):
               {"kind": "change", "pr": PR, "sha": HEAD, "author": "mallory", "held": "true", "trust": "screen"},
               {"kind": "enrollment", "pr": PR, "sha": HEAD, "author": "mallory", "held": "true", "trust": "screen"},
               {"kind": "change", "pr": PR, "sha": HEAD, "author": "mallory", "trust": "cap",
-               "free": "2026-11-17T00:00:00Z"})
+               "free": "2026-11-17T00:00:00Z"},
+              {"pr": PR, "sha": HEAD, "author": "mallory", "replay": "true"})
     # What each job gives when it runs: the review held a finding back, kept a session, and the triage comment is
     # written.
     OUTPUTS = {"gather": {"digest": "d" * 64, "screen": "true", "name": "x"},
@@ -890,12 +914,17 @@ class ClaudeFiles(Stand):
 
 class HeldApproval(Stand):
     """d7: a run by hand of review.yml for a pull request whose runs GitHub holds, and the comment job's approval of
-    them. The screen's verdict is the screen job's output, given to run_graph of tests/test_outside_screen.py."""
+    them; and a run by hand for a merged pull request whose run of enroll-merged.yml GitHub holds, and the comment job's
+    replay of the merge. The screen's verdict is the screen job's output, given to run_graph of
+    tests/test_outside_screen.py."""
 
     ROUTE = "An enrollment, a change or an issue"
     TRUST = "Whether the author and the account that started the run have write access"
     TOKEN = "Get the oss-verify App's token to approve the held runs"
     APPROVE = "Approve the held runs"
+    REPLAY = "Replay the merge for Enroll dispatch"
+    # The merge commit of pull request 7, once it is merged.
+    MERGE = "c" * 40
     # The held runs that the API lists: (id, workflow file, head commit, head repository, head branch). 11 to 13 are
     # the pull request's, at HEAD. 21 is of another head, 22 of another repository, and 23 of another branch.
     HELD = ((11, ".github/workflows/build.yaml", HEAD, FORK, BRANCH),
@@ -1094,6 +1123,82 @@ class HeldApproval(Stand):
         env = self.comment_env(ctx)
         self.assertEqual((env["APPROVE"], env["RECORD"]), ("true", "false"))
 
+    def merged(self, held, merged=True):
+        """Pull request 7 of mallory's fork at HEAD, closed, and with `merged` merged into main at MERGE, and the runs of
+        enroll-merged.yml that GitHub holds: `held`, each (id, head commit, head repository, head branch)."""
+        pull = self.pull_request(("projects/x/project.yaml", "projects/x/build.sh"))
+        pull.update(state="closed", merged=merged, merge_commit_sha=self.MERGE)
+        self.serve(f"repos/{REPO}/pulls/{PR}", pull)
+        self.serve(f"repos/{REPO}/actions/workflows/enroll-merged.yml/runs", {"workflow_runs": [
+            {"id": i, "path": ".github/workflows/enroll-merged.yml", "event": "pull_request",
+             "status": "action_required", "head_sha": sha, "head_repository": {"full_name": repository},
+             "head_branch": branch} for i, sha, repository, branch in held]})
+
+    def test_held_a_merged_pull_request_whose_merge_run_is_held_is_replayed_with_the_apps_token(self):
+        for label, held, commits in (("at its head commit", [(31, HEAD, FORK, BRANCH)], [HEAD]),
+                                     ("at its merge commit", [(32, self.MERGE, FORK, BRANCH)], [HEAD, self.MERGE])):
+            with self.subTest(label):
+                self.clear()
+                self.merged(held)
+                route, log = self.route("github-actions[bot]")
+                self.assertEqual(route, {"pr": PR, "sha": HEAD, "author": "mallory", "replay": "true"}, log)
+                self.assertIn(f"GitHub holds run {held[0][0]} of enroll-merged.yml at {held[0][1]}", log)
+                # route reads the pull request and the held runs of enroll-merged.yml at each commit until it finds
+                # one, and no file of the closed pull request, no other held run and no Build run.
+                self.assertEqual([r["endpoint"] for r in self.requests()], [f"repos/{REPO}/pulls/{PR}"] + [
+                    f"repos/{REPO}/actions/workflows/enroll-merged.yml/runs?event=pull_request&status=action_required"
+                    f"&head_sha={commit}&per_page=100" for commit in commits], log)
+                got, ctx = self.tos.run_graph(route, event="workflow_dispatch", workflow=self.review,
+                                              ref="refs/heads/main")
+                self.assertEqual({job for job, result in got.items() if result != "skipped"},
+                                 {"route", "comment", "collect"}, got)
+                # The check review jobs: the comment job asked for and passed, and every other job skipped, as asked.
+                code, said = self.tos.required(ctx)
+                self.assertEqual(code, 0, said)
+                self.assertIn("the jobs the run asked for (comment)", said)
+                env = self.comment_env(ctx)
+                self.assertEqual({k: env[k] for k in ("KIND", "REPLAY", "APPROVE", "HOLDING", "RECORD")},
+                                 {"KIND": "", "REPLAY": "true", "APPROVE": "false", "HOLDING": "false",
+                                  "RECORD": "false"})
+                # Of the comment job's steps, those with no condition (its checkout, its sign-in and the read of the
+                # App's key, which every token needs) and, of the others, the token that can write runs and the replay.
+                steps = self.review["jobs"]["comment"]["steps"]
+                self.assertEqual([s.get("name") or s["uses"].split("@")[0] for s in steps if "if" not in s],
+                                 ["actions/checkout", "Sign in to Google Cloud", "Read the oss-verify App's key"])
+                self.assertEqual([s["name"] for s in steps if "if" in s and self.ran(s["name"], env)],
+                                 [self.TOKEN, self.REPLAY])
+                ctx = dict(ctx, **{"github.token": WORKFLOW_TOKEN, "github.repository": REPO,
+                                   "steps.app.outputs.token": APP_TOKEN, "steps.approve.outputs.token": APPROVE_TOKEN})
+                since = len(self.calls())
+                rc, log, _ = self.run_step(self.review, "comment", self.REPLAY, ctx, ROOT, evaluate=self.tos.evaluate)
+                self.assertEqual(rc, 0, log)
+                self.assertEqual(self.calls()[since:], [(APPROVE_TOKEN, ["workflow", "run", "enroll-merged.yml", "-R",
+                                                                         REPO, "--ref", "main", "-f", f"pr={PR}"])])
+                self.assertIn(f"Started enroll-merged.yml on main for pull request {PR} with the oss-verify App's token",
+                              log)
+
+    def test_held_a_closed_pull_request_with_no_held_merge_run_runs_nothing(self):
+        # A held run of enroll-merged.yml of another commit, repository or branch alone; none; and a pull request
+        # closed with no merge, whose head has a held run.
+        for label, held, merged, said in (
+                ("another commit, repository or branch",
+                 [(33, OTHER, FORK, BRANCH), (34, HEAD, "eve/oss-verify", BRANCH), (35, self.MERGE, FORK, "other")],
+                 True, f"Pull request {PR} is merged, and GitHub holds no run of enroll-merged.yml"),
+                ("no held run", [], True, f"Pull request {PR} is merged, and GitHub holds no run of enroll-merged.yml"),
+                ("closed with no merge", [(31, HEAD, FORK, BRANCH)], False,
+                 f"Pull request {PR} is closed, and not merged into the default branch: nothing runs.")):
+            with self.subTest(label):
+                self.clear()
+                self.merged(held, merged)
+                # Held runs of other workflows at the head: a closed pull request is still not screened.
+                self.held_runs(self.HELD)
+                for actor in ("github-actions[bot]", "alice"):
+                    route, log = self.route(actor)
+                    self.assertEqual(route, {}, log)
+                    self.assertIn(said, log)
+                got, _ = self.tos.run_graph({}, event="workflow_dispatch", workflow=self.review, ref="refs/heads/main")
+                self.assertEqual({job for job, result in got.items() if result != "skipped"}, {"route", "collect"}, got)
+
     def test_held_the_comment_job_makes_a_token_of_its_own_for_the_approval(self):
         steps = self.review["jobs"]["comment"]["steps"]
         names = [s.get("name") for s in steps]
@@ -1108,22 +1213,33 @@ class HeldApproval(Stand):
             self.assertTrue(step["uses"].startswith("actions/create-github-app-token@"), step)
         self.assertNotIn("permission-actions", permissions(app))
         self.assertEqual(permissions(token), {"permission-actions": "write"})
-        self.assertEqual((token["id"], token["if"], approve["if"]), ("approve", "env.APPROVE == 'true'",
-                                                                     "env.APPROVE == 'true'"))
+        self.assertEqual((token["id"], token["if"], approve["if"]),
+                         ("approve", "env.APPROVE == 'true' || env.REPLAY == 'true'", "env.APPROVE == 'true'"))
+        self.assertEqual(app["if"], "env.APPROVE != 'true' && env.REPLAY != 'true'")
         self.assertEqual(names.index(self.TOKEN) + 1, names.index(self.APPROVE))
-        self.assertEqual(approve["env"]["GH_TOKEN"], "${{ steps.approve.outputs.token }}")
+        self.assertLess(names.index(self.TOKEN), names.index(self.REPLAY))
+        replay = self.step(self.review, "comment", self.REPLAY)
+        self.assertEqual(replay["if"], "env.REPLAY == 'true'")
+        for step in (approve, replay):
+            self.assertEqual(step["env"]["GH_TOKEN"], "${{ steps.approve.outputs.token }}")
         # No other step takes the token that can write runs.
         self.assertEqual([s.get("name") for s in steps if "steps.approve.outputs.token" in json.dumps(s)],
-                         [self.APPROVE])
-        # The approval runs only when route found held runs and the screen succeeded with the verdict clean.
-        for held in ("true", "false", ""):
-            for result in ("success", "failure", "cancelled", "skipped"):
-                for verdict in ("clean", "held", ""):
-                    ctx = {"needs.route.outputs.held": held, "needs.screen.result": result,
-                           "needs.screen.outputs.verdict": verdict}
-                    env = self.comment_env(ctx)
-                    want = (held, result, verdict) == ("true", "success", "clean")
-                    self.assertEqual((self.ran(self.TOKEN, env), self.ran(self.APPROVE, env)), (want, want), ctx)
+                         [self.APPROVE, self.REPLAY])
+        # The token that can write runs is made only on an approval (route found held runs, and the screen succeeded
+        # with the verdict clean) or on a merge's replay (route's replay). The approval runs only on an approval, the
+        # replay only on a replay, and the other token only on neither.
+        for replay in ("true", ""):
+            for held in ("true", "false", ""):
+                for result in ("success", "failure", "cancelled", "skipped"):
+                    for verdict in ("clean", "held", ""):
+                        ctx = {"needs.route.outputs.held": held, "needs.screen.result": result,
+                               "needs.screen.outputs.verdict": verdict, "needs.route.outputs.replay": replay}
+                        env = self.comment_env(ctx)
+                        approval = (held, result, verdict) == ("true", "success", "clean")
+                        replays = replay == "true"
+                        self.assertEqual(tuple(self.ran(n, env) for n in (self.TOKEN, self.APPROVE, self.REPLAY,
+                                                                          "Get the oss-verify App's token")),
+                                         (approval or replays, approval, replays, not (approval or replays)), ctx)
 
 
 class HeldScreen(Stand):

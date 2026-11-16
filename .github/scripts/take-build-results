@@ -25,12 +25,13 @@ First it reads every page of the pull request's files, and checks each name and 
 MAX_LISTED_FILES files or more is not the whole change, so then it reads nothing.
 
 The artifact is ARTIFACT of BUILD_RUN, which build.yaml's results job writes. The run must have exactly one unexpired
-artifact of that name, of at most 1 MiB. Its zip must hold exactly one member, MEMBER, of at most 1 MiB. That member
-must be JSON with the schema SCHEMA and the fields of FIELDS, each of its type, shape and size. Its pr, sha and project
-must be PR, HEAD_SHA and NAME: the pull request and the head that route read from the API, and the project that the
-gather job's own take-project took. The artifact never gives the number, the head, the diff or the files that
-review.yml reads or posts to. This reads the zip in memory and writes no file but GITHUB_OUTPUT: nothing goes into the
-working directory.
+artifact of that name, of at most 1 MiB. Its zip must hold exactly one member, MEMBER, of at most 1 MiB by its header
+and by the bytes read: the header is the zip's own word, so this reads at most 1 MiB and one byte of the member, and
+refuses it when that byte came. That member must be JSON with the schema SCHEMA and the fields of FIELDS, each of its
+type, shape and size. Its pr, sha and project must be PR, HEAD_SHA and NAME: the pull request and the head that route
+read from the API, and the project that the gather job's own take-project took. The artifact never gives the number,
+the head, the diff or the files that review.yml reads or posts to. This reads the zip in memory and writes no file but
+GITHUB_OUTPUT: nothing goes into the working directory.
 
 When a read or a check fails, build is the fixed line NO_RESULT, and binaries, checks and commit are empty. The log
 says why, with no text of the artifact. The exit status is then 0, so the review continues with no result of the
@@ -184,7 +185,11 @@ def take(api: Api, repo: str, run: int, pr: int, head: str, name: str) -> tuple[
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         if archive.namelist() != [MEMBER] or archive.getinfo(MEMBER).file_size > MAX_ARTIFACT_BYTES:
             return nothing(NO_RESULT), f"Build run {run}'s {ARTIFACT} does not hold {MEMBER} alone"
-        results = json.loads(archive.read(MEMBER))
+        with archive.open(MEMBER) as member:
+            text = member.read(MAX_ARTIFACT_BYTES + 1)
+    if len(text) > MAX_ARTIFACT_BYTES:
+        return nothing(NO_RESULT), f"Build run {run}'s {MEMBER} holds more than {MAX_ARTIFACT_BYTES} bytes"
+    results = json.loads(text)
     why = problem(results, pr, head, name)
     if why:
         return nothing(NO_RESULT), why

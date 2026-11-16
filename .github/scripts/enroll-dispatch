@@ -70,11 +70,12 @@ decides. A check run of the same name from any other run (a run of another file 
 second pull request at the same commit from another head) is not counted, and a required check with no entry in
 REQUIRED_SOURCES is never passed. build.yaml, validate.yaml and terms.yaml ran on pull_request_target, and they run on
 pull_request after they moved to it (the move). A run on either event counts, so that the checks of a head that ran
-before the move still count. A pull_request_target run always ran main's copy of the file. A pull_request run runs the
-merge commit's copy, which a pull request that changes the file controls: the_project makes every such pull request
-none, as it has a file outside one projects/<name>/. The record is the artifact enrollment-record of the Build run
-whose project-builds check is the bound one, which build.yaml's record job wrote from project-builds' outputs; every
-value of it is checked against its shape.
+before the move still count. A pull_request_target run ran the base branch's copy of the file. The bound checks are of
+a pull request into main (open_at, and the base check of a merge), so for them that copy is main's. A pull_request
+run runs the merge commit's copy, which a pull request that changes the file controls: the_project makes every such
+pull request none, as it has a file outside one projects/<name>/. The record is the artifact enrollment-record of the
+Build run whose project-builds check is the bound one, which build.yaml's record job wrote from project-builds'
+outputs; every value of it is checked against its shape.
 
 The pull request of any other run is the one the record names. It must be open, into main, from that head, with that
 commit as its head commit, and its files must all be under one projects/<name>/, the record's project; it is read again
@@ -172,8 +173,9 @@ SIZE_LIMIT = 1_000_000
 # (docs/project-yaml.md, "language").
 PAUSED_LANGUAGES = frozenset({"python", "go"})
 # The events of a run of a pull request: pull_request, and pull_request_target, which build.yaml, validate.yaml,
-# terms.yaml and maintainer-confirmed.yml ran on before the move. A pull_request_target run always ran main's copy of
-# its file, so a run of a head from before the move still counts.
+# terms.yaml and maintainer-confirmed.yml ran on before the move. A pull_request_target run ran the base branch's copy
+# of its file. The bound checks are of a pull request into main (open_at, and the base check of a merge), so for them
+# that copy is main's, and a run of a head from before the move still counts.
 PULL_EVENTS = frozenset({"pull_request", "pull_request_target"})
 # The workflow file and the events each required check must come from. Each is required here whatever the ruleset
 # says, and so is any other check the ruleset requires (which, with no source here, is never passed).
@@ -340,7 +342,9 @@ def bound_checks(api: Api, runs: Runs, repo: str, sha: str, head: tuple) -> tupl
 
 def build_record(api: Api, repo: str, run_id: int) -> tuple[dict | None, str]:
     """The record build.yaml's record job uploaded in this run: the JSON of record.json, the one file of its artifact
-    RECORD_ARTIFACT; or None and why not."""
+    RECORD_ARTIFACT; or None and why not. record.json must be at most MAX_ARTIFACT_BYTES by its header and by the bytes
+    read: the header is the zip's own word, so this reads at most one byte more than that, and refuses the record when
+    that byte came."""
     artifacts = [a for page in api.pages(f"repos/{repo}/actions/runs/{run_id}/artifacts?name={RECORD_ARTIFACT}"
                                          "&per_page=100")
                  for a in page.get("artifacts") or [] if a.get("name") == RECORD_ARTIFACT and not a.get("expired")]
@@ -354,7 +358,11 @@ def build_record(api: Api, repo: str, run_id: int) -> tuple[dict | None, str]:
             names = archive.namelist()
             if set(names) != {"record.json"} or archive.getinfo("record.json").file_size > MAX_ARTIFACT_BYTES:
                 return None, f"Build run {run_id}'s {RECORD_ARTIFACT} holds {names}, not record.json alone"
-            return json.loads(archive.read("record.json")), ""
+            with archive.open("record.json") as member:
+                text = member.read(MAX_ARTIFACT_BYTES + 1)
+        if len(text) > MAX_ARTIFACT_BYTES:
+            return None, f"Build run {run_id}'s record.json holds more than {MAX_ARTIFACT_BYTES} bytes"
+        return json.loads(text), ""
     except (zipfile.BadZipFile, ValueError) as error:
         return None, f"Build run {run_id}'s {RECORD_ARTIFACT} cannot be read: {error}"
 

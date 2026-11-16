@@ -556,8 +556,8 @@ class DailyCap(Runner):
 
     def test_a_run_counts_from_routes_mark_until_it_ends_without_a_screen(self):
         """A run counts once route gave it trust screen (daily-cap-route), while it has not completed, and once it
-        has, only when its screen job signed in (daily-cap-screen): a newer Build run of the pull request cancels a run
-        whose screen has not signed in, and a refused sign-in ends it, before its screen. A run that route gave no
+        has, only when its screen job signed in (daily-cap-screen): a run whose gather job kept nothing (the head
+        moved), a run that was cancelled, and a refused sign-in each end it before its screen. A run that route gave no
         trust screen never counts, whatever ran."""
         self.runs((20, 1, "workflow_run", "mallory", self.UNSTARTED),
                   (21, 2, "workflow_run", "mallory", self.SCREENED),
@@ -797,16 +797,17 @@ class Routes(unittest.TestCase):
 
     def test_the_review_and_the_comment_are_asked_for_on_their_own_conditions(self):
         """Every condition change of the review and comment jobs is mirrored in the job collect's ASKED_REVIEW and
-        ASKED_COMMENT: the same answer over every route, gather, screen and review those jobs can see, a held head
-        and a run by hand on another branch than main included."""
+        ASKED_COMMENT: the same answer over every route, gather, screen and review those jobs can see, a held head, a
+        merge's replay (no kind) and a run by hand on another branch than main included."""
         collect = step("collect", COLLECT)["env"]
-        for trust, kind, name, gathered, screened, review, comment, held, (event, ref) in itertools.product(
-                ("", "writer", "screen", "cap"), ("enrollment", "change", "issue"),
+        for trust, kind, name, gathered, screened, review, comment, held, replay, (event, ref) in itertools.product(
+                ("", "writer", "screen", "cap"), ("enrollment", "change", "issue", ""),
                 ("libx", ""), ("success", "failure", "kept nothing"), ("false", "clean", "held", "failure"),
-                ("success", "failure", "cancelled", "skipped"), ("Thanks.", ""), ("", "true"),
+                ("success", "failure", "cancelled", "skipped"), ("Thanks.", ""), ("", "true"), ("", "true"),
                 (("workflow_run", "refs/heads/main"), ("workflow_dispatch", "refs/heads/other"))):
             ctx = {"needs.route.outputs.trust": trust, "needs.route.outputs.kind": kind,
-                   "needs.route.outputs.held": held, "needs.gather.outputs.name": name,
+                   "needs.route.outputs.held": held, "needs.route.outputs.replay": replay,
+                   "needs.gather.outputs.name": name,
                    "needs.gather.result": "success" if gathered == "kept nothing" else gathered,
                    "needs.gather.outputs.digest": "d" * 64 if gathered == "success" else "",
                    "needs.gather.outputs.screen": "false" if screened == "false" else "true",
@@ -1057,8 +1058,8 @@ class Holdings(unittest.TestCase):
     def test_the_comment_job_reads_main_s_scripts_and_writes_with_the_apps_tokens(self):
         """Its own token reads the checkout of .github/scripts and nothing else. The App's first token writes the
         check run, the review comment and the hold of a change pull request or an issue. The job makes it on every
-        path but the approval of the held runs (APPROVE), where no step writes these. The second token, the
-        approval's, is a case of tests/test_trigger_move.py (d7)."""
+        path but the approval of the held runs (APPROVE) and the replay of a merge (REPLAY), where no step writes
+        these. The second token, of the approval and the replay, is a case of tests/test_trigger_move.py (d7)."""
         job = REVIEW_JOBS["comment"]
         self.assertEqual(job["permissions"], {"contents": "read", "id-token": "write"})
         checkout = job["steps"][0]
@@ -1066,12 +1067,13 @@ class Holdings(unittest.TestCase):
         self.assertEqual(checkout["with"], {"persist-credentials": False, "sparse-checkout": ".github/scripts"})
         tokens = {s["id"]: s for s in job["steps"] if "create-github-app-token" in s.get("uses", "")}
         self.assertEqual(sorted(tokens), ["app", "approve"])
-        self.assertEqual(tokens["app"]["if"], "env.APPROVE != 'true'")
+        self.assertEqual(tokens["app"]["if"], "env.APPROVE != 'true' && env.REPLAY != 'true'")
         self.assertEqual({k: v for k, v in tokens["app"]["with"].items() if k.startswith("permission-")},
                          {"permission-checks": "write", "permission-pull-requests": "write",
                           "permission-issues": "write"})
         for s in job["steps"]:
-            if "GH_TOKEN" in s.get("env", {}) and s["name"] != "Approve the held runs":
+            if "GH_TOKEN" in s.get("env", {}) and s["name"] not in ("Approve the held runs",
+                                                                    "Replay the merge for Enroll dispatch"):
                 self.assertEqual(s["env"]["GH_TOKEN"], "${{ steps.app.outputs.token }}", s["name"])
 
     def test_the_gather_job_holds_no_model_and_writes_nothing(self):
@@ -2057,9 +2059,10 @@ class RunWiring(unittest.TestCase):
     def test_it_starts_on_no_label_event_and_a_push_cancels_the_run_going(self):
         """A pull request starts Build on these four events alone, none of them labeled or unlabeled, and a push
         cancels the run of its older head. Review starts when a run of Build or Triage completes (by their names), on
-        an issue's events, and by hand. A newer Build run of a pull request's head repository and branch cancels the
-        review of its older head, and a Triage run never cancels a review; a run by hand cancels the run already going
-        in its group; an issue's event waits for it."""
+        an issue's events, and by hand. A run after a Build or Triage run has a group of its own, by that run's id: no
+        run of another Build or Triage run cancels it, so a second pull request from the same head repository and
+        branch never cancels the review of the first, and a re-run of the same run cancels the run of its earlier
+        attempt. A run by hand cancels the run already going in its group; an issue's event waits for it."""
         on = BUILD.get("on", BUILD.get(True))
         self.assertEqual(on, {"pull_request": {"types": ["opened", "reopened", "synchronize", "ready_for_review"]}})
         pr = {"github.event_name": "pull_request", "github.event.pull_request.number": 7}
@@ -2074,13 +2077,14 @@ class RunWiring(unittest.TestCase):
         self.assertEqual(on["issues"], {"types": ["opened", "edited", "reopened"]})
         self.assertEqual(sorted(on["workflow_dispatch"]["inputs"]),
                          ["issue", "measure", "measure_repeats", "measure_set", "pr"])
+        # Runs 900 and 901 of Build are of two pull requests from mallory/libx's branch main, one into main and one into
+        # another base; run 902 of Triage is of the first. Each run's review has a group of its own.
         run = {"github.event_name": "workflow_run", "github.event.workflow_run.head_branch": "main",
                "github.event.workflow_run.head_repository.full_name": "mallory/libx"}
-        for name in ("Build", "Triage"):
-            with self.subTest(workflow_run=name):
-                ctx = dict(run, **{"github.event.workflow_run.name": name})
-                want = (f"review-workflow_run-{name}-mallory/libx:main", True)
-                self.assertEqual((self.group(ctx), self.cancels(ctx)), want)
+        for name, run_id in (("Build", 900), ("Build", 901), ("Triage", 902)):
+            with self.subTest(workflow_run=name, run_id=run_id):
+                ctx = dict(run, **{"github.event.workflow_run.name": name, "github.event.workflow_run.id": run_id})
+                self.assertEqual((self.group(ctx), self.cancels(ctx)), (f"review-workflow_run-{run_id}", True))
         by_hand = {"github.event_name": "workflow_dispatch", "inputs.pr": 7}
         self.assertEqual((self.group(by_hand), self.cancels(by_hand)), ("review-workflow_dispatch-7", True))
         issue = {"github.event_name": "issues", "github.event.action": "edited", "github.event.issue.number": 9,
@@ -2088,8 +2092,8 @@ class RunWiring(unittest.TestCase):
         self.assertEqual((self.group(issue), self.cancels(issue)), ("review-issues-9", False))
 
     def test_a_screened_review_that_ran_out_of_time_is_held(self):
-        """A review job that runs out of its own time ends cancelled, and the run goes on (a newer Build run cancels
-        the whole run, and then no job after it runs): the comment job holds the item."""
+        """A review job that runs out of its own time ends cancelled, and the run goes on (when the whole run is
+        cancelled, no job after it runs): the comment job holds the item."""
         got, ctx = run_graph(dict(ITEMS["change"], trust="screen"), results={"review": "cancelled"},
                              outputs={"screen": {"verdict": "clean", "checks": "model_armor"}})
         self.assertEqual({n for n, r in got.items() if r != "skipped"} - {"route", "collect"},

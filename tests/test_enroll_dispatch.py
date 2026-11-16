@@ -13,6 +13,7 @@ import os
 import pathlib
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -64,6 +65,19 @@ def zipped(files):
         for name, data in files.items():
             archive.writestr(name, data)
     return buffer.getvalue()
+
+
+def understated(name, data, size):
+    """A zip of one member `name` that holds `data`, compressed, whose local file header and central directory entry
+    each say that it holds `size` bytes: the uncompressed size, 22 bytes into the local file header (at the start)
+    and 24 bytes into the entry, which the end of central directory record (the last 22 bytes) gives the offset of."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(name, data)
+    out = bytearray(buffer.getvalue())
+    struct.pack_into("<I", out, 22, size)
+    struct.pack_into("<I", out, struct.unpack_from("<I", out, len(out) - 22 + 16)[0] + 24, size)
+    return bytes(out)
 
 
 def sizes(plain_text=61_316, plain_exec=70_000):
@@ -460,6 +474,19 @@ class ThePullRequest(unittest.TestCase):
             world = World()
             world.artifacts[101] = rec
             self.assertEqual(world.decide()["decision"], "none")
+
+    def test_a_record_that_holds_more_than_its_header_says_is_no_record(self):
+        # The header says record.json holds the record alone; it holds the record and more than 1 MiB after it.
+        text = json.dumps(record())
+        data = understated("record.json", text + " " * dispatch.MAX_ARTIFACT_BYTES, len(text))
+        self.assertLess(len(data), dispatch.MAX_ARTIFACT_BYTES)
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            self.assertEqual(archive.getinfo("record.json").file_size, len(text))
+        world = World()
+        world.artifacts[101] = data
+        rec, why = dispatch.build_record(world.api(), REPO, 101)
+        self.assertIsNone(rec, why)
+        self.assertEqual(world.decide()["decision"], "none")
 
     def test_the_reason_is_one_line(self):
         world = World()
@@ -979,7 +1006,8 @@ class Merged(unittest.TestCase):
                              (change, got["reason"]))
             self.assertIn("which is not the head of pull request 32 at its head commit or its merge commit",
                           got["reason"], change)
-        # pull_request_target ran main's copy of the file (before the move): its title is not bound to its head.
+        # pull_request_target ran the base branch's copy of the file (before the move), main's for a merge into main:
+        # its title is not bound to its head.
         got = self.decide(self.world("pull_request_target", head_sha=NEWER, branch="copy"))
         self.assertEqual((got["decision"], got["sha"]), ("dispatch", SHA), got["reason"])
 
@@ -2431,8 +2459,8 @@ class ReviewPassed(unittest.TestCase):
 
 class BeforeTheMove(unittest.TestCase):
     """OSSV-679's plan, decision 5: build.yaml, validate.yaml, terms.yaml and maintainer-confirmed.yml ran on
-    pull_request_target before they moved to pull_request. Such a run always ran main's copy of its file, so it still
-    counts."""
+    pull_request_target before they moved to pull_request. Such a run ran the base branch's copy of its file, main's
+    for a pull request into main, which every bound check is of: so it still counts."""
 
     def test_a_pull_request_target_run_of_the_three_moved_files_is_still_bound(self):
         for names in (["project-builds"], ["enrollment"], ["terms-accepted"],
