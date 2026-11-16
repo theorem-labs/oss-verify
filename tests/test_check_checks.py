@@ -165,6 +165,74 @@ class Report(unittest.TestCase):
         self.assertFalse(check_checks.Run("t", "s", None, "coverage").caught())
         self.assertIn("abort()", check_checks.describe(check_checks.Run("t", "s", 134, "asan")))
 
+    def not_met(self, base, mutant, other=None):
+        """The report's line for a `mutant:` record whose input exits with `base` on the unchanged code and with
+        `mutant` on the mutant, in a coverage build only. `other`, if given, is (base, mutant) for a second target
+        whose harness holds the same record and has a seed of the same name."""
+        from unittest import mock
+        harness = (b"int LLVMFuzzerTestOneInput(const unsigned char *d, unsigned long n) {\n"
+                   b"  // mutant: lib.c:1 `x + 1` -> `x + 2`\n  // input: s1\n  if (f(d) != 3) abort();\n"
+                   b"  return 0;\n}\n")
+        files = {"/src/h.c": harness, "/src/h2.c": harness, "/src/lib.c": b"int f(int x) { return x + 1; }\n"}
+
+        def export_of(path):
+            return {"data": [{"functions": [{"name": "LLVMFuzzerTestOneInput", "filenames": [path]}],
+                              "files": [{"filename": path, "segments": [[1, 1, 1, True], [4, 3, 1, True]]},
+                                        {"filename": "/src/lib.c", "segments": [[1, 1, 1, True]]}]}]}
+        exports = {"t": export_of("/src/h.c")}
+        if other:
+            exports["u"] = export_of("/src/h2.c")
+
+        def runs(which):
+            return [check_checks.Run("t", "s1", (base, mutant)[which], "coverage")] + (
+                [check_checks.Run("u", "s1", other[which], "coverage")] if other else [])
+
+        def measure(*args, **kwargs):
+            coverage = check_checks.Coverage()
+            for export in exports.values():
+                coverage.add(export)
+            return runs(0), coverage, exports
+
+        def evaluate(ctx, number, breakage, record_targets):
+            breakage.outcome, breakage.runs = "measured", runs(1)
+            return breakage
+
+        job = mock.Mock(language="c", directory=pathlib.Path("/nonexistent"), builds=[], mutants=None)
+        with tempfile.TemporaryDirectory() as work, \
+                mock.patch.multiple(check_checks, write_seeds=lambda *args: {target: ["s1"] for target in exports},
+                                    llvm_version=lambda *args: "20.1.8", compiler_rt=lambda version: "/rt",
+                                    workdir_of=lambda tag: "/src", compile_check=lambda *args, **kwargs: None,
+                                    measure=measure, evaluate=evaluate, step=lambda text: None,
+                                    image_files=lambda tag, paths, labels: {p: files[p] for p in paths if p in files}):
+            report = check_checks.checks(job, "tag", list(exports), pathlib.Path(work), pathlib.Path(work) / "raw",
+                                         labels=[])
+        (line, *_) = [line for line in report.splitlines() if "mutant not met" in line and "`h.c:" in line]
+        return line
+
+    def test_a_record_whose_input_passes_on_the_mutant_is_not_met(self):
+        self.assertIn("**mutant not met**: the input passes (coverage 0)", self.not_met(0, 0))
+
+    def test_a_record_whose_input_fails_on_the_unchanged_code_says_so(self):
+        """Its failure on the mutant is no catch, and the input does not pass."""
+        self.assertIn("**mutant not met**: the input does not pass on the unchanged code (coverage 134)",
+                      self.not_met(134, 134))
+
+    def test_a_record_whose_input_does_not_end_on_the_unchanged_code_says_so(self):
+        """A run stopped at the time limit on the unchanged code is no pass, so a failure on the mutant is no catch."""
+        self.assertIn("**mutant not met**: the input does not pass on the unchanged code (coverage 134)",
+                      self.not_met(None, 134))
+
+    def test_a_record_is_judged_by_its_own_targets_runs(self):
+        """The same record in another target's harness, with a seed of the same name, does not give this one its
+        reason."""
+        self.assertIn("**mutant not met**: the input passes (coverage 0)", self.not_met(0, 0, other=(0, None)))
+        self.assertIn("**mutant not met**: the input passes (coverage 0)", self.not_met(0, 0, other=(134, 134)))
+
+    def test_a_record_whose_run_did_not_end_says_so(self):
+        """A run stopped at the time limit neither passes nor catches the mutant."""
+        self.assertIn("**mutant not met**: the input did not end within 120 seconds (coverage time limit)",
+                      self.not_met(0, None))
+
     def test_seeds_get_the_driver_header(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = pathlib.Path(directory)

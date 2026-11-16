@@ -739,9 +739,16 @@ def checks(job, tag, targets, work, raw, *, labels, ubsan=None, budget=BUDGET_MI
             elif breakage.outcome == "does not build":
                 problems.append(f"  - {label}: **the mutant does not build**: {code(breakage.detail, 300)}")
             elif not any(catches(breakage, passing, t, record.input) for t in record_targets.get(check.path, ())):
+                runs = [run for run in breakage.runs
+                        if run.seed == record.input and run.target in record_targets.get(check.path, ())]
                 statuses = ", ".join(f"{run.build} {run.status if run.status is not None else 'time limit'}"
-                                     for run in breakage.runs if run.seed == record.input) or "no run"
-                problems.append(f"  - {label}: **mutant not met**: the input passes ({statuses})"
+                                     for run in runs) or "no run"
+                # A failure is no catch where the unchanged code does not pass, and a run that did not end is neither.
+                stopped = next((run for run in runs if not run.passed() and not run.caught()), None)
+                why = ("the input does not pass on the unchanged code"
+                       if any(run.caught() and run.key() not in passing for run in runs)
+                       else f"the input {describe(stopped)}" if stopped else "the input passes")
+                problems.append(f"  - {label}: **mutant not met**: {why} ({statuses})"
                                 + (f"; {code(breakage.detail, 300)}" if breakage.detail else ""))
             else:
                 met += 1
