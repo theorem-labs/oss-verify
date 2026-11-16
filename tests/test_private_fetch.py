@@ -1110,6 +1110,10 @@ class WhatTheGuardWillNotRead(unittest.TestCase):
         self.assertIn("does not mount it", self.refuses(text))
         check_build.check_secret_mount("Dockerfile", text, None, "https://x/y/z")  # and it mounts nothing
 
+    def test_a_shift_in_an_instruction_is_not_a_heredoc(self):
+        text = f"FROM x\nRUN echo $((1<<4))\nRUN {self.MOUNT} fetch-commit /src/x\n"
+        check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
+
     def test_a_public_library_is_refused_only_for_a_mount_it_really_has(self):
         # Three valid public Dockerfiles that mount nothing: a heredoc BODY quoting a mount, an id that merely
         # begins with ours, and a mount named in a comment. Looking for the id in the text refused all three.

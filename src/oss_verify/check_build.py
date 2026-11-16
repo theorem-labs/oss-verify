@@ -859,7 +859,7 @@ def unreadable_steps(text):
     # A heredoc BODY is skipped when the instructions are read, so a fetch written inside one appears in no
     # instruction at all. The raw text is what says it is there, and the instruction that opened the heredoc is
     # what to name.
-    heredocs = [line for line in lines if "<<" in line]
+    heredocs = [line for line in lines if HEREDOC.search(line)]
     if heredocs and "fetch-commit" in text:
         unreadable = list(dict.fromkeys(unreadable + heredocs))
     return unreadable
