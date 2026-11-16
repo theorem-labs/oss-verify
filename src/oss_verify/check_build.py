@@ -701,7 +701,8 @@ def instructions(text):
         break  # a parser directive comes before the first instruction and nowhere else
     joined, carry, ending = [], "", []
     continuing = False
-    for line in text.splitlines():
+    for line in text.split("\n"):
+        line = line.rstrip("\r")  # BuildKit's lines end at \n alone, less a trailing \r
         if ending:
             # Inside a heredoc body: these lines are the content of a file or a script, not instructions. A
             # review measured a COPY heredoc whose body quoted a mounted RUN, which read as a real mount and
@@ -711,7 +712,7 @@ def instructions(text):
             continue
         if line.lstrip().startswith("#"):
             continue
-        if continuing and not line.strip():
+        if continuing and re.fullmatch(r"[^\S\x1c-\x1f]*", line):
             continue  # BuildKit steps over a blank line inside a continued instruction and keeps joining
         end = re.search(rf"{re.escape(escape)}[ \t]*$", line)
         if end and not line[:end.start()].endswith(escape):

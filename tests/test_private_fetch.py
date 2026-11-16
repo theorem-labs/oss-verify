@@ -946,6 +946,15 @@ class TheParserAgainstBuildKit(unittest.TestCase):
                 text = f"FROM x\nRUN {self.MOUNT} \\\n{blank}\n    fetch-commit /src/x\n"
                 self.assertEqual(self.mounts(text), [[check_build.GIT_TOKEN_SECRET]])
                 check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
+        # Python calls a line of U+001C, U+001D, U+001E or U+001F alone blank, and splitlines() ends a line at the
+        # first three. BuildKit does neither: that line ends the RUN, and the fetch below it runs with no mount.
+        for character in ("\x1c", "\x1d", "\x1e", "\x1f"):
+            with self.subTest(character=character):
+                text = (f"FROM x\nRUN {self.MOUNT} true \\\n{character}\nRUN fetch-commit /src/y\n"
+                        f"RUN {self.MOUNT} fetch-commit /src/x\n")
+                with self.assertRaises(Failed) as refused:
+                    check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
+                self.assertIn("does not mount it: RUN fetch-commit /src/y", str(refused.exception))
 
     def test_an_escaped_escape_at_the_end_of_a_line_continues_nothing(self):
         # `C:\\` ends its instruction in BuildKit. Read as a continuation, it joined the mounted fetch below into
