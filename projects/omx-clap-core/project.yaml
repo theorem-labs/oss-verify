@@ -1,7 +1,7 @@
 # omx-clap-core: the CLAP and LV2 plugin host core of OpenMixer. The fuzz targets drive the readers of bytes from disk
 # that the host parses itself: the preset file (JSON), the base64 state body it carries, and the manifest.ttl of each LV2
 # bundle. Pinned to a commit of main, whose fuzz/ the three targets are built from as they are.
-repo: https://github.com/Open-Mixer/omx-clap-core#b61ec3f92bd43d4bafd6614e61e765a8bd1e1a4f
+repo: https://github.com/Open-Mixer/omx-clap-core#b843114254a2648020a5c72762e0bb5a7e6c1c6b
 primary_contact: linuxnow@gmail.com
 homepage: https://github.com/Open-Mixer/omx-clap-core
 language: c
