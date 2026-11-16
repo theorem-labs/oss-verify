@@ -1409,10 +1409,12 @@ class HeldRuns(Stand):
                 "conclusion": conclusion if status == "completed" else None, "created_at": ago(minutes),
                 "run_started_at": ago(minutes if started is None else started)}
 
-    def go(self, refused=()):
+    def go(self, refused=(), status=0):
         """One run of the step: the runs it started, as the arguments of gh, then the runs whose failed jobs it re-ran
         (reruns). `refused`: the runs whose re-run GitHub refuses. The stand-in serves no answer for those, so gh fails
-        on them as on GitHub's refusal, and the step's exit status is not checked."""
+        on them as on GitHub's refusal. `status`: the step's exit status. self.bounds gets each read of the runs by
+        hand as (its file, its bound), and self.window the earliest and the latest time of three hours before now while
+        the step ran."""
         for path in self.api.glob("*.json"):
             path.unlink()
         self.serve(f"repos/{REPO}", {"default_branch": "main"})
@@ -1435,10 +1437,13 @@ class HeldRuns(Stand):
                 self.serve(f"repos/{REPO}/actions/runs/{run['id']}/rerun-failed-jobs", {})
         since = len(self.calls())
         workflow = yaml.safe_load(self.workflow_text)
+        before = datetime.datetime.now(datetime.timezone.utc)
         rc, log, _ = self.run_step(workflow, "held-runs", self.STEP,
                                    {"github.token": WORKFLOW_TOKEN, "github.repository": REPO}, self.temp)
-        if not refused:
-            self.assertEqual(rc, 0, log)
+        after = datetime.datetime.now(datetime.timezone.utc)
+        self.assertEqual(rc, status, log)
+        self.window = tuple((moment - datetime.timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                            for moment in (before, after))
         calls = self.calls()[since:]
         # It only reads, but for the runs it starts and the runs whose failed jobs it re-runs, each with the job's own
         # token.
@@ -1450,15 +1455,26 @@ class HeldRuns(Stand):
             self.assertTrue(rerun and r["method"] == "POST" and "--input" not in r["args"], r)
             self.assertEqual(r["token"], WORKFLOW_TOKEN, r)
             reran.append(self.reruns(int(rerun.group(1))))
-        # Each read of the runs by hand asks GitHub only for the runs created from a time. No run that the case serves
-        # is before that time, so GitHub's answer is the stand-in's, which ignores the filter.
+        # Each read of the runs by hand asks GitHub only for the runs created from the bound of one head: the earlier of
+        # its newest held run (of a merged head, its newest held run of enroll-merged.yml) and three hours before now.
+        # GitHub leaves out a run before the bound, and the stand-in, which ignores the filter, gives it. The step skips
+        # a complete run created before its head's newest held run and more than an hour ago, so the two answers give
+        # the same result when each run that the case serves before the bound is complete.
+        low, high = self.window
+        held = {run["created_at"] for run in self.held}
+        self.bounds = []
         for r in self.requests(since):
             if "/runs?event=workflow_dispatch" in (r["endpoint"] or ""):
                 bounds = [a.removeprefix("created=>=") for a in r["args"] if a.startswith("created=>=")]
                 self.assertEqual(len(bounds), 1, r["args"])
-                self.assertRegex(bounds[0], r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
-                runs = self.reviews if "/review.yml/" in r["endpoint"] else self.replays
-                self.assertEqual([run for run in runs if run["created_at"] < bounds[0]], [], bounds[0])
+                bound = bounds[0]
+                self.assertRegex(bound, r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+                self.assertTrue(low <= bound <= high or (bound in held and bound < low), (bound, low, high))
+                file = re.search(r"/workflows/([^/]+)/runs", r["endpoint"]).group(1)
+                self.bounds.append((file, bound))
+                runs = self.reviews if file == "review.yml" else self.replays
+                incomplete = [run["id"] for run in runs if run["created_at"] < bound and run["status"] != "completed"]
+                self.assertEqual(incomplete, [], bound)
         started = [(token, " ".join(args)) for token, args in calls if args[:2] == ["workflow", "run"]]
         self.assertEqual({token for token, _ in started} - {WORKFLOW_TOKEN}, set())
         self.log = log
@@ -1579,21 +1595,48 @@ class HeldRuns(Stand):
             self.jobs = {951: None}
             self.assertEqual(self.go(), [], (minutes, self.log))
 
-    def test_held_runs_a_held_merge_run_is_replayed_once(self):
+    def test_held_runs_a_held_merge_run_starts_review_yml_at_most_once_an_hour_until_the_replay(self):
+        # review.yml replays the merge with the oss-verify App's token: a run that the job's own token starts starts no
+        # workflow_run when it completes, so the step starts review.yml, never enroll-merged.yml.
         merged = ".github/workflows/enroll-merged.yml"
         h71, m71, h72, m72 = "c" * 40, "d" * 40, "e" * 40, "f" * 40
         self.pulls = [self.pull(71, "hal/oss-verify", "p71", h71, state="closed", merged=True, merge=m71),
                       self.pull(72, "ivy/oss-verify", "p72", h72, state="closed", merged=True, merge=m72)]
-        # 71 is held at its head commit, 72 at its merge commit.
-        self.held = [self.held_run(7101, h71, "hal/oss-verify", "p71", 60, merged),
-                     self.held_run(7201, m72, "ivy/oss-verify", "p72", 50, merged)]
+        def held(minutes):
+            """71 held at its head commit `minutes` ago, and 72 at its merge commit 10 minutes later."""
+            self.held = [self.held_run(7101, h71, "hal/oss-verify", "p71", minutes, merged),
+                         self.held_run(7201, m72, "ivy/oss-verify", "p72", minutes - 10, merged)]
+        held(120)
+        # The replay of 72 before its held run is not its replay.
         self.replays = [self.by_hand(7998, "merged #72", 600)]
-        self.assertEqual(self.go(), [self.starts("enroll-merged.yml", 71), self.starts("enroll-merged.yml", 72)],
-                         self.log)
-        # The next run, with the replays there: nothing new.
+        both = [self.starts("review.yml", 71), self.starts("review.yml", 72)]
+        self.assertEqual(self.go(), both, self.log)
+        # The next schedules, while the runs it started are queued, then in progress: nothing.
+        for status in ("queued", "in_progress"):
+            self.reviews = [self.by_hand(8102, "Pull request 72", 0, status=status),
+                            self.by_hand(8101, "Pull request 71", 0, status=status)]
+            self.assertEqual(self.go(), [], (status, self.log))
+        # They ended with no replay (their comment job failed, say): nothing in the hour after each run, then a start.
+        for minutes, again in ((40, False), (70, True)):
+            self.reviews = [self.by_hand(8102, "Pull request 72", minutes, conclusion="failure"),
+                            self.by_hand(8101, "Pull request 71", minutes, conclusion="failure")]
+            self.assertEqual(self.go(), both if again else [], (minutes, self.log))
+        # A run less than an hour old that came before the held run does not make the head wait.
+        held(30)
+        self.reviews = [self.by_hand(8102, "Pull request 72", 25), self.by_hand(8101, "Pull request 71", 35)]
+        self.assertEqual(self.go(), both, self.log)
+        # A replay of each after its held run: nothing, whatever the runs of review.yml did.
+        held(120)
+        self.reviews = [self.by_hand(8102, "Pull request 72", 20, conclusion="failure")]
         self.replays = [self.by_hand(8002, "merged #72", 0, status="queued"),
-                        self.by_hand(8001, "merged #71", 0, status="queued")] + self.replays
+                        self.by_hand(8001, "merged #71", 30)] + self.replays
         self.assertEqual(self.go(), [], self.log)
+        self.assertIn("Run 8001 of enroll-merged.yml replayed the merge after the held run.", self.log)
+        # A merge held at its head commit and at its merge commit: one start for the pull request.
+        self.pulls, self.reviews, self.replays = [self.pulls[0]], [], []
+        self.held = [self.held_run(7102, m71, "hal/oss-verify", "p71", 40, merged), self.held[0]]
+        self.assertEqual(self.go(), [self.starts("review.yml", 71)], self.log)
+        self.assertIn("This run started review.yml for the pull request already.", self.log)
 
     def test_held_runs_a_held_run_at_a_head_the_pull_request_no_longer_has_gets_nothing(self):
         self.pulls = [self.pull(91, "max/oss-verify", "q", "0" * 40)]
@@ -1633,6 +1676,64 @@ class HeldRuns(Stand):
         self.reviews = [self.by_hand(971, "Pull request 301", 190, conclusion="failure", started=70)]
         self.jobs, self.comment = {971: "success"}, {971: "Sign in to Google Cloud"}
         self.assertIn(self.starts("review.yml", 302), self.go(refused={971}), self.log)
+
+    def test_held_runs_a_rerun_that_github_refuses_starts_a_new_run_of_that_head(self):
+        # The refusal is no failure of the step: a new run screens the head again, and the next schedule waits for it.
+        sha = "7" * 40
+        self.pulls = [self.pull(121, "pat/oss-verify", "s", sha)]
+        self.held = [self.held_run(12101, sha, "pat/oss-verify", "s", 180)]
+        self.reviews = [self.by_hand(971, "Pull request 121", 150, conclusion="failure", started=70)]
+        self.jobs, self.comment = {971: "success"}, {971: "Sign in to Google Cloud"}
+        self.assertEqual(self.go(refused={971}), [self.starts("review.yml", 121), self.reruns(971)], self.log)
+        self.assertIn("GitHub refused the re-run of the failed jobs of run 971 of review.yml", self.log)
+        self.assertIn("so a new run screens the head again.", self.log)
+        self.reviews.insert(0, self.by_hand(972, "Pull request 121", 0, status="queued"))
+        self.assertEqual(self.go(refused={971}), [], self.log)
+
+    def test_held_runs_a_read_that_fails_for_one_head_leaves_the_other_heads_their_screen(self):
+        # GitHub gives no jobs of run 991, so the step cannot tell whether it screened pull request 151. The line of
+        # that head says so, pull request 152, held before 151, still gets its screen, and the step fails at its end:
+        # the run is red, and the next schedule reads that head again.
+        a, b = "1" * 40, "2" * 40
+        self.pulls = [self.pull(151, "uma/oss-verify", "v", a), self.pull(152, "val/oss-verify", "w", b)]
+        self.held = [self.held_run(15101, a, "uma/oss-verify", "v", 100),
+                     self.held_run(15201, b, "val/oss-verify", "w", 120)]
+        self.reviews = [self.by_hand(991, "Pull request 151", 60)]
+        self.assertEqual(self.go(status=1), [self.starts("review.yml", 152)], self.log)
+        self.assertIn("Head 1111111 of uma/oss-verify:v, pull request 151: failed. GitHub gave no jobs of run 991 of "
+                      "review.yml. The step goes on to the next head, and fails at its end.", self.log)
+        # The next schedule, when GitHub gives them: run 991 counts, the run that the step started is queued, and the
+        # step ends with no failure.
+        self.jobs = {991: "success"}
+        self.reviews.insert(0, self.by_hand(992, "Pull request 152", 0, status="queued"))
+        self.assertEqual(self.go(), [], self.log)
+
+    def test_held_runs_reads_the_runs_by_hand_of_each_head_from_its_own_bound(self):
+        # GitHub gives at most 1,000 runs of a filtered list, newest first, so each head reads from the earlier of its
+        # newest held run and three hours before now. Pull request 141, held two days ago, reads from its held run, and
+        # finds the run that screened it. 142 and 143, held in the last hour, read from three hours before now, in one
+        # read. Merged pull request 144 reads from its held run of enroll-merged.yml five days ago, not from its newer
+        # held run of Terms.
+        merged = ".github/workflows/enroll-merged.yml"
+        a, b, c, h, m = "3" * 40, "4" * 40, "5" * 40, "6" * 40, "7" * 40
+        self.pulls = [self.pull(141, "wes/oss-verify", "x", a), self.pull(142, "xia/oss-verify", "y", b),
+                      self.pull(143, "yan/oss-verify", "z", c),
+                      self.pull(144, "zed/oss-verify", "m", h, state="closed", merged=True, merge=m)]
+        self.held = [self.held_run(14201, b, "xia/oss-verify", "y", 20),
+                     self.held_run(14301, c, "yan/oss-verify", "z", 30),
+                     self.held_run(14402, h, "zed/oss-verify", "m", 60, ".github/workflows/terms.yaml"),
+                     self.held_run(14101, a, "wes/oss-verify", "x", 2880),
+                     self.held_run(14401, h, "zed/oss-verify", "m", 7200, merged)]
+        self.reviews = [self.by_hand(9143, "Pull request 143", 25), self.by_hand(9141, "Pull request 141", 2870)]
+        self.jobs = {9141: "success", 9143: "success"}
+        self.assertEqual(self.go(), [self.starts("review.yml", 142), self.starts("review.yml", 144)], self.log)
+        held = {run["id"]: run["created_at"] for run in self.held}
+        low, high = self.window
+        reviews = sorted(bound for file, bound in self.bounds if file == "review.yml")
+        self.assertEqual(len(reviews), 3, self.bounds)
+        self.assertEqual(reviews[:2], [held[14401], held[14101]], self.bounds)
+        self.assertTrue(low <= reviews[2] <= high, (reviews[2], low, high))
+        self.assertEqual([bound for file, bound in self.bounds if file == "enroll-merged.yml"], [held[14401]])
 
     def test_held_runs_workflow_holds_no_identity_and_starts_on_its_schedule_alone(self):
         workflow = yaml.safe_load(self.workflow_text)

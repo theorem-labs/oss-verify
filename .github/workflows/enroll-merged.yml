@@ -11,8 +11,10 @@ name: Enrollment merged
 # workflow_dispatch replays a merge made before this file existed:
 #   gh workflow run enroll-merged.yml -R theorem-labs/oss-verify -f pr=<n>
 # With the repository's default setting, GitHub holds the closed run of a first-time contributor's pull request until
-# someone with write access approves it. Held runs (.github/workflows/held-runs.yml) replays such a merge with this
-# workflow_dispatch.
+# someone with write access approves it. Held runs (.github/workflows/held-runs.yml) then starts review.yml for the
+# pull request, and review.yml replays the merge with this workflow_dispatch, with the oss-verify App's token. Held
+# runs does not replay it with its own token: a run that a job's GITHUB_TOKEN starts starts no workflow_run when it
+# completes, so enroll-dispatch.yml would not run.
 #
 # This workflow holds no permission, checks out nothing, and runs no code of the pull request.
 # pull_request: the workflow file comes from the merge commit, so a pull request that changes it controls this run.

@@ -23,11 +23,13 @@
 # for Microsoft Entra and Anthropic). So a run counts when it has daily-cap-route and either it has not completed (it
 # may yet screen) or it has daily-cap-screen. A run whose sign-in to Google, Microsoft Entra or Anthropic is refused
 # ends before its screen starts, and it does not count. It counts from the moment route gave its trust, so a
-# burst of items is counted before their screens start; and a run cancelled before its screen started (the review of
-# an older head, which a newer push cancels) does not count, nor a run that route capped or a run of a writer's
-# trust. Write access is what GitHub's collaborator permission API answers, admin or write, and the Apps of
-# ALLOWED_BOTS count as having it, with one read of each account's permission. It reads the runs, their status
-# included, and the two artifacts' lists, each in one paginated call, and no run's jobs.
+# burst of items is counted before their screens start; and a run that ended before its screen started does not
+# count: a run that was cancelled (a re-run of the same Build or Triage run, or a newer run by hand for the same
+# pull request, cancels a run), and the run of an older head, whose gather job keeps nothing when the head moved.
+# Nor does a run that route capped or a run of a writer's trust. Write access is what GitHub's collaborator
+# permission API answers, admin or write, and the Apps of ALLOWED_BOTS count as having it, with one read of each
+# account's permission. It reads the runs, their status included, and the two artifacts' lists, each in one
+# paginated call, and no run's jobs.
 # A known limit: route reads this count in its trust step and keeps its mark in the step after, so routes that run in
 # the same seconds each read the count before the others' marks exist, and a burst of items opened at once can pass
 # the cap by as many runs as there are routes in that window. The cap still bounds the screens and reviews of outside
