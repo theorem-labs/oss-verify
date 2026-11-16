@@ -1,6 +1,6 @@
 # Patch style and report preferences
 
-plugin-hostd-protocol is the command protocol library of FreeMixer's plugin hosts: plugin-hostd and FreeMixer's
+plugin-hostd-protocol is the command protocol library of OpenMixer's plugin hosts: plugin-hostd and OpenMixer's
 mod-host link it to read their controller's commands. Its command parser (`src/protocol.c`) reads every byte a local
 client sends on the command socket, the dispatcher (`src/host-dispatch.c`) turns each verb into a call of the host's
 backend and writes the reply, and the scenario reader (`src/host-scenario.c`) reads the test scenarios. The four fuzz
@@ -9,7 +9,7 @@ targets drive them; `fuzz_session` drives a whole connection, with `hello` and r
 ## How findings and patches land
 
 Nothing from the pipeline enters plugin-hostd-protocol as it is. A maintainer reads each finding, reproduces it
-against the library's harness and build, and writes the fix in FreeMixer/plugin-hostd-protocol as an ordinary change.
+against the library's harness and build, and writes the fix in Open-Mixer/plugin-hostd-protocol as an ordinary change.
 A patch you send is a description of a fix, and we re-author it before it lands.
 
 Every commit in plugin-hostd-protocol is signed. No attribution line, trailer, or generated-by marker enters the
