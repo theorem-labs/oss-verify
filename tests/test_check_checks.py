@@ -1,6 +1,6 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for src/oss_verify/check_checks.py, build.yaml's review steps and the review's helper scripts, that need no
+"""Tests for src/oss_verify/check_checks.py, review.yml's review steps and the review's helper scripts, that need no
 Docker: uv run pytest"""
 import base64
 import html
@@ -22,8 +22,8 @@ from oss_verify import check_checks
 from oss_verify import check_records
 from oss_verify import validate
 
-# The workflow tests' expression evaluator and step runner with a stand-in gh.
-from test_outside_screen import Runner, evaluate, step  # noqa: E402
+# The workflow tests' expression evaluator and step runner with a stand-in gh, and review.yml's jobs.
+from test_outside_screen import REVIEW_JOBS, Runner, as_text, evaluate, step  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -432,14 +432,15 @@ class ImageFiles(unittest.TestCase):
 
 
 class WorkflowArguments(unittest.TestCase):
-    """What build.yaml, triage.yaml and enroll-dispatch.yml do with the credentials they hold, as far as their text
-    shows it: each named credential reaches a command through a pipe or a shell builtin and never as a process's
-    argument, and only the jobs that run no code of the pull request can ask for a GitHub identity token. This reads
-    the files; it does not run them, so it proves nothing about what a called script does with what it is given."""
+    """What review.yml and enroll-dispatch.yml do with the credentials they hold, as far as their text shows it: each
+    named credential reaches a command through a pipe or a shell builtin and never as a process's argument; and in
+    these files and in build.yaml and triage.yaml, only the jobs that run no code of the pull request can ask for a
+    GitHub identity token. This reads the files; it does not run them, so it proves nothing about what a called script
+    does with what it is given."""
 
-    # The jobs of each workflow that read the App's key, in the GitHub Environment `comment`: build.yaml's hold job
-    # sends held findings with the App's token.
-    KEY_JOBS = {"build.yaml": ("comment", "hold"), "triage.yaml": ("comment",), "enroll-dispatch.yml": ("dispatch",)}
+    # The jobs of each workflow that read the App's key, in the GitHub Environment `comment`: review.yml's hold job
+    # sends held findings, and its triage job posts the triage comment, with the App's token.
+    KEY_JOBS = {"review.yml": ("comment", "hold", "triage"), "enroll-dispatch.yml": ("dispatch",)}
 
     def workflow(self, name):
         return yaml.safe_load((ROOT / ".github" / "workflows" / name).read_text())
@@ -481,8 +482,7 @@ class WorkflowArguments(unittest.TestCase):
     def test_no_credential_is_an_argument(self):
         # The App's key and the base64 it is decoded from are shell variables of their step, so they are named here
         # by those names, beside the environment variables.
-        for workflow, names in (("build.yaml", ("GCP_ACCESS_TOKEN", "key", "payload")),
-                                ("triage.yaml", ("GCP_ACCESS_TOKEN", "key", "payload")),
+        for workflow, names in (("review.yml", ("GCP_ACCESS_TOKEN", "key", "payload")),
                                 ("enroll-dispatch.yml", ("GCP_ACCESS_TOKEN", "key", "payload"))):
             steps = self.steps(workflow)
             for name in names:
@@ -511,12 +511,14 @@ class WorkflowArguments(unittest.TestCase):
     def test_only_the_jobs_that_run_no_pull_request_code_hold_an_identity_token(self):
         # A GitHub identity token names no job; the GitHub Environment a job declares is what holds each Google account
         # to its job, and these files must also keep id-token: write off every other job. project-builds builds the
-        # pull request's code and triage's gather reads its text, so neither may ever ask for one. A job with no permissions of its own inherits the workflow's, so the effective
-        # permission is what is read here: a workflow-level id-token: write would reach every job.
+        # pull request's code, and review.yml's gather and triage-gather read its text, so none of them may ever ask
+        # for one. Build and Triage run on pull_request, and no job of theirs holds one. A job with no permissions of
+        # its own inherits the workflow's, so the effective permission is what is read here: a workflow-level
+        # id-token: write would reach every job.
         # The screen job runs no code of the pull request either, and its token reaches only the screen's identities
         # (its environment, review-screen; ScreenJob).
-        for workflow, want in (("build.yaml", {"review", "comment", "hold", "screen"}), ("triage.yaml", {"comment"}),
-                               ("enroll-dispatch.yml", {"dispatch"})):
+        for workflow, want in (("review.yml", {"review", "comment", "hold", "screen", "triage"}),
+                               ("build.yaml", set()), ("triage.yaml", set()), ("enroll-dispatch.yml", {"dispatch"})):
             parsed = self.workflow(workflow)
             default = parsed.get("permissions") or {}
             got = set()
@@ -552,17 +554,17 @@ class WorkflowArguments(unittest.TestCase):
 
         cases = [
             # Both steps upload through .github/scripts/held-bucket-put, which runs here too.
-            ("build.yaml review held finding store", steps("build.yaml", "review", "Store the held finding for the hold job"),
+            ("review.yml review held finding store", steps("review.yml", "review", "Store the held finding for the hold job"),
              json.dumps({"generation": "1761500000000000"}),
              {"GCP_ACCESS_TOKEN": gcp, "RUN_ID": "7", "PR": "68", "NAME": "libreac", "HEAD_SHA": "1" * 40,
               "RUN_URL": "https://github.com/theorem-labs/oss-verify/actions/runs/7"}, [gcp]),
-            ("build.yaml review issue draft store", steps("build.yaml", "review", "Store the issue draft for a person"),
+            ("review.yml review issue draft store", steps("review.yml", "review", "Store the issue draft for a person"),
              json.dumps({"generation": "1761500000000000"}),
              {"GCP_ACCESS_TOKEN": gcp, "ISSUE": "45", "RUN_ID": "7", "RUN_ATTEMPT": "1",
               "RUN_URL": "https://github.com/theorem-labs/oss-verify/actions/runs/7"}, [gcp]),
-            ("build.yaml hold listing", steps("build.yaml", "hold", "Look for stored held findings"),
+            ("review.yml hold listing", steps("review.yml", "hold", "Look for stored held findings"),
              json.dumps({"items": [{"name": "held/7/" + "a" * 32}]}), {"GCP_ACCESS_TOKEN": gcp}, [gcp]),
-            ("build.yaml hold repository", steps("build.yaml", "hold", "Where the held findings go"),
+            ("review.yml hold repository", steps("review.yml", "hold", "Where the held findings go"),
              json.dumps({"payload": {"data": base64.b64encode(b"private-repository").decode()}}),
              {"GCP_ACCESS_TOKEN": gcp}, [gcp]),
         ]
@@ -718,19 +720,19 @@ class WorkflowArguments(unittest.TestCase):
 
     def test_another_job_in_the_comment_environment_is_refused_in_every_shape(self):
         # The shapes GitHub takes for `environment` (workflow syntax, jobs.<job_id>.environment), each put on the
-        # review job of the real build.yaml: every one must be refused.
+        # review job of the real review.yml: every one must be refused.
         for shape in ("comment", {"name": "comment"}, {"name": "comment", "url": "https://example.invalid"},
                       "${{ 'comment' }}", {"name": "${{ 'comment' }}"}, "Comment",
                       {"name": "${{ github.ref == 'x' && 'enroll-review' || 'COMMENT' }}", "deployment": False},
                       "${{ format('com{0}', 'ment') }}", {"name": "${{ format('com{0}', 'ment') }}"}):
-            jobs = self.workflow("build.yaml")["jobs"]
+            jobs = self.workflow("review.yml")["jobs"]
             jobs["review"]["environment"] = shape
-            self.assertTrue(self.app_key_jobs_problems(jobs, self.KEY_JOBS["build.yaml"]),
+            self.assertTrue(self.app_key_jobs_problems(jobs, self.KEY_JOBS["review.yml"]),
                             f"review with environment {shape!r} was not refused")
         for shape in ({"name": "comment"}, "${{ 'comment' }}", {"name": "comment", "url": "https://example.invalid"}):
-            jobs = self.workflow("build.yaml")["jobs"]
+            jobs = self.workflow("review.yml")["jobs"]
             jobs["comment"]["environment"] = shape
-            self.assertTrue(self.app_key_jobs_problems(jobs, self.KEY_JOBS["build.yaml"]),
+            self.assertTrue(self.app_key_jobs_problems(jobs, self.KEY_JOBS["review.yml"]),
                             f"comment with environment {shape!r} was not refused")
 
 
@@ -770,7 +772,7 @@ SENTENCES = {"success": "No change is needed.", "failure": "The changes below ar
 
 
 class PostingStep(Runner):
-    """build.yaml's comment step "Post the comment and record the verdict", and after it the step "Take the label
+    """review.yml's comment step "Post the comment and record the verdict", and after it the step "Take the label
     review-held off" when its if holds, run with the stand-in gh of test_outside_screen, which keeps each request's
     method, endpoint and body: the review comment it posts or updates, for an enrollment the one check run Enrollment
     review it records from the same verdicts (c1, c3), and the holds taken off after it."""
@@ -783,12 +785,14 @@ class PostingStep(Runner):
     MARKER = "<!-- oss-verify-review -->"
 
     def post(self, kind="enrollment", verdicts=None, reasons=None, review="Thanks.\n\n1. Fix X.\n", head=HEAD,
-             pr_head=None, comments=(), label=True, status=0, **env):
+             pr_head=None, comments=(), label=True, status=0, name=None, **env):
         """Run the step for a run of `kind` at `head` whose review gave `verdicts` and `reasons` (None: no verdicts),
         on pull request 8, whose head is now `pr_head` (by default `head`) and which carries `comments` (and
         review-held, unless `label` is false); then the step after it, with route's output started
-        2026-11-03T10:00:00Z, when its if holds. `env` replaces what the job gives the step. Return the steps' output
-        and each request they sent, as (method, endpoint, body)."""
+        2026-11-03T10:00:00Z, when its if holds. `name` is the project the gather job took (by default libreac for an
+        enrollment, and none for a change). `env` replaces what the job gives the step. The job's own env (KIND,
+        RECORD, HOLDING, APPROVE) is what its expressions give for this run, whose head route did not find held.
+        Return the steps' output and each request they sent, as (method, endpoint, body)."""
         # Each run starts with no request recorded.
         self.api.joinpath("args").unlink(missing_ok=True)
         self.api.joinpath(f"repos_{self.REPO.replace('/', '_')}_issues_8_labels_review-held.json").unlink(
@@ -806,15 +810,22 @@ class PostingStep(Runner):
                  "TRUST": "writer", "FREE": "", "GATHER_RESULT": "success", "SCREEN_RESULT": "skipped",
                  "SCREEN_VERDICT": "", "REVIEW_RESULT": "success", "HELD": "false", "HOLD_RESULT": "success"}
         given.update(env)
+        if name is None:
+            name = "libreac" if kind == "enrollment" else ""
+        needs = {"needs.route.outputs.kind": kind, "needs.route.outputs.trust": given["TRUST"],
+                 "needs.route.outputs.held": "false", "needs.gather.outputs.name": name,
+                 "needs.review.result": given["REVIEW_RESULT"], "needs.screen.result": given["SCREEN_RESULT"],
+                 "needs.screen.outputs.verdict": given["SCREEN_VERDICT"]}
+        job = self.job_env(needs)
         # step() finds exactly one, so this cannot run a same-name copy instead of the step the job really uses; and
         # every value the step's env names is given here.
         posting = step("comment", self.STEP)
         self.assertEqual(set(posting["env"]) - {"GH_TOKEN", "REPO"}, set(given))
-        rc, out, self.outputs = self.run_script(posting["run"], cwd=ROOT, KIND=kind, **given)
+        rc, out, self.outputs = self.run_script(posting["run"], cwd=ROOT, **job, **given)
         self.assertEqual(rc, status, out)
         take_off = step("comment", "Take the label review-held off")
         self.assertEqual(set(take_off["env"]) - {"GH_TOKEN", "REPO"}, {"NUMBER", "STARTED", "RUN_ID"})
-        if rc == 0 and evaluate(take_off["if"], {"env.KIND": kind, "env.HOLDING": "false", **{
+        if rc == 0 and evaluate(take_off["if"], {**{f"env.{k}": v for k, v in job.items()}, **{
                 f"steps.post.outputs.{k}": v for k, v in self.outputs.items()}}):
             rc, more, _ = self.run_script(take_off["run"], cwd=ROOT, KIND=kind, NUMBER="8",
                                           STARTED="2026-11-03T10:00:00Z", RUN_ID="77")
@@ -830,6 +841,11 @@ class PostingStep(Runner):
         for _, _, text in self.comments(requests):
             self.assertTrue(text.startswith(self.MARKER + "\n"), text[:80])
         return out, requests
+
+    @staticmethod
+    def job_env(needs):
+        """The comment job's own env (KIND, APPROVE, HOLDING, RECORD), as its expressions give it for `needs`."""
+        return {k: as_text(evaluate(v, needs)) for k, v in REVIEW_JOBS["comment"]["env"].items() if "${{" in str(v)}
 
     def comments(self, requests):
         """The comments the step posted or updated: (method, endpoint, body)."""
@@ -856,6 +872,22 @@ class PostingStep(Runner):
     @staticmethod
     def verdicts(**changed):
         return dict({check: "pass" for check in check_ids("review.md")}, **changed)
+
+    def test_an_approval_of_a_held_head_posts_nothing_and_records_nothing(self):
+        """Decision 6: on a run by hand for a head whose runs GitHub holds (route's held), a screen that passed it has
+        the comment job approve the held runs, and no step of the job posts the review comment, records the check run
+        Enrollment review, holds the item or takes a hold off: for an enrollment whose project the gather job took, or
+        a change."""
+        for kind, name in (("enrollment", "libreac"), ("change", "")):
+            with self.subTest(kind=kind):
+                env = {f"env.{k}": v for k, v in self.job_env({
+                    "needs.route.outputs.kind": kind, "needs.route.outputs.trust": "screen",
+                    "needs.route.outputs.held": "true", "needs.gather.outputs.name": name,
+                    "needs.review.result": "skipped", "needs.screen.result": "success",
+                    "needs.screen.outputs.verdict": "clean"}).items()}
+                self.assertEqual((env["env.APPROVE"], env["env.HOLDING"]), ("true", "false"))
+                for title in (self.STEP, "Label it review-held and say so", "Take the label review-held off"):
+                    self.assertFalse(evaluate(step("comment", title)["if"], env), title)
 
     def test_c1_a_every_check_passes(self):
         _, requests = self.post(verdicts=self.verdicts())
@@ -914,15 +946,17 @@ class PostingStep(Runner):
                 self.assertEqual(self.comments(requests), [])
 
     def test_c3_c_d_a_capped_pull_request_is_told_the_cap_and_when_it_frees(self):
+        # Route held it at the daily cap, so the gather job did not run and took no project: the check run records the
+        # cap all the same.
         _, requests = self.post(review="", TRUST="cap", FREE="2026-11-10T00:00:00Z", GATHER_RESULT="skipped",
-                                REVIEW_RESULT="skipped", HOLD_RESULT="skipped")
+                                REVIEW_RESULT="skipped", HOLD_RESULT="skipped", name="")
         run = self.record(requests)
         self.assertEqual((run["conclusion"], run["output"]), ("action_required", {
             "title": "The daily cap of automated reviews held this pull request.",
             "summary": "The daily cap of automated reviews held this pull request. It comes from an account without "
                        "write access to this repository, and the automated reviews of such accounts reached their cap "
                        "of 24 in 24 hours, 12 for one author. From 2026-11-10 00:00 UTC, a push or "
-                       "`gh workflow run build.yaml -R theorem-labs/oss-verify -f pr=8` reviews it."}))
+                       "`gh workflow run review.yml -R theorem-labs/oss-verify -f pr=8` reviews it."}))
         self.assertEqual(self.comments(requests), [])
 
     def test_a_review_replaces_the_posted_one(self):
@@ -1031,10 +1065,10 @@ class PostingStep(Runner):
         self.assertIn("R" * 50_000, text)
 
     def test_the_triage_step_posts_or_updates_its_comment(self):
-        # triage.yaml's own posting step, run with a fake gh: with no comment of ours it posts one; with one, it edits it.
-        workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "triage.yaml").read_text())
+        # review.yml's triage job's posting step, run with a fake gh: with no comment of ours it posts one; with one, it
+        # edits it.
         name = "Post the comment, or update the one already there"
-        matches = [s for s in workflow["jobs"]["comment"]["steps"] if s.get("name") == name]
+        matches = [s for s in REVIEW_JOBS["triage"]["steps"] if s.get("name") == name]
         self.assertEqual(len(matches), 1)
         for existing, sent in (("", "post.json"), ("4242", "patch.json")):
             with tempfile.TemporaryDirectory() as directory:
@@ -1822,7 +1856,7 @@ else:
         # stores, the job's output, the log and the job summary of this public repository hold nothing but the
         # object's name, and that name is what the hold job reads the finding by.
         [script] = [s["run"] for s in
-                    yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["jobs"]["review"]
+                    yaml.safe_load((ROOT / ".github" / "workflows" / "review.yml").read_text())["jobs"]["review"]
                     ["steps"] if s.get("name") == "Store the held finding for the hold job"]
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -2036,11 +2070,11 @@ class SinceLastReview(unittest.TestCase):
 
 
 class ReviewJob(unittest.TestCase):
-    """build.yaml's review job: its own small steps, and the scripts it runs (review-gather, review-prompt), run with
+    """review.yml's review job: its own small steps, and the scripts it runs (review-gather, review-prompt), run with
     stand-ins."""
 
     def setUp(self):
-        self.workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
+        self.workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "review.yml").read_text())
         self.jobs = self.workflow["jobs"]
         self.steps = {s.get("name"): s for s in self.jobs["review"]["steps"]}
 
@@ -2453,10 +2487,13 @@ class ReviewJob(unittest.TestCase):
         self.assertEqual([self.steps[n]["timeout-minutes"] for n in ("Review", "Review again")], [45, 45])
         self.assertEqual(job["timeout-minutes"], 105)
 
-    # bootstrap/'s stack outputs in agent-infra, read with `pulumi stack output --stack prod` after the apply of
-    # 2026-10-31 that made the federated identity ossv-review-github and the Service svc:spend (INFRA-832 S1a):
-    # ossvReviewTailnetClientId, and spendCollectorTailnetUrl, http:// and the Service's IPv4 address.
-    CLIENT_ID = "TWbBfz7fqc11CNTRL-kwYSkwdwGN11CNTRL"
+    # The Tailscale client id of the federated identity ossv-review-yml-github, as which review.yml's review job joins
+    # the tailnet. The seed apply of dispatch://INFRA-3369 makes it (dispatch://INFRA-3746), and it is not known before
+    # that apply: review.yml names "" until then, and its join fails. A later change writes the id here and in
+    # review.yml. The collector's URL is bootstrap/'s stack output spendCollectorTailnetUrl in agent-infra, read with
+    # `pulumi stack output --stack prod` after the apply of 2026-10-31 that made the Service svc:spend (INFRA-832 S1a):
+    # http:// and the Service's IPv4 address.
+    CLIENT_ID = ""
     COLLECTOR_URL = "http://100.116.58.240"
 
     def test_the_job_joins_the_tailnet_as_ossv_review(self):
@@ -2536,7 +2573,7 @@ class ReviewJob(unittest.TestCase):
         self.assertEqual(sudo, "")
 
     def test_no_step_reads_the_collector_token(self):
-        text = (ROOT / ".github" / "workflows" / "build.yaml").read_text()
+        text = (ROOT / ".github" / "workflows" / "review.yml").read_text()
         self.assertNotIn("agent-spend-otel-token", text)
         self.assertNotIn("agent-otel-public", text)
         self.assertNotIn("OTEL_EXPORTER_OTLP_HEADERS", text)
@@ -2644,22 +2681,27 @@ class ReviewJob(unittest.TestCase):
 
 
 class SessionCache(unittest.TestCase):
-    """The review's session in the Actions cache. build.yaml runs on pull_request_target, under which GitHub gives a job
-    read-only access to main's cache unless the job declares a write-capable cache-mode, and such a job must process no
-    untrusted input before it writes (GitHub's dependency caching reference, "Bypassing the default untrusted-trigger
-    cache restriction"). The gather job reads the pull request and the review job runs the model, so the gather job
-    only restores and the review job does not touch the cache; the session job writes, and it runs no script and
-    reads nothing of the pull request: it moves the review job's artifact into the cache."""
+    """The review's session in the Actions cache. review.yml runs on workflow_run and issues, under which GitHub gives a
+    job read-only access to main's cache unless the job declares a write-capable cache-mode, and such a job must
+    process no untrusted input before it writes (GitHub's dependency caching reference, "Bypassing the default
+    untrusted-trigger cache restriction"). The gather job reads the pull request and the review job runs the model, so
+    the gather job only restores and the review job does not touch the cache; the session job writes, and it runs no
+    script and reads nothing of the pull request: it moves the review job's artifact into the cache."""
 
     WRITERS = {"actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333",
                "actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"}
 
     def setUp(self):
-        self.workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
+        self.workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "review.yml").read_text())
         self.jobs = self.workflow["jobs"]
 
     def mode(self, job):
         return job.get("cache-mode", self.workflow.get("cache-mode"))
+
+    @staticmethod
+    def interpolated(value, ctx):
+        """A value with ${{ }} expressions in its text, as the runner gives it for ctx."""
+        return re.sub(r"\$\{\{(.*?)\}\}", lambda m: as_text(evaluate(m.group(1), ctx)), value)
 
     def test_the_gather_job_only_restores_the_cache_and_the_review_job_does_not_touch_it(self):
         self.assertEqual(self.mode(self.jobs["gather"]), "read")
@@ -2693,11 +2735,22 @@ class SessionCache(unittest.TestCase):
         self.assertIs(keep["with"]["include-hidden-files"], True)
         self.assertEqual(review["outputs"]["session"], "${{ steps.session.outputs.artifact-id }}")
         # Kind reaches the session job as a review output, not by reading the event. It selects the same key each kind
-        # restores from.
+        # restores from: for pull request 7, an enrollment of libreac or a change, the key the session job saves under
+        # is the one the gather job restores from, with the name the gather job took, which is its output name.
         self.assertEqual(review["outputs"]["kind"], "${{ needs.route.outputs.kind }}")
         self.assertEqual(session["env"]["KIND"], "${{ needs.review.outputs.kind }}")
-        self.assertEqual(session["env"]["SESSION_KEY"],
-                         "${{ needs.review.outputs.kind == 'change' && format('review-{0}-', github.event.pull_request.number || inputs.pr) || format('enroll-review/{0}/{1}/', github.event.pull_request.number || inputs.pr, needs.project-builds.outputs.name) }}")
+        self.assertEqual(gather["outputs"]["name"], "${{ steps.project.outputs.name }}")
+        restore = steps["Restore the last review's session and the head it reviewed"]
+        restored = {"enrollment": restore["env"]["SESSION_KEY"], "change": gather["env"]["CHANGE_KEY"]}
+        for kind, key in restored.items():
+            with self.subTest(kind=kind):
+                saved = evaluate(session["env"]["SESSION_KEY"], {"needs.review.outputs.kind": kind,
+                                                                 "needs.route.outputs.pr": "7",
+                                                                 "needs.gather.outputs.name": "libreac"})
+                self.assertEqual(saved, self.interpolated(key, {"needs.route.outputs.pr": "7",
+                                                                "steps.project.outputs.name": "libreac"}))
+        self.assertEqual(enrollment_restore["key"],
+                         "${{ env.SESSION_KEY }}${{ github.run_id }}-${{ github.run_attempt }}")
         self.assertEqual(change_restore["key"], "${{ env.CHANGE_KEY }}${{ github.run_id }}-${{ github.run_attempt }}")
         download, save = session["steps"]
         # The one artifact the review job uploaded, by its id, into ~/.claude, the root of the paths it holds.
@@ -2708,17 +2761,17 @@ class SessionCache(unittest.TestCase):
                                         "key": "${{ env.SESSION_KEY }}${{ github.run_id }}-${{ github.run_attempt }}"})
         self.assertEqual(session["if"], "${{ !cancelled() && needs.review.outputs.session != '' }}")
 
-    def test_the_required_check_collects_the_session_job(self):
-        required = self.jobs["required"]
-        self.assertIn("session", required["needs"])
-        step = required["steps"][-1]
+    def test_the_collector_collects_the_session_job(self):
+        collect = self.jobs["collect"]
+        self.assertIn("session", collect["needs"])
+        step = collect["steps"][-1]
         self.assertIn('"session:$SESSION:$ASKED_SESSION"', step["run"])
         self.assertEqual(step["env"]["ASKED_SESSION"], "${{ needs.review.outputs.session != '' }}")
 
 
 @unittest.skipUnless(shutil.which("jq"), "needs jq, which the gh stand-in runs the script's filters with")
 class IssueDraftCap(unittest.TestCase):
-    """.github/scripts/issue-draft-cap, build.yaml's step "Hold the draft at the hourly cap", with a stand-in gh: it
+    """.github/scripts/issue-draft-cap, review.yml's step "Hold the draft at the hourly cap", with a stand-in gh: it
     counts the other runs for an issue's own event in the last hour whose review reached the model, and holds the
     draft at the cap or on a failed read with a ::error::HELD annotation and exit status 1."""
 
@@ -2752,7 +2805,7 @@ class IssueDraftCap(unittest.TestCase):
                 'filter=""; path=""; for a; do [ "$prev" = --jq ] && filter=$a; [[ $a == repos/* ]] && path=$a; prev=$a; done\n'
                 f'echo "$*" >> {root}/calls\n'
                 'case "$path" in\n'
-                f'  */workflows/build.yaml/runs) {listing} ;;\n'
+                f'  */workflows/review.yml/runs) {listing} ;;\n'
                 f'  */runs/{fail}/jobs*) echo "gh: HTTP 502" >&2; exit 1 ;;\n'
                 f'  */runs/*/jobs*) id=${{path#*/runs/}}; id=${{id%%/*}}; jq -r "$filter" {root}/jobs-$id.json ;;\n'
                 '  *) exit 1 ;;\n'
@@ -2805,12 +2858,12 @@ class IssueDraftCap(unittest.TestCase):
 
 
 class StoreSignInGate(unittest.TestCase):
-    """build.yaml's step "Stop before the model when the draft cannot be stored", run as it is: for an issue, a
+    """review.yml's step "Stop before the model when the draft cannot be stored", run as it is: for an issue, a
     refused Google sign-in before the model fails the job there, red, with ::error:: and a summary naming the
     cause."""
 
     def gate(self, outcome, event="issues"):
-        flow = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())
+        flow = yaml.safe_load((ROOT / ".github" / "workflows" / "review.yml").read_text())
         [step] = [s for s in flow["jobs"]["review"]["steps"]
                   if s.get("name") == "Stop before the model when the draft cannot be stored"]
         with tempfile.TemporaryDirectory() as directory:
@@ -2831,7 +2884,7 @@ class StoreSignInGate(unittest.TestCase):
                 self.assertNotIn("HELD", out + summary)
 
     def test_a_refused_sign_in_on_a_run_started_by_hand_names_another_cause(self):
-        # gh workflow run build.yaml -f issue=<n>: the provider admits workflow_dispatch already, so the issues
+        # gh workflow run review.yml -f issue=<n>: the provider admits workflow_dispatch already, so the issues
         # setting is not the cause.
         code, out, summary = self.gate("failure", event="workflow_dispatch")
         self.assertEqual(code, 1)
@@ -2849,12 +2902,11 @@ class StoreSignInGate(unittest.TestCase):
 @unittest.skipUnless(shutil.which("jq"), "needs jq, which the gh stand-in runs the script's filters with")
 class ChangeReviewSession(unittest.TestCase):
     """A change review resumes its last session for context: review-gather takes the head that review reviewed from
-    the runs API, and the session's id from the cache only when the cache names that head."""
+    the head line of its review comment, and the session's id from the cache only when the cache names that head."""
 
-    # A change review of pull request 34 at HEAD, in Build run 900.
-    HEAD, LAST, OLDER, FAILED, CACHED = "e" * 40, "b" * 40, "a" * 40, "f" * 40, "d" * 40
+    # A change review of pull request 34 at HEAD.
+    HEAD, LAST, OLDER, CACHED = "e" * 40, "b" * 40, "a" * 40, "d" * 40
     SESSION = "09227178-7bbf-4e5f-86db-8736e530ef01"
-    PULL = {"head": {"ref": "fix-x", "repo": {"full_name": "someone/oss-verify"}}}
     # A stand-in for gh: `gh pr view` and `gh pr diff`, and `gh api` answered from state.json by its path without the
     # query, with the script's own --jq filter applied by the real jq; a compare gives its status (ahead when the base
     # is in state["ahead"]), or with the diff media type the diff. It records every call.
@@ -2876,7 +2928,7 @@ if "/compare/" in path:
         sys.exit(print(f"diff from {base} to {head}"))
     answer = {"status": "ahead" if base in state["ahead"] else "diverged"}
 else:
-    # The pull request's files and review comments: none.
+    # The pull request's comments are state.json's; its files and review comments: none.
     answer = state.get(path, [])
 if "--jq" in a:
     sys.stdout.flush()
@@ -2886,20 +2938,15 @@ else:
     print(json.dumps(answer))
 '''
 
-    def gather_change(self, runs, reviews, last_review, ahead=()):
-        """review-gather for the change review of pull request 34 of theorem-labs/oss-verify (the head branch fix-x of
-        someone/oss-verify): `runs` the runs API's Build runs, newest first; `reviews` {run id: its review job's
-        conclusion}; `last_review` the file of the cache (None: none). Return the run, its output,
-        since-last-review.diff, pr.diff and gh's calls."""
+    def gather_change(self, comments, last_review, ahead=()):
+        """review-gather for the change review of pull request 34 of theorem-labs/oss-verify: `comments` the comments
+        of the pull request as the issues API lists them; `last_review` the file of the cache (None: none). Return the
+        run, its output, since-last-review.diff, pr.diff and gh's calls."""
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             (root / "bin").mkdir()
             repo = "repos/theorem-labs/oss-verify"
-            state = {"ahead": list(ahead), f"{repo}/actions/workflows/build.yaml/runs": {"workflow_runs": runs},
-                     f"{repo}/pulls/34": self.PULL}
-            for run_id, conclusion in reviews.items():
-                state[f"{repo}/actions/runs/{run_id}/jobs"] = {"jobs": [
-                    {"name": "route", "conclusion": "success"}, {"name": "review", "conclusion": conclusion}]}
+            state = {"ahead": list(ahead), f"{repo}/issues/34/comments": list(comments)}
             (root / "state.json").write_text(json.dumps(state))
             (root / "bin" / "gh").write_text(
                 self.GATHER_GH.replace("@@PYTHON@@", sys.executable).replace("@@ROOT@@", repr(str(root))))
@@ -2911,46 +2958,69 @@ else:
                                  env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "GH_TOKEN": "x",
                                       "KIND": "change", "REPO": "theorem-labs/oss-verify", "PR": "34", "NAME": "",
                                       "HEAD_SHA": self.HEAD, "LAST_REVIEW": str(root / "last-review"),
-                                      "RUN_ID": "900", "GITHUB_OUTPUT": str(root / "output")})
+                                      "GITHUB_OUTPUT": str(root / "output")})
             read = lambda path: path.read_text() if path.exists() else None  # noqa: E731
             calls = [json.loads(line) for line in (root / "calls").read_text().splitlines()]
             return (run, read(root / "output") or "", read(root / "out" / "since-last-review.diff"),
                     read(root / "out" / "pr.diff"), calls)
 
     @staticmethod
-    def own(run_id, sha, fork="someone/oss-verify", branch="fix-x", event="pull_request_target"):
-        """A Build run of the pull request as the runs API lists it."""
-        return {"id": run_id, "event": event, "head_branch": branch, "path": ".github/workflows/build.yaml",
-                "display_title": "fix x", "head_sha": sha, "head_repository": {"full_name": fork}}
+    def comment(head, login="oss-verify[bot]", user_type="Bot", at="2026-11-10T10:00:00Z", comment_id=4242, text=None):
+        """A comment on the pull request as the issues API lists it: by default the App's review comment of a change
+        review of `head`, as .github/scripts/review-body writes it."""
+        if text is None:
+            text = body(head, rules="review-change.md", conclusion="")
+        return {"id": comment_id, "user": {"login": login, "type": user_type}, "created_at": at, "updated_at": at,
+                "body": text}
 
-    def test_last_comes_from_the_runs_api_not_the_cache(self):
+    def test_last_comes_from_the_review_comment_not_the_cache(self):
         cached = f"session={self.SESSION} head={self.LAST}\n"
-        runs = [self.own(950, "3" * 40),  # made after this run
-                self.own(900, self.HEAD),  # this run
-                self.own(890, self.FAILED),  # its review failed
-                self.own(885, "2" * 40, fork="other/oss-verify"),  # a branch of the same name in another fork
-                self.own(882, "1" * 40, branch="fix-y"),  # another branch
-                self.own(881, "0" * 40, event="workflow_dispatch"),  # a run started by hand
-                self.own(880, self.LAST),
-                self.own(870, self.OLDER)]
-        reviews = {950: "success", 900: None, 890: "failure", 885: "success", 882: "success", 881: "success",
-                   880: "success", 870: "success"}
-        run, output, since, _, _ = self.gather_change(runs, reviews, cached, ahead=(self.LAST, self.OLDER, self.CACHED))
+        others = [
+            # Another account's comment that copies the marker and the head line, and one of type User with the App's
+            # login: neither is the App's.
+            self.comment("2" * 40, login="mallory", user_type="User", at="2026-11-10T12:00:00Z", comment_id=5001),
+            self.comment("1" * 40, user_type="User", at="2026-11-10T12:00:00Z", comment_id=5002),
+            # The App's comment that does not start with the marker: its hold comment.
+            self.comment("0" * 40, at="2026-11-10T12:00:00Z", comment_id=5003,
+                         text=f"<!-- oss-verify-held -->\nheld\n<!-- oss-verify-review-head {'0' * 40} -->\n")]
+        # The App's review comment that was edited last names the head of the last review.
+        comments = [self.comment(self.LAST, at="2026-11-10T11:00:00Z", comment_id=4000),
+                    self.comment(self.OLDER, at="2026-11-10T09:00:00Z", comment_id=4100)] + others
+        run, output, since, _, calls = self.gather_change(comments, cached,
+                                                          ahead=(self.LAST, self.OLDER, self.CACHED))
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(output, f"session={self.SESSION}\nlast={self.LAST}\n")
         self.assertEqual(since, f"diff from {self.LAST} to {self.HEAD}\n(exit status 0)\n")
+        # It reads no run of any workflow.
+        self.assertFalse([c for c in calls if "/actions/" in json.dumps(c)])
         # The session itself comes from the cache: with no cache entry, the review is fresh.
-        self.assertEqual(self.gather_change(runs, reviews, None, ahead=(self.LAST,))[1], "")
-        # No earlier review that succeeded: fresh, whatever head the cache names.
-        self.assertEqual(self.gather_change(runs[2:3], {890: "failure"}, cached, ahead=(self.LAST,))[1], "")
+        self.assertEqual(self.gather_change(comments, None, ahead=(self.LAST,))[1], "")
+        # No review comment of the App: fresh, whatever head the cache names.
+        self.assertEqual(self.gather_change(others, cached, ahead=(self.LAST,))[1], "")
+
+    def test_a_review_comment_without_exactly_one_head_line_gives_a_fresh_review(self):
+        # The App's review comment that was edited last decides, even when an older one names the head the cache
+        # names: with no head line, a short one, a head line inside a line of text, or two head lines, the review is
+        # fresh.
+        cached = f"session={self.SESSION} head={self.LAST}\n"
+        marker, line = "<!-- oss-verify-review -->\n", f"<!-- oss-verify-review-head {self.LAST} -->"
+        for text in (marker + "Thanks.\n", marker + f"<!-- oss-verify-review-head {self.LAST[:7]} -->\n",
+                     marker + f"See {line} here.\n",
+                     marker + f"{line}\n<!-- oss-verify-review-head {self.OLDER} -->\n"):
+            with self.subTest(text=text):
+                run, output, since, _, _ = self.gather_change(
+                    [self.comment(self.LAST, at="2026-11-10T09:00:00Z", comment_id=4000),
+                     self.comment(self.LAST, at="2026-11-10T11:00:00Z", comment_id=4100, text=text)],
+                    cached, ahead=(self.LAST, self.OLDER))
+                self.assertEqual(run.returncode, 0, run.stderr)
+                self.assertEqual((output, since), ("", None))
 
     def test_a_session_kept_for_another_head_is_not_resumed(self):
-        # The runs API names the head the last review reviewed; the session in the cache was kept for another head (the
-        # save of that review did not happen, or the cache holds an older run's session). It is not resumed, and the
-        # head the cache names is never read.
+        # The review comment names the head the last review reviewed; the session in the cache was kept for another
+        # head (the save of that review did not happen, or the cache holds an older run's session). It is not resumed,
+        # and the head the cache names is never read.
         run, output, since, _, calls = self.gather_change(
-            [self.own(860, self.LAST)], {860: "success"}, f"session={self.SESSION} head={self.CACHED}\n",
-            ahead=(self.LAST, self.CACHED))
+            [self.comment(self.LAST)], f"session={self.SESSION} head={self.CACHED}\n", ahead=(self.LAST, self.CACHED))
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual((output, since), ("", None))
         self.assertIn(f"the session in the cache was kept for {self.CACHED}, not {self.LAST}: the review is fresh",
@@ -2960,11 +3030,10 @@ else:
     def test_the_whole_diff_is_gathered_whether_or_not_the_review_resumes(self):
         # Checks 4 and 5 read pr.diff, the whole diff against the base, on a resumed review too.
         _, output, since, whole, _ = self.gather_change(
-            [self.own(860, self.LAST)], {860: "success"}, f"session={self.SESSION} head={self.LAST}\n",
-            ahead=(self.LAST,))
+            [self.comment(self.LAST)], f"session={self.SESSION} head={self.LAST}\n", ahead=(self.LAST,))
         self.assertTrue(output and since)
         self.assertEqual(whole, "the whole diff against the base\n")
-        _, output, since, whole, _ = self.gather_change([], {}, None)
+        _, output, since, whole, _ = self.gather_change([], None)
         self.assertEqual((output, since, whole), ("", None, "the whole diff against the base\n"))
 
 

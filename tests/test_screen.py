@@ -1,6 +1,6 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
-"""Tests of .github/scripts/screen.py, the screen of .github/workflows/build.yaml:  uv run pytest
+"""Tests of .github/scripts/screen.py, the screen of .github/workflows/review.yml:  uv run pytest
 
 The three services (Model Armor, Prompt Shields with Microsoft Entra's token endpoint, and Anthropic with its token
 exchange), GitHub's identity token endpoint and Cloud Storage are stand-ins served on 127.0.0.1, which record each

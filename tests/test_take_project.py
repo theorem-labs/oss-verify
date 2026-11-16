@@ -254,7 +254,7 @@ def test_a_fork_that_changes_two_projects_and_nothing_else_fails(tmp_path, head)
 @pytest.mark.parametrize("head", ["someone/oss-verify", ""])
 @pytest.mark.parametrize("change", OUTSIDE_PROJECTS)
 def test_a_fork_that_changes_no_file_under_projects_is_not_an_enrollment(tmp_path, head, change):
-    # tests.yaml runs this repository's tests on it, and build.yaml gives it a change review.
+    # tests.yaml runs this repository's tests on it, and review.yml gives it a change review.
     pull = PullRequest(tmp_path, NOT_A_PROJECT[change])
     code, log, values, summary = pull.run(head)
     assert code == 0, log
