@@ -267,6 +267,20 @@ class WhereTheCodeIs(Base):
     def test_a_non_zero_gap_mapped_executable_is_decoded(self):
         self.one(mkelf(NOP + ADD, gap=CNOP + CNOP), "RVC", rvc16=2, regions=2)
 
+    def test_the_first_finding_is_of_the_verdicts_kind_across_regions(self):
+        # Sections are decoded before gaps. A finding in .text that loses to one in the gap is not named.
+        res, out = self.one(mkelf(VSETVLI + NOP, gap=CNOP + CNOP), "RVC", rvc16=2, outside_model=1, regions=2)
+        self.assertEqual(out["first"], f"rvc16 at {TEXT_VADDR + 8:#x}")
+        self.assertIn(f"first rvc16 at {TEXT_VADDR + 8:#x}", out["detail"])
+        res, out = self.one(mkelf(VSETVLI + NOP, gap=LONG48 + Z16 + ADD), "NOT-RV64G", long=1, rvc16=0,
+                            outside_model=1, regions=2)
+        self.assertEqual(out["first"], f"long at {TEXT_VADDR + 8:#x}")
+        res, out = self.one(mkelf(NOP + LONG48 + Z16 + ADD, gap=CNOP + CNOP), "RVC", long=1, rvc16=2, regions=2)
+        self.assertEqual(out["first"], f"rvc16 at {TEXT_VADDR + 12:#x}")
+        # Outside-model words in two regions: the first region's is named.
+        res, out = self.one(mkelf(VSETVLI + NOP, gap=CLZ + NOP), "NOT-MODEL", outside_model=2, regions=2)
+        self.assertEqual(out["first"], f"outside_model at {TEXT_VADDR:#x}")
+
     def test_a_zero_gap_is_padding(self):
         res, _ = self.one(mkelf(NOP + ADD, gap=Z32 * 4), "CLEAN", regions=1)
         self.assertEqual((res["pf_x"]["gap_zero"], res["pf_x"]["gap_nonzero"]), (16, 0))
