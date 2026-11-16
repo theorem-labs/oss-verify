@@ -472,6 +472,11 @@ class Output(unittest.TestCase):
     def test_printable(self):
         self.assertEqual(validate.printable("a\x1b[31mb\n\x07"), "a\\x1b[31mb\\x0a\\x07")
 
+    def test_help_names_each_field(self):
+        """`oss-verify validate --help` prints the module's docstring, which lists the fields of project.yaml."""
+        for key in validate.ALLOWED_KEYS:
+            self.assertRegex(validate.__doc__, rf"\n    {key}: ", key)
+
     def run_main(self, *args):
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(sys, "argv", ["validate.py", *map(str, args)]):
