@@ -970,6 +970,30 @@ class TheParserAgainstBuildKit(unittest.TestCase):
                 with self.assertRaises(Failed) as refused:
                     check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
                 self.assertIn("cannot read", str(refused.exception))
+        # A heredoc named by U+001F, which Go counts as no space and Python's split() takes away: BuildKit runs its
+        # body, here a fetch with no mount, so the RUN that opens it is refused and named.
+        with self.subTest(opener="<<\x1f"):
+            text = f"FROM x\nRUN {self.MOUNT} fetch-commit /src/x\nRUN sh <<\x1f\nfetch-commit /src/y\n\x1f\n"
+            with self.assertRaises(Failed) as refused:
+                check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
+            self.assertIn("cannot read", str(refused.exception))
+            self.assertIn("RUN sh <<", str(refused.exception))
+        # BuildKit reads no heredoc from an empty word, so a bare `<<` or `2<<` at the end of a RUN opens none: the
+        # RUN after it is an instruction, and its mount is refused for a public library.
+        for opener in ("<<", "2<<"):
+            with self.subTest(empty_word=opener):
+                text = f"FROM x\nRUN cat {opener}\nRUN {self.MOUNT} true\n"
+                with self.assertRaises(Failed) as refused:
+                    check_build.check_secret_mount("Dockerfile", text, None, "https://x/y/z")
+                self.assertIn("take the mount off", str(refused.exception))
+        # Nor from a word that starts with expansions, which it keeps as they are: the lines after `$X<<EOT` are
+        # instructions too, so a mount there is refused for a public library, even when a `#` line could end a body.
+        for opener in ("cat $X<<EOT", 'echo " $X<<#"'):
+            with self.subTest(expansions=opener):
+                text = f"FROM x\nRUN {opener}\nRUN {self.MOUNT} true\n#\n"
+                with self.assertRaises(Failed) as refused:
+                    check_build.check_secret_mount("Dockerfile", text, None, "https://x/y/z")
+                self.assertIn("take the mount off", str(refused.exception))
 
     def test_the_forms_that_already_worked_still_do(self):
         for text in (f"FROM x\nRUN {self.MOUNT} fetch-commit /src/x\n",

@@ -674,10 +674,15 @@ def recorded_images(record):
 # `<<EOT`, `<<"EOT"`, `<<-EOT`, `2<<EOT`: what ends a heredoc body. The body is the content of a file or of a script
 # and holds no instruction of its own. BuildKit takes a heredoc only from a word that starts with it and has no
 # other `<` (`^(\d*)<<(-?)\s*([^<]*)$`), so a here-string `<<<`, a shift `$((1<<4))` and `cat<<EOT` open none. Its
-# name may be any word (`<<1EOT`, `<<.EOT`). `<< EOT`, which BuildKit splits into two words, is read as one too, and
-# so is a word that starts with expansions (`$X<<EOT`, `${X}2<<EOT`), which BuildKit keeps as they are and does not
-# read as a heredoc: a heredoc read where there is none makes the guard refuse, never accept.
-HEREDOC = re.compile(r"(?<!\S)(?:\$(?:\{[^}]*\}+|\w+|[@*#?$!-]))*\d*<<(?!<)-?\s*([^\s<]+)")
+# name may be any word (`<<1EOT`, `<<.EOT`), or none, as after U+001C to U+001F, which Python counts as space and
+# BuildKit does not: a step with an empty name is still unreadable, and no body is looked for. `<< EOT` is read as
+# one too.
+HEREDOC = re.compile(r"(?<!\S)\d*<<(?!<)-?\s*([^\s<]*)")
+
+# A heredoc, or a word that starts with expansions and then `<<` (`$X<<EOT`, `${X}2<<EOT`). BuildKit keeps such
+# expansions as they are and reads no heredoc there, so instructions() skips no lines after one, but the step is
+# still refused as unreadable. `\w++` gives nothing back: a `$` and a long run of digits stays linear.
+OPENS_HEREDOC = re.compile(r"(?<!\S)(?:\$(?:\{[^}]*\}+|\w++|[@*#?$!-]))*\d*<<(?!<)")
 
 
 def instructions(text):
@@ -721,7 +726,7 @@ def instructions(text):
         if carry.strip():
             instruction = " ".join(carry.split())
             joined.append(instruction)
-            ending = [word.strip("\"'") for word in HEREDOC.findall(instruction)]
+            ending = [word.strip("\"'") for word in HEREDOC.findall(instruction) if word]
         carry = ""
     if carry.strip():
         joined.append(" ".join(carry.split()))
@@ -779,7 +784,7 @@ def words_of(instruction):
     """An instruction's words as a shell would split them, or None when it cannot be split (an unmatched quote) or
     carries a heredoc, which this does not parse. A caller that cannot read an instruction must not conclude that
     it does nothing."""
-    if HEREDOC.search(instruction):
+    if OPENS_HEREDOC.search(instruction):
         return None
     try:
         return shlex.split(instruction, comments=False, posix=True)
@@ -863,7 +868,7 @@ def unreadable_steps(text):
     # A heredoc BODY is skipped when the instructions are read, so a fetch written inside one appears in no
     # instruction at all. The raw text is what says it is there, and the instruction that opened the heredoc is
     # what to name.
-    heredocs = [line for line in lines if HEREDOC.search(line)]
+    heredocs = [line for line in lines if OPENS_HEREDOC.search(line)]
     if heredocs and "fetch-commit" in text:
         unreadable = list(dict.fromkeys(unreadable + heredocs))
     return unreadable
