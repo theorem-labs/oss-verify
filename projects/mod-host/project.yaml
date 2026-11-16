@@ -3,7 +3,7 @@
 # the head of that branch. The fuzz targets read each reply from a buffer (fuzz/socket_fuzz.c in place of
 # src/socket.c), keep their scratch files in the working directory, and compare values, each check with its mutant and
 # input records.
-repo: https://github.com/Open-Mixer/mod-host#37fad274d99ba952ae87a3e30331ec822ffd5523
+repo: https://github.com/Open-Mixer/mod-host#49bba8511163ce556b8ed2fa6a8d5a84d0f5a2e2
 primary_contact: linuxnow@gmail.com
 homepage: https://github.com/Open-Mixer/mod-host
 language: c

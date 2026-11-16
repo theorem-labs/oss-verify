@@ -24,9 +24,7 @@ first, then a read out of bounds, then undefined behaviour that a sanitizer trap
 bug of the same rank as the code it guards. A finding without a patch is welcome. Put findings that share one cause in
 one report.
 
-`fuzz_statepaths` does not give `MakePluginStatePath()` a request path that holds `..`: the function does not confine
-such a path to the instance's directory. If you find that a command can reach it with such a path, report it as a
-finding of its own.
+`fuzz_statepaths` gives `MakePluginStatePath()` requests that hold `..`: one with a `..` component must be refused, any other must be made inside the instance's directory. If you find that a command reaches it with a path that leaves that directory, report it as a finding of its own.
 
 ## Which patches to write
 
