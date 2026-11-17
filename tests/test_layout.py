@@ -12,6 +12,7 @@ import hashlib
 import importlib.util
 import os
 import pathlib
+import re
 import struct
 import subprocess
 import sys
@@ -598,7 +599,17 @@ def readonly_growth():
                                 for r in moved]}, moved[1]
 
 
-@pytest.mark.parametrize("scenario", [jal_lost, jal_gained, repeated_key, alignment, readonly_growth])
+def repeated_run_dragged():
+    # One pattern would keep the run, but one member moved for a cause of its own (alignment): the other moves with it.
+    dup1 = dict(DUP1, address=0x11080)
+    moved0, moved1 = dict(DUP0, address=0x11300, align=64), dict(dup1, address=0x11310)
+    return ({"rows": BASE_ROWS + [DUP0, dup1]},
+            {"rows": BASE_ROWS + [moved0, moved1],
+             "placement": [placed(moved0, 0, "alignment", "align=64"), placed(moved1, 1, "repeated_key")]}, moved1)
+
+
+@pytest.mark.parametrize("scenario", [jal_lost, jal_gained, repeated_key, repeated_run_dragged, alignment,
+                                      readonly_growth])
 def test_check_lists_a_function_that_moved_for_a_cause_the_trees_show(tmp_path, capsys, scenario):
     base, new, moved = scenario()
     status, lines = run_check(tmp_path, capsys, new, base)
@@ -636,6 +647,15 @@ def repeated_run():
              "placement": [placed(moved0, 0, "repeated_key"), placed(moved1, 1, "repeated_key")]}, "dup")
 
 
+def repeated_run_unshown_drag():
+    # The member that would drag the other claims alignment, but its base address meets its alignment.
+    dup1 = dict(DUP1, address=0x11080)
+    moved0, moved1 = dict(DUP0, address=0x11300, align=16), dict(dup1, address=0x11310)
+    return ({"rows": BASE_ROWS + [DUP0, dup1]},
+            {"rows": BASE_ROWS + [moved0, moved1],
+             "placement": [placed(moved0, 0, "alignment", "align=16"), placed(moved1, 1, "repeated_key")]}, "dup")
+
+
 def aligned():
     alpha = dict(ALPHA, address=0x11100, align=64)
     return None, {"rows": [TABLE, alpha, BETA, GAMMA, COMMENT],
@@ -664,8 +684,9 @@ def no_placement():
     return None, {"rows": [TABLE, ALPHA, dict(BETA, address=0x11100), GAMMA, COMMENT]}, "beta"
 
 
-@pytest.mark.parametrize("scenario", [jal_in_reach, jal_no_such_call, repeated_once, repeated_run, aligned,
-                                      within_room, wrong_growth, no_cause, no_placement])
+@pytest.mark.parametrize("scenario", [jal_in_reach, jal_no_such_call, repeated_once, repeated_run,
+                                      repeated_run_unshown_drag, aligned, within_room, wrong_growth, no_cause,
+                                      no_placement])
 def test_check_fails_for_a_cause_the_trees_do_not_show(tmp_path, capsys, scenario):
     base, new, name = scenario()
     status, lines = run_check(tmp_path, capsys, new, base)
@@ -693,6 +714,602 @@ def test_check_exits_2_when_the_trees_share_no_build_and_target(tmp_path):
     assert layout.main(["check", str(tmp_path / "base"), str(tmp_path / "new")]) == 2
 
 
-@pytest.mark.parametrize("words", [["--help"], ["collect", "--help"], ["check", "--help"]])
+# ── wraps ────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+def fake_driver(tmp_path, status=0, linker=True, loop=False):
+    """A compiler driver that answers -### as clang does, on its standard error, and exits with `status`: a linker
+    line that a later one replaces, a compile line, the linker's line (with --wrap=a, --wrap b and an @file that
+    holds --wrap=c and a nested @file that holds --wrap=d), and then a line of another tool. With `linker` false, no
+    linker line; with `loop`, the nested @file names the first. Returns its path."""
+    (tmp_path / "two.rsp").write_text(f"--wrap=d --wrap=a{f' @{tmp_path}/one.rsp' if loop else ''}\n")
+    (tmp_path / "one.rsp").write_text(f'--wrap=c\n"@{tmp_path}/two.rsp" x.o\n')
+    earlier = ' "/usr/bin/ld" "--wrap=earlier"\n'
+    linker_line = f' "/usr/bin/ld.lld" "-o" "a.out" "--wrap=a" "--wrap" "b" "@{tmp_path}/one.rsp" "main.o"\n'
+    driver = tmp_path / "driver"
+    driver.write_text("#!/bin/sh\n"
+                      "case \" $* \" in *' -### '*) ;; *) exit 9 ;; esac\n"
+                      "cat >&2 <<'EOF'\n"
+                      "clang version 20.1.8\n"
+                      + (earlier if linker else "")
+                      + ' "/usr/bin/clang-20" "-cc1" "--wrap=compiled"\n'
+                      + (linker_line if linker else "")
+                      + ' "/usr/bin/llvm-objcopy" "--wrap=other"\n'
+                      f"EOF\nexit {status}\n")
+    driver.chmod(0o755)
+    return driver
+
+
+def test_wraps_of_reads_the_linkers_command_and_its_at_files(tmp_path):
+    wraps = layout.wraps_of([str(fake_driver(tmp_path)), "main.o"])
+    assert wraps == ["a", "b", "c", "d"]
+    # A call of a wrapped function reaches its wrapper, and a call of __real_<f> the function itself.
+    assert layout.resolve("c", wraps) == "__wrap_c"
+    assert layout.resolve("__real_d", wraps) == "d"
+    assert layout.resolve("other", wraps) == "other"
+
+
+def test_wraps_runs_as_a_command(tmp_path):
+    done = subprocess.run([sys.executable, str(SCRIPT), "wraps", "--", str(fake_driver(tmp_path)), "main.o"],
+                          capture_output=True, text=True)
+    assert (done.returncode, done.stdout) == (0, "a\nb\nc\nd\n"), done.stderr
+
+
+@pytest.mark.parametrize("driver", [{"status": 1}, {"linker": False}, {"loop": True}],
+                         ids=["fails", "no-linker-line", "at-file-loop"])
+def test_wraps_exits_2_without_a_linker_command_it_can_read(tmp_path, capsys, driver):
+    assert layout.main(["wraps", "--", str(fake_driver(tmp_path, **driver)), "main.o"]) == 2
+    assert len(capsys.readouterr().err.splitlines()) == 1
+
+
+# ── the append mode: the plan ────────────────────────────────────────────────────────────────────────────────────────
+
+def text_input(row, name, address, size, file="/work/a.o", member=None, content=None, align=4, section=None):
+    """A .text input section of a link (Input): .text.<name> of `file`, `size` bytes (input and linked) at
+    `address`, with the bytes that `content` names (by default the name)."""
+    section = section or f".text.{name}"
+    return layout.Input(row, address, size, file, (file, member or "-", section), member, section,
+                        sha((content or name).encode()), size, align)
+
+
+def laid_out(specs, start=0x11000):
+    """The .text input sections of a link with no script: [(name, size, text_input's other arguments)], one after
+    another from `start`, each at its alignment."""
+    found, at = [], start
+    for row, (name, size, extra) in enumerate(specs):
+        align = extra.get("align", 4)
+        at = (at + align - 1) // align * align
+        found.append(text_input(row, name, at, size, **extra))
+        at += size
+    return found
+
+
+def link(found, calls=(), symbols=None, front=0x10400):
+    """A Layout of the .text input sections `found` and their calls [(row, offset, called global)]. Its output:
+    .eh_frame in a read-only PT_LOAD from 0x10000 to `front`, .text over the sections in the next PT_LOAD, and
+    .init_array and .fini_array in the PT_LOAD after it, where lld puts it (the next page, at the same offset), and
+    the global symbols `symbols`."""
+    by_row = collections.defaultdict(list)
+    for row, offset, name in calls:
+        by_row[row].append(layout.Call(row, offset, "global", name, 0))
+    start, end = min(i.address for i in found), max(i.address + i.linked for i in found)
+    rw = (end + 0xFFF) // 0x1000 * 0x1000 + end % 0x1000
+    sections = [layout.OutputSection(".eh_frame", 0x10300, front - 0x10300, 0x2),
+                layout.OutputSection(".text", start, end - start, 0x6),
+                layout.OutputSection(".init_array", rw, 8, 0x3), layout.OutputSection(".fini_array", rw + 8, 8, 0x3),
+                layout.OutputSection(".comment", 0, 0x10, 0x30)]
+    loads = [layout.Load(0x10000, front - 0x10000, front - 0x10000, 0x4),
+             layout.Load(start, end - start, end - start, 0x5), layout.Load(rw, 16, 16, 0x6)]
+    return layout.Layout(found, by_row, layout.Output(sections, loads, dict(symbols or {})), {})
+
+
+def planned(base, probe):
+    return layout.plan(base, probe, layout.pair(base.inputs, probe.inputs))
+
+
+def where(plan, probe):
+    """{function: (place, address, cause, detail)} of a plan."""
+    return {probe.inputs[row].section[len(".text."):]: tuple(place) for row, place in plan.places.items()}
+
+
+def test_the_plan_fills_the_holes_largest_first_never_at_a_sections_own_address():
+    base = link([text_input(0, "k0", 0x11000, 0x10), text_input(1, "changed", 0x11010, 0x40),
+                 text_input(2, "k1", 0x11050, 0x10), text_input(3, "gone", 0x11060, 0x20),
+                 text_input(4, "k2", 0x11080, 0x10)])
+    probe = link(laid_out([("k0", 0x10, {}), ("changed", 0x40, {"content": "changed 2"}), ("k1", 0x10, {}),
+                           ("k2", 0x10, {}), ("big", 0x60, {}), ("mid", 0x30, {}), ("zeta", 0x20, {}),
+                           ("alpha", 0x20, {})]))
+    # The holes are [0x11010, 0x11050) and [0x11060, 0x11080); the end starts at 0x11090.
+    assert where(planned(base, probe), probe) == {
+        "k0": ("kept", 0x11000, "-", "-"), "k1": ("kept", 0x11050, "-", "-"), "k2": ("kept", 0x11080, "-", "-"),
+        "big": ("end", 0x11090, "-", "-"),  # first, and too large for each hole
+        "changed": ("end", 0x110F0, "-", "-"),  # it fits the first hole only at its own base address
+        "mid": ("hole", 0x11010, "-", "-"),
+        "zeta": ("hole", 0x11060, "-", "-"),  # as large as alpha, and before it in the probe's map
+        "alpha": ("end", 0x11130, "-", "-"),
+    }
+
+
+@pytest.mark.parametrize("size, fits", [(0xFE0, True), (0xFE4, False)], ids=["fits", "past"])
+def test_the_script_keeps_the_next_segment_when_the_code_ends_below_its_page(size, fits):
+    base = link([text_input(0, "grown", 0x11000, 0x10), text_input(1, "kept", 0x11010, 0x10)])
+    probe = link(laid_out([("grown", size, {"content": "grown 2"}), ("kept", 0x10, {})]))
+    plan = planned(base, probe)
+    # BASE's next PT_LOAD starts at 0x12020, so .text may end at page_floor(0x12020) = 0x12000.
+    assert plan.places[0][:2] == ("end", 0x11020)
+    assert plan.places[0].address + size == (0x12000 if fits else 0x12004)
+    pinned = "SECTIONS { .init_array 0x12020 : { } } INSERT BEFORE .fini_array;\n"
+    assert plan.script.endswith("}\nINSERT AFTER .eh_frame;\n" + (pinned if fits else ""))
+    assert plan.next_start == (0x12020 if fits else None)
+
+
+def test_a_plan_whose_read_only_data_grew_past_its_room_is_a_normal_link():
+    base = link([text_input(0, "same", 0x11000, 0x10), text_input(1, "changed", 0x11010, 0x10)])
+    probe = link(laid_out([("same", 0x10, {}), ("changed", 0x10, {"content": "changed 2"}), ("new", 0x8, {})],
+                          start=0x12100), front=0x11100)
+    plan = planned(base, probe)
+    # The segment in front of .text now ends at 0x11100, 0xd00 bytes past BASE's 0x10400, whose room up to
+    # page_floor(0x11000) was 0xc00.
+    assert (plan.script, plan.growth, plan.next_start) == (None, (0xD00, 0xC00), None)
+    assert where(plan, probe) == {"same": ("normal", 0x12100, "readonly_growth", "growth=3328;room=3072"),
+                                  "changed": ("normal", 0x12110, "-", "-"), "new": ("normal", 0x12120, "-", "-")}
+
+
+FILLER = 0x180000  # 1.5 MiB: past the reach of jal
+
+
+def test_a_kept_caller_whose_relaxation_a_moved_target_would_change_moves_with_jal_reach():
+    # c1 calls f in reach; c2, after the filler, calls g out of reach. f and g grow past their holes.
+    calls = [(0, 4, "f"), (5, 4, "g")]
+    base = link([text_input(0, "c1", 0x11000, 0x10), text_input(1, "f", 0x11010, 0x20),
+                 text_input(2, "pad", 0x11030, 0x10), text_input(3, "g", 0x11040, 0x20),
+                 text_input(4, "filler", 0x11060, FILLER), text_input(5, "c2", 0x11060 + FILLER, 0x10)],
+                calls, {"f": 0x11010, "g": 0x11040})
+    found = laid_out([("c1", 0x10, {}), ("f", 0x50, {"content": "f 2"}), ("pad", 0x10, {}),
+                      ("g", 0x50, {"content": "g 2"}), ("filler", FILLER, {}), ("c2", 0x10, {})])
+    probe = link(found, calls, {"f": found[1].address, "g": found[3].address})
+    # At the end, after c2, f is out of c1's reach (lost) and g in c2's (gained): both callers move, and the next
+    # round puts them into the holes, while f and g stay where the callers' causes hold.
+    assert where(planned(base, probe), probe) == {
+        "c1": ("hole", 0x11040, "jal_reach", "offset=0x4;target=f;lost"),
+        "f": ("end", 0x11060 + FILLER, "-", "-"),
+        "pad": ("kept", 0x11030, "-", "-"),
+        "g": ("end", 0x110B0 + FILLER, "-", "-"),
+        "filler": ("kept", 0x11060, "-", "-"),
+        "c2": ("hole", 0x11000, "jal_reach", "offset=0x4;target=g;gained"),
+    }
+
+
+def test_a_kept_function_whose_call_target_changed_address_moves_with_jal_reach():
+    base = link([text_input(0, "caller", 0x11000, 0x10), text_input(1, "t", 0x11010, 0x10)], [(0, 8, "t")],
+                {"t": 0x11010})
+    # The link now resolves t to a definition outside .text, 4 MiB away.
+    probe = link(laid_out([("caller", 0x10, {}), ("t", 0x10, {})]), [(0, 8, "t")], {"t": 0x400000})
+    assert where(planned(base, probe), probe) == {"caller": ("end", 0x11020, "jal_reach", "offset=0x8;target=t;lost"),
+                                                  "t": ("kept", 0x11010, "-", "-")}
+
+
+def test_the_placement_ends_when_each_round_moves_another_caller():
+    # c3 calls c2, which calls c1, which calls f; kept pads keep their holes apart, and f grows to the end.
+    names = ["c3", "p0", "c2", "p1", "c1", "p2", "f", "p3", "filler"]
+    sizes = [0x40, 0x10, 0x30, 0x10, 0x20, 0x10, 0x10, 0x10, FILLER]
+    calls = [(0, 4, "c2"), (2, 4, "c1"), (4, 4, "f")]
+    rows = {"c2": 2, "c1": 4, "f": 6}
+    old = laid_out([(name, size, {}) for name, size in zip(names, sizes)])
+    new = laid_out([(name, 0x100, {"content": "f 2"}) if name == "f" else (name, size, {})
+                    for name, size in zip(names, sizes)])
+    base = link(old, calls, {name: old[row].address for name, row in rows.items()})
+    probe = link(new, calls, {name: new[row].address for name, row in rows.items()})
+    found = where(planned(base, probe), probe)
+    # Each round moves the caller of the last mover: c1 loses f's reach, then c2 loses c1's, then c3 c2's.
+    assert {name: found[name][2:] for name in ("c1", "c2", "c3", "f")} == {
+        "c1": ("jal_reach", "offset=0x4;target=f;lost"), "c2": ("jal_reach", "offset=0x4;target=c1;lost"),
+        "c3": ("jal_reach", "offset=0x4;target=c2;lost"), "f": ("-", "-")}
+    assert all(found[name][0] == "end" for name in ("c1", "c2", "c3", "f"))
+    assert all(found[name] == ("kept", old[k].address, "-", "-") for k, name in enumerate(names)
+               if name in ("p0", "p1", "p2", "p3", "filler"))
+
+
+LIB = {"file": "/work/lib.a", "member": "dup.o"}
+
+
+def test_a_repeated_key_that_did_not_sit_side_by_side_moves_as_one_block():
+    base = link([text_input(0, "k0", 0x11000, 0x102, align=2), text_input(1, "gone", 0x11102, 0x1C, align=2),
+                 text_input(2, "k1", 0x1111E, 0x22, align=2), text_input(3, "dup", 0x11140, 0xA, align=2, **LIB),
+                 text_input(4, "k2", 0x1114A, 0x6, align=2),
+                 text_input(5, "dup", 0x11150, 0x10, align=8, content="dup 1", **LIB),
+                 text_input(6, "k3", 0x11160, 0x20)])
+    probe = link(laid_out([("k0", 0x102, {"align": 2}), ("k1", 0x22, {"align": 2}), ("dup", 0xA, {"align": 2, **LIB}),
+                           ("k2", 0x6, {"align": 2}), ("dup", 0x10, {"align": 8, "content": "dup 1", **LIB}),
+                           ("k3", 0x20, {})]))
+    plan = planned(base, probe)
+    # The first hole, [0x11102, 0x1111e), holds the two members' 0x1a bytes, but not the 4 bytes of padding that
+    # the second one's alignment needs after the first: the block goes to the end, 0x11180, with that padding.
+    assert [tuple(plan.places[row]) for row in (2, 4)] == [("end", 0x11180, "repeated_key", "-"),
+                                                          ("end", 0x11190, "repeated_key", "-")]
+    assert [tuple(plan.places[row]) for row in (0, 1, 3, 5)] == [
+        ("kept", 0x11000, "-", "-"), ("kept", 0x1111E, "-", "-"), ("kept", 0x1114A, "-", "-"),
+        ("kept", 0x11160, "-", "-")]
+    # One pattern names both members.
+    assert plan.script.count('"/work/lib.a:dup.o"(.text.dup)') == 1
+    assert '    . = 0x11180;\n    "/work/lib.a:dup.o"(.text.dup)\n  }\n' in plan.script
+
+
+def test_a_repeated_key_that_sat_side_by_side_is_kept_with_one_pattern():
+    base = link([text_input(0, "dup", 0x11000, 0x10, **LIB),
+                 text_input(1, "dup", 0x11010, 0x10, content="dup 1", **LIB), text_input(2, "k", 0x11020, 0x10)])
+    probe = link(laid_out([("dup", 0x10, LIB), ("dup", 0x10, {"content": "dup 1", **LIB}), ("k", 0x10, {})]))
+    plan = planned(base, probe)
+    assert [tuple(plan.places[row]) for row in range(3)] == [("kept", 0x11000, "-", "-"), ("kept", 0x11010, "-", "-"),
+                                                            ("kept", 0x11020, "-", "-")]
+    assert ('  {\n    . = 0x11000;\n    "/work/lib.a:dup.o"(.text.dup)\n    . = 0x11020;\n    "/work/a.o"(.text.k)\n'
+            '  }\n') in plan.script
+
+
+def test_a_same_bytes_section_moves_when_its_base_address_does_not_meet_its_new_alignment():
+    base = link([text_input(0, "meets", 0x11000, 0x10), text_input(1, "misses", 0x11010, 0x10)])
+    probe = link(laid_out([("meets", 0x10, {"align": 16}), ("misses", 0x10, {"align": 32})]))
+    assert where(planned(base, probe), probe) == {"meets": ("kept", 0x11000, "-", "-"),
+                                                  "misses": ("end", 0x11020, "alignment", "align=32")}
+
+
+def test_the_script_of_a_small_plan():
+    base = link([text_input(0, "main", 0x11000, 0x20), text_input(1, "helper", 0x11020, 0x10, "/work/lib.a", "m.o"),
+                 text_input(2, "odd", 0x11030, 0x8, section=".text.odd-name"), text_input(3, "grow", 0x11038, 0x8)])
+    probe = link(laid_out([("main", 0x20, {}), ("helper", 0x10, {"file": "/work/lib.a", "member": "m.o"}),
+                           ("odd", 0x8, {"section": ".text.odd-name"}), ("grow", 0x10, {"content": "grow 2"})]))
+    plan = planned(base, probe)
+    assert plan.script == (
+        "SECTIONS\n"
+        "{\n"
+        "  .text 0x11000 :\n"
+        "  {\n"
+        "    . = 0x11000;\n"
+        '    "/work/a.o"(.text.main)\n'
+        "    . = 0x11020;\n"
+        '    "/work/lib.a:m.o"(.text.helper)\n'
+        "    . = 0x11030;\n"
+        '    "/work/a.o"(".text.odd-name")\n'
+        # The end starts at grow's own base address, 0x11038: it goes to the next address of its alignment.
+        "    . = 0x1103c;\n"
+        '    "/work/a.o"(.text.grow)\n'
+        "  }\n"
+        "}\n"
+        "INSERT AFTER .eh_frame;\n"
+        "SECTIONS { .init_array 0x12040 : { } } INSERT BEFORE .fini_array;\n")
+    assert plan.lines == {6: 0, 8: 1, 10: 2, 12: 3}
+
+
+def test_the_script_refuses_a_file_name_it_cannot_quote():
+    base = link([text_input(0, "f", 0x11000, 0x10, file='/work/we"ird.o')])
+    probe = link(laid_out([("f", 0x10, {"file": '/work/we"ird.o'})]))
+    with pytest.raises(layout.AppendError, match='we"ird'):
+        planned(base, probe)
+
+
+# ── the append mode: the links ───────────────────────────────────────────────────────────────────────────────────────
+
+def relocatable(functions):
+    """A riscv64 relocatable ELF64 object of [(name, bytes, alignment, [(offset, called function)])]: a section
+    .text.<name> for each, a global function <name> at its start, and an R_RISCV_CALL_PLT relocation for each call,
+    against a symbol of this object or an undefined one."""
+    defined = [name for name, _, _, _ in functions]
+    names = defined + sorted({callee for _, _, _, calls in functions for _, callee in calls} - set(defined))
+    strtab, symtab = b"\0", [bytes(24)]
+    for k, name in enumerate(names):
+        here = k < len(defined)
+        symtab.append(struct.pack("<IBBHQQ", len(strtab), 0x12 if here else 0x10, 0, k + 1 if here else 0, 0,
+                                  len(functions[k][1]) if here else 0))
+        strtab += name.encode() + b"\0"
+    # name, type, flags, bytes, link, info, alignment, entry size
+    sections = [(f".text.{name}", 1, 0x6, body, 0, 0, align, 0) for name, body, align, _ in functions]
+    symbols = len(functions) + sum(1 for *_, calls in functions if calls) + 1
+    for k, (name, _, _, calls) in enumerate(functions):
+        if calls:
+            body = b"".join(struct.pack("<QQq", offset, (names.index(callee) + 1) << 32 | 19, 0)
+                            for offset, callee in calls)
+            sections.append((f".rela.text.{name}", 4, 0x40, body, symbols, k + 1, 8, 24))
+    sections += [(".symtab", 2, 0, b"".join(symtab), symbols + 1, 1, 8, 24), (".strtab", 3, 0, strtab, 0, 0, 1, 0)]
+    shstrtab = b"\0" + b"".join(s[0].encode() + b"\0" for s in sections) + b".shstrtab\0"
+    sections.append((".shstrtab", 3, 0, shstrtab, 0, 0, 1, 0))
+    data, headers = bytearray(64), [bytes(64)]
+    for name, kind, flags, body, link_to, info, align, entsize in sections:
+        headers.append(struct.pack("<IIQQQQIIQQ", shstrtab.index(b"\0" + name.encode() + b"\0") + 1, kind, flags, 0,
+                                   len(data), len(body), link_to, info, align, entsize))
+        data += body
+    shoff = len(data)
+    data += b"".join(headers)
+    data[:64] = b"\x7fELF" + bytes([2, 1, 1, 0]) + bytes(8) + struct.pack(
+        "<HHIQQQIHHHHHH", 1, 0xF3, 1, 0, 0, shoff, 0, 64, 0, 0, 64, len(headers), len(headers) - 1)
+    return bytes(data)
+
+
+def executable_of(sections, loads, symbols):
+    """A riscv64 ELF64 executable of the output sections [(name, address, size, flags)] (SHT_NOBITS, with no bytes
+    in the file), the PT_LOAD segments [(address, size, flags)] and the global functions {name: address}."""
+    strtab, symtab = b"\0", [bytes(24)]
+    for name, address in sorted(symbols.items()):
+        symtab.append(struct.pack("<IBBHQQ", len(strtab), 0x12, 0, 2, address, 0))
+        strtab += name.encode() + b"\0"
+    # name, type, flags, address, bytes, size (None: that of the bytes), link, info, alignment, entry size
+    entries = [(name, 8, flags, address, b"", size, 0, 0, 4, 0) for name, address, size, flags in sections]
+    entries += [(".symtab", 2, 0, 0, b"".join(symtab), None, len(entries) + 2, 1, 8, 24),
+                (".strtab", 3, 0, 0, strtab, None, 0, 0, 1, 0)]
+    shstrtab = b"\0" + b"".join(e[0].encode() + b"\0" for e in entries) + b".shstrtab\0"
+    entries.append((".shstrtab", 3, 0, 0, shstrtab, None, 0, 0, 1, 0))
+    data = bytearray(64 + 56 * len(loads))
+    for k, (vaddr, size, flags) in enumerate(loads):
+        struct.pack_into("<IIQQQQQQ", data, 64 + 56 * k, 1, flags, 0, vaddr, vaddr, size, size, 0x1000)
+    headers = [bytes(64)]
+    for name, kind, flags, address, body, size, link_to, info, align, entsize in entries:
+        headers.append(struct.pack("<IIQQQQIIQQ", shstrtab.index(b"\0" + name.encode() + b"\0") + 1, kind, flags,
+                                   address, len(data), len(body) if size is None else size, link_to, info, align,
+                                   entsize))
+        data += body
+    shoff = len(data)
+    data += b"".join(headers)
+    data[:64] = b"\x7fELF" + bytes([2, 1, 1, 0]) + bytes(8) + struct.pack(
+        "<HHIQQQIHHHHHH", 2, 0xF3, 1, 0, 64, shoff, 0, 64, 56, len(loads), 64, len(headers), len(headers) - 1)
+    return bytes(data)
+
+
+def fake_linker(cwd, ro_end=0x10300, misplace=None, extra_load=False, backward=None, far=None, grown=None,
+                far_once=None):
+    """The commands of the append mode (layout.run), with a stand-in for the compiler driver and lld, in `cwd`. For
+    -###, the linker's line. Else a link of the objects and archives the command names: it lays out their .text
+    sections one after another in input order, or as an append script puts them (each pattern's sections from the
+    address before it, and the next PT_LOAD at the address the script gives), and writes lld's map (-Wl,-Map=) and
+    an executable (-o). The read-only segment in front of .text ends at `ro_end`. In a link with a script: `misplace`
+    names a function whose map line it puts 0x10 bytes further, `extra_load` adds a PT_LOAD, `backward` makes it
+    fail as lld does when the script's line `backward` moves the location counter backward, `far` ({function:
+    address}) puts symbols elsewhere, `far_once` the same in the first such link only, and `grown` ({function:
+    bytes}) gives functions more linked bytes in the map."""
+    scripted = []
+
+    def run(words):
+        if "-###" in words:
+            return 0, ' "/usr/bin/clang-20" "-cc1"\n "/usr/bin/ld.lld" "-o" "a.out" "--wrap=getenv" "main.o"\n'
+        found = []  # (pattern's file, the map's name, section, size, alignment)
+        for word in words[1:]:
+            if word.endswith(".o"):
+                members = [(word, word, (cwd / word).read_bytes())]
+            elif word.endswith(".a"):
+                members = [(f"{word}:{name}", f"{word}({name})", bytes(body))
+                           for name, body in layout.ar_members((cwd / word).read_bytes(), word)]
+            else:
+                continue
+            for file, named, data in members:
+                found += [(file, named, s.name, s.size, s.align) for s in layout.Elf(data, word).sections
+                          if layout.is_text(s.name)]
+        script = next((w[len("-Wl,-T,"):] for w in words if w.startswith("-Wl,-T,")), None)
+        text = (ro_end + 0xFFF) // 0x1000 * 0x1000 + ro_end % 0x1000
+        addresses, rw = {}, None
+        if script:
+            scripted.append(script)
+            lines = pathlib.Path(script).read_text()
+            if backward:
+                return 1, (f"ld.lld: error: {script}:{backward}: unable to move location counter (0x11400) backward "
+                           "to 0x11340 for section '.text'\nclang: error: linker command failed with exit code 1\n")
+            text = int(re.search(r"\.text (0x[0-9a-f]+) :", lines).group(1), 16)
+            for address, file, _, section in re.findall(r'\. = (0x[0-9a-f]+);\n +"([^"]*)"\(("?)([^")]*)\3\)',
+                                                        lines):
+                at = int(address, 16)
+                for k, (pattern_file, _, name, size, align) in enumerate(found):
+                    if (pattern_file, name) == (file, section):
+                        at = (at + align - 1) // align * align
+                        addresses[k], at = at, at + size
+            pinned = re.search(r"\.init_array (0x[0-9a-f]+) :", lines)
+            rw = int(pinned.group(1), 16) if pinned else None
+        at = max([addresses[k] + found[k][3] for k in addresses], default=text)
+        for k, (_, _, _, size, align) in enumerate(found):
+            if k not in addresses:
+                at = (at + align - 1) // align * align
+                addresses[k], at = at, at + size
+        end = max(addresses[k] + found[k][3] for k in addresses)
+        rw = rw or (end + 0xFFF) // 0x1000 * 0x1000 + end % 0x1000
+        lines = [f"{text:>16x} {text:>16x} {end - text:>8x} {4:>5} .text\n"]
+        for k in sorted(addresses, key=lambda k: (addresses[k], k)):
+            _, named, section, size, align = found[k]
+            shift = 0x10 if script and section == f".text.{misplace}" else 0
+            more = (grown or {}).get(section[len(".text."):], 0) if script else 0
+            lines.append(map_line(addresses[k] + shift, size + more, align, f"{named}:({section})"))
+        mapping = next(w[len("-Wl,-Map="):] for w in words if w.startswith("-Wl,-Map="))
+        pathlib.Path(mapping).write_text("".join(lines))
+        loads = [(0x10000, ro_end - 0x10000, 4), (text, end - text, 5), (rw, 16, 6)]
+        if script and extra_load:
+            loads.append((rw + 0x1000, 16, 6))
+        pathlib.Path(words[words.index("-o") + 1]).write_bytes(executable_of(
+            [(".eh_frame", 0x10200, ro_end - 0x10200, 0x2), (".text", text, end - text, 0x6),
+             (".init_array", rw, 8, 0x3), (".fini_array", rw + 8, 8, 0x3)], loads,
+            {**{found[k][2][len(".text."):]: addresses[k] for k in addresses}, **((far or {}) if script else {}),
+             **((far_once or {}) if len(scripted) == 1 and script else {})}))
+        return 0, ""
+    return run
+
+
+def sources(new):
+    """The files of the link of the append tests: main.o (entry, which calls helper and grow, grow and tail), b.o
+    (other) and lib.a, whose member m.o holds helper and small. In the new source, grow has other bytes and more of
+    them, and small the same bytes at an alignment of 16."""
+    main = relocatable([("entry", b"\1" * 0x40, 4, [(0x8, "helper"), (0x10, "grow")]),
+                        ("grow", b"\x99" * 0x50 if new else b"\2" * 0x30, 4, []), ("tail", b"\3" * 0x20, 4, [])])
+    member = relocatable([("helper", b"\5" * 0x18, 4, []), ("small", b"\6" * 0x8, 16 if new else 4, [])])
+    return {"main.o": main, "b.o": relocatable([("other", b"\4" * 0x60, 4, [])]), "lib.a": archive([("m.o", member)])}
+
+
+COMMAND = ["clang", "main.o", "b.o", "lib.a"]
+
+
+def tree_entry(root, directory, map_text, binary, placement=None):
+    """root/plain/fuzz/, the layout tree's entry of a link of the files in `directory`, as collect writes it."""
+    entry = root / "plain" / "fuzz"
+    entry.mkdir(parents=True)
+    found, calls = layout.describe(layout.read_map(map_text), layout.Objects(lambda f: (directory / f).read_bytes()),
+                                   lambda f: f, {"getenv"})
+    (entry / "map").write_text(map_text)
+    (entry / "sections.tsv").write_bytes(layout.tsv(layout.sections_rows(found)))
+    (entry / "calls.tsv").write_bytes(layout.tsv(layout.calls_rows(calls)))
+    (entry / "output.tsv").write_bytes(layout.tsv(layout.output_rows(layout.Elf(binary, "fuzz"))))
+    (entry / "wraps").write_text("getenv\n")
+    if placement is not None:
+        (entry / "placement.tsv").write_bytes(placement)
+    return entry
+
+
+def append_setup(tmp_path, monkeypatch, **fake):
+    """The base layout tree tmp_path/base of a link of the old sources in tmp_path/old, and the new sources in
+    tmp_path/work, the working directory, with fake_linker(**fake) in place of the commands. Returns the base
+    entry."""
+    for name, new in (("old", False), ("work", True)):
+        (tmp_path / name).mkdir()
+        for file, data in sources(new).items():
+            (tmp_path / name / file).write_bytes(data)
+    old = tmp_path / "old"
+    assert fake_linker(old)(COMMAND + [f"-Wl,-Map={old / 'map'}", "-o", str(old / "fuzz")]) == (0, "")
+    entry = tree_entry(tmp_path / "base", old, (old / "map").read_text(), (old / "fuzz").read_bytes())
+    monkeypatch.chdir(tmp_path / "work")
+    monkeypatch.setattr(layout, "run", fake_linker(tmp_path / "work", **fake))
+    (tmp_path / "links").mkdir()
+    return entry
+
+
+def run_append(tmp_path, entry):
+    return layout.main(["append", "--base", str(entry), "--work", str(tmp_path / "links"), "--script",
+                        str(tmp_path / "script.ld"), "--placement", str(tmp_path / "placement.tsv"), "--wraps",
+                        str(tmp_path / "wraps"), "--"] + COMMAND)
+
+
+# The base link lays .text out from 0x11300: entry, grow, tail, other, helper and small, to 0x11410; its next PT_LOAD
+# starts at 0x12410. grow, at 0x11340, now takes 0x50 bytes; small, at 0x11408, needs an alignment of 16.
+SCRIPT_TEXT = """SECTIONS
+{
+  .text 0x11300 :
+  {
+    . = 0x11300;
+    "main.o"(.text.entry)
+    . = 0x11340;
+    "lib.a:m.o"(.text.small)
+    . = 0x11370;
+    "main.o"(.text.tail)
+    . = 0x11390;
+    "b.o"(.text.other)
+    . = 0x113f0;
+    "lib.a:m.o"(.text.helper)
+    . = 0x11408;
+    "main.o"(.text.grow)
+  }
+}
+INSERT AFTER .eh_frame;
+SECTIONS { .init_array 0x12410 : { } } INSERT BEFORE .fini_array;
+"""
+
+
+def test_append_writes_the_script_the_placement_and_the_wraps(tmp_path, monkeypatch, capsys):
+    entry = append_setup(tmp_path, monkeypatch)
+    assert run_append(tmp_path, entry) == 0
+    assert (tmp_path / "script.ld").read_text() == SCRIPT_TEXT
+    assert (tmp_path / "wraps").read_text() == "getenv\n"
+    assert [line.split("\t") for line in (tmp_path / "placement.tsv").read_text().splitlines()] == [
+        ["main.o", "-", ".text.entry", "0", "main.o", "-", ".text.entry", "0", "kept", "0x11300", "-", "-"],
+        ["lib.a", "m.o", ".text.small", "0", "lib.a", "m.o", ".text.small", "0", "hole", "0x11340", "alignment",
+         "align=16"],
+        ["main.o", "-", ".text.tail", "0", "main.o", "-", ".text.tail", "0", "kept", "0x11370", "-", "-"],
+        ["b.o", "-", ".text.other", "0", "b.o", "-", ".text.other", "0", "kept", "0x11390", "-", "-"],
+        ["lib.a", "m.o", ".text.helper", "0", "lib.a", "m.o", ".text.helper", "0", "kept", "0x113f0", "-", "-"],
+        ["main.o", "-", ".text.grow", "0", "main.o", "-", ".text.grow", "0", "end", "0x11408", "-", "-"],
+    ]
+    assert capsys.readouterr().err == ("layout.py append: fuzz (plain): 4 kept, 1 moved (alignment: 1), 1 changed "
+                                       "or new; the next segment stays at 0x12410\n")
+    # The same inputs make the same script, byte for byte.
+    assert run_append(tmp_path, entry) == 0
+    assert (tmp_path / "script.ld").read_text() == SCRIPT_TEXT
+
+
+def test_layout_check_verifies_what_append_writes(tmp_path, monkeypatch, capsys):
+    entry = append_setup(tmp_path, monkeypatch)
+    assert run_append(tmp_path, entry) == 0
+    links = tmp_path / "links"
+    tree_entry(tmp_path / "new", tmp_path / "work", (links / "check.map").read_text(), (links / "check").read_bytes(),
+               (tmp_path / "placement.tsv").read_bytes())
+    capsys.readouterr()
+    assert layout.main(["check", str(tmp_path / "base"), str(tmp_path / "new")]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines_with(lines, "plain/fuzz: 4 kept, 1 moved with a cause, 1 changed or new, 0 failed")
+    assert lines_with(lines, "moved with a cause: small", "alignment (align=16)", "0x11408 -> 0x11340")
+    assert lines_with(lines, "changed: grow", "0x11340 -> 0x11408")
+
+
+def test_append_links_normally_when_the_read_only_data_grew_past_its_room(tmp_path, monkeypatch, capsys):
+    # The new link's read-only segment ends at 0x11100: 0xe00 bytes past the base's 0x10300, whose room up to
+    # page_floor(0x11300) was 0xd00.
+    entry = append_setup(tmp_path, monkeypatch, ro_end=0x11100)
+    (tmp_path / "script.ld").write_text("an old script\n")
+    assert run_append(tmp_path, entry) == 0
+    assert not (tmp_path / "script.ld").exists()
+    assert capsys.readouterr().err == (
+        "layout.py append: fuzz (plain): the read-only data in front of .text grew by 3584 bytes, past its room of "
+        "3328 bytes, so this is a normal link, and every function whose code did not change moves (readonly_growth)\n")
+    rows = [line.split("\t") for line in (tmp_path / "placement.tsv").read_text().splitlines()]
+    assert [row[2] for row in rows] == [".text.entry", ".text.grow", ".text.tail", ".text.other", ".text.helper",
+                                        ".text.small"]
+    assert {row[8] for row in rows} == {"normal"} and rows[0][9] == "0x12100"
+    assert [row[10:] for row in rows] == [["readonly_growth", "growth=3584;room=3328"]] + [["-", "-"]] + [
+        ["readonly_growth", "growth=3584;room=3328"]] * 4
+    # layout check verifies the cause on the normal link's tree.
+    links = tmp_path / "links"
+    tree_entry(tmp_path / "new", tmp_path / "work", (links / "probe.map").read_text(), (links / "probe").read_bytes(),
+               (tmp_path / "placement.tsv").read_bytes())
+    assert layout.main(["check", str(tmp_path / "base"), str(tmp_path / "new")]) == 0
+    assert lines_with(capsys.readouterr().out.splitlines(), "plain/fuzz: 0 kept, 5 moved with a cause")
+
+
+@pytest.mark.parametrize("fake, named", [
+    ({"misplace": "tail"}, ["tail (main.o)", "0x11370", "0x11380", "defect"]),
+    ({"extra_load": True}, ["PT_LOAD 3", "0x13410"]),
+    # Line 7 of SCRIPT_TEXT is the address of small: entry, on the line before, took more room than it had.
+    ({"backward": 7}, ["unable to move location counter", "line 7", "entry (main.o)"]),
+], ids=["kept-elsewhere", "pt-load-count", "backward"])
+def test_append_exits_1_when_the_check_link_is_not_what_the_plan_asks(tmp_path, monkeypatch, capsys, fake, named):
+    entry = append_setup(tmp_path, monkeypatch, **fake)
+    assert run_append(tmp_path, entry) == 1
+    error = capsys.readouterr().err
+    assert error.splitlines()[-1].startswith("layout.py append: fuzz (plain): ")
+    assert all(word in error for word in named), error
+    assert not (tmp_path / "placement.tsv").exists()
+
+
+@pytest.mark.parametrize("fake, placed_rows", [
+    # In the check link, entry takes 4 bytes more, because its call of grow, which the link puts 4 MiB away, is no
+    # longer in jal's reach: entry moves with jal_reach, and the plan runs again. grow keeps away from entry's base
+    # call site, so that entry's cause holds.
+    ({"far": {"grow": 0x400000}, "grown": {"entry": 4}},
+     [[".text.small", "hole", "0x11300", "alignment", "align=16"], [".text.tail", "kept", "0x11370", "-", "-"],
+      [".text.other", "kept", "0x11390", "-", "-"], [".text.helper", "kept", "0x113f0", "-", "-"],
+      [".text.grow", "end", "0x11408", "-", "-"],
+      [".text.entry", "end", "0x11458", "jal_reach", "offset=0x10;target=grow;lost"]]),
+    # The first check link also puts helper far, and entry moves for its call of helper; in the second, only the
+    # call of grow is relaxed otherwise, and placement.tsv gives that one.
+    ({"far": {"grow": 0x400000}, "far_once": {"helper": 0x400000}, "grown": {"entry": 4}},
+     [[".text.grow", "hole", "0x11300", "-", "-"], [".text.small", "hole", "0x11350", "alignment", "align=16"],
+      [".text.tail", "kept", "0x11370", "-", "-"], [".text.other", "kept", "0x11390", "-", "-"],
+      [".text.helper", "kept", "0x113f0", "-", "-"],
+      [".text.entry", "end", "0x11408", "jal_reach", "offset=0x10;target=grow;lost"]]),
+], ids=["lost", "another-call"])
+def test_append_moves_a_kept_section_whose_call_the_check_link_relaxes_otherwise(tmp_path, monkeypatch, capsys, fake,
+                                                                                 placed_rows):
+    entry = append_setup(tmp_path, monkeypatch, **fake)
+    assert run_append(tmp_path, entry) == 0
+    rows = [line.split("\t") for line in (tmp_path / "placement.tsv").read_text().splitlines()]
+    assert [[row[2]] + row[8:] for row in rows] == placed_rows
+    assert capsys.readouterr().err.endswith("fuzz (plain): 3 kept, 2 moved (jal_reach: 1, alignment: 1), 1 changed "
+                                            "or new; the next segment stays at 0x12410\n")
+    links = tmp_path / "links"
+    tree_entry(tmp_path / "new", tmp_path / "work", (links / "check.map").read_text(), (links / "check").read_bytes(),
+               (tmp_path / "placement.tsv").read_bytes())
+    assert layout.main(["check", str(tmp_path / "base"), str(tmp_path / "new")]) == 0
+    assert lines_with(capsys.readouterr().out.splitlines(), "moved with a cause: entry", "jal_reach")
+
+
+@pytest.mark.parametrize("words", [["--help"], ["collect", "--help"], ["check", "--help"], ["wraps", "--help"],
+                                   ["append", "--help"]])
 def test_each_command_has_help(words):
     assert subprocess.run([sys.executable, str(SCRIPT)] + words, capture_output=True).returncode == 0

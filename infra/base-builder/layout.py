@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
-"""The layout of a fuzz target's link, and the check that a development build kept each function whose code did not
-change at the address its base gave it.
+"""The layout of a fuzz target's link, the append mode that keeps each function whose code did not change at the
+address its base gave it, and the check that a development build did.
 
     python3 layout.py collect BUILDS DIR
     python3 layout.py check BASE NEW
+    python3 layout.py wraps -- COMMAND...
+    python3 layout.py append --base ENTRY --work DIR --script FILE --placement FILE --wraps FILE [--renamed FILE]
+        -- COMMAND...
 
 collect reads BUILDS/<build>/, the $OUT of one build of compile with link records (link-fuzz-target, "the record of
 this link"): the fuzz targets at its top, the stripped twin of each in .stripped/<sha256 of the target>, the record of
@@ -36,16 +39,35 @@ section of its key), alignment (its base address does not meet its new alignment
 front of .text grew past the page that holds the base's first .text byte). It exits 1 when one does not, naming the
 function; 2 when a tree cannot be read or the two share no (build, target); else 0.
 
+wraps prints the functions that the link COMMAND wraps, one a line, sorted: each --wrap=<f> of the linker command
+that the compiler driver gives for it with -###, with each @file expanded. It exits 2 when the command fails or gives
+no linker command.
+
+append is the append mode of link-fuzz-target, which runs it in the link's working directory with the link's whole
+command (the compiler and every argument, the seals last; no -o, no map, no script). ENTRY is the base layout tree's
+entry <tree>/<build>/<target>/, DIR an empty directory for its links, and --renamed an allocation-failure link's
+renamed. It writes the link's wraps to --wraps, links once normally (the probe link, DIR/probe), and plans where
+each .text input section goes: each same-bytes one at its base address, unless it moves for one of the causes above,
+and every other one into a hole between them or at the end of .text. It writes the lld script of that plan to
+--script, links with it (the check link, DIR/check), verifies that each kept section is at its base address with its
+base linked size and that the PT_LOAD segments are the probe link's, and writes placement.tsv to --placement. When
+the read-only data in front of .text grew past its room, it writes no script: the link is a normal one, and
+placement.tsv gives every same-bytes section readonly_growth. It exits 1 when a link fails or the check link is not
+what the plan asks, 2 when an input cannot be read, else 0.
+
 The builder image runs this file with its own python3, and the host runs its commands: it takes the standard library
 only, and the syntax of Python 3.9.
 """
 import argparse
+import bisect
 import collections
 import hashlib
 import os
 import re
+import shlex
 import stat
 import struct
+import subprocess
 import sys
 
 CAUSES = ("jal_reach", "repeated_key", "alignment", "readonly_growth")
@@ -170,6 +192,15 @@ def tsv(rows):
                 raise LayoutError(f"{field!r} holds a tab or a line break")
         out.append("\t".join(row) + "\n")
     return "".join(out).encode("utf-8", "surrogateescape")
+
+
+def write_new(path, data):
+    """Write `data` to the file `path` anew: a file or a symbolic link that stands there is removed, never followed."""
+    if os.path.lexists(path):
+        os.unlink(path)
+    handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
+    with os.fdopen(handle, "wb") as stream:
+        stream.write(data)
 
 
 def hex_text(number):
@@ -587,8 +618,13 @@ def read_calls(path, count):
 
 def read_output(path):
     """The output sections, PT_LOAD segments and global symbols of a layout's output.tsv (Output)."""
+    return output_of(tsv_rows(path), path)
+
+
+def output_of(rows, what):
+    """The Output of the lines of an output.tsv (output_rows), as fields; `what` names them in a message."""
     sections, loads, symbols = [], [], {}
-    for number, fields in enumerate(tsv_rows(path), 1):
+    for number, fields in enumerate(rows, 1):
         if fields[0] == "section" and len(fields) == 5 and DECIMAL.fullmatch(fields[3]):
             addr, flags = hex_value(fields[2]), hex_value(fields[4])
             if addr is not None and flags is not None:
@@ -605,7 +641,7 @@ def read_output(path):
             if addr is not None:
                 symbols[fields[1]] = addr
                 continue
-        raise LayoutError(f"{path}: line {number} does not read")
+        raise LayoutError(f"{what}: line {number} does not read")
     return Output(sections, loads, symbols)
 
 
@@ -753,12 +789,10 @@ def collect(builds, out):
         os.makedirs(directory, exist_ok=True)
         for file in TREE_FILES:
             path = os.path.join(directory, file)
-            if os.path.lexists(path):
-                os.unlink(path)
             if file in files:
-                handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
-                with os.fdopen(handle, "wb") as stream:
-                    stream.write(files[file])
+                write_new(path, files[file])
+            elif os.path.lexists(path):
+                os.unlink(path)
 
 
 # ── pairing ──────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -884,6 +918,20 @@ def target_address(call, layout):
     return None if address is None else address + call.value
 
 
+def dragged(fn, base, new, pairing):
+    """Whether another same-bytes member of the repeated key of `fn` (of NEW) moved for a cause of its own that the
+    two layouts show: one pattern places every member of a key, so the others move with it, with repeated_key."""
+    occurrence = occurrences(new.inputs)
+    for i in new.inputs:
+        if i.row == fn.row or i.key != fn.key or not pairing.same.get(i.row):
+            continue
+        placement = new.placement.get(i.key + (occurrence[i.row],))
+        if placement is not None and placement.cause not in ("-", "repeated_key") \
+                and unshown(placement, i, base.inputs[pairing.partner[i.row]], base, new, pairing) is None:
+            return True
+    return False
+
+
 def unshown(placement, fn, old, base, new, pairing):
     """Why the two layouts do not show the cause that NEW's placement gives for the same-bytes function `fn` (of NEW,
     paired with `old` of BASE) to move, or None when they show it."""
@@ -911,9 +959,9 @@ def unshown(placement, fn, old, base, new, pairing):
     if cause == "repeated_key":
         if fn.key not in pairing.repeated:
             return "its key occurs once on each side"
-        if kept_run(fn.key, base, new, pairing):
+        if kept_run(fn.key, base, new, pairing) and not dragged(fn, base, new, pairing):
             return ("its key's members are as many on both sides, same-bytes, side by side at the base and in the "
-                    "same order in NEW: one pattern keeps them")
+                    "same order in NEW, and none moved for a cause of its own: one pattern keeps them")
         return None
     if cause == "alignment":
         if fn.align <= 1 or old.address % fn.align == 0:
@@ -1045,6 +1093,572 @@ def check(base_tree, new_tree):
     return 1 if failed else 0
 
 
+# ── the linker's command ─────────────────────────────────────────────────────────────────────────────────────────────
+
+# The first word of the linker's line in the compiler driver's account of a link (-###): a path to ld.lld or ld.
+LINKER = re.compile(r"(.*/)?([^/]*-)?ld(\.lld)?")
+# An option that wraps a function: --wrap=<f>, or --wrap and <f> in the next word. lld takes one dash as well.
+WRAP = re.compile(r"--?wrap(=(.*))?")
+
+
+def run(words):
+    """Run the command `words` in the working directory, with no input: (its exit status, its standard output and
+    standard error as one text). Each command that wraps and append run goes through here; the tests replace it."""
+    done = subprocess.run(words, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    return done.returncode, text_of(done.stdout)
+
+
+def read_linked(path):
+    """The bytes of a file that a link reads, by the name the link gives it. wraps and append run where the link
+    runs, in the build's own container, and read what the linker reads: through a symbolic link too."""
+    return read_regular(os.path.realpath(path))
+
+
+def split_words(text, what):
+    """The words of `text`, split as a shell would. Raise LayoutError for a quote that does not close."""
+    try:
+        return shlex.split(text)
+    except ValueError as error:
+        raise LayoutError(f"{what} does not split into words: {error}") from None
+
+
+def expand(words, opened=()):
+    """`words`, with each @file word replaced by the words of that file, split as a shell would and expanded the
+    same way. Raise LayoutError for a file that cannot be read, or that names itself through its @file words."""
+    out = []
+    for word in words:
+        if not word.startswith("@") or word == "@":
+            out.append(word)
+            continue
+        path = word[1:]
+        real = os.path.realpath(path)
+        if real in opened:
+            raise LayoutError(f"{path} names itself through its @file words")
+        out += expand(split_words(text_of(read_linked(path)), path), opened + (real,))
+    return out
+
+
+def wraps_of(command):
+    """The functions that the link `command` (the compiler driver and its arguments) wraps, sorted, each once. With
+    -###, the driver prints the commands it would run on its standard error, and runs none. The linker's is the last
+    line that starts with a blank and a double quote and whose first word is ld.lld or ld. Each --wrap=<f> and
+    --wrap <f> of its words counts, with each @file word expanded. Raise LayoutError when the command fails or
+    prints no linker command."""
+    status, output = run(command + ["-###"])
+    if status:
+        raise LayoutError(f"{command[0]} -### exits with status {status}")
+    words = None
+    for line in reversed(output.split("\n")):
+        if not line.startswith(' "'):
+            continue
+        try:
+            found = shlex.split(line)
+        except ValueError:
+            continue
+        if found and LINKER.fullmatch(found[0]):
+            words = found
+            break
+    if words is None:
+        raise LayoutError(f"{command[0]} -### prints no linker command")
+    words = expand(words[1:])
+    wrapped = set()
+    for k, word in enumerate(words):
+        found = WRAP.fullmatch(word)
+        if found is None:
+            continue
+        name = found.group(2) if found.group(1) else (words[k + 1] if k + 1 < len(words) else "")
+        if name:
+            wrapped.add(name)
+    return sorted(wrapped)
+
+
+# ── the append mode ──────────────────────────────────────────────────────────────────────────────────────────────────
+
+class AppendError(Exception):
+    """A link of the append mode that fails, or a check link that is not what the plan asks: append exits 1."""
+
+
+# Where the append mode puts a .text input section of the link: `place` (kept, hole, end, or normal for a normal
+# link), its address, and for a same-bytes section that moves, the cause and its detail (- for none).
+Place = collections.namedtuple("Place", "place address cause detail")
+# A call of a same-bytes .text input section, as the append mode tests it at the section's base address: its offset,
+# its target as BASE's call at that offset names it (call_target), the base call site and the base target's address,
+# the link's own call, and where the link's target is: in the .text input section `row`, `value` bytes into it, or,
+# with row None, at the address `value`.
+CallTest = collections.namedtuple("CallTest", "offset target site before call row value")
+# The plan of an append link (plan): `places` {row: Place} for each .text input section of the link, `script` the
+# text of the linker script (None for a normal link), `lines` {line of the script: the row whose pattern is on it},
+# `next_start` the address at which the script keeps the next PT_LOAD (None when it does not), and `growth` (N, M)
+# of readonly_growth for a normal link (else None).
+Plan = collections.namedtuple("Plan", "places script lines next_start growth")
+# A check link: its map's lines, {row of the probe link: index of its line in that map}, and its Output.
+Link = collections.namedtuple("Link", "lines match output")
+# A section name that lld's script reads bare, as the exact name.
+BARE = re.compile(r"[A-Za-z0-9._$]+")
+# lld's error when an address of the script lies below the end of what the script put before it.
+BACKWARD = re.compile(r":([0-9]+): unable to move location counter[^\n]*backward")
+
+
+def align_up(address, align):
+    align = max(align, 1)
+    return (address + align - 1) // align * align
+
+
+def relaxed_otherwise(test, after):
+    """Whether the call `test`, at its base call site, is in jal's reach of the address `after` and not of its base
+    target, or the other way round. False when `after` is None."""
+    return after is not None and in_reach(test.site, test.before) != in_reach(test.site, after)
+
+
+def jal_detail(test):
+    """The detail of jal_reach for the call `test`, as unshown reads it."""
+    way = "lost" if in_reach(test.site, test.before) else "gained"
+    return f"offset={hex_text(test.offset)};target={test.target};{way}"
+
+
+def call_tests(base, probe, pairing):
+    """{row: [CallTest], in offset order} for each same-bytes .text input section of the link `probe` (Layout). A
+    call is tested when BASE's partner has a call at the same offset and both targets have an address. The link's
+    target is in the .text input section that holds it: a local symbol's section, or the section at the address of a
+    global symbol in the link's output. A target in no .text input section keeps the link's address."""
+    text = sorted((i for i in probe.inputs if is_text(i.section) and i.linked), key=lambda i: (i.address, i.row))
+    starts = [i.address for i in text]
+
+    def where(call):
+        if call.kind == "local":
+            if call.target is None:
+                return None
+            target = probe.inputs[call.target]
+            return (target.row, call.value) if is_text(target.section) else (None, target.address + call.value)
+        address = probe.output.symbols.get(call.target)
+        if address is None:
+            return None
+        k = bisect.bisect_right(starts, address) - 1
+        if k >= 0 and address < text[k].address + text[k].linked:
+            return text[k].row, address - text[k].address + call.value
+        return None, address + call.value
+
+    tests = {}
+    for i in probe.inputs:
+        if not (is_text(i.section) and pairing.same[i.row]):
+            continue
+        old = base.inputs[pairing.partner[i.row]]
+        then = {}
+        for call in base.calls.get(old.row, []):
+            then.setdefault(call.offset, call)
+        found = []
+        for call in sorted(probe.calls.get(i.row, []), key=lambda c: c.offset):
+            before = then.get(call.offset)
+            before_address = None if before is None else target_address(before, base)
+            now = where(call)
+            if before_address is not None and now is not None:
+                found.append(CallTest(call.offset, call_target(before), old.address + call.offset, before_address,
+                                      call, *now))
+        if found:
+            tests[i.row] = found
+    return tests
+
+
+def kept_set(base, probe, pairing, forced):
+    """The .text input sections of the link `probe` that keep their base addresses ({row: BASE's partner}), and the
+    cause of each same-bytes one that moves ({row: (cause, detail)}). A same-bytes section is kept, unless: `forced`
+    ({row: CallTest}) names it (jal_reach); its base address does not meet its alignment now (alignment); or its key
+    repeats (pairing.repeated). The members of such a key are kept, each at its base address, when one pattern keeps
+    them all (kept_run) and none moves for a cause of its own; else the same-bytes ones move with repeated_key."""
+    text = [i for i in probe.inputs if is_text(i.section)]
+    kept, causes = {}, {}
+    for i in text:
+        if not pairing.same[i.row]:
+            continue
+        old = base.inputs[pairing.partner[i.row]]
+        if i.row in forced:
+            causes[i.row] = ("jal_reach", jal_detail(forced[i.row]))
+        elif i.align > 1 and old.address % i.align:
+            causes[i.row] = ("alignment", f"align={i.align}")
+        elif i.key not in pairing.repeated:
+            kept[i.row] = old
+    for key in sorted(pairing.repeated):
+        members = [i for i in text if i.key == key]
+        if members and kept_run(key, base, probe, pairing) and not any(i.row in causes for i in members):
+            kept.update((i.row, base.inputs[pairing.partner[i.row]]) for i in members)
+            continue
+        for i in members:
+            if pairing.same[i.row] and i.row not in causes:
+                causes[i.row] = ("repeated_key", "-")
+    return kept, causes
+
+
+def lay(unit, start):
+    """The address of each input section of `unit` laid out from `start` in order, each at its alignment and with
+    its input size, and the address after the last."""
+    at, addresses = start, []
+    for i in unit:
+        at = align_up(at, i.align)
+        addresses.append(at)
+        at += i.size
+    return addresses, at
+
+
+def allowed(unit, addresses, own, wanted):
+    """Whether the input sections of `unit` may go to `addresses`: none at its own base address (`own`), and each
+    call into one that `wanted` names ({row: [(CallTest, whether it must be relaxed otherwise)]}) relaxed so."""
+    for i, at in zip(unit, addresses):
+        if own.get(i.row) == at:
+            return False
+        for test, change in wanted.get(i.row, ()):
+            if relaxed_otherwise(test, at + test.value) != change:
+                return False
+    return True
+
+
+def planned_target(test, planned):
+    """The address of the target of the call `test` when each .text input section is at its address in `planned`."""
+    return test.value if test.row is None else planned[test.row] + test.value
+
+
+def alloc_order(output):
+    """The SHF_ALLOC output sections of a link, in address order (then header order): [(address, index, name)]."""
+    return sorted((s.addr, k, s.name) for k, s in enumerate(output.sections) if s.flags & SHF_ALLOC)
+
+
+def next_segment(base, probe):
+    """(S, first, after): S the start of BASE's PT_LOAD after the one that holds .text; `first` the SHF_ALLOC section
+    of the probe link with the lowest address in the probe's PT_LOAD after the one that holds .text, and `after` the
+    SHF_ALLOC section that follows it in the probe's address order. None when one of them is not there."""
+    loads = []
+    for output in (base, probe):
+        text = next((s for s in output.sections if s.name == ".text"), None)
+        holder = next((k for k, p in enumerate(output.loads) if text and p.vaddr <= text.addr < p.vaddr + p.memsz),
+                      None)
+        if holder is None or holder + 1 >= len(output.loads):
+            return None
+        loads.append(output.loads[holder + 1])
+    order = alloc_order(probe)
+    first = next((k for k, (address, _, _) in enumerate(order)
+                  if loads[1].vaddr <= address < loads[1].vaddr + loads[1].memsz), None)
+    if first is None or first + 1 >= len(order):
+        return None
+    return loads[0].vaddr, order[first][2], order[first + 1][2]
+
+
+def quotable(name):
+    """`name`, which the script quotes. Raise AppendError for a quote or a line break, which a quoted name cannot
+    hold."""
+    if '"' in name or "\n" in name:
+        raise AppendError(f"{name!r} holds a double quote or a line break, which a linker script cannot name")
+    return name
+
+
+def script_name(name):
+    """A section's name in the script: bare when lld reads it bare as the exact name, else quoted."""
+    return name if BARE.fullmatch(name) else f'"{quotable(name)}"'
+
+
+def pattern(i):
+    """The script's pattern of the input section `i`: the file as the map names it (<archive>:<member> for a member
+    of an archive), quoted, which lld reads as the exact name with no wildcard, and the section."""
+    file = i.file if i.member is None else f"{i.file}:{i.member}"
+    return f'"{quotable(file)}"({script_name(i.section)})'
+
+
+def plan(base, probe, pairing, forced=None):
+    """The plan (Plan) of an append link: where each .text input section of the probe link `probe` (Layout, with no
+    placement) goes against the base layout `base`, with the pairing `pairing` (pair). It reads no file and runs
+    nothing. `forced` ({row: CallTest}) names kept sections that the check after the link moves with jal_reach.
+
+    When the read-only data in front of .text grew past its room (readonly_growth), the link is a normal one: no
+    script, each section at the probe's address. Else each same-bytes section that kept_set keeps occupies its base
+    address and base linked size, and the holes are the gaps between them from the base's .text address. Each other
+    section moves: largest input size first (ties: the probe map's order), into the first hole in address order
+    where it fits at its alignment (its input size: relaxation only removes bytes), never at its own base address,
+    and where each call from a kept section into it is relaxed as at the base; else to the end of .text, one after
+    another. The members of a repeated key that move are one block: one pattern places them all, in input order.
+    Then each call of each kept section is tested at its base call site against its planned target: a kept section
+    with a call relaxed otherwise moves with jal_reach, and the placement runs again with the larger set of moved
+    sections. Each round moves one section more, so it ends.
+
+    The script puts .text at the base's address, and each section, a kept run or a moved block once, at its address
+    in address order. When the planned end of .text is at or below page_floor of the start S of BASE's next PT_LOAD,
+    the script keeps that PT_LOAD at S: the first section of the probe's next PT_LOAD at S with an empty body, which
+    lld fills in its own order (next_segment)."""
+    text = [i for i in probe.inputs if is_text(i.section)]
+    figures = readonly_growth(base.output, probe.output)
+    if figures is not None and figures[0] > figures[1]:
+        cause = ("readonly_growth", "growth={};room={}".format(*figures))
+        places = {i.row: Place("normal", i.address, *(cause if pairing.same[i.row] else ("-", "-"))) for i in text}
+        return Plan(places, None, {}, None, figures)
+    start = next((s.addr for s in base.output.sections if s.name == ".text"), None)
+    if start is None:
+        raise LayoutError("BASE's output.tsv has no .text")
+    tests = call_tests(base, probe, pairing)
+    forced = dict(forced or {})
+    while True:
+        kept, causes = kept_set(base, probe, pairing, forced)
+        movers = [i for i in text if i.row not in kept]
+        units, blocks = [], {}
+        for i in movers:
+            if i.key not in pairing.repeated:
+                units.append([i])
+                continue
+            if i.key not in blocks:
+                blocks[i.key] = []
+                units.append(blocks[i.key])
+            blocks[i.key].append(i)
+        units.sort(key=lambda unit: (-sum(i.size for i in unit), unit[0].row))
+        own = {i.row: base.inputs[pairing.partner[i.row]].address for i in movers
+               if pairing.partner[i.row] is not None}
+        # A call from a kept section must be relaxed as at the base; the call that moved a section with jal_reach
+        # must stay relaxed otherwise, so that its cause holds.
+        wanted = collections.defaultdict(list)
+        for row in sorted(kept):
+            for test in tests.get(row, []):
+                if test.row is not None and test.row not in kept:
+                    wanted[test.row].append((test, False))
+        for row, test in sorted(forced.items()):
+            if test.row is not None and test.row not in kept:
+                wanted[test.row].append((test, True))
+        holes, end = [], start
+        for old in sorted(kept.values(), key=lambda i: (i.address, i.row)):
+            if old.address > end:
+                holes.append([end, old.address])
+            end = max(end, old.address + old.linked)
+        planned = {row: old.address for row, old in kept.items()}
+        where = {}
+        for unit in units:
+            for hole in holes:
+                addresses, after = lay(unit, hole[0])
+                if after <= hole[1] and allowed(unit, addresses, own, wanted):
+                    hole[0], place = after, "hole"
+                    break
+            else:
+                addresses, after = lay(unit, end)
+                while any(own.get(i.row) == at for i, at in zip(unit, addresses)):
+                    addresses, after = lay(unit, addresses[0] + 1)
+                end, place = after, "end"
+            for i, at in zip(unit, addresses):
+                planned[i.row], where[i.row] = at, place
+        moved = {}
+        for row in sorted(kept):
+            test = next((t for t in tests.get(row, []) if relaxed_otherwise(t, planned_target(t, planned))), None)
+            if test is not None:
+                moved[row] = test
+        if not moved:
+            break
+        forced.update(moved)
+    places, items, runs = {}, [], set()
+    for i in text:
+        if i.row not in kept:
+            places[i.row] = Place(where[i.row], planned[i.row], *causes.get(i.row, ("-", "-")))
+            continue
+        places[i.row] = Place("kept", planned[i.row], "-", "-")
+        if i.key not in pairing.repeated:
+            items.append((planned[i.row], i.row, i))
+        elif i.key not in runs:
+            runs.add(i.key)
+            first = min((m for m in text if m.key == i.key), key=lambda m: (planned[m.row], m.row))
+            items.append((planned[first.row], first.row, first))
+    items += [(planned[unit[0].row], unit[0].row, unit[0]) for unit in units]
+    order = alloc_order(probe.output)
+    at = next((k for k, (_, _, name) in enumerate(order) if name == ".text"), None)
+    if not at:
+        raise LayoutError("the probe link has no SHF_ALLOC section before .text")
+    out, lines = ["SECTIONS", "{", f"  .text {hex_text(start)} :", "  {"], {}
+    for address, row, i in sorted(items, key=lambda item: item[:2]):
+        out += [f"    . = {hex_text(address)};", f"    {pattern(i)}"]
+        lines[len(out)] = row
+    out += ["  }", "}", f"INSERT AFTER {script_name(order[at - 1][2])};"]
+    found, next_start = next_segment(base.output, probe.output), None
+    if found is not None and end <= page_floor(found[0]):
+        next_start = found[0]
+        out.append(f"SECTIONS {{ {script_name(found[1])} {hex_text(next_start)} : {{ }} }} "
+                   f"INSERT BEFORE {script_name(found[2])};")
+    return Plan(places, "\n".join(out) + "\n", lines, next_start, None)
+
+
+def map_index(lines):
+    """{(file, member, section, k): index} of the lines of a map (read_map), where k counts the lines of one (file,
+    member, section) from 0 in the map's order. One pattern places the sections of one name in input order, as a
+    link with no script does, so the k-th of two maps of the same inputs is the same section."""
+    seen, found = collections.Counter(), {}
+    for index, line in enumerate(lines):
+        name = (line.file, line.member, line.section)
+        found[name + (seen[name],)] = index
+        seen[name] += 1
+    return found
+
+
+def linked_target(call, link):
+    """The address that the call `call` of the probe link reaches in the check link `link` (Link): its section's
+    address there plus the value, or the check binary's symbol plus the addend. None when it has none."""
+    if call.kind == "local":
+        at = None if call.target is None else link.match.get(call.target)
+        return None if at is None else link.lines[at].address + call.value
+    address = link.output.symbols.get(call.target)
+    return None if address is None else address + call.value
+
+
+def relaxed_there(test, address, link):
+    """Whether the call `test` of a section at `address` in the check link `link` is in jal's reach of its target
+    there (from address + offset) and not of its base target at the base, or the other way round."""
+    after = linked_target(test.call, link)
+    return after is not None and in_reach(test.site, test.before) != in_reach(address + test.offset, after)
+
+
+def segments_failure(probe, check):
+    """Why the PT_LOAD segments `check` of the check link are not what the append mode may make, or None: they must
+    have the count and the flags of the probe link's (`probe`), in order, and no two may share a page."""
+    for k in range(max(len(probe), len(check))):
+        if k >= len(check):
+            return f"the check link lacks the probe link's PT_LOAD {k} at {hex_text(probe[k].vaddr)}"
+        if k >= len(probe):
+            return f"the check link has a PT_LOAD {k} at {hex_text(check[k].vaddr)}, which the probe link does not"
+        if check[k].flags != probe[k].flags:
+            return (f"the check link's PT_LOAD {k} at {hex_text(check[k].vaddr)} has the flags "
+                    f"{hex_text(check[k].flags)}, and the probe link's {hex_text(probe[k].flags)}")
+    ordered = sorted(check, key=lambda p: p.vaddr)
+    for a, b in zip(ordered, ordered[1:]):
+        if page_floor(a.vaddr + max(a.memsz, 1) - 1) >= page_floor(b.vaddr):
+            return (f"the check link's PT_LOADs at {hex_text(a.vaddr)} and {hex_text(b.vaddr)} share the page "
+                    f"{hex_text(page_floor(b.vaddr))}")
+    return None
+
+
+def placement_rows(found, places, pairing, base):
+    """The lines of placement.tsv (read_placement) for `found`: [(the probe link's Input, its address in the final
+    link)], in the final link's map order."""
+    rows, seen = [], collections.Counter()
+    occurrence = occurrences(base.inputs)
+    for i, address in found:
+        partner = pairing.partner[i.row]
+        then = ["-"] * 4 if partner is None else list(base.inputs[partner].key) + [str(occurrence[partner])]
+        place = places[i.row]
+        rows.append(list(i.key) + [str(seen[i.key])] + then
+                    + [place.place, hex_text(address), place.cause, place.detail])
+        seen[i.key] += 1
+    return rows
+
+
+def append(entry, work, script, placement, wraps, renamed, command):
+    """The append mode (module docstring), for the base layout tree's entry `entry`: 0. Raise AppendError when a link
+    fails or the check link is not what the plan asks, and LayoutError when an input cannot be read."""
+    parts = os.path.normpath(entry).split(os.sep)
+    label = f"{parts[-1]} ({parts[-2]})" if len(parts) > 1 else parts[-1]
+    try:
+        return append_link(label, entry, work, script, placement, wraps, renamed, command)
+    except (AppendError, LayoutError) as error:
+        raise type(error)(f"{label}: {error}") from None
+
+
+def append_link(label, entry, work, script, placement, wraps, renamed, command):
+    wrapped = wraps_of(command)
+    write_new(wraps, "".join(f"{name}\n" for name in wrapped).encode("utf-8", "surrogateescape"))
+    probe_map, probe_binary = os.path.join(work, "probe.map"), os.path.join(work, "probe")
+    status, output = run(command + [f"-Wl,-Map={probe_map}", "-o", probe_binary])
+    if status:
+        sys.stderr.write(output)
+        raise AppendError(f"the probe link fails with exit status {status}")
+    base = read_layout(entry)
+    copies = read_renamed(renamed) if renamed else {}
+
+    def key_file(file):
+        # As collect keys a copy: by the name the link gives it, or else by its real path.
+        if file in copies:
+            return copies[file]
+        return copies.get(os.path.realpath(file), file)
+
+    lines = read_map(text_of(read_regular(probe_map)))
+    inputs, calls = describe(lines, Objects(read_linked), key_file, set(wrapped))
+    by_row = collections.defaultdict(list)
+    for call in calls:
+        by_row[call.row].append(call)
+    probe = Layout(inputs, by_row, output_of(output_rows(Elf(read_regular(probe_binary), probe_binary)),
+                                             probe_binary), {})
+    pairing = pair(base.inputs, probe.inputs)
+    text = [i for i in probe.inputs if is_text(i.section)]
+    tests = call_tests(base, probe, pairing)
+    names = map_index(lines)
+    check_map, check_binary = os.path.join(work, "check.map"), os.path.join(work, "check")
+    forced = {}
+    while True:
+        planned = plan(base, probe, pairing, forced)
+        if planned.script is None:
+            if os.path.lexists(script):
+                os.unlink(script)
+            print(f"layout.py append: {label}: the read-only data in front of .text grew by {planned.growth[0]} "
+                  f"bytes, past its room of {planned.growth[1]} bytes, so this is a normal link, and every function "
+                  "whose code did not change moves (readonly_growth)", file=sys.stderr)
+            write_new(placement, tsv(placement_rows([(i, i.address) for i in text], planned.places, pairing, base)))
+            return 0
+        write_new(script, planned.script.encode("utf-8", "surrogateescape"))
+        status, output = run(command + [f"-Wl,-T,{script}", f"-Wl,-Map={check_map}", "-o", check_binary])
+        if status:
+            sys.stderr.write(output)
+            backward = BACKWARD.search(output)
+            number = int(backward.group(1)) if backward else None
+            row = planned.lines.get(number, planned.lines.get(number - 1)) if backward else None
+            if row is not None:
+                raise AppendError(f"the check link cannot move the location counter backward at line {number} of "
+                                  f"{script}, at {function(probe.inputs[row])}")
+            raise AppendError(f"the check link fails with exit status {status}")
+        checked = read_map(text_of(read_regular(check_map)))
+        at = map_index(checked)
+        link = Link(checked, {row: at[name] for name, row in names.items() if name in at},
+                    output_of(output_rows(Elf(read_regular(check_binary), check_binary)), check_binary))
+        moved = {}
+        for i in text:
+            if planned.places[i.row].place != "kept":
+                continue
+            if i.row not in link.match:
+                raise AppendError(f"{function(i)} is not in the check link's map")
+            old, line = base.inputs[pairing.partner[i.row]], checked[link.match[i.row]]
+            if (line.address, line.size) == (old.address, old.linked):
+                continue
+            test = next((t for t in tests.get(i.row, []) if relaxed_there(t, line.address, link)), None)
+            if test is None:
+                raise AppendError(f"{function(i)}: the script keeps it at {hex_text(old.address)} with {old.linked} "
+                                  f"bytes, and the check link puts it at {hex_text(line.address)} with {line.size} "
+                                  "bytes, and no call of it is relaxed otherwise: a defect of the append mode")
+            moved[i.row] = test
+        if not moved:
+            break
+        forced.update(moved)
+    places = dict(planned.places)
+    for row, place in sorted(places.items()):
+        if place.cause != "jal_reach":
+            continue
+        shown = [jal_detail(t) for t in tests.get(row, []) if relaxed_otherwise(t, linked_target(t.call, link))]
+        if not shown:
+            raise AppendError(f"{function(probe.inputs[row])} moves with jal_reach, but no call of it is relaxed "
+                              "otherwise at its base address in the check link: a defect of the append mode")
+        if place.detail not in shown:
+            places[row] = place._replace(detail=shown[0])
+    failure = segments_failure(probe.output.loads, link.output.loads)
+    if failure:
+        raise AppendError(failure)
+    back = {at: row for row, at in link.match.items()}
+    found = []
+    for at, line in enumerate(checked):
+        if not is_text(line.section):
+            continue
+        if at not in back:
+            where = line.file if line.member is None else f"{line.file}({line.member})"
+            raise AppendError(f"the check link takes {where}:({line.section}), which the probe link does not")
+        found.append((probe.inputs[back[at]], line.address))
+    missing = [i for i in text if i.row not in link.match]
+    if missing:
+        raise AppendError(f"{function(missing[0])} is not in the check link's map")
+    write_new(placement, tsv(placement_rows(found, places, pairing, base)))
+    kept = sum(place.place == "kept" for place in places.values())
+    causes = collections.Counter(place.cause for place in places.values() if place.cause != "-")
+    counts = ", ".join(f"{cause}: {causes[cause]}" for cause in CAUSES if causes[cause])
+    changed = sum(not pairing.same[i.row] for i in text)
+    tail = "the data moves" if planned.next_start is None else \
+        f"the next segment stays at {hex_text(planned.next_start)}"
+    print(f"layout.py append: {label}: {kept} kept, {sum(causes.values())} moved" + (f" ({counts})" if counts else "")
+          + f", {changed} changed or new; {tail}", file=sys.stderr)
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="layout.py", description=__doc__.split("\n\n")[0])
     commands = parser.add_subparsers(dest="command", metavar="COMMAND", required=True)
@@ -1063,12 +1677,46 @@ def main(argv=None):
                     "cannot be read or the two share no (build, target).")
     checking.add_argument("base", metavar="BASE", help="the base build's layout tree")
     checking.add_argument("new", metavar="NEW", help="the append build's layout tree")
+    wrapping = commands.add_parser(
+        "wraps", help="print the functions a link wraps",
+        description="Print each function that the link COMMAND wraps, one a line, sorted: each --wrap=<f> of the "
+                    "linker command that the compiler driver gives for COMMAND -###, with each @file expanded. Exit "
+                    "2 when the command fails or prints no linker command.")
+    wrapping.add_argument("words", nargs="+", metavar="COMMAND", help="the link's command, after --")
+    appending = commands.add_parser(
+        "append", help="link a development build that keeps the base's addresses",
+        description="The append mode of link-fuzz-target, run in the link's working directory with the link's whole "
+                    "command (no -o, no map, no script). Write the link's wraps, link once normally in DIR (the "
+                    "probe link), plan where each .text input section goes, write the linker script of that plan, "
+                    "link with it in DIR (the check link) and verify that each kept section is at its base address "
+                    "with its base linked size and that the PT_LOAD segments are the probe link's, and write "
+                    "placement.tsv. When the read-only data in front of .text grew past its room, write no script "
+                    "(a normal link). Exit 1 when a link fails or the check link is not what the plan asks, 2 when "
+                    "an input cannot be read.")
+    appending.add_argument("--base", required=True, metavar="ENTRY",
+                           help="the base layout tree's entry <tree>/<build>/<target>/")
+    appending.add_argument("--work", required=True, metavar="DIR", help="an empty directory for the links")
+    appending.add_argument("--script", required=True, metavar="FILE", help="the linker script to write")
+    appending.add_argument("--placement", required=True, metavar="FILE", help="the placement.tsv to write")
+    appending.add_argument("--wraps", required=True, metavar="FILE", help="the wraps to write")
+    appending.add_argument("--renamed", metavar="FILE", help="an allocation-failure link's renamed")
+    appending.add_argument("words", nargs="+", metavar="COMMAND", help="the link's command, after --")
     arguments = parser.parse_args(argv)
     try:
         if arguments.command == "collect":
             collect(arguments.builds, arguments.dir)
             return 0
+        if arguments.command == "wraps":
+            for name in wraps_of(arguments.words):
+                print(name)
+            return 0
+        if arguments.command == "append":
+            return append(arguments.base, arguments.work, arguments.script, arguments.placement, arguments.wraps,
+                          arguments.renamed, arguments.words)
         return check(arguments.base, arguments.new)
+    except AppendError as error:
+        print(f"layout.py {arguments.command}: {error}", file=sys.stderr)
+        return 1
     except (LayoutError, OSError) as error:
         print(f"layout.py {arguments.command}: {error}", file=sys.stderr)
         return 2
