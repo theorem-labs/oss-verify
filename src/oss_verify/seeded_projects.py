@@ -32,7 +32,7 @@ them when sources shows that lay-out-sources cannot lay out the port:
   - a link at a path that is there already: a path that the lines before it lay out, or the link's own target, is
     at that path or in it
   - a path that follows more than 40 links
-It also cannot name them when the links and the build.sh of the port take more than 1,000,000 steps (STEPS) to
+It also cannot name them when the sources and the build.sh of the port take more than 1,000,000 steps (STEPS) to
 read. When the check found that the binaries match the release's, the notes also say which binaries differ, or may
 differ. No content of a port stops the table: a port file that is missing or that cannot be read counts as absent.
 
@@ -74,19 +74,33 @@ SHA256 = re.compile("[0-9a-f]{64}")
 KEY_TREES = ("ext/{}", "ext/{}/src", "targets/{}")
 # Linux follows at most this many links in one path (MAXSYMLINKS), so lay-out-sources and a build do too.
 MAXSYMLINKS = 40
-# The most steps that the table takes on the sources and build.sh of one port, for all of its patches. A step is a
-# path component that a walk reads, a component of the target of a link that a walk follows, a key of an
-# ov_target_begin line that the table reads, a tree that the search for the trees a patch reaches reads or finds, a
-# link or block that a tree found leads to, or a fuzz target that the search names. A key that the table reads for
-# the first time takes KEY_STEPS more. Each character of build.sh that the search for a key with other characters
-# than those of WORD reads is a step too. A patch at a tree of a real port takes fewer than 5,000 steps, and the fan
-# of 2400 blocks in tests/test_seeded_projects.py takes about 283,000. A port that takes all the steps takes less
-# than a second of CPU time.
+# The most steps that the table takes on the sources and build.sh of one port, for all of its patches. A step is one
+# unit of work whose count grows with the content of the port:
+#   - a character or a line of sources or of build.sh
+#   - a path component that a walk reads, or a component of the target of a link that a walk follows (two steps)
+#   - a component of a path that the table adds as a directory, or a tree that it adds to its trie or finds there,
+#     and each component of the tree
+#   - a key of an ov_target_begin line, and each character of the key: when the table reads the trees of the key, and
+#     when it searches the other lines of build.sh for the key
+#   - a tree of a key that a block reads
+#   - a component of a path, or a node of the trie, that the search for the trees that meet the path reads
+#   - a tree that the search for the trees that a patch reaches finds, and each link or block that the tree leads to
+#   - a fuzz target that the search names, and each character of it
+#   - for a key with other characters than those of WORD, a character of build.sh that the search for the key reads
+# A key that the table reads for the first time takes KEY_STEPS more. Each other operation goes over a text, a list or
+# a path that took these steps, a fixed number of times. Only the sort of the fuzz targets compares each of them more
+# times: about log2 of their number, which is less than 20. The table keeps one str for each path component (see
+# components), so a dict lookup that finds a component compares no characters. The table reads each of the two files
+# whole before it counts their characters, and validate.py lets sources have 64 KiB and build.sh 256 KiB.
+# A probe at a tree of a real port takes fewer than 80,000 steps (projects/openssl), and the fan of 2400 blocks in
+# tests/test_seeded_projects.py takes about 425,000. On the machine where we measured, the steps of keys that the
+# table reads for the first time take the most CPU time: 12,000 such keys on one line take 864,000 steps and 0.25 to
+# 0.5 seconds. Thus a port that takes all the steps takes less than a second of CPU time, whatever its content.
 STEPS = 1_000_000
 # The steps that a key takes in addition when the table reads it for the first time. For each such key, the table
-# makes its three trees (KEY_TREES), walks them, and adds them to its trie and to its lists. That work takes more CPU
-# time than the steps of the walks alone show. With these steps, about 9,000 keys take all the steps.
-KEY_STEPS = 100
+# makes its three trees (KEY_TREES) from the characters of the key, and starts a walk and a lookup in its trie for
+# each tree. On the machine where we measured, this work takes as much CPU time as about 40 other steps.
+KEY_STEPS = 40
 # A whole word of a line of build.sh: a run of word characters, dots and dashes that is as long as it can be.
 WORD = re.compile(r"[\w.-]+")
 LANGUAGE_NAMES = {"rust": "Rust", "python": "Python", "go": "Go", "javascript": "JavaScript", "jvm": "JVM"}
@@ -155,10 +169,12 @@ def relative(text):
     """The components of the path `text`, which is relative to a root: the parts between its slashes, without the
     empty parts and the parts that are a dot, as pathlib.PurePosixPath gives them. None if the path has no
     components, starts with a slash (it is absolute) or holds .. (lay-out-sources refuses such a path)."""
-    parts = tuple(part for part in text.split("/") if part and part != ".")
+    parts = text.split("/")
+    if "" in parts or "." in parts:
+        parts = [part for part in parts if part and part != "."]
     if not parts or text.startswith("/") or ".." in parts:
         return None
-    return parts
+    return tuple(parts)
 
 
 def port_bytes(port, name):
@@ -194,19 +210,20 @@ class Steps:
 
 def walk(root, path, steps):
     """The path that `path` names after the links in `root` (from lay_out), as Linux follows them. The walk reads
-    the components of `path` in turn, one step for each. At a link, also at the last component, it goes on from the
-    root: first with the components of the link's target, then with the components that are left. When it follows the
-    link, it takes one step for each component of the target, because the walk can stop before it reads them. None
-    if the walk follows more than MAXSYMLINKS links, or if `steps` run out."""
+    the components of `path` in turn, one step for each, which it takes first. At a link, also at the last component,
+    it goes on from the root: first with the components of the link's target, then with the components that are left.
+    When it follows the link, it takes two steps for each component of the target: one because the walk can stop
+    before it reads them, and one for the read. None if the walk follows more than MAXSYMLINKS links, or if `steps`
+    run out."""
+    if not steps.take(len(path)):
+        return None
     node, walked, rest, followed = root, [], list(reversed(path)), 0
     while rest:
-        if not steps.take():
-            return None
         name = rest.pop()
         child = None if node is None else node.get(name)
         if isinstance(child, tuple):
             followed += 1
-            if followed > MAXSYMLINKS or not steps.take(len(child)):
+            if followed > MAXSYMLINKS or not steps.take(2 * len(child)):
                 return None
             node, walked = root, []
             rest += reversed(child)
@@ -216,9 +233,12 @@ def walk(root, path, steps):
     return tuple(walked)
 
 
-def directory(root, path):
+def directory(root, path, steps):
     """The dict of the directory `path` in `root` (from lay_out). It adds the directory, and each directory that holds
-    it, where they are not there yet, as mkdir -p does. `path` goes through no link: it is a path after the links."""
+    it, where they are not there yet, as mkdir -p does. `path` goes through no link: it is a path after the links. It
+    takes one step for each component of `path`. None if `steps` run out."""
+    if not steps.take(len(path)):
+        return None
     node = root
     for name in path:
         node = node.setdefault(name, {})
@@ -230,59 +250,82 @@ def link(root, path, target, steps):
     links in `root` (from lay_out). It adds the link to `root`. The location is the path of the link: its parent after
     those links, then its own name. The end is `target` after those links. lay-out-sources also needs the target to be
     there, but the sources file does not show each directory that a tree, git or archive line lays out. So this adds
-    the end where it is not there yet. None if a walk gives None, or if lay-out-sources cannot make the link because
-    something is at the location: a path laid out before the link, or the target, is at the location or in it."""
+    the end where it is not there yet. None if a walk or a directory gives None, or if lay-out-sources cannot make the
+    link because something is at the location: a path laid out before the link, or the target, is at the location or
+    in it."""
     parent, end = walk(root, path[:-1], steps), walk(root, target, steps)
-    if parent is None or end is None:
+    if parent is None or end is None or directory(root, end, steps) is None:
         return None
-    directory(root, end)
-    node = directory(root, parent)
-    if path[-1] in node:
+    node = directory(root, parent, steps)
+    if node is None or path[-1] in node:
         return None
     node[path[-1]] = target
     return parent + path[-1:], end
 
 
-def lay_out(sources, steps):
+def components(text, names):
+    """The components of the path `text` (from relative). Each is the str of `names` that has the same characters: this
+    adds to `names` each component that is not in it yet. So the table has one str for each component, and a dict
+    lookup that finds a component compares no characters. None if relative gives None."""
+    path = relative(text)
+    return None if path is None else tuple([names.setdefault(name, name) for name in path])
+
+
+def text_lines(text, steps):
+    """The lines of `text` (str.splitlines). It takes one step for each character of the text, before it splits the
+    text, and one step for each line. The table reads each line, and splits it into fields and words, a fixed number
+    of times. None if `steps` run out."""
+    if not steps.take(len(text)):
+        return None
+    lines = text.splitlines()
+    return lines if steps.take(len(lines)) else None
+
+
+def lay_out(sources, names, steps):
     """What lay-out-sources lays out from the text of a sources file, line by line, as far as the text shows it:
     (root, links, patched).
       - root: the dict of the root directory. The dict of a directory maps the name of each directory in it to the
         directory's dict, and the name of each link in it to the components of the link's target.
       - links: the (location, end) of each link (from link).
       - patched: {patch: [each path that a patch line applies it to, after the links before that line]}
-    None if lay-out-sources cannot lay out the text (see the module's docstring), or if `steps` run out."""
+    Each path component is a str of `names` (see components). None if lay-out-sources cannot lay out the text (see
+    the module's docstring), or if `steps` run out."""
+    lines = text_lines(sources, steps)
+    if lines is None:
+        return None
     root, links, patched = {}, [], {}
-    for line in sources.splitlines():
+    for line in lines:
         if not line.strip() or line.startswith("#"):
             continue
         kind, *fields = line.split("\t")
-        path = relative(fields[0]) if fields else None
+        path = components(fields[0], names) if fields else None
         if path is None or (kind in ("link", "patch") and len(fields) != 2):
             return None
         if kind == "link":
-            target = relative(fields[1])
+            target = components(fields[1], names)
             placed = None if target is None else link(root, path, target, steps)
             if placed is None:
                 return None
             links.append(placed)
             continue
         walked = walk(root, path, steps)
-        if walked is None:
+        if walked is None or directory(root, walked, steps) is None:
             return None
-        directory(root, walked)
         if kind == "patch":
             patched.setdefault(fields[1], []).append(walked)
     return root, links, patched
 
 
-def key_trees(root, blocks, steps):
+def key_trees(root, blocks, names, steps):
     """The trees that `blocks` (from target_blocks) read for each of their keys (KEY_TREES), after the links in `root`
-    (from lay_out): {key: [tree]}, each key once, in the order in which the blocks first name it. It takes one step
-    for each key that it reads, also for a key that it read before, and KEY_STEPS more for a key that it did not read
-    before. None at the first key with a tree that holds .. or whose walk gives None, or if `steps` run out."""
+    (from lay_out): {key: [tree]}, each key once, in the order in which the blocks first name it. Each key of each
+    block takes one step, and one step for each of its characters, because the lookup of the key reads them. This is
+    also true for a key that it read before. A key that it did not read before takes KEY_STEPS more, and the steps of
+    the walks of its trees. Each path component is a str of `names` (see components). None at the first key with a
+    tree that holds .. or whose walk gives None, or if `steps` run out."""
     trees = {}
     for key in (key for keys, _ in blocks for key in keys):
-        if not steps.take():
+        if not steps.take(1 + len(key)):
             return None
         if key in trees:
             continue
@@ -290,7 +333,7 @@ def key_trees(root, blocks, steps):
             return None
         trees[key] = []
         for tree in KEY_TREES:
-            path = relative(tree.format(key))
+            path = components(tree.format(key), names)
             walked = None if path is None else walk(root, path, steps)
             if walked is None:
                 return None
@@ -298,20 +341,27 @@ def key_trees(root, blocks, steps):
     return trees
 
 
-def tree_index(trees):
-    """A trie of the paths `trees`: [children, number]. children maps each next path component to the trie of the
-    trees that go on with it. number is that of the tree that ends there (its index in `trees`), or None."""
-    index = [{}, None]
-    for number, tree in enumerate(trees):
-        node = index
-        for name in tree:
-            node = node[0].setdefault(name, [{}, None])
-        node[1] = number
-    return index
+def tree_number(index, readable, tree, steps):
+    """The number of `tree` in `index`, the trie of the trees `readable`: [children, number]. children maps each next
+    path component to the trie of the trees that go on with it. number is that of the tree that ends there (its index
+    in `readable`), or None. A tree that is not in the trie yet gets the next number: this adds it to the trie and to
+    `readable`. It takes one step for the tree and one step for each of its components. None if `steps` run out."""
+    if not steps.take(1 + len(tree)):
+        return None
+    node = index
+    for name in tree:
+        child = node[0].get(name)
+        if child is None:
+            child = node[0][name] = [{}, None]
+        node = child
+    if node[1] is None:
+        node[1] = len(readable)
+        readable.append(tree)
+    return node[1]
 
 
 def meeting(index, path, steps):
-    """The numbers of the trees in `index` (from tree_index) that meet `path`: each tree that holds it, is it, or is
+    """The numbers of the trees in `index` (from tree_number) that meet `path`: each tree that holds it, is it, or is
     in it. None if `steps` run out."""
     met, node = [], index
     for name in path:
@@ -333,39 +383,59 @@ def meeting(index, path, steps):
     return met
 
 
-def build_lines(build):
-    """The lines of the text of a build.sh that are not comments (whose first character that is not blank is #)."""
-    return [line for line in build.splitlines() if not line.lstrip().startswith("#")]
-
-
-def target_blocks(lines):
-    """The blocks of build.sh lines that each ov_target_begin line starts: [(keys, fuzz targets)], with the block's
-    key and dependency keys, and the fuzz targets that its ov_target_build lines name."""
-    blocks = []
-    for words in map(str.split, lines):
+def target_blocks(build, steps):
+    """What the table reads of the text of a build.sh, without its comment lines (whose first character that is not
+    blank is #): (blocks, other).
+      - blocks: [(keys, fuzz targets)] for each ov_target_begin line: the block's key and dependency keys, each once,
+        and the fuzz targets that the ov_target_build lines after it name.
+      - other: the text of the lines that are not ov_target_begin lines, with a newline between two lines.
+    None if `steps` run out (see text_lines)."""
+    lines = text_lines(build, steps)
+    if lines is None:
+        return None
+    blocks, other = [], []
+    for line in lines:
+        words = line.split()
         if words[:1] == ["ov_target_begin"]:
-            blocks.append((words[1:], []))
-        elif words[:1] == ["ov_target_build"] and words[1:] and blocks:
-            blocks[-1][1].append(words[1])
-    return blocks
+            blocks.append((list(dict.fromkeys(words[1:])), []))
+        elif not words or not words[0].startswith("#"):
+            if words[:1] == ["ov_target_build"] and words[1:] and blocks:
+                blocks[-1][1].append(words[1])
+            other.append(line)
+    return blocks, "\n".join(other)
 
 
-def named_elsewhere(keys, lines, steps):
-    """The `keys` that a line of build.sh among `lines` names as a whole word (WORD), if the line is not an
-    ov_target_begin line. Another block can then read what the block of such a key builds (as $LIBROOT/<key>). None
-    if `steps` run out."""
-    lines = [line for line in lines if line.split()[:1] != ["ov_target_begin"]]
-    words = {word for line in lines for word in WORD.findall(line)}
-    text = "\n".join(lines)
+def whole_word(key, padded):
+    """Whether `padded`, a text with a space at its start and at its end, names `key`, which holds no blank, as a whole
+    word: the character just before it and the character just after it are not characters of WORD. re's \\w is a
+    character for which str.isalnum() is true, or _."""
+    start = padded.find(key)
+    while start >= 0:
+        before, after = padded[start - 1], padded[start + len(key)]
+        if not (before.isalnum() or before in "_.-" or after.isalnum() or after in "_.-"):
+            return True
+        start = padded.find(key, start + 1)
+    return False
+
+
+def named_elsewhere(keys, other, steps):
+    """The `keys` that `other`, the text of the lines of build.sh that are not ov_target_begin lines (from
+    target_blocks), names as a whole word (WORD). Another block can then read what the block of such a key builds (as
+    $LIBROOT/<key>). Each key takes one step, and one step for each of its characters. A key with other characters
+    than those of WORD takes one more step for each character of `other`, which the search for the key reads. None if
+    `steps` run out."""
+    words = set(WORD.findall(other))
+    padded = f" {other} "
     named = set()
     for key in keys:
+        if not steps.take(1 + len(key)):
+            return None
         if WORD.fullmatch(key):
             if key in words:
                 named.add(key)
-        # A key with other characters: one step for each character of the lines that the search reads.
-        elif not steps.take(len(text)):
+        elif not steps.take(len(other)):
             return None
-        elif re.search(rf"(?<![\w.-]){re.escape(key)}(?![\w.-])", text):
+        elif whole_word(key, padded):
             named.add(key)
     return named
 
@@ -375,7 +445,7 @@ class Layout:
     """What fuzz_targets reads of a port, which port_layout makes once from its sources and build.sh. A tree that a
     build can read is a tree of a key of build.sh or the end of a link, after the links. Each has a number.
       - patched: {patch: [each path that sources applies it to, after the links]}
-      - index: the trie of the trees (from tree_index)
+      - index: the trie of the trees (see tree_number)
       - holders: for each tree, the trees that hold the location of a link to it
       - readers: for each tree, the blocks of build.sh that read it (their numbers in targets)
       - named: for each tree, whether it is a tree of a key that build.sh names elsewhere (named_elsewhere)
@@ -393,34 +463,42 @@ class Layout:
 def port_layout(port):
     """The Layout of `port`, from its sources and build.sh. None if the table cannot name the fuzz targets of any
     patch of the port (see the module's docstring)."""
-    steps = Steps()
-    laid = lay_out(port_text(port, validate.SOURCES), steps)
-    if laid is None:
+    steps, names = Steps(), {}
+    laid = lay_out(port_text(port, validate.SOURCES), names, steps)
+    read = None if laid is None else target_blocks(port_text(port, "build.sh"), steps)
+    if read is None:
         return None
-    root, links, patched = laid
-    lines = build_lines(port_text(port, "build.sh"))
-    blocks = target_blocks(lines)
-    trees = key_trees(root, blocks, steps)
-    elsewhere = None if trees is None else named_elsewhere(trees, lines, steps)
+    (root, links, patched), (blocks, other) = laid, read
+    trees = key_trees(root, blocks, names, steps)
+    elsewhere = None if trees is None else named_elsewhere(trees, other, steps)
     if elsewhere is None:
         return None
-    readable = list(dict.fromkeys([tree for paths in trees.values() for tree in paths] + [end for _, end in links]))
-    number = {tree: n for n, tree in enumerate(readable)}
-    index = tree_index(readable)
+    # The trees of each key and the end of each link get their numbers once. tree_number gives None only when the
+    # steps run out.
+    index, readable = [{}, None], []
+    numbers = {key: [tree_number(index, readable, tree, steps) for tree in paths] for key, paths in trees.items()}
+    ends = [tree_number(index, readable, end, steps) for _, end in links]
+    if steps.left < 0:
+        return None
     holders, readers, named = [[] for _ in readable], [[] for _ in readable], [False] * len(readable)
-    for location, end in links:
+    for (location, _), end in zip(links, ends):
         # No tree is at the location of a link or in it: each is a path after the links. So a tree that meets the
         # location holds it.
         held = meeting(index, location, steps)
         if held is None:
             return None
-        holders[number[end]] += held
+        holders[end] += held
+    for key in elsewhere:
+        for tree in numbers[key]:
+            named[tree] = True
+    # A block names each of its keys once (target_blocks). Each tree of each key of a block takes one step.
     for block, (keys, _) in enumerate(blocks):
+        if not steps.take(len(KEY_TREES) * len(keys)):
+            return None
         for key in keys:
-            for tree in trees[key]:
-                readers[number[tree]].append(block)
-                named[number[tree]] = named[number[tree]] or key in elsewhere
-    return Layout(patched, index, holders, readers, named, [names for _, names in blocks], steps)
+            for tree in numbers[key]:
+                readers[tree].append(block)
+    return Layout(patched, index, holders, readers, named, [targets for _, targets in blocks], steps)
 
 
 def reached_trees(layout, paths):
@@ -452,7 +530,11 @@ def fuzz_targets(layout, patch):
     if found is None or any(layout.named[tree] for tree in found):
         return None
     targets = [layout.targets[block] for block in {block for tree in found for block in layout.readers[tree]}]
-    if not targets or not all(targets) or not layout.steps.take(sum(map(len, targets))):
+    if not targets or not all(targets):
+        return None
+    # Each fuzz target of each block takes one step, and one step for each of its characters, which the set and the
+    # sort of the fuzz targets compare.
+    if not layout.steps.take(sum(len(names) + sum(map(len, names)) for names in targets)):
         return None
     return sorted({name for names in targets for name in names})
 

@@ -275,6 +275,9 @@ class Table(unittest.TestCase):
         # key's trees again.
         deep = "tree\tbase\tupstream/base\nlink\text/D\tbase" + "/x" * 10_000 + "\n"
         deep_build = "(\nov_target_begin kay-fuzz_z" + " D" * 60_000 + "\nov_target_build fuzz_z\n)\n"
+        # 8,000 keys on one ov_target_begin line, each with a character that is not a word character, a dot or a dash.
+        # For each of these keys, the table searches the other lines of build.sh.
+        odd_build = "(\nov_target_begin " + " ".join(f"+{key}" for key in keys[:8000]) + "\nov_target_build fuzz_k\n)\n"
         cannot = ("applies kay.0002-new.patch, whose fuzz targets this table cannot name: some of its binaries may "
                   "differ from the release's")
         cases = {
@@ -290,6 +293,8 @@ class Table(unittest.TestCase):
             "60,000 keys on one line": (self.new_patch("targets/kay-fuzz_d", build=keys_build), cannot),
             "a key with long trees that one line names 60,000 times": (
                 self.new_patch("targets/kay-fuzz_d", links=deep, build=deep_build), cannot),
+            "8,000 keys with another character on one line": (
+                self.new_patch("targets/kay-fuzz_d", build=odd_build), cannot),
         }
         for case, (ports, words) in cases.items():
             with self.subTest(case):
