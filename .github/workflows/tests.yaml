@@ -22,8 +22,8 @@ name: "Tests"
 #             hand, or a push whose earlier commit cannot be read, runs suite and docker.
 #   suite     the tests in tests, and oss-verify validate on every project.
 #   docker    tests/test_seed_runs_docker.py, whenever suite runs. suite skips it: it needs Docker, qemu-riscv64-static
-#             and the newest C toolchain image, and it builds tests/fixtures/example in that image. It fails on a runner
-#             whose kernel writes no core dump through a pipe, where the test cannot show the fault it checks for.
+#             and the newest C toolchain image, and it builds tests/fixtures/example in that image. It fails unless
+#             kernel.core_pattern is a pipe, the one setup where CI showed that the test finds the fault it checks for.
 #   docs      the tests that read the documentation: tests/test_check.py's test that no tracked file but
 #             infra/toolchains.tsv names a toolchain digest, which reads every file git tracks, the documentation too;
 #             and tests/test_seeded_projects.py's test that docs/seeded-projects.tsv is what
@@ -224,17 +224,18 @@ jobs:
         with:
           persist-credentials: false
 
-      # Without the write of 0 to /proc/self/coredump_filter in infra/checks/run-seeds and run-binaries, the test fails
-      # only where the kernel sends the core dump of the qemu process to a pipe (kernel.core_pattern starts with |).
-      # The ubuntu-24.04 runner does that today. On a runner that writes no core dump through a pipe, the test passes
-      # with or without that write. There it shows nothing, so this step fails the job.
+      # Without the write of 0 to /proc/self/coredump_filter in infra/checks/run-seeds and run-binaries, a run that
+      # aborts waits for the core dump of the qemu process, past the test's limit of 20 s, and the test fails. That was
+      # shown where kernel.core_pattern is a pipe (this runner, in CI) and where it is core (OSSV-729's measurement,
+      # arm A5a). No other pattern was measured. This step accepts only a pipe, the one setup that CI showed.
       - name: The kernel writes core dumps through a pipe
         run: |
           pattern=$(cat /proc/sys/kernel/core_pattern)
           if [[ $pattern != '|'* ]]; then
-            echo "::error::This runner writes no core dump through a pipe: its kernel.core_pattern is '$pattern'." \
-              "Thus tests/test_seed_runs_docker.py cannot show here the fault that it checks for:" \
-              "a run that waits for its core dump."
+            echo "::error::This runner's kernel.core_pattern is '$pattern', not a pipe. This step accepts only" \
+              "a pipe: it is the one setup on which CI showed tests/test_seed_runs_docker.py fail without the write" \
+              "of 0 to /proc/self/coredump_filter. Before you change this step, take main's infra/checks/, remove" \
+              "that write from run-seeds and run-binaries, run that test on this runner, and see it fail."
             exit 1
           fi
 
