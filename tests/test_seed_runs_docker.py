@@ -10,7 +10,8 @@ time limit stopped, and such a run is neither a pass nor a catch. run-seeds and 
 /proc/self/coredump_filter, so a run's core dump holds no memory. Without that write, a core dump that could not end in
 time made an abort read as 137.
 
-Needs Docker, the newest C toolchain image, and qemu-riscv64-static on PATH:
+Needs Docker, the newest C toolchain image, and qemu-riscv64-static on PATH, so the suite job of tests.yaml skips it.
+tests/test_core_dump_filter.py, which suite runs, checks the coredump_filter of each run without them:
 
     OV_DOCKER_TESTS=1 uv run pytest tests/test_seed_runs_docker.py
 """
@@ -36,11 +37,11 @@ BUILD = "asan-ubsan"
 TARGET = "example_fuzzer"
 # The time limit of each run here, in seconds, in place of check_checks.RUN_TIMEOUT and check_binaries.RUN_SECONDS.
 # run-seeds and run-binaries write 0 to /proc/self/coredump_filter, so a run's core dump holds no memory. Without that
-# write, the core dump of an aborting run did not end within this time on the CI runner: the runs on 'h' read 137 in
-# theorem-labs/oss-verify's tests.yaml runs 44069641356 and 44070455751. With that write, an aborting run ends in less
-# than a second: in OSSV-729's measurement on ubuntu-24.04-16core, the longest of 50 aborting runs took 0.86 s. The
-# tests set this limit themselves, so a fix that only makes the limit longer still fails here. A short limit also keeps
-# the tests fast.
+# write, the core dump of an aborting run did not end within this time on GitHub's ubuntu-24.04 runner: the runs on 'h'
+# read 137 in OSSV-729's runs of this test, theorem-labs/oss-verify runs 44069641356 and 44070455751. With that write,
+# an aborting run ends in less than a second: in OSSV-729's measurement on ubuntu-24.04-16core, the longest of 50
+# aborting runs took 0.86 s. The tests set this limit themselves, so a fix that only makes the limit longer still fails
+# here. A short limit also keeps the tests fast.
 LIMIT = 20
 # Each input: its name, its payload after the driver's header, and the exit status of its run in the asan-ubsan build
 # (tests/fixtures/example/example.c, and EXPECTED in tests/test_builder.py). The four that start with 'h' read one byte
