@@ -40,10 +40,11 @@ a port stops the table: a port file that is missing or that cannot be read count
 
 tests/test_seeded_projects.py fails when docs/seeded-projects.tsv is not what this writes. The workflow
 .github/workflows/tests.yaml runs its test Committed for a change to this file, src/oss_verify/validate.py, a file
-under seeds/, docs/seeded-projects.tsv or tests/test_seeded_projects.py. The top of that workflow lists these paths.
-A pull request that changes one of them runs this and commits docs/seeded-projects.tsv. After any other change,
-such as a change to a port, .github/workflows/seeded-projects.yml fails on the push to main until a pull request
-commits the table.
+under seeds/, docs/seeded-projects.tsv, tests/test_seeded_projects.py, or a file under projects/<name>/ of a seeded
+project (a project with a row in seeds/builds.tsv). The top of that workflow lists these paths. A pull request that
+changes one of them runs this and commits docs/seeded-projects.tsv. A pull request from a fork that changes a file
+under projects/ runs no test there and cannot commit the table, so its change to a seeded port leaves the table stale
+until a pull request that runs Committed meets it.
 """
 import argparse
 import dataclasses

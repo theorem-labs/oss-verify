@@ -22,12 +22,17 @@ name: "Tests"
 #             hand, or a push whose earlier commit cannot be read, runs suite.
 #             route also decides if the job it asks for runs Committed, the test in tests/test_seeded_projects.py that
 #             docs/seeded-projects.tsv is what src/oss_verify/seeded_projects.py writes. Committed runs when a changed
-#             path is a file that the table depends on in code, the table, or its test:
-#             src/oss_verify/seeded_projects.py, src/oss_verify/validate.py (the generator reads each series with it),
-#             a file under seeds/, docs/seeded-projects.tsv or tests/test_seeded_projects.py. It also runs when there
-#             is no earlier commit to compare with. Other changes do not run it. The table also depends on the port of
-#             each seeded project. But a fork's enrollment changes one projects/<name>/ and nothing else, so it cannot
-#             commit the table. seeded-projects.yml finds a table that such a change leaves stale, on the push to main.
+#             path is a file that the table depends on, the table, or its test: src/oss_verify/seeded_projects.py,
+#             src/oss_verify/validate.py (the generator reads each series with it), a file under seeds/, a file under
+#             projects/<name>/ of a seeded project (its port), docs/seeded-projects.tsv or
+#             tests/test_seeded_projects.py. A seeded project is a project with a row in seeds/builds.tsv. route reads
+#             that file of the commit as data and runs no code of the change. Committed also runs when there is no
+#             earlier commit to compare with. Other changes do not run it. Thus a pull request that makes the table
+#             stale fails the check tests, and Committed's message names the command that writes the table. A pull
+#             request from a fork that changes a file under projects/ runs no job here (above), and enrollment refuses
+#             a fork that changes a file outside one projects/<name>/. So a fork's enrollment of a seeded project runs
+#             no Committed and cannot commit the table. Such a change to a seeded port leaves the table stale until a
+#             pull request that runs Committed meets it.
 #   suite     the tests in tests, and oss-verify validate on every project. It runs Committed only when route asks
 #             for it.
 #   docs      the tests that read the documentation: tests/test_check.py's test that no tracked file but
@@ -147,14 +152,34 @@ jobs:
             exit 0
           fi
           git diff --no-renames --name-only -z "$from" HEAD > "$RUNNER_TEMP/paths"
+          # The seeded projects: the first field of each row of seeds/builds.tsv in the commit, as the generator reads
+          # the file (it skips empty lines, comment lines and the line of column names). seeded holds one name on each
+          # line, between newlines. The step reads the file with git as data and runs nothing from it. With no such
+          # file, no project is seeded.
+          seeded=$'\n'
+          if [ "$(git cat-file -t HEAD:seeds/builds.tsv 2>/dev/null)" = blob ]; then
+            git cat-file blob HEAD:seeds/builds.tsv > "$RUNNER_TEMP/builds.tsv"
+            while IFS= read -r line || [ -n "$line" ]; do
+              case $line in
+                ''|'#'*|$'project\tresult\tdetail') ;;
+                *) seeded+="${line%%$'\t'*}"$'\n' ;;
+              esac
+            done < "$RUNNER_TEMP/builds.tsv"
+          fi
           changed=0 other=0 projects=0 table=0
           while IFS= read -r -d '' path; do
             changed=$((changed + 1))
             [[ $path == projects/* ]] && projects=$((projects + 1))
-            # The files docs/seeded-projects.tsv depends on in code, the table, and its test (the top of this file).
+            # The files docs/seeded-projects.tsv depends on, the table, and its test (the top of this file). A path
+            # under projects/ is one of them when its first name after projects/ is the name of a seeded project.
             case $path in
               src/oss_verify/seeded_projects.py|src/oss_verify/validate.py|seeds/*|docs/seeded-projects.tsv|tests/test_seeded_projects.py)
                 table=$((table + 1)) ;;
+              projects/*)
+                name=${path#projects/}
+                if [[ $seeded == *$'\n'"${name%%/*}"$'\n'* ]]; then
+                  table=$((table + 1))
+                fi ;;
             esac
             # docs/, and a Markdown file at the top but README.md (tests/test_triage.py reads it).
             if [[ $path == docs/* || ( $path != */* && $path == *.md && $path != README.md ) ]]; then
@@ -175,12 +200,12 @@ jobs:
           else
             say "Nothing runs: the commit changes no file."
           fi
-          code="src/oss_verify/seeded_projects.py, src/oss_verify/validate.py, seeds/"
+          inputs="src/oss_verify/seeded_projects.py, src/oss_verify/validate.py, seeds/, projects/<name>/ of a seeded project"
           if (( table )); then
             echo "table=true" >> "$GITHUB_OUTPUT"
-            say "tests/test_seeded_projects.py::Committed runs: $table of the $changed changed files are docs/seeded-projects.tsv, its test, or files it depends on in code ($code)."
+            say "tests/test_seeded_projects.py::Committed runs: $table of the $changed changed files are docs/seeded-projects.tsv, its test, or files it depends on ($inputs)."
           elif (( changed )); then
-            say "tests/test_seeded_projects.py::Committed does not run: no changed file is docs/seeded-projects.tsv, its test, or a file it depends on in code ($code). seeded-projects.yml finds a stale table on the push to main."
+            say "tests/test_seeded_projects.py::Committed does not run: no changed file is docs/seeded-projects.tsv, its test, or a file it depends on ($inputs)."
           fi
 
   suite:

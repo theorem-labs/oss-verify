@@ -7,18 +7,15 @@ Each workflow has a route job that decides which jobs the run needs, and a job n
 collects every result with the collector, and reports the workflow's one required check. These check the collector's
 verdicts, the shape every routed workflow keeps (the collector waits for every job, and no job a route may skip reports
 a required check), and the routes' own steps, run on made-up changes. They also run the steps of tests.yaml's jobs that
-choose their tests from route's outputs, and the step of seeded-projects.yml, which has no route, on a made-up tree.
+choose their tests from route's outputs.
 """
-import hashlib
 import importlib.util
 import itertools
 import json
 import os
 import pathlib
 import re
-import shutil
 import subprocess
-import sys
 
 import pytest
 import yaml
@@ -351,7 +348,10 @@ def commit(directory, environment, files):
     return git("rev-parse", "HEAD", cwd=directory, env=environment)
 
 
-TREE = {"README.md": "x\n", "AGENTS.md": "x\n", "docs/a.md": "x\n", "src/t.py": "x\n", "projects/p/project.yaml": "x\n"}
+# kay is a seeded project (it has a row in seeds/builds.tsv), and projects/kay/ is its port. p is not seeded.
+TREE = {"README.md": "x\n", "AGENTS.md": "x\n", "docs/a.md": "x\n", "src/t.py": "x\n", "projects/p/project.yaml": "x\n",
+        "seeds/builds.tsv": "# a comment\nproject\tresult\tdetail\nkay\treproduces\tall binaries match the release's\n",
+        "projects/kay/series": "kay.0001-checked.patch\n"}
 
 
 def route_tests(tmp_path, change, event="pull_request", before=None, fork=None):
@@ -389,13 +389,17 @@ def route_tests(tmp_path, change, event="pull_request", before=None, fork=None):
     ({".github/workflows/tests.yaml": "y\n"}, {"suite": "true"}),
     # A rename out of the documentation is a change to both names.
     ({"docs/a.md": None, "src/a.md": "x\n"}, {"suite": "true"}),
-    # A file that docs/seeded-projects.tsv depends on in code, the table, or its test: Committed runs too.
+    # A file that docs/seeded-projects.tsv depends on, the table, or its test: Committed runs too. A port of a seeded
+    # project is such a file.
     ({"seeds/checked-patches.tsv": "y\n"}, {"suite": "true", "table": "true"}),
     ({"src/oss_verify/seeded_projects.py": "y\n"}, {"suite": "true", "table": "true"}),
     ({"src/oss_verify/validate.py": "y\n"}, {"suite": "true", "table": "true"}),
     ({"tests/test_seeded_projects.py": "y\n"}, {"suite": "true", "table": "true"}),
     ({"docs/seeded-projects.tsv": "y\n"}, {"docs": "true", "table": "true"}),
-    # A change to a port, as an enrollment makes, and any other change: Committed does not run.
+    ({"projects/kay/series": "y\n"}, {"suite": "true", "table": "true"}),
+    ({"projects/kay/series": None}, {"suite": "true", "table": "true"}),
+    # A change to the port of a project that is not seeded, as its enrollment makes, and any other change: Committed
+    # does not run.
     ({"projects/p/series": "y\n"}, {"suite": "true"}),
     ({"src/oss_verify/check.py": "y\n"}, {"suite": "true"}),
     # No change: nothing to run.
@@ -411,8 +415,9 @@ def test_tests_route_compares_a_push_with_the_commit_before_it(tmp_path):
 
 
 @pytest.mark.parametrize("change, outputs", [
-    # An enrollment, or any change under projects/: no job runs a fork's code.
+    # An enrollment, or any change under projects/: no job runs a fork's code, not even Committed for a seeded port.
     ({"projects/p/project.yaml": "y\n"}, {}),
+    ({"projects/kay/series": "y\n"}, {}),
     ({"projects/p/project.yaml": "y\n", "src/t.py": "y\n"}, {}),
     ({"projects/p/project.yaml": None, "src/p.yaml": "x\n"}, {}),
     # No file under projects/: tested as a branch of this repository is.
@@ -474,88 +479,6 @@ def test_the_suite_and_docs_jobs_run_committed_only_when_route_asks_for_the_tabl
         assert run.returncode == 0, run.stderr
         argv = (tmp_path / "argv").read_text().splitlines()
         assert [a for a in argv if a == "--deselect" or a.startswith("tests/")] == named[job], job
-
-
-# --- seeded-projects.yml's step, run on a copy of src/ and a made-up tree ---
-
-
-SEEDED_PATCH = "--- a/f.c\n+++ b/f.c\n@@ -1 +1 @@\n-a\n+b\n"
-# Two projects of the release: gone, which is not seeded, and kay, whose port applies the patch that the check of its
-# seed port applied.
-SEEDED_TREE = {
-    "seeds/oss-fuzz-projects.tsv": "project\treason or notes\ngone\tthe release did not build it\nkay\t-\n",
-    "seeds/languages.tsv": ("project\toss_fuzz\tlanguage\trepo\tcommit\thomepage\tsanitizers\tfuzz_targets\t"
-                            "release_targets\theld\n"),
-    "seeds/builds.tsv": "project\tresult\tdetail\nkay\treproduces\tall binaries match the release's\n",
-    "seeds/checked-patches.tsv": ("project\tpatch\tsha256\nkay\tkay.0001-checked.patch\t"
-                                  f"{hashlib.sha256(SEEDED_PATCH.encode()).hexdigest()}\n"),
-    "projects/kay/series": "kay.0001-checked.patch\n",
-    "projects/kay/kay.0001-checked.patch": SEEDED_PATCH,
-}
-
-
-def check_table(tmp_path, change):
-    """Run seeded-projects.yml's step in a copy of this repository's src/, beside SEEDED_TREE and the table that the
-    copy's generator writes for it, after `change` to the tree ({path: text, or None for no file}). The generator's
-    ROOT is two directories above its file, so the copy reads the tree and not this repository. Return the run and
-    the step's summary."""
-    root = tmp_path / "repo"
-    shutil.copytree(ROOT / "src", root / "src", ignore=shutil.ignore_patterns("__pycache__"))
-    write_files(root, SEEDED_TREE)
-    (root / "docs").mkdir()
-    summary = tmp_path / "summary"
-    # The step's python3 is the interpreter of these tests.
-    environment = {**os.environ, "PATH": f"{pathlib.Path(sys.executable).parent}:{os.environ['PATH']}",
-                   "PYTHONPATH": str(root / "src"), "RUNNER_TEMP": str(tmp_path), "GITHUB_STEP_SUMMARY": str(summary)}
-    subprocess.run([sys.executable, "-P", "-m", "oss_verify.seeded_projects"], cwd=root, env=environment, check=True)
-    write_files(root, change)
-    script = step(workflow("seeded-projects.yml")["jobs"]["table"],
-                  "docs/seeded-projects.tsv is what the generator writes")["run"]
-    run = subprocess.run(["bash", "-e", "-c", script], cwd=root, env=environment, capture_output=True, text=True)
-    return run, summary.read_text() if summary.exists() else ""
-
-
-def test_seeded_projects_passes_when_the_table_is_what_the_generator_writes(tmp_path):
-    run, summary = check_table(tmp_path, {})
-    assert (run.returncode, run.stdout, summary) == (0, "", ""), run.stderr
-
-
-def test_seeded_projects_fails_with_the_command_and_the_diff_when_a_port_changes(tmp_path):
-    # kay's port applies a patch that the check of its seed port did not apply, and the committed table does not say so.
-    run, summary = check_table(tmp_path, {"projects/kay/series": "kay.0001-checked.patch\nkay.0002-new.patch\n"})
-    assert run.returncode == 1, run.stderr
-    assert summary.startswith("### docs/seeded-projects.tsv is not what src/oss_verify/seeded_projects.py writes\n")
-    assert "\nuv run python3 -m oss_verify.seeded_projects\n" in summary
-    assert "\n-kay\tyes\treproduces\tall binaries match the release's\t-\n" in summary
-    assert ("\n+kay\tyes\treproduces\tthe seed port's check: all binaries match the release's; since that check the "
-            "port applies kay.0002-new.patch, whose fuzz targets this table cannot name: some of its binaries may "
-            "differ from the release's\t-\n") in summary
-    assert run.stdout == ("::error::docs/seeded-projects.tsv is not what src/oss_verify/seeded_projects.py writes. Run "
-                          "uv run python3 -m oss_verify.seeded_projects on a branch, then commit "
-                          "docs/seeded-projects.tsv in a pull request. The run's summary shows the diff.\n")
-
-
-def test_seeded_projects_fences_the_diff_with_one_backtick_more_than_its_longest_run_of_backticks(tmp_path):
-    # kay's port applies a new patch to the tree of a block whose fuzz target holds a run of 4 backticks. A fork
-    # writes build.sh, so a fork can write such a name. The fence of the diff has 5 backticks, and the row is in it.
-    run, summary = check_table(tmp_path, {
-        "projects/kay/series": "kay.0001-checked.patch\nkay.0002-new.patch\n",
-        "projects/kay/kay.0002-new.patch": SEEDED_PATCH,
-        "projects/kay/sources": "patch\text/kay/src\tkay.0002-new.patch\n",
-        "projects/kay/build.sh": "(\nov_target_begin kay\nov_target_build fuzz_````x\n)\n"})
-    assert run.returncode == 1, run.stderr
-    row = ("+kay\tyes\treproduces\tthe seed port's check: all binaries match the release's; since that check the port "
-           "applies kay.0002-new.patch to fuzz_````x: the binaries of fuzz_````x differ from the release's\t-")
-    lines = summary.splitlines()
-    assert "`````diff" in lines and row in lines and lines[-1] == "`````", summary
-    assert lines.index("`````diff") < lines.index(row) < len(lines) - 1, summary
-
-
-def test_seeded_projects_fails_with_the_generators_message_when_it_cannot_write_the_table(tmp_path):
-    run, summary = check_table(tmp_path, {"seeds/builds.tsv": "project\tresult\tdetail\nkay\treproduces\n"})
-    assert (run.returncode, run.stdout, summary) == (1, "", "")
-    assert run.stderr.startswith("src/oss_verify/seeded_projects.py: ")
-    assert "a row without a value in each of its 3 columns: 'kay\\treproduces'" in run.stderr
 
 
 # --- triage.yaml's route, run with a made-up gh ---

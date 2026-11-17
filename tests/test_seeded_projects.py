@@ -249,8 +249,8 @@ class Table(unittest.TestCase):
 
     def test_port_content_that_fills_sources_takes_a_bounded_time(self):
         # A sources file of validate.MAX_FILE_BYTES (64 KiB) and a build.sh of validate.MAX_SOURCE_BYTES (256 KiB) are
-        # the most that oss-verify validate takes. seeded-projects.yml stops after 5 minutes, and the table reads each
-        # seeded port. Each case here fits in these limits.
+        # the most that oss-verify validate takes. Committed runs in the required check tests, in a job that stops
+        # after 10 minutes, and the table reads each seeded port. Each case here fits in these limits.
         # A chain: each link points into the next one. lay-out-sources refuses it at its second link, c1: the target
         # of the first link, c1/x, is in c1. So the table stops at that line.
         chain = "".join(f"link\tc{i}\tc{i + 1}/x\n" for i in range(2000))
