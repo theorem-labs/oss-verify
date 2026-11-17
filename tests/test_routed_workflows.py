@@ -535,6 +535,22 @@ def test_seeded_projects_fails_with_the_command_and_the_diff_when_a_port_changes
                           "docs/seeded-projects.tsv in a pull request. The run's summary shows the diff.\n")
 
 
+def test_seeded_projects_fences_the_diff_with_one_backtick_more_than_its_longest_run_of_backticks(tmp_path):
+    # kay's port applies a new patch to the tree of a block whose fuzz target holds a run of 4 backticks. A fork
+    # writes build.sh, so a fork can write such a name. The fence of the diff has 5 backticks, and the row is in it.
+    run, summary = check_table(tmp_path, {
+        "projects/kay/series": "kay.0001-checked.patch\nkay.0002-new.patch\n",
+        "projects/kay/kay.0002-new.patch": SEEDED_PATCH,
+        "projects/kay/sources": "patch\text/kay/src\tkay.0002-new.patch\n",
+        "projects/kay/build.sh": "(\nov_target_begin kay\nov_target_build fuzz_````x\n)\n"})
+    assert run.returncode == 1, run.stderr
+    row = ("+kay\tyes\treproduces\tthe seed port's check: all binaries match the release's; since that check the port "
+           "applies kay.0002-new.patch to fuzz_````x: the binaries of fuzz_````x differ from the release's\t-")
+    lines = summary.splitlines()
+    assert "`````diff" in lines and row in lines and lines[-1] == "`````", summary
+    assert lines.index("`````diff") < lines.index(row) < len(lines) - 1, summary
+
+
 def test_seeded_projects_fails_with_the_generators_message_when_it_cannot_write_the_table(tmp_path):
     run, summary = check_table(tmp_path, {"seeds/builds.tsv": "project\tresult\tdetail\nkay\treproduces\n"})
     assert (run.returncode, run.stdout, summary) == (1, "", "")

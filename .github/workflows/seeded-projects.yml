@@ -73,6 +73,14 @@ jobs:
           fi
           if (( status )); then
             lines=$(wc -l < "$RUNNER_TEMP/table.diff")
+            # A fuzz target name in the diff comes from a word of a port's build.sh. A fork writes that file, so the
+            # name can hold backticks. The fence of the diff has one backtick more than the longest run of backticks in
+            # the diff, and at least 3. Thus no line of the diff can close the fence.
+            fence=$(awk '{
+                for (rest = $0; match(rest, /`+/); rest = substr(rest, RSTART + RLENGTH))
+                  if (RLENGTH > longest) longest = RLENGTH
+              }
+              END { for (n = (longest < 3 ? 3 : longest + 1); n > 0; n--) printf "`" }' "$RUNNER_TEMP/table.diff")
             {
               echo "### docs/seeded-projects.tsv is not what src/oss_verify/seeded_projects.py writes"
               echo
@@ -88,9 +96,9 @@ jobs:
                 echo "The diff:"
               fi
               echo
-              echo '```diff'
+              echo "${fence}diff"
               head -n 200 "$RUNNER_TEMP/table.diff"
-              echo '```'
+              echo "$fence"
             } >> "$GITHUB_STEP_SUMMARY"
             echo "::error::docs/seeded-projects.tsv is not what src/oss_verify/seeded_projects.py writes. Run uv run python3 -m oss_verify.seeded_projects on a branch, then commit docs/seeded-projects.tsv in a pull request. The run's summary shows the diff."
             exit 1
