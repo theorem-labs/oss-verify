@@ -270,6 +270,11 @@ class Table(unittest.TestCase):
         same_build = "(\nov_target_begin" + " k" * 130_000 + "\nov_target_build fuzz_k\n)\n"
         keys = ["".join(letters) for letters in itertools.product(string.ascii_letters, repeat=3)][:60_000]
         keys_build = "(\nov_target_begin " + " ".join(keys) + "\nov_target_build fuzz_k\n)\n"
+        # A key with long trees, named many times: ext/D is a link whose target has 10,000 components, and one
+        # ov_target_begin line names D 60,000 times. Each time that a block names a key, the table must not read the
+        # key's trees again.
+        deep = "tree\tbase\tupstream/base\nlink\text/D\tbase" + "/x" * 10_000 + "\n"
+        deep_build = "(\nov_target_begin kay-fuzz_z" + " D" * 60_000 + "\nov_target_build fuzz_z\n)\n"
         cannot = ("applies kay.0002-new.patch, whose fuzz targets this table cannot name: some of its binaries may "
                   "differ from the release's")
         cases = {
@@ -283,6 +288,8 @@ class Table(unittest.TestCase):
                 self.new_patch("targets/kay-fuzz_d", links=long, build=long_build), cannot),
             "a key that one line names 130,000 times": (self.new_patch("targets/kay-fuzz_d", build=same_build), cannot),
             "60,000 keys on one line": (self.new_patch("targets/kay-fuzz_d", build=keys_build), cannot),
+            "a key with long trees that one line names 60,000 times": (
+                self.new_patch("targets/kay-fuzz_d", links=deep, build=deep_build), cannot),
         }
         for case, (ports, words) in cases.items():
             with self.subTest(case):
