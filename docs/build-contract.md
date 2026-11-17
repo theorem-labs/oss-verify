@@ -43,20 +43,32 @@ A new toolchain image changes the bytes of each binary that it builds, and a pro
 * Without a lock, `oss-verify check` builds with the newest toolchain for the project's language: the last row that lists it. `--toolchain <image>` overrides the lock and the newest toolchain.
 * The lock of a project pins its vintage. A project with published proofs stays on the toolchain that its lock names, so its binaries keep their bytes. A project with no lock, for example a seeded project in `seeds/`, uses the newest toolchain.
 
+We check builds ported from oss-fuzz-theorems against the release's binaries, on the release's toolchain. Their `harness.yaml` locks name it.
+
 ### Frame pointers
 
-The release's toolchain images build without frame pointers: the common flags have no `-fno-omit-frame-pointer`, so many functions use the register `s0` for data. AddressSanitizer's fast unwinder follows the frame records in `s0` when it records the stack of an allocation. In such a function, it can read data as a frame record, so a recorded trace is not always a call chain.
+The release's toolchain images build without frame pointers, so many functions use the register `s0` for data. AddressSanitizer's fast unwinder follows the frame records in `s0` when it stores the stack of an allocation. In such a function, it can read data as a frame record. Thus a stored trace is not always a call chain.
 
-A toolchain image with frame pointers is a release image with one change: its configuration sets the environment variable `OFT_FRAME_POINTERS=1`. Its layers are the release image's layers, so each file of it, the musl sysroot and the AddressSanitizer runtime too, has the same bytes. [.github/workflows/toolchain-images.yaml](../.github/workflows/toolchain-images.yaml) makes one from each of the C and C++, Rust and Python images and checks this. On such an image:
+A toolchain image with frame pointers is a toolchain image whose configuration sets the environment variable `OFT_FRAME_POINTERS=1`. On such an image, the builder adds these flags:
 
-* [toolchain.sh](../infra/base-builder/toolchain.sh) adds `-fno-omit-frame-pointer` to the common flags. Thus the library, the fuzz target, the driver and the C code of a Rust or Python build keep their frame records.
-* [rust/recipes.sh](../infra/base-builder/rust/recipes.sh) gives rustc `-Cforce-frame-pointers=yes`. The build compiles the standard library from source with the same flags (`-Zbuild-std`), so its functions keep their frame records too.
+* For C and C++, [toolchain.sh](../infra/base-builder/toolchain.sh) adds `-fno-omit-frame-pointer` to the common flags ([below](#the-builds)). Thus the library, the fuzz target, the driver and the C code of a Rust or Python build get this flag.
+* For Rust, [rust/recipes.sh](../infra/base-builder/rust/recipes.sh) gives rustc `-Cforce-frame-pointers=yes` ([below](#rust-fuzz-targets)). The build compiles the standard library from source with the same flags (`-Zbuild-std`), so the standard library gets this flag too.
 
-The code that the link takes from the toolchain image is the same as on the release's image, without frame pointers: the C library, compiler-rt, the C++ runtime and the libraries of the sysroot. The AddressSanitizer runtime keeps its frame records. A Go build already has `-fno-omit-frame-pointer` ([go/compile-go](../infra/base-builder/go/compile-go)), so no Go image with frame pointers is needed.
+With an empty or unset value, the builder adds neither flag, so a build keeps the release's flags. With any other value, `toolchain.sh` stops the build. Only the toolchain image gives this setting. `oss-verify validate` refuses a project's `Dockerfile` or `build.sh` that names `OFT_FRAME_POINTERS` ([project-yaml.md](project-yaml.md#rules-for-each-file)).
 
-A row of [infra/toolchains.tsv](../infra/toolchains.tsv) whose name ends in `-frame-pointers` names a toolchain image with frame pointers. These rows come after the release's rows, so a project with no lock builds with frame pointers, and a project with a lock keeps the toolchain that its lock names.
+[.github/workflows/toolchain-images.yaml](../.github/workflows/toolchain-images.yaml) makes each toolchain image with frame pointers from a base row of [infra/toolchains.tsv](../infra/toolchains.tsv): the C and C++, the Rust or the Python row. It takes the image of that row, the base image, and adds only `OFT_FRAME_POINTERS=1` to its configuration (`crane mutate`). Thus the new image has the layers of the base image, and each file of it has the same bytes. The workflow checks this. It also builds probe programs on a builder made from each of the two images, and checks their frame records ([probe](../.github/scripts/frame-pointers/probe)).
 
-We check builds ported from oss-fuzz-theorems against the release's binaries, on the release's toolchain. Their `harness.yaml` locks name it.
+In infra/toolchains.tsv, the row of a toolchain image with frame pointers has the name `<base row>-frame-pointers`.
+
+On a toolchain image with frame pointers, the code that the link takes from the toolchain image has the same bytes as in the base image. This code is the C library, compiler-rt, the C++ library, the AddressSanitizer runtime and the other libraries of the sysroot. Thus it keeps the frame records that it has in the base image, and it gets no new ones.
+
+A calling function has a `jal` or a `jalr` that writes `ra`. A calling function keeps a frame record when an `addi s0, sp, N` comes before its first call. In the base image of the row `oss-fuzz-theorems-2026.10`, the `probe` job of the workflow counted these functions:
+
+* the C library, `/opt/musl-sysroot/usr/lib/libc.a`: 9 of 1,153 calling functions keep a frame record;
+* the C++ library, `/opt/musl-sysroot/usr/lib/libc++.a`: 5 of 1,853 calling functions keep a frame record;
+* the AddressSanitizer runtime, `libclang_rt.asan.a`: 542 of 1,653 calling functions keep a frame record in `/opt/asan-static-rt`, and 542 of 1,654 in the copy in `/opt/asan-rt`.
+
+To count them, run `.github/scripts/frame-pointers/frames.py count <archive>…` in the builder of the row `oss-fuzz-theorems-2026.10`. The `probe` job runs this command, and prints the count of each archive again on each run.
 
 ## What build.sh gets
 
@@ -406,7 +418,7 @@ A Rust fuzz target is a cargo-fuzz `[[bin]]` of the project's repository. The Ru
 
 rustc makes no static library from a `[[bin]]`. Thus the build makes one package for each fuzz target: [rust/gen-shim.py](../infra/base-builder/rust/gen-shim.py) writes a package named `oft-rust-shim`, whose library root is a copy of the bin's source without its `#![no_main]` lines, with the line `extern crate oft_rust_rt as _;` added at its end. The package depends on the adapter `oft-rust-rt`, on the dependencies of the fuzz package, and on the fuzz package itself when it has a `[lib]`. `build.sh` then builds this package and links it with the driver ([rust/recipes.sh](../infra/base-builder/rust/recipes.sh)).
 
-A Rust project has all four builds. Each one compiles the standard library with its own flags (`-Zbuild-std`). The table gives the flags that make the four builds different. In each build, `recipes.sh` also adds two `--remap-path-prefix` flags, `-Cdebug-assertions=on` when the target sets `CARGO_DEBUG_ASSERTIONS=1`, and the `--cfg` of the stdio seal when the target sets `OFT_RUST_QUIET_STDIO=1`:
+A Rust project has all four builds. Each one compiles the standard library with its own flags (`-Zbuild-std`). The table gives the flags that make the four builds different. In each build, `recipes.sh` also adds two `--remap-path-prefix` flags, `-Cdebug-assertions=on` when the target sets `CARGO_DEBUG_ASSERTIONS=1`, `-Cforce-frame-pointers=yes` on a toolchain image that sets `OFT_FRAME_POINTERS=1` ([Frame pointers](#frame-pointers)), and the `--cfg` of the stdio seal when the target sets `OFT_RUST_QUIET_STDIO=1`:
 
 | build | what the compiler gets |
 |---|---|
