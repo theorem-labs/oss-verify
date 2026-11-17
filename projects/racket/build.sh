@@ -30,6 +30,12 @@ mkdir -p $WORK/host && cd $WORK/host
 )
 HOST_RACKET=$WORK/host-racket/bin/racket
 
+# Chez Scheme's collector (c/gc*.c) expands so many macros that llvm-cov
+# export of a coverage build needs more memory than a runner has, so it
+# is left out of coverage; the flag changes nothing in other builds
+printf 'source:*c/gc*.c=skip\n' > $WORK/profile-list
+CFLAGS="$CFLAGS -fprofile-list=$WORK/profile-list"
+
 # 2. Cross-build for riscv64; `--disable-curses` avoids needing a
 # riscv64 ncurses, and zlib and LZ4 come from the Chez Scheme sources
 # (`--disable-libz` and `--disable-liblz4`, because the builder's sysroot
