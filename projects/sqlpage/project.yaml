@@ -5,3 +5,4 @@ homepage: https://sql-page.com/
 language: rust
 fuzz_targets: [sql_file]
 publish: after_fixes
+# scratch comment for check c3 of OSSV-672
