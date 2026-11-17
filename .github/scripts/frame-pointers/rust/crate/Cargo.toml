@@ -1,0 +1,13 @@
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+#
+# The package names, versions and dependencies of tests/fixtures/rust-example/crate, so that that fixture's Cargo.lock
+# is this crate's lock too: .github/scripts/frame-pointers/probe copies it into the build context.
+[package]
+name = "example"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"

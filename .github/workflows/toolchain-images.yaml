@@ -2,52 +2,84 @@
 # SPDX-License-Identifier: Apache-2.0
 name: "Toolchain images"
 # toolchain-images makes the frame-pointer toolchain images. Each is a toolchain image of infra/toolchains.tsv with one
-# change: the environment variable OFT_FRAME_POINTERS=1 in its configuration. The builder reads it: on such an image,
-# infra/base-builder/toolchain.sh compiles C and C++ with -fno-omit-frame-pointer, and rust/recipes.sh gives rustc
-# -Cforce-frame-pointers=yes (docs/build-contract.md, "Frame pointers").
+# change: the environment variable OFT_FRAME_POINTERS=1 in its configuration. The builder reads this variable. On such
+# an image, infra/base-builder/toolchain.sh compiles C and C++ with -fno-omit-frame-pointer, and rust/recipes.sh gives
+# rustc -Cforce-frame-pointers=yes. Thus each function that the build compiles keeps a frame record, and s0 points to
+# it (docs/build-contract.md, "Frame pointers").
 #
 # crane mutate writes the new configuration and a manifest that names it and the base image's own layers. Thus every
 # file of the base image is in the new image with the same bytes, the musl sysroot and the AddressSanitizer runtime
-# too. It writes nothing from the time or the runner, so the same base gives the same digest on every run: a pull
-# request's run shows the digest that the push to main publishes.
+# too. crane writes nothing from the time or the runner. Thus the same base gives the same digest on every run, and a
+# pull request's run shows the digest that the push to main publishes.
 #
-# The jobs, each once per base image (the matrix):
-#   make     makes the image in a registry on the runner and checks it. It fails if the manifest names other layers
-#            than the base image's, in another order; if the configuration is not the base image's with
-#            OFT_FRAME_POINTERS=1 added to its environment; or if a file under /opt/musl-sysroot or /opt/asan-static-rt
-#            has another SHA-256 in the new image. Its step summary gives the digest, and the SHA-256 of the C library
-#            and of the AddressSanitizer runtime in both images. When infra/toolchains.tsv has the row
-#            <base row>-frame-pointers, it also fails unless that row names the image it made, and ghcr.io holds it:
-#            thus the pull request that adds the rows passes only once the images it names are published.
-#   publish  on a push to main, or by hand on main, after make passed for every image: makes the image again in a
-#            registry on the runner, and fails, pushing nothing, if the frame-pointer row names another image. If
-#            ghcr.io already holds that digest in the package of its base image, it pushes nothing; else it pushes the
-#            image there, under the tag frame-pointers-<commit>, and fails unless ghcr.io gives the same digest. Either
-#            way it checks the image on ghcr.io as make does, and its step summary gives the digest. Only this job can
-#            write a package.
+# The jobs:
+#   make          Once for each base image (the matrix). It makes the image in a registry on the runner, and checks
+#                 it. It fails if the manifest names other layers than the base image's, or the same layers in a
+#                 different order. It fails if the configuration is not the base image's with OFT_FRAME_POINTERS=1
+#                 added to its environment. It fails if a file under /opt/musl-sysroot or /opt/asan-static-rt has a
+#                 different SHA-256 in the new image. Its step summary gives the digest, and the SHA-256 of the C
+#                 library and of the AddressSanitizer runtime in the two images. When infra/toolchains.tsv has the
+#                 row <base row>-frame-pointers, make also fails unless that row names the image that make made and
+#                 ghcr.io holds that image. Thus the pull request that adds the rows passes only after the images are
+#                 published. make keeps the digest in the artifact fp-digest-<base row>.
+#   probe         Once for each base image, after make. It makes the image again in its own registry, and fails
+#                 unless the digest is the digest that make made. Then .github/scripts/frame-pointers/probe builds the
+#                 builder FROM the base image and FROM the new image. It builds the probes of that directory with
+#                 each builder: the C probe, and on the Rust image the Rust probe too. frames.py reads their machine
+#                 code. probe fails unless each probe function that calls keeps a frame record on the new image. It
+#                 fails unless at least one such function keeps no frame record on the base image. On the C and C++
+#                 image, it also counts the calling functions that keep a frame record in the C library, the C++
+#                 library and the AddressSanitizer runtime of the base image. Its step summary gives the results.
+#   docker-tests  After make. It makes the C and C++ image and the Rust image again, and fails unless each digest is
+#                 the digest that make made. Then it runs the class FramePointers of tests/test_builder.py. These
+#                 tests build tests/fixtures/example and tests/fixtures/rust-example on the base images and on the
+#                 new images. They fail unless each build on a new image has the flags. They fail if a build on a
+#                 base image has them, with OFT_FRAME_POINTERS not set or set to the empty value. They fail unless
+#                 compile fails on a base image with OFT_FRAME_POINTERS=0. docker-tests also fails if a test is
+#                 skipped.
+#   publish       On a push to main, or by hand on main, after make, probe and docker-tests passed for every image.
+#                 It makes the image again in a registry on the runner. It fails, and pushes nothing, if the
+#                 frame-pointer row names a different image. If ghcr.io holds that digest in the package of its base
+#                 image, publish pushes nothing. Else it pushes the image there, under the tag
+#                 frame-pointers-<commit>, and fails unless ghcr.io gives the same digest. Then it checks the image
+#                 on ghcr.io as make does. Its step summary gives the digest. Only this job can write a package.
 #
-# A row of infra/toolchains.tsv names an image only after it is published, so the rows of these images come in a pull
-# request after the push. The release's toolchain packages are linked to no repository, so this repository's token can
-# push to them only after an organization admin adds this repository with the Write role under "Manage Actions access"
-# in the settings of oss-fuzz-theorems-toolchain, oss-fuzz-theorems-toolchain-rust and
-# oss-fuzz-theorems-toolchain-python (GitHub has no API for it). Without that, a person whose token can write to the
-# packages runs make's command, with the base digest from infra/toolchains.tsv, before the merge:
-#   crane mutate <base image@digest> --env OFT_FRAME_POINTERS=1 -t <base image>:frame-pointers
-# It gives the digest that make's run shows, and publish then finds it and pushes nothing.
+# The publish job of a run on main is the only route of these images to ghcr.io. No person and no agent pushes an
+# image by hand, with any token. No copy goes to a different registry. publish pushes with the job's GITHUB_TOKEN. The
+# release's toolchain packages are linked to no repository. Thus this token can push to them only after an
+# organization owner gives theorem-labs/oss-verify the Write role under "Manage Actions access" in the settings of
+# oss-fuzz-theorems-toolchain, oss-fuzz-theorems-toolchain-rust and oss-fuzz-theorems-toolchain-python. GitHub has no
+# API for this. If publish fails, fix the cause. Then run publish again: run the failed jobs of that run again, or
+# start a later run on main (a push that changes a path below, or a run by hand).
 #
-# No step runs code of the pull request but this file: the base images come from infra/toolchains.tsv, read as text.
+# A row of infra/toolchains.tsv names an image only after the image is published. Thus the rows of these images come
+# in a pull request after the push.
+#
+# probe and docker-tests run code of the pull request: the builder (infra/base-builder), the probes and the tests.
+# They have contents: read and no secret. Only publish gets a token that can write, and publish runs only on main.
 
 on:
   pull_request:
     types: [opened, reopened, synchronize]
     paths:
       - .github/workflows/toolchain-images.yaml
+      - .github/scripts/frame-pointers/**
       - infra/toolchains.tsv
+      - infra/base-builder/**
+      - tests/test_builder.py
+      - tests/fixtures/example/**
+      - tests/fixtures/rust-example/**
   push:
     branches: [main]
+    # The same paths as pull_request's.
     paths:
       - .github/workflows/toolchain-images.yaml
+      - .github/scripts/frame-pointers/**
       - infra/toolchains.tsv
+      - infra/base-builder/**
+      - tests/test_builder.py
+      - tests/fixtures/example/**
+      - tests/fixtures/rust-example/**
   workflow_dispatch:
 
 permissions: {}
@@ -190,8 +222,175 @@ jobs:
             echo
           } >> "$GITHUB_STEP_SUMMARY"
 
-  publish:
+      # This job's registry ends with the job. So probe and docker-tests make the image again, and compare its digest
+      # with this one. A matrix job keeps one value of each output, so each image's digest is an artifact of its own.
+      - name: the digest, for probe and docker-tests
+        env:
+          MADE: ${{ steps.made.outputs.ref }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/fp-digest"
+          echo "${MADE#*@}" > "$RUNNER_TEMP/fp-digest/$BASE_ROW.digest"
+          echo "$BASE_ROW: ${MADE#*@}"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (sha-pinned)
+        with:
+          name: fp-digest-${{ matrix.base }}
+          path: ${{ runner.temp }}/fp-digest/${{ matrix.base }}.digest
+          if-no-files-found: error
+          # GitHub runs the jobs of a run again for up to 30 days: a rerun of probe or docker-tests reads this.
+          retention-days: 30
+          # A rerun of the job replaces the artifact of its run.
+          overwrite: true
+
+  probe:
     needs: make
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        base: [oss-fuzz-theorems-2026.10, oss-fuzz-theorems-2026.10-rust, oss-fuzz-theorems-2026.10-python]
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+    env:
+      BASE_ROW: ${{ matrix.base }}
+    steps:
+      # The whole tree: the probe builds infra/base-builder, and the Rust probe takes the lock of
+      # tests/fixtures/rust-example.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
+        with:
+          persist-credentials: false
+
+      - name: install crane
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/$CRANE_ARCHIVE" \
+            "https://github.com/google/go-containerregistry/releases/download/$CRANE_VERSION/$CRANE_ARCHIVE"
+          echo "$CRANE_SHA256  $RUNNER_TEMP/$CRANE_ARCHIVE" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/$CRANE_ARCHIVE" -C "$RUNNER_TEMP/bin" crane
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2 (sha-pinned)
+        with:
+          pattern: fp-digest-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/fp-digest
+
+      - name: the base image, from infra/toolchains.tsv
+        id: base
+        run: |
+          set -euo pipefail
+          image=$(awk -F'\t' -v row="$BASE_ROW" '$1 == row { print $2 }' infra/toolchains.tsv)
+          [[ "$image" =~ ^ghcr\.io/theorem-labs/oss-fuzz-theorems-toolchain(-[a-z]+)?@sha256:[0-9a-f]{64}$ ]] ||
+            { echo "::error::infra/toolchains.tsv has no row $BASE_ROW with a toolchain digest: '$image'"; exit 1; }
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "name=${image%@*}" >> "$GITHUB_OUTPUT"
+
+      - name: make the image again in the runner's registry, with the digest that make made
+        id: made
+        env:
+          BASE: ${{ steps.base.outputs.image }}
+          NAME: ${{ steps.base.outputs.name }}
+        run: |
+          set -euo pipefail
+          want=$(cat "$RUNNER_TEMP/fp-digest/$BASE_ROW.digest" 2> /dev/null || true)
+          [[ "$want" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+            { echo "::error::make gave no digest for $BASE_ROW: '$want'"; exit 1; }
+          ref=$(crane mutate "$BASE" --env OFT_FRAME_POINTERS=1 -t "localhost:5000/${NAME#ghcr.io/}:frame-pointers")
+          [ "${ref#*@}" = "$want" ] ||
+            { echo "::error::the image made here from $BASE_ROW is $ref, but make made $want"; exit 1; }
+          echo "made $ref: the digest that make made"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: the probes, on the base image and on the frame-pointer image
+        env:
+          BASE: ${{ steps.base.outputs.image }}
+          FP: ${{ steps.made.outputs.ref }}
+        run: .github/scripts/frame-pointers/probe "$BASE_ROW" "$BASE" "$FP"
+
+  docker-tests:
+    needs: make
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
+        with:
+          persist-credentials: false
+
+      - name: install crane
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/$CRANE_ARCHIVE" \
+            "https://github.com/google/go-containerregistry/releases/download/$CRANE_VERSION/$CRANE_ARCHIVE"
+          echo "$CRANE_SHA256  $RUNNER_TEMP/$CRANE_ARCHIVE" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/$CRANE_ARCHIVE" -C "$RUNNER_TEMP/bin" crane
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2 (sha-pinned)
+        with:
+          pattern: fp-digest-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/fp-digest
+
+      - name: make the C and C++ image and the Rust image again, with the digests that make made
+        id: made
+        run: |
+          set -euo pipefail
+          for row in oss-fuzz-theorems-2026.10 oss-fuzz-theorems-2026.10-rust; do
+            base=$(awk -F'\t' -v row="$row" '$1 == row { print $2 }' infra/toolchains.tsv)
+            [[ "$base" =~ ^ghcr\.io/theorem-labs/oss-fuzz-theorems-toolchain(-[a-z]+)?@sha256:[0-9a-f]{64}$ ]] ||
+              { echo "::error::infra/toolchains.tsv has no row $row with a toolchain digest: '$base'"; exit 1; }
+            name=${base%@*}
+            want=$(cat "$RUNNER_TEMP/fp-digest/$row.digest" 2> /dev/null || true)
+            [[ "$want" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::make gave no digest for $row: '$want'"; exit 1; }
+            ref=$(crane mutate "$base" --env OFT_FRAME_POINTERS=1 -t "localhost:5000/${name#ghcr.io/}:frame-pointers")
+            [ "${ref#*@}" = "$want" ] ||
+              { echo "::error::the image made here from $row is $ref, but make made $want"; exit 1; }
+            echo "$row: made $ref, the digest that make made"
+            # The tests skip unless the base image is here, and build a builder FROM each of the two images.
+            docker pull --quiet "$base" > /dev/null
+            docker pull --quiet "$ref" > /dev/null
+            case $row in
+              *-rust) echo "rust=$ref" >> "$GITHUB_OUTPUT" ;;
+              *) echo "c=$ref" >> "$GITHUB_OUTPUT" ;;
+            esac
+          done
+
+      - name: Install PyYAML and pytest
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml python3-pytest
+
+      - name: The FramePointers tests of tests/test_builder.py, on the base images and on the frame-pointer images
+        env:
+          OV_DOCKER_TESTS: "1"
+          OV_FP_TOOLCHAIN_C: ${{ steps.made.outputs.c }}
+          OV_FP_TOOLCHAIN_RUST: ${{ steps.made.outputs.rust }}
+        run: |
+          set -o pipefail
+          python3 -P -m pytest -rs -p no:cacheprovider -c pyproject.toml tests/test_builder.py -k FramePointers \
+            | tee "$RUNNER_TEMP/pytest"
+          # Each test must run and pass: a test that skips (no Docker, no base image) is a failure here.
+          if ! grep -qE '[0-9]+ passed' "$RUNNER_TEMP/pytest" || grep -q '^SKIPPED' "$RUNNER_TEMP/pytest"; then
+            echo "::error::A FramePointers test did not run."
+            exit 1
+          fi
+
+  publish:
+    needs: [make, probe, docker-tests]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 60

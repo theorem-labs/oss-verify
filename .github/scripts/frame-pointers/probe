@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+#
+# The probe job of .github/workflows/toolchain-images.yaml runs this once for each base row of infra/toolchains.tsv:
+#
+#   .github/scripts/frame-pointers/probe ROW BASE_IMAGE FP_IMAGE
+#
+# BASE_IMAGE is the image of the row ROW, and FP_IMAGE is the frame-pointer image made from it. For each of the two
+# images, it builds the builder FROM the image (docker build --build-arg TOOLCHAIN=<image> infra/base-builder), as
+# oss-verify check does. Then it builds the probes of this directory in a project image FROM that builder, and runs
+# compile there, the plain build, with no network, as oss-verify check does:
+#   - the C probe (probe.c and build.sh), in every row;
+#   - in a Rust row (ROW ends in -rust), the Rust probe (rust/) too, with tests/fixtures/rust-example/Cargo.lock as its
+#     lock. lay-out-sources gets its crates with the network while the image builds, and the Rust recipe compiles the
+#     standard library from source.
+# frames.py then reads each probe in the builder of its image, with the probe's symbols: on FP_IMAGE, each fp_probe_*
+# function that calls must keep a frame record (frames.py probe --expect fp); on BASE_IMAGE, at least one must not
+# (--expect base). In the C and C++ row (no -rust or -python at the end of ROW), frames.py count also counts the
+# calling functions that keep a frame record in the base image's C library (libc.a of the musl sysroot), C++ library
+# (libc++.a) and AddressSanitizer runtime (libclang_rt.asan*.a): each such file under /opt.
+#
+# What it finds goes to standard output, and to $GITHUB_STEP_SUMMARY when that is set. It exits non-zero when a build
+# or a check fails, and 2 on a usage error.
+set -euo pipefail
+
+if [ $# -ne 3 ]; then
+  echo "usage: probe ROW BASE_IMAGE FP_IMAGE" >&2
+  exit 2
+fi
+row=$1 base=$2 fp=$3
+here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+root=$(cd -- "$here/../../.." && pwd)
+work=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/frame-pointers.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+# compile hands $OUT to this owner at its end, so that this script can read and remove what it wrote.
+owner="$(id -u):$(id -g)"
+case $row in
+  *-rust) toolchain=rust probes="c rust" ;;
+  *-python) toolchain=python probes="c" ;;
+  *) toolchain=c probes="c" ;;
+esac
+
+say() {
+  printf '%s\n' "$1"
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then printf '%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"; fi
+}
+
+# report TITLE FILE: what FILE holds, under TITLE, in the log and in the step summary.
+report() {
+  printf '\n%s\n' "$1"
+  cat "$2"
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    { printf '\n#### %s\n\n```\n' "$1"; cat "$2"; printf '```\n'; } >> "$GITHUB_STEP_SUMMARY"
+  fi
+}
+
+tag() { echo "oss-verify-frame-pointers/$1:$2"; }
+
+# builder IMAGE KIND: the builder FROM IMAGE.
+builder() {
+  docker pull --quiet "$1" > /dev/null
+  docker build --progress=plain --build-arg "TOOLCHAIN=$1" -t "$(tag builder "$2")" "$root/infra/base-builder"
+}
+
+# c_probe KIND: the C probe's project image, FROM the builder of KIND: probe.c and build.sh in $SRC, where compile
+# runs build.sh.
+c_probe() {
+  docker build --progress=plain --build-arg "BASE_BUILDER=$(tag builder "$1")" -t "$(tag c "$1")" -f - "$here" <<'EOF'
+ARG BASE_BUILDER=oss-verify-base-builder
+FROM ${BASE_BUILDER}
+COPY probe.c build.sh $SRC/
+WORKDIR $SRC
+EOF
+}
+
+# rust_probe KIND: the Rust probe's project image, FROM the builder of KIND. Its build context is a copy of rust/,
+# with the fixture's Cargo.lock.
+rust_probe() {
+  local context=$work/rust-$1
+  cp -R "$here/rust" "$context"
+  cp "$root/tests/fixtures/rust-example/Cargo.lock" "$context/Cargo.lock"
+  docker build --progress=plain --build-arg "BASE_BUILDER=$(tag builder "$1")" -t "$(tag rust "$1")" "$context"
+}
+
+# build LANGUAGE KIND: compile in the probe's project image, the plain build, with no network, into
+# $work/out/KIND-LANGUAGE.
+build() {
+  mkdir -p "$work/out/$2-$1"
+  docker run --rm --init --network=none -e SANITIZER=none -e "OV_OWNER=$owner" -v "$work/out/$2-$1:/out" \
+    "$(tag "$1" "$2")" compile
+}
+
+# frames IMAGE TITLE ARGUMENT...: frames.py ARGUMENT... in the builder of IMAGE (base or fp), with $work/out at /out.
+# Its exit status.
+frames() {
+  local image=$1 title=$2 status=0
+  shift 2
+  docker run --rm --network=none --entrypoint python3 -v "$here:/fp:ro" -v "$work/out:/out:ro" \
+    "$(tag builder "$image")" /fp/frames.py "$@" > "$work/frames.txt" 2>&1 || status=$?
+  report "$title" "$work/frames.txt"
+  return "$status"
+}
+
+for image in base fp; do
+  if [ "$image" = base ]; then builder "$base" base; else builder "$fp" fp; fi
+  c_probe "$image"
+  build c "$image"
+  if [ "$toolchain" = rust ]; then
+    rust_probe "$image"
+    build rust "$image"
+  fi
+done
+
+say ""
+say "### $row: the probes"
+say ""
+say "- base image: \`$base\`"
+say "- frame-pointer image: \`$fp\`"
+failed=0
+for image in base fp; do
+  for language in $probes; do
+    frames "$image" "the $language probe on the $image image: frames.py probe --expect $image" \
+      probe --expect "$image" "/out/$image-$language/fp_probe" || failed=1
+  done
+done
+
+if [ "$toolchain" = c ]; then
+  # The libraries of the base image, each file of each name: the C library of the musl sysroot, the C++ library and
+  # the AddressSanitizer runtime.
+  libraries=()
+  for where in "/opt/musl-sysroot libc.a" "/opt libc++.a" "/opt libclang_rt.asan*.a"; do
+    if ! found=$(docker run --rm --network=none --entrypoint find "$(tag builder base)" "${where% *}" -type f \
+                   -name "${where#* }" | LC_ALL=C sort); then
+      say "find failed under ${where% *} in the base image"
+      failed=1
+    fi
+    if [ -z "$found" ]; then
+      say "no file ${where#* } under ${where% *} in the base image"
+      failed=1
+      continue
+    fi
+    while IFS= read -r path; do libraries+=("$path"); done <<< "$found"
+  done
+  printf '%s\n' "${libraries[@]}" > "$work/libraries.txt"
+  report "the libraries of the base image: find under /opt" "$work/libraries.txt"
+  if [ "${#libraries[@]}" -gt 0 ]; then
+    frames base "the libraries of the base image: frames.py count" count "${libraries[@]}" || failed=1
+  fi
+fi
+
+exit "$failed"
