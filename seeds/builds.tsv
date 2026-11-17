@@ -1,5 +1,6 @@
 # The result of oss-verify check --twice --lock on each seeded project's port, one row per project, from its
-# latest check
+# latest check. The patches that each check applied are in seeds/checked-patches.tsv. A row written from a new check
+# comes with its port's rows there, written again from that check.
 project	result	detail
 abseil-cpp	reproduces	all binaries match the release's
 ada-url	reproduces	all binaries match the release's
