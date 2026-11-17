@@ -68,6 +68,9 @@ def docker_ready():
                      "set OV_DOCKER_TESTS=1, with Docker and the toolchain image, and put qemu-riscv64-static on PATH, "
                      "to build and run the fixture")
 class SeedRuns(unittest.TestCase):
+    # unittest cuts a long diff by default. Show all of it, so that a failure shows the status of each input.
+    maxDiff = None
+
     @classmethod
     def setUpClass(cls):
         cls.scratch = tempfile.TemporaryDirectory(prefix="ov-test-seed-runs.")
@@ -98,14 +101,12 @@ class SeedRuns(unittest.TestCase):
         names = [name for name, _, _ in SEEDS]
         runs = check_checks.run_all(TAG, self.raw, inputs, {TARGET: names}, BUILD, results, labels=self.labels)
         self.assertEqual([run.seed for run in runs], names)
-        for n, (run, (name, _, expected)) in enumerate(zip(runs, SEEDS)):
-            with self.subTest(seed=name):
-                text = (results / TARGET / f"{n}.status").read_text().strip()
-                self.assertEqual(text, str(expected),
-                                 f"the run on {name!r}: {check_checks.KILLED} is the status of a run the time limit "
-                                 "stopped")
-                self.assertEqual(run.status, expected, name)
-                self.assertEqual(run.caught(), expected != 0, name)
+        # Compare the statuses of all inputs in one assertion, so that a failure shows the status of each input.
+        texts = {name: (results / TARGET / f"{n}.status").read_text().strip() for n, (name, _, _) in enumerate(SEEDS)}
+        self.assertEqual(texts, {name: str(expected) for name, _, expected in SEEDS},
+                         f"{check_checks.KILLED} is the status of a run the time limit stopped")
+        self.assertEqual({run.seed: run.status for run in runs}, {name: expected for name, _, expected in SEEDS})
+        self.assertEqual({run.seed: run.caught() for run in runs}, {name: expected != 0 for name, _, expected in SEEDS})
 
     def test_binary_runs_read_each_exit_status(self):
         # The job's files as check_binaries.binary_checks lays them out. binary_checks runs the stripped copy that
@@ -120,9 +121,10 @@ class SeedRuns(unittest.TestCase):
         (files / "runs").write_text(f"l0 binary inputs/0 {TARGET}\nl1 binary inputs/1 {TARGET}\n")
         results = check_binaries.run_job(job_dir, check_build.newest_toolchain(), check_checks.qemu(), self.labels,
                                          600)
-        self.assertEqual((results / "l0.status").read_text().strip(), "134",
-                         f"the run on 'h': {check_binaries.STOPPED} is the status of a run the time limit stopped")
-        self.assertEqual((results / "l1.status").read_text().strip(), "0", "the run on 'm'")
+        run_names = {"h": "l0", "m": "l1"}  # the names of the runs in the file "runs"
+        statuses = {name: (results / f"{run}.status").read_text().strip() for name, run in run_names.items()}
+        self.assertEqual(statuses, {"h": "134", "m": "0"},
+                         f"{check_binaries.STOPPED} is the status of a run the time limit stopped")
 
 
 if __name__ == "__main__":
