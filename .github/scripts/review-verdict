@@ -57,8 +57,8 @@ JOBS = ("gather", "screen", "review", "hold")
 # failed.
 SCREEN_HOLD = "The automated screen held this pull request."
 CAP_HOLD = "The daily cap of automated reviews held this pull request."
-FAILED = {job: f"The {job} job failed." for job in JOBS}
-HOLDS = (SCREEN_HOLD, CAP_HOLD, *FAILED.values())
+FAILED_HOLDS = {job: f"The {job} job failed." for job in JOBS}
+HOLDS = (SCREEN_HOLD, CAP_HOLD, *FAILED_HOLDS.values())
 NO_VERDICT = "The review gave no verdict."
 NO_REASON = "The review gave no reason."
 # A reason's length, after review-neutralize: 31 reasons of REASON_LIMIT keep the summary under the 65,535 characters
@@ -144,7 +144,7 @@ def from_hold(hold):
         job = os.environ.get("JOB", "")
         if job not in JOBS:
             die(f"JOB is not one of {', '.join(JOBS)}")
-        title = FAILED[job]
+        title = FAILED_HOLDS[job]
         summary = (f"The {job} job of [this run]({run_url}) failed, so the review gave no verdict."
                    f" `gh run rerun {run.group(1)} --failed -R {repo}` reviews it.")
     else:

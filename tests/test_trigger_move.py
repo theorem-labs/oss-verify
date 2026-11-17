@@ -347,6 +347,12 @@ class Stand(unittest.TestCase):
         step = self.step(workflow, job, name)
         return self.run_script(step["run"], cwd, **env_of(workflow, job, step, ctx, given, evaluate))
 
+    def check_ids(self, tree=ROOT):
+        """Each check id of review.md, in its order, with the verdicts it takes: what `tree`'s
+        .github/scripts/review-verdict --ids prints."""
+        return json.loads(subprocess.run([str(tree / ".github/scripts/review-verdict"), "--ids"], env=self.env,
+                                         check=True, capture_output=True, text=True).stdout)
+
     def copy_tree(self, name, changes=()):
         """A copy of what the cases run, .github/ and the rules files, with src/ as a link, with `changes`. A change is
         (path, old text, new text), where the old text is in the file once, or (path, a function of the file's text)."""
@@ -554,8 +560,7 @@ class FirstRunArtifact(Stand):
         review = self.workflow(tree, "review.yml")
         no_result = re.search(r'^NO_RESULT = "(.*)"$', (tree / ".github/scripts/take-build-results").read_text(),
                               re.M).group(1)
-        ids = json.loads(subprocess.run([str(tree / ".github/scripts/review-verdict"), "--ids"], env=self.env,
-                                        check=True, capture_output=True, text=True).stdout)
+        ids = self.check_ids(tree)
         for label, change in self.VARIANTS:
             self.fixture(change)
             ctx = {"github.token": WORKFLOW_TOKEN, "github.repository": REPO, "github.actor": "mallory",
@@ -1021,6 +1026,9 @@ class HeldApproval(Stand):
     HOLDS = (("the screen held it", "screen", "success", "held", "The automated screen held this pull request."),
              ("the daily cap", "cap", None, None, "The daily cap of automated reviews held this pull request."),
              ("the screen failed", "screen", "failure", None, "The screen job failed."))
+    # The body of the check run that `recorded` gives for each hold, by its arguments (route's trust, the screen job's
+    # result and its verdict). The tests of this class share it, so the step runs once for each hold.
+    RECORDED = {}
 
     def setUp(self):
         super().setUp()
@@ -1052,11 +1060,9 @@ class HeldApproval(Stand):
     def verdict_run(self, run_id, **changed):
         """The oss-verify App's check run Enrollment review of pull request 7 at HEAD for a review that gave each check
         the verdict pass, but those of `changed`: what .github/scripts/review-verdict prints for those verdicts."""
-        script = str(ROOT / ".github/scripts/review-verdict")
-        ids = json.loads(subprocess.run([script, "--ids"], env=self.env, check=True, capture_output=True,
-                                        text=True).stdout)
-        verdicts = json.dumps(dict(dict.fromkeys(ids, "pass"), **changed))
-        made = json.loads(subprocess.run([script], env={**self.env, "VERDICTS": verdicts, "REASONS": "{}"}, check=True,
+        verdicts = json.dumps(dict(dict.fromkeys(self.check_ids(), "pass"), **changed))
+        made = json.loads(subprocess.run([str(ROOT / ".github/scripts/review-verdict")],
+                                         env={**self.env, "VERDICTS": verdicts, "REASONS": "{}"}, check=True,
                                          capture_output=True, text=True).stdout)
         return self.as_listed({"name": "Enrollment review", "head_sha": HEAD, "external_id": PR, "status": "completed",
                                "conclusion": made["conclusion"],
@@ -1215,11 +1221,14 @@ class HeldApproval(Stand):
 
     def recorded(self, trust, screen, verdict):
         """The check run that the step records for that hold when the oss-verify App has no check run Enrollment
-        review of pull request 7 at HEAD: the body of its request."""
-        rc, log, out, sent = self.hold_of_held_head(trust, screen, verdict, self.not_app_runs)
-        self.assertEqual((rc, out, [(r["method"], r["endpoint"]) for r in sent]),
-                         (0, {"recorded": "true"}, [("POST", f"repos/{REPO}/check-runs")]), log)
-        return sent[0]["body"]
+        review of pull request 7 at HEAD: the body of its request, from RECORDED when a test built it before."""
+        key = (trust, screen, verdict)
+        if key not in self.RECORDED:
+            rc, log, out, sent = self.hold_of_held_head(trust, screen, verdict, self.not_app_runs)
+            self.assertEqual((rc, out, [(r["method"], r["endpoint"]) for r in sent]),
+                             (0, {"recorded": "true"}, [("POST", f"repos/{REPO}/check-runs")]), log)
+            self.RECORDED[key] = sent[0]["body"]
+        return self.RECORDED[key]
 
     def test_held_a_hold_of_a_held_head_replaces_no_verdict_of_the_review_at_that_head(self):
         """On a run by hand for a held head, the screen decides only whether the comment job approves the held runs: it
@@ -1248,12 +1257,13 @@ class HeldApproval(Stand):
 
     def test_held_a_hold_of_a_held_head_replaces_an_earlier_hold_at_that_head(self):
         """The oss-verify App's newest check run Enrollment review of pull request 7 at HEAD records an earlier hold, as
-        the step recorded it: of the daily cap, or of a job that failed (the screen job). A hold gives no verdict of the
-        review. Then a hold of the screen records the check run that it records when the App has no check run of the
-        pull request: its title is the screen's hold, not the earlier hold."""
+        the step recorded it: of the screen, of the daily cap, or of a job that failed (the screen job). A hold gives
+        no verdict of the review. Then a hold of the screen records the check run that it records when the App has no
+        check run of the pull request, with the title of the screen's hold. After a hold of the screen, it records the
+        same check run again."""
         screen_hold = self.HOLDS[0][1:4]
         alone = self.recorded(*screen_hold)
-        for label, trust, screen, verdict, title in self.HOLDS[1:]:
+        for label, trust, screen, verdict, title in self.HOLDS:
             with self.subTest(label):
                 earlier = self.as_listed(self.recorded(trust, screen, verdict), 604)
                 self.assertEqual(earlier["output"]["title"], title)
@@ -1267,17 +1277,16 @@ class HeldApproval(Stand):
         review that passed, and a hold of the daily cap. The newest, the one with the larger id, decides, in whatever
         order the API lists them. When the hold is newer, a hold of the screen replaces it. When the verdict is newer,
         the verdict stands."""
-        screen_hold = self.HOLDS[0][1:4]
-        alone = self.recorded(*screen_hold)
-        cap = self.recorded("cap", None, None)
-        for label, verdict_id, hold_id in (("the hold is newer", 601, 604), ("the verdict is newer", 605, 604)):
+        cap = self.recorded(*self.HOLDS[1][1:4])
+        for label, verdict_id, hold_id, replaced in (("the hold is newer", 601, 604, True),
+                                                     ("the verdict is newer", 605, 604, False)):
             with self.subTest(label):
                 runs = (self.verdict_run(verdict_id), self.as_listed(cap, hold_id), *self.not_app_runs)
-                rc, log, out, sent = self.hold_of_held_head(*screen_hold, runs)
-                if hold_id > verdict_id:
+                rc, log, out, sent = self.hold_of_held_head(*self.HOLDS[0][1:4], runs)
+                if replaced:
                     self.assertEqual((rc, out), (0, {"recorded": "true"}), f"the newer hold stands: {log}")
                     self.assertEqual([(r["method"], r["endpoint"], r["body"]) for r in sent],
-                                     [("POST", f"repos/{REPO}/check-runs", alone)], log)
+                                     [("POST", f"repos/{REPO}/check-runs", self.recorded(*self.HOLDS[0][1:4]))], log)
                 else:
                     self.assertEqual((rc, out, sent), (0, {}, []), f"the hold replaces the newer verdict: {log}")
 
@@ -2224,8 +2233,7 @@ class ReviewThatPasses(Stand):
         self.assertTrue(prompt["prompt"].startswith("Read review.md at the root of this checkout"), prompt)
         self.assertEqual(self.step(review, "review", "Review")["with"]["prompt"], "${{ steps.prompt.outputs.prompt }}")
         # The stand-in model: its structured output, every verdict pass.
-        ids = json.loads(subprocess.run([str(ROOT / ".github/scripts/review-verdict"), "--ids"], env=self.env,
-                                        check=True, capture_output=True, text=True).stdout)
+        ids = self.check_ids()
         result = self.dir / "execution.json"
         result.write_text(json.dumps([
             {"type": "system", "subtype": "init", "session_id": self.SESSION},

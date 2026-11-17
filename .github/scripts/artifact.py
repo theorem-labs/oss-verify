@@ -1,8 +1,8 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
-"""The read of one file of an artifact of a Build run (read_member), the class that reads GitHub's REST API (Api), and
-the check of a whole number of JSON (whole). take-build-results and enroll-dispatch import them from this directory, as
-they import steering.py:
+"""The read of one file of an artifact of a Build run (read_member), the exceptions that read_member does not catch
+(UNREADABLE), the class that reads GitHub's REST API (Api), and the check of a whole number of JSON (whole).
+take-build-results and enroll-dispatch import them from this directory, as they import steering.py:
 
     sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
     from artifact import Api, read_member, whole

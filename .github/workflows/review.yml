@@ -2126,10 +2126,9 @@ jobs:
           # person check is action_required, as a hold is. A read that fails fails this step.
           if [ "${HELD_RUNS:-}" = true ] && [ -n "$hold" ]; then
             holds=$(.github/scripts/review-verdict --holds)
-            newest=$(gh api --paginate "repos/$REPO/commits/$HEAD_SHA/check-runs?check_name=Enrollment%20review&filter=all&per_page=100" \
-                --jq '.check_runs[] | select(.app.id == 5447700) | {id, external_id, title: .output.title}' \
-              | jq -r -s --arg pr "$PR" --arg holds "$holds" 'map(select(.external_id == $pr)) | max_by(.id)
-                  | if . == null then "none" elif IN(.title; $holds | split("\n")[]) then "hold" else "verdict" end')
+            newest=$(gh api --paginate --slurp "repos/$REPO/commits/$HEAD_SHA/check-runs?check_name=Enrollment%20review&filter=all&per_page=100" \
+              | jq -r --arg pr "$PR" --arg holds "$holds" '[.[].check_runs[] | select(.app.id == 5447700 and .external_id == $pr)]
+                  | max_by(.id) | if . == null then "none" elif IN(.output.title; $holds | split("\n")[]) then "hold" else "verdict" end')
             if [ "$newest" = verdict ]; then
               echo "The newest check run Enrollment review of #$PR at $HEAD_SHA by the oss-verify App is a verdict of the review, and it stands: this hold ($hold${job:+, the $job job}) records nothing and posts nothing."
               exit 0
