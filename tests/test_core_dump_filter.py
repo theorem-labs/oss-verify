@@ -51,9 +51,10 @@ def docker_answers():
 
 def host_root():
     """The image's files, as a tar archive: the host's top-level links into /usr (bin -> usr/bin and the like), an
-    /etc with the host's ld.so.cache, and /tmp and /var/tmp. /sbin is an empty directory of the image, so that docker
-    run --init can put its docker-init there, beside a read-only /usr. Return (the archive, the host's top-level
-    directories that are not links into /usr, which the container mounts read-only too)."""
+    /etc with the host's ld.so.cache and the links of /etc/alternatives (cc is one: /usr/bin/cc links to it), and /tmp
+    and /var/tmp. /sbin is an empty directory of the image, so that docker run --init can put its docker-init there,
+    beside a read-only /usr. Return (the archive, the host's top-level directories that are not links into /usr, which
+    the container mounts read-only too)."""
     data, mounts = io.BytesIO(), ["/usr"]
     with tarfile.open(fileobj=data, mode="w") as archive:
         def add(name, kind, mode, target=""):
@@ -68,6 +69,12 @@ def host_root():
                 mounts.append(str(path))
         for name, mode in (("etc", 0o755), ("sbin", 0o755), ("tmp", 0o1777), ("var", 0o755), ("var/tmp", 0o1777)):
             add(name, tarfile.DIRTYPE, mode)
+        alternatives = pathlib.Path("/etc/alternatives")
+        if alternatives.is_dir():
+            add("etc/alternatives", tarfile.DIRTYPE, 0o755)
+            for link in sorted(alternatives.iterdir()):
+                if link.is_symlink():
+                    add(f"etc/alternatives/{link.name}", tarfile.SYMTYPE, 0o777, os.readlink(link))
         cache = pathlib.Path("/etc/ld.so.cache")
         if cache.is_file():
             info = tarfile.TarInfo("etc/ld.so.cache")
