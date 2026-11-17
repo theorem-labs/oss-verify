@@ -33,8 +33,10 @@ them when sources shows that lay-out-sources cannot lay out the port:
     at that path or in it
   - a path that follows more than 40 links
 It also cannot name them when the sources and the build.sh of the port take more than 1,000,000 steps (STEPS) to
-read. When the check found that the binaries match the release's, the notes also say which binaries differ, or may
-differ. No content of a port stops the table: a port file that is missing or that cannot be read counts as absent.
+read. The table does not search build.sh for a key with a character that is not a word character, a dot or a dash.
+So it also cannot name the fuzz targets of a patch that a build reads through a tree of such a key. When the check
+found that the binaries match the release's, the notes also say which binaries differ, or may differ. No content of
+a port stops the table: a port file that is missing or that cannot be read counts as absent.
 
 tests/test_seeded_projects.py fails when docs/seeded-projects.tsv is not what this writes. The workflow
 .github/workflows/tests.yaml runs its test Committed for a change to this file, src/oss_verify/validate.py, a file
@@ -81,21 +83,25 @@ MAXSYMLINKS = 40
 #   - a component of a path that the table adds as a directory, or a tree that it adds to its trie or finds there,
 #     and each component of the tree
 #   - a key of an ov_target_begin line, and each character of the key: when the table reads the trees of the key, and
-#     when it searches the other lines of build.sh for the key
+#     when it looks for the key in the words of the other lines of build.sh
 #   - a tree of a key that a block reads
 #   - a component of a path, or a node of the trie, that the search for the trees that meet the path reads
 #   - a tree that the search for the trees that a patch reaches finds, and each link or block that the tree leads to
 #   - a fuzz target that the search names, and each character of it
-#   - for a key with other characters than those of WORD, a character of build.sh that the search for the key reads
 # A key that the table reads for the first time takes KEY_STEPS more. Each other operation goes over a text, a list or
 # a path that took these steps, a fixed number of times. Only the sort of the fuzz targets compares each of them more
 # times: about log2 of their number, which is less than 20. The table keeps one str for each path component (see
 # components), so a dict lookup that finds a component compares no characters. The table reads each of the two files
 # whole before it counts their characters, and validate.py lets sources have 64 KiB and build.sh 256 KiB.
-# A probe at a tree of a real port takes fewer than 80,000 steps (projects/openssl), and the fan of 2400 blocks in
-# tests/test_seeded_projects.py takes about 425,000. On the machine where we measured, the steps of keys that the
-# table reads for the first time take the most CPU time: 12,000 such keys on one line take 864,000 steps and 0.25 to
-# 0.5 seconds. Thus a port that takes all the steps takes less than a second of CPU time, whatever its content.
+# The table does the same work each time that it reads a port. Each of its loops goes forward through a text, a list,
+# a path or the trie, and takes steps for what it reads. So the table ends on each port. A probe at a tree of a real
+# port takes fewer than 80,000 steps (projects/openssl). test_port_content_that_fills_sources_takes_a_bounded_time in
+# tests/test_seeded_projects.py makes a port of each kind of slow shape that we know. The table has all of STEPS for
+# each port, and the steps run out on some of them. The fan of 2400 blocks there takes about 425,000 steps. On the
+# machine where we measured, each of these ports takes less than 0.5 seconds of CPU time: the most is 0.35 to 0.45
+# seconds, for 2,100 patch lines at a tree that holds 20,000 trees. The slowest port that we found has the same kind
+# of shape, and takes all the steps and 0.4 to 0.6 seconds: 3,500 patch lines at a tree that holds the trees of 500
+# keys.
 STEPS = 1_000_000
 # The steps that a key takes in addition when the table reads it for the first time. For each such key, the table
 # makes its three trees (KEY_TREES) from the characters of the key, and starts a walk and a lookup in its trie for
@@ -405,37 +411,19 @@ def target_blocks(build, steps):
     return blocks, "\n".join(other)
 
 
-def whole_word(key, padded):
-    """Whether `padded`, a text with a space at its start and at its end, names `key`, which holds no blank, as a whole
-    word: the character just before it and the character just after it are not characters of WORD. re's \\w is a
-    character for which str.isalnum() is true, or _."""
-    start = padded.find(key)
-    while start >= 0:
-        before, after = padded[start - 1], padded[start + len(key)]
-        if not (before.isalnum() or before in "_.-" or after.isalnum() or after in "_.-"):
-            return True
-        start = padded.find(key, start + 1)
-    return False
-
-
 def named_elsewhere(keys, other, steps):
     """The `keys` that `other`, the text of the lines of build.sh that are not ov_target_begin lines (from
-    target_blocks), names as a whole word (WORD). Another block can then read what the block of such a key builds (as
-    $LIBROOT/<key>). Each key takes one step, and one step for each of its characters. A key with other characters
-    than those of WORD takes one more step for each character of `other`, which the search for the key reads. None if
-    `steps` run out."""
+    target_blocks), can name: each key that `other` names as a whole word (WORD), and each key with other characters
+    than those of WORD. Another block can then read what the block of such a key builds (as $LIBROOT/<key>). The
+    table does not search `other` for a key with other characters, so it cannot tell if another block reads what the
+    block of that key builds. Each key takes one step, and one step for each of its characters. None if `steps` run
+    out."""
     words = set(WORD.findall(other))
-    padded = f" {other} "
     named = set()
     for key in keys:
         if not steps.take(1 + len(key)):
             return None
-        if WORD.fullmatch(key):
-            if key in words:
-                named.add(key)
-        elif not steps.take(len(other)):
-            return None
-        elif whole_word(key, padded):
+        if key in words or not WORD.fullmatch(key):
             named.add(key)
     return named
 
@@ -448,7 +436,7 @@ class Layout:
       - index: the trie of the trees (see tree_number)
       - holders: for each tree, the trees that hold the location of a link to it
       - readers: for each tree, the blocks of build.sh that read it (their numbers in targets)
-      - named: for each tree, whether it is a tree of a key that build.sh names elsewhere (named_elsewhere)
+      - named: for each tree, whether it is a tree of a key that build.sh can name elsewhere (named_elsewhere)
       - targets: for each block of build.sh, the fuzz targets that it builds
       - steps: the steps that the table can still take on the port"""
     patched: dict

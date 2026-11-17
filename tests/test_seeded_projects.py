@@ -251,54 +251,64 @@ class Table(unittest.TestCase):
         # A sources file of validate.MAX_FILE_BYTES (64 KiB) and a build.sh of validate.MAX_SOURCE_BYTES (256 KiB) are
         # the most that oss-verify validate takes. seeded-projects.yml stops after 5 minutes, and the table reads each
         # seeded port. Each case here fits in these limits.
-        # A chain: each link points into the next one, so the path of each link takes one step for each link after
-        # it, and becomes longer at each step. The patched tree is the end of the chain, which no block reads.
+        # A chain: each link points into the next one. lay-out-sources refuses it at its second link, c1: the target
+        # of the first link, c1/x, is in c1. So the table stops at that line.
         chain = "".join(f"link\tc{i}\tc{i + 1}/x\n" for i in range(2000))
         # A fan: each of 2400 blocks has a link to one shared tree, which is the patched tree.
         names = sorted(f"fuzz_v{i}" for i in range(2400))
         fan = "tree\ts\tupstream/s\n" + "".join(f"link\text/v{i}/vendor\ts\n" for i in range(2400))
         fan_build = self.PORT["projects/kay/build.sh"] + "".join(
             f"(\nov_target_begin v{i}\nov_target_build fuzz_v{i}\n)\n" for i in range(2400))
-        # A long link: ext/w is a link whose target has 32,000 components. The first component, l40, is the top of a
-        # ladder of 40 links. Each of the 23,000 keys of one ov_target_begin line is w/<n>, so the walk of the block
-        # tree ext/w/<n> follows ext/w and the 40 links of the ladder. It stops at the 41st link, before it reads the
-        # rest of the target of ext/w.
-        ladder = "link\tl1\tz\n" + "".join(f"link\tl{n}\tl{n - 1}\n" for n in range(2, 41))
-        long = ladder + "link\text/w\tl40" + "/x" * 31_999 + "\n"
+        # A long link: ext/w is a link whose target has 32,000 components. The first component, l39, is the top of a
+        # ladder of 39 links. Each of the 23,000 keys of one ov_target_begin line is w/<n>, so the walk of the block
+        # tree ext/w/<n> follows ext/w and the 39 links of the ladder, and then reads the rest of the target of ext/w.
+        # This walk and the walk of ext/w/<n>/src end, and each takes about 64,000 steps. So the steps run out at the
+        # sixth key.
+        ladder = "link\tl1\tz\n" + "".join(f"link\tl{n}\tl{n - 1}\n" for n in range(2, 40))
+        long = ladder + "link\text/w\tl39" + "/x" * 31_999 + "\n"
         long_build = "(\nov_target_begin " + " ".join(f"w/{n}" for n in range(23_000)) + "\nov_target_build fuzz_w\n)\n"
-        # Many keys: one ov_target_begin line that names the same key 130,000 times, or 60,000 different keys.
+        # Many keys: one ov_target_begin line that names the same key 130,000 times, or 60,000 different keys. The
+        # table reads the trees of a key once, so the row of the same key names fuzz_k. For the 60,000 keys, the steps
+        # run out at about the 15,000th key.
         same_build = "(\nov_target_begin" + " k" * 130_000 + "\nov_target_build fuzz_k\n)\n"
         keys = ["".join(letters) for letters in itertools.product(string.ascii_letters, repeat=3)][:60_000]
         keys_build = "(\nov_target_begin " + " ".join(keys) + "\nov_target_build fuzz_k\n)\n"
         # A key with long trees, named many times: ext/D is a link whose target has 10,000 components, and one
         # ov_target_begin line names D 60,000 times. Each time that a block names a key, the table must not read the
-        # key's trees again.
+        # key's trees again. So the row names fuzz_z.
         deep = "tree\tbase\tupstream/base\nlink\text/D\tbase" + "/x" * 10_000 + "\n"
         deep_build = "(\nov_target_begin kay-fuzz_z" + " D" * 60_000 + "\nov_target_build fuzz_z\n)\n"
-        # 8,000 keys on one ov_target_begin line, each with a character that is not a word character, a dot or a dash.
-        # For each of these keys, the table searches the other lines of build.sh.
+        # Keys with a character that is not a word character, a dot or a dash: 8,000 keys on one ov_target_begin line,
+        # and one key +x+x... of 40,000 characters, which a line x+x+x... of 160,000 characters holds many times, each
+        # time after an x. The table does not search build.sh for such a key. So the row cannot name the fuzz targets
+        # of a patch at a tree of the key, and the steps do not run out.
         odd_build = "(\nov_target_begin " + " ".join(f"+{key}" for key in keys[:8000]) + "\nov_target_build fuzz_k\n)\n"
+        plus = "+x" * 20_000
+        plus_build = "(\nov_target_begin " + plus + "\nov_target_build fuzz_x\n)\nx" + "+x" * 80_000 + "\n"
         # A big trie that the table reads again and again: 10,000 keys put 20,000 trees under ext, and 2,100 patch
-        # lines apply the patch at ext. So each search for the trees that meet ext reads all of them.
+        # lines apply the patch at ext. So each search for the trees that meet ext reads all of them, and the steps run
+        # out.
         trie = "patch\text\tkay.0002-new.patch\n" * 2099
         trie_build = "(\nov_target_begin " + " ".join(keys[:10_000]) + "\nov_target_build fuzz_k\n)\n"
         cannot = ("applies kay.0002-new.patch, whose fuzz targets this table cannot name: some of its binaries may "
                   "differ from the release's")
+
+        def named(targets):
+            return f"applies kay.0002-new.patch to {targets}: the binaries of {targets} differ from the release's"
+
         cases = {
-            "a chain of links": (self.new_patch("c0", links=chain),
-                                 "applies kay.0002-new.patch, whose fuzz targets this table cannot name: some of its "
-                                 "binaries may differ from the release's"),
-            "a fan of links to one tree": (self.new_patch("s", links=fan, build=fan_build),
-                                           f"applies kay.0002-new.patch to {', '.join(names)}: the binaries of "
-                                           f"{', '.join(names)} differ from the release's"),
+            "a chain of links": (self.new_patch("c0", links=chain), cannot),
+            "a fan of links to one tree": (self.new_patch("s", links=fan, build=fan_build), named(", ".join(names))),
             "a long link that each block tree follows": (
-                self.new_patch("targets/kay-fuzz_d", links=long, build=long_build), cannot),
-            "a key that one line names 130,000 times": (self.new_patch("targets/kay-fuzz_d", build=same_build), cannot),
-            "60,000 keys on one line": (self.new_patch("targets/kay-fuzz_d", build=keys_build), cannot),
+                self.new_patch("targets/w/0", links=long, build=long_build), cannot),
+            "a key that one line names 130,000 times": (self.new_patch("ext/k", build=same_build), named("fuzz_k")),
+            "60,000 keys on one line": (self.new_patch(f"ext/{keys[0]}", build=keys_build), cannot),
             "a key with long trees that one line names 60,000 times": (
-                self.new_patch("targets/kay-fuzz_d", links=deep, build=deep_build), cannot),
+                self.new_patch("ext/D", links=deep, build=deep_build), named("fuzz_z")),
             "8,000 keys with another character on one line": (
-                self.new_patch("targets/kay-fuzz_d", build=odd_build), cannot),
+                self.new_patch(f"ext/+{keys[0]}", build=odd_build), cannot),
+            "a key of 40,000 characters with another character that a line of 160,000 characters holds": (
+                self.new_patch(f"targets/{plus}", build=plus_build), cannot),
             "2,100 patch lines at a tree that holds 20,000 trees": (
                 self.new_patch("ext", links=trie, build=trie_build), cannot),
         }
@@ -362,7 +372,9 @@ class Table(unittest.TestCase):
         deep = "/".join(["d"] * 1000)
         steps = f"tree\t{deep}\tupstream/d\nlink\t{deep}/s\t{deep}\n" + "".join(
             f"patch\t{deep}{'/s' * 40}\tkay.0002-new.patch\n" for _ in range(25))
-        # A block whose key has a character that is not a word character, a dot or a dash.
+        # A block whose key has a character that is not a word character, a dot or a dash. The table does not search
+        # build.sh for such a key. So it cannot name the fuzz targets of a patch at a tree of the key, if another line
+        # names the key or not. A patch at a tree that the block does not read changes fuzz_d.
         odd = build + "(\nov_target_begin kay+x\nov_target_build fuzz_x\n)\n"
         cases = {
             **{case: (self.new_patch("targets/kay-fuzz_d", links=links), cannot) for case, links in refused.items()},
@@ -373,11 +385,13 @@ class Table(unittest.TestCase):
                 cannot),
             "links that take more steps than STEPS": (self.new_patch("targets/kay-fuzz_d", links=steps), cannot),
             "a key with another character that no other line names": (self.new_patch(
-                "ext/kay+x/src", links="tree\text/kay+x/src\tupstream/x\n", build=odd + "echo kay+xy\n"),
-                names("fuzz_x")),
+                "ext/kay+x/src", links="tree\text/kay+x/src\tupstream/x\n", build=odd + "echo kay+xy\n"), cannot),
             "a key with another character that another line names": (self.new_patch(
                 "ext/kay+x/src", links="tree\text/kay+x/src\tupstream/x\n",
                 build=odd + "cp \"$LIBROOT/kay+x/lib/liboft.a\" \"$BUILDDIR/\"\n"), cannot),
+            "a key with another character, and a patch at a tree that its block does not read": (self.new_patch(
+                "targets/kay-fuzz_d", links="tree\text/kay+x/src\tupstream/x\n", build=odd + "echo kay+xy\n"),
+                names("fuzz_d")),
         }
         for case, (ports, row) in cases.items():
             with self.subTest(case):
