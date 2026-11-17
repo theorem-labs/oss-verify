@@ -42,7 +42,9 @@ name: "Toolchain images"
 #                 frame-pointer row names a different image. If ghcr.io holds that digest in the package of its base
 #                 image, publish pushes nothing. Else it pushes the image there, under the tag
 #                 frame-pointers-<commit>, and fails unless ghcr.io gives the same digest. Then it checks the image
-#                 on ghcr.io as make does. Its step summary gives the digest. Only this job can write a package.
+#                 on ghcr.io: it fails unless the manifest names the base image's layers and has its media type, and
+#                 unless the configuration is the base image's with OFT_FRAME_POINTERS=1 added. Its step summary
+#                 gives the digest. Only this job can write a package.
 #
 # The publish job of a run on main is the only route of these images to ghcr.io. No person and no agent pushes an
 # image by hand, with any token. No copy goes to a different registry. publish pushes with the job's GITHUB_TOKEN. The
@@ -69,6 +71,8 @@ on:
       - tests/test_builder.py
       - tests/fixtures/example/**
       - tests/fixtures/rust-example/**
+      - src/oss_verify/check_build.py
+      - pyproject.toml
   push:
     branches: [main]
     # The same paths as pull_request's.
@@ -80,6 +84,8 @@ on:
       - tests/test_builder.py
       - tests/fixtures/example/**
       - tests/fixtures/rust-example/**
+      - src/oss_verify/check_build.py
+      - pyproject.toml
   workflow_dispatch:
 
 permissions: {}
@@ -261,8 +267,8 @@ jobs:
     env:
       BASE_ROW: ${{ matrix.base }}
     steps:
-      # The whole tree: the probe builds infra/base-builder, and the Rust probe takes the lock of
-      # tests/fixtures/rust-example.
+      # The whole tree: the probe builds infra/base-builder, and the Rust probe takes the Dockerfile, the lock and
+      # crate/Cargo.toml of tests/fixtures/rust-example.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with:
           persist-credentials: false
@@ -452,10 +458,11 @@ jobs:
             [ "$pushed" = "$ref" ] || { echo "::error::ghcr.io holds $pushed, not the image made here ($ref)"; exit 1; }
             how="pushed under the tag ${tag##*:}"
           fi
-          # The same check as make's, on the image on ghcr.io: the base image's layers, and its configuration plus
-          # the one variable.
+          # make's checks of the manifest and of the configuration, on the image on ghcr.io: the manifest names the
+          # base image's layers and has its media type, and the configuration is the base image's plus the one
+          # variable.
           jq -e -n --argjson b "$(crane manifest "$base")" --argjson n "$(crane manifest "$ref")" \
-            '$b.layers == $n.layers' > /dev/null ||
+            '$b.layers == $n.layers and $b.mediaType == $n.mediaType' > /dev/null ||
             { echo "::error::$ref does not name exactly the base image's layers"; exit 1; }
           jq -e -n --argjson b "$(crane config "$base")" --argjson n "$(crane config "$ref")" \
             '($b | .config.Env += ["OFT_FRAME_POINTERS=1"]) == $n' > /dev/null ||

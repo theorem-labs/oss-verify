@@ -54,7 +54,7 @@ A toolchain image with frame pointers is a toolchain image whose configuration s
 * For C and C++, [toolchain.sh](../infra/base-builder/toolchain.sh) adds `-fno-omit-frame-pointer` to the common flags ([below](#the-builds)). Thus the library, the fuzz target, the driver and the C code of a Rust or Python build get this flag.
 * For Rust, [rust/recipes.sh](../infra/base-builder/rust/recipes.sh) gives rustc `-Cforce-frame-pointers=yes` ([below](#rust-fuzz-targets)). The build compiles the standard library from source with the same flags (`-Zbuild-std`), so the standard library gets this flag too.
 
-With an empty or unset value, the builder adds neither flag, so a build keeps the release's flags. With any other value, `toolchain.sh` stops the build. Only the toolchain image gives this setting. `oss-verify validate` refuses a project's `Dockerfile` or `build.sh` that names `OFT_FRAME_POINTERS` ([project-yaml.md](project-yaml.md#rules-for-each-file)).
+With an empty or unset value, the builder adds neither flag, so a build keeps the release's flags. With any other value, `toolchain.sh` stops the build. The rule is that only the toolchain image gives this setting. Thus `oss-verify validate` refuses a `Dockerfile` or `build.sh` beside `project.yaml` that names `OFT_FRAME_POINTERS` ([project-yaml.md](project-yaml.md#rules-for-each-file)).
 
 [.github/workflows/toolchain-images.yaml](../.github/workflows/toolchain-images.yaml) makes each toolchain image with frame pointers from a base row of [infra/toolchains.tsv](../infra/toolchains.tsv): the C and C++, the Rust or the Python row. It takes the image of that row, the base image, and adds only `OFT_FRAME_POINTERS=1` to its configuration (`crane mutate`). Thus the new image has the layers of the base image, and each file of it has the same bytes. The workflow checks this. It also builds probe programs on a builder made from each of the two images, and checks their frame records ([probe](../.github/scripts/frame-pointers/probe)).
 
@@ -68,7 +68,12 @@ A calling function has a `jal` or a `jalr` that writes `ra`. A calling function 
 * the C++ library, `/opt/musl-sysroot/usr/lib/libc++.a`: 5 of 1,853 calling functions keep a frame record;
 * the AddressSanitizer runtime, `libclang_rt.asan.a`: 542 of 1,653 calling functions keep a frame record in `/opt/asan-static-rt`, and 542 of 1,654 in the copy in `/opt/asan-rt`.
 
-To count them, run `.github/scripts/frame-pointers/frames.py count <archive>…` in the builder of the row `oss-fuzz-theorems-2026.10`. The `probe` job runs this command, and prints the count of each archive again on each run.
+To count them, do these steps in the root of this repository:
+
+1. Build the builder from the base image: `docker build --build-arg TOOLCHAIN=<image> -t <tag> infra/base-builder`. `<image>` is the image of the row `oss-fuzz-theorems-2026.10` in [infra/toolchains.tsv](../infra/toolchains.tsv).
+2. Run `docker run --rm --network=none --entrypoint python3 -v "$PWD/.github/scripts/frame-pointers:/fp:ro" <tag> /fp/frames.py count <archive>…`. Each `<archive>` is a path in the builder, for example `/opt/musl-sysroot/usr/lib/libc.a`.
+
+The builder does not hold `frames.py`, so step 2 mounts it from this repository. The `probe` job does these steps, and prints the count of each archive again on each run.
 
 ## What build.sh gets
 
