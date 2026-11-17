@@ -1112,7 +1112,7 @@ def executable_of(sections, loads, symbols):
 
 
 def fake_linker(cwd, ro_end=0x10300, misplace=None, extra_load=False, backward=None, far=None, grown=None,
-                far_once=None, unrelaxed=None):
+                far_once=None, unrelaxed=None, hidden=()):
     """The commands of the append mode (layout.run), with a stand-in for the compiler driver and lld, in `cwd`. For
     -###, the linker's line. Else a link of the objects and archives the command names: it lays out their .text
     sections one after another in input order, or as an append script puts them (each pattern's sections from the
@@ -1124,7 +1124,8 @@ def fake_linker(cwd, ro_end=0x10300, misplace=None, extra_load=False, backward=N
     bytes}) gives functions more linked bytes in the map. In every link, `unrelaxed` ({function: bytes}) gives
     functions more linked bytes, in the map and before what follows them, as lld does for an access it no longer
     relaxes wherever .text puts the function; a script's address below the end of what came before it then fails as
-    lld fails."""
+    lld fails. The executable has no global symbol for the functions `hidden` names, as lld writes a symbol of hidden
+    visibility as a local one."""
     extra = unrelaxed or {}
     scripted = []
 
@@ -1193,7 +1194,8 @@ def fake_linker(cwd, ro_end=0x10300, misplace=None, extra_load=False, backward=N
         pathlib.Path(words[words.index("-o") + 1]).write_bytes(executable_of(
             [(".eh_frame", 0x10200, ro_end - 0x10200, 0x2), (".text", text, end - text, 0x6),
              (".init_array", rw, 8, 0x3), (".fini_array", rw + 8, 8, 0x3)], loads,
-            {**{found[k][2][len(".text."):]: addresses[k] for k in addresses}, **((far or {}) if script else {}),
+            {**{found[k][2][len(".text."):]: addresses[k] for k in addresses
+                if found[k][2][len(".text."):] not in hidden}, **((far or {}) if script else {}),
              **((far_once or {}) if len(scripted) == 1 and script else {})}))
         return 0, ""
     return run
@@ -1417,6 +1419,49 @@ def test_append_links_when_a_kept_functions_thread_local_read_is_no_longer_relax
     assert layout.main(["check", str(tmp_path / "base"), str(tmp_path / "new")]) == 0
     assert lines_with(capsys.readouterr().out.splitlines(), "moved with a cause: tail")
 
+
+def test_append_moves_a_kept_caller_whose_call_of_a_hidden_function_is_relaxed_otherwise(tmp_path, monkeypatch,
+                                                                                         capsys):
+    # OSSV-675 testing. f has hidden visibility (a library built with -fvisibility=hidden, or a function declared
+    # hidden, as musl's internal functions are), so the output's symbol table, and so output.tsv, has no global symbol
+    # for it: lld writes a hidden symbol as a local one. At the base, 1.25 MiB of filler lies between f and its caller
+    # in c.o, so the call is out of jal's reach. In the new source f changes and grows, and goes to the end of .text,
+    # right after caller: from caller's base call site, f is now in reach, lld relaxes the call, and caller takes 4
+    # bytes less. caller must move with jal_reach, as it does when f is a global symbol (case (b) of c1), and layout
+    # check must verify that cause. On the real toolchain at 76d299e2 the link stops instead: "LLVMFuzzerTestOneInput
+    # (/work/example_fuzzer.o): the script keeps it at 0x12c4c with 128 bytes, and the check link puts it at 0x12c4c
+    # with 132 bytes, and no call of it is relaxed otherwise: a defect of the append mode" (case (b) of c1 with ov_f
+    # declared hidden, farm job farm/20261117t181743z-173fb2).
+    def files(new):
+        return {"main.o": relocatable([("f", b"\x99" * 0x50 if new else b"\2" * 0x30, 4, [])]),
+                "filler.o": relocatable([("filler", b"\4" * 0x140000, 4, [])]),
+                "c.o": relocatable([("caller", b"\3" * 0x20, 4, [(0x8, "f")])])}
+    command = ["clang", "main.o", "filler.o", "c.o"]
+    for name, new in (("old", False), ("work", True)):
+        (tmp_path / name).mkdir()
+        for file, data in files(new).items():
+            (tmp_path / name / file).write_bytes(data)
+    old = tmp_path / "old"
+    assert fake_linker(old, hidden={"f"})(command + [f"-Wl,-Map={old / 'map'}", "-o", str(old / "fuzz")]) == (0, "")
+    entry = tree_entry(tmp_path / "base", old, (old / "map").read_text(), (old / "fuzz").read_bytes())
+    monkeypatch.chdir(tmp_path / "work")
+    monkeypatch.setattr(layout, "run", fake_linker(tmp_path / "work", hidden={"f"}, grown={"caller": -4}))
+    (tmp_path / "links").mkdir()
+    code = layout.main(["append", "--base", str(entry), "--work", str(tmp_path / "links"), "--script",
+                        str(tmp_path / "script.ld"), "--placement", str(tmp_path / "placement.tsv"), "--wraps",
+                        str(tmp_path / "wraps"), "--"] + command)
+    assert code == 0, capsys.readouterr().err
+    rows = {row[2]: row[8:] for row in (line.split("\t") for line in
+                                        (tmp_path / "placement.tsv").read_text().splitlines())}
+    assert rows[".text.filler"][:2] == ["kept", "0x11330"]
+    assert rows[".text.caller"][0] != "kept" and rows[".text.caller"][2:] == ["jal_reach",
+                                                                              "offset=0x8;target=f;gained"]
+    links = tmp_path / "links"
+    tree_entry(tmp_path / "new", tmp_path / "work", (links / "check.map").read_text(), (links / "check").read_bytes(),
+               (tmp_path / "placement.tsv").read_bytes())
+    capsys.readouterr()
+    assert layout.main(["check", str(tmp_path / "base"), str(tmp_path / "new")]) == 0
+    assert lines_with(capsys.readouterr().out.splitlines(), "moved with a cause: caller", "jal_reach")
 
 
 @pytest.mark.parametrize("words", [["--help"], ["collect", "--help"], ["check", "--help"], ["wraps", "--help"],
