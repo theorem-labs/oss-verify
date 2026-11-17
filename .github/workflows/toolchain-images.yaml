@@ -70,10 +70,12 @@ name: "Toolchain images"
 #
 # publish runs only after the merge, and GitHub tells only the person who started a run that it failed. So after a
 # run where a job failed, failure-notice writes the failed run's URL and the first error line to the summary, and
-# fails. OS Verify's controller watches the push runs of this workflow (dispatch://INFRA-4122). Thus a failed run on
-# main reaches it. If publish fails, fix the cause. Then run publish again: run the failed jobs of that run again, or
-# start a later run on main (a push that changes a path below, or a run by hand). A rerun of the failed jobs reads the
-# digest that make made in that run: GitHub keeps the artifact for 30 days.
+# fails. OS Verify's Legion controller gets each completed run of this workflow, and acts on a failed push run on
+# main: now by an Envoy subscription of its session, and, once dispatch://INFRA-4122 is live, by the entry
+# theorem-labs/oss-verify/toolchain-images.yaml@push of OS Verify's watched workflows. If publish fails, fix the
+# cause. Then run publish again: run the failed jobs of that run again, or start a later run on main (a push that
+# changes a path below, or a run by hand). A rerun of the failed jobs reads the digest that make made in that run:
+# GitHub keeps the artifact for 30 days.
 #
 # A row of infra/toolchains.tsv names an image only after the image is published. Thus the rows of these images come
 # in a pull request after the push.
