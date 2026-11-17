@@ -1048,9 +1048,11 @@ def test_the_script_refuses_a_file_name_it_cannot_quote():
 def relocatable(functions):
     """A riscv64 relocatable ELF64 object of [(name, bytes, alignment, [(offset, called function)])]: a section
     .text.<name> for each, a global function <name> at its start, and an R_RISCV_CALL_PLT relocation for each call,
-    against a symbol of this object or an undefined one."""
+    against a symbol of this object or an undefined one. A call (offset, symbol, type) gives a relocation of that
+    type instead, and a symbol of None the symbol 0 (R_RISCV_RELAX)."""
     defined = [name for name, _, _, _ in functions]
-    names = defined + sorted({callee for _, _, _, calls in functions for _, callee in calls} - set(defined))
+    names = defined + sorted({call[1] for _, _, _, calls in functions for call in calls if call[1] is not None}
+                             - set(defined))
     strtab, symtab = b"\0", [bytes(24)]
     for k, name in enumerate(names):
         here = k < len(defined)
@@ -1062,8 +1064,8 @@ def relocatable(functions):
     symbols = len(functions) + sum(1 for *_, calls in functions if calls) + 1
     for k, (name, _, _, calls) in enumerate(functions):
         if calls:
-            body = b"".join(struct.pack("<QQq", offset, (names.index(callee) + 1) << 32 | 19, 0)
-                            for offset, callee in calls)
+            body = b"".join(struct.pack("<QQq", call[0], (0 if call[1] is None else names.index(call[1]) + 1) << 32
+                                        | (call[2] if len(call) > 2 else 19), 0) for call in calls)
             sections.append((f".rela.text.{name}", 4, 0x40, body, symbols, k + 1, 8, 24))
     sections += [(".symtab", 2, 0, b"".join(symtab), symbols + 1, 1, 8, 24), (".strtab", 3, 0, strtab, 0, 0, 1, 0)]
     shstrtab = b"\0" + b"".join(s[0].encode() + b"\0" for s in sections) + b".shstrtab\0"
@@ -1110,7 +1112,7 @@ def executable_of(sections, loads, symbols):
 
 
 def fake_linker(cwd, ro_end=0x10300, misplace=None, extra_load=False, backward=None, far=None, grown=None,
-                far_once=None):
+                far_once=None, unrelaxed=None):
     """The commands of the append mode (layout.run), with a stand-in for the compiler driver and lld, in `cwd`. For
     -###, the linker's line. Else a link of the objects and archives the command names: it lays out their .text
     sections one after another in input order, or as an append script puts them (each pattern's sections from the
@@ -1119,7 +1121,11 @@ def fake_linker(cwd, ro_end=0x10300, misplace=None, extra_load=False, backward=N
     names a function whose map line it puts 0x10 bytes further, `extra_load` adds a PT_LOAD, `backward` makes it
     fail as lld does when the script's line `backward` moves the location counter backward, `far` ({function:
     address}) puts symbols elsewhere, `far_once` the same in the first such link only, and `grown` ({function:
-    bytes}) gives functions more linked bytes in the map."""
+    bytes}) gives functions more linked bytes in the map. In every link, `unrelaxed` ({function: bytes}) gives
+    functions more linked bytes, in the map and before what follows them, as lld does for an access it no longer
+    relaxes wherever .text puts the function; a script's address below the end of what came before it then fails as
+    lld fails."""
+    extra = unrelaxed or {}
     scripted = []
 
     def run(words):
@@ -1137,6 +1143,9 @@ def fake_linker(cwd, ro_end=0x10300, misplace=None, extra_load=False, backward=N
             for file, named, data in members:
                 found += [(file, named, s.name, s.size, s.align) for s in layout.Elf(data, word).sections
                           if layout.is_text(s.name)]
+
+        def linked(k):
+            return found[k][3] + extra.get(found[k][2][len(".text."):], 0)
         script = next((w[len("-Wl,-T,"):] for w in words if w.startswith("-Wl,-T,")), None)
         text = (ro_end + 0xFFF) // 0x1000 * 0x1000 + ro_end % 0x1000
         addresses, rw = {}, None
@@ -1147,28 +1156,35 @@ def fake_linker(cwd, ro_end=0x10300, misplace=None, extra_load=False, backward=N
                 return 1, (f"ld.lld: error: {script}:{backward}: unable to move location counter (0x11400) backward "
                            "to 0x11340 for section '.text'\nclang: error: linker command failed with exit code 1\n")
             text = int(re.search(r"\.text (0x[0-9a-f]+) :", lines).group(1), 16)
-            for address, file, _, section in re.findall(r'\. = (0x[0-9a-f]+);\n +"([^"]*)"\(("?)([^")]*)\3\)',
-                                                        lines):
+            counter = None
+            for match in re.finditer(r'\. = (0x[0-9a-f]+);\n +"([^"]*)"\(("?)([^")]*)\3\)', lines):
+                address, file, _, section = match.groups()
                 at = int(address, 16)
-                for k, (pattern_file, _, name, size, align) in enumerate(found):
+                if extra and counter is not None and at < counter:
+                    number = lines.count("\n", 0, match.start()) + 1
+                    return 1, (f"ld.lld: error: {script}:{number}: unable to move location counter ({hex(counter)}) "
+                               f"backward to {hex(at)} for section '.text'\nclang: error: linker command failed "
+                               "with exit code 1\n")
+                for k, (pattern_file, _, name, _, align) in enumerate(found):
                     if (pattern_file, name) == (file, section):
                         at = (at + align - 1) // align * align
-                        addresses[k], at = at, at + size
+                        addresses[k], at = at, at + linked(k)
+                counter = at
             pinned = re.search(r"\.init_array (0x[0-9a-f]+) :", lines)
             rw = int(pinned.group(1), 16) if pinned else None
-        at = max([addresses[k] + found[k][3] for k in addresses], default=text)
-        for k, (_, _, _, size, align) in enumerate(found):
+        at = max([addresses[k] + linked(k) for k in addresses], default=text)
+        for k, (_, _, _, _, align) in enumerate(found):
             if k not in addresses:
                 at = (at + align - 1) // align * align
-                addresses[k], at = at, at + size
-        end = max(addresses[k] + found[k][3] for k in addresses)
+                addresses[k], at = at, at + linked(k)
+        end = max(addresses[k] + linked(k) for k in addresses)
         rw = rw or (end + 0xFFF) // 0x1000 * 0x1000 + end % 0x1000
         lines = [f"{text:>16x} {text:>16x} {end - text:>8x} {4:>5} .text\n"]
         for k in sorted(addresses, key=lambda k: (addresses[k], k)):
-            _, named, section, size, align = found[k]
+            _, named, section, _, align = found[k]
             shift = 0x10 if script and section == f".text.{misplace}" else 0
             more = (grown or {}).get(section[len(".text."):], 0) if script else 0
-            lines.append(map_line(addresses[k] + shift, size + more, align, f"{named}:({section})"))
+            lines.append(map_line(addresses[k] + shift, linked(k) + more, align, f"{named}:({section})"))
         mapping = next(w[len("-Wl,-Map="):] for w in words if w.startswith("-Wl,-Map="))
         pathlib.Path(mapping).write_text("".join(lines))
         loads = [(0x10000, ro_end - 0x10000, 4), (text, end - text, 5), (rw, 16, 6)]
@@ -1183,12 +1199,20 @@ def fake_linker(cwd, ro_end=0x10300, misplace=None, extra_load=False, backward=N
     return run
 
 
-def sources(new):
+# R_RISCV_TPREL_HI20, R_RISCV_TPREL_ADD and R_RISCV_TPREL_LO12_I, each with R_RISCV_RELAX: a local-exec read of the
+# thread-local variable tv, as clang compiles `return tv;`. lld relaxes it (removes the lui and the add, 8 bytes) when
+# tv lies within 2 KiB of the start of the TLS segment, wherever .text puts the function.
+TLS_READ = [(0x0, "tv", 29), (0x0, None, 51), (0x4, "tv", 32), (0x4, None, 51), (0x8, "tv", 30), (0x8, None, 51)]
+
+
+def sources(new, tls=False):
     """The files of the link of the append tests: main.o (entry, which calls helper and grow, grow and tail), b.o
     (other) and lib.a, whose member m.o holds helper and small. In the new source, grow has other bytes and more of
-    them, and small the same bytes at an alignment of 16."""
+    them, and small the same bytes at an alignment of 16. With `tls`, tail reads a thread-local variable (TLS_READ),
+    in both sources."""
     main = relocatable([("entry", b"\1" * 0x40, 4, [(0x8, "helper"), (0x10, "grow")]),
-                        ("grow", b"\x99" * 0x50 if new else b"\2" * 0x30, 4, []), ("tail", b"\3" * 0x20, 4, [])])
+                        ("grow", b"\x99" * 0x50 if new else b"\2" * 0x30, 4, []),
+                        ("tail", b"\3" * 0x20, 4, TLS_READ if tls else [])])
     member = relocatable([("helper", b"\5" * 0x18, 4, []), ("small", b"\6" * 0x8, 16 if new else 4, [])])
     return {"main.o": main, "b.o": relocatable([("other", b"\4" * 0x60, 4, [])]), "lib.a": archive([("m.o", member)])}
 
@@ -1212,13 +1236,13 @@ def tree_entry(root, directory, map_text, binary, placement=None):
     return entry
 
 
-def append_setup(tmp_path, monkeypatch, **fake):
+def append_setup(tmp_path, monkeypatch, tls=False, **fake):
     """The base layout tree tmp_path/base of a link of the old sources in tmp_path/old, and the new sources in
-    tmp_path/work, the working directory, with fake_linker(**fake) in place of the commands. Returns the base
-    entry."""
+    tmp_path/work, the working directory, with fake_linker(**fake) in place of the commands (sources(new, tls)).
+    Returns the base entry."""
     for name, new in (("old", False), ("work", True)):
         (tmp_path / name).mkdir()
-        for file, data in sources(new).items():
+        for file, data in sources(new, tls).items():
             (tmp_path / name / file).write_bytes(data)
     old = tmp_path / "old"
     assert fake_linker(old)(COMMAND + [f"-Wl,-Map={old / 'map'}", "-o", str(old / "fuzz")]) == (0, "")
@@ -1364,6 +1388,35 @@ def test_append_moves_a_kept_section_whose_call_the_check_link_relaxes_otherwise
                (tmp_path / "placement.tsv").read_bytes())
     assert layout.main(["check", str(tmp_path / "base"), str(tmp_path / "new")]) == 0
     assert lines_with(capsys.readouterr().out.splitlines(), "moved with a cause: entry", "jal_reach")
+
+
+def test_append_links_when_a_kept_functions_thread_local_read_is_no_longer_relaxed(tmp_path, monkeypatch, capsys):
+    # OSSV-675 testing. tail has the same bytes in both links and reads a thread-local variable. At the base lld
+    # relaxed that read; in the new link, new thread-local data in front of the variable puts it more than 2 KiB into
+    # the TLS segment, so lld keeps the lui and the add, and tail takes 8 bytes more in every link of the new inputs,
+    # the probe link's included, wherever .text puts it. That is a change of the code, which the append mode must not
+    # stop a link for (docs/build-contract.md: "The mode never stops a link for a change of the code"). On the real
+    # toolchain at 76d299e2 the link stops: "unable to move location counter ... backward", "the check link cannot
+    # move the location counter backward ... at ov_tls_get" (tests/fixtures/example with a __thread variable, farm
+    # job farm/20261117t173804z-7d787b). tail must move, the functions around it keep their base addresses, and
+    # layout check accepts the tree. The helpers may grow (tree_entry may have to write more of the tree); these
+    # assertions are the contract.
+    entry = append_setup(tmp_path, monkeypatch, tls=True, unrelaxed={"tail": 8})
+    assert run_append(tmp_path, entry) == 0, capsys.readouterr().err
+    rows = {row[2]: row[8:] for row in (line.split("\t") for line in
+                                        (tmp_path / "placement.tsv").read_text().splitlines())}
+    # At the base: entry 0x11300, tail 0x11370, other 0x11390, helper 0x113f0.
+    assert rows[".text.entry"][:2] == ["kept", "0x11300"]
+    assert rows[".text.other"][:2] == ["kept", "0x11390"]
+    assert rows[".text.helper"][:2] == ["kept", "0x113f0"]
+    assert rows[".text.tail"][0] != "kept"
+    links = tmp_path / "links"
+    tree_entry(tmp_path / "new", tmp_path / "work", (links / "check.map").read_text(), (links / "check").read_bytes(),
+               (tmp_path / "placement.tsv").read_bytes())
+    capsys.readouterr()
+    assert layout.main(["check", str(tmp_path / "base"), str(tmp_path / "new")]) == 0
+    assert lines_with(capsys.readouterr().out.splitlines(), "moved with a cause: tail")
+
 
 
 @pytest.mark.parametrize("words", [["--help"], ["collect", "--help"], ["check", "--help"], ["wraps", "--help"],
