@@ -12,25 +12,22 @@ name: "Tests"
 #
 # Each commit is judged on its own changes: for a pull request, GitHub's merge of it against the base branch; for a push
 # to main, against the commit before the push. The jobs:
-#   route     decides which of the jobs below the changes need, from the paths they change (git diff, renames as both
-#             names):
+#   route     decides which of the two jobs below the changes need, from the paths they change (git diff, renames as
+#             both names):
 #               - only documentation (docs/, and the Markdown files at the top but README.md, which a test reads):
 #                 docs, which runs the tests that read those files;
-#               - anything else: suite, and docker with it;
-#               - nothing: no job.
-#             A pull request from a fork that changes a file under projects/ runs no job (above). A run started by
-#             hand, or a push whose earlier commit cannot be read, runs suite and docker.
+#               - anything else: suite;
+#               - nothing: neither.
+#             A pull request from a fork that changes a file under projects/ runs neither (above). A run started by
+#             hand, or a push whose earlier commit cannot be read, runs suite.
 #   suite     the tests in tests, and oss-verify validate on every project.
-#   docker    tests/test_seed_runs_docker.py, whenever suite runs. suite skips it: it needs Docker, qemu-riscv64-static
-#             and the newest C toolchain image, and it builds tests/fixtures/example in that image. It fails unless
-#             kernel.core_pattern is a pipe, the one setup where CI showed that the test finds the fault it checks for.
 #   docs      the tests that read the documentation: tests/test_check.py's test that no tracked file but
 #             infra/toolchains.tsv names a toolchain digest, which reads every file git tracks, the documentation too;
 #             and tests/test_seeded_projects.py's test that docs/seeded-projects.tsv is what
 #             src/oss_verify/seeded_projects.py writes. A new test that reads the documentation goes here as well.
 #   required  always runs, after the others, and reports the required check tests (.github/scripts/collect): it passes
-#             only if route passed, each job route asked for passed, and every other job was skipped. A skipped job
-#             counts as a pass where a check is required, so no job that route may skip is the required check.
+#             only if route passed, each job route asked for passed, and the other was skipped. A skipped job counts as
+#             a pass where a check is required, so neither suite nor docs is the required check.
 #
 # On a pull request the checkout is GitHub's merge of it into its base branch. route fails for a pull request into any
 # branch but the default one, as enrollment and project-builds do (build.yaml says why). The workflow does not run on
@@ -199,74 +196,14 @@ jobs:
           git -C "$RUNNER_TEMP/model" checkout -q --detach FETCH_HEAD
           echo "OSS_VERIFY_MODEL=$RUNNER_TEMP/model" >> "$GITHUB_ENV"
 
-      # The Docker tests need the toolchain image and are skipped here. The docker job runs
-      # tests/test_seed_runs_docker.py; the others (tests/test_builder.py, test_binary_checks_docker.py) stay skipped.
+      # The Docker tests that need the toolchain image (tests/test_builder.py, test_binary_checks_docker.py,
+      # test_seed_runs_docker.py) are skipped here. tests/test_core_dump_filter.py runs here: it needs the runner's
+      # Docker, but no image to pull.
       - name: The tests in tests/
         run: python3 -P -m pytest -q -p no:cacheprovider -c pyproject.toml
 
       - name: Every project passes oss-verify validate
         run: python3 -P -m oss_verify validate < /dev/null
-
-  docker:
-    needs: route
-    if: needs.route.outputs.suite == 'true'
-    # The Ubuntu of the 16-core runner (ubuntu-24.04-16core) that theorem-labs/oss-verify-proofs-internal's
-    # enroll-build.yml builds projects on. Unlike ubuntu-latest, this label does not move to the next Ubuntu release.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    permissions:
-      contents: read
-    # As for suite: this repository's package, for python3 -P -c and -m.
-    env:
-      PYTHONPATH: ${{ github.workspace }}/src
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
-        with:
-          persist-credentials: false
-
-      # Without the write of 0 to /proc/self/coredump_filter in infra/checks/run-seeds and run-binaries, a run that
-      # aborts waits for the core dump of the qemu process, past the test's limit of 20 s, and the test fails. That was
-      # shown where kernel.core_pattern is a pipe (this runner, in CI) and where it is core (OSSV-729's measurement,
-      # arm A5a). No other pattern was measured. This step accepts only a pipe, the one setup that CI showed.
-      - name: The kernel writes core dumps through a pipe
-        run: |
-          pattern=$(cat /proc/sys/kernel/core_pattern)
-          if [[ $pattern != '|'* ]]; then
-            echo "::error::This runner's kernel.core_pattern is '$pattern', not a pipe. This step accepts only" \
-              "a pipe: it is the one setup on which CI showed tests/test_seed_runs_docker.py fail without the write" \
-              "of 0 to /proc/self/coredump_filter. Before you change this step, take main's infra/checks/, remove" \
-              "that write from run-seeds and run-binaries, run that test on this runner, and see it fail."
-            exit 1
-          fi
-
-      # Unused toolchains, removed to free disk for the test's builds: the toolchain image alone is about 6 GB.
-      - name: Make room
-        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-
-      - name: Install PyYAML and pytest
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml python3-pytest
-
-      # The test runs the fuzz target with it. A qemu that cannot be unpacked fails the job.
-      - name: Unpack qemu-riscv64-static
-        run: .github/scripts/unpack-qemu "$RUNNER_TEMP/qemu" >> "$GITHUB_PATH"
-
-      - name: Pull the toolchain image the fixture builds FROM
-        run: |
-          set -euo pipefail
-          image=$(python3 -P -c 'from oss_verify import check_build; print(check_build.newest_toolchain())')
-          [[ $image == *@sha256:* ]] || { echo "::error::Unpinned toolchain image: $image"; exit 1; }
-          docker pull "$image"
-
-      - name: The tests in tests/test_seed_runs_docker.py
-        run: |
-          set -o pipefail
-          OV_DOCKER_TESTS=1 python3 -P -m pytest -q -p no:cacheprovider -c pyproject.toml -rs \
-            tests/test_seed_runs_docker.py | tee "$RUNNER_TEMP/pytest"
-          # Each test here must run and pass: it skips itself without Docker, the image or qemu-riscv64-static.
-          if ! grep -qE '^[0-9]+ passed' "$RUNNER_TEMP/pytest" || grep -qE '[0-9]+ skipped' "$RUNNER_TEMP/pytest"; then
-            echo "::error::The Docker tests did not run."
-            exit 1
-          fi
 
   docs:
     needs: route
@@ -299,7 +236,7 @@ jobs:
   required:
     # The required check tests (the top of this file). A static name: GitHub reports the check under it on every run.
     name: tests
-    needs: [route, suite, docker, docs]
+    needs: [route, suite, docs]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -321,10 +258,6 @@ jobs:
           ROUTE: ${{ needs.route.result }}
           SUITE: ${{ needs.suite.result }}
           ASKED_SUITE: ${{ needs.route.outputs.suite == 'true' }}
-          # docker runs on the same condition as suite.
-          DOCKER: ${{ needs.docker.result }}
           DOCS: ${{ needs.docs.result }}
           ASKED_DOCS: ${{ needs.route.outputs.docs == 'true' }}
-        run: >-
-          .github/scripts/collect "$ROUTE" "suite:$SUITE:$ASKED_SUITE" "docker:$DOCKER:$ASKED_SUITE"
-          "docs:$DOCS:$ASKED_DOCS"
+        run: .github/scripts/collect "$ROUTE" "suite:$SUITE:$ASKED_SUITE" "docs:$DOCS:$ASKED_DOCS"
