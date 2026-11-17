@@ -215,6 +215,8 @@ A link through `$CC` or `$CXX` that names `$LIB_FUZZING_ENGINE` goes to [link-fu
 
 `link-fuzz-target` links two times. The first link makes the file that `build.sh` asked for, with its symbols, so that we can find the fuzz target by its symbol table. The second link adds `-Wl,--strip-all`, and its output is the published binary. `compile` keeps it as `$OUT/.stripped/<sha256 of the first>`.
 
+With `OV_BASE_LAYOUT`, `link-fuzz-target` can make the link of a development build, which keeps the address of each function whose code did not change ([below](#a-development-build-that-keeps-addresses)). With no `OV_BASE_LAYOUT`, or with no entry in it for the link, the link is the one above, with the same commands and the same arguments in the same order.
+
 ## The driver
 
 The driver takes the place of libFuzzer. Each fuzz target is linked with it through `$LIB_FUZZING_ENGINE` ([infra/base-builder/driver/](../infra/base-builder/driver/)). Its files are under MIT OR Apache-2.0, so that a program under version 2 of the GNU GPL can be linked with it ([NOTICE](../NOTICE)). A binary takes one argument, the input file:
@@ -381,7 +383,9 @@ The checks hold each binary against LPS as the published proofs use it: the proo
 
 The one exception that check 4 makes in the AddressSanitizer builds, rustc's allocator shim, is read from the object rather than taken on its name. An object is that shim when it defines at least one global function, when every function it defines, of any binding, is one of `__rust_alloc`, `__rust_dealloc`, `__rust_realloc`, `__rust_alloc_zeroed`, `__rust_alloc_error_handler`, `__rust_no_alloc_shim_is_unstable`, `__rust_no_alloc_shim_is_unstable_v2` and `__rust_alloc_error_handler_should_panic_v2`, each with this name or with its v0 spelling in rustc's `__rustc` crate (`_RNvC`, an optional `s<disambiguator>_`, `7___rustc`, then `<length>_<name>`, where `<length>` is the length of the name, as in `_RNvC7___rustc12___rust_alloc`), and when its code holds no instruction that reads or writes memory: no load, store, floating-point load or store, or atomic, in 32 bits or compressed, and no bytes that the check cannot read as instructions. That last condition is the reason for the exemption, so the check makes it rather than assuming it: an object that carries these names and makes an access is a finding like any other, and so is one that hides a function of another name by making it local. At most one such member is exempt; a second is a finding. The exempt member is the project's own code that no sanitizer instruments, so the `uninstrumented` list names it, with `kind` `rust-allocator-shim` and the SHA-256 of its bytes, and the verdict's detail counts it out of the objects it calls instrumented.
 
-The records and the quiet twins change no byte of a binary. With `--twice`, the second build makes neither, and its binaries must be the same as the first build's. A record that cannot be written leaves the link as it is, with a warning, and that fuzz target's checks say that it has no record. A compile record that cannot be written is not there, and the check counts the traps of that object.
+The records and the quiet twins change no byte of a binary. With `--twice`, the second build makes neither, unless `--layout-out` is given ([below](#a-development-build-that-keeps-addresses)), and its binaries must be the same as the first build's. A record that cannot be written leaves the link as it is, with a warning, and that fuzz target's checks say that it has no record. A compile record that cannot be written is not there, and the check counts the traps of that object.
+
+With `OV_LAYOUT=1` (`oss-verify check --layout-out` and `--base-layout` set it), the record of a link also holds `wraps`, the functions that the link wraps (`--wrap=<f>`), and the record of an append link holds `placement.tsv`, where the append mode put each `.text` input section. `layout.py collect` reads the records into a layout tree ([below](#the-layout-tree)).
 
 These checks find a build that did not do what it meant to, for example a library whose own build dropped the sanitizer flags. The records are written in the build's own container, so they do not stand against a `build.sh` written to deceive them; the review of the pull request does. The same holds for the runs: qemu writes the trace as the program's own user, so a binary written to deceive the checks can rewrite its trace. `oss-verify check` reads the records and the runs' results without following a symbolic link, and checks each kept file against its SHA-256.
 
@@ -526,6 +530,63 @@ These steps rebuild a binary and compare it with its lock in the proofs reposito
 `oss-verify check` can check the lock of a project that has a directory in this repository, in `projects/` or `seeds/`. The release also has locks of projects that have no directory here. This repository has no build files for them.
 
 If `oss-verify check` at `main` does not print `matches the lock` for a binary of the release, open an issue in this repository. Include the output of `oss-verify check`.
+
+## A development build that keeps addresses
+
+In a normal link, a change that makes one function larger moves every function after it. Each fact about the address of such a function then changes, and almost every proof file of the fuzz target must build again. A development build in the append mode keeps each function whose code did not change at the address that the base build gave it. The base build is the build of the merge base. The other functions go into free space.
+
+A development build is never evidence. Its binaries are never a pin and never a lock: they go only into a draft release, and no `project.yaml` or `harness.yaml` names them.
+
+Build the merge base and keep its layout tree, then build the change against that tree, then compare the two trees:
+
+    uv run oss-verify check --no-shell --layout-out base-layout <name>       # at the merge base
+    uv run oss-verify check --no-shell --layout-out new-layout --base-layout base-layout <name>
+    python3 infra/base-builder/layout.py check base-layout new-layout
+
+* `--layout-out DIR` turns on the records of each link, also without `--checks`, and sets `OV_LAYOUT=1`. After the build, it writes the layout tree of the build to `DIR` (`layout.py collect`). `DIR` must be new or an empty directory, because `layout.py check` compares each entry that two trees hold.
+* `--base-layout DIR` gives each `compile` container the layout tree `DIR`, read-only, as `OV_BASE_LAYOUT`. It needs `--layout-out`, which then gets the layout tree of the append build. With `--twice`, the second build is an append build too, so `--twice` also shows that two append builds of the same inputs make the same bytes.
+
+A base layout must come from a build with `OV_LAYOUT=1`. A record of `--checks` alone has no `wraps`, and `layout.py collect` refuses it.
+
+### The layout tree
+
+The layout tree has a directory `<build>/<target>/` for each fuzz target that has a record. [layout.py](../infra/base-builder/layout.py) writes these files from the record (`$OUT/.records/<sha256>/`), the files that the link took (`$OUT/.records/store/`) and the binary:
+
+* `map`: the map of the record, as it is: the input sections of the linker's map, in the map's order.
+* `sections.tsv`: one line for each line of `map` that names a file. It gives the file, the file that the key uses (for a copy of an allocation-failure link, its original), the archive member, the section, the SHA-256 of the section's bytes before relocation, the size of the input section and its alignment.
+* `calls.tsv`: each call relocation (`R_RISCV_CALL`, `R_RISCV_CALL_PLT`) of each `.text` input section, and its target. A call to a function that the link wraps (`--wrap=<f>`) is a call to `__wrap_<f>`, and a call to `__real_<f>` is a call to `<f>`.
+* `output.tsv`: the output sections, the `PT_LOAD` segments and the global symbols of the binary.
+* `binary.sha256`: the SHA-256 of the binary and of its stripped twin.
+* `wraps`: each function that the link wraps.
+* `placement.tsv`, of an append build only: where the append mode put each `.text` input section, and why a function whose bytes did not change moved.
+
+### What the append mode does
+
+`link-fuzz-target` uses the append mode when `$OV_BASE_LAYOUT/<build>/<target>/` exists. When `OV_BASE_LAYOUT` is set and that directory is not there, it writes one line on standard error and makes a normal link. An allocation-failure link uses the append mode too, and keys each copy of a file by its original.
+
+`layout.py append` does these steps:
+
+1. It links one time normally (the probe link). This gives the input sections that the link takes, their sizes, and the end of the read-only segment.
+2. It pairs each `.text` input section of the probe link with one of the base: by its key (the file, the member and the section) when the key occurs one time on each side; else by its section name, SHA-256 and size, when one section on each side has all three (a C++ COMDAT section that now comes from another object); else, for a key that occurs more than one time, member by member in the order of the map. A function has the same bytes when its input section has the same SHA-256 and size as at the base. The test reads the bytes before relocation, so a function whose calls now go to other addresses has the same bytes.
+3. Each function with the same bytes stays at its base address. Each other function goes into a hole between two kept functions, the largest first, where it fits at its alignment. A function that fits no hole goes to the end of `.text`. A changed function never goes to its own base address.
+4. When the code ends at or below the start of the page that holds the start of the base's next `PT_LOAD` segment, that segment starts where it did at the base, so the data after `.text` keeps its addresses. Else lld places the data, and `layout.py check` lists the data that moved.
+5. It writes an lld linker script that puts `.text` and each function at its address. The output and its stripped twin are linked with that script, after the seals. The quiet twin of the record is a normal link.
+6. It links with the script, and it checks that each kept function has its base address and its base size, and that the `PT_LOAD` segments have the count and the flags of the probe link. A difference that no cause below explains is a defect of the mode: the link stops with an error that names the function or the segment.
+
+### Why a function whose bytes did not change can move
+
+The mode never stops a link for a change of the code. When the linker cannot keep a function at its base address, the mode moves that function too and records one of these four causes in `placement.tsv`:
+
+* `jal_reach`: lld changes a call into one 4-byte `jal` instruction only when the target is less than 1 MiB away. When a call in the function would change in this way at its base address, because its target moved, the function moves too. This can occur only when `.text` is larger than 1 MiB.
+* `repeated_key`: one pattern of a linker script places all the sections of one key together, in their input order. The members of a key that occurs more than one time stay only when they were side by side at the base, in the same order, and each has the same bytes. Else they all move, as one block.
+* `alignment`: the alignment of the section grew, and its base address is not a multiple of the new alignment. This occurs only for code compiled without relaxation, or written in assembly: with relaxation, clang puts the padding of an alignment inside the section, so the bytes change.
+* `readonly_growth`: the read-only segment before `.text` grew past the start of the page that holds the base's first `.text` byte, so `.text` cannot start where it did. The mode then makes a normal link, writes one line that gives the growth and the room, and records each function with the same bytes with this cause. The room is less than 4 KiB. For `libreac/fuzz_pcap` it is 2,680 bytes (plain), 2,608 (ubsan), 144 (asan) and 64 (asan-ubsan).
+
+### The layout check
+
+`python3 infra/base-builder/layout.py check BASE NEW` compares each build and fuzz target that the two layout trees both hold. It pairs the `.text` input sections as the append mode does, and reads each address and size from the two maps. Each function with the same bytes must have its base address and its base size in `NEW`, or move for a cause in `NEW`'s `placement.tsv` that the two trees show. The check reads each cause again from the trees, and it does not believe `placement.tsv`. It lists the functions that moved with a cause apart. It also prints the number of kept functions, each changed function with its two addresses, the change of the start and the size of `.text`, and each other section with the same bytes that moved.
+
+It exits with status 1 when a function with the same bytes moved with no cause, or with a cause that the trees do not show, and names the function. It exits with status 2 when it cannot read a tree, or when the two trees have no build and fuzz target in common.
 
 ## Builds ported from oss-fuzz-theorems
 
