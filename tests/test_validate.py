@@ -419,6 +419,10 @@ class Problems(unittest.TestCase):
         self.assertProblem(MINIMAL, "a file name may use only", {**base, "-x.c": "x"})
         self.assertProblem(MINIMAL, "Dockerfile is empty", {**base, "Dockerfile": " \n"})
         self.assertProblem(MINIMAL, "build.sh is empty", {**base, "build.sh": ""})
+        self.assertProblem(MINIMAL, "Dockerfile names OFT_FRAME_POINTERS",
+                           {**base, "Dockerfile": "FROM x\nENV OFT_FRAME_POINTERS=1\n"})
+        self.assertProblem(MINIMAL, "build.sh names OFT_FRAME_POINTERS",
+                           {**base, "build.sh": "#!/bin/bash\nexport OFT_FRAME_POINTERS=1\n"})
         self.assertProblem(MINIMAL, "larger than 64 KiB", {**base, "Dockerfile": "x" * (64 * 1024 + 1)})
         self.assertProblem(MINIMAL, "larger than 256 KiB", {**base, "build.sh": "x" * (256 * 1024 + 1)})
         self.assertProblem(MINIMAL, "larger than 256 KiB", {**base, "big.c": "x" * (256 * 1024 + 1)})

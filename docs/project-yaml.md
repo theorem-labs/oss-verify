@@ -274,5 +274,6 @@ Each file must obey these rules:
 * Its size is at most 128 KiB for `project.yaml`.
 * Its size is at most 256 KiB for `build.sh`, a fuzz target source, a file that `sources` copies or reads, or a build patch.
 * Its size is at most 64 KiB for each other file.
+* The `Dockerfile` and `build.sh` do not name `OFT_FRAME_POINTERS`, because only the toolchain image gives that setting ([build-contract.md](build-contract.md#frame-pointers)).
 
 The project directory holds at most 64 files. Its name uses only `a-z 0-9 . _ -`, starts with a letter or digit, and has at most 63 characters.
