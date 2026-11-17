@@ -177,7 +177,9 @@ keep template-history.txt git log --format='%h %cI %s' -- .github/PULL_REQUEST_T
 # Each seed corpus: its listing, and the first 512 bytes of each of its first 200 inputs, in hexadecimal. The zip is the
 # pull request's. read() with no size decompresses the whole member before it cuts the member, so this reads 512 bytes
 # through open(). zipfile decompresses bzip2 and lzma with no bound, also for a read with a size. So this reads only a
-# stored or deflated member, and gives a line for each other member that says that it is not read.
+# stored or deflated member, and gives a line for each other member that says that it is not read. open() raises
+# RuntimeError for an encrypted member, because this gives no password. So this reads no member whose bit 0x1 of the
+# general purpose bit flag is set, as read_member of .github/scripts/artifact.py does, and gives a line for it too.
 for zip in "$dir"/*_seed_corpus.zip; do
   [ -f "$zip" ] || continue
   target=$(basename "$zip" _seed_corpus.zip)
@@ -189,6 +191,9 @@ with zipfile.ZipFile(sys.argv[1]) as archive, open(sys.argv[2], "w") as out:
         out.write(f"== {info.filename!r}: {info.file_size} bytes\n")
         if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
             out.write(f"(not read: compression method {info.compress_type}, not stored or deflated)\n")
+            continue
+        if info.flag_bits & 0x1:
+            out.write("(not read: encrypted)\n")
             continue
         with archive.open(info) as member:
             data = member.read(512)

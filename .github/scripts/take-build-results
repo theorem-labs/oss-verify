@@ -24,15 +24,12 @@ of main's code. For any other pull request this reads nothing of the artifact, a
 First it reads every page of the pull request's files, and checks each name and each previous name. A list of
 MAX_LISTED_FILES files or more is not the whole change, so then it reads nothing.
 
-The artifact is ARTIFACT of BUILD_RUN, which build.yaml's results job writes, and read_member of
-.github/scripts/artifact.py reads it. The run must have exactly one unexpired artifact of that name, and the artifact
-and its download must be of at most 1 MiB (MAX_ARTIFACT_BYTES). Its zip must hold exactly one member, MEMBER, stored or
-deflated, of at most 1 MiB by its header. A read with a size stops at the header's size for such a member, and the
-read of a member whose bytes do not match its header fails. That member must be JSON with the schema SCHEMA and the
-fields of FIELDS, each of its type, shape and size. Its pr, sha and project must be PR, HEAD_SHA and NAME: the pull
-request and the head that route read from the API, and the project that the gather job's own take-project took. The
-artifact never gives the number, the head, the diff or the files that review.yml reads or posts to. This reads the zip
-in memory and writes no file but GITHUB_OUTPUT: nothing goes into the working directory.
+The artifact is ARTIFACT of BUILD_RUN, which build.yaml's results job writes. read_member of .github/scripts/artifact.py
+reads MEMBER of ARTIFACT with the limit MAX_ARTIFACT_BYTES, by the rules of its docstring. That member must be JSON with
+the schema SCHEMA and the fields of FIELDS, each of its type, shape and size. Its pr, sha and project must be PR,
+HEAD_SHA and NAME: the pull request and the head that route read from the API, and the project that the gather job's
+own take-project took. The artifact never gives the number, the head, the diff or the files that review.yml reads or
+posts to. This reads the zip in memory and writes no file but GITHUB_OUTPUT: nothing goes into the working directory.
 
 When a read or a check fails, build is the fixed line NO_RESULT, and binaries, checks and commit are empty. The log
 says why, with no text of the artifact. The exit status is then 0, so the review continues with no result of the

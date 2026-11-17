@@ -9,9 +9,9 @@ they import steering.py:
     data, why = read_member(Api(), repo, run, "build-results", "results.json", 1 << 20)
 
 read_member gives the bytes of the file and '', or None and why not. The reason names no text of the artifact. A zip,
-or a file in it, that zipfile cannot read raises one of the exceptions that read_member's docstring names. A call of gh
-that fails raises subprocess.CalledProcessError. Each caller handles them in its own way. This reads the zip in memory
-and writes no file.
+or a file in it, that zipfile cannot read raises one of the exceptions of UNREADABLE. A call of gh that fails raises
+subprocess.CalledProcessError. Each caller handles them in its own way. This reads the zip in memory and writes no
+file.
 """
 from __future__ import annotations
 
@@ -19,6 +19,13 @@ import io
 import json
 import subprocess
 import zipfile
+import zlib
+
+# The exceptions that read_member does not catch, for a zip, or a file in it, that zipfile cannot read:
+# zipfile.BadZipFile (for example, a file whose bytes do not match its header), EOFError (a cut file), zlib.error (a
+# broken deflate stream), NotImplementedError (a flag bit or a zip version that zipfile cannot read), and ValueError (a
+# file name that is not UTF-8).
+UNREADABLE = (zipfile.BadZipFile, EOFError, zlib.error, NotImplementedError, ValueError)
 
 
 class Api:
@@ -49,11 +56,9 @@ def read_member(api: Api, repo: str, run: int, name: str, member: str, limit: in
     whole numbers. That size and the size of the download must be at most `limit` bytes. The zip must hold `member`
     once, and no other file. That file must be stored or deflated, and of at most `limit` bytes by its header. It must
     not be encrypted. A read with a size stops at the header's size for such a file.
-    zipfile raises an exception for a zip, or a file in it, that it cannot read, and this does not catch it:
-    zipfile.BadZipFile (for example, a file whose bytes do not match its header), EOFError (a cut file), zlib.error (a
-    broken deflate stream), NotImplementedError (a flag bit or a zip version that zipfile cannot read), or ValueError
-    (a file name that is not UTF-8). An answer of the API that is not JSON raises ValueError too. A call of gh that
-    fails raises subprocess.CalledProcessError."""
+    zipfile raises an exception of UNREADABLE for a zip, or a file in it, that it cannot read, and this does not catch
+    it. An answer of the API that is not JSON raises ValueError, one of UNREADABLE, too. A call of gh that fails raises
+    subprocess.CalledProcessError."""
     found = [a for page in api.pages(f"repos/{repo}/actions/runs/{run}/artifacts?name={name}&per_page=100")
              for a in page.get("artifacts") or [] if a.get("name") == name and not a.get("expired")]
     if len(found) != 1:

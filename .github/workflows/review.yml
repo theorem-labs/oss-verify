@@ -186,8 +186,9 @@ name: "Review"
 #            unless a newer hold came after that review's run started.
 #            On a run by hand for a held head (below), its step "Approve the held runs" approves every held run of
 #            that head (.github/scripts/approve-held) when the screen's verdict is clean. Such a run posts no review,
-#            no comment and no check run. A hold of it is recorded by the rules above, except when the oss-verify App
-#            recorded a check run Enrollment review of that pull request at that head already: that check run stands.
+#            no comment and no check run. A hold of it is recorded by the rules above, except when the newest check
+#            run Enrollment review of the oss-verify App for that pull request at that head is a verdict of the review:
+#            that verdict stands. A hold replaces an earlier hold.
 #            On a run by hand for a merged pull request whose run of enroll-merged.yml GitHub holds (route's replay,
 #            below), its step "Replay the merge for Enroll dispatch" starts enroll-merged.yml for that pull request with
 #            the App's token, so that enroll-dispatch.yml runs on its completion. Such a run does nothing else.
@@ -209,8 +210,8 @@ name: "Review"
 # hold, comment, triage-gather and triage jobs when their own conditions call for them (the screen and the review on
 # the gather job's outputs screen and digest). Every other job must be skipped. A held item passes it when the comment
 # job recorded the hold: for an enrollment in the check run Enrollment review (the screen's hold or the daily cap),
-# for a change or an issue with the label review-held. On a run by hand for a held head whose check run Enrollment
-# review stands (above), the comment job records nothing and passes. A gather, screen, review (after its second
+# for a change or an issue with the label review-held. On a run by hand for a held head whose verdict of the review
+# stands (above), the comment job records nothing and passes. A gather, screen, review (after its second
 # attempt), hold or comment job that failed fails it, held or not, which a re-run of the failed jobs clears. It is no
 # check that the ruleset requires: a check of a workflow_run or workflow_dispatch run never satisfies a required check
 # (https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks#checks-from-some-workflow-jobs-are-not-evaluated).
@@ -367,10 +368,10 @@ name: "Review"
 #     change, and the screen reads the text, the diff and each changed file. A clean verdict: the comment job
 #     approves every held run of that head, and posts no review, no comment and no check run. A screen that held it,
 #     a job that failed, or the daily cap: the comment job records the hold by one rule. An enrollment at the cap, or
-#     one whose project the gather job took, gets the check run Enrollment review with the hold. But when the
-#     oss-verify App recorded a check run Enrollment review of that pull request at that head already, that check run
-#     stands. The comment job then records nothing and posts nothing. Any other item gets the label review-held and
-#     the hold comment.
+#     one whose project the gather job took, gets the check run Enrollment review with the hold. But when the newest
+#     check run Enrollment review of the oss-verify App for that pull request at that head is a verdict of the review,
+#     that verdict stands. The comment job then records nothing and posts nothing. When that check run is a hold, the
+#     new hold replaces it. Any other item gets the label review-held and the hold comment.
 #   - Not held, an enrollment with a completed Build run of that head that wrote build-results: the review, with the
 #     results of the newest such run, and the comment.
 #   - Not held, an enrollment with no such Build run: nothing. route says "No Build run of this head wrote results: a
@@ -1806,8 +1807,9 @@ jobs:
     # On a run by hand for a held head (route's held), a clean verdict of the screen approves the head's held runs
     # (APPROVE below), and nothing is posted or recorded. Any other outcome of such a run is recorded by the rules
     # above: RECORD for an enrollment whose project the gather job took, or one at the daily cap, and else the label
-    # and the hold comment. Not a check run when the oss-verify App recorded one of this pull request at this head
-    # already: that check run stands (the step "Post the comment and record the verdict").
+    # and the hold comment. Not a check run when the newest check run Enrollment review of the oss-verify App for this
+    # pull request at this head is a verdict of the review: that verdict stands. A hold replaces an earlier hold (the
+    # step "Post the comment and record the verdict").
     # On a run by hand that replays a merge (route's replay, REPLAY below), it starts enroll-merged.yml for the pull
     # request with the App's token, and does nothing else: no gather, screen or review ran, and it posts and records
     # nothing. GitHub starts no workflow_run for a run that a job's GITHUB_TOKEN starts, so Held runs cannot start that
@@ -2063,8 +2065,8 @@ jobs:
       # Enrollment review too, from the same parsed verdicts, on every run this job runs for. Its outputs: posted=true
       # when it posted the review comment, and recorded=true when it recorded the check run (the step after it then
       # takes a hold off). Nothing on an approval or a replay. On a run by hand for a held head, a hold records nothing
-      # and posts nothing when the oss-verify App recorded a check run Enrollment review of this pull request at this
-      # head already: that check run stands (below).
+      # and posts nothing when the newest check run Enrollment review of the oss-verify App for this pull request at
+      # this head is a verdict of the review: that verdict stands. A hold replaces an earlier hold (below).
       - name: Post the comment and record the verdict
         id: post
         if: env.APPROVE != 'true' && (env.RECORD == 'true' || (env.KIND == 'change' && env.HOLDING != 'true'))
@@ -2114,16 +2116,22 @@ jobs:
             fi
           fi
           # On a run by hand for a held head (HELD_RUNS), the screen decides only whether this job approves the held
-          # runs. It does not change the review's verdict. A check run Enrollment review of this pull request at this
-          # head that the oss-verify App recorded already (a review's verdict, or an earlier hold) stands: no hold
-          # replaces it, and nothing is posted. This step finds that check run as enroll-dispatch does: by its name
-          # (the query's check_name), by the App's id (REVIEW_APP) and by its external_id, the pull request's number.
-          # A read that fails fails this step.
+          # runs. It does not change the review's verdict. So the newest check run Enrollment review of this pull
+          # request at this head that the oss-verify App recorded decides. When it is a verdict of the review, that
+          # verdict stands: a hold records nothing and posts nothing. When it is a hold, the new hold replaces it. This
+          # step finds that check run as enroll-dispatch does. It reads the check runs by their name (the query's
+          # check_name), by the App's id (REVIEW_APP) and by their external_id, the pull request's number. Of these,
+          # the newest has the largest id. Its title tells a hold from a verdict: review-verdict --holds prints the
+          # title of each hold, and a verdict has none of them. Its conclusion cannot tell them: a verdict with a
+          # person check is action_required, as a hold is. A read that fails fails this step.
           if [ "${HELD_RUNS:-}" = true ] && [ -n "$hold" ]; then
-            recorded=$(gh api --paginate "repos/$REPO/commits/$HEAD_SHA/check-runs?check_name=Enrollment%20review&filter=all&per_page=100" \
-              --jq '.check_runs[] | select(.app.id == 5447700) | .external_id // ""')
-            if grep -qxF "$PR" <<< "$recorded"; then
-              echo "The oss-verify App recorded a check run Enrollment review of #$PR at $HEAD_SHA already, and it stands: this hold ($hold${job:+, the $job job}) records nothing and posts nothing."
+            holds=$(.github/scripts/review-verdict --holds)
+            newest=$(gh api --paginate "repos/$REPO/commits/$HEAD_SHA/check-runs?check_name=Enrollment%20review&filter=all&per_page=100" \
+                --jq '.check_runs[] | select(.app.id == 5447700) | {id, external_id, title: .output.title}' \
+              | jq -r -s --arg pr "$PR" --arg holds "$holds" 'map(select(.external_id == $pr)) | max_by(.id)
+                  | if . == null then "none" elif IN(.title; $holds | split("\n")[]) then "hold" else "verdict" end')
+            if [ "$newest" = verdict ]; then
+              echo "The newest check run Enrollment review of #$PR at $HEAD_SHA by the oss-verify App is a verdict of the review, and it stands: this hold ($hold${job:+, the $job job}) records nothing and posts nothing."
               exit 0
             fi
           fi

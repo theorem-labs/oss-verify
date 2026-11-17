@@ -2153,7 +2153,10 @@ class SeedHex(unittest.TestCase):
         """A deflated member and a bzip2 member each hold 64 MiB of spaces, in a zip of less than 1 MiB. The script of
         review-gather runs in this process, so that tracemalloc sees its memory. It takes less than 16 MiB: a read of
         a whole member takes about 128 MiB. It gives the first 512 bytes of a stored member, of a deflated member and
-        of the deflated 64 MiB. It does not read the bzip2 member: zipfile decompresses bzip2 with no bound."""
+        of the deflated 64 MiB. It does not read the bzip2 member: zipfile decompresses bzip2 with no bound. It does
+        not read an encrypted member either: open() raises RuntimeError for it, because the script gives no
+        password."""
+        import struct
         import tracemalloc
         from unittest import mock
         gather = (ROOT / ".github" / "scripts" / "review-gather").read_text()
@@ -2164,6 +2167,7 @@ class SeedHex(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             corpus, hex_file = pathlib.Path(directory) / "x_seed_corpus.zip", pathlib.Path(directory) / "x.hex.txt"
             with zipfile.ZipFile(corpus, "w") as archive:
+                archive.writestr("encrypted", stored)
                 archive.writestr("stored", stored)
                 archive.writestr("deflated", deflated, compress_type=zipfile.ZIP_DEFLATED)
                 for name, method in (("deflated-64-mib", zipfile.ZIP_DEFLATED), ("bzip2-64-mib", zipfile.ZIP_BZIP2)):
@@ -2172,6 +2176,14 @@ class SeedHex(unittest.TestCase):
                     with archive.open(info, "w") as member:
                         for _ in range(size // len(spaces)):
                             member.write(spaces)
+            # zipfile writes no encrypted member. So this sets bit 0x1 of the general purpose bit flag, which marks an
+            # encrypted member, on the first member, "encrypted". The flag is 6 bytes into its local file header, at the
+            # start of the zip, and 8 bytes into its central directory entry. The end of central directory record (the
+            # last 22 bytes) gives the offset of that entry, the first one, 16 bytes into it.
+            raw = bytearray(corpus.read_bytes())
+            for at in (6, struct.unpack_from("<I", raw, len(raw) - 22 + 16)[0] + 8):
+                struct.pack_into("<H", raw, at, struct.unpack_from("<H", raw, at)[0] | 0x1)
+            corpus.write_bytes(raw)
             self.assertLess(corpus.stat().st_size, 1 << 20)
             with mock.patch.object(sys, "argv", ["-", str(corpus), str(hex_file)]):
                 tracemalloc.start()
@@ -2191,13 +2203,15 @@ class SeedHex(unittest.TestCase):
                 rows = members.setdefault(line, [])
             else:
                 rows.append(line)
-        self.assertEqual(list(members), ["== 'stored': 768 bytes", "== 'deflated': 1000 bytes",
-                                         f"== 'deflated-64-mib': {size} bytes", f"== 'bzip2-64-mib': {size} bytes"])
+        self.assertEqual(list(members), ["== 'encrypted': 768 bytes", "== 'stored': 768 bytes",
+                                         "== 'deflated': 1000 bytes", f"== 'deflated-64-mib': {size} bytes",
+                                         f"== 'bzip2-64-mib': {size} bytes"])
         for name, data in (("== 'stored': 768 bytes", stored), ("== 'deflated': 1000 bytes", deflated),
                            (f"== 'deflated-64-mib': {size} bytes", spaces)):
             self.assertEqual(b"".join(bytes.fromhex(row[6:53]) for row in members[name]), data[:512], name)
         self.assertEqual(members[f"== 'bzip2-64-mib': {size} bytes"],
                          ["(not read: compression method 12, not stored or deflated)"])
+        self.assertEqual(members["== 'encrypted': 768 bytes"], ["(not read: encrypted)"])
 
 
 class ReviewJob(unittest.TestCase):
