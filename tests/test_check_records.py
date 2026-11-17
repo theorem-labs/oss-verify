@@ -6,6 +6,8 @@ Written for theorem-labs/oss-verify#24, and moved here with the reader.
 """
 import pathlib
 import sys
+import time
+import tracemalloc
 import unittest
 
 from oss_verify import check_records
@@ -130,6 +132,65 @@ class Reader(unittest.TestCase):
         self.assertEqual([record.line for record in found.records], [999999999])
 
 
+# A harness source is the project's to write, and check --checks reads each one the coverage build compiled in the
+# directory of a fuzz target, up to 16 MiB (check_checks.MAX_IMAGE_FILE_BYTES). The reader that read back over the
+# source for each separator, abort() or case label took from 46 seconds to over 4 minutes on the first four cases here,
+# and the long line's copies took 1.4 GB; the bound leaves room for a slow machine.
+LINEAR_SECONDS = 10
+
+
+class Speed(unittest.TestCase):
+    def timed(self, source):
+        start = time.monotonic()
+        found = check_records.find_checks(source)
+        self.assertLess(time.monotonic() - start, LINEAR_SECONDS)
+        return found
+
+    def test_a_number_with_many_digit_separators_is_read_in_linear_time(self):
+        """Each `'` of 1'1'1'...'1 is a digit separator, not a character literal: the number is read once, not once
+        for each of its separators."""
+        (found,) = self.timed("int f(int x) {\n  int n = " + "1'" * 32768 + "1; if (x) abort();\n}\n")
+        self.assertEqual((found.line, found.guard, found.note), (2, (2, 2), None))
+
+    def test_many_aborts_in_one_block_are_read_in_linear_time(self):
+        """Each abort() after another statement is guarded by the block that holds it, found without reading back
+        over the block."""
+        unit = "    g(); abort();\n"
+        found = self.timed("void f(int x) {\n  if (x) {\n" + unit * (256 * 1024 // len(unit)) + "  }\n}\n")
+        self.assertEqual(len(found), 256 * 1024 // len(unit))
+        self.assertEqual({(check.guard, check.note) for check in found}, {((2, 2), None)})
+
+    def test_many_case_labels_in_one_switch_are_read_in_linear_time(self):
+        """Each `case 1: abort();` is guarded by its switch, found without reading back over the switch."""
+        unit = "  case 1: abort();\n"
+        found = self.timed("void f(int x) {\n  switch (x) {\n" + unit * (256 * 1024 // len(unit)) + "  }\n}\n")
+        self.assertEqual(len(found), 256 * 1024 // len(unit))
+        self.assertEqual({(check.guard, check.note) for check in found}, {((2, 2), None)})
+
+    def test_many_aborts_under_a_guard_of_many_lines_are_read_in_linear_time(self):
+        """The guard of a block, or the switch of its case labels, is found once for the block, and of its lines only
+        those with a comment are read for records: each check does not read back over the whole guard."""
+        for head, unit in (("if", "g(); abort(); "), ("switch", "case 1: abort(); ")):
+            source = "void f(int x) {\n  " + head + " (x" + "\n" * 262144 + ") {\n" + unit * 4096 + "\n  }\n}\n"
+            found = self.timed(source)
+            self.assertEqual(len(found), 4096)
+            self.assertEqual({(check.guard, check.note) for check in found}, {((2, 262146), None)})
+
+    def test_the_checks_on_one_long_line_share_its_text(self):
+        """The text of a line is found once, however many checks are on it. A copy for each check took memory that
+        grew with the square of the line: 8,192 checks on one line of 172 KB held 1.4 GB of copies."""
+        line = "if (x) g();" + " else if (x) abort();" * 8192
+        source = "void f(int x) {\n  " + line + "\n}\n"
+        found = self.timed(source)  # tracemalloc slows the reader several times over: time it without
+        tracemalloc.start()
+        try:
+            check_records.find_checks(source)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 64 << 20)
+        self.assertEqual(len(found), 8192)
+        self.assertEqual({(check.line, check.guard, check.text) for check in found}, {(2, (2, 2), line)})
 
 
 class Macros(unittest.TestCase):
