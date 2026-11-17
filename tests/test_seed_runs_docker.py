@@ -32,9 +32,11 @@ BUILD = "asan-ubsan"
 # The C fuzz target: tests/fixtures/example/build.sh links it to $OUT/example_fuzzer.
 TARGET = "example_fuzzer"
 # The time limit of each run here, in seconds, in place of check_checks.RUN_TIMEOUT and check_binaries.RUN_SECONDS.
-# Before the fix, the core dump of an aborting run did not end within this time on the CI runner. After the fix, each
-# aborting run ends in less than a fifth of it. The tests set this limit themselves, so a fix that only makes the limit
-# longer still fails here. A short limit also keeps the tests fast.
+# Before the fix, the core dump of an aborting run did not end within this time on the CI runner: the runs on 'h' read
+# 137 in theorem-labs/oss-verify's tests.yaml runs 44069641356 and 44070455751. With the fix, an aborting run ends in
+# less than a second: in OSSV-729's measurement on ubuntu-24.04-16core, the longest of 50 aborting runs took 0.86 s.
+# The tests set this limit themselves, so a fix that only makes the limit longer still fails here. A short limit also
+# keeps the tests fast.
 LIMIT = 20
 # Each input: its name, its payload after the driver's header, and the exit status of its run in the asan-ubsan build
 # (tests/fixtures/example/example.c, and EXPECTED in tests/test_builder.py). The four that start with 'h' read one byte
