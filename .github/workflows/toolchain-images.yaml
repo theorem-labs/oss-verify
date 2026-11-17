@@ -48,6 +48,9 @@ name: "Toolchain images"
 #                 layers and has its media type, and unless the configuration is the base image's with
 #                 OFT_FRAME_POINTERS=1 added. Its step summary gives the digest. publish is the one job of this file
 #                 with packages: write.
+#   failure-notice
+#                 After the other jobs, when one of them failed. It writes the run's URL to the run's summary, with
+#                 the name and the first error line of each failed job. Then it fails.
 #
 # The publish job of a run on main is the only route of these images to ghcr.io. No person and no agent pushes an
 # image by hand, with any token. No copy goes to a different registry. publish pushes with the job's GITHUB_TOKEN. The
@@ -65,9 +68,12 @@ name: "Toolchain images"
 # oss-fuzz-theorems-toolchain. So the controls are the code owners' review of /.github/ on main (.github/CODEOWNERS)
 # and who may push a branch of this repository.
 #
-# If publish fails, fix the cause. Then run publish again: run the failed jobs of that run again, or start a later run
-# on main (a push that changes a path below, or a run by hand). A rerun of the failed jobs reads the digest that make
-# made in that run: GitHub keeps the artifact for 30 days.
+# publish runs only after the merge, and GitHub tells only the person who started a run that it failed. So after a
+# run where a job failed, failure-notice writes the failed run's URL and the first error line to the summary, and
+# fails. OS Verify's controller watches the push runs of this workflow (dispatch://INFRA-4122). Thus a failed run on
+# main reaches it. If publish fails, fix the cause. Then run publish again: run the failed jobs of that run again, or
+# start a later run on main (a push that changes a path below, or a run by hand). A rerun of the failed jobs reads the
+# digest that make made in that run: GitHub keeps the artifact for 30 days.
 #
 # A row of infra/toolchains.tsv names an image only after the image is published. Thus the rows of these images come
 # in a pull request after the push.
@@ -115,7 +121,7 @@ env:
 
 jobs:
   make:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
       contents: read
@@ -272,7 +278,7 @@ jobs:
 
   probe:
     needs: make
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
       contents: read
@@ -344,7 +350,7 @@ jobs:
 
   docker-tests:
     needs: make
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
       contents: read
@@ -420,7 +426,7 @@ jobs:
   publish:
     needs: [make, probe, docker-tests]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
       contents: read
@@ -507,3 +513,54 @@ jobs:
             '($b | .config.Env += ["OFT_FRAME_POINTERS=1"]) == $n' > /dev/null ||
             { echo "::error::$ref's configuration is not the base image's with OFT_FRAME_POINTERS=1 added"; exit 1; }
           echo "### $BASE_ROW, with frame pointers: \`$ref\` ($how)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  failure-notice:
+    needs: [make, probe, docker-tests, publish]
+    if: failure()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read # to list the jobs of this run
+      checks: read # to read the annotations of each failed job
+    steps:
+      - name: the failed run's URL and the first error line, to the summary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          attempt="actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT"
+          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/$attempt"
+          { echo "### $GITHUB_WORKFLOW failed: $GITHUB_EVENT_NAME on $GITHUB_REF_NAME"; echo; echo "Run: $url"; echo; } \
+            >> "$GITHUB_STEP_SUMMARY"
+          # The failed jobs of this attempt, one line each: its check run's id, its name and its first failed step.
+          if ! failed=$(gh api "repos/$GITHUB_REPOSITORY/$attempt/jobs" --paginate |
+              jq -r '.jobs[] | select(.conclusion == "failure") | [(.check_run_url | split("/") | last), .name,
+                ([.steps[]? | select(.conclusion == "failure") | .name][0] // "")] | @tsv'); then
+            echo "The error line could not be read: GitHub's API gave an error for the jobs of this run." \
+              >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::$url: the error line could not be read"
+            exit 1
+          fi
+          first=""
+          while IFS=$'\t' read -r id name step; do
+            [ -n "$id" ] || continue
+            # The first error annotation that is not GitHub's "Process completed with exit code N.", else that one,
+            # else the name of the job's first failed step. It takes only the first line of each message.
+            if line=$(gh api "repos/$GITHUB_REPOSITORY/check-runs/$id/annotations" --paginate < /dev/null |
+                jq -rs '[add // [] | .[] | select(.annotation_level == "failure") | .message // "" | split("\n")
+                  | map(select(test("\\S")))[0] // empty]
+                  | (map(select(test("^Process completed with exit code [0-9]+\\.?$") | not)) + .)[0] // empty'); then
+              if [ -z "$line" ] && [ -n "$step" ]; then line="the step \"$step\" failed"; fi
+              line=${line:-GitHub gives no error line}
+            else
+              line="the error line could not be read: GitHub's API gave an error for the annotations of this job"
+            fi
+            echo "- $name: $line" >> "$GITHUB_STEP_SUMMARY"
+            first=${first:-$name: $line}
+          done <<< "$failed"
+          if [ -z "$first" ]; then
+            first="the jobs list of this attempt has no failed job"
+            echo "$first" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "::error::$url: $first"
+          exit 1
