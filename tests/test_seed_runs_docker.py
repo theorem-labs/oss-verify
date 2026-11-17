@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Run the asan-ubsan build of tests/fixtures/example on inputs that make it abort. Run it with the two scripts that run
 fuzz targets for oss-verify check --checks: infra/checks/run-seeds (check_checks.run_all) and infra/checks/run-binaries
-(check_binaries.run_job). Check that each run gives its own exit status.
+(check_binaries.run_job). Check that each run gives its own exit status, and that check 3 of the binary checks (quiet
+and loud) counts an input on which the build aborts as agreed.
 
 A run that aborts must give the status of its abort, 134. It must not give 137. 137 is the status of a run that the
 time limit stopped, and such a run is neither a pass nor a catch. run-seeds and run-binaries write 0 to
@@ -25,6 +26,7 @@ from oss_verify import check_binaries
 from oss_verify import check_build
 from oss_verify import check_checks
 from oss_verify import validate
+from test_builder import docker_ready
 
 FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "example"
 TAG = "oss-verify-test/example-seed-runs:latest"
@@ -42,7 +44,7 @@ TARGET = "example_fuzzer"
 LIMIT = 20
 # Each input: its name, its payload after the driver's header, and the exit status of its run in the asan-ubsan build
 # (tests/fixtures/example/example.c, and EXPECTED in tests/test_builder.py). The four that start with 'h' read one byte
-# past the end of a heap block: AddressSanitizer reports it and calls abort(). run-seeds runs as many runs at once as
+# past the end of a heap block: AddressSanitizer finds it and calls abort(). run-seeds runs as many runs at once as
 # the machine has CPUs, so with four CPUs or more these four run at the same time.
 SEEDS = [
     ("h", b"h", 134),
@@ -53,15 +55,6 @@ SEEDS = [
     ("s", b"s", 139),  # a load through a null pointer: a segmentation fault
     ("m", b"m", 0),  # the fuzz target returns -1, which passes
 ]
-
-
-def docker_ready():
-    """Whether Docker runs and the toolchain image the fixture builds FROM (the newest for C) is here."""
-    try:
-        return subprocess.run(["docker", "image", "inspect", check_build.newest_toolchain()],
-                              capture_output=True).returncode == 0
-    except OSError:
-        return False
 
 
 @unittest.skipUnless(os.environ.get("OV_DOCKER_TESTS") == "1" and QEMU and docker_ready(),
@@ -80,7 +73,9 @@ class SeedRuns(unittest.TestCase):
                               dockerfile="", builds=[BUILD], fuzz_targets=None)
         check_build.build_project(job, "0" * 40, check_build.build_builder(), TAG, cls.work)
         cls.raw = cls.work / "raw" / BUILD
-        check_build.compile_build(TAG, BUILD, validate.BUILDS[BUILD], cls.raw, labels=cls.labels)
+        # As oss-verify check --checks compiles: with records, so that compile also makes the quiet twin. The records
+        # change no byte of the binary (tests/test_binary_checks_docker.py, test_records_change_no_byte).
+        check_build.compile_build(TAG, BUILD, validate.BUILDS[BUILD], cls.raw, labels=cls.labels, record=True)
 
     @classmethod
     def tearDownClass(cls):
@@ -110,21 +105,36 @@ class SeedRuns(unittest.TestCase):
 
     def test_binary_runs_read_each_exit_status(self):
         # The job's files as check_binaries.binary_checks lays them out. binary_checks runs the stripped copy that
-        # compile publishes. Stripping removes no code, so the raw binary serves here.
+        # compile publishes. Stripping removes no code, so the raw binary serves here. The quiet twin is the one that
+        # compile recorded.
         job_dir = self.work / "binary-runs"
         files = job_dir / "job"
         (files / "inputs").mkdir(parents=True)
         shutil.copyfile(self.raw / TARGET, files / "binary")
+        quiet = check_binaries.record_of(self.raw, TARGET)[1]
+        self.assertIsNotNone(quiet, "compile recorded no quiet twin")
+        (files / "quiet").write_bytes(quiet)
         os.chmod(files / "binary", 0o755)
-        (files / "inputs" / "0").write_bytes(check_checks.HEADER + b"h")
-        (files / "inputs" / "1").write_bytes(check_checks.HEADER + b"m")
-        (files / "runs").write_text(f"l0 binary inputs/0 {TARGET}\nl1 binary inputs/1 {TARGET}\n")
+        os.chmod(files / "quiet", 0o755)
+        inputs = [("h", check_checks.HEADER + b"h"), ("m", check_checks.HEADER + b"m")]
+        runs = []
+        for n, (_, data) in enumerate(inputs):
+            (files / "inputs" / str(n)).write_bytes(data)
+            runs += [f"l{n} binary inputs/{n} {TARGET}", f"q{n} quiet inputs/{n} {TARGET}"]
+        (files / "runs").write_text("".join(f"{run}\n" for run in runs))
         results = check_binaries.run_job(job_dir, check_build.newest_toolchain(), check_checks.qemu(), self.labels,
                                          600)
-        run_names = {"h": "l0", "m": "l1"}  # the names of the runs in the file "runs"
-        statuses = {name: (results / f"{run}.status").read_text().strip() for name, run in run_names.items()}
-        self.assertEqual(statuses, {"h": "134", "m": "0"},
+        loud = {name: (results / f"l{n}.status").read_text().strip() for n, (name, _) in enumerate(inputs)}
+        self.assertEqual(loud, {"h": "134", "m": "0"},
                          f"{check_binaries.STOPPED} is the status of a run the time limit stopped")
+        silent = {name: (results / f"q{n}.status").read_text().strip() for n, (name, _) in enumerate(inputs)}
+        self.assertEqual(silent, loud, "the quiet twin must exit with the binary's status")
+        # An ASan abort writes no report (docs/build-contract.md, the sealed AddressSanitizer runtime). Thus on 'h'
+        # the binary and its quiet twin both exit 134, the twin writes nothing, and check 3 counts 'h' as agreed.
+        agreement = check_binaries.quiet_loud(True, "", inputs, results)
+        self.assertEqual(agreement["result"], "pass", agreement)
+        # A pass that lists no input as not decided means that both inputs agreed.
+        self.assertNotIn("not decided", agreement["detail"])
 
 
 if __name__ == "__main__":
