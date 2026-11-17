@@ -21,10 +21,13 @@ target with a record it writes the layout tree DIR/<build>/<target>/:
                    the member or -, the section, the sha256 of the section's bytes before relocation (empty for
                    SHT_NOBITS and for a section the object does not hold, such as COMMON), its input size and its
                    alignment
-    calls.tsv      each call relocation of each .text input section: its row in sections.tsv, its offset, and
-                   `local <row> <value>` for a symbol of the same object (the row of the section it is defined in,
-                   or - when the map did not take it), else `global <name> <addend>`, with the name the link
-                   resolves it to through its wraps
+    calls.tsv      each call (R_RISCV_CALL, R_RISCV_CALL_PLT) and each thread-local access (R_RISCV_TPREL_HI20, the
+                   lui of a local-exec access) of each .text input section: its row in sections.tsv, its offset, its
+                   type (call or tprel), then `local <row> <value>` for a symbol of the same object (the row of the
+                   section it is defined in, or - when the map did not take it), else `global <name> <addend>`, with
+                   the name the link resolves it to through its wraps, and last the definition of a global in the
+                   link's own objects, `<row> <value>` (- - when no object defines it: a symbol the linker makes; a
+                   local line ends with - -)
     output.tsv     the unstripped binary's section headers, PT_LOAD segments and defined global symbols
     binary.sha256  the sha256 of the unstripped binary and of its stripped twin
     wraps          the functions the link wraps (--wrap=<f>), one a line
@@ -34,10 +37,11 @@ target with a record it writes the layout tree DIR/<build>/<target>/:
 check compares two layout trees, a base and an append build, for each (build, target) that both hold. It pairs the
 .text input sections (pair), and each function whose input section has the same bytes as at the base must have the
 base's address and linked size, unless NEW's placement.tsv names a cause that the two trees show: jal_reach (a call
-in it would be relaxed otherwise at its base address), repeated_key (lld's patterns cannot place it apart from another
-section of its key), alignment (its base address does not meet its new alignment) or readonly_growth (the segment in
-front of .text grew past the page that holds the base's first .text byte). It exits 1 when one does not, naming the
-function; 2 when a tree cannot be read or the two share no (build, target); else 0.
+in it would be relaxed otherwise at its base address), tls_reach (a thread-local access in it is relaxed otherwise: its
+variable crossed the bound of 2 KiB from the start of the TLS segment), repeated_key (lld's patterns cannot place it
+apart from another section of its key), alignment (its base address does not meet its new alignment) or
+readonly_growth (the segment in front of .text grew past the page that holds the base's first .text byte). It exits 1
+when one does not, naming the function; 2 when a tree cannot be read or the two share no (build, target); else 0.
 
 wraps prints the functions that the link COMMAND wraps, one a line, sorted: each --wrap=<f> of the linker command
 that the compiler driver gives for it with -###, with each @file expanded. It exits 2 when the command fails or gives
@@ -50,11 +54,13 @@ renamed. It writes the link's wraps to --wraps, links once normally (the probe l
 each .text input section goes: each same-bytes one at its base address, unless it moves for one of the causes above,
 and every other one into a hole before or between them or at the end of .text. It writes the lld script of that
 plan to --script, links with it (the check link, DIR/check), verifies that each kept section is at its base address
-with its base linked size, that the PT_LOAD segments are the probe link's and that no two of them share a page, and
-writes placement.tsv to --placement. When the read-only data in front of .text grew past its room, it writes no
-script: the link is a normal one, and placement.tsv gives every same-bytes section readonly_growth. It exits 1 when a
-link fails, when the check link is not what the plan asks, or when a file or section name holds a double quote or a
-line break, which the script cannot quote; 2 when an input cannot be read; else 0.
+with its base linked size (one whose call or thread-local access the check link relaxes otherwise moves, with
+jal_reach or tls_reach, and the plan runs again), that the PT_LOAD segments are the probe link's and that no two of
+them share a page, and writes placement.tsv to --placement. When the read-only data in front of .text grew past its
+room, it writes no script: the link is a normal one, and placement.tsv gives every same-bytes section
+readonly_growth. It exits 1 when a link fails, when the check link is not what the plan asks, or when a file or
+section name holds a double quote or a line break, which the script cannot quote; 2 when an input cannot be read;
+else 0.
 
 The builder image runs this file with its own python3, and the host runs its commands: it takes the standard library
 only, and the syntax of Python 3.9.
@@ -71,14 +77,19 @@ import struct
 import subprocess
 import sys
 
-CAUSES = ("jal_reach", "repeated_key", "alignment", "readonly_growth")
+CAUSES = ("jal_reach", "tls_reach", "repeated_key", "alignment", "readonly_growth")
 PLACES = ("kept", "hole", "end", "normal")
 # lld relaxes a call to one `jal` when the target is this many bytes from the call site, at most.
 JAL_REACH = (-0x100000, 0xFFFFE)
+# lld removes the lui and the add of a local-exec thread-local access when the variable's offset from the start of
+# the TLS segment, plus the addend, is in this range: its hi20 is 0 (lld's relaxTlsLe).
+TLS_REACH = (-0x800, 0x7FF)
 PAGE = 0x1000
-R_RISCV_CALL, R_RISCV_CALL_PLT = 18, 19
+R_RISCV_CALL, R_RISCV_CALL_PLT, R_RISCV_TPREL_HI20 = 18, 19, 29
+# The type of a line of calls.tsv, by the relocation it records.
+LINE_TYPES = {R_RISCV_CALL: "call", R_RISCV_CALL_PLT: "call", R_RISCV_TPREL_HI20: "tprel"}
 SHT_SYMTAB, SHT_RELA, SHT_NOBITS, SHT_REL, SHT_SYMTAB_SHNDX = 2, 4, 8, 9, 18
-SHF_ALLOC = 0x2
+SHF_ALLOC, SHF_TLS = 0x2, 0x400
 STB_LOCAL, STB_GLOBAL, STB_WEAK = 0, 1, 2
 STT_SECTION = 3
 SHN_UNDEF, SHN_LORESERVE, SHN_XINDEX = 0, 0xFF00, 0xFFFF
@@ -469,10 +480,12 @@ class Objects:
 # and `linked` (its linked size) from the map, `key` (key_file, member or "-", section), `sha256` of its bytes before
 # relocation ("" for none), and its input size and alignment.
 Input = collections.namedtuple("Input", "row address linked file key member section sha256 size align")
-# A call relocation of a .text input section: kind "local", with `target` the row of the section its symbol is
-# defined in (None when the map did not take it) and `value` the symbol's value plus the addend; or kind "global",
-# with `target` the symbol's name as the link resolves it and `value` the addend.
-Call = collections.namedtuple("Call", "row offset kind target value")
+# A line of calls.tsv: a call (type "call") or the lui of a thread-local access ("tprel") at `offset` in the .text
+# input section `row`. Kind "local": `target` the row of the section its symbol is defined in (None when the map did
+# not take it) and `value` the symbol's value plus the addend. Kind "global": `target` the symbol's name as the link
+# resolves it, `value` the addend, and `definition` (row, value) of the symbol that defines it in the link's own
+# objects (definitions), or None when none does. A local line has no definition.
+Call = collections.namedtuple("Call", "row offset type kind target value definition")
 
 
 def member_text(member):
@@ -495,13 +508,15 @@ def resolve(name, wraps):
 
 
 def describe(lines, objects, key_file, wraps):
-    """The sections.tsv lines ([Input]) and the calls ([Call]) of a link: `lines` are its map's lines (read_map),
-    `objects` its Objects, `key_file(file)` the file a section's key names, and `wraps` the functions it wraps.
+    """The sections.tsv lines ([Input]) and the calls.tsv lines ([Call]) of a link: `lines` are its map's lines
+    (read_map), `objects` its Objects, `key_file(file)` the file a section's key names, and `wraps` the functions it
+    wraps.
 
     The bytes of a map line are those of the section of its name in the object the line names. When an archive holds
     several members of one name, or an object several sections of one name, the k-th map line of that (file,
     member, section) is the k-th such (member, section) in file order. A line with no such section (COMMON, or a
-    piece of .eh_frame) gets no sha256, and the map's size and alignment."""
+    piece of .eh_frame) gets no sha256, and the map's size and alignment. Each call and each thread-local access of
+    a .text input section is a Call; a global one names its definition in the link's objects (definitions)."""
     inputs, located, rows, seen = [], {}, {}, collections.Counter()
     for row, line in enumerate(lines):
         name = (line.file, line.member, line.section)
@@ -525,17 +540,44 @@ def describe(lines, objects, key_file, wraps):
         if not is_text(line.section):
             continue
         for relocation, table in elf.relocations(section.index):
-            if relocation.type not in (R_RISCV_CALL, R_RISCV_CALL_PLT):
+            line_type = LINE_TYPES.get(relocation.type)
+            if line_type is None:
                 continue
             symbol = elf.symbol(table, relocation.symbol)
             if symbol.bind == STB_LOCAL or symbol.type == STT_SECTION:
                 target = None
                 if SHN_UNDEF < symbol.shndx < SHN_LORESERVE:
                     target = rows.get((line.file, line.member, instance, symbol.shndx))
-                calls.append(Call(row, relocation.offset, "local", target, symbol.value + relocation.addend))
+                calls.append(Call(row, relocation.offset, line_type, "local", target,
+                                  symbol.value + relocation.addend, None))
             else:
-                calls.append(Call(row, relocation.offset, "global", resolve(symbol.name, wraps), relocation.addend))
-    return inputs, calls
+                calls.append(Call(row, relocation.offset, line_type, "global", resolve(symbol.name, wraps),
+                                  relocation.addend, None))
+    found = definitions({c.target for c in calls if c.kind == "global"}, lines, located, rows)
+    return inputs, [c._replace(definition=found.get(c.target)) if c.kind == "global" else c for c in calls]
+
+
+def definitions(names, lines, located, rows):
+    """{name: (row, value)}: where the link defines each of `names` in its own objects, the objects (archive members
+    too) whose sections the map took: a defined global or weak symbol of that name in a section that a map line names
+    (its row, and its value in that section), a global one before a weak one, else the first in map order. lld writes a
+    symbol of hidden visibility into the binary as a local one, so the binary's global symbols lack it; the objects
+    give it. `lines`, `located` and `rows` are describe's."""
+    found, seen = {}, set()
+    for row, (instance, elf, _) in sorted(located.items()):
+        where = (lines[row].file, lines[row].member, instance)
+        if where in seen:
+            continue
+        seen.add(where)
+        for symbol in elf.symbols():
+            if symbol.name not in names or symbol.bind not in (STB_GLOBAL, STB_WEAK) \
+                    or not SHN_UNDEF < symbol.shndx < SHN_LORESERVE:
+                continue
+            at = rows.get(where + (symbol.shndx,))
+            rank = (symbol.bind != STB_GLOBAL, at)
+            if at is not None and (symbol.name not in found or rank < found[symbol.name][0]):
+                found[symbol.name] = (rank, (at, symbol.value))
+    return {name: definition for name, (_, definition) in found.items()}
 
 
 def occurrences(inputs):
@@ -561,9 +603,12 @@ def sections_rows(inputs):
 
 
 def calls_rows(calls):
-    return [[str(c.row), hex(c.offset), c.kind,
-             ("-" if c.target is None else str(c.target)) if c.kind == "local" else c.target, hex(c.value)]
-            for c in calls]
+    rows = []
+    for c in calls:
+        target = c.target if c.kind == "global" else "-" if c.target is None else str(c.target)
+        definition = ["-", "-"] if c.definition is None else [str(c.definition[0]), hex(c.definition[1])]
+        rows.append([str(c.row), hex(c.offset), c.type, c.kind, target, hex(c.value)] + definition)
+    return rows
 
 
 def output_rows(elf):
@@ -599,19 +644,25 @@ def read_sections(path, lines):
 
 def read_calls(path, count):
     """{row: [Call]} from calls.tsv, for a layout of `count` inputs."""
+
+    def row_of(text):
+        return int(text) if DECIMAL.fullmatch(text) and int(text) < count else None
+
     calls = collections.defaultdict(list)
     for number, fields in enumerate(tsv_rows(path), 1):
         call = None
-        if len(fields) == 5 and DECIMAL.fullmatch(fields[0]) and int(fields[0]) < count:
-            row, offset, kind, target, value = int(fields[0]), hex_value(fields[1]), fields[2], fields[3], \
-                hex_value(fields[4])
+        if len(fields) == 8 and row_of(fields[0]) is not None and fields[2] in LINE_TYPES.values():
+            row, offset, line_type, kind, target, value = (row_of(fields[0]), hex_value(fields[1]), fields[2],
+                                                           fields[3], fields[4], hex_value(fields[5]))
             known = offset is not None and offset >= 0 and value is not None
-            if known and kind == "local" and target == "-":
-                call = Call(row, offset, kind, None, value)
-            elif known and kind == "local" and DECIMAL.fullmatch(target) and int(target) < count:
-                call = Call(row, offset, kind, int(target), value)
-            elif known and kind == "global" and target:
-                call = Call(row, offset, kind, target, value)
+            undefined = fields[6:] == ["-", "-"]
+            at, defined = row_of(fields[6]), hex_value(fields[7])
+            if known and kind == "local" and undefined and (target == "-" or row_of(target) is not None):
+                call = Call(row, offset, line_type, kind, row_of(target), value, None)
+            elif known and kind == "global" and target and undefined:
+                call = Call(row, offset, line_type, kind, target, value, None)
+            elif known and kind == "global" and target and at is not None and defined is not None and defined >= 0:
+                call = Call(row, offset, line_type, kind, target, value, (at, defined))
         if call is None:
             raise LayoutError(f"{path}: line {number} does not read")
         calls[call.row].append(call)
@@ -913,6 +964,20 @@ def in_reach(site, target):
     return JAL_REACH[0] <= target - site <= JAL_REACH[1]
 
 
+def tls_relaxed(offset):
+    """Whether lld removes the lui and the add of a local-exec thread-local access whose variable, plus the addend,
+    lies `offset` bytes from the start of the TLS segment."""
+    return TLS_REACH[0] <= offset <= TLS_REACH[1]
+
+
+def tls_offset(address, output):
+    """The offset of `address` from the start of the TLS segment of an output.tsv reading (Output), the lowest
+    address of an output section with SHF_TLS: for a thread-local variable, the value whose size decides whether lld
+    relaxes an access to it. It does not depend on where .text puts the function. None when either is not there."""
+    start = min((s.addr for s in output.sections if s.flags & SHF_TLS), default=None)
+    return None if address is None or start is None else address - start
+
+
 def text_load(output):
     """(.text, k) of an output.tsv reading (Output): its .text output section, and the index k of the PT_LOAD that
     holds the address of .text. .text is None when the output has no .text, and k is None when no PT_LOAD holds it."""
@@ -938,19 +1003,40 @@ def readonly_growth(base, new):
 
 
 def call_target(call):
-    """A call's target as calls.tsv and the detail of jal_reach name it: row:<row>+<value>, or the global's name."""
+    """A line's target as calls.tsv and the detail of jal_reach and tls_reach name it: row:<row>+<value>, or the
+    global's name."""
     if call.kind == "local":
         return f"row:{'-' if call.target is None else call.target}+{hex(call.value)}"
     return call.target
 
 
-def target_address(call, layout):
-    """The address a call reaches in a layout, or None: its section's address plus the value, or its symbol's address
-    plus the addend."""
+def target_row(call):
+    """(row, value): the input section that the target of the calls.tsv line `call` lies in, and how far into it: a
+    local symbol's section (row None when the map did not take it), or a global's definition. None for a global that
+    no object of the link defines: only the binary's symbols give its address."""
     if call.kind == "local":
-        return None if call.target is None else layout.inputs[call.target].address + call.value
-    address = layout.output.symbols.get(call.target)
-    return None if address is None else address + call.value
+        return call.target, call.value
+    if call.definition is None:
+        return None
+    return call.definition[0], call.definition[1] + call.value
+
+
+def target_address(call, layout):
+    """The address that the target of the calls.tsv line `call` has in a layout, or None: the address of its section
+    (target_row) plus the value, or else its symbol's address plus the addend."""
+    found = target_row(call)
+    if found is None:
+        address = layout.output.symbols.get(call.target)
+        return None if address is None else address + call.value
+    row, value = found
+    return None if row is None else layout.inputs[row].address + value
+
+
+def tls_address(line, layout):
+    """The address that the target of the tprel line `line` has in a layout (target_address), or None for a global
+    that no object of the link defines: the binary gives a thread-local symbol's offset in the TLS segment as its
+    value, not its address, so only the map gives the address of a thread-local variable."""
+    return None if target_row(line) is None else target_address(line, layout)
 
 
 def dragged(fn, base, new, pairing):
@@ -971,25 +1057,38 @@ def unshown(placement, fn, old, base, new, pairing):
     """Why the two layouts do not show the cause that NEW's placement gives for the same-bytes function `fn` (of NEW,
     paired with `old` of BASE) to move, or None when they show it."""
     cause, detail = placement.cause, placement.detail
-    if cause == "jal_reach":
+    if cause in ("jal_reach", "tls_reach"):
         found = re.fullmatch(r"offset=(0x[0-9a-f]+);target=(.+);(lost|gained)", detail)
         if not found:
             return "the detail does not read as offset=0x<offset>;target=<target>;lost or gained"
-        offset, named, way = int(found.group(1), 16), found.group(2), found.group(3)
-        call = next((c for c in base.calls.get(old.row, []) if c.offset == offset and call_target(c) == named), None)
-        if call is None:
-            return "BASE's calls.tsv gives the function no such call"
-        now = next((c for c in new.calls.get(fn.row, []) if c.offset == offset), None)
+        offset, named, lost = int(found.group(1), 16), found.group(2), found.group(3) == "lost"
+        line_type, what = ("call", "call") if cause == "jal_reach" else ("tprel", "thread-local access")
+        then = next((c for c in base.calls.get(old.row, [])
+                     if c.type == line_type and c.offset == offset and call_target(c) == named), None)
+        if then is None:
+            return f"BASE's calls.tsv gives the function no such {what}"
+        now = next((c for c in new.calls.get(fn.row, []) if c.type == line_type and c.offset == offset), None)
         if now is None:
-            return "NEW's calls.tsv gives the function no call at that offset"
-        site, before, after = old.address + offset, target_address(call, base), target_address(now, new)
+            return f"NEW's calls.tsv gives the function no {what} at that offset"
+        before, after = target_address(then, base), target_address(now, new)
+        if cause == "jal_reach":
+            site = old.address + offset
+            if before is None or after is None:
+                return "a target of the call has no address in its tree"
+            reach = (in_reach(site, before), in_reach(site, after))
+            if reach != (lost, not lost):
+                return (f"from the base call site {hex(site)}, the base target {hex(before)} is "
+                        f"{'in' if reach[0] else 'out of'} reach and the new target {hex(after)} "
+                        f"{'in' if reach[1] else 'out of'} reach")
+            return None
+        before, after = tls_offset(tls_address(then, base), base.output), tls_offset(tls_address(now, new), new.output)
         if before is None or after is None:
-            return "a target of the call has no address in its tree"
-        reach = (in_reach(site, before), in_reach(site, after))
-        if reach != ((True, False) if way == "lost" else (False, True)):
-            return (f"from the base call site {hex(site)}, the base target {hex(before)} is "
-                    f"{'in' if reach[0] else 'out of'} reach and the new target {hex(after)} "
-                    f"{'in' if reach[1] else 'out of'} reach")
+            return "a target of the thread-local access has no offset in the TLS segment of its tree"
+        reach = (tls_relaxed(before), tls_relaxed(after))
+        if reach != (lost, not lost):
+            return (f"the base target lies {hex(before)} bytes into the TLS segment, {'in' if reach[0] else 'out of'} "
+                    f"the reach of a relaxed access, and the new target {hex(after)}, "
+                    f"{'in' if reach[1] else 'out of'} it")
         return None
     if cause == "repeated_key":
         if fn.key not in pairing.repeated:
@@ -1232,6 +1331,10 @@ Place = collections.namedtuple("Place", "place address cause detail")
 # the link's own call, and where the link's target is: in the .text input section `row`, `value` bytes into it, or,
 # with row None, at the address `value`.
 CallTest = collections.namedtuple("CallTest", "offset target site before call row value")
+# A thread-local access of a same-bytes .text input section (a tprel line), as the append mode tests it: its offset,
+# its target as BASE's line at that offset names it (call_target), the base target's offset from the start of BASE's
+# TLS segment (tls_offset), and the link's own line.
+TlsTest = collections.namedtuple("TlsTest", "offset target before call")
 # The plan of an append link (plan): `places` {row: Place} for each .text input section of the link, `script` the
 # text of the linker script (None for a normal link), `lines` {line of the script: the row whose pattern is on it},
 # `next_start` the address at which the script keeps the next PT_LOAD (None when it does not), and `growth` (N, M)
@@ -1256,26 +1359,56 @@ def relaxed_otherwise(test, after):
     return after is not None and in_reach(test.site, test.before) != in_reach(test.site, after)
 
 
-def jal_detail(test):
-    """The detail of jal_reach for the call `test`, as unshown reads it."""
-    way = "lost" if in_reach(test.site, test.before) else "gained"
-    return f"offset={hex(test.offset)};target={test.target};{way}"
+def tls_otherwise(test, offset):
+    """Whether lld relaxes the thread-local access `test` when its target lies `offset` bytes into the TLS segment
+    and not at its base offset, or the other way round. False when `offset` is None."""
+    return offset is not None and tls_relaxed(test.before) != tls_relaxed(offset)
+
+
+def reach_cause(test):
+    """(cause, detail) of a kept section that the test `test` moves, as unshown reads them: jal_reach for a call
+    (CallTest), tls_reach for a thread-local access (TlsTest)."""
+    if test.call.type == "tprel":
+        cause, relaxed = "tls_reach", tls_relaxed(test.before)
+    else:
+        cause, relaxed = "jal_reach", in_reach(test.site, test.before)
+    return cause, f"offset={hex(test.offset)};target={test.target};{'lost' if relaxed else 'gained'}"
+
+
+def paired_lines(base, probe, pairing, line_type):
+    """(the link's Input, its BASE partner, the link's line, BASE's line) for each calls.tsv line of the type
+    `line_type` of each same-bytes .text input section of the link `probe` (Layout), when BASE's partner has a line
+    of that type at the same offset: in row order, then in offset order."""
+    for i in probe.inputs:
+        if not (is_text(i.section) and pairing.same[i.row]):
+            continue
+        old = base.inputs[pairing.partner[i.row]]
+        then = {}
+        for line in base.calls.get(old.row, []):
+            if line.type == line_type:
+                then.setdefault(line.offset, line)
+        for line in sorted(probe.calls.get(i.row, []), key=lambda c: c.offset):
+            if line.type == line_type and line.offset in then:
+                yield i, old, line, then[line.offset]
 
 
 def call_tests(base, probe, pairing):
     """{row: [CallTest], in offset order} for each same-bytes .text input section of the link `probe` (Layout). A
     call is tested when BASE's partner has a call at the same offset and both targets have an address. The link's
-    target is in the .text input section that holds it: a local symbol's section, or the section at the address of a
-    global symbol in the link's output. A target in no .text input section keeps the link's address."""
+    target is in the .text input section that holds it: the section of a local symbol or of a global's definition
+    (target_row), or, for a global that no object defines, the section at the address of its symbol in the link's
+    output. A target in no .text input section keeps the link's address."""
     text = sorted((i for i in probe.inputs if is_text(i.section) and i.linked), key=lambda i: (i.address, i.row))
     starts = [i.address for i in text]
 
     def where(call):
-        if call.kind == "local":
-            if call.target is None:
+        found = target_row(call)
+        if found is not None:
+            row, value = found
+            if row is None:
                 return None
-            target = probe.inputs[call.target]
-            return (target.row, call.value) if is_text(target.section) else (None, target.address + call.value)
+            target = probe.inputs[row]
+            return (row, value) if is_text(target.section) else (None, target.address + value)
         address = probe.output.symbols.get(call.target)
         if address is None:
             return None
@@ -1285,32 +1418,34 @@ def call_tests(base, probe, pairing):
         return None, address + call.value
 
     tests = {}
-    for i in probe.inputs:
-        if not (is_text(i.section) and pairing.same[i.row]):
-            continue
-        old = base.inputs[pairing.partner[i.row]]
-        then = {}
-        for call in base.calls.get(old.row, []):
-            then.setdefault(call.offset, call)
-        found = []
-        for call in sorted(probe.calls.get(i.row, []), key=lambda c: c.offset):
-            before = then.get(call.offset)
-            before_address = None if before is None else target_address(before, base)
-            now = where(call)
-            if before_address is not None and now is not None:
-                found.append(CallTest(call.offset, call_target(before), old.address + call.offset, before_address,
-                                      call, *now))
-        if found:
-            tests[i.row] = found
+    for i, old, call, before in paired_lines(base, probe, pairing, "call"):
+        before_address, now = target_address(before, base), where(call)
+        if before_address is not None and now is not None:
+            tests.setdefault(i.row, []).append(CallTest(call.offset, call_target(before), old.address + call.offset,
+                                                        before_address, call, *now))
+    return tests
+
+
+def tls_tests(base, probe, pairing):
+    """{row: [TlsTest], in offset order} for each same-bytes .text input section of the link `probe` (Layout). A
+    thread-local access is tested when BASE's partner has one at the same offset and both targets lie in a TLS
+    segment. Its offset there does not depend on where .text puts the function: the probe link gives the one of
+    every link of its inputs."""
+    tests = {}
+    for i, _, line, before in paired_lines(base, probe, pairing, "tprel"):
+        offset = tls_offset(tls_address(before, base), base.output)
+        if offset is not None and tls_offset(tls_address(line, probe), probe.output) is not None:
+            tests.setdefault(i.row, []).append(TlsTest(line.offset, call_target(before), offset, line))
     return tests
 
 
 def kept_set(base, probe, pairing, forced):
     """The .text input sections of the link `probe` that keep their base addresses ({row: BASE's partner}), and the
     cause of each same-bytes one that moves ({row: (cause, detail)}). A same-bytes section is kept, unless: `forced`
-    ({row: CallTest}) names it (jal_reach); its base address does not meet its alignment now (alignment); or its key
-    repeats (pairing.repeated). The members of such a key are kept, each at its base address, when one pattern keeps
-    them all (kept_run) and none moves for a cause of its own; else the same-bytes ones move with repeated_key."""
+    ({row: CallTest or TlsTest}) names it (jal_reach or tls_reach, reach_cause); its base address does not meet its
+    alignment now (alignment); or its key repeats (pairing.repeated). The members of such a key are kept, each at its
+    base address, when one pattern keeps them all (kept_run) and none moves for a cause of its own; else the
+    same-bytes ones move with repeated_key."""
     text = [i for i in probe.inputs if is_text(i.section)]
     kept, causes = {}, {}
     for i in text:
@@ -1318,7 +1453,7 @@ def kept_set(base, probe, pairing, forced):
             continue
         old = base.inputs[pairing.partner[i.row]]
         if i.row in forced:
-            causes[i.row] = ("jal_reach", jal_detail(forced[i.row]))
+            causes[i.row] = reach_cause(forced[i.row])
         elif i.align > 1 and old.address % i.align:
             causes[i.row] = ("alignment", f"align={i.align}")
         elif i.key not in pairing.repeated:
@@ -1334,14 +1469,20 @@ def kept_set(base, probe, pairing, forced):
     return kept, causes
 
 
+def taken(i):
+    """The bytes that a moved input section of the probe link takes: the larger of its input size and its linked size
+    there. lld's relaxation only removes bytes, so with lld that is its input size."""
+    return max(i.size, i.linked)
+
+
 def lay(unit, start):
     """The address of each input section of `unit` laid out from `start` in order, each at its alignment and with
-    its input size, and the address after the last."""
+    the bytes it takes (taken), and the address after the last."""
     at, addresses = start, []
     for i in unit:
         at = align_up(at, i.align)
         addresses.append(at)
-        at += i.size
+        at += taken(i)
     return addresses, at
 
 
@@ -1423,18 +1564,20 @@ def pattern(i):
 def plan(base, probe, pairing, forced=None):
     """The plan (Plan) of an append link: where each .text input section of the probe link `probe` (Layout, with no
     placement) goes against the base layout `base`, with the pairing `pairing` (pair). It reads no file and runs
-    nothing. `forced` ({row: CallTest}) names kept sections that the check after the link moves with jal_reach.
+    nothing. `forced` ({row: CallTest or TlsTest}) names kept sections that the check after the link moves with
+    jal_reach or tls_reach.
 
     When the read-only data in front of .text grew past its room (readonly_growth), the link is a normal one: no
-    script, each section at the probe's address. Else each same-bytes section that kept_set keeps occupies its base
-    address and base linked size, and the holes are the gaps between them from the base's .text address. Each other
-    section moves: largest input size first (ties: the probe map's order), into the first hole in address order
-    where it fits at its alignment (its input size: relaxation only removes bytes), never at its own base address,
-    and where each call from a kept section into it is relaxed as at the base; else to the end of .text, one after
-    another. The members of a repeated key that move are one block: one pattern places them all, in input order.
-    Then each call of each kept section is tested at its base call site against its planned target: a kept section
-    with a call relaxed otherwise moves with jal_reach, and the placement runs again with the larger set of moved
-    sections. Each round moves one section more, so it ends.
+    script, each section at the probe's address. Else a same-bytes section with a thread-local access that lld
+    relaxes otherwise in the probe link than at the base (tls_tests) moves with tls_reach: it changes size wherever
+    it goes. Each same-bytes section that kept_set keeps occupies its base address and base linked size, and the
+    holes are the gaps between them from the base's .text address. Each other section moves: largest first, by the
+    bytes it takes (taken; ties: the probe map's order), into the first hole in address order where it fits at its
+    alignment, never at its own base address, and where each call from a kept section into it is relaxed as at the
+    base; else to the end of .text, one after another. The members of a repeated key that move are one block: one
+    pattern places them all, in input order. Then each call of each kept section is tested at its base call site
+    against its planned target: a kept section with a call relaxed otherwise moves with jal_reach, and the placement
+    runs again with the larger set of moved sections. Each round moves one section more, so it ends.
 
     The script puts .text at the base's address, and each section, a kept run or a moved block once, at its address
     in address order. When the planned end of .text, with what the probe link puts after .text in its PT_LOAD
@@ -1453,6 +1596,11 @@ def plan(base, probe, pairing, forced=None):
     start = base_text.addr
     tests = call_tests(base, probe, pairing)
     forced = dict(forced or {})
+    for row, found in tls_tests(base, probe, pairing).items():
+        test = next((t for t in found if tls_otherwise(t, tls_offset(target_address(t.call, probe), probe.output))),
+                    None)
+        if test is not None:
+            forced.setdefault(row, test)
     while True:
         kept, causes = kept_set(base, probe, pairing, forced)
         movers = [i for i in text if i.row not in kept]
@@ -1465,7 +1613,7 @@ def plan(base, probe, pairing, forced=None):
                 blocks[i.key] = []
                 units.append(blocks[i.key])
             blocks[i.key].append(i)
-        units.sort(key=lambda unit: (-sum(i.size for i in unit), unit[0].row))
+        units.sort(key=lambda unit: (-sum(taken(i) for i in unit), unit[0].row))
         own = {i.row: base.inputs[pairing.partner[i.row]].address for i in movers
                if pairing.partner[i.row] is not None}
         # A call from a kept section must be relaxed as at the base; the call that moved a section with jal_reach
@@ -1476,7 +1624,7 @@ def plan(base, probe, pairing, forced=None):
                 if test.row is not None and test.row not in kept:
                     wanted[test.row].append((test, False))
         for row, test in sorted(forced.items()):
-            if test.row is not None and test.row not in kept:
+            if test.call.type == "call" and test.row is not None and test.row not in kept:
                 wanted[test.row].append((test, True))
         holes, end = [], start
         for old in sorted(kept.values(), key=lambda i: (i.address, i.row)):
@@ -1549,13 +1697,16 @@ def map_index(lines):
 
 
 def linked_target(call, link):
-    """The address that the call `call` of the probe link reaches in the check link `link` (Link): its section's
-    address there plus the value, or the check binary's symbol plus the addend. None when it has none."""
-    if call.kind == "local":
-        at = None if call.target is None else link.match.get(call.target)
-        return None if at is None else link.lines[at].address + call.value
-    address = link.output.symbols.get(call.target)
-    return None if address is None else address + call.value
+    """The address that the target of the calls.tsv line `call` of the probe link has in the check link `link`
+    (Link): the address there of its section (target_row) plus the value, or else the check binary's symbol plus the
+    addend. None when it has none."""
+    found = target_row(call)
+    if found is None:
+        address = link.output.symbols.get(call.target)
+        return None if address is None else address + call.value
+    row, value = found
+    at = None if row is None else link.match.get(row)
+    return None if at is None else link.lines[at].address + value
 
 
 def relaxed_there(test, address, link):
@@ -1635,7 +1786,7 @@ def append_link(label, entry, work, script, placement, wraps, renamed, command):
     probe = Layout(inputs, by_row, binary_output(probe_binary), {})
     pairing = pair(base.inputs, probe.inputs)
     text = [i for i in probe.inputs if is_text(i.section)]
-    tests = call_tests(base, probe, pairing)
+    tests, tls = call_tests(base, probe, pairing), tls_tests(base, probe, pairing)
     names = map_index(lines)
     check_map, check_binary = os.path.join(work, "check.map"), os.path.join(work, "check")
     forced = {}
@@ -1674,21 +1825,32 @@ def append_link(label, entry, work, script, placement, wraps, renamed, command):
                 continue
             test = next((t for t in tests.get(i.row, []) if relaxed_there(t, line.address, link)), None)
             if test is None:
+                test = next((t for t in tls.get(i.row, [])
+                             if tls_otherwise(t, tls_offset(linked_target(t.call, link), link.output))), None)
+            if test is None:
                 raise AppendError(f"{function(i)}: the script keeps it at {hex(old.address)} with {old.linked} "
                                   f"bytes, and the check link puts it at {hex(line.address)} with {line.size} "
-                                  "bytes, and no call of it is relaxed otherwise: a defect of the append mode")
+                                  "bytes, and no call or thread-local access of it is relaxed otherwise: a defect of "
+                                  "the append mode")
             moved[i.row] = test
         if not moved:
             break
         forced.update(moved)
     places = dict(planned.places)
     for row, place in sorted(places.items()):
-        if place.cause != "jal_reach":
+        if place.cause == "jal_reach":
+            shown = [reach_cause(t)[1] for t in tests.get(row, [])
+                     if relaxed_otherwise(t, linked_target(t.call, link))]
+            what = "call of it is relaxed otherwise at its base address"
+        elif place.cause == "tls_reach":
+            shown = [reach_cause(t)[1] for t in tls.get(row, [])
+                     if tls_otherwise(t, tls_offset(linked_target(t.call, link), link.output))]
+            what = "thread-local access of it is relaxed otherwise"
+        else:
             continue
-        shown = [jal_detail(t) for t in tests.get(row, []) if relaxed_otherwise(t, linked_target(t.call, link))]
         if not shown:
-            raise AppendError(f"{function(probe.inputs[row])} moves with jal_reach, but no call of it is relaxed "
-                              "otherwise at its base address in the check link: a defect of the append mode")
+            raise AppendError(f"{function(probe.inputs[row])} moves with {place.cause}, but no {what} in the check "
+                              "link: a defect of the append mode")
         if place.detail not in shown:
             places[row] = place._replace(detail=shown[0])
     failure = segments_failure(probe.output.loads, link.output.loads)
@@ -1732,8 +1894,9 @@ def main(argv=None):
         "check", help="compare a base layout tree and an append build's",
         description="Compare each (build, target) that the layout trees BASE and NEW both hold: each function whose "
                     "input section has the same bytes must keep its base address and linked size, or move for a "
-                    "cause in NEW's placement.tsv that the two trees show. Exit 1 when one does not, 2 when a tree "
-                    "cannot be read or the two share no (build, target).")
+                    "cause in NEW's placement.tsv that the two trees show (jal_reach, tls_reach, repeated_key, "
+                    "alignment or readonly_growth). Exit 1 when one does not, 2 when a tree cannot be read or the "
+                    "two share no (build, target).")
     checking.add_argument("base", metavar="BASE", help="the base build's layout tree")
     checking.add_argument("new", metavar="NEW", help="the append build's layout tree")
     wrapping = commands.add_parser(
@@ -1748,8 +1911,10 @@ def main(argv=None):
                     "command (no -o, no map, no script). Write the link's wraps, link once normally in DIR (the "
                     "probe link), plan where each .text input section goes, write the linker script of that plan, "
                     "link with it in DIR (the check link) and verify that each kept section is at its base address "
-                    "with its base linked size, that the PT_LOAD segments are the probe link's and that no two of "
-                    "them share a page, and write placement.tsv. When the read-only data in front of .text grew past "
+                    "with its base linked size (a kept section whose call or thread-local access the check link "
+                    "relaxes otherwise moves, with jal_reach or tls_reach, and the plan runs again), that the "
+                    "PT_LOAD segments are the probe link's and that no two of them share a page, and write "
+                    "placement.tsv. When the read-only data in front of .text grew past "
                     "its room, write no script (a normal link). Exit 1 when a link fails, when the check link is not "
                     "what the plan asks, or when a file or section name holds a double quote or a line break, which "
                     "the script cannot quote; 2 when an input cannot be read.")

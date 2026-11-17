@@ -202,7 +202,9 @@ def out_tree(builds, copies="/tmp/ov/af.AAAAAA", local_call=LOCAL_CALL, placemen
 
 
 def expected_tables(copies, local_call=LOCAL_CALL):
-    """sections.tsv and calls.tsv of out_tree's record, from the test's own reading of its objects."""
+    """sections.tsv and calls.tsv of out_tree's record, from the test's own reading of its objects: each call and each
+    R_RISCV_TPREL_HI20, and for a global, the global (else the first weak) symbol of its name that an object the map
+    took defines in a section the map took."""
     objects = {("/work/lib/libshim.a", "a.o"): [REAL, STORES],
                ("/work/lib/libshim.a", "shim-local-access.o"): [LOCAL_ACCESS],
                (f"{copies}/2-shim-local-call.o", None): [local_call], ("/work/obj/shim-rustc-v0.o", None): [V0]}
@@ -228,23 +230,35 @@ def expected_tables(copies, local_call=LOCAL_CALL):
             rows[((file, member), i, index)] = len(sections)
         key_file = ORIGINAL if file.endswith("/2-shim-local-call.o") else file
         sections.append(f"{file}\t{key_file}\t{member or '-'}\t{section}\t{digest}\t{size}\t{align}\n")
+    # The definitions: a global symbol first, then the first in map order.
+    defined = {}
+    for where, i, index, section in located.values():
+        for name, value, symbol_info, shndx in readings[(where, i)][1]:
+            row = rows.get((where, i, shndx))
+            if symbol_info >> 4 in (1, 2) and row is not None and name:
+                rank = (symbol_info >> 4 != 1, row)
+                if name not in defined or rank < defined[name][0]:
+                    defined[name] = (rank, f"{row}\t0x{value:x}")
     calls = []
     for row, (where, i, index, section) in sorted(located.items()):
         if not section.startswith(".text"):
             continue
         _, symbols, relocations = readings[(where, i)]
         for offset, info, addend in relocations.get(index, []):
-            if info & 0xFFFFFFFF not in (18, 19):
+            kind = {18: "call", 19: "call", 29: "tprel"}.get(info & 0xFFFFFFFF)
+            if kind is None:
                 continue
             name, value, symbol_info, shndx = symbols[info >> 32]
             if symbol_info >> 4 == 0 or symbol_info & 0xF == 3:
-                calls.append(f"{row}\t0x{offset:x}\tlocal\t{rows.get((where, i, shndx), '-')}\t0x{value + addend:x}\n")
+                calls.append(f"{row}\t0x{offset:x}\t{kind}\tlocal\t{rows.get((where, i, shndx), '-')}\t"
+                             f"0x{value + addend:x}\t-\t-\n")
             else:
                 if name in WRAPS:
                     name = "__wrap_" + name
                 elif name.startswith("__real_") and name[7:] in WRAPS:
                     name = name[7:]
-                calls.append(f"{row}\t0x{offset:x}\tglobal\t{name}\t0x{addend:x}\n")
+                definition = defined[name][1] if name in defined else "-\t-"
+                calls.append(f"{row}\t0x{offset:x}\t{kind}\tglobal\t{name}\t0x{addend:x}\t{definition}\n")
     return "".join(sections), "".join(calls)
 
 
@@ -349,11 +363,12 @@ def test_collect_writes_the_layout_tree(tmp_path):
     assert [r[1] for r in rows[7:9]] == [ORIGINAL, ORIGINAL]  # the allocation-failure copy, by its original
     assert [r[1] for r in rows[:7]] == [r[0] for r in rows[:7]]
     calls = [line.split("\t") for line in (entry / "calls.tsv").read_text().splitlines()]
-    assert ["1", "0x0", "global", "__wrap___rdl_alloc", "0x0"] in calls  # a wrapped function
-    assert ["3", "0x0", "global", "dalloc", "0x0"] in calls  # __real_dalloc
-    assert ["4", "0x0", "global", "__rdl_realloc", "0x0"] in calls
-    assert ["5", "0x8", "local", "6", "0x0"] in calls and ["5", "0x16", "local", "-", "0x0"] in calls
-    assert ["7", "0x0", "local", "8", "0x0"] in calls
+    assert ["1", "0x0", "call", "global", "__wrap___rdl_alloc", "0x0", "-", "-"] in calls  # a wrapped function
+    assert ["3", "0x0", "call", "global", "dalloc", "0x0", "-", "-"] in calls  # __real_dalloc
+    assert ["4", "0x0", "call", "global", "__rdl_realloc", "0x0", "-", "-"] in calls
+    assert ["5", "0x8", "call", "local", "6", "0x0", "-", "-"] in calls
+    assert ["5", "0x16", "call", "local", "-", "0x0", "-", "-"] in calls
+    assert ["7", "0x0", "call", "local", "8", "0x0", "-", "-"] in calls
     assert not [c for c in calls if c[0] == "2"]
 
 
@@ -503,14 +518,21 @@ COMMENT = row(".comment", 0, 0x10, align=1)
 DUP0 = row(".text.dup", 0x11070, 0x10, file="/work/lib.a", member="dup.o")
 OTHER = row(".text.other", 0x11080, 0x10, file="/work/c.o")
 DUP1 = row(".text.dup", 0x11090, 0x10, file="/work/lib.a", member="dup.o", content="dup 1")
-# beta (row 2) calls alpha, a local symbol of a.o (row 1), at 0x4, and gamma, a global, at 0xc.
-CALLS = [("2", "0x4", "local", "1", "0x0"), ("2", "0xc", "global", "gamma", "0x0")]
+# beta (row 2) calls alpha, a local symbol of a.o (row 1), at 0x4, and gamma, a global that only the binary's symbol
+# gives (no definition), at 0xc.
+CALLS = [("2", "0x4", "call", "local", "1", "0x0", "-", "-"), ("2", "0xc", "call", "global", "gamma", "0x0", "-", "-")]
+# tv, a thread-local variable of b.o, lies in the TLS segment that starts at 0x12000. beta also reads it, with a lui at
+# 0x8 whose line names tv's definition, row 4.
+TV = dict(row(".tbss.tv", 0x12000, 4, file="/work/b.o"), sha256="")
+TLS_CALLS = CALLS + [("2", "0x8", "tprel", "global", "tv", "0x0", "4", "0x0")]
 
 
-def output(text=0x11000, text_size=0x100, front=0x300, gamma=0x11030):
-    """output.tsv: .rodata in a read-only PT_LOAD at 0x10000 of `front` bytes, .text in the next one."""
+def output(text=0x11000, text_size=0x100, front=0x300, gamma=0x11030, tls=False):
+    """output.tsv: .rodata in a read-only PT_LOAD at 0x10000 of `front` bytes, .text in the next one; with `tls`, a
+    .tbss at 0x12000, the start of the TLS segment."""
     return (f"section\t.rodata\t0x10200\t256\t0x2\nsection\t.text\t0x{text:x}\t{text_size}\t0x6\n"
-            f"section\t.comment\t0x0\t16\t0x30\nload\t0x10000\t{front}\t{front}\t0x4\n"
+            + ("section\t.tbss\t0x12000\t8192\t0x403\n" if tls else "")
+            + f"section\t.comment\t0x0\t16\t0x30\nload\t0x10000\t{front}\t{front}\t0x4\n"
             f"load\t0x{text:x}\t{text_size}\t{text_size}\t0x5\nsymbol\tgamma\t0x{gamma:x}\n")
 
 
@@ -641,8 +663,28 @@ def repeated_run_dragged():
              "placement": [placed(moved0, 0, "alignment", "align=64"), placed(moved1, 1, "repeated_key")]}, moved1)
 
 
-@pytest.mark.parametrize("scenario", [jal_lost, jal_gained, repeated_key, repeated_run_dragged, alignment,
-                                      readonly_growth])
+def tls_reach(base_offset, new_offset, way):
+    """beta reads tv (TLS_CALLS), which lies `base_offset` bytes into the TLS segment at the base and `new_offset`
+    bytes into it in NEW, and moved with tls_reach, `way`: lld keeps or removes 8 of its bytes wherever it goes."""
+    beta = dict(BETA, address=0x11100, linked=BETA["linked"] + (8 if way == "lost" else -8))
+    return ({"rows": [TABLE, ALPHA, BETA, GAMMA, dict(TV, address=0x12000 + base_offset), COMMENT],
+             "calls": TLS_CALLS, "out": output(tls=True)},
+            {"rows": [TABLE, ALPHA, beta, GAMMA, dict(TV, address=0x12000 + new_offset), COMMENT],
+             "calls": TLS_CALLS, "out": output(tls=True),
+             "placement": [placed(beta, cause="tls_reach", detail=f"offset=0x8;target=tv;{way}")]}, beta)
+
+
+def tls_lost():
+    # 0x7ff is the largest offset whose access lld relaxes.
+    return tls_reach(0x7FF, 0x800, "lost")
+
+
+def tls_gained():
+    return tls_reach(0x2000, 0x10, "gained")
+
+
+@pytest.mark.parametrize("scenario", [jal_lost, jal_gained, tls_lost, tls_gained, repeated_key, repeated_run_dragged,
+                                      alignment, readonly_growth])
 def test_check_lists_a_function_that_moved_for_a_cause_the_trees_show(tmp_path, capsys, scenario):
     base, new, moved = scenario()
     status, lines = run_check(tmp_path, capsys, new, base)
@@ -708,6 +750,17 @@ def wrong_growth():
     return base, new, "gamma"
 
 
+def tls_within():
+    # tv moved, but stayed within the reach of a relaxed access.
+    base, new, _ = tls_reach(0, 0x7FF, "lost")
+    return base, new, "beta"
+
+
+def tls_wrong_way():
+    base, new, _ = tls_reach(0x7FF, 0x800, "gained")
+    return base, new, "beta"
+
+
 def no_cause():
     beta = dict(BETA, address=0x11100)
     return None, {"rows": [TABLE, ALPHA, beta, GAMMA, COMMENT], "placement": [placed(beta)]}, "beta"
@@ -717,9 +770,9 @@ def no_placement():
     return None, {"rows": [TABLE, ALPHA, dict(BETA, address=0x11100), GAMMA, COMMENT]}, "beta"
 
 
-@pytest.mark.parametrize("scenario", [jal_in_reach, jal_no_such_call, repeated_once, repeated_run,
-                                      repeated_run_unshown_drag, aligned, within_room, wrong_growth, no_cause,
-                                      no_placement])
+@pytest.mark.parametrize("scenario", [jal_in_reach, jal_no_such_call, tls_within, tls_wrong_way, repeated_once,
+                                      repeated_run, repeated_run_unshown_drag, aligned, within_room, wrong_growth,
+                                      no_cause, no_placement])
 def test_check_fails_for_a_cause_the_trees_do_not_show(tmp_path, capsys, scenario):
     base, new, name = scenario()
     status, lines = run_check(tmp_path, capsys, new, base)
@@ -732,6 +785,20 @@ def test_check_exits_2_for_a_missing_file(tmp_path, capsys):
     os.unlink(write_entry(tmp_path / "new", BASE_ROWS) / "calls.tsv")
     assert layout.main(["check", str(tmp_path / "base"), str(tmp_path / "new")]) == 2
     assert "calls.tsv" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("line", [
+    "2\t0x4\tlocal\t1\t0x0",
+    "2\t0x4\tjump\tlocal\t1\t0x0\t-\t-",
+    "2\t0x4\tcall\tlocal\t1\t0x0\t3\t0x0",
+    "2\t0x4\tcall\tglobal\tgamma\t0x0\t5\t0x0",
+    "2\t0x4\tcall\tglobal\tgamma\t0x0\t3\t-",
+], ids=["old-columns", "type", "local-definition", "definition-past-the-rows", "half-a-definition"])
+def test_check_exits_2_for_a_line_of_calls_that_does_not_read(tmp_path, capsys, line):
+    write_entry(tmp_path / "base", BASE_ROWS)
+    write_entry(tmp_path / "new", BASE_ROWS, calls=[line.split("\t")])
+    assert layout.main(["check", str(tmp_path / "base"), str(tmp_path / "new")]) == 2
+    assert "calls.tsv: line 1 does not read" in capsys.readouterr().err
 
 
 def test_check_exits_2_for_sections_that_do_not_match_the_map(tmp_path):
@@ -816,23 +883,31 @@ def laid_out(specs, start=0x11000):
     return found
 
 
-def link(found, calls=(), symbols=None, front=0x10400):
+def link(found, calls=(), symbols=None, front=0x10400, tls=()):
     """A Layout of the .text input sections `found` and their calls [(row, offset, called global)]. Its output:
     .eh_frame in a read-only PT_LOAD from 0x10000 to `front`, .text over the sections in the next PT_LOAD, and
     .init_array and .fini_array in the PT_LOAD after it, where lld puts it (the next page, at the same offset), and
-    the global symbols `symbols`."""
+    the global symbols `symbols`. With `tls` [(section, address, size)], the link also takes these thread-local data
+    sections of /work/t.o, rows after `found`, and its TLS segment is a .tdata over them; a call (row, offset,
+    variable, (row, value)) is then a thread-local access of the variable that row and value define."""
     by_row = collections.defaultdict(list)
-    for row, offset, name in calls:
-        by_row[row].append(layout.Call(row, offset, "global", name, 0))
+    for row, offset, name, *defined in calls:
+        line_type, definition = ("tprel", defined[0]) if defined else ("call", None)
+        by_row[row].append(layout.Call(row, offset, line_type, "global", name, 0, definition))
     start, end = min(i.address for i in found), max(i.address + i.linked for i in found)
     rw = (end + 0xFFF) // 0x1000 * 0x1000 + end % 0x1000
     sections = [layout.OutputSection(".eh_frame", 0x10300, front - 0x10300, 0x2),
                 layout.OutputSection(".text", start, end - start, 0x6),
                 layout.OutputSection(".init_array", rw, 8, 0x3), layout.OutputSection(".fini_array", rw + 8, 8, 0x3),
                 layout.OutputSection(".comment", 0, 0x10, 0x30)]
+    data = [layout.Input(len(found) + k, address, size, "/work/t.o", ("/work/t.o", "-", section), None, section,
+                         sha(section.encode()), size, 8) for k, (section, address, size) in enumerate(tls)]
+    if data:
+        sections.append(layout.OutputSection(".tdata", data[0].address, data[-1].address + data[-1].size
+                                             - data[0].address, 0x403))
     loads = [layout.Load(0x10000, front - 0x10000, front - 0x10000, 0x4),
              layout.Load(start, end - start, end - start, 0x5), layout.Load(rw, 16, 16, 0x6)]
-    return layout.Layout(found, by_row, layout.Output(sections, loads, dict(symbols or {})), {})
+    return layout.Layout(found + data, by_row, layout.Output(sections, loads, dict(symbols or {})), {})
 
 
 def planned(base, probe):
@@ -945,6 +1020,21 @@ def test_a_kept_function_whose_call_target_changed_address_moves_with_jal_reach(
                                                   "t": ("kept", 0x11010, "-", "-")}
 
 
+def test_a_kept_section_whose_thread_local_access_is_relaxed_otherwise_moves_with_tls_reach():
+    # near reads tw and far reads tv, thread-local variables of t.o. In the probe link 0x7f0 bytes of new thread-local
+    # data lie in front of them: tw now lies 0x7ff bytes into the TLS segment, the most whose access lld relaxes, and
+    # tv 0x800 bytes, one past it. far changes size wherever it goes, so it moves; near keeps its base address.
+    base = link([text_input(0, "near", 0x11000, 0x10), text_input(1, "far", 0x11010, 0x10),
+                 text_input(2, "k", 0x11020, 0x10)], [(0, 4, "tw", (3, 0xF)), (1, 4, "tv", (4, 0))],
+                tls=[(".tdata.tw", 0x20000, 0x10), (".tdata.tv", 0x20010, 0x10)])
+    probe = link(laid_out([("near", 0x10, {}), ("far", 0x10, {}), ("k", 0x10, {})]),
+                 [(0, 4, "tw", (4, 0xF)), (1, 4, "tv", (5, 0))],
+                 tls=[(".tdata.new", 0x20000, 0x7F0), (".tdata.tw", 0x207F0, 0x10), (".tdata.tv", 0x20800, 0x10)])
+    assert where(planned(base, probe), probe) == {
+        "near": ("kept", 0x11000, "-", "-"), "far": ("end", 0x11030, "tls_reach", "offset=0x4;target=tv;lost"),
+        "k": ("kept", 0x11020, "-", "-")}
+
+
 def test_the_placement_ends_when_each_round_moves_another_caller():
     # c3 calls c2, which calls c1, which calls f; kept pads keep their holes apart, and f grows to the end.
     names = ["c3", "p0", "c2", "p1", "c1", "p2", "f", "p3", "filler"]
@@ -1045,23 +1135,32 @@ def test_the_script_refuses_a_file_name_it_cannot_quote():
 
 # ── the append mode: the links ───────────────────────────────────────────────────────────────────────────────────────
 
-def relocatable(functions):
+def relocatable(functions, variables=(), weak=()):
     """A riscv64 relocatable ELF64 object of [(name, bytes, alignment, [(offset, called function)])]: a section
     .text.<name> for each, a global function <name> at its start, and an R_RISCV_CALL_PLT relocation for each call,
     against a symbol of this object or an undefined one. A call (offset, symbol, type) gives a relocation of that
-    type instead, and a symbol of None the symbol 0 (R_RISCV_RELAX)."""
-    defined = [name for name, _, _, _ in functions]
+    type instead, and a symbol of None the symbol 0 (R_RISCV_RELAX). `variables` [(section, bytes, alignment, name)]
+    adds a data section for each, with a global object <name> at its start: one whose name starts with .tdata or
+    .tbss is thread-local (SHF_TLS, STT_TLS), and a .tbss one holds no bytes (SHT_NOBITS, of the size of `bytes`).
+    The symbols that `weak` names are weak ones."""
+    defined = [name for name, _, _, _ in functions] + [name for _, _, _, name in variables]
     names = defined + sorted({call[1] for _, _, _, calls in functions for call in calls if call[1] is not None}
                              - set(defined))
-    strtab, symtab = b"\0", [bytes(24)]
-    for k, name in enumerate(names):
-        here = k < len(defined)
-        symtab.append(struct.pack("<IBBHQQ", len(strtab), 0x12 if here else 0x10, 0, k + 1 if here else 0, 0,
-                                  len(functions[k][1]) if here else 0))
-        strtab += name.encode() + b"\0"
     # name, type, flags, bytes, link, info, alignment, entry size
     sections = [(f".text.{name}", 1, 0x6, body, 0, 0, align, 0) for name, body, align, _ in functions]
-    symbols = len(functions) + sum(1 for *_, calls in functions if calls) + 1
+    sections += [(section, 8 if section.startswith(".tbss") else 1,
+                  0x403 if section.startswith((".tdata", ".tbss")) else 0x3, body, 0, 0, align, 0)
+                 for section, body, align, _ in variables]
+    strtab, symtab = b"\0", [bytes(24)]
+    for k, name in enumerate(names):
+        if k < len(defined):
+            kind = 0x2 if k < len(functions) else 0x6 if sections[k][2] & 0x400 else 0x1
+            symtab.append(struct.pack("<IBBHQQ", len(strtab), (2 if name in weak else 1) << 4 | kind, 0, k + 1, 0,
+                                      len(sections[k][3])))
+        else:
+            symtab.append(struct.pack("<IBBHQQ", len(strtab), 0x10, 0, 0, 0, 0))
+        strtab += name.encode() + b"\0"
+    symbols = len(sections) + sum(1 for *_, calls in functions if calls) + 1
     for k, (name, _, _, calls) in enumerate(functions):
         if calls:
             body = b"".join(struct.pack("<QQq", call[0], (0 if call[1] is None else names.index(call[1]) + 1) << 32
@@ -1112,20 +1211,22 @@ def executable_of(sections, loads, symbols):
 
 
 def fake_linker(cwd, ro_end=0x10300, misplace=None, extra_load=False, backward=None, far=None, grown=None,
-                far_once=None, unrelaxed=None, hidden=()):
+                far_once=None, unrelaxed=None, hidden=(), made=None):
     """The commands of the append mode (layout.run), with a stand-in for the compiler driver and lld, in `cwd`. For
     -###, the linker's line. Else a link of the objects and archives the command names: it lays out their .text
     sections one after another in input order, or as an append script puts them (each pattern's sections from the
-    address before it, and the next PT_LOAD at the address the script gives), and writes lld's map (-Wl,-Map=) and
-    an executable (-o). The read-only segment in front of .text ends at `ro_end`. In a link with a script: `misplace`
-    names a function whose map line it puts 0x10 bytes further, `extra_load` adds a PT_LOAD, `backward` makes it
-    fail as lld does when the script's line `backward` moves the location counter backward, `far` ({function:
-    address}) puts symbols elsewhere, `far_once` the same in the first such link only, and `grown` ({function:
-    bytes}) gives functions more linked bytes in the map. In every link, `unrelaxed` ({function: bytes}) gives
-    functions more linked bytes, in the map and before what follows them, as lld does for an access it no longer
-    relaxes wherever .text puts the function; a script's address below the end of what came before it then fails as
-    lld fails. The executable has no global symbol for the functions `hidden` names, as lld writes a symbol of hidden
-    visibility as a local one."""
+    address before it, and the next PT_LOAD at the address the script gives), then their thread-local data sections
+    (SHF_TLS: the .tdata ones before the .tbss ones, each in input order) in the output sections .tdata and .tbss,
+    and writes lld's map (-Wl,-Map=) and an executable (-o). The read-only segment in front of .text ends at
+    `ro_end`. In a link with a script: `misplace` names a function whose map line it puts 0x10 bytes further,
+    `extra_load` adds a PT_LOAD, `backward` makes it fail as lld does when the script's line `backward` moves the
+    location counter backward, `far` ({function: address}) puts symbols elsewhere, `far_once` the same in the first
+    such link only, and `grown` ({function: bytes}) gives functions more linked bytes in the map. In every link,
+    `unrelaxed` ({function: bytes}) gives functions more linked bytes, in the map and before what follows them, as
+    lld does for an access it no longer relaxes wherever .text puts the function; a script's address below the end
+    of what came before it then fails as lld fails. The executable has no global symbol for the functions `hidden`
+    names, as lld writes a symbol of hidden visibility as a local one, and it has the symbols `made` ({name:
+    address}) that the linker makes, which no object defines."""
     extra = unrelaxed or {}
     scripted = []
 
@@ -1133,6 +1234,7 @@ def fake_linker(cwd, ro_end=0x10300, misplace=None, extra_load=False, backward=N
         if "-###" in words:
             return 0, ' "/usr/bin/clang-20" "-cc1"\n "/usr/bin/ld.lld" "-o" "a.out" "--wrap=getenv" "main.o"\n'
         found = []  # (pattern's file, the map's name, section, size, alignment)
+        tls = []  # (the map's name, section, size, alignment)
         for word in words[1:]:
             if word.endswith(".o"):
                 members = [(word, word, (cwd / word).read_bytes())]
@@ -1142,8 +1244,9 @@ def fake_linker(cwd, ro_end=0x10300, misplace=None, extra_load=False, backward=N
             else:
                 continue
             for file, named, data in members:
-                found += [(file, named, s.name, s.size, s.align) for s in layout.Elf(data, word).sections
-                          if layout.is_text(s.name)]
+                sections = layout.Elf(data, word).sections
+                found += [(file, named, s.name, s.size, s.align) for s in sections if layout.is_text(s.name)]
+                tls += [(named, s.name, s.size, s.align) for s in sections if s.flags & 0x400]
 
         def linked(k):
             return found[k][3] + extra.get(found[k][2][len(".text."):], 0)
@@ -1179,23 +1282,34 @@ def fake_linker(cwd, ro_end=0x10300, misplace=None, extra_load=False, backward=N
                 at = (at + align - 1) // align * align
                 addresses[k], at = at, at + linked(k)
         end = max(addresses[k] + linked(k) for k in addresses)
-        rw = rw or (end + 0xFFF) // 0x1000 * 0x1000 + end % 0x1000
+        thread_local, at = [], end  # (address, the map's name, section, size, alignment)
+        for named, section, size, align in sorted(tls, key=lambda t: t[1].startswith(".tbss")):
+            at = (at + align - 1) // align * align
+            thread_local.append((at, named, section, size, align))
+            at += size
+        rw = rw or (at + 0xFFF) // 0x1000 * 0x1000 + at % 0x1000
         lines = [f"{text:>16x} {text:>16x} {end - text:>8x} {4:>5} .text\n"]
         for k in sorted(addresses, key=lambda k: (addresses[k], k)):
             _, named, section, _, align = found[k]
             shift = 0x10 if script and section == f".text.{misplace}" else 0
             more = (grown or {}).get(section[len(".text."):], 0) if script else 0
             lines.append(map_line(addresses[k] + shift, linked(k) + more, align, f"{named}:({section})"))
+        lines += [map_line(address, size, align, f"{named}:({section})")
+                  for address, named, section, size, align in thread_local]
         mapping = next(w[len("-Wl,-Map="):] for w in words if w.startswith("-Wl,-Map="))
         pathlib.Path(mapping).write_text("".join(lines))
         loads = [(0x10000, ro_end - 0x10000, 4), (text, end - text, 5), (rw, 16, 6)]
         if script and extra_load:
             loads.append((rw + 0x1000, 16, 6))
+        outputs = [(".eh_frame", 0x10200, ro_end - 0x10200, 0x2), (".text", text, end - text, 0x6)]
+        for name in (".tdata", ".tbss"):
+            held = [t for t in thread_local if t[2].startswith(name)]
+            if held:
+                outputs.append((name, held[0][0], held[-1][0] + held[-1][3] - held[0][0], 0x403))
         pathlib.Path(words[words.index("-o") + 1]).write_bytes(executable_of(
-            [(".eh_frame", 0x10200, ro_end - 0x10200, 0x2), (".text", text, end - text, 0x6),
-             (".init_array", rw, 8, 0x3), (".fini_array", rw + 8, 8, 0x3)], loads,
-            {**{found[k][2][len(".text."):]: addresses[k] for k in addresses
-                if found[k][2][len(".text."):] not in hidden}, **((far or {}) if script else {}),
+            outputs + [(".init_array", rw, 8, 0x3), (".fini_array", rw + 8, 8, 0x3)], loads,
+            {**(made or {}), **{found[k][2][len(".text."):]: addresses[k] for k in addresses
+                                if found[k][2][len(".text."):] not in hidden}, **((far or {}) if script else {}),
              **((far_once or {}) if len(scripted) == 1 and script else {})}))
         return 0, ""
     return run
@@ -1207,16 +1321,23 @@ def fake_linker(cwd, ro_end=0x10300, misplace=None, extra_load=False, backward=N
 TLS_READ = [(0x0, "tv", 29), (0x0, None, 51), (0x4, "tv", 32), (0x4, None, 51), (0x8, "tv", 30), (0x8, None, 51)]
 
 
-def sources(new, tls=False):
+def sources(new, tls=False, made=()):
     """The files of the link of the append tests: main.o (entry, which calls helper and grow, grow and tail), b.o
     (other) and lib.a, whose member m.o holds helper and small. In the new source, grow has other bytes and more of
     them, and small the same bytes at an alignment of 16. With `tls`, tail reads a thread-local variable (TLS_READ),
-    in both sources."""
-    main = relocatable([("entry", b"\1" * 0x40, 4, [(0x8, "helper"), (0x10, "grow")]),
+    in both sources: tv, which b.o defines in .tbss.tv, at the start of the TLS segment in the old source and after
+    8 KiB of .tdata in the new one. entry also calls each function that `made` names, which no object defines: the
+    first at 0x18, the next 8 bytes further."""
+    main = relocatable([("entry", b"\1" * 0x40, 4,
+                         [(0x8, "helper"), (0x10, "grow")] + [(0x18 + 8 * k, name) for k, name in enumerate(made)]),
                         ("grow", b"\x99" * 0x50 if new else b"\2" * 0x30, 4, []),
                         ("tail", b"\3" * 0x20, 4, TLS_READ if tls else [])])
     member = relocatable([("helper", b"\5" * 0x18, 4, []), ("small", b"\6" * 0x8, 16 if new else 4, [])])
-    return {"main.o": main, "b.o": relocatable([("other", b"\4" * 0x60, 4, [])]), "lib.a": archive([("m.o", member)])}
+    variables = []
+    if tls:
+        variables = ([(".tdata.table", bytes(0x2000), 8, "table")] if new else []) + [(".tbss.tv", bytes(4), 4, "tv")]
+    return {"main.o": main, "b.o": relocatable([("other", b"\4" * 0x60, 4, [])], variables),
+            "lib.a": archive([("m.o", member)])}
 
 
 COMMAND = ["clang", "main.o", "b.o", "lib.a"]
@@ -1238,19 +1359,19 @@ def tree_entry(root, directory, map_text, binary, placement=None):
     return entry
 
 
-def append_setup(tmp_path, monkeypatch, tls=False, **fake):
+def append_setup(tmp_path, monkeypatch, tls=False, made=None, **fake):
     """The base layout tree tmp_path/base of a link of the old sources in tmp_path/old, and the new sources in
-    tmp_path/work, the working directory, with fake_linker(**fake) in place of the commands (sources(new, tls)).
-    Returns the base entry."""
+    tmp_path/work, the working directory, with fake_linker(**fake) in place of the commands (sources(new, tls,
+    made)). The linker makes the symbols `made` ({name: address}) in every link. Returns the base entry."""
     for name, new in (("old", False), ("work", True)):
         (tmp_path / name).mkdir()
-        for file, data in sources(new, tls).items():
+        for file, data in sources(new, tls, made or {}).items():
             (tmp_path / name / file).write_bytes(data)
     old = tmp_path / "old"
-    assert fake_linker(old)(COMMAND + [f"-Wl,-Map={old / 'map'}", "-o", str(old / "fuzz")]) == (0, "")
+    assert fake_linker(old, made=made)(COMMAND + [f"-Wl,-Map={old / 'map'}", "-o", str(old / "fuzz")]) == (0, "")
     entry = tree_entry(tmp_path / "base", old, (old / "map").read_text(), (old / "fuzz").read_bytes())
     monkeypatch.chdir(tmp_path / "work")
-    monkeypatch.setattr(layout, "run", fake_linker(tmp_path / "work", **fake))
+    monkeypatch.setattr(layout, "run", fake_linker(tmp_path / "work", made=made, **fake))
     (tmp_path / "links").mkdir()
     return entry
 
@@ -1321,6 +1442,31 @@ def test_layout_check_verifies_what_append_writes(tmp_path, monkeypatch, capsys)
     assert lines_with(lines, "changed: grow", "0x11340 -> 0x11408")
 
 
+def test_a_global_target_resolves_to_its_definition_in_the_links_objects(tmp_path):
+    # caller calls f, which the member m.o of lib.a defines and the binary has no symbol for (a hidden one, which lld
+    # writes as a local one); g, weak in w.o and global in s.o after it; h, weak in both; and stub, which no object
+    # defines and the linker makes. The link lays them out in input order from 0x11300: caller (row 0), w.o's g and h
+    # (1, 2), s.o's g and h (3, 4), and f (5).
+    calls = [(0x0, "f"), (0x8, "g"), (0x10, "h"), (0x18, "stub")]
+    files = {"main.o": relocatable([("caller", b"\1" * 0x20, 4, calls)]),
+             "w.o": relocatable([("g", b"\2" * 0x8, 4, []), ("h", b"\3" * 0x8, 4, [])], weak={"g", "h"}),
+             "s.o": relocatable([("g", b"\4" * 0x8, 4, []), ("h", b"\5" * 0x8, 4, [])], weak={"h"}),
+             "lib.a": archive([("m.o", relocatable([("f", b"\6" * 0x8, 4, [])]))])}
+    for file, data in files.items():
+        (tmp_path / file).write_bytes(data)
+    words = ["clang", *files, f"-Wl,-Map={tmp_path / 'map'}", "-o", str(tmp_path / "fuzz")]
+    assert fake_linker(tmp_path, hidden={"f"}, made={"stub": 0x12000})(words) == (0, "")
+    entry = tree_entry(tmp_path / "tree", tmp_path, (tmp_path / "map").read_text(), (tmp_path / "fuzz").read_bytes())
+    # The global g wins over the weak one before it, and of two weak h the first in the map's order.
+    assert [line.split("\t") for line in (entry / "calls.tsv").read_text().splitlines()] == [
+        ["0", "0x0", "call", "global", "f", "0x0", "5", "0x0"], ["0", "0x8", "call", "global", "g", "0x0", "3", "0x0"],
+        ["0", "0x10", "call", "global", "h", "0x0", "2", "0x0"],
+        ["0", "0x18", "call", "global", "stub", "0x0", "-", "-"]]
+    tree = layout.read_layout(str(entry))
+    assert "f" not in tree.output.symbols
+    assert [layout.target_address(call, tree) for call in tree.calls[0]] == [0x11340, 0x11330, 0x11328, 0x12000]
+
+
 def test_append_links_normally_when_the_read_only_data_grew_past_its_room(tmp_path, monkeypatch, capsys):
     # The new link's read-only segment ends at 0x11100: 0xe00 bytes past the base's 0x10300, whose room up to
     # page_floor(0x11300) was 0xd00.
@@ -1360,22 +1506,26 @@ def test_append_exits_1_when_the_check_link_is_not_what_the_plan_asks(tmp_path, 
     assert not (tmp_path / "placement.tsv").exists()
 
 
+# A call of a function that an object defines reaches it where the check link's map puts it, so a check link can
+# relax such a call otherwise than the plan only when the call names a symbol that the linker makes (as --defsym=
+# stub=grow does): stub, at grow's address in the base and the probe links, and once, at helper's.
 @pytest.mark.parametrize("fake, placed_rows", [
-    # In the check link, entry takes 4 bytes more, because its call of grow, which the link puts 4 MiB away, is no
-    # longer in jal's reach: entry moves with jal_reach, and the plan runs again. grow keeps away from entry's base
-    # call site, so that entry's cause holds.
-    ({"far": {"grow": 0x400000}, "grown": {"entry": 4}},
+    # In the check link, entry takes 4 bytes more, because its call of stub, which the link puts 4 MiB away, is no
+    # longer in jal's reach: entry moves with jal_reach, and the plan runs again. grow, where the probe link has stub,
+    # keeps away from entry's base call site, so that entry's cause holds.
+    ({"made": {"stub": 0x11340}, "far": {"stub": 0x400000}, "grown": {"entry": 4}},
      [[".text.small", "hole", "0x11300", "alignment", "align=16"], [".text.tail", "kept", "0x11370", "-", "-"],
       [".text.other", "kept", "0x11390", "-", "-"], [".text.helper", "kept", "0x113f0", "-", "-"],
       [".text.grow", "end", "0x11408", "-", "-"],
-      [".text.entry", "end", "0x11458", "jal_reach", "offset=0x10;target=grow;lost"]]),
-    # The first check link also puts helper far, and entry moves for its call of helper; in the second, only the
-    # call of grow is relaxed otherwise, and placement.tsv gives that one.
-    ({"far": {"grow": 0x400000}, "far_once": {"helper": 0x400000}, "grown": {"entry": 4}},
+      [".text.entry", "end", "0x11458", "jal_reach", "offset=0x18;target=stub;lost"]]),
+    # The first check link also puts once far, and entry moves for its call of once; in the second, only the call of
+    # stub is relaxed otherwise, and placement.tsv gives that one.
+    ({"made": {"once": 0x113F0, "stub": 0x11340}, "far": {"stub": 0x400000}, "far_once": {"once": 0x400000},
+      "grown": {"entry": 4}},
      [[".text.grow", "hole", "0x11300", "-", "-"], [".text.small", "hole", "0x11350", "alignment", "align=16"],
       [".text.tail", "kept", "0x11370", "-", "-"], [".text.other", "kept", "0x11390", "-", "-"],
       [".text.helper", "kept", "0x113f0", "-", "-"],
-      [".text.entry", "end", "0x11408", "jal_reach", "offset=0x10;target=grow;lost"]]),
+      [".text.entry", "end", "0x11408", "jal_reach", "offset=0x20;target=stub;lost"]]),
 ], ids=["lost", "another-call"])
 def test_append_moves_a_kept_section_whose_call_the_check_link_relaxes_otherwise(tmp_path, monkeypatch, capsys, fake,
                                                                                  placed_rows):

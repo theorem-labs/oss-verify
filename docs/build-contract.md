@@ -554,7 +554,7 @@ The layout tree has a directory `<build>/<target>/` for each fuzz target that ha
 
 * `map`: the map of the record, as it is: the input sections of the linker's map, in the map's order.
 * `sections.tsv`: one line for each line of `map` that names a file. It gives the file, the file that the key uses (for a copy of an allocation-failure link, its original), the archive member, the section, the SHA-256 of the section's bytes before relocation, the size of the input section and its alignment.
-* `calls.tsv`: each call relocation (`R_RISCV_CALL`, `R_RISCV_CALL_PLT`) of each `.text` input section, and its target. A call to a function that the link wraps (`--wrap=<f>`) is a call to `__wrap_<f>`, and a call to `__real_<f>` is a call to `<f>`.
+* `calls.tsv`: each call relocation (`R_RISCV_CALL`, `R_RISCV_CALL_PLT`) and each thread-local access (`R_RISCV_TPREL_HI20`) of each `.text` input section, and its target. `layout.py` finds the target of a global symbol in the objects of the link. Thus a function of hidden visibility has a target too, although the symbol table of the binary lists it as local. A call to a function that the link wraps (`--wrap=<f>`) is a call to `__wrap_<f>`, and a call to `__real_<f>` is a call to `<f>`.
 * `output.tsv`: the output sections, the `PT_LOAD` segments and the global symbols of the binary.
 * `binary.sha256`: the SHA-256 of the binary and of its stripped twin.
 * `wraps`: each function that the link wraps.
@@ -575,9 +575,10 @@ The layout tree has a directory `<build>/<target>/` for each fuzz target that ha
 
 ### Why a function whose bytes did not change can move
 
-The mode never stops a link for a change of the code. When the linker cannot keep a function at its base address, the mode moves that function too and records one of these four causes in `placement.tsv`:
+The mode never stops a link for a change of the code. When the linker cannot keep a function at its base address, the mode moves that function too and records one of these five causes in `placement.tsv`:
 
 * `jal_reach`: lld changes a call into one 4-byte `jal` instruction only when the target is less than 1 MiB away. When a call in the function would change in this way at its base address, because its target moved, the function moves too. This can occur only when `.text` is larger than 1 MiB.
+* `tls_reach`: lld removes the `lui` and the `add` of a thread-local access only when the variable lies within 2 KiB of the start of the TLS segment. When a change moves the variable across that bound, the function changes size wherever it goes, so it moves.
 * `repeated_key`: one pattern of a linker script places all the sections of one key together, in their input order. The members of a key that occurs more than one time stay only when they were side by side at the base, in the same order, and each has the same bytes. Else they all move, as one block.
 * `alignment`: the alignment of the section grew, and its base address is not a multiple of the new alignment. This occurs only for code compiled without relaxation, or written in assembly: with relaxation, clang puts the padding of an alignment inside the section, so the bytes change.
 * `readonly_growth`: the read-only segment before `.text` grew past the start of the page that holds the base's first `.text` byte, so `.text` cannot start where it did. The mode then makes a normal link, writes one line that gives the growth and the room, and records each function with the same bytes with this cause. The room is less than 4 KiB. For `libreac/fuzz_pcap` it is 2,680 bytes (plain), 2,608 (ubsan), 144 (asan) and 64 (asan-ubsan).
