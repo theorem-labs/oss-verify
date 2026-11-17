@@ -4,13 +4,15 @@
 uv run pytest"""
 import difflib
 import hashlib
+import itertools
 import pathlib
+import string
 import sys
 import tempfile
 import time
 import unittest
 
-from oss_verify import seeded_projects
+from oss_verify import seeded_projects, validate
 
 LANGUAGE_HEADER = ("# project\toss_fuzz\tlanguage\trepo\tcommit\thomepage\tsanitizers\tfuzz_targets\trelease_targets"
                    "\theld\n")
@@ -246,8 +248,9 @@ class Table(unittest.TestCase):
                          "fuzz_q, fuzz_r differ from the release's" + KAY_NOTES)
 
     def test_port_content_that_fills_sources_takes_a_bounded_time(self):
-        # A sources file of 64 KiB is the most that oss-verify validate takes. seeded-projects.yml stops after 5
-        # minutes, and the table reads each seeded port. Each case here fits in 64 KiB.
+        # A sources file of validate.MAX_FILE_BYTES (64 KiB) and a build.sh of validate.MAX_SOURCE_BYTES (256 KiB) are
+        # the most that oss-verify validate takes. seeded-projects.yml stops after 5 minutes, and the table reads each
+        # seeded port. Each case here fits in these limits.
         # A chain: each link points into the next one, so the path of each link takes one step for each link after
         # it, and becomes longer at each step. The patched tree is the end of the chain, which no block reads.
         chain = "".join(f"link\tc{i}\tc{i + 1}/x\n" for i in range(2000))
@@ -256,6 +259,19 @@ class Table(unittest.TestCase):
         fan = "tree\ts\tupstream/s\n" + "".join(f"link\text/v{i}/vendor\ts\n" for i in range(2400))
         fan_build = self.PORT["projects/kay/build.sh"] + "".join(
             f"(\nov_target_begin v{i}\nov_target_build fuzz_v{i}\n)\n" for i in range(2400))
+        # A long link: ext/w is a link whose target has 32,000 components. The first component, l40, is the top of a
+        # ladder of 40 links. Each of the 23,000 keys of one ov_target_begin line is w/<n>, so the walk of the block
+        # tree ext/w/<n> follows ext/w and the 40 links of the ladder. It stops at the 41st link, before it reads the
+        # rest of the target of ext/w.
+        ladder = "link\tl1\tz\n" + "".join(f"link\tl{n}\tl{n - 1}\n" for n in range(2, 41))
+        long = ladder + "link\text/w\tl40" + "/x" * 31_999 + "\n"
+        long_build = "(\nov_target_begin " + " ".join(f"w/{n}" for n in range(23_000)) + "\nov_target_build fuzz_w\n)\n"
+        # Many keys: one ov_target_begin line that names the same key 130,000 times, or 60,000 different keys.
+        same_build = "(\nov_target_begin" + " k" * 130_000 + "\nov_target_build fuzz_k\n)\n"
+        keys = ["".join(letters) for letters in itertools.product(string.ascii_letters, repeat=3)][:60_000]
+        keys_build = "(\nov_target_begin " + " ".join(keys) + "\nov_target_build fuzz_k\n)\n"
+        cannot = ("applies kay.0002-new.patch, whose fuzz targets this table cannot name: some of its binaries may "
+                  "differ from the release's")
         cases = {
             "a chain of links": (self.new_patch("c0", links=chain),
                                  "applies kay.0002-new.patch, whose fuzz targets this table cannot name: some of its "
@@ -263,10 +279,15 @@ class Table(unittest.TestCase):
             "a fan of links to one tree": (self.new_patch("s", links=fan, build=fan_build),
                                            f"applies kay.0002-new.patch to {', '.join(names)}: the binaries of "
                                            f"{', '.join(names)} differ from the release's"),
+            "a long link that each block tree follows": (
+                self.new_patch("targets/kay-fuzz_d", links=long, build=long_build), cannot),
+            "a key that one line names 130,000 times": (self.new_patch("targets/kay-fuzz_d", build=same_build), cannot),
+            "60,000 keys on one line": (self.new_patch("targets/kay-fuzz_d", build=keys_build), cannot),
         }
         for case, (ports, words) in cases.items():
             with self.subTest(case):
-                self.assertLessEqual(len(ports["projects/kay/sources"].encode()), 64 * 1024)
+                self.assertLessEqual(len(ports["projects/kay/sources"].encode()), validate.MAX_FILE_BYTES)
+                self.assertLessEqual(len(ports.get("projects/kay/build.sh", "").encode()), validate.MAX_SOURCE_BYTES)
                 start = time.process_time()
                 row = self.row("kay", ports=ports)
                 self.assertLess(time.process_time() - start, 5)
@@ -318,7 +339,8 @@ class Table(unittest.TestCase):
         # A chain of links to ext/kay-fuzz_e/src: the path l<n> follows n links.
         chain = "link\tl1\text/kay-fuzz_e/src\n" + "".join(f"link\tl{n}\tl{n - 1}\n" for n in range(2, 42))
         # A deep tree that holds a link to itself, and patch lines that follow that link 40 times. Each line takes
-        # more than 40,000 steps, so together they take more than STEPS. The sources file fits in 64 KiB.
+        # more than 40,000 steps, so together they take more than STEPS. The sources file fits in
+        # validate.MAX_FILE_BYTES (64 KiB).
         deep = "/".join(["d"] * 1000)
         steps = f"tree\t{deep}\tupstream/d\nlink\t{deep}/s\t{deep}\n" + "".join(
             f"patch\t{deep}{'/s' * 40}\tkay.0002-new.patch\n" for _ in range(25))
@@ -341,7 +363,7 @@ class Table(unittest.TestCase):
         }
         for case, (ports, row) in cases.items():
             with self.subTest(case):
-                self.assertLessEqual(len(ports["projects/kay/sources"].encode()), 64 * 1024)
+                self.assertLessEqual(len(ports["projects/kay/sources"].encode()), validate.MAX_FILE_BYTES)
                 self.assertEqual(self.row("kay", ports=ports), row)
 
     def test_a_checked_patch_in_other_bytes(self):
