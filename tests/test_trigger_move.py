@@ -1773,11 +1773,13 @@ class HeldRuns(Stand):
             self.assertEqual(self.go(), [self.starts("review.yml", 41)] if again else [], (who, self.log))
 
     def test_held_runs_a_rerun_that_github_refuses_leaves_the_other_heads_their_screen(self):
-        # GitHub refuses a re-run of a run that was re-run 50 times, or that started more than 30 days ago
-        # (https://github.blog/changelog/2026-04-10-actions-workflows-are-limited-to-50-reruns/). Pull request 301 is
-        # due a re-run of run 971 (its screen gave a verdict, its comment job failed, its latest attempt started 70
-        # minutes ago), and GitHub refuses it. Pull request 302, held before 301, was never screened. The refusal of
-        # one head's re-run does not keep the other head from its screen.
+        # GitHub refuses (HTTP 4xx) a re-run of a run that started more than 30 days ago. A 51st re-run gets no
+        # refusal but a failed check suite, so Held runs reads that limit from run_attempt (the test of a run at the
+        # limit, below):
+        # https://github.blog/changelog/2026-04-10-actions-workflows-are-limited-to-50-reruns/
+        # Pull request 301 is due a re-run of run 971 (its screen gave a verdict, its comment job failed, its latest
+        # attempt started 70 minutes ago), and GitHub refuses it. Pull request 302, held before 301, was never
+        # screened. The refusal of one head's re-run does not keep the other head from its screen.
         p, q = "7" * 40, "2" * 40
         self.pulls = [self.pull(301, "pat/oss-verify", "s", p), self.pull(302, "rob/oss-verify", "u", q)]
         self.held = [self.held_run(30101, p, "pat/oss-verify", "s", 200),
