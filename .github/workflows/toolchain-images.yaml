@@ -109,7 +109,9 @@ jobs:
         base: [oss-fuzz-theorems-2026.10, oss-fuzz-theorems-2026.10-rust, oss-fuzz-theorems-2026.10-python]
     services:
       registry:
-        image: registry:2
+        # docker.io/library/registry:2, pinned by the digest of its image index (read with crane v0.22.1 on
+        # 2026-11-17T17:16Z). probe, docker-tests and publish run the same image.
+        image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
         ports:
           - 5000:5000
     env:
@@ -261,7 +263,7 @@ jobs:
         base: [oss-fuzz-theorems-2026.10, oss-fuzz-theorems-2026.10-rust, oss-fuzz-theorems-2026.10-python]
     services:
       registry:
-        image: registry:2
+        image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
         ports:
           - 5000:5000
     env:
@@ -329,7 +331,7 @@ jobs:
       contents: read
     services:
       registry:
-        image: registry:2
+        image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
         ports:
           - 5000:5000
     steps:
@@ -389,7 +391,8 @@ jobs:
           set -o pipefail
           python3 -P -m pytest -rs -p no:cacheprovider -c pyproject.toml tests/test_builder.py -k FramePointers \
             | tee "$RUNNER_TEMP/pytest"
-          # Each test must run and pass: a test that skips (no Docker, no base image) is a failure here.
+          # Each test must run and pass: a test that skips (no Docker, no base image, no frame-pointer image named) is
+          # a failure here.
           if ! grep -qE '[0-9]+ passed' "$RUNNER_TEMP/pytest" || grep -q '^SKIPPED' "$RUNNER_TEMP/pytest"; then
             echo "::error::A FramePointers test did not run."
             exit 1
@@ -409,7 +412,7 @@ jobs:
         base: [oss-fuzz-theorems-2026.10, oss-fuzz-theorems-2026.10-rust, oss-fuzz-theorems-2026.10-python]
     services:
       registry:
-        image: registry:2
+        image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
         ports:
           - 5000:5000
     env:

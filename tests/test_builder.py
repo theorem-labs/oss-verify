@@ -12,7 +12,8 @@ docs/build-contract.md. Running the riscv64 binaries needs qemu-riscv64 (static)
 is skipped.
 
 FramePointers also needs the frame-pointer images that .github/workflows/toolchain-images.yaml makes, named by
-OV_FP_TOOLCHAIN_C and OV_FP_TOOLCHAIN_RUST (that workflow's docker-tests job sets both).
+OV_FP_TOOLCHAIN_C and OV_FP_TOOLCHAIN_RUST. It skips unless both are set. That workflow's docker-tests job sets both,
+and fails if a test skips.
 """
 import os
 import pathlib
@@ -621,9 +622,11 @@ def row_image(name):
 
 
 @unittest.skipUnless(os.environ.get("OV_DOCKER_TESTS") == "1"
+                     and all(os.environ.get(variable) for _, variable in FRAME_POINTER_IMAGES.values())
                      and all(docker_ready(row_image(row)) for row, _ in FRAME_POINTER_IMAGES.values()),
-                     "set OV_DOCKER_TESTS=1, with Docker and the base images of the frame-pointer images, to build the "
-                     "fixtures on them")
+                     "set OV_DOCKER_TESTS=1, and OV_FP_TOOLCHAIN_C and OV_FP_TOOLCHAIN_RUST to the frame-pointer "
+                     "images (.github/workflows/toolchain-images.yaml makes them), with Docker and their base images, "
+                     "to build the fixtures on them")
 class FramePointers(unittest.TestCase):
     """OFT_FRAME_POINTERS: the plain build of fixtures/example and fixtures/rust-example on each frame-pointer image and
     on the base image it is made from. compile_build passes no -e of its caller and keeps no output, so these tests run
@@ -632,11 +635,6 @@ class FramePointers(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        # A missing image is an error of the run, not a reason to skip.
-        missing = [variable for _, variable in FRAME_POINTER_IMAGES.values() if not os.environ.get(variable)]
-        if missing:
-            raise AssertionError(f"OV_DOCKER_TESTS=1, and no frame-pointer image is named: set {' and '.join(missing)} "
-                                 "(.github/workflows/toolchain-images.yaml makes the images)")
         cls.scratch = tempfile.TemporaryDirectory(prefix="ov-test-frame-pointers.")
         cls.work = pathlib.Path(cls.scratch.name)
         cls.labels = check_build.work_label(cls.work)
