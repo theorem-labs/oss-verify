@@ -2109,6 +2109,36 @@ class SinceLastReview(unittest.TestCase):
                 self.assertEqual((output, run.stdout), ("", ""))
 
 
+class SeedHex(unittest.TestCase):
+    """review-gather's hexadecimal dump of each seed corpus: the first 512 bytes of each input, read as data from a zip
+    that the pull request brings."""
+
+    def test_a_member_is_read_only_as_far_as_its_first_512_bytes(self):
+        gather = (ROOT / ".github" / "scripts" / "review-gather").read_text()
+        code = re.search(r'^  python3 - "\$zip" "\$out/seeds/\$target\.hex\.txt" <<\'EOF\'\n(.*?)^EOF$', gather,
+                         re.M | re.S)[1]
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            # 256 MiB of zeros deflate to about 250 KiB: a pull request can bring such a zip.
+            corpus = directory / "demo_seed_corpus.zip"
+            with zipfile.ZipFile(corpus, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                with archive.open("zeros", "w") as member:
+                    for _ in range(256):
+                        member.write(bytes(1 << 20))
+            # The heredoc as python3 - runs it, with its peak allocation traced: a dump that decompresses the
+            # whole member takes hundreds of megabytes.
+            run = subprocess.run([sys.executable, "-c",
+                                  "import tracemalloc\ntracemalloc.start()\n" + code +
+                                  "\nprint(tracemalloc.get_traced_memory()[1])",
+                                  str(corpus), str(directory / "demo.hex.txt")], capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            peak = int(run.stdout)
+            self.assertLess(peak, 16 << 20, "the dump decompressed the whole member")
+            lines = (directory / "demo.hex.txt").read_text().splitlines()
+        self.assertEqual(lines[0], f"== 'zeros': {256 << 20} bytes")
+        self.assertEqual(lines[1:], [f"{at:04x}  {' '.join(['00'] * 16)}  {'.' * 16}" for at in range(0, 512, 16)])
+
+
 class ReviewJob(unittest.TestCase):
     """build.yaml's review job: its own small steps, and the scripts it runs (review-gather, review-prompt), run with
     stand-ins."""
