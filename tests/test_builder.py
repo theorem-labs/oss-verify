@@ -407,7 +407,8 @@ class RustBuilder(unittest.TestCase):
         # An AddressSanitizer detection in a Rust fuzz target took minutes under qemu (about 160 s here, 234 s on
         # ubuntu-24.04-16core): that was the core dump of the qemu process. With run_in_container's write to
         # coredump_filter the dump holds no memory, and all the cases of this test run in less than a second there
-        # (OSSV-729's measurement). The time limit stays 600 s.
+        # (OSSV-729's measurement). OSSV-729 keeps each helper's time limit, as its R2 asks, and measured no lower
+        # limit.
         runner = ('for b in plain ubsan asan asan-ubsan; do for c in /in/*; do '
                   'timeout 600 /qemu /bin2/example_fuzzer.$b "$c" > /dev/null 2>&1; echo "$b ${c#/in/case-} $?"; done; '
                   'printf "%s " "$b printed"; timeout 60 /qemu /bin2/example_fuzzer.$b /in/case-r | tr "\\n" ,; echo; '
