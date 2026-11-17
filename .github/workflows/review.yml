@@ -260,9 +260,9 @@ name: "Review"
 # dispatch://INFRA-3369) makes Theorem's identities admit this file, on refs/heads/main and only from its own events
 # (here workflow_run, issues and workflow_dispatch, as Theorem's infrastructure code lists them): Google's provider
 # github-ossv for the accounts ossv-ci, ossv-app-comment and oss-verify-ci, the screen's Google pool review-screen and
-# its Anthropic rule oss-verify-screen, and a second tailnet identity, ossv-review-yml-github, for the review job. Until
-# that change is applied, each job of this file that signs in (screen, review, hold, comment and triage) runs and fails
-# at its sign-in: no screen, review, comment, check run Enrollment review or approval comes from this file. A token
+# its Anthropic rule oss-verify-screen, and a second tailnet identity, ossv-review-yml-github, for the review job. The
+# three applies of dispatch://INFRA-3746 (bootstrap/, anthropic-org/ and root/ in agent-infra) ran on 2026-11-17.
+# So each job that signs in (screen, review, hold, comment and triage) can sign in once this file is on main. A token
 # carries no job name, so what keeps each Google account to the job that needs it is the job's GitHub Environment,
 # which the token carries a claim for: `ossv-ci`, which the review job uses only to store a held finding or an issue's
 # draft, can be acted as only from the environment `enroll-review`, which the review job declares; `ossv-app-comment`,
@@ -302,7 +302,7 @@ name: "Review"
 # policy test that fails if the tag reaches anything else, are declared by INFRA-832 S1a in agent-infra, merged on
 # 2026-10-30 as 99d1b5d. Its bootstrap apply ran on 2026-10-31 at agent-infra c96f3d672, and the address below is an
 # output of that apply. The federated identity that trades this file's token for the node is ossv-review-yml-github
-# (dispatch://INFRA-3746), and its client id below comes from the seed apply of dispatch://INFRA-3369. The
+# (dispatch://INFRA-3746), and its client id below comes from the apply of root/ for that issue on 2026-11-17. The
 # export is tagged theorem.project=oss-verify, theorem.subproject=<name> (or _change, or _issue: a project name never
 # starts with `_`), theorem.lane=enroll-review-ci and theorem.credential=oss-verify-ci. The export is a measurement and
 # never decides whether a review runs: if the job cannot join the tailnet, or the collector does not answer at its
@@ -367,8 +367,10 @@ name: "Review"
 #     change, and the screen reads the text, the diff and each changed file. A clean verdict: the comment job
 #     approves every held run of that head, and posts no review, no comment and no check run. A screen that held it,
 #     a job that failed, or the daily cap: the comment job records the hold by one rule. An enrollment at the cap, or
-#     one whose project the gather job took, gets the check run Enrollment review with the hold. Any other item gets
-#     the label review-held and the hold comment.
+#     one whose project the gather job took, gets the check run Enrollment review with the hold. But when the
+#     oss-verify App recorded a check run Enrollment review of that pull request at that head already, that check run
+#     stands. The comment job then records nothing and posts nothing. Any other item gets the label review-held and
+#     the hold comment.
 #   - Not held, an enrollment with a completed Build run of that head that wrote build-results: the review, with the
 #     results of the newest such run, and the comment.
 #   - Not held, an enrollment with no such Build run: nothing. route says "No Build run of this head wrote results: a
@@ -1319,10 +1321,10 @@ jobs:
       # The client id Tailscale gives the federated identity ossv-review-yml-github, which dispatch://INFRA-3746 (a part
       # of dispatch://INFRA-3369) makes for this file. The old identity, ossv-review-github, admits build.yaml alone,
       # which joins no tailnet now, and dispatch://INFRA-3755 removes the old admissions after this file is on main.
-      # The id comes from the apply of root/ that dispatch://INFRA-3746 makes, which records it on that issue, and it is
-      # not known yet: until it is written here, the join to the tailnet fails, and so does the review. The id is
-      # public, not a secret, and this is the one place this file names it.
-      TAILNET_CLIENT_ID: ""
+      # The id comes from the apply of root/ for dispatch://INFRA-3746 on 2026-11-17: it is that apply's output
+      # tailnetClientId-ossv-review-yml-github, which dispatch://INFRA-3369 records. The id is public, not a secret, and
+      # this is the one place this file names it.
+      TAILNET_CLIENT_ID: "TWbBfz7fqc11CNTRL-k41v23iH8F11CNTRL"
       # The cost collector's address on the tailnet, http://<IPv4 address> on port 80. Every sender of spend
       # records takes this one URL, and it holds the address, not the Service's MagicDNS name, because
       # linux28-agents-1 joins the tailnet with --accept-dns=false and resolves no MagicDNS name; tailscaled
@@ -1409,9 +1411,9 @@ jobs:
       # svc:spend on tcp:80 and the model gateway's tcp:443 and tcp:4000 (INFRA-481), beyond those
       # nothing else but the two read-only pages every node of the tailnet may read. The federated identity
       # ossv-review-yml-github (dispatch://INFRA-3746) has claims that admit only this workflow of this repository, on
-      # refs/heads/main, in the environment enroll-review, on a GitHub-hosted runner. The seed apply of
-      # dispatch://INFRA-3369 makes the client id above. The job joins with its GitHub identity token, so no key is
-      # stored. One review
+      # refs/heads/main, in the environment enroll-review, on a GitHub-hosted runner. The apply of root/ for
+      # dispatch://INFRA-3746 on 2026-11-17 made the client id above. The job joins with its GitHub identity token, so
+      # no key is stored. One review
       # job runs in a run attempt, so the run id and the attempt name the node. A Linux device reaches a Tailscale
       # Service's address only with Tailscale 1.94 or later, or with --accept-routes
       # (https://tailscale.com/kb/1552, "Access Tailscale Services from other devices"): this action meets both at
@@ -2114,11 +2116,12 @@ jobs:
           # On a run by hand for a held head (HELD_RUNS), the screen decides only whether this job approves the held
           # runs. It does not change the review's verdict. A check run Enrollment review of this pull request at this
           # head that the oss-verify App recorded already (a review's verdict, or an earlier hold) stands: no hold
-          # replaces it, and nothing is posted. This step finds that check run as enroll-dispatch does: by the App's id
-          # (REVIEW_APP) and by its external_id, the pull request's number. A read that fails fails this step.
+          # replaces it, and nothing is posted. This step finds that check run as enroll-dispatch does: by its name
+          # (the query's check_name), by the App's id (REVIEW_APP) and by its external_id, the pull request's number.
+          # A read that fails fails this step.
           if [ "${HELD_RUNS:-}" = true ] && [ -n "$hold" ]; then
             recorded=$(gh api --paginate "repos/$REPO/commits/$HEAD_SHA/check-runs?check_name=Enrollment%20review&filter=all&per_page=100" \
-              --jq '.check_runs[] | select(.name == "Enrollment review" and .app.id == 5447700) | .external_id // ""')
+              --jq '.check_runs[] | select(.app.id == 5447700) | .external_id // ""')
             if grep -qxF "$PR" <<< "$recorded"; then
               echo "The oss-verify App recorded a check run Enrollment review of #$PR at $HEAD_SHA already, and it stands: this hold ($hold${job:+, the $job job}) records nothing and posts nothing."
               exit 0
@@ -2379,8 +2382,9 @@ jobs:
           # to read). triage-gather is asked for when route asked for the triage comment, and triage when triage-gather
           # wrote one. The jobs that sign in (screen, review, hold, comment and triage) are never asked for on a run by
           # hand on another branch than main. So a held item passes this check when the comment job recorded the hold:
-          # a screen's hold or the daily cap. A gather, screen, review (after its second attempt), hold or comment job
-          # that failed fails it, held or not.
+          # a screen's hold or the daily cap. It also passes when, on a run by hand for a held head whose check run
+          # Enrollment review stands, the comment job recorded nothing. A gather, screen, review (after its second
+          # attempt), hold or comment job that failed fails it, held or not.
           GATHER: ${{ needs.gather.result }}
           ASKED_GATHER: >-
             ${{ needs.route.result == 'success'

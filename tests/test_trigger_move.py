@@ -1014,16 +1014,6 @@ class HeldApproval(Stand):
     APPROVE_IF_ANY = "APPROVE: ${{ needs.route.outputs.held == 'true' && needs.screen.result == 'success' }}"
     REFUSAL = '[ "${SCREEN_VERDICT:-}" = clean ] || fail "the screen\'s verdict is not clean: no run is approved."\n'
     POST = "Post the comment and record the verdict"
-    # The check runs Enrollment review at HEAD. APP_RUN: the check run that the oss-verify App (id 5447700, REVIEW_APP
-    # of .github/scripts/enroll-dispatch) recorded for pull request 7, the verdict of a review that passed.
-    # NOT_APP_RUNS: a check run of another App for pull request 7, and one of the oss-verify App for pull request 8 at
-    # the same commit. enroll-dispatch counts neither of them.
-    APP_RUN = {"id": 601, "name": "Enrollment review", "app": {"id": 5447700, "slug": "oss-verify"},
-               "external_id": PR, "status": "completed", "conclusion": "success"}
-    NOT_APP_RUNS = ({"id": 602, "name": "Enrollment review", "app": {"id": 1, "slug": "another-app"},
-                     "external_id": PR, "status": "completed", "conclusion": "success"},
-                    {"id": 603, "name": "Enrollment review", "app": {"id": 5447700, "slug": "oss-verify"},
-                     "external_id": "8", "status": "completed", "conclusion": "success"})
     # The holds of a held enrollment whose project the gather job took: (label, route's trust, the result of the screen
     # job, or None when it does not run, its verdict, and the title of the check run that records the hold).
     HOLDS = (("the screen held it", "screen", "success", "held", "The automated screen held this pull request."),
@@ -1042,6 +1032,19 @@ class HeldApproval(Stand):
         self.serve("users/alice", {"type": "User"})
         self.serve(f"repos/{REPO}/actions/workflows/review.yml/runs", {"workflow_runs": []})
         self.serve(f"repos/{REPO}/actions/artifacts", {"artifacts": []})
+        # The oss-verify App's id: REVIEW_APP of .github/scripts/enroll-dispatch, which the comment job's step POST
+        # writes as a number too. The check runs Enrollment review at HEAD: app_run, the check run that the App recorded
+        # for pull request 7, the verdict of a review that passed. not_app_runs: a check run of another App for pull
+        # request 7, and one of the oss-verify App for pull request 8 at the same commit. enroll-dispatch counts neither
+        # of them.
+        app = self.review_app = int(re.search(r"^REVIEW_APP = ([0-9]+)$",
+                                              (ROOT / ".github/scripts/enroll-dispatch").read_text(), re.M).group(1))
+        self.app_run = {"id": 601, "name": "Enrollment review", "app": {"id": app, "slug": "oss-verify"},
+                        "external_id": PR, "status": "completed", "conclusion": "success"}
+        self.not_app_runs = ({"id": 602, "name": "Enrollment review", "app": {"id": 1, "slug": "another-app"},
+                              "external_id": PR, "status": "completed", "conclusion": "success"},
+                             {"id": 603, "name": "Enrollment review", "app": {"id": app, "slug": "oss-verify"},
+                              "external_id": "8", "status": "completed", "conclusion": "success"})
 
     def held_runs(self, runs):
         self.serve(f"repos/{REPO}/actions/runs", {"workflow_runs": [
@@ -1113,9 +1116,9 @@ class HeldApproval(Stand):
         env = self.comment_env(ctx)
         self.assertEqual((env["APPROVE"], env["HOLDING"]), ("true", "false"))
         self.assertEqual({n: self.ran(n, env) for n in (self.TOKEN, self.APPROVE, "Label it review-held and say so",
-                                                        "Post the comment and record the verdict")},
+                                                        self.POST)},
                          {self.TOKEN: True, self.APPROVE: True, "Label it review-held and say so": False,
-                          "Post the comment and record the verdict": False})
+                          self.POST: False})
         rc, log, sent = self.approve(ROOT, ctx)
         self.assertEqual(rc, 0, log)
         self.assertEqual([(r["token"], r["endpoint"]) for r in sent if r["method"] == "POST"],
@@ -1200,13 +1203,14 @@ class HeldApproval(Stand):
         review of pull request 7 at HEAD. Then a hold of the held path (the screen held it, the daily cap, or a screen
         that failed) records nothing and posts nothing, so Enroll dispatch still reads that verdict. With no such check
         run, the hold is recorded as off the held path."""
+        self.assertIn(f".app.id == {self.review_app}", self.step(self.review, "comment", self.POST)["run"])
         for label, trust, screen, verdict, title in self.HOLDS:
             with self.subTest(label):
-                rc, log, out, sent = self.hold_of_held_head(trust, screen, verdict, (*self.NOT_APP_RUNS, self.APP_RUN))
+                rc, log, out, sent = self.hold_of_held_head(trust, screen, verdict, (*self.not_app_runs, self.app_run))
                 self.assertEqual((rc, out, sent), (0, {}, []), f"the hold replaces the App's check run: {log}")
                 self.assertIn(f"The oss-verify App recorded a check run Enrollment review of #{PR} at {HEAD} already",
                               log)
-                rc, log, out, sent = self.hold_of_held_head(trust, screen, verdict, self.NOT_APP_RUNS)
+                rc, log, out, sent = self.hold_of_held_head(trust, screen, verdict, self.not_app_runs)
                 self.assertEqual((rc, out), (0, {"recorded": "true"}), log)
                 self.assertEqual([(r["method"], r["endpoint"]) for r in sent], [("POST", f"repos/{REPO}/check-runs")],
                                  log)
@@ -2081,8 +2085,7 @@ class ReviewThatPasses(Stand):
               "maintainer-review": "the author is not shown to maintain the project's repository"}
     # The only sentences of the paragraph that name a comment: each one is about the comment of the review. Enroll
     # dispatch puts a label on and posts no comment, so the paragraph points to no comment of a label.
-    ABOUT_THE_COMMENT = ("When no check is **fail** or **person**, the check `Enrollment review` of this commit has "
-                         "the conclusion `success`, and the comment says what happens next.",
+    ABOUT_THE_COMMENT = ("When no check is **fail** or **person**, " + STATEMENTS[1],
                          "The comment says what each label means, in these words or in plainer words.",
                          STATEMENTS[-1])
     # What neither review.md nor the comment of a pass says: that Theorem decides the next step, that a maintainer

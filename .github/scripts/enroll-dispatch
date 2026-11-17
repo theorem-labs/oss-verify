@@ -152,17 +152,18 @@ import subprocess
 import sys
 import urllib.parse
 import zipfile
+import zlib
 from urllib.parse import quote
 
 import yaml
 
 # triage.py's maintainer check, the one the triage table shows as "Opened by an active maintainer". steering.py's list
 # of steering files, for the steering-file gate. artifact.py's read of one file of a Build run's artifact, for the
-# record, and its Api.
+# record, its Api, and its check of a whole number of JSON (whole).
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import steering  # noqa: E402
 import triage  # noqa: E402
-from artifact import Api, read_member  # noqa: E402
+from artifact import Api, read_member, whole  # noqa: E402
 
 # The size line for statements that start with no person's decision, "Up to 1 MB" of a plain binary
 # (dispatch://OSSV-141/ask/7c73eb21), the README's "less than 1 MB of code": 1 MB is 1,000,000 bytes here. It is
@@ -326,12 +327,14 @@ def bound_checks(api: Api, runs: Runs, repo: str, sha: str, head: tuple) -> tupl
 
 def build_record(api: Api, repo: str, run_id: int) -> tuple[dict | None, str]:
     """The record build.yaml's record job uploaded in this run: the JSON of record.json, the one file of its artifact
-    RECORD_ARTIFACT; or None and why not. read_member reads it, with the limit MAX_ARTIFACT_BYTES. A zip that cannot be
-    read, and a record.json that is not JSON, give None too."""
+    RECORD_ARTIFACT; or None and why not. read_member reads it, with the limit MAX_ARTIFACT_BYTES, and gives None and
+    why for each artifact it refuses (an encrypted record.json among them). A zip or a record.json that zipfile cannot
+    read (zipfile.BadZipFile, EOFError, zlib.error, NotImplementedError or ValueError), and a record.json that is not
+    JSON (ValueError), give None and the error too. A call of gh that fails raises subprocess.CalledProcessError."""
     try:
         data, why = read_member(api, repo, run_id, RECORD_ARTIFACT, "record.json", MAX_ARTIFACT_BYTES)
         return (None, why) if data is None else (json.loads(data), "")
-    except (zipfile.BadZipFile, ValueError) as error:
+    except (zipfile.BadZipFile, ValueError, EOFError, zlib.error, NotImplementedError) as error:
         return None, f"Build run {run_id}'s {RECORD_ARTIFACT} cannot be read: {error}"
 
 
@@ -351,7 +354,7 @@ def review_conclusion(api: Api, repo: str, head: str, number: int) -> str:
 
 
 def size(value: object) -> bool:
-    return value is None or (isinstance(value, int) and not isinstance(value, bool) and value >= 0)
+    return value is None or (whole(value) and value >= 0)
 
 
 def record_problem(record: object, sha: str) -> str:
@@ -359,7 +362,7 @@ def record_problem(record: object, sha: str) -> str:
     if not isinstance(record, dict) or record.get("schema") != RECORD_SCHEMA:
         return "the build record has another shape"
     pr, project = record.get("pr"), record.get("project")
-    if not isinstance(pr, int) or isinstance(pr, bool) or pr < 1:
+    if not whole(pr) or pr < 1:
         return "the build record names no pull request"
     if not isinstance(project, str) or not NAME.fullmatch(project):
         return "the build record names no project"

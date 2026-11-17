@@ -2617,12 +2617,11 @@ class ReviewJob(unittest.TestCase):
         self.assertEqual(job["timeout-minutes"], 105)
 
     # The Tailscale client id of the federated identity ossv-review-yml-github, as which review.yml's review job joins
-    # the tailnet. The seed apply of dispatch://INFRA-3369 makes it (dispatch://INFRA-3746), and it is not known before
-    # that apply: review.yml names "" until then, and its join fails. A later change writes the id here and in
-    # review.yml. The collector's URL is bootstrap/'s stack output spendCollectorTailnetUrl in agent-infra, read with
-    # `pulumi stack output --stack prod` after the apply of 2026-10-31 that made the Service svc:spend (INFRA-832 S1a):
-    # http:// and the Service's IPv4 address.
-    CLIENT_ID = ""
+    # the tailnet. The apply of root/ for dispatch://INFRA-3746 on 2026-11-17 made it: it is that apply's output
+    # tailnetClientId-ossv-review-yml-github, which dispatch://INFRA-3369 records. The collector's URL is bootstrap/'s
+    # stack output spendCollectorTailnetUrl in agent-infra, read with `pulumi stack output --stack prod` after the apply
+    # of 2026-10-31 that made the Service svc:spend (INFRA-832 S1a): http:// and the Service's IPv4 address.
+    CLIENT_ID = "TWbBfz7fqc11CNTRL-k41v23iH8F11CNTRL"
     COLLECTOR_URL = "http://100.116.58.240"
 
     def test_the_job_joins_the_tailnet_as_ossv_review(self):

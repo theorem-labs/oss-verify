@@ -47,7 +47,8 @@ import secrets
 import subprocess
 import sys
 
-# steering.py's list of steering files. artifact.py's read of one file of the Build run's artifact, and its Api.
+# steering.py's list of steering files. artifact.py's read of one file of the Build run's artifact, its Api, and its
+# check of a whole number of JSON (whole).
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import steering  # noqa: E402
 from artifact import Api, read_member, whole  # noqa: E402

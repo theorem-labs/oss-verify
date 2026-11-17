@@ -540,6 +540,35 @@ class ThePullRequest(unittest.TestCase):
                 got = dispatch.decide(api, REPO, 104, "pull_request", SHA)
                 self.assertEqual((got["decision"], decision_reason(got)), ("none", said))
 
+    def test_a_record_that_zipfile_cannot_read_sends_nothing_and_raises_nothing(self):
+        """An encrypted record.json, and a record.json whose deflate stream is broken, each give no record and the
+        decision none with a reason, and no exception. read_member refuses the encrypted file before it opens it.
+        zipfile raises zlib.error for the broken stream, and build_record gives None and that error."""
+        plain = zipped({"record.json": json.dumps(record())}, zipfile.ZIP_DEFLATED)
+        # The end of central directory record (the last 22 bytes) gives the offset of the central directory entry 16
+        # bytes into it. The general purpose bit flag is 6 bytes into the local file header (at the start of the zip)
+        # and 8 bytes into the entry. Its bit 0x1 says that the file is encrypted.
+        encrypted = bytearray(plain)
+        for at in (6, struct.unpack_from("<I", plain, len(plain) - 22 + 16)[0] + 8):
+            struct.pack_into("<H", encrypted, at, struct.unpack_from("<H", encrypted, at)[0] | 0x1)
+        # The compressed data starts after the local file header's 30 bytes, the file name and the extra field. Its
+        # compressed size is 18 bytes into the header. Each byte 0xff starts a deflate block of the reserved type 3,
+        # which zlib refuses. The sizes in the headers do not change.
+        broken = bytearray(plain)
+        start, length = 30 + sum(struct.unpack_from("<HH", plain, 26)), struct.unpack_from("<I", plain, 18)[0]
+        broken[start:start + length] = b"\xff" * length
+        for label, data, said in (
+                ("encrypted", encrypted, "Build run 101's record.json is encrypted"),
+                ("a broken deflate stream", broken,
+                 "Build run 101's enrollment-record cannot be read: Error -3 while decompressing data: invalid block "
+                 "type")):
+            with self.subTest(label):
+                world = World()
+                world.artifacts[101] = bytes(data)
+                self.assertEqual(dispatch.build_record(world.api(), REPO, 101), (None, said))
+                got = world.decide()
+                self.assertEqual((got["decision"], decision_reason(got)), ("none", said))
+
     def test_the_reason_is_one_line(self):
         world = World()
         world.files = [{"filename": "a\nb\n::error::x", "status": "added"}]
