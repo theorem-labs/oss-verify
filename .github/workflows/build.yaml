@@ -630,21 +630,9 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
           dpkg -s python3-yaml > /dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
-          # qemu-riscv64-static runs the fuzz targets for oss-verify check --checks, inside a container of the project
-          # image. It is taken out of its package, not installed: the package registers qemu with the kernel for riscv64
-          # programs (binfmt_misc), and a build.sh could then run the riscv64 programs that it makes. (From #24.)
-          # Without it, --checks says that it could not measure, and the build is checked as before. The check of system
-          # calls reads the runs of qemu 10.0.11 only (src/oss_verify/check_binaries.py QEMU_VERSIONS), so this is
-          # Debian 13's qemu-user 1:10.0.11+ds-0+deb13u1, pinned by its SHA-256 at its snapshot.debian.org address: the
-          # build theorem-labs/oss-verify-proofs's toolchain/runner.Dockerfile runs counterexamples with. Its
-          # qemu-riscv64 is a static binary; the -static name is the one oss-verify check looks for.
-          mkdir "$RUNNER_TEMP/qemu" && cd "$RUNNER_TEMP/qemu"
-          deb=qemu-user_10.0.11+ds-0+deb13u1_amd64.deb
-          if curl -fsSL --retry 3 -o "$deb" https://snapshot.debian.org/file/a0eaa62f815efb2361d43b1e3f8011c17ad9123a \
-              && echo "6b6fea55551fbcc1eb30e146ad5abdfbb49f8fa8c5998016242126de4d7f80df  $deb" | sha256sum -c --quiet \
-              && dpkg-deb -x "$deb" . && ln -s qemu-riscv64 usr/bin/qemu-riscv64-static \
-              && usr/bin/qemu-riscv64-static --version | grep -q 'version 10\.0\.11'; then
-            echo "$RUNNER_TEMP/qemu/usr/bin" >> "$GITHUB_PATH"
+          # qemu-riscv64-static runs the fuzz targets for oss-verify check --checks (.github/scripts/unpack-qemu).
+          if bin=$(.github/scripts/unpack-qemu "$RUNNER_TEMP/qemu"); then
+            echo "$bin" >> "$GITHUB_PATH"
           else
             echo "::warning::No qemu-riscv64-static 10.0.11: oss-verify check --checks cannot run the fuzz targets."
           fi
