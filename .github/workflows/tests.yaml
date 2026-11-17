@@ -20,11 +20,19 @@ name: "Tests"
 #               - nothing: neither.
 #             A pull request from a fork that changes a file under projects/ runs neither (above). A run started by
 #             hand, or a push whose earlier commit cannot be read, runs suite.
-#   suite     the tests in tests, and oss-verify validate on every project.
+#             route also decides if the job it asks for runs Committed, the test in tests/test_seeded_projects.py that
+#             docs/seeded-projects.tsv is what src/oss_verify/seeded_projects.py writes. Committed runs when a changed
+#             path is a file that the table depends on in code, the table, or its test:
+#             src/oss_verify/seeded_projects.py, src/oss_verify/validate.py (the generator reads each series with it),
+#             a file under seeds/, docs/seeded-projects.tsv or tests/test_seeded_projects.py. It also runs when there
+#             is no earlier commit to compare with. Other changes do not run it. The table also depends on the port of
+#             each seeded project. But a fork's enrollment changes one projects/<name>/ and nothing else, so it cannot
+#             commit the table. seeded-projects.yml finds a table that such a change leaves stale, on the push to main.
+#   suite     the tests in tests, and oss-verify validate on every project. It runs Committed only when route asks
+#             for it.
 #   docs      the tests that read the documentation: tests/test_check.py's test that no tracked file but
 #             infra/toolchains.tsv names a toolchain digest, which reads every file git tracks, the documentation too;
-#             and tests/test_seeded_projects.py's test that docs/seeded-projects.tsv is what
-#             src/oss_verify/seeded_projects.py writes. A new test that reads the documentation goes here as well.
+#             and Committed, when route asks for it. A new test that reads the documentation goes here as well.
 #   required  always runs, after the others, and reports the required check tests (.github/scripts/collect): it passes
 #             only if route passed, each job route asked for passed, and the other was skipped. A skipped job counts as
 #             a pass where a check is required, so neither suite nor docs is the required check.
@@ -77,6 +85,7 @@ jobs:
     outputs:
       suite: ${{ steps.paths.outputs.suite }}
       docs: ${{ steps.paths.outputs.docs }}
+      table: ${{ steps.paths.outputs.table }}
     steps:
       - name: The pull request targets the default branch
         if: github.event_name == 'pull_request'
@@ -133,14 +142,20 @@ jobs:
           esac
           if [ -z "$from" ]; then
             echo "suite=true" >> "$GITHUB_OUTPUT"
-            say "suite runs: a $EVENT run has no earlier commit to compare with."
+            echo "table=true" >> "$GITHUB_OUTPUT"
+            say "suite and tests/test_seeded_projects.py::Committed run: a $EVENT run has no earlier commit to compare with."
             exit 0
           fi
           git diff --no-renames --name-only -z "$from" HEAD > "$RUNNER_TEMP/paths"
-          changed=0 other=0 projects=0
+          changed=0 other=0 projects=0 table=0
           while IFS= read -r -d '' path; do
             changed=$((changed + 1))
             [[ $path == projects/* ]] && projects=$((projects + 1))
+            # The files docs/seeded-projects.tsv depends on in code, the table, and its test (the top of this file).
+            case $path in
+              src/oss_verify/seeded_projects.py|src/oss_verify/validate.py|seeds/*|docs/seeded-projects.tsv|tests/test_seeded_projects.py)
+                table=$((table + 1)) ;;
+            esac
             # docs/, and a Markdown file at the top but README.md (tests/test_triage.py reads it).
             if [[ $path == docs/* || ( $path != */* && $path == *.md && $path != README.md ) ]]; then
               continue
@@ -159,6 +174,12 @@ jobs:
             say "docs runs: the $changed changed files are all documentation."
           else
             say "Nothing runs: the commit changes no file."
+          fi
+          if (( table )); then
+            echo "table=true" >> "$GITHUB_OUTPUT"
+            say "tests/test_seeded_projects.py::Committed runs: $table of the $changed changed files are docs/seeded-projects.tsv, its test, or files it depends on in code (src/oss_verify/seeded_projects.py, src/oss_verify/validate.py, seeds/)."
+          elif (( changed )); then
+            say "tests/test_seeded_projects.py::Committed does not run: no changed file is docs/seeded-projects.tsv, its test, or a file it depends on in code (src/oss_verify/seeded_projects.py, src/oss_verify/validate.py, seeds/). seeded-projects.yml finds a stale table on the push to main."
           fi
 
   suite:
@@ -197,9 +218,16 @@ jobs:
           echo "OSS_VERIFY_MODEL=$RUNNER_TEMP/model" >> "$GITHUB_ENV"
 
       # The Docker tests (tests/test_builder.py, test_binary_checks_docker.py) need the toolchain image and are
-      # skipped here.
+      # skipped here. tests/test_seeded_projects.py::Committed runs only when route asks for it (the top of this file).
       - name: The tests in tests/
-        run: python3 -P -m pytest -q -p no:cacheprovider -c pyproject.toml
+        env:
+          TABLE: ${{ needs.route.outputs.table }}
+        run: |
+          deselect=()
+          if [ "$TABLE" != true ]; then
+            deselect=(--deselect "tests/test_seeded_projects.py::Committed::test_docs_seeded_projects_tsv_is_what_the_generator_writes")
+          fi
+          python3 -P -m pytest -q -p no:cacheprovider -c pyproject.toml "${deselect[@]}"
 
       - name: Every project passes oss-verify validate
         run: python3 -P -m oss_verify validate < /dev/null
@@ -220,12 +248,16 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml python3-pytest
 
       - name: The tests that read the documentation
+        env:
+          TABLE: ${{ needs.route.outputs.table }}
         run: |
           set -o pipefail
-          python3 -P -m pytest -q -p no:cacheprovider -c pyproject.toml -rs \
-            "tests/test_check.py::Toolchains::test_infra_toolchains_tsv_is_the_one_file_that_names_a_toolchain_digest" \
-            "tests/test_seeded_projects.py::Committed::test_docs_seeded_projects_tsv_is_what_the_generator_writes" \
-            | tee "$RUNNER_TEMP/pytest"
+          tests=("tests/test_check.py::Toolchains::test_infra_toolchains_tsv_is_the_one_file_that_names_a_toolchain_digest")
+          # tests/test_seeded_projects.py::Committed runs only when route asks for it (the top of this file).
+          if [ "$TABLE" = true ]; then
+            tests+=("tests/test_seeded_projects.py::Committed::test_docs_seeded_projects_tsv_is_what_the_generator_writes")
+          fi
+          python3 -P -m pytest -q -p no:cacheprovider -c pyproject.toml -rs "${tests[@]}" | tee "$RUNNER_TEMP/pytest"
           # Each test here must run and pass: one skips itself outside a git checkout.
           if ! grep -qE '^[0-9]+ passed' "$RUNNER_TEMP/pytest" || grep -qE '[0-9]+ skipped' "$RUNNER_TEMP/pytest"; then
             echo "::error::A test that reads the documentation did not run."
