@@ -31,7 +31,8 @@ name: Held runs
 # groups the runs. The oss-verify App put on the label that started it (review-held, review-passed, size-review or
 # another label of the App), and that label is no new event at the head. So the run makes no head, and it does not
 # change the newest held run of a head. A label that a person or another account put on counts, and gets one more
-# screen (below).
+# screen (below). route in review.yml has the same rule when it finds the held runs of a head on a run by hand. Keep
+# the two rules equal.
 # GitHub gives at most 1,000 runs of a list of runs with a filter (actor, branch, check_suite_id, created, event,
 # head_sha or status), newest first. The list of the held runs and each list of runs by hand are such lists. So when a
 # read of a list gives 1,000 runs, the step reads the list again for the runs created from a bound to the oldest run

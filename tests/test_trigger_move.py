@@ -23,10 +23,12 @@ The move:
   (claude files) The gather job keeps no CLAUDE*.md, AGENTS*.md or .claude/ of the pull request, and the review job
        refuses one.
 The held runs (each test name holds the word held):
-  route finds the held runs of a head on a run by hand. The comment job approves them with a token of the oss-verify
-  App that can write runs, only when the screen passed that head. A screen that cannot sign in fails with no verdict,
-  before the mark of the daily cap. Held runs (.github/workflows/held-runs.yml) starts a run by hand of review.yml for
-  each held head that no run screened, and re-runs the failed jobs of a run whose screen gave a verdict.
+  route finds the held runs of a head on a run by hand. It counts the held runs that Held runs counts: neither counts a
+  run of the oss-verify App's own label. The comment job approves them with a token of the oss-verify App that can
+  write runs, only when the screen passed that head. Its hold of a held head replaces no check run Enrollment review
+  that the App recorded at that head. A screen that cannot sign in fails with no verdict, before the mark of the daily
+  cap. Held runs (.github/workflows/held-runs.yml) starts a run by hand of review.yml for each held head that no run
+  screened, and re-runs the failed jobs of a run whose screen gave a verdict.
 A review that passes: the paragraph of review.md that says what happens next, and the comment that says it.
 
 Each case runs the steps and the scripts of the workflows with stand-ins: this file's gh, which gives the API's answers
@@ -44,6 +46,7 @@ import hashlib
 import importlib.machinery
 import importlib.util
 import io
+import itertools
 import json
 import os
 import pathlib
@@ -985,9 +988,9 @@ class ClaudeFiles(Stand):
 
 class HeldApproval(Stand):
     """d7: a run by hand of review.yml for a pull request whose runs GitHub holds, and the comment job's approval of
-    them; and a run by hand for a merged pull request whose run of enroll-merged.yml GitHub holds, and the comment job's
-    replay of the merge. The screen's verdict is the screen job's output, given to run_graph of
-    tests/test_outside_screen.py."""
+    them or its record of the hold; and a run by hand for a merged pull request whose run of enroll-merged.yml GitHub
+    holds, and the comment job's replay of the merge. The screen's verdict is the screen job's output, given to
+    run_graph of tests/test_outside_screen.py."""
 
     ROUTE = "An enrollment, a change or an issue"
     TRUST = "Whether the author and the account that started the run have write access"
@@ -1009,6 +1012,22 @@ class HeldApproval(Stand):
                   " && needs.screen.outputs.verdict == 'clean' }}")
     APPROVE_IF_ANY = "APPROVE: ${{ needs.route.outputs.held == 'true' && needs.screen.result == 'success' }}"
     REFUSAL = '[ "${SCREEN_VERDICT:-}" = clean ] || fail "the screen\'s verdict is not clean: no run is approved."\n'
+    POST = "Post the comment and record the verdict"
+    # The check runs Enrollment review at HEAD. APP_RUN: the check run that the oss-verify App (id 5447700, REVIEW_APP
+    # of .github/scripts/enroll-dispatch) recorded for pull request 7, the verdict of a review that passed.
+    # NOT_APP_RUNS: a check run of another App for pull request 7, and one of the oss-verify App for pull request 8 at
+    # the same commit. enroll-dispatch counts neither of them.
+    APP_RUN = {"id": 601, "name": "Enrollment review", "app": {"id": 5447700, "slug": "oss-verify"},
+               "external_id": PR, "status": "completed", "conclusion": "success"}
+    NOT_APP_RUNS = ({"id": 602, "name": "Enrollment review", "app": {"id": 1, "slug": "another-app"},
+                     "external_id": PR, "status": "completed", "conclusion": "success"},
+                    {"id": 603, "name": "Enrollment review", "app": {"id": 5447700, "slug": "oss-verify"},
+                     "external_id": "8", "status": "completed", "conclusion": "success"})
+    # The holds of a held enrollment whose project the gather job took: (label, route's trust, the result of the screen
+    # job, or None when it does not run, its verdict, and the title of the check run that records the hold).
+    HOLDS = (("the screen held it", "screen", "success", "held", "The automated screen held this pull request."),
+             ("the daily cap", "cap", None, None, "The daily cap of automated reviews held this pull request."),
+             ("the screen failed", "screen", "failure", None, "The screen job failed."))
 
     def setUp(self):
         super().setUp()
@@ -1140,6 +1159,63 @@ class HeldApproval(Stand):
             self.case_held_verdict(changed)
         self.assertIn("approve-held alone, for the verdict held", str(caught.exception))
 
+    def hold_of_held_head(self, trust, screen, verdict, check_runs):
+        """The comment job's step "Post the comment and record the verdict" on a run by hand for held enrollment 7 at
+        HEAD, whose project x the gather job took: for route's `trust`, the screen job's result `screen` (None when it
+        does not run) and its `verdict`. The check runs Enrollment review at HEAD are `check_runs`, or a read of them
+        fails when it is None. Return the step's exit status, its log, its outputs, and the requests it sent that are
+        not reads."""
+        self.clear()
+        self.pull_request(("projects/x/project.yaml", "projects/x/build.sh"))
+        checks = f"repos/{REPO}/commits/{HEAD}/check-runs"
+        if check_runs is None:
+            self.serve_error(checks, "gh: Server Error (HTTP 500)")
+        else:
+            self.serve(checks, {"total_count": len(check_runs), "check_runs": list(check_runs)})
+        self.serve(f"repos/{REPO}/check-runs", {"id": 1})
+        route = {"kind": "enrollment", "pr": PR, "sha": HEAD, "author": "mallory", "held": "true", "trust": trust,
+                 "free": "2026-11-20T00:00:00Z" if trust == "cap" else ""}
+        outputs = {"gather": {"digest": "d" * 64, "screen": "true", "name": "x"}}
+        if verdict is not None:
+            outputs["screen"] = {"verdict": verdict, "checks": "claude"}
+        got, ctx = self.tos.run_graph(route, results={"screen": screen} if screen else {}, outputs=outputs,
+                                      event="workflow_dispatch", workflow=self.review, ref="refs/heads/main")
+        self.assertEqual((got["screen"], got["review"], got["comment"]), (screen or "skipped", "skipped", "success"))
+        env = self.comment_env(ctx)
+        self.assertEqual((env["RECORD"], env["HOLDING"], env["APPROVE"]), ("true", "true", "false"))
+        self.assertTrue(self.ran(self.POST, env))
+        ctx = dict(ctx, **{"github.token": WORKFLOW_TOKEN, "github.repository": REPO,
+                           "github.server_url": "https://github.com", "github.run_id": "1000",
+                           "steps.app.outputs.token": APP_TOKEN})
+        since = len(self.calls())
+        rc, log, out = self.run_step(self.review, "comment", self.POST, ctx, ROOT, evaluate=self.tos.evaluate)
+        requests = self.requests(since)
+        self.assertEqual({r["token"] for r in requests}, {APP_TOKEN}, log)
+        return rc, log, out, [r for r in requests if r["method"] != "GET"]
+
+    def test_held_a_hold_of_a_held_head_replaces_no_check_run_of_the_app_at_that_head(self):
+        """On a run by hand for a held head, the screen decides only whether the comment job approves the held runs: it
+        does not change the review's verdict. A review that passed recorded the oss-verify App's check run Enrollment
+        review of pull request 7 at HEAD. Then a hold of the held path (the screen held it, the daily cap, or a screen
+        that failed) records nothing and posts nothing, so Enroll dispatch still reads that verdict. With no such check
+        run, the hold is recorded as off the held path."""
+        for label, trust, screen, verdict, title in self.HOLDS:
+            with self.subTest(label):
+                rc, log, out, sent = self.hold_of_held_head(trust, screen, verdict, (*self.NOT_APP_RUNS, self.APP_RUN))
+                self.assertEqual((rc, out, sent), (0, {}, []), f"the hold replaces the App's check run: {log}")
+                self.assertIn(f"The oss-verify App recorded a check run Enrollment review of #{PR} at {HEAD} already",
+                              log)
+                rc, log, out, sent = self.hold_of_held_head(trust, screen, verdict, self.NOT_APP_RUNS)
+                self.assertEqual((rc, out), (0, {"recorded": "true"}), log)
+                self.assertEqual([(r["method"], r["endpoint"]) for r in sent], [("POST", f"repos/{REPO}/check-runs")],
+                                 log)
+                body = sent[0]["body"]
+                self.assertEqual((body["name"], body["head_sha"], body["external_id"], body["conclusion"],
+                                  body["output"]["title"]), ("Enrollment review", HEAD, PR, "action_required", title))
+        # A read of the check runs that fails fails the step, which records nothing and posts nothing.
+        rc, log, out, sent = self.hold_of_held_head("screen", "success", "held", None)
+        self.assertEqual((rc != 0, out, sent), (True, {}, []), log)
+
     def test_held_a_head_whose_runs_are_not_held_gets_no_approval(self):
         self.pull_request(("README.md",))
         # Held runs of another head, repository or branch alone.
@@ -1151,6 +1227,37 @@ class HeldApproval(Stand):
         env = self.comment_env(ctx)
         self.assertEqual(env["APPROVE"], "false")
         self.assertEqual((self.ran(self.TOKEN, env), self.ran(self.APPROVE, env)), (False, False))
+
+    def test_held_a_persons_run_by_hand_at_a_head_held_only_by_the_apps_label_reviews_with_its_build_run(self):
+        """The oss-verify App put one of its labels on enrollment 7, and that label started a run of Maintainer
+        confirmed at head HEAD, with the App as its actor. GitHub holds that run, but it is no new event at the head,
+        and Held runs does not count it. alice starts the review again by hand (gh workflow run review.yml -f pr=7).
+        route finds no held head, and gives the enrollment the newest completed Build run of the head that wrote
+        results, so the review runs with those results."""
+        self.pull_request(("projects/x/project.yaml", "projects/x/build.sh"))
+        self.serve(f"repos/{REPO}/actions/runs", {"workflow_runs": [
+            {"id": 14, "path": ".github/workflows/maintainer-confirmed.yml", "event": "pull_request",
+             "status": "action_required", "head_sha": HEAD, "head_repository": {"full_name": FORK},
+             "head_branch": BRANCH, "actor": {"login": "oss-verify[bot]"}}]})
+        # The completed Build runs of the head: 43 wrote no results, and 42 and 41 wrote results.
+        self.serve(f"repos/{REPO}/actions/workflows/build.yaml/runs", {"workflow_runs": [
+            {"id": i, "path": ".github/workflows/build.yaml", "event": "pull_request", "status": "completed",
+             "head_sha": HEAD, "head_repository": {"full_name": FORK}, "head_branch": BRANCH} for i in (41, 43, 42)]})
+        for i, wrote in ((41, True), (42, True), (43, False)):
+            self.serve(f"repos/{REPO}/actions/runs/{i}/artifacts", {"artifacts": [
+                {"id": i * 10, "name": "build-results", "expired": False}] if wrote else []})
+        route, log = self.route("alice")
+        self.assertEqual({k: route.get(k) for k in ("kind", "held", "build_run", "trust")},
+                         {"kind": "enrollment", "held": None, "build_run": "42", "trust": "screen"}, log)
+        self.assertIn("The review reads the results of Build run 42.", log)
+        got, ctx = self.graph(route, "clean", gather={"digest": "d" * 64, "screen": "true", "name": "x"})
+        self.assertEqual((got["gather"], got["screen"], got["review"]), ("success", "success", "success"))
+        # The gather job takes the results of Build run 42, which the review reads.
+        take = self.step(self.review, "gather", "Take the results of the Build run")
+        ctx.update({f"needs.route.outputs.{k}": v for k, v in route.items()})
+        ctx.update({"steps.project.outputs.kind": "enrollment", "steps.project.outputs.name": "x"})
+        self.assertTrue(self.tos.evaluate(take["if"], ctx))
+        self.assertEqual(env_of(self.review, "gather", take, ctx, evaluate=self.tos.evaluate)["BUILD_RUN"], "42")
 
     def test_held_a_head_that_moved_after_the_screen_gets_no_approval(self):
         self.pull_request(("README.md",), head=OTHER)
@@ -1751,6 +1858,33 @@ class HeldRuns(Stand):
         self.pulls = [self.pull(91, "max/oss-verify", "q", "0" * 40)]
         self.held = [self.held_run(9101, "1" * 40, "max/oss-verify", "q", 30)]
         self.assertEqual(self.go(), [], self.log)
+
+    def test_held_runs_and_route_count_the_same_held_runs(self):
+        # Neither route (review.yml) nor Held runs counts a held run of Maintainer confirmed whose actor is the
+        # oss-verify App: the App's own label started it. Each set of held runs of head HEAD of pull request 7 goes to
+        # both. Held runs starts the screen of the head exactly when route finds the head held on that run by hand.
+        confirmed = ".github/workflows/maintainer-confirmed.yml"
+        runs = {"the App's label": (4201, confirmed, "oss-verify[bot]"),
+                "a person's label": (4202, confirmed, "sjawhar"),
+                "a run of another workflow": (4203, ".github/workflows/build.yaml", "mallory")}
+        review = self.workflow(ROOT, "review.yml")
+        ctx = {"github.token": WORKFLOW_TOKEN, "github.repository": REPO, "github.event_name": "workflow_dispatch",
+               "github.ref": "refs/heads/main", "github.actor": "github-actions[bot]", "github.run_id": "1000",
+               "inputs.pr": PR}
+        for chosen in (c for n in range(1, len(runs) + 1) for c in itertools.combinations(runs, n)):
+            self.pulls, self.held = [self.pull(int(PR), FORK, BRANCH, HEAD)], []
+            for name in chosen:
+                run_id, path, actor = runs[name]
+                self.held.append(dict(self.held_run(run_id, HEAD, FORK, BRANCH, 30, path), actor={"login": actor}))
+            started = self.go()
+            self.assertIn(started, ([], [self.starts("review.yml", PR)]), (chosen, self.log))
+            # route reads the held runs that go() served, and the pull request.
+            self.pull_request(("README.md",))
+            rc, log, decided = self.run_step(review, "route", "An enrollment, a change or an issue", ctx, ROOT)
+            self.assertEqual(rc, 0, log)
+            counted = chosen != ("the App's label",)
+            self.assertEqual((decided.get("held") == "true", started != []), (counted, counted),
+                             f"route's held, and whether Held runs started the head ({chosen}): {log}{self.log}")
 
     def test_held_runs_a_held_run_of_the_apps_own_label_gets_no_screen(self):
         # The screen held head 5555555 of pull request 41 an hour ago (run 931 counts). The comment job then put the

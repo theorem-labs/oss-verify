@@ -186,7 +186,8 @@ name: "Review"
 #            unless a newer hold came after that review's run started.
 #            On a run by hand for a held head (below), its step "Approve the held runs" approves every held run of
 #            that head (.github/scripts/approve-held) when the screen's verdict is clean. Such a run posts no review,
-#            no comment and no check run. A hold of it is recorded by the rules above.
+#            no comment and no check run. A hold of it is recorded by the rules above, except when the oss-verify App
+#            recorded a check run Enrollment review of that pull request at that head already: that check run stands.
 #            On a run by hand for a merged pull request whose run of enroll-merged.yml GitHub holds (route's replay,
 #            below), its step "Replay the merge for Enroll dispatch" starts enroll-merged.yml for that pull request with
 #            the App's token, so that enroll-dispatch.yml runs on its completion. Such a run does nothing else.
@@ -208,9 +209,10 @@ name: "Review"
 # hold, comment, triage-gather and triage jobs when their own conditions call for them (the screen and the review on
 # the gather job's outputs screen and digest). Every other job must be skipped. A held item passes it when the comment
 # job recorded the hold: for an enrollment in the check run Enrollment review (the screen's hold or the daily cap),
-# for a change or an issue with the label review-held. A gather, screen, review (after its second attempt), hold or
-# comment job that failed fails it, held or not, which a re-run of the failed jobs clears. It is no check that the
-# ruleset requires: a check of a workflow_run or workflow_dispatch run never satisfies a required check
+# for a change or an issue with the label review-held. On a run by hand for a held head whose check run Enrollment
+# review stands (above), the comment job records nothing and passes. A gather, screen, review (after its second
+# attempt), hold or comment job that failed fails it, held or not, which a re-run of the failed jobs clears. It is no
+# check that the ruleset requires: a check of a workflow_run or workflow_dispatch run never satisfies a required check
 # (https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks#checks-from-some-workflow-jobs-are-not-evaluated).
 # An open enrollment's statements start only when its check run Enrollment review is success (enroll-dispatch.yml).
 # The review is of a commit: build.yaml does not run on edited, so an edit of the description alone is reviewed with
@@ -357,7 +359,8 @@ name: "Review"
 #     run that an App's token starts does: so Held runs, whose token is its job's, has this file start the replay.
 #   - Closed, with no such run: nothing. route says that the pull request is closed, or that GitHub holds no such run.
 #   - Held: GitHub holds runs of that head (status action_required), which it does for each push of a first-time
-#     contributor. The kind comes from the paths alone: a file under projects/ makes it an enrollment, else a change,
+#     contributor. A held run of a label that the oss-verify App put on does not count, as in Held runs (route). The
+#     kind comes from the paths alone: a file under projects/ makes it an enrollment, else a change,
 #     whoever started the run (the review job does not run on this path, so actor-kind's refusal of an App does not
 #     apply). The gather job reads it from the API, with no results of a build, and the screen reads it. When
 #     take-project takes no project (a fork that changes more than one project, say), the gather job gathers it as a
@@ -671,12 +674,17 @@ jobs:
             fi
           else
             # A run by hand: GitHub holds the runs of this head (status action_required) when they are of a first-time
-            # contributor's pull request. id, head commit, head repository and head branch, split at U+001F.
+            # contributor's pull request. A held run of .github/workflows/maintainer-confirmed.yml whose actor is
+            # oss-verify[bot] does not make the head held: the oss-verify App put on the label that started it, and that
+            # label is no new event at the head. Held runs (.github/workflows/held-runs.yml) has the same rule. Keep the
+            # two rules equal. id, file, head commit, head repository, head branch and the actor's login, split at
+            # U+001F.
             held_runs=$(gh api --paginate \
               "repos/$REPO/actions/runs?event=pull_request&status=action_required&head_sha=$sha&per_page=100" \
-              --jq '.workflow_runs[] | [(.id | tostring), .head_sha // "", .head_repository.full_name // "",
-                                        .head_branch // ""] | join("\u001f")')
-            while IFS=$'\x1f' read -r id head repository branch; do
+              --jq '.workflow_runs[] | [(.id | tostring), .path // "", .head_sha // "", .head_repository.full_name // "",
+                                        .head_branch // "", .actor.login // ""] | join("\u001f")')
+            while IFS=$'\x1f' read -r id path head repository branch login; do
+              if [[ $path == .github/workflows/maintainer-confirmed.yml && $login == "oss-verify[bot]" ]]; then continue; fi
               if [[ -n ${id:-} && $head == "$sha" && -n $from && $repository == "$from" && $branch == "$ref" ]]; then
                 held=true
               fi
@@ -1796,7 +1804,8 @@ jobs:
     # On a run by hand for a held head (route's held), a clean verdict of the screen approves the head's held runs
     # (APPROVE below), and nothing is posted or recorded. Any other outcome of such a run is recorded by the rules
     # above: RECORD for an enrollment whose project the gather job took, or one at the daily cap, and else the label
-    # and the hold comment.
+    # and the hold comment. Not a check run when the oss-verify App recorded one of this pull request at this head
+    # already: that check run stands (the step "Post the comment and record the verdict").
     # On a run by hand that replays a merge (route's replay, REPLAY below), it starts enroll-merged.yml for the pull
     # request with the App's token, and does nothing else: no gather, screen or review ran, and it posts and records
     # nothing. GitHub starts no workflow_run for a run that a job's GITHUB_TOKEN starts, so Held runs cannot start that
@@ -1857,6 +1866,9 @@ jobs:
       GCP_WORKLOAD_IDENTITY_PROVIDER: projects/844532188053/locations/global/workloadIdentityPools/github/providers/github-ossv
       GCP_SERVICE_ACCOUNT: ossv-app-comment@theorem-agent-root.iam.gserviceaccount.com
       KIND: ${{ needs.route.outputs.kind }}
+      # true when route found held runs at the head: a run by hand that only screens, and approves on a clean verdict.
+      # The step "Post the comment and record the verdict" reads it.
+      HELD_RUNS: ${{ needs.route.outputs.held }}
       # Whether this job approves the held runs of the head: a run by hand for a held head whose screen gave the
       # verdict clean. Then it posts and records nothing. route gives a replay no held head, so a replay is no approval.
       APPROVE: ${{ needs.route.outputs.held == 'true' && needs.screen.result == 'success' && needs.screen.outputs.verdict == 'clean' }}
@@ -2048,7 +2060,9 @@ jobs:
       # The review comment of a change pull request; for an enrollment pull request that RECORD names, the check run
       # Enrollment review too, from the same parsed verdicts, on every run this job runs for. Its outputs: posted=true
       # when it posted the review comment, and recorded=true when it recorded the check run (the step after it then
-      # takes a hold off). Nothing on an approval or a replay.
+      # takes a hold off). Nothing on an approval or a replay. On a run by hand for a held head, a hold records nothing
+      # and posts nothing when the oss-verify App recorded a check run Enrollment review of this pull request at this
+      # head already: that check run stands (below).
       - name: Post the comment and record the verdict
         id: post
         if: env.APPROVE != 'true' && (env.RECORD == 'true' || (env.KIND == 'change' && env.HOLDING != 'true'))
@@ -2094,6 +2108,19 @@ jobs:
             elif [ "$REVIEW_RESULT" != success ]; then
               # The gather job kept nothing: the head moved while it read, and the push started a run of its own.
               echo "The gather job kept nothing, because the head moved from $HEAD_SHA: the run of the new head records the verdict."
+              exit 0
+            fi
+          fi
+          # On a run by hand for a held head (HELD_RUNS), the screen decides only whether this job approves the held
+          # runs. It does not change the review's verdict. A check run Enrollment review of this pull request at this
+          # head that the oss-verify App recorded already (a review's verdict, or an earlier hold) stands: no hold
+          # replaces it, and nothing is posted. This step finds that check run as enroll-dispatch does: by the App's id
+          # (REVIEW_APP) and by its external_id, the pull request's number. A read that fails fails this step.
+          if [ "${HELD_RUNS:-}" = true ] && [ -n "$hold" ]; then
+            recorded=$(gh api --paginate "repos/$REPO/commits/$HEAD_SHA/check-runs?check_name=Enrollment%20review&filter=all&per_page=100" \
+              --jq '.check_runs[] | select(.name == "Enrollment review" and .app.id == 5447700) | .external_id // ""')
+            if grep -qxF "$PR" <<< "$recorded"; then
+              echo "The oss-verify App recorded a check run Enrollment review of #$PR at $HEAD_SHA already, and it stands: this hold ($hold${job:+, the $job job}) records nothing and posts nothing."
               exit 0
             fi
           fi
