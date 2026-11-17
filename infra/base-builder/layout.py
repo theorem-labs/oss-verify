@@ -48,12 +48,13 @@ command (the compiler and every argument, the seals last; no -o, no map, no scri
 entry <tree>/<build>/<target>/, DIR an empty directory for its links, and --renamed an allocation-failure link's
 renamed. It writes the link's wraps to --wraps, links once normally (the probe link, DIR/probe), and plans where
 each .text input section goes: each same-bytes one at its base address, unless it moves for one of the causes above,
-and every other one into a hole between them or at the end of .text. It writes the lld script of that plan to
---script, links with it (the check link, DIR/check), verifies that each kept section is at its base address with its
-base linked size and that the PT_LOAD segments are the probe link's, and writes placement.tsv to --placement. When
-the read-only data in front of .text grew past its room, it writes no script: the link is a normal one, and
-placement.tsv gives every same-bytes section readonly_growth. It exits 1 when a link fails or the check link is not
-what the plan asks, 2 when an input cannot be read, else 0.
+and every other one into a hole before or between them or at the end of .text. It writes the lld script of that
+plan to --script, links with it (the check link, DIR/check), verifies that each kept section is at its base address
+with its base linked size, that the PT_LOAD segments are the probe link's and that no two of them share a page, and
+writes placement.tsv to --placement. When the read-only data in front of .text grew past its room, it writes no
+script: the link is a normal one, and placement.tsv gives every same-bytes section readonly_growth. It exits 1 when a
+link fails, when the check link is not what the plan asks, or when a file or section name holds a double quote or a
+line break, which the script cannot quote; 2 when an input cannot be read; else 0.
 
 The builder image runs this file with its own python3, and the host runs its commands: it takes the standard library
 only, and the syntax of Python 3.9.
@@ -203,12 +204,8 @@ def write_new(path, data):
         stream.write(data)
 
 
-def hex_text(number):
-    return f"-0x{-number:x}" if number < 0 else f"0x{number:x}"
-
-
 def hex_value(text):
-    """The number of a hex_text field, or None."""
+    """The number of a field that `hex` wrote, or None."""
     return int(text, 16) if HEX.fullmatch(text) else None
 
 
@@ -250,7 +247,7 @@ def read_map(text):
 
 
 def is_text(section):
-    """Whether an input section holds a function: its name is .text or starts with .text."""
+    """Whether an input section holds a function: its name is .text or starts with `.text.`."""
     return section == ".text" or section.startswith(".text.")
 
 
@@ -453,7 +450,7 @@ class Objects:
         objects = held[member]
         for i, body in enumerate(objects):
             if not isinstance(body, Elf):
-                objects[i] = Elf(body, file if member is None else f"{file}({member})")
+                objects[i] = Elf(body, origin(file, member))
         return objects
 
     def sections(self, file, member, section):
@@ -480,6 +477,11 @@ Call = collections.namedtuple("Call", "row offset kind target value")
 
 def member_text(member):
     return "-" if member is None else member
+
+
+def origin(file, member):
+    """Where an input section comes from, for a person: `file`, or `file(member)` for a member of an archive."""
+    return file if member is None else f"{file}({member})"
 
 
 def resolve(name, wraps):
@@ -559,23 +561,23 @@ def sections_rows(inputs):
 
 
 def calls_rows(calls):
-    return [[str(c.row), hex_text(c.offset), c.kind,
-             ("-" if c.target is None else str(c.target)) if c.kind == "local" else c.target, hex_text(c.value)]
+    return [[str(c.row), hex(c.offset), c.kind,
+             ("-" if c.target is None else str(c.target)) if c.kind == "local" else c.target, hex(c.value)]
             for c in calls]
 
 
 def output_rows(elf):
     """output.tsv of an unstripped binary: each section header but the null one, in index order; each PT_LOAD; and
     each defined global or weak symbol, the first of each name."""
-    rows = [["section", s.name, hex_text(s.addr), str(s.size), hex_text(s.flags)] for s in elf.sections[1:]]
-    rows += [["load", hex_text(p.vaddr), str(p.filesz), str(p.memsz), hex_text(p.flags)]
+    rows = [["section", s.name, hex(s.addr), str(s.size), hex(s.flags)] for s in elf.sections[1:]]
+    rows += [["load", hex(p.vaddr), str(p.filesz), str(p.memsz), hex(p.flags)]
              for p in elf.segments() if p.type == PT_LOAD]
     named = set()
     for symbol in elf.symbols():
         if symbol.bind in (STB_GLOBAL, STB_WEAK) and symbol.shndx != SHN_UNDEF and symbol.name \
                 and symbol.name not in named:
             named.add(symbol.name)
-            rows.append(["symbol", symbol.name, hex_text(symbol.value)])
+            rows.append(["symbol", symbol.name, hex(symbol.value)])
     return rows
 
 
@@ -645,6 +647,11 @@ def output_of(rows, what):
     return Output(sections, loads, symbols)
 
 
+def binary_output(path):
+    """The Output of the binary at `path`, as its output.tsv gives it (output_rows)."""
+    return output_of(output_rows(Elf(read_regular(path), path)), path)
+
+
 def read_placement(path):
     """{(key_file, member, section, occurrence): Placement} from an append build's placement.tsv: one line for each
     .text input section of its link, tab-separated: the key and its occurrence (its index among the map lines of
@@ -700,11 +707,31 @@ def read_renamed(path):
     return found
 
 
-def collect_target(raw, name, binary):
+def store_reader(raw):
+    """read(file, sha256): the bytes of `file`, a file that a record of the build $OUT `raw` names, from the build's
+    store by its sha256, which they must have. Each store file is read and checked once for all the records of the
+    build, so that a file many links took, such as libc, is read once. Raise LayoutError when the store lacks it or
+    holds other bytes."""
+    checked = {}
+
+    def read(file, stored):
+        if stored not in checked:
+            try:
+                data = read_regular(below(raw, ".records", "store", stored))
+            except LayoutError as error:
+                raise LayoutError(f"the record's store lacks {file}: {error}") from None
+            if hashlib.sha256(data).hexdigest() != stored:
+                raise LayoutError(f"the record's store holds other bytes for {file} than its sha256 {stored}")
+            checked[stored] = data
+        return checked[stored]
+
+    return read
+
+
+def collect_target(raw, name, binary, digest, store):
     """The files of the layout tree's entry of the fuzz target `name` of the build $OUT `raw`, whose bytes are
-    `binary`: {file name: bytes}. Raise LayoutError when its record is incomplete, when it has no wraps, or when its
-    store lacks a file its map names."""
-    digest = hashlib.sha256(binary).hexdigest()
+    `binary` and their sha256 `digest`, with `store` the build's store_reader: {file name: bytes}. Raise LayoutError
+    when its record is incomplete, when it has no wraps, or when its store lacks a file its map names."""
     record = below(raw, ".records", digest)
     mapping = read_regular(below(record, "map"))
     inputs = read_inputs(below(record, "inputs.tsv"))
@@ -724,14 +751,7 @@ def collect_target(raw, name, binary):
     def read(file):
         if file not in inputs:
             raise LayoutError(f"the record's store lacks {file}: its inputs.tsv does not name it")
-        stored = inputs[file][1]
-        try:
-            data = read_regular(below(raw, ".records", "store", stored))
-        except LayoutError as error:
-            raise LayoutError(f"the record's store lacks {file}: {error}") from None
-        if hashlib.sha256(data).hexdigest() != stored:
-            raise LayoutError(f"the record's store holds other bytes for {file} than its sha256 {stored}")
-        return data
+        return store(file, inputs[file][1])
 
     def key_file(file):
         # renamed names a copy by the path the link was given, which is the map's name for it; check_links reads it
@@ -778,15 +798,17 @@ def collect(builds, out, names=None):
             targets = sorted(os.listdir(raw))
         except OSError as error:
             raise LayoutError(f"{raw}: {error.strerror}") from None
+        store = store_reader(raw)
         for name in targets:
             path = os.path.join(raw, name)
             if not is_elf_file(path):
                 continue
             binary = read_regular(path)
-            if not os.path.lexists(os.path.join(raw, ".records", hashlib.sha256(binary).hexdigest())):
+            digest = hashlib.sha256(binary).hexdigest()
+            if not os.path.lexists(os.path.join(raw, ".records", digest)):
                 continue
             try:
-                layouts[(build, name)] = collect_target(raw, name, binary)
+                layouts[(build, name)] = collect_target(raw, name, binary, digest, store)
             except LayoutError as error:
                 raise LayoutError(f"{build}/{name}: {error}") from None
     if not layouts:
@@ -891,6 +913,14 @@ def in_reach(site, target):
     return JAL_REACH[0] <= target - site <= JAL_REACH[1]
 
 
+def text_load(output):
+    """(.text, k) of an output.tsv reading (Output): its .text output section, and the index k of the PT_LOAD that
+    holds the address of .text. .text is None when the output has no .text, and k is None when no PT_LOAD holds it."""
+    text = next((s for s in output.sections if s.name == ".text"), None)
+    holder = next((k for k, p in enumerate(output.loads) if text and p.vaddr <= text.addr < p.vaddr + p.memsz), None)
+    return text, holder
+
+
 def readonly_growth(base, new):
     """(N, M) for two output.tsv readings (Output): N, the growth of the PT_LOAD in front of the one that holds .text
     (NEW's end, vaddr + memsz, less BASE's); M, its room (page_floor of BASE's .text address less BASE's end). When N
@@ -898,10 +928,8 @@ def readonly_growth(base, new):
     or no PT_LOAD in front of it."""
     ends = []
     for output in (base, new):
-        text = next((s for s in output.sections if s.name == ".text"), None)
-        holder = next((k for k, p in enumerate(output.loads) if text and p.vaddr <= text.addr < p.vaddr + p.memsz),
-                      None)
-        if not holder:
+        text, holder = text_load(output)
+        if not holder:  # no PT_LOAD holds .text, or the first one does, with none in front of it
             return None
         front = output.loads[holder - 1]
         ends.append((text.addr, front.vaddr + front.memsz))
@@ -912,7 +940,7 @@ def readonly_growth(base, new):
 def call_target(call):
     """A call's target as calls.tsv and the detail of jal_reach name it: row:<row>+<value>, or the global's name."""
     if call.kind == "local":
-        return f"row:{'-' if call.target is None else call.target}+{hex_text(call.value)}"
+        return f"row:{'-' if call.target is None else call.target}+{hex(call.value)}"
     return call.target
 
 
@@ -959,8 +987,8 @@ def unshown(placement, fn, old, base, new, pairing):
             return "a target of the call has no address in its tree"
         reach = (in_reach(site, before), in_reach(site, after))
         if reach != ((True, False) if way == "lost" else (False, True)):
-            return (f"from the base call site {hex_text(site)}, the base target {hex_text(before)} is "
-                    f"{'in' if reach[0] else 'out of'} reach and the new target {hex_text(after)} "
+            return (f"from the base call site {hex(site)}, the base target {hex(before)} is "
+                    f"{'in' if reach[0] else 'out of'} reach and the new target {hex(after)} "
                     f"{'in' if reach[1] else 'out of'} reach")
         return None
     if cause == "repeated_key":
@@ -972,7 +1000,7 @@ def unshown(placement, fn, old, base, new, pairing):
         return None
     if cause == "alignment":
         if fn.align <= 1 or old.address % fn.align == 0:
-            return f"its base address {hex_text(old.address)} is a multiple of its alignment {fn.align} in NEW"
+            return f"its base address {hex(old.address)} is a multiple of its alignment {fn.align} in NEW"
         if detail != f"align={fn.align}":
             return f"its alignment in NEW's sections.tsv is {fn.align}"
         return None
@@ -994,7 +1022,7 @@ def unshown(placement, fn, old, base, new, pairing):
 def function(i):
     """A .text input section's name for a person: the function (the section name without .text.) and where it comes
     from, or the key of a section named .text."""
-    where = i.key[0] if i.member is None else f"{i.key[0]}({i.member})"
+    where = origin(i.key[0], i.member)
     if i.section.startswith(".text."):
         return f"{i.section[len('.text.'):]} ({where})"
     return f"{where}:({i.section})"
@@ -1016,17 +1044,16 @@ def compare(label, base, new):
             continue
         partner = pairing.partner[i.row]
         if partner is None:
-            changed.append(f"  new: {function(i)}: - -> {hex_text(i.address)}")
+            changed.append(f"  new: {function(i)}: - -> {hex(i.address)}")
             continue
         old = base.inputs[partner]
         if not pairing.same[i.row]:
-            changed.append(f"  changed: {function(i)}: {hex_text(old.address)} -> {hex_text(i.address)}")
+            changed.append(f"  changed: {function(i)}: {hex(old.address)} -> {hex(i.address)}")
             continue
         if (old.address, old.linked) == (i.address, i.linked):
             kept += 1
             continue
-        values = (f"address {hex_text(old.address)} -> {hex_text(i.address)}, linked size {old.linked} -> "
-                  f"{i.linked}")
+        values = f"address {hex(old.address)} -> {hex(i.address)}, linked size {old.linked} -> {i.linked}"
         placement = new.placement.get(i.key + (occurrence[i.row],))
         if placement is None or placement.cause == "-":
             failures.append(f"FAIL {label}: {function(i)}: {values}: it has the same bytes, and NEW's placement.tsv "
@@ -1041,19 +1068,18 @@ def compare(label, base, new):
     lines = [f"{label}: {kept} kept, {len(moved)} moved with a cause, {len(changed)} changed or new, "
              f"{len(failures)} failed"]
     lines += moved + changed
-    text = [next((s for s in layout.output.sections if s.name == ".text"), None) for layout in (base, new)]
+    text = [text_load(layout.output)[0] for layout in (base, new)]
     lines.append("  .text: start {} -> {}, size {} -> {}".format(
-        *[hex_text(s.addr) if s else "-" for s in text], *[s.size if s else "-" for s in text]))
-    others = pair(base.inputs, new.inputs, kind=lambda name: not name.startswith(".text"))
+        *[hex(s.addr) if s else "-" for s in text], *[s.size if s else "-" for s in text]))
+    others = pair(base.inputs, new.inputs, kind=lambda name: not is_text(name))
     for i in new.inputs:
         partner = others.partner.get(i.row)
         if partner is None or not others.same[i.row]:
             continue
         old = base.inputs[partner]
         if old.address != i.address and loaded(base.output, old.address) and loaded(new.output, i.address):
-            where = i.key[0] if i.member is None else f"{i.key[0]}({i.member})"
-            lines.append(f"  moved, same bytes: {i.section} ({where}): {hex_text(old.address)} -> "
-                         f"{hex_text(i.address)}")
+            lines.append(f"  moved, same bytes: {i.section} ({origin(i.key[0], i.member)}): {hex(old.address)} -> "
+                         f"{hex(i.address)}")
     return failures, lines
 
 
@@ -1079,17 +1105,16 @@ def check(base_tree, new_tree):
     shared = [entry for entry in base_entries if entry in new_entries]
     if not shared:
         raise LayoutError(f"{base_tree} and {new_tree} share no (build, target)")
-    layouts = []
+    # One (build, target) at a time, whose two layouts are dropped once compared; the lines are printed after the
+    # last, so that a tree that cannot be read stops the check before it prints anything.
+    lines, failed = [], 0
     for build, target in shared:
-        layouts.append(((build, target), read_layout(below(base_tree, build, target)),
-                        read_layout(below(new_tree, build, target))))
-    failed = 0
-    for (build, target), base, new in layouts:
-        failures, lines = compare(f"{build}/{target}", base, new)
+        failures, found = compare(f"{build}/{target}", read_layout(below(base_tree, build, target)),
+                                  read_layout(below(new_tree, build, target)))
         failed += bool(failures)
-        print(lines[0])
-        for line in failures + lines[1:]:
-            print(line)
+        lines += found[:1] + failures + found[1:]
+    for line in lines:
+        print(line)
     for entry in base_entries:
         if entry not in new_entries:
             print(f"only in BASE: {entry[0]}/{entry[1]}")
@@ -1182,7 +1207,8 @@ def wraps_of(command):
 # ── the append mode ──────────────────────────────────────────────────────────────────────────────────────────────────
 
 class AppendError(Exception):
-    """A link of the append mode that fails, or a check link that is not what the plan asks: append exits 1."""
+    """A link of the append mode that fails, a check link that is not what the plan asks, or a file or section name
+    that the script cannot quote (it holds a double quote or a line break): append exits 1."""
 
 
 # Where the append mode puts a .text input section of the link: `place` (kept, hole, end, or normal for a normal
@@ -1220,7 +1246,7 @@ def relaxed_otherwise(test, after):
 def jal_detail(test):
     """The detail of jal_reach for the call `test`, as unshown reads it."""
     way = "lost" if in_reach(test.site, test.before) else "gained"
-    return f"offset={hex_text(test.offset)};target={test.target};{way}"
+    return f"offset={hex(test.offset)};target={test.target};{way}"
 
 
 def call_tests(base, probe, pairing):
@@ -1334,9 +1360,7 @@ def next_segment(base, probe):
     SHF_ALLOC section that follows it in the probe's address order. None when one of them is not there."""
     loads = []
     for output in (base, probe):
-        text = next((s for s in output.sections if s.name == ".text"), None)
-        holder = next((k for k, p in enumerate(output.loads) if text and p.vaddr <= text.addr < p.vaddr + p.memsz),
-                      None)
+        _, holder = text_load(output)
         if holder is None or holder + 1 >= len(output.loads):
             return None
         loads.append(output.loads[holder + 1])
@@ -1352,11 +1376,11 @@ def segment_tail(probe):
     """The bytes that the probe link puts after .text in the PT_LOAD that holds .text (an output section of libc++'s
     overrides, __lcxx_override, for one), with room for their alignment: lld puts them after .text wherever .text
     ends, so the code ends that much after .text. 0 when the probe has no such PT_LOAD."""
-    text = next((s for s in probe.output.sections if s.name == ".text"), None)
-    holder = next((p for p in probe.output.loads if text and p.vaddr <= text.addr < p.vaddr + p.memsz), None)
+    text, holder = text_load(probe.output)
     if holder is None:
         return 0
-    start, end = text.addr + text.size, holder.vaddr + holder.memsz
+    load = probe.output.loads[holder]
+    start, end = text.addr + text.size, load.vaddr + load.memsz
     if end <= start:
         return 0
     aligns = [i.align for i in probe.inputs if start <= i.address < end]
@@ -1410,9 +1434,10 @@ def plan(base, probe, pairing, forced=None):
         cause = ("readonly_growth", "growth={};room={}".format(*figures))
         places = {i.row: Place("normal", i.address, *(cause if pairing.same[i.row] else ("-", "-"))) for i in text}
         return Plan(places, None, {}, None, figures)
-    start = next((s.addr for s in base.output.sections if s.name == ".text"), None)
-    if start is None:
+    base_text, _ = text_load(base.output)
+    if base_text is None:
         raise LayoutError("BASE's output.tsv has no .text")
+    start = base_text.addr
     tests = call_tests(base, probe, pairing)
     forced = dict(forced or {})
     while True:
@@ -1485,15 +1510,15 @@ def plan(base, probe, pairing, forced=None):
     at = next((k for k, (_, _, name) in enumerate(order) if name == ".text"), None)
     if not at:
         raise LayoutError("the probe link has no SHF_ALLOC section before .text")
-    out, lines = ["SECTIONS", "{", f"  .text {hex_text(start)} :", "  {"], {}
+    out, lines = ["SECTIONS", "{", f"  .text {hex(start)} :", "  {"], {}
     for address, row, i in sorted(items, key=lambda item: item[:2]):
-        out += [f"    . = {hex_text(address)};", f"    {pattern(i)}"]
+        out += [f"    . = {hex(address)};", f"    {pattern(i)}"]
         lines[len(out)] = row
     out += ["  }", "}", f"INSERT AFTER {script_name(order[at - 1][2])};"]
     found, next_start = next_segment(base.output, probe.output), None
     if found is not None and end + segment_tail(probe) <= page_floor(found[0]):
         next_start = found[0]
-        out.append(f"SECTIONS {{ {script_name(found[1])} {hex_text(next_start)} : {{ }} }} "
+        out.append(f"SECTIONS {{ {script_name(found[1])} {hex(next_start)} : {{ }} }} "
                    f"INSERT BEFORE {script_name(found[2])};")
     return Plan(places, "\n".join(out) + "\n", lines, next_start, None)
 
@@ -1532,38 +1557,38 @@ def segments_failure(probe, check):
     have the count and the flags of the probe link's (`probe`), in order, and no two may share a page."""
     for k in range(max(len(probe), len(check))):
         if k >= len(check):
-            return f"the check link lacks the probe link's PT_LOAD {k} at {hex_text(probe[k].vaddr)}"
+            return f"the check link lacks the probe link's PT_LOAD {k} at {hex(probe[k].vaddr)}"
         if k >= len(probe):
-            return f"the check link has a PT_LOAD {k} at {hex_text(check[k].vaddr)}, which the probe link does not"
+            return f"the check link has a PT_LOAD {k} at {hex(check[k].vaddr)}, which the probe link does not"
         if check[k].flags != probe[k].flags:
-            return (f"the check link's PT_LOAD {k} at {hex_text(check[k].vaddr)} has the flags "
-                    f"{hex_text(check[k].flags)}, and the probe link's {hex_text(probe[k].flags)}")
+            return (f"the check link's PT_LOAD {k} at {hex(check[k].vaddr)} has the flags "
+                    f"{hex(check[k].flags)}, and the probe link's {hex(probe[k].flags)}")
     ordered = sorted(check, key=lambda p: p.vaddr)
     for a, b in zip(ordered, ordered[1:]):
         if page_floor(a.vaddr + max(a.memsz, 1) - 1) >= page_floor(b.vaddr):
-            return (f"the check link's PT_LOADs at {hex_text(a.vaddr)} and {hex_text(b.vaddr)} share the page "
-                    f"{hex_text(page_floor(b.vaddr))}")
+            return (f"the check link's PT_LOADs at {hex(a.vaddr)} and {hex(b.vaddr)} share the page "
+                    f"{hex(page_floor(b.vaddr))}")
     return None
 
 
 def placement_rows(found, places, pairing, base):
     """The lines of placement.tsv (read_placement) for `found`: [(the probe link's Input, its address in the final
     link)], in the final link's map order."""
-    rows, seen = [], collections.Counter()
-    occurrence = occurrences(base.inputs)
+    rows = []
+    occurrence, base_occurrence = occurrences([i for i, _ in found]), occurrences(base.inputs)
     for i, address in found:
         partner = pairing.partner[i.row]
-        then = ["-"] * 4 if partner is None else list(base.inputs[partner].key) + [str(occurrence[partner])]
+        then = ["-"] * 4 if partner is None else list(base.inputs[partner].key) + [str(base_occurrence[partner])]
         place = places[i.row]
-        rows.append(list(i.key) + [str(seen[i.key])] + then
-                    + [place.place, hex_text(address), place.cause, place.detail])
-        seen[i.key] += 1
+        rows.append(list(i.key) + [str(occurrence[i.row])] + then
+                    + [place.place, hex(address), place.cause, place.detail])
     return rows
 
 
 def append(entry, work, script, placement, wraps, renamed, command):
     """The append mode (module docstring), for the base layout tree's entry `entry`: 0. Raise AppendError when a link
-    fails or the check link is not what the plan asks, and LayoutError when an input cannot be read."""
+    fails, when the check link is not what the plan asks, or when a file or section name holds a double quote or a
+    line break, which the script cannot quote; and LayoutError when an input cannot be read."""
     parts = os.path.normpath(entry).split(os.sep)
     label = f"{parts[-1]} ({parts[-2]})" if len(parts) > 1 else parts[-1]
     try:
@@ -1594,8 +1619,7 @@ def append_link(label, entry, work, script, placement, wraps, renamed, command):
     by_row = collections.defaultdict(list)
     for call in calls:
         by_row[call.row].append(call)
-    probe = Layout(inputs, by_row, output_of(output_rows(Elf(read_regular(probe_binary), probe_binary)),
-                                             probe_binary), {})
+    probe = Layout(inputs, by_row, binary_output(probe_binary), {})
     pairing = pair(base.inputs, probe.inputs)
     text = [i for i in probe.inputs if is_text(i.section)]
     tests = call_tests(base, probe, pairing)
@@ -1625,8 +1649,7 @@ def append_link(label, entry, work, script, placement, wraps, renamed, command):
             raise AppendError(f"the check link fails with exit status {status}")
         checked = read_map(text_of(read_regular(check_map)))
         at = map_index(checked)
-        link = Link(checked, {row: at[name] for name, row in names.items() if name in at},
-                    output_of(output_rows(Elf(read_regular(check_binary), check_binary)), check_binary))
+        link = Link(checked, {row: at[name] for name, row in names.items() if name in at}, binary_output(check_binary))
         moved = {}
         for i in text:
             if planned.places[i.row].place != "kept":
@@ -1638,8 +1661,8 @@ def append_link(label, entry, work, script, placement, wraps, renamed, command):
                 continue
             test = next((t for t in tests.get(i.row, []) if relaxed_there(t, line.address, link)), None)
             if test is None:
-                raise AppendError(f"{function(i)}: the script keeps it at {hex_text(old.address)} with {old.linked} "
-                                  f"bytes, and the check link puts it at {hex_text(line.address)} with {line.size} "
+                raise AppendError(f"{function(i)}: the script keeps it at {hex(old.address)} with {old.linked} "
+                                  f"bytes, and the check link puts it at {hex(line.address)} with {line.size} "
                                   "bytes, and no call of it is relaxed otherwise: a defect of the append mode")
             moved[i.row] = test
         if not moved:
@@ -1664,7 +1687,7 @@ def append_link(label, entry, work, script, placement, wraps, renamed, command):
         if not is_text(line.section):
             continue
         if at not in back:
-            where = line.file if line.member is None else f"{line.file}({line.member})"
+            where = origin(line.file, line.member)
             raise AppendError(f"the check link takes {where}:({line.section}), which the probe link does not")
         found.append((probe.inputs[back[at]], line.address))
     missing = [i for i in text if i.row not in link.match]
@@ -1676,7 +1699,7 @@ def append_link(label, entry, work, script, placement, wraps, renamed, command):
     counts = ", ".join(f"{cause}: {causes[cause]}" for cause in CAUSES if causes[cause])
     changed = sum(not pairing.same[i.row] for i in text)
     tail = "the data moves" if planned.next_start is None else \
-        f"the next segment stays at {hex_text(planned.next_start)}"
+        f"the next segment stays at {hex(planned.next_start)}"
     print(f"layout.py append: {label}: {kept} kept, {sum(causes.values())} moved" + (f" ({counts})" if counts else "")
           + f", {changed} changed or new; {tail}", file=sys.stderr)
     return 0
@@ -1712,10 +1735,11 @@ def main(argv=None):
                     "command (no -o, no map, no script). Write the link's wraps, link once normally in DIR (the "
                     "probe link), plan where each .text input section goes, write the linker script of that plan, "
                     "link with it in DIR (the check link) and verify that each kept section is at its base address "
-                    "with its base linked size and that the PT_LOAD segments are the probe link's, and write "
-                    "placement.tsv. When the read-only data in front of .text grew past its room, write no script "
-                    "(a normal link). Exit 1 when a link fails or the check link is not what the plan asks, 2 when "
-                    "an input cannot be read.")
+                    "with its base linked size, that the PT_LOAD segments are the probe link's and that no two of "
+                    "them share a page, and write placement.tsv. When the read-only data in front of .text grew past "
+                    "its room, write no script (a normal link). Exit 1 when a link fails, when the check link is not "
+                    "what the plan asks, or when a file or section name holds a double quote or a line break, which "
+                    "the script cannot quote; 2 when an input cannot be read.")
     appending.add_argument("--base", required=True, metavar="ENTRY",
                            help="the base layout tree's entry <tree>/<build>/<target>/")
     appending.add_argument("--work", required=True, metavar="DIR", help="an empty directory for the links")

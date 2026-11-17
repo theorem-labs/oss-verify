@@ -28,7 +28,8 @@
 # A recipe that compiles its own adapter (rust/recipes.sh, with plugin_rust.h; python/recipes.sh, with
 # python_tier_plugin.h) names it in OV_ADAPTER: it takes the place of adapter.o.
 #
-# With OV_RECORDS set (compile sets it for oss-verify check --checks), it also records the link for the checks of the
+# With OV_RECORDS set (compile sets it with OV_RECORD=1, which oss-verify check --checks sets for its first build, and
+# --layout-out, with or without --base-layout, for each build), it also records the link for the checks of the
 # binaries: the linker's map, the files the link took, and a quiet twin linked with the quiet driver (below, at the
 # end). None of this changes a byte of the two outputs.
 #
@@ -126,18 +127,22 @@ if [ "$driver" = "$OV_AF_DRIVER" ] || [ "$driver" = "$OV_AFC_DRIVER" ]; then
 fi
 
 tail=()
+# words <options>: the link's command in cmd, with <options> after -Wl,--gc-sections. It is built at each call, since
+# record_link changes driver before the quiet link.
+words() {
+  # shellcheck disable=SC2086,SC2206 # the lists in link.env are meant to be split
+  cmd=($real -static -no-pie -Wl,--gc-sections "$@" $driver $OV_SILENT_LD ${args[@]+"${args[@]}"} $seals)
+}
 link() {
-  # shellcheck disable=SC2086 # the lists in link.env are meant to be split
-  $real -static -no-pie -Wl,--gc-sections "$@" $driver $OV_SILENT_LD ${args[@]+"${args[@]}"} $seals \
-    ${tail[@]+"${tail[@]}"}
+  words "$@"
+  "${cmd[@]}" ${tail[@]+"${tail[@]}"}
 }
 
 # layout <command> <options>: python3 layout.py <command> <options> -- <the link's command>, which is the words that
 # link gives the compiler with no -o, no map and no script.
 layout() {
-  # shellcheck disable=SC2086 # the lists in link.env are meant to be split
-  python3 "$(dirname -- "$0")/layout.py" "$@" -- $real -static -no-pie -Wl,--gc-sections $driver $OV_SILENT_LD \
-    ${args[@]+"${args[@]}"} $seals
+  words
+  python3 "$(dirname -- "$0")/layout.py" "$@" -- "${cmd[@]}"
 }
 
 # An append link: layout.py append links once normally in $work (the probe link), plans where each .text input
@@ -156,10 +161,11 @@ if [ -n "$entry" ]; then
   [ ! -s "$work/append.ld" ] || script=-Wl,-T,$work/append.ld
 fi
 
-# With OV_RECORDS (oss-verify check --checks), the first link also writes the linker's map: every input section the link
-# took, with the object or archive member it came from. It is the last argument, so that it is the map the linker
-# writes even when the link names one of its own. The map changes no byte of either output. An append link's script
-# comes before it, after the link's own arguments and the seals, in the output's link and its stripped twin's.
+# With OV_RECORDS (oss-verify check --checks in its first build, --layout-out in each build, with or without
+# --base-layout), the first link also writes the linker's map: every input section the link took, with the object or
+# archive member it came from. It is the last argument, so that it is the map the linker writes even when the link
+# names one of its own. The map changes no byte of either output. An append link's script comes before it, after the
+# link's own arguments and the seals, in the output's link and its stripped twin's.
 tail=(${script:+"$script"})
 [ -z "${OV_RECORDS:-}" ] || tail+=("-Wl,-Map=$OV_RECORDS/map.$$")
 link -o "$out"
@@ -172,8 +178,9 @@ mv -f "$OV_TWINS/$sum.tmp" "$OV_TWINS/$sum"
 tail=()
 
 [ -n "${OV_RECORDS:-}" ] || exit 0
-# The record of this link, for the checks of oss-verify check --checks (src/oss_verify/check_links.py), in
-# $OV_RECORDS/<sum>/:
+# The record of this link, in $OV_RECORDS/<sum>/: for the checks of oss-verify check --checks, in its first build
+# (src/oss_verify/check_links.py), and for layout.py collect, in each build of --layout-out, with or without
+# --base-layout:
 #   map         the input sections of the linker's map, in the map's own order. The reader takes the output section
 #               each one belongs to, and whether the linker loads it, from that order and from the addresses
 #               (src/oss_verify/check_links.py, parse_map), so keep both: never sort or re-order the lines below.

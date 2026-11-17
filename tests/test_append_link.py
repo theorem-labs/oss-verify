@@ -1,7 +1,8 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
-"""infra/base-builder/link-fuzz-target's append mode, and its rule that a link with no base layout runs the commands
-that the script ran at main (889360251058), argument for argument: uv run pytest tests/test_append_link.py
+"""infra/base-builder/link-fuzz-target's append mode, and its rule that a link with no base layout is a normal link,
+which runs the commands that the script ran at commit 889360251058, argument for argument (normal_links):
+uv run pytest tests/test_append_link.py
 
 No linker runs here. The script runs as tests/test_allocation_library_links.py runs it: a copy, with /tmp/ov/ replaced
 by a scratch directory. The compiler is a stand-in that logs each command and writes the output and the map it is
@@ -87,8 +88,8 @@ DRIVERS = {
     "failure-engine": (["cli.o", "af.o"], ["cli-quiet.o", "af-quiet.o"]),
     "counting-engine": (["cli.o", "count.o"], ["cli-quiet.o", "count-quiet.o"]),
 }
-# The files of a record that main's script writes for the link below.
-MAINS_RECORD = ["driver", "inputs.tsv", "map", "quiet"]
+# The files of a record that a normal link writes for the link below.
+NORMAL_RECORD = ["driver", "inputs.tsv", "map", "quiet"]
 
 
 @pytest.fixture
@@ -167,10 +168,10 @@ def inputs(t, engine):
     return [f"{copies}/0-fuzzer.o", "-pthread", f"{copies}/2-libfixture.a"]
 
 
-def mains_links(t, engine, records):
-    """The compiler's commands of link-fuzz-target at main (889360251058) for the link of `run`, argument for argument:
-    the output link, with OV_RECORDS the map argument last; the stripped twin into OV_TWINS; and with OV_RECORDS the
-    quiet twin, with the quiet driver."""
+def normal_links(t, engine, records):
+    """The compiler's commands of a normal link for the link of `run`, argument for argument, as link-fuzz-target ran
+    them at 889360251058: the output link, with OV_RECORDS the map argument last; the stripped twin into OV_TWINS; and
+    with OV_RECORDS the quiet twin, with the quiet driver."""
     driver, quiet = DRIVERS[engine]
     own = inputs(t, engine)
     links = [
@@ -192,7 +193,7 @@ def link_command(t, engine):
 
 
 def with_script(t, links):
-    """`links` (mains_links) with the append mode's script: after the seals and before the map argument on the output
+    """`links` (normal_links) with the append mode's script: after the seals and before the map argument on the output
     link, last on the stripped twin, and none on the quiet twin."""
     script = f"-Wl,-T,{t.only('append.*')}/append.ld"
     first = links[0][:-1] + [script, links[0][-1]] if links[0][-1].startswith("-Wl,-Map=") else links[0] + [script]
@@ -206,14 +207,14 @@ def record_files(t):
 @pytest.mark.parametrize("engine", ["normal-engine", "failure-engine"])
 @pytest.mark.parametrize("records", [False, True], ids=["no-records", "records"])
 @pytest.mark.parametrize("base", ["unset", "empty", "no-entry"])
-def test_no_base_layout_runs_mains_commands(t, base, records, engine):
-    """R2: with no base layout, or one with no entry for this link, the compiler's commands are main's, argument for
-    argument; with OV_RECORDS alone (the --checks path) too, with no layout.py call and no wraps in the record. Only a
-    base layout with no entry adds its one line on standard error."""
+def test_no_base_layout_runs_the_normal_link_commands(t, base, records, engine):
+    """With no base layout, or one with no entry for this link, the compiler's commands are the normal link's,
+    argument for argument; with OV_RECORDS alone (the --checks path) too, with no layout.py call and no wraps in the
+    record. Only a base layout with no entry adds its one line on standard error."""
     done = t.run(engine, records=t.records if records else False,
                  base_layout={"unset": None, "empty": "", "no-entry": t.base}[base])
     assert done.returncode == 0, done.stderr
-    assert t.compiles() == mains_links(t, engine, records)
+    assert t.compiles() == normal_links(t, engine, records)
     assert t.layout_calls() == []
     assert not list(t.ov.glob("append.*"))
     if base == "no-entry":
@@ -226,7 +227,7 @@ def test_no_base_layout_runs_mains_commands(t, base, records, engine):
     assert (t.build / "target").read_bytes() == OUTPUT
     assert (t.twins / SUM).read_bytes() == OUTPUT
     if records:
-        assert record_files(t) == sorted(MAINS_RECORD + ([] if engine == "normal-engine" else ["renamed"]))
+        assert record_files(t) == sorted(NORMAL_RECORD + ([] if engine == "normal-engine" else ["renamed"]))
     else:
         assert not (t.records / SUM).exists()
         if engine != "normal-engine":
@@ -235,14 +236,14 @@ def test_no_base_layout_runs_mains_commands(t, base, records, engine):
 
 @pytest.mark.parametrize("base", ["unset", "no-entry"])
 def test_layout_without_an_entry_records_the_wraps(t, base):
-    """OV_LAYOUT=1 with no entry: the links are main's, and the record holds the wraps that layout.py wraps prints for
-    the link's command."""
+    """OV_LAYOUT=1 with no entry: the links are normal ones, and the record holds the wraps that layout.py wraps prints
+    for the link's command."""
     done = t.run(records=t.records, layout=True, base_layout=None if base == "unset" else t.base)
     assert done.returncode == 0, done.stderr
-    assert t.compiles() == mains_links(t, "normal-engine", True)
+    assert t.compiles() == normal_links(t, "normal-engine", True)
     assert t.layout_calls() == [{"argv": ["wraps", "--", *link_command(t, "normal-engine")],
                                  "cwd": os.path.realpath(t.build), "renamed": None}]
-    assert record_files(t) == sorted(MAINS_RECORD + ["wraps"])
+    assert record_files(t) == sorted(NORMAL_RECORD + ["wraps"])
     assert (t.records / SUM / "wraps").read_text() == WRAPS
 
 
@@ -261,12 +262,12 @@ def test_an_entry_takes_the_append_mode(t, records):
                  "--placement", f"{work}/placement.tsv", "--wraps", f"{work}/wraps", "--",
                  *link_command(t, "normal-engine")],
         "cwd": os.path.realpath(t.build), "renamed": None}]
-    links = with_script(t, mains_links(t, "normal-engine", records))
+    links = with_script(t, normal_links(t, "normal-engine", records))
     assert t.compiles() == links
     if records:
         assert links[0][-2:] == [f"-Wl,-T,{work}/append.ld", f"-Wl,-Map={t.records}/map.$$"]
         assert not any(word.startswith("-Wl,-T,") for word in links[2])
-        assert record_files(t) == sorted(MAINS_RECORD + ["placement.tsv", "wraps"])
+        assert record_files(t) == sorted(NORMAL_RECORD + ["placement.tsv", "wraps"])
         assert (t.records / SUM / "placement.tsv").read_text() == PLACEMENT
         assert (t.records / SUM / "wraps").read_text() == WRAPS
     else:
@@ -277,13 +278,13 @@ def test_an_entry_takes_the_append_mode(t, records):
 @pytest.mark.parametrize("script_kind", ["empty", "absent"])
 def test_readonly_growth_links_with_no_script(t, script_kind):
     """When layout.py append writes an empty script, or none (the read-only data grew past its room, and it linked
-    normally), the two links have no script: they are main's. The record still holds the placement."""
+    normally), the two links have no script: they are the normal link's. The record still holds the placement."""
     t.entry.mkdir()
     done = t.run(records=t.records, layout=True, base_layout=t.base, script_kind=script_kind)
     assert done.returncode == 0, done.stderr
     assert [call["argv"][0] for call in t.layout_calls()] == ["append"]
-    assert t.compiles() == mains_links(t, "normal-engine", True)
-    assert record_files(t) == sorted(MAINS_RECORD + ["placement.tsv", "wraps"])
+    assert t.compiles() == normal_links(t, "normal-engine", True)
+    assert record_files(t) == sorted(NORMAL_RECORD + ["placement.tsv", "wraps"])
 
 
 @pytest.mark.parametrize("status", [1, 2])
@@ -321,4 +322,4 @@ def test_an_allocation_failure_link_takes_the_append_mode(t, engine):
                  "--script", f"{work}/append.ld", "--placement", f"{work}/placement.tsv", "--wraps", f"{work}/wraps",
                  "--", *link_command(t, engine)],
         "cwd": os.path.realpath(t.build), "renamed": renamed}]
-    assert t.compiles() == with_script(t, mains_links(t, engine, False))
+    assert t.compiles() == with_script(t, normal_links(t, engine, False))

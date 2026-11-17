@@ -247,8 +247,8 @@ class LayoutOptions(Project):
     def check(self, options, damage=None):
         """Run oss-verify check with `options`, each build_all leaving raw/<build>/ for each build of the run as compile
         does with link records (test_layout.out_tree; the second one's with a placement.tsv), with `damage` done to
-        the first one's plain record: (exit code, output, the keyword arguments of each build_all, and the layout
-        tree's files when the second build ran)."""
+        the first one's plain record: (exit code, output, record, layout and base_layout of each build_all, with
+        build_all's default for one it is not given, and the layout tree's files when the second build ran)."""
         calls, seen = [], []
 
         def build_all(job, commit, work, *args, **kwargs):
@@ -267,7 +267,8 @@ class LayoutOptions(Project):
             return "builder", "project", ["demo_fuzzer"], built
 
         code, output, _ = self.main(options, build_all)
-        return code, output, [{name: kwargs[name] for name in ("record", "layout", "base_layout")}
+        defaults = {"record": False, "layout": False, "base_layout": None}
+        return code, output, [{name: kwargs.get(name, default) for name, default in defaults.items()}
                               for kwargs in calls], seen
 
     def collected(self):
@@ -279,7 +280,8 @@ class LayoutOptions(Project):
     def test_layout_out_records_the_links_and_writes_the_layout_tree(self):
         code, output, calls, _ = self.check(["--layout-out", str(self.tree)])
         self.assertEqual(code, 0, output)
-        self.assertEqual(calls, [{"record": True, "layout": True, "base_layout": None}])
+        # layout=True records the links too: compile_build gives such a build OV_RECORD=1 (CompileBuild).
+        self.assertEqual(calls, [{"record": False, "layout": True, "base_layout": None}])
         self.assertEqual(sorted(path.name for path in (self.tree / "plain" / "fuzz_shim").iterdir()),
                          ["binary.sha256", "calls.tsv", "map", "output.tsv", "sections.tsv", "wraps"])
         self.assertEqual(tree_files(self.tree), self.collected())
@@ -289,7 +291,7 @@ class LayoutOptions(Project):
         code, output, calls, seen = self.check(["--twice", "--layout-out", str(self.tree), "--base-layout",
                                                 str(self.base)])
         self.assertEqual(code, 0, output)
-        self.assertEqual(calls, [{"record": True, "layout": True, "base_layout": self.base.resolve()}] * 2)
+        self.assertEqual(calls, [{"record": False, "layout": True, "base_layout": self.base.resolve()}] * 2)
         # Written from the first build's raw/, before the second build ran; the second one's is twice/raw/.
         self.assertEqual(seen, [self.collected()])
         self.assertEqual(tree_files(self.tree), self.collected())

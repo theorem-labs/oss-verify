@@ -387,9 +387,7 @@ def link_wraps(record):
 
 
 def no_record(record):
-    for path in sorted(record.parent.rglob("*"), reverse=True):
-        path.rmdir() if path.is_dir() else path.unlink()
-    record.parent.rmdir()
+    shutil.rmtree(record.parent)
 
 
 @pytest.mark.parametrize("damage, named", [
@@ -577,13 +575,17 @@ def test_check_lists_changed_new_and_moved_data(tmp_path, capsys):
     delta = row(".text.delta", 0x11140, 0x10, file="/work/b.o")
     table = dict(TABLE, address=0x10240)
     comment = dict(COMMENT, address=0x40)
-    status, lines = run_check(tmp_path, capsys, {"rows": [table, ALPHA, BETA, gamma, delta, comment],
-                                                 "out": output(text_size=0x200)})
+    # A section whose name starts with .text but not with .text. holds no function: it is listed as data.
+    textfoo = row(".textfoo", 0x10280, 0x10, file="/work/c.o")
+    status, lines = run_check(tmp_path, capsys, {"rows": [table, ALPHA, BETA, gamma, delta, comment,
+                                                          dict(textfoo, address=0x102a0)],
+                                                 "out": output(text_size=0x200)}, {"rows": BASE_ROWS + [textfoo]})
     assert status == 0
     assert lines_with(lines, "gamma", "0x11030", "0x11100")
     assert lines_with(lines, "delta", "- -> 0x11140")
     assert lines_with(lines, ".text", "0x11000", "256", "512")
     assert lines_with(lines, ".rodata.table", "0x10200", "0x10240")
+    assert lines_with(lines, "moved, same bytes: .textfoo (/work/c.o): 0x10280 -> 0x102a0")
     assert not lines_with(lines, ".comment")  # not loaded
 
 

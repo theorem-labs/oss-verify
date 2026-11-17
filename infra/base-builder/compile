@@ -35,16 +35,16 @@
 #      "sanitizer": {"c": [<each word of the flags a C compile gets>], "c++": [<a C++ compile's>]},
 #      "ubsan": {"c": [<those of them that are the UndefinedBehaviorSanitizer's>], "c++": [...]}}
 #
-# oss-verify check --checks sets it for its first build. A build that records makes the same binaries as one that does
-# not.
+# oss-verify check --checks sets it for its first build, and --layout-out, with or without --base-layout, for each
+# build. A build that records makes the same binaries as one that does not.
 #
 # With OV_RECORD=1, set OV_LAYOUT=1 to have each record also hold the functions the link wraps and, for an append link,
 # where the append mode put each .text input section. oss-verify check --layout-out and --base-layout set it.
 #
 # Set OV_BASE_LAYOUT=<dir> to a layout tree (infra/base-builder/layout.py collect) to make a development build: each
 # link with an entry for its build and target in that tree takes the append mode (link-fuzz-target), which keeps each
-# function whose code did not change at the address the base gave it. A build without OV_LAYOUT and OV_BASE_LAYOUT
-# makes the same binaries as before.
+# function whose code did not change at the address the base gave it. OV_LAYOUT changes no byte of a binary. With
+# OV_BASE_LAYOUT, only the output and the stripped twin of an append link differ from those of a normal link.
 set -euo pipefail
 
 LIB=/usr/local/lib/oss-verify
@@ -102,11 +102,12 @@ done
 "$CHOST-ar" rcs "$OV/libFuzzingEngine.a" "$OV/cli.o" "$OV/adapter.o"
 LIB_FUZZING_ENGINE=$OV/libFuzzingEngine.a
 
-# With OV_RECORD=1 (oss-verify check --checks), link-fuzz-target records each link for the checks of the binaries and
-# links a quiet twin with the quiet driver: each driver object compiled again with -DHARNESS_QUIET, as <object>-quiet.o,
-# so that cli.c's DIAG and the adapter's emit_printf (emit.h) write nothing; and record-compile, through a front before
-# each compiler shim, records each compile of build.sh (below, before build.sh runs). The records reach $OUT/.records/
-# at the end. They change no byte of the binaries.
+# With OV_RECORD=1 (oss-verify check --checks in its first build, --layout-out in each build, with or without
+# --base-layout), link-fuzz-target records each link for the checks of the binaries and links a quiet twin with the
+# quiet driver: each driver object compiled again with -DHARNESS_QUIET, as <object>-quiet.o, so that cli.c's DIAG and
+# the adapter's emit_printf (emit.h) write nothing; and record-compile, through a front before each compiler shim,
+# records each compile of build.sh (below, before build.sh runs). The records reach $OUT/.records/ at the end. They
+# change no byte of the binaries.
 OV_RECORDS=""
 if [ "${OV_RECORD:-}" = 1 ]; then
   OV_RECORDS=$OV/records

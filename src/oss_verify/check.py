@@ -203,10 +203,10 @@ def build_all(job, commit, work, toolchain, home, suffix="", no_cache=False, rec
     """Build the images, FROM the toolchain image `toolchain`, compile every build and collect the fuzz targets into
     work/out. `home` is the run's work directory: the project image's tag names it and is added to home/images before
     the image is built, and every container carries its work_label(). With `record`, each build records its links for
-    the checks of the binaries; with `layout`, also what infra/base-builder/layout.py collect needs; with
-    `base_layout`, a layout tree, each build is a development build that keeps its addresses
-    (check_build.compile_build). `token`, for a library in infra/private-libraries.tsv, is the read-only token this
-    build fetches it with; it reaches docker as a BuildKit secret and nothing else.
+    the checks of the binaries; with `layout`, which implies `record`, the records also hold what
+    infra/base-builder/layout.py collect needs; with `base_layout`, a layout tree, each build is a development build
+    that keeps its addresses (check_build.compile_build). `token`, for a library in infra/private-libraries.tsv, is the
+    read-only token this build fetches it with; it reaches docker as a BuildKit secret and nothing else.
 
     Return (builder tag, project tag, targets, entries). Raise Failed if any step fails.
     """
@@ -409,8 +409,8 @@ def main(argv=None):
             say(f"{job.ref or 'the default branch'} is {commit}")
         say(f"toolchain: {toolchain} ({why})")
         builder, tag, targets, entries = build_all(
-            job, commit, work, toolchain, work, record=bool(options.checks) or with_layout, token=token,
-            layout=with_layout, base_layout=options.base_layout)
+            job, commit, work, toolchain, work, record=bool(options.checks), token=token, layout=with_layout,
+            base_layout=options.base_layout)
     except Failed as failure:
         say(f"\nBUILD FAILED: {failure}")
         return 1
@@ -463,7 +463,7 @@ def main(argv=None):
             # layout tree written to --layout-out stays the first build's.
             builder_again, tag_again, targets_again, again = build_all(
                 job, commit, work / "twice", toolchain, work, "-twice", no_cache=True,
-                token=check_build.mint_token(job.repo) if token else None, record=with_layout, layout=with_layout,
+                token=check_build.mint_token(job.repo) if token else None, layout=with_layout,
                 base_layout=options.base_layout)
             builder_ids = {"toolchain": toolchain, "image": check_build.image_id(builder_again),
                            "project_image": check_build.image_id(tag_again)}
