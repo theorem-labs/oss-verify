@@ -314,7 +314,7 @@ class CredentialHelper(unittest.TestCase):
 class TheList(unittest.TestCase):
     """infra/private-libraries.tsv: the only thing that makes a build ask for a token."""
 
-    def test_it_lists_the_two_private_libraries(self):
+    def test_it_lists_the_private_libraries(self):
         listed = check_build.private_libraries()
         for repository in ("https://github.com/theorem-labs/cjson-ossv267",
                            "https://github.com/theorem-labs/theorem-cli"):
@@ -951,6 +951,32 @@ class TheParserAgainstBuildKit(unittest.TestCase):
         text = f"FROM x\nRUN {self.MOUNT} \\\n    fetch-commit /src/x\n"
         self.assertEqual(self.mounts(text), [[check_build.GIT_TOKEN_SECRET]])
 
+    def test_a_blank_line_inside_a_continued_instruction_does_not_end_it(self):
+        # BuildKit joins across it (and warns NoEmptyContinuation); ending the RUN there lost the mounted fetch,
+        # and the guard said there was no fetch-commit step at all.
+        for blank in ("", "   ", "\t"):
+            with self.subTest(blank=blank):
+                text = f"FROM x\nRUN {self.MOUNT} \\\n{blank}\n    fetch-commit /src/x\n"
+                self.assertEqual(self.mounts(text), [[check_build.GIT_TOKEN_SECRET]])
+                check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
+        # Python calls a line of U+001C, U+001D, U+001E or U+001F alone blank, and splitlines() ends a line at the
+        # first three. BuildKit does neither: that line ends the RUN, and the fetch below it runs with no mount.
+        for character in ("\x1c", "\x1d", "\x1e", "\x1f"):
+            with self.subTest(character=character):
+                text = (f"FROM x\nRUN {self.MOUNT} true \\\n{character}\nRUN fetch-commit /src/y\n"
+                        f"RUN {self.MOUNT} fetch-commit /src/x\n")
+                with self.assertRaises(Failed) as refused:
+                    check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
+                self.assertIn("does not mount it: RUN fetch-commit /src/y", str(refused.exception))
+
+    def test_an_escaped_escape_at_the_end_of_a_line_continues_nothing(self):
+        # `C:\\` ends its instruction in BuildKit. Read as a continuation, it joined the mounted fetch below into
+        # the echo.
+        text = f"FROM x\nRUN echo C:\\\\\nRUN {self.MOUNT} fetch-commit /src/x\n"
+        self.assertEqual(check_build.instructions(text)[1:],
+                         ["RUN echo C:\\\\", f"RUN {self.MOUNT} fetch-commit /src/x"])
+        check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
+
     def test_the_secret_id_may_come_from_an_arg_or_an_env(self):
         # BuildKit expands these and the step really gets the secret, so a guard that reads the literal
         # `$SECRET_ID` refuses a working private build and lets a public one carry a real mount.
@@ -965,6 +991,48 @@ class TheParserAgainstBuildKit(unittest.TestCase):
 
     def test_an_unset_variable_names_no_secret(self):
         self.assertEqual(self.mounts("FROM x\nRUN --mount=type=secret,id=$NOT_SET fetch-commit /src/x\n"), [[]])
+
+    def test_a_here_string_or_a_shift_opens_no_heredoc(self):
+        # A private library's correctly mounted fetch was refused as unreadable for `<<<` or `1<<4` elsewhere.
+        for line in ('RUN read -r v <<< "$X"', "RUN read -r v <<<EOT", "RUN echo $((1<<4))", "RUN cat<<EOT"):
+            with self.subTest(line=line):
+                text = f"FROM x\n{line}\nRUN {self.MOUNT} fetch-commit /src/x\nRUN echo EOT\n"
+                self.assertEqual(check_build.unreadable_steps(text), [])
+                self.assertEqual(self.mounts(text), [[check_build.GIT_TOKEN_SECRET]])
+                check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
+        # A heredoc is still one, with a file descriptor or a dash before its word.
+        for opener, word in (("<<EOT", "EOT"), ("<<-EOT", "EOT"), ("2<<EOT", "EOT"), ('<<"EOT"', "EOT"),
+                             ("<<1EOT", "1EOT"), ("<<.EOT", ".EOT"), ("<<'9'", "9"), ("<< EOT", "EOT"),
+                             ("sh $X<<EOT", "EOT"), ("sh ${X}2<<EOT", "EOT"), ("sh ${X:-${Y}}<<EOT", "EOT")):
+            with self.subTest(opener=opener):
+                text = f"FROM x\nRUN {self.MOUNT} {opener}\nfetch-commit /src/x\n{word}\n"
+                with self.assertRaises(Failed) as refused:
+                    check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
+                self.assertIn("cannot read", str(refused.exception))
+        # A heredoc named by U+001F, which Go counts as no space and Python's split() takes away: BuildKit runs its
+        # body, here a fetch with no mount, so the RUN that opens it is refused and named.
+        with self.subTest(opener="<<\x1f"):
+            text = f"FROM x\nRUN {self.MOUNT} fetch-commit /src/x\nRUN sh <<\x1f\nfetch-commit /src/y\n\x1f\n"
+            with self.assertRaises(Failed) as refused:
+                check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
+            self.assertIn("cannot read", str(refused.exception))
+            self.assertIn("RUN sh <<", str(refused.exception))
+        # BuildKit reads no heredoc from an empty word, so a bare `<<` or `2<<` at the end of a RUN opens none: the
+        # RUN after it is an instruction, and its mount is refused for a public library.
+        for opener in ("<<", "2<<"):
+            with self.subTest(empty_word=opener):
+                text = f"FROM x\nRUN cat {opener}\nRUN {self.MOUNT} true\n"
+                with self.assertRaises(Failed) as refused:
+                    check_build.check_secret_mount("Dockerfile", text, None, "https://x/y/z")
+                self.assertIn("take the mount off", str(refused.exception))
+        # Nor from a word that starts with expansions, which it keeps as they are: the lines after `$X<<EOT` are
+        # instructions too, so a mount there is refused for a public library, even when a `#` line could end a body.
+        for opener in ("cat $X<<EOT", 'echo " $X<<#"'):
+            with self.subTest(expansions=opener):
+                text = f"FROM x\nRUN {opener}\nRUN {self.MOUNT} true\n#\n"
+                with self.assertRaises(Failed) as refused:
+                    check_build.check_secret_mount("Dockerfile", text, None, "https://x/y/z")
+                self.assertIn("take the mount off", str(refused.exception))
 
     def test_the_forms_that_already_worked_still_do(self):
         for text in (f"FROM x\nRUN {self.MOUNT} fetch-commit /src/x\n",

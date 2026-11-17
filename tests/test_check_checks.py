@@ -168,6 +168,80 @@ class Report(unittest.TestCase):
         self.assertFalse(check_checks.Run("t", "s", None, "coverage").caught())
         self.assertIn("abort()", check_checks.describe(check_checks.Run("t", "s", 134, "asan")))
 
+    def not_met(self, base, *mutant, other=None):
+        """The report's line for a `mutant:` record whose input exits with `base` on the unchanged code and with
+        `mutant` on the mutant, in a coverage build only; with no `mutant`, the target has no run of it on the mutant.
+        `other`, if given, is (base, mutant) for a second target whose harness holds the same record and has a seed of
+        the same name."""
+        from unittest import mock
+        harness = (b"int LLVMFuzzerTestOneInput(const unsigned char *d, unsigned long n) {\n"
+                   b"  // mutant: lib.c:1 `x + 1` -> `x + 2`\n  // input: s1\n  if (f(d) != 3) abort();\n"
+                   b"  return 0;\n}\n")
+        files = {"/src/h.c": harness, "/src/h2.c": harness, "/src/lib.c": b"int f(int x) { return x + 1; }\n"}
+
+        def export_of(path):
+            return {"data": [{"functions": [{"name": "LLVMFuzzerTestOneInput", "filenames": [path]}],
+                              "files": [{"filename": path, "segments": [[1, 1, 1, True], [4, 3, 1, True]]},
+                                        {"filename": "/src/lib.c", "segments": [[1, 1, 1, True]]}]}]}
+        exports = {"t": export_of("/src/h.c")}
+        if other:
+            exports["u"] = export_of("/src/h2.c")
+
+        def runs(which):
+            return [check_checks.Run("t", "s1", status, "coverage") for status in ((base,), mutant)[which]] + (
+                [check_checks.Run("u", "s1", other[which], "coverage")] if other else [])
+
+        def measure(*args, **kwargs):
+            coverage = check_checks.Coverage()
+            for export in exports.values():
+                coverage.add(export)
+            return runs(0), coverage, exports
+
+        def evaluate(ctx, number, breakage, record_targets):
+            breakage.outcome, breakage.runs = "measured", runs(1)
+            return breakage
+
+        job = mock.Mock(language="c", directory=pathlib.Path("/nonexistent"), builds=[], mutants=None)
+        with tempfile.TemporaryDirectory() as work, \
+                mock.patch.multiple(check_checks, write_seeds=lambda *args: {target: ["s1"] for target in exports},
+                                    llvm_version=lambda *args: "20.1.8", compiler_rt=lambda version: "/rt",
+                                    workdir_of=lambda tag: "/src", compile_check=lambda *args, **kwargs: None,
+                                    measure=measure, evaluate=evaluate, step=lambda text: None,
+                                    image_files=lambda tag, paths, labels: {p: files[p] for p in paths if p in files}):
+            report = check_checks.checks(job, "tag", list(exports), pathlib.Path(work), pathlib.Path(work) / "raw",
+                                         labels=[])
+        (line, *_) = [line for line in report.splitlines() if "mutant not met" in line and "`h.c:" in line]
+        return line
+
+    def test_a_record_whose_input_passes_on_the_mutant_is_not_met(self):
+        self.assertIn("**mutant not met**: the input passes (coverage 0)", self.not_met(0, 0))
+
+    def test_a_record_whose_input_fails_on_the_unchanged_code_says_so(self):
+        """Its failure on the mutant is no catch, and the input does not pass."""
+        self.assertIn("**mutant not met**: the input does not pass on the unchanged code (coverage 134)",
+                      self.not_met(134, 134))
+
+    def test_a_record_whose_input_does_not_end_on_the_unchanged_code_says_so(self):
+        """A run stopped at the time limit on the unchanged code is no pass, so a failure on the mutant is no catch."""
+        self.assertIn("**mutant not met**: the input does not pass on the unchanged code (coverage 134)",
+                      self.not_met(None, 134))
+
+    def test_a_record_is_judged_by_its_own_targets_runs(self):
+        """The same record in another target's harness, with a seed of the same name, does not give this one its
+        reason."""
+        self.assertIn("**mutant not met**: the input passes (coverage 0)", self.not_met(0, 0, other=(0, None)))
+        self.assertIn("**mutant not met**: the input passes (coverage 0)", self.not_met(0, 0, other=(134, 134)))
+
+    def test_a_record_whose_run_did_not_end_says_so(self):
+        """A run stopped at the time limit neither passes nor catches the mutant."""
+        self.assertIn("**mutant not met**: the input did not end within 120 seconds (coverage time limit)",
+                      self.not_met(0, None))
+
+    def test_a_record_whose_input_did_not_run_says_so(self):
+        """Its own target has no run of the input on the mutant, though another target ran a seed of the same name:
+        the input did not run, so it does not pass."""
+        self.assertIn("**mutant not met**: the input did not run (no run)", self.not_met(0, other=(0, 0)))
+
     def test_seeds_get_the_driver_header(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = pathlib.Path(directory)
@@ -2207,6 +2281,31 @@ class SeedHex(unittest.TestCase):
         self.assertEqual(members[f"== 'bzip2-64-mib': {size} bytes"],
                          ["(not read: compression method 12, not stored or deflated)"])
         self.assertEqual(members["== 'encrypted': 768 bytes"], ["(not read: encrypted)"])
+
+    def test_a_member_is_read_only_as_far_as_its_first_512_bytes(self):
+        gather = (ROOT / ".github" / "scripts" / "review-gather").read_text()
+        code = re.search(r'^  python3 - "\$zip" "\$out/seeds/\$target\.hex\.txt" <<\'EOF\'\n(.*?)^EOF$', gather,
+                         re.M | re.S)[1]
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            # 256 MiB of zeros deflate to about 250 KiB: a pull request can bring such a zip.
+            corpus = directory / "demo_seed_corpus.zip"
+            with zipfile.ZipFile(corpus, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                with archive.open("zeros", "w") as member:
+                    for _ in range(256):
+                        member.write(bytes(1 << 20))
+            # The heredoc as python3 - runs it, with its peak allocation traced: a dump that decompresses the
+            # whole member takes hundreds of megabytes.
+            run = subprocess.run([sys.executable, "-c",
+                                  "import tracemalloc\ntracemalloc.start()\n" + code +
+                                  "\nprint(tracemalloc.get_traced_memory()[1])",
+                                  str(corpus), str(directory / "demo.hex.txt")], capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            peak = int(run.stdout)
+            self.assertLess(peak, 16 << 20, "the dump decompressed the whole member")
+            lines = (directory / "demo.hex.txt").read_text().splitlines()
+        self.assertEqual(lines[0], f"== 'zeros': {256 << 20} bytes")
+        self.assertEqual(lines[1:], [f"{at:04x}  {' '.join(['00'] * 16)}  {'.' * 16}" for at in range(0, 512, 16)])
 
 
 class ReviewJob(unittest.TestCase):

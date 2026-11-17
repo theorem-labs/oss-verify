@@ -773,10 +773,17 @@ def unwinder_vlenb_idiom(buf, off):
     return u32(buf, off) >> 20 == 0xC22
 
 
+# The most distinct words outside_sites() looks for with bytes.find. Each word is one pass over the region, and past
+# about 16 one pass over the census's words is faster: 9.5 MiB took 0.02 s for one word with bytes.find, 0.21 s with
+# the census's words, and 1.2 s for 128 words with bytes.find.
+FIND_WORDS = 8
+
+
 def outside_sites(buf, base, clean, outw, pairs_fn):
     """Every (address, word) of the region whose word is in `outw`, in address order. A region without a finding (at
-    an even address, see isa_census()) is searched with bytes.find, and only hits at aligned words are kept."""
-    if not clean:
+    an even address, see isa_census()) and with at most FIND_WORDS of them is searched with bytes.find, and only hits
+    at aligned words are kept."""
+    if not clean or len(outw) > FIND_WORDS:
         return [(a, w) for a, w in pairs_fn() if w in outw]
     res = []
     lead = 2 * aligned_parity(base)
@@ -905,8 +912,9 @@ def scan(data):
     "machine", "e_flags", "located_by", "regions", "exec_bytes", "insn32", "zero_parcels", each finding of SHAPES,
     "outside_model", "families", "unwinder_vlenb", "in_data", "mapping_symbols", "first", "pf_x", "cfi"}. "verdict"
     is "CLEAN", "RVC" (a compressed instruction), "NOT-RV64G" (another finding of SHAPES), "NOT-MODEL" (a word
-    outside the model) or "UNEXAMINED" (no executable byte). "first" is (finding, address) or None. "cfi" is None
-    unless an unwinder site made .eh_frame be read. Raise Unexamined if the file cannot be decoded."""
+    outside the model) or "UNEXAMINED" (no executable byte). "first" is (finding, address) for the first finding of
+    the kind the verdict names, or None. "cfi" is None unless an unwinder site made .eh_frame be read. Raise
+    Unexamined if the file cannot be decoded."""
     e, secs, segs = parse_elf(data)
     mode, xsegs, regs, notes = regions(data, e, secs, segs)
     msyms = mapping_symbols(data, secs) if secs else {}
@@ -914,7 +922,9 @@ def scan(data):
     tot.update({k: 0 for k in SHAPES})
     tot.update(outside_model=0, unwinder_vlenb=0, in_data=0)
     fams = collections.Counter()
-    first = None
+    # The first finding of each verdict's kind, in the order the regions are decoded (sections, then gaps). A later
+    # region can hold the finding that decides the verdict, so "first" is chosen once the verdict is known.
+    firsts = {}
     cfi = None                   # (parsed, names 7202), read when an unwinder site first needs it
     cfist = {}
     for r in regs:
@@ -950,11 +960,11 @@ def scan(data):
         for k in SHAPES:
             tot[k] += len(at[k])
             if at[k]:
-                first = first or (k, at[k][0])
+                firsts.setdefault("RVC" if k == "rvc16" else "NOT-RV64G", (k, at[k][0]))
                 if ms:
                     tot["in_data"] += _in_data(ms, keys, at[k])
         if kept:
-            first = first or ("outside_model", kept[0])
+            firsts.setdefault("NOT-MODEL", ("outside_model", kept[0]))
             if ms:
                 tot["in_data"] += _in_data(ms, keys, kept)
     if tot["exec_bytes"] == 0:
@@ -969,7 +979,7 @@ def scan(data):
         verdict = "CLEAN"
     tot.update(verdict=verdict, e_type=e["type"], machine=e["machine"], e_flags=e["flags"], located_by=mode,
                regions=len(regs), families=dict(sorted(fams.items(), key=lambda x: (-x[1], x[0]))),
-               mapping_symbols=sum(len(v) for v in msyms.values()), first=first,
+               mapping_symbols=sum(len(v) for v in msyms.values()), first=firsts.get(verdict),
                pf_x=dict(notes, segments=len(xsegs)),
                cfi=None if cfi is None else dict(cfist, parsed=cfi[0], names_vlenb=cfi[1]))
     return tot
@@ -1012,7 +1022,7 @@ def check(path):
     outside_model   the number of 32-bit words the model does not execute (exempt unwinder reads not counted).
     families        {family: count} of those words.
     unwinder_vlenb  the number of libunwind vlenb reads exempt.
-    first           "<finding> at 0x<address>" for the first finding, or None.
+    first           "<finding> at 0x<address>" for the first finding of the kind the verdict names, or None.
     detail          one line for a person, naming the first finding.
     """
     out = {"result": "error", "e_type": None, "machine": None, "words": 0, "compressed": 0, "outside_model": 0,
