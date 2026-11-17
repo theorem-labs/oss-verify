@@ -965,14 +965,21 @@ def empty_directory(path, tag, *, labels):
 
 # The status docker run exits with when it cannot run the container at all.
 DOCKER_FAILED = 125
+# Where compile_build mounts a base layout tree, read-only, in the container of a development build.
+BASE_LAYOUT_MOUNT = "/ov-base-layout"
 
 
-def compile_build(tag, build, sanitizer, out, ubsan=None, *, labels, record=False):
+def compile_build(tag, build, sanitizer, out, ubsan=None, *, labels, record=False, layout=False, base_layout=None):
     """Run `compile` for one build in a fresh container with no network, its $OUT mounted at `out`. `ubsan`, if given,
     is (checks, left out[, left out of C compiles]): the UBSan checks of the build, those that trap mode leaves out,
     and those that its C compiles leave out. `labels`: docker run arguments for the container, work_label(). With
     `record`, compile records each fuzz target's link in $OUT/.records/ for the checks of the binaries
-    (src/oss_verify/check_links.py); the binaries are the same."""
+    (src/oss_verify/check_links.py); the binaries are the same. With `layout`, which implies `record`, each record also
+    holds the functions its link wraps and, for an append link, where the append mode put each .text input section
+    (OV_LAYOUT=1), as infra/base-builder/layout.py collect needs. `base_layout`, which implies `layout`, is a layout
+    tree (layout.py collect), mounted read-only at BASE_LAYOUT_MOUNT and named by OV_BASE_LAYOUT: the build is a
+    development build, and each link with an entry there for its build and target is an append link
+    (infra/base-builder/link-fuzz-target), which keeps each function whose code did not change at its base address."""
     step(f"compile: the {build} build (SANITIZER={sanitizer}), with no network")
     empty_directory(out, tag, labels=labels)
     owner = f"{os.getuid()}:{os.getgid()}"
@@ -983,8 +990,13 @@ def compile_build(tag, build, sanitizer, out, ubsan=None, *, labels, record=Fals
         checks = ["-e", f"OV_UBSAN_CHECKS={','.join(ubsan[0])}", "-e", f"OV_UBSAN_EXCLUDE={','.join(ubsan[1])}"]
         if len(ubsan) > 2 and ubsan[2]:
             checks += ["-e", f"OV_UBSAN_C_EXCLUDE={','.join(ubsan[2])}"]
-    if record:
+    layout = layout or base_layout is not None
+    if record or layout:
         checks += ["-e", "OV_RECORD=1"]
+    if layout:
+        checks += ["-e", "OV_LAYOUT=1"]
+    if base_layout is not None:
+        checks += ["-v", f"{base_layout}:{BASE_LAYOUT_MOUNT}:ro", "-e", f"OV_BASE_LAYOUT={BASE_LAYOUT_MOUNT}"]
     command = ["docker", "run", "--rm", "--init", "--network=none", *labels, "-e", f"SANITIZER={sanitizer}",
                "-e", f"OV_OWNER={owner}", *jobs, *checks, "-v", f"{out}:/out", tag, "compile"]
     code = run(*command)

@@ -13,6 +13,7 @@ import importlib.util
 import os
 import pathlib
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -402,6 +403,32 @@ def test_collect_exits_2_for_a_record_it_cannot_use(tmp_path, capsys, damage, na
     assert layout.main(["collect", str(tmp_path / "builds"), str(tmp_path / "layout")]) == 2
     error = capsys.readouterr().err
     assert len(error.splitlines()) == 1 and named in error
+    assert not (tmp_path / "layout").exists()
+
+
+def test_collect_of_named_builds_reads_no_other_build_directory(tmp_path):
+    builds = tmp_path / "builds"
+    out_tree(builds)
+    # Another run's build beside it, whose record has no wraps: a collect of each build directory stops on it.
+    shutil.copytree(builds / "plain", builds / "asan", symlinks=True)
+    for wraps in (builds / "asan" / ".records").glob("*/wraps"):
+        wraps.unlink()
+    with pytest.raises(layout.LayoutError, match="asan/fuzz_shim: the record has no wraps"):
+        layout.collect(str(builds), str(tmp_path / "every"))
+    layout.collect(str(builds), str(tmp_path / "layout"), ["plain"])
+    assert [p.relative_to(tmp_path / "layout").as_posix() for p in sorted((tmp_path / "layout").glob("*/*"))] == [
+        "plain/fuzz_shim"]
+    assert sorted(p.name for p in (tmp_path / "layout" / "plain" / "fuzz_shim").iterdir()) == [
+        "binary.sha256", "calls.tsv", "map", "output.tsv", "sections.tsv", "wraps"]
+
+
+@pytest.mark.parametrize("name, made", [("ubsan", True), ("asan", False)], ids=["no-records", "no-directory"])
+def test_collect_refuses_a_named_build_with_no_records(tmp_path, name, made):
+    out_tree(tmp_path / "builds")
+    if made:
+        (tmp_path / "builds" / name).mkdir()
+    with pytest.raises(layout.LayoutError, match=f"^{name}: .* holds no link records"):
+        layout.collect(str(tmp_path / "builds"), str(tmp_path / "layout"), ["plain", name])
     assert not (tmp_path / "layout").exists()
 
 

@@ -754,17 +754,24 @@ def collect_target(raw, name, binary):
     return files
 
 
-def collect(builds, out):
-    """Write the layout tree `out` of the builds in `builds` (module docstring). Nothing is written when one of
-    them cannot be read. Raise LayoutError for that, and when `builds` holds no link record at all."""
+def collect(builds, out, names=None):
+    """Write the layout tree `out` of the builds in `builds` (module docstring): of each directory there, or, with
+    `names`, of builds/<name>/ for each of those names alone, so that a build directory another run left there is not
+    read. Nothing is written when one of them cannot be read. Raise LayoutError for that, for a name whose directory
+    holds no .records, and when the builds hold no link record at all."""
     layouts = {}
-    try:
-        names = sorted(os.listdir(builds))
-    except OSError as error:
-        raise LayoutError(f"{builds}: {error.strerror}") from None
-    for build in names:
+    if names is None:
+        try:
+            listed = sorted(os.listdir(builds))
+        except OSError as error:
+            raise LayoutError(f"{builds}: {error.strerror}") from None
+    else:
+        listed = sorted(set(names))
+    for build in listed:
         raw = os.path.join(builds, build)
         if not is_directory(raw) or not os.path.lexists(os.path.join(raw, ".records")):
+            if names is not None:
+                raise LayoutError(f"{build}: {raw} holds no link records (.records)")
             continue
         below(raw, ".records")
         try:

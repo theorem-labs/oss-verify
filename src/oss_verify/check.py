@@ -21,6 +21,19 @@ Build a project's fuzz targets the way we do, collect the binaries, and write th
                                                reaches, which breakage patches (project.yaml's mutants) no seed input
                                                catches (src/oss_verify/check_checks.py), and the four checks of each
                                                binary (src/oss_verify/check_binaries.py)
+    oss-verify check --layout-out <dir> <name> also record each fuzz target's link, and write the layout tree of the
+                                               first build to <dir>: for each build and fuzz target, its linker map,
+                                               the digest and calls of each input section, and its binary's sections,
+                                               segments and symbols (python3 infra/base-builder/layout.py collect).
+                                               <dir> must be new or an empty directory, and not in the base layout
+    oss-verify check --base-layout <base> --layout-out <dir> <name>
+                                               a development build, in append mode: each function whose code did not
+                                               change keeps the address it has in the layout tree <base> (an earlier
+                                               run's --layout-out), and each other one goes into a hole or at the end
+                                               of .text. Its binaries are never pins. Then
+                                               python3 infra/base-builder/layout.py check <base> <dir> compares the
+                                               two layout trees: each function that kept its code kept its address,
+                                               or moved for a cause the trees show
     oss-verify check --print-toolchain <name>  print the toolchain image `oss-verify check <name>` builds FROM, and
                                                build nothing
 
@@ -38,7 +51,10 @@ It runs these steps:
        A private library's token goes with it as the BuildKit secret oss-verify-git-token, which its Dockerfile
        mounts on the fetch step; it is in no build argument, no layer and no log.
     6. Run `compile` once per build, each in a fresh container with no network (docker run --network=none). With
-       --checks, the first build also records each fuzz target's link (infra/base-builder/link-fuzz-target).
+       --checks, the first build also records each fuzz target's link (infra/base-builder/link-fuzz-target). With
+       --layout-out, each build records them, with the functions each link wraps (OV_LAYOUT=1). With --base-layout,
+       each container also gets the base layout tree, read-only, as OV_BASE_LAYOUT, and each link with an entry there
+       for its build and fuzz target is an append link: a development build, whose binaries are never pins.
     7. Find the fuzz targets: executables in $OUT whose symbol table defines LLVMFuzzerTestOneInput, present in every
        build (or those fuzz_targets lists). Collect each one's published (stripped) bytes as
        out/<target>/<target>.<build>, and read the size of its .text section and whether it is statically linked (no
@@ -47,16 +63,24 @@ It runs these steps:
        image it was built FROM, the git checkouts in the image, and the file, size and SHA-256 of every target in
        every build, with the .text size and linkage of each one. List each binary with these values; stop if one is
        not statically linked.
-    9. With --twice, build everything again from scratch (steps 4 to 7, with docker build --no-cache), compare every
+    9. With --layout-out, write the layout tree of the build to <dir> (python3 infra/base-builder/layout.py collect,
+       on the $OUT in raw/ of each build of this run alone); stop, with exit code 1, if it cannot be written, though
+       the build succeeded. Before anything is built, a <dir> that is there and is not an empty directory, or that is
+       or lies in the base layout, is refused: the tree must hold this build's fuzz targets alone, because
+       python3 infra/base-builder/layout.py check <base> <dir>, which compares two layout trees, a base and an append
+       build, compares each entry that both hold.
+   10. With --twice, build everything again from scratch (steps 4 to 7, with docker build --no-cache), compare every
        byte, and only then add the rebuild block to manifest.yaml: this host, the time, the second builder, the file,
-       size and SHA-256 of every binary the second build made, and result: identical or differs.
-   10. With --checks, check each binary (src/oss_verify/check_binaries.py; docs/build-contract.md, "The checks of the
+       size and SHA-256 of every binary the second build made, and result: identical or differs. With --layout-out,
+       the second build records its links as the first did, and with --base-layout it is an append build too, so the
+       comparison tests that the append mode makes the same bytes. The layout tree is the first build's.
+   11. With --checks, check each binary (src/oss_verify/check_binaries.py; docs/build-contract.md, "The checks of the
        binaries"): its ELF header and instructions, its system calls against the process model of the published
        proofs, its quiet twin, and the code it links uninstrumented. Write the results into manifest.yaml (each
        build's uninstrumented list, and the binary_checks block). Then measure the fuzz targets' checks on their seed
        inputs (src/oss_verify/check_checks.py; docs/build-contract.md, "The checks of a fuzz target"). What --checks
        finds changes no exit code.
-   11. Open a shell in the project image with no network and out/ at /out, unless --no-shell.
+   12. Open a shell in the project image with no network and out/ at /out, unless --no-shell.
 
 Everything is kept in ~/.cache/oss-verify-check/<name>, or in --dir if given. Each run replaces out/ there, so the
 binaries of an earlier run's other builds are gone after a run with --build.
@@ -67,15 +91,17 @@ still there: a container outlives its docker run client. Its containers keep no 
 Security note: the project's Dockerfile is built with network access, as `docker build` would. Check a project from
 someone you don't trust on a machine with nothing to lose.
 
-Exit codes: 0 if the project builds (and, with --twice or --lock, every byte matches); 1 if it does not build; 2 if
-projects/<name>/ breaks the enrollment rules, or a fuzz target is not statically linked; 3 if it builds but the bytes
-differ (--twice or --lock).
+Exit codes: 0 if the project builds (and, with --twice or --lock, every byte matches); 1 if it does not build, or if
+the layout tree of --layout-out cannot be written; 2 if projects/<name>/ breaks the enrollment rules, a fuzz target is
+not statically linked, or the options are wrong (such as --base-layout with no --layout-out, or a --layout-out that is
+not new or empty); 3 if it builds but the bytes differ (--twice or --lock).
 
 Requires git, Docker (with the toolchain image available) and PyYAML (on Ubuntu, apt install python3-yaml).
 """
 import argparse
 import contextlib
 import datetime
+import importlib.util
 import os
 import pathlib
 import socket
@@ -172,12 +198,15 @@ def ubsan_settings(job, toolchain):
     return (list(checks), sorted(set(validate.TRAP_EXCEPTIONS) - set(checks)), c_left_out)
 
 
-def build_all(job, commit, work, toolchain, home, suffix="", no_cache=False, record=False, token=None):
+def build_all(job, commit, work, toolchain, home, suffix="", no_cache=False, record=False, token=None, layout=False,
+              base_layout=None):
     """Build the images, FROM the toolchain image `toolchain`, compile every build and collect the fuzz targets into
     work/out. `home` is the run's work directory: the project image's tag names it and is added to home/images before
     the image is built, and every container carries its work_label(). With `record`, each build records its links for
-    the checks of the binaries (check_build.compile_build). `token`, for a library in infra/private-libraries.tsv, is
-    the read-only token this build fetches it with; it reaches docker as a BuildKit secret and nothing else.
+    the checks of the binaries; with `layout`, also what infra/base-builder/layout.py collect needs; with
+    `base_layout`, a layout tree, each build is a development build that keeps its addresses
+    (check_build.compile_build). `token`, for a library in infra/private-libraries.tsv, is the read-only token this
+    build fetches it with; it reaches docker as a BuildKit secret and nothing else.
 
     Return (builder tag, project tag, targets, entries). Raise Failed if any step fails.
     """
@@ -190,7 +219,8 @@ def build_all(job, commit, work, toolchain, home, suffix="", no_cache=False, rec
     for build in job.builds:
         raw[build] = work / "raw" / build
         check_build.compile_build(tag, build, validate.BUILDS[build], raw[build], ubsan,
-                                  labels=check_build.work_label(home), record=record)
+                                  labels=check_build.work_label(home), record=record, layout=layout,
+                                  base_layout=base_layout)
 
     step("find the fuzz targets")
     found = {build: manifest.discover(directory) for build, directory in raw.items()}
@@ -201,6 +231,34 @@ def build_all(job, commit, work, toolchain, home, suffix="", no_cache=False, rec
     if problems or missing:
         raise Failed("\n  ".join(["the fuzz targets are not right:", *problems, *missing]))
     return builder, tag, targets, entries
+
+
+def layout_module():
+    """infra/base-builder/layout.py, loaded as a module. It is the builder's own file and no module of this package:
+    the builder image is built from infra/base-builder alone, and its append links run it there."""
+    spec = importlib.util.spec_from_file_location("layout", check_build.BUILDER_DIR / "layout.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def write_layout(raw, out, builds):
+    """Write the layout tree `out` of the builds `builds` in `raw`, each a $OUT whose links compile recorded with
+    OV_LAYOUT=1 (infra/base-builder/layout.py collect); a directory of `raw` that another run left there is not read.
+    Raise Failed if it cannot."""
+    layout = layout_module()
+    try:
+        layout.collect(str(raw), str(out), builds)
+    except (layout.LayoutError, OSError) as error:
+        raise Failed(f"layout.py collect: {error}") from None
+
+
+def new_or_empty(path):
+    """Whether nothing is at `path`, or an empty directory."""
+    try:
+        return not os.path.lexists(path) or (path.is_dir() and not any(path.iterdir()))
+    except OSError:
+        return False
 
 
 def shell(tag, out, home):
@@ -255,7 +313,33 @@ def main(argv=None):
     parser.add_argument("--dir", type=pathlib.Path, help=f"where to work (default: {check_build.CACHE}/<name>)")
     parser.add_argument("--print-toolchain", action="store_true",
                         help="print the toolchain image the build is FROM, and build nothing (exit 0)")
+    parser.add_argument("--layout-out", type=pathlib.Path, metavar="DIR",
+                        help="record each fuzz target's link, and write the layout tree of the first build to DIR "
+                             "(infra/base-builder/layout.py collect), which must be new or an empty directory, and "
+                             "not in --base-layout")
+    parser.add_argument("--base-layout", type=pathlib.Path, metavar="DIR",
+                        help="a development build: each function whose code did not change keeps the address it has "
+                             "in the layout tree DIR (an earlier --layout-out); its binaries are never pins. Needs "
+                             "--layout-out")
     options = parser.parse_args(argv)
+    if options.base_layout is not None:
+        if options.layout_out is None:
+            parser.error("--base-layout needs --layout-out: `python3 infra/base-builder/layout.py check BASE NEW` "
+                         "compares the base layout tree with the append build's own, which --layout-out writes")
+        options.base_layout = options.base_layout.resolve()
+        if not options.base_layout.is_dir():
+            parser.error(f"--base-layout {options.base_layout} is not a directory")
+    if options.layout_out is not None:
+        # The tree must hold this build's fuzz targets alone: layout.py check compares each entry that both trees hold.
+        if options.base_layout is not None and options.layout_out.resolve().is_relative_to(options.base_layout):
+            parser.error(f"--layout-out {options.layout_out} is the --base-layout directory or lies in it: the "
+                         "append build's layout tree would be written into its base")
+        if not new_or_empty(options.layout_out):
+            parser.error(f"--layout-out {options.layout_out} is there and is not an empty directory: the layout tree "
+                         "it gets must hold only this build's fuzz targets, as `python3 infra/base-builder/layout.py "
+                         "check BASE NEW` compares each entry the two trees hold")
+    # Each build of a run with --layout-out records its links, with what layout.py collect needs (OV_LAYOUT=1).
+    with_layout = options.layout_out is not None
 
     if options.print_toolchain:
         print(toolchain_for(options.project))
@@ -324,8 +408,9 @@ def main(argv=None):
             commit = check_build.resolve(job.repo, job.ref, token)
             say(f"{job.ref or 'the default branch'} is {commit}")
         say(f"toolchain: {toolchain} ({why})")
-        builder, tag, targets, entries = build_all(job, commit, work, toolchain, work, record=bool(options.checks),
-                                                   token=token)
+        builder, tag, targets, entries = build_all(
+            job, commit, work, toolchain, work, record=bool(options.checks) or with_layout, token=token,
+            layout=with_layout, base_layout=options.base_layout)
     except Failed as failure:
         say(f"\nBUILD FAILED: {failure}")
         return 1
@@ -358,15 +443,28 @@ def main(argv=None):
     if not_static:
         return 2
 
+    if with_layout:
+        step(f"--layout-out: the layout tree of the build, in {options.layout_out}")
+        try:
+            write_layout(work / "raw", options.layout_out, job.builds)
+        except Failed as failure:
+            say(f"\nTHE LAYOUT TREE WAS NOT WRITTEN, though the build itself succeeded: {failure}")
+            return 1
+        say(f"layout tree: {options.layout_out}")
+
     code = 0
     if options.twice:
         try:
             step("--twice: everything again, from scratch")
             # A fresh token: the first build's may have been minted an hour ago, and a token that expires mid-build
             # fails as an authorisation error, which is the one failure this path must not invent.
+            # With --layout-out, the records and the base layout of the first build: with --base-layout the second
+            # build is an append build too, and the comparison tests that the append mode makes the same bytes. The
+            # layout tree written to --layout-out stays the first build's.
             builder_again, tag_again, targets_again, again = build_all(
                 job, commit, work / "twice", toolchain, work, "-twice", no_cache=True,
-                token=check_build.mint_token(job.repo) if token else None)
+                token=check_build.mint_token(job.repo) if token else None, record=with_layout, layout=with_layout,
+                base_layout=options.base_layout)
             builder_ids = {"toolchain": toolchain, "image": check_build.image_id(builder_again),
                            "project_image": check_build.image_id(tag_again)}
         except Failed as failure:
