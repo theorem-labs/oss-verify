@@ -1,4 +1,5 @@
 # Copyright 2026 SQLPage contributors. SPDX-License-Identifier: Apache-2.0
+# Scratch comment line for check c3 of #227 of theorem-labs/oss-verify. Do not merge.
 repo: https://github.com/sqlpage/SQLPage#main
 primary_contact: ophir@sql-page.com
 homepage: https://sql-page.com/
