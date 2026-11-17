@@ -525,7 +525,7 @@ These steps rebuild a binary and compare it with its lock in the proofs reposito
 
 `oss-verify check` can check the lock of a project that has a directory in this repository, in `projects/` or `seeds/`. The release also has locks of projects that have no directory here. This repository has no build files for them.
 
-If `oss-verify check` at `main` does not print `matches the lock` for a binary of the release, open an issue in this repository. Include the output of `oss-verify check`. [seeded-projects.tsv](seeded-projects.tsv) names each patch that the port of a seeded project applies since the check of its seed port, or no longer applies. Its build notes tell which binaries differ from the release's, or may differ. Do not open an issue for these binaries.
+If `oss-verify check` at `main` does not print `matches the lock` for a binary of the release, open an issue in this repository. Include the output of `oss-verify check`. [seeded-projects.tsv](seeded-projects.tsv) names each patch that the port of a seeded project applies since the check of its seed port, or no longer applies. Its build notes tell which binaries differ from the release's, or may differ. Do not open an issue for these binaries. When the build notes of a project say that some binaries may differ and do not name them, do not open an issue for any binary of that project.
 
 ## Builds ported from oss-fuzz-theorems
 

@@ -26,9 +26,12 @@ sources. When those files do not show all the targets, the notes say that the ta
 check found that the binaries match the release's, the notes also say which binaries differ, or may differ. No
 content of a port stops the table: a port file that is missing or that cannot be read counts as absent.
 
-tests/test_seeded_projects.py fails when docs/seeded-projects.tsv is not what this writes. A pull request that
-changes this file or seeds/ runs this and commits docs/seeded-projects.tsv. After any other change, such as a change
-to a port, .github/workflows/seeded-projects.yml fails on the push to main until a pull request commits the table.
+tests/test_seeded_projects.py fails when docs/seeded-projects.tsv is not what this writes. The workflow
+.github/workflows/tests.yaml runs its test Committed for a change to this file, src/oss_verify/validate.py, a file
+under seeds/, docs/seeded-projects.tsv or tests/test_seeded_projects.py. The top of that workflow lists these paths.
+A pull request that changes one of them runs this and commits docs/seeded-projects.tsv. After any other change,
+such as a change to a port, .github/workflows/seeded-projects.yml fails on the push to main until a pull request
+commits the table.
 """
 import argparse
 import hashlib
@@ -46,8 +49,8 @@ TABLE = ROOT / "docs" / "seeded-projects.tsv"
 HEADER = ("# Written by src/oss_verify/seeded_projects.py; do not edit. Every OSS-Fuzz project at the commit of the "
           "oss-fuzz-theorems 2026.10 release: whether we seeded it, and why not. For a seeded project, build is what "
           "the check of its seed port found (seeds/builds.tsv). Its build notes also name each patch that the port "
-          "applies since that check (seeds/checked-patches.tsv). A seeded project's fuzz targets are in its "
-          "project.yaml, in seeds/<name>/ or projects/<name>/.")
+          "applies since that check, or no longer applies (seeds/checked-patches.tsv). A seeded project's fuzz "
+          "targets are in its project.yaml, in seeds/<name>/ or projects/<name>/.")
 COLUMNS = ("project", "seedable", "build", "build notes", "reason or notes")
 RELEASE_COLUMNS = ("project", "reason or notes")
 LANGUAGE_COLUMNS = ("project", "oss_fuzz", "language", "repo", "commit", "homepage", "sanitizers", "fuzz_targets",

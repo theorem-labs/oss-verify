@@ -18,7 +18,8 @@ name: "Seeded projects table"
 # table, and a maintainer reviews it. The contents: read token goes to actions/checkout alone.
 #
 # This workflow sends no notice of a failure. A failed run is a red run on main's commit and in the Actions tab. The
-# next pull request that changes the generator, seeds/ or the table meets the same failure in Committed.
+# next pull request that changes a file the table depends on in code, the table, or its test meets the same failure in
+# Committed. The top of tests.yaml lists these files.
 #
 # To run it by hand:
 #   gh workflow run seeded-projects.yml --ref main
