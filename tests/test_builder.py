@@ -126,10 +126,11 @@ NO_CORE_MEMORY = "if [ -e /proc/self/coredump_filter ]; then echo 0 > /proc/self
 
 def run_in_container(image, runner, *mounts):
     """Run the sh script runner in a container of image with no network, with qemu-riscv64 at /qemu and each (host
-    path, container path) of mounts read-only. Returns the completed process, with its output as text."""
+    path, container path) of mounts read-only. image is a tag that the test built, so docker never pulls it from a
+    registry. Returns the completed process, with its output as text."""
     volumes = [arg for host, container in ((QEMU, "/qemu"), *mounts) for arg in ("-v", f"{host}:{container}:ro")]
-    return subprocess.run(["docker", "run", "--rm", "--network=none", *volumes, "--entrypoint", "sh", image, "-c",
-                           f"{NO_CORE_MEMORY}\n{runner}"], capture_output=True, text=True, check=True)
+    return subprocess.run(["docker", "run", "--rm", "--network=none", "--pull=never", *volumes, "--entrypoint", "sh",
+                           image, "-c", f"{NO_CORE_MEMORY}\n{runner}"], capture_output=True, text=True, check=True)
 
 
 @unittest.skipUnless(os.environ.get("OV_DOCKER_TESTS") == "1" and docker_ready(),
