@@ -265,6 +265,8 @@ class Locks(Scratch):
         (harness_dir / "harness.yaml").write_text(yaml.safe_dump(harness))
         (harness_dir.parent / "project.yaml").write_text("build:\n  builder: example.org/tc@sha256:" + "2" * 64 + "\n")
         self.assertEqual(manifest.load_lock(harness_dir / "harness.yaml")[2], "example.org/tc@sha256:" + "2" * 64)
+        (harness_dir.parent / "project.yaml").write_text("at: 2024-13-45\n")
+        self.assertIsNone(manifest.load_lock(harness_dir / "harness.yaml")[2])
         differences, extras, matched = manifest.compare(self.ENTRIES, pins, ["plain", "asan"])
         self.assertEqual(matched, 1)
         self.assertEqual(extras, [])
@@ -276,7 +278,8 @@ class Locks(Scratch):
     def test_extras_and_bad_locks(self):
         _, extras, _ = manifest.compare(self.ENTRIES, {("fuzzer", "plain"): {"sha256": "aa"}}, ["plain", "asan"])
         self.assertEqual(extras, ["fuzzer.asan: in this build, not in the lock"])
-        for text in ("- a\n", "schema: something/else\n", "harness: x\nbuilds: {plain: {bytes: 1}}\n", "a: [\n"):
+        for text in ("- a\n", "schema: something/else\n", "harness: x\nbuilds: {plain: {bytes: 1}}\n", "a: [\n",
+                     "at: 2024-13-45\n", "created: 2024-01-01T25:00:00\n"):
             (self.dir / "lock.yaml").write_text(text)
             with self.assertRaises(manifest.LockError, msg=text):
                 manifest.load_lock(self.dir / "lock.yaml")
