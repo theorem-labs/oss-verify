@@ -279,6 +279,56 @@ class Table(unittest.TestCase):
                                  SINCE + "applies kay.0002-new.patch, whose fuzz targets this table cannot name: "
                                  "some of its binaries may differ from the release's" + KAY_NOTES)
 
+    def test_what_lay_out_sources_refuses_the_step_budget_and_keys_with_other_characters(self):
+        build = self.PORT["projects/kay/build.sh"]
+        cannot = (SINCE + "applies kay.0002-new.patch, whose fuzz targets this table cannot name: some of its binaries "
+                  "may differ from the release's" + KAY_NOTES)
+
+        def names(targets):
+            return (SINCE + f"applies kay.0002-new.patch to {targets}: the binaries of {targets} differ from the "
+                    "release's" + KAY_NOTES)
+
+        # Lines that lay-out-sources refuses. Without them, a patch at targets/kay-fuzz_d changes fuzz_d.
+        refused = {
+            "a line without a tab": "tree ext/kay-z upstream/z\n",
+            "a link line without a target": "link\text/kay-z\n",
+            "a link line with one field more": "link\text/kay-z\text/kay-fuzz_a/src\tmore\n",
+            "a patch line with one field more": "patch\text/kay-fuzz_e/src\tkay.0002-new.patch\tmore\n",
+            "an empty link path": "link\t\text/kay-fuzz_a/src\n",
+            "an absolute link path": "link\t/ext/kay-z\text/kay-fuzz_a/src\n",
+            "a link target that holds ..": "link\text/kay-z\t../kay-fuzz_a/src\n",
+            "a link at a path that holds a tree laid out before it": "link\text/kay-fuzz_e\text/kay-fuzz_a/src\n",
+            "a link at a path that holds its own target": "link\text/kay-z\text/kay-z/sub\n",
+        }
+        # A chain of links to ext/kay-fuzz_e/src: the path l<n> follows n links.
+        chain = "link\tl1\text/kay-fuzz_e/src\n" + "".join(f"link\tl{n}\tl{n - 1}\n" for n in range(2, 42))
+        # A deep tree that holds a link to itself, and patch lines that follow that link 40 times. Each line takes
+        # more than 40,000 steps, so together they take more than STEPS. The sources file fits in 64 KiB.
+        deep = "/".join(["d"] * 1000)
+        steps = f"tree\t{deep}\tupstream/d\nlink\t{deep}/s\t{deep}\n" + "".join(
+            f"patch\t{deep}{'/s' * 40}\tkay.0002-new.patch\n" for _ in range(25))
+        # A block whose key has a character that is not a word character, a dot or a dash.
+        odd = build + "(\nov_target_begin kay+x\nov_target_build fuzz_x\n)\n"
+        cases = {
+            **{case: (self.new_patch("targets/kay-fuzz_d", links=links), cannot) for case, links in refused.items()},
+            "a path that follows 40 links": (self.new_patch("l40", links=chain), names("fuzz_e")),
+            "a path that follows 41 links": (self.new_patch("l41", links=chain), cannot),
+            "a key that holds ..": (self.new_patch(
+                "targets/kay-fuzz_d", build=build + "(\nov_target_begin ../kay-up\nov_target_build fuzz_up\n)\n"),
+                cannot),
+            "links that take more steps than STEPS": (self.new_patch("targets/kay-fuzz_d", links=steps), cannot),
+            "a key with another character that no other line names": (self.new_patch(
+                "ext/kay+x/src", links="tree\text/kay+x/src\tupstream/x\n", build=odd + "echo kay+xy\n"),
+                names("fuzz_x")),
+            "a key with another character that another line names": (self.new_patch(
+                "ext/kay+x/src", links="tree\text/kay+x/src\tupstream/x\n",
+                build=odd + "cp \"$LIBROOT/kay+x/lib/liboft.a\" \"$BUILDDIR/\"\n"), cannot),
+        }
+        for case, (ports, row) in cases.items():
+            with self.subTest(case):
+                self.assertLessEqual(len(ports["projects/kay/sources"].encode()), 64 * 1024)
+                self.assertEqual(self.row("kay", ports=ports), row)
+
     def test_a_checked_patch_in_other_bytes(self):
         self.assertEqual(self.row("kay", ports={"projects/kay/kay-fuzz_a.0001-checked.patch": NEW_PATCH}),
                          SINCE + "applies kay-fuzz_a.0001-checked.patch in bytes other than that check's, to fuzz_a, "
