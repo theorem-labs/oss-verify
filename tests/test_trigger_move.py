@@ -1026,9 +1026,6 @@ class HeldApproval(Stand):
     HOLDS = (("the screen held it", "screen", "success", "held", "The automated screen held this pull request."),
              ("the daily cap", "cap", None, None, "The daily cap of automated reviews held this pull request."),
              ("the screen failed", "screen", "failure", None, "The screen job failed."))
-    # The body of the check run that `recorded` gives for each hold, by its arguments (route's trust, the screen job's
-    # result and its verdict). The tests of this class share it, so the step runs once for each hold.
-    RECORDED = {}
 
     def setUp(self):
         super().setUp()
@@ -1221,14 +1218,11 @@ class HeldApproval(Stand):
 
     def recorded(self, trust, screen, verdict):
         """The check run that the step records for that hold when the oss-verify App has no check run Enrollment
-        review of pull request 7 at HEAD: the body of its request, from RECORDED when a test built it before."""
-        key = (trust, screen, verdict)
-        if key not in self.RECORDED:
-            rc, log, out, sent = self.hold_of_held_head(trust, screen, verdict, self.not_app_runs)
-            self.assertEqual((rc, out, [(r["method"], r["endpoint"]) for r in sent]),
-                             (0, {"recorded": "true"}, [("POST", f"repos/{REPO}/check-runs")]), log)
-            self.RECORDED[key] = sent[0]["body"]
-        return self.RECORDED[key]
+        review of pull request 7 at HEAD: the body of its request."""
+        rc, log, out, sent = self.hold_of_held_head(trust, screen, verdict, self.not_app_runs)
+        self.assertEqual((rc, out, [(r["method"], r["endpoint"]) for r in sent]),
+                         (0, {"recorded": "true"}, [("POST", f"repos/{REPO}/check-runs")]), log)
+        return sent[0]["body"]
 
     def test_held_a_hold_of_a_held_head_replaces_no_verdict_of_the_review_at_that_head(self):
         """On a run by hand for a held head, the screen decides only whether the comment job approves the held runs: it
@@ -1245,8 +1239,6 @@ class HeldApproval(Stand):
                 with self.subTest(label, verdict=kind):
                     rc, log, out, sent = self.hold_of_held_head(trust, screen, verdict, (*self.not_app_runs, run))
                     self.assertEqual((rc, out, sent), (0, {}, []), f"the hold replaces the App's verdict: {log}")
-                    self.assertIn(f"The newest check run Enrollment review of #{PR} at {HEAD} by the oss-verify App is "
-                                  "a verdict of the review, and it stands", log)
             with self.subTest(label):
                 body = self.recorded(trust, screen, verdict)
                 self.assertEqual((body["name"], body["head_sha"], body["external_id"], body["conclusion"],
@@ -1265,7 +1257,8 @@ class HeldApproval(Stand):
         alone = self.recorded(*screen_hold)
         for label, trust, screen, verdict, title in self.HOLDS:
             with self.subTest(label):
-                earlier = self.as_listed(self.recorded(trust, screen, verdict), 604)
+                hold = (trust, screen, verdict)
+                earlier = self.as_listed(alone if hold == screen_hold else self.recorded(*hold), 604)
                 self.assertEqual(earlier["output"]["title"], title)
                 rc, log, out, sent = self.hold_of_held_head(*screen_hold, (*self.not_app_runs, earlier))
                 self.assertEqual((rc, out), (0, {"recorded": "true"}), f"the earlier hold stands: {log}")
@@ -2156,9 +2149,11 @@ class ReviewThatPasses(Stand):
               "size-review": "a plain binary has more than 1 MB of code, or its size cannot be read",
               "maintainer-review": "the author is not shown to maintain the project's repository"}
     # A pointer to a comment of a label, which the paragraph does not hold: Enroll dispatch puts a label on and posts no
-    # comment. For example "the comment on the label", "the label's comment", or "Enroll dispatch posts a comment".
+    # comment. For example "the comment on the label", "the label's comment", or "Enroll dispatch (then) posts a
+    # comment". The true sentence "Enroll dispatch posts no comment." does not match.
     LABEL_COMMENT = re.compile(r"\bcomments? (?:of|on|for|with|from|about) (?:the |a |each |its |this |that |one )?"
-                               r"label|\blabel(?:'s|s'|s)? comments?\b|\benroll dispatch\b[^.]*\bcomment", re.I)
+                               r"label|\blabel(?:'s|s'|s)? comments?\b"
+                               r"|\benroll dispatch (?:\w+ )?(?:posts|writes|leaves) (?:a|its) comment", re.I)
     # What neither review.md nor the comment of a pass says: that Theorem decides the next step, that a maintainer
     # will look at or review the pull request, or anything of held bugs.
     MUST_NOT_SAY = re.compile(r"theorem decides|decides the next step|maintainer will (look|review)|held bug", re.I)

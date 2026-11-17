@@ -22,6 +22,8 @@ from oss_verify import check_checks
 from oss_verify import check_records
 from oss_verify import validate
 
+# The function of test_enroll_dispatch.py that marks the first member of a zip as encrypted.
+from test_enroll_dispatch import marked_encrypted  # noqa: E402
 # The workflow tests' expression evaluator and step runner with a stand-in gh, and review.yml and its jobs.
 from test_outside_screen import (REVIEW, REVIEW_JOBS, Runner, comment_job_env, evaluate, interpolated,  # noqa: E402
                                  step)
@@ -2156,7 +2158,6 @@ class SeedHex(unittest.TestCase):
         of the deflated 64 MiB. It does not read the bzip2 member: zipfile decompresses bzip2 with no bound. It does
         not read an encrypted member either: open() raises RuntimeError for it, because the script gives no
         password."""
-        import struct
         import tracemalloc
         from unittest import mock
         gather = (ROOT / ".github" / "scripts" / "review-gather").read_text()
@@ -2176,14 +2177,8 @@ class SeedHex(unittest.TestCase):
                     with archive.open(info, "w") as member:
                         for _ in range(size // len(spaces)):
                             member.write(spaces)
-            # zipfile writes no encrypted member. So this sets bit 0x1 of the general purpose bit flag, which marks an
-            # encrypted member, on the first member, "encrypted". The flag is 6 bytes into its local file header, at the
-            # start of the zip, and 8 bytes into its central directory entry. The end of central directory record (the
-            # last 22 bytes) gives the offset of that entry, the first one, 16 bytes into it.
-            raw = bytearray(corpus.read_bytes())
-            for at in (6, struct.unpack_from("<I", raw, len(raw) - 22 + 16)[0] + 8):
-                struct.pack_into("<H", raw, at, struct.unpack_from("<H", raw, at)[0] | 0x1)
-            corpus.write_bytes(raw)
+            # The member "encrypted" is the first one: mark it as encrypted.
+            corpus.write_bytes(marked_encrypted(corpus.read_bytes()))
             self.assertLess(corpus.stat().st_size, 1 << 20)
             with mock.patch.object(sys, "argv", ["-", str(corpus), str(hex_file)]):
                 tracemalloc.start()

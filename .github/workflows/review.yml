@@ -2389,9 +2389,9 @@ jobs:
           # to read). triage-gather is asked for when route asked for the triage comment, and triage when triage-gather
           # wrote one. The jobs that sign in (screen, review, hold, comment and triage) are never asked for on a run by
           # hand on another branch than main. So a held item passes this check when the comment job recorded the hold:
-          # a screen's hold or the daily cap. It also passes when, on a run by hand for a held head whose check run
-          # Enrollment review stands, the comment job recorded nothing. A gather, screen, review (after its second
-          # attempt), hold or comment job that failed fails it, held or not.
+          # a screen's hold or the daily cap. It also passes when, on a run by hand for a held head whose verdict of the
+          # review stands, the comment job recorded nothing. A gather, screen, review (after its second attempt), hold
+          # or comment job that failed fails it, held or not.
           GATHER: ${{ needs.gather.result }}
           ASKED_GATHER: >-
             ${{ needs.route.result == 'success'

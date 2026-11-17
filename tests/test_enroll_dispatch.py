@@ -86,6 +86,17 @@ def understated(name, text, method):
     return bytes(out)
 
 
+def marked_encrypted(data):
+    """The zip `data`, with its first member marked as encrypted. zipfile writes no encrypted member. So this sets bit
+    0x1 of the general purpose bit flag, which marks an encrypted member. The flag is 6 bytes into the first member's
+    local file header (at the start of the zip) and 8 bytes into its central directory entry. The end of central
+    directory record (the last 22 bytes) gives the offset of that entry, the first one, 16 bytes into it."""
+    out = bytearray(data)
+    for at in (6, struct.unpack_from("<I", out, len(out) - 22 + 16)[0] + 8):
+        struct.pack_into("<H", out, at, struct.unpack_from("<H", out, at)[0] | 0x1)
+    return bytes(out)
+
+
 def sizes(plain_text=61_316, plain_exec=70_000):
     return {"fuzz_command": {"plain": {"text": plain_text, "exec": plain_exec},
                              "asan": {"text": 454_828, "exec": 2_500_000}},
@@ -545,12 +556,7 @@ class ThePullRequest(unittest.TestCase):
         decision none with a reason, and no exception. read_member refuses the encrypted file before it opens it.
         zipfile raises zlib.error for the broken stream, and build_record gives None and that error."""
         plain = zipped({"record.json": json.dumps(record())}, zipfile.ZIP_DEFLATED)
-        # The end of central directory record (the last 22 bytes) gives the offset of the central directory entry 16
-        # bytes into it. The general purpose bit flag is 6 bytes into the local file header (at the start of the zip)
-        # and 8 bytes into the entry. Its bit 0x1 says that the file is encrypted.
-        encrypted = bytearray(plain)
-        for at in (6, struct.unpack_from("<I", plain, len(plain) - 22 + 16)[0] + 8):
-            struct.pack_into("<H", encrypted, at, struct.unpack_from("<H", encrypted, at)[0] | 0x1)
+        encrypted = marked_encrypted(plain)
         # The compressed data starts after the local file header's 30 bytes, the file name and the extra field. Its
         # compressed size is 18 bytes into the header. Each byte 0xff starts a deflate block of the reserved type 3,
         # which zlib refuses. The sizes in the headers do not change.
