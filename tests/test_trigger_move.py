@@ -1804,6 +1804,23 @@ class HeldRuns(Stand):
                          self.log)
         self.assertIn("so a new run screens the head again.", self.log)
 
+    def test_held_runs_a_run_at_githubs_limit_of_50_reruns_gets_a_new_run_and_no_rerun(self):
+        # GitHub runs no 51st re-run of a run: "if you attempt to rerun a given workflow more than 50 times, you will
+        # get a failed check suite with an annotation indicating you have hit the limit"
+        # (https://github.blog/changelog/2026-04-10-actions-workflows-are-limited-to-50-reruns/). That is no answer of
+        # HTTP 4xx to rerun-failed-jobs: the stand-in answers it with 201, as for any re-run. A run at attempt 51 has had
+        # its 50 re-runs, so the head gets a new run, which screens it again (R2), and no re-run that cannot run. A run
+        # at attempt 50 still gets its re-run.
+        sha = "7" * 40
+        for attempt, again in ((50, [self.reruns(971)]), (51, [self.starts("review.yml", 121)])):
+            self.pulls = [self.pull(121, "pat/oss-verify", "s", sha)]
+            self.held = [self.held_run(12101, sha, "pat/oss-verify", "s", 180)]
+            run = self.by_hand(971, "Pull request 121", 150, conclusion="failure", started=70)
+            run["run_attempt"] = attempt
+            self.reviews = [run]
+            self.jobs, self.comment = {971: "success"}, {971: "Sign in to Google Cloud"}
+            self.assertEqual(self.go(), again, (attempt, self.log))
+
     def test_held_runs_a_rerun_that_github_does_not_answer_starts_no_run_and_fails_the_step(self):
         # Only an answer of HTTP 4xx is GitHub's refusal of a re-run. Pull request 301 is due a re-run of run 971, and
         # GitHub answers it with HTTP 500, or gives no answer. The step starts no new run of 301, which would screen it
