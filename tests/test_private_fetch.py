@@ -951,6 +951,32 @@ class TheParserAgainstBuildKit(unittest.TestCase):
         text = f"FROM x\nRUN {self.MOUNT} \\\n    fetch-commit /src/x\n"
         self.assertEqual(self.mounts(text), [[check_build.GIT_TOKEN_SECRET]])
 
+    def test_a_blank_line_inside_a_continued_instruction_does_not_end_it(self):
+        # BuildKit joins across it (and warns NoEmptyContinuation); ending the RUN there lost the mounted fetch,
+        # and the guard said there was no fetch-commit step at all.
+        for blank in ("", "   ", "\t"):
+            with self.subTest(blank=blank):
+                text = f"FROM x\nRUN {self.MOUNT} \\\n{blank}\n    fetch-commit /src/x\n"
+                self.assertEqual(self.mounts(text), [[check_build.GIT_TOKEN_SECRET]])
+                check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
+        # Python calls a line of U+001C, U+001D, U+001E or U+001F alone blank, and splitlines() ends a line at the
+        # first three. BuildKit does neither: that line ends the RUN, and the fetch below it runs with no mount.
+        for character in ("\x1c", "\x1d", "\x1e", "\x1f"):
+            with self.subTest(character=character):
+                text = (f"FROM x\nRUN {self.MOUNT} true \\\n{character}\nRUN fetch-commit /src/y\n"
+                        f"RUN {self.MOUNT} fetch-commit /src/x\n")
+                with self.assertRaises(Failed) as refused:
+                    check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
+                self.assertIn("does not mount it: RUN fetch-commit /src/y", str(refused.exception))
+
+    def test_an_escaped_escape_at_the_end_of_a_line_continues_nothing(self):
+        # `C:\\` ends its instruction in BuildKit. Read as a continuation, it joined the mounted fetch below into
+        # the echo.
+        text = f"FROM x\nRUN echo C:\\\\\nRUN {self.MOUNT} fetch-commit /src/x\n"
+        self.assertEqual(check_build.instructions(text)[1:],
+                         ["RUN echo C:\\\\", f"RUN {self.MOUNT} fetch-commit /src/x"])
+        check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
+
     def test_the_secret_id_may_come_from_an_arg_or_an_env(self):
         # BuildKit expands these and the step really gets the secret, so a guard that reads the literal
         # `$SECRET_ID` refuses a working private build and lets a public one carry a real mount.
