@@ -132,9 +132,8 @@ class SeedRuns(unittest.TestCase):
         # An ASan abort writes no report (docs/build-contract.md, the sealed AddressSanitizer runtime). Thus on 'h'
         # the binary and its quiet twin both exit 134, the twin writes nothing, and check 3 counts 'h' as agreed.
         agreement = check_binaries.quiet_loud(True, "", inputs, results)
-        self.assertEqual(agreement["result"], "pass", agreement)
-        # A pass that lists no input as not decided means that both inputs agreed.
-        self.assertNotIn("not decided", agreement["detail"])
+        self.assertEqual(agreement,
+                         {"result": "pass", "detail": "the same status on 2 inputs, and the quiet twin wrote nothing"})
 
 
 if __name__ == "__main__":
