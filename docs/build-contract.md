@@ -66,7 +66,7 @@ A calling function has a `jal` or a `jalr` that writes `ra`. A calling function 
 
 * the C library, `/opt/musl-sysroot/usr/lib/libc.a`: 9 of 1,153 calling functions keep a frame record;
 * the C++ library, `/opt/musl-sysroot/usr/lib/libc++.a`: 5 of 1,853 calling functions keep a frame record;
-* the AddressSanitizer runtime, `libclang_rt.asan.a`: 542 of 1,653 calling functions keep a frame record in `/opt/asan-static-rt`, and 542 of 1,654 in the copy in `/opt/asan-rt`.
+* the AddressSanitizer runtime, `libclang_rt.asan.a`: 542 of 1,653 calling functions keep a frame record in `/opt/asan-static-rt`, and 542 of 1,654 in the archive of the same name in `/opt/asan-rt`.
 
 To count them, do these steps in the root of this repository:
 

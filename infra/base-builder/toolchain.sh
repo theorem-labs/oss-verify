@@ -22,9 +22,10 @@ OFT_NO_BUILTIN_ALLOC="-fno-builtin-malloc -fno-builtin-calloc -fno-builtin-reall
 BASE_CFLAGS="-march=rv64g -mabi=lp64d -Os -g -ffunction-sections -fdata-sections -fno-stack-protector -fno-plt -Wdate-time $OFT_NO_BUILTIN_ALLOC"
 
 # Frame pointers, on a toolchain image that sets OFT_FRAME_POINTERS=1 (.github/workflows/toolchain-images.yaml makes
-# them): every function keeps its frame record in s0, which AddressSanitizer's fast unwinder follows when it records an
-# allocation's stack, so a recorded trace is a call chain. The release's images do not set it, so their builds keep the
-# release's flags and bytes (docs/build-contract.md, "Frame pointers").
+# them): every function that the build compiles keeps its frame record in s0, which AddressSanitizer's fast unwinder
+# follows when it stores an allocation's stack. The libraries that the link takes from the image keep their bytes, and
+# most of their functions keep no frame record. The release's images do not set it, so their builds keep the release's
+# flags and bytes (docs/build-contract.md, "Frame pointers").
 case "${OFT_FRAME_POINTERS:-}" in
   "") ;;
   1) BASE_CFLAGS="$BASE_CFLAGS -fno-omit-frame-pointer" ;;
