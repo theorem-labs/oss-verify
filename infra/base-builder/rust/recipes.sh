@@ -171,7 +171,7 @@ oft_build_cargo_shim() {
   esac
   # Frame pointers, as toolchain.sh gives the C compiles on an image that sets OFT_FRAME_POINTERS=1. -Zbuild-std
   # compiles the standard library with these flags too, so its frames keep their frame records as well.
-  [ "${OFT_FRAME_POINTERS:-}" != 1 ] || _rf="$_rf -Cforce-frame-pointers=yes"
+  [ "${OFT_FRAME_POINTERS:-}" != 1 ] || _rf="$_rf"
   [ "${OFT_RUST_QUIET_STDIO:-0}" != 1 ] || _rf="$_rf --cfg $_qcfg"
   _rf="$_rf $(oft_rust_release_rustflags "$_w")"
   _feat=""
