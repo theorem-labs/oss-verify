@@ -198,9 +198,9 @@ jobs:
 
       # The Docker tests that need the toolchain image (tests/test_builder.py, test_binary_checks_docker.py,
       # test_seed_runs_docker.py) are skipped here. tests/test_core_dump_filter.py runs here: it needs the runner's
-      # Docker, but no image to pull.
+      # Docker, but no image to pull. -rs lists each skipped test with its reason, so the log shows what did not run.
       - name: The tests in tests/
-        run: python3 -P -m pytest -q -p no:cacheprovider -c pyproject.toml
+        run: python3 -P -m pytest -q -p no:cacheprovider -c pyproject.toml -rs
 
       - name: Every project passes oss-verify validate
         run: python3 -P -m oss_verify validate < /dev/null
