@@ -574,19 +574,23 @@ def test_check_lists_changed_new_and_moved_data(tmp_path, capsys):
     gamma = dict(GAMMA, address=0x11100, sha256=sha(b"gamma 2"))
     delta = row(".text.delta", 0x11140, 0x10, file="/work/b.o")
     table = dict(TABLE, address=0x10240)
-    comment = dict(COMMENT, address=0x40)
     # A section whose name starts with .text but not with .text. holds no function: it is listed as data.
     textfoo = row(".textfoo", 0x10280, 0x10, file="/work/c.o")
-    status, lines = run_check(tmp_path, capsys, {"rows": [table, ALPHA, BETA, gamma, delta, comment,
-                                                          dict(textfoo, address=0x102a0)],
-                                                 "out": output(text_size=0x200)}, {"rows": BASE_ROWS + [textfoo]})
+    # A section that the binary does not load has offsets from 0, which can fall in the range of one it loads (.text
+    # here): it moved with the same bytes, and is not listed.
+    debug = row(".debug_info", 0x11010, 0x10)
+    status, lines = run_check(tmp_path, capsys,
+                              {"rows": [table, ALPHA, BETA, gamma, delta, dict(textfoo, address=0x102a0), COMMENT,
+                                        dict(debug, address=0x11050)],
+                               "out": output(text_size=0x200)},
+                              {"rows": BASE_ROWS[:-1] + [textfoo, COMMENT, debug]})
     assert status == 0
     assert lines_with(lines, "gamma", "0x11030", "0x11100")
     assert lines_with(lines, "delta", "- -> 0x11140")
     assert lines_with(lines, ".text", "0x11000", "256", "512")
     assert lines_with(lines, ".rodata.table", "0x10200", "0x10240")
     assert lines_with(lines, "moved, same bytes: .textfoo (/work/c.o): 0x10280 -> 0x102a0")
-    assert not lines_with(lines, ".comment")  # not loaded
+    assert not lines_with(lines, ".debug_info")  # not loaded
 
 
 def jal_lost():

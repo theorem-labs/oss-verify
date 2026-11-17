@@ -1028,9 +1028,21 @@ def function(i):
     return f"{where}:({i.section})"
 
 
-def loaded(output, address):
-    """Whether an address falls in an output section that the binary loads (SHF_ALLOC)."""
-    return any(s.flags & SHF_ALLOC and s.addr <= address < s.addr + max(s.size, 1) for s in output.sections)
+def loaded_rows(inputs):
+    """The rows of the map lines whose output section the binary loads. An address cannot say it alone: lld gives each
+    section it does not load (.debug_*, .comment) and its input sections their offsets from 0, which can fall in the
+    range of a section it loads. So the map's order says it, as src/oss_verify/check_links.py, parse_map, reads it:
+    within one output section the addresses do not fall, so a line whose address is below the line before it begins
+    another output section, and that one is loaded when the address of its first line is not 0 (the link is -static
+    -no-pie, so no loaded section is at 0, and lld writes the sections it does not load last)."""
+    rows, is_loaded, previous = set(), False, None
+    for i in inputs:
+        if previous is None or i.address < previous:
+            is_loaded = i.address != 0
+        previous = i.address
+        if is_loaded:
+            rows.add(i.row)
+    return rows
 
 
 def compare(label, base, new):
@@ -1072,12 +1084,13 @@ def compare(label, base, new):
     lines.append("  .text: start {} -> {}, size {} -> {}".format(
         *[hex(s.addr) if s else "-" for s in text], *[s.size if s else "-" for s in text]))
     others = pair(base.inputs, new.inputs, kind=lambda name: not is_text(name))
+    base_loaded, new_loaded = loaded_rows(base.inputs), loaded_rows(new.inputs)
     for i in new.inputs:
         partner = others.partner.get(i.row)
         if partner is None or not others.same[i.row]:
             continue
         old = base.inputs[partner]
-        if old.address != i.address and loaded(base.output, old.address) and loaded(new.output, i.address):
+        if old.address != i.address and old.row in base_loaded and i.row in new_loaded:
             lines.append(f"  moved, same bytes: {i.section} ({origin(i.key[0], i.member)}): {hex(old.address)} -> "
                          f"{hex(i.address)}")
     return failures, lines
