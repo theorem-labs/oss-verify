@@ -7,8 +7,9 @@ route's trust step (who is screened, and the daily cap of .github/scripts/screen
 route and each answer of the screen (the jobs' conditions, evaluated as GitHub does), what the required check reports,
 the run's concurrency, what each job holds, how the screen
 and the review take the gathered data (.github/scripts/take-review-data), the gather job's check that the head did not
-move, the gather job run step by step for an outside account's enrollment (the project's source, the failed fetch, and
-the session the review resumes), the comment job's hold, and the review comment's line on the checks that ran.
+move, the gather job run step by step for an outside account's enrollment (the project's source, the failed fetch, the
+session the review resumes, and the criticality score and OSS-Fuzz of the triage as the outputs of the step gather), the
+comment job's hold, and the review comment's line on the checks that ran.
 .github/scripts/screen.py itself is tested in test_screen.py."""
 import datetime
 import hashlib
@@ -1633,7 +1634,8 @@ class GatherJob(Runner):
 
     def gather_job(self, trust="screen", commit=None, fetch_fails=False, compare_status=None, compare_diff=""):
         """The gather job's steps from GATHER on, each whose if holds, in a checkout with nothing gathered yet: (the
-        first failing step's exit status or 0, the log, the job's outputs)."""
+        first failing step's exit status or 0, the log, the job's outputs). The outputs of the step gather go in
+        self.gather_outputs, also when a step fails."""
         shutil.rmtree(self.checkout / ".review", ignore_errors=True)
         shutil.rmtree(self.temp / "review-data", ignore_errors=True)
         (self.api / "compare-status").write_text(f"{compare_status}\n" if compare_status else "")
@@ -1644,11 +1646,14 @@ class GatherJob(Runner):
         steps = JOBS["gather"]["steps"]
         start = [s.get("name") for s in steps].index(self.GATHER)
         log = ""
+        self.gather_outputs = {}
         for s in steps[start:]:
             if "run" not in s or ("if" in s and not evaluate(s["if"], ctx)):
                 continue
             rc, out, got = self.run_script(s["run"], cwd=self.checkout, **env)
             log += out
+            if s.get("id") == "gather":
+                self.gather_outputs = got
             if rc:
                 return rc, log, {}
             ctx.update({f"steps.{s['id']}.outputs.{k}": v for k, v in got.items()})
@@ -1830,6 +1835,63 @@ class OutsidersResume(GatherJob):
                            outputs={"screen": {"verdict": "clean", "checks": "claude"},
                                     "review": {"comment": "x", "held_object": "", "session": "41", "kind": "enrollment"}})
         self.assertEqual((got["screen"], got["review"], got["session"]), ("success", "success", "success"))
+
+
+class TriageFacts(GatherJob):
+    """The criticality score and OSS-Fuzz that .github/scripts/triage.py --facts writes in the same run as --full: the
+    step gather gives them as its outputs criticality_score and oss_fuzz, each as its JSON type or null, and they go in
+    no file that the gather job keeps."""
+
+    TABLE = "| OK | Criticality score | 0.07 |"
+
+    def triage(self, facts):
+        """The stand-in triage.py: the full table on standard output only for --full, and the text `facts` in the file
+        after --facts."""
+        (self.checkout / ".github" / "scripts" / "triage.py").write_text(
+            "import sys\n"
+            f"print({self.TABLE!r} if '--full' in sys.argv else 'THE-COMMENT')\n"
+            "if '--facts' in sys.argv:\n"
+            f"    open(sys.argv[sys.argv.index('--facts') + 1], 'w').write({facts!r})\n")
+
+    def facts(self):
+        return self.gather_outputs.get("criticality_score"), self.gather_outputs.get("oss_fuzz")
+
+    def test_the_step_gives_the_score_and_oss_fuzz_and_the_review_the_full_table(self):
+        self.triage('{"criticality_score": 0.07123, "oss_fuzz": false}\n')
+        rc, log, outputs = self.gather_job()
+        self.assertEqual(rc, 0, log)
+        self.assertEqual(self.facts(), ("0.07123", "false"))
+        review, _ = self.take("review", outputs["digest"])
+        self.assertEqual((review / ".review" / "triage-today.md").read_text(), f"{self.TABLE}\n(exit status 0)\n")
+        # The file of the facts is in no member of what the screen and the review take, and gone from the checkout.
+        with tarfile.open(self.temp / "review-data" / "review.tar") as tar:
+            names = tar.getnames()
+        self.assertIn(".review/triage-today.md", names)
+        self.assertEqual([n for n in names if "facts" in n], [])
+        self.assertEqual(list(self.checkout.rglob("*facts*")), [])
+        # The step writes them before it fetches the project's repository: a fetch that fails does not lose them.
+        rc, log, _ = self.gather_job(fetch_fails=True)
+        self.assertNotEqual(rc, 0, log)
+        self.assertEqual(self.facts(), ("0.07123", "false"))
+        self.assertEqual(list(self.checkout.rglob("*facts*")), [])
+
+    def test_a_value_of_another_type_or_a_file_that_is_not_one_object_gives_null(self):
+        with self.subTest(facts="no file: the stand-in of setUp"):
+            rc, log, _ = self.gather_job()
+            self.assertEqual(rc, 0, log)
+            self.assertEqual(self.facts(), ("null", "null"))
+        for facts, want in (('{"criticality_score": "x", "oss_fuzz": true}', ("null", "true")),
+                            ('{"criticality_score": true, "oss_fuzz": false}', ("null", "false")),
+                            ('{"criticality_score": 0.5, "oss_fuzz": "yes"}', ("0.5", "null")),
+                            ('{"criticality_score": 0.5, "oss_fuzz": tru', ("null", "null")),
+                            ("not JSON\n", ("null", "null")),
+                            ('[{"criticality_score": 0.5, "oss_fuzz": true}]', ("null", "null"))):
+            with self.subTest(facts=facts):
+                self.triage(facts)
+                rc, log, _ = self.gather_job()
+                self.assertEqual(rc, 0, log)
+                self.assertEqual(self.facts(), want)
+                self.assertEqual(list(self.checkout.rglob("*facts*")), [])
 
 
 class TrustWiring(unittest.TestCase):

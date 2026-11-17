@@ -596,12 +596,6 @@ class Callers(unittest.TestCase):
         self.assertTrue(output[0].startswith("comment<<triage-"), output)
         self.assertEqual(output[1:3], ["COMMENT", output[0].removeprefix("comment<<")])
 
-    def test_the_review_reads_the_full_table(self):
-        gather = (ROOT / ".github" / "scripts" / "review-gather").read_text()
-        call = re.search(r"^.*\bkeep triage-today\.md (.*)$", gather, re.M)[1]
-        self.assertEqual(call.split(), ["python3", ".github/scripts/triage.py", "--repo", '"$REPO"', "--pr", '"$PR"',
-                                        "--full"])
-
 
 if __name__ == "__main__":
     unittest.main()

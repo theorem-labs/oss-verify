@@ -23,6 +23,9 @@
 # keeps beside the last review's session in the Actions cache, and the gather job restores, one line
 # `session=<id> head=<commit>`: when the head descends from that commit, this writes the diff since it and, to
 # GITHUB_OUTPUT, `session` and `last`, so that the review resumes that session for the diff alone.
+# For an enrollment it also writes to GITHUB_OUTPUT `criticality_score`, the repository's criticality score as a JSON
+# number, and `oss_fuzz`, true or false for whether the repository is in OSS-Fuzz, as .github/scripts/triage.py --facts
+# gives them: each is null when triage.py does not know it. They go in no file of the directory.
 # KIND is route's decision in build.yaml, and this chooses its path on it once, here at its top.
 # KIND=change, a change review (review-change.md): only the pull request, its diff, its checks and review comments,
 # and each changed file as it is at HEAD_SHA, as data under head/, cut at 1 MiB. It resumes the session of the last
@@ -151,10 +154,20 @@ jq -r '[.comments[]? | select(.author.login == "oss-verify")]
        | map(.body | select(startswith("<!-- oss-verify-triage -->"))) | .[0] // ""' "$out/pr.json" \
   > "$out/triage-comment.md" 2>/dev/null || true
 # --full: the review reads every row of the triage (its standing, stars, outside participants, criticality score and
-# OSS-Fuzz rows too), not only the five that the public comment carries.
+# OSS-Fuzz rows too), not only the five that the public comment carries. --facts: the same run writes the criticality
+# score and OSS-Fuzz as JSON, for the step's outputs (below), to a file beside the directory and not in it, so that
+# what the screen and the review read does not change.
 # triage.py reads GITHUB_TOKEN from the environment; the assignment prefix exports it to python3 without it becoming an
 # argument of any process (env put it in the argument vector, which another user on the machine can read).
-GITHUB_TOKEN="${GH_TOKEN:-}" keep triage-today.md python3 .github/scripts/triage.py --repo "$REPO" --pr "$PR" --full
+GITHUB_TOKEN="${GH_TOKEN:-}" keep triage-today.md python3 .github/scripts/triage.py --repo "$REPO" --pr "$PR" --full --facts "$out.facts.json"
+# The step's outputs criticality_score and oss_fuzz: a value of another JSON type is null, and both are null when
+# triage.py wrote no file, or a file that is not one JSON object. The file goes after the read, whatever it held.
+facts=$(jq -rs 'if length == 1 and (.[0] | type) == "object" then .[0] else {} end
+  | "criticality_score=\(.criticality_score | if type == "number" then tojson else "null" end)",
+    "oss_fuzz=\(.oss_fuzz | if type == "boolean" then tojson else "null" end)"' "$out.facts.json" 2> /dev/null) \
+  || facts=$'criticality_score=null\noss_fuzz=null'
+rm -f "$out.facts.json"
+echo "$facts" >> "${GITHUB_OUTPUT:-/dev/null}"
 keep validate.txt python3 -P -m oss_verify validate "$dir"
 # Claude Code reads a CLAUDE.md beside a file that it reads as instructions. The pull request's are data, so they go
 # from the checkout once the validator has reported them (rule 1 of review.md).
