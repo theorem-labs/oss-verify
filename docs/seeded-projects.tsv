@@ -191,7 +191,7 @@ cubefs	no	-	-	the release did not build it (status language-pending: go)
 cups	no	-	-	the release did not build it (status too-large: size)
 cups-filters	no	-	-	no harness to seed: fuzz_cupsfilters_image_png_decoder (the release's patch 0001-ppdgenerator-private-cups-symbol-clash.patch edits cupsfilters/ppdgenerator.c, the library's own source)
 cura-engine	no	-	-	the release did not build it (status no-harness: none-at-commit)
-curl	yes	reproduces	the seed port's check: all binaries match the release's; since that check the port applies curl-fuzz_bufq.0001-no-syscalls.patch to fuzz_bufq: the binaries of fuzz_bufq differ from the release's	fuzz_bufq: the release modified this harness; its copy is not published yet; fuzz_fnmatch: the release modified this harness; its copy is not published yet
+curl	yes	reproduces	the seed port's check: all binaries match the release's; since that check the port applies curl-fuzz_bufq.0001-no-syscalls.patch to fuzz_bufq; applies curl-fuzz_bufq.0002-tester-probe.patch to fuzz_bufq: the binaries of fuzz_bufq differ from the release's	fuzz_bufq: the release modified this harness; its copy is not published yet; fuzz_fnmatch: the release modified this harness; its copy is not published yet
 curvesapi	no	-	-	the release did not build it (status language-pending: jvm)
 cxxopts	yes	reproduces	all binaries match the release's	-
 cyclonedds	no	-	-	the release did not build it (status held: held)
