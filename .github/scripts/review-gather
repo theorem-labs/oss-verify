@@ -31,8 +31,9 @@
 # from the review comment: the newest comment on the pull request by the oss-verify App (login oss-verify[bot], type
 # Bot) that starts with <!-- oss-verify-review -->, from its line <!-- oss-verify-review-head <commit> -->, which
 # .github/scripts/review-body writes. It never comes from the runs API, or from LAST_REVIEW, which sits in a cache
-# that the runs of outside pull requests can write too (main's scope). LAST_REVIEW gives the session's id, which is
-# resumed only when the head LAST_REVIEW names is that head.
+# that review.yml's session job writes in main's scope with what the review job kept, after its model read the text
+# of the pull request, an outside one too. LAST_REVIEW gives the session's id, which is resumed only when the head
+# LAST_REVIEW names is that head.
 # KIND=issue, the draft reply to an issue (review-issue.md): only the issue's title, body, author and comments, in
 # issue.json, and nothing else.
 # The runner reads none of its output as a workflow command: the gathered text is the pull request's or the issue's.

@@ -938,8 +938,8 @@ jobs:
         env: {SESSION_KEY: "enroll-review/${{ needs.route.outputs.pr }}/${{ steps.project.outputs.name }}/"}
         with: {path: "~/.claude/projects\n~/.claude/ossv-last-review", key: "${{ env.SESSION_KEY }}${{ github.run_id }}-${{ github.run_attempt }}", restore-keys: "${{ env.SESSION_KEY }}"}
       # A change review resumes its last session for context only: review-gather takes the head that session reviewed
-      # from the review comment, never from this cache, which the runs of outside pull requests can write too (main's
-      # scope).
+      # from the review comment, never from this cache. The session job writes this cache in main's scope with what the
+      # review job kept, and the model of that job read the text of the pull request, an outside one too.
       - name: Restore the last change review's session
         if: steps.project.outputs.kind == 'change'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
