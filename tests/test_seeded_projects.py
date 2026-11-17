@@ -3,6 +3,7 @@
 """Tests for src/oss_verify/seeded_projects.py, and that docs/seeded-projects.tsv is what it writes:
 uv run pytest"""
 import difflib
+import hashlib
 import pathlib
 import sys
 import tempfile
@@ -12,6 +13,11 @@ from oss_verify import seeded_projects
 
 LANGUAGE_HEADER = ("# project\toss_fuzz\tlanguage\trepo\tcommit\thomepage\tsanitizers\tfuzz_targets\trelease_targets"
                    "\theld\n")
+CHECKED_PATCH = "--- a/kay.c\n+++ b/kay.c\n@@ -1 +1 @@\n-0\n+1\n"
+NEW_PATCH = "--- a/kay.c\n+++ b/kay.c\n@@ -1 +1 @@\n-1\n+2\n"
+# The start and the end of kay's row when its port applies a patch since the check of its seed port.
+SINCE = "kay\tyes\treproduces\tthe seed port's check: all binaries match the release's; since that check the port "
+KAY_NOTES = "\tfuzz_a: the release modified this harness"
 
 
 def language_row(project, oss_fuzz, language, targets, held="-"):
@@ -27,13 +33,13 @@ class Committed(unittest.TestCase):
             diff = difflib.unified_diff(committed.decode("utf-8", "replace").splitlines(keepends=True),
                                         made.decode("utf-8").splitlines(keepends=True), "docs/seeded-projects.tsv",
                                         "src/oss_verify/seeded_projects.py's output", n=0)
-            self.fail("docs/seeded-projects.tsv is not what src/oss_verify/seeded_projects.py writes. Run it, and "
-                      "commit "
-                      "the result:\n" + "".join(list(diff)[:20]))
+            self.fail("docs/seeded-projects.tsv is not what src/oss_verify/seeded_projects.py writes. Run "
+                      "uv run python3 -m oss_verify.seeded_projects. Then commit docs/seeded-projects.tsv. The "
+                      "diff:\n" + "".join(list(diff)[:20]))
 
 
 class Table(unittest.TestCase):
-    """table() on a small seeds/ made here."""
+    """table() on a small seeds/ and projects/ made here."""
 
     FILES = {
         "oss-fuzz-projects.tsv": (
@@ -41,6 +47,7 @@ class Table(unittest.TestCase):
             "cee\tcee_fuzzer: the release modified this harness\n"
             "dee\t-\n"
             "gone\tthe release did not build it (status held: held)\n"
+            "kay\tfuzz_a: the release modified this harness\n"
             "multi\t-\n"
             "py\t-\n"),
         "languages.tsv": (
@@ -52,17 +59,67 @@ class Table(unittest.TestCase):
             "# the result of oss-verify check\nproject\tresult\tdetail\n"
             "cee\treproduces\tall binaries match the release's\n"
             "dee\treproducible\t4 binaries; a second build is identical; the release has none to compare\n"
+            "kay\treproduces\tall binaries match the release's\n"
             "multi-a\treproducible\t4 binaries\n"
             "multi-b\treproducible\t8 binaries\n"
             "py\treproducible\t8 binaries\n"),
+        "checked-patches.tsv": (
+            "# the patches each seed port's check applied\nproject\tpatch\tsha256\n"
+            f"kay\tkay-fuzz_a.0001-checked.patch\t{hashlib.sha256(CHECKED_PATCH.encode()).hexdigest()}\n"),
     }
 
-    def table(self, changes=None):
+    # kay's port, which applies the patch its check applied. The trees of kay-fuzz_b and kay-fuzz_c are links to
+    # that of kay-fuzz_a (kay-fuzz_c's through kay-fuzz_b's), and kay-fuzz_d reads the tree of the key kay-dep.
+    PORT = {
+        "projects/kay/series": "# the order of the patches\nkay-fuzz_a.0001-checked.patch\n",
+        "projects/kay/kay-fuzz_a.0001-checked.patch": CHECKED_PATCH,
+        "projects/kay/sources": (
+            "# kind\tpath\targuments: see lay-out-sources\n"
+            "tree\text/kay-fuzz_a/src\tupstream/kay\n"
+            "link\text/kay-fuzz_b/src\text/kay-fuzz_a/src\n"
+            "link\text/kay-fuzz_c/src\text/kay-fuzz_b/src\n"
+            "tree\text/kay-dep/src\tupstream/kay-dep\n"
+            "tree\text/kay-fuzz_d/src\tupstream/kay\n"
+            "file\ttargets/kay-fuzz_d/fuzz_d.c\thttps://example.com/fuzz_d.c\t" + "0" * 64 + "\n"
+            "tree\text/kay-fuzz_e/src\tupstream/kay\n"
+            "patch\text/kay-fuzz_a/src\tkay-fuzz_a.0001-checked.patch\n"),
+        "projects/kay/build.sh": (
+            "#!/bin/sh -e\n"
+            "# A comment that names kay-fuzz_d, kay-dep and kay-fuzz_e does not count.\n"
+            ". /usr/local/lib/oss-verify/release-target.sh\n"
+            "(\nov_target_begin kay-fuzz_a\nov_target_build fuzz_a\n)\n"
+            "(\nov_target_begin kay-fuzz_b\nov_target_build fuzz_b\n)\n"
+            "(\nov_target_begin kay-fuzz_c\nov_target_build fuzz_c\n)\n"
+            "(\nov_target_begin kay-fuzz_d kay-dep\n  # the harness of kay-fuzz_d\nov_target_build fuzz_d\n)\n"
+            "(\nov_target_begin kay-fuzz_e\nbuild_lib() {\n  oft_build_harness \"fuzz_e.c\"\n}\n"
+            "ov_target_build fuzz_e\n)\n"),
+    }
+
+    def table(self, changes=None, ports=None):
+        """table() on FILES with `changes` in seeds/, and PORT with `ports` (paths under the root, None for no
+        file)."""
         with tempfile.TemporaryDirectory() as scratch:
-            seeds = pathlib.Path(scratch)
-            for name, text in {**self.FILES, **(changes or {})}.items():
-                (seeds / name).write_text(text, encoding="utf-8")
-            return seeded_projects.table(seeds)
+            root = pathlib.Path(scratch)
+            files = {f"seeds/{name}": text for name, text in {**self.FILES, **(changes or {})}.items()}
+            for name, data in {**files, **self.PORT, **(ports or {})}.items():
+                if data is not None:
+                    path = root / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(data.encode("utf-8") if isinstance(data, str) else data)
+            return seeded_projects.table(root / "seeds", root / "projects")
+
+    def row(self, project, changes=None, ports=None):
+        """The line of `project` in table()."""
+        return next(line for line in self.table(changes, ports).splitlines() if line.startswith(f"{project}\t"))
+
+    def new_patch(self, at, name="kay.0002-new.patch", links="", build=None):
+        """PORT's changes for a patch `name` that kay's port applies since its check: listed in series, beside it,
+        and on a patch line of sources at `at` (None: no such line), after the lines `links`. `build` replaces
+        build.sh."""
+        sources = self.PORT["projects/kay/sources"] + links + (f"patch\t{at}\t{name}\n" if at else "")
+        ports = {"projects/kay/series": self.PORT["projects/kay/series"] + name + "\n",
+                 f"projects/kay/{name}": NEW_PATCH, "projects/kay/sources": sources}
+        return ports if build is None else {**ports, "projects/kay/build.sh": build}
 
     def test_rows(self):
         self.assertEqual(self.table().splitlines()[1:], [
@@ -70,6 +127,7 @@ class Table(unittest.TestCase):
             "cee\tyes\treproduces\tall binaries match the release's\tcee_fuzzer: the release modified this harness",
             "dee\tyes\treproducible\t4 binaries; a second build is identical; the release has none to compare\t-",
             "gone\tno\t-\t-\tthe release did not build it (status held: held)",
+            "kay\tyes\treproduces\tall binaries match the release's\tfuzz_a: the release modified this harness",
             "multi\tno\t-\t-\tseeded as multi-a, multi-b: one project for each of its repositories",
             "multi-a\tyes\treproducible\t4 binaries\tthe release built it in its Rust build, which it did not publish; "
             "one of the repositories of OSS-Fuzz's project multi, each a project here; the release held back these "
@@ -79,6 +137,108 @@ class Table(unittest.TestCase):
             "py\tyes\treproducible\t8 binaries\tthe release built it in its Python build, which it did not publish",
         ])
 
+    def test_a_patch_since_the_check_at_a_targets_tree(self):
+        self.assertEqual(self.row("kay", ports=self.new_patch("targets/kay-fuzz_d")),
+                         SINCE + "applies kay.0002-new.patch to fuzz_d: the binaries of fuzz_d differ from the "
+                         "release's" + KAY_NOTES)
+
+    def test_a_patch_at_a_tree_that_links_share(self):
+        self.assertEqual(self.row("kay", ports=self.new_patch("ext/kay-fuzz_c/src")),
+                         SINCE + "applies kay.0002-new.patch to fuzz_a, fuzz_b, fuzz_c: the binaries of fuzz_a, "
+                         "fuzz_b, fuzz_c differ from the release's" + KAY_NOTES)
+
+    def test_a_patch_at_the_tree_of_a_dependency_key(self):
+        self.assertEqual(self.row("kay", ports=self.new_patch("ext/kay-dep/src")),
+                         SINCE + "applies kay.0002-new.patch to fuzz_d: the binaries of fuzz_d differ from the "
+                         "release's" + KAY_NOTES)
+
+    def test_fuzz_targets_this_table_cannot_name(self):
+        build = self.PORT["projects/kay/build.sh"]
+        self.assertEqual(self.row("kay", ports=self.new_patch("ext/kay-fuzz_e/src")),
+                         SINCE + "applies kay.0002-new.patch to fuzz_e: the binaries of fuzz_e differ from the "
+                         "release's" + KAY_NOTES)
+        cases = {
+            "no patch line in sources": self.new_patch(None),
+            "a patch that reaches no block": self.new_patch("ext/kay-other/src"),
+            "a block with no ov_target_build": self.new_patch(
+                "ext/kay-fuzz_e/src", build=build.replace("ov_target_build fuzz_e\n", "")),
+            "the key in a line of build.sh": self.new_patch("ext/kay-fuzz_e/src", build=build.replace(
+                "ov_target_build fuzz_d\n", "cp \"$LIBROOT/kay-fuzz_e/lib/liboft.a\" \"$BUILDDIR/\"\n"
+                "ov_target_build fuzz_d\n")),
+            "a link cycle": self.new_patch(
+                "ext/kay-x/src", links="link\text/kay-x/src\text/kay-y/src\nlink\text/kay-y/src\text/kay-x/src\n"),
+        }
+        for case, ports in cases.items():
+            with self.subTest(case):
+                self.assertEqual(self.row("kay", ports=ports),
+                                 SINCE + "applies kay.0002-new.patch, whose fuzz targets this table cannot name: "
+                                 "some of its binaries may differ from the release's" + KAY_NOTES)
+
+    def test_a_checked_patch_in_other_bytes(self):
+        self.assertEqual(self.row("kay", ports={"projects/kay/kay-fuzz_a.0001-checked.patch": NEW_PATCH}),
+                         SINCE + "applies kay-fuzz_a.0001-checked.patch in bytes other than that check's, to fuzz_a, "
+                         "fuzz_b, fuzz_c: the binaries of fuzz_a, fuzz_b, fuzz_c differ from the release's" + KAY_NOTES)
+
+    def test_a_checked_patch_that_series_no_longer_lists(self):
+        self.assertEqual(self.row("kay", ports={"projects/kay/series": "# the order of the patches\n"}),
+                         SINCE + "no longer applies kay-fuzz_a.0001-checked.patch: some of its binaries may differ "
+                         "from the release's" + KAY_NOTES)
+
+    def test_a_change_that_names_its_targets_and_one_that_does_not(self):
+        ports = self.new_patch("targets/kay-fuzz_d")
+        ports["projects/kay/series"] += "kay.0003-new.patch\n"
+        ports["projects/kay/kay.0003-new.patch"] = NEW_PATCH
+        self.assertEqual(self.row("kay", ports=ports),
+                         SINCE + "applies kay.0002-new.patch to fuzz_d; applies kay.0003-new.patch, whose fuzz targets "
+                         "this table cannot name: the binaries of fuzz_d differ from the release's, and others may"
+                         + KAY_NOTES)
+
+    def test_a_reproducible_row_with_a_patch_since_the_check(self):
+        ports = {"projects/dee/series": "dee-fuzz.0001-new.patch\n", "projects/dee/dee-fuzz.0001-new.patch": NEW_PATCH,
+                 "projects/dee/sources": "tree\text/dee-fuzz/src\tupstream/dee\n"
+                                         "patch\text/dee-fuzz/src\tdee-fuzz.0001-new.patch\n",
+                 "projects/dee/build.sh": "(\nov_target_begin dee-fuzz\nov_target_build fuzz_dee\n)\n"}
+        self.assertEqual(self.row("dee", ports=ports),
+                         "dee\tyes\treproducible\tthe seed port's check: 4 binaries; a second build is identical; the "
+                         "release has none to compare; since that check the port applies dee-fuzz.0001-new.patch to "
+                         "fuzz_dee\t-")
+
+    def test_the_port_in_projects_decides(self):
+        changed = self.new_patch("targets/kay-fuzz_d")
+        in_seeds = {name.replace("projects/", "seeds/"): text for name, text in {**self.PORT, **changed}.items()}
+        with self.subTest("a port in seeds/ and in projects/"):
+            self.assertEqual(self.row("kay", ports=in_seeds),
+                             "kay\tyes\treproduces\tall binaries match the release's" + KAY_NOTES)
+        with self.subTest("a port in seeds/ only"):
+            self.assertEqual(self.row("kay", ports={**in_seeds, **dict.fromkeys(self.PORT)}),
+                             SINCE + "applies kay.0002-new.patch to fuzz_d: the binaries of fuzz_d differ from the "
+                             "release's" + KAY_NOTES)
+
+    def test_port_content_never_stops_the_table(self):
+        series = self.PORT["projects/kay/series"]
+        cannot = ", whose fuzz targets this table cannot name: some of its binaries may differ from the release's"
+        cases = {
+            "series lists a file that is missing": (
+                {**self.new_patch("ext/kay-fuzz_a/src", "kay.0002-missing.patch"),
+                 "projects/kay/kay.0002-missing.patch": None},
+                SINCE + "applies kay.0002-missing.patch" + cannot + KAY_NOTES),
+            "series holds bytes that are not UTF-8": (
+                {"projects/kay/series": series.encode() + b"kay-\xff.patch\n"},
+                SINCE + "applies kay-\ufffd.patch" + cannot + KAY_NOTES),
+            "series lists a file outside the port": (
+                {"projects/kay/series": series + "../../seeds/builds.tsv\n",
+                 "projects/kay/sources": self.PORT["projects/kay/sources"]
+                 + "patch\text/kay-fuzz_e/src\t../../seeds/builds.tsv\n"},
+                SINCE + "applies ../../seeds/builds.tsv" + cannot + KAY_NOTES),
+            "build.sh holds bytes that are not UTF-8": (
+                self.new_patch("targets/kay-fuzz_d", build=self.PORT["projects/kay/build.sh"].encode() + b"\xfe\xff\n"),
+                SINCE + "applies kay.0002-new.patch to fuzz_d: the binaries of fuzz_d differ from the release's"
+                + KAY_NOTES),
+        }
+        for case, (ports, row) in cases.items():
+            with self.subTest(case):
+                self.assertEqual(self.row("kay", ports=ports), row)
+
     def test_a_project_without_a_builds_row_is_not_seeded(self):
         builds = self.FILES["builds.tsv"].replace("cee\treproduces\tall binaries match the release's\n", "")
         self.assertIn("\ncee\tno\t-\t-\tcee_fuzzer: the release modified this harness\n",
@@ -86,6 +246,7 @@ class Table(unittest.TestCase):
 
     def test_refusals(self):
         release, builds = self.FILES["oss-fuzz-projects.tsv"], self.FILES["builds.tsv"]
+        checked = self.FILES["checked-patches.tsv"]
         refused = {
             "a builds row for a project that no file names": {"builds.tsv": builds + "stray\treproduces\tall\n"},
             "notes on a project that languages.tsv seeds": {
@@ -101,6 +262,14 @@ class Table(unittest.TestCase):
                 "oss-fuzz-projects.tsv": release.replace("project\treason or notes", "project\treason")},
             "a builds row for a project seeded as one project for each repository": {
                 "builds.tsv": builds + "multi\treproduces\tall\n"},
+            "a checked patch with a missing column": {"checked-patches.tsv": checked + "kay\tkay.0002-new.patch\n"},
+            "two rows for one checked patch": {"checked-patches.tsv": checked + checked.splitlines()[-1] + "\n"},
+            "a checked patch whose sha256 is not 64 lower-case hex digits": {
+                "checked-patches.tsv": checked + "kay\tkay.0002-new.patch\t" + "A" * 64 + "\n"},
+            "a checked patch of a project with no builds row": {
+                "checked-patches.tsv": checked + "gone\tgone.0001-x.patch\t" + "0" * 64 + "\n"},
+            "a line of column names of checked-patches.tsv that is not the file's": {
+                "checked-patches.tsv": checked.replace("project\tpatch\tsha256", "project\tpatch\tsum")},
         }
         for case, changes in refused.items():
             with self.subTest(case), self.assertRaises(seeded_projects.Error):
