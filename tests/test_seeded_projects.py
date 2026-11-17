@@ -7,6 +7,7 @@ import hashlib
 import pathlib
 import sys
 import tempfile
+import time
 import unittest
 
 from oss_verify import seeded_projects
@@ -211,6 +212,50 @@ class Table(unittest.TestCase):
         self.assertEqual(self.row("kay", ports=self.new_patch("targets/kay-fuzz_d", links=links)),
                          SINCE + "applies kay.0002-new.patch, whose fuzz targets this table cannot name: some of its "
                          "binaries may differ from the release's" + KAY_NOTES)
+
+    def test_a_patch_through_a_link_that_lay_out_sources_puts_in_a_linked_tree(self):
+        # lay-out-sources makes the parents of a link through the links laid out before it. So the link
+        # ext/kay-fuzz_p/src/vendor sits in ext/kay-shared, as ext/kay-shared/vendor, and points to ext/kay-lib. The
+        # patched path ext/kay-fuzz_q/src/dep/vendor reaches that link through ext/kay-fuzz_q/src/dep: the patch is in
+        # ext/kay-lib. The builds of kay-fuzz_p and kay-fuzz_q read it through ext/kay-shared/vendor, and the build of
+        # kay-fuzz_r reads it through ext/kay-fuzz_r/src.
+        build = self.PORT["projects/kay/build.sh"] + "".join(
+            f"(\nov_target_begin kay-fuzz_{name}\nov_target_build fuzz_{name}\n)\n" for name in "pqr")
+        links = ("tree\text/kay-shared\tupstream/shared\ntree\text/kay-lib\tupstream/lib\n"
+                 "tree\text/kay-fuzz_q/src\tupstream/q\n"
+                 "link\text/kay-fuzz_p/src\text/kay-shared\nlink\text/kay-fuzz_p/src/vendor\text/kay-lib\n"
+                 "link\text/kay-fuzz_q/src/dep\text/kay-shared\nlink\text/kay-fuzz_r/src\text/kay-lib\n")
+        self.assertEqual(self.row("kay", ports=self.new_patch("ext/kay-fuzz_q/src/dep/vendor", links=links,
+                                                              build=build)),
+                         SINCE + "applies kay.0002-new.patch to fuzz_p, fuzz_q, fuzz_r: the binaries of fuzz_p, fuzz_q, "
+                         "fuzz_r differ from the release's" + KAY_NOTES)
+
+    def test_port_content_that_fills_sources_takes_a_bounded_time(self):
+        # A sources file of 64 KiB is the most that oss-verify validate takes. seeded-projects.yml stops after 5
+        # minutes, and the table reads each seeded port. Each case here fits in 64 KiB.
+        # A chain: each link points into the next one, so the path of each link takes one step for each link after
+        # it, and becomes longer at each step. The patched tree is the end of the chain, which no block reads.
+        chain = "".join(f"link\tc{i}\tc{i + 1}/x\n" for i in range(2000))
+        # A fan: each of 2400 blocks has a link to one shared tree, which is the patched tree.
+        names = sorted(f"fuzz_v{i}" for i in range(2400))
+        fan = "tree\ts\tupstream/s\n" + "".join(f"link\text/v{i}/vendor\ts\n" for i in range(2400))
+        fan_build = self.PORT["projects/kay/build.sh"] + "".join(
+            f"(\nov_target_begin v{i}\nov_target_build fuzz_v{i}\n)\n" for i in range(2400))
+        cases = {
+            "a chain of links": (self.new_patch("c0", links=chain),
+                                 "applies kay.0002-new.patch, whose fuzz targets this table cannot name: some of its "
+                                 "binaries may differ from the release's"),
+            "a fan of links to one tree": (self.new_patch("s", links=fan, build=fan_build),
+                                           f"applies kay.0002-new.patch to {', '.join(names)}: the binaries of "
+                                           f"{', '.join(names)} differ from the release's"),
+        }
+        for case, (ports, words) in cases.items():
+            with self.subTest(case):
+                self.assertLessEqual(len(ports["projects/kay/sources"].encode()), 64 * 1024)
+                start = time.process_time()
+                row = self.row("kay", ports=ports)
+                self.assertLess(time.process_time() - start, 5)
+                self.assertEqual(row, SINCE + words + KAY_NOTES)
 
     def test_fuzz_targets_this_table_cannot_name(self):
         build = self.PORT["projects/kay/build.sh"]
