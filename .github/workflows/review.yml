@@ -622,15 +622,18 @@ jobs:
             merge=$(jq -r '.merge_commit_sha // ""' <<< "$pull") replay=""
             for commit in "$sha" "$merge"; do
               [[ $commit =~ ^[0-9a-f]{40}$ && -z $replay ]] || continue
-              # id, file, event, status, head commit, head repository and head branch, split at U+001F.
+              # id, file, event, status, conclusion, head commit, head repository and head branch, split at U+001F.
+              # GitHub lists a held run with the status completed and the conclusion action_required. The API's
+              # filter status=action_required gives the runs with that conclusion.
               runs=$(gh api --paginate \
                 "repos/$REPO/actions/workflows/enroll-merged.yml/runs?event=pull_request&status=action_required&head_sha=$commit&per_page=100" \
-                --jq '.workflow_runs[] | [(.id | tostring), .path // "", .event // "", .status // "", .head_sha // "",
-                                          .head_repository.full_name // "", .head_branch // ""] | join("\u001f")')
-              while IFS=$'\x1f' read -r id path event status head repository branch; do
+                --jq '.workflow_runs[] | [(.id | tostring), .path // "", .event // "", .status // "",
+                                          .conclusion // "", .head_sha // "", .head_repository.full_name // "",
+                                          .head_branch // ""] | join("\u001f")')
+              while IFS=$'\x1f' read -r id path event status conclusion head repository branch; do
                 if [[ ${id:-} =~ ^[0-9]+$ && $path == .github/workflows/enroll-merged.yml && $event == pull_request
-                      && $status == action_required && $head == "$commit" && -n $from && $repository == "$from"
-                      && $branch == "$ref" ]]; then
+                      && $status == completed && $conclusion == action_required && $head == "$commit" && -n $from
+                      && $repository == "$from" && $branch == "$ref" ]]; then
                   replay="GitHub holds run $id of enroll-merged.yml at $commit"
                   break
                 fi

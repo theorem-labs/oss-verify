@@ -223,7 +223,8 @@ def route_review(tmp_path, files, changed=None, actor="someone", event="workflow
     pull = pull_request(files, changed)
     answers = {"pulls": [pull] if pulls is None else pulls, "pull": pull,
                "builds": {"workflow_runs": [run for run, _ in builds]},
-               "held": {"workflow_runs": [{"id": i, "head_sha": "a" * 40, "head_branch": "main",
+               "held": {"workflow_runs": [{"id": i, "status": "completed", "conclusion": "action_required",
+                                           "head_sha": "a" * 40, "head_branch": "main",
                                            "head_repository": {"full_name": "mallory/libx"}} for i in held]}}
     answers.update({f"artifacts-{run['id']}": {"artifacts": list(artifacts)} for run, artifacts in builds})
     if not fail:

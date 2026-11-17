@@ -40,6 +40,10 @@ run-name: ${{ github.event.pull_request.title }}
 
 on:
   pull_request:
+    # Only a pull request into main, the default branch. review.yml takes each run as a run of the open pull request
+    # into the default branch from the run's head repository and branch, at the run's head commit. So a run for a pull
+    # request into another branch gives the pull request into main from the same branch and commit a second triage.
+    branches: [main]
     # edited: the comment reports on the checklist in the description.
     types: [opened, edited, reopened, synchronize]
 

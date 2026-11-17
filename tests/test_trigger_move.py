@@ -19,6 +19,8 @@ The move:
   (w)  Enroll dispatch sends no enrollment that changes a steering file, and puts no label on it, until a person
        approved its head: for an open pull request and for a merge.
   (x)  No workflow with workflow_dispatch builds the code of a pull request (oss-verify check, docker).
+  (base) Build and Triage start on pull_request only for a pull request into main: review.yml takes each of their runs
+       as a run of the pull request into main from the same branch and commit.
   (z2) A run by hand on another branch than main holds no identity and posts nothing.
   (claude files) The gather job keeps no CLAUDE*.md, AGENTS*.md or .claude/ of the pull request, and the review job
        refuses one.
@@ -450,7 +452,7 @@ class Stand(unittest.TestCase):
 
 
 class PullRequestWorkflows(unittest.TestCase):
-    """(r) and (x): the events of each workflow, and what the jobs hold and run."""
+    """(r), (x) and (base): the events of each workflow, and what the jobs hold and run."""
 
     def workflows(self):
         found = sorted(p for p in (ROOT / ".github" / "workflows").iterdir() if p.suffix in (".yml", ".yaml"))
@@ -503,6 +505,15 @@ class PullRequestWorkflows(unittest.TestCase):
                         self.assertNotIn("workflow_dispatch", on,
                                          f"{path.name}, job {name}, step {step.get('name')!r} builds code")
         self.assertIn("build.yaml", {found[0] for found in builds})
+
+    def test_base_build_and_triage_start_only_for_a_pull_request_into_main(self):
+        # A run for a pull request into another branch would give the pull request into main from the same branch and
+        # commit a second review or triage.
+        for name in ("build.yaml", "triage.yaml"):
+            on = triggers(yaml.load((ROOT / ".github" / "workflows" / name).read_text(), Loader=YAML_LOADER))
+            self.assertIn("pull_request", on, name)
+            self.assertEqual({k: v for k, v in (on["pull_request"] or {}).items() if k.startswith("branches")},
+                             {"branches": ["main"]}, name)
 
 
 class FirstRunArtifact(Stand):
@@ -1008,18 +1019,22 @@ class HeldApproval(Stand):
     # The merge commit of pull request 7, once it is merged.
     MERGE = "c" * 40
     # The held runs that the API lists: (id, workflow file, head commit, head repository, head branch). 11 to 13 are
-    # the pull request's, at HEAD. 21 is of another head, 22 of another repository, and 23 of another branch.
+    # the pull request's, at HEAD. 21 is of another head, 22 of another repository, and 23 of another branch. GitHub
+    # lists a held run with the status completed and the conclusion action_required, and the stand-ins do too.
     HELD = ((11, ".github/workflows/build.yaml", HEAD, FORK, BRANCH),
             (12, ".github/workflows/terms.yaml", HEAD, FORK, BRANCH),
             (13, ".github/workflows/validate.yaml", HEAD, FORK, BRANCH),
             (21, ".github/workflows/build.yaml", OTHER, FORK, BRANCH),
             (22, ".github/workflows/build.yaml", HEAD, "eve/oss-verify", BRANCH),
             (23, ".github/workflows/build.yaml", HEAD, FORK, "other"))
-    # Controls: the verdict condition taken out of the approval step's condition, or out of approve-held.
+    # Controls: the verdict condition taken out of the approval step's condition, or out of approve-held. And route's
+    # check of a run of enroll-merged.yml by its status alone, as before: GitHub never gives the status action_required.
     APPROVE_IF = ("APPROVE: ${{ needs.route.outputs.held == 'true' && needs.screen.result == 'success'"
                   " && needs.screen.outputs.verdict == 'clean' }}")
     APPROVE_IF_ANY = "APPROVE: ${{ needs.route.outputs.held == 'true' && needs.screen.result == 'success' }}"
     REFUSAL = '[ "${SCREEN_VERDICT:-}" = clean ] || fail "the screen\'s verdict is not clean: no run is approved."\n'
+    HELD_MERGE = "&& $status == completed && $conclusion == action_required &&"
+    STATUS_ALONE = "&& $status == action_required &&"
     POST = "Post the comment and record the verdict"
     # The holds of a held enrollment whose project the gather job took: (label, route's trust, the result of the screen
     # job, or None when it does not run, its verdict, and the title of the check run that records the hold).
@@ -1067,24 +1082,25 @@ class HeldApproval(Stand):
 
     def held_runs(self, runs):
         self.serve(f"repos/{REPO}/actions/runs", {"workflow_runs": [
-            {"id": i, "path": path, "event": "pull_request", "status": "action_required", "head_sha": sha,
-             "head_repository": {"full_name": repository}, "head_branch": branch}
+            {"id": i, "path": path, "event": "pull_request", "status": "completed", "conclusion": "action_required",
+             "head_sha": sha, "head_repository": {"full_name": repository}, "head_branch": branch}
             for i, path, sha, repository, branch in runs]})
         for run in self.HELD:
             self.serve(f"repos/{REPO}/actions/runs/{run[0]}/approve", {})
 
-    def route(self, actor):
-        """route's two steps for gh workflow run review.yml -f pr=7 on main, started by `actor`: its outputs, and the
-        log of its first step."""
+    def route(self, actor, tree=ROOT):
+        """route's two steps for gh workflow run review.yml -f pr=7 on main, started by `actor`, as review.yml in `tree`
+        runs them: its outputs, and the log of its first step."""
+        review = self.review if tree == ROOT else self.workflow(tree, "review.yml")
         ctx = {"github.token": WORKFLOW_TOKEN, "github.repository": REPO, "github.event_name": "workflow_dispatch",
                "github.ref": "refs/heads/main", "github.actor": actor, "github.run_id": "1000", "inputs.pr": PR}
-        rc, log, decided = self.run_step(self.review, "route", self.ROUTE, ctx, ROOT, evaluate=self.tos.evaluate)
+        rc, log, decided = self.run_step(review, "route", self.ROUTE, ctx, tree, evaluate=self.tos.evaluate)
         self.assertEqual(rc, 0, log)
         ctx.update({f"steps.decide.outputs.{k}": v for k, v in decided.items()})
-        trust = self.step(self.review, "route", self.TRUST)
+        trust = self.step(review, "route", self.TRUST)
         if not self.tos.evaluate(trust["if"], ctx):
             return decided, log
-        rc, more, trusted = self.run_script(trust["run"], ROOT, **env_of(self.review, "route", trust, ctx,
+        rc, more, trusted = self.run_script(trust["run"], tree, **env_of(review, "route", trust, ctx,
                                                                           evaluate=self.tos.evaluate))
         self.assertEqual(rc, 0, more)
         return {**decided, **trusted}, log
@@ -1304,8 +1320,8 @@ class HeldApproval(Stand):
         self.pull_request(("projects/x/project.yaml", "projects/x/build.sh"))
         self.serve(f"repos/{REPO}/actions/runs", {"workflow_runs": [
             {"id": 14, "path": ".github/workflows/maintainer-confirmed.yml", "event": "pull_request",
-             "status": "action_required", "head_sha": HEAD, "head_repository": {"full_name": FORK},
-             "head_branch": BRANCH, "actor": {"login": "oss-verify[bot]"}}]})
+             "status": "completed", "conclusion": "action_required", "head_sha": HEAD,
+             "head_repository": {"full_name": FORK}, "head_branch": BRANCH, "actor": {"login": "oss-verify[bot]"}}]})
         # The completed Build runs of the head: 43 wrote no results, and 42 and 41 wrote results.
         self.serve(f"repos/{REPO}/actions/workflows/build.yaml/runs", {"workflow_runs": [
             {"id": i, "path": ".github/workflows/build.yaml", "event": "pull_request", "status": "completed",
@@ -1368,16 +1384,22 @@ class HeldApproval(Stand):
         env = self.comment_env(ctx)
         self.assertEqual((env["APPROVE"], env["RECORD"]), ("true", "false"))
 
+    @staticmethod
+    def merge_run(run_id, sha, repository=FORK, branch=BRANCH, conclusion="action_required"):
+        """A run of enroll-merged.yml on pull_request at `sha`, as GitHub lists it: completed, with `conclusion`. GitHub
+        holds the run when its conclusion is action_required."""
+        return {"id": run_id, "path": ".github/workflows/enroll-merged.yml", "event": "pull_request",
+                "status": "completed", "conclusion": conclusion, "head_sha": sha,
+                "head_repository": {"full_name": repository}, "head_branch": branch}
+
     def merged(self, held, merged=True):
         """Pull request 7 of mallory's fork at HEAD, closed, and with `merged` merged into main at MERGE, and the runs of
         enroll-merged.yml that GitHub holds: `held`, each (id, head commit, head repository, head branch)."""
         pull = self.pull_request(("projects/x/project.yaml", "projects/x/build.sh"))
         pull.update(state="closed", merged=merged, merge_commit_sha=self.MERGE)
         self.serve(f"repos/{REPO}/pulls/{PR}", pull)
-        self.serve(f"repos/{REPO}/actions/workflows/enroll-merged.yml/runs", {"workflow_runs": [
-            {"id": i, "path": ".github/workflows/enroll-merged.yml", "event": "pull_request",
-             "status": "action_required", "head_sha": sha, "head_repository": {"full_name": repository},
-             "head_branch": branch} for i, sha, repository, branch in held]})
+        self.serve(f"repos/{REPO}/actions/workflows/enroll-merged.yml/runs",
+                   {"workflow_runs": [self.merge_run(*run) for run in held]})
 
     def test_held_a_merged_pull_request_whose_merge_run_is_held_is_replayed_with_the_apps_token(self):
         for label, held, commits in (("at its head commit", [(31, HEAD, FORK, BRANCH)], [HEAD]),
@@ -1443,6 +1465,30 @@ class HeldApproval(Stand):
                     self.assertIn(said, log)
                 got, _ = self.tos.run_graph({}, event="workflow_dispatch", workflow=self.review, ref="refs/heads/main")
                 self.assertEqual({job for job, result in got.items() if result != "skipped"}, {"route", "collect"}, got)
+
+    def case_merge_run_as_github_lists_it(self, tree):
+        """Merged pull request 7 and its runs of enroll-merged.yml, as GitHub lists them: run 36 at HEAD completed with
+        the conclusion success (GitHub did not hold it), and run 37 at MERGE completed with the conclusion
+        action_required (GitHub holds it). The stand-in gh lists both runs, whatever the filter status=action_required.
+        route of review.yml in `tree` replays the merge for run 37."""
+        self.clear()
+        self.merged([])
+        self.serve(f"repos/{REPO}/actions/workflows/enroll-merged.yml/runs", {"workflow_runs": [
+            self.merge_run(36, HEAD, conclusion="success"), self.merge_run(37, self.MERGE)]})
+        route, log = self.route("github-actions[bot]", tree)
+        self.assertEqual(route, {"pr": PR, "sha": HEAD, "author": "mallory", "replay": "true"},
+                         f"route's replay of a merge whose run GitHub holds: {log}")
+        self.assertIn(f"GitHub holds run 37 of enroll-merged.yml at {self.MERGE}", log)
+
+    def test_held_a_merge_run_completed_with_the_conclusion_action_required_is_replayed(self):
+        self.case_merge_run_as_github_lists_it(ROOT)
+
+    def test_held_control_route_checks_a_merge_run_by_its_status_alone(self):
+        self.case_merge_run_as_github_lists_it(self.copy_tree("unchanged"))
+        changed = self.copy_tree("changed", [(".github/workflows/review.yml", self.HELD_MERGE, self.STATUS_ALONE)])
+        with self.assertRaises(AssertionError) as caught:
+            self.case_merge_run_as_github_lists_it(changed)
+        self.assertIn("route's replay of a merge whose run GitHub holds", str(caught.exception))
 
     def test_held_the_comment_job_makes_a_token_of_its_own_for_the_approval(self):
         steps = self.review["jobs"]["comment"]["steps"]
@@ -1632,8 +1678,10 @@ class HeldRuns(Stand):
 
     @staticmethod
     def held_run(run_id, sha, repository, branch, minutes, path=".github/workflows/build.yaml"):
-        return {"id": run_id, "path": path, "event": "pull_request", "status": "action_required", "head_sha": sha,
-                "head_repository": {"full_name": repository}, "head_branch": branch, "created_at": ago(minutes)}
+        """A held run, as GitHub lists it: completed, with the conclusion action_required."""
+        return {"id": run_id, "path": path, "event": "pull_request", "status": "completed",
+                "conclusion": "action_required", "head_sha": sha, "head_repository": {"full_name": repository},
+                "head_branch": branch, "created_at": ago(minutes)}
 
     @staticmethod
     def pull(number, repository, branch, sha, state="open", merged=False, merge=None):

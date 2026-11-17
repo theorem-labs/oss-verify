@@ -58,9 +58,10 @@ name: "Build"
 #   - It fails if the pull request's head or base moves while the step reads it; the next run (for a newer commit, or
 #     after a change of base) checks it again.
 # It does not run on edited, which GitHub sends for an edit of the title or description (nothing the build judges
-# changes; before, such an edit built the project again in full) and for a change of base. After a change of base, a
-# push or closing and reopening the pull request runs it again; until then a pull request into another branch keeps
-# its failed check. The review is of a commit too: an edit of the description alone is reviewed with the next push.
+# changes; before, such an edit built the project again in full) and for a change of base. It runs only for a pull
+# request into main (the trigger's branches, below). After a change of base to main, a push or closing and reopening
+# the pull request runs it again. The review is of a commit too: an edit of the description alone is reviewed with the
+# next push.
 # It runs on ready_for_review too: enroll-dispatch.yml starts no statements for a draft pull request, and the
 # completion of this run, when the draft is marked ready, starts review.yml, whose completion has it decide again.
 # A failure is usually the project's, but it can be the runner's: GitHub's runner may run out of disk or time on a
@@ -104,6 +105,11 @@ run-name: ${{ github.event.pull_request.title }}
 
 on:
   pull_request:
+    # Only a pull request into main, the default branch. review.yml takes each run as a run of the open pull request
+    # into the default branch from the run's head repository and branch, at the run's head commit. So a run for a pull
+    # request into another branch gives the pull request into main from the same branch and commit a second review,
+    # and a second count of the daily cap.
+    branches: [main]
     types: [opened, reopened, synchronize, ready_for_review]
 
 permissions: {}

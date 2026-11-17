@@ -2057,9 +2057,9 @@ class RunWiring(unittest.TestCase):
         return cancel if isinstance(cancel, bool) else evaluate(cancel, ctx)
 
     def test_it_starts_on_no_label_event_and_a_push_cancels_the_run_going(self):
-        """A pull request starts Build on these four events alone, none of them labeled or unlabeled, and a push
-        cancels the run of its older head. Review starts when a run of Build or Triage completes (by their names), on
-        an issue's events, and by hand. A run after a Build run has a group of its own, by that run's id: no run of
+        """A pull request into main starts Build on these four events alone, none of them labeled or unlabeled, and a
+        push cancels the run of its older head. Review starts when a run of Build or Triage completes (by their names),
+        on an issue's events, and by hand. A run after a Build run has a group of its own, by that run's id: no run of
         another Build run cancels it, so a second pull request from the same head repository and branch never cancels
         the review of the first, and a re-run of the same run cancels the run of its earlier attempt. A run after a
         Triage run that ended success has one group for the head repository and branch of that run. route triages only
@@ -2070,7 +2070,8 @@ class RunWiring(unittest.TestCase):
         its own, by that run's id, so that it cancels no run that writes one. A run by hand cancels the run already
         going in its group; an issue's event waits for it."""
         on = BUILD.get("on", BUILD.get(True))
-        self.assertEqual(on, {"pull_request": {"types": ["opened", "reopened", "synchronize", "ready_for_review"]}})
+        self.assertEqual(on, {"pull_request": {"branches": ["main"],
+                                               "types": ["opened", "reopened", "synchronize", "ready_for_review"]}})
         pr = {"github.event_name": "pull_request", "github.event.pull_request.number": 7}
         for action in ("opened", "reopened", "synchronize", "ready_for_review"):
             with self.subTest(action=action):
