@@ -1348,6 +1348,21 @@ def next_segment(base, probe):
     return loads[0].vaddr, order[first][2], order[first + 1][2]
 
 
+def segment_tail(probe):
+    """The bytes that the probe link puts after .text in the PT_LOAD that holds .text (an output section of libc++'s
+    overrides, __lcxx_override, for one), with room for their alignment: lld puts them after .text wherever .text
+    ends, so the code ends that much after .text. 0 when the probe has no such PT_LOAD."""
+    text = next((s for s in probe.output.sections if s.name == ".text"), None)
+    holder = next((p for p in probe.output.loads if text and p.vaddr <= text.addr < p.vaddr + p.memsz), None)
+    if holder is None:
+        return 0
+    start, end = text.addr + text.size, holder.vaddr + holder.memsz
+    if end <= start:
+        return 0
+    aligns = [i.align for i in probe.inputs if start <= i.address < end]
+    return end - start + max(aligns + [1]) - 1
+
+
 def quotable(name):
     """`name`, which the script quotes. Raise AppendError for a quote or a line break, which a quoted name cannot
     hold."""
@@ -1385,9 +1400,10 @@ def plan(base, probe, pairing, forced=None):
     sections. Each round moves one section more, so it ends.
 
     The script puts .text at the base's address, and each section, a kept run or a moved block once, at its address
-    in address order. When the planned end of .text is at or below page_floor of the start S of BASE's next PT_LOAD,
-    the script keeps that PT_LOAD at S: the first section of the probe's next PT_LOAD at S with an empty body, which
-    lld fills in its own order (next_segment)."""
+    in address order. When the planned end of .text, with what the probe link puts after .text in its PT_LOAD
+    (segment_tail), is at or below page_floor of the start S of BASE's next PT_LOAD, the script keeps that PT_LOAD at
+    S: the first section of the probe's next PT_LOAD at S with an empty body, which lld fills in its own order
+    (next_segment)."""
     text = [i for i in probe.inputs if is_text(i.section)]
     figures = readonly_growth(base.output, probe.output)
     if figures is not None and figures[0] > figures[1]:
@@ -1475,7 +1491,7 @@ def plan(base, probe, pairing, forced=None):
         lines[len(out)] = row
     out += ["  }", "}", f"INSERT AFTER {script_name(order[at - 1][2])};"]
     found, next_start = next_segment(base.output, probe.output), None
-    if found is not None and end <= page_floor(found[0]):
+    if found is not None and end + segment_tail(probe) <= page_floor(found[0]):
         next_start = found[0]
         out.append(f"SECTIONS {{ {script_name(found[1])} {hex_text(next_start)} : {{ }} }} "
                    f"INSERT BEFORE {script_name(found[2])};")

@@ -869,6 +869,30 @@ def test_the_script_keeps_the_next_segment_when_the_code_ends_below_its_page(siz
     assert plan.next_start == (0x12020 if fits else None)
 
 
+@pytest.mark.parametrize("tail, fits", [(0x10, True), (0x30, False)], ids=["fits", "past"])
+def test_what_follows_text_in_its_segment_counts_against_the_room_of_the_next_segment(tail, fits):
+    # libc++'s __lcxx_override is an output section of code that lld puts after .text in the same PT_LOAD, wherever
+    # .text ends: an example_fuzzer_cc_af whose .text fitted the room, and whose overrides did not, linked its code and
+    # its data on one page.
+    base = link([text_input(0, "grown", 0x11000, 0x10), text_input(1, "kept", 0x11010, 0x10)])
+    probe = link(laid_out([("grown", 0xFC0, {"content": "grown 2"}), ("kept", 0x10, {})]))
+    end = 0x11FD0  # the end of the probe's .text
+    override = layout.Input(2, end, tail, "/opt/lib/libc++.a", ("/opt/lib/libc++.a", "new.o", "__lcxx_override"),
+                            "new.o", "__lcxx_override", sha(b"override"), tail, 4)
+    sections = probe.output.sections[:2] + [layout.OutputSection("__lcxx_override", end, tail, 0x6)] + \
+        probe.output.sections[2:]
+    loads = list(probe.output.loads)
+    loads[1] = loads[1]._replace(filesz=loads[1].filesz + tail, memsz=loads[1].memsz + tail)
+    probe = probe._replace(inputs=probe.inputs + [override],
+                           output=layout.Output(sections, loads, probe.output.symbols))
+    plan = planned(base, probe)
+    # .text ends at 0x11020 + 0xfc0 = 0x11fe0, below page_floor(0x12020) = 0x12000, and the overrides after it
+    # (with room for their alignment of 4) end at 0x11ff3 or past 0x12000.
+    assert plan.places[0].address + 0xFC0 == 0x11FE0
+    assert plan.next_start == (0x12020 if fits else None)
+    assert ("INSERT BEFORE .fini_array;" in plan.script) == fits
+
+
 def test_a_plan_whose_read_only_data_grew_past_its_room_is_a_normal_link():
     base = link([text_input(0, "same", 0x11000, 0x10), text_input(1, "changed", 0x11010, 0x10)])
     probe = link(laid_out([("same", 0x10, {}), ("changed", 0x10, {"content": "changed 2"}), ("new", 0x8, {})],
