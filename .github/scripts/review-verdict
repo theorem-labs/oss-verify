@@ -3,14 +3,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """The verdict of an enrollment's review, as the check run `Enrollment review` of the oss-verify App records it:
 
-    VERDICTS=<json> REASONS=<json> .github/scripts/review-verdict
+    VERDICTS=<json> REASONS=<json> HEAD_SHA=<commit> [CRITICALITY_SCORE=<number>] [OSS_FUZZ=true|false] \\
+      [SIZES=<json>] .github/scripts/review-verdict
     HOLD=screen|cap|failed [FREE=<time>] [JOB=gather|screen|review|hold] RUN_URL=<run> REPO=<owner/repo> \\
-      PR=<number> .github/scripts/review-verdict
+      PR=<number> HEAD_SHA=<commit> [CRITICALITY_SCORE=<number>] [OSS_FUZZ=true|false] [SIZES=<json>] \\
+      .github/scripts/review-verdict
     .github/scripts/review-verdict --ids
     .github/scripts/review-verdict --sentence success|failure|action_required
 
 build.yaml's comment job runs it in its step "Post the comment and record the verdict", which posts the check run
-from what it prints: one JSON object with `conclusion`, `title` and `summary`.
+from what it prints: one JSON object with `conclusion`, `title`, `summary` and `text`. The step posts `text` as the
+check run's `output.text`, the record (below).
 
 VERDICTS is the review's structured output `verdicts`, the id of each check of review.md to `pass`, `fail`, `person`
 or, for F5 and F8 alone, `optional`; REASONS is its `reasons`, an id to the sentences that decide the verdict. An id
@@ -23,6 +26,51 @@ text does, and the summary stays under the 65,535 characters GitHub takes.
 HOLD gives no verdict of the review: the screen held the pull request, the daily cap stopped it (FREE, route's output
 free, the time the cap lets it run), or a job of the run failed (JOB). Each is `action_required`, with fixed words.
 
+The record is the review as programs read it (dispatch://OSSV-275's Enrollment view, dispatch://OSSV-623's hold
+counts): one JSON object in an HTML comment, which GitHub does not show. Each record has all of these keys, in this
+order:
+
+    schema             "oss-verify/enrollment-review/1".
+    head               HEAD_SHA, the commit of the check run. It must be 40 lower-case hexadecimal digits: else this
+                       stops with exit status 2 and prints nothing.
+    hold               HOLD: "screen", "cap" or "failed". It is null when the review gave verdicts.
+    job                JOB ("gather", "screen", "review" or "hold") when hold is "failed", else null.
+    verdicts           For a review, each id of IDS, in that order, to the verdict that the summary counts: an id
+                       that VERDICTS does not give, or gives another value, is "person". For a hold, {}.
+    criticality_score  CRITICALITY_SCORE, the criticality score that .github/scripts/triage.py computed, to 5 places
+                       (its table shows 2).
+    oss_fuzz           OSS_FUZZ: true when one of the OSS-Fuzz projects that triage.py reads (the OSS_FUZZ_CANDIDATES
+                       projects whose names are most like the repository's) has this repository as its main_repo,
+                       false when none of them has.
+    sizes              SIZES, the object of .github/scripts/binary-sizes as it is (the project-builds job's output
+                       sizes): {target: {build: {"text": ..., "exec": ...}}}.
+
+criticality_score and oss_fuzz are null when they are not known: the repository is a fork (for criticality_score
+only: a fork is not scored), it is not on github.com or GitHub does not find it, its row could not be checked, or the
+run had no gather (the daily cap) or its gather failed before the triage. A gather that fails after the triage, at the
+fetch of the source, can still give the two values: they are then the values that the run got. Only a JSON number
+that is finite and not a boolean is a CRITICALITY_SCORE, only the text true or false is an OSS_FUZZ, and only a JSON
+object is a SIZES. Any other value is null, and so is a value that is not given.
+
+The text is json.dumps(record, ensure_ascii=True, separators=(",", ":")), with each "<", ">" and "&" replaced by
+\\u003c, \\u003e and \\u0026, in "<!-- " and " -->". A JSON parser reads each escape back as the same character. The
+escapes are necessary, in keys too: GitHub shows output.text as Markdown, and a target is a file name that the pull
+request's build chooses. Measured 2026-11-17 with GitHub's POST /markdown (gfm), the first line below shows nothing,
+but the second shows <b>shown</b> and a link to the account it mentions:
+
+    <!-- {"a\\u003e--\\u003e @octocat #12":...} -->
+    <!-- {"x":"a --> <b>shown</b> @octocat"} -->
+
+The text has at most 65,535 characters, GitHub's limit for output.text. When it would be longer, sizes keeps only the
+"plain" build of each target (a target whose value is not an object, or has no "plain" build, keeps {}). When it is
+still longer, sizes is null, and one line on standard error says why. Standard output stays one JSON object.
+
+A reader takes the newest check run Enrollment review of the oss-verify App (id 5447700) whose external_id is the
+pull request's number, as .github/scripts/enroll-dispatch does. It removes the first 5 and the last 4 characters of
+its output.text and parses the JSON. It ignores each key that it does not know: dispatch://OSSV-661 writes records of
+the same schema from another repository, with keys of its own. A check run from before the record has output.text
+null, and so no record.
+
 --ids prints each check id of review.md, in its order, with the verdicts it takes, as one JSON object: the one list,
 which .github/scripts/review-prompt puts in the review's schema. --sentence prints the first sentence of the review
 comment for a conclusion, which .github/scripts/review-body writes."""
@@ -30,6 +78,7 @@ import datetime
 import importlib.machinery
 import importlib.util
 import json
+import math
 import os
 import pathlib
 import re
@@ -54,6 +103,12 @@ NO_REASON = "The review gave no reason."
 # A reason's length, after review-neutralize: 31 reasons of REASON_LIMIT keep the summary under the 65,535 characters
 # GitHub takes.
 REASON_LIMIT = 1500
+# The record's schema.
+SCHEMA = "oss-verify/enrollment-review/1"
+# GitHub's limit for a check run's output.text, in characters.
+TEXT_LIMIT = 65535
+# The escape of each character that can end the record's HTML comment, or start a tag or a character reference.
+ESCAPES = {ord("<"): "\\u003c", ord(">"): "\\u003e", ord("&"): "\\u0026"}
 
 # No bytecode file beside the scripts: the job's checkout is main's, and only read.
 sys.dont_write_bytecode = True
@@ -78,6 +133,31 @@ def as_object(text):
     return value if isinstance(value, dict) else {}
 
 
+def parsed(text):
+    """The JSON value of text, or None when text is not JSON."""
+    try:
+        return json.loads(text or "")
+    except (ValueError, RecursionError):
+        return None
+
+
+def head():
+    """HEAD_SHA, the commit of the check run."""
+    sha = os.environ.get("HEAD_SHA", "")
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        die("HEAD_SHA is not a commit of 40 lower-case hexadecimal digits")
+    return sha
+
+
+def score(text):
+    """CRITICALITY_SCORE as a number, or None when it is not a finite JSON number."""
+    value = parsed(text)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    # An int is always finite, and math.isfinite() cannot take one that is too large for a float.
+    return value if isinstance(value, int) or math.isfinite(value) else None
+
+
 def reason(text):
     """A reason as the summary shows it: neutralized as the comment's text is, on one line, cut at REASON_LIMIT."""
     if not isinstance(text, str) or not text.strip():
@@ -86,23 +166,27 @@ def reason(text):
 
 
 def from_verdicts(verdicts, reasons):
-    found = {}
+    """The conclusion, title and summary of a review, and the verdict that it counts for each check."""
+    found, counted = {}, {}
     for check in IDS:
         verdict = verdicts.get(check)
         if verdict not in TAKES[check]:
-            found[check] = ("person", NO_VERDICT)
+            verdict = "person"
+            found[check] = (verdict, NO_VERDICT)
         elif verdict != "pass":
             found[check] = (verdict, reason(reasons.get(check)))
+        counted[check] = verdict
     kinds = {verdict for verdict, _ in found.values()}
     conclusion = "failure" if "fail" in kinds else "action_required" if "person" in kinds else "success"
     sentence = SENTENCES[conclusion]
     lines = [f"- **{check}** ({verdict}): {text}"
              for kind in ORDER for check, (verdict, text) in found.items() if verdict == kind]
     summary = sentence + ("\n\n" + "\n".join(lines) if lines else "")
-    return conclusion, sentence, summary
+    return conclusion, sentence, summary, counted
 
 
 def from_hold(hold):
+    """The conclusion, title and summary of a hold, and the job that failed (None for a hold that is not failed)."""
     repo, pr = os.environ.get("REPO", ""), os.environ.get("PR", "")
     run_url = os.environ.get("RUN_URL", "")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
@@ -112,6 +196,7 @@ def from_hold(hold):
     run = re.fullmatch(r"https://[A-Za-z0-9.-]+/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/([0-9]+)", run_url)
     if not run:
         die("RUN_URL is not the address of a run")
+    job = None
     if hold == "screen":
         title = "The automated screen held this pull request."
         summary = (f"{title} It comes from, or holds the text of, an account without write access to this repository,"
@@ -139,7 +224,29 @@ def from_hold(hold):
                    f" `gh run rerun {run.group(1)} --failed -R {repo}` reviews it.")
     else:
         die("HOLD is not screen, cap or failed")
-    return "action_required", title, summary
+    return "action_required", title, summary, job
+
+
+def as_text(record):
+    """The record as output.text: its JSON in an HTML comment, with no character that can end that comment."""
+    return "<!-- " + json.dumps(record, ensure_ascii=True, separators=(",", ":")).translate(ESCAPES) + " -->"
+
+
+def fitted(record):
+    """The record's text, at most TEXT_LIMIT characters: with only the plain build of each target when the sizes of
+    all builds make it longer, and with sizes null when it is still longer."""
+    text = as_text(record)
+    if len(text) <= TEXT_LIMIT:
+        return text
+    # Only sizes can make the text so long: each other value is short.
+    plain = {target: {"plain": builds["plain"]} if isinstance(builds, dict) and "plain" in builds else {}
+             for target, builds in record["sizes"].items()}
+    text = as_text({**record, "sizes": plain})
+    if len(text) <= TEXT_LIMIT:
+        return text
+    print(f"review-verdict: the record's text is over {TEXT_LIMIT:,} characters with only the plain builds of SIZES,"
+          " so its sizes is null", file=sys.stderr)
+    return as_text({**record, "sizes": None})
 
 
 def main():
@@ -154,13 +261,21 @@ def main():
         return
     if arguments:
         die("usage: review-verdict [--ids | --sentence CONCLUSION]")
+    sha = head()
     hold = os.environ.get("HOLD", "")
     if hold:
-        conclusion, title, summary = from_hold(hold)
+        conclusion, title, summary, job = from_hold(hold)
+        verdicts = {}
     else:
-        conclusion, title, summary = from_verdicts(as_object(os.environ.get("VERDICTS")),
-                                                   as_object(os.environ.get("REASONS")))
-    print(json.dumps({"conclusion": conclusion, "title": title, "summary": summary}))
+        conclusion, title, summary, verdicts = from_verdicts(as_object(os.environ.get("VERDICTS")),
+                                                             as_object(os.environ.get("REASONS")))
+        job = None
+    sizes = parsed(os.environ.get("SIZES"))
+    record = {"schema": SCHEMA, "head": sha, "hold": hold or None, "job": job, "verdicts": verdicts,
+              "criticality_score": score(os.environ.get("CRITICALITY_SCORE")),
+              "oss_fuzz": {"true": True, "false": False}.get(os.environ.get("OSS_FUZZ")),
+              "sizes": sizes if isinstance(sizes, dict) else None}
+    print(json.dumps({"conclusion": conclusion, "title": title, "summary": summary, "text": fitted(record)}))
 
 
 if __name__ == "__main__":
