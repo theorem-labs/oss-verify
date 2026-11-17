@@ -41,7 +41,9 @@ def release_model(url=RELEASE_YAML, text=None):
             raise Failed(f"cannot read {url}: {error}") from error
     try:
         data = yaml.safe_load(text)
-    except yaml.YAMLError as error:
+    # ValueError covers UnicodeDecodeError, and what PyYAML's scalar constructors raise for a value such as the date
+    # 2024-13-45, which is not a YAMLError.
+    except (yaml.YAMLError, ValueError, RecursionError) as error:
         raise Failed(f"{url} is not YAML: {error}") from error
     semantics = data.get("semantics") if isinstance(data, dict) else None
     if not isinstance(semantics, dict):
