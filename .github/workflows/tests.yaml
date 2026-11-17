@@ -175,11 +175,12 @@ jobs:
           else
             say "Nothing runs: the commit changes no file."
           fi
+          code="src/oss_verify/seeded_projects.py, src/oss_verify/validate.py, seeds/"
           if (( table )); then
             echo "table=true" >> "$GITHUB_OUTPUT"
-            say "tests/test_seeded_projects.py::Committed runs: $table of the $changed changed files are docs/seeded-projects.tsv, its test, or files it depends on in code (src/oss_verify/seeded_projects.py, src/oss_verify/validate.py, seeds/)."
+            say "tests/test_seeded_projects.py::Committed runs: $table of the $changed changed files are docs/seeded-projects.tsv, its test, or files it depends on in code ($code)."
           elif (( changed )); then
-            say "tests/test_seeded_projects.py::Committed does not run: no changed file is docs/seeded-projects.tsv, its test, or a file it depends on in code (src/oss_verify/seeded_projects.py, src/oss_verify/validate.py, seeds/). seeded-projects.yml finds a stale table on the push to main."
+            say "tests/test_seeded_projects.py::Committed does not run: no changed file is docs/seeded-projects.tsv, its test, or a file it depends on in code ($code). seeded-projects.yml finds a stale table on the push to main."
           fi
 
   suite:

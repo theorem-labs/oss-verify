@@ -64,10 +64,9 @@ class Error(Exception):
     """An input from which the table cannot be made."""
 
 
-def read_rows(path, columns):
-    """The rows of a TSV file, {project: {column: value}}, without its comment lines (#) and its line of column
-    names. Each row has a value in each of `columns`, and names a project that no other row names."""
-    rows = {}
+def tsv_fields(path, columns):
+    """The fields of each row of a TSV file, one value for each of `columns`, without its comment lines (#) and its
+    line of column names."""
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line or line.startswith("#") or line == "\t".join(columns):
             continue
@@ -76,6 +75,14 @@ def read_rows(path, columns):
             raise Error(f"{path}: a row without a value in each of its {len(columns)} columns: {line!r}")
         if fields[0] == "project":
             raise Error(f"{path}: its line of column names is not {chr(9).join(columns)!r}: {line!r}")
+        yield fields
+
+
+def read_rows(path, columns):
+    """The rows of a TSV file, {project: {column: value}}, without its comment lines (#) and its line of column
+    names. Each row has a value in each of `columns`, and names a project that no other row names."""
+    rows = {}
+    for fields in tsv_fields(path, columns):
         if fields[0] in rows:
             raise Error(f"{path}: two rows for {fields[0]}")
         rows[fields[0]] = dict(zip(columns, fields))
@@ -97,15 +104,7 @@ def checked_patches(path):
     """The patches that the check of each seed port applied, from seeds/checked-patches.tsv: {project: {patch:
     sha256}}, the patches of a project in the order of its rows."""
     record = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line or line.startswith("#") or line == "\t".join(CHECKED_COLUMNS):
-            continue
-        fields = line.split("\t")
-        if len(fields) != len(CHECKED_COLUMNS) or not all(fields):
-            raise Error(f"{path}: a row without a value in each of its {len(CHECKED_COLUMNS)} columns: {line!r}")
-        project, patch, sha256 = fields
-        if project == "project":
-            raise Error(f"{path}: its line of column names is not {chr(9).join(CHECKED_COLUMNS)!r}: {line!r}")
+    for project, patch, sha256 in tsv_fields(path, CHECKED_COLUMNS):
         if patch in record.get(project, {}):
             raise Error(f"{path}: two rows for {patch} of {project}")
         if not SHA256.fullmatch(sha256):
@@ -154,10 +153,9 @@ def resolved(path, links):
     """`path` after the links of sources ({path: target}): the longest link that holds it replaced by its target,
     again until no link holds it. None if a link still holds it after one step more than there are links."""
     for _ in range(len(links) + 2):
-        held = [link for link in links if path[:len(link)] == link]
-        if not held:
+        link = next((path[:n] for n in range(len(path), -1, -1) if path[:n] in links), None)
+        if link is None:
             return path
-        link = max(held, key=len)
         path = links[link] + path[len(link):]
     return None
 
@@ -194,14 +192,16 @@ def named_elsewhere(key, lines):
 def fuzz_targets(port, patch):
     """The sorted fuzz targets whose builds read the tree that the sources of `port` applies `patch` to, from its
     sources and build.sh. None if those files do not show them all (see the module's docstring)."""
-    sources = port_text(port, "sources")
+    sources = port_text(port, validate.SOURCES)
     links = {path: pathlib.PurePosixPath(target).parts for path, target in directives(sources, "link")}
     patched = [resolved(path, links) for path, name in directives(sources, "patch") if name == patch]
+    if not patched or None in patched:
+        return None
     lines = build_lines(port_text(port, "build.sh"))
     blocks = target_blocks(lines)
     trees = {key: [resolved(pathlib.PurePosixPath(tree.format(key)).parts, links) for tree in KEY_TREES]
              for keys, _ in blocks for key in keys}
-    if not patched or None in patched or any(None in paths for paths in trees.values()):
+    if any(None in paths for paths in trees.values()):
         return None
     reached = {key for key, paths in trees.items() if any(meets(path, tree) for path in patched for tree in paths)}
     targets = [names for keys, names in blocks if reached.intersection(keys)]
@@ -210,20 +210,20 @@ def fuzz_targets(port, patch):
     return sorted({name for names in targets for name in names})
 
 
-def applied(patch, checked, targets):
+def applied(patch, other_bytes, targets):
     """The words that name `patch`, which the port applies since the check of its seed port (in bytes other than
-    that check's, if `checked`), and its fuzz `targets` (None if the table cannot name them)."""
-    other = " in bytes other than that check's" if checked else ""
+    that check's, if `other_bytes`), and its fuzz `targets` (None if the table cannot name them)."""
+    other = " in bytes other than that check's" if other_bytes else ""
     if targets is None:
         return f"applies {patch}{other}, whose fuzz targets this table cannot name"
-    return f"applies {patch}{other}{',' if checked else ''} to {', '.join(targets)}"
+    return f"applies {patch}{other}{',' if other_bytes else ''} to {', '.join(targets)}"
 
 
 def port_changes(port, checked):
     """What `port` applies since the check of its seed port, which applied `checked` ({patch: sha256}): [(words,
     fuzz targets or None)], first each patch applied since that check in series order, then each patch of
     `checked` that the port no longer applies."""
-    listed = dict.fromkeys(validate.series_entries(port_text(port, "series")))
+    listed = dict.fromkeys(validate.series_entries(port_text(port, validate.SERIES)))
     changes = []
     for patch in listed:
         data = port_bytes(port, patch)
