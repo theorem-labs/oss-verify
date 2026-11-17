@@ -254,9 +254,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       # This job's registry ends with the job. So probe and docker-tests make the image again, and compare its digest
-      # with this one. publish also makes the image again before it copies the image to ghcr.io, and it copies
-      # nothing unless the digest is this one. A matrix job keeps one value of each output, so each image's digest is
-      # an artifact of its own.
+      # with this one. When ghcr.io does not hold the image, publish also makes it again, and copies it to ghcr.io
+      # only if its digest is this one. A matrix job keeps one value of each output, so each image's digest is an
+      # artifact of its own.
       - name: the digest, for probe, docker-tests and publish
         env:
           MADE: ${{ steps.made.outputs.ref }}
@@ -459,8 +459,8 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$CRANE_ARCHIVE" -C "$RUNNER_TEMP/bin" crane
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
-      # The digests that make made. publish makes the image again, and copies it to ghcr.io only if it has the digest
-      # of its base row.
+      # The digests that make made. When ghcr.io does not hold the image, publish makes it again, and copies it to
+      # ghcr.io only if it has the digest of its base row.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2 (sha-pinned)
         with:
           pattern: fp-digest-*
