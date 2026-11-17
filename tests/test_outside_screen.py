@@ -2059,10 +2059,16 @@ class RunWiring(unittest.TestCase):
     def test_it_starts_on_no_label_event_and_a_push_cancels_the_run_going(self):
         """A pull request starts Build on these four events alone, none of them labeled or unlabeled, and a push
         cancels the run of its older head. Review starts when a run of Build or Triage completes (by their names), on
-        an issue's events, and by hand. A run after a Build or Triage run has a group of its own, by that run's id: no
-        run of another Build or Triage run cancels it, so a second pull request from the same head repository and
-        branch never cancels the review of the first, and a re-run of the same run cancels the run of its earlier
-        attempt. A run by hand cancels the run already going in its group; an issue's event waits for it."""
+        an issue's events, and by hand. A run after a Build run has a group of its own, by that run's id: no run of
+        another Build run cancels it, so a second pull request from the same head repository and branch never cancels
+        the review of the first, and a re-run of the same run cancels the run of its earlier attempt. A run after a
+        Triage run that ended success has one group for the head repository and branch of that run. route triages only
+        the pull request into the default branch, so a second pull request from the same branch into another base gets
+        no triage, and the shared group cancels no triage of it. Of two Triage runs of one pull request, the run after
+        the newer cancels the run after the older, so the triage comment is of the newest description. A run after a
+        Triage run that ended skipped, cancelled or failure writes no triage comment (route stops it). It has a group of
+        its own, by that run's id, so that it cancels no run that writes one. A run by hand cancels the run already
+        going in its group; an issue's event waits for it."""
         on = BUILD.get("on", BUILD.get(True))
         self.assertEqual(on, {"pull_request": {"types": ["opened", "reopened", "synchronize", "ready_for_review"]}})
         pr = {"github.event_name": "pull_request", "github.event.pull_request.number": 7}
@@ -2078,13 +2084,23 @@ class RunWiring(unittest.TestCase):
         self.assertEqual(sorted(on["workflow_dispatch"]["inputs"]),
                          ["issue", "measure", "measure_repeats", "measure_set", "pr"])
         # Runs 900 and 901 of Build are of two pull requests from mallory/libx's branch main, one into main and one into
-        # another base; run 902 of Triage is of the first. Each run's review has a group of its own.
+        # another base. The review of each run has a group of its own. Runs 902 and 903 of Triage are of the first,
+        # after two edits of its description. Their runs share one group, and the newer run cancels the older. Runs 904,
+        # 905 and 906 of Triage are of the first too, and ended skipped (an edit of the title alone), cancelled and
+        # failure. The run after each has a group of its own, so it cancels no run after 902 or 903.
         run = {"github.event_name": "workflow_run", "github.event.workflow_run.head_branch": "main",
                "github.event.workflow_run.head_repository.full_name": "mallory/libx"}
-        for name, run_id in (("Build", 900), ("Build", 901), ("Triage", 902)):
-            with self.subTest(workflow_run=name, run_id=run_id):
-                ctx = dict(run, **{"github.event.workflow_run.name": name, "github.event.workflow_run.id": run_id})
-                self.assertEqual((self.group(ctx), self.cancels(ctx)), (f"review-workflow_run-{run_id}", True))
+        shared = "review-workflow_run-Triage-mallory/libx:main"
+        for name, run_id, conclusion, group in (("Build", 900, "success", "review-workflow_run-900"),
+                                                ("Build", 901, "success", "review-workflow_run-901"),
+                                                ("Triage", 902, "success", shared), ("Triage", 903, "success", shared),
+                                                ("Triage", 904, "skipped", "review-workflow_run-904"),
+                                                ("Triage", 905, "cancelled", "review-workflow_run-905"),
+                                                ("Triage", 906, "failure", "review-workflow_run-906")):
+            with self.subTest(workflow_run=name, run_id=run_id, conclusion=conclusion):
+                ctx = dict(run, **{"github.event.workflow_run.name": name, "github.event.workflow_run.id": run_id,
+                                   "github.event.workflow_run.conclusion": conclusion})
+                self.assertEqual((self.group(ctx), self.cancels(ctx)), (group, True))
         by_hand = {"github.event_name": "workflow_dispatch", "inputs.pr": 7}
         self.assertEqual((self.group(by_hand), self.cancels(by_hand)), ("review-workflow_dispatch-7", True))
         issue = {"github.event_name": "issues", "github.event.action": "edited", "github.event.issue.number": 9,

@@ -445,18 +445,25 @@ env:
   HELD_LABEL: review-held
 
 concurrency:
-  # A run after a Build or Triage run: a group of its own, by the id of that run, so that nothing cancels it across
-  # pull requests. A group by the head repository and branch would be shared by a second open pull request from the
-  # same branch into another base, and the run of one would cancel the review of the other. So a newer Build run of a
-  # pull request does not cancel the review of its older head: that review runs on, and the gather job's first step
-  # reads the head again and keeps nothing when it moved (the top of this file). A re-run of the same Build or Triage
-  # run has the same id, and cancels the run that its earlier attempt started. By event too, so that a run started by
-  # hand never cancels the run of an event. For an issue's events, one run at a time for each issue, and the newest
-  # waiting run replaces an older waiting one: an edit while a draft runs waits for it. Only the events that the
-  # issue's author sent share that group: route skips every other (the top of this file), and each of those gets a
-  # group of its own run, so it never replaces a waiting run of the author's own edit. An event that the author sent
-  # and route still skips (an owner, a member or an App wrote the issue) is of an issue that never gets a draft.
-  group: review-${{ github.event_name }}-${{ (github.event_name == 'workflow_run' && github.event.workflow_run.id) || inputs.pr || inputs.issue || (github.event.sender.login == github.event.issue.user.login && github.event.issue.number || format('{0}-run-{1}', github.event.issue.number, github.run_id)) }}
+  # A run after a Build run: a group of its own, by the id of that run, so that nothing cancels it across pull
+  # requests. A group by the head repository and branch would be shared by a second open pull request from the same
+  # branch into another base, and the run of one would cancel the review of the other. So a newer Build run of a pull
+  # request does not cancel the review of its older head: that review runs on, and the gather job's first step reads
+  # the head again and keeps nothing when it moved (the top of this file). A run after a Triage run that ended success:
+  # one group for the head repository and branch of that run. route triages only the pull request into the default
+  # branch, so a second pull request from the same branch into another base gets no triage, and the shared group
+  # cancels no triage of it. Of two Triage runs of one pull request (an edit of the description, and then one more),
+  # the run after the newer cancels the run after the older, so the triage comment is of the newest description. A run
+  # after a Triage run that did not end success writes no triage comment: route stops it. It has a group of its own, by
+  # the id of that run, so that it cancels no run that writes the comment of an earlier edit. triage.yaml gives an edit
+  # of the title alone (its Triage run skips the one job) a group of its own for the same reason. A re-run of the same
+  # Build run has the same group, and cancels the run that its earlier attempt started. By event too, so that a run
+  # started by hand never cancels the run of an event. For an issue's events, one run at a time for each issue,
+  # and the newest waiting run replaces an older waiting one: an edit while a draft runs waits for it. Only the events
+  # that the issue's author sent share that group: route skips every other (the top of this file), and each of those
+  # gets a group of its own run, so it never replaces a waiting run of the author's own edit. An event that the author
+  # sent and route still skips (an owner, a member or an App wrote the issue) is of an issue that never gets a draft.
+  group: review-${{ github.event_name }}-${{ (github.event_name == 'workflow_run' && (github.event.workflow_run.name == 'Triage' && github.event.workflow_run.conclusion == 'success' && format('Triage-{0}:{1}', github.event.workflow_run.head_repository.full_name, github.event.workflow_run.head_branch) || github.event.workflow_run.id)) || inputs.pr || inputs.issue || (github.event.sender.login == github.event.issue.user.login && github.event.issue.number || format('{0}-run-{1}', github.event.issue.number, github.run_id)) }}
   cancel-in-progress: ${{ github.event_name != 'issues' }}
 
 jobs:
