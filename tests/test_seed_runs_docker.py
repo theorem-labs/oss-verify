@@ -10,10 +10,12 @@ time limit stopped, and such a run is neither a pass nor a catch. run-seeds and 
 /proc/self/coredump_filter, so a run's core dump holds no memory. Without that write, a core dump that could not end in
 time made an abort read as 137.
 
-Needs Docker, the newest C toolchain image, and qemu-riscv64-static on PATH, so the suite job of tests.yaml skips it.
-tests/test_core_dump_filter.py, which suite runs, checks the coredump_filter of each run without them:
+Needs Docker, the newest C toolchain image, and qemu-riscv64-static on PATH:
 
     OV_DOCKER_TESTS=1 uv run pytest tests/test_seed_runs_docker.py
+
+So the suite job of tests.yaml skips it. tests/test_core_dump_filter.py, which suite runs, checks the coredump_filter
+of each run without them.
 """
 import os
 import pathlib
