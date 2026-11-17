@@ -37,6 +37,14 @@
 #
 # oss-verify check --checks sets it for its first build. A build that records makes the same binaries as one that does
 # not.
+#
+# With OV_RECORD=1, set OV_LAYOUT=1 to have each record also hold the functions the link wraps and, for an append link,
+# where the append mode put each .text input section. oss-verify check --layout-out and --base-layout set it.
+#
+# Set OV_BASE_LAYOUT=<dir> to a layout tree (infra/base-builder/layout.py collect) to make a development build: each
+# link with an entry for its build and target in that tree takes the append mode (link-fuzz-target), which keeps each
+# function whose code did not change at the address the base gave it. A build without OV_LAYOUT and OV_BASE_LAYOUT
+# makes the same binaries as before.
 set -euo pipefail
 
 LIB=/usr/local/lib/oss-verify
@@ -162,6 +170,7 @@ OV_AFC='$LIB_ALLOCATION_COUNTING_ENGINE'
 OV_AFC_DRIVER='$OV/cli.o $OV/allocation_counting.o'
 OV_RECORDS='$OV_RECORDS'
 OV_AF_RENAME='${af_rename# }'
+OV_BUILD='$BUILD'
 EOF
 
 # $CC and $CXX: the build's compiler, except that a link naming $LIB_FUZZING_ENGINE or $LIB_ALLOCATION_FAILURE_ENGINE

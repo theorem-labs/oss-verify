@@ -31,6 +31,15 @@
 # With OV_RECORDS set (compile sets it for oss-verify check --checks), it also records the link for the checks of the
 # binaries: the linker's map, the files the link took, and a quiet twin linked with the quiet driver (below, at the
 # end). None of this changes a byte of the two outputs.
+#
+# With OV_BASE_LAYOUT set to a layout tree (layout.py collect) that holds an entry for this build and target,
+# $OV_BASE_LAYOUT/$OV_BUILD/<the output's file name>/, the link is an append link, for a development build. layout.py
+# append plans where each .text input section goes, so that each function whose code did not change keeps the
+# address the base gave it, and writes a linker script of that plan. The output and its stripped twin are linked with
+# that script (-Wl,-T,<script>, after the seals). The quiet twin is always a normal link. An allocation-failure link
+# takes the append mode too. With OV_BASE_LAYOUT unset, or with no entry for this link, it links exactly as above,
+# with the same arguments in the same order. With OV_LAYOUT=1 and OV_RECORDS, the record also holds the functions the
+# link wraps and, for an append link, where the append mode put each .text input section (below, at the end).
 set -euo pipefail
 
 # shellcheck source=/dev/null
@@ -65,6 +74,17 @@ if [ -n "${OV_ADAPTER:-}" ]; then
   driver="$OV_CLI $OV_ADAPTER"
 fi
 
+# The base entry of an append link (above). With OV_BASE_LAYOUT set and no entry for this link, it is a normal link.
+entry=""
+if [ -n "${OV_BASE_LAYOUT:-}" ]; then
+  target=$(basename -- "$out")
+  entry=$OV_BASE_LAYOUT/$OV_BUILD/$target
+  if [ ! -d "$entry" ]; then
+    echo "link-fuzz-target: $target ($OV_BUILD): the base layout has no entry $entry, so this link is a normal one" >&2
+    entry=""
+  fi
+fi
+
 if [ "$driver" = "$OV_AF_DRIVER" ] || [ "$driver" = "$OV_AFC_DRIVER" ]; then
   copies=$(mktemp -d /tmp/ov/af.XXXXXX)
   for i in "${!args[@]}"; do
@@ -97,8 +117,9 @@ if [ "$driver" = "$OV_AF_DRIVER" ] || [ "$driver" = "$OV_AFC_DRIVER" ]; then
     # shellcheck disable=SC2086 # a list of options
     llvm-objcopy $OV_AF_RENAME "$copy"
     args[i]=$copy
-    # For the record (below): which file the copy stands for.
-    if [ -n "${OV_RECORDS:-}" ]; then
+    # For the record (below), and for an append link, which keys a copy's sections by its original: which file the
+    # copy stands for.
+    if [ -n "${OV_RECORDS:-}" ] || [ -n "$entry" ]; then
       printf '%s\t%s\t%s\n' "$copy" "$(readlink -f -- "$a")" "$(sha256sum < "$a" | cut -d' ' -f1)" >> "$copies/renamed"
     fi
   done
@@ -111,15 +132,44 @@ link() {
     ${tail[@]+"${tail[@]}"}
 }
 
+# layout <command> <options>: python3 layout.py <command> <options> -- <the link's command>, which is the words that
+# link gives the compiler with no -o, no map and no script.
+layout() {
+  # shellcheck disable=SC2086 # the lists in link.env are meant to be split
+  python3 "$(dirname -- "$0")/layout.py" "$@" -- $real -static -no-pie -Wl,--gc-sections $driver $OV_SILENT_LD \
+    ${args[@]+"${args[@]}"} $seals
+}
+
+# An append link: layout.py append links once normally in $work (the probe link), plans where each .text input
+# section goes, and links with the script of that plan there (the check link) to verify it. It writes the script, the
+# placement and the wraps into $work. When the read-only data in front of .text grew past its room, it writes no
+# script and says so: the two links below are then normal ones. When the link cannot be made, or the mode has a
+# defect, it says which and exits with a status other than 0, and the link stops with that status (set -e), before it
+# writes the output.
+script=""
+if [ -n "$entry" ]; then
+  work=$(mktemp -d /tmp/ov/append.XXXXXX)
+  renamed=()
+  if [ -n "${copies:-}" ] && [ -f "$copies/renamed" ]; then renamed=(--renamed "$copies/renamed"); fi
+  layout append --base "$entry" --work "$work" ${renamed[@]+"${renamed[@]}"} --script "$work/append.ld" \
+    --placement "$work/placement.tsv" --wraps "$work/wraps"
+  [ ! -s "$work/append.ld" ] || script=-Wl,-T,$work/append.ld
+fi
+
 # With OV_RECORDS (oss-verify check --checks), the first link also writes the linker's map: every input section the link
 # took, with the object or archive member it came from. It is the last argument, so that it is the map the linker
-# writes even when the link names one of its own. The map changes no byte of either output.
-[ -z "${OV_RECORDS:-}" ] || tail=("-Wl,-Map=$OV_RECORDS/map.$$")
+# writes even when the link names one of its own. The map changes no byte of either output. An append link's script
+# comes before it, after the link's own arguments and the seals, in the output's link and its stripped twin's.
+tail=(${script:+"$script"})
+[ -z "${OV_RECORDS:-}" ] || tail+=("-Wl,-Map=$OV_RECORDS/map.$$")
 link -o "$out"
-tail=()
+tail=(${script:+"$script"})
 sum=$(sha256sum "$out" | cut -d' ' -f1)
 link -Wl,--strip-all -o "$OV_TWINS/$sum.tmp"
 mv -f "$OV_TWINS/$sum.tmp" "$OV_TWINS/$sum"
+# The quiet twin (below) is a normal link, with no script: its driver objects are other files, which no pattern of the
+# script names, and a quiet link that failed would leave no record at all.
+tail=()
 
 [ -n "${OV_RECORDS:-}" ] || exit 0
 # The record of this link, for the checks of oss-verify check --checks (src/oss_verify/check_links.py), in
@@ -133,6 +183,11 @@ mv -f "$OV_TWINS/$sum.tmp" "$OV_TWINS/$sum"
 #   quiet       the quiet twin: the same link, stripped, with each of the driver's objects compiled with -DHARNESS_QUIET
 #               (compile makes <object>-quiet.o beside each one; a recipe's own adapter names its quiet build in
 #               OV_ADAPTER_QUIET), so that the driver writes nothing. Absent when one of them has no quiet build.
+#   wraps       with OV_LAYOUT=1: the functions the link wraps (each --wrap=<f> of the linker), one a line (layout.py
+#               wraps; in an append link, layout.py append writes the same list)
+#   placement.tsv
+#               with OV_LAYOUT=1, for an append link: where the append mode put each .text input section, and the
+#               cause for which a same-bytes one moved (layout.py append)
 # Every input is also kept, by its sha256, in $OV_RECORDS/store/: what the build made is gone when its container
 # ends, and the checks examine its code. A record that cannot be written is left out, with a warning: the link itself
 # has succeeded, and the checks then say that the target has no record.
@@ -152,6 +207,14 @@ record_link() {
   { for word in $driver $seals; do case "$word" in *.o) printf '%s\n' "$word" ;; esac; done; } > "$rec/driver" \
     || return 1
   if [ -n "${copies:-}" ] && [ -f "$copies/renamed" ]; then cp -- "$copies/renamed" "$rec/renamed" || return 1; fi
+  if [ "${OV_LAYOUT:-}" = 1 ]; then
+    if [ -n "$entry" ]; then
+      cp -- "$work/wraps" "$rec/wraps" || return 1
+      cp -- "$work/placement.tsv" "$rec/placement.tsv" || return 1
+    else
+      layout wraps > "$rec/wraps" || return 1
+    fi
+  fi
   awk '{
     sub(/^ *[0-9a-f]+ +[0-9a-f]+ +[0-9a-f]+ +[0-9]+ +/, "")
     at = 0
