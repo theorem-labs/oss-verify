@@ -204,6 +204,21 @@ class Table(unittest.TestCase):
                          SINCE + "applies kay.0002-new.patch to fuzz_a, fuzz_h: the binaries of fuzz_a, fuzz_h differ "
                          "from the release's" + KAY_NOTES)
 
+    def test_a_link_to_a_tree_in_a_tree_that_other_links_reach(self):
+        # The link ext/kay-fuzz_g/vendor points to ext/kay-fuzz_c/src/sub. ext/kay-fuzz_c/src is a link to
+        # ext/kay-fuzz_b/src, which is a link to ext/kay-fuzz_a/src. So the build of kay-fuzz_g reads
+        # ext/kay-fuzz_a/src/sub, and no other part of ext/kay-fuzz_a/src.
+        build = self.PORT["projects/kay/build.sh"] + "(\nov_target_begin kay-fuzz_g\nov_target_build fuzz_g\n)\n"
+        links = "link\text/kay-fuzz_g/vendor\text/kay-fuzz_c/src/sub\n"
+        cases = {"a patch in that tree": ("ext/kay-fuzz_a/src/sub/lib", "fuzz_a, fuzz_b, fuzz_c, fuzz_g"),
+                 "a patch in another part of ext/kay-fuzz_a/src": ("ext/kay-fuzz_a/src/other",
+                                                                   "fuzz_a, fuzz_b, fuzz_c")}
+        for case, (at, targets) in cases.items():
+            with self.subTest(case):
+                self.assertEqual(self.row("kay", ports=self.new_patch(at, links=links, build=build)),
+                                 SINCE + f"applies kay.0002-new.patch to {targets}: the binaries of {targets} differ "
+                                 "from the release's" + KAY_NOTES)
+
     def test_a_link_whose_parent_is_in_a_link_cycle(self):
         # The tree of the patch has no link, but the parent of the link ext/kay-x/vendor does not resolve. So the table
         # cannot tell which tree holds that link, nor which builds read the tree that it points to.
@@ -227,8 +242,8 @@ class Table(unittest.TestCase):
                  "link\text/kay-fuzz_q/src/dep\text/kay-shared\nlink\text/kay-fuzz_r/src\text/kay-lib\n")
         self.assertEqual(self.row("kay", ports=self.new_patch("ext/kay-fuzz_q/src/dep/vendor", links=links,
                                                               build=build)),
-                         SINCE + "applies kay.0002-new.patch to fuzz_p, fuzz_q, fuzz_r: the binaries of fuzz_p, fuzz_q, "
-                         "fuzz_r differ from the release's" + KAY_NOTES)
+                         SINCE + "applies kay.0002-new.patch to fuzz_p, fuzz_q, fuzz_r: the binaries of fuzz_p, "
+                         "fuzz_q, fuzz_r differ from the release's" + KAY_NOTES)
 
     def test_port_content_that_fills_sources_takes_a_bounded_time(self):
         # A sources file of 64 KiB is the most that oss-verify validate takes. seeded-projects.yml stops after 5
