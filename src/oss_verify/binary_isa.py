@@ -773,10 +773,17 @@ def unwinder_vlenb_idiom(buf, off):
     return u32(buf, off) >> 20 == 0xC22
 
 
+# The most distinct words outside_sites() looks for with bytes.find. Each word is one pass over the region, and past
+# about 16 one pass over the census's words is faster: 9.5 MiB took 0.02 s for one word with bytes.find, 0.21 s with
+# the census's words, and 1.2 s for 128 words with bytes.find.
+FIND_WORDS = 8
+
+
 def outside_sites(buf, base, clean, outw, pairs_fn):
     """Every (address, word) of the region whose word is in `outw`, in address order. A region without a finding (at
-    an even address, see isa_census()) is searched with bytes.find, and only hits at aligned words are kept."""
-    if not clean:
+    an even address, see isa_census()) and with at most FIND_WORDS of them is searched with bytes.find, and only hits
+    at aligned words are kept."""
+    if not clean or len(outw) > FIND_WORDS:
         return [(a, w) for a, w in pairs_fn() if w in outw]
     res = []
     lead = 2 * aligned_parity(base)
