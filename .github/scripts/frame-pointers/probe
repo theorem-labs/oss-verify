@@ -11,9 +11,9 @@
 # oss-verify check does. Then it builds the probes of this directory in a project image FROM that builder, and runs
 # compile there, the plain build, with no network, as oss-verify check does:
 #   - the C probe (probe.c and build.sh), in every row;
-#   - in a Rust row (ROW ends in -rust), the Rust probe (rust/) too, with tests/fixtures/rust-example/Cargo.lock as its
-#     lock. lay-out-sources gets its crates with the network while the image builds, and the Rust recipe compiles the
-#     standard library from source.
+#   - in a Rust row (ROW ends in -rust), the Rust probe (rust/) too, with the Dockerfile, the Cargo.lock and the
+#     crate/Cargo.toml of tests/fixtures/rust-example. lay-out-sources gets its crates with the network while the image
+#     builds, and the Rust recipe compiles the standard library from source.
 # frames.py then reads each probe in the builder of its image, with the probe's symbols: on FP_IMAGE, each fp_probe_*
 # function that calls must keep a frame record (frames.py probe --expect fp); on BASE_IMAGE, at least one must not
 # (--expect base). In the C and C++ row (no -rust or -python at the end of ROW), frames.py count also counts the
@@ -65,6 +65,7 @@ builder() {
 
 # c_probe KIND: the C probe's project image, FROM the builder of KIND: probe.c and build.sh in $SRC, where compile
 # runs build.sh.
+# shellcheck disable=SC2317 # the build loop calls it as "${language}_probe"
 c_probe() {
   docker build --progress=plain --build-arg "BASE_BUILDER=$(tag builder "$1")" -t "$(tag c "$1")" -f - "$here" <<'EOF'
 ARG BASE_BUILDER=oss-verify-base-builder
@@ -74,13 +75,17 @@ WORKDIR $SRC
 EOF
 }
 
-# rust_probe KIND: the Rust probe's project image, FROM the builder of KIND. Its build context is a copy of rust/,
-# with the fixture's Cargo.lock.
+# rust_probe KIND: the Rust probe's project image, FROM the builder of KIND, made by the fixture's Dockerfile
+# (tests/fixtures/rust-example/Dockerfile). Its build context is a copy of rust/, with the fixture's Cargo.lock and
+# crate/Cargo.toml.
+# shellcheck disable=SC2317 # the build loop calls it as "${language}_probe"
 rust_probe() {
   local context=$work/rust-$1
   cp -R "$here/rust" "$context"
   cp "$root/tests/fixtures/rust-example/Cargo.lock" "$context/Cargo.lock"
-  docker build --progress=plain --build-arg "BASE_BUILDER=$(tag builder "$1")" -t "$(tag rust "$1")" "$context"
+  cp "$root/tests/fixtures/rust-example/crate/Cargo.toml" "$context/crate/Cargo.toml"
+  docker build --progress=plain --build-arg "BASE_BUILDER=$(tag builder "$1")" -t "$(tag rust "$1")" \
+    -f "$root/tests/fixtures/rust-example/Dockerfile" "$context"
 }
 
 # build LANGUAGE KIND: compile in the probe's project image, the plain build, with no network, into
@@ -91,25 +96,23 @@ build() {
     "$(tag "$1" "$2")" compile
 }
 
-# frames IMAGE TITLE ARGUMENT...: frames.py ARGUMENT... in the builder of IMAGE (base or fp), with $work/out at /out.
+# frames KIND TITLE ARGUMENT...: frames.py ARGUMENT... in the builder of KIND (base or fp), with $work/out at /out.
 # Its exit status.
 frames() {
-  local image=$1 title=$2 status=0
+  local kind=$1 title=$2 status=0
   shift 2
   docker run --rm --network=none --entrypoint python3 -v "$here:/fp:ro" -v "$work/out:/out:ro" \
-    "$(tag builder "$image")" /fp/frames.py "$@" > "$work/frames.txt" 2>&1 || status=$?
+    "$(tag builder "$kind")" /fp/frames.py "$@" > "$work/frames.txt" 2>&1 || status=$?
   report "$title" "$work/frames.txt"
   return "$status"
 }
 
-for image in base fp; do
-  if [ "$image" = base ]; then builder "$base" base; else builder "$fp" fp; fi
-  c_probe "$image"
-  build c "$image"
-  if [ "$toolchain" = rust ]; then
-    rust_probe "$image"
-    build rust "$image"
-  fi
+for kind in base fp; do
+  if [ "$kind" = base ]; then builder "$base" base; else builder "$fp" fp; fi
+  for language in $probes; do
+    "${language}_probe" "$kind"
+    build "$language" "$kind"
+  done
 done
 
 say ""
@@ -118,10 +121,10 @@ say ""
 say "- base image: \`$base\`"
 say "- frame-pointer image: \`$fp\`"
 failed=0
-for image in base fp; do
+for kind in base fp; do
   for language in $probes; do
-    frames "$image" "the $language probe on the $image image: frames.py probe --expect $image" \
-      probe --expect "$image" "/out/$image-$language/fp_probe" || failed=1
+    frames "$kind" "the $language probe on the $kind image: frames.py probe --expect $kind" \
+      probe --expect "$kind" "/out/$kind-$language/fp_probe" || failed=1
   done
 done
 

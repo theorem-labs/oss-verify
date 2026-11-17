@@ -605,14 +605,14 @@ class AllocationFailureOnCjson(unittest.TestCase):
 # the fixture: the row of infra/toolchains.tsv that the image is made from, and the variable that names the image. The
 # rows are taken by name, never as the newest for a language, so that these tests read the same images after
 # infra/toolchains.tsv has the frame-pointer rows too.
-FRAME_POINTERS = {"c": ("oss-fuzz-theorems-2026.10", "OV_FP_TOOLCHAIN_C"),
-                  "rust": ("oss-fuzz-theorems-2026.10-rust", "OV_FP_TOOLCHAIN_RUST")}
+FRAME_POINTER_IMAGES = {"c": ("oss-fuzz-theorems-2026.10", "OV_FP_TOOLCHAIN_C"),
+                        "rust": ("oss-fuzz-theorems-2026.10-rust", "OV_FP_TOOLCHAIN_RUST")}
 # What toolchain.sh adds to the C flags, and rust/recipes.sh to rustc's, on a frame-pointer image.
 FP_C_FLAG = "-fno-omit-frame-pointer"
 FP_RUST_FLAG = "-Cforce-frame-pointers=yes"
 
 
-def toolchain_row(name):
+def row_image(name):
     """The image of the row of infra/toolchains.tsv named `name`."""
     images = [image for row, image, _, _ in check_build.toolchains() if row == name]
     if len(images) != 1:
@@ -621,7 +621,7 @@ def toolchain_row(name):
 
 
 @unittest.skipUnless(os.environ.get("OV_DOCKER_TESTS") == "1"
-                     and all(docker_ready(toolchain_row(row)) for row, _ in FRAME_POINTERS.values()),
+                     and all(docker_ready(row_image(row)) for row, _ in FRAME_POINTER_IMAGES.values()),
                      "set OV_DOCKER_TESTS=1, with Docker and the base images of the frame-pointer images, to build the "
                      "fixtures on them")
 class FramePointers(unittest.TestCase):
@@ -633,7 +633,7 @@ class FramePointers(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         # A missing image is an error of the run, not a reason to skip.
-        missing = [variable for _, variable in FRAME_POINTERS.values() if not os.environ.get(variable)]
+        missing = [variable for _, variable in FRAME_POINTER_IMAGES.values() if not os.environ.get(variable)]
         if missing:
             raise AssertionError(f"OV_DOCKER_TESTS=1, and no frame-pointer image is named: set {' and '.join(missing)} "
                                  "(.github/workflows/toolchain-images.yaml makes the images)")
@@ -649,10 +649,10 @@ class FramePointers(unittest.TestCase):
         }
         # The project image of each fixture, on the base image ("base") and on the frame-pointer image ("fp").
         cls.tags = {}
-        for language, (row, variable) in FRAME_POINTERS.items():
-            for image, toolchain in (("base", toolchain_row(row)), ("fp", os.environ[variable])):
-                tag = f"oss-verify-test/{jobs[language].name}-frame-pointers:{image}"
-                cls.tags[language, image] = tag
+        for language, (row, variable) in FRAME_POINTER_IMAGES.items():
+            for kind, toolchain in (("base", row_image(row)), ("fp", os.environ[variable])):
+                tag = f"oss-verify-test/{jobs[language].name}-frame-pointers:{kind}"
+                cls.tags[language, kind] = tag
                 check_build.build_project(jobs[language], "0" * 40, check_build.build_builder(toolchain), tag,
                                           cls.work)
 
@@ -662,11 +662,11 @@ class FramePointers(unittest.TestCase):
         for tag in cls.tags.values():
             subprocess.run(["docker", "image", "rm", tag], capture_output=True)
 
-    def compile(self, language, image, *settings):
-        """compile, the plain build, in the project image of `language` on the `image` ("base" or "fp"), with
+    def compile(self, language, kind, *settings):
+        """compile, the plain build, in the project image of `language` on the image of `kind` ("base" or "fp"), with
         compile_build's docker run arguments and an -e for each of `settings`: its exit status, and its standard output
         and standard error together."""
-        tag = self.tags[language, image]
+        tag = self.tags[language, kind]
         out = self.work / "out"
         check_build.empty_directory(out, tag, labels=self.labels)
         environment = [word for setting in settings for word in ("-e", setting)]

@@ -506,13 +506,14 @@ def check_files(config, files):
         if text is None:
             yield f"{name} is larger than {limit // 1024} KiB (or not UTF-8 text)"
             continue
-        if name in ("Dockerfile", "build.sh") and not text.strip():
-            yield f"{name} is empty"
-        if name in ("Dockerfile", "build.sh") and FRAME_POINTERS in text:
-            yield (
-                f"{name} names {FRAME_POINTERS}: only the toolchain image gives that setting "
-                '(docs/build-contract.md, "Frame pointers")'
-            )
+        if name in ("Dockerfile", "build.sh"):
+            if not text.strip():
+                yield f"{name} is empty"
+            if FRAME_POINTERS in text:
+                yield (
+                    f"{name} names {FRAME_POINTERS}: only the toolchain image gives that setting "
+                    '(docs/build-contract.md, "Frame pointers")'
+                )
         if name in FILE_KEYS and config.get(FILE_KEYS[name]) is not None:
             yield f"{name} is given both beside project.yaml and as {FILE_KEYS[name]}: in your repository; one place only"
         if in_repo and name not in FILE_KEYS:
