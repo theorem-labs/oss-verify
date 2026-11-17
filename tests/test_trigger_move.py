@@ -548,7 +548,7 @@ class FirstRunArtifact(Stand):
         """Route, take-build-results, review-gather and the comment job's post, each as review.yml runs it, for each
         artifact of VARIANTS."""
         self.need(tree, ".github/workflows/review.yml", ".github/scripts/take-build-results",
-                  ".github/scripts/steering.py")
+                  ".github/scripts/steering.py", ".github/scripts/artifact.py")
         review = self.workflow(tree, "review.yml")
         no_result = re.search(r'^NO_RESULT = "(.*)"$', (tree / ".github/scripts/take-build-results").read_text(),
                               re.M).group(1)
@@ -665,7 +665,8 @@ class FirstRunArtifact(Stand):
         import contextlib
         import tracemalloc
         from unittest import mock
-        self.need(ROOT, ".github/scripts/take-build-results", ".github/scripts/steering.py")
+        self.need(ROOT, ".github/scripts/take-build-results", ".github/scripts/steering.py",
+                  ".github/scripts/artifact.py")
         saved = list(sys.path)
         try:
             loader = importlib.machinery.SourceFileLoader("take_build_results_of_this_test",
@@ -1391,13 +1392,10 @@ class HeldApproval(Stand):
             self.assertTrue(step["uses"].startswith("actions/create-github-app-token@"), step)
         self.assertNotIn("permission-actions", permissions(app))
         self.assertEqual(permissions(token), {"permission-actions": "write"})
-        self.assertEqual((token["id"], token["if"], approve["if"]),
-                         ("approve", "env.APPROVE == 'true' || env.REPLAY == 'true'", "env.APPROVE == 'true'"))
-        self.assertEqual(app["if"], "env.APPROVE != 'true' && env.REPLAY != 'true'")
+        self.assertEqual(token["id"], "approve")
         self.assertEqual(names.index(self.TOKEN) + 1, names.index(self.APPROVE))
         self.assertLess(names.index(self.TOKEN), names.index(self.REPLAY))
         replay = self.step(self.review, "comment", self.REPLAY)
-        self.assertEqual(replay["if"], "env.REPLAY == 'true'")
         for step in (approve, replay):
             self.assertEqual(step["env"]["GH_TOKEN"], "${{ steps.approve.outputs.token }}")
         # No other step takes the token that can write runs.
@@ -2067,24 +2065,46 @@ class ReviewThatPasses(Stand):
     """d10: the comment of an enrollment whose review passes says what happens next, as review.md's paragraph
     says."""
 
-    # The paragraph's three statements.
+    # The paragraph's statements. The first one finds the paragraph.
     STATEMENTS = ("Theorem writes the theorem statements of the project, and publishes them as its `publish` field "
-                  "allows", "We do not promise to merge the pull request or to start work on the proofs.",
-                  "The maintainer needs to do nothing more.")
-    # The stand-in model's comment, which says them to the maintainer.
-    SAID = ("Theorem writes the theorem statements of the project, and publishes them as its `publish` field allows",
+                  "allows (`docs/project-yaml.md`, \"publish\").",
+                  "the check `Enrollment review` of this commit has the conclusion `success`, and the comment says "
+                  "what happens next.",
+                  "If Enroll dispatch then gives the pull request one of four labels, the statements wait.",
+                  "We do not promise to merge the pull request or to start work on the proofs.",
+                  "The maintainer needs to do nothing more.",
+                  "When the comment has no request, these sentences end the visible text, in place of the offer below.")
+    # The labels of Enroll dispatch that make the statements wait, and what each one means.
+    LABELS = {"language-paused": "the project's language is paused for now",
+              "name-review": "the project's name has a dot, which the statements repository cannot take",
+              "size-review": "a plain binary has more than 1 MB of code, or its size cannot be read",
+              "maintainer-review": "the author is not shown to maintain the project's repository"}
+    # The only sentences of the paragraph that name a comment: each one is about the comment of the review. Enroll
+    # dispatch puts a label on and posts no comment, so the paragraph points to no comment of a label.
+    ABOUT_THE_COMMENT = ("When no check is **fail** or **person**, the check `Enrollment review` of this commit has "
+                         "the conclusion `success`, and the comment says what happens next.",
+                         "The comment says what each label means, in these words or in plainer words.",
+                         STATEMENTS[-1])
+    # What neither review.md nor the comment of a pass says: that Theorem decides the next step, that a maintainer
+    # will look at or review the pull request, or anything of held bugs.
+    MUST_NOT_SAY = re.compile(r"theorem decides|decides the next step|maintainer will (look|review)|held bug", re.I)
+    # The stand-in model's comment, which tells the maintainer what the paragraph asks for.
+    SAID = ("The check `Enrollment review` of this commit has the conclusion `success`.",
+            "Theorem writes the theorem statements of the project, and publishes them as its `publish` field allows "
+            "(`docs/project-yaml.md`, \"publish\").",
+            "If the pull request then gets one of these four labels, the statements wait:",
+            *(f"- `{label}`: {meaning}." for label, meaning in LABELS.items()),
             "We do not promise to merge the pull request or to start work on the proofs.",
             "You need to do nothing more.")
-    COMMENT = ("Every check of review.md passes for projects/libreac/. The check `Enrollment review` of this commit "
-               "has the conclusion `success`. " + SAID[0] + " (`docs/project-yaml.md`, \"publish\"). " + SAID[1]
-               + " " + SAID[2] + "\n")
+    COMMENT = ("Every check of review.md passes for projects/libreac/. " + " ".join(SAID[:3]) + "\n\n"
+               + "\n".join(SAID[3:7]) + "\n\n" + " ".join(SAID[7:]) + "\n")
     SESSION = "09227178-7bbf-4e5f-86db-8736e530ef01"
 
     def paragraph(self):
-        """The bullet of review.md's section "Write the comment" that holds the first statement."""
+        """The bullet of review.md's section "Write the comment" that holds the first statement, with no "- "."""
         text = (ROOT / "review.md").read_text()
         section = text.split("\n## Write the comment\n", 1)[1].split("\n## ", 1)[0]
-        found = [bullet for bullet in re.split(r"(?m)^- ", section) if self.STATEMENTS[0] in bullet]
+        found = [bullet.strip() for bullet in re.split(r"(?m)^- ", section) if self.STATEMENTS[0] in bullet]
         self.assertEqual(len(found), 1, found)
         return found[0]
 
@@ -2092,21 +2112,27 @@ class ReviewThatPasses(Stand):
         paragraph = self.paragraph()
         for statement in self.STATEMENTS:
             self.assertIn(statement, paragraph)
-        self.assertIn("conclusion `success`", paragraph)
+        for label, meaning in self.LABELS.items():
+            self.assertIn(f"The label `{label}` means that {meaning}.", paragraph)
 
     def test_passes_review_md_says_nothing_the_comment_of_a_pass_must_not_say(self):
-        said = re.compile(r"theorem decides|decides the next step|maintainer will (look|review)|held bug", re.I)
+        """The paragraph names the labels as facts, and does not say who decides. It points to no comment of a
+        label. No line of review.md says what MUST_NOT_SAY matches."""
+        paragraph = self.paragraph()
+        self.assertNotRegex(paragraph, re.compile(r"decid", re.I))
+        sentences = re.split(r"(?<=\.) +(?=[A-Z])", paragraph)
+        self.assertEqual([s for s in sentences if re.search(r"\bcomment", s, re.I)], list(self.ABOUT_THE_COMMENT))
         lines = (ROOT / "review.md").read_text().splitlines()
-        self.assertEqual([(n, line) for n, line in enumerate(lines, 1) if said.search(line)], [])
+        self.assertEqual([(n, line) for n, line in enumerate(lines, 1) if self.MUST_NOT_SAY.search(line)], [])
 
     def test_passes_the_comment_of_an_enrollment_that_passes_says_what_happens_next(self):
+        # The prompt that the review job builds has the model read review.md, which holds the paragraph.
+        self.paragraph()
         import test_check_checks
         import test_outside_screen
         evaluate = test_outside_screen.evaluate
         review = self.workflow(ROOT, "review.yml")
         posting = test_check_checks.PostingStep
-        # The prompt that the review job builds has the model read review.md, which holds the paragraph.
-        self.paragraph()
         ctx = {"needs.route.outputs.kind": "enrollment", "needs.route.outputs.pr": "8",
                "needs.route.outputs.sha": posting.HEAD, "needs.gather.outputs.name": "libreac",
                "needs.gather.outputs.session": "", "needs.gather.outputs.last": ""}
@@ -2140,6 +2166,7 @@ class ReviewThatPasses(Stand):
             [(_, _, body)] = step.comments(requests)
             for said in self.SAID:
                 self.assertIn(said, body)
+            self.assertNotRegex(body, self.MUST_NOT_SAY)
             self.assertEqual(step.record(requests)["conclusion"], "success")
         finally:
             step.tearDown()

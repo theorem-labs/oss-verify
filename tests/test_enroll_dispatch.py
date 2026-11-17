@@ -21,6 +21,7 @@ import time
 import tracemalloc
 import unittest
 import urllib.parse
+import warnings
 import zipfile
 
 import yaml
@@ -509,6 +510,35 @@ class ThePullRequest(unittest.TestCase):
         world = World()
         world.artifacts[101] = zipped({"record.json": text}, zipfile.ZIP_DEFLATED)
         self.assertEqual(dispatch.build_record(world.api(), REPO, 101), (record(), ""))
+
+    def test_a_record_artifact_that_the_reader_refuses_sends_nothing(self):
+        """read_member of .github/scripts/artifact.py, which take-build-results uses too, refuses an artifact that the
+        API gives with no size, a download larger than MAX_ARTIFACT_BYTES, and a zip that holds record.json two
+        times. Each is no record, and nothing is sent."""
+        text = json.dumps(record())
+        twice = io.BytesIO()
+        with zipfile.ZipFile(twice, "w") as archive, warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # zipfile warns of a second member of the same name
+            archive.writestr("record.json", text)
+            archive.writestr("record.json", text)
+        listing = f"repos/{REPO}/actions/runs/101/artifacts?name={dispatch.RECORD_ARTIFACT}&per_page=100"
+        for label, data, artifact, said in (
+                ("no size", zipped({"record.json": text}),
+                 {"id": 1010, "name": dispatch.RECORD_ARTIFACT, "expired": False},
+                 "the API gave Build run 101's enrollment-record with no id or size"),
+                # A stored record.json of MAX_ARTIFACT_BYTES: its header is at the limit, and its zip is larger.
+                ("a large download", zipped({"record.json": text.ljust(dispatch.MAX_ARTIFACT_BYTES)}), None,
+                 f"Build run 101's enrollment-record is larger than {dispatch.MAX_ARTIFACT_BYTES} bytes"),
+                ("record.json two times", twice.getvalue(), None,
+                 "Build run 101's enrollment-record does not hold record.json alone")):
+            with self.subTest(label):
+                world = World()
+                world.artifacts[101] = data
+                api = world.api()
+                if artifact is not None:
+                    api.table[listing] = [{"artifacts": [artifact]}]
+                got = dispatch.decide(api, REPO, 104, "pull_request", SHA)
+                self.assertEqual((got["decision"], decision_reason(got)), ("none", said))
 
     def test_the_reason_is_one_line(self):
         world = World()

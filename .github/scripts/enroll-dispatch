@@ -145,7 +145,6 @@ carries it, whatever else it decides, and never puts it on.
 from __future__ import annotations
 
 import datetime
-import io
 import json
 import os
 import re
@@ -158,10 +157,12 @@ from urllib.parse import quote
 import yaml
 
 # triage.py's maintainer check, the one the triage table shows as "Opened by an active maintainer". steering.py's list
-# of steering files, for the steering-file gate.
+# of steering files, for the steering-file gate. artifact.py's read of one file of a Build run's artifact, for the
+# record, and its Api.
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import steering  # noqa: E402
 import triage  # noqa: E402
+from artifact import Api, read_member  # noqa: E402
 
 # The size line for statements that start with no person's decision, "Up to 1 MB" of a plain binary
 # (dispatch://OSSV-141/ask/7c73eb21), the README's "less than 1 MB of code": 1 MB is 1,000,000 bytes here. It is
@@ -240,23 +241,6 @@ LOGIN = re.compile(r"[A-Za-z0-9-]+(\[bot\])?")
 TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 # The checkout this script is in: review.yml there holds ALLOWED_BOTS.
 CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
-
-
-class Api:
-    """GitHub's REST API through the gh command-line tool, which reads GH_TOKEN."""
-
-    def run(self, path: str, *flags: str) -> bytes:
-        return subprocess.run(["gh", "api", *flags, "--", path], check=True, capture_output=True).stdout
-
-    def get(self, path: str):
-        return json.loads(self.run(path))
-
-    def pages(self, path: str) -> list:
-        """Every page of a paginated answer, as a list of pages."""
-        return json.loads(self.run(path, "--paginate", "--slurp"))
-
-    def raw(self, path: str) -> bytes:
-        return self.run(path, "-H", "Accept: application/vnd.github.raw")
 
 
 def outcome(decision: str, reason: str, pr: int | None = None, project: str = "", sha: str = "",
@@ -342,32 +326,11 @@ def bound_checks(api: Api, runs: Runs, repo: str, sha: str, head: tuple) -> tupl
 
 def build_record(api: Api, repo: str, run_id: int) -> tuple[dict | None, str]:
     """The record build.yaml's record job uploaded in this run: the JSON of record.json, the one file of its artifact
-    RECORD_ARTIFACT; or None and why not. record.json must be stored or deflated, and of at most MAX_ARTIFACT_BYTES by
-    its header. A read with a size stops at the header's size for such a member, and the read of a member whose bytes
-    do not match its header fails."""
-    artifacts = [a for page in api.pages(f"repos/{repo}/actions/runs/{run_id}/artifacts?name={RECORD_ARTIFACT}"
-                                         "&per_page=100")
-                 for a in page.get("artifacts") or [] if a.get("name") == RECORD_ARTIFACT and not a.get("expired")]
-    if len(artifacts) != 1:
-        return None, f"Build run {run_id} has {len(artifacts)} unexpired {RECORD_ARTIFACT} artifacts, not one"
-    if int(artifacts[0].get("size_in_bytes") or 0) > MAX_ARTIFACT_BYTES:
-        return None, f"Build run {run_id}'s {RECORD_ARTIFACT} is larger than {MAX_ARTIFACT_BYTES} bytes"
-    data = api.raw(f"repos/{repo}/actions/artifacts/{artifacts[0]['id']}/zip")
+    RECORD_ARTIFACT; or None and why not. read_member reads it, with the limit MAX_ARTIFACT_BYTES. A zip that cannot be
+    read, and a record.json that is not JSON, give None too."""
     try:
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            names = archive.namelist()
-            if set(names) != {"record.json"} or (info := archive.getinfo("record.json")).file_size > MAX_ARTIFACT_BYTES:
-                return None, f"Build run {run_id}'s {RECORD_ARTIFACT} holds {names}, not record.json alone"
-            # read() with no size decompresses the whole member before it cuts the member to the header's size. A
-            # read with a size stops at the header's size for a stored or deflated member, and the read of a member
-            # whose bytes do not match its header fails (BadZipFile). zipfile decompresses bzip2 and lzma with no
-            # bound, also for a read with a size. So this reads only a stored or deflated member.
-            if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
-                return None, (f"Build run {run_id}'s record.json has the compression method {info.compress_type}, not "
-                              "stored or deflated")
-            with archive.open(info) as member:
-                text = member.read(MAX_ARTIFACT_BYTES)
-        return json.loads(text), ""
+        data, why = read_member(api, repo, run_id, RECORD_ARTIFACT, "record.json", MAX_ARTIFACT_BYTES)
+        return (None, why) if data is None else (json.loads(data), "")
     except (zipfile.BadZipFile, ValueError) as error:
         return None, f"Build run {run_id}'s {RECORD_ARTIFACT} cannot be read: {error}"
 
@@ -391,8 +354,8 @@ def size(value: object) -> bool:
     return value is None or (isinstance(value, int) and not isinstance(value, bool) and value >= 0)
 
 
-def record_problem(record: object, sha: str | None) -> str:
-    """Why the record cannot be used (for the commit `sha`, when it is known), or ''."""
+def record_problem(record: object, sha: str) -> str:
+    """Why the record cannot be used for the commit `sha`, or ''."""
     if not isinstance(record, dict) or record.get("schema") != RECORD_SCHEMA:
         return "the build record has another shape"
     pr, project = record.get("pr"), record.get("project")
@@ -400,8 +363,7 @@ def record_problem(record: object, sha: str | None) -> str:
         return "the build record names no pull request"
     if not isinstance(project, str) or not NAME.fullmatch(project):
         return "the build record names no project"
-    if not isinstance(record.get("sha"), str) or not SHA.fullmatch(record["sha"]) \
-            or (sha is not None and record["sha"] != sha):
+    if not isinstance(record.get("sha"), str) or not SHA.fullmatch(record["sha"]) or record["sha"] != sha:
         return f"the build record is of commit {record.get('sha')!r}, not {sha}"
     sizes = record.get("sizes")
     if not isinstance(sizes, dict) or not sizes:

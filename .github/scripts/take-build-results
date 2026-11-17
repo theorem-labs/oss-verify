@@ -24,9 +24,10 @@ of main's code. For any other pull request this reads nothing of the artifact, a
 First it reads every page of the pull request's files, and checks each name and each previous name. A list of
 MAX_LISTED_FILES files or more is not the whole change, so then it reads nothing.
 
-The artifact is ARTIFACT of BUILD_RUN, which build.yaml's results job writes. The run must have exactly one unexpired
-artifact of that name, of at most 1 MiB. Its zip must hold exactly one member, MEMBER, stored or deflated, of at most
-1 MiB (MAX_ARTIFACT_BYTES) by its header. A read with a size stops at the header's size for such a member, and the
+The artifact is ARTIFACT of BUILD_RUN, which build.yaml's results job writes, and read_member of
+.github/scripts/artifact.py reads it. The run must have exactly one unexpired artifact of that name, and the artifact
+and its download must be of at most 1 MiB (MAX_ARTIFACT_BYTES). Its zip must hold exactly one member, MEMBER, stored or
+deflated, of at most 1 MiB by its header. A read with a size stops at the header's size for such a member, and the
 read of a member whose bytes do not match its header fails. That member must be JSON with the schema SCHEMA and the
 fields of FIELDS, each of its type, shape and size. Its pr, sha and project must be PR, HEAD_SHA and NAME: the pull
 request and the head that route read from the API, and the project that the gather job's own take-project took. The
@@ -39,17 +40,17 @@ build. The exit status is 2 only when an input variable is missing or malformed.
 """
 from __future__ import annotations
 
-import io
 import json
 import os
 import re
 import secrets
 import subprocess
 import sys
-import zipfile
 
+# steering.py's list of steering files. artifact.py's read of one file of the Build run's artifact, and its Api.
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import steering  # noqa: E402
+from artifact import Api, read_member, whole  # noqa: E402
 
 ARTIFACT = "build-results"
 MEMBER = "results.json"
@@ -74,26 +75,8 @@ REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 NUMBER = re.compile(r"[1-9][0-9]*")
 
 
-class Api:
-    """GitHub's REST API through the gh command-line tool, which reads GH_TOKEN."""
-
-    def run(self, path: str, *flags: str) -> bytes:
-        return subprocess.run(["gh", "api", *flags, "--", path], check=True, capture_output=True).stdout
-
-    def pages(self, path: str) -> list:
-        """Every page of a paginated answer, as a list of pages."""
-        return json.loads(self.run(path, "--paginate", "--slurp"))
-
-    def raw(self, path: str) -> bytes:
-        return self.run(path, "-H", "Accept: application/vnd.github.raw")
-
-
 def nothing(build: str) -> dict:
     return {"build": build, "binaries": "", "checks": "", "commit": ""}
-
-
-def whole(value: object) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def text(value: object) -> bool:
@@ -169,32 +152,10 @@ def take(api: Api, repo: str, run: int, pr: int, head: str, name: str) -> tuple[
         return nothing(NO_RESULT), why
     if steered:
         return nothing(STEERED), why
-    pages = api.pages(f"repos/{repo}/actions/runs/{run}/artifacts?name={ARTIFACT}&per_page=100")
-    artifacts = [a for page in pages for a in page.get("artifacts") or []
-                 if a.get("name") == ARTIFACT and not a.get("expired")]
-    if len(artifacts) != 1:
-        return nothing(NO_RESULT), f"Build run {run} has {len(artifacts)} unexpired {ARTIFACT} artifacts, not one"
-    artifact = artifacts[0]
-    if not whole(artifact.get("id")) or not whole(artifact.get("size_in_bytes")):
-        return nothing(NO_RESULT), f"the API gave Build run {run}'s {ARTIFACT} with no id or size"
-    if artifact["size_in_bytes"] > MAX_ARTIFACT_BYTES:
-        return nothing(NO_RESULT), f"Build run {run}'s {ARTIFACT} is larger than {MAX_ARTIFACT_BYTES} bytes"
-    data = api.raw(f"repos/{repo}/actions/artifacts/{artifact['id']}/zip")
-    if len(data) > MAX_ARTIFACT_BYTES:
-        return nothing(NO_RESULT), f"Build run {run}'s {ARTIFACT} is larger than {MAX_ARTIFACT_BYTES} bytes"
-    with zipfile.ZipFile(io.BytesIO(data)) as archive:
-        if archive.namelist() != [MEMBER] or (info := archive.getinfo(MEMBER)).file_size > MAX_ARTIFACT_BYTES:
-            return nothing(NO_RESULT), f"Build run {run}'s {ARTIFACT} does not hold {MEMBER} alone"
-        # read() with no size decompresses the whole member before it cuts the member to the header's size. A read
-        # with a size stops at the header's size for a stored or deflated member, and the read of a member whose bytes
-        # do not match its header fails (BadZipFile). zipfile decompresses bzip2 and lzma with no bound, also for a
-        # read with a size. So this reads only a stored or deflated member.
-        if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
-            return nothing(NO_RESULT), (f"Build run {run}'s {MEMBER} has the compression method {info.compress_type}, "
-                                        "not stored or deflated")
-        with archive.open(info) as member:
-            text = member.read(MAX_ARTIFACT_BYTES)
-    results = json.loads(text)
+    data, why = read_member(api, repo, run, ARTIFACT, MEMBER, MAX_ARTIFACT_BYTES)
+    if data is None:
+        return nothing(NO_RESULT), why
+    results = json.loads(data)
     why = problem(results, pr, head, name)
     if why:
         return nothing(NO_RESULT), why

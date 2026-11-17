@@ -1059,7 +1059,8 @@ class Holdings(unittest.TestCase):
         """Its own token reads the checkout of .github/scripts and nothing else. The App's first token writes the
         check run, the review comment and the hold of a change pull request or an issue. The job makes it on every
         path but the approval of the held runs (APPROVE) and the replay of a merge (REPLAY), where no step writes
-        these. The second token, of the approval and the replay, is a case of tests/test_trigger_move.py (d7)."""
+        these. tests/test_trigger_move.py (d7) evaluates the if of the two token steps on each path, and checks the
+        second token, of the approval and the replay."""
         job = REVIEW_JOBS["comment"]
         self.assertEqual(job["permissions"], {"contents": "read", "id-token": "write"})
         checkout = job["steps"][0]
@@ -1067,7 +1068,6 @@ class Holdings(unittest.TestCase):
         self.assertEqual(checkout["with"], {"persist-credentials": False, "sparse-checkout": ".github/scripts"})
         tokens = {s["id"]: s for s in job["steps"] if "create-github-app-token" in s.get("uses", "")}
         self.assertEqual(sorted(tokens), ["app", "approve"])
-        self.assertEqual(tokens["app"]["if"], "env.APPROVE != 'true' && env.REPLAY != 'true'")
         self.assertEqual({k: v for k, v in tokens["app"]["with"].items() if k.startswith("permission-")},
                          {"permission-checks": "write", "permission-pull-requests": "write",
                           "permission-issues": "write"})
