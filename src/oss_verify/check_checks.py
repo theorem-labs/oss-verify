@@ -196,10 +196,11 @@ def qemu():
     found = shutil.which("qemu-riscv64-static")
     if not found:
         raise Failed("--checks runs the riscv64 binaries with qemu-riscv64-static, which is not on PATH. The check "
-                     "of system calls reads the runs of qemu 10.0.11 only: take qemu-user 1:10.0.11 out of Debian 13's "
-                     "package without installing it (installing registers qemu with the kernel), with dpkg-deb -x "
-                     "<the .deb> <directory> and ln -s qemu-riscv64 <directory>/usr/bin/qemu-riscv64-static, then put "
-                     "<directory>/usr/bin on PATH (docs/build-contract.md, \"The checks of a fuzz target\")")
+                     "of system calls reads the runs of qemu 10.0.11 only. Run .github/scripts/unpack-qemu "
+                     "<a new directory>: it downloads Debian 13's qemu-user 1:10.0.11, checks its SHA-256 and its "
+                     "version, and unpacks it without installing it (installing registers qemu with the kernel). "
+                     "Then put the directory that it prints on PATH (docs/build-contract.md, \"The checks of a fuzz "
+                     "target\")")
     return pathlib.Path(found).resolve()
 
 
