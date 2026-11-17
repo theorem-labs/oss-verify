@@ -220,9 +220,10 @@ def directory(root, path):
 def link(root, path, target, steps):
     """The (location, end) of the link at `path` to `target` (path components), which lay-out-sources makes after the
     links in `root` (from lay_out). It adds the link to `root`. The location is the path of the link: its parent after
-    those links, then its own name. The end is `target` after those links. None if a walk gives None, or if
-    lay-out-sources cannot make the link. The target must be there, and nothing must be at the location. So no path
-    laid out before the link, and not the target, can be at the location or in it."""
+    those links, then its own name. The end is `target` after those links. lay-out-sources also needs the target to be
+    there, but the sources file does not show each directory that a tree, git or archive line lays out. So this adds
+    the end where it is not there yet. None if a walk gives None, or if lay-out-sources cannot make the link because
+    something is at the location: a path laid out before the link, or the target, is at the location or in it."""
     parent, end = walk(root, path[:-1], steps), walk(root, target, steps)
     if parent is None or end is None:
         return None
