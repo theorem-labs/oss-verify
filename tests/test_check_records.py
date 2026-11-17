@@ -180,9 +180,11 @@ class Speed(unittest.TestCase):
         """The text of a line is found once, however many checks are on it. A copy for each check took memory that
         grew with the square of the line: 8,192 checks on one line of 172 KB held 1.4 GB of copies."""
         line = "if (x) g();" + " else if (x) abort();" * 8192
+        source = "void f(int x) {\n  " + line + "\n}\n"
+        found = self.timed(source)  # tracemalloc slows the reader several times over: time it without
         tracemalloc.start()
         try:
-            found = self.timed("void f(int x) {\n  " + line + "\n}\n")
+            check_records.find_checks(source)
             peak = tracemalloc.get_traced_memory()[1]
         finally:
             tracemalloc.stop()
