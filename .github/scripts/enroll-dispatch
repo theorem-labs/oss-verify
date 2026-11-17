@@ -343,7 +343,8 @@ def bound_checks(api: Api, runs: Runs, repo: str, sha: str, head: tuple) -> tupl
 def build_record(api: Api, repo: str, run_id: int) -> tuple[dict | None, str]:
     """The record build.yaml's record job uploaded in this run: the JSON of record.json, the one file of its artifact
     RECORD_ARTIFACT; or None and why not. record.json must be stored or deflated, and of at most MAX_ARTIFACT_BYTES by
-    its header and by the bytes read."""
+    its header. A read with a size stops at the header's size for such a member, and the read of a member whose bytes
+    do not match its header fails."""
     artifacts = [a for page in api.pages(f"repos/{repo}/actions/runs/{run_id}/artifacts?name={RECORD_ARTIFACT}"
                                          "&per_page=100")
                  for a in page.get("artifacts") or [] if a.get("name") == RECORD_ARTIFACT and not a.get("expired")]
@@ -355,19 +356,17 @@ def build_record(api: Api, repo: str, run_id: int) -> tuple[dict | None, str]:
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             names = archive.namelist()
-            if set(names) != {"record.json"} or archive.getinfo("record.json").file_size > MAX_ARTIFACT_BYTES:
+            if set(names) != {"record.json"} or (info := archive.getinfo("record.json")).file_size > MAX_ARTIFACT_BYTES:
                 return None, f"Build run {run_id}'s {RECORD_ARTIFACT} holds {names}, not record.json alone"
-            info = archive.getinfo("record.json")
-            # read() with no size decompresses the whole member before it cuts the member to the header's size.
-            # zipfile decompresses bzip2 and lzma with no bound, also for a read with a size. So this reads only a
-            # stored or deflated member, and at most one byte more than the limit.
+            # read() with no size decompresses the whole member before it cuts the member to the header's size. A
+            # read with a size stops at the header's size for a stored or deflated member, and the read of a member
+            # whose bytes do not match its header fails (BadZipFile). zipfile decompresses bzip2 and lzma with no
+            # bound, also for a read with a size. So this reads only a stored or deflated member.
             if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
                 return None, (f"Build run {run_id}'s record.json has the compression method {info.compress_type}, not "
                               "stored or deflated")
             with archive.open(info) as member:
-                text = member.read(MAX_ARTIFACT_BYTES + 1)
-        if len(text) > MAX_ARTIFACT_BYTES:
-            return None, f"Build run {run_id}'s record.json holds more than {MAX_ARTIFACT_BYTES} bytes"
+                text = member.read(MAX_ARTIFACT_BYTES)
         return json.loads(text), ""
     except (zipfile.BadZipFile, ValueError) as error:
         return None, f"Build run {run_id}'s {RECORD_ARTIFACT} cannot be read: {error}"

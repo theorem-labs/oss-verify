@@ -1922,7 +1922,7 @@ jobs:
       # step alone: the other paths of this job use the token above. The cost of actions: write: this token can also
       # cancel, re-run and start the runs of this repository, so it exists only on these two paths, and only the two
       # steps after it use it: the approval, and the replay, which starts a run with it.
-      - name: Get the oss-verify App's token to approve the held runs
+      - name: Get the oss-verify App's token to approve the held runs or replay a merge
         id: approve
         if: env.APPROVE == 'true' || env.REPLAY == 'true'
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0 (sha-pinned)

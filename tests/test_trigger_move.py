@@ -76,6 +76,10 @@ WORKFLOW_TOKEN, APP_TOKEN, APPROVE_TOKEN = "workflow-token", "app-token", "app-a
 # does. `gh pr view <n>` gives $FAKE_GH/pr-view-<n>.json, `gh pr diff <n>` gives $FAKE_GH/pr-<n>.diff, and
 # `gh workflow run` does nothing. Each call goes to $FAKE_GH/calls: its GH_TOKEN, then its arguments, each ended by NUL,
 # and the call by \1. What a call reads on its standard input (--input -) goes to $FAKE_GH/input.<n>, n counted from 1.
+# An endpoint with a file $FAKE_GH/<endpoint>.error fails: gh prints the text of that file. A list of runs (an answer
+# with workflow_runs) is as GitHub gives it. With -f or -F created=<from>..<to> or created=>=<from>, it holds only the
+# runs created in that range. With a filter (actor, branch, check_suite_id, created, event, head_sha or status, in the
+# query or in a field), it holds at most the first 1,000 runs.
 GH = r"""#!/usr/bin/env bash
 printf '%s\0' "${GH_TOKEN:-}" "$@" >> "$FAKE_GH/calls"
 printf '\1' >> "$FAKE_GH/calls"
@@ -89,7 +93,7 @@ case "${1:-} ${2:-}" in
 esac
 [ "${1:-}" = api ] || { echo "gh: not served here: $*" >&2; exit 9; }
 shift
-filter=. endpoint="" input="" slurp="" raw=""
+filter=. endpoint="" input="" slurp="" raw="" created="" cut=""
 while [ $# -gt 0 ]; do
   case $1 in
     --paginate|--) shift ;;
@@ -97,21 +101,38 @@ while [ $# -gt 0 ]; do
     --jq) filter=$2; shift 2 ;;
     --input) input=$2; shift 2 ;;
     -H) case $2 in *vnd.github.raw*|*vnd.github.diff*) raw=1 ;; esac; shift 2 ;;
-    --method|-X|-f|-F) shift 2 ;;
+    -f|-F)
+      case $2 in created=*) created=${2#created=} ;; esac
+      case ${2%%=*} in actor|branch|check_suite_id|created|event|head_sha|status) cut=1 ;; esac
+      shift 2 ;;
+    --method|-X) shift 2 ;;
     *) endpoint=$1; shift ;;
   esac
 done
+case "&${endpoint#*\?}" in
+  *"&actor="*|*"&branch="*|*"&check_suite_id="*|*"&created="*|*"&event="*|*"&head_sha="*|*"&status="*) cut=1 ;;
+esac
 [ "$input" != - ] || cat > "$FAKE_GH/input.$n"
 queried=${endpoint//\//_}
 bare=${endpoint%%\?*}
 bare=${bare//\//_}
+for file in "$FAKE_GH/$queried.error" "$FAKE_GH/$bare.error"; do
+  if [ -f "$file" ]; then cat "$file" >&2; exit 1; fi
+done
+runs='if type == "object" and (.workflow_runs | type) == "array" then .workflow_runs |= (map(select(
+    if $created == "" then true
+    elif ($created | startswith(">=")) then .created_at >= $created[2:]
+    elif ($created | test("^[^.]+[.][.][^.]+$")) then
+      ($created | split("..")) as [$from, $to] | .created_at >= $from and .created_at <= $to
+    else error("the stand-in gh reads no created=" + $created) end)) | if $cut == "" then . else .[:1000] end)
+  else . end'
 kind=json
 [ -z "$raw" ] || kind=raw
 for file in "$FAKE_GH/$queried.$kind" "$FAKE_GH/$bare.$kind"; do
   [ -f "$file" ] || continue
   if [ -n "$raw" ]; then exec cat "$file"; fi
   if [ -n "$slurp" ]; then exec jq -c -s . "$file"; fi
-  exec jq -r "$filter" "$file"
+  exec jq -r --arg created "$created" --arg cut "$cut" "$runs | $filter" "$file"
 done
 echo "gh: Not Found (HTTP 404): $endpoint" >&2
 exit 1
@@ -196,9 +217,9 @@ def triggers(workflow):
     return dict(on or {})
 
 
-def zipped(files):
+def zipped(files, method=zipfile.ZIP_STORED):
     buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w") as archive:
+    with zipfile.ZipFile(buffer, "w", method) as archive:
         for name, data in files.items():
             archive.writestr(name, data)
     return buffer.getvalue()
@@ -252,6 +273,10 @@ class Stand(unittest.TestCase):
     def serve_raw(self, endpoint, data):
         data = data if isinstance(data, bytes) else data.encode()
         (self.api / (endpoint.replace("/", "_") + ".raw")).write_bytes(data)
+
+    def serve_error(self, endpoint, printed):
+        """A call of `endpoint` fails, and gh prints `printed`."""
+        (self.api / (endpoint.replace("/", "_") + ".error")).write_text(printed)
 
     def clear(self):
         """No answer of the API, and no call recorded."""
@@ -649,16 +674,13 @@ class FirstRunArtifact(Stand):
         env = {**self.env, "GH_TOKEN": WORKFLOW_TOKEN, "REPO": REPO, "BUILD_RUN": self.RUN, "PR": PR,
                "HEAD_SHA": HEAD, "NAME": "x"}
         text = json.dumps(self.results({}))
-        honest = io.BytesIO()
-        with zipfile.ZipFile(honest, "w", zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("results.json", text)
         no_result = {"build": take.NO_RESULT, "binaries": "", "checks": "", "commit": ""}
         for label, data, want, said in (
                 ("deflated", self.understated("results.json", text, zipfile.ZIP_DEFLATED), no_result,
                  "the read failed (BadZipFile)"),
                 ("bzip2", self.understated("results.json", text, zipfile.ZIP_BZIP2), no_result,
                  f"Build run {self.RUN}'s results.json has the compression method 12, not stored or deflated."),
-                ("honest and deflated", honest.getvalue(),
+                ("honest and deflated", zipped({"results.json": text}, zipfile.ZIP_DEFLATED),
                  {"build": "The Build check success: ARTIFACT-RESULT.", "binaries": "ARTIFACT-BINARIES",
                   "checks": "ARTIFACT-CHECKS", "commit": ""}, f"read the results of Build run {self.RUN}")):
             self.assertLess(len(data), 1 << 20, label)
@@ -969,7 +991,7 @@ class HeldApproval(Stand):
 
     ROUTE = "An enrollment, a change or an issue"
     TRUST = "Whether the author and the account that started the run have write access"
-    TOKEN = "Get the oss-verify App's token to approve the held runs"
+    TOKEN = "Get the oss-verify App's token to approve the held runs or replay a merge"
     APPROVE = "Approve the held runs"
     REPLAY = "Replay the merge for Enroll dispatch"
     # The merge commit of pull request 7, once it is merged.
@@ -1458,13 +1480,15 @@ class HeldRuns(Stand):
                 "conclusion": conclusion if status == "completed" else None, "created_at": ago(minutes),
                 "run_started_at": ago(minutes if started is None else started)}
 
-    def go(self, refused=(), status=0):
+    def go(self, refused=(), status=0, broken=None):
         """One run of the step: the runs it started, as the arguments of gh, then the runs whose failed jobs it re-ran
-        (reruns). `refused`: the runs whose re-run GitHub refuses. The stand-in serves no answer for those, so gh fails
-        on them as on GitHub's refusal. `status`: the step's exit status. self.bounds gets each read of the runs by
-        hand as (its file, its bound), and self.window the earliest and the latest time of three hours before now while
-        the step ran."""
-        for path in self.api.glob("*.json"):
+        or tried to re-run (reruns). `refused`: the runs whose re-run GitHub refuses. The stand-in serves no answer for
+        those, so gh prints gh: Not Found (HTTP 404), as on GitHub's refusal. `broken`: for each run in it, what gh
+        prints when GitHub answers the re-run of the run with HTTP 5xx, or gives no answer. `status`: the step's exit
+        status. self.reads gets the filter created of each read of a list (None when the read has none): of the held
+        runs (held), and of the runs by hand of each file. self.bounds gets the bound of the reads of each file."""
+        broken = broken or {}
+        for path in [*self.api.glob("*.json"), *self.api.glob("*.error")]:
             path.unlink()
         self.serve(f"repos/{REPO}", {"default_branch": "main"})
         self.serve(f"repos/{REPO}/actions/runs", {"workflow_runs": self.held})
@@ -1482,8 +1506,10 @@ class HeldRuns(Stand):
             self.serve(f"repos/{REPO}/actions/runs/{run_id}/jobs", {"total_count": len(jobs), "jobs": jobs})
         # GitHub's answer to a re-run of the failed jobs of a run: 201, with an empty object.
         for run in self.reviews:
-            if run["id"] not in refused:
+            if run["id"] not in refused and run["id"] not in broken:
                 self.serve(f"repos/{REPO}/actions/runs/{run['id']}/rerun-failed-jobs", {})
+        for run_id, printed in broken.items():
+            self.serve_error(f"repos/{REPO}/actions/runs/{run_id}/rerun-failed-jobs", printed)
         since = len(self.calls())
         workflow = yaml.safe_load(self.workflow_text)
         before = datetime.datetime.now(datetime.timezone.utc)
@@ -1491,8 +1517,9 @@ class HeldRuns(Stand):
                                    {"github.token": WORKFLOW_TOKEN, "github.repository": REPO}, self.temp)
         after = datetime.datetime.now(datetime.timezone.utc)
         self.assertEqual(rc, status, log)
-        self.window = tuple((moment - datetime.timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
-                            for moment in (before, after))
+        stamp = "%Y-%m-%dT%H:%M:%SZ"
+        low, high = ((moment - datetime.timedelta(hours=3)).strftime(stamp) for moment in (before, after))
+        month = [(moment - datetime.timedelta(days=30)).strftime(stamp) for moment in (before, after)]
         calls = self.calls()[since:]
         # It only reads, but for the runs it starts and the runs whose failed jobs it re-runs, each with the job's own
         # token.
@@ -1504,30 +1531,62 @@ class HeldRuns(Stand):
             self.assertTrue(rerun and r["method"] == "POST" and "--input" not in r["args"], r)
             self.assertEqual(r["token"], WORKFLOW_TOKEN, r)
             reran.append(self.reruns(int(rerun.group(1))))
-        # Each read of the runs by hand asks GitHub only for the runs created from the bound of one head: the earlier of
-        # its newest held run (of a merged head, its newest held run of enroll-merged.yml) and three hours before now.
-        # GitHub leaves out a run before the bound, and the stand-in, which ignores the filter, gives it. The step skips
-        # a complete run created before its head's newest held run and more than an hour ago, so the two answers give
-        # the same result when each run that the case serves before the bound is complete.
-        low, high = self.window
+        # The reads of the lists. The first read of the held runs has no filter created. The first read of the runs by
+        # hand of a file asks for the runs created from the bound of the pass: three hours before now, or the newest
+        # held run of a head (of a merged head, its newest held run of enroll-merged.yml) when that is earlier. The
+        # stand-in cuts a read at 1,000 runs, as GitHub does. After a cut read, the next read of the list asks for the
+        # runs created from its bound (for the held runs, 30 days before now) to the oldest run that the cut read gave.
+        # The last read of each list gives fewer than 1,000 runs, so the step loses no run of the list.
         held = {run["created_at"] for run in self.held}
-        self.bounds = []
+        self.reads, self.bounds = {}, {}
         for r in self.requests(since):
-            if "/runs?event=workflow_dispatch" in (r["endpoint"] or ""):
-                bounds = [a.removeprefix("created=>=") for a in r["args"] if a.startswith("created=>=")]
-                self.assertEqual(len(bounds), 1, r["args"])
-                bound = bounds[0]
+            endpoint = r["endpoint"] or ""
+            if endpoint.startswith(f"repos/{REPO}/actions/runs?"):
+                name = "held"
+            elif "/runs?event=workflow_dispatch" in endpoint:
+                name = re.search(r"/workflows/([^/]+)/runs", endpoint).group(1)
+            else:
+                continue
+            created = [a.removeprefix("created=") for a in r["args"] if a.startswith("created=")]
+            self.assertLessEqual(len(created), 1, r["args"])
+            self.reads.setdefault(name, []).append(created[0] if created else None)
+        for name, reads in self.reads.items():
+            runs = {"held": self.held, "review.yml": self.reviews, "enroll-merged.yml": self.replays}[name]
+            if name == "held":
+                self.assertIsNone(reads[0], reads)
+            else:
+                self.assertTrue((reads[0] or "").startswith(">="), reads)
+                bound = self.bounds[name] = reads[0][2:]
                 self.assertRegex(bound, r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
                 self.assertTrue(low <= bound <= high or (bound in held and bound < low), (bound, low, high))
-                file = re.search(r"/workflows/([^/]+)/runs", r["endpoint"]).group(1)
-                self.bounds.append((file, bound))
-                runs = self.reviews if file == "review.yml" else self.replays
-                incomplete = [run["id"] for run in runs if run["created_at"] < bound and run["status"] != "completed"]
-                self.assertEqual(incomplete, [], bound)
+            gave = self.given(runs, reads[0])
+            for created in reads[1:]:
+                self.assertEqual(len(gave), 1000, (name, reads))
+                start, _, end = (created or "").partition("..")
+                if name == "held":
+                    self.assertTrue(month[0] <= start <= month[1], (created, month))
+                else:
+                    self.assertEqual(start, bound, reads)
+                self.assertEqual(end, min(run["created_at"] for run in gave), reads)
+                gave = self.given(runs, created)
+            self.assertLess(len(gave), 1000, (name, reads))
         started = [(token, " ".join(args)) for token, args in calls if args[:2] == ["workflow", "run"]]
         self.assertEqual({token for token, _ in started} - {WORKFLOW_TOKEN}, set())
         self.log = log
         return [run for _, run in started] + reran
+
+    @staticmethod
+    def given(runs, created):
+        """The runs of a list that a read with the filter created gives (None: no filter), as the stand-in gives them:
+        the runs created in its range, at most the first 1,000."""
+        if created is None:
+            kept = runs
+        elif created.startswith(">="):
+            kept = [run for run in runs if run["created_at"] >= created[2:]]
+        else:
+            low, high = created.split("..")
+            kept = [run for run in runs if low <= run["created_at"] <= high]
+        return kept[:1000]
 
     @staticmethod
     def starts(file, number):
@@ -1605,7 +1664,8 @@ class HeldRuns(Stand):
         sha = "7" * 40
         # Its job screen succeeded, and then its comment job failed: it could not sign in, or GitHub refused the
         # approval (the App's installation has not accepted actions: write).
-        for failed in ("Sign in to Google Cloud", "Get the oss-verify App's token to approve the held runs"):
+        for failed in ("Sign in to Google Cloud",
+                       "Get the oss-verify App's token to approve the held runs or replay a merge"):
             for label, minutes, started, again in (
                     ("run 90 minutes old", 90, None, True),
                     ("run 30 minutes old", 30, None, False),
@@ -1738,6 +1798,34 @@ class HeldRuns(Stand):
         self.assertIn("so a new run screens the head again.", self.log)
         self.reviews.insert(0, self.by_hand(972, "Pull request 121", 0, status="queued"))
         self.assertEqual(self.go(refused={971}), [], self.log)
+        # An answer of HTTP 4xx with no message: gh prints gh: HTTP <status>. It is a refusal too.
+        self.reviews = [self.by_hand(971, "Pull request 121", 150, conclusion="failure", started=70)]
+        self.assertEqual(self.go(broken={971: "gh: HTTP 403"}), [self.starts("review.yml", 121), self.reruns(971)],
+                         self.log)
+        self.assertIn("so a new run screens the head again.", self.log)
+
+    def test_held_runs_a_rerun_that_github_does_not_answer_starts_no_run_and_fails_the_step(self):
+        # Only an answer of HTTP 4xx is GitHub's refusal of a re-run. Pull request 301 is due a re-run of run 971, and
+        # GitHub answers it with HTTP 500, or gives no answer. The step starts no new run of 301, which would screen it
+        # again. The line of that head says that GitHub gave no answer, pull request 302 still gets its screen, and the
+        # step fails at its end. The next schedule re-runs the failed jobs of run 971.
+        p, q = "7" * 40, "2" * 40
+        for label, printed in (("HTTP 500", "gh: Server Error (HTTP 500)"),
+                               ("no answer", "error connecting to api.github.com\n"
+                                             "check your internet connection or https://githubstatus.com")):
+            self.pulls = [self.pull(301, "pat/oss-verify", "s", p), self.pull(302, "rob/oss-verify", "u", q)]
+            self.held = [self.held_run(30101, p, "pat/oss-verify", "s", 200),
+                         self.held_run(30201, q, "rob/oss-verify", "u", 300)]
+            self.reviews = [self.by_hand(971, "Pull request 301", 190, conclusion="failure", started=70)]
+            self.jobs, self.comment = {971: "success"}, {971: "Sign in to Google Cloud"}
+            self.assertEqual(self.go(status=1, broken={971: printed}),
+                             [self.starts("review.yml", 302), self.reruns(971)], (label, self.log))
+            self.assertIn("Head 7777777 of pat/oss-verify:s, pull request 301: failed. GitHub gave no answer to the "
+                          "re-run of the failed jobs of run 971 of review.yml. The step goes on to the next head, and "
+                          "fails at its end.", self.log)
+            # The next schedule, when GitHub answers: the run that the step started for 302 is queued.
+            self.reviews.insert(0, self.by_hand(3021, "Pull request 302", 0, status="queued"))
+            self.assertEqual(self.go(), [self.reruns(971)], (label, self.log))
 
     def test_held_runs_a_read_that_fails_for_one_head_leaves_the_other_heads_their_screen(self):
         # GitHub gives no jobs of run 991, so the step cannot tell whether it screened pull request 151. The line of
@@ -1757,12 +1845,13 @@ class HeldRuns(Stand):
         self.reviews.insert(0, self.by_hand(992, "Pull request 152", 0, status="queued"))
         self.assertEqual(self.go(), [], self.log)
 
-    def test_held_runs_reads_the_runs_by_hand_of_each_head_from_its_own_bound(self):
-        # GitHub gives at most 1,000 runs of a filtered list, newest first, so each head reads from the earlier of its
-        # newest held run and three hours before now. Pull request 141, held two days ago, reads from its held run, and
-        # finds the run that screened it. 142 and 143, held in the last hour, read from three hours before now, in one
-        # read. Merged pull request 144 reads from its held run of enroll-merged.yml five days ago, not from its newer
-        # held run of Terms.
+    def test_held_runs_reads_each_file_once_and_each_head_decides_from_its_own_bound(self):
+        # The step reads the runs by hand of each file once, from the earliest bound of a head: the held run of
+        # enroll-merged.yml of merged pull request 144 five days ago, not its newer held run of Terms. The bound of a
+        # head is the earlier of its newest held run and three hours before now, and the head decides only from the
+        # runs created at or after it. Pull request 141, held two days ago, finds the run that screened it. Run 9142 of
+        # pull request 142, held 20 minutes ago, is queued, and came before three hours before now: it does not make
+        # 142 wait.
         merged = ".github/workflows/enroll-merged.yml"
         a, b, c, h, m = "3" * 40, "4" * 40, "5" * 40, "6" * 40, "7" * 40
         self.pulls = [self.pull(141, "wes/oss-verify", "x", a), self.pull(142, "xia/oss-verify", "y", b),
@@ -1773,16 +1862,39 @@ class HeldRuns(Stand):
                      self.held_run(14402, h, "zed/oss-verify", "m", 60, ".github/workflows/terms.yaml"),
                      self.held_run(14101, a, "wes/oss-verify", "x", 2880),
                      self.held_run(14401, h, "zed/oss-verify", "m", 7200, merged)]
-        self.reviews = [self.by_hand(9143, "Pull request 143", 25), self.by_hand(9141, "Pull request 141", 2870)]
+        self.reviews = [self.by_hand(9143, "Pull request 143", 25),
+                        self.by_hand(9142, "Pull request 142", 200, status="queued"),
+                        self.by_hand(9141, "Pull request 141", 2870)]
         self.jobs = {9141: "success", 9143: "success"}
         self.assertEqual(self.go(), [self.starts("review.yml", 142), self.starts("review.yml", 144)], self.log)
         held = {run["id"]: run["created_at"] for run in self.held}
-        low, high = self.window
-        reviews = sorted(bound for file, bound in self.bounds if file == "review.yml")
-        self.assertEqual(len(reviews), 3, self.bounds)
-        self.assertEqual(reviews[:2], [held[14401], held[14101]], self.bounds)
-        self.assertTrue(low <= reviews[2] <= high, (reviews[2], low, high))
-        self.assertEqual([bound for file, bound in self.bounds if file == "enroll-merged.yml"], [held[14401]])
+        self.assertEqual(self.bounds, {"review.yml": held[14401], "enroll-merged.yml": held[14401]})
+        self.assertEqual(self.reads["review.yml"], [f">={held[14401]}"])
+
+    def test_held_runs_reads_the_runs_by_hand_past_githubs_cut_at_1000_runs(self):
+        # Run 9161 screened pull request 161 after its held run two days ago, and 1,050 runs by hand of other pull
+        # requests came after it. The first read of review.yml gives the newest 1,000 runs: the stand-in cuts as GitHub
+        # does. The step reads the older runs too, finds run 9161, and leaves the head.
+        sha = "6" * 40
+        self.pulls = [self.pull(161, "ann/oss-verify", "k", sha)]
+        self.held = [self.held_run(16101, sha, "ann/oss-verify", "k", 2880)]
+        self.reviews = [self.by_hand(20000 + n, f"Pull request {1000 + n}", n) for n in range(1, 1051)]
+        self.reviews.append(self.by_hand(9161, "Pull request 161", 2870))
+        self.jobs = {9161: "success"}
+        self.assertEqual(self.go(), [], self.log)
+        self.assertIn("Run 9161 of review.yml screened the head after its newest held run, and ended success.", self.log)
+        self.assertEqual(len(self.reads["review.yml"]), 2, self.reads)
+
+    def test_held_runs_reads_the_held_runs_past_githubs_cut_at_1000_runs(self):
+        # 1,050 held runs of the head of pull request 171 came after the one held run of pull request 172, which no run
+        # screened. The first read of the held runs gives the newest 1,000: the stand-in cuts as GitHub does. The step
+        # reads the older held runs too, from 30 days before now, and starts the screen of each head.
+        a, b = "1" * 40, "2" * 40
+        self.pulls = [self.pull(171, "bea/oss-verify", "n", a), self.pull(172, "cy/oss-verify", "o", b)]
+        self.held = [self.held_run(170000 + n, a, "bea/oss-verify", "n", n) for n in range(1, 1051)]
+        self.held.append(self.held_run(17201, b, "cy/oss-verify", "o", 1100))
+        self.assertEqual(self.go(), [self.starts("review.yml", 171), self.starts("review.yml", 172)], self.log)
+        self.assertEqual(len(self.reads["held"]), 2, self.reads)
 
     def test_held_runs_workflow_holds_no_identity_and_starts_on_its_schedule_alone(self):
         workflow = yaml.safe_load(self.workflow_text)
