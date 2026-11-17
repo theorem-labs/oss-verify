@@ -20,11 +20,12 @@ proofs we publish), and not in the table: a maintainer who adopts a project in p
 The build notes of a seeded project give the detail of its check. They also name each patch that the port applies
 since that check, new or in other bytes. They also name each patch of the check that the port no longer applies.
 The sources and build.sh of the port give the fuzz targets that a patch changes. Each ov_target_begin block reads
-the trees ext/<key>, ext/<key>/src and targets/<key> of its key and of each dependency key. A patch changes the
-fuzz targets of the block when the patched tree is one of these trees, is in one, or holds one, after the links of
-sources. When those files do not show all the targets, the notes say that the table cannot name them. When the
-check found that the binaries match the release's, the notes also say which binaries differ, or may differ. No
-content of a port stops the table: a port file that is missing or that cannot be read counts as absent.
+the trees ext/<key>, ext/<key>/src and targets/<key> of its key and of each dependency key. It also reads each tree
+that a link inside a tree that it reads points to. A patch changes the fuzz targets of the block when the patched
+tree is one of these trees, is in one, or holds one, after the links of sources. When those files do not show all
+the targets, the notes say that the table cannot name them. When the check found that the binaries match the
+release's, the notes also say which binaries differ, or may differ. No content of a port stops the table: a port
+file that is missing or that cannot be read counts as absent.
 
 tests/test_seeded_projects.py fails when docs/seeded-projects.tsv is not what this writes. The workflow
 .github/workflows/tests.yaml runs its test Committed for a change to this file, src/oss_verify/validate.py, a file
@@ -152,20 +153,73 @@ def directives(sources, kind):
     return found
 
 
-def resolved(path, links):
-    """`path` after the links of sources ({path: target}): the longest link that holds it replaced by its target,
-    again until no link holds it. None if a link still holds it after one step more than there are links."""
-    for _ in range(len(links) + 2):
-        link = next((path[:n] for n in range(len(path), -1, -1) if path[:n] in links), None)
-        if link is None:
-            return path
-        path = links[link] + path[len(link):]
-    return None
+def resolver(links):
+    """The function that gives a path after the links of sources ({path: target}). It replaces the longest link that
+    holds the path with the link's target, and it does this again until no link holds the path. It gives None when a
+    link still holds the path after one step more than there are links. It also gives None when the path becomes
+    longer than it can become if it follows each link once. When the path becomes the path of a link that an earlier
+    call went through and resolved, the function gives the end of that call."""
+    lengths = sorted({len(path) for path in links}, reverse=True)
+    growth = sum(max(0, len(target) - len(path)) for path, target in links.items())
+    ends = {}
+
+    def resolved(path):
+        limit, walked = len(path) + growth, []
+        for _ in range(len(links) + 2):
+            if path in ends:
+                break
+            # Only the prefixes as long as a link are looked up: their number does not grow with the path.
+            link = next((path[:n] for n in lengths if n <= len(path) and path[:n] in links), None)
+            if link is None:
+                break
+            walked.append(path)
+            path = links[link] + path[len(link):]
+            if len(path) > limit:
+                return None
+        else:
+            return None
+        end = ends.get(path, path)
+        ends.update(dict.fromkeys((step for step in walked if step in links), end))
+        return end
+
+    return resolved
+
+
+def placed_links(links, resolved):
+    """The (location, end) of each link of sources ({path: target}), from `resolved` (from resolver). The location is
+    the path of the link after the links: its parent after the links, then its own name. The end is the tree that
+    the link points to, after the links. None if a location or an end does not resolve."""
+    placed = []
+    for path, target in links.items():
+        parent, end = resolved(path[:-1]), resolved(target)
+        if parent is None or end is None:
+            return None
+        placed.append((parent + path[-1:], end))
+    return placed
 
 
 def meets(path, tree):
     """Whether `path` is the path `tree`, is in it, or holds it."""
     return path[:len(tree)] == tree or tree[:len(path)] == path
+
+
+def changed_trees(patched, placed, trees):
+    """The trees through which a build reads a patched path, among `trees` and the ends of the links. `placed` holds
+    the (location, end) of each link (from placed_links). Such a tree meets one of the `patched` paths, or holds the
+    location of a link whose end is such a tree."""
+    locations = {}
+    for location, end in placed:
+        locations.setdefault(end, []).append(location)
+    candidates = set(trees) | set(locations)
+    lengths = {len(tree) for tree in candidates}
+    found, new = set(), {tree for tree in candidates if any(meets(path, tree) for path in patched)}
+    while new:
+        found |= new
+        # A tree that holds the location of a link whose end is new is a first part of that location.
+        held = {location[:n] for end in new for location in locations.get(end, ())
+                for n in lengths if n < len(location)}
+        new = (held & candidates) - found
+    return found
 
 
 def build_lines(build):
@@ -197,16 +251,19 @@ def fuzz_targets(port, patch):
     sources and build.sh. None if those files do not show them all (see the module's docstring)."""
     sources = port_text(port, validate.SOURCES)
     links = {path: pathlib.PurePosixPath(target).parts for path, target in directives(sources, "link")}
-    patched = [resolved(path, links) for path, name in directives(sources, "patch") if name == patch]
+    resolved = resolver(links)
+    patched = [resolved(path) for path, name in directives(sources, "patch") if name == patch]
     if not patched or None in patched:
         return None
     lines = build_lines(port_text(port, "build.sh"))
     blocks = target_blocks(lines)
-    trees = {key: [resolved(pathlib.PurePosixPath(tree.format(key)).parts, links) for tree in KEY_TREES]
+    trees = {key: [resolved(pathlib.PurePosixPath(tree.format(key)).parts) for tree in KEY_TREES]
              for keys, _ in blocks for key in keys}
-    if any(None in paths for paths in trees.values()):
+    placed = placed_links(links, resolved)
+    if placed is None or any(None in paths for paths in trees.values()):
         return None
-    reached = {key for key, paths in trees.items() if any(meets(path, tree) for path in patched for tree in paths)}
+    found = changed_trees(patched, placed, [tree for paths in trees.values() for tree in paths])
+    reached = {key for key, paths in trees.items() if found.intersection(paths)}
     targets = [names for keys, names in blocks if reached.intersection(keys)]
     if not targets or not all(targets) or any(named_elsewhere(key, lines) for key in reached):
         return None

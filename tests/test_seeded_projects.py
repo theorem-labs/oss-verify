@@ -179,6 +179,39 @@ class Table(unittest.TestCase):
                          SINCE + "applies kay.0002-new.patch, whose fuzz targets this table cannot name: some of its "
                          "binaries may differ from the release's" + KAY_NOTES)
 
+    def test_a_patch_in_a_tree_that_a_link_in_a_block_tree_points_to(self):
+        # As the Rust ports share one vendor tree: the link ext/kay-fuzz_g/vendor is in the tree ext/kay-fuzz_g, so the
+        # build of kay-fuzz_g reads ext/kay-fuzz_a/vendor. The links of kay-fuzz_b and kay-fuzz_c point only to
+        # ext/kay-fuzz_a/src.
+        build = self.PORT["projects/kay/build.sh"] + "(\nov_target_begin kay-fuzz_g\nov_target_build fuzz_g\n)\n"
+        links = "tree\text/kay-fuzz_a/vendor\tupstream/vendor\nlink\text/kay-fuzz_g/vendor\text/kay-fuzz_a/vendor\n"
+        cases = {"a patch through the link": "ext/kay-fuzz_g/vendor/lib",
+                 "a patch in the tree that the link points to": "ext/kay-fuzz_a/vendor/lib"}
+        for case, at in cases.items():
+            with self.subTest(case):
+                self.assertEqual(self.row("kay", ports=self.new_patch(at, links=links, build=build)),
+                                 SINCE + "applies kay.0002-new.patch to fuzz_a, fuzz_g: the binaries of fuzz_a, fuzz_g "
+                                 "differ from the release's" + KAY_NOTES)
+
+    def test_a_patch_in_a_tree_that_a_link_in_a_linked_tree_points_to(self):
+        # The link ext/kay-fuzz_h/vendor is in the tree ext/kay-fuzz_h and points to ext/kay-lib. The link
+        # ext/kay-lib/vendor is in that tree and points to the patched tree. So the build of kay-fuzz_h reads it.
+        build = self.PORT["projects/kay/build.sh"] + "(\nov_target_begin kay-fuzz_h\nov_target_build fuzz_h\n)\n"
+        links = ("tree\text/kay-fuzz_a/vendor\tupstream/vendor\ntree\text/kay-lib\tupstream/kay-lib\n"
+                 "link\text/kay-lib/vendor\text/kay-fuzz_a/vendor\nlink\text/kay-fuzz_h/vendor\text/kay-lib\n")
+        self.assertEqual(self.row("kay", ports=self.new_patch("ext/kay-fuzz_a/vendor/lib", links=links, build=build)),
+                         SINCE + "applies kay.0002-new.patch to fuzz_a, fuzz_h: the binaries of fuzz_a, fuzz_h differ "
+                         "from the release's" + KAY_NOTES)
+
+    def test_a_link_whose_parent_is_in_a_link_cycle(self):
+        # The tree of the patch has no link, but the parent of the link ext/kay-x/vendor does not resolve. So the table
+        # cannot tell which tree holds that link, nor which builds read the tree that it points to.
+        links = ("link\text/kay-x\text/kay-y\nlink\text/kay-y\text/kay-x\n"
+                 "link\text/kay-x/vendor\text/kay-fuzz_a/src\n")
+        self.assertEqual(self.row("kay", ports=self.new_patch("targets/kay-fuzz_d", links=links)),
+                         SINCE + "applies kay.0002-new.patch, whose fuzz targets this table cannot name: some of its "
+                         "binaries may differ from the release's" + KAY_NOTES)
+
     def test_fuzz_targets_this_table_cannot_name(self):
         build = self.PORT["projects/kay/build.sh"]
         self.assertEqual(self.row("kay", ports=self.new_patch("ext/kay-fuzz_e/src")),
