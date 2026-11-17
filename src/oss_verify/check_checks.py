@@ -747,7 +747,8 @@ def checks(job, tag, targets, work, raw, *, labels, ubsan=None, budget=BUDGET_MI
                 stopped = next((run for run in runs if not run.passed() and not run.caught()), None)
                 why = ("the input does not pass on the unchanged code"
                        if any(run.caught() and run.key() not in passing for run in runs)
-                       else f"the input {describe(stopped)}" if stopped else "the input passes")
+                       else f"the input {describe(stopped)}" if stopped
+                       else "the input passes" if runs else "the input did not run")
                 problems.append(f"  - {label}: **mutant not met**: {why} ({statuses})"
                                 + (f"; {code(breakage.detail, 300)}" if breakage.detail else ""))
             else:

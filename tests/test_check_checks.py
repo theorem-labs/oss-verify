@@ -165,10 +165,11 @@ class Report(unittest.TestCase):
         self.assertFalse(check_checks.Run("t", "s", None, "coverage").caught())
         self.assertIn("abort()", check_checks.describe(check_checks.Run("t", "s", 134, "asan")))
 
-    def not_met(self, base, mutant, other=None):
+    def not_met(self, base, *mutant, other=None):
         """The report's line for a `mutant:` record whose input exits with `base` on the unchanged code and with
-        `mutant` on the mutant, in a coverage build only. `other`, if given, is (base, mutant) for a second target
-        whose harness holds the same record and has a seed of the same name."""
+        `mutant` on the mutant, in a coverage build only; with no `mutant`, the target has no run of it on the mutant.
+        `other`, if given, is (base, mutant) for a second target whose harness holds the same record and has a seed of
+        the same name."""
         from unittest import mock
         harness = (b"int LLVMFuzzerTestOneInput(const unsigned char *d, unsigned long n) {\n"
                    b"  // mutant: lib.c:1 `x + 1` -> `x + 2`\n  // input: s1\n  if (f(d) != 3) abort();\n"
@@ -184,7 +185,7 @@ class Report(unittest.TestCase):
             exports["u"] = export_of("/src/h2.c")
 
         def runs(which):
-            return [check_checks.Run("t", "s1", (base, mutant)[which], "coverage")] + (
+            return [check_checks.Run("t", "s1", status, "coverage") for status in ((base,), mutant)[which]] + (
                 [check_checks.Run("u", "s1", other[which], "coverage")] if other else [])
 
         def measure(*args, **kwargs):
@@ -232,6 +233,11 @@ class Report(unittest.TestCase):
         """A run stopped at the time limit neither passes nor catches the mutant."""
         self.assertIn("**mutant not met**: the input did not end within 120 seconds (coverage time limit)",
                       self.not_met(0, None))
+
+    def test_a_record_whose_input_did_not_run_says_so(self):
+        """Its own target has no run of the input on the mutant, though another target ran a seed of the same name:
+        the input did not run, so it does not pass."""
+        self.assertIn("**mutant not met**: the input did not run (no run)", self.not_met(0, other=(0, 0)))
 
     def test_seeds_get_the_driver_header(self):
         with tempfile.TemporaryDirectory() as directory:
