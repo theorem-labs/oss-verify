@@ -525,7 +525,7 @@ These steps rebuild a binary and compare it with its lock in the proofs reposito
 
 `oss-verify check` can check the lock of a project that has a directory in this repository, in `projects/` or `seeds/`. The release also has locks of projects that have no directory here. This repository has no build files for them.
 
-If `oss-verify check` at `main` does not print `matches the lock` for a binary of the release, open an issue in this repository. Include the output of `oss-verify check`.
+If `oss-verify check` at `main` does not print `matches the lock` for a binary of the release, open an issue in this repository. Include the output of `oss-verify check`. [seeded-projects.tsv](seeded-projects.tsv) names each patch that the port of a seeded project applies since the check of its seed port, or no longer applies. Its build notes tell which binaries differ from the release's, or may differ. Do not open an issue for these binaries.
 
 ## Builds ported from oss-fuzz-theorems
 
@@ -544,7 +544,7 @@ We ported the build of each project that we seeded from the oss-fuzz-theorems 20
 
 The internal paths matter too. The source locations of the UBSan checks keep the internal path. In an `asan-ubsan` build, a header that uses `__FILE__` and holds a UBSan check thus makes one more string literal, which AddressSanitizer instruments. With the release's layout, a ported build makes the release's binaries again.
 
-We checked each port with `uv run oss-verify check --lock`, against each `harness.yaml` of the release for its fuzz targets. [seeds/builds.tsv](../seeds/builds.tsv) holds the result for each project, and [src/oss_verify/seeded_projects.py](../src/oss_verify/seeded_projects.py) writes it into [seeded-projects.tsv](seeded-projects.tsv). A seeded project gets the port in `seeds/<name>/` only if each binary is the release's.
+We checked each port with `uv run oss-verify check --lock`, against each `harness.yaml` of the release for its fuzz targets. [seeds/builds.tsv](../seeds/builds.tsv) holds the result for each project, and [src/oss_verify/seeded_projects.py](../src/oss_verify/seeded_projects.py) writes it into [seeded-projects.tsv](seeded-projects.tsv). A seeded project gets the port in `seeds/<name>/` only if each binary is the release's. [seeds/checked-patches.tsv](../seeds/checked-patches.tsv) holds the patches that each check applied, with their SHA-256. In the build notes, `seeded_projects.py` also names each patch that a port applies since the check of its seed port, or no longer applies.
 
 ## Build patches
 

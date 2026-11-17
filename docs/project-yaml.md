@@ -230,7 +230,7 @@ A core maintainer can adopt a seeded project:
 4. Remove the two comment lines.
 5. Do the steps in the [README](../README.md#enroll-a-project) from step 3.
 
-The build files of a seeded project come from the build recipe of that release. They make that release's binaries again, byte for byte. Keep them, or write your own. If a seeded project has no build files, [seeded-projects.tsv](seeded-projects.tsv) tells why. Add a `Dockerfile` and a `build.sh` before you open the pull request.
+The build files of a seeded project come from the build recipe of that release. They make that release's binaries again, byte for byte. A patch that the build files apply since the check of their seed port, or no longer apply, can change some of these binaries ([build-contract.md](build-contract.md#builds-ported-from-oss-fuzz-theorems)). The build notes in [seeded-projects.tsv](seeded-projects.tsv) name each such patch, and tell which binaries differ from the release's, or may differ. Keep the build files, or write your own. If a seeded project has no build files, [seeded-projects.tsv](seeded-projects.tsv) tells why. Add a `Dockerfile` and a `build.sh` before you open the pull request.
 
 ## The files in the project directory
 
