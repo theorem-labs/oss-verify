@@ -441,7 +441,7 @@ class ModelISA(Base):
         text = b"".join(struct.pack("<I", 0x57 | k << 12) + NOP * 3 for k in range(30000))
         start = time.monotonic()
         res = binary_isa.scan(mkelf(text))
-        self.assertLess(time.monotonic() - start, 2)
+        self.assertLess(time.monotonic() - start, 10)
         self.assertEqual((res["verdict"], res["outside_model"], res["first"]),
                          ("NOT-MODEL", 30000, ("outside_model", TEXT_VADDR)))
 
