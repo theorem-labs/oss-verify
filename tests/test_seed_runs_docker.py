@@ -5,8 +5,9 @@ fuzz targets for oss-verify check --checks: infra/checks/run-seeds (check_checks
 (check_binaries.run_job). Check that each run gives its own exit status.
 
 A run that aborts must give the status of its abort, 134. It must not give 137. 137 is the status of a run that the
-time limit stopped, and such a run is neither a pass nor a catch. Before the fix, a core dump that could not end in time
-made an abort read as 137.
+time limit stopped, and such a run is neither a pass nor a catch. run-seeds and run-binaries write 0 to
+/proc/self/coredump_filter, so a run's core dump holds no memory. Without that write, a core dump that could not end in
+time made an abort read as 137.
 
 Needs Docker, the newest C toolchain image, and qemu-riscv64-static on PATH:
 
@@ -32,11 +33,12 @@ BUILD = "asan-ubsan"
 # The C fuzz target: tests/fixtures/example/build.sh links it to $OUT/example_fuzzer.
 TARGET = "example_fuzzer"
 # The time limit of each run here, in seconds, in place of check_checks.RUN_TIMEOUT and check_binaries.RUN_SECONDS.
-# Before the fix, the core dump of an aborting run did not end within this time on the CI runner: the runs on 'h' read
-# 137 in theorem-labs/oss-verify's tests.yaml runs 44069641356 and 44070455751. With the fix, an aborting run ends in
-# less than a second: in OSSV-729's measurement on ubuntu-24.04-16core, the longest of 50 aborting runs took 0.86 s.
-# The tests set this limit themselves, so a fix that only makes the limit longer still fails here. A short limit also
-# keeps the tests fast.
+# run-seeds and run-binaries write 0 to /proc/self/coredump_filter, so a run's core dump holds no memory. Without that
+# write, the core dump of an aborting run did not end within this time on the CI runner: the runs on 'h' read 137 in
+# theorem-labs/oss-verify's tests.yaml runs 44069641356 and 44070455751. With that write, an aborting run ends in less
+# than a second: in OSSV-729's measurement on ubuntu-24.04-16core, the longest of 50 aborting runs took 0.86 s. The
+# tests set this limit themselves, so a fix that only makes the limit longer still fails here. A short limit also keeps
+# the tests fast.
 LIMIT = 20
 # Each input: its name, its payload after the driver's header, and the exit status of its run in the asan-ubsan build
 # (tests/fixtures/example/example.c, and EXPECTED in tests/test_builder.py). The four that start with 'h' read one byte
@@ -88,15 +90,13 @@ class SeedRuns(unittest.TestCase):
         self.enterContext(mock.patch.object(check_binaries, "RUN_SECONDS", LIMIT))
 
     def test_seed_runs_read_each_exit_status(self):
-        inputs, binaries, results = self.work / "inputs", self.work / "binaries", self.work / "results"
+        inputs, results = self.work / "inputs", self.work / "results"
         (inputs / TARGET).mkdir(parents=True)
         for n, (_, payload, _) in enumerate(SEEDS):
             (inputs / TARGET / str(n)).write_bytes(check_checks.HEADER + payload)
         # As check_checks.checks does for its sanitizer build, the runs use the binary that compile wrote to $OUT.
-        binaries.mkdir()
-        shutil.copy(self.raw / TARGET, binaries / TARGET)
         names = [name for name, _, _ in SEEDS]
-        runs = check_checks.run_all(TAG, binaries, inputs, {TARGET: names}, BUILD, results, labels=self.labels)
+        runs = check_checks.run_all(TAG, self.raw, inputs, {TARGET: names}, BUILD, results, labels=self.labels)
         self.assertEqual([run.seed for run in runs], names)
         for n, (run, (name, _, expected)) in enumerate(zip(runs, SEEDS)):
             with self.subTest(seed=name):

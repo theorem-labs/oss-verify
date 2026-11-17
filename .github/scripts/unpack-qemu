@@ -33,6 +33,6 @@ dpkg-deb -x "$dir/$deb" "$dir"
 ln -s qemu-riscv64 "$dir/usr/bin/qemu-riscv64-static"
 # The first line, as check_binaries.py QEMU_VERSIONS reads it.
 version=$("$dir/usr/bin/qemu-riscv64-static" --version)
-[[ $version =~ ^qemu-riscv64\ version\ 10\.0\.11([^0-9]|$) ]] \
+[[ $version =~ ^qemu-riscv64\ version\ 10\.0\.11([^[:alnum:]_]|$) ]] \
   || { echo "unpack-qemu: qemu-riscv64-static --version says '${version%%$'\n'*}', not version 10.0.11" >&2; exit 1; }
 echo "$dir/usr/bin"
