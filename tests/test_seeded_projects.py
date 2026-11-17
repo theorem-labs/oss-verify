@@ -152,6 +152,33 @@ class Table(unittest.TestCase):
                          SINCE + "applies kay.0002-new.patch to fuzz_d: the binaries of fuzz_d differ from the "
                          "release's" + KAY_NOTES)
 
+    def test_a_patch_in_a_tree_or_at_a_tree_that_holds_one(self):
+        # kay-fuzz_ab's key starts with kay-fuzz_a's, as openssl-asn1parse's starts with openssl-asn1's: a tree is a
+        # list of path components, so targets/kay-fuzz_ab is not in targets/kay-fuzz_a. The tree of kay-fuzz_f is
+        # in the tree of kay-fuzz_a, as a vendored library is.
+        build = (self.PORT["projects/kay/build.sh"] + "(\nov_target_begin kay-fuzz_ab\nov_target_build fuzz_ab\n)\n"
+                 "(\nov_target_begin kay-fuzz_f\nov_target_build fuzz_f\n)\n")
+        links = "tree\text/kay-fuzz_ab/src\tupstream/kay\nlink\text/kay-fuzz_f/src\text/kay-fuzz_a/src/vendor\n"
+        cases = {
+            "a patch in the tree of a block": ("ext/kay-fuzz_e/src/lib", "fuzz_e"),
+            "a patch at a tree that holds the tree of another block": ("ext/kay-fuzz_a/src",
+                                                                       "fuzz_a, fuzz_b, fuzz_c, fuzz_f"),
+            "a patch at the tree of a key that starts with another key": ("targets/kay-fuzz_ab", "fuzz_ab"),
+        }
+        for case, (at, targets) in cases.items():
+            with self.subTest(case):
+                self.assertEqual(self.row("kay", ports=self.new_patch(at, links=links, build=build)),
+                                 SINCE + f"applies kay.0002-new.patch to {targets}: the binaries of {targets} differ "
+                                 "from the release's" + KAY_NOTES)
+
+    def test_a_block_whose_tree_is_in_a_link_cycle(self):
+        # The tree of the patch has no link, but the tree of kay-fuzz_e does not resolve, so the table cannot tell if
+        # the build of kay-fuzz_e reads the patched tree.
+        links = "link\text/kay-fuzz_e\text/kay-y\nlink\text/kay-y\text/kay-fuzz_e\n"
+        self.assertEqual(self.row("kay", ports=self.new_patch("targets/kay-fuzz_d", links=links)),
+                         SINCE + "applies kay.0002-new.patch, whose fuzz targets this table cannot name: some of its "
+                         "binaries may differ from the release's" + KAY_NOTES)
+
     def test_fuzz_targets_this_table_cannot_name(self):
         build = self.PORT["projects/kay/build.sh"]
         self.assertEqual(self.row("kay", ports=self.new_patch("ext/kay-fuzz_e/src")),
