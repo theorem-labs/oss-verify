@@ -279,10 +279,12 @@ def test_the_map_reader_agrees_with_parse_map():
     assert check_links.parse_map(tail)[0] == [] and layout.read_map(tail) == lines[len(taken):]
     assert len(lines) > len(taken)
     assert read == len(lines) + text.count("<internal>:(")
+    # A line is loaded when parse_map keeps it: the lines it takes, which come first, and none of the tail.
+    assert [line.loaded for line in lines] == [k < len(taken) for k in range(len(lines))]
     # Every line's address, and the alignment in decimal.
     assert lines[0] == layout.MapLine(0x10824, 0x24, 4, "/work/build/lib/plain/curl-fuzz_bufq/lib/liboft.a",
-                                      "harness.o", ".rodata._Z16fuzz_handle_bufqP18FuzzedDataProvider")
-    assert layout.MapLine(0x704E0, 0x30, 16, "/tmp/ov/adapter.o", None, ".bss..L_MergedGlobals.2") in lines
+                                      "harness.o", ".rodata._Z16fuzz_handle_bufqP18FuzzedDataProvider", True)
+    assert layout.MapLine(0x704E0, 0x30, 16, "/tmp/ov/adapter.o", None, ".bss..L_MergedGlobals.2", True) in lines
     assert [line.address for line in lines if line.section == ".debug_info"][0] == 0
 
 
@@ -455,9 +457,10 @@ def inputs(*specs):
 
 
 def test_pairing_by_key():
-    base = inputs(("a.o", None, ".text.f", "f", 8), ("a.o", None, ".text.g", "g", 12), ("a.o", None, ".rodata.r", "r", 4))
-    new = inputs(("a.o", None, ".rodata.r", "r", 4), ("a.o", None, ".text.g", "g", 12), ("a.o", None, ".text.f", "F", 8),
-                 ("a.o", None, ".text.h", "h", 4))
+    base = inputs(("a.o", None, ".text.f", "f", 8), ("a.o", None, ".text.g", "g", 12),
+                  ("a.o", None, ".rodata.r", "r", 4))
+    new = inputs(("a.o", None, ".rodata.r", "r", 4), ("a.o", None, ".text.g", "g", 12),
+                 ("a.o", None, ".text.f", "F", 8), ("a.o", None, ".text.h", "h", 4))
     pairing = layout.pair(base, new)
     assert pairing.partner == {1: 1, 2: 0, 3: None}
     assert pairing.same == {1: True, 2: False, 3: False}
@@ -495,7 +498,8 @@ def test_pairing_keys_a_copy_by_its_original(tmp_path):
     for name, copies, data in (("base", "/tmp/ov/af.AAAAAA", LOCAL_CALL), ("new", "/tmp/ov/af.BBBBBB", changed)):
         out_tree(tmp_path / name, copies=copies, local_call=bytes(data))
         assert layout.main(["collect", str(tmp_path / name), str(tmp_path / f"{name}-layout")]) == 0
-    base, new = (layout.read_layout(str(tmp_path / f"{name}-layout" / "plain" / "fuzz_shim")) for name in ("base", "new"))
+    base, new = (layout.read_layout(str(tmp_path / f"{name}-layout" / "plain" / "fuzz_shim"))
+                 for name in ("base", "new"))
     assert base.inputs[8].file != new.inputs[8].file and base.inputs[8].key == new.inputs[8].key
     pairing = layout.pair(base.inputs, new.inputs)
     assert (pairing.partner[7], pairing.same[7]) == (7, True)
@@ -543,7 +547,8 @@ def placed(r, occurrence=0, cause="-", detail="-", place="hole"):
 
 
 def write_entry(root, rows, calls=CALLS, out=None, placement=None, build="plain", target="fuzz"):
-    """root/<build>/<target>/ of a layout tree."""
+    """root/<build>/<target>/ of a layout tree. A row of the file <internal> is a line of the map alone, as the
+    linker's own sections are: sections.tsv has no line for it."""
     entry = root / build / target
     entry.mkdir(parents=True)
     where = [r["file"] if r["member"] is None else f"{r['file']}({r['member']})" for r in rows]
@@ -551,7 +556,7 @@ def write_entry(root, rows, calls=CALLS, out=None, placement=None, build="plain"
                                        for r, w in zip(rows, where)))
     (entry / "sections.tsv").write_text("".join(
         f"{r['file']}\t{r['file']}\t{r['member'] or '-'}\t{r['section']}\t{r['sha256']}\t{r['size']}\t{r['align']}\n"
-        for r in rows))
+        for r in rows if r["file"] != "<internal>"))
     (entry / "calls.tsv").write_text("".join("\t".join(c) + "\n" for c in calls))
     (entry / "output.tsv").write_text(out or output())
     if placement is not None:
@@ -613,6 +618,21 @@ def test_check_lists_changed_new_and_moved_data(tmp_path, capsys):
     assert lines_with(lines, ".rodata.table", "0x10200", "0x10240")
     assert lines_with(lines, "moved, same bytes: .textfoo (/work/c.o): 0x10280 -> 0x102a0")
     assert not lines_with(lines, ".debug_info")  # not loaded
+
+
+def test_check_does_not_list_a_section_the_binary_does_not_load_that_begins_with_an_internal_line(tmp_path, capsys):
+    # OSSV-675. An output section that the binary does not load can begin with a line of the linker's own at 0, and
+    # go on with an object's line at an offset that is not 0. As parse_map reads the map, the address falls to 0 on
+    # the <internal> line, so the object's .comment is not loaded: its offset changed with the same bytes, and it is
+    # not listed. The table, which the binary loads, is.
+    internal = row(".comment", 0, 0x13, file="<internal>", align=1)
+    status, lines = run_check(tmp_path, capsys,
+                              {"rows": [dict(TABLE, address=0x10240), ALPHA, BETA, GAMMA, internal,
+                                        dict(COMMENT, address=0x26)]},
+                              {"rows": BASE_ROWS[:-1] + [internal, dict(COMMENT, address=0x13)]})
+    assert status == 0
+    assert lines_with(lines, "moved, same bytes:") == [
+        "  moved, same bytes: .rodata.table (/work/a.o): 0x10200 -> 0x10240"]
 
 
 def jal_lost():
@@ -889,7 +909,8 @@ def link(found, calls=(), symbols=None, front=0x10400, tls=()):
     .init_array and .fini_array in the PT_LOAD after it, where lld puts it (the next page, at the same offset), and
     the global symbols `symbols`. With `tls` [(section, address, size)], the link also takes these thread-local data
     sections of /work/t.o, rows after `found`, and its TLS segment is a .tdata over them; a call (row, offset,
-    variable, (row, value)) is then a thread-local access of the variable that row and value define."""
+    variable, (row, value)) is then a thread-local access of the variable that row and value define. The binary loads
+    each input."""
     by_row = collections.defaultdict(list)
     for row, offset, name, *defined in calls:
         line_type, definition = ("tprel", defined[0]) if defined else ("call", None)
@@ -907,7 +928,9 @@ def link(found, calls=(), symbols=None, front=0x10400, tls=()):
                                              - data[0].address, 0x403))
     loads = [layout.Load(0x10000, front - 0x10000, front - 0x10000, 0x4),
              layout.Load(start, end - start, end - start, 0x5), layout.Load(rw, 16, 16, 0x6)]
-    return layout.Layout(found + data, by_row, layout.Output(sections, loads, dict(symbols or {})), {})
+    inputs = found + data
+    return layout.Layout(inputs, by_row, layout.Output(sections, loads, dict(symbols or {})), {},
+                         {i.row for i in inputs})
 
 
 def planned(base, probe):

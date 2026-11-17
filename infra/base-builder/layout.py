@@ -222,7 +222,7 @@ def hex_value(text):
 
 # ── the map ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-MapLine = collections.namedtuple("MapLine", "address size align file member section")
+MapLine = collections.namedtuple("MapLine", "address size align file member section loaded")
 
 
 def read_map(text):
@@ -230,10 +230,20 @@ def read_map(text):
     link-fuzz-target (record_link) keeps the input-section lines of lld's map alone, never sorted: four columns —
     address, load address and size in hexadecimal, alignment in decimal — then eight blanks and <file>:(<section>) or
     <archive>(<member>):(<section>). The linker's own sections (<internal>) are left out. Each line gives its address,
-    its linked size, its alignment, the file, the member or None, and the section. Every line is read, loaded or not
-    (src/oss_verify/check_links.py, parse_map, keeps the loaded ones only): a caller selects lines by their section
-    names, never by the order of their addresses."""
-    lines = []
+    its linked size, its alignment, the file, the member or None, the section, and whether the binary loads it. Every
+    line is read, loaded or not: a caller selects lines by their section names, never by the order of their addresses.
+
+    Whether the binary loads a line is read as src/oss_verify/check_links.py, parse_map, reads it (parse_map keeps the
+    loaded lines only). An address cannot say it alone: lld gives each output section it does not load (.debug_*,
+    .comment) and its input sections their offsets from 0, which can fall in the range of a section it loads. So the
+    map's order says it: within one output section the addresses do not fall, so a line whose address is below the
+    line before it begins another output section, and that one is loaded when the address of its first line is not 0
+    (the link is -static -no-pie, so no loaded section is at 0, and lld writes the sections it does not load last).
+    Each line of four columns, eight blanks and a text that does not start with a blank takes part in that order, as
+    in parse_map, whether or not it names a file, so an <internal> line does too: an output section that lld does not
+    load can begin with one of its own lines at 0, such as <internal>:(.comment), and go on with an object's line at
+    an offset that is not 0."""
+    lines, loaded, previous = [], False, None
     for line in text.split("\n"):
         found = MAP_COLUMNS.match(line)
         if not found:
@@ -241,6 +251,10 @@ def read_map(text):
         rest = line[found.end():]
         if not rest.startswith(" " * 8) or rest[8:9] in ("", " "):
             continue
+        address = int(found.group(1), 16)
+        if previous is None or address < previous:
+            loaded = address != 0
+        previous = address
         rest = rest[8:]
         at = rest.rfind(":(")
         if at <= 0 or not rest.endswith(")"):
@@ -252,8 +266,7 @@ def read_map(text):
         if file.endswith(")") and "(" in file:
             open_at = file.rindex("(")
             file, member = file[:open_at], file[open_at + 1:-1]
-        lines.append(MapLine(int(found.group(1), 16), int(found.group(2), 16), int(found.group(3)), file, member,
-                             section))
+        lines.append(MapLine(address, int(found.group(2), 16), int(found.group(3)), file, member, section, loaded))
     return lines
 
 
@@ -595,7 +608,10 @@ OutputSection = collections.namedtuple("OutputSection", "name addr size flags")
 Load = collections.namedtuple("Load", "vaddr filesz memsz flags")
 Output = collections.namedtuple("Output", "sections loads symbols")
 Placement = collections.namedtuple("Placement", "base place address cause detail")
-Layout = collections.namedtuple("Layout", "inputs calls output placement")
+# The layout of a link (read_layout): its inputs [Input], its calls {row: [Call]}, its Output, its placement
+# {(key_file, member, section, occurrence): Placement}, and `loaded`, the set of the rows whose map line the binary
+# loads (read_map).
+Layout = collections.namedtuple("Layout", "inputs calls output placement loaded")
 
 
 def sections_rows(inputs):
@@ -733,7 +749,7 @@ def read_layout(directory):
     placement = {}
     if os.path.lexists(os.path.join(directory, "placement.tsv")):
         placement = read_placement(below(directory, "placement.tsv"))
-    return Layout(inputs, calls, output, placement)
+    return Layout(inputs, calls, output, placement, {row for row, line in enumerate(lines) if line.loaded})
 
 
 # ── collect ──────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -1127,23 +1143,6 @@ def function(i):
     return f"{where}:({i.section})"
 
 
-def loaded_rows(inputs):
-    """The rows of the map lines whose output section the binary loads. An address cannot say it alone: lld gives each
-    section it does not load (.debug_*, .comment) and its input sections their offsets from 0, which can fall in the
-    range of a section it loads. So the map's order says it, as src/oss_verify/check_links.py, parse_map, reads it:
-    within one output section the addresses do not fall, so a line whose address is below the line before it begins
-    another output section, and that one is loaded when the address of its first line is not 0 (the link is -static
-    -no-pie, so no loaded section is at 0, and lld writes the sections it does not load last)."""
-    rows, is_loaded, previous = set(), False, None
-    for i in inputs:
-        if previous is None or i.address < previous:
-            is_loaded = i.address != 0
-        previous = i.address
-        if is_loaded:
-            rows.add(i.row)
-    return rows
-
-
 def compare(label, base, new):
     """The comparison of one (build, target) of two layouts: (failures, information), each a list of lines."""
     pairing = pair(base.inputs, new.inputs)
@@ -1183,13 +1182,12 @@ def compare(label, base, new):
     lines.append("  .text: start {} -> {}, size {} -> {}".format(
         *[hex(s.addr) if s else "-" for s in text], *[s.size if s else "-" for s in text]))
     others = pair(base.inputs, new.inputs, kind=lambda name: not is_text(name))
-    base_loaded, new_loaded = loaded_rows(base.inputs), loaded_rows(new.inputs)
     for i in new.inputs:
         partner = others.partner.get(i.row)
         if partner is None or not others.same[i.row]:
             continue
         old = base.inputs[partner]
-        if old.address != i.address and old.row in base_loaded and i.row in new_loaded:
+        if old.address != i.address and old.row in base.loaded and i.row in new.loaded:
             lines.append(f"  moved, same bytes: {i.section} ({origin(i.key[0], i.member)}): {hex(old.address)} -> "
                          f"{hex(i.address)}")
     return failures, lines
@@ -1783,7 +1781,8 @@ def append_link(label, entry, work, script, placement, wraps, renamed, command):
     by_row = collections.defaultdict(list)
     for call in calls:
         by_row[call.row].append(call)
-    probe = Layout(inputs, by_row, binary_output(probe_binary), {})
+    probe = Layout(inputs, by_row, binary_output(probe_binary), {},
+                   {row for row, line in enumerate(lines) if line.loaded})
     pairing = pair(base.inputs, probe.inputs)
     text = [i for i in probe.inputs if is_text(i.section)]
     tests, tls = call_tests(base, probe, pairing), tls_tests(base, probe, pairing)
