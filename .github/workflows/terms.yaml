@@ -7,15 +7,25 @@ name: "Terms"
 # description. This check fails until it is, and runs again whenever the description is edited. A branch of this
 # repository needs no box of its own: only an account with write access, including a GitHub App, can push one.
 #
-# But a branch can adopt a seeded project: its patch of projects/<name>/project.yaml adds a line primary_contact with a
-# value other than n/a, and docs/seeded-projects.tsv of the base marks <name> yes. enrollment refuses a pull request
-# from a fork that changes a seeded project, so a maintainer of this repository carries the adopter's change on a
-# branch. The adopter's own pull request from their fork, which enrollment refuses, ticks the box: it is their record
-# that they accept the terms. The branch's description names it on a line "Adoption: #<number>" (or with its URL). The
-# check passes only when that pull request comes from a fork, was not opened by a bot, ticks the box, and adds the same
-# primary_contact for each project that the branch adopts (docs/project-yaml.md, "Seeded projects"). The files of a
-# branch are read on each run, every page of them, with their patches. A read that fails, a list over the API's 3000
-# files, or a head that moves while they are read, fails the check.
+# But a branch can adopt a seeded project: docs/seeded-projects.tsv of the base marks <name> yes, and the branch sets
+# primary_contact in projects/<name>/project.yaml to a value other than n/a and other than the value at the base.
+# enrollment refuses a pull request from a fork that changes a seeded project, so a maintainer of this repository
+# carries the adopter's change on a branch. The adopter's own pull request from their fork, which enrollment refuses,
+# ticks the box: it is their record that they accept the terms. The branch's description names it on a line
+# "Adoption: #<number>" (or with its URL). The check passes only when that pull request comes from a fork, was not
+# opened by a bot, ticks the box, and sets the same primary_contact for each project that the branch adopts
+# (docs/project-yaml.md, "Seeded projects"). The files of a branch are read on each run, every page of them. A read
+# that fails, a list over the API's 3000 files, or a head that moves while they are read, fails the check.
+#
+# The check reads primary_contact with the reader of oss-verify validate: yaml.safe_load of the whole project.yaml
+# (src/oss_verify/validate.py, load). YAML reads the same key from many spellings: a quoted key, a space before the
+# colon, a flow mapping, a block scalar, an alias. A reader of the lines of a patch finds only some of them, and a
+# branch could then adopt a project with no record. So for each project.yaml of a seeded project that a branch
+# changes, the check loads its text at the head and at the base, and the text of the same file in the pull request
+# that the description names, at the head of that pull request. The text at the base is that of the same path, or of
+# seeds/<name>/project.yaml for a seed port that the branch moves from seeds/<name>/ into projects/<name>/. A rename
+# from another file, such as the project.yaml of another project, keeps nothing of the contact of that file. The check
+# compares the values that YAML gives, not the lines: the record can spell the same contact in another way.
 #
 # A pull request that changes no file under projects/ (a change to src/ or docs/, say) enrolls nothing, and needs no
 # box either: the terms govern the enrollment of a project. They say so in their first paragraph: "This OSS Verify
@@ -28,16 +38,19 @@ name: "Terms"
 #
 # pull_request_target, not pull_request: with pull_request the workflow file is taken from the pull request itself, so
 # a contributor could edit this check away. This job reads only the event's description and the list of the files the
-# pull request changes, with their patches. For a branch that adopts a seeded project, it also reads
-# docs/seeded-projects.tsv of the base, and the pull request that the description names, with its files. It reads each
-# through the API, and never the pull request's code. Its token has no permission (permissions: {} below): the API
-# gives a public repository's pull requests, their files and its contents to any token ("This endpoint can be used
-# without authentication or the aforementioned permissions if only public resources are requested",
+# pull request changes. For a branch that changes the project.yaml of a seeded project, it also reads
+# docs/seeded-projects.tsv of the base, the text of that project.yaml at the head and at the base, the pull request
+# that the description names, and the text of that project.yaml at the head of that pull request. It reads each
+# through the API, and never runs the pull request's code. Its token has no permission (permissions: {} below): the
+# API gives a public repository's pull requests, their files and its contents to any token ("This endpoint can be
+# used without authentication or the aforementioned permissions if only public resources are requested",
 # https://docs.github.com/en/rest/pulls/pulls#list-pull-requests-files), and a token is used, not none, for the
 # authenticated rate limit. The description reaches the script through an environment variable, never by ${{ }}
-# substitution into the script, so its text cannot become shell. Each value that the API gives (a description, a
-# patch, a file name, a login) is data too: the script only compares it, jq gets it as input and never in a filter,
-# and a number goes into an API path only when it is digits.
+# substitution into the script, so its text cannot become shell. Each value that the API gives (a description, a file
+# name, the text of a file, a login) is data too: the script only compares it, jq gets it as input and never in a
+# filter, Python gets a text on its standard input and loads it only with yaml.safe_load, which makes only plain data
+# and runs no code, and a name, a commit or a number goes into an API path only when a regular expression of the
+# script matches it.
 on:
   pull_request_target:
     types: [opened, edited, reopened, synchronize]
@@ -54,7 +67,9 @@ jobs:
   terms-accepted:
     name: terms-accepted
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    # 5 minutes, not 2: a branch that changes the project.yaml of a seeded project can need PyYAML, and apt-get can take
+    # more than a minute to install it.
+    timeout-minutes: 5
     steps:
       - name: The description accepts the OSS Verify terms
         env:
@@ -75,51 +90,70 @@ jobs:
           ticks_the_box() {
             printf '%s\n' "$1" | grep -qiE '^[[:space:]]*[-*][[:space:]]+\[[xX]\][[:space:]]+I accept the \[OSS Verify terms\]\(https://theorem\.dev/oss-verify/terms/?\)'
           }
-          # The contacts that pull request $1 sets, from the patches of its files, every page. For each line
-          # primary_contact: <value> that the patch of a projects/<name>/project.yaml adds, with a value other than n/a,
-          # a line "<name> <the value as JSON>". For such a file that GitHub lists with no patch (it leaves out the patch
-          # of a large diff), a line "<name> ?": its value is unknown. A file that GitHub lists as renamed with no change
-          # (a seed port moved from seeds/<name>/ into projects/<name>/, say) keeps the text that it had under its old
-          # name and adds no line. The value is read without its comment, the spaces around it, and one pair of quotes
-          # around it. gh runs the filter in gojq, whose regular expressions are Go's: the filter uses none that jq reads
-          # in another way.
-          # shellcheck disable=SC2016 # $name is jq's
-          contacts_of() {
-            gh api --paginate "repos/$REPOSITORY/pulls/$1/files?per_page=100" --jq '.[]
-              | select(.status != "removed" and (.status != "renamed" or .changes != 0))
-              | select(.filename | test("^projects/[a-z0-9][a-z0-9._-]{0,62}/project\\.yaml$"))
-              | (.filename | ltrimstr("projects/") | rtrimstr("/project.yaml")) as $name
-              | if (.patch | type) == "string" then
-                  .patch | split("\n")[] | select(startswith("+primary_contact:")) | ltrimstr("+primary_contact:")
-                  | sub("[ \t]+#.*$"; "") | sub("^[ \t\r]+"; "") | sub("[ \t\r]+$"; "")
-                  | if test("^(\".*\"|\u0027.*\u0027)$") then .[1:-1] else . end
-                  | select(. != "n/a") | "\($name) \(tojson)"
-                else "\($name) ?" end'
+          # The primary_contact that the text on standard input sets, read as oss-verify validate reads project.yaml
+          # (src/oss_verify/validate.py, load): the text as UTF-8, loaded by yaml.safe_load. When the text loads to a
+          # mapping, the program prints the value of its key primary_contact as JSON, or null when it has no such key.
+          # It prints ? when the text does not load, or when the value has no JSON form: the contact is then unknown.
+          program='
+          import json
+          import yaml
+          try:
+              config = yaml.safe_load(open(0, encoding="utf-8").read())
+              contact = config.get("primary_contact") if isinstance(config, dict) else None
+              print(json.dumps(contact, sort_keys=True))
+          except Exception:
+              print("?")
+          '
+          # The contact that file $2 sets at commit $1, as the program above prints it. A shell variable cannot hold a
+          # NUL byte, so the raw text of the file goes from the API to the file $text, and from there to the program.
+          # Status 2: the API says that the file is not there (HTTP 404). Status 1: the read fails in another way. The
+          # callers give it a commit of the event, or a commit id that a regular expression of this script matched, and
+          # a path made from a name that a regular expression of this script matched.
+          contact_at() {
+            local error
+            if ! error=$({ gh api -H 'Accept: application/vnd.github.raw' "repos/$REPOSITORY/contents/$2?ref=$1" \
+                > "$text"; } 2>&1); then
+              [[ $error == *'(HTTP 404)'* ]] && return 2
+              return 1
+            fi
+            python3 -c "$program" < "$text"
           }
-          # The contacts of this pull request, of a head that did not move meanwhile, as not_an_enrollment below reads
-          # its files. In an if condition bash -e stops nothing, so each step that can fail returns by hand.
-          branch_contacts() {
-            local pull changed contacts
+          # The project.yaml files that this pull request does not remove, of a head that did not move meanwhile, as
+          # not_an_enrollment below reads its files. For each projects/<name>/project.yaml, a line "<name> <base>".
+          # <base> is the file whose text at the base gives the contact that the head is compared with: the same file,
+          # or seeds/<name>/project.yaml when GitHub lists the file as renamed from it (a seed port moved from
+          # seeds/<name>/ into projects/<name>/). A rename from any other file, such as the project.yaml of another
+          # project, keeps nothing of the contact of that file: its old name is only compared, never read, and the base
+          # has no file at the same path (HTTP 404), so no contact. gh runs the filter in gojq, whose regular
+          # expressions are Go's: the filter uses none that jq reads in another way. In an if condition bash -e stops
+          # nothing, so each step that can fail returns by hand.
+          branch_files() {
+            local pull changed files
             pull=$(gh api "repos/$REPOSITORY/pulls/$PR") || return 1
             [ "$(jq -r .head.sha <<< "$pull")" = "$HEAD_SHA" ] || return 1
             changed=$(jq -r .changed_files <<< "$pull") || return 1
             [[ $changed =~ ^[0-9]+$ ]] && (( changed <= 3000 )) || return 1
-            contacts=$(contacts_of "$PR") || return 1
+            files=$(gh api --paginate "repos/$REPOSITORY/pulls/$PR/files?per_page=100" --jq '.[]
+              | select(.status != "removed")
+              | select(.filename | test("^projects/[a-z0-9][a-z0-9._-]{0,62}/project\\.yaml$"))
+              | (.filename | ltrimstr("projects/") | rtrimstr("/project.yaml")) + " " + (
+                  if .status == "renamed" and .previous_filename == ("seeds/" + (.filename | ltrimstr("projects/")))
+                  then .previous_filename else .filename end)') || return 1
             [ "$(gh api "repos/$REPOSITORY/pulls/$PR" --jq .head.sha)" = "$HEAD_SHA" ] || return 1
-            printf '%s' "$contacts"
+            printf '%s' "$files"
           }
           # A same-repository branch can only be pushed by an account with write access, including a GitHub App. It
           # needs the record of the terms only when it adopts a seeded project (the top of this file).
           if [ "$HEAD_REPOSITORY" = "$REPOSITORY" ]; then
             # A read that fails, a list over the API's 3000 files, or a head that moved, decides nothing.
-            if ! contacts=$(branch_contacts); then
+            if ! files=$(branch_files); then
               echo "::error::The files of this pull request could not be read for certain. A push or an edit of the description runs this check again."
               exit 1
             fi
-            # An adoption: a contact for a project that docs/seeded-projects.tsv of the base marks yes in its second
-            # column. The table is read as data, as take-project reads it.
-            adoptions=()
-            if [ -n "$contacts" ]; then
+            # The files of seeded projects: those of a project that docs/seeded-projects.tsv of the base marks yes in
+            # its second column. The table is read as data, as take-project reads it.
+            seeded_files=()
+            if [ -n "$files" ]; then
               if ! table=$(gh api -H 'Accept: application/vnd.github.raw' \
                   "repos/$REPOSITORY/contents/docs/seeded-projects.tsv?ref=$BASE_SHA"); then
                 echo "::error::docs/seeded-projects.tsv of the base branch could not be read. A push or an edit of the description runs this check again."
@@ -127,8 +161,39 @@ jobs:
               fi
               seeded=$(jq -Rr 'split("\t") | select(.[1] == "yes") | .[0]' <<< "$table")
               while IFS= read -r line; do
-                if grep -qxF -- "${line%% *}" <<< "$seeded"; then adoptions+=("$line"); fi
-              done <<< "$contacts"
+                if grep -qxF -- "${line%% *}" <<< "$seeded"; then seeded_files+=("$line"); fi
+              done <<< "$files"
+            fi
+            # An adoption: the head sets a contact other than none and n/a, and other than the contact at the base. A
+            # file that is not at the base (HTTP 404) sets none there. A text that does not load sets an unknown
+            # contact: at the base it differs from each contact, and at the head no record can match it.
+            adoptions=()
+            if (( ${#seeded_files[@]} > 0 )); then
+              # PyYAML, for the program above. The runner image can lack it, and only a branch that changes the
+              # project.yaml of a seeded project needs it, so it is installed only now.
+              python3 -c 'import yaml' 2> /dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
+              text=$(mktemp)
+              trap 'rm -f -- "$text"' EXIT
+              for line in "${seeded_files[@]}"; do
+                name=${line%% *}
+                base_file=${line#* }
+                file=projects/$name/project.yaml
+                if ! head=$(contact_at "$HEAD_SHA" "$file"); then
+                  echo "::error::$file of this pull request could not be read. A push or an edit of the description runs this check again."
+                  exit 1
+                fi
+                status=0
+                base=$(contact_at "$BASE_SHA" "$base_file") || status=$?
+                if (( status == 2 )); then
+                  base=null
+                elif (( status != 0 )); then
+                  echo "::error::$base_file of the base branch could not be read. A push or an edit of the description runs this check again."
+                  exit 1
+                fi
+                if [ "$head" = '?' ] || { [ "$head" != null ] && [ "$head" != '"n/a"' ] && [ "$head" != "$base" ]; }; then
+                  adoptions+=("$name $head")
+                fi
+              done
             fi
             if (( ${#adoptions[@]} == 0 )); then
               echo "Opened from this repository, and it adopts no seeded project: no terms box needed."; exit 0
@@ -148,7 +213,7 @@ jobs:
               echo "::error::The line Adoption: names this pull request itself. Name the adopter's pull request from their fork."
               exit 1
             fi
-            if ! record=$(gh api "repos/$REPOSITORY/pulls/$number") || ! recorded=$(contacts_of "$number"); then
+            if ! record=$(gh api "repos/$REPOSITORY/pulls/$number"); then
               echo "::error::Pull request #$number, which the line Adoption: names, could not be read. Editing the description runs this check again."
               exit 1
             fi
@@ -165,11 +230,27 @@ jobs:
             if ! ticks_the_box "$(jq -r '.body // ""' <<< "$record")"; then
               echo "::error::Pull request #$number does not tick 'I accept the OSS Verify terms'."; failed=1
             fi
+            # The contact of the record: its projects/<name>/project.yaml at its head, read as this branch's. This
+            # repository's API gives the head commit of a pull request from a fork too. The head goes into an API path
+            # only when it is a commit id, 40 hexadecimal digits.
+            record_head=$(jq -r '.head.sha // ""' <<< "$record")
             for line in "${adoptions[@]}"; do
-              if [ "${line#* }" = '?' ]; then
-                echo "::error::GitHub lists projects/${line%% *}/project.yaml of this pull request with no patch: the primary_contact that it sets is unknown, and no pull request can record it."; failed=1
-              elif ! grep -qxF -- "$line" <<< "$recorded"; then
-                echo "::error::Pull request #$number sets another primary_contact for ${line%% *}, or none."; failed=1
+              name=${line%% *}
+              head=${line#* }
+              file=projects/$name/project.yaml
+              if [ "$head" = '?' ]; then
+                echo "::error::The primary_contact that $file of this pull request sets is unknown: the text does not load with yaml.safe_load, or the value has no JSON form. No pull request can record it."; failed=1
+                continue
+              fi
+              status=1
+              if [[ $record_head =~ ^[0-9a-f]{40}$ ]]; then
+                status=0
+                recorded=$(contact_at "$record_head" "$file") || status=$?
+              fi
+              if (( status == 2 )) || { (( status == 0 )) && [ "$recorded" != "$head" ]; }; then
+                echo "::error::Pull request #$number sets another primary_contact for $name, or none."; failed=1
+              elif (( status != 0 )); then
+                echo "::error::$file of pull request #$number could not be read. Editing the description runs this check again."; failed=1
               fi
             done
             (( failed == 0 )) || exit 1
