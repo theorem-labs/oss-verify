@@ -361,7 +361,7 @@ def split_paths(paths: list[str]) -> tuple[list[str], list[str]]:
 
 def seeded_names(table: pathlib.Path = SEEDED_TABLE) -> set[str]:
     """The projects that docs/seeded-projects.tsv marks seeded (yes in its second column), as enrollment
-    (.github/scripts/take-project) reads that table. None without the table."""
+    (.github/scripts/take-project) reads that table. An empty set without the table."""
     try:
         text = table.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -467,8 +467,9 @@ def scope_row(names: list[str], outside: list[str], changed_files: int, seeded: 
         return WARN, (
             f"{code('projects/' + seeded[0] + '/')} is the port of a project that we seeded: `enrollment` refuses a "
             "pull request from a fork that changes it. A maintainer of this repository carries the change on a branch "
-            "of this repository. For an adoption, tick the box that accepts the OSS Verify terms in this pull request: "
-            "that branch's pull request names it (docs/project-yaml.md, Seeded projects)"
+            "of this repository. For an adoption, tick the box that accepts the OSS Verify terms in this pull request, "
+            f"and name {code('projects/' + seeded[0])} in its description: that branch's pull request names it "
+            "(docs/project-yaml.md, Seeded projects)"
         )
     return OK, "only this project's directory"
 

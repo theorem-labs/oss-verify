@@ -4,17 +4,22 @@
 
 The check needs the box that accepts the OSS Verify terms in an enrollment's description, and no box for a pull request
 that changes no file under projects/, which enrolls nothing. A branch of this repository that adopts a seeded project
-names the adopter's pull request from their fork, which ticks the box: their record that they accept the terms. The
-check reads primary_contact as oss-verify validate reads it, from the text of project.yaml with yaml.safe_load.
+names the adopter's pull request from their fork, which ticks the box and names the project: their record that they
+accept the terms. The check reads primary_contact as oss-verify validate reads it: .github/scripts/primary-contact
+loads the text of project.yaml with oss_verify.validate.load. The step runs in a temporary directory, as in the
+checkout of the base, where .github/scripts and src are links to this repository's.
 """
 import json
 import os
 import pathlib
 import shutil
 import subprocess
+import time
 
 import pytest
 import yaml
+
+from oss_verify import validate
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 REPOSITORY = "theorem-labs/oss-verify"
@@ -22,20 +27,25 @@ HEAD = "a" * 40
 BASE = "c" * 40
 TICKED = "- [x] I accept the [OSS Verify terms](https://theorem.dev/oss-verify/terms/).\n"
 UNTICKED = "- [ ] I accept the [OSS Verify terms](https://theorem.dev/oss-verify/terms/).\n"
-# docs/seeded-projects.tsv of the base, in the form that src/oss_verify/seeded_projects.py writes: curl is seeded, and
-# sqlpage is not.
+# docs/seeded-projects.tsv of the base, in the form that src/oss_verify/seeded_projects.py writes: curl and abseil-cpp
+# are seeded, and sqlpage is not.
 TABLE = ("# Written by src/oss_verify/seeded_projects.py; do not edit.\t\n"
          "project\tseedable\tbuild\tbuild notes\treason or notes\n"
+         "abseil-cpp\tyes\treproduces\tall binaries match the release's\t-\n"
          "curl\tyes\treproduces\tall binaries match the release's\t-\n"
          "sqlpage\tno\t-\t-\tthe release did not build it\n")
 # The description of a branch that carries the adoption of curl, and names the adopter's pull request 9.
 CARRIED = "Carries the adoption of curl from the adopter's pull request.\n\nAdoption: #9\n"
+# The description of the adopter's pull request 9: the heading of the pull request template names the project, and
+# the box is ticked.
+NAMES_CURL = "## Enroll `projects/curl`\n\n" + TICKED
 NO_ADOPTION = "Opened from this repository, and it adopts no seeded project: no terms box needed."
-RECORDED = ("Pull request #9, from a fork by adopter, accepts the OSS Verify terms and sets the same primary_contact "
-            "for curl: the adoption is recorded.")
+RECORDED = ("Pull request #9, from a fork by adopter, accepts the OSS Verify terms and names projects/curl, and no "
+            "other project: the adoption is recorded.")
 NO_RECORD = "::error::This branch adopts curl, which docs/seeded-projects.tsv marks seeded."
 NOT_READ = "::error::The files of this pull request could not be read for certain."
-# The text of the seed port of curl, and of curl adopted with the contact that the adopter's pull request 9 sets.
+REFUSED = "::error::oss-verify validate refuses projects/curl/project.yaml of this pull request"
+# The text of the seed port of curl, and of curl adopted.
 SEED = "repo: https://github.com/curl/curl\nprimary_contact: n/a\n"
 ADOPTED = "repo: https://github.com/curl/curl\nprimary_contact: security@curl.example\n"
 # For the `head` or `base` of a file entry: the API gives an error other than a 404 for that text.
@@ -131,12 +141,15 @@ def write_texts(stub, files, head, base=None):
 
 
 def terms(tmp_path, files, body=UNTICKED, head_repository="someone/oss-verify", association="NONE",
-          author="someone", changed=None, api_head=HEAD, after_head=None, fail=False, table=TABLE, others=None):
+          author="someone", changed=None, api_head=HEAD, after_head=None, fail=False, table=TABLE, others=None,
+          no_yaml=False):
     """Run the check's step on pull request 7 from `head_repository` whose description is `body` and that changes
     `files` (each as `entry` takes it, with its texts as `texts` gives them; changed_files: `changed`, by default their
     number). The API gives `api_head` as its head, and `after_head` on every later read, docs/seeded-projects.tsv of the
-    base as `table` (None: a 404), and each other pull request of `others`, {number: (pull request, files)}, with the
-    head texts of its files at its head. Return (exit code, output, calls)."""
+    base as `table` (None: a 404), and each other pull request of `others`, {number: pull request}. The step runs in
+    `tmp_path`, as in the checkout of the base: .github/scripts and src there are links to this repository's, and
+    PYTHONPATH names that src. With `no_yaml`, PYTHONPATH first names a directory whose yaml.py raises ImportError, as
+    on a runner without PyYAML. Return (exit code, output, calls)."""
     stub = tmp_path / "stub"
     stub.mkdir()
     (stub / "gh").write_text(STUB_GH)
@@ -152,22 +165,31 @@ def terms(tmp_path, files, body=UNTICKED, head_repository="someone/oss-verify", 
         (stub / "pull.7.after.json").write_text(pull(after_head))
     (stub / "files.7.json").write_text(json.dumps([entry(f) for f in files]))
     write_texts(stub, files, HEAD, BASE)
-    for number, (other, other_files) in (others or {}).items():
+    for number, other in (others or {}).items():
         (stub / f"pull.{number}.json").write_text(json.dumps(other))
-        (stub / f"files.{number}.json").write_text(json.dumps([entry(f) for f in other_files]))
-        write_texts(stub, other_files, other["head"]["sha"])
     if table is not None:
         (stub / "table.tsv").write_text(table)
     if fail:
         (stub / "fail").write_text("")
     (stub / "calls").write_text("")
+    (tmp_path / ".github").mkdir()
+    (tmp_path / ".github" / "scripts").symlink_to(ROOT / ".github" / "scripts")
+    (tmp_path / "src").symlink_to(ROOT / "src")
+    pythonpath = [str(tmp_path / "src")]
+    if no_yaml:
+        (stub / "no-yaml").mkdir()
+        (stub / "no-yaml" / "yaml.py").write_text('raise ImportError("no PyYAML on this runner")\n')
+        pythonpath.insert(0, str(stub / "no-yaml"))
     flow = yaml.safe_load((ROOT / ".github" / "workflows" / "terms.yaml").read_text())
-    [step] = flow["jobs"]["terms-accepted"]["steps"]
+    [step] = [step for step in flow["jobs"]["terms-accepted"]["steps"]
+              if step.get("name") == "The description accepts the OSS Verify terms"]
     env = {**os.environ, "PATH": f"{stub}{os.pathsep}{os.environ['PATH']}", "STUB": str(stub), "STUB_BASE": BASE,
            "BODY": body, "AUTHOR": author, "ASSOCIATION": association, "HEAD_REPOSITORY": head_repository,
-           "REPOSITORY": REPOSITORY, "GH_TOKEN": "x", "PR": "7", "HEAD_SHA": HEAD, "BASE_SHA": BASE}
-    # bash -e, as GitHub runs a step's run.
-    run = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=tmp_path, env=env, capture_output=True, text=True)
+           "REPOSITORY": REPOSITORY, "GH_TOKEN": "x", "PR": "7", "HEAD_SHA": HEAD, "BASE_SHA": BASE,
+           "PYTHONPATH": os.pathsep.join(pythonpath)}
+    # bash -e, as GitHub runs a step's run, and no longer than the job's timeout-minutes.
+    run = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=tmp_path, env=env, capture_output=True, text=True,
+                         timeout=60 * flow["jobs"]["terms-accepted"]["timeout-minutes"])
     return run.returncode, run.stdout + run.stderr, (stub / "calls").read_text().splitlines()
 
 
@@ -184,13 +206,11 @@ def adoption(name="curl", contact="security@curl.example", status="modified"):
         f" homepage: https://{name}.example\n")}
 
 
-def adopter(body=TICKED, head_repository="adopter/oss-verify", author="adopter", files=None, number=9, sha="d" * 40):
+def adopter(body=NAMES_CURL, head_repository="adopter/oss-verify", author="adopter", number=9):
     """For `others`: pull request `number` from `head_repository` (None: a deleted fork), opened by `author`, whose
-    description is `body` and whose head, commit `sha`, has the texts of `files`, by default the adoption of curl and
-    its build.sh."""
-    head = {"sha": sha, "repo": None if head_repository is None else {"full_name": head_repository}}
-    pull = {"number": number, "head": head, "user": {"login": author}, "body": body, "changed_files": 2}
-    return {number: (pull, [adoption(), "projects/curl/build.sh"] if files is None else files)}
+    description is `body`. Its head is the commit "d" * 40, but the check reads no file at that commit."""
+    head = {"sha": "d" * 40, "repo": None if head_repository is None else {"full_name": head_repository}}
+    return {number: {"number": number, "head": head, "user": {"login": author}, "body": body, "changed_files": 2}}
 
 
 def branch(tmp_path, files=None, body=CARRIED, others=None, **arguments):
@@ -277,24 +297,35 @@ def test_a_branch_that_adopts_a_seeded_project_passes_with_the_adopters_record(t
     code, out, calls = branch(tmp_path, body=body, others=adopter())
     assert code == 0, out
     assert RECORDED in out
-    assert (f"api -H Accept: application/vnd.github.raw repos/{REPOSITORY}/contents/docs/seeded-projects.tsv"
-            f"?ref={BASE}") in calls
-    # The record's project.yaml at its head, and not its list of files.
-    assert (f"api -H Accept: application/vnd.github.raw repos/{REPOSITORY}/contents/projects/curl/project.yaml"
-            f"?ref={'d' * 40}") in calls
-    assert not [call for call in calls if "pulls/9/files" in call]
+    # The table, and projects/curl/project.yaml at the head and at the base: no file of the record.
+    assert [call.split("/contents/")[1] for call in calls if "/contents/" in call] == [
+        f"docs/seeded-projects.tsv?ref={BASE}", f"projects/curl/project.yaml?ref={HEAD}",
+        f"projects/curl/project.yaml?ref={BASE}"]
 
 
-@pytest.mark.parametrize("ours, theirs", [
+def test_a_record_need_not_change_the_project(tmp_path):
+    # The check reads the description of pull request 9, never its list of files or a file at its head: the record
+    # does not have to change projects/curl/.
+    code, out, calls = branch(tmp_path, others=adopter())
+    assert code == 0, out
+    assert RECORDED in out
+    assert [call for call in calls if "pulls/9" in call] == [f"api repos/{REPOSITORY}/pulls/9"]
+    assert not [call for call in calls if f"ref={'d' * 40}" in call]
+
+
+@pytest.mark.parametrize("base, head", [
     ("security@curl.example", '"security@curl.example"  # the security team'),
     ("'security@curl.example'", "security@curl.example   "),
     ("security@curl.example # adopted", "  security@curl.example"),
 ], ids=["quotes and a comment", "single quotes and spaces after it", "a comment and spaces"])
-def test_the_contact_is_read_without_quotes_comments_or_spaces(tmp_path, ours, theirs):
-    code, out, _ = branch(tmp_path, files=[adoption(contact=ours)],
-                          others=adopter(files=[adoption(contact=theirs)]))
+def test_the_same_contact_in_another_spelling_adopts_nothing(tmp_path, base, head):
+    # The check compares the values that YAML gives at the head and at the base, not the lines.
+    files = [{"filename": "projects/curl/project.yaml", "status": "modified",
+              "base": f"repo: https://github.com/curl/curl\nprimary_contact: {base}\n",
+              "head": f"repo: https://github.com/curl/curl\nprimary_contact: {head}\n"}]
+    code, out, _ = branch(tmp_path, files=files, body="Fixes the build of curl.\n")
     assert code == 0, out
-    assert RECORDED in out
+    assert NO_ADOPTION in out
 
 
 def test_a_record_from_a_deleted_fork_is_from_a_fork(tmp_path):
@@ -323,8 +354,8 @@ def test_a_branch_that_adopts_a_seeded_project_with_no_record_fails(tmp_path, bo
 @pytest.mark.parametrize("body", [UNTICKED, "", "I accept the OSS Verify terms.\n"],
                          ids=["not ticked", "no description", "no box"])
 def test_a_record_that_does_not_tick_the_box_fails(tmp_path, body):
-    # Negative control: the description names pull request 9, which sets the same contact, but its box is not ticked.
-    code, out, _ = branch(tmp_path, others=adopter(body=body))
+    # Negative control: the description names pull request 9, which names curl, but its box is not ticked.
+    code, out, _ = branch(tmp_path, others=adopter(body="## Enroll `projects/curl`\n\n" + body))
     assert code == 1, out
     assert "::error::Pull request #9 does not tick 'I accept the OSS Verify terms'." in out
     assert RECORDED not in out
@@ -337,31 +368,60 @@ def test_a_record_from_a_branch_of_this_repository_fails(tmp_path):
     assert RECORDED not in out
 
 
-@pytest.mark.parametrize("files", [
-    [adoption(contact="someone@else.example")],
-    [adoption(name="sqlpage")],
-    [adoption(contact="n/a")],
-    [{"filename": "projects/curl/project.yaml", "head": "notes:\n  primary_contact: security@curl.example\n"}],
-    [{"filename": "projects/curl/project.yaml", "head": "primary_contact: [security@curl.example\n"}],
-    ["projects/curl/build.sh"],
-], ids=["another address", "another project", "n/a", "the contact only under another key", "a text that does not load",
-        "no project.yaml"])
-def test_a_record_that_sets_another_contact_or_none_fails(tmp_path, files):
-    code, out, _ = branch(tmp_path, others=adopter(files=files))
-    assert code == 1, out
-    assert "::error::Pull request #9 sets another primary_contact for curl, or none." in out
-    assert RECORDED not in out
+@pytest.mark.parametrize("body", [
+    NAMES_CURL,
+    "Adopts projects/curl/ for its maintainers.\n" + TICKED,
+    "Adopts projects/curl for its maintainers.\n" + TICKED,
+    "Adopts projects/curl\n" + TICKED,
+    TICKED + "Adopts projects/curl",
+    "Adopts projects/curl, with its build files.\n" + TICKED,
+    "Adopts https://github.com/theorem-labs/oss-verify/tree/main/projects/curl\n" + TICKED,
+], ids=["a backtick after it, in the template's heading", "a slash after it", "a space after it",
+        "a line end after it", "the end of the description", "a comma after it", "in the path of a URL"])
+def test_a_record_that_names_the_project_passes(tmp_path, body):
+    code, out, _ = branch(tmp_path, others=adopter(body=body))
+    assert code == 0, out
+    assert RECORDED in out
 
 
-@pytest.mark.parametrize("case", ["API error", "a head that is not a commit id"])
-def test_a_record_whose_project_yaml_cannot_be_read_fails(tmp_path, case):
-    # The texts of the record are at its head "main" too, but only a commit id goes into an API path.
-    others = (adopter(files=[{**adoption(), "head": API_ERROR}]) if case == "API error" else adopter(sha="main"))
-    code, out, calls = branch(tmp_path, others=others)
+@pytest.mark.parametrize("body, errors", [
+    (TICKED, ["::error::Pull request #9 does not name projects/curl in its description."]),
+    ("## Enroll `projects/<name>`\n\n" + TICKED,
+     ["::error::Pull request #9 does not name projects/curl in its description."]),
+    ("## Enroll `projects/sqlpage`\n\n" + TICKED,
+     ["::error::Pull request #9 does not name projects/curl in its description.",
+      "::error::Pull request #9 also names projects/sqlpage. One record names each project that this branch adopts, "
+      "and no other."]),
+    ("## Enroll `projects/curl` and `projects/sqlpage`\n\n" + TICKED,
+     ["::error::Pull request #9 also names projects/sqlpage. One record names each project that this branch adopts, "
+      "and no other."]),
+    ("## Enroll `projects/curlx`\n\n" + TICKED,
+     ["::error::Pull request #9 does not name projects/curl in its description.",
+      "::error::Pull request #9 also names projects/curlx."]),
+], ids=["no project", "the template's heading as it is", "another project", "the project and another",
+        "projects/curlx, which is not curl"])
+def test_a_record_that_does_not_name_the_project_alone_fails(tmp_path, body, errors):
+    # One record cannot serve two projects: it names each project that the branch adopts, and no other.
+    code, out, _ = branch(tmp_path, others=adopter(body=body))
     assert code == 1, out
-    assert "::error::projects/curl/project.yaml of pull request #9 could not be read." in out
-    assert RECORDED not in out
-    assert not [call for call in calls if "?ref=main" in call]
+    for error in errors:
+        assert error in out
+    assert "the adoption is recorded" not in out
+
+
+def test_a_branch_that_adopts_several_projects_needs_one_record_that_names_each(tmp_path):
+    files = [adoption(), adoption(name="abseil-cpp")]
+    both = "## Enroll `projects/curl` and `projects/abseil-cpp`\n\n" + TICKED
+    code, out, _ = branch(tmp_path, files=files, others=adopter(body=both))
+    assert code == 0, out
+    assert ("accepts the OSS Verify terms and names projects/abseil-cpp, projects/curl, and no other project: the "
+            "adoption is recorded.") in out
+    # Negative control: the record names curl alone.
+    (tmp_path / "curl").mkdir()
+    code, out, _ = branch(tmp_path / "curl", files=files, others=adopter())
+    assert code == 1, out
+    assert "::error::Pull request #9 does not name projects/abseil-cpp in its description." in out
+    assert "the adoption is recorded" not in out
 
 
 @pytest.mark.parametrize("line", ["Adoption: #7", "Adoption: https://github.com/theorem-labs/oss-verify/pull/7"])
@@ -404,12 +464,16 @@ def test_a_record_that_cannot_be_read_fails(tmp_path):
       "changes": 0, "head": SEED, "base": SEED}],
     [{"filename": "projects/curl/project.yaml", "status": "added",
       "patch": "@@ -0,0 +1,2 @@\n+repo: https://github.com/curl/curl\n+primary_contact: n/a\n"}],
+    [{"filename": "projects/curl/project.yaml", "status": "modified",
+      "patch": "@@ -2,1 +2,1 @@\n-primary_contact: old@curl.example\n+primary_contact: n/a\n"}],
 ], ids=["a build file", "project.yaml, primary_contact kept", "project.yaml, n/a set again", "project.yaml removed",
         "project.yaml removed, no patch",
         "a contact in a comment, under another key, or in another file than projects/<name>/project.yaml",
-        "a seed port moved into projects/ with no change", "a seed port added to projects/ with n/a"])
+        "a seed port moved into projects/ with no change", "a seed port added to projects/ with n/a",
+        "a contact set back to n/a"])
 def test_a_branch_that_changes_a_seeded_port_and_keeps_its_contact_needs_no_record(tmp_path, files):
-    # A maintainer's own fix of a seeded port: the contact at the head is none, n/a, or the contact at the base.
+    # A maintainer's own fix of a seeded port: the head has no project.yaml, or its contact is n/a, which gives
+    # findings to no one.
     code, out, _ = branch(tmp_path, files=files, body="Fixes the build of curl.\n")
     assert code == 0, out
     assert NO_ADOPTION in out
@@ -436,19 +500,34 @@ def test_a_branch_that_sets_a_seeded_contact_in_another_yaml_spelling_is_an_adop
     assert NO_ADOPTION not in out
 
 
+@pytest.mark.parametrize("key", ['"primary_contact":', "'primary_contact':", "primary_contact :"],
+                         ids=["double quotes", "single quotes", "a space before the colon"])
+def test_a_seeded_contact_in_another_yaml_spelling_needs_the_record(tmp_path, key):
+    # The branches of the test above: with no record, the step says that the record is missing. With the adopter's
+    # record, which names curl, it passes.
+    files = [{"filename": "projects/curl/project.yaml", "status": "modified",
+              "patch": f"@@ -4,1 +4,1 @@\n-primary_contact: n/a\n+{key} security@curl.example\n"}]
+    code, out, _ = branch(tmp_path, files=files, body="Carries the adoption of curl.\n")
+    assert code == 1, out
+    assert NO_RECORD in out
+    (tmp_path / "named").mkdir()
+    code, out, _ = branch(tmp_path / "named", files=files, others=adopter())
+    assert code == 0, out
+    assert RECORDED in out
+
+
 @pytest.mark.parametrize("patch", [
     "@@ -1,2 +1,1 @@\n-repo: https://github.com/curl/curl\n-primary_contact: n/a\n"
     "+{repo: https://github.com/curl/curl, primary_contact: security@curl.example}\n",
     "@@ -1,2 +1,3 @@\n repo: https://github.com/curl/curl\n-primary_contact: n/a\n"
     "+primary_contact: >-\n+  security@curl.example\n",
 ], ids=["a flow mapping", "a block scalar"])
-def test_a_seeded_contact_in_another_yaml_form_is_an_adoption_that_a_plain_record_matches(tmp_path, patch):
+def test_a_seeded_contact_in_another_yaml_form_is_an_adoption(tmp_path, patch):
     files = [{"filename": "projects/curl/project.yaml", "status": "modified", "patch": patch}]
     assert yaml.safe_load(texts(files[0])[0])["primary_contact"] == "security@curl.example"
     code, out, _ = branch(tmp_path, files=files, body="Carries the adoption of curl.\n")
     assert code == 1, out
     assert NO_RECORD in out
-    # The record compares contacts, not spellings: pull request 9 sets the same contact as "primary_contact: <value>".
     (tmp_path / "named").mkdir()
     code, out, _ = branch(tmp_path / "named", files=files, others=adopter())
     assert code == 0, out
@@ -458,31 +537,41 @@ def test_a_seeded_contact_in_another_yaml_form_is_an_adoption_that_a_plain_recor
 @pytest.mark.parametrize("patch, status", [
     ("@@ -2,1 +2,1 @@\n-primary_contact: old@curl.example\n+primary_contact: security@curl.example\n", "modified"),
     ("@@ -0,0 +1,2 @@\n+repo: https://github.com/curl/curl\n+primary_contact: security@curl.example\n", "added"),
-], ids=["another address than the base's", "a new file"])
+], ids=["another address than the base's", "a new file, which the base does not have: n/a"])
 def test_a_branch_that_sets_a_contact_other_than_the_bases_adopts(tmp_path, patch, status):
+    # A change from one contact to another needs a record from the new contact.
     files = [{"filename": "projects/curl/project.yaml", "status": status, "patch": patch}]
-    code, out, _ = branch(tmp_path, files=files, body="Carries the adoption of curl.\n")
+    code, out, calls = branch(tmp_path, files=files, body="Carries the adoption of curl.\n")
     assert code == 1, out
     assert NO_RECORD in out
+    assert (f"api -H Accept: application/vnd.github.raw repos/{REPOSITORY}/contents/projects/curl/project.yaml"
+            f"?ref={BASE}") in calls
     (tmp_path / "named").mkdir()
     code, out, _ = branch(tmp_path / "named", files=files, others=adopter())
     assert code == 0, out
     assert RECORDED in out
 
 
-def test_a_seed_port_moved_into_projects_compares_the_contact_with_its_old_file(tmp_path):
-    rename = {"filename": "projects/curl/project.yaml", "previous_filename": "seeds/curl/project.yaml",
-              "status": "renamed", "head": ADOPTED, "base": ADOPTED}
-    code, out, calls = branch(tmp_path, files=[rename], body="Moves curl into projects/.\n")
-    assert code == 0, out
-    assert NO_ADOPTION in out
-    assert (f"api -H Accept: application/vnd.github.raw repos/{REPOSITORY}/contents/seeds/curl/project.yaml"
-            f"?ref={BASE}") in calls
-    # Negative control: the old file says n/a, so the same rename sets a new contact.
-    (tmp_path / "n-a").mkdir()
-    code, out, _ = branch(tmp_path / "n-a", files=[{**rename, "base": SEED}], body="Moves curl into projects/.\n")
+def test_a_seed_port_moved_into_projects_with_a_contact_adopts_it(tmp_path):
+    # The two steps of the review. Step A changes only seeds/abseil-cpp/project.yaml, to a contact: the check reads no
+    # file of seeds/, and the test in tests/test_seeded_projects.py that each seed port has n/a fails step A. Step B,
+    # this branch, moves seeds/abseil-cpp/ into projects/abseil-cpp/ with no change. Had step A merged, the seed port at
+    # the base would have the contact too, but the check reads projects/abseil-cpp/project.yaml of the base, which is
+    # not there: n/a. So step B adopts abseil-cpp, and with no record the step must not pass it.
+    text = "repo: https://github.com/abseil/abseil-cpp\nprimary_contact: maintainer@abseil.example\n"
+    rename = {"filename": "projects/abseil-cpp/project.yaml", "previous_filename": "seeds/abseil-cpp/project.yaml",
+              "status": "renamed", "changes": 0, "head": text, "base": text}
+    code, out, calls = branch(tmp_path, files=[rename], body="Moves abseil-cpp into projects/.\n")
     assert code == 1, out
-    assert NO_RECORD in out
+    assert "::error::This branch adopts abseil-cpp, which docs/seeded-projects.tsv marks seeded." in out
+    assert [call.split("/contents/")[1] for call in calls if "/contents/" in call] == [
+        f"docs/seeded-projects.tsv?ref={BASE}", f"projects/abseil-cpp/project.yaml?ref={HEAD}",
+        f"projects/abseil-cpp/project.yaml?ref={BASE}"]
+    (tmp_path / "named").mkdir()
+    code, out, _ = branch(tmp_path / "named", files=[rename],
+                          others=adopter(body="## Enroll `projects/abseil-cpp`\n\n" + TICKED))
+    assert code == 0, out
+    assert "names projects/abseil-cpp, and no other project: the adoption is recorded." in out
 
 
 def test_a_rename_of_the_project_yaml_of_another_project_onto_a_seeded_project_adopts_it(tmp_path):
@@ -501,14 +590,14 @@ def test_a_rename_of_the_project_yaml_of_another_project_onto_a_seeded_project_a
         f"projects/curl/project.yaml?ref={BASE}"]
 
 
-@pytest.mark.parametrize("old", ["seeds/sqlpage/project.yaml", "projects/curl/project.yml",
+@pytest.mark.parametrize("old", ["seeds/curl/project.yaml", "seeds/sqlpage/project.yaml", "projects/curl/project.yml",
                                  "seeds/../seeds/curl/project.yaml", "seeds/$(touch pwned-a)/project.yaml",
                                  "seeds/curl/project.yaml?ref=main", "seeds/curl project.yaml"],
-                         ids=["the seed port of another project", "another file of curl", "a part ..",
-                              "a shell expansion", "a query", "a space"])
-def test_a_rename_from_another_file_than_the_seed_port_never_reads_that_file(tmp_path, old):
-    # The old file sets the same contact, but only seeds/curl/project.yaml is read under its old name. The base of curl
-    # is projects/curl/project.yaml, which is not there, so the rename gives curl a first contact.
+                         ids=["the seed port of curl", "the seed port of another project", "another file of curl",
+                              "a part ..", "a shell expansion", "a query", "a space"])
+def test_a_rename_never_reads_the_old_name(tmp_path, old):
+    # The old file sets the same contact, but the check never reads it. The base of curl is projects/curl/project.yaml,
+    # which is not there, so the rename gives curl a first contact.
     files = [{"filename": "projects/curl/project.yaml", "previous_filename": old, "status": "renamed",
               "head": ADOPTED, "base": ADOPTED}]
     code, out, calls = branch(tmp_path, files=files, body="Moves curl into projects/.\n")
@@ -549,24 +638,66 @@ def test_a_head_project_yaml_that_cannot_be_read_fails(tmp_path, head):
     assert "the adoption is recorded" not in out
 
 
+# A graph of YAML aliases, 9 levels deep: it loads fast, with each list once, but its JSON is about 10 MB.
+ALIASES = ("a: &a [x, x, x, x, x]\n"
+           + "".join(f"{name}: &{name} [{', '.join(['*' + below] * 5)}]\n"
+                     for below, name in zip("abcdefgh", "bcdefghi"))
+           + "repo: https://github.com/curl/curl\nprimary_contact: *i\n")
+
+
 @pytest.mark.parametrize("text", [
     "primary_contact: [security@curl.example\n",
     "primary_contact: 2026-11-18\n",
+    "primary_contact: 2026-13-45\n",
     'primary_contact: !!python/object/apply:os.system ["touch pwned-a"]\n',
-], ids=["a flow sequence with no end", "a date, which has no JSON form", "a tag that would run code"])
-def test_a_head_project_yaml_that_does_not_load_needs_a_record_that_cannot_match_it(tmp_path, text):
-    # Its contact is unknown: the branch adopts curl, and no record matches it, not even one with the same text.
-    files = [{**adoption(), "head": text}]
+    "primary_contact: 5\n",
+    "primary_contact: [security@curl.example]\n",
+    "primary_contact: {address: security@curl.example}\n",
+    "primary_contact:\n",
+    "repo: https://github.com/curl/curl\n",
+    "security@curl.example\n",
+    ALIASES,
+    ADOPTED + "#" * validate.MAX_CONFIG_BYTES,
+], ids=["a flow sequence with no end", "a date", "a date that does not exist", "a tag that would run code",
+        "a number", "a list", "a mapping", "null", "no primary_contact", "no mapping", "a graph of aliases",
+        "larger than oss-verify validate reads"])
+def test_a_head_contact_that_oss_verify_validate_refuses_fails(tmp_path, text):
+    # The contact is unknown, and oss-verify validate refuses the file: the check fails, even with the adopter's
+    # record, which would pass.
+    start = time.monotonic()
+    code, out, _ = branch(tmp_path, files=[{**adoption(), "head": text}], others=adopter())
+    assert time.monotonic() - start < 30, "the step must not make JSON of what the text loads to"
+    assert code == 1, out
+    assert REFUSED in out
+    assert NO_RECORD not in out
+    assert "the adoption is recorded" not in out
+    # yaml.safe_load makes no Python object of a tag: the text runs no code.
+    assert sorted(tmp_path.rglob("pwned-*")) == []
+
+
+@pytest.mark.parametrize("text", [
+    "primary_contact: [security@curl.example\n",
+    "primary_contact: 5\n",
+    "repo: https://github.com/curl/curl\n",
+    ADOPTED + "#" * validate.MAX_CONFIG_BYTES,
+], ids=["a flow sequence with no end", "a number", "no primary_contact", "larger than oss-verify validate reads"])
+def test_an_unknown_contact_at_the_base_differs_from_each_contact(tmp_path, text):
+    # The base's unknown contact differs from the head's, even from the same address: the branch adopts curl.
+    files = [{**adoption(), "base": text}]
     code, out, _ = branch(tmp_path, files=files, body="Carries a change of curl.\n")
     assert code == 1, out
     assert NO_RECORD in out
     (tmp_path / "named").mkdir()
-    code, out, _ = branch(tmp_path / "named", files=files, others=adopter(files=files))
-    assert code == 1, out
-    assert "::error::The primary_contact that projects/curl/project.yaml of this pull request sets is unknown" in out
-    assert "the adoption is recorded" not in out
-    # yaml.safe_load makes no Python object of a tag: the text runs no code.
-    assert sorted(tmp_path.rglob("pwned-*")) == []
+    code, out, _ = branch(tmp_path / "named", files=files, others=adopter())
+    assert code == 0, out
+    assert RECORDED in out
+    # A contact of n/a at the head adopts nothing, whatever the base has: the check does not read the base.
+    (tmp_path / "n-a").mkdir()
+    code, out, calls = branch(tmp_path / "n-a", files=[{**adoption(contact="n/a"), "base": text}],
+                              body="Fixes the build of curl.\n")
+    assert code == 0, out
+    assert NO_ADOPTION in out
+    assert not [call for call in calls if f"?ref={BASE}" in call and "contents/projects/" in call]
 
 
 def test_a_base_project_yaml_that_cannot_be_read_fails(tmp_path):
@@ -579,6 +710,19 @@ def test_a_base_project_yaml_that_cannot_be_read_fails(tmp_path):
     assert "the adoption is recorded" not in out
 
 
+def test_a_runner_without_pyyaml_fails(tmp_path):
+    code, out, calls = branch(tmp_path, others=adopter(), no_yaml=True)
+    assert code == 1, out
+    assert "::error::The runner image lacks PyYAML (python3-yaml)" in out
+    assert "the adoption is recorded" not in out
+    assert not [call for call in calls if "contents/projects/" in call]
+    # Negative control: a branch that changes no project.yaml of a seeded project needs no PyYAML.
+    (tmp_path / "build").mkdir()
+    code, out, _ = branch(tmp_path / "build", files=["projects/curl/build.sh"], body=UNTICKED, no_yaml=True)
+    assert code == 0, out
+    assert NO_ADOPTION in out
+
+
 def test_a_long_ticked_description_is_read_as_ticked(tmp_path):
     # As long as GitHub allows (65536 characters), the box first: grep -q stops reading at the box, and the step sets
     # no pipefail, so printf's broken pipe never reads as an unticked box.
@@ -588,7 +732,7 @@ def test_a_long_ticked_description_is_read_as_ticked(tmp_path):
 
 
 def test_a_long_ticked_record_is_read_as_ticked(tmp_path):
-    code, out, _ = branch(tmp_path, others=adopter(body=TICKED + "x\n" * 32_700))
+    code, out, _ = branch(tmp_path, others=adopter(body=NAMES_CURL + "x\n" * 32_700))
     assert code == 0, out
     assert RECORDED in out
 
@@ -607,8 +751,8 @@ def test_a_branch_reads_descriptions_texts_file_names_and_logins_only_as_data(tm
                                          "patch": "+primary_contact: `touch pwned-j`\n"}]
     login = "$(touch pwned-k)`touch pwned-l`"
     code, out, _ = branch(tmp_path, files=files, body=f"{hostile}\nAdoption: #9\n",
-                          others=adopter(body=f"{hostile}\n{TICKED}", author=login, files=files))
+                          others=adopter(body=f"{hostile}\n{NAMES_CURL}", author=login))
     assert sorted(tmp_path.glob("pwned-*")) == []
-    # The same text on both sides is the same contact, and the login is only printed.
+    # The contact is only compared, and the login is only printed.
     assert code == 0, out
     assert f"from a fork by {login}, accepts the OSS Verify terms" in out

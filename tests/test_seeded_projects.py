@@ -1,7 +1,7 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for src/oss_verify/seeded_projects.py, and that docs/seeded-projects.tsv is what it writes:
-uv run pytest"""
+"""Tests for src/oss_verify/seeded_projects.py, that docs/seeded-projects.tsv is what it writes, and that every
+seeds/<name>/project.yaml has primary_contact: n/a:  uv run pytest"""
 import difflib
 import hashlib
 import itertools
@@ -39,6 +39,54 @@ class Committed(unittest.TestCase):
             self.fail("docs/seeded-projects.tsv is not what src/oss_verify/seeded_projects.py writes. Run "
                       "uv run python3 -m oss_verify.seeded_projects. Then commit docs/seeded-projects.tsv. The "
                       "diff:\n" + "".join(list(diff)[:20]))
+
+
+def seed_contacts(seeds):
+    """A line for each seeds/<name>/project.yaml under the directory `seeds` whose primary_contact, as
+    oss_verify.validate.load reads it, is not n/a: the file and its primary_contact, or why load refuses the file."""
+    lines = []
+    for config_file in sorted(seeds.glob("*/project.yaml")):
+        path = config_file.relative_to(seeds.parent)
+        try:
+            config = validate.load(config_file.parent)
+        except ValueError as error:
+            lines.append(f"{path}: {error}")
+            continue
+        contact = config.get("primary_contact") if isinstance(config, dict) else None
+        if contact != "n/a":
+            lines.append(f"{path}: primary_contact is {contact!r}, not 'n/a'")
+    return lines
+
+
+class SeedContacts(unittest.TestCase):
+    """Every seeds/<name>/project.yaml has primary_contact: n/a. The contact of a seeded project goes in
+    projects/<name>/project.yaml, and .github/workflows/terms.yaml reads it only there: a branch that sets it needs the
+    adopter's record of the OSS Verify terms. A contact in seeds/ would skip that record. The tests check runs this test
+    for each change that is not only documentation, a change to seeds/ included."""
+
+    def test_every_seed_port_has_primary_contact_n_a(self):
+        self.assertTrue(list(seeded_projects.SEEDS.glob("*/project.yaml")), "seeds/ has no <name>/project.yaml")
+        lines = seed_contacts(seeded_projects.SEEDS)
+        if lines:
+            self.fail("Each seeds/<name>/project.yaml must have primary_contact: n/a. To adopt a seeded project, set "
+                      "its contact in projects/<name>/project.yaml (docs/project-yaml.md, Seeded projects). These "
+                      "do not:\n" + "\n".join(lines))
+
+    def test_a_seed_port_with_another_contact_fails_the_check(self):
+        # Negative control, on a seeds/ made here.
+        with tempfile.TemporaryDirectory() as directory:
+            seeds = pathlib.Path(directory) / "seeds"
+            texts = {"kept": "repo: https://github.com/example/kept\nprimary_contact: n/a\n",
+                     "x": "repo: https://github.com/example/x\nprimary_contact: maintainer@x.example\n",
+                     "none": "repo: https://github.com/example/none\n",
+                     "large": "primary_contact: n/a\n" + "#" * validate.MAX_CONFIG_BYTES}
+            for name, text in texts.items():
+                (seeds / name).mkdir(parents=True)
+                (seeds / name / "project.yaml").write_text(text)
+            self.assertEqual(seed_contacts(seeds), [
+                "seeds/large/project.yaml: project.yaml is larger than 128 KiB",
+                "seeds/none/project.yaml: primary_contact is None, not 'n/a'",
+                "seeds/x/project.yaml: primary_contact is 'maintainer@x.example', not 'n/a'"])
 
 
 class Table(unittest.TestCase):
