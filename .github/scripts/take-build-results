@@ -43,7 +43,8 @@ outputs stay as they are. The output sizes has at most MAX_SIZES_BYTES bytes: th
 environment variable, and Linux starts no process with a variable over 131,072 bytes. When the sizes of all builds are
 longer, each target keeps only its "plain" build ({} for a target with no plain build), as review-verdict does. When
 they are still longer, the output sizes is empty. Each of these writes one line to the log that says why, with no
-text of the artifact.
+text of the artifact. build.yaml's build step already cuts the sizes at the same bound, by the same rule
+(.github/scripts/binary-sizes --cut). This checks and cuts them again, because it reads them as data.
 
 When a read or a check fails, build is the fixed line NO_RESULT, and binaries, checks, commit and sizes are empty.
 The log says why, with no text of the artifact. The exit status is then 0, so the review continues with no result of
@@ -206,13 +207,14 @@ def sizes_output(sizes: object) -> tuple[str, list[str]]:
     if sizes is None:
         return "", []
     text = compact(sizes)
-    if len(text.encode("utf-8")) <= MAX_SIZES_BYTES:
+    # compact() gives ASCII alone (json.dumps escapes each other character), so len() is the count of bytes.
+    if len(text) <= MAX_SIZES_BYTES:
         return text, []
     said = [f"the sizes of all builds are over {MAX_SIZES_BYTES:,} bytes of JSON, so the output sizes keeps only the"
             " plain build of each target"]
     plain = {target: {"plain": builds["plain"]} if "plain" in builds else {} for target, builds in sizes.items()}
     text = compact(plain)
-    if len(text.encode("utf-8")) <= MAX_SIZES_BYTES:
+    if len(text) <= MAX_SIZES_BYTES:
         return text, said
     return "", said + [f"the sizes of the plain builds are over {MAX_SIZES_BYTES:,} bytes of JSON too, so the output"
                        " sizes is empty"]

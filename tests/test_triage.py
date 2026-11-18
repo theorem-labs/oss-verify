@@ -141,14 +141,8 @@ class Rows(unittest.TestCase):
             self.assertEqual(mark, triage.WARN, association)
 
     def test_oss_fuzz_does_not_compare_primary_contact(self):
-        gh = FakeGitHub(
-            responses={"repos/google/oss-fuzz/git/trees/HEAD:projects": {"tree": [{"path": "example", "type": "tree"}]}},
-            texts={
-                "repos/google/oss-fuzz/contents/projects/example/project.yaml": (
-                    "main_repo: https://github.com/owner/example\nprimary_contact: security@libexample.dev\n"
-                )
-            },
-        )
+        gh = in_oss_fuzz(FakeGitHub(), {
+            "example": "main_repo: https://github.com/owner/example\nprimary_contact: security@libexample.dev\n"})
         facts = {}
         self.assertEqual(
             triage.oss_fuzz_row(gh, "owner/example", facts),

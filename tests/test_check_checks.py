@@ -919,6 +919,17 @@ def check_ids(rules):
     return found
 
 
+def record_in(case, text):
+    """The record of a review in `text`, a check run's output.text: its JSON in an HTML comment, at most the 65,535
+    characters of GitHub's output.text, with every key in its order. `case` is the test that asserts it."""
+    case.assertTrue(text.startswith("<!-- ") and text.endswith(" -->"), text[:80])
+    case.assertLessEqual(len(text), 65_535)
+    record = json.loads(text[5:-4])
+    case.assertEqual(list(record), ["schema", "head", "hold", "job", "verdicts", "criticality_score", "oss_fuzz",
+                                    "sizes"])
+    return record
+
+
 # Verdict keys that are no check id: a model that a pull request steers chooses the keys of its verdicts.
 HOSTILE_KEYS = ["x --> @octocat cli/cli#1 <!--", "F2 --> @octocat", "f2", "F2 ", " F2", "F2\n", "x\nF2", "FF2", "H1",
                 "2a", "", "-1", "F2\u2060", "\uff26\uff12"]
@@ -1022,10 +1033,8 @@ class PostingStep(Runner):
         return {key: value for key, value in run["output"].items() if key != "text"}
 
     def kept(self, run):
-        """The record of the review in the check run's output.text: its JSON in an HTML comment."""
-        text = run["output"]["text"]
-        self.assertTrue(text.startswith("<!-- ") and text.endswith(" -->"), text[:80])
-        return json.loads(text[5:-4])
+        """The record of the review in the check run's output.text (record_in)."""
+        return record_in(self, run["output"]["text"])
 
     def first_sentence(self, requests):
         """The first visible line of the one comment the step sent."""
@@ -1310,8 +1319,6 @@ class ReviewVerdict(unittest.TestCase):
     review's verdicts and reasons or from a hold, the record of the review in its text, and the one list of check
     ids."""
 
-    KEYS = ["schema", "head", "hold", "job", "verdicts", "criticality_score", "oss_fuzz", "sizes"]
-
     def call(self, *arguments, **env):
         """Run review-verdict with `env` over a hold's values and the head HEAD40. A value of None leaves its variable
         out, as CRITICALITY_SCORE, OSS_FUZZ and SIZES are when `env` does not give them."""
@@ -1332,14 +1339,8 @@ class ReviewVerdict(unittest.TestCase):
         return got
 
     def record(self, got):
-        """The record in the text that review-verdict printed: in an HTML comment, at most the 65,535 characters of
-        GitHub's output.text, with every key in its order."""
-        text = got["text"]
-        self.assertTrue(text.startswith("<!-- ") and text.endswith(" -->"), text[:80])
-        self.assertLessEqual(len(text), 65_535)
-        record = json.loads(text[5:-4])
-        self.assertEqual(list(record), self.KEYS)
-        return record
+        """The record in the text that review-verdict printed (record_in)."""
+        return record_in(self, got["text"])
 
     @staticmethod
     def text_of(record):
@@ -1447,8 +1448,6 @@ class ReviewVerdict(unittest.TestCase):
             "- **D2** (fail): fuzz/seed_corpus.zip holds no input for the target parse.\n"
             "- **E** (person): Whether the project is critical enough is left to a person."))
         record = self.record(got)
-        self.assertEqual(list(record), ["schema", "head", "hold", "job", "verdicts", "criticality_score", "oss_fuzz",
-                                        "sizes"])
         self.assertEqual(record, {"schema": "oss-verify/enrollment-review/1", "head": "c" * 40, "hold": None,
                                   "job": None, "verdicts": verdicts, "criticality_score": 0.07, "oss_fuzz": False,
                                   "sizes": sizes})
@@ -1524,7 +1523,6 @@ class ReviewVerdict(unittest.TestCase):
         text = got["text"]
         # The only < and > are the comment's own, and no & starts a character reference.
         self.assertEqual((text.count("<"), text.count(">"), text.count("&")), (1, 1, 0), text)
-        self.assertEqual(list(self.record(got)["sizes"]), [name])
         self.assertEqual(self.record(got)["sizes"], sizes)
 
     def test_a_text_at_githubs_limit_keeps_every_build(self):

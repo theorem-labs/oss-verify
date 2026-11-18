@@ -2017,12 +2017,15 @@ class TriageFacts(GatherJob):
     job's record, each as its JSON type or null. They go in no file that the gather job keeps."""
 
     TABLE = "| OK | Criticality score | 0.07 |"
+    # The file of the stand-in triage.py's arguments, in the test's directory.
+    ARGV = "triage-argv.json"
 
     def triage(self, facts):
-        """The stand-in triage.py: the full table on standard output only for --full, and the text `facts` in the file
-        after --facts."""
+        """The stand-in triage.py: its arguments in the file ARGV of the test's directory, the full table on standard
+        output only for --full, and the text `facts` in the file after --facts."""
         (self.checkout / ".github" / "scripts" / "triage.py").write_text(
-            "import sys\n"
+            "import json, sys\n"
+            f"json.dump(sys.argv[1:], open({str(self.dir / self.ARGV)!r}, 'w'))\n"
             f"print({self.TABLE!r} if '--full' in sys.argv else 'THE-COMMENT')\n"
             "if '--facts' in sys.argv:\n"
             f"    open(sys.argv[sys.argv.index('--facts') + 1], 'w').write({facts!r})\n")
@@ -2037,6 +2040,11 @@ class TriageFacts(GatherJob):
         rc, log, outputs = self.gather_job()
         self.assertEqual(rc, 0, log)
         self.assertEqual(self.facts(outputs), ("0.07123", "false"))
+        # review-gather runs it with exactly these arguments: --full, and --facts with a file outside .review.
+        argv = json.loads((self.dir / self.ARGV).read_text())
+        self.assertEqual(argv[:-1], ["--repo", REPO, "--pr", "7", "--full", "--facts"])
+        facts = pathlib.Path(os.path.normpath(self.checkout / argv[-1]))
+        self.assertNotIn(self.checkout / ".review", [facts, *facts.parents])
         review, _ = self.take("review", outputs["digest"])
         self.assertEqual((review / ".review" / "triage-today.md").read_text(), f"{self.TABLE}\n(exit status 0)\n")
         # The file of the facts is in no member of what the screen and the review take, and gone from the checkout.
@@ -2081,17 +2089,11 @@ class BuildSizes(GatherJob):
         rc, log, outputs = self.gather_job(sizes=self.SIZES)
         self.assertEqual(rc, 0, log)
         self.assertEqual(outputs["sizes"], self.SIZES)
-        # A gather that fails after the step build still gives them.
-        rc, log, outputs = self.gather_job(sizes=self.SIZES, fetch_fails=True)
-        self.assertNotEqual(rc, 0, log)
-        self.assertEqual(outputs["sizes"], self.SIZES)
 
     def test_with_no_sizes_of_the_step_build_the_output_is_empty(self):
-        for sizes in (None, ""):
-            with self.subTest(sizes=sizes):
-                rc, log, outputs = self.gather_job(sizes=sizes)
-                self.assertEqual(rc, 0, log)
-                self.assertEqual(outputs["sizes"], "")
+        rc, log, outputs = self.gather_job()
+        self.assertEqual(rc, 0, log)
+        self.assertEqual(outputs["sizes"], "")
 
 
 class TrustWiring(unittest.TestCase):

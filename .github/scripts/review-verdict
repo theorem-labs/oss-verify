@@ -44,9 +44,9 @@ order:
                        projects whose names are most like the repository's) has this repository as its main_repo,
                        false when none of them has.
     sizes              SIZES, the object of .github/scripts/binary-sizes as it is: {target: {build: {"text": ...,
-                       "exec": ...}}}. It comes from build.yaml's project-builds output sizes, through the artifact
-                       build-results and .github/scripts/take-build-results: the gather job's output sizes, at most
-                       100,000 bytes.
+                       "exec": ...}}}. It comes from build.yaml's project-builds output results_sizes, through the
+                       artifact build-results and .github/scripts/take-build-results: the gather job's output sizes, at
+                       most 100,000 bytes.
 
 criticality_score and oss_fuzz are null when they are not known: the repository is a fork (for criticality_score
 only: a fork is not scored), it is not on github.com or GitHub does not find it, its row could not be checked, or the
@@ -115,7 +115,6 @@ NO_REASON = "The review gave no reason."
 # A reason's length, after review-neutralize: 31 reasons of REASON_LIMIT keep the summary under the 65,535 characters
 # GitHub takes.
 REASON_LIMIT = 1500
-# The record's schema.
 SCHEMA = "oss-verify/enrollment-review/1"
 # GitHub's limit for a check run's output.text, in characters.
 TEXT_LIMIT = 65535
@@ -138,10 +137,7 @@ def die(message):
 
 def as_object(text):
     """A JSON object, or {} for anything else: a value the review did not give decides nothing."""
-    try:
-        value = json.loads(text or "")
-    except ValueError:
-        return {}
+    value = parsed(text)
     return value if isinstance(value, dict) else {}
 
 

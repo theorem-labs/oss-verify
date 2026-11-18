@@ -774,7 +774,7 @@ class FirstRunArtifact(Stand):
         self.assertEqual((code, got), (0, {**self.HONEST, "sizes": ""}), printed)
 
     def test_s_results_from_before_sizes_give_every_other_output(self):
-        """Decision 8: a Build run keeps its artifact 30 days, so a review by hand of a head can read a results.json
+        """A Build run keeps its artifact 30 days, so a review by hand of a head can read a results.json
         that build.yaml wrote before it wrote sizes: the four other outputs are its results, and sizes is empty."""
         take = self.take_module()
         old = self.results({})
@@ -799,7 +799,7 @@ class FirstRunArtifact(Stand):
                               " v1'.", printed)
 
     def test_s_sizes_of_another_shape_give_no_sizes_and_keep_the_other_outputs(self):
-        """Decision 9: sizes that are not those of binary-sizes give the output sizes empty, and only it. One line of
+        """Sizes that are not those of binary-sizes give the output sizes empty, and only it. One line of
         the log says why, and it names no text of the artifact."""
         take = self.take_module()
         plain = {"text": 1000, "exec": 1200}
@@ -825,7 +825,7 @@ class FirstRunArtifact(Stand):
                 self.assertNotIn("ARTIFACT-", printed)
 
     def test_s_sizes_over_the_bound_keep_only_the_plain_build_of_each_target(self):
-        """Decision 7: the comment job's step gets the output sizes in one environment variable, and Linux starts no
+        """The comment job's step gets the output sizes in one environment variable, and Linux starts no
         process with one over 131,072 bytes. Sizes of 100,001 bytes of compact JSON, 4 builds of each target, keep
         only the plain build of each target ({} for a target with none), and one line of the log says so. Sizes of
         100,000 bytes keep every build."""
@@ -861,8 +861,9 @@ class FirstRunArtifact(Stand):
         self.assertEqual(len(said), 2, printed)
 
     def test_s_the_results_job_writes_the_sizes_of_the_build_step_and_take_build_results_gives_them(self):
-        """build.yaml's results job, run here, writes the build step's output sizes into results.json as JSON, null
-        when the output is empty. take-build-results gives them back as its output sizes."""
+        """build.yaml's results job, run here, writes the build step's output results_sizes (the sizes, cut at 100,000
+        bytes) into results.json as JSON, null when the output is empty. take-build-results gives them back as its
+        output sizes."""
         build = self.workflow(ROOT, "build.yaml")
         take = self.take_module()
         line = '{"parse":{"asan":{"exec":3300,"text":3000},"plain":{"exec":1200,"text":1000}}}'
@@ -870,7 +871,7 @@ class FirstRunArtifact(Stand):
             with self.subTest(sizes=given):
                 shutil.rmtree(self.temp / "results", ignore_errors=True)
                 built = {"name": "x", "sha": HEAD, "commit": "", "code": "0", "result": "ARTIFACT-RESULT",
-                         "binaries": "ARTIFACT-BINARIES", "checks": "ARTIFACT-CHECKS", "sizes": given}
+                         "binaries": "ARTIFACT-BINARIES", "checks": "ARTIFACT-CHECKS", "results_sizes": given}
                 ctx = {"github.event.pull_request.number": PR,
                        **{f"needs.project-builds.outputs.{k}": v for k, v in built.items()}}
                 rc, log, _ = self.run_step(build, "results", "Write the results", ctx, self.dir)
