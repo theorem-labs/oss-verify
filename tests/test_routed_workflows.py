@@ -1,12 +1,13 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the routed workflows (build.yaml, validate.yaml, tests.yaml, triage.yaml) and their collector,
-.github/scripts/collect:  uv run pytest
+"""Tests for the routed workflows (build.yaml, validate.yaml, tests.yaml, review.yml) and their collector,
+.github/scripts/collect, and for the condition of triage.yaml's one job:  uv run pytest
 
-Each workflow has a route job that decides which jobs the run needs, and a job named required that always runs last,
-collects every result with the collector, and reports the workflow's one required check. These check the collector's
-verdicts, the shape every routed workflow keeps (the collector waits for every job, and no job a route may skip reports
-a required check), and the routes' own steps, run on made-up changes.
+Each workflow has a route job that decides which jobs the run needs, and a collector job that always runs last,
+collects every result with the collector, and reports the workflow's one check: the job required reports the check
+that the ruleset requires, and review.yml's job collect the check review jobs, which no ruleset requires. These check
+the collector's verdicts, the shape every routed workflow keeps (the collector waits for every job, and no job a route
+may skip reports a required check), and the routes' own steps, run on made-up changes.
 """
 import importlib.util
 import itertools
@@ -19,14 +20,19 @@ import subprocess
 import pytest
 import yaml
 
+from test_outside_screen import evaluate
 from test_take_project import git, isolated_git_env
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 COLLECT = ROOT / ".github" / "scripts" / "collect"
 WORKFLOWS = ROOT / ".github" / "workflows"
 # Each routed workflow, and the check its required job reports (the default branch's ruleset requires project-builds,
-# enrollment and tests; triage is required by none).
-REQUIRED = {"build.yaml": "project-builds", "validate.yaml": "enrollment", "tests.yaml": "tests", "triage.yaml": "triage"}
+# enrollment and tests).
+REQUIRED = {"build.yaml": "project-builds", "validate.yaml": "enrollment", "tests.yaml": "tests"}
+# Each routed workflow's collector job, and the check it reports. review.yml's is no required check: a check of a
+# workflow_run or workflow_dispatch run never satisfies one.
+COLLECTORS = {**{name: ("required", check) for name, check in REQUIRED.items()},
+              "review.yml": ("collect", "review jobs")}
 # The checks the default branch's ruleset requires.
 RULESET = {"enrollment", "project-builds", "terms-accepted", "tests"}
 
@@ -95,18 +101,19 @@ def test_the_collector_names_every_failure_at_once(tmp_path):
 # --- the shape of each routed workflow ---
 
 
-@pytest.mark.parametrize("name", sorted(REQUIRED))
+@pytest.mark.parametrize("name", sorted(COLLECTORS))
 def test_only_the_required_job_reports_the_required_check(name):
     jobs = workflow(name)["jobs"]
-    check = REQUIRED[name]
+    collector, check = COLLECTORS[name]
+    assert jobs[collector].get("name", collector) == check
     for job_id, job in jobs.items():
-        if job_id == "required":
+        if job_id == collector:
             continue
-        # A job's check is its name, or its id when it has none. Any job but required may be skipped by route.
+        # A job's check is its name, or its id when it has none. Any job but the collector may be skipped by route.
         assert job.get("name", job_id) != check, f"{name}: the job {job_id} reports {check}"
-    # Every job but route and required runs only when route asks for it (directly, or through the job it needs).
+    # Every job but route and the collector runs only when route asks for it (directly, or through the job it needs).
     for job_id, job in jobs.items():
-        if job_id not in ("route", "required"):
+        if job_id not in ("route", collector):
             assert "if" in job, f"{name}: {job_id} runs whatever route decides"
 
 
@@ -140,64 +147,211 @@ def literal_env(flow, decide):
     return {k: str(v) for k, v in pairs.items() if "${{" not in str(v)}
 
 
-def route_build(tmp_path, files, changed=None, base="main", actor="someone"):
-    """Run build.yaml's route step, started by `actor`, with a fake gh whose pull request into `base` lists `files` (a
-    path, or a (new, old) pair for a rename; changed_files: `changed`, by default their number), and applies the step's
-    --jq filter as gh does. Return its outputs, one line each."""
+def pull_request(files, changed=None, base="main"):
+    """Pull request 8 of mallory, from the branch main of the fork mallory/libx into `base`, at the head a*40, as
+    GitHub's pulls API gives it: changed_files is `changed`, by default the number of `files`."""
+    return {"number": 8, "state": "open", "user": {"login": "mallory"},
+            "head": {"sha": "a" * 40, "ref": "main", "repo": {"full_name": "mallory/libx"}},
+            "base": {"ref": base, "repo": {"full_name": "o/r", "default_branch": "main"}},
+            "changed_files": len(files) if changed is None else changed}
+
+
+def files_of(files):
+    """The pulls API's files: each a path, or a (new, old) pair for a rename."""
+    return [{"filename": f} if isinstance(f, str) else {"filename": f[0], "previous_filename": f[1]} for f in files]
+
+
+def route_build(tmp_path, files, changed=None, base="main", fail=False):
+    """Run build.yaml's route step with a fake gh whose pull request 8 into `base` lists `files` (pull_request), or
+    fails to list them when `fail`, and applies the step's --jq filter as gh does. Return its exit status and its
+    outputs, one line each."""
     bin = tmp_path / "bin"
     bin.mkdir()
-    (tmp_path / "pull.json").write_text(json.dumps({"head": {"sha": "a" * 40},
-                                                    "base": {"ref": base, "repo": {"default_branch": "main"}},
-                                                    "changed_files": len(files) if changed is None else changed}))
-    (tmp_path / "files.json").write_text(json.dumps(
-        [{"filename": f} if isinstance(f, str) else {"filename": f[0], "previous_filename": f[1]} for f in files]))
+    (tmp_path / "pull.json").write_text(json.dumps(pull_request(files, changed, base)))
+    (tmp_path / "files.json").write_text(json.dumps(files_of(files)))
+    listed = "exit 1" if fail else f'jq -r "$filter" {tmp_path}/files.json'
     (bin / "gh").write_text('#!/bin/bash\nfilter=""; for a; do [ "$prev" = --jq ] && filter=$a; prev=$a; done\n'
-                            f'case " $*" in {USERS_GH}  *"/files"*) jq -r "$filter" {tmp_path}/files.json ;;\n'
+                            f'case " $*" in *"/files"*) {listed} ;;\n'
                             f'  *) cat {tmp_path}/pull.json ;; esac\n')
     (bin / "gh").chmod(0o755)
     written = tmp_path / "output"
-    flow = workflow("build.yaml")
-    decide = step(flow["jobs"]["route"], "An enrollment, a change or an issue")
+    decide = step(workflow("build.yaml")["jobs"]["route"], "An enrollment or a change")
     run = subprocess.run(["bash", "-e", "-c", decide["run"]], capture_output=True, text=True, cwd=ROOT,
-                         env={**os.environ, **literal_env(flow, decide),
-                              "PATH": f"{bin}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r",
-                              "PR": "8", "HEAD_SHA": "", "ACTOR": actor,
-                              "GITHUB_OUTPUT": str(written),
+                         env={**os.environ, "PATH": f"{bin}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r",
+                              "PR": "8", "GITHUB_OUTPUT": str(written),
                               "GITHUB_STEP_SUMMARY": str(tmp_path / "summary")})
-    assert run.returncode == 0, run.stderr
-    return written.read_text().splitlines()
+    return run.returncode, written.read_text().splitlines() if written.exists() else []
 
 
 @pytest.mark.parametrize("files, changed, base, want", [
-    # Tooling and documentation only, as from a fork: a change review, and no build.
-    (["src/oss_verify/check.py", "docs/build-contract.md", "tests/test_check.py"], None, "main", "kind=change"),
-    (["README.md"], None, "main", "kind=change"),
+    # Tooling and documentation only, as from a fork: a change, which review.yml reviews, and no build.
+    (["src/oss_verify/check.py", "docs/build-contract.md", "tests/test_check.py"], None, "main", []),
+    (["README.md"], None, "main", []),
     # Into another branch: the build, where take-project refuses it, as before.
-    (["README.md"], None, "ci/other", "kind=enrollment"),
+    (["README.md"], None, "ci/other", ["build=true"]),
     # A file under projects/, alone or beside others (a fork's mixed change then fails in take-project, as before),
     # or a rename out of projects/ (both names are listed): an enrollment, built.
-    (["projects/p/project.yaml"], None, "main", "kind=enrollment"),
-    (["projects/p/project.yaml", "src/oss_verify/check.py"], None, "main", "kind=enrollment"),
-    (["src/x.yaml", "projects/p/x.yaml"], None, "main", "kind=enrollment"),
-    ([("src/x.yaml", "projects/p/x.yaml")], None, "main", "kind=enrollment"),
+    (["projects/p/project.yaml"], None, "main", ["build=true"]),
+    (["projects/p/project.yaml", "src/oss_verify/check.py"], None, "main", ["build=true"]),
+    (["src/x.yaml", "projects/p/x.yaml"], None, "main", ["build=true"]),
+    ([("src/x.yaml", "projects/p/x.yaml")], None, "main", ["build=true"]),
     # No file, or more files than the API lists: the list decides nothing, and take-project judges it.
-    ([], None, "main", "kind=enrollment"),
-    (["src/oss_verify/check.py"], 3001, "main", "kind=enrollment"),
+    ([], None, "main", ["build=true"]),
+    (["src/oss_verify/check.py"], 3001, "main", ["build=true"]),
 ])
-def test_builds_route_reviews_a_pull_request_with_no_file_under_projects_as_a_change(tmp_path, files, changed, base,
-                                                                                     want):
-    assert route_build(tmp_path, files, changed, base=base) == [f"sha={'a' * 40}", want]
+def test_builds_route_builds_every_pull_request_but_a_change(tmp_path, files, changed, base, want):
+    assert route_build(tmp_path, files, changed, base=base) == (0, want)
+
+
+def test_builds_route_fails_when_it_cannot_read_the_files(tmp_path):
+    code, outputs = route_build(tmp_path, ["projects/p/project.yaml"], fail=True)
+    assert code != 0 and outputs == []
+
+
+def route_review(tmp_path, files, changed=None, actor="someone", event="workflow_run",
+                 run_path=".github/workflows/build.yaml", run_event="pull_request", conclusion="success", pulls=None,
+                 held=(), builds=(), fail=False):
+    """Run review.yml's route step on main, started by `actor`, with a fake gh that applies the step's --jq filter as
+    gh does. On workflow_run, after run 900 of `run_path` on `run_event` that ended `conclusion`, at the head a*40 of
+    mallory/libx's branch main; on workflow_dispatch, a run by hand of pull request 8. The gh gives as the open pull
+    requests of that head `pulls` (by default pull request 8 into main), pull request 8 and its `files` (or fails to
+    list them when `fail`), the runs GitHub holds at its head (`held`, their ids), and the completed Build runs of the
+    head in `builds`, each a pair (the run, the artifacts named build-results that it lists), by default none.
+    Return its exit status, its outputs (one line each), and the gh calls."""
+    bin = tmp_path / "bin"
+    bin.mkdir()
+    pull = pull_request(files, changed)
+    answers = {"pulls": [pull] if pulls is None else pulls, "pull": pull,
+               "builds": {"workflow_runs": [run for run, _ in builds]},
+               "held": {"workflow_runs": [{"id": i, "status": "completed", "conclusion": "action_required",
+                                           "head_sha": "a" * 40, "head_branch": "main",
+                                           "head_repository": {"full_name": "mallory/libx"}} for i in held]}}
+    answers.update({f"artifacts-{run['id']}": {"artifacts": list(artifacts)} for run, artifacts in builds})
+    if not fail:
+        answers["files"] = files_of(files)
+    for name, answer in answers.items():
+        (tmp_path / f"{name}.json").write_text(json.dumps(answer))
+    (bin / "gh").write_text('#!/bin/bash\nfilter=.; for a; do [ "$prev" = --jq ] && filter=$a; prev=$a; done\n'
+                            f'echo "$*" >> {tmp_path}/calls\n'
+                            'serve() {\n'
+                            f'  [ -f {tmp_path}/$1.json ] || {{ echo "gh: Server Error (HTTP 502)" >&2; exit 1; }}\n'
+                            f'  jq -r "$filter" {tmp_path}/$1.json\n}}\n'
+                            f'case " $*" in {USERS_GH}'
+                            '  *"/pulls?"*) serve pulls ;;\n'
+                            '  *"/files"*) serve files ;;\n'
+                            '  *"/pulls/"*) serve pull ;;\n'
+                            '  *"status=action_required"*) serve held ;;\n'
+                            '  *"/build.yaml/runs"*) serve builds ;;\n'
+                            '  *"/artifacts?name=build-results"*) all="$*"; id=${all##*/actions/runs/}; '
+                            'serve "artifacts-${id%%/*}" ;;\n'
+                            '  *) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;; esac\n')
+    (bin / "gh").chmod(0o755)
+    written = tmp_path / "output"
+    flow = workflow("review.yml")
+    decide = step(flow["jobs"]["route"], "An enrollment, a change or an issue")
+    env = {**os.environ, **literal_env(flow, decide), "PATH": f"{bin}:{os.environ['PATH']}", "GH_TOKEN": "x",
+           "REPO": "o/r", "EVENT": event, "REF": "refs/heads/main", "ACTOR": actor, "PR": "", "ISSUE": "",
+           "SENDER": actor, "AUTHOR": "", "ASSOCIATION": "", "MEASURE": "", "DEFAULT_BRANCH": "main",
+           "GITHUB_OUTPUT": str(written), "GITHUB_STEP_SUMMARY": str(tmp_path / "summary")}
+    if event == "workflow_run":
+        env.update(RUN_ID="900", RUN_EVENT=run_event, RUN_PATH=run_path, RUN_CONCLUSION=conclusion,
+                   RUN_HEAD_SHA="a" * 40, RUN_HEAD_REPOSITORY="mallory/libx", RUN_HEAD_BRANCH="main")
+    else:
+        env["PR"] = "8"
+    run = subprocess.run(["bash", "-e", "-c", decide["run"]], capture_output=True, text=True, cwd=ROOT, env=env)
+    calls = (tmp_path / "calls").read_text().splitlines() if (tmp_path / "calls").exists() else []
+    return run.returncode, written.read_text().splitlines() if written.exists() else [], calls
+
+
+# route's outputs for pull request 8 at its head, and for an enrollment after Build run 900, whose results it reads.
+PULL = ["pr=8", f"sha={'a' * 40}", "author=mallory"]
+ENROLLMENT = ["kind=enrollment", "build_run=900"]
+
+
+@pytest.mark.parametrize("files, changed, want", [
+    # Tooling and documentation only, as from a fork: a change review.
+    (["src/oss_verify/check.py", "docs/build-contract.md", "tests/test_check.py"], None, ["kind=change"]),
+    (["README.md"], None, ["kind=change"]),
+    # A file under projects/, alone or beside others, or a rename out of projects/ (both names are listed): an
+    # enrollment, reviewed with the results of the Build run.
+    (["projects/p/project.yaml"], None, ENROLLMENT),
+    (["projects/p/project.yaml", "src/oss_verify/check.py"], None, ENROLLMENT),
+    (["src/x.yaml", "projects/p/x.yaml"], None, ENROLLMENT),
+    ([("src/x.yaml", "projects/p/x.yaml")], None, ENROLLMENT),
+    # No file, or more files than the API lists: the list decides nothing, and take-project judges it.
+    ([], None, ENROLLMENT),
+    (["src/oss_verify/check.py"], 3001, ENROLLMENT),
+])
+def test_reviews_route_reviews_a_pull_request_with_no_file_under_projects_as_a_change(tmp_path, files, changed, want):
+    code, outputs, _ = route_review(tmp_path, files, changed)
+    assert (code, outputs) == (0, PULL + want)
 
 
 @pytest.mark.parametrize("actor, want", [
-    ("someone", "kind=change"), ("sjawhar-agent[bot]", "kind=change"), ("oss-verify[bot]", "kind=change"),
-    # An App the action refuses (src/github/validation/actor.ts) would fail the review, and so the required check:
+    ("someone", ["kind=change"]), ("sjawhar-agent[bot]", ["kind=change"]), ("oss-verify[bot]", ["kind=change"]),
+    # An App the action refuses (src/github/validation/actor.ts) would fail the review, and so the check review jobs:
     # by its account type, so Copilot, whose login has no [bot] and which the Users API does not find, too.
-    ("dependabot[bot]", "kind=enrollment"), ("oss-verify[bot]x[bot]", "kind=enrollment"),
-    ("Copilot", "kind=enrollment"),
+    ("dependabot[bot]", ENROLLMENT), ("oss-verify[bot]x[bot]", ENROLLMENT), ("Copilot", ENROLLMENT),
 ])
-def test_a_change_that_an_app_the_review_refuses_started_is_built_as_before(tmp_path, actor, want):
-    assert route_build(tmp_path, [".github/workflows/build.yaml"], actor=actor)[-1] == want
+def test_a_change_that_an_app_the_review_refuses_started_is_an_enrollment_as_before(tmp_path, actor, want):
+    code, outputs, _ = route_review(tmp_path, [".github/workflows/build.yaml"], actor=actor)
+    assert (code, outputs) == (0, PULL + want)
+
+
+def merged(base, change):
+    """`base` with the values of `change`, key by key."""
+    return {k: merged(v, change[k]) if isinstance(v, dict) and k in change else change.get(k, v)
+            for k, v in base.items()}
+
+
+@pytest.mark.parametrize("change", [
+    # The open pull request into main at the run's head commit, from its head repository and branch.
+    {},
+    # The head moved after the run: the run of the new head reviews it.
+    {"head": {"sha": "b" * 40}},
+    # A branch of the same name in another repository, or another branch.
+    {"head": {"repo": {"full_name": "eve/libx"}}},
+    {"head": {"ref": "other"}},
+    # Into another branch, or closed.
+    {"base": {"ref": "ci/other"}},
+    {"state": "closed"},
+])
+def test_reviews_route_reads_the_open_pull_request_at_the_runs_head(tmp_path, change):
+    """A fork's pull request is not in a workflow_run event: route asks the API for the open pull requests into main
+    of the run's head repository and branch, and keeps only the one at the run's head commit. With none, nothing runs,
+    and route reads no pull request."""
+    files = ["projects/p/project.yaml"]
+    code, outputs, calls = route_review(tmp_path, files, pulls=[merged(pull_request(files), change)])
+    assert calls[0] == "api repos/o/r/pulls?state=open&base=main&head=mallory:main&per_page=100"
+    if change:
+        assert (code, outputs) == (0, [])
+        assert [c for c in calls if "repos/o/r/pulls/" in c] == []
+    else:
+        assert (code, outputs) == (0, PULL + ENROLLMENT)
+
+
+@pytest.mark.parametrize("run_path, run_event, conclusion, want", [
+    # A Build run that ended success or failure: its pull request is reviewed.
+    (".github/workflows/build.yaml", "pull_request", "success", PULL + ENROLLMENT),
+    (".github/workflows/build.yaml", "pull_request", "failure", PULL + ENROLLMENT),
+    # A Build run that ended otherwise (cancelled by a newer push, say), a Triage run that did not end success, a run
+    # of another file (a pull request can name a workflow of its own Build), or a run on another event: nothing.
+    (".github/workflows/build.yaml", "pull_request", "cancelled", []),
+    (".github/workflows/build.yaml", "pull_request", "skipped", []),
+    (".github/workflows/build.yaml", "pull_request", "", []),
+    (".github/workflows/triage.yaml", "pull_request", "failure", []),
+    (".github/workflows/triage.yaml", "pull_request", "cancelled", []),
+    (".github/workflows/other.yml", "pull_request", "success", []),
+    (".github/workflows/build.yaml", "pull_request_target", "success", []),
+    (".github/workflows/build.yaml", "push", "success", []),
+])
+def test_reviews_route_reads_only_a_build_or_triage_run_of_a_pull_request_that_ended_so(tmp_path, run_path, run_event,
+                                                                                        conclusion, want):
+    code, outputs, calls = route_review(tmp_path, ["projects/p/project.yaml"], run_path=run_path, run_event=run_event,
+                                        conclusion=conclusion)
+    assert (code, outputs) == (0, want)
+    # A run it does not read stops route before any read of GitHub.
+    assert bool(calls) == bool(want), calls
 
 
 def actor_kind(tmp_path, login, allowed="sjawhar-agent[bot],oss-verify[bot]", answer=None):
@@ -242,10 +396,10 @@ def test_actor_kind_fails_on_a_read_that_is_not_a_404(tmp_path):
 
 def route_issue(tmp_path, pr, issue, is_pull=False, event="workflow_dispatch", sender="someone", author="",
                 association=""):
-    """Run build.yaml's route step on an `event`: a run started by hand with the inputs `pr` and `issue` ("" when not
-    given), or an issue's own event for issue `issue`, sent by `sender`, whose author is `author` with GitHub's
-    `association`. Its fake gh's number is an issue, or a pull request when `is_pull`. Return its exit status and
-    outputs."""
+    """Run review.yml's route step on main, on an `event`: a run started by hand with the inputs `pr` and `issue` (""
+    when not given), or an issue's own event for issue `issue`, sent by `sender`, whose author is `author` with
+    GitHub's `association`. Its fake gh's number is an issue, or a pull request when `is_pull`. Return its exit status
+    and outputs."""
     bin = tmp_path / "bin"
     bin.mkdir()
     pull = {"pull_request": {"url": "x"}} if is_pull else {}
@@ -257,19 +411,19 @@ def route_issue(tmp_path, pr, issue, is_pull=False, event="workflow_dispatch", s
                             '  *) exit 1 ;; esac\n')
     (bin / "gh").chmod(0o755)
     written = tmp_path / "output"
-    flow = workflow("build.yaml")
+    flow = workflow("review.yml")
     decide = step(flow["jobs"]["route"], "An enrollment, a change or an issue")
     run = subprocess.run(["bash", "-e", "-c", decide["run"]], capture_output=True, text=True, cwd=ROOT,
                          env={**os.environ, **literal_env(flow, decide),
                               "PATH": f"{bin}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r",
-                              "PR": pr, "ISSUE": issue, "HEAD_SHA": "", "ACTOR": sender, "EVENT": event,
+                              "PR": pr, "ISSUE": issue, "ACTOR": sender, "EVENT": event, "REF": "refs/heads/main",
                               "SENDER": sender, "AUTHOR": author, "ASSOCIATION": association,
                               "GITHUB_OUTPUT": str(written), "GITHUB_STEP_SUMMARY": str(tmp_path / "summary")})
     return run.returncode, written.read_text().splitlines() if written.exists() else []
 
 
 def test_a_run_for_an_issue_asks_for_the_review_alone(tmp_path):
-    assert route_issue(tmp_path, "", "5") == (0, ["kind=issue"])
+    assert route_issue(tmp_path, "", "5") == (0, ["kind=issue", "issue=5"])
 
 
 @pytest.mark.parametrize("pr, issue, is_pull", [
@@ -290,7 +444,7 @@ def test_route_refuses_both_inputs_neither_or_a_pull_request_as_an_issue(tmp_pat
 ])
 def test_an_issue_that_waits_for_us_starts_one_review_on_its_event(tmp_path, action_sender, association):
     assert route_issue(tmp_path, "", "5", event="issues", sender=action_sender, author="alice",
-                       association=association) == (0, ["kind=issue"])
+                       association=association) == (0, ["kind=issue", "issue=5"])
     assert "repos/o/r/issues/5" in (tmp_path / "calls").read_text()
 
 
@@ -431,51 +585,108 @@ def test_the_docs_job_runs_the_tests_it_names(tmp_path):
         assert re.search(rf"^class {cls}\b", source, re.M) and re.search(rf"^    def {test}\(", source, re.M), node
 
 
-# --- triage.yaml's route, run with a made-up gh ---
+# --- the triage comment: triage.yaml's one job, and review.yml's route after it ---
 
 
-def route_triage(tmp_path, files, event="pull_request_target", title_only="false", fail=False):
-    bin = tmp_path / "bin"
-    bin.mkdir()
-    (tmp_path / "files").write_text("".join(f"{path}\n" for path in files))
-    (bin / "gh").write_text("#!/bin/bash\n" + ("exit 1\n" if fail else f"cat {tmp_path / 'files'}\n"))
-    (bin / "gh").chmod(0o755)
-    route = step(workflow("triage.yaml")["jobs"]["route"], "Whether the comment can change")
-    output = tmp_path / "output"
-    environment = {**os.environ, "PATH": f"{bin}:{os.environ['PATH']}", "GH_TOKEN": "x", "REPO": "o/r", "PR": "8",
-                   "EVENT": event, "TITLE_ONLY": title_only, "GITHUB_OUTPUT": str(output),
-                   "GITHUB_STEP_SUMMARY": str(tmp_path / "summary"), "RUNNER_TEMP": str(tmp_path)}
-    run = subprocess.run(["bash", "-e", "-c", route["run"]], env=environment, capture_output=True, text=True)
-    return run.returncode, output.read_text() if output.exists() else ""
-
-
-@pytest.mark.parametrize("files, event, title_only, gather", [
-    (["projects/p/project.yaml"], "pull_request_target", "false", True),
-    (["README.md", "projects/p/build.sh"], "pull_request_target", "false", True),
-    (["README.md", "src/t.py"], "pull_request_target", "false", False),
-    (["projects/p/project.yaml"], "pull_request_target", "true", False),
-    ([], "workflow_dispatch", "false", True),
+@pytest.mark.parametrize("action, changes, runs", [
+    ("opened", {}, True), ("reopened", {}, True), ("synchronize", {}, True),
+    # An edit of the description, which the comment reports on (its checklist), or a change of base.
+    ("edited", {"body": {"from": "x"}}, True),
+    ("edited", {"base": {"ref": {"from": "other"}}}, True),
+    # An edit of the title alone, which the comment does not show: no job, so no run that ends success.
+    ("edited", {"title": {"from": "x"}}, False),
 ])
-def test_triage_route_asks_for_gather_only_when_the_comment_can_change(tmp_path, files, event, title_only, gather):
-    code, output = route_triage(tmp_path, files, event, title_only)
-    assert code == 0
-    assert output == ("gather=true\n" if gather else "")
+def test_triages_job_runs_unless_the_edit_is_of_the_title_alone(action, changes, runs):
+    jobs = workflow("triage.yaml")["jobs"]
+    assert sorted(jobs) == ["triage"]
+    ctx = {"github.event_name": "pull_request", "github.event.action": action,
+           **{f"github.event.changes.{k}": v for k, v in changes.items()}}
+    assert bool(evaluate(jobs["triage"]["if"], ctx)) == runs
 
 
-def test_triage_route_fails_when_it_cannot_read_the_files(tmp_path):
-    code, output = route_triage(tmp_path, [], fail=True)
-    assert code != 0 and output == ""
+@pytest.mark.parametrize("files, want", [
+    (["projects/p/project.yaml"], ["triage=true"]),
+    (["README.md", "projects/p/build.sh"], ["triage=true"]),
+    ([("src/x.yaml", "projects/p/x.yaml")], ["triage=true"]),
+    (["README.md", "src/t.py"], None),
+])
+def test_reviews_route_asks_for_the_triage_comment_after_a_triage_run_that_touches_projects(tmp_path, files, want):
+    """After a Triage run that ended success, the triage comment alone (no kind, so no review), and only for a pull
+    request that touches projects/."""
+    code, outputs, _ = route_review(tmp_path, files, run_path=".github/workflows/triage.yaml")
+    assert (code, outputs) == (0, PULL + want if want else [])
 
 
-def test_triage_route_asks_for_gather_whenever_triage_py_would_comment():
-    # triage.py writes a comment only when split_paths names a project; route asks for gather when a path matches its
-    # grep pattern. Over every path of up to four segments from a set that includes near misses, the first must imply
-    # the second, so that a change to either rule that lets them drift apart fails here.
+@pytest.mark.parametrize("actor, held, want", [
+    # A person's run by hand writes the triage comment too, whatever the review does: here no Build run of the head
+    # wrote results, so no review runs.
+    ("alice", (), ["triage=true"]),
+    # Held runs' run for a held head screens it alone: the Triage run that its approval lets complete has the comment
+    # written.
+    ("github-actions[bot]", (51,), ["kind=enrollment", "held=true"]),
+    # Held runs' run for a head that is no longer held: nothing.
+    ("github-actions[bot]", (), None),
+])
+def test_a_run_by_hand_that_a_person_starts_writes_the_triage_comment(tmp_path, actor, held, want):
+    code, outputs, _ = route_review(tmp_path, ["projects/p/project.yaml"], actor=actor, event="workflow_dispatch",
+                                    held=held)
+    assert (code, outputs) == (0, PULL + want if want else [])
+
+
+def build_run(run_id, head_sha="a" * 40, repository="mallory/libx", branch="main"):
+    """A completed Build run on pull_request: by default of pull request 8's head commit, repository and branch."""
+    return {"id": run_id, "path": ".github/workflows/build.yaml", "event": "pull_request", "status": "completed",
+            "head_sha": head_sha, "head_repository": {"full_name": repository}, "head_branch": branch}
+
+
+# The artifact build-results of a Build run, not expired.
+RESULTS = {"id": 1, "name": "build-results", "expired": False}
+
+
+@pytest.mark.parametrize("builds, want", [
+    # One completed Build run of the head, with one build-results.
+    ([(build_run(901), [RESULTS])], "901"),
+    # Of two such runs, the newer.
+    ([(build_run(901), [RESULTS]), (build_run(902), [RESULTS])], "902"),
+    # A newer run of another repository, branch or head commit is not taken.
+    ([(build_run(901), [RESULTS]), (build_run(902, repository="eve/libx"), [RESULTS])], "901"),
+    ([(build_run(901), [RESULTS]), (build_run(902, branch="other"), [RESULTS])], "901"),
+    ([(build_run(901), [RESULTS]), (build_run(902, head_sha="b" * 40), [RESULTS])], "901"),
+    # No build-results, two of them, or one that expired: no run wrote results.
+    ([(build_run(901), [])], None),
+    ([(build_run(901), [RESULTS, dict(RESULTS, id=2)])], None),
+    ([(build_run(901), [dict(RESULTS, expired=True)])], None),
+])
+def test_a_persons_run_by_hand_of_an_enrollment_reads_the_newest_build_run_that_wrote_results(tmp_path, builds, want):
+    """A run by hand that a person starts, for an enrollment whose runs GitHub does not hold: the review reads the
+    results of the newest completed Build run of the head, from its repository and branch, that lists exactly one
+    build-results that has not expired. With no such run, there is no kind, so no review runs, and the summary says
+    why."""
+    code, outputs, _ = route_review(tmp_path, ["projects/p/project.yaml"], actor="alice", event="workflow_dispatch",
+                                    builds=builds)
+    if want:
+        assert (code, outputs) == (0, PULL + ["kind=enrollment", f"build_run={want}", "triage=true"])
+    else:
+        assert (code, outputs) == (0, PULL + ["triage=true"])
+        assert "No Build run of this head wrote results: a push, or a close and a reopen, builds it." in \
+            (tmp_path / "summary").read_text()
+
+
+@pytest.mark.parametrize("run_path", [".github/workflows/build.yaml", ".github/workflows/triage.yaml"])
+def test_reviews_route_fails_when_it_cannot_read_the_files(tmp_path, run_path):
+    code, outputs, _ = route_review(tmp_path, ["projects/p/project.yaml"], run_path=run_path, fail=True)
+    assert code != 0 and outputs == []
+
+
+def test_reviews_route_asks_for_the_triage_comment_whenever_triage_py_would_comment():
+    # triage.py writes a comment only when split_paths names a project; route asks for the comment when a path matches
+    # its grep pattern. Over every path of up to four segments from a set that includes near misses, the first must
+    # imply the second, so that a change to either rule that lets them drift apart fails here.
     spec = importlib.util.spec_from_file_location("triage", ROOT / ".github" / "scripts" / "triage.py")
     triage = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(triage)
-    run = step(workflow("triage.yaml")["jobs"]["route"], "Whether the comment can change")["run"]
-    patterns = re.findall(r"grep -q '([^']+)' \"\$RUNNER_TEMP/paths\"", run)
+    run = step(workflow("review.yml")["jobs"]["route"], "An enrollment, a change or an issue")["run"]
+    patterns = re.findall(r"grep -q '([^']+)' <<< \"\$paths\"", run)
     assert len(patterns) == 1, patterns
     asks = re.compile(patterns[0])
     segments = ["projects", "Projects", "project", "docs", "p", "x.md", ".github", ""]

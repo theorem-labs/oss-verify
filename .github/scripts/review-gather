@@ -7,30 +7,33 @@
 #   KIND=enrollment GH_TOKEN=<read-only token> REPO=<owner>/<name> PR=<number> NAME=<project> COMMIT=<built commit> \
 #     [BUILD=<result line> BINARIES=<table> CHECKS=<report>] [HEAD_SHA=<head commit> LAST_REVIEW=<file>] \
 #     .github/scripts/review-gather <directory>
-#   KIND=change GH_TOKEN=... REPO=... PR=<number> HEAD_SHA=<head commit> [LAST_REVIEW=<file> RUN_ID=<this run>] \
+#   KIND=change GH_TOKEN=... REPO=... PR=<number> HEAD_SHA=<head commit> [LAST_REVIEW=<file>] \
 #     .github/scripts/review-gather <directory>
 #   KIND=issue GH_TOKEN=... REPO=... ISSUE=<number> .github/scripts/review-gather <directory>
 #
-# build.yaml's gather job runs it from the base branch's checkout, after take-project has put the pull request's
+# review.yml's gather job runs it from the checkout of main, after take-project has put the pull request's
 # projects/<name>/ into that checkout. It runs no code of the pull request or of the project: it reads the pull request
 # through the API, clones the project's repository at the built commit as data, and runs this repository's own
 # oss-verify validate and .github/scripts/triage.py on them, as the validate and triage workflows do. The directory gets
 # the files that the section "In CI" of .claude/skills/review-enrollment/SKILL.md lists, the build's results (BUILD,
-# BINARIES and CHECKS) among them. A failed read leaves its file with the error in it, and the review says what it could
-# not check, with one exception: when COMMIT is a commit id and the project's repository cannot be fetched at it, this
-# exits 1, so that the gather job fails and a re-run of its failed jobs fetches again. With no COMMIT (the build did
-# not get as far as resolving it), source.txt says that there is no source. LAST_REVIEW is the file the review job
+# BINARIES and CHECKS, which .github/scripts/take-build-results reads from the Build run) among them. A failed read
+# leaves its file with the error in it, and the review says what it could not check, with one exception: when COMMIT
+# is a commit id and the project's repository cannot be fetched at it, this exits 1, so that the gather job fails and
+# a re-run of its failed jobs fetches again. With no COMMIT (the build did not get as far as resolving it, or its
+# results were not read), source.txt says that there is no source. LAST_REVIEW is the file the review job
 # keeps beside the last review's session in the Actions cache, and the gather job restores, one line
 # `session=<id> head=<commit>`: when the head descends from that commit, this writes the diff since it and, to
 # GITHUB_OUTPUT, `session` and `last`, so that the review resumes that session for the diff alone.
-# KIND is route's decision in build.yaml, and this chooses its path on it once, here at its top.
+# KIND is route's decision in review.yml, and this chooses its path on it once, here at its top.
 # KIND=change, a change review (review-change.md): only the pull request, its diff, its checks and review comments,
 # and each changed file as it is at HEAD_SHA, as data under head/, cut at 1 MiB. It resumes the session of the last
 # change review of the pull request, for context, with the diff from the head that review reviewed. That head comes
-# from the runs API: the head of the newest Build run before RUN_ID of the pull request's own event
-# (pull_request_target), on its head branch in its head repository, whose review job succeeded. It never comes from
-# LAST_REVIEW, which sits in a cache that the runs of outside pull requests can write too (main's scope). LAST_REVIEW
-# gives the session's id, which is resumed only when the head LAST_REVIEW names is that head.
+# from the review comment: the newest comment on the pull request by the oss-verify App (login oss-verify[bot], type
+# Bot) that starts with <!-- oss-verify-review -->, from its line <!-- oss-verify-review-head <commit> -->, which
+# .github/scripts/review-body writes. It never comes from the runs API, or from LAST_REVIEW, which sits in a cache
+# that review.yml's session job writes in main's scope with what the review job kept, after its model read the text
+# of the pull request, an outside one too. LAST_REVIEW gives the session's id, which is resumed only when the head
+# LAST_REVIEW names is that head.
 # KIND=issue, the draft reply to an issue (review-issue.md): only the issue's title, body, author and comments, in
 # issue.json, and nothing else.
 # The runner reads none of its output as a workflow command: the gathered text is the pull request's or the issue's.
@@ -45,28 +48,22 @@ export PYTHONPATH="$PWD/src"
 out=${1:?usage: review-gather <directory>}
 # Run a command, and keep its standard output and error in a file, whatever its status.
 keep() { local file=$1; shift; { "$@"; echo "(exit status $?)"; } > "$out/$file" 2>&1; }
-# The head that the newest earlier Build run of this change's pull request reviewed, its review job a success, from the
-# runs API alone (the header above); nothing when there is none. It reads one page, the 100 newest Build runs of the
-# pull request's head branch, and looks at 10 of them at most: a pull request whose last review is older than that gets
-# a fresh review.
+# The head that the last change review of this pull request reviewed, from its review comment alone (the header
+# above); nothing when there is none. The comment job edits that comment for each new review, so the newest comment is
+# the one with the newest edit. Only review-body writes its head line: review-neutralize takes each line that holds
+# oss-verify-review out of the review's text. A comment whose head line is not one commit id gives nothing.
 reviewed_head() {
-  local runs id head tried=0 ref="" fork=""
-  [[ ${RUN_ID:-} =~ ^[0-9]+$ ]] || return 0
-  read -r ref fork < <(gh api "repos/$REPO/pulls/$PR" --jq '"\(.head.ref) \(.head.repo.full_name // "")"' 2> /dev/null)
-  [[ $ref =~ ^[A-Za-z0-9._/-]+$ && $fork =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 0
-  runs=$(gh api "repos/$REPO/actions/workflows/build.yaml/runs?event=pull_request_target&branch=$ref&per_page=100" \
-    --jq ".workflow_runs[] | select(.id < $RUN_ID and .path == \".github/workflows/build.yaml\"
-      and .event == \"pull_request_target\" and .head_branch == \"$ref\" and .head_repository.full_name == \"$fork\")
-      | \"\(.id) \(.head_sha)\"" 2> /dev/null)
-  while read -r id head; do
-    [[ ${id:-} =~ ^[0-9]+$ && ${head:-} =~ ^[0-9a-f]{40}$ ]] || continue
-    tried=$((tried + 1)) && [ "$tried" -le 10 ] || return 0
-    if [ "$(gh api "repos/$REPO/actions/runs/$id/jobs?per_page=100" \
-        --jq '[.jobs[] | select(.name == "review")][0].conclusion' 2> /dev/null)" = success ]; then
-      echo "$head"
-      return 0
-    fi
-  done <<< "$runs"
+  local newest head
+  newest=$(gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100" --jq '.[]
+      | select(.user.login == "oss-verify[bot]" and .user.type == "Bot"
+               and (.body // "" | startswith("<!-- oss-verify-review -->")))
+      | [(.updated_at // .created_at // ""), (.id | tostring),
+         ([.body | split("\n")[] | capture("^<!-- oss-verify-review-head (?<head>[0-9a-f]{40}) -->$").head]
+          | if length == 1 then .[0] else "" end)]
+      | join("\u001f")' 2> /dev/null | sort -t $'\x1f' -k1,1 -k2,2n | tail -n 1) || return 0
+  IFS=$'\x1f' read -r _ _ head <<< "$newest"
+  if [[ ${head:-} =~ ^[0-9a-f]{40}$ ]]; then echo "$head"; fi
+  return 0
 }
 case ${KIND:-} in
   issue)
@@ -93,7 +90,7 @@ keep pr.json gh pr view "$PR" -R "$REPO" --json \
 keep checks.json gh pr view "$PR" -R "$REPO" --json statusCheckRollup
 gh pr diff "$PR" -R "$REPO" > "$out/pr.diff" 2>&1
 # One read gives both files: the review comments as the review reads them, and their authors, one login a line, which
-# build.yaml's gather job asks GitHub about (an account without write access has the screen read the text first).
+# review.yml's gather job asks GitHub about (an account without write access has the screen read the text first).
 gh api --paginate "repos/$REPO/pulls/$PR/comments" \
   --jq '.[] | [(.user.login // "-"), "\(.user.login) \(.path):\(.line) \(.body)"]' > "$out/review-comments.json" 2>&1
 status=$?
@@ -119,7 +116,7 @@ if [ "$KIND" = change ]; then
     [ "$status" = 0 ] || [ "$status" = 141 ] || rm -f "$out/head/$path"
   done
   reviewed=$(reviewed_head)
-  # The cache's file gives the session's id, and its head must be the one the runs API gave: a session kept for
+  # The cache's file gives the session's id, and its head must be the one the review comment gave: a session kept for
   # another head (a review whose save did not happen, an older run's entry) is not the session of that review.
   read -r session kept < <(sed -n 's/^session=\([0-9a-f-]\{36\}\) head=\([0-9a-f]\{40\}\)$/\1 \2/p' \
     "${LAST_REVIEW:-/nonexistent}" 2> /dev/null | head -n 1)
@@ -132,7 +129,7 @@ if [ "$KIND" = change ]; then
     fi
     if [ "$(tail -n 1 "$out/since-last-review.diff" 2> /dev/null)" = "(exit status 0)" ]; then
       echo "review-gather: the change review resumes the session $session, with the diff from $reviewed, the head its" \
-        "last review reviewed (the runs API), to $HEAD_SHA"
+        "last review reviewed (its review comment), to $HEAD_SHA"
       { echo "session=$session"; echo "last=$reviewed"; } >> "${GITHUB_OUTPUT:-/dev/null}"
     else
       echo "review-gather: no diff from $reviewed, the head the last review reviewed, to $HEAD_SHA (compare status" \
@@ -177,7 +174,12 @@ for t in got:
 EOF
 keep template-history.txt git log --format='%h %cI %s' -- .github/PULL_REQUEST_TEMPLATE.md
 
-# Each seed corpus: its listing, and the first 512 bytes of each of its first 200 inputs, in hexadecimal.
+# Each seed corpus: its listing, and the first 512 bytes of each of its first 200 inputs, in hexadecimal. The zip is the
+# pull request's. read() with no size decompresses the whole member before it cuts the member, so this reads 512 bytes
+# through open(). zipfile decompresses bzip2 and lzma with no bound, also for a read with a size. So this reads only a
+# stored or deflated member, and gives a line for each other member that says that it is not read. open() raises
+# RuntimeError for an encrypted member, because this gives no password. So this reads no member whose bit 0x1 of the
+# general purpose bit flag is set, as read_member of .github/scripts/artifact.py does, and gives a line for it too.
 for zip in "$dir"/*_seed_corpus.zip; do
   [ -f "$zip" ] || continue
   target=$(basename "$zip" _seed_corpus.zip)
@@ -186,11 +188,15 @@ for zip in "$dir"/*_seed_corpus.zip; do
 import sys, zipfile
 with zipfile.ZipFile(sys.argv[1]) as archive, open(sys.argv[2], "w") as out:
     for info in [i for i in archive.infolist() if not i.is_dir()][:200]:
-        # A member is read only as far as its first 512 bytes. read() decompresses all of it, and a small zip can hold
-        # a member of gigabytes.
+        out.write(f"== {info.filename!r}: {info.file_size} bytes\n")
+        if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+            out.write(f"(not read: compression method {info.compress_type}, not stored or deflated)\n")
+            continue
+        if info.flag_bits & 0x1:
+            out.write("(not read: encrypted)\n")
+            continue
         with archive.open(info) as member:
             data = member.read(512)
-        out.write(f"== {info.filename!r}: {info.file_size} bytes\n")
         for at in range(0, len(data), 16):
             row = data[at:at + 16]
             text = "".join(chr(b) if 32 <= b < 127 else "." for b in row)
@@ -268,7 +274,7 @@ if [[ ${COMMIT:-} =~ ^[0-9a-f]{40}$ ]]; then
     exit 1
   fi
 else
-  echo "Not gathered: the build did not resolve a commit of the project's repository, so there is no source to read." \
+  echo "Not gathered: no commit of the project's repository came from the Build run, so there is no source to read." \
     > "$out/source.txt"
 fi
 # The changes to projects/<name>/ since the commit of the last review (LAST_REVIEW), whose session the review then

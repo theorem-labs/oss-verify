@@ -1,245 +1,68 @@
 # Adapted from OSS Scanner's .github/workflows/triage.yaml (https://github.com/anthropics/oss-scanner), Copyright 2026
-# Anthropic PBC, Apache-2.0. Modified 2026 by Theorem Labs, PBC: OSS Verify's comment (its marker and checks).
+# Anthropic PBC, Apache-2.0. Modified 2026 by Theorem Labs, PBC: OSS Verify's comment (its marker and checks), and then
+# the move of its jobs to .github/workflows/review.yml and of this file to the trigger pull_request.
 name: "Triage"
 # Triages an enrollment pull request with what a reviewer would otherwise look up by hand. The comment on the pull
 # request is public and carries only whether the repository is a fork, the license, whether whoever opened it looks like
 # an active maintainer, the pull request's scope, oss-verify validate and the checklist. The full table, for Theorem's
-# reviewers, is gather's job summary:
+# reviewers, is the job summary of review.yml's job triage-gather:
 # it adds the project's standing, stars and forks, outside participants, criticality score, OSS-Fuzz, .oss-verify/ in
 # its repository and its status in the proofs index. Both inform the review and decide nothing. A pull request that
 # touches nothing under projects/ gets neither.
 #
-# pull_request_target, not pull_request: a pull request from a fork gets a read-only token, which cannot comment.
-# That makes this workflow run with the base repository's token on input from anyone, so it is split in two:
-#   gather   reads the pull request through the GitHub API, as data, with a read-only token. Its checkout is the base
-#            branch (the default for pull_request_target), never the pull request, so no code from the pull request runs.
-#   comment  does nothing but post the text gather produced, as the oss-verify GitHub App (oss-verify[bot]), with an
-#            installation token that can write pull requests in this repository only. It makes that token from the
-#            App's client id and its private key, which it reads at run time from Secret Manager
-#            (oss-verify-github-app-key in theorem-agent-infra), signing in with this job's GitHub identity token by
-#            Google workload identity federation (Theorem's infrastructure code). This repository stores no
-#            copy of the key. The provider admits this file, build.yaml and the enrollment workflow
-#            enroll-dispatch.yml, each on refs/heads/main and only from its own events. The account that reads the key
-#            can be acted as only by a job of this repository that declares the GitHub Environment `comment`, as this
-#            job does; a token carries no job name, so the environment is what keeps the key to such jobs, and a job
-#            that declares none reaches no account at all. gather must never be given id-token: write, nor an
-#            environment.
-# Values from the event reach the scripts through environment variables, never by ${{ }} substitution into them.
+# This file only starts the triage. Its one job, triage, runs no script of this repository, checks out nothing and
+# holds no permission.
+# When a run of this file completes with success, .github/workflows/review.yml runs main's copy of two jobs for the
+# pull request (workflow_run), if the pull request touches projects/ (the paths GitHub lists for it, renames under both
+# names):
+#   triage-gather  writes the comment with main's .github/scripts/triage.py, which reads the pull request through the
+#                  GitHub API, as data, with a read-only token. Its job summary is the full table.
+#   triage         posts the comment, or updates the one already there, as the oss-verify GitHub App
+#                  (oss-verify[bot]).
+# A run of a pull request from a fork gets a read-only token, which cannot comment, so review.yml posts the comment.
+# An edit of the title alone runs no job, because the comment does not show the title. review.yml writes the comment
+# only after a run of this file whose conclusion is success. An edit of the description runs the job: the comment
+# reports on the checklist in it. The check triage is not required by the ruleset: the comment decides nothing.
 #
-# Two more jobs: route runs first and asks for gather only when the comment can change: a run started
-# by hand, or a pull request that touches projects/ (the paths GitHub lists for it, renames under both names), on any
-# event but an edit of the title alone, which the comment does not show. An edit of the description runs gather: the
-# comment reports on the checklist in it. required always runs, last, and passes only if route passed, gather passed
-# when route asked for it, and comment passed when gather wrote one (.github/scripts/collect); any job route did not ask
-# for must be skipped. Its check, triage, is not required by the ruleset: the comment decides nothing.
+# pull_request: the workflow file comes from the merge commit, so a pull request that changes it controls this run.
+# The run decides nothing: review.yml reads only that it completed with success, and reads the pull request from the
+# API.
 #
 # A pull request that has had none of the events below since this workflow was added has no comment. Someone with
-# write access can ask for one, or for a fresh one, from the same two jobs with the same permissions:
-#   gh workflow run triage.yaml -f pr=123
-# Started on any branch but main, its comment job cannot read the App's key, which the provider admits on main alone,
-# so start it on main. It never checks out a pull request.
+# write access can ask for one, or for a fresh one, with a run by hand of review.yml on main, which also reviews the
+# pull request:
+#   gh workflow run review.yml -f pr=123
 # For many pull requests, leave a few minutes between runs. A run makes about 30 API requests, plus one per file in the
 # project's directory, every run in this repository draws on the same 1,000 an hour, and a check that finds them spent
 # says "could not be checked".
 
-# A run started by hand is listed under the number it was given, as a pull request's is under its title.
-run-name: ${{ github.event.pull_request.title || format('Pull request {0}', inputs.pr) }}
+run-name: ${{ github.event.pull_request.title }}
 
 on:
-  pull_request_target:
+  pull_request:
+    # Only a pull request into main, the default branch. review.yml takes each run as a run of the open pull request
+    # into the default branch from the run's head repository and branch, at the run's head commit. So a run for a pull
+    # request into another branch gives the pull request into main from the same branch and commit a second triage.
+    branches: [main]
     # edited: the comment reports on the checklist in the description.
     types: [opened, edited, reopened, synchronize]
-  workflow_dispatch:
-    inputs:
-      pr:
-        description: "Number of the pull request to comment on"
-        required: true
-        type: number
 
 permissions: {}
 
 concurrency:
-  # An edit of the title alone has a group of its own, the run's, so that it cancels no run that is writing the comment.
-  group: ${{ github.event.action == 'edited' && !github.event.changes.body && !github.event.changes.base && format('triage-edited-{0}', github.run_id) || format('triage-{0}', github.event.pull_request.number || inputs.pr) }}
+  # An edit of the title alone has a group of its own, the run's, so that it cancels no run whose completion has
+  # review.yml write the comment. By event too, so that the runs of this file's copy from before the move to
+  # pull_request (on pull_request_target) and the runs of this copy never cancel each other.
+  group: ${{ github.event.action == 'edited' && !github.event.changes.body && !github.event.changes.base && format('triage-edited-{0}', github.run_id) || format('triage-{0}-{1}', github.event_name, github.event.pull_request.number) }}
   cancel-in-progress: true
 
 jobs:
-  route:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      pull-requests: read
-    outputs:
-      gather: ${{ steps.paths.outputs.gather }}
-    steps:
-      - name: Whether the comment can change
-        id: paths
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number || inputs.pr }}
-          EVENT: ${{ github.event_name }}
-          TITLE_ONLY: ${{ github.event.action == 'edited' && !github.event.changes.body && !github.event.changes.base }}
-        run: |
-          set -euo pipefail
-          say() { echo "$1"; echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
-          if [ "$EVENT" = workflow_dispatch ]; then
-            echo "gather=true" >> "$GITHUB_OUTPUT"
-            say "gather runs: started by hand."
-            exit 0
-          fi
-          if [ "$TITLE_ONLY" = true ]; then
-            say "Nothing runs: an edit of the pull request's title, which the comment does not show."
-            exit 0
-          fi
-          # A failed read fails this job, and so the check: it never reads as "touches nothing".
-          gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" \
-            --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/paths"
-          if grep -q '^projects/' "$RUNNER_TEMP/paths"; then
-            echo "gather=true" >> "$GITHUB_OUTPUT"
-            say "gather runs: the pull request touches projects/."
-          else
-            say "Nothing runs: the pull request touches nothing under projects/, so it gets no comment."
-          fi
-
-  gather:
-    needs: route
-    if: needs.route.outputs.gather == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      pull-requests: read
-    outputs:
-      comment: ${{ steps.triage.outputs.comment }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
-        with:
-          persist-credentials: false
-      - name: Write the comment
-        id: triage
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number || inputs.pr }}
-          # triage.py imports oss_verify.validate, from this repository's src/.
-          PYTHONPATH: ${{ github.workspace }}/src
-        run: |
-          dpkg -s python3-yaml > /dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
-          # A random delimiter, so that no text in the comment can end the output early.
-          delimiter="triage-$(openssl rand -hex 16)"
-          # The public comment is the job's output; the full table, every row, is this job's summary, from the same run.
-          {
-            echo "comment<<$delimiter"
-            python3 .github/scripts/triage.py --repo "$REPO" --pr "$PR" --summary "$GITHUB_STEP_SUMMARY"
-            echo "$delimiter"
-          } >> "$GITHUB_OUTPUT"
-
-  comment:
-    needs: gather
-    if: needs.gather.outputs.comment != ''
+  triage:
+    name: triage
+    # Not for an edit of the title alone, which the comment does not show.
+    if: ${{ !(github.event.action == 'edited' && !github.event.changes.body && !github.event.changes.base) }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
-    # The GitHub Environment is what gets this job the App's key and keeps it from every other job: its identity
-    # token carries an `environment` claim, and only a token with that claim may act as ossv-app-comment, the
-    # dedicated reader of the key for these jobs (Theorem's infrastructure code). Its one protection rule is
-    # the deployment-branch policy `main` (Theorem's infrastructure code); it has no
-    # required reviewer and no wait timer, so it adds no wait and no approval. Removing this line does not weaken the
-    # job; it stops it working.
-    # deployment: false, so the comment posts no deployment; the environment claim the account needs is in the token
-    # either way.
-    environment:
-      name: comment
-      deployment: false
-    permissions:
-      # Only for the GitHub identity token that Google's federation trades for an access token of
-      # ossv-app-comment@theorem-agent-root, which reads the App's key. This job posts text and runs no code of the
-      # pull request.
-      id-token: write
-    env:
-      # Theorem's Google project, as Theorem's infrastructure code declares them. Public identifiers, not
-      # credentials: the provider admits this file, build.yaml and enroll-dispatch.yml on refs/heads/main, and only a
-      # job in the environment `comment` can act as this account.
-      GCP_WORKLOAD_IDENTITY_PROVIDER: projects/844532188053/locations/global/workloadIdentityPools/github/providers/github-ossv
-      GCP_SERVICE_ACCOUNT: ossv-app-comment@theorem-agent-root.iam.gserviceaccount.com
+    permissions: {}
     steps:
-      - name: Sign in to Google Cloud
-        id: gcp
-        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0 (sha-pinned)
-        with:
-          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
-          token_format: access_token
-          access_token_lifetime: 300s
-          # Nothing is written to the workspace and nothing is exported: the token is this step's output alone.
-          create_credentials_file: false
-          export_environment_variables: false
-
-      # Each line of the key is masked, and so is its base64 form, because one mask command registers one line: that
-      # keeps these two representations out of the log, not every possible re-encoding of the key.
-      - name: Read the oss-verify App's key
-        id: key
-        env:
-          GCP_ACCESS_TOKEN: ${{ steps.gcp.outputs.access_token }}
-        run: |
-          set -euo pipefail
-          payload=$(curl -q -sSf -H @<(builtin printf 'Authorization: Bearer %s\n' "$GCP_ACCESS_TOKEN") \
-            'https://secretmanager.googleapis.com/v1/projects/theorem-agent-infra/secrets/oss-verify-github-app-key/versions/latest:access' \
-            | jq -er '.payload.data | select(type == "string" and length > 0)')
-          builtin printf '::add-mask::%s\n' "$payload"
-          key=$(builtin printf '%s' "$payload" | base64 -d)
-          while IFS= read -r line; do
-            if [[ $line == *[![:space:]]* ]]; then builtin printf '::add-mask::%s\n' "$line"; fi
-          done <<< "$key"
-          delimiter="key-$(openssl rand -hex 16)"
-          { echo "key<<$delimiter"; builtin printf '%s\n' "$key"; echo "$delimiter"; } >> "$GITHUB_OUTPUT"
-
-      - name: Get the oss-verify App's token
-        id: app
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0 (sha-pinned)
-        with:
-          client-id: Iv23liAWPMahJZYsw3un
-          private-key: ${{ steps.key.outputs.key }}
-          permission-pull-requests: write
-
-      - name: Post the comment, or update the one already there
-        env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number || inputs.pr }}
-          COMMENT: ${{ needs.gather.outputs.comment }}
-        run: |
-          # Ours is the oss-verify App's comment that starts with the marker.
-          existing=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-            --jq '.[] | select(.user.login == "oss-verify[bot]" and (.body | startswith("<!-- oss-verify-triage -->"))) | .id')
-          existing=${existing%%$'\n'*}
-          if [ -n "$existing" ]; then
-            jq -n --arg body "$COMMENT" '{body: $body}' | gh api --method PATCH "repos/$REPO/issues/comments/$existing" --input - > /dev/null
-          else
-            jq -n --arg body "$COMMENT" '{body: $body}' | gh api --method POST "repos/$REPO/issues/$PR/comments" --input - > /dev/null
-          fi
-
-  required:
-    name: triage
-    needs: [route, gather, comment]
-    if: always()
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      # Only for the checkout of .github/scripts.
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
-        with:
-          persist-credentials: false
-          sparse-checkout: .github/scripts
-
-      - name: Every job route asked for passed, and no other ran
-        env:
-          ROUTE: ${{ needs.route.result }}
-          GATHER: ${{ needs.gather.result }}
-          ASKED_GATHER: ${{ needs.route.outputs.gather == 'true' }}
-          COMMENT: ${{ needs.comment.result }}
-          # gather asks for the comment by writing one.
-          ASKED_COMMENT: ${{ needs.gather.outputs.comment != '' }}
-        run: .github/scripts/collect "$ROUTE" "gather:$GATHER:$ASKED_GATHER" "comment:$COMMENT:$ASKED_COMMENT"
+      - run: echo "When this run completes, review.yml writes the triage comment of a pull request that touches projects/."
