@@ -2,7 +2,7 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 #
-# The hourly cap on the model runs that issues' own events start (build.yaml, the review job's step "Hold the draft
+# The hourly cap on the model runs that issues' own events start (review.yml, the review job's step "Hold the draft
 # at the hourly cap"):
 #
 #   GH_TOKEN=<token with actions: read> REPO=<owner>/<name> RUN_ID=<this run's id> CAP=<runs an hour> \
@@ -26,7 +26,7 @@ held() {
 }
 [[ $cap =~ ^[1-9][0-9]*$ ]] || held "the cap is not a number."
 since=$(date -u -d '-1 hour' +%Y-%m-%dT%H:%M:%SZ) || held "the time an hour ago could not be read."
-if ! runs=$(gh api --method GET --paginate "repos/$REPO/actions/workflows/build.yaml/runs" -f event=issues \
+if ! runs=$(gh api --method GET --paginate "repos/$REPO/actions/workflows/review.yml/runs" -f event=issues \
     -f created=">=$since" -F per_page=100 --jq '.workflow_runs[].id'); then
   held "the runs of the last hour could not be read."
 fi
@@ -35,7 +35,7 @@ for id in $runs; do
   [[ $id =~ ^[0-9]+$ ]] || held "the runs API gave a run id that is not a number."
   [ "$id" = "${RUN_ID:-}" ] && continue
   # Its own assignment, so that a failed read holds instead of reading as no review. A run stopped before the model is
-  # found by the names of build.yaml's two steps that stop it, which build.yaml keeps for that reason.
+  # found by the names of review.yml's two steps that stop it, which review.yml keeps for that reason.
   if ! ran=$(gh api "repos/$REPO/actions/runs/$id/jobs?per_page=100" \
       --jq '[.jobs[] | select(.name == "review" and .conclusion != "skipped")
              | select(any(.steps[]?; (.name == "Hold the draft at the hourly cap"

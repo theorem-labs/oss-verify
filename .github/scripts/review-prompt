@@ -2,7 +2,7 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 #
-# The prompt and the arguments of build.yaml's one Review step, for the kind of review that route decided:
+# The prompt and the arguments of review.yml's one Review step, for the kind of review that route decided:
 #
 #   KIND=enrollment PR=<number> NAME=<project> [SESSION=<id> LAST=<commit> HEAD_SHA=<commit>] review-prompt
 #   KIND=change PR=<number> [SESSION=<id> LAST=<commit> HEAD_SHA=<commit>] review-prompt

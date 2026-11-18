@@ -502,10 +502,10 @@ class CommandLine(unittest.TestCase):
 
 class Callers(unittest.TestCase):
     def test_the_workflow_puts_the_full_table_in_the_job_summary_and_the_comment_in_the_output(self):
-        # The gather step's own script, run with stand-ins for dpkg and python3: the stand-in python3 prints a comment and
-        # writes a table to the file after --summary, as triage.py does.
-        jobs = validate.yaml.safe_load((ROOT / ".github" / "workflows" / "triage.yaml").read_text())["jobs"]
-        [script] = [s["run"] for s in jobs["gather"]["steps"] if s.get("name") == "Write the comment"]
+        # review.yml's triage-gather step, run with stand-ins for dpkg and python3: the stand-in python3 prints a
+        # comment and writes a table to the file after --summary, as triage.py does.
+        jobs = validate.yaml.safe_load((ROOT / ".github" / "workflows" / "review.yml").read_text())["jobs"]
+        [script] = [s["run"] for s in jobs["triage-gather"]["steps"] if s.get("name") == "Write the comment"]
         with tempfile.TemporaryDirectory() as scratch:
             scratch = pathlib.Path(scratch)
             bin = scratch / "bin"

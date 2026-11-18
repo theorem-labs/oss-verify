@@ -45,10 +45,14 @@ name: "Terms"
 # pull request that changes more files than the 3000 the API lists, or whose head moves while they are read, needs the
 # box.
 #
-# pull_request_target, not pull_request: with pull_request the workflow file is taken from the pull request itself, so
-# a contributor could edit this check away. The job checks out the base branch, never the pull request, and runs only
-# the base's code: .github/scripts/primary-contact and src/oss_verify/. It reads the event's description and the list
-# of the files the pull request changes. For a branch that changes the project.yaml of a seeded project, it also reads
+# pull_request: the workflow file comes from the merge commit, so a pull request that changes it controls this run and
+# its check: a contributor could edit this check away in their own pull request. The code-owner rule on /.github/ of
+# .github/CODEOWNERS guards the merge of such a pull request. enroll-dispatch.yml sends no pull request for its
+# theorem statements unless all its files are under one projects/<name>/ (the_project() of
+# .github/scripts/enroll-dispatch), and none that changes a steering file (.github/scripts/steering.py) until a person
+# approves its head. The job checks out the base commit, not the merge commit, and runs only the base's code:
+# .github/scripts/primary-contact and src/oss_verify/. It reads the event's description and the list of the files the
+# pull request changes. For a branch that changes the project.yaml of a seeded project, it also reads
 # docs/seeded-projects.tsv of the base, the text of that project.yaml at the head and at the base, and the pull request
 # that the description names. It reads each through the API, and never runs the pull request's code. Its token has no
 # permission (permissions: {} below): the API gives a public repository's pull requests, their files and its contents
@@ -61,15 +65,16 @@ name: "Terms"
 # yaml.safe_load, which makes only plain data and runs no code, and a name or a number goes into an API path only when
 # a regular expression of the script matches it.
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, edited, reopened, synchronize]
 
 permissions: {}
 
 concurrency:
   # One run per pull request: an edit or a push while a run is going supersedes it, so the newest description is
-  # the one this check reports on.
-  group: terms-${{ github.event.pull_request.number }}
+  # the one this check reports on. By event too, so that the runs of this file's copy from before the move to
+  # pull_request (on pull_request_target) and the runs of this copy never cancel each other.
+  group: terms-${{ github.event_name }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
@@ -78,10 +83,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
-      # For pull_request_target, actions/checkout with no ref checks out the base branch, never the pull request. So the
-      # step below runs the base's .github/scripts/primary-contact and src/oss_verify/, never the pull request's code.
+      # On pull_request, the base commit, not the merge commit that actions/checkout takes by default. So the step
+      # below runs the base's .github/scripts/primary-contact and src/oss_verify/, never the pull request's code.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with:
+          ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
       - name: The description accepts the OSS Verify terms
         env:
