@@ -101,8 +101,8 @@ ov_target_build example_small_fuzzer
 ov_target_begin zlib-gzio_fuzzer
 build_lib() {
   oft_build_cmake
-  OFT_HARNESS_CFLAGS="-include unistd.h"
-  oft_build_harness "gzio_fuzzer.c"
+  # gzio_fuzzer.c calls close(), which is declared in unistd.h; zlib 1.4's headers do not include it.
+  OFT_HARNESS_CFLAGS="-include unistd.h" oft_build_harness "gzio_fuzzer.c"
   oft_seal_getenv
   oft_seal_mkstemp
   oft_seal_getpid
