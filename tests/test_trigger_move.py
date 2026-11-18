@@ -14,8 +14,8 @@ The move:
        changes nothing that review.yml reads or posts: route reads the pull request and its head from the API,
        .github/scripts/take-build-results gives its fixed line, the gather job reads the text and the diff from the
        API, and the comment job posts to that pull request at that head.
-  (u)  The list of .github/scripts/steering.py is the list of patterns of .github/CODEOWNERS that give a file to
-       @theorem-labs/engineering, at commit 62081ee and today.
+  (u)  The list of .github/scripts/steering.py is the list of the last patterns of .github/CODEOWNERS, which give a file
+       to @theorem-labs/engineering and @theorem-labs/research, at commit 62081ee and today.
   (w)  Enroll dispatch sends no enrollment that changes a steering file, and puts no label on it, until a person
        approved its head: for an open pull request and for a merge.
   (x)  No workflow with workflow_dispatch builds the code of a pull request (oss-verify check, docker).
@@ -735,7 +735,7 @@ class SteeringFiles(unittest.TestCase):
         "/review.md", "/review-change.md", "/review-issue.md", "/.claude/skills/write-to-maintainer/",
         "/.github/CODEOWNERS")
 
-    def test_u_the_steering_files_are_the_engineering_patterns_of_codeowners(self):
+    def test_u_the_steering_files_are_the_last_owned_patterns_of_codeowners(self):
         path = ROOT / ".github" / "scripts" / "steering.py"
         self.assertTrue(path.is_file(), ".github/scripts/steering.py is absent")
         spec = importlib.util.spec_from_file_location("steering_of_this_test", path)
@@ -747,9 +747,14 @@ class SteeringFiles(unittest.TestCase):
             self.assertTrue(steering.is_steering(name), name)
         for name in ("projects/x/build.sh", "docs/build-contract.md", "tests/test_x.py"):
             self.assertFalse(steering.is_steering(name), name)
+        # A line counts when either team owns it; each line of CODEOWNERS names both.
+        teams = {"@theorem-labs/engineering", "@theorem-labs/research"}
         owned = [line.split()[0] for line in (ROOT / ".github" / "CODEOWNERS").read_text().splitlines()
-                 if line.strip() and not line.startswith("#") and "@theorem-labs/engineering" in line.split()[1:]]
-        self.assertEqual(owned, list(steering.STEERING))
+                 if line.strip() and not line.startswith("#") and teams & set(line.split()[1:])]
+        # The four patterns at the top give agent instructions and skills at any depth the same owners, and add no
+        # steering file: AGENTS*.md and CLAUDE*.md already match each AGENTS.md and CLAUDE.md, and a skill that Claude
+        # Code loads in the review job is under .claude/.
+        self.assertEqual(owned, ["**/AGENTS.md", "**/CLAUDE.md", "**/SKILL.md", "skills/", *steering.STEERING])
 
 
 class SteeringGate(Stand):
