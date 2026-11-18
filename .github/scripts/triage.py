@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Modified 2026 by Theorem Labs, PBC: OSS Verify's enrollment files (build.sh, patch_style, harness sources and
 # patches beside project.yaml; .oss-verify/ in the project's repository), validation warnings, two new rows (the
-# n/a contact of a seeded project on an outside pull request; the project's status in the proofs index), and no
-# package-rank row.
+# n/a contact of a seeded project on an outside pull request; the project's status in the proofs index), a warning for
+# a fork's change to a seeded project, which enrollment refuses, and no package-rank row.
 """Write the triage of an enrollment pull request: the comment for the pull request, and the full table for Theorem's
 reviewers, as Markdown.
 
@@ -69,6 +69,8 @@ MARKER = "<!-- oss-verify-triage -->"
 PUBLIC_ROWS = ("Fork", "License", "Opened by an active maintainer", "Pull request scope", "`oss-verify validate`",
                "Checklist")
 COMMENT_FOOTER = "<sub>Automated, from public data. It decides nothing.</sub>\n"
+# The table of the projects that we seeded, in this checkout: the base branch's in the workflow, the clone's by hand.
+SEEDED_TABLE = pathlib.Path(__file__).resolve().parents[2] / "docs" / "seeded-projects.tsv"
 
 OK, WARN, FAIL, INFO = "✅", "⚠️", "❌", "ℹ️"
 NOW = datetime.now(timezone.utc)
@@ -357,6 +359,16 @@ def split_paths(paths: list[str]) -> tuple[list[str], list[str]]:
     return sorted(names), outside
 
 
+def seeded_names(table: pathlib.Path = SEEDED_TABLE) -> set[str]:
+    """The projects that docs/seeded-projects.tsv marks seeded (yes in its second column), as enrollment
+    (.github/scripts/take-project) reads that table. None without the table."""
+    try:
+        text = table.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return set()
+    return {fields[0] for fields in (line.split("\t") for line in text.split("\n")) if fields[1:2] == ["yes"]}
+
+
 def accepted_limit(name: str, copied: frozenset[str] = frozenset()) -> int | None:
     """The size above which validate.py refuses a file of this name beside project.yaml, or None if it refuses the
     name itself (so that only the name matters, not the bytes). `copied` names the files that `sources` copies, which
@@ -437,7 +449,9 @@ def top_contributors(gh: GitHub, slug: str, count: int) -> list[dict]:
 # --- the checks: each returns the mark and the text of one row of the table ---
 
 
-def scope_row(names: list[str], outside: list[str], changed_files: int) -> tuple[str, str]:
+def scope_row(names: list[str], outside: list[str], changed_files: int, seeded: list[str] = ()) -> tuple[str, str]:
+    """`seeded` holds the names among `names` that docs/seeded-projects.tsv marks seeded, for a pull request from a
+    fork: enrollment refuses such a pull request (.github/scripts/take-project)."""
     problems = []
     if len(names) > 1:
         shown = ", ".join(code(name) for name in names[:5])
@@ -449,6 +463,13 @@ def scope_row(names: list[str], outside: list[str], changed_files: int) -> tuple
         problems.append(f"changes {changed_files} files")
     if problems:
         return FAIL, "; ".join(problems)
+    if seeded:
+        return WARN, (
+            f"{code('projects/' + seeded[0] + '/')} is the port of a project that we seeded: `enrollment` refuses a "
+            "pull request from a fork that changes it. A maintainer of this repository carries the change on a branch "
+            "of this repository. For an adoption, tick the box that accepts the OSS Verify terms in this pull request: "
+            "that branch's pull request names it (docs/project-yaml.md, Seeded projects)"
+        )
     return OK, "only this project's directory"
 
 
@@ -869,9 +890,11 @@ def table(rows: list[tuple]) -> str:
 
 
 def report(gh: GitHub, repo: str, name: str, directory: pathlib.Path, login: str, association: str, body: str,
-           paths: list[str], changed_files: int) -> Triage:
-    """The triage of projects/<name>/ as it is in `directory`, in a pull request by `login` that changes `paths`."""
+           paths: list[str], changed_files: int, fork: bool) -> Triage:
+    """The triage of projects/<name>/ as it is in `directory`, in a pull request by `login` that changes `paths`, from a
+    fork or from a branch of this repository."""
     names, outside = split_paths(paths)
+    seeded = sorted(set(names) & seeded_names()) if fork else []
     heading = f"### Enrollment triage: {code('projects/' + name)}\n\n"
     problems, warnings, _ = validate.check_project(directory)
     config = read_config(directory)
@@ -882,7 +905,7 @@ def report(gh: GitHub, repo: str, name: str, directory: pathlib.Path, login: str
         rows.append(row("Seeded contact", seeded_contact_row, config, association))
     rows += [
         row("Proofs index", proofs_index_row, gh, name),
-        row("Pull request scope", scope_row, names, outside, changed_files),
+        row("Pull request scope", scope_row, names, outside, changed_files, seeded),
         row("`oss-verify validate`", validate_row, problems, warnings),
         row("Checklist", checklist_row, body),
     ]
@@ -905,15 +928,21 @@ def triage(gh: GitHub, repo: str, number: int) -> Triage:
     if not names:
         return Triage("", "")
     name = names[0]
+    # A deleted fork has no head repository: it is a fork all the same.
+    fork = (pull["head"].get("repo") or {}).get("full_name") != repo
     with tempfile.TemporaryDirectory() as scratch:
         directory = pathlib.Path(scratch) / name
         # A name validate.py would refuse is not fetched; check_project() reports it without reading the directory.
         if validate.NAME.fullmatch(name) and not fetch_project(gh, repo, pull["head"]["sha"], name, directory):
             withdrawal = (f"### Enrollment triage: {code('projects/' + name)}\n\n"
                           "This pull request removes the project's directory: a withdrawal, nothing to triage.\n")
+            if fork and name in seeded_names():
+                withdrawal += ("\n`enrollment` refuses a pull request from a fork that removes the port of a project "
+                               "that we seeded. To leave, ask in an issue: a maintainer of this repository removes "
+                               "it on a branch of this repository (README.md, Pause or leave).\n")
             return Triage(f"{MARKER}\n{withdrawal}", withdrawal)
         return report(gh, repo, name, directory, pull["user"]["login"], pull.get("author_association") or "",
-                      pull.get("body") or "", paths, pull["changed_files"])
+                      pull.get("body") or "", paths, pull["changed_files"], fork)
 
 
 def triage_local(gh: GitHub, repo: str, directory: pathlib.Path, login: str, body: str) -> Triage:
@@ -921,7 +950,7 @@ def triage_local(gh: GitHub, repo: str, directory: pathlib.Path, login: str, bod
     opened by `login` with the description `body`."""
     name = directory.name
     paths = [f"projects/{name}/{path.name}" for path in sorted(directory.glob("*"))]
-    return report(gh, repo, name, directory, login, "NONE", body, paths, len(paths))
+    return report(gh, repo, name, directory, login, "NONE", body, paths, len(paths), True)
 
 
 def main() -> int:

@@ -105,6 +105,23 @@ class Rows(unittest.TestCase):
         self.assertIn("`oss-verify check`", text)
         self.assertIn("`projects/a/sub/x`", text)
         self.assertIn("changes 101 files", triage.scope_row(["a"], [], 101)[1])
+        # A fork's change to a seeded project: enrollment refuses it, so the row warns, and names the way through.
+        mark, text = triage.scope_row(["curl"], [], 2, ["curl"])
+        self.assertEqual(mark, triage.WARN)
+        self.assertIn("`projects/curl/` is the port of a project that we seeded: `enrollment` refuses", text)
+        self.assertIn("For an adoption, tick the box that accepts the OSS Verify terms", text)
+        # A problem of scope fails first.
+        self.assertEqual(triage.scope_row(["curl", "b"], [], 2, ["curl"])[0], triage.FAIL)
+
+    def test_seeded_names(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            table = pathlib.Path(scratch) / "seeded-projects.tsv"
+            table.write_text("# Written by src/oss_verify/seeded_projects.py; do not edit.\n"
+                             "project\tseedable\tbuild\tbuild notes\treason or notes\n"
+                             "curl\tyes\treproduces\tall binaries match the release's\t-\n"
+                             "sqlpage\tno\t-\t-\tthe release did not build it\n", encoding="utf-8")
+            self.assertEqual(triage.seeded_names(table), {"curl"})
+            self.assertEqual(triage.seeded_names(pathlib.Path(scratch) / "missing.tsv"), set())
 
     def test_checklist_with_the_template(self):
         template = (ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md").read_text(encoding="utf-8")
@@ -369,6 +386,30 @@ class Comment(unittest.TestCase):
         self.assertIn("a withdrawal, nothing to triage", result.full)
         self.assertNotIn(triage.MARKER, result.full)
 
+    def test_a_seeded_project_from_a_fork_and_from_a_branch(self):
+        # enrollment refuses a fork's change to a seeded project and takes a branch's (.github/scripts/take-project).
+        with mock.patch.object(triage, "seeded_names", return_value={"example"}):
+            fork = triage.triage(self.pull(ENROLLED, "NONE"), REPO, 7).comment
+            branch = self.pull(ENROLLED, "NONE")
+            branch.responses[f"repos/{REPO}/pulls/7"]["head"]["repo"] = {"full_name": REPO}
+            branch = triage.triage(branch, REPO, 7).comment
+        self.assertIn("| ⚠️ | Pull request scope | `projects/example/` is the port of a project that we seeded", fork)
+        self.assertIn("| ✅ | Pull request scope | only this project's directory |", branch)
+        # Without the table's mark, a fork's pull request is in scope.
+        self.assertIn("| ✅ | Pull request scope | only this project's directory |",
+                      triage.triage(self.pull(ENROLLED, "NONE"), REPO, 7).comment)
+
+    def test_a_fork_that_removes_a_seeded_project(self):
+        refused = "`enrollment` refuses a pull request from a fork that removes the port of a project that we seeded"
+        with mock.patch.object(triage, "seeded_names", return_value={"example"}):
+            fork = self.pull(SEEDED, "NONE")
+            del fork.responses[f"repos/{REPO}/contents/projects/example"]
+            branch = self.pull(SEEDED, "NONE")
+            del branch.responses[f"repos/{REPO}/contents/projects/example"]
+            branch.responses[f"repos/{REPO}/pulls/7"]["head"]["repo"] = {"full_name": REPO}
+            self.assertIn(refused, triage.triage(fork, REPO, 7).comment)
+            self.assertNotIn(refused, triage.triage(branch, REPO, 7).comment)
+
     def test_a_local_directory_before_the_pull_request(self):
         # No pull request exists yet: nothing about one is asked of GitHub, and the directory is read as it is here.
         with tempfile.TemporaryDirectory() as scratch:
@@ -379,12 +420,16 @@ class Comment(unittest.TestCase):
             template = (ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md").read_text(encoding="utf-8")
             gh = FakeGitHub()
             comment = triage.triage_local(gh, REPO, directory, "someone", template).comment
+            # The pull request it is written for comes from a fork, so a seeded project's row warns.
+            with mock.patch.object(triage, "seeded_names", return_value={"example"}):
+                seeded = triage.triage_local(FakeGitHub(), REPO, directory, "someone", template).comment
         self.assertTrue(comment.startswith(triage.MARKER + "\n"))
         self.assertIn("opened by `someone`", comment)
         self.assertIn("| ✅ | Pull request scope | only this project's directory |", comment)
         self.assertIn("| ✅ | `oss-verify validate` | passes |", comment)
         self.assertIn("| ⚠️ | Checklist | ", comment)
         self.assertFalse([path for path in gh.fetched if "/pulls/" in path], gh.fetched)
+        self.assertIn("| ⚠️ | Pull request scope | `projects/example/` is the port of a project that we seeded", seeded)
 
 
 class CommandLine(unittest.TestCase):
