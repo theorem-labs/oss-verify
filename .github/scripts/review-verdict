@@ -43,8 +43,10 @@ order:
     oss_fuzz           OSS_FUZZ: true when one of the OSS-Fuzz projects that triage.py reads (the OSS_FUZZ_CANDIDATES
                        projects whose names are most like the repository's) has this repository as its main_repo,
                        false when none of them has.
-    sizes              SIZES, the object of .github/scripts/binary-sizes as it is (the project-builds job's output
-                       sizes): {target: {build: {"text": ..., "exec": ...}}}.
+    sizes              SIZES, the object of .github/scripts/binary-sizes as it is: {target: {build: {"text": ...,
+                       "exec": ...}}}. It comes from build.yaml's project-builds output sizes, through the artifact
+                       build-results and .github/scripts/take-build-results: the gather job's output sizes, at most
+                       100,000 bytes.
 
 criticality_score and oss_fuzz are null when they are not known: the repository is a fork (for criticality_score
 only: a fork is not scored), it is not on github.com or GitHub does not find it, its row could not be checked, or the

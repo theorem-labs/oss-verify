@@ -7,14 +7,17 @@
       GITHUB_OUTPUT=<file> .github/scripts/take-build-results
 
 review.yml's gather job runs it, from the checkout of main, before .github/scripts/review-gather, for an enrollment
-whose Build run route found (route's output build_run). It writes four outputs to GITHUB_OUTPUT, and the gather job
-gives them to review-gather as BUILD, BINARIES, CHECKS and COMMIT:
+whose Build run route found (route's output build_run). It writes five outputs to GITHUB_OUTPUT. The gather job gives
+the first four to review-gather as BUILD, BINARIES, CHECKS and COMMIT, and sizes as its own output sizes, which the
+comment job puts in the record of the review (SIZES of .github/scripts/review-verdict):
 
   build     one line: "The Build check success: <result>." when the check's exit status (code) is 0, else "The Build
             check failure: <result>.".
   binaries  the table of the binaries that the build wrote.
   checks    the report of the checks of the fuzz targets.
   commit    the commit of the project's repository that the build fetched, or empty.
+  sizes     each binary's .text bytes and executable bytes, as .github/scripts/binary-sizes gives them, as one line of
+            compact JSON (json.dumps with the separators "," and ":"), or empty when there are none.
 
 The build step cuts binaries and checks at 60,000 bytes each, and adds the line CUT after a cut.
 
@@ -26,14 +29,25 @@ MAX_LISTED_FILES files or more is not the whole change, so then it reads nothing
 
 The artifact is ARTIFACT of BUILD_RUN, which build.yaml's results job writes. read_member of .github/scripts/artifact.py
 reads MEMBER of ARTIFACT with the limit MAX_ARTIFACT_BYTES, by the rules of its docstring. That member must be JSON with
-the schema SCHEMA and the fields of FIELDS, each of its type, shape and size. Its pr, sha and project must be PR,
+the schema SCHEMA and the fields of FIELDS, each of its type, shape and size. A member with the fields of OLD_FIELDS,
+which build.yaml's results job wrote before it wrote sizes, is read too, with no sizes: a Build run keeps its artifact
+30 days, and a review by hand of such a head keeps the results of its build. Its pr, sha and project must be PR,
 HEAD_SHA and NAME: the pull request and the head that route read from the API, and the project that the gather job's
 own take-project took. The artifact never gives the number, the head, the diff or the files that review.yml reads or
 posts to. This reads the zip in memory and writes no file but GITHUB_OUTPUT: nothing goes into the working directory.
 
-When a read or a check fails, build is the fixed line NO_RESULT, and binaries, checks and commit are empty. The log
-says why, with no text of the artifact. The exit status is then 0, so the review continues with no result of the
-build. The exit status is 2 only when an input variable is missing or malformed.
+The member's sizes must be null or {target: {build: {"text": <bytes>, "exec": <bytes>}}}: each target and each build
+a name that is not empty and holds no NUL, each build an object with exactly the keys text and exec, and each of
+them a whole number of at least 0 or null. Sizes of another shape give the output sizes empty, and the other four
+outputs stay as they are. The output sizes has at most MAX_SIZES_BYTES bytes: the comment job's step gets it in one
+environment variable, and Linux starts no process with a variable over 131,072 bytes. When the sizes of all builds are
+longer, each target keeps only its "plain" build ({} for a target with no plain build), as review-verdict does. When
+they are still longer, the output sizes is empty. Each of these writes one line to the log that says why, with no
+text of the artifact.
+
+When a read or a check fails, build is the fixed line NO_RESULT, and binaries, checks, commit and sizes are empty.
+The log says why, with no text of the artifact. The exit status is then 0, so the review continues with no result of
+the build. The exit status is 2 only when an input variable is missing or malformed.
 """
 from __future__ import annotations
 
@@ -53,7 +67,9 @@ from artifact import Api, read_member, whole  # noqa: E402
 ARTIFACT = "build-results"
 MEMBER = "results.json"
 SCHEMA = "oss-verify build results v1"
-FIELDS = frozenset({"schema", "pr", "project", "sha", "commit", "code", "result", "binaries", "checks"})
+FIELDS = frozenset({"schema", "pr", "project", "sha", "commit", "code", "result", "binaries", "checks", "sizes"})
+# The fields that build.yaml's results job wrote before it wrote sizes.
+OLD_FIELDS = FIELDS - {"sizes"}
 MAX_ARTIFACT_BYTES = 1 << 20
 # The API lists at most 3,000 files of a pull request; above that, the list is not the whole change.
 MAX_LISTED_FILES = 3000
@@ -64,6 +80,9 @@ CUT = "\n(Cut at 60,000 bytes: the rest is in the Build check's step summary.)"
 # The build step writes a result of less than 200 bytes. This limit keeps BUILD far below the 131,072 bytes that Linux
 # takes in one environment variable of the gather step.
 MAX_RESULT_BYTES = 1000
+# The limit of the output sizes, in bytes of its JSON. The comment job's step gets it in one environment variable, and
+# Linux starts no process with a variable over 131,072 bytes.
+MAX_SIZES_BYTES = 100000
 STEERED = "The Build run's results are not read: this pull request changes a file that steers the workflows."
 NO_RESULT = "The Build run of this head gave no result that this review can read."
 # A project's directory name, as oss-verify validate's NAME takes it.
@@ -74,7 +93,7 @@ NUMBER = re.compile(r"[1-9][0-9]*")
 
 
 def nothing(build: str) -> dict:
-    return {"build": build, "binaries": "", "checks": "", "commit": ""}
+    return {"build": build, "binaries": "", "checks": "", "commit": "", "sizes": ""}
 
 
 def text(value: object) -> bool:
@@ -111,7 +130,7 @@ def steering_change(files: list) -> tuple[bool | None, str]:
 def problem(results: object, pr: int, head: str, name: str) -> str:
     """Why the results cannot be read for pull request `pr` at `head`, project `name`, or ''. The reason names no
     value of the results."""
-    if not isinstance(results, dict) or set(results) != FIELDS or results["schema"] != SCHEMA:
+    if not isinstance(results, dict) or set(results) not in (FIELDS, OLD_FIELDS) or results["schema"] != SCHEMA:
         return f"{MEMBER} does not have the shape of {SCHEMA!r}"
     if not whole(results["pr"]) or results["pr"] < 1:
         return f"{MEMBER} names no pull request"
@@ -140,27 +159,87 @@ def problem(results: object, pr: int, head: str, name: str) -> str:
     return ""
 
 
-def take(api: Api, repo: str, run: int, pr: int, head: str, name: str) -> tuple[dict, str]:
-    """The four outputs, and what the output says about them."""
+def size_name(value: object) -> bool:
+    """Whether `value` is the name of a target or of a build in sizes: a text that is not empty and holds no NUL."""
+    return isinstance(value, str) and value != "" and "\0" not in value
+
+
+def size_value(value: object) -> bool:
+    """Whether `value` is one size of binary-sizes: a whole number of at least 0, or null for a size it could not
+    read."""
+    return value is None or (whole(value) and value >= 0)
+
+
+def sizes_problem(sizes: object) -> str:
+    """Why `sizes` is not null or the object of .github/scripts/binary-sizes, or ''. The reason names no value of
+    it."""
+    if sizes is None:
+        return ""
+    if not isinstance(sizes, dict):
+        return "sizes that are not an object"
+    for target, builds in sizes.items():
+        if not size_name(target):
+            return "sizes with a target name that is empty or holds a NUL"
+        if not isinstance(builds, dict):
+            return "sizes with a target that is not an object"
+        for build, binary in builds.items():
+            if not size_name(build):
+                return "sizes with a build name that is empty or holds a NUL"
+            if not isinstance(binary, dict) or set(binary) != {"text", "exec"}:
+                return "sizes with a build that is not an object of text and exec alone"
+            if not all(size_value(value) for value in binary.values()):
+                return "sizes with a size that is not a whole number of at least 0 or null"
+    return ""
+
+
+def compact(value: object) -> str:
+    """`value` as one line of compact JSON."""
+    return json.dumps(value, separators=(",", ":"))
+
+
+def sizes_output(sizes: object) -> tuple[str, list[str]]:
+    """The output sizes for the sizes of the member (None when it has none), at most MAX_SIZES_BYTES, and the lines
+    that the log says about it."""
+    why = sizes_problem(sizes)
+    if why:
+        return "", [f"{MEMBER} gives {why}, so the output sizes is empty"]
+    if sizes is None:
+        return "", []
+    text = compact(sizes)
+    if len(text.encode("utf-8")) <= MAX_SIZES_BYTES:
+        return text, []
+    said = [f"the sizes of all builds are over {MAX_SIZES_BYTES:,} bytes of JSON, so the output sizes keeps only the"
+            " plain build of each target"]
+    plain = {target: {"plain": builds["plain"]} if "plain" in builds else {} for target, builds in sizes.items()}
+    text = compact(plain)
+    if len(text.encode("utf-8")) <= MAX_SIZES_BYTES:
+        return text, said
+    return "", said + [f"the sizes of the plain builds are over {MAX_SIZES_BYTES:,} bytes of JSON too, so the output"
+                       " sizes is empty"]
+
+
+def take(api: Api, repo: str, run: int, pr: int, head: str, name: str) -> tuple[dict, list[str]]:
+    """The five outputs, and the lines that the log says about them."""
     pages = api.pages(f"repos/{repo}/pulls/{pr}/files?per_page=100")
     if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages):
-        return nothing(NO_RESULT), "the API did not give the pull request's files as a list"
+        return nothing(NO_RESULT), ["the API did not give the pull request's files as a list"]
     steered, why = steering_change([f for page in pages for f in page])
     if steered is None:
-        return nothing(NO_RESULT), why
+        return nothing(NO_RESULT), [why]
     if steered:
-        return nothing(STEERED), why
+        return nothing(STEERED), [why]
     data, why = read_member(api, repo, run, ARTIFACT, MEMBER, MAX_ARTIFACT_BYTES)
     if data is None:
-        return nothing(NO_RESULT), why
+        return nothing(NO_RESULT), [why]
     results = json.loads(data)
     why = problem(results, pr, head, name)
     if why:
-        return nothing(NO_RESULT), why
+        return nothing(NO_RESULT), [why]
+    sizes, said = sizes_output(results.get("sizes"))
     outcome = "success" if results["code"] == 0 else "failure"
     return ({"build": f"The Build check {outcome}: {results['result']}.", "binaries": results["binaries"],
-             "checks": results["checks"], "commit": results["commit"]},
-            f"read the results of Build run {run} for pull request {pr} at {head}, project {name}")
+             "checks": results["checks"], "commit": results["commit"], "sizes": sizes},
+            [f"read the results of Build run {run} for pull request {pr} at {head}, project {name}", *said])
 
 
 def write(path: str, outputs: dict) -> None:
@@ -189,14 +268,15 @@ def main() -> int:
             return 2
     run, pr, head, name = int(env("BUILD_RUN")), int(env("PR")), env("HEAD_SHA"), env("NAME")
     try:
-        outputs, why = take(Api(), env("REPO"), run, pr, head, name)
+        outputs, said = take(Api(), env("REPO"), run, pr, head, name)
     except subprocess.CalledProcessError as error:
         # gh's error names the request and GitHub's answer to it, never the artifact's text.
-        said = error.stderr.decode("utf-8", "replace").strip().splitlines()
-        outputs, why = nothing(NO_RESULT), f"gh exited {error.returncode}: {said[-1][:200] if said else ''!r}"
+        lines = error.stderr.decode("utf-8", "replace").strip().splitlines()
+        outputs, said = nothing(NO_RESULT), [f"gh exited {error.returncode}: {lines[-1][:200] if lines else ''!r}"]
     except Exception as error:  # noqa: BLE001 - a bad artifact never fails the job, whatever it holds
-        outputs, why = nothing(NO_RESULT), f"the read failed ({type(error).__name__})"
-    print(f"take-build-results: {why}.")
+        outputs, said = nothing(NO_RESULT), [f"the read failed ({type(error).__name__})"]
+    for line in said:
+        print(f"take-build-results: {line}.")
     if outputs["build"] in (STEERED, NO_RESULT):
         print(f"take-build-results: the review reads this line in place of the build's results: {outputs['build']}")
     write(env("GITHUB_OUTPUT"), outputs)

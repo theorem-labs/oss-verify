@@ -931,7 +931,8 @@ class PostingStep(Runner):
     """review.yml's comment step "Post the comment and record the verdict", and after it the step "Take the label
     review-held off" when its if holds, run with the stand-in gh of test_outside_screen, which keeps each request's
     method, endpoint and body: the review comment it posts or updates, for an enrollment the one check run Enrollment
-    review it records from the same verdicts (c1, c3), and the holds taken off after it."""
+    review it records from the same verdicts (c1, c3) with the record of the review in its output.text, and the holds
+    taken off after it."""
 
     STEP = "Post the comment and record the verdict"
     REPO = "theorem-labs/oss-verify"
@@ -964,7 +965,8 @@ class PostingStep(Runner):
                  "VERDICTS": "" if verdicts is None else json.dumps(verdicts), "REASONS": json.dumps(reasons or {}),
                  "CHECKS": "### new report\n" if kind == "enrollment" else "", "SCREENED": "",
                  "TRUST": "writer", "FREE": "", "GATHER_RESULT": "success", "SCREEN_RESULT": "skipped",
-                 "SCREEN_VERDICT": "", "REVIEW_RESULT": "success", "HELD": "false", "HOLD_RESULT": "success"}
+                 "SCREEN_VERDICT": "", "REVIEW_RESULT": "success", "HELD": "false", "HOLD_RESULT": "success",
+                 "CRITICALITY_SCORE": "", "OSS_FUZZ": "", "SIZES": ""}
         given.update(env)
         if name is None:
             name = "libreac" if kind == "enrollment" else ""
@@ -1010,8 +1012,20 @@ class PostingStep(Runner):
         run = runs[0]
         self.assertEqual((run["name"], run["head_sha"], run["external_id"], run["status"], run["details_url"],
                           sorted(run["output"])),
-                         ("Enrollment review", self.HEAD, "8", "completed", self.RUN_URL, ["summary", "title"]))
+                         ("Enrollment review", self.HEAD, "8", "completed", self.RUN_URL, ["summary", "text", "title"]))
         return run
+
+    @staticmethod
+    def shown(run):
+        """What a maintainer reads of the check run's output: its title and summary, without the record in its
+        text, which GitHub does not show."""
+        return {key: value for key, value in run["output"].items() if key != "text"}
+
+    def kept(self, run):
+        """The record of the review in the check run's output.text: its JSON in an HTML comment."""
+        text = run["output"]["text"]
+        self.assertTrue(text.startswith("<!-- ") and text.endswith(" -->"), text[:80])
+        return json.loads(text[5:-4])
 
     def first_sentence(self, requests):
         """The first visible line of the one comment the step sent."""
@@ -1044,7 +1058,7 @@ class PostingStep(Runner):
     def test_c1_a_every_check_passes(self):
         _, requests = self.post(verdicts=self.verdicts())
         run = self.record(requests)
-        self.assertEqual((run["conclusion"], run["output"]),
+        self.assertEqual((run["conclusion"], self.shown(run)),
                          ("success", {"title": SENTENCES["success"], "summary": SENTENCES["success"]}))
         self.assertEqual(self.first_sentence(requests), SENTENCES["success"])
 
@@ -1091,7 +1105,7 @@ class PostingStep(Runner):
             with self.subTest(job=job, env=env):
                 _, requests = self.post(verdicts=self.verdicts(), **env)
                 run = self.record(requests)
-                self.assertEqual((run["conclusion"], run["output"]),
+                self.assertEqual((run["conclusion"], self.shown(run)),
                                  ("action_required", {"title": f"The {job} job failed.", "summary":
                                   f"The {job} job of [this run]({self.RUN_URL}) failed, so the review gave no verdict. "
                                   + self.RERUN}))
@@ -1103,7 +1117,7 @@ class PostingStep(Runner):
         _, requests = self.post(review="", TRUST="cap", FREE="2026-11-10T00:00:00Z", GATHER_RESULT="skipped",
                                 REVIEW_RESULT="skipped", HOLD_RESULT="skipped", name="")
         run = self.record(requests)
-        self.assertEqual((run["conclusion"], run["output"]), ("action_required", {
+        self.assertEqual((run["conclusion"], self.shown(run)), ("action_required", {
             "title": "The daily cap of automated reviews held this pull request.",
             "summary": "The daily cap of automated reviews held this pull request. It comes from an account without "
                        "write access to this repository, and the automated reviews of such accounts reached their cap "
@@ -1190,7 +1204,9 @@ class PostingStep(Runner):
     def test_the_longest_verdict_reaches_the_check_run_in_no_argument_over_linuxs_limit(self):
         """Linux refuses to start a process with an argument over 131,072 bytes. The longest reasons the review job
         lets through, 31 of 1,500 characters that json.dumps writes as \\u escapes, make a verdict of about 280,000
-        bytes: the step gives it to no command as an argument, and the check run gets the whole summary."""
+        bytes: the step gives it to no command as an argument, and the check run gets the whole summary. The gather
+        job's sizes near their bound of 100,000 bytes (take-build-results) reach no argument either, and the record
+        keeps the plain build of each target."""
         shim = self.dir / "shim"
         shim.mkdir()
         (shim / "jq").write_text("#!/usr/bin/env bash\n"
@@ -1200,15 +1216,62 @@ class PostingStep(Runner):
         self.env.update(PATH=f"{shim}{os.pathsep}{self.env['PATH']}", JQ_ARGV=str(self.dir / "jq-argv"))
         ids = check_ids("review.md")
         reasons = {check: "é" * 1500 for check in ids}
+        builds = {build: {"text": 123456, "exec": 234567} for build in ("plain", "asan", "ubsan", "msan")}
+        sizes = {f"fuzz_{n:04d}": builds for n in range(600)}
+        given = json.dumps(sizes, separators=(",", ":"))
+        self.assertTrue(90_000 < len(given.encode()) <= 100_000, len(given))
         _, requests = self.post(verdicts=self.verdicts(**{check: "fail" for check in ids}),
-                                REASONS=json.dumps(reasons, ensure_ascii=False))
+                                REASONS=json.dumps(reasons, ensure_ascii=False), SIZES=given)
         run = self.record(requests)
         self.assertEqual(run["conclusion"], "failure")
         self.assertEqual(run["output"]["summary"].count("é" * 1500), len(ids))
+        self.assertEqual(self.kept(run)["sizes"], {target: {"plain": builds["plain"]} for target in sizes})
         self.assertGreater(len(json.dumps(run).encode()), 131_072)
         lengths = [int(n) for n in (self.dir / "jq-argv").read_text().split()]
         lengths += [len(a.encode()) for call in self.calls() for a in call]
         self.assertLess(max(lengths), 131_072)
+
+    def test_k1_the_record_of_a_review_has_its_verdicts_and_the_values_of_the_gather_job(self):
+        """The check run's output.text is the record of the review (review-verdict's docstring): at the step's head,
+        with no hold, the 31 verdicts that the summary counts, and the criticality score, OSS-Fuzz and binary sizes
+        that the gather job gave."""
+        verdicts = self.verdicts(D2="fail", E="person")
+        sizes = {"parse": {"plain": {"text": 1000, "exec": 1200}, "asan": {"text": 3000, "exec": 3300}},
+                 "dump": {"plain": {"text": 900, "exec": None}}}
+        _, requests = self.post(verdicts=verdicts, reasons={"D2": "No input.", "E": "A person's call."},
+                                CRITICALITY_SCORE="0.07123", OSS_FUZZ="false",
+                                SIZES=json.dumps(sizes, separators=(",", ":")))
+        record = self.kept(self.record(requests))
+        self.assertEqual(record, {"schema": "oss-verify/enrollment-review/1", "head": self.HEAD, "hold": None,
+                                  "job": None, "verdicts": verdicts, "criticality_score": 0.07123, "oss_fuzz": False,
+                                  "sizes": sizes})
+        self.assertEqual((list(record["verdicts"]), len(record["verdicts"])), (check_ids("review.md"), 31))
+        self.assertIs(record["oss_fuzz"], False)
+
+    def test_k2_the_record_of_each_hold_names_the_hold_and_the_job_and_has_no_verdict(self):
+        """Each hold through the step: the screen's and a failed job's, with the values that the gather job gave; and
+        the daily cap's, which no gather job ran for, so its values are empty and the record's are null. The review's
+        verdicts, when the step has them, are in no record of a hold."""
+        sizes = {"parse": {"plain": {"text": 1000, "exec": 1200}}}
+        values = {"CRITICALITY_SCORE": "0.5", "OSS_FUZZ": "true", "SIZES": json.dumps(sizes, separators=(",", ":"))}
+        gathered = {"criticality_score": 0.5, "oss_fuzz": True, "sizes": sizes}
+        holds = (("screen", None, dict(values, review="", TRUST="screen", SCREEN_RESULT="success",
+                                       SCREEN_VERDICT="held", REVIEW_RESULT="skipped"), gathered),
+                 ("cap", None, {"review": "", "TRUST": "cap", "FREE": "2026-11-10T00:00:00Z",
+                                "GATHER_RESULT": "skipped", "REVIEW_RESULT": "skipped", "HOLD_RESULT": "skipped",
+                                "name": ""}, {"criticality_score": None, "oss_fuzz": None, "sizes": None}),
+                 ("failed", "gather", dict(values, GATHER_RESULT="failure", REVIEW_RESULT="skipped"), gathered),
+                 ("failed", "screen", dict(values, TRUST="screen", SCREEN_RESULT="failure", REVIEW_RESULT="skipped"),
+                  gathered),
+                 ("failed", "review", dict(values, REVIEW_RESULT="failure"), gathered),
+                 ("failed", "hold", dict(values, HELD="true", HOLD_RESULT="failure"), gathered))
+        for hold, job, env, want in holds:
+            with self.subTest(hold=hold, job=job):
+                _, requests = self.post(verdicts=self.verdicts(), **env)
+                record = self.kept(self.record(requests))
+                self.assertEqual(record, {"schema": "oss-verify/enrollment-review/1", "head": self.HEAD, "hold": hold,
+                                          "job": job, "verdicts": {}, **want})
+                self.assertIs(record["oss_fuzz"], want["oss_fuzz"])
 
     def test_the_comment_stays_under_githubs_limit(self):
         _, requests = self.post(review="R" * 70_000, verdicts=self.verdicts(), CHECKS="C" * 20_000)

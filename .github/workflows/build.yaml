@@ -27,10 +27,10 @@ name: "Build"
 #            the theorem statements once every required check has passed.
 #   results  writes the build's results, the artifact build-results, when the build took a project, whether the
 #            build passed or failed: the pull request, the project, the head commit, the commit of the project's
-#            repository that the build fetched, the exit status of oss-verify check, its result, the binaries table
-#            and the checks' report. review.yml's gather job reads it, as data, through
-#            .github/scripts/take-build-results, and only for a pull request that changes no steering file
-#            (.github/scripts/steering.py).
+#            repository that the build fetched, the exit status of oss-verify check, its result, the binaries table,
+#            the checks' report and each binary's .text and executable bytes (sizes). review.yml's gather job reads
+#            it, as data, through .github/scripts/take-build-results, and only for a pull request that changes no
+#            steering file (.github/scripts/steering.py).
 #   required always runs, last, and reports the required check (below).
 #
 # project-builds is the required check, and the job required reports it (.github/scripts/collect). required runs on
@@ -283,8 +283,9 @@ jobs:
           commit=$(python3 -P -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["commit"])' \
             ~/.cache/oss-verify-check/"$NAME"/manifest.yaml 2> /dev/null || true)
           [[ $commit =~ ^[0-9a-f]{40}$ ]] || commit=""
-          # For the record job: each binary's .text bytes and executable bytes (.github/scripts/binary-sizes), as one
-          # line of JSON {target: {build: {text, exec}}}, with null for a size that could not be read.
+          # For the record job and the results job: each binary's .text bytes and executable bytes
+          # (.github/scripts/binary-sizes), as one line of JSON {target: {build: {text, exec}}}, with null for a size
+          # that could not be read.
           sizes=$(python3 .github/scripts/binary-sizes ~/.cache/oss-verify-check/"$NAME" 2> /dev/null < /dev/null || true)
           [[ $sizes == "{"*"}" && $sizes != *$'\n'* ]] || sizes=""
           # A random delimiter, so that no text can end an output early.
@@ -350,13 +351,14 @@ jobs:
   results:
     # The build's results, for review.yml, as the artifact build-results (one file, results.json): the pull request,
     # the project, the head commit, the commit of the project's repository that the build fetched, the exit status of
-    # oss-verify check, its result, the binaries table and the checks' report. It runs when the build took a project,
-    # whether the build passed or failed. review.yml's gather job reads it, as data, through
-    # .github/scripts/take-build-results, only for a pull request that changes no steering file
-    # (.github/scripts/steering.py): for such a pull request the merge commit's workflow and scripts are main's. A
-    # workflow that another run starts cannot read this run's job outputs, so this job writes them into the artifact.
-    # It runs no code of the pull request or the project, checks out nothing, and holds no permission: the artifact
-    # goes up with the runner's own artifact token, which every job has.
+    # oss-verify check, its result, the binaries table, the checks' report, and each binary's .text and executable
+    # bytes (sizes, null when the build step gave none). It runs when the build took a project, whether the build
+    # passed or failed. review.yml's gather job reads it, as data, through .github/scripts/take-build-results, only
+    # for a pull request that changes no steering file (.github/scripts/steering.py): for such a pull request the
+    # merge commit's workflow and scripts are main's. A workflow that another run starts cannot read this run's job
+    # outputs, so this job writes them into the artifact. It runs no code of the pull request or the project, checks
+    # out nothing, and holds no permission: the artifact goes up with the runner's own artifact token, which every job
+    # has.
     needs: project-builds
     if: ${{ !cancelled() && needs.project-builds.outputs.name != '' }}
     runs-on: ubuntu-latest
@@ -373,15 +375,16 @@ jobs:
           RESULT: ${{ needs.project-builds.outputs.result }}
           BINARIES: ${{ needs.project-builds.outputs.binaries }}
           CHECKS: ${{ needs.project-builds.outputs.checks }}
+          SIZES: ${{ needs.project-builds.outputs.sizes }}
         run: |
           set -euo pipefail
           # The build step writes the exit status only when oss-verify check ended. With none, there is no result.
           [[ $CODE =~ ^[0-9]+$ ]] || { echo "::error::The build step gave no exit status of oss-verify check."; exit 1; }
           mkdir "$RUNNER_TEMP/results"
           jq -n --argjson pr "$PR" --arg project "$NAME" --arg sha "$SHA" --arg commit "$COMMIT" --argjson code "$CODE" \
-            --arg result "$RESULT" --arg binaries "$BINARIES" --arg checks "$CHECKS" \
+            --arg result "$RESULT" --arg binaries "$BINARIES" --arg checks "$CHECKS" --argjson sizes "${SIZES:-null}" \
             '{schema: "oss-verify build results v1", pr: $pr, project: $project, sha: $sha, commit: $commit,
-              code: $code, result: $result, binaries: $binaries, checks: $checks}' \
+              code: $code, result: $result, binaries: $binaries, checks: $checks, sizes: $sizes}' \
             > "$RUNNER_TEMP/results/results.json"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (sha-pinned)
