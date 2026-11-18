@@ -977,6 +977,15 @@ class TheParserAgainstBuildKit(unittest.TestCase):
                          ["RUN echo C:\\\\", f"RUN {self.MOUNT} fetch-commit /src/x"])
         check_build.check_secret_mount("Dockerfile", text, TOKEN, self.PRIVATE)
 
+    def test_an_odd_count_of_escapes_at_the_end_of_a_line_continues_it(self):
+        # An odd count of escapes ends in a continuation: the last continues into the next line, and those before
+        # it are escaped escapes.
+        text = f"FROM x\nRUN echo C:\\\\\\\n  foo\n"
+        self.assertEqual(check_build.instructions(text)[1:], ["RUN echo C:\\\\ foo"])
+        # Backtick escape directive works the same: 3 backticks continues with 2 literal backticks.
+        text_backtick = "# escape=`\nFROM x\nRUN echo C:```\n  foo\n"
+        self.assertEqual(check_build.instructions(text_backtick)[1:], ["RUN echo C:`` foo"])
+
     def test_the_secret_id_may_come_from_an_arg_or_an_env(self):
         # BuildKit expands these and the step really gets the secret, so a guard that reads the literal
         # `$SECRET_ID` refuses a working private build and lets a public one carry a real mount.

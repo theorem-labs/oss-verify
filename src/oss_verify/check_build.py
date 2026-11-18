@@ -727,10 +727,12 @@ def instructions(text):
             continue
         if continuing and re.fullmatch(r"[^\S\x1c-\x1f]*", line):
             continue  # BuildKit steps over a blank line inside a continued instruction and keeps joining
-        end = re.search(rf"{re.escape(escape)}[ \t]*$", line)
-        if end and not line[:end.start()].endswith(escape):
-            # An escape at the end of the line continues it, unless it is itself escaped (`C:\\`).
-            carry += line[:end.start()]
+        end = line.rstrip(" \t")
+        escapes = len(end) - len(end.rstrip(escape))
+        if escapes % 2 == 1:
+            # An odd count of escapes at the end of the line continues it: the last is the continuation, and any
+            # before it are escaped escapes (`C:\\\`).
+            carry += end[:-1]
             continuing = True
             continue
         carry += line
