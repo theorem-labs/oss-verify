@@ -106,11 +106,11 @@ def host_root():
     return data.getvalue(), mounts
 
 
-@unittest.skipUnless(sys.platform == "linux", "the containers run the host's /usr, which needs a Linux host")
 class CoreDumpFilter(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        needs = (("an x86-64 host (infra/checks/host-calls.c reads x86-64 registers)", platform.machine() == "x86_64"),
+        needs = (("an x86-64 Linux host (the containers run the host's /usr, and infra/checks/host-calls.c reads "
+                  "x86-64 registers)", sys.platform == "linux" and platform.machine() == "x86_64"),
                  ("Docker", docker_answers()),
                  ("a cc that links statically (run-binaries compiles its tracer with it)", cc_links_statically()))
         missing = [need for need, met in needs if not met]
@@ -127,9 +127,8 @@ class CoreDumpFilter(unittest.TestCase):
         # docker run arguments that run_all and run_job put before their own: never pull the tag from a registry,
         # and the host's /usr (and any top-level directory that is not a link into it) read-only.
         cls.labels = ["--pull=never", *(arg for host in mounts for arg in ("-v", f"{host}:{host}:ro"))]
-        control = subprocess.run(["docker", "run", "--rm", "--init", "--network=none", *cls.labels, "--entrypoint",
-                                  "/bin/sh", TAG, "-c", CONTROL], capture_output=True, text=True)
-        cls.control = control.stdout.strip() if control.returncode == 0 else f"exit {control.returncode}"
+        cls.control = subprocess.run(["docker", "run", "--rm", "--init", "--network=none", *cls.labels, "--entrypoint",
+                                      "/bin/sh", TAG, "-c", CONTROL], capture_output=True, text=True)
         cls.scratch = tempfile.TemporaryDirectory(prefix="ov-test-core-dump-filter.")
         cls.work = pathlib.Path(cls.scratch.name)
         cls.stand_in = cls.work / "qemu"
@@ -142,8 +141,11 @@ class CoreDumpFilter(unittest.TestCase):
         subprocess.run(["docker", "image", "rm", TAG], capture_output=True)
 
     def setUp(self):
-        self.assertRegex(self.control, r"^[0-9a-f]{8}$", "the control could not read its coredump_filter")
-        self.assertNotEqual(self.control, ZERO, NO_FAULT)
+        if self.control.returncode != 0:
+            self.fail(f"the control's docker run exited {self.control.returncode}: {self.control.stderr}")
+        start = self.control.stdout.strip()
+        self.assertRegex(start, r"^[0-9a-f]{8}$", "the control printed no coredump_filter")
+        self.assertNotEqual(start, ZERO, NO_FAULT)
 
     # run_all and run_job drop the container's own output (check_build.run(..., quiet=True)), and raise Failed when
     # the script exits with a status other than 0. The test reads what each run of the stand-in wrote.
