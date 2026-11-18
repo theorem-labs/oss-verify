@@ -27,7 +27,9 @@ skills/ @theorem-labs/engineering
 #
 # The ruleset of main requires a code owner's approval, so a change to any of these files, or to this file, which says
 # who owns them, needs the approval of a member of @theorem-labs/engineering, a team of people. No other file has an
-# owner, so no other pull request needs a code owner: a change to tests/, docs/ or one projects/<name>/ needs none.
+# owner but an AGENTS.md, CLAUDE.md or SKILL.md file or a file under a directory named skills, at any depth, which the
+# patterns at the top of the file give the same owner, so a change to tests/, docs/ or one projects/<name>/ needs no
+# code owner unless it adds or changes such a file.
 # These lines stay the last patterns of the file: the last pattern that matches a file decides its owner.
 /.github/ @theorem-labs/engineering
 /src/ @theorem-labs/engineering
