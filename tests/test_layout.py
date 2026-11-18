@@ -1004,6 +1004,58 @@ def test_check_lists_twins_that_moved_with_repeated_key(tmp_path, capsys):
                           f"address {hex(old['address'])} -> {hex(now['address'])}")
 
 
+# The reason that append gives when a build falls back to its normal link (append_link).
+FALLBACK = ("beta (/work/a.o): the plan keeps it at 0x11020, and the append mode cannot test the call at offset 0x4 "
+            "(i): its target is an ifunc, whose call goes through lld's PLT entry, whose address no tree holds")
+
+
+def fell_back(rows, reasons=(FALLBACK,), causes=("normal_layout",)):
+    """placement.tsv of a build that fell back to its normal link, for the .text rows of `rows`: each line the place
+    normal, its own address, and the k-th line the k-th of `causes` and of `reasons`, the last for the lines past."""
+    text = [r for r in rows if r["section"].startswith(".text")]
+    seen = collections.Counter()
+    lines = []
+    for k, r in enumerate(text):
+        key = (r["file"], r["member"], r["section"])
+        lines.append(placed(r, seen[key], causes[min(k, len(causes) - 1)], reasons[min(k, len(reasons) - 1)],
+                            "normal"))
+        seen[key] += 1
+    return lines
+
+
+def test_check_lists_a_build_that_fell_back_to_its_normal_link(tmp_path, capsys):
+    # OSSV-675, R3: layout check lists a build that fell back to its normal link as "normal layout: <reason>", and the
+    # architect's decision (dispatch://OSSV-675/comment/4c082109-3ce9-41cb-bd15-a055a29454bd): the build does not fail.
+    # In NEW's normal link beta moved and grew, and the twins lie at their base addresses. A normal link keeps no base
+    # address, so the build claims none: nothing fails, and nothing is kept. The control: with no such mark, the same
+    # tree fails for beta and for the twins.
+    rows = [TABLE, ALPHA, dict(BETA, address=0x11100, linked=0x14), GAMMA, COMMENT, TWIN0, TWIN1]
+    base = {"rows": BASE_ROWS + [TWIN0, TWIN1]}
+    status, lines = run_check(tmp_path / "marked", capsys, {"rows": rows, "placement": fell_back(rows)}, base)
+    assert (status, lines) == (0, [f"plain/fuzz: normal layout: {FALLBACK}",
+                                   "  .text: start 0x11000 -> 0x11000, size 256 -> 256",
+                                   "layout check: 1 of 1 (build, target) pass, 1 with a normal layout"])
+    status, lines = run_check(tmp_path / "control", capsys, {"rows": rows}, base)
+    assert status == 1
+    assert [len(lines_with(lines, "FAIL", name)) for name in ("beta", "twin")] == [1, 2]
+    assert lines[-1] == "layout check: 0 of 1 (build, target) pass"
+
+
+def test_check_exits_2_for_a_placement_that_marks_a_fallback_on_some_lines_only_or_with_two_reasons(tmp_path, capsys):
+    # A build that fell back to its normal link gives normal_layout, with one reason, on every line of placement.tsv.
+    rows = BASE_ROWS
+    cases = [(fell_back(rows, causes=("normal_layout", "-")), "line 1 gives normal_layout, and line 2 does not"),
+             (fell_back(rows, causes=("-", "normal_layout")), "line 2 gives normal_layout, and line 1 does not"),
+             (fell_back(rows, reasons=(FALLBACK, "another reason")),
+              "lines 1 and 2 give normal_layout with two reasons"),
+             ([line.replace("\tnormal\t", "\tkept\t") for line in fell_back(rows)], "line 1 does not read")]
+    for k, (placement, named) in enumerate(cases):
+        write_entry(tmp_path / str(k) / "base", BASE_ROWS)
+        entry = write_entry(tmp_path / str(k) / "new", rows, placement=placement)
+        assert layout.main(["check", str(tmp_path / str(k) / "base"), str(tmp_path / str(k) / "new")]) == 2
+        assert f"{entry / 'placement.tsv'}: {named}" in capsys.readouterr().err
+
+
 def test_check_exits_2_for_a_missing_file(tmp_path, capsys):
     write_entry(tmp_path / "base", BASE_ROWS)
     os.unlink(write_entry(tmp_path / "new", BASE_ROWS) / "calls.tsv")
@@ -1396,13 +1448,16 @@ def test_a_call_with_no_relax_relocation_or_no_known_site_is_not_tested():
                 {"t": 0x11010}, norelax={(0, 8)})
     probe = link(laid_out([("caller", 0x10, {}), ("t", 0x10, {})]), [(0, 8, "t")], {"t": 0x400000},
                  norelax={(0, 8)})
-    assert layout.call_tests(base, probe, layout.pair(base.inputs, probe.inputs)) == {}
+    assert layout.call_tests(base, probe, layout.pair(base.inputs, probe.inputs)) == ({}, {})
     assert where(planned(base, probe), probe) == {"caller": ("kept", 0x11000, "-", "-"),
                                                   "t": ("kept", 0x11010, "-", "-")}
-    # A call whose BASE line has no delta has no known base call site.
+    # A call whose BASE line has no delta has no known base call site: it is not tested, and call_tests says why.
     base = link(base.inputs, [(0, 8, "t")], {"t": 0x11010}, deltas={(0, 8): None})
     probe = link(probe.inputs, [(0, 8, "t")], {"t": 0x400000})
-    assert layout.call_tests(base, probe, layout.pair(base.inputs, probe.inputs)) == {}
+    tests = layout.call_tests(base, probe, layout.pair(base.inputs, probe.inputs))
+    assert tests.tests == {}
+    assert [(line.offset, why) for line, why in tests.skipped[0]] == [
+        (8, "the bytes that relaxation removed in front of it at the base are not known")]
 
 
 def test_a_call_into_a_moved_section_past_bytes_that_relaxation_may_remove_is_tested_wherever_they_put_its_target():
@@ -1426,14 +1481,37 @@ def test_a_call_into_a_moved_section_past_bytes_that_relaxation_may_remove_is_te
     # A check link that put M in the first hole would not tell whether lld relaxes c's call otherwise: when it changes
     # c, the append mode names that call as one it cannot decide.
     pairing = layout.pair(base.inputs, probe.inputs)
-    test, = layout.call_tests(base, probe, pairing)[5]
+    test, = layout.call_tests(base, probe, pairing).tests[5]
     at = {i.row: base.inputs[pairing.partner[i.row]].address for i in probe.inputs if i.row != 3}
     lines = [layout.MapLine(at.get(i.row, 0x11010), i.linked, i.align, i.file, i.member, i.section, True)
              for i in probe.inputs]
     check = layout.Link(lines, {i.row: i.row for i in probe.inputs}, probe.output._replace(symbols={}))
     assert layout.relaxed_there(test, 0x11101C, check, set(at)) is None
-    why, = layout.untested(probe.inputs[5], base.inputs[7], base, probe, {5: [test]}, {}, {test.offset})
+    why, = layout.untested([], [(test, layout.linked_span(test, check, set(at)))])
     assert "0x4" in why and "f2" in why
+
+
+def test_a_local_call_into_a_line_with_no_row_is_named_as_such_and_the_plan_does_not_keep_its_caller():
+    # OSSV-675 review. A local call into a twin line or an ambiguous line has no target row (describe): the tree
+    # cannot place its target, so relaxation gives that call, and each later relocation of its section, no delta.
+    # call_tests and tls_tests say why they skip each line, and untested words it: the first call names its target
+    # that has no row, not the delta at the base that this leaves unknown; the call after it names that delta. The
+    # plan does not link user, which it would keep: the build falls back to its normal link (append_link).
+    twin = layout.Call(0, 0x4, "call", True, None, "local", None, 0x0, None, 0, 0)
+    later = twin._replace(offset=0xC, kind="global", target="k", definition=(1, 0x0))
+    base = link([text_input(0, "user", 0x11000, 0x20), text_input(1, "k", 0x11020, 0x10)])._replace(
+        calls={0: [twin, later]})
+    probe = link(laid_out([("user", 0x20, {}), ("k", 0x10, {})]))._replace(calls={0: [twin, later]})
+    tests = layout.call_tests(base, probe, layout.pair(base.inputs, probe.inputs))
+    assert tests.tests == {}
+    assert layout.untested(tests.skipped[0], []) == [
+        "the call at offset 0x4 (row:-+0x0): its target is a local symbol of a section that has no row: a twin or an "
+        "ambiguous line of the map, which the tree cannot place, or a section that the map did not take",
+        "the call at offset 0xc (k): the bytes that relaxation removed in front of it at the base are not known"]
+    with pytest.raises(layout.Fallback, match=r"^user \(/work/a\.o\): the plan keeps it at 0x11000, and the append "
+                                              r"mode cannot test the call at offset 0x4 \(row:-\+0x0\): its target is "
+                                              r"a local symbol of a section that has no row"):
+        planned(base, probe)
 
 
 def test_a_call_into_a_kept_section_past_bytes_that_relaxation_removed_is_tested_where_the_base_put_its_target():
@@ -1446,7 +1524,7 @@ def test_a_call_into_a_kept_section_past_bytes_that_relaxation_removed_is_tested
     base = link(old, [(0, 0, "f2")], defined={"f2": (2, 0x10)}, removed={(0, 0): 4})
     probe = link(laid_out([("c", 0x10, {}), ("filler", 0xFFFE0, {}), ("K", 0x20, {})]), [(0, 0, "f2")],
                  defined={"f2": (2, 0x10)}, removable={(0, 0): 4})
-    test, = layout.call_tests(base, probe, layout.pair(base.inputs, probe.inputs))[0]
+    test, = layout.call_tests(base, probe, layout.pair(base.inputs, probe.inputs)).tests[0]
     assert (test.before, test.fixed) == (0x110FFC, 0x110FFC)
     assert where(planned(base, probe), probe) == {"c": ("kept", 0x11000, "-", "-"),
                                                   "filler": ("kept", 0x11010, "-", "-"),
@@ -1571,12 +1649,47 @@ def test_a_section_that_the_check_link_moved_never_returns():
     # plan alone returns it, and its base range is free for other sections.
     base, probe = reach_case()
     pairing = layout.pair(base.inputs, probe.inputs)
-    test, = layout.call_tests(base, probe, pairing)[2]
+    test, = layout.call_tests(base, probe, pairing).tests[2]
     assert where(layout.plan(base, probe, pairing, {2: test}), probe) == {
         "T": ("end", 0x211024, "-", "-"), "filler": ("kept", 0x11010, "-", "-"),
         "k": ("end", 0x210F24, "jal_reach", "offset=0x4;target=T;gained"), "filler2": ("kept", 0x111110, "-", "-"),
         "V": ("hole", 0x111010, "-", "-")}
     assert where(layout.plan(base, probe, pairing), probe)["k"] == ("kept", 0x111010, "-", "-")
+
+
+def straddle_case(filler2):
+    """(base, probe) of the OSSV-675 review's finding at layout.py:2183: T at 0x11000, a filler, K at 0x211100 with a
+    call at 0x4 of t, 0x80 bytes into T past 8 bytes that lld may remove (rows 0 to 2), and `filler2` bytes of a second
+    filler. In the probe link T grows to 0xa0 bytes."""
+    old = [text_input(0, "T", 0x11000, 0x90), text_input(1, "filler", 0x11090, 0x200070),
+           text_input(2, "K", 0x211100, 0x10), text_input(3, "filler2", 0x211110, filler2)]
+    base = link(old, [(2, 4, "t")], defined={"t": (0, 0x80)}, removed={(2, 4): 8})
+    probe = link(laid_out([("T", 0xA0, {"content": "T 2"}), ("filler", 0x200070, {}), ("K", 0x10, {}),
+                           ("filler2", filler2, {})]), [(2, 4, "t")], defined={"t": (0, 0x80)}, removable={(2, 4): 8})
+    return base, probe
+
+
+def test_a_kept_caller_whose_call_the_plan_cannot_decide_falls_back_before_any_check_link_forces_it():
+    # OSSV-675 review, the reproduction of the finding at layout.py:2183: K keeps its base address, its call site
+    # 0x211104, and calls t, 0x80 bytes into T, past 8 bytes that lld may remove; from there, t lies out of jal's reach
+    # at the base. T grows and goes to the end, at 0x311084: t lies from 0x3110fc to 0x311104, in reach of K's call
+    # site or one past it. At 8e0c6f16 that call moves nothing; the review traced how a check link that puts t in
+    # reach then forces K, the next plan puts T at 0x311104, where the forced cause no longer holds, and the link
+    # stops. Now the plan does not keep K with a call that it cannot decide: the build falls back to its normal link
+    # (append_link), naming K and that call.
+    base, probe = straddle_case(0xFFF74)
+    with pytest.raises(layout.Fallback) as error:
+        planned(base, probe)
+    assert str(error.value) == (
+        "K (/work/a.o): the plan keeps it at 0x211100, and the append mode cannot test the call at offset 0x4 (t): "
+        "lld's relaxation may remove up to 8 bytes in front of its target in the target's section, so that the "
+        "target lies somewhere from 0x3110fc to 0x311104: in jal's reach of the call or out of it")
+    # The control: with 8 bytes more of filler2, t lies out of reach wherever lld's relaxation puts it, as at the
+    # base, and K keeps its base address.
+    base, probe = straddle_case(0xFFF7C)
+    assert where(planned(base, probe), probe) == {
+        "T": ("end", 0x31108C, "-", "-"), "filler": ("kept", 0x11090, "-", "-"), "K": ("kept", 0x211100, "-", "-"),
+        "filler2": ("kept", 0x211110, "-", "-")}
 
 
 LIB = {"file": "/work/lib.a", "member": "dup.o"}
@@ -1702,7 +1815,7 @@ def test_the_script_of_a_small_plan():
 def test_the_script_refuses_a_file_name_it_cannot_quote():
     base = link([text_input(0, "f", 0x11000, 0x10, file='/work/we"ird.o')])
     probe = link(laid_out([("f", 0x10, {"file": '/work/we"ird.o'})]))
-    with pytest.raises(layout.AppendError, match='we"ird'):
+    with pytest.raises(layout.Fallback, match='we"ird'):
         planned(base, probe)
 
 
@@ -1987,10 +2100,52 @@ def append_setup(tmp_path, monkeypatch, tls=False, made=None, **fake):
     return entry
 
 
-def run_append(tmp_path, entry):
+def run_append(tmp_path, entry, command=COMMAND):
     return layout.main(["append", "--base", str(entry), "--work", str(tmp_path / "links"), "--script",
                         str(tmp_path / "script.ld"), "--placement", str(tmp_path / "placement.tsv"), "--wraps",
-                        str(tmp_path / "wraps"), "--"] + COMMAND)
+                        str(tmp_path / "wraps"), "--"] + command)
+
+
+def link_setup(root, monkeypatch, files, command, **fake):
+    """The base layout tree root/base of a link of the files files(False) in root/old, and the files files(True) in
+    root/work, the working directory, with fake_linker(**fake) in place of the commands of both: the base entry."""
+    root.mkdir()
+    for name, new in (("old", False), ("work", True)):
+        (root / name).mkdir()
+        for file, data in files(new).items():
+            (root / name / file).write_bytes(data)
+    old = root / "old"
+    assert fake_linker(old, **fake)(command + [f"-Wl,-Map={old / 'map'}", "-o", str(old / "fuzz")]) == (0, "")
+    entry = tree_entry(root / "base", old, (old / "map").read_text(), (old / "fuzz").read_bytes())
+    monkeypatch.chdir(root / "work")
+    monkeypatch.setattr(layout, "run", fake_linker(root / "work", **fake))
+    (root / "links").mkdir()
+    return entry
+
+
+def fallen_back(root, capsys, *words):
+    """The reason of an append link in `root` that fell back to its normal link, which holds each of `words`: append
+    wrote no script, gave each .text input section of the probe link, in its map's order, the place normal, its
+    address there, the cause normal_layout and that one reason in placement.tsv, and printed one line, the reason."""
+    error = capsys.readouterr().err
+    assert not (root / "script.ld").exists()
+    text = [line for line in layout.read_map((root / "links" / "probe.map").read_text())
+            if layout.is_text(line.section)]
+    rows = [line.split("\t") for line in (root / "placement.tsv").read_text().splitlines()]
+    reason = rows[0][11]
+    assert [row[2:3] + row[8:] for row in rows] == [[line.section, "normal", hex(line.address), "normal_layout", reason]
+                                                    for line in text]
+    assert error == f"layout.py append: fuzz (plain): normal link: {reason}\n"
+    assert all(word in reason for word in words), reason
+    return reason
+
+
+def appended(root, capsys):
+    """{section: [place, address, cause, detail]} of placement.tsv of an append link in `root` that stayed in the
+    append mode: append wrote a script, and printed one line, which counts what it kept."""
+    error = capsys.readouterr().err
+    assert (root / "script.ld").exists() and len(error.splitlines()) == 1 and " kept, " in error, error
+    return {row[2]: row[8:] for row in (line.split("\t") for line in (root / "placement.tsv").read_text().splitlines())}
 
 
 # The base link lays .text out from 0x11300: entry, grow, tail, other, helper and small, to 0x11410; its next PT_LOAD
@@ -2416,18 +2571,27 @@ def test_append_links_normally_when_the_read_only_data_grew_past_its_room(tmp_pa
 
 
 @pytest.mark.parametrize("fake, named", [
-    ({"misplace": "tail"}, ["tail (main.o)", "0x11370", "0x11380"]),
+    ({"misplace": "tail"}, ["tail (main.o)", "0x11370", "0x11380", "a defect of the append mode"]),
     ({"extra_load": True}, ["PT_LOAD 3", "0x13410"]),
-    # Line 7 of SCRIPT_TEXT is the address of small: entry, on the line before, took more room than it had.
-    ({"backward": 7}, ["line 7", "entry (main.o)"]),
+    # Line 7 of SCRIPT_TEXT is the address of small: entry, on the line before, took more room than the plan gave it.
+    ({"backward": 7}, ["line 7 of the script, `. = 0x11340;`", "entry (main.o), on the line before",
+                       "cannot put small (lib.a(m.o)) at 0x11340"]),
 ], ids=["kept-elsewhere", "pt-load-count", "backward"])
-def test_append_exits_1_when_the_check_link_is_not_what_the_plan_asks(tmp_path, monkeypatch, capsys, fake, named):
+def test_append_falls_back_to_the_normal_link_when_the_check_link_is_not_what_the_plan_asks(tmp_path, monkeypatch,
+                                                                                           capsys, fake, named):
+    # OSSV-675, the architect's decision (dispatch://OSSV-675/comment/4c082109-3ce9-41cb-bd15-a055a29454bd): the
+    # append mode never stops a link for a change of the code. When the check link is not what the plan asks, or lld
+    # cannot move the location counter backward to an address of the script, the build falls back to its normal
+    # link, and one line names the function, the segment, or the line of the script with the functions in front of it
+    # and after it. The control: the same link, with a linker that does what the script asks, stays in the append
+    # mode.
     entry = append_setup(tmp_path, monkeypatch, **fake)
-    assert run_append(tmp_path, entry) == 1
-    error = capsys.readouterr().err
-    assert error.splitlines()[-1].startswith("layout.py append: fuzz (plain): ")
-    assert all(word in error for word in named), error
-    assert not (tmp_path / "placement.tsv").exists()
+    assert run_append(tmp_path, entry) == 0
+    fallen_back(tmp_path, capsys, *named)
+    monkeypatch.setattr(layout, "run", fake_linker(tmp_path / "work", relaxed={"entry": RELAXED["entry"]}))
+    assert run_append(tmp_path, entry) == 0
+    assert appended(tmp_path, capsys)[".text.entry"][:2] == ["kept", "0x11300"]
+    assert (tmp_path / "script.ld").read_text() == SCRIPT_TEXT
 
 
 # A call of a function that an object defines reaches it where the check link's map puts it, so a check link can
@@ -2466,19 +2630,22 @@ def test_append_moves_a_kept_section_whose_call_the_check_link_relaxes_otherwise
     assert lines_with(capsys.readouterr().out.splitlines(), "moved with a cause: entry", "jal_reach")
 
 
-def test_append_stops_when_the_cause_of_a_section_that_a_check_link_moved_is_gone(tmp_path, monkeypatch, capsys):
+def test_append_falls_back_when_the_cause_of_a_section_that_a_check_link_moved_is_gone(tmp_path, monkeypatch, capsys):
     # OSSV-675 review. The first check link puts once, a symbol that the linker makes, 4 MiB away, and entry, whose
     # call of once at 0x18 it then no longer relaxes, takes 4 bytes more: entry moves for that call, and never returns,
     # so that the links end. The next check link puts once back at helper's address, where lld relaxes entry's call
     # of it as at the base, and relaxes no other call of entry otherwise: entry's cause is gone. The append mode cannot
-    # keep it, and stops the link, naming entry and the call that moved it.
+    # keep it, and the build falls back to its normal link, naming entry and the call that moved it. The control: when
+    # every link puts once at helper's address, entry keeps its base address in the append mode.
     entry = append_setup(tmp_path, monkeypatch, made={"once": 0x113F0}, far_once={"once": 0x400000},
                          grown={"entry": 4})
-    assert run_append(tmp_path, entry) == 1
-    error = capsys.readouterr().err.splitlines()[-1]
-    assert error.startswith("layout.py append: fuzz (plain): entry (main.o)")
-    assert "0x18" in error and "once" in error
-    assert not (tmp_path / "placement.tsv").exists()
+    assert run_append(tmp_path, entry) == 0
+    reason = fallen_back(tmp_path, capsys, "0x18", "once", "a limit of the append mode")
+    assert reason.startswith("entry (main.o): a check link moved it")
+    monkeypatch.setattr(layout, "run", fake_linker(tmp_path / "work", made={"once": 0x113F0},
+                                                   relaxed={"entry": RELAXED["entry"]}))
+    assert run_append(tmp_path, entry) == 0
+    assert appended(tmp_path, capsys)[".text.entry"][:2] == ["kept", "0x11300"]
 
 
 def test_append_links_when_a_kept_functions_thread_local_read_is_no_longer_relaxed(tmp_path, monkeypatch, capsys):
@@ -2553,35 +2720,110 @@ def test_append_moves_a_kept_caller_whose_call_of_a_hidden_function_is_relaxed_o
     assert lines_with(capsys.readouterr().out.splitlines(), "moved with a cause: caller", "jal_reach")
 
 
-def test_append_names_the_call_it_cannot_test_when_the_check_link_changes_a_kept_section(tmp_path, monkeypatch,
-                                                                                         capsys):
-    # OSSV-675 review. caller calls i, an ifunc, whose call goes through lld's PLT entry, whose address no tree holds:
-    # the append mode cannot test whether lld relaxes that call otherwise. When the check link gives caller 4 bytes
-    # more (as when lld no longer relaxes the call), the link stops, and the error names that call, not a defect of
-    # the mode.
+def ifunc_files(ifunc):
+    """files(new) of a link in which caller calls i at 0x8, and g changes and grows: i is an ifunc of i.o
+    (STT_GNU_IFUNC) when `ifunc` is true, else an ordinary function."""
     def files(new):
         return {"main.o": relocatable([("caller", b"\1" * 0x24, 4, [(0x8, "i")]),
                                        ("g", b"\x99" * 0x30 if new else b"\2" * 0x10, 4, [])]),
-                "i.o": relocatable([("i", b"\3" * 0x8, 4, [])], ifunc={"i"})}
+                "i.o": relocatable([("i", b"\3" * 0x8, 4, [])], ifunc={"i"} if ifunc else ())}
+    return files
+
+
+def test_append_falls_back_to_the_normal_link_when_a_kept_section_calls_an_ifunc(tmp_path, monkeypatch, capsys):
+    # OSSV-675, the architect's decision (dispatch://OSSV-675/comment/4c082109-3ce9-41cb-bd15-a055a29454bd), a planted
+    # ifunc call: caller calls i, an ifunc, whose call goes through lld's PLT entry, whose address no tree holds. The
+    # append mode cannot test whether lld relaxes that call as at the base, so it never links caller at its base
+    # address: the build falls back to its normal link, prints one line that names the call and why, and layout check
+    # lists the build as "normal layout: <reason>". At 8e0c6f16 the append link keeps caller, and stops only when the
+    # check link changes it. The control: the same call of an ordinary function stays in the append mode, and caller
+    # keeps its base address.
     command = ["clang", "main.o", "i.o"]
-    for name, new in (("old", False), ("work", True)):
-        (tmp_path / name).mkdir()
-        for file, data in files(new).items():
-            (tmp_path / name / file).write_bytes(data)
-    old = tmp_path / "old"
-    assert fake_linker(old, relaxed={"caller": 4})(command + [f"-Wl,-Map={old / 'map'}", "-o", str(old / "fuzz")]) \
-        == (0, "")
-    entry = tree_entry(tmp_path / "base", old, (old / "map").read_text(), (old / "fuzz").read_bytes())
-    monkeypatch.chdir(tmp_path / "work")
-    monkeypatch.setattr(layout, "run", fake_linker(tmp_path / "work", relaxed={"caller": 4}, grown={"caller": 4}))
-    (tmp_path / "links").mkdir()
-    code = layout.main(["append", "--base", str(entry), "--work", str(tmp_path / "links"), "--script",
-                        str(tmp_path / "script.ld"), "--placement", str(tmp_path / "placement.tsv"), "--wraps",
-                        str(tmp_path / "wraps"), "--"] + command)
-    error = capsys.readouterr().err
-    assert code == 1
-    assert "caller (main.o)" in error and "offset 0x8 (i)" in error
-    assert not (tmp_path / "placement.tsv").exists()
+    root = tmp_path / "ifunc"
+    entry = link_setup(root, monkeypatch, ifunc_files(True), command, relaxed={"caller": 4})
+    assert run_append(root, entry, command) == 0
+    reason = fallen_back(root, capsys, "caller (main.o): the plan keeps it at 0x11300",
+                         "cannot test the call at offset 0x8 (i): its target is an ifunc")
+    links = root / "links"
+    tree_entry(root / "new", root / "work", (links / "probe.map").read_text(), (links / "probe").read_bytes(),
+               (root / "placement.tsv").read_bytes())
+    assert layout.main(["check", str(root / "base"), str(root / "new")]) == 0
+    assert capsys.readouterr().out.splitlines() == [f"plain/fuzz: normal layout: {reason}",
+                                                    "  .text: start 0x11300 -> 0x11300, size 56 -> 88",
+                                                    "layout check: 1 of 1 (build, target) pass, 1 with a normal layout"]
+    root = tmp_path / "control"
+    entry = link_setup(root, monkeypatch, ifunc_files(False), command, relaxed={"caller": 4})
+    assert run_append(root, entry, command) == 0
+    assert appended(root, capsys)[".text.caller"][:2] == ["kept", "0x11300"]
+
+
+def undecided_files(filler):
+    """files(new) of a link in which c calls f2, 0x10 bytes into M, past M's call of k, which lld may relax; and after
+    k, `filler` bytes of filler. M changes and grows."""
+    def files(new):
+        return {"main.o": relocatable([("c", b"\1" * 0x10, 4, [(0x4, "f2")]),
+                                       ("M", b"\x99" * 0x30 if new else b"\2" * 0x20, 4, [(0x4, "k")]),
+                                       ("k", b"\3" * 0x10, 4, []), ("filler", b"\4" * filler, 4, [])],
+                                      labels=[("f2", "M", 0x10)])}
+    return files
+
+
+def test_append_falls_back_to_the_normal_link_when_the_plan_cannot_decide_a_kept_sections_call(tmp_path, monkeypatch,
+                                                                                              capsys):
+    # OSSV-675, the architect's decision (dispatch://OSSV-675/comment/4c082109-3ce9-41cb-bd15-a055a29454bd), an
+    # undecided reach: c, at 0x11300, calls f2, 0x10 bytes into M, in front of which M's call of k lets lld remove up
+    # to 4 bytes wherever M goes. At the base f2 lay in jal's reach of c's call site 0x11304. M grows, fits no hole, and
+    # goes to the end of .text, after the filler, at 0x1112f4: f2 may lie from 0x111300, in reach, to 0x111304, one
+    # past it. The plan cannot tell whether lld relaxes c's call as at the base. At 8e0c6f16 it keeps c, and a check
+    # link that does not change c accepts it. Now the build falls back to its normal link, naming c and that call. The
+    # control: with 4 bytes less of filler, M goes to 0x1112f0, where f2 lies in reach wherever lld's relaxation puts
+    # it, and c keeps its base address in the append mode.
+    command = ["clang", "main.o"]
+    root = tmp_path / "straddles"
+    entry = link_setup(root, monkeypatch, undecided_files(0xFFFB4), command)
+    assert run_append(root, entry, command) == 0
+    fallen_back(root, capsys, "c (main.o): the plan keeps it at 0x11300", "cannot test the call at offset 0x4 (f2)",
+                "from 0x111300 to 0x111304", "jal's reach")
+    root = tmp_path / "control"
+    entry = link_setup(root, monkeypatch, undecided_files(0xFFFB0), command)
+    assert run_append(root, entry, command) == 0
+    rows = appended(root, capsys)
+    assert (rows[".text.c"][:2], rows[".text.M"][:2]) == (["kept", "0x11300"], ["end", "0x1112f0"])
+
+
+def twin_files(twins):
+    """files(new) of a link of main.o, whose entry changes and grows, and lib.a, which holds two members named a.o:
+    the first holds user, which calls ctor at 0x4 through a local symbol, and ctor, a static function; the second its
+    own ctor, with the same bytes when `twins` is true (twin lines, which the tree cannot tell apart), else with 4
+    bytes more, so that sizes decide which line is which."""
+    def files(new):
+        first = relocatable([("user", b"\1" * 0x20, 4, [(0x4, "ctor")]), ("ctor", b"\7" * 0x10, 4, [])],
+                            local=("ctor",))
+        second = relocatable([("ctor", b"\7" * (0x10 if twins else 0x14), 4, [])], local=("ctor",))
+        return {"main.o": relocatable([("entry", b"\x99" * 0x50 if new else b"\2" * 0x40, 4, [])]),
+                "lib.a": archive([("a.o", first), ("a.o", second)])}
+    return files
+
+
+def test_append_falls_back_to_the_normal_link_when_a_kept_section_calls_into_a_twin_line(tmp_path, monkeypatch,
+                                                                                         capsys):
+    # OSSV-675 review, the finding at layout.py:2427: user calls ctor through a local symbol, and the other member of
+    # the same name holds a ctor with the same bytes: the two lines of ctor are twins, which get no row of their own
+    # (describe), so the tree cannot place user's target. At 8e0c6f16 the append link keeps user and moves the twins,
+    # and stops only when a check link changes user. Now the build falls back to its normal link, and the reason says
+    # that the target has no row. The control: when the second ctor has 4 bytes more, sizes decide which line is
+    # which, user's call is tested, and user keeps its base address in the append mode.
+    command = ["clang", "main.o", "lib.a"]
+    root = tmp_path / "twins"
+    entry = link_setup(root, monkeypatch, twin_files(True), command)
+    assert run_append(root, entry, command) == 0
+    fallen_back(root, capsys, "user (lib.a(a.o)): the plan keeps it at 0x11340",
+                "cannot test the call at offset 0x4 (row:-+0x0): its target is a local symbol of a section that has "
+                "no row: a twin")
+    root = tmp_path / "control"
+    entry = link_setup(root, monkeypatch, twin_files(False), command)
+    assert run_append(root, entry, command) == 0
+    assert appended(root, capsys)[".text.user"][:2] == ["kept", "0x11340"]
 
 
 def test_a_kept_twin_is_at_its_own_members_base_address_when_lld_takes_the_members_in_another_order(tmp_path,
