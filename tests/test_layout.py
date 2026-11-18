@@ -106,6 +106,11 @@ def read_object(data):
     return sections, symbols, relocations
 
 
+def body(data, section=".text.__rust_alloc"):
+    """The bytes of the section `section` of the object `data` (read_object)."""
+    return next(s[2] for s in read_object(data)[0].values() if s[0] == section)
+
+
 def section_offset(data, name):
     """The file offset of the bytes of the section `name` of an object, from its section header."""
     sections, _, _ = read_object(data)
@@ -444,10 +449,9 @@ def test_collect_writes_the_layout_tree(tmp_path):
     # where the map gives the first line 4). The one __rust_dealloc line of 8 bytes, the size of either member's, cannot
     # be told: it has no sha256 and the map's size and alignment. The __rust_realloc line, which only REAL has, is
     # REAL's.
-    alloc = [next(s[2] for s in read_object(data)[0].values() if s[0] == ".text.__rust_alloc")
-             for data in (REAL, STORES)]
+    alloc = [body(data) for data in (REAL, STORES)]
     assert [r[4:] for r in rows[1:4]] == [[sha(alloc[0]), "8", "2"], [sha(alloc[1]), "26", "2"], ["", "8", "2"]]
-    realloc = next(s[2] for s in read_object(REAL)[0].values() if s[0] == ".text.__rust_realloc")
+    realloc = body(REAL, ".text.__rust_realloc")
     assert rows[4][4:] == [sha(realloc), "8", "2"]
     assert rows[11][4:] == ["", "64", "1"]  # .bss: SHT_NOBITS
     assert rows[12][4:] == ["", "16", "8"]  # COMMON: no such section; the map's size and alignment
@@ -1251,6 +1255,11 @@ def planned(base, probe):
     return layout.plan(base, probe, layout.pair(base.inputs, probe.inputs))
 
 
+def calls_tested(base, probe, pairing):
+    """layout.call_tests of the link `probe` against `base`, with the tail after the probe link's .text."""
+    return layout.call_tests(base, probe, pairing, layout.segment_tail(probe, []))
+
+
 def where(plan, probe):
     """{function: (place, address, cause, detail)} of a plan."""
     return {probe.inputs[row].section[len(".text."):]: tuple(place) for row, place in plan.places.items()}
@@ -1456,13 +1465,13 @@ def test_a_call_with_no_relax_relocation_or_no_known_site_is_not_tested():
                 {"t": 0x11010}, norelax={(0, 8)})
     probe = link(laid_out([("caller", 0x10, {}), ("t", 0x10, {})]), [(0, 8, "t")], {"t": 0x400000},
                  norelax={(0, 8)})
-    assert layout.call_tests(base, probe, layout.pair(base.inputs, probe.inputs)) == ({}, {})
+    assert calls_tested(base, probe, layout.pair(base.inputs, probe.inputs)) == ({}, {})
     assert where(planned(base, probe), probe) == {"caller": ("kept", 0x11000, "-", "-"),
                                                   "t": ("kept", 0x11010, "-", "-")}
     # A call whose BASE line has no delta has no known base call site: it is not tested, and call_tests says why.
     base = link(base.inputs, [(0, 8, "t")], {"t": 0x11010}, deltas={(0, 8): None})
     probe = link(probe.inputs, [(0, 8, "t")], {"t": 0x400000})
-    tests = layout.call_tests(base, probe, layout.pair(base.inputs, probe.inputs))
+    tests = calls_tested(base, probe, layout.pair(base.inputs, probe.inputs))
     assert tests.tests == {}
     assert [(line.offset, why) for line, why in tests.skipped[0]] == [
         (8, "the bytes that relaxation removed in front of it at the base are not known")]
@@ -1489,7 +1498,7 @@ def test_a_call_into_a_moved_section_past_bytes_that_relaxation_may_remove_is_te
     # A check link that put M in the first hole would not tell whether lld relaxes c's call otherwise: when it changes
     # c, the append mode names that call as one it cannot decide.
     pairing = layout.pair(base.inputs, probe.inputs)
-    test, = layout.call_tests(base, probe, pairing).tests[5]
+    test, = calls_tested(base, probe, pairing).tests[5]
     at = {i.row: base.inputs[pairing.partner[i.row]].address for i in probe.inputs if i.row != 3}
     lines = [layout.MapLine(at.get(i.row, 0x11010), i.linked, i.align, i.file, i.member, i.section, True)
              for i in probe.inputs]
@@ -1510,7 +1519,7 @@ def test_a_local_call_into_a_line_with_no_row_is_named_as_such_and_the_plan_does
     base = link([text_input(0, "user", 0x11000, 0x20), text_input(1, "k", 0x11020, 0x10)])._replace(
         calls={0: [twin, later]})
     probe = link(laid_out([("user", 0x20, {}), ("k", 0x10, {})]))._replace(calls={0: [twin, later]})
-    tests = layout.call_tests(base, probe, layout.pair(base.inputs, probe.inputs))
+    tests = calls_tested(base, probe, layout.pair(base.inputs, probe.inputs))
     assert tests.tests == {}
     assert layout.untested(tests.skipped[0], []) == [
         "the call at offset 0x4 (row:-+0x0): its target is a local symbol of a section that has no row: a twin or an "
@@ -1532,7 +1541,7 @@ def test_a_call_into_a_kept_section_past_bytes_that_relaxation_removed_is_tested
     base = link(old, [(0, 0, "f2")], defined={"f2": (2, 0x10)}, removed={(0, 0): 4})
     probe = link(laid_out([("c", 0x10, {}), ("filler", 0xFFFE0, {}), ("K", 0x20, {})]), [(0, 0, "f2")],
                  defined={"f2": (2, 0x10)}, removable={(0, 0): 4})
-    test, = layout.call_tests(base, probe, layout.pair(base.inputs, probe.inputs)).tests[0]
+    test, = calls_tested(base, probe, layout.pair(base.inputs, probe.inputs)).tests[0]
     assert (test.before, test.fixed) == (0x110FFC, 0x110FFC)
     assert where(planned(base, probe), probe) == {"c": ("kept", 0x11000, "-", "-"),
                                                   "filler": ("kept", 0x11010, "-", "-"),
@@ -1657,7 +1666,7 @@ def test_a_section_that_the_check_link_moved_never_returns():
     # plan alone returns it, and its base range is free for other sections.
     base, probe = reach_case()
     pairing = layout.pair(base.inputs, probe.inputs)
-    test, = layout.call_tests(base, probe, pairing).tests[2]
+    test, = calls_tested(base, probe, pairing).tests[2]
     assert where(layout.plan(base, probe, pairing, {2: test}), probe) == {
         "T": ("end", 0x211024, "-", "-"), "filler": ("kept", 0x11010, "-", "-"),
         "k": ("end", 0x210F24, "jal_reach", "offset=0x4;target=T;gained"), "filler2": ("kept", 0x111110, "-", "-"),
@@ -2246,6 +2255,21 @@ def test_a_global_target_resolves_to_its_definition_in_the_links_objects(tmp_pat
     assert [layout.target_address(call, tree) for call in tree.calls[0]] == [0x11340, 0x11330, 0x11328, 0x12000]
 
 
+def describe_map(text, files, symbols=()):
+    """layout.describe of the map `text` (map_line) of a link of the objects and archives `files` ({file: bytes}) that
+    wraps no function, with each section keyed by its own file: with an output of no section and no segment whose
+    global symbols are `symbols` ({name: address}), or with no output when `symbols` is None."""
+    output = None if symbols is None else layout.Output([], [], dict(symbols))
+    return layout.describe(layout.read_map(text), layout.Objects(files.__getitem__), lambda f: f, set(), output)
+
+
+def described(members, *lines):
+    """describe_map of the map lines lib.a(a.o):(.text.__rust_alloc) at `lines` [(address, linked size)], each of
+    alignment 2, in an archive lib.a of the members `members` [(name, bytes)]."""
+    text = "".join(map_line(address, size, 2, "/work/lib.a(a.o):(.text.__rust_alloc)") for address, size in lines)
+    return describe_map(text, {"/work/lib.a": archive(members)})
+
+
 def test_each_line_gives_the_bytes_that_relaxation_removed_in_front_of_it():
     # OSSV-675 review. lld 20's relax() walks the relocations of a section in offset order, and each is at the
     # section's address plus its offset, less the bytes removed in front of it (delta). c is at 0x11000. Its call of k
@@ -2257,13 +2281,11 @@ def test_each_line_gives_the_bytes_that_relaxation_removed_in_front_of_it():
                                                             (0x30, "t", 19)]),
                                       ("k", bytes(0x10), 4, [(0x4, "t")])])}
     text = map_line(0x11000, 0x34, 4, "main.o:(.text.c)") + map_line(0x11034, 0xC, 4, "main.o:(.text.k)")
-    _, calls = layout.describe(layout.read_map(text), layout.Objects(objects.__getitem__), lambda f: f, set(),
-                               layout.Output([], [], {"t": 0x11100}))
+    _, calls = describe_map(text, objects, {"t": 0x11100})
     assert [(c.row, c.offset, c.relax, c.delta) for c in calls] == [(0, 0x0, True, 0), (0, 0x20, True, 8),
                                                                    (0, 0x30, False, 12), (1, 0x4, True, 0)]
     # With t 1 MiB further, c's call of t at 0x20 keeps its 8 bytes: 4 bytes fewer lie in front of the next call.
-    _, calls = layout.describe(layout.read_map(text), layout.Objects(objects.__getitem__), lambda f: f, set(),
-                               layout.Output([], [], {"t": 0x211100}))
+    _, calls = describe_map(text, objects, {"t": 0x211100})
     assert [c.delta for c in calls] == [0, 8, 8, 0]
 
 
@@ -2279,15 +2301,14 @@ def test_a_target_inside_its_section_lies_where_the_relaxation_in_front_of_it_pu
     text = (map_line(0x11000, 0xC, 4, "main.o:(.text.c)") + map_line(0x110FF0, 0x1C, 4, "main.o:(.text.multi)")
             + map_line(0x11100C, 0x10, 4, "main.o:(.text.k)"))
     output = layout.Output([], [], {})
-    inputs, calls = layout.describe(layout.read_map(text), layout.Objects(objects.__getitem__), lambda f: f, set(),
-                                    output)
+    inputs, calls = describe_map(text, objects)
     assert [(c.row, c.offset, c.target, c.delta, c.target_delta) for c in calls] == [
         (0, 0x0, "f2", 0, 4), (0, 0x8, "k", 4, 0), (1, 0x0, "k", 0, 0)]
     assert layout.target_address(calls[0], layout.Layout(inputs, {}, output, {}, set())) == 0x110FF0 + 0x10 - 4
     assert layout.calls_rows(calls[:1]) == [["0", "0x0", "call", "1", "0x0", "global", "f2", "0x0", "1", "0x10",
                                              "0x4"]]
     # A link with no output (the probe link) does not know those bytes, but knows that lld can remove up to 4.
-    _, calls = layout.describe(layout.read_map(text), layout.Objects(objects.__getitem__), lambda f: f, set())
+    _, calls = describe_map(text, objects, None)
     assert [(c.target_delta, c.removable) for c in calls] == [(None, 4), (0, 0), (0, 0)]
 
 
@@ -2325,8 +2346,7 @@ def test_a_map_line_whose_section_the_objects_do_not_tell_has_no_bytes_and_no_ca
     # STORES's section of 26 bytes, which lld never gives 8 bytes, the line is REAL's: the test after this one.)
     lib = archive([("a.o", REAL), ("a.o", relocatable([("__rust_alloc", b"\4" * 8, 2, [])]))])
     text = map_line(0x11000, 8, 2, "/work/lib.a(a.o):(.text.__rust_alloc)")
-    inputs, calls = layout.describe(layout.read_map(text), layout.Objects({"/work/lib.a": lib}.__getitem__),
-                                    lambda f: f, set(), layout.Output([], [], {}))
+    inputs, calls = describe_map(text, {"/work/lib.a": lib})
     assert [(i.sha256, i.size, i.align) for i in inputs] == [("", 8, 2)] and calls == []
 
     # An object with two sections .text.f, the first of 8 bytes with a call that lld may relax, so that lld gives it
@@ -2334,8 +2354,7 @@ def test_a_map_line_whose_section_the_objects_do_not_tell_has_no_bytes_and_no_ca
     def described(second, *lines):
         two = {"/work/two.o": relocatable([("f", b"\1" * 8, 4, [(0x0, "g")]), ("f", second, 4, [])])}
         text = "".join(map_line(address, size, 4, "/work/two.o:(.text.f)") for address, size in lines)
-        return layout.describe(layout.read_map(text), layout.Objects(two.__getitem__), lambda f: f, set(),
-                               layout.Output([], [], {}))
+        return describe_map(text, two)
 
     # The map takes one of them (--gc-sections dropped the other), and the second takes 8 bytes: lld can give both of
     # them 8 bytes, so the line is either. So too a line of 4 bytes, which only the first can be in this link: in
@@ -2361,14 +2380,6 @@ def test_the_one_map_line_of_a_name_is_the_one_section_to_which_lld_can_give_its
     # STORES, two members named a.o, and one line of .text.__rust_alloc of 0x1a bytes: REAL's 8 bytes cannot be it,
     # STORES's 26 bytes are. Neither section holds a byte that lld's relaxation removes, so lld gives each its input
     # size in every link.
-    def described(members, *lines):
-        text = "".join(map_line(address, size, 2, "/work/lib.a(a.o):(.text.__rust_alloc)") for address, size in lines)
-        return layout.describe(layout.read_map(text), layout.Objects({"/work/lib.a": archive(members)}.__getitem__),
-                               lambda f: f, set(), layout.Output([], [], {}))
-
-    def body(data):
-        return next(s[2] for s in read_object(data)[0].values() if s[0] == ".text.__rust_alloc")
-
     inputs, calls = described([("a.o", REAL), ("a.o", STORES)], (0x11000, 0x1A))
     assert [(i.sha256, i.size, i.align) for i in inputs] == [(sha(body(STORES)), 0x1A, 2)] and calls == []
     # A member whose section holds no byte, before REAL: the line of 8 bytes is REAL's, with its call.
@@ -2394,9 +2405,7 @@ def test_the_one_map_line_of_a_name_is_the_one_section_to_which_lld_can_give_its
     # line of 16 bytes is the second; a line of 8 or 4 bytes, whichever lld gave the first, is the first.
     two = {"/work/two.o": relocatable([("f", b"\1" * 8, 4, [(0x0, "g")]), ("f", b"\2" * 0x10, 4, [])])}
     for size, data, targets in ((0x10, b"\2" * 0x10, []), (8, b"\1" * 8, ["g"]), (4, b"\1" * 8, ["g"])):
-        inputs, calls = layout.describe(layout.read_map(map_line(0x11000, size, 4, "/work/two.o:(.text.f)")),
-                                        layout.Objects(two.__getitem__), lambda f: f, set(),
-                                        layout.Output([], [], {}))
+        inputs, calls = describe_map(map_line(0x11000, size, 4, "/work/two.o:(.text.f)"), two)
         assert [(i.sha256, i.size) for i in inputs] == [(sha(data), len(data))]
         assert [c.target for c in calls] == targets
 
@@ -2439,8 +2448,7 @@ def member_lines(members, section, sizes):
     text = "".join(map_line(0x11000 + 0x20 * k, size, 4, f"/work/lib.a(a.o):({section})")
                    for k, size in enumerate(sizes))
     lib = {"/work/lib.a": archive([("a.o", member) for member in members])}
-    inputs, calls = layout.describe(layout.read_map(text), layout.Objects(lib.__getitem__), lambda f: f, set(),
-                                    layout.Output([], [], {}))
+    inputs, calls = describe_map(text, lib)
     return [i.sha256 for i in inputs], [[c.target for c in calls if c.row == row] for row in range(len(sizes))]
 
 
@@ -2468,8 +2476,7 @@ def test_sizes_tell_apart_two_sections_to_which_lld_can_never_give_the_same_link
     # of the members, each line is its own member's section, with its bytes and calls, as at 6d637487. So too a
     # section of 0x20 bytes with a call that lld may relax, to which lld gives 0x1c or 0x20 bytes, beside one of 0x18
     # bytes: each line is its own section, for each linked size that lld can give the first.
-    real, stores = (sha(next(s[2] for s in read_object(data)[0].values() if s[0] == ".text.__rust_alloc"))
-                    for data in (REAL, STORES))
+    real, stores = (sha(body(data)) for data in (REAL, STORES))
     for members in ([REAL, STORES], [STORES, REAL]):
         assert member_lines(members, ".text.__rust_alloc", (0x1A, 8)) == ([stores, real], [[], ["__rdl_alloc"]])
         assert member_lines(members, ".text.__rust_alloc", (8, 0x1A)) == ([real, stores], [["__rdl_alloc"], []])
@@ -2489,12 +2496,9 @@ def test_a_line_is_the_section_that_every_assignment_of_the_lines_of_its_name_gi
     # section, the only one that can hold it, so that line is STORES's. Each line of 8 bytes is REAL's in one
     # assignment and EIGHT's in the other, so neither is paired.
     eight = relocatable([("__rust_alloc", b"\4" * 8, 2, [])])
-    lib = {"/work/lib.a": archive([("a.o", REAL), ("a.o", STORES), ("a.o", eight)])}
-    text = "".join(map_line(address, size, 2, "/work/lib.a(a.o):(.text.__rust_alloc)")
-                   for address, size in ((0x11000, 8), (0x11008, 0x1A), (0x11024, 8)))
-    inputs, calls = layout.describe(layout.read_map(text), layout.Objects(lib.__getitem__), lambda f: f, set(),
-                                    layout.Output([], [], {}))
-    stores = next(s[2] for s in read_object(STORES)[0].values() if s[0] == ".text.__rust_alloc")
+    inputs, calls = described([("a.o", REAL), ("a.o", STORES), ("a.o", eight)], (0x11000, 8), (0x11008, 0x1A),
+                              (0x11024, 8))
+    stores = body(STORES)
     assert [(i.sha256, i.size) for i in inputs] == [("", 8), (sha(stores), 0x1A), ("", 8)] and calls == []
     # One object with three sections .text.f of 8, 0x10 and 8 bytes, of which the map takes two (--gc-sections
     # dropped one): the line of 0x10 bytes can only be the second, and the line of 8 bytes after it only the third,
@@ -2502,8 +2506,7 @@ def test_a_line_is_the_section_that_every_assignment_of_the_lines_of_its_name_gi
     three = {"/work/three.o": relocatable([("f", b"\1" * 8, 4, []), ("f", b"\2" * 0x10, 4, []),
                                            ("f", b"\3" * 8, 4, [(0x0, "g")])])}
     text = map_line(0x11000, 0x10, 4, "/work/three.o:(.text.f)") + map_line(0x11010, 8, 4, "/work/three.o:(.text.f)")
-    inputs, calls = layout.describe(layout.read_map(text), layout.Objects(three.__getitem__), lambda f: f, set(),
-                                    layout.Output([], [], {}))
+    inputs, calls = describe_map(text, three)
     assert [i.sha256 for i in inputs] == [sha(b"\2" * 0x10), sha(b"\3" * 8)]
     assert [(c.row, c.offset, c.target) for c in calls] == [(1, 0x0, "g")]
 
@@ -2511,18 +2514,13 @@ def test_a_line_is_the_section_that_every_assignment_of_the_lines_of_its_name_gi
 def test_no_line_of_a_name_is_paired_when_no_assignment_fits():
     # OSSV-675. A line longer than every section of its name can be none of them (lld only removes bytes), so no
     # assignment of the lines of that name fits, and none of them is paired: the objects do not hold what lld took.
-    lib = {"/work/lib.a": archive([("a.o", REAL), ("a.o", STORES)])}
-    text = "".join(map_line(address, size, 2, "/work/lib.a(a.o):(.text.__rust_alloc)")
-                   for address, size in ((0x11000, 0x1A), (0x1101C, 0x20)))
-    inputs, calls = layout.describe(layout.read_map(text), layout.Objects(lib.__getitem__), lambda f: f, set(),
-                                    layout.Output([], [], {}))
+    inputs, calls = described([("a.o", REAL), ("a.o", STORES)], (0x11000, 0x1A), (0x1101C, 0x20))
     assert [(i.sha256, i.size) for i in inputs] == [("", 0x1A), ("", 0x20)] and calls == []
     # So too in one object with two sections .text.f of 8 and 0x10 bytes, though the first line is as large as the
     # first section, and has a call.
     two = {"/work/two.o": relocatable([("f", b"\1" * 8, 4, [(0x0, "g")]), ("f", b"\2" * 0x10, 4, [])])}
     text = map_line(0x11000, 8, 4, "/work/two.o:(.text.f)") + map_line(0x11008, 0x20, 4, "/work/two.o:(.text.f)")
-    inputs, calls = layout.describe(layout.read_map(text), layout.Objects(two.__getitem__), lambda f: f, set(),
-                                    layout.Output([], [], {}))
+    inputs, calls = describe_map(text, two)
     assert [(i.sha256, i.size) for i in inputs] == [("", 8), ("", 0x20)] and calls == []
 
 
@@ -2539,11 +2537,10 @@ def test_every_line_of_a_name_is_ambiguous_when_the_search_for_its_assignments_p
                 + map_line(0x12000, 8, 4, "/work/one.o:(.text.f)"))
         files = {"/work/lib.a": archive([("a.o", STORES)] + [("a.o", REAL)] * n),
                  "/work/one.o": relocatable([("f", b"\1" * 8, 4, [])])}
-        inputs, _ = layout.describe(layout.read_map(text), layout.Objects(files.__getitem__), lambda f: f, set(),
-                                    layout.Output([], [], {}))
+        inputs, _ = describe_map(text, files)
         return [i.sha256 for i in inputs]
 
-    stores = sha(next(s[2] for s in read_object(STORES)[0].values() if s[0] == ".text.__rust_alloc"))
+    stores = sha(body(STORES))
     assert described(2) == [stores, "", "", sha(b"\1" * 8)]
     n = 2
     while math.factorial(n) <= layout.ASSIGNMENT_STEPS:
@@ -2569,8 +2566,7 @@ def ctor_lines(first, second):
     named a.o are `first` and `second`, and their calls [(row, offset, kind, target)]."""
     text = "".join(map_line(address, 0x10, 4, "/work/lib.a(a.o):(.text.ctor)") for address in (0x11000, 0x11010))
     lib = {"/work/lib.a": archive([("a.o", first), ("a.o", second)])}
-    inputs, calls = layout.describe(layout.read_map(text), layout.Objects(lib.__getitem__), lambda f: f, set(),
-                                    layout.Output([], [], {}))
+    inputs, calls = describe_map(text, lib)
     return [i.sha256 for i in inputs], [(c.row, c.offset, c.kind, c.target) for c in calls]
 
 
@@ -2589,8 +2585,7 @@ def test_lines_whose_possible_sections_have_the_same_bytes_get_those_bytes():
     name = "/work/lib.a(a.o):(.text.ctor)"
     text = (map_line(0x11000, 8, 4, name) + map_line(0x11008, 8, 4, "/work/lib.a(a.o):(.text.user)")
             + map_line(0x211000, 0x10, 4, name))
-    inputs, calls = layout.describe(layout.read_map(text), layout.Objects(lib.__getitem__), lambda f: f, set(),
-                                    layout.Output([], [], {"init": 0x11100}))
+    inputs, calls = describe_map(text, lib, {"init": 0x11100})
     assert [(i.sha256, i.size, i.align) for i in inputs] == [(sha(CTOR), 0x10, 4), (sha(b"\5" * 8), 8, 4),
                                                               (sha(CTOR), 0x10, 4)]
     assert [(c.row, c.offset, c.kind, c.target, c.delta) for c in calls] == [
