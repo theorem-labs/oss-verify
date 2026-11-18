@@ -53,9 +53,13 @@ in it with relax 1 would be relaxed otherwise at its base call site: its base ad
 the bytes that relaxation removed in front of the call at the base; each target at its section's address plus its
 offset there, less the target delta of the call's line), tls_reach (a thread-local access in it with relax 1 is
 relaxed otherwise: its variable crossed the bound of 2 KiB from the start of the TLS segment), repeated_key (lld's
-patterns cannot place it apart from another section of its key), alignment (its base address does not meet its new
-alignment) or readonly_growth (the segment in front of .text grew past the page that holds the base's first .text
-byte). It exits 1 when one does not, naming the function; 2 when a tree cannot be read or the two share no (build,
+patterns cannot place it apart from another section of its key, or two sections of its key on one side have the same
+bytes: twins, which the trees cannot tell apart), alignment (its base address does not meet its new alignment) or
+readonly_growth (the segment in front of .text grew past the page that holds the base's first .text byte). A
+same-bytes function of a key with twins must move: at its base address, the trees do not show that the section there
+is the base's own, since lld may take the archive members of one name in another order. It exits 1 when a function
+neither keeps its base address nor moves for a cause that the trees show, or when a same-bytes function of a key with
+twins lies at its base address, naming the function; 2 when a tree cannot be read or the two share no (build,
 target); else 0.
 
 wraps prints the functions that the link COMMAND wraps, one a line, sorted: each --wrap=<f> of the linker command
@@ -66,23 +70,23 @@ append is the append mode of link-fuzz-target, which runs it in the link's worki
 command (the compiler and every argument, the seals last; no -o, no map, no script). ENTRY is the base layout tree's
 entry <tree>/<build>/<target>/, DIR an empty directory for its links, and --renamed an allocation-failure link's
 renamed. It writes the link's wraps to --wraps, links once normally (the probe link, DIR/probe), and plans where
-each .text input section goes: each same-bytes one at its base address, unless it moves for one of the causes above,
-and every other one into a hole before or between them or at the end of .text. .text ends where the plan ends it, so
-that lld puts what follows .text in its PT_LOAD (libc++'s __lcxx_override, for one) where the plan's tests of the
-calls into it expect it. A call into a section that moves is tested wherever lld's relaxation there may put its
-target; one whose target may then lie in jal's reach or out of it is not decided, and moves nothing. Each jal_reach
-cause that the plan finds holds in the final plan: a section that it moves for a call relaxed otherwise returns to
-its base address when no call of it is relaxed otherwise against that plan. It writes the lld script of that plan to
---script, links with it (the check link, DIR/check), verifies that each kept section is at its base address with its
-base linked size (one whose call or thread-local access the check link relaxes otherwise moves, with jal_reach or
-tls_reach, and the plan runs again), that each jal_reach and tls_reach cause holds in the last check link, that the
-PT_LOAD segments are the probe link's and that no two of them share a page, and writes placement.tsv to
---placement. When the read-only data in front of .text grew past its room, it writes no script: the link is a
-normal one, and placement.tsv gives every same-bytes section readonly_growth. It exits 1 when a link fails, when the
-check link is not what the plan asks (a kept section that it changes for a call that the mode cannot test or
-decide, or a section that an earlier check link moved and whose cause the last one does not show), or when a file or
-section name holds a double quote or a line break, which the script cannot quote; 2 when an input cannot be read;
-else 0.
+each .text input section goes: each same-bytes one at its base address, unless it moves for one of the causes above
+(each one of a key with twins does, with repeated_key), and every other one into a hole before or between them or at
+the end of .text. .text ends where the plan ends it, so that lld puts what follows .text in its PT_LOAD (libc++'s
+__lcxx_override, for one) where the plan's tests of the calls into it expect it. A call into a section that moves is
+tested wherever lld's relaxation there may put its target; one whose target may then lie in jal's reach or out of it is
+not decided, and moves nothing. Each jal_reach cause that the plan finds holds in the final plan: a section that it
+moves for a call relaxed otherwise returns to its base address when no call of it is relaxed otherwise against that
+plan. It writes the lld script of that plan to --script, links with it (the check link, DIR/check), verifies that each
+kept section is at its base address with its base linked size (one whose call or thread-local access the check link
+relaxes otherwise moves, with jal_reach or tls_reach, and the plan runs again), that each jal_reach and tls_reach cause
+holds in the last check link, that the PT_LOAD segments are the probe link's and that no two of them share a page, and
+writes placement.tsv to --placement. When the read-only data in front of .text grew past its room, it writes no script:
+the link is a normal one, and placement.tsv gives every same-bytes section readonly_growth. It exits 1 when a link
+fails, when the check link is not what the plan asks (a kept section that it changes for a call that the mode cannot
+test or decide, or a section that an earlier check link moved and whose cause the last one does not show), or when a
+file or section name holds a double quote or a line break, which the script cannot quote; 2 when an input cannot be
+read; else 0.
 
 The builder image runs this file with its own python3, and the host runs its commands: it takes the standard library
 only, and the syntax of Python 3.9.
@@ -1257,7 +1261,7 @@ def collect(builds, out, names=None):
 
 # ── pairing ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-Pairing = collections.namedtuple("Pairing", "partner same repeated")
+Pairing = collections.namedtuple("Pairing", "partner same repeated twins")
 
 
 def same_bytes(a, b):
@@ -1282,7 +1286,11 @@ def pair(base, new, kind=is_text):
 
     Every other section is new, or gone. The check and the append mode pair the same way. The Pairing gives, for the
     row of each new section, the row of its base partner or None (`partner`) and whether the pair is same-bytes
-    (`same`, same_bytes), and the keys that occur more than once on either side (`repeated`)."""
+    (`same`, same_bytes), the keys that occur more than once on either side (`repeated`), and those of them in which
+    two of the sections on one side have the same section name, sha256 (not empty) and input size (`twins`).
+    The trees cannot tell twins apart: step 3 pairs them in map order, the order in which lld took their archive
+    members, which a change of the code can turn. Two such sections of one object, whose order lld keeps, are twins
+    too, since a tree does not record which object of a key holds a section."""
     base = [i for i in base if kind(i.section)]
     new = [i for i in new if kind(i.section)]
     base_count = collections.Counter(i.key for i in base)
@@ -1311,15 +1319,23 @@ def pair(base, new, kind=is_text):
     for key, members in new_members.items():
         for i, b in zip(members, base_members.get(key, [])):
             partner[i.row] = b
+    twins = set()
+    for side in (base, new):
+        found = collections.Counter((i.key, content(i)) for i in side if i.sha256)
+        twins.update(key for (key, _), n in found.items() if n > 1)
     return Pairing({i.row: partner[i.row].row if i.row in partner else None for i in new},
                    {i.row: i.row in partner and same_bytes(partner[i.row], i) for i in new},
-                   repeated)
+                   repeated, twins)
 
 
 def kept_run(key, base, new, pairing):
     """Whether the members of the repeated key `key` could all keep their base addresses under one lld pattern: as
     many on both sides, each same-bytes with its partner, side by side at the base (no other .text input section
-    between them in BASE's address order), and in the same order in NEW's addresses."""
+    between them in BASE's address order), in the same order in NEW's addresses, and no two of them on one side with
+    the same bytes (pairing.twins). The map does not tell twins apart, and lld may take their archive members in
+    another order: one pattern would then put each twin where the other was at the base, which would read as kept."""
+    if key in pairing.twins:
+        return False
     olds = [i for i in base.inputs if is_text(i.section) and i.key == key]
     news = [i for i in new.inputs if is_text(i.section) and i.key == key]
     rows = {i.row for i in olds}
@@ -1546,6 +1562,13 @@ def compare(label, base, new):
             changed.append(f"  changed: {function(i)}: {hex(old.address)} -> {hex(i.address)}")
             continue
         if (old.address, old.linked) == (i.address, i.linked):
+            if i.key in pairing.twins:
+                failures.append(f"FAIL {label}: {function(i)}: address {hex(i.address)}, linked size {i.linked}: it "
+                                "has the same bytes and lies at its partner's base address, but two sections of its "
+                                "key have the same bytes, which the trees cannot tell apart, and lld may take their "
+                                "archive members in another order: the trees do not show that the section at that "
+                                "address is the base's own, so it must move, with repeated_key")
+                continue
             kept += 1
             continue
         values = f"address {hex(old.address)} -> {hex(i.address)}, linked size {old.linked} -> {i.linked}"
@@ -1911,8 +1934,8 @@ def kept_set(base, probe, pairing, forced):
     cause of each same-bytes one that moves ({row: (cause, detail)}). A same-bytes section is kept, unless: `forced`
     ({row: CallTest or TlsTest}) names it (jal_reach or tls_reach, reach_cause); its base address does not meet its
     alignment now (alignment); or its key repeats (pairing.repeated). The members of such a key are kept, each at its
-    base address, when one pattern keeps them all (kept_run) and none moves for a cause of its own; else the
-    same-bytes ones move with repeated_key."""
+    base address, when one pattern keeps them all (kept_run, never for a key with twins) and none moves for a cause
+    of its own; else the same-bytes ones move with repeated_key."""
     text = [i for i in probe.inputs if is_text(i.section)]
     kept, causes = {}, {}
     for i in text:
@@ -2475,8 +2498,9 @@ def main(argv=None):
         description="Compare each (build, target) that the layout trees BASE and NEW both hold: each function whose "
                     "input section has the same bytes must keep its base address and linked size, or move for a "
                     "cause in NEW's placement.tsv that the two trees show (jal_reach, tls_reach, repeated_key, "
-                    "alignment or readonly_growth). Exit 1 when one does not, 2 when a tree cannot be read or the "
-                    "two share no (build, target).")
+                    "alignment or readonly_growth); one of a key with two sections of the same bytes, which the trees "
+                    "cannot tell apart, must move. Exit 1 when one does not, 2 when a tree cannot be read or the two "
+                    "share no (build, target).")
     checking.add_argument("base", metavar="BASE", help="the base build's layout tree")
     checking.add_argument("new", metavar="NEW", help="the append build's layout tree")
     wrapping = commands.add_parser(

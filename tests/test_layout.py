@@ -577,6 +577,21 @@ def test_pairing_a_repeated_key_member_by_member():
     assert pairing.partner == {0: 1, 1: 0} and pairing.same == {0: True, 1: True}
 
 
+def test_pairing_names_the_repeated_keys_whose_sections_on_one_side_have_the_same_bytes():
+    # OSSV-675. Two sections of one key with the same name, sha256 and size on one side are twins, which the trees
+    # cannot tell apart: helper's at the base, other's in the new link (at the base they differ in size). A line with
+    # no sha256, whose bytes the objects do not tell, is never a twin.
+    helper, other = ("lib.a", "x.o", ".text.helper"), ("lib.a", "y.o", ".text.other")
+    blank = ("lib.a", "z.o", ".text.blank")
+    base = inputs(helper + ("x", 8), helper + ("x", 8), other + ("o", 8), other + ("o", 12), blank + ("", 8),
+                  blank + ("", 8))
+    new = inputs(helper + ("x", 8), helper + ("y", 8), other + ("o", 8), other + ("o", 8), blank + ("", 8),
+                 blank + ("", 8))
+    pairing = layout.pair(base, new)
+    assert pairing.repeated == {helper, other, blank}
+    assert pairing.twins == {helper, other}
+
+
 def test_pairing_keys_a_copy_by_its_original(tmp_path):
     # The append build's copy is at another path, and one of its functions changed: it is paired by its original.
     changed = bytearray(LOCAL_CALL)
@@ -956,6 +971,37 @@ def test_check_fails_for_a_cause_the_trees_do_not_show(tmp_path, capsys, scenari
     status, lines = run_check(tmp_path, capsys, new, base)
     assert status == 1
     assert lines_with(lines, "FAIL", "plain/fuzz", name)
+
+
+# Two members of lib.a named twin.o, each with a section .text.twin of the same bytes, side by side at the base: twins,
+# which the map does not tell apart.
+TWIN0 = row(".text.twin", 0x11070, 0x10, file="/work/lib.a", member="twin.o")
+TWIN1 = dict(TWIN0, address=0x11080)
+
+
+@pytest.mark.parametrize("placement", [True, False], ids=["kept", "no-placement"])
+def test_check_fails_for_twins_at_their_partners_base_addresses(tmp_path, capsys, placement):
+    # OSSV-675. lld may take the two members in another order, so that the section at each twin's base address is the
+    # other member's: the trees do not show that either is kept, whatever NEW's placement.tsv says.
+    new = {"rows": BASE_ROWS + [TWIN0, TWIN1]}
+    if placement:
+        new["placement"] = [placed(TWIN0, 0, place="kept"), placed(TWIN1, 1, place="kept")]
+    status, lines = run_check(tmp_path, capsys, new, {"rows": BASE_ROWS + [TWIN0, TWIN1]})
+    assert status == 1
+    failed = lines_with(lines, "FAIL", "plain/fuzz", "twin (/work/lib.a(twin.o))", "repeated_key")
+    assert [len(lines_with(failed, f"address {hex(r['address'])},")) for r in (TWIN0, TWIN1)] == [1, 1]
+    assert lines_with(lines, "plain/fuzz", "3 kept", "2 failed")
+
+
+def test_check_lists_twins_that_moved_with_repeated_key(tmp_path, capsys):
+    moved = [dict(TWIN0, address=0x11300), dict(TWIN1, address=0x11310)]
+    new = {"rows": BASE_ROWS + moved,
+           "placement": [placed(moved[0], 0, "repeated_key"), placed(moved[1], 1, "repeated_key")]}
+    status, lines = run_check(tmp_path, capsys, new, {"rows": BASE_ROWS + [TWIN0, TWIN1]})
+    assert status == 0, lines
+    for old, now in zip((TWIN0, TWIN1), moved):
+        assert lines_with(lines, "moved with a cause", "twin (/work/lib.a(twin.o))", "repeated_key",
+                          f"address {hex(old['address'])} -> {hex(now['address'])}")
 
 
 def test_check_exits_2_for_a_missing_file(tmp_path, capsys):
@@ -1595,6 +1641,26 @@ def test_a_repeated_key_that_sat_side_by_side_is_kept_with_one_pattern():
                                                             ("kept", 0x11020, "-", "-")]
     assert ('  {\n    . = 0x11000;\n    "/work/lib.a:dup.o"(.text.dup)\n    . = 0x11020;\n    "/work/a.o"(.text.k)\n'
             '    . = 0x11030;\n  }\n') in plan.script
+
+
+def test_twins_that_sat_side_by_side_move_as_one_block_never_to_a_partners_base_address():
+    # OSSV-675. The two members named dup.o of lib.a hold .text.dup with the same bytes (twins), side by side at the
+    # base and in the same order in the probe link. The map does not tell them apart, and lld may take the members in
+    # another order, so that one pattern that kept them would put each where the other was. They move as one block,
+    # with repeated_key, and never to a partner's base address, where a twin would read as kept: their hole
+    # [0x11000, 0x11020) would put the first one there, so the block goes to the end. A repeated key whose members
+    # differ in their bytes is still kept (test_a_repeated_key_that_sat_side_by_side_is_kept_with_one_pattern).
+    base = link([text_input(0, "dup", 0x11000, 0x10, **LIB), text_input(1, "dup", 0x11010, 0x10, **LIB),
+                 text_input(2, "k", 0x11020, 0x10)])
+    probe = link(laid_out([("dup", 0x10, LIB), ("dup", 0x10, LIB), ("k", 0x10, {})]))
+    pairing = layout.pair(base.inputs, probe.inputs)
+    plan = layout.plan(base, probe, pairing)
+    assert [tuple(plan.places[row]) for row in range(3)] == [("end", 0x11030, "repeated_key", "-"),
+                                                            ("end", 0x11040, "repeated_key", "-"),
+                                                            ("kept", 0x11020, "-", "-")]
+    assert all(plan.places[row].address != base.inputs[pairing.partner[row]].address for row in (0, 1))
+    assert plan.script.count('"/work/lib.a:dup.o"(.text.dup)') == 1
+    assert unverified(base, probe, plan) == {}
 
 
 def test_a_same_bytes_section_moves_when_its_base_address_does_not_meet_its_new_alignment():
