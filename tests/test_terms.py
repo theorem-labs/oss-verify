@@ -347,6 +347,19 @@ def test_a_branch_that_sets_the_contact_of_a_project_that_is_not_seeded_needs_no
     assert [call for call in calls if "contents/docs/seeded-projects.tsv" in call]
 
 
+@pytest.mark.parametrize("key", ['"primary_contact":', "'primary_contact':", "primary_contact :"],
+                         ids=["double quotes", "single quotes", "a space before the colon"])
+def test_a_branch_that_sets_a_seeded_contact_in_another_yaml_spelling_is_an_adoption(tmp_path, key):
+    # oss-verify validate reads project.yaml with yaml.safe_load, which reads each of these lines as primary_contact:
+    # the branch adopts curl as surely as with primary_contact:, so with no record the step must not pass it.
+    assert yaml.safe_load(f"{key} security@curl.example\n") == {"primary_contact": "security@curl.example"}
+    files = [{"filename": "projects/curl/project.yaml", "status": "modified",
+              "patch": f"@@ -4,1 +4,1 @@\n-primary_contact: n/a\n+{key} security@curl.example\n"}]
+    code, out, _ = branch(tmp_path, files=files, body="Carries the adoption of curl.\n")
+    assert code == 1, out
+    assert NO_ADOPTION not in out
+
+
 @pytest.mark.parametrize("case", ["API error", "head moved before", "head moved after", "over the API's list",
                                   "no table"])
 def test_a_branch_whose_files_or_table_cannot_be_read_fails(tmp_path, case):
