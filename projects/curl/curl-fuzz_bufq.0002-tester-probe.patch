@@ -1,0 +1,9 @@
+Scratch probe for a check of pull request #227 of theorem-labs/oss-verify. Do not merge.
+
+A comment line in fuzz_bufq.cc. The pull request that holds this patch is closed after the check.
+
+--- a/fuzz_bufq.cc
++++ b/fuzz_bufq.cc
+@@ -1,1 +1,2 @@
++/* scratch probe */
+ /***************************************************************************
