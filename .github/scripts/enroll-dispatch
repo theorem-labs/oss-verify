@@ -438,7 +438,7 @@ def project_yaml(api: Api, repo: str, project: str, sha: str) -> dict | None:
         if len(data) > MAX_PROJECT_YAML_BYTES:
             return None
         config = yaml.safe_load(data)
-    except (subprocess.CalledProcessError, yaml.YAMLError, RecursionError):
+    except (subprocess.CalledProcessError, yaml.YAMLError, RecursionError, ValueError):
         return None
     return config if isinstance(config, dict) else None
 
