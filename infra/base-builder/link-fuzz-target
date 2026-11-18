@@ -86,8 +86,16 @@ if [ -n "${OV_BASE_LAYOUT:-}" ]; then
   fi
 fi
 
+# The directories this link makes in /tmp/ov: an allocation-failure link's copies and an append link's $work (both
+# below). The record keeps what it needs of them, in its own files and in its store, and nothing reads them once the
+# script has ended, so they go then, whether the link succeeded or failed. A removal that fails says so on standard
+# error and leaves the link's exit status as it is.
+made=()
+trap 'rm -rf -- ${made[@]+"${made[@]}"} || true' EXIT
+
 if [ "$driver" = "$OV_AF_DRIVER" ] || [ "$driver" = "$OV_AFC_DRIVER" ]; then
   copies=$(mktemp -d /tmp/ov/af.XXXXXX)
+  made+=("$copies")
   for i in "${!args[@]}"; do
     a=${args[$i]}
     case "$a" in
@@ -154,6 +162,7 @@ layout() {
 script=""
 if [ -n "$entry" ]; then
   work=$(mktemp -d /tmp/ov/append.XXXXXX)
+  made+=("$work")
   renamed=()
   if [ -n "${copies:-}" ] && [ -f "$copies/renamed" ]; then renamed=(--renamed "$copies/renamed"); fi
   layout append --base "$entry" --work "$work" ${renamed[@]+"${renamed[@]}"} --script "$work/append.ld" \

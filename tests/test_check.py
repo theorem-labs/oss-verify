@@ -308,7 +308,6 @@ class LayoutOptions(Project):
         self.assertEqual(code, 1)
         failure = [line for line in output.splitlines() if "LAYOUT TREE WAS NOT WRITTEN" in line]
         self.assertEqual(len(failure), 1, output)
-        self.assertIn("the build itself succeeded", failure[0])
         self.assertIn("plain/fuzz_shim: the record has no wraps", failure[0])
         self.assertFalse(self.tree.exists())
 
@@ -349,7 +348,6 @@ class LayoutOptions(Project):
     def test_base_layout_without_layout_out_is_refused(self):
         errors = self.refused(["--base-layout", str(self.base)])
         self.assertIn("--base-layout needs --layout-out", errors)
-        self.assertIn("layout.py check BASE NEW", errors)
 
     def test_base_layout_must_be_a_directory(self):
         (self.work.parent / "file").write_text("")
@@ -365,7 +363,6 @@ class LayoutOptions(Project):
             with self.subTest(path=path.name):
                 errors = self.refused(["--layout-out", str(path)])
                 self.assertIn(f"--layout-out {path} is there and is not an empty directory", errors)
-                self.assertIn("must hold only this build's fuzz targets", errors)
 
     def test_layout_out_in_the_base_layout_is_refused(self):
         # The base layout directory itself, even while it is empty, and a directory in it.

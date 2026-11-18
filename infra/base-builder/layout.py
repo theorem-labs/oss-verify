@@ -1013,6 +1013,23 @@ def read_renamed(path):
     return found
 
 
+def key_file_for(renamed, real):
+    """key_file(file), for describe: the file that the key of a section of `file`, a file a link's map names, names:
+    for a copy that an allocation-failure link made, its original, and else `file`. `renamed` is the link's renamed
+    (read_renamed), and `real(file)` gives the real path of `file`."""
+
+    # collect (collect_target) and append (append_link) both key a copy with this rule, and must: when they key it
+    # differently, compare finds no line of NEW's placement.tsv for the copy's sections. renamed names a copy by the
+    # path the link was given, which is the map's name for it; check_links reads it by the real path, which is the same
+    # path unless a directory on the way is a link. So a copy is keyed by the map's name, and else by its real path.
+    def key_file(file):
+        if file in renamed:
+            return renamed[file]
+        return renamed.get(real(file), file)
+
+    return key_file
+
+
 def store_reader(raw):
     """read(file, sha256): the bytes of `file`, a file that a record of the build $OUT `raw` names, from the build's
     store by its sha256, which they must have. Each store file is read and checked once for all the records of the
@@ -1059,13 +1076,7 @@ def collect_target(raw, name, binary, digest, store):
             raise LayoutError(f"the record's store lacks {file}: its inputs.tsv does not name it")
         return store(file, inputs[file][1])
 
-    def key_file(file):
-        # renamed names a copy by the path the link was given, which is the map's name for it; check_links reads it
-        # by the real path, which is the same path unless a directory on the way is a link.
-        if file in renamed:
-            return renamed[file]
-        return renamed.get(inputs[file][0], file)
-
+    key_file = key_file_for(renamed, lambda file: inputs[file][0])
     output = output_rows(Elf(binary, name))
     inputs_of, calls = describe(read_map(text_of(mapping)), Objects(read), key_file, wraps, output_of(output, name))
     files = {
@@ -2209,13 +2220,7 @@ def append_link(label, entry, work, script, placement, wraps, renamed, command):
         sys.stderr.write(output)
         raise AppendError(f"the probe link fails with exit status {status}")
     base = read_layout(entry)
-    copies = read_renamed(renamed) if renamed else {}
-
-    def key_file(file):
-        # As collect keys a copy: by the name the link gives it, or else by its real path.
-        if file in copies:
-            return copies[file]
-        return copies.get(os.path.realpath(file), file)
+    key_file = key_file_for(read_renamed(renamed) if renamed else {}, os.path.realpath)
 
     # The probe map's lines that name a file (read_map), and those of the linker's own sections, which plan counts.
     entries = map_entries(text_of(read_regular(probe_map)))
