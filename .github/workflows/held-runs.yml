@@ -3,7 +3,8 @@
 name: Held runs
 # Starts the screen of a pull request whose runs GitHub holds. With the repository's default setting, GitHub holds
 # each run of a first-time contributor's pull request (status action_required) until someone with write access
-# approves it. A schedule runs the default branch's copy of this file, main's, every 15 minutes. Its one step lists
+# approves it. Events run the default branch's copy of this file, main's (the triggers, below): a run of Build, Triage
+# or Tests that ended, a push to main, an issue opened or reopened, or a run by hand on main. Its one step lists
 # every held run of the event pull_request, and groups the runs by head repository, head branch and head commit: a
 # head. For each head, it finds the pull request into the default branch from that repository and branch:
 #   open, at the head        When a held run of the head is not screened (below), the step starts a run by hand of
@@ -43,7 +44,9 @@ name: Held runs
 # three hours before now. Each head decides only from the runs created at or after its own bound.
 # When the read of the default branch or of the held runs fails, the step fails at once. When a read, a re-run or a
 # start for one head fails, the line of that head says why, the step goes on to the next head, and the step fails at
-# its end. Then the run is red, and the next schedule tries again.
+# its end. Then the run is red, and the next event tries again.
+# The rules "at most once an hour" below read the times of runs from the API, not the time of this run. So they hold
+# whatever event starts this file. A head that an hour rule leaves waits for the first event after that hour.
 #
 # A held run counts as screened when a workflow_dispatch run of review.yml for its pull request (title Pull request
 # <n>, the only kind of run that approves) was created after it, and that run counts. A workflow_run run of Review
@@ -69,14 +72,14 @@ name: Held runs
 #         prints gh: <message> (HTTP 4xx), or gh: HTTP 4xx when the answer has no message.
 #     Any other failure of the re-run (an answer of HTTP 5xx, or no answer) is no refusal: the step starts no run, and
 #     the line of the head says that the re-run failed (above). When the App's installation never accepts actions:
-#     write, the step re-runs the failed jobs of such a run each hour, with no cost to the caps, until the run had its
-#     50 re-runs or GitHub refuses the re-run. Then a new run screens the head, and the same occurs to that run, until
-#     a person repairs the App. A person sees this as a failed comment job at the head.
+#     write, the step re-runs the failed jobs of such a run at most once an hour, with no cost to the caps, until the
+#     run had its 50 re-runs or GitHub refuses the re-run. Then a new run screens the head, and the same occurs to that
+#     run, until a person repairs the App. A person sees this as a failed comment job at the head.
 #   - Else (that run gave no verdict, or no run came after the newest held run): the step starts the head again, at
 #     most once an hour after the newest run of any time, also when a new held run comes in that hour.
 # So a head started before the three applies of dispatch://INFRA-3746, which admit review.yml's sign-ins at different
 # times, is screened again or re-run after the last of them, with no person.
-# Each new held event at a head gets one screen that gives a verdict, and the schedule alone gets no more: the step
+# Each new held event at a head gets one screen that gives a verdict, and other events alone get no more: the step
 # starts a new run of a head only when no run came after its newest held run, the newest that came gave no verdict,
 # that run had its 50 re-runs, or GitHub refused the re-run of that run. A head that the screen held keeps its held
 # runs, all older than that screen, and gets no new screen. This is no rescreen loop of a held item
@@ -93,21 +96,37 @@ name: Held runs
 # merge. Such a run writes no triage comment, and it does nothing when the head is no longer held (the top of
 # review.yml).
 
+# Events only, never a schedule. Each event below runs main's copy of this file. A held run starts no workflow_run when
+# GitHub holds it, so a held head waits for the next of these events in the repository.
 on:
-  schedule:
-    - cron: '*/15 * * * *'
+  # A run of the pull requests' own workflows that ended: Build, Triage and Tests run for each push of a pull request
+  # whose runs GitHub does not hold, and for an approved run of a held head.
+  workflow_run:
+    workflows: [Build, Triage, Tests]
+    types: [completed]
+  # A merge, or any other push to main.
+  push:
+    branches: [main]
+  issues:
+    types: [opened, reopened]
+  # A run by hand, on main only (the job's if).
+  workflow_dispatch:
 
 permissions: {}
 
 concurrency:
-  # One run at a time: a new run waits for the run in progress, and does not cancel it.
+  # One run at a time in the repository. A new run waits for the run in progress, and does not cancel it. Every waiting
+  # run keeps its place (queue: max), so no event's run is cancelled by a later one
+  # (https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).
   group: held-runs
   cancel-in-progress: false
+  queue: max
 
 jobs:
   held-runs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
     # actions: write to start runs, to re-run failed jobs and to read runs and their jobs, pull-requests: read to read
     # pull requests.
     permissions: {actions: write, pull-requests: read}
@@ -120,7 +139,7 @@ jobs:
           set -euo pipefail
           say() { echo "$1"; echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
           now=$EPOCHSECONDS
-          # A schedule's event names no repository, so the default branch comes from the API.
+          # The default branch comes from the API, the same way for every event.
           default=$(gh api "repos/$REPO" --jq .default_branch)
           [[ $default =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "::error::GitHub gave no default branch of $REPO."; exit 1; }
           base=$(jq -rn --arg b "$default" '$b | @uri')
@@ -431,6 +450,6 @@ jobs:
 
           for head in "${heads[@]}"; do one "$head"; done
           if [ "$failed" = true ]; then
-            echo "::error::A read, a re-run or a start of GitHub failed for a head (its line above). The next schedule tries again."
+            echo "::error::A read, a re-run or a start of GitHub failed for a head (its line above). The next event tries again."
             exit 1
           fi

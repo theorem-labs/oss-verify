@@ -1873,7 +1873,7 @@ class HeldRuns(Stand):
             self.reviews = [self.by_hand(941, "Pull request 51", minutes, conclusion="failure")]
             self.jobs = {941: screen}
             self.assertEqual(self.go(), [self.starts("review.yml", 51)] if again else [], (label, self.log))
-        # The next schedule, 15 minutes after a start: the run it started ended before a verdict too.
+        # The next event, 15 minutes after a start: the run it started ended before a verdict too.
         self.reviews = [self.by_hand(942, "Pull request 51", 15, conclusion="failure"),
                         self.by_hand(941, "Pull request 51", 105, conclusion="failure")]
         self.jobs = {941: "failure", 942: "failure"}
@@ -1898,7 +1898,7 @@ class HeldRuns(Stand):
                 if again:
                     self.assertIn("re-ran the failed jobs of run 971 of review.yml", self.log)
                     self.assertIn("The verdict stands, and nothing screens the head again.", self.log)
-        # The next schedule, while the re-run runs: nothing. Then the re-run failed too, 15 minutes after its start:
+        # The next event, while the re-run runs: nothing. Then the re-run failed too, 15 minutes after its start:
         # nothing in that hour.
         self.reviews = [self.by_hand(971, "Pull request 121", 150, status="in_progress", started=0)]
         self.assertEqual(self.go(), [], self.log)
@@ -1939,7 +1939,7 @@ class HeldRuns(Stand):
         self.replays = [self.by_hand(7998, "merged #72", 600)]
         both = [self.starts("review.yml", 71), self.starts("review.yml", 72)]
         self.assertEqual(self.go(), both, self.log)
-        # The next schedules, while the runs it started are queued, then in progress: nothing.
+        # The next events, while the runs it started are queued, then in progress: nothing.
         for status in ("queued", "in_progress"):
             self.reviews = [self.by_hand(8102, "Pull request 72", 0, status=status),
                             self.by_hand(8101, "Pull request 71", 0, status=status)]
@@ -2035,7 +2035,7 @@ class HeldRuns(Stand):
         self.assertIn(self.starts("review.yml", 302), self.go(refused={971}), self.log)
 
     def test_held_runs_a_rerun_that_github_refuses_starts_a_new_run_of_that_head(self):
-        # The refusal is no failure of the step: a new run screens the head again, and the next schedule waits for it.
+        # The refusal is no failure of the step: a new run screens the head again, and the next event waits for it.
         sha = "7" * 40
         self.pulls = [self.pull(121, "pat/oss-verify", "s", sha)]
         self.held = [self.held_run(12101, sha, "pat/oss-verify", "s", 180)]
@@ -2073,7 +2073,7 @@ class HeldRuns(Stand):
         # Only an answer of HTTP 4xx is GitHub's refusal of a re-run. Pull request 301 is due a re-run of run 971, and
         # GitHub answers it with HTTP 500, or gives no answer. The step starts no new run of 301, which would screen it
         # again. The line of that head says that GitHub gave no answer, pull request 302 still gets its screen, and the
-        # step fails at its end. The next schedule re-runs the failed jobs of run 971.
+        # step fails at its end. The next event re-runs the failed jobs of run 971.
         p, q = "7" * 40, "2" * 40
         for label, printed in (("HTTP 500", "gh: Server Error (HTTP 500)"),
                                ("no answer", "error connecting to api.github.com\n"
@@ -2088,14 +2088,14 @@ class HeldRuns(Stand):
             self.assertIn("Head 7777777 of pat/oss-verify:s, pull request 301: failed. GitHub gave no answer to the "
                           "re-run of the failed jobs of run 971 of review.yml. The step goes on to the next head, and "
                           "fails at its end.", self.log)
-            # The next schedule, when GitHub answers: the run that the step started for 302 is queued.
+            # The next event, when GitHub answers: the run that the step started for 302 is queued.
             self.reviews.insert(0, self.by_hand(3021, "Pull request 302", 0, status="queued"))
             self.assertEqual(self.go(), [self.reruns(971)], (label, self.log))
 
     def test_held_runs_a_read_that_fails_for_one_head_leaves_the_other_heads_their_screen(self):
         # GitHub gives no jobs of run 991, so the step cannot tell whether it screened pull request 151. The line of
         # that head says so, pull request 152, held before 151, still gets its screen, and the step fails at its end:
-        # the run is red, and the next schedule reads that head again.
+        # the run is red, and the next event reads that head again.
         a, b = "1" * 40, "2" * 40
         self.pulls = [self.pull(151, "uma/oss-verify", "v", a), self.pull(152, "val/oss-verify", "w", b)]
         self.held = [self.held_run(15101, a, "uma/oss-verify", "v", 100),
@@ -2104,7 +2104,7 @@ class HeldRuns(Stand):
         self.assertEqual(self.go(status=1), [self.starts("review.yml", 152)], self.log)
         self.assertIn("Head 1111111 of uma/oss-verify:v, pull request 151: failed. GitHub gave no jobs of run 991 of "
                       "review.yml. The step goes on to the next head, and fails at its end.", self.log)
-        # The next schedule, when GitHub gives them: run 991 counts, the run that the step started is queued, and the
+        # The next event, when GitHub gives them: run 991 counts, the run that the step started is queued, and the
         # step ends with no failure.
         self.jobs = {991: "success"}
         self.reviews.insert(0, self.by_hand(992, "Pull request 152", 0, status="queued"))
@@ -2161,10 +2161,22 @@ class HeldRuns(Stand):
         self.assertEqual(self.go(), [self.starts("review.yml", 171), self.starts("review.yml", 172)], self.log)
         self.assertEqual(len(self.reads["held"]), 2, self.reads)
 
-    def test_held_runs_workflow_holds_no_identity_and_starts_on_its_schedule_alone(self):
+    def test_held_runs_workflow_holds_no_identity_and_starts_on_events_alone(self):
+        # Events only, never a schedule: a run of Build, Triage or Tests that ended, a push to main, an issue opened or
+        # reopened, and a run by hand, in one concurrency group whose waiting runs keep their places. A run by hand
+        # runs on main alone.
+        import test_outside_screen
         workflow = yaml.safe_load(self.workflow_text)
         self.assertEqual(workflow["name"], "Held runs")
-        self.assertEqual(triggers(workflow), {"schedule": [{"cron": "*/15 * * * *"}]})
+        self.assertEqual(triggers(workflow), {
+            "workflow_run": {"workflows": ["Build", "Triage", "Tests"], "types": ["completed"]},
+            "push": {"branches": ["main"]},
+            "issues": {"types": ["opened", "reopened"]},
+            "workflow_dispatch": None})
+        names = {yaml.safe_load((ROOT / ".github" / "workflows" / f).read_text())["name"]
+                 for f in ("build.yaml", "triage.yaml", "tests.yaml")}
+        self.assertEqual(names, {"Build", "Triage", "Tests"})
+        self.assertEqual(workflow["concurrency"], {"group": "held-runs", "cancel-in-progress": False, "queue": "max"})
         self.assertEqual(workflow["permissions"], {})
         self.assertEqual(list(workflow["jobs"]), ["held-runs"])
         job = workflow["jobs"]["held-runs"]
@@ -2173,6 +2185,12 @@ class HeldRuns(Stand):
         self.assertNotIn("secrets.", self.workflow_text)
         self.assertNotIn("id-token", self.workflow_text)
         self.assertEqual([s for s in job["steps"] if "uses" in s], [])
+        # The job runs on each event of its triggers, and on a run by hand only on main.
+        for event, ref, runs in (("workflow_run", "refs/heads/main", True), ("push", "refs/heads/main", True),
+                                 ("issues", "refs/heads/main", True), ("workflow_dispatch", "refs/heads/main", True),
+                                 ("workflow_dispatch", "refs/heads/other", False)):
+            self.assertEqual(bool(test_outside_screen.evaluate(job["if"], {"github.event_name": event,
+                                                                           "github.ref": ref})), runs, (event, ref))
 
 
 class ReviewThatPasses(Stand):
