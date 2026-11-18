@@ -2,7 +2,7 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 # Modified 2026 by Theorem Labs, PBC: the fuzz targets after fuzz_fnmatch, which are not of the release (among them the
-# structured fuzz targets and the stack they share, curl-fuzz_proto_lib), and fuzz_bufq's harness patches (sources).
+# structured fuzz targets and the stack they share, curl-fuzz_proto_lib), and fuzz_bufq's harness patch (sources).
 #
 # Generated from the build recipe of the oss-fuzz-theorems 2026.10 release.
 #
@@ -11,8 +11,7 @@
 [ -z "${BASH_VERSION:-}" ] || exec sh -e "$0"
 . /usr/local/lib/oss-verify/release-target.sh
 
-# fuzz_bufq: the release's target curl-fuzz_bufq, its harness patched by curl-fuzz_bufq.0001-no-syscalls.patch and
-# curl-fuzz_bufq.0002-mayfail-harness-fixes.patch (sources)
+# fuzz_bufq: the release's target curl-fuzz_bufq, its harness patched by curl-fuzz_bufq.0001-no-syscalls.patch (sources)
 (
 ov_target_begin curl-fuzz_bufq
 build_lib() {
