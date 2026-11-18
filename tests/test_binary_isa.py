@@ -18,6 +18,7 @@ import re
 import struct
 import sys
 import tempfile
+import time
 import unittest
 
 from oss_verify import binary_isa
@@ -226,6 +227,16 @@ class Verdicts(Base):
                          binary_isa.outside_sites(buf, TEXT_VADDR, False, outw, slow_pairs))
         self.assertEqual(binary_isa.outside_sites(buf, TEXT_VADDR, True, outw, pairs),
                          [(TEXT_VADDR + 12, 0x0C007057), (TEXT_VADDR + 20, 0x0C007057)])
+        # Past FIND_WORDS distinct words a clean region is read by the census's words; each word searched alone with
+        # bytes.find finds the same sites.
+        words = [0x57 | (k + 8) << 12 for k in range(binary_isa.FIND_WORDS + 1)]
+        buf = b"".join(struct.pack("<I", w) + NOP + Z32 for w in words * 3)
+        counts, at = binary_isa.walk(buf, TEXT_VADDR)
+        self.assertFalse(any(at.values()), at)
+        _, pairs = binary_isa.isa_census(buf, TEXT_VADDR, True, counts["insn32"])
+        alone = sorted(site for w in words for site in binary_isa.outside_sites(buf, TEXT_VADDR, True, {w: ""}, pairs))
+        self.assertEqual(binary_isa.outside_sites(buf, TEXT_VADDR, True, {w: "" for w in words}, pairs), alone)
+        self.assertEqual(len(alone), 3 * len(words))
 
 
 class HeaderClaims(Base):
@@ -266,6 +277,20 @@ class WhereTheCodeIs(Base):
 
     def test_a_non_zero_gap_mapped_executable_is_decoded(self):
         self.one(mkelf(NOP + ADD, gap=CNOP + CNOP), "RVC", rvc16=2, regions=2)
+
+    def test_the_first_finding_is_of_the_verdicts_kind_across_regions(self):
+        # Sections are decoded before gaps. A finding in .text that loses to one in the gap is not named.
+        res, out = self.one(mkelf(VSETVLI + NOP, gap=CNOP + CNOP), "RVC", rvc16=2, outside_model=1, regions=2)
+        self.assertEqual(out["first"], f"rvc16 at {TEXT_VADDR + 8:#x}")
+        self.assertIn(f"first rvc16 at {TEXT_VADDR + 8:#x}", out["detail"])
+        res, out = self.one(mkelf(VSETVLI + NOP, gap=LONG48 + Z16 + ADD), "NOT-RV64G", long=1, rvc16=0,
+                            outside_model=1, regions=2)
+        self.assertEqual(out["first"], f"long at {TEXT_VADDR + 8:#x}")
+        res, out = self.one(mkelf(NOP + LONG48 + Z16 + ADD, gap=CNOP + CNOP), "RVC", long=1, rvc16=2, regions=2)
+        self.assertEqual(out["first"], f"rvc16 at {TEXT_VADDR + 12:#x}")
+        # Outside-model words in two regions: the first region's is named.
+        res, out = self.one(mkelf(VSETVLI + NOP, gap=CLZ + NOP), "NOT-MODEL", outside_model=2, regions=2)
+        self.assertEqual(out["first"], f"outside_model at {TEXT_VADDR:#x}")
 
     def test_a_zero_gap_is_padding(self):
         res, _ = self.one(mkelf(NOP + ADD, gap=Z32 * 4), "CLEAN", regions=1)
@@ -423,6 +448,16 @@ class ModelISA(Base):
         # The slow path, for a region with a finding, must find the same words.
         res, out = self.one(mkelf(NOP + CNOP + CNOP + VSETVLI + ADD), "RVC", rvc16=2, outside_model=1)
         self.assertEqual(out["families"], {"rvv-vsetvl": 1})
+
+    def test_many_distinct_outside_words_take_little_time(self):
+        """A region without a finding was searched with one bytes.find per distinct outside word, so its time grew with
+        the region times the words. 30,000 distinct vector words, each before three nops, took over 10 seconds."""
+        text = b"".join(struct.pack("<I", 0x57 | k << 12) + NOP * 3 for k in range(30000))
+        start = time.monotonic()
+        res = binary_isa.scan(mkelf(text))
+        self.assertLess(time.monotonic() - start, 10)
+        self.assertEqual((res["verdict"], res["outside_model"], res["first"]),
+                         ("NOT-MODEL", 30000, ("outside_model", TEXT_VADDR)))
 
     def test_the_first_finding_names_the_isa_failure(self):
         res, out = self.one(mkelf(NOP + VSETVLI + ADD), "NOT-MODEL")

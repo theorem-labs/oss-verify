@@ -675,15 +675,25 @@ def recorded_images(record):
         return []
 
 
-# `<<EOT`, `<<"EOT"`, `<<-EOT`: what ends a heredoc body. The body is the content of a file or of a script and
-# holds no instruction of its own.
-HEREDOC = re.compile(r"<<-?\s*([\"']?[A-Za-z_][A-Za-z0-9_]*[\"']?)")
+# `<<EOT`, `<<"EOT"`, `<<-EOT`, `2<<EOT`: what ends a heredoc body. The body is the content of a file or of a script
+# and holds no instruction of its own. BuildKit takes a heredoc only from a word that starts with it and has no
+# other `<` (`^(\d*)<<(-?)\s*([^<]*)$`), so a here-string `<<<`, a shift `$((1<<4))` and `cat<<EOT` open none. Its
+# name may be any word (`<<1EOT`, `<<.EOT`), or none, as after U+001C to U+001F, which Python counts as space and
+# BuildKit does not: a step with an empty name is still unreadable, and no body is looked for. `<< EOT` is read as
+# one too.
+HEREDOC = re.compile(r"(?<!\S)\d*<<(?!<)-?\s*([^\s<]*)")
+
+# A heredoc, or a word that starts with expansions and then `<<` (`$X<<EOT`, `${X}2<<EOT`). BuildKit keeps such
+# expansions as they are and reads no heredoc there, so instructions() skips no lines after one, but the step is
+# still refused as unreadable. `\w++` gives nothing back: a `$` and a long run of digits stays linear.
+OPENS_HEREDOC = re.compile(r"(?<!\S)(?:\$(?:\{[^}]*\}+|\w++|[@*#?$!-]))*\d*<<(?!<)")
 
 
 def instructions(text):
     r"""The Dockerfile's instructions, one a string, as a Dockerfile parser reads it: the `escape` directive chooses
     the continuation character, a `#` line is a comment wherever it is (including in the middle of a continued
-    instruction), and a line ending in that character continues into the next.
+    instruction), and a line ending in that character continues into the next, unless the character before it is
+    the escape too. A blank line inside a continued instruction is stepped over, as a comment line is.
 
     A continuation takes away the escape character and the newline and NOTHING ELSE: what was before it stays, and
     the next line arrives with its own indentation. So `fetch-\` + `commit` is one word and `--mount=… \` +
@@ -703,7 +713,9 @@ def instructions(text):
         if found.group(1).lower() == "escape" and found.group(2) in ("\\", "`"):
             escape = found.group(2)
     joined, carry, ending = [], "", []
-    for line in text.splitlines():
+    continuing = False
+    for line in text.split("\n"):
+        line = line.rstrip("\r")  # BuildKit's lines end at \n alone, less a trailing \r
         if ending:
             # Inside a heredoc body: these lines are the content of a file or a script, not instructions. A
             # review measured a COPY heredoc whose body quoted a mounted RUN, which read as a real mount and
@@ -713,15 +725,20 @@ def instructions(text):
             continue
         if line.lstrip().startswith("#"):
             continue
-        stripped = line.rstrip()
-        if stripped.endswith(escape):
-            carry += stripped[:-1]
+        if continuing and re.fullmatch(r"[^\S\x1c-\x1f]*", line):
+            continue  # BuildKit steps over a blank line inside a continued instruction and keeps joining
+        end = re.search(rf"{re.escape(escape)}[ \t]*$", line)
+        if end and not line[:end.start()].endswith(escape):
+            # An escape at the end of the line continues it, unless it is itself escaped (`C:\\`).
+            carry += line[:end.start()]
+            continuing = True
             continue
         carry += line
+        continuing = False
         if carry.strip():
             instruction = " ".join(carry.split())
             joined.append(instruction)
-            ending = [word.strip("\"'") for word in HEREDOC.findall(instruction)]
+            ending = [word.strip("\"'") for word in HEREDOC.findall(instruction) if word]
         carry = ""
     if carry.strip():
         joined.append(" ".join(carry.split()))
@@ -779,7 +796,7 @@ def words_of(instruction):
     """An instruction's words as a shell would split them, or None when it cannot be split (an unmatched quote) or
     carries a heredoc, which this does not parse. A caller that cannot read an instruction must not conclude that
     it does nothing."""
-    if "<<" in instruction:
+    if OPENS_HEREDOC.search(instruction):
         return None
     try:
         return shlex.split(instruction, comments=False, posix=True)
@@ -863,7 +880,7 @@ def unreadable_steps(text):
     # A heredoc BODY is skipped when the instructions are read, so a fetch written inside one appears in no
     # instruction at all. The raw text is what says it is there, and the instruction that opened the heredoc is
     # what to name.
-    heredocs = [line for line in lines if "<<" in line]
+    heredocs = [line for line in lines if OPENS_HEREDOC.search(line)]
     if heredocs and "fetch-commit" in text:
         unreadable = list(dict.fromkeys(unreadable + heredocs))
     return unreadable

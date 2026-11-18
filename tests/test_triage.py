@@ -410,6 +410,35 @@ class Comment(unittest.TestCase):
             self.assertIn(refused, triage.triage(fork, REPO, 7).comment)
             self.assertNotIn(refused, triage.triage(branch, REPO, 7).comment)
 
+    def test_a_pull_request_that_removes_two_projects_is_a_withdrawal_of_the_first(self):
+        gh = self.pull(SEEDED, "NONE")
+        del gh.responses[f"repos/{REPO}/contents/projects/example"]
+        gh.responses[f"repos/{REPO}/pulls/7/files"] = [
+            {"filename": f"projects/{project}/project.yaml"} for project in ["example", "aaa"]]
+        result = triage.triage(gh, REPO, 7)
+        self.assertTrue(result.comment.startswith(triage.MARKER + "\n### Enrollment triage: `projects/aaa`\n\n"))
+        self.assertIn("a withdrawal, nothing to triage", result.comment)
+
+    def test_a_removed_project_beside_an_edited_one_triages_the_edited_one(self):
+        gh = self.pull(SEEDED, "NONE")
+        gh.responses[f"repos/{REPO}/pulls/7/files"] = [
+            {"filename": f"projects/{project}/project.yaml"} for project in ["aaa", "example"]]
+        result = triage.triage(gh, REPO, 7)
+        self.assertNotIn("withdrawal", result.full)
+        self.assertTrue(result.comment.startswith(triage.MARKER + "\n### Enrollment triage: `projects/example`\n\n"))
+
+    def test_a_renamed_project_is_triaged_under_its_new_name(self):
+        """GitHub lists a renamed file under both names. The old directory is gone, but nothing is withdrawn."""
+        gh = self.pull(SEEDED, "NONE")
+        gh.responses[f"repos/{REPO}/pulls/7/files"] = [
+            {"filename": f"projects/example/{name}", "previous_filename": f"projects/aaa/{name}"}
+            for name in ["project.yaml", "Dockerfile", "build.sh"]]
+        result = triage.triage(gh, REPO, 7)
+        self.assertNotIn("withdrawal", result.full)
+        self.assertTrue(result.comment.startswith(triage.MARKER + "\n### Enrollment triage: `projects/example`\n\n"))
+        self.assertIn("| ❌ | Pull request scope | touches 2 projects (`aaa`, `example`); one per pull request |",
+                      result.comment)
+
     def test_a_local_directory_before_the_pull_request(self):
         # No pull request exists yet: nothing about one is asked of GitHub, and the directory is read as it is here.
         with tempfile.TemporaryDirectory() as scratch:

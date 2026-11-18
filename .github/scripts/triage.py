@@ -388,7 +388,7 @@ def accepted_limit(name: str, copied: frozenset[str] = frozenset()) -> int | Non
 
 def fetch_project(gh: GitHub, repo: str, sha: str, name: str, directory: pathlib.Path) -> bool:
     """Recreate projects/<name>/ as it is at commit `sha` in `directory`, so oss-verify validate can check it like a
-    checkout. Return False if the pull request has no such directory (it withdraws the project).
+    checkout. Return False if the pull request has no such directory (it removes the project, or renames it).
 
     In a directory with more files than validate.py accepts, only project.yaml is downloaded and the other files are
     only named: validate.py refuses the directory for its size anyway, and a download per file would spend the
@@ -927,22 +927,25 @@ def triage(gh: GitHub, repo: str, number: int) -> Triage:
     names, _ = split_paths(paths)
     if not names:
         return Triage("", "")
-    name = names[0]
     # A deleted fork has no head repository: it is a fork all the same.
     fork = (pull["head"].get("repo") or {}).get("full_name") != repo
     with tempfile.TemporaryDirectory() as scratch:
-        directory = pathlib.Path(scratch) / name
-        # A name validate.py would refuse is not fetched; check_project() reports it without reading the directory.
-        if validate.NAME.fullmatch(name) and not fetch_project(gh, repo, pull["head"]["sha"], name, directory):
-            withdrawal = (f"### Enrollment triage: {code('projects/' + name)}\n\n"
-                          "This pull request removes the project's directory: a withdrawal, nothing to triage.\n")
-            if fork and name in seeded_names():
-                withdrawal += ("\n`enrollment` refuses a pull request from a fork that removes the port of a project "
-                               "that we seeded. To leave, ask in an issue: a maintainer of this repository removes "
-                               "it on a branch of this repository (README.md, Pause or leave).\n")
-            return Triage(f"{MARKER}\n{withdrawal}", withdrawal)
-        return report(gh, repo, name, directory, pull["user"]["login"], pull.get("author_association") or "",
-                      pull.get("body") or "", paths, pull["changed_files"], fork)
+        # A renamed project is touched under both names, and only the new one is left at the head commit. The first
+        # touched project still there is triaged, and its scope row names the others. Only a pull request that leaves
+        # none of them is a withdrawal.
+        for name in names:
+            directory = pathlib.Path(scratch) / name
+            # A name validate.py would refuse is not fetched; check_project() reports it without reading the directory.
+            if not validate.NAME.fullmatch(name) or fetch_project(gh, repo, pull["head"]["sha"], name, directory):
+                return report(gh, repo, name, directory, pull["user"]["login"], pull.get("author_association") or "",
+                              pull.get("body") or "", paths, pull["changed_files"], fork)
+    withdrawal = (f"### Enrollment triage: {code('projects/' + names[0])}\n\n"
+                  "This pull request removes the project's directory: a withdrawal, nothing to triage.\n")
+    if fork and set(names) & seeded_names():
+        withdrawal += ("\n`enrollment` refuses a pull request from a fork that removes the port of a project that we "
+                       "seeded. To leave, ask in an issue: a maintainer of this repository removes it on a branch of "
+                       "this repository (README.md, Pause or leave).\n")
+    return Triage(f"{MARKER}\n{withdrawal}", withdrawal)
 
 
 def triage_local(gh: GitHub, repo: str, directory: pathlib.Path, login: str, body: str) -> Triage:

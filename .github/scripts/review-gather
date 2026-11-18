@@ -186,7 +186,10 @@ for zip in "$dir"/*_seed_corpus.zip; do
 import sys, zipfile
 with zipfile.ZipFile(sys.argv[1]) as archive, open(sys.argv[2], "w") as out:
     for info in [i for i in archive.infolist() if not i.is_dir()][:200]:
-        data = archive.read(info)[:512]
+        # A member is read only as far as its first 512 bytes. read() decompresses all of it, and a small zip can hold
+        # a member of gigabytes.
+        with archive.open(info) as member:
+            data = member.read(512)
         out.write(f"== {info.filename!r}: {info.file_size} bytes\n")
         for at in range(0, len(data), 16):
             row = data[at:at + 16]

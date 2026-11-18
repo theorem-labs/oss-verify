@@ -383,7 +383,9 @@ def load_lock(path):
     """
     try:
         data = yaml.safe_load(pathlib.Path(path).read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, yaml.YAMLError) as error:
+    # ValueError covers UnicodeDecodeError, and what PyYAML's scalar constructors raise for a value such as the date
+    # 2024-13-45, which is not a YAMLError.
+    except (OSError, ValueError, RecursionError, yaml.YAMLError) as error:
         raise LockError(f"cannot read {path}: {error}") from None
     if not isinstance(data, dict):
         raise LockError(f"{path} is not a mapping")
@@ -415,7 +417,7 @@ def load_lock(path):
         project_file = pathlib.Path(path).resolve().parent.parent / "project.yaml"
         try:
             project = yaml.safe_load(project_file.read_text(encoding="utf-8")) if project_file.is_file() else None
-        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        except (OSError, ValueError, RecursionError, yaml.YAMLError):
             project = None
         if isinstance(project, dict) and isinstance(project.get("build"), dict):
             toolchain = project["build"].get("builder")
