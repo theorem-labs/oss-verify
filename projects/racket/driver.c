@@ -12,7 +12,6 @@
      FUZZ_ADDON_DIR   the addon directory, so that Racket does not look
                       for the home directory */
 
-#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,23 +42,6 @@ extern char fuzz_petite_boot[], fuzz_petite_boot_end[];
 extern char fuzz_scheme_boot[], fuzz_scheme_boot_end[];
 extern char fuzz_racket_boot[], fuzz_racket_boot_end[];
 extern char fuzz_modules[], fuzz_modules_end[];
-
-/* OSS Verify wants a target to install no signal handlers, so put
-   back the default action for every signal that Chez Scheme or
-   rktio handles, so that a memory fault ends the process with the
-   signal. Ignored signals stay ignored. */
-static void reset_signal_handlers(void)
-{
-  int sig;
-
-  for (sig = 1; sig < NSIG; sig++) {
-    struct sigaction sa;
-    if ((sigaction(sig, NULL, &sa) == 0)
-        && ((sa.sa_flags & SA_SIGINFO)
-            || ((sa.sa_handler != SIG_DFL) && (sa.sa_handler != SIG_IGN))))
-      signal(sig, SIG_DFL);
-  }
-}
 
 static int initialized = 0;
 
@@ -111,8 +93,6 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
   FUZZ_LSAN_DISABLE();
 
   racket_boot(&ba);
-
-  reset_signal_handlers();
 
   racket_embedded_load_bytes(fuzz_modules, fuzz_modules_end - fuzz_modules, 0);
 

@@ -1,5 +1,6 @@
 # kind	path	arguments: see lay-out-sources
 patch	racket	session-key.patch
+patch	racket	pb.patch
 git	racket/fuzz	https://github.com/samth/racket-fuzz	0bde2c9adda9e198e9772ec9e08d7a86bd7493de
 copy	racket/fuzz/oss-verify-driver.c	driver.c
 copy	racket/fuzz/mutants/exact-number.patch	mutant-exact-number.diff

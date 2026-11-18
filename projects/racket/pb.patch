@@ -1,0 +1,112 @@
+diff --git a/racket/src/ChezScheme/c/schsig.c b/racket/src/ChezScheme/c/schsig.c
+index ccc3a2d..acf6f86 100644
+--- a/racket/src/ChezScheme/c/schsig.c
++++ b/racket/src/ChezScheme/c/schsig.c
+@@ -1016,5 +1016,7 @@ void S_schsig_init(void) {
+ 
+     S_set_symbol_value(S_G.collect_request_pending_id, Sfalse);
+ 
++#ifndef DISABLE_SIGNAL_HANDLERS
+     init_signal_handlers();
++#endif
+ }
+diff --git a/racket/src/cs/io.sls b/racket/src/cs/io.sls
+index 6d9ef0c..4e16f1d 100644
+--- a/racket/src/cs/io.sls
++++ b/racket/src/cs/io.sls
+@@ -540,11 +540,11 @@
+   ;; For glib logging, we need a function pointer that works across
+   ;; places and logs to the main place's root logger. Although it's
+   ;; kind of a hack, it's much simpler to implement that here and
+-  ;; export the function pointer as a primitive.
++  ;; export the function pointer as a primitive. The callable is made
++  ;; on first use, since a foreign callable needs executable memory on
++  ;; some platforms (via libffi for pb).
+   
+-  (export glib-log-message
+-          ;; Make sure the callable is retained:
+-          glib-log-message-callable)
++  (export glib-log-message)
+ 
+   (define G_LOG_LEVEL_ERROR    2)
+   (define G_LOG_LEVEL_CRITICAL 3)
+@@ -553,7 +553,7 @@
+   (define G_LOG_LEVEL_INFO     6)
+   (define G_LOG_LEVEL_DEBUG    7)
+   
+-  (define-values (glib-log-message glib-log-message-callable)
++  (define (make-glib-log-message-callable)
+     (let ([glib-log-message
+            (lambda (domain glib-level message)
+              (let ([level (cond
+@@ -577,10 +577,29 @@
+                   [else
+                    (ensure-virtual-registers)
+                    (post-as-asynchronous-callback go)]))))])
+-      (let ([callable (foreign-callable __collect_safe glib-log-message (string int string) void)])
+-        (values
+-         (foreign-callable-entry-point callable)
+-         callable))))
++      (foreign-callable __collect_safe glib-log-message (string int string) void)))
++
++  ;; Retains the callable once it is made:
++  (define glib-log-message-callable #f)
++
++  (meta-cond
++   [(threaded?)
++    (define glib-log-message-lock (make-mutex))
++    (define-syntax with-glib-log-message-lock
++      (syntax-rules () [(_ e) (with-mutex glib-log-message-lock e)]))]
++   [else
++    (define-syntax with-glib-log-message-lock
++      (syntax-rules () [(_ e) (with-interrupts-disabled e)]))])
++
++  (define (glib-log-message-entry-point)
++    (with-glib-log-message-lock
++     (begin
++       (unless glib-log-message-callable
++         (set! glib-log-message-callable (make-glib-log-message-callable)))
++       (foreign-callable-entry-point glib-log-message-callable))))
++
++  (define-syntax glib-log-message
++    (identifier-syntax (glib-log-message-entry-point)))
+   
+   ;; ----------------------------------------
+ 
+diff --git a/racket/src/cs/rumble/foreign.ss b/racket/src/cs/rumble/foreign.ss
+index b5e4e5a..1363612 100644
+--- a/racket/src/cs/rumble/foreign.ss
++++ b/racket/src/cs/rumble/foreign.ss
+@@ -1974,10 +1974,15 @@
+       [(not (eq? (machine-type) (#%$target-machine)))
+        (lambda (thunk) (#%error 'call-with-c-return "cannot use while cross-compiling"))]
+       [else
+-       (let ([fptr (make-ftype-pointer ptr->ptr call)])
+-         (let ([v (ftype-ref ptr->ptr () fptr)])
+-           ;; must leave the callable code object locked
+-           v))])))
++       ;; made on first use, so that a program that never calls back
++       ;; from C allocates no executable memory for it
++       (let ([v #f])
++         (lambda (thunk)
++           (unless v
++             (let ([fptr (make-ftype-pointer ptr->ptr call)])
++               ;; must leave the callable code object locked
++               (set! v (ftype-ref ptr->ptr () fptr))))
++           (v thunk)))])))
+ 
+ ;; ----------------------------------------
+ 
+diff --git a/racket/src/rktio/rktio_signal.c b/racket/src/rktio/rktio_signal.c
+index c4a6105..b9d98a4 100644
+--- a/racket/src/rktio/rktio_signal.c
++++ b/racket/src/rktio/rktio_signal.c
+@@ -65,7 +65,7 @@ void rktio_install_os_signal_handler(rktio_t *rktio)
+ 
+   handlers_installed = 1;
+ 
+-#if defined(RKTIO_SYSTEM_UNIX)
++#if defined(RKTIO_SYSTEM_UNIX) && !defined(DISABLE_SIGNAL_HANDLERS)
+   rktio_set_signal_handler(SIGINT, user_break_hit);
+   rktio_set_signal_handler(SIGTERM, term_hit);
+   {

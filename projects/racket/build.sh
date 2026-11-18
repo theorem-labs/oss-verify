@@ -6,6 +6,11 @@
 # $OUT: static riscv64 musl, no threads, boot files and modules embedded
 # in each target.
 #
+# The targets run Chez Scheme's portable bytecode (pb) instead of riscv64
+# machine code, and install no signal handlers (pb.patch), because the
+# process model has no executable memory and no handlers but SIGINT's and
+# SIGTERM's.
+#
 # Racket CS cross-builds with a Racket and a Chez Scheme for the build
 # machine, so this first builds those natively, without threads to match
 # the target's machine type (a6le, not ta6le).
@@ -33,9 +38,13 @@ HOST_RACKET=$WORK/host-racket/bin/racket
 
 # Chez Scheme's collector (c/gc*.c) expands so many macros that llvm-cov
 # export of a coverage build needs more memory than a runner has, so it
-# is left out of coverage; the flag changes nothing in other builds
-printf 'source:*c/gc*.c=skip\n' > $WORK/profile-list
-CFLAGS="$CFLAGS -fprofile-list=$WORK/profile-list"
+# is left out of coverage, as is the C that pbchunk generates from the
+# boot files (cs/c/petiteN.c, schemeN.c, racketN.c); the flag changes
+# nothing in other builds
+printf '%s\n' 'source:*c/gc*.c=skip' 'source:*cs/c/petite[0-9]*.c=skip' \
+  'source:*cs/c/scheme[0-9]*.c=skip' 'source:*cs/c/racket[0-9]*.c=skip' \
+  > $WORK/profile-list
+CFLAGS="$CFLAGS -fprofile-list=$WORK/profile-list -DDISABLE_SIGNAL_HANDLERS"
 
 # 2. Cross-build for riscv64; `--disable-curses` avoids needing a
 # riscv64 ncurses, and zlib and LZ4 come from the Chez Scheme sources
@@ -45,7 +54,8 @@ CFLAGS="$CFLAGS -fprofile-list=$WORK/profile-list"
 # tools such as zuo that run during the build need the native compiler
 mkdir -p $WORK/target && cd $WORK/target
 $SRCDIR/configure --host=riscv64-linux-musl \
-  --enable-cs --disable-pthread --disable-curses --enable-libs \
+  --enable-cs --enable-pb \
+  --disable-pthread --disable-curses --enable-libs \
   --disable-libz --disable-liblz4 \
   --enable-racket=$HOST_RACKET --enable-scheme=$WORK/host/cs/c \
   --prefix=$WORK/target-racket --enable-sessionkey=$SESSION_KEY \
@@ -56,12 +66,12 @@ make -j$(nproc)
 make install PLT_SETUP_OPTIONS="-j 1"
 R=$WORK/target-racket
 
-# 3. The module bundle must hold riscv64 machine code. The host Racket
-# makes it in cross mode, as `make install` does for the collections, so
-# that no riscv64 program runs during the build: first compile the
-# harness modules for riscv64, then write the bundle.
+# 3. The module bundle must hold the target's portable bytecode. The host
+# Racket makes it in cross mode, as `make install` does for the
+# collections, so that no riscv64 program runs during the build: first
+# compile the harness modules for pb64l, then write the bundle.
 CROSS_RACKET="$HOST_RACKET -MCR $WORK/target/cs/c/compiled: \
-  --cross-compiler rv64le $WORK/target/cs/c \
+  --cross-compiler pb64l $WORK/target/cs/c \
   -X $R/share/racket/collects -G $R/etc/racket"
 $CROSS_RACKET -l racket/base -l compiler/cm \
   -e '(for ([f (vector->list (current-command-line-arguments))]) (managed-compile-zo (path->complete-path f)))' \
@@ -81,6 +91,6 @@ for t in eval heap-eval read print-roundtrip number regexp fasl ; do
     -DFUZZ_ADDON_DIR='"/nonexistent/racket-addon"' \
     -DFUZZ_ENTRY="\"fuzz-$t\"" $FUZZ/oss-verify-driver.c -o $WORK/driver-$t.o
   $CC $CFLAGS -static $WORK/driver-$t.o $WORK/embed-data.o \
-    $R/lib/libracketcs.a $LIB_FUZZING_ENGINE -lm \
+    $R/lib/libracketcs.a $LIB_FUZZING_ENGINE -lffi -lm \
     -o $OUT/racket_${t}_fuzzer
 done
