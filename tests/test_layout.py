@@ -79,8 +79,8 @@ ARCHIVE = archive(MEMBERS)
 
 def read_object(data):
     """The test's own reading of a relocatable ELF64 little-endian object: ({section index: (name, type, bytes or
-    None for SHT_NOBITS, size, alignment)}, [symbol: (name, value, info, shndx)], {section index: [(offset, info,
-    addend)] of its SHT_RELA relocations})."""
+    None for SHT_NOBITS, size, alignment, flags)}, [symbol: (name, value, info, shndx)], {section index: [(offset,
+    info, addend)] of its SHT_RELA relocations})."""
     shoff, = struct.unpack_from("<Q", data, 0x28)
     shnum, shstrndx = struct.unpack_from("<HH", data, 0x3C)
     headers = [struct.unpack_from("<IIQQQQIIQQ", data, shoff + 64 * i) for i in range(shnum)]
@@ -93,7 +93,7 @@ def read_object(data):
         return table[at:table.index(b"\0", at)].decode()
 
     names = body(shstrndx)
-    sections = {i: (string(names, h[0]), h[1], None if h[1] == 8 else body(i), h[5], h[8])
+    sections = {i: (string(names, h[0]), h[1], None if h[1] == 8 else body(i), h[5], h[8], h[2])
                 for i, h in enumerate(headers)}
     symtab = next(i for i, h in enumerate(headers) if h[1] == 2)
     strings, table = body(headers[symtab][6]), body(symtab)
@@ -209,12 +209,17 @@ def out_tree(builds, copies="/tmp/ov/af.AAAAAA", local_call=LOCAL_CALL, placemen
 
 
 def expected_tables(copies, local_call=LOCAL_CALL):
-    """sections.tsv and calls.tsv of out_tree's record, from the test's own reading of its objects. A map line takes
-    the section of its name in the objects of its file and member that every assignment of the map's lines of that
-    name gives it: an assignment gives each line its own section, as large as the line, and the lines of the sections
-    of one object those sections in their order in the object. Any other line has no sha256, the map's size and
-    alignment, and no calls. calls.tsv has each call and each R_RISCV_TPREL_HI20, and for a global, the global (else
-    the first weak) symbol of its name that an object the map took defines in a section the map took."""
+    """sections.tsv and calls.tsv of out_tree's record, from the test's own reading of its objects. A map line can be
+    each section of its name in the objects of its file and member that an assignment of the map's lines of that name
+    gives it: an assignment gives each line its own section, as large as the line, and the lines of the sections of
+    one object those sections in their order in the object. A line that can be one section is that section. A line
+    that can be two or more alike ones has the first one's sha256, size, alignment and calls, but neither a local
+    reference nor a definition reaches into it: alike sections hold bytes (not SHT_NOBITS), the same bytes, size,
+    alignment and flags, in objects of one EF_RISCV_RVC, no global or weak symbol, and the same relocations of the
+    types that relaxation or calls.tsv reads, each followed or not by an R_RISCV_RELAX, whose symbols are global or
+    weak ones of one name. Any other line has no sha256, the map's size and alignment, and no calls. calls.tsv has
+    each call and each R_RISCV_TPREL_HI20, and for a global, the global (else the first weak) symbol of its name that
+    an object the map took defines in a section the map took."""
     objects = {("/work/lib/libshim.a", "a.o"): [REAL, STORES],
                ("/work/lib/libshim.a", "shim-local-access.o"): [LOCAL_ACCESS],
                (f"{copies}/2-shim-local-call.o", None): [local_call], ("/work/obj/shim-rustc-v0.o", None): [V0]}
@@ -228,8 +233,34 @@ def expected_tables(copies, local_call=LOCAL_CALL):
         file, member = (where[:where.index("(")], where[where.index("(") + 1:-1]) if where.endswith(")") else (
             where, None)
         named.append((file, member, section, linked, map_align))
-    # Each line's section: the one that every assignment of the lines of its name gives it, of all the ways to give
-    # them distinct sections of that name.
+
+    def alike(where, choices):
+        # Whether the sections `choices` [(i, index)] of the objects of `where` are alike.
+        seen = set()
+        for i, index in choices:
+            headers, symbols, relocations = readings[(where, i)]
+            _, kind, body, size, align, flags = headers[index]
+            if kind == 8 or any(info >> 4 in (1, 2) and shndx == index for _, _, info, shndx in symbols):
+                return False
+            found = sorted(relocations.get(index, []), key=lambda r: r[0])
+            read = []
+            for k, (offset, info, addend) in enumerate(found):
+                if info & 0xFFFFFFFF not in (18, 19, 29, 32, 43, 51, 62, 63, 64, 65):
+                    continue
+                name = None
+                if info >> 32:
+                    name, _, symbol_info, shndx = symbols[info >> 32]
+                    if symbol_info >> 4 not in (1, 2):
+                        return False
+                    name = (name, symbol_info >> 4 == 2 and shndx == 0)
+                relax = k + 1 < len(found) and found[k + 1][1] & 0xFFFFFFFF == 51
+                read.append((offset, info & 0xFFFFFFFF, addend, name, relax))
+            rvc = struct.unpack_from("<I", objects[where][i], 0x30)[0] & 1
+            seen.add((body, size, align, flags, rvc, tuple(read)))
+        return len(seen) == 1
+
+    # The sections that each line can be, of all the ways to give the lines of its name distinct sections of that
+    # name, and the one it takes: (section, whether it is the only one), or None.
     taken = collections.defaultdict(list)  # {(file, member, section): [index in named]}
     for k, (file, member, section, _, _) in enumerate(named):
         taken[(file, member, section)].append(k)
@@ -244,16 +275,22 @@ def expected_tables(copies, local_call=LOCAL_CALL):
             if fits and ordered:
                 for choices, choice in zip(given, assignment):
                     choices.add(choice)
-        chosen.update((k, next(iter(choices)) if len(choices) == 1 else None) for k, choices in zip(ks, given))
-    sections, located, rows = [], {}, {}
+        for k, choices in zip(ks, given):
+            choices = sorted(choices)
+            one = len(choices) == 1
+            chosen[k] = (choices[0], one) if one or (len(choices) > 1 and alike((file, member), choices)) else None
+    sections, located, twins, rows = [], {}, {}, {}
     for k, (file, member, section, linked, map_align) in enumerate(named):
         digest, size, align = "", linked, map_align
         if chosen[k] is not None:
-            i, index = chosen[k]
-            _, _, body, size, align = readings[((file, member), i)][0][index]
+            (i, index), one = chosen[k]
+            _, _, body, size, align, _ = readings[((file, member), i)][0][index]
             digest = "" if body is None else sha(body)
-            located[len(sections)] = ((file, member), i, index, section)
-            rows[((file, member), i, index)] = len(sections)
+            if one:
+                located[len(sections)] = ((file, member), i, index, section)
+                rows[((file, member), i, index)] = len(sections)
+            else:
+                twins[len(sections)] = ((file, member), i, index, section)
         key_file = ORIGINAL if file.endswith("/2-shim-local-call.o") else file
         sections.append(f"{file}\t{key_file}\t{member or '-'}\t{section}\t{digest}\t{size}\t{align}\n")
     # The definitions: a global symbol first, then the first in map order.
@@ -267,7 +304,7 @@ def expected_tables(copies, local_call=LOCAL_CALL):
                 if name not in defined or rank < defined[name][0]:
                     defined[name] = (rank, f"{row}\t0x{value:x}")
     calls = []
-    for row, (where, i, index, section) in sorted(located.items()):
+    for row, (where, i, index, section) in sorted({**located, **twins}.items()):
         if not section.startswith(".text"):
             continue
         _, symbols, relocations = readings[(where, i)]
@@ -1605,7 +1642,7 @@ def test_the_script_refuses_a_file_name_it_cannot_quote():
 
 # ── the append mode: the links ───────────────────────────────────────────────────────────────────────────────────────
 
-def relocatable(functions, variables=(), weak=(), ifunc=(), labels=()):
+def relocatable(functions, variables=(), weak=(), ifunc=(), labels=(), local=()):
     """A riscv64 relocatable ELF64 object of [(name, bytes, alignment, [(offset, called function)])]: a section
     .text.<name> for each, a global function <name> at its start, and for each call an R_RISCV_CALL_PLT relocation and
     an R_RISCV_RELAX at its offset, as clang writes a call that lld may relax, against a symbol of this object or an
@@ -1616,7 +1653,8 @@ def relocatable(functions, variables=(), weak=(), ifunc=(), labels=()):
     (SHF_TLS, STT_TLS), and a .tbss one holds no bytes (SHT_NOBITS, of the size of `bytes`). `labels` [(name,
     function, offset)] adds a global function <name> that many bytes into the section of that function, as an
     assembly file with several functions in one section has. The symbols that `weak` names are weak ones, defined
-    or undefined, and the functions that `ifunc` names are of type STT_GNU_IFUNC."""
+    or undefined, the functions that `ifunc` names are of type STT_GNU_IFUNC, and the functions that `local` names
+    are local ones (STB_LOCAL), as a static function is."""
     defined = [name for name, _, _, _ in functions] + [name for _, _, _, name in variables]
     inner = {name: (next(k for k, f in enumerate(functions) if f[0] == function), offset)
              for name, function, offset in labels}
@@ -1631,8 +1669,8 @@ def relocatable(functions, variables=(), weak=(), ifunc=(), labels=()):
     for k, name in enumerate(names):
         if k < len(defined):
             kind = (0xA if name in ifunc else 0x2) if k < len(functions) else 0x6 if sections[k][2] & 0x400 else 0x1
-            symtab.append(struct.pack("<IBBHQQ", len(strtab), (2 if name in weak else 1) << 4 | kind, 0, k + 1, 0,
-                                      len(sections[k][3])))
+            bind = 0 if name in local else 2 if name in weak else 1
+            symtab.append(struct.pack("<IBBHQQ", len(strtab), bind << 4 | kind, 0, k + 1, 0, len(sections[k][3])))
         elif name in inner:
             symtab.append(struct.pack("<IBBHQQ", len(strtab), 1 << 4 | 0x2, 0, inner[name][0] + 1, inner[name][1], 0))
         else:
@@ -2193,7 +2231,8 @@ def test_every_line_of_a_name_is_ambiguous_when_the_search_for_its_assignments_p
     # can hold, and after it n lines of 8 bytes, which the sections of n members REAL can each hold: every assignment
     # gives the first line STORES's section, and there are n! of them, each at least one step of the search. With n!
     # past ASSIGNMENT_STEPS the search stops, and every line of that name is ambiguous, the first one too; a line of
-    # another name is not.
+    # another name is not. Below the bound a line of 8 bytes is ambiguous too: the sections of the members REAL have
+    # the same bytes, but each defines the global __rust_alloc, which definitions would need to place.
     def described(n):
         name = "/work/lib.a(a.o):(.text.__rust_alloc)"
         text = (map_line(0x11000, 0x1A, 2, name) + "".join(map_line(0x1101C + 8 * k, 8, 2, name) for k in range(n))
@@ -2210,6 +2249,73 @@ def test_every_line_of_a_name_is_ambiguous_when_the_search_for_its_assignments_p
     while math.factorial(n) <= layout.ASSIGNMENT_STEPS:
         n += 1
     assert described(n) == [""] * (n + 1) + [sha(b"\1" * 8)]
+
+
+# The bytes of the section .text.ctor of ctor(), whose code calls init at 0x0 and at 0x8.
+CTOR = bytes(range(16))
+
+
+def ctor(body=CTOR, align=4, calls=((0x0, "init"), (0x8, "init")), bind="local", functions=()):
+    """An object with a function ctor at the start of .text.ctor, which holds `body` and the calls `calls`
+    (relocatable): a local function, as asan.module_ctor is, or a global or weak one by `bind`; and after it the
+    functions `functions` (relocatable), of that binding too."""
+    every = ["ctor"] + [function[0] for function in functions]
+    return relocatable([("ctor", body, align, list(calls))] + list(functions), weak=every if bind == "weak" else (),
+                       local=every if bind == "local" else ())
+
+
+def ctor_lines(first, second):
+    """The sha256 of each of two map lines lib.a(a.o):(.text.ctor) of 0x10 bytes, in an archive whose two members
+    named a.o are `first` and `second`, and their calls [(row, offset, kind, target)]."""
+    text = "".join(map_line(address, 0x10, 4, "/work/lib.a(a.o):(.text.ctor)") for address in (0x11000, 0x11010))
+    lib = {"/work/lib.a": archive([("a.o", first), ("a.o", second)])}
+    inputs, calls = layout.describe(layout.read_map(text), layout.Objects(lib.__getitem__), lambda f: f, set(),
+                                    layout.Output([], [], {}))
+    return [i.sha256 for i in inputs], [(c.row, c.offset, c.kind, c.target) for c in calls]
+
+
+def test_lines_whose_possible_sections_have_the_same_bytes_get_those_bytes():
+    # OSSV-675. AddressSanitizer gives each object a local function asan.module_ctor, in a section
+    # .text.asan.module_ctor, which calls __asan_init. The tester's librk.a holds two members named ov_rk.o, whose two
+    # such sections have one size, so the sizes leave each of the two map lines either section. The two have the same
+    # bytes, alignment and calls, and define no global symbol: whichever the link took, a line has those bytes and
+    # those calls. At f7627064 neither line had bytes, so layout check listed asan.module_ctor as "changed" in the
+    # entries that took both, though its bytes did not change. Here two members named a.o hold such a .text.ctor, and
+    # the first also a function user that calls ctor. The link puts the first line in jal's reach of init and the
+    # second out of it: each line has the calls with this link's deltas. user's call of ctor, a local reference,
+    # reaches neither line: the tree does not know which of them is the first member's section.
+    user = ("user", b"\5" * 8, 4, [(0x0, "ctor")])
+    lib = {"/work/lib.a": archive([("a.o", ctor(functions=[user])), ("a.o", ctor())])}
+    name = "/work/lib.a(a.o):(.text.ctor)"
+    text = (map_line(0x11000, 8, 4, name) + map_line(0x11008, 8, 4, "/work/lib.a(a.o):(.text.user)")
+            + map_line(0x211000, 0x10, 4, name))
+    inputs, calls = layout.describe(layout.read_map(text), layout.Objects(lib.__getitem__), lambda f: f, set(),
+                                    layout.Output([], [], {"init": 0x11100}))
+    assert [(i.sha256, i.size, i.align) for i in inputs] == [(sha(CTOR), 0x10, 4), (sha(b"\5" * 8), 8, 4),
+                                                              (sha(CTOR), 0x10, 4)]
+    assert [(c.row, c.offset, c.kind, c.target, c.delta) for c in calls] == [
+        (0, 0x0, "global", "init", 0), (0, 0x8, "global", "init", 4), (1, 0x0, "local", None, None),
+        (2, 0x0, "global", "init", 0), (2, 0x8, "global", "init", 0)]
+
+
+@pytest.mark.parametrize("first, second", [
+    (ctor(), ctor(body=bytes(range(1, 17)))),
+    (ctor(), ctor(align=8)),
+    (ctor(), ctor(bind="global")),
+    (ctor(), ctor(bind="weak")),
+    (ctor(), ctor(calls=[(0x0, "init"), (0x8, "fini")])),
+    (ctor(calls=[(0x0, "init"), (0x8, "helper")], functions=[("helper", b"\6" * 8, 4, [])]),) * 2,
+], ids=["bytes", "alignment", "global", "weak", "target", "local-call"])
+def test_lines_whose_possible_sections_are_not_alike_stay_ambiguous(first, second):
+    # OSSV-675. As in the test before, two members named a.o hold a section .text.ctor of 0x10 bytes each, and each
+    # of two map lines of 0x10 bytes can be either section: two copies of ctor() give both lines their bytes and
+    # calls. Here the two sections differ in their bytes (of one size), their alignment, a global or weak symbol that
+    # one of them defines (definitions would need to know which section the link took), or the target of a call; or
+    # both call a local function helper, which lies in each member's own section. Which section a line is changes its
+    # line of sections.tsv or calls.tsv, so both lines stay ambiguous, with no bytes and no calls.
+    alike = [(row, offset, "global", "init") for row in (0, 1) for offset in (0x0, 0x8)]
+    assert ctor_lines(ctor(), ctor()) == ([sha(CTOR)] * 2, alike)
+    assert ctor_lines(first, second) == (["", ""], [])
 
 
 def test_append_links_normally_when_the_read_only_data_grew_past_its_room(tmp_path, monkeypatch, capsys):

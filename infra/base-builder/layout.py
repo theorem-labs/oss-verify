@@ -19,8 +19,8 @@ target with a record it writes the layout tree DIR/<build>/<target>/:
     sections.tsv   one line for each line of map that names a file, in the same order: the file as the map names
                    it, key_file (the file the pairing keys on: for an allocation-failure link's copy, its original),
                    the member or -, the section, the sha256 of the section's bytes before relocation (empty for
-                   SHT_NOBITS, for a section the object does not hold, such as COMMON, and for a line whose section
-                   the objects do not tell, describe), its input size and its alignment
+                   SHT_NOBITS, for a section the object does not hold, such as COMMON, and for a line whose bytes the
+                   objects do not tell, describe), its input size and its alignment
     calls.tsv      each call (R_RISCV_CALL, R_RISCV_CALL_PLT) and each thread-local access (R_RISCV_TPREL_HI20, the
                    lui of a local-exec access) of each .text input section, in the order lld reads them (by offset):
                    its row in sections.tsv, its offset, its type (call or tprel), relax (1 when the next relocation is
@@ -115,6 +115,8 @@ R_RISCV_TLSDESC = (62, 63, 64, 65)
 LINE_TYPES = {R_RISCV_CALL: "call", R_RISCV_CALL_PLT: "call", R_RISCV_TPREL_HI20: "tprel"}
 # The relocations whose target decides whether lld's relaxation removes bytes (relaxation).
 TARGETED = (R_RISCV_CALL, R_RISCV_CALL_PLT, R_RISCV_TPREL_HI20, R_RISCV_TPREL_ADD)
+# The relocations that relaxation, most_removed or a line of calls.tsv reads (alike).
+MODELED = TARGETED + (R_RISCV_ALIGN, R_RISCV_RELAX) + R_RISCV_TLSDESC
 # The kinds of the target of a line of calls.tsv (module docstring).
 KINDS = ("local", "global", "weak", "ifunc")
 EF_RISCV_RVC = 0x1
@@ -569,18 +571,18 @@ def resolve(name, wraps):
 
 
 def assigned(sizes, candidates):
-    """The section of each map line of one (file, member, section), in map order, or None for an ambiguous line
-    ([(instance, Elf, Section) or None]): `sizes` are the lines' linked sizes, and `candidates` the sections of that
-    name (Objects.sections).
+    """The candidates that each map line of one (file, member, section) can be, in map order, each in the order of
+    `candidates` ([[(instance, Elf, Section)]]), or None when the search tells none: `sizes` are the lines' linked
+    sizes, and `candidates` the sections of that name (Objects.sections).
 
     An assignment gives each line a candidate as large as it (lld only removes bytes), never the candidate of another
     line (lld takes each section once), and gives the lines of the candidates of one object those candidates in their
     order in the object (lld keeps that order, though --gc-sections may drop some of them). It orders nothing between
     two objects, and so assumes nothing of where the lines of one member lie in the map: lld's map lists the members
-    of one name in the order lld took them, which the tree does not know. A line is paired with a candidate when
-    every assignment gives it that candidate. Every line is ambiguous when no assignment exists, and when the search,
+    of one name in the order lld took them, which the tree does not know. A line can be each candidate that an
+    assignment gives it, so the search finds every assignment. None when no assignment exists, and when the search,
     which gives each line in map order each candidate that it can have, gives more than ASSIGNMENT_STEPS candidates
-    in all."""
+    in all: every line of that name is then ambiguous."""
     places, groups = [], collections.defaultdict(list)  # groups: {instance: [index in candidates] in object order}
     for j, (instance, _, _) in enumerate(candidates):
         places.append(len(groups[instance]))
@@ -614,7 +616,7 @@ def assigned(sizes, candidates):
         j = stack[-1].pop()
         steps += 1
         if steps > ASSIGNMENT_STEPS:
-            return [None] * len(sizes)
+            return None
         instance = candidates[j][0]
         chosen.append((j, last[instance]))
         free -= places[j] - last[instance]
@@ -624,10 +626,44 @@ def assigned(sizes, candidates):
             continue
         for line, (j, _) in enumerate(chosen):
             given[line].add(j)
-        if all(len(found) > 1 for found in given):
-            # No assignment that the search may still find can pair a line.
-            return [None] * len(sizes)
-    return [candidates[next(iter(found))] if len(found) == 1 else None for found in given]
+    if not all(given):
+        return None
+    return [[candidates[j] for j in sorted(found)] for found in given]
+
+
+def alike(candidates):
+    """Whether the sections `candidates` ([(instance, Elf, Section)]), any of which a map line may be, give it the
+    same line of sections.tsv and the same lines of calls.tsv (describe): none is SHT_NOBITS; all have the same
+    bytes, size, alignment and flags, in objects that agree on EF_RISCV_RVC; none defines a global or weak symbol
+    (definitions would need to know which one the link took); and all have the same relocations of the types that
+    relaxation, most_removed or a line of calls.tsv reads (MODELED), in lld's order: the same offset, type and addend,
+    and whether the next relocation is R_RISCV_RELAX. Each symbol that one of those relocations names must be a
+    global or weak one of one name, and of one kind as describe gives it (weak for an undefined weak one), in all of
+    them: a local or section symbol names a section of its own object, which differs from one candidate to the
+    next."""
+    headers = {(section.type, section.size, section.align, section.flags, elf.flags & EF_RISCV_RVC,
+                hashlib.sha256(elf.body(section)).digest()) for _, elf, section in candidates}
+    if len(headers) != 1 or next(iter(headers))[0] == SHT_NOBITS:
+        return False
+    read = set()
+    for _, elf, section in candidates:
+        if any(symbol.shndx == section.index and symbol.bind in (STB_GLOBAL, STB_WEAK) for symbol in elf.symbols()):
+            return False
+        ordered = sorted(elf.relocations(section.index), key=lambda item: item[0].offset)
+        found = []
+        for k, (relocation, table) in enumerate(ordered):
+            if relocation.type not in MODELED:
+                continue
+            named = None
+            if relocation.symbol:
+                symbol = elf.symbol(table, relocation.symbol)
+                if symbol.bind not in (STB_GLOBAL, STB_WEAK):
+                    return False
+                named = (symbol.name, symbol.bind == STB_WEAK and symbol.shndx == SHN_UNDEF)
+            relax = k + 1 < len(ordered) and ordered[k + 1][0].type == R_RISCV_RELAX
+            found.append((relocation.offset, relocation.type, relocation.addend, named, relax))
+        read.add(tuple(found))
+    return len(read) == 1
 
 
 def describe(lines, objects, key_file, wraps, output=None):
@@ -636,15 +672,19 @@ def describe(lines, objects, key_file, wraps, output=None):
     wraps, and `output` its binary's Output (read_output), or None, for a link whose deltas are never used.
 
     The candidates of a map line are the sections of its name in the objects of its file and member
-    (Objects.sections), and its section is the candidate that every assignment of the map's lines of that (file,
+    (Objects.sections), and the line can be each candidate that an assignment of the map's lines of that (file,
     member, section) to those candidates gives it (assigned). lld only removes bytes, takes each section once, and
     keeps the sections of one name of one object in their order in the object, but lists the archive members of one
-    name in the order it took them, which the tree does not know. Every other line is ambiguous: lld took only some
-    of the candidates (--gc-sections, or archive members it did not extract), or they lie in two or more members of
-    one name, and the sizes leave the line two or more of them; or no assignment fits; or the search for the
-    assignments took more than its bound. An ambiguous line, as a line with no candidate (COMMON, or a piece of
-    .eh_frame), gets no sha256 (so it never counts as same bytes), the map's size and alignment, no calls, and no
-    symbols for definitions.
+    name in the order it took them, which the tree does not know. A line that can be one candidate is that section.
+    A line that can be two or more (lld took only some of the candidates, through --gc-sections or the archive
+    members it extracted, or they lie in two or more members of one name) is a twin line when they are alike (alike):
+    asan.module_ctor in two archive members of one name, for one. A twin line gets their sha256, size and alignment,
+    and the calls of the first of them, with this link's deltas; as the tree does not know which of them the link
+    took, nothing reaches into it: a local reference from another section into it has no target row, and it holds
+    no symbol for definitions. Every other line is ambiguous: its candidates are not alike, or no assignment fits, or
+    the search for the assignments took more than its bound. An ambiguous line, as a line with no candidate (COMMON,
+    or a piece of .eh_frame), gets no sha256 (so it never counts as same bytes), the map's size and alignment, no
+    calls, and no symbols for definitions.
 
     Each call and each thread-local access of a .text input section is a Call; a global one names its definition in
     the link's objects (definitions). Its delta comes from relaxation, with the addresses of this link: those of the
@@ -659,31 +699,36 @@ def describe(lines, objects, key_file, wraps, output=None):
     with no `output`. The relaxation of a section depends on the target deltas of its calls, so each round relaxes
     every section with the target deltas of the round before, from 0, until they settle, as lld's passes do; past
     lld's last pass, none of them is known."""
-    inputs, located, rows = [], {}, {}
+    inputs, located, twins, rows = [], {}, {}, {}
     named = collections.defaultdict(list)  # {(file, member, section): [the row of each of its lines, in map order]}
     for row, line in enumerate(lines):
         named[(line.file, line.member, line.section)].append(row)
-    paired = {}
+    possible = {}  # {row: the candidates that its line can be (assigned), or None}
     for name, name_rows in named.items():
-        paired.update(zip(name_rows, assigned([lines[row].size for row in name_rows], objects.sections(*name))))
+        given = assigned([lines[row].size for row in name_rows], objects.sections(*name))
+        possible.update(zip(name_rows, given or [None] * len(name_rows)))
     for row, line in enumerate(lines):
         digest, size, align = "", line.size, line.align
-        chosen = paired[row]
-        if chosen is not None:
-            instance, elf, section = chosen
+        choices = possible[row]
+        if choices is not None and (len(choices) == 1 or alike(choices)):
+            instance, elf, section = choices[0]
             if section.type != SHT_NOBITS:
                 digest = hashlib.sha256(elf.body(section)).hexdigest()
             size, align = section.size, section.align
-            located[row] = (instance, elf, section)
-            rows[(line.file, line.member, instance, section.index)] = row
+            if len(choices) == 1:
+                located[row] = choices[0]
+                rows[(line.file, line.member, instance, section.index)] = row
+            else:
+                twins[row] = choices[0]
         inputs.append(Input(row, line.address, line.size, line.file,
                             (key_file(line.file), member_text(line.member), line.section), line.member, line.section,
                             digest, size, align))
     # Each relocation of each .text input section and of each other section of code in lld's order, by offset (lld
     # sorts them stably): (Relocation, a Call for each one whose target decides a relaxation (TARGETED) or None, the
-    # offset of the Call's symbol in its section, which lld moves, or 0).
+    # offset of the Call's symbol in its section, which lld moves, or 0). A twin line has the relocations of the first
+    # of its candidates, which name no local symbol (alike).
     relocated = {}
-    for row, (instance, elf, section) in sorted(located.items()):
+    for row, (instance, elf, section) in sorted({**located, **twins}.items()):
         line = lines[row]
         if not (is_text(line.section) or section.flags & SHF_EXECINSTR):
             continue
