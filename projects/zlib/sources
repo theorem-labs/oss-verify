@@ -24,7 +24,10 @@ file	ext/oss-fuzz-zlib/projects/zlib/gzio_fuzzer.c	https://raw.githubusercontent
 patch	ext/oss-fuzz-zlib	zlib-gzio_fuzzer.0003-oss-fuzz-16316.patch
 patch	ext/oss-fuzz-zlib	zlib-gzio_fuzzer.0004-oss-fuzz-16411.patch
 link	targets/zlib-gzio_fuzzer/gzio_fuzzer.c	ext/oss-fuzz-zlib/projects/zlib/gzio_fuzzer.c
-file	targets/zlib-minigzip_fuzzer/minigzip_fuzzer.c	https://raw.githubusercontent.com/google/oss-fuzz/955c6866c152471d78c7472c0f1f354343548b9f/projects/zlib/minigzip_fuzzer.c	6fbd421114a7c9754b2d33e0fd9171664b323ff22fc6464da755d2dbec03211d
+file	ext/oss-fuzz-zlib/projects/zlib/minigzip_fuzzer.c	https://raw.githubusercontent.com/google/oss-fuzz/955c6866c152471d78c7472c0f1f354343548b9f/projects/zlib/minigzip_fuzzer.c	6fbd421114a7c9754b2d33e0fd9171664b323ff22fc6464da755d2dbec03211d
+patch	ext/oss-fuzz-zlib	zlib-minigzip_fuzzer.0002-oss-fuzz-16428.patch
+patch	ext/oss-fuzz-zlib	zlib-minigzip_fuzzer.0003-oss-fuzz-16429.patch
+link	targets/zlib-minigzip_fuzzer/minigzip_fuzzer.c	ext/oss-fuzz-zlib/projects/zlib/minigzip_fuzzer.c
 file	targets/zlib-zlib_uncompress2_fuzzer/zlib_uncompress2_fuzzer.cc	https://raw.githubusercontent.com/google/oss-fuzz/955c6866c152471d78c7472c0f1f354343548b9f/projects/zlib/zlib_uncompress2_fuzzer.cc	afff986a00ba4cd11d9b72e9ccc9c103da0ee36712e92b40b89f9df5e914f6d4
 file	targets/zlib-zlib_uncompress3_fuzzer/zlib_uncompress3_fuzzer.cc	https://raw.githubusercontent.com/google/oss-fuzz/955c6866c152471d78c7472c0f1f354343548b9f/projects/zlib/zlib_uncompress3_fuzzer.cc	be171ee38f2c132fe9f99a9b0b9a2bbae2d9e41806719afafdf1e7cb5a652a48
 file	targets/zlib-zlib_uncompress_fuzzer/zlib_uncompress_fuzzer.cc	https://raw.githubusercontent.com/google/oss-fuzz/955c6866c152471d78c7472c0f1f354343548b9f/projects/zlib/zlib_uncompress_fuzzer.cc	518f9e2d49f4d64ffff78fafe3422d2441ce23e357b62d0e8c661fa6c7d3d9a9
