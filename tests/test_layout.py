@@ -1734,7 +1734,7 @@ def executable_of(sections, loads, symbols):
 
 
 def fake_linker(cwd, ro_end=0x10300, misplace=None, extra_load=False, backward=None, far=None, grown=None,
-                far_once=None, unrelaxed=None, hidden=(), made=None, relaxed=None):
+                far_once=None, unrelaxed=None, hidden=(), made=None, relaxed=None, placed=None):
     """The commands of the append mode (layout.run), with a stand-in for the compiler driver and lld, in `cwd`. For
     -###, the linker's line. Else a link of the objects and archives the command names: it lays out their .text
     sections one after another in input order, or as an append script puts them (each pattern's sections from the
@@ -1751,7 +1751,9 @@ def fake_linker(cwd, ro_end=0x10300, misplace=None, extra_load=False, backward=N
     longer relaxes wherever .text puts the function; a script's address below the end of what came before it then
     fails as lld fails. The executable has no global symbol for the functions `hidden` names, as lld writes a symbol
     of hidden visibility as a local one, and it has the symbols `made` ({name: address}) that the linker makes, which
-    no object defines."""
+    no object defines. `placed`, a dict, gets after each link {(the sha256 of the object or archive member, section):
+    address} of its .text sections: which object's section each address holds, which the map does not tell for two
+    archive members of one name."""
     extra = unrelaxed or {}
     scripted = []
 
@@ -1759,6 +1761,7 @@ def fake_linker(cwd, ro_end=0x10300, misplace=None, extra_load=False, backward=N
         if "-###" in words:
             return 0, ' "/usr/bin/clang-20" "-cc1"\n "/usr/bin/ld.lld" "-o" "a.out" "--wrap=getenv" "main.o"\n'
         found = []  # (pattern's file, the map's name, section, size, alignment)
+        owners = []  # the sha256 of the object or member of each of found
         tls = []  # (the map's name, section, size, alignment)
         for word in words[1:]:
             if word.endswith(".o"):
@@ -1771,6 +1774,7 @@ def fake_linker(cwd, ro_end=0x10300, misplace=None, extra_load=False, backward=N
             for file, named, data in members:
                 sections = layout.Elf(data, word).sections
                 found += [(file, named, s.name, s.size, s.align) for s in sections if layout.is_text(s.name)]
+                owners += [hashlib.sha256(data).hexdigest() for s in sections if layout.is_text(s.name)]
                 tls += [(named, s.name, s.size, s.align) for s in sections if s.flags & 0x400]
 
         def linked(k):
@@ -1810,6 +1814,9 @@ def fake_linker(cwd, ro_end=0x10300, misplace=None, extra_load=False, backward=N
                 at = (at + align - 1) // align * align
                 addresses[k], at = at, at + linked(k)
         end = max([addresses[k] + linked(k) for k in addresses] + ([closing] if closing else []))
+        if placed is not None:
+            placed.clear()
+            placed.update({(owners[k], found[k][2]): addresses[k] for k in addresses})
         thread_local, at = [], end  # (address, the map's name, section, size, alignment)
         for named, section, size, align in sorted(tls, key=lambda t: t[1].startswith(".tbss")):
             at = (at + align - 1) // align * align
@@ -2509,6 +2516,48 @@ def test_append_names_the_call_it_cannot_test_when_the_check_link_changes_a_kept
     assert code == 1
     assert "caller (main.o)" in error and "offset 0x8 (i)" in error
     assert not (tmp_path / "placement.tsv").exists()
+
+
+def test_a_kept_twin_is_at_its_own_members_base_address_when_lld_takes_the_members_in_another_order(tmp_path,
+                                                                                                    monkeypatch):
+    # OSSV-675 testing. lib.a holds two members named m.o, and each holds helper_z, a static function with the same
+    # bytes, which its own member's other function calls through a local symbol. At the base lld took member 2 first
+    # (the link named ov_rk2 alone, which calls ov_rk1 of member 1); in the change it takes member 1 first (the link
+    # names ov_rk1 too). Here the archive's order stands for lld's extraction order, which this stand-in follows.
+    # R1: each function whose section has the same bytes keeps the base address of its own section, or moves with a
+    # cause; R3's check fails when one does not. At a83d118e the two helper_z lines are twins (alike): the append mode
+    # keeps them with one pattern, which puts member 1's helper_z where member 2's was at the base and the other way
+    # round, and layout check passes. ov_rk1 and ov_rk2 are kept, yet each one's call now reaches another address.
+    # On the real toolchain: tests/fixtures/example with rkz-base and rkz-new (dispatch://OSSV-675 test handoff).
+    m1 = relocatable([("helper_z", b"\7" * 0x10, 4, []), ("ov_rk1", b"\1" * 0x20, 4, [(0x4, "helper_z")])],
+                     local=("helper_z",))
+    m2 = relocatable([("ov_rk2", b"\2" * 0x20, 4, [(0x4, "helper_z"), (0xC, "ov_rk1")]),
+                      ("helper_z", b"\7" * 0x10, 4, [])], local=("helper_z",))
+    command = ["clang", "main.o", "lib.a"]
+    for name, new, members in (("old", False, [("m.o", m2), ("m.o", m1)]), ("work", True, [("m.o", m1), ("m.o", m2)])):
+        (tmp_path / name).mkdir()
+        calls = [(0x8, "ov_rk1"), (0x10, "ov_rk2")] if new else [(0x8, "ov_rk2")]
+        (tmp_path / name / "main.o").write_bytes(relocatable([("entry", b"\x99" * (0x50 if new else 0x40), 4, calls)]))
+        (tmp_path / name / "lib.a").write_bytes(archive(members))
+    owner = {hashlib.sha256(m1).hexdigest(): "member 1", hashlib.sha256(m2).hexdigest(): "member 2"}
+    old, before, after = tmp_path / "old", {}, {}
+    assert fake_linker(old, placed=before)(command + [f"-Wl,-Map={old / 'map'}", "-o", str(old / "fuzz")]) == (0, "")
+    entry = tree_entry(tmp_path / "base", old, (old / "map").read_text(), (old / "fuzz").read_bytes())
+    monkeypatch.chdir(tmp_path / "work")
+    monkeypatch.setattr(layout, "run", fake_linker(tmp_path / "work", placed=after))
+    (tmp_path / "links").mkdir()
+    assert layout.main(["append", "--base", str(entry), "--work", str(tmp_path / "links"), "--script",
+                        str(tmp_path / "script.ld"), "--placement", str(tmp_path / "placement.tsv"), "--wraps",
+                        str(tmp_path / "wraps"), "--"] + command) == 0
+    base_at = {(owner[o], section): address for (o, section), address in before.items() if o in owner}
+    now_at = {(owner[o], section): address for (o, section), address in after.items() if o in owner}
+    kept = {(row[2], int(row[9], 16)) for row in (line.split("\t") for line in
+                                                 (tmp_path / "placement.tsv").read_text().splitlines())
+            if row[8] == "kept"}
+    # Each section the append mode keeps is, in the link it made, its own member's section of the base address.
+    for (who, section), address in sorted(now_at.items()):
+        if (section, address) in kept:
+            assert base_at[(who, section)] == address, (who, section, hex(base_at[(who, section)]), hex(address))
 
 
 @pytest.mark.parametrize("words", [["--help"], ["collect", "--help"], ["check", "--help"], ["wraps", "--help"],
