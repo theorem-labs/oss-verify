@@ -160,12 +160,13 @@ def map_lines(copies):
     return [
         (0x10200, 0x24, 4, "<internal>:(.note.gnu.build-id)"),
         (0x10224, 0x10, 8, "/work/lib/libshim.a(a.o):(.eh_frame)"),
-        (0x11000, 0x4, 4, "/work/lib/libshim.a(a.o):(.text.__rust_alloc)"),
-        (0x11004, 0x1a, 2, "/work/lib/libshim.a(a.o):(.text.__rust_alloc)"),
-        (0x11020, 0x8, 2, "/work/lib/libshim.a(a.o):(.text.__rust_dealloc)"),
-        # Smaller than its section, as lld's relaxation makes a line: sections.tsv gives the object's input size.
-        (0x11028, 0x4, 2, "/work/lib/libshim.a(a.o):(.text.__rust_realloc)"),
-        (0x11030, 0x2e, 2, "/work/lib/libshim.a(shim-local-access.o):(.text.__rust_alloc)"),
+        # No relocation of these objects lets lld's relaxation remove a byte (expected_tables), so lld gives each of
+        # their sections of code its input size in every link.
+        (0x11000, 0x8, 4, "/work/lib/libshim.a(a.o):(.text.__rust_alloc)"),
+        (0x11008, 0x1a, 2, "/work/lib/libshim.a(a.o):(.text.__rust_alloc)"),
+        (0x11022, 0x8, 2, "/work/lib/libshim.a(a.o):(.text.__rust_dealloc)"),
+        (0x1102a, 0x8, 2, "/work/lib/libshim.a(a.o):(.text.__rust_realloc)"),
+        (0x11032, 0x2e, 2, "/work/lib/libshim.a(shim-local-access.o):(.text.__rust_alloc)"),
         (0x11060, 0x20, 2,
          "/work/lib/libshim.a(shim-local-access.o):(.text._RNvCsdMW3fuGnryS_17shim_local_access5parse)"),
         (0x11080, 0x8, 2, f"{copy}:(.text.__rust_alloc)"),
@@ -211,19 +212,25 @@ def out_tree(builds, copies="/tmp/ov/af.AAAAAA", local_call=LOCAL_CALL, placemen
 def expected_tables(copies, local_call=LOCAL_CALL):
     """sections.tsv and calls.tsv of out_tree's record, from the test's own reading of its objects. A map line can be
     each section of its name in the objects of its file and member that an assignment of the map's lines of that name
-    gives it: an assignment gives each line its own section, as large as the line, and the lines of the sections of
-    one object those sections in their order in the object. A line that can be one section is that section. A line
-    that can be two or more alike ones has the first one's sha256, size, alignment and calls, but neither a local
-    reference nor a definition reaches into it: alike sections hold bytes (not SHT_NOBITS), the same bytes, size,
-    alignment and flags, in objects of one EF_RISCV_RVC, no global or weak symbol, and the same relocations of the
-    types that relaxation or calls.tsv reads, each followed or not by an R_RISCV_RELAX, whose symbols are global or
-    weak ones of one name. Any other line has no sha256, the map's size and alignment, and no calls. calls.tsv has
-    each call and each R_RISCV_TPREL_HI20, and for a global, the global (else the first weak) symbol of its name that
-    an object the map took defines in a section the map took."""
+    gives it: an assignment gives each line its own section, one that lld can give the line's size, and the lines of
+    the sections of one object those sections in their order in the object. No relocation of these objects lets
+    lld's relaxation remove a byte, so lld gives each section its input size in every link: a line can be a section
+    of its own size alone. A line that can be one section is that section. A line that can be two or more alike ones
+    has the first one's sha256, size, alignment and calls, but neither a local reference nor a definition reaches
+    into it: alike sections hold bytes (not SHT_NOBITS), the same bytes, size, alignment and flags, in objects of one
+    EF_RISCV_RVC, no global or weak symbol, and the same relocations of the types that relaxation or calls.tsv reads,
+    each followed or not by an R_RISCV_RELAX, whose symbols are global or weak ones of one name. Any other line has
+    no sha256, the map's size and alignment, and no calls. calls.tsv has each call and each R_RISCV_TPREL_HI20, and
+    for a global, the global (else the first weak) symbol of its name that an object the map took defines in a
+    section the map took."""
     objects = {("/work/lib/libshim.a", "a.o"): [REAL, STORES],
                ("/work/lib/libshim.a", "shim-local-access.o"): [LOCAL_ACCESS],
                (f"{copies}/2-shim-local-call.o", None): [local_call], ("/work/obj/shim-rustc-v0.o", None): [V0]}
     readings = {(where, i): read_object(data) for where, datas in objects.items() for i, data in enumerate(datas)}
+    # No R_RISCV_ALIGN, no R_RISCV_RELAX (without which lld relaxes no call and no thread-local access), and no
+    # R_RISCV_TLSDESC_HI20, _LOAD_LO12 or _ADD_LO12.
+    assert not [r for _, _, relocations in readings.values() for found in relocations.values() for r in found
+                if r[1] & 0xFFFFFFFF in (43, 51, 62, 63, 64)]
     named = []
     for _, linked, map_align, text in map_lines(copies):
         if text.startswith("<internal>"):
@@ -270,7 +277,7 @@ def expected_tables(copies, local_call=LOCAL_CALL):
                  for index, s in readings[((file, member), i)][0].items() if s[0] == section}
         given = [set() for _ in ks]
         for assignment in itertools.permutations(sizes, len(ks)):
-            fits = all(named[k][3] <= sizes[choice] for k, choice in zip(ks, assignment))
+            fits = all(named[k][3] == sizes[choice] for k, choice in zip(ks, assignment))
             ordered = all(a[0] != b[0] or a[1] < b[1] for a, b in itertools.combinations(assignment, 2))
             if fits and ordered:
                 for choices, choice in zip(given, assignment):
@@ -431,11 +438,12 @@ def test_collect_writes_the_layout_tree(tmp_path):
     assert (entry / "binary.sha256").read_text() == f"{sha(binary)}  unstripped\n{sha(binary[:300])}  stripped\n"
     rows = [line.split("\t") for line in (entry / "sections.tsv").read_text().splitlines()]
     # Both members named a.o, REAL and STORES, have a .text.__rust_alloc and a .text.__rust_dealloc, and lld's map
-    # lists the members it took in the order it took them. Only STORES's __rust_alloc, of 26 bytes, can hold the
-    # second __rust_alloc line, so the first one, of 4 bytes, is REAL's, of 8: each has its section's sha256, size and
-    # alignment. The one __rust_dealloc line of 8 bytes, as large as either member's, cannot be told: it has no sha256
-    # and the map's size and alignment. The one member's __rust_realloc has the object's input size and alignment, not
-    # the map's.
+    # lists the members it took in the order it took them. No relocation of theirs lets lld's relaxation remove a
+    # byte, so lld gives each section its input size in every link: REAL's __rust_alloc always takes 8 bytes and
+    # STORES's 26, which tells the two __rust_alloc lines apart. Each has its section's sha256, size and alignment (2,
+    # where the map gives the first line 4). The one __rust_dealloc line of 8 bytes, the size of either member's, cannot
+    # be told: it has no sha256 and the map's size and alignment. The __rust_realloc line, which only REAL has, is
+    # REAL's.
     alloc = [next(s[2] for s in read_object(data)[0].values() if s[0] == ".text.__rust_alloc")
              for data in (REAL, STORES)]
     assert [r[4:] for r in rows[1:4]] == [[sha(alloc[0]), "8", "2"], [sha(alloc[1]), "26", "2"], ["", "8", "2"]]
@@ -2310,42 +2318,49 @@ def test_an_undefined_weak_target_is_at_0_and_an_ifunc_has_no_address(tmp_path):
 
 
 def test_a_map_line_whose_section_the_objects_do_not_tell_has_no_bytes_and_no_calls():
-    # OSSV-675 review. An archive of two members named a.o, REAL and STORES, whose .text.__rust_alloc sections take 8
-    # and 26 bytes, and a map that holds one of them, a line of 8 bytes: lld's map lists the members it took in the
-    # order it took them, and both sections are as large as the line, so it could be either member's. It gets no
-    # sha256 (it moves as a changed function), the map's size and alignment, and none of REAL's calls.
-    lib = archive([("a.o", REAL), ("a.o", STORES)])
+    # OSSV-675 review. An archive of two members named a.o, REAL and EIGHT, whose .text.__rust_alloc sections take 8
+    # bytes each, with other bytes, and a map that holds one of them, a line of 8 bytes: lld's map lists the members it
+    # took in the order it took them, and lld gives either section 8 bytes, so it could be either member's. It gets
+    # no sha256 (it moves as a changed function), the map's size and alignment, and none of REAL's calls. (Beside
+    # STORES's section of 26 bytes, which lld never gives 8 bytes, the line is REAL's: the test after this one.)
+    lib = archive([("a.o", REAL), ("a.o", relocatable([("__rust_alloc", b"\4" * 8, 2, [])]))])
     text = map_line(0x11000, 8, 2, "/work/lib.a(a.o):(.text.__rust_alloc)")
     inputs, calls = layout.describe(layout.read_map(text), layout.Objects({"/work/lib.a": lib}.__getitem__),
                                     lambda f: f, set(), layout.Output([], [], {}))
     assert [(i.sha256, i.size, i.align) for i in inputs] == [("", 8, 2)] and calls == []
-    # An object with two sections .text.f, the first with a call.
-    two = {"/work/two.o": relocatable([("f", b"\1" * 8, 4, [(0x0, "g")]), ("f", b"\2" * 0x10, 4, [])])}
 
-    def described(*lines):
+    # An object with two sections .text.f, the first of 8 bytes with a call that lld may relax, so that lld gives it
+    # 4 to 8 bytes, and the second of the bytes `second`, with nothing that lld removes.
+    def described(second, *lines):
+        two = {"/work/two.o": relocatable([("f", b"\1" * 8, 4, [(0x0, "g")]), ("f", second, 4, [])])}
         text = "".join(map_line(address, size, 4, "/work/two.o:(.text.f)") for address, size in lines)
         return layout.describe(layout.read_map(text), layout.Objects(two.__getitem__), lambda f: f, set(),
                                layout.Output([], [], {}))
 
-    # The map takes one of them (--gc-sections dropped the other), and both are as large as its line: either.
-    inputs, calls = described((0x11000, 8))
-    assert [(i.sha256, i.size) for i in inputs] == [("", 8)] and calls == []
-    # It takes both: the k-th line is the k-th section, as before.
-    inputs, calls = described((0x11000, 8), (0x11008, 0x10))
+    # The map takes one of them (--gc-sections dropped the other), and the second takes 8 bytes: lld can give both of
+    # them 8 bytes, so the line is either. So too a line of 4 bytes, which only the first can be in this link: in
+    # another link lld may give the first 8 bytes, and the section of a line must not depend on the link.
+    for size in (8, 4):
+        inputs, calls = described(b"\2" * 8, (0x11000, size))
+        assert [(i.sha256, i.size) for i in inputs] == [("", size)] and calls == []
+    # It takes both, the second of 0x10 bytes: the k-th line is the k-th section, as before.
+    inputs, calls = described(b"\2" * 0x10, (0x11000, 8), (0x11008, 0x10))
     assert [(i.sha256, i.size) for i in inputs] == [(sha(b"\1" * 8), 8), (sha(b"\2" * 0x10), 0x10)]
     assert [(c.row, c.offset, c.target) for c in calls] == [(0, 0x0, "g")]
     # A line longer than its section is not that section (lld only removes bytes), and lld keeps the order of the
     # sections of one object: the line of 0x10 bytes cannot be the first section, nor, before the line of 8 bytes, the
     # second. No assignment fits, so neither line can be told.
-    inputs, calls = described((0x11000, 0x10), (0x11010, 8))
+    inputs, calls = described(b"\2" * 0x10, (0x11000, 0x10), (0x11010, 8))
     assert [(i.sha256, i.size) for i in inputs] == [("", 0x10), ("", 8)] and calls == []
 
 
-def test_the_one_map_line_of_a_name_is_the_one_section_as_large_as_it():
+def test_the_one_map_line_of_a_name_is_the_one_section_to_which_lld_can_give_its_size():
     # OSSV-675. musl's libc.a holds two members named clone.lo, whose .text sections take 0 and 68 bytes, and the map
-    # has one line libc.a(clone.lo):(.text) of 68 bytes: lld only removes bytes, so the line can only be the second
-    # member's. So too an archive of REAL and STORES, two members named a.o, and one line of .text.__rust_alloc of
-    # 0x1a bytes: REAL's 8 bytes cannot be it, STORES's 26 bytes are.
+    # has one line libc.a(clone.lo):(.text) of 68 bytes: lld gives a section its input size, less at most the bytes
+    # that its relaxation can remove, so the line can only be the second member's. So too an archive of REAL and
+    # STORES, two members named a.o, and one line of .text.__rust_alloc of 0x1a bytes: REAL's 8 bytes cannot be it,
+    # STORES's 26 bytes are. Neither section holds a byte that lld's relaxation removes, so lld gives each its input
+    # size in every link.
     def described(members, *lines):
         text = "".join(map_line(address, size, 2, "/work/lib.a(a.o):(.text.__rust_alloc)") for address, size in lines)
         return layout.describe(layout.read_map(text), layout.Objects({"/work/lib.a": archive(members)}.__getitem__),
@@ -2361,22 +2376,29 @@ def test_the_one_map_line_of_a_name_is_the_one_section_as_large_as_it():
     inputs, calls = described([("a.o", empty), ("a.o", REAL)], (0x11000, 8))
     assert [(i.sha256, i.size) for i in inputs] == [(sha(body(REAL)), 8)]
     assert [(c.row, c.offset, c.target) for c in calls] == [(0, 0x0, "__rdl_alloc")]
-    # Two sections as large as the line: either could be it.
+    # STORES's section, of 26 bytes in every link, is never a line of 8 bytes: that line is REAL's, with its call. At
+    # 6d637487 it is either, as large as both.
     inputs, calls = described([("a.o", REAL), ("a.o", STORES)], (0x11000, 8))
-    assert [i.sha256 for i in inputs] == [""] and calls == []
+    assert [i.sha256 for i in inputs] == [sha(body(REAL))]
+    assert [(c.row, c.offset, c.target) for c in calls] == [(0, 0x0, "__rdl_alloc")]
     # Two lines of the name in members of one name: lld's map lists the members in the order it took them, but only
     # STORES's section can hold the line of 0x1a bytes, so the other line is REAL's, with its call.
     inputs, calls = described([("a.o", REAL), ("a.o", STORES)], (0x11000, 0x1A), (0x1101C, 8))
     assert [i.sha256 for i in inputs] == [sha(body(STORES)), sha(body(REAL))]
     assert [(c.row, c.offset, c.target) for c in calls] == [(1, 0x0, "__rdl_alloc")]
-    # Two lines of 8 bytes: each member's section can hold either line, so the sizes do not tell which is which.
+    # Two lines of 8 bytes: only REAL's section can take 8 bytes, and lld takes it once, so no assignment fits, and
+    # the sizes tell neither line.
     inputs, calls = described([("a.o", REAL), ("a.o", STORES)], (0x11000, 8), (0x11008, 8))
     assert [i.sha256 for i in inputs] == ["", ""] and calls == []
-    # In one object with two sections .text.f of 8 and 16 bytes, the one line of 16 bytes is the second.
+    # In one object with two sections .text.f, of 8 bytes with a call that lld may relax and of 16 bytes, the one
+    # line of 16 bytes is the second; a line of 8 or 4 bytes, whichever lld gave the first, is the first.
     two = {"/work/two.o": relocatable([("f", b"\1" * 8, 4, [(0x0, "g")]), ("f", b"\2" * 0x10, 4, [])])}
-    inputs, calls = layout.describe(layout.read_map(map_line(0x11000, 0x10, 4, "/work/two.o:(.text.f)")),
-                                    layout.Objects(two.__getitem__), lambda f: f, set(), layout.Output([], [], {}))
-    assert [(i.sha256, i.size) for i in inputs] == [(sha(b"\2" * 0x10), 0x10)] and calls == []
+    for size, data, targets in ((0x10, b"\2" * 0x10, []), (8, b"\1" * 8, ["g"]), (4, b"\1" * 8, ["g"])):
+        inputs, calls = layout.describe(layout.read_map(map_line(0x11000, size, 4, "/work/two.o:(.text.f)")),
+                                        layout.Objects(two.__getitem__), lambda f: f, set(),
+                                        layout.Output([], [], {}))
+        assert [(i.sha256, i.size) for i in inputs] == [(sha(data), len(data))]
+        assert [c.target for c in calls] == targets
 
 
 def test_two_lines_of_a_name_in_members_of_one_name_get_their_bytes_when_only_one_assignment_fits():
@@ -2409,6 +2431,56 @@ def test_two_lines_of_a_name_in_members_of_one_name_get_their_bytes_when_only_on
             assert [i.sha256 for i in inputs] == [alone[name][0] for name in names]
             assert [[(c.offset, c.target) for c in calls if c.row == row] for row in (0, 1)] == [
                 alone[name][1] for name in names]
+
+
+def member_lines(members, section, sizes):
+    """The sha256 of each of the map lines lib.a(a.o):(<section>) of the linked sizes `sizes`, in an archive lib.a
+    whose members named a.o are the objects `members`, and the targets of the calls of each line ([[target]])."""
+    text = "".join(map_line(0x11000 + 0x20 * k, size, 4, f"/work/lib.a(a.o):({section})")
+                   for k, size in enumerate(sizes))
+    lib = {"/work/lib.a": archive([("a.o", member) for member in members])}
+    inputs, calls = layout.describe(layout.read_map(text), layout.Objects(lib.__getitem__), lambda f: f, set(),
+                                    layout.Output([], [], {}))
+    return [i.sha256 for i in inputs], [[c.target for c in calls if c.row == row] for row in range(len(sizes))]
+
+
+def test_sizes_never_tell_apart_two_sections_to_which_lld_can_give_the_same_linked_size():
+    # OSSV-675 review, the finding at layout.py:712. lld's relaxation changes the linked size of a section from one
+    # link to the next: the base, the probe link and the final link. Two members named a.o of lib.a hold a section
+    # .text.f: the first of 0x20 bytes with a call that lld may relax, so that lld gives it 0x1c or 0x20 bytes, and the
+    # second of 0x1c bytes, which holds nothing that lld removes. A map that holds both has lines of (0x20, 0x1c),
+    # (0x1c, 0x20) or (0x1c, 0x1c), by how far lld relaxed the first and the order in which it took the members, and a
+    # map that holds one of them a line of 0x20 or 0x1c bytes. At 6d637487 the sizes pair the lines of (0x20, 0x1c),
+    # (0x1c, 0x20) and (0x20): the same two sections get a sha256 in one link and none in the next, so that the
+    # append mode moves them as changed functions, and layout check, which reads the final tree, fails one as a
+    # same-bytes function to which NEW's placement.tsv gives no cause to move. No line may be paired with either
+    # section by its size, in any of these maps, in either order of the members.
+    first = relocatable([("f", b"\1" * 0x20, 4, [(0x4, "g")])])
+    second = relocatable([("f", b"\2" * 0x1C, 4, [])])
+    for members in ([first, second], [second, first]):
+        for sizes in ((0x20, 0x1C), (0x1C, 0x20), (0x1C, 0x1C), (0x20,), (0x1C,)):
+            assert member_lines(members, ".text.f", sizes) == ([""] * len(sizes), [[]] * len(sizes)), sizes
+
+
+def test_sizes_tell_apart_two_sections_to_which_lld_can_never_give_the_same_linked_size():
+    # OSSV-675 review. REAL's .text.__rust_alloc of 8 bytes and STORES's of 26, in two members named a.o, hold nothing
+    # that lld's relaxation removes, so lld gives them 8 and 26 bytes in every link: in either order of the lines and
+    # of the members, each line is its own member's section, with its bytes and calls, as at 6d637487. So too a
+    # section of 0x20 bytes with a call that lld may relax, to which lld gives 0x1c or 0x20 bytes, beside one of 0x18
+    # bytes: each line is its own section, for each linked size that lld can give the first.
+    real, stores = (sha(next(s[2] for s in read_object(data)[0].values() if s[0] == ".text.__rust_alloc"))
+                    for data in (REAL, STORES))
+    for members in ([REAL, STORES], [STORES, REAL]):
+        assert member_lines(members, ".text.__rust_alloc", (0x1A, 8)) == ([stores, real], [[], ["__rdl_alloc"]])
+        assert member_lines(members, ".text.__rust_alloc", (8, 0x1A)) == ([real, stores], [["__rdl_alloc"], []])
+    first = relocatable([("f", b"\1" * 0x20, 4, [(0x4, "g")])])
+    second = relocatable([("f", b"\2" * 0x18, 4, [])])
+    for members in ([first, second], [second, first]):
+        for size in (0x1C, 0x20):
+            assert member_lines(members, ".text.f", (size, 0x18)) == ([sha(b"\1" * 0x20), sha(b"\2" * 0x18)],
+                                                                      [["g"], []])
+            assert member_lines(members, ".text.f", (0x18, size)) == ([sha(b"\2" * 0x18), sha(b"\1" * 0x20)],
+                                                                      [[], ["g"]])
 
 
 def test_a_line_is_the_section_that_every_assignment_of_the_lines_of_its_name_gives_it():

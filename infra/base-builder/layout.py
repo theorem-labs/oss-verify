@@ -595,14 +595,35 @@ def assigned(sizes, candidates):
     `candidates` ([[(instance, Elf, Section)]]), or None when the search tells none: `sizes` are the lines' linked
     sizes, and `candidates` the sections of that name (Objects.sections).
 
-    An assignment gives each line a candidate as large as it (lld only removes bytes), never the candidate of another
-    line (lld takes each section once), and gives the lines of the candidates of one object those candidates in their
-    order in the object (lld keeps that order, though --gc-sections may drop some of them). It orders nothing between
-    two objects, and so assumes nothing of where the lines of one member lie in the map: lld's map lists the members
-    of one name in the order lld took them, which the tree does not know. A line can be each candidate that an
-    assignment gives it, so the search finds every assignment. None when no assignment exists, and when the search,
-    which gives each line in map order each candidate that it can have, gives more than ASSIGNMENT_STEPS candidates
-    in all: every line of that name is then ambiguous."""
+    lld's relaxation gives a candidate a linked size from its input size less its removable bytes (removable_bytes)
+    up to its input size, and which one depends on where the link puts the code, so that it changes from one link to
+    the next: the base, the probe link and the final link. Candidates whose ranges of linked sizes overlap, directly
+    or through other candidates, form one cluster, and a line can be a candidate of the one cluster whose ranges hold
+    its linked size, and of no other. So the candidates of a line do not depend on the linked size that lld gave each
+    section in that link: sizes tell two candidates apart only when no linked size of one can be a linked size of the
+    other, and the lines of the same sections get the same candidates in every link.
+
+    An assignment gives each line a candidate of its cluster, never the candidate of another line (lld takes each
+    section once), and gives the lines of the candidates of one object those candidates in their order in the object
+    (lld keeps that order, though --gc-sections may drop some of them). It orders nothing between two objects, and so
+    assumes nothing of where the lines of one member lie in the map: lld's map lists the members of one name in the
+    order lld took them, which the tree does not know. A line can be each candidate that an assignment gives it, so
+    the search finds every assignment. None when no assignment exists (a line whose linked size no cluster holds, for
+    one), and when the search, which gives each line in map order each candidate that it can have, gives more than
+    ASSIGNMENT_STEPS candidates in all: every line of that name is then ambiguous."""
+    # The cluster of each candidate, and of each line (None when no cluster holds its linked size). A cluster is the
+    # range from the lowest to the highest linked size of its candidates: the candidates' ranges, in order of their
+    # lowest sizes, join the cluster before them while they overlap its range.
+    ranges = sorted((section.size - removable_bytes(elf, section), section.size, j)
+                    for j, (_, elf, section) in enumerate(candidates))
+    clusters, cluster = [], [0] * len(candidates)  # clusters: [[lowest, highest linked size]], in size order
+    for low, high, j in ranges:
+        if clusters and low <= clusters[-1][1]:
+            clusters[-1][1] = max(clusters[-1][1], high)
+        else:
+            clusters.append([low, high])
+        cluster[j] = len(clusters) - 1
+    held = [next((k for k, (low, high) in enumerate(clusters) if low <= size <= high), None) for size in sizes]
     places, groups = [], collections.defaultdict(list)  # groups: {instance: [index in candidates] in object order}
     for j, (instance, _, _) in enumerate(candidates):
         places.append(len(groups[instance]))
@@ -614,13 +635,13 @@ def assigned(sizes, candidates):
 
     def options(line):
         # The candidates that `line` can have after the lines before it, last first: each lies past the last
-        # candidate given in its object, leaves a candidate for each line after `line`, and is as large as `line`.
-        # The candidate at the place p of an object takes p - last of that object's candidates from the lines after
-        # `line`: itself and those it passes over.
+        # candidate given in its object, leaves a candidate for each line after `line`, and is in the cluster of
+        # `line`. The candidate at the place p of an object takes p - last of that object's candidates from the lines
+        # after `line`: itself and those it passes over.
         reach = max(free - (len(sizes) - line - 1), 0)
         found = [j for instance, members in groups.items()
                  for j in members[last[instance] + 1:last[instance] + 1 + reach]
-                 if sizes[line] <= candidates[j][2].size]
+                 if cluster[j] == held[line]]
         return found[::-1]
 
     stack, steps = [options(0)], 0
@@ -693,18 +714,22 @@ def describe(lines, objects, key_file, wraps, output=None):
 
     The candidates of a map line are the sections of its name in the objects of its file and member
     (Objects.sections), and the line can be each candidate that an assignment of the map's lines of that (file,
-    member, section) to those candidates gives it (assigned). lld only removes bytes, takes each section once, and
-    keeps the sections of one name of one object in their order in the object, but lists the archive members of one
-    name in the order it took them, which the tree does not know. A line that can be one candidate is that section.
-    A line that can be two or more (lld took only some of the candidates, through --gc-sections or the archive
+    member, section) to those candidates gives it (assigned). lld's relaxation gives a section a linked size from its
+    input size less its removable bytes (removable_bytes) up to its input size, which changes from one link to the
+    next, so a line's size tells two candidates apart only when no linked size of one can be a linked size of the
+    other (assigned's clusters); the line is then the same candidate in the base, the probe link and the final link,
+    whichever linked size each of them gives it. lld takes each section once, and keeps the sections of one name of
+    one object in their order in the object, but lists the archive members of one name in the order it took them,
+    which the tree does not know. A line that can be one candidate is that section. A line that can be two or more
+    (candidates of one cluster, when lld took only some of the candidates, through --gc-sections or the archive
     members it extracted, or they lie in two or more members of one name) is a twin line when they are alike (alike):
     asan.module_ctor in two archive members of one name, for one. A twin line gets their sha256, size and alignment,
     and the calls of the first of them, with this link's deltas; as the tree does not know which of them the link
     took, nothing reaches into it: a local reference from another section into it has no target row, and it holds
-    no symbol for definitions. Every other line is ambiguous: its candidates are not alike, or no assignment fits, or
-    the search for the assignments took more than its bound. An ambiguous line, as a line with no candidate (COMMON,
-    or a piece of .eh_frame), gets no sha256 (so it never counts as same bytes), the map's size and alignment, no
-    calls, and no symbols for definitions.
+    no symbol for definitions. Every other line is ambiguous: its candidates are not alike, or no assignment fits (no
+    candidate can have its linked size, for one), or the search for the assignments took more than its bound. An
+    ambiguous line, as a line with no candidate (COMMON, or a piece of .eh_frame), gets no sha256 (so it never counts
+    as same bytes), the map's size and alignment, no calls, and no symbols for definitions.
 
     Each call and each thread-local access of a .text input section is a Call; a global one names its definition in
     the link's objects (definitions). Its delta comes from relaxation, with the addresses of this link: those of the
@@ -929,6 +954,18 @@ def most_removed(relocations, k, rvc):
     if relocation.type in (R_RISCV_TPREL_HI20, R_RISCV_TPREL_ADD) and relaxable:
         return 4
     return 4 if relocation.type in R_RISCV_TLSDESC[:3] else 0
+
+
+def removable_bytes(elf, section):
+    """The most bytes that lld's relaxation can remove from the section `section` of the object `elf` in all,
+    wherever the link puts it and its targets: the sum of most_removed over each of its relocations, in lld's order
+    (by offset, as describe relaxes it). 0 for a section with no relocation that lets lld remove a byte, and for a
+    section that holds no code (neither .text nor SHF_EXECINSTR), which describe never relaxes: lld relaxes code
+    alone."""
+    if not (is_text(section.name) or section.flags & SHF_EXECINSTR):
+        return 0
+    ordered = sorted(elf.relocations(section.index), key=lambda item: item[0].offset)
+    return sum(most_removed(ordered, k, elf.flags & EF_RISCV_RVC) for k in range(len(ordered)))
 
 
 def definitions(names, lines, located, rows):
