@@ -246,7 +246,7 @@ fi
 if [ "$same_repository" = false ] && [ -f docs/seeded-projects.tsv ]; then
   while IFS=$'\t' read -r project seedable _; do
     if [ "$project" = "$name" ] && [ "$seedable" = yes ]; then
-      fail "projects/$name/ is the port of a project that we seeded: docs/seeded-projects.tsv marks it seeded. A change to the port can change that table. A pull request from a fork that changes projects/ cannot change the table, and the tests check runs no test on it. A maintainer of this repository carries such a change on a branch of this repository, where the tests check runs the test of the table. Ask in this pull request or in an issue."
+      fail "projects/$name/ is the port of a project that we seeded: docs/seeded-projects.tsv marks it seeded. A change to the port can change that table. A pull request from a fork that changes projects/ cannot change the table, and the tests check runs no test on it. A maintainer of this repository carries such a change on a branch of this repository, where the tests check runs the test of the table. For an adoption, tick 'I accept the OSS Verify terms' in this pull request, and the branch's pull request names this one (docs/project-yaml.md, Seeded projects). To pause or leave, ask in an issue."
     fi
   done < docs/seeded-projects.tsv
 fi

@@ -1,28 +1,43 @@
 # Adapted from OSS Scanner's .github/workflows/terms.yaml (https://github.com/anthropics/oss-scanner), Copyright 2026
 # Anthropic PBC, Apache-2.0. Modified 2026 by Theorem Labs, PBC: the OSS Verify terms, the repository's maintainers
-# recognised by their association with it rather than by a list of logins, and no box for a pull request that enrolls
-# nothing.
+# recognised by their association with it rather than by a list of logins, no box for a pull request that enrolls
+# nothing, and the record of the terms that a branch names when it adopts a seeded project.
 name: "Terms"
 # An enrollment pull request must accept the OSS Verify terms: the box in the pull request template, ticked in the
 # description. This check fails until it is, and runs again whenever the description is edited. A branch of this
-# repository needs no box: only an account with write access, including a GitHub App, can push one.
+# repository needs no box of its own: only an account with write access, including a GitHub App, can push one.
+#
+# But a branch can adopt a seeded project: its patch of projects/<name>/project.yaml adds a line primary_contact with a
+# value other than n/a, and docs/seeded-projects.tsv of the base marks <name> yes. enrollment refuses a pull request
+# from a fork that changes a seeded project, so a maintainer of this repository carries the adopter's change on a
+# branch. The adopter's own pull request from their fork, which enrollment refuses, ticks the box: it is their record
+# that they accept the terms. The branch's description names it on a line "Adoption: #<number>" (or with its URL). The
+# check passes only when that pull request comes from a fork, was not opened by a bot, ticks the box, and adds the same
+# primary_contact for each project that the branch adopts (docs/project-yaml.md, "Seeded projects"). The files of a
+# branch are read on each run, every page of them, with their patches. A read that fails, a list over the API's 3000
+# files, or a head that moves while they are read, fails the check.
 #
 # A pull request that changes no file under projects/ (a change to src/ or docs/, say) enrolls nothing, and needs no
 # box either: the terms govern the enrollment of a project. They say so in their first paragraph: "This OSS Verify
 # Agreement (the "Agreement") governs your ("Participant") enrollment of a project in OSS Verify", accepted "by ticking
 # "I accept the OSS Verify terms" in an enrollment pull request" (https://theorem.dev/oss-verify/terms/). Any other
-# contribution is under the Apache License 2.0, as CONTRIBUTING.md says. The files are read from the API only when the
-# box is not ticked, every page of them, renames under both names, as build.yaml's route reads them. A pull request
-# that changes more files than the 3000 the API lists, or whose head moves while they are read, needs the box.
+# contribution is under the Apache License 2.0, as CONTRIBUTING.md says. From a fork, the files are read from the API
+# only when the box is not ticked, every page of them, renames under both names, as build.yaml's route reads them. A
+# pull request that changes more files than the 3000 the API lists, or whose head moves while they are read, needs the
+# box.
 #
 # pull_request_target, not pull_request: with pull_request the workflow file is taken from the pull request itself, so
 # a contributor could edit this check away. This job reads only the event's description and the list of the files the
-# pull request changes, never the pull request's code. Its token has no permission (permissions: {} below): the API
-# gives a public repository's pull request and its files to any token ("This endpoint can be used without
-# authentication or the aforementioned permissions if only public resources are requested",
+# pull request changes, with their patches. For a branch that adopts a seeded project, it also reads
+# docs/seeded-projects.tsv of the base, and the pull request that the description names, with its files. It reads each
+# through the API, and never the pull request's code. Its token has no permission (permissions: {} below): the API
+# gives a public repository's pull requests, their files and its contents to any token ("This endpoint can be used
+# without authentication or the aforementioned permissions if only public resources are requested",
 # https://docs.github.com/en/rest/pulls/pulls#list-pull-requests-files), and a token is used, not none, for the
 # authenticated rate limit. The description reaches the script through an environment variable, never by ${{ }}
-# substitution into the script, so its text cannot become shell.
+# substitution into the script, so its text cannot become shell. Each value that the API gives (a description, a
+# patch, a file name, a login) is data too: the script only compares it, jq gets it as input and never in a filter,
+# and a number goes into an API path only when it is digits.
 on:
   pull_request_target:
     types: [opened, edited, reopened, synchronize]
@@ -52,12 +67,111 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           # No pipefail: grep -q below stops reading early, and printf's broken pipe must not read as no box.
           set -eu
-          # A same-repository branch can only be pushed by an account with write access, including a GitHub App.
+          # Whether the description $1 ticks the box of the pull request template.
+          ticks_the_box() {
+            printf '%s\n' "$1" | grep -qiE '^[[:space:]]*[-*][[:space:]]+\[[xX]\][[:space:]]+I accept the \[OSS Verify terms\]\(https://theorem\.dev/oss-verify/terms/?\)'
+          }
+          # The contacts that pull request $1 sets, from the patches of its files, every page. For each line
+          # primary_contact: <value> that the patch of a projects/<name>/project.yaml adds, with a value other than n/a,
+          # a line "<name> <the value as JSON>". For such a file that GitHub lists with no patch (it leaves out the patch
+          # of a large diff), a line "<name> ?": its value is unknown. The value is read without its comment, the spaces
+          # around it, and one pair of quotes around it. gh runs the filter in gojq, whose regular expressions are Go's:
+          # the filter uses none that jq reads in another way.
+          # shellcheck disable=SC2016 # $name is jq's
+          contacts_of() {
+            gh api --paginate "repos/$REPOSITORY/pulls/$1/files?per_page=100" --jq '.[] | select(.status != "removed")
+              | select(.filename | test("^projects/[a-z0-9][a-z0-9._-]{0,62}/project\\.yaml$"))
+              | (.filename | ltrimstr("projects/") | rtrimstr("/project.yaml")) as $name
+              | if (.patch | type) == "string" then
+                  .patch | split("\n")[] | select(startswith("+primary_contact:")) | ltrimstr("+primary_contact:")
+                  | sub("[ \t]+#.*$"; "") | sub("^[ \t\r]+"; "") | sub("[ \t\r]+$"; "")
+                  | if test("^(\".*\"|\u0027.*\u0027)$") then .[1:-1] else . end
+                  | select(. != "n/a") | "\($name) \(tojson)"
+                else "\($name) ?" end'
+          }
+          # The contacts of this pull request, of a head that did not move meanwhile, as not_an_enrollment below reads
+          # its files. In an if condition bash -e stops nothing, so each step that can fail returns by hand.
+          branch_contacts() {
+            local pull changed contacts
+            pull=$(gh api "repos/$REPOSITORY/pulls/$PR") || return 1
+            [ "$(jq -r .head.sha <<< "$pull")" = "$HEAD_SHA" ] || return 1
+            changed=$(jq -r .changed_files <<< "$pull") || return 1
+            [[ $changed =~ ^[0-9]+$ ]] && (( changed <= 3000 )) || return 1
+            contacts=$(contacts_of "$PR") || return 1
+            [ "$(gh api "repos/$REPOSITORY/pulls/$PR" --jq .head.sha)" = "$HEAD_SHA" ] || return 1
+            printf '%s' "$contacts"
+          }
+          # A same-repository branch can only be pushed by an account with write access, including a GitHub App. It
+          # needs the record of the terms only when it adopts a seeded project (the top of this file).
           if [ "$HEAD_REPOSITORY" = "$REPOSITORY" ]; then
-            echo "Opened from this repository: no terms box needed."; exit 0
+            # A read that fails, a list over the API's 3000 files, or a head that moved, decides nothing.
+            if ! contacts=$(branch_contacts); then
+              echo "::error::The files of this pull request could not be read for certain. A push or an edit of the description runs this check again."
+              exit 1
+            fi
+            # An adoption: a contact for a project that docs/seeded-projects.tsv of the base marks yes in its second
+            # column. The table is read as data, as take-project reads it.
+            adoptions=()
+            if [ -n "$contacts" ]; then
+              if ! table=$(gh api -H 'Accept: application/vnd.github.raw' \
+                  "repos/$REPOSITORY/contents/docs/seeded-projects.tsv?ref=$BASE_SHA"); then
+                echo "::error::docs/seeded-projects.tsv of the base branch could not be read. A push or an edit of the description runs this check again."
+                exit 1
+              fi
+              seeded=$(jq -Rr 'split("\t") | select(.[1] == "yes") | .[0]' <<< "$table")
+              while IFS= read -r line; do
+                if grep -qxF -- "${line%% *}" <<< "$seeded"; then adoptions+=("$line"); fi
+              done <<< "$contacts"
+            fi
+            if (( ${#adoptions[@]} == 0 )); then
+              echo "Opened from this repository, and it adopts no seeded project: no terms box needed."; exit 0
+            fi
+            adopted=$(jq -nr --args '$ARGS.positional | unique | join(", ")' "${adoptions[@]%% *}")
+            # The record: the first line of the description that is "Adoption: #<number>" or
+            # "Adoption: https://github.com/<this repository>/pull/<number>", with spaces after it or none.
+            number=$(jq -nr --arg url "https://github.com/$REPOSITORY/pull/" 'first($ENV.BODY // "" | split("\n")[]
+              | sub("[ \t\r]+$"; "") | select(startswith("Adoption: ")) | ltrimstr("Adoption: ")
+              | if startswith("#") then .[1:] elif startswith($url) then ltrimstr($url) else empty end
+              | select(test("^[0-9]+$"))) // ""')
+            if [[ ! $number =~ ^[0-9]+$ ]]; then
+              echo "::error::This branch adopts $adopted, which docs/seeded-projects.tsv marks seeded. Name the adopter's pull request from their fork on a line 'Adoption: #<number>' of this description. That pull request must tick 'I accept the OSS Verify terms' and set the same primary_contact. Editing the description runs this check again."
+              exit 1
+            fi
+            if [ "$number" = "$PR" ]; then
+              echo "::error::The line Adoption: names this pull request itself. Name the adopter's pull request from their fork."
+              exit 1
+            fi
+            if ! record=$(gh api "repos/$REPOSITORY/pulls/$number") || ! recorded=$(contacts_of "$number"); then
+              echo "::error::Pull request #$number, which the line Adoption: names, could not be read. Editing the description runs this check again."
+              exit 1
+            fi
+            # The record (the top of this file): from a fork (a deleted fork has no head repository), not opened by a
+            # bot, with the box ticked, and the same contact for each project that this branch adopts.
+            failed=0
+            if [ "$(jq -r '.head.repo.full_name // ""' <<< "$record")" = "$REPOSITORY" ]; then
+              echo "::error::Pull request #$number comes from a branch of this repository, not from a fork."; failed=1
+            fi
+            login=$(jq -r '.user.login // ""' <<< "$record")
+            if [[ $login == *'[bot]' ]]; then
+              echo "::error::Pull request #$number was opened by a bot, not by the adopter."; failed=1
+            fi
+            if ! ticks_the_box "$(jq -r '.body // ""' <<< "$record")"; then
+              echo "::error::Pull request #$number does not tick 'I accept the OSS Verify terms'."; failed=1
+            fi
+            for line in "${adoptions[@]}"; do
+              if [ "${line#* }" = '?' ]; then
+                echo "::error::GitHub lists projects/${line%% *}/project.yaml of this pull request with no patch: the primary_contact that it sets is unknown, and no pull request can record it."; failed=1
+              elif ! grep -qxF -- "$line" <<< "$recorded"; then
+                echo "::error::Pull request #$number sets another primary_contact for ${line%% *}, or none."; failed=1
+              fi
+            done
+            (( failed == 0 )) || exit 1
+            echo "Pull request #$number, from a fork by $login, accepts the OSS Verify terms and sets the same primary_contact for $adopted: the adoption is recorded."
+            exit 0
           fi
           # Bots, and the repository's own maintainers (as GitHub relates them to it), do not enroll through this form.
           case "$AUTHOR" in
@@ -68,7 +182,7 @@ jobs:
             OWNER|MEMBER|COLLABORATOR)
               echo "Opened by a maintainer of this repository ($ASSOCIATION): no terms box needed."; exit 0 ;;
           esac
-          if printf '%s\n' "$BODY" | grep -qiE '^[[:space:]]*[-*][[:space:]]+\[[xX]\][[:space:]]+I accept the \[OSS Verify terms\]\(https://theorem\.dev/oss-verify/terms/?\)'; then
+          if ticks_the_box "$BODY"; then
             echo "The OSS Verify terms are accepted in the description."; exit 0
           fi
           # Not an enrollment (the top of this file): no file under projects/, of a head that did not move meanwhile. A
