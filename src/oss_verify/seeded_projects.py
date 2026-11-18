@@ -125,9 +125,8 @@ def tsv_fields(path, columns):
     str.splitlines ends a line, such as a carriage return. The route job of .github/workflows/tests.yaml reads the
     lines of seeds/builds.tsv between newlines, so the two read the same rows."""
     for number, line in enumerate(path.read_bytes().decode("utf-8").split("\n"), 1):
-        # str.splitlines gives more than one line for the line and a character after it only when the line holds
-        # another line end.
-        if len((line + ".").splitlines()) != 1:
+        # str.splitlines gives the line itself only when it holds no other line end.
+        if line and line.splitlines() != [line]:
             raise Error(f"{path}: line {number} holds a line end other than a newline: {line!r}")
         if not line or line.startswith("#") or line == "\t".join(columns):
             continue
