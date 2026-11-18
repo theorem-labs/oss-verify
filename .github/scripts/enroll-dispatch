@@ -84,9 +84,10 @@ request is none: build.yaml runs again on ready_for_review, and the Review run a
 request once it is ready.
 
 The steering-file gate. A steering file can change what a workflow runs, or what Claude Code loads in the review job
-(steering.py: the paths of .github/CODEOWNERS that give a file to @theorem-labs/engineering, such as
-projects/<name>/AGENTS.md). So when a file of the pull request (by its name or its previous name) is a steering file,
-the run is none, for an open pull request and for a merge, unless a person approved the commit (person_approval). With
+(steering.py: the paths that the last patterns of .github/CODEOWNERS give to @theorem-labs/engineering and
+@theorem-labs/research, such as projects/<name>/AGENTS.md). So when a file of the pull request (by its name or its
+previous name) is a steering file, the run is none, for an open pull request and for a merge, unless a person approved
+the commit (person_approval). With
 that approval the run goes on, and its reason says who approved. A person approval is a review of the pull request in
 state APPROVED, of that commit, by a user of type User who is not the pull request's author and whose collaborator
 permission is admin or write. That user's newest review in state APPROVED, CHANGES_REQUESTED or DISMISSED must be that

@@ -2,9 +2,9 @@
 
 This file says what the enrollment review checks, and how it writes its comment. The review job of
 `.github/workflows/review.yml` reads this file from `main`, never from the pull request: the job checks out `main`
-and takes only `projects/<name>/` from the pull request. `.github/CODEOWNERS` names the team @theorem-labs/engineering,
-people only, as the owner of this file, and the ruleset of `main` requires the approval of a code owner, so a change to
-this file needs the approval of one of them.
+and takes only `projects/<name>/` from the pull request. `.github/CODEOWNERS` names the teams @theorem-labs/engineering
+and @theorem-labs/research, people only, as the owners of this file, and the ruleset of `main` requires the approval of
+a code owner, so a change to this file needs the approval of a member of either team.
 `.claude/skills/review-enrollment/SKILL.md` says where the review finds its inputs, and what changes in CI.
 
 Before you start, read `README.md` ("Who can enroll"), `CONTRIBUTING.md`, `.github/PULL_REQUEST_TEMPLATE.md`, `docs/project-yaml.md`, `docs/build-contract.md` ("The driver", "The fuzz targets"), `docs/what-gets-proven.md` and step 3 of `.claude/skills/add-project/SKILL.md`. Read them on the base branch: the rules are those of today's `main`, not those of the day the pull request was opened.

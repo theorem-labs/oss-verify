@@ -3271,8 +3271,10 @@ class Owners(unittest.TestCase):
     def test_only_the_listed_patterns_have_an_owner_and_they_are_the_last_of_the_file(self):
         lines = [line.split() for line in (ROOT / ".github" / "CODEOWNERS").read_text().splitlines()
                  if line.strip() and not line.lstrip().startswith("#")]
-        team = "@theorem-labs/engineering"
-        owned = [[pattern, team] for pattern in (
+        teams = ["@theorem-labs/engineering", "@theorem-labs/research"]
+        owned = [[pattern, *teams] for pattern in (
+            # Agent instructions and skills at any depth (the first patterns of CODEOWNERS).
+            "**/AGENTS.md", "**/CLAUDE.md", "**/SKILL.md", "skills/",
             # What changes what a workflow runs (the top of CODEOWNERS).
             "/.github/", "/src/", "/infra/", "/seeds/", ".claude/", "CLAUDE*.md", "AGENTS*.md", "/.mcp.json", "/*.py",
             "/pytest.ini", "/.pytest.ini", "/pyproject.toml", "/uv.lock", "/.python-version", "/setup.cfg",

@@ -1,3 +1,9 @@
+# Agent instructions and skills at any depth; a pattern further down decides the owner of a file it also matches.
+**/AGENTS.md @theorem-labs/engineering @theorem-labs/research
+**/CLAUDE.md @theorem-labs/engineering @theorem-labs/research
+**/SKILL.md @theorem-labs/engineering @theorem-labs/research
+skills/ @theorem-labs/engineering @theorem-labs/research
+
 # review.md, review-change.md and review-issue.md say what the enrollment review and the change review check, and what
 # the draft reply to an issue says (.github/workflows/review.yml reads main's copies), and
 # .claude/skills/write-to-maintainer/ says how every message to a maintainer is written and checked.
@@ -20,27 +26,30 @@
 # fork's own copy of itself, so these lines are what keeps such a change from merging on one person's reading.
 #
 # The ruleset of main requires a code owner's approval, so a change to any of these files, or to this file, which says
-# who owns them, needs the approval of a member of @theorem-labs/engineering, a team of people. No other file has an
-# owner, so no other pull request needs a code owner: a change to tests/, docs/ or one projects/<name>/ needs none.
+# who owns them, needs the approval of a member of @theorem-labs/engineering or of @theorem-labs/research, each a team
+# of people: research holds the people who were on engineering, and engineering is kept beside it. No other file has an
+# owner but an AGENTS.md, CLAUDE.md or SKILL.md file or a file under a directory named skills, at any depth, which the
+# patterns at the top of the file give the same owners, so a change to tests/, docs/ or one projects/<name>/ needs no
+# code owner unless it adds or changes such a file.
 # These lines stay the last patterns of the file: the last pattern that matches a file decides its owner.
-/.github/ @theorem-labs/engineering
-/src/ @theorem-labs/engineering
-/infra/ @theorem-labs/engineering
-/seeds/ @theorem-labs/engineering
-.claude/ @theorem-labs/engineering
-CLAUDE*.md @theorem-labs/engineering
-AGENTS*.md @theorem-labs/engineering
-/.mcp.json @theorem-labs/engineering
-/*.py @theorem-labs/engineering
-/pytest.ini @theorem-labs/engineering
-/.pytest.ini @theorem-labs/engineering
-/pyproject.toml @theorem-labs/engineering
-/uv.lock @theorem-labs/engineering
-/.python-version @theorem-labs/engineering
-/setup.cfg @theorem-labs/engineering
-/tox.ini @theorem-labs/engineering
-/review.md @theorem-labs/engineering
-/review-change.md @theorem-labs/engineering
-/review-issue.md @theorem-labs/engineering
-/.claude/skills/write-to-maintainer/ @theorem-labs/engineering
-/.github/CODEOWNERS @theorem-labs/engineering
+/.github/ @theorem-labs/engineering @theorem-labs/research
+/src/ @theorem-labs/engineering @theorem-labs/research
+/infra/ @theorem-labs/engineering @theorem-labs/research
+/seeds/ @theorem-labs/engineering @theorem-labs/research
+.claude/ @theorem-labs/engineering @theorem-labs/research
+CLAUDE*.md @theorem-labs/engineering @theorem-labs/research
+AGENTS*.md @theorem-labs/engineering @theorem-labs/research
+/.mcp.json @theorem-labs/engineering @theorem-labs/research
+/*.py @theorem-labs/engineering @theorem-labs/research
+/pytest.ini @theorem-labs/engineering @theorem-labs/research
+/.pytest.ini @theorem-labs/engineering @theorem-labs/research
+/pyproject.toml @theorem-labs/engineering @theorem-labs/research
+/uv.lock @theorem-labs/engineering @theorem-labs/research
+/.python-version @theorem-labs/engineering @theorem-labs/research
+/setup.cfg @theorem-labs/engineering @theorem-labs/research
+/tox.ini @theorem-labs/engineering @theorem-labs/research
+/review.md @theorem-labs/engineering @theorem-labs/research
+/review-change.md @theorem-labs/engineering @theorem-labs/research
+/review-issue.md @theorem-labs/engineering @theorem-labs/research
+/.claude/skills/write-to-maintainer/ @theorem-labs/engineering @theorem-labs/research
+/.github/CODEOWNERS @theorem-labs/engineering @theorem-labs/research
