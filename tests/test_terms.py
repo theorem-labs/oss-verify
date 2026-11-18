@@ -327,8 +327,11 @@ def test_a_record_that_cannot_be_read_fails(tmp_path):
     [{"filename": "projects/curl/tools/project.yaml", "patch": "+primary_contact: security@curl.example\n"},
      {"filename": "seeds/curl/project.yaml", "patch": "+primary_contact: security@curl.example\n"},
      {"filename": "projects/curl/project.yaml", "patch": "+ primary_contact: security@curl.example\n"}],
+    [{"filename": "projects/curl/project.yaml", "previous_filename": "seeds/curl/project.yaml", "status": "renamed",
+      "changes": 0}],
 ], ids=["a build file", "project.yaml, primary_contact kept", "project.yaml, n/a set again", "project.yaml removed",
-        "project.yaml removed, no patch", "no line primary_contact of a projects/<name>/project.yaml"])
+        "project.yaml removed, no patch", "no line primary_contact of a projects/<name>/project.yaml",
+        "a seed port moved into projects/ with no change, no patch"])
 def test_a_branch_that_changes_a_seeded_port_and_keeps_its_contact_needs_no_record(tmp_path, files):
     # A maintainer's own fix of a seeded port. With no contact to adopt, the step does not read the table.
     code, out, calls = branch(tmp_path, files=files, body="Fixes the build of curl.\n")

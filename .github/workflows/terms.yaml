@@ -78,12 +78,15 @@ jobs:
           # The contacts that pull request $1 sets, from the patches of its files, every page. For each line
           # primary_contact: <value> that the patch of a projects/<name>/project.yaml adds, with a value other than n/a,
           # a line "<name> <the value as JSON>". For such a file that GitHub lists with no patch (it leaves out the patch
-          # of a large diff), a line "<name> ?": its value is unknown. The value is read without its comment, the spaces
-          # around it, and one pair of quotes around it. gh runs the filter in gojq, whose regular expressions are Go's:
-          # the filter uses none that jq reads in another way.
+          # of a large diff), a line "<name> ?": its value is unknown. A file that GitHub lists as renamed with no change
+          # (a seed port moved from seeds/<name>/ into projects/<name>/, say) keeps the text that it had under its old
+          # name and adds no line. The value is read without its comment, the spaces around it, and one pair of quotes
+          # around it. gh runs the filter in gojq, whose regular expressions are Go's: the filter uses none that jq reads
+          # in another way.
           # shellcheck disable=SC2016 # $name is jq's
           contacts_of() {
-            gh api --paginate "repos/$REPOSITORY/pulls/$1/files?per_page=100" --jq '.[] | select(.status != "removed")
+            gh api --paginate "repos/$REPOSITORY/pulls/$1/files?per_page=100" --jq '.[]
+              | select(.status != "removed" and (.status != "renamed" or .changes != 0))
               | select(.filename | test("^projects/[a-z0-9][a-z0-9._-]{0,62}/project\\.yaml$"))
               | (.filename | ltrimstr("projects/") | rtrimstr("/project.yaml")) as $name
               | if (.patch | type) == "string" then
