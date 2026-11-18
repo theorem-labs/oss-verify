@@ -1,0 +1,6 @@
+Scratch probe for a check of pull request #227 of theorem-labs/oss-verify. Do not merge.
+--- a/tests/fuzz/fuzz_bufq.cc
++++ b/tests/fuzz/fuzz_bufq.cc
+@@ -1,1 +1,2 @@
++// tester probe
+ /***************************************************************************
