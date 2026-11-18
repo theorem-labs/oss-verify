@@ -9,9 +9,10 @@
 #
 #   GH_TOKEN=... REPO=<owner>/<name> PR=<number> [HEAD_SHA=<commit>] .github/scripts/take-project build|validate
 #
-# build.yaml and validate.yaml run it from the base branch's checkout, never the pull request's. The pull request's
-# files are read from git's object store and written as regular files: nothing from it is checked out or run. The
-# token authorizes only the one `git fetch` of the pull request's commit, and is never saved in git's configuration.
+# build.yaml's project-builds job, review.yml's gather job and validate.yaml run it from the base branch's checkout,
+# never the pull request's. The pull request's files are read from git's object store and written as regular files:
+# nothing from it is checked out or run. The token authorizes only the one `git fetch` of the pull request's commit,
+# and is never saved in git's configuration.
 #
 # Every check is for the pull request as it targets the default branch. A pull request into another branch fails with
 # "This pull request targets <base>, not <default>", so that a result judged against another branch never stands as
@@ -25,7 +26,7 @@
 #   - A pull request from a fork, a deleted fork included, is judged on the files GitHub lists for it.
 #       - No listed path under projects/ (a change to src/, docs/ or a workflow, say): it is not an enrollment. It
 #         passes with nothing to build or validate, and the log and step summary say so. The tests check
-#         (tests.yaml) runs this repository's tests on it, build.yaml gives it a change review, and a maintainer
+#         (tests.yaml) runs this repository's tests on it, review.yml gives it a change review, and a maintainer
 #         decides whether to merge it.
 #       - Any listed path under projects/: it is an enrollment, and fails if it changes any path outside one
 #         projects/<name>/: a file outside projects/, a file in a subdirectory of a project, or a second project,
@@ -55,7 +56,8 @@
 #     a project the base branch renamed since the branch left it is built under its new name with the branch's
 #     changes. They must be regular files with plain names, or this fails: no subdirectory, symbolic link or submodule.
 #
-# The commit is HEAD_SHA, the event's head on a pull_request_target run, or the API's head on a run started by hand.
+# The commit is HEAD_SHA: the event's head on a pull_request run, or route's head on a review.yml run, which route
+# read from the API. With no HEAD_SHA (a run started by hand) it is the API's head.
 # The API lists the files of whatever the pull request's head and base are when it is asked. If the head is another
 # commit, or the base another branch, before or after the list is read, this fails rather than pair one commit's list
 # with another's files; the next run (for a newer commit, or after a change of base) checks it.

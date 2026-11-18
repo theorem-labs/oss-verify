@@ -21,12 +21,17 @@ name: "Validate"
 # runs, after both, and reports the required check enrollment with .github/scripts/collect, so that the check is never
 # a job that could be skipped.
 #
-# As in build.yaml: pull_request_target, so the pull request cannot edit this workflow or the validator; the checkout
-# is the base branch; only the files directly inside the one projects/<name>/ are taken from the pull request, as
-# regular files written from git's object store, and they are read as data, never run. No job gets a secret, cache,
-# artifact or write permission. Never add one.
+# pull_request: the workflow file comes from the merge commit, so a pull request that changes it controls this run and
+# its check. The code-owner rule on /.github/ of .github/CODEOWNERS guards the merge of such a pull request.
+# enroll-dispatch.yml sends no pull request for its theorem statements unless all its files are under one
+# projects/<name>/ (the_project() of .github/scripts/enroll-dispatch), and none that changes a steering file
+# (.github/scripts/steering.py) until a person approves its head. The validate job checks out the base commit, not the
+# merge commit, so take-project reads the base branch's head and the validator is the base branch's. Only the files
+# directly inside the one projects/<name>/ are taken from the pull request, as regular files written from git's object
+# store, and they are read as data, never run. No job gets a secret, cache, artifact or write permission. Never add one.
 #
-# To validate a pull request's project by number:
+# To validate a pull request's project by number (a run by hand stays: it reads a project as data, builds nothing,
+# and holds no secret and only a read-only token):
 #   gh workflow run validate.yaml -f pr=123
 # Such a run reports a check named enrollment too, but a check from a workflow_dispatch run never satisfies a
 # ruleset's required check (https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks#checks-from-some-workflow-jobs-are-not-evaluated).
@@ -34,7 +39,7 @@ name: "Validate"
 run-name: ${{ github.event.pull_request.title || format('Pull request {0}', inputs.pr) }}
 
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, reopened, synchronize]
   workflow_dispatch:
     inputs:
@@ -75,8 +80,11 @@ jobs:
       contents: read
       pull-requests: read
     steps:
+      # On pull_request, the base commit, not the merge commit it checks out by default: take-project reads this HEAD
+      # as the base branch's head, and the validator is the base branch's. A run by hand checks out its own branch.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with:
+          ref: ${{ github.event.pull_request.base.sha || '' }}
           persist-credentials: false
 
       - name: Take projects/<name>/ from the pull request, and nothing else

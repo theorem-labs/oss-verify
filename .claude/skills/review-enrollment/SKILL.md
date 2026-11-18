@@ -1,11 +1,11 @@
 ---
 name: review-enrollment
-description: Review an enrollment pull request on this repository, as the agent of the enrollment check in CI. Checks the README's conditions, the pull request checklist, the process, the binary sizes and static linking, the rubric for which projects we take, and each fuzz target against step 3 of the add-project skill, with the reach and breakage measurements of oss-verify check --checks. Writes one comment that asks the maintainer for each fix, and a separate summary for the people at Theorem who decide. Use it for each pull request that adds or changes one projects/<name>/. build.yaml's review job runs it on each enrollment pull request.
+description: Review an enrollment pull request on this repository, as the agent of the enrollment check in CI. Checks the README's conditions, the pull request checklist, the process, the binary sizes and static linking, the rubric for which projects we take, and each fuzz target against step 3 of the add-project skill, with the reach and breakage measurements of oss-verify check --checks. Writes one comment that asks the maintainer for each fix, and a separate summary for the people at Theorem who decide. Use it for each pull request that adds or changes one projects/<name>/. review.yml's review job runs it on each enrollment pull request.
 ---
 
 # Review an enrollment pull request
 
-This skill is for the agent that the enrollment check runs in CI on a pull request that adds or changes `projects/<name>/`: the review job of `.github/workflows/build.yaml`, after the build. A person at Theorem can also run it by hand. What the review checks, and how it writes the comment, is in `review.md` at the root of the repository: read it first, as `main` has it. This skill gives the inputs, the commands and the two outputs:
+This skill is for the agent that the enrollment check runs in CI on a pull request that adds or changes `projects/<name>/`: the review job of `.github/workflows/review.yml`, after the build. A person at Theorem can also run it by hand. What the review checks, and how it writes the comment, is in `review.md` at the root of the repository: read it first, as `main` has it. This skill gives the inputs, the commands and the two outputs:
 
 1. **The comment**: one comment on the pull request, to the maintainer, written as `.claude/skills/write-to-maintainer/SKILL.md` says. It asks for each fix.
 2. **The summary**: a report for the people at Theorem who decide. It gives the facts, the verdict of each check and what a person must decide.
@@ -22,7 +22,7 @@ The workflow gives you these values. If one is missing, get it with the command.
 | `DIR` | `projects/<name>/` as the pull request has it | `git fetch origin "pull/$PR/head" && git archive FETCH_HEAD "projects/$NAME" \| tar -x -C "$WORK"`, then `DIR=$WORK/projects/$NAME` |
 | `pr.json`, `pr.diff` | the pull request and its diff | `gh pr view "$PR" --json number,title,author,isDraft,createdAt,body,headRefOid,files,commits,comments,reviews,statusCheckRollup > pr.json` and `gh pr diff "$PR" > pr.diff` |
 | the triage comment | the comment that starts with `<!-- oss-verify-triage -->` | `jq -r '.comments[].body \| select(startswith("<!-- oss-verify-triage -->"))' pr.json` |
-| the build output | the log of `uv run oss-verify check --no-shell --twice`, its step summary, `manifest.yaml`, and `out/<target>/<target>.<build>` if the workflow keeps it | the log: `gh run view <run> --log`, from the `build` row of `statusCheckRollup` (the `project-builds` row is the check that collects the build, the review and the comment, and finishes after the review) |
+| the build output | the log of `uv run oss-verify check --no-shell --twice`, its step summary, `manifest.yaml`, and `out/<target>/<target>.<build>` if the workflow keeps it | the log: `gh run view <run> --log`, from the `build` row of `statusCheckRollup` (the `project-builds` row is the check that collects the build, the record and the results) |
 
 `oss-verify check` lists each binary with its file size, the size of its `.text` section, `static` or `dynamic`, and its SHA-256. The log has one line for each binary (`out/<target>/<file>  N bytes  M .text  static  sha256 ...`). The step summary of the Build check has the same values as a table, with the columns target, build, file bytes, `.text` bytes and static. `manifest.yaml` has them too: `targets.<target>.builds.<build>.bytes`, and `layout.<target>.<build>.text_bytes` and `.static`. It also gives `repo`, `ref`, `commit` (the commit that the build fetched) and `rebuild.result`. The log gives the commit in its `<ref> is <commit>` line, and the result of the second build in its last line.
 
@@ -30,7 +30,7 @@ Run each command from the checkout of the base branch, never from the pull reque
 
 ## In CI
 
-The review job of `.github/workflows/build.yaml` runs this skill with Claude Code, through `anthropics/claude-code-action`. There, these rules change:
+The review job of `.github/workflows/review.yml` runs this skill with Claude Code, through `anthropics/claude-code-action`. There, these rules change:
 
 - **You have only Read, Glob and Grep**, inside the checkout of the base branch. You have no shell and no network. The workflow ran each command of this skill before you started (`.github/scripts/review-gather`), and wrote its output to `.review/`, `$IN` below. Do not ask for a command. Read its file.
 - **Give your result as the structured output, and nothing else.** Its `comment` is the comment to the maintainer. Its `held` is each finding that you hold back (rule 6 of `review.md`), as "A held finding" below says, or empty. Its `verdicts` gives the verdict of each check by its id (`A1` to `G5`); for an item of F, the worst verdict over the fuzz targets. Write no summary: the job's log is public, and the summary is for the people at Theorem. The workflow posts your comment, with the report of `uv run oss-verify check --checks` folded below it, and replaces it on the next push. Refer to that report as "the report below".
@@ -50,7 +50,7 @@ The review job of `.github/workflows/build.yaml` runs this skill with Claude Cod
 | the build result (C3) and each binary's size and linkage (D1, D2) | `$IN/build/result.md` and `$IN/build/binaries.md`, the Build check's step summary |
 | the reach and breakage measurements (F3, F4), and the table "The checks of the binaries" with "What each failure is" under it (D3) | `$IN/build/checks.md`, the report of `uv run oss-verify check --checks` |
 | the repository's facts: `git ls-remote`, the contributors, the comparisons of G1, and its pull requests | `$IN/repository.txt` |
-| the seed corpora (F3) | `$IN/seeds/<target>.listing.txt` (`unzip -l`) and `$IN/seeds/<target>.hex.txt` (the first 512 bytes of each of the first 200 inputs) |
+| the seed corpora (F3) | `$IN/seeds/<target>.listing.txt` (`unzip -l`) and `$IN/seeds/<target>.hex.txt` (the first 512 bytes of each of the first 200 inputs; an input that is not stored or deflated is not read, and its line says so) |
 | the review comments of other reviewers (G5) | `$IN/review-comments.txt`, and `.reviews` in `$IN/pr.json` |
 | the changes since the last review (a later push) | `$IN/since-last-review.diff` |
 

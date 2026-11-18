@@ -1,5 +1,5 @@
 # review.md, review-change.md and review-issue.md say what the enrollment review and the change review check, and what
-# the draft reply to an issue says (.github/workflows/build.yaml reads main's copies), and
+# the draft reply to an issue says (.github/workflows/review.yml reads main's copies), and
 # .claude/skills/write-to-maintainer/ says how every message to a maintainer is written and checked.
 #
 # The other lines own each file that changes what a workflow runs or what a verdict is, whoever opens the pull request:
