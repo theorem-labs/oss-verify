@@ -19,4 +19,3 @@ file	targets/curl-fuzz_netrc/fuzz_netrc.cc	https://raw.githubusercontent.com/cur
 file	targets/curl-fuzz_netrc/proto_fuzzer/bounded_anonymous_input_file.h	https://raw.githubusercontent.com/curl/curl-fuzzer/de8de303d3e0d54e5ce235fd95d562154970ebf9/proto_fuzzer/bounded_anonymous_input_file.h	a2145119bdc3c4d364512d594ca0f5b87f0f839f0ce13ce921d051b6f2d99be6
 file	targets/curl-fuzz_netrc/proto_fuzzer/bounded_anonymous_input_file.cc	https://raw.githubusercontent.com/curl/curl-fuzzer/de8de303d3e0d54e5ce235fd95d562154970ebf9/proto_fuzzer/bounded_anonymous_input_file.cc	29beca8f00d5ae4689cf264fb56b524703d6db19c787eaf610667b72549ab11a
 # Not of the release: fuzz_bufq's harness as the OSS Verify proofs build it, without the three system calls of its first call that the process model declines
-patch	targets/curl-fuzz_bufq	curl-fuzz_bufq.0001-no-syscalls.patch
