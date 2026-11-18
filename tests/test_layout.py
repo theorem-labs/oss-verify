@@ -35,10 +35,10 @@ STORES = (SHIMS / "shim-stores.o").read_bytes()
 LOCAL_ACCESS = (SHIMS / "shim-local-access.o").read_bytes()
 LOCAL_CALL = (SHIMS / "shim-local-call.o").read_bytes()
 V0 = (SHIMS / "shim-rustc-v0.o").read_bytes()
-# shim-forwards.o's __rust_dealloc calls __rdl_dealloc. This copy names that symbol __real_dalloc (as long a name), so
+# shim-forwards.o's __rust_realloc calls __rdl_realloc. This copy names that symbol __real_dalloc (as long a name), so
 # that in a link that wraps dalloc the call reaches dalloc itself.
-REAL = FORWARDS.replace(b"\0__rdl_dealloc\0", b"\0__real_dalloc\0")
-WRAPS = ("__rdl_alloc", "dalloc")
+REAL = FORWARDS.replace(b"\0__rdl_realloc\0", b"\0__real_dalloc\0")
+WRAPS = ("_RNvCs6UdHf40Qw6p_7___rustc11___rdl_alloc", "dalloc")
 ORIGINAL = "/work/obj/shim-local-call.o"
 
 
@@ -69,7 +69,8 @@ def archive(members):
     return b"".join(out)
 
 
-# Two members named a.o, an odd-sized member before them, and a member whose name is in the // table.
+# Two members named a.o, both with a .text.__rust_alloc and a .text.__rust_dealloc, an odd-sized member before them,
+# and a member whose name is in the // table.
 MEMBERS = [("notes.txt", b"odd"), ("a.o", REAL), ("a.o", STORES), ("shim-local-access.o", LOCAL_ACCESS)]
 ARCHIVE = archive(MEMBERS)
 
@@ -160,13 +161,17 @@ def map_lines(copies):
         (0x11000, 0x4, 4, "/work/lib/libshim.a(a.o):(.text.__rust_alloc)"),
         (0x11004, 0x1a, 2, "/work/lib/libshim.a(a.o):(.text.__rust_alloc)"),
         (0x11020, 0x8, 2, "/work/lib/libshim.a(a.o):(.text.__rust_dealloc)"),
-        (0x11028, 0x8, 2, "/work/lib/libshim.a(a.o):(.text.__rust_realloc)"),
+        # Smaller than its section, as lld's relaxation makes a line: sections.tsv gives the object's input size.
+        (0x11028, 0x4, 2, "/work/lib/libshim.a(a.o):(.text.__rust_realloc)"),
         (0x11030, 0x2e, 2, "/work/lib/libshim.a(shim-local-access.o):(.text.__rust_alloc)"),
-        (0x11060, 0x20, 2, "/work/lib/libshim.a(shim-local-access.o):(.text._RNvCsdMW3fuGnryS_17shim_local_access5parse)"),
+        (0x11060, 0x20, 2,
+         "/work/lib/libshim.a(shim-local-access.o):(.text._RNvCsdMW3fuGnryS_17shim_local_access5parse)"),
         (0x11080, 0x8, 2, f"{copy}:(.text.__rust_alloc)"),
         (0x11088, 0xc, 2, f"{copy}:(.text._RNvCsgdEkaKC4q9e_15shim_local_call7rounded)"),
         (0x11094, 0x8, 4, "/work/obj/shim-rustc-v0.o:(.text._RNvCs6UdHf40Qw6p_7___rustc12___rust_alloc)"),
-        (0x12000, 0x40, 1, "/work/lib/libshim.a(shim-local-access.o):(.bss._RNvCsdMW3fuGnryS_17shim_local_access4POOL)"),
+        (0x1109c, 0x8, 4, "/work/obj/shim-rustc-v0.o:(.text._RNvCs6UdHf40Qw6p_7___rustc14___rust_dealloc)"),
+        (0x12000, 0x40, 1,
+         "/work/lib/libshim.a(shim-local-access.o):(.bss._RNvCsdMW3fuGnryS_17shim_local_access4POOL)"),
         (0x12040, 0x10, 8, "/work/obj/shim-rustc-v0.o:(COMMON)"),
         (0, 0x36, 1, "/work/lib/libshim.a(a.o):(.comment)"),
     ]
@@ -202,27 +207,34 @@ def out_tree(builds, copies="/tmp/ov/af.AAAAAA", local_call=LOCAL_CALL, placemen
 
 
 def expected_tables(copies, local_call=LOCAL_CALL):
-    """sections.tsv and calls.tsv of out_tree's record, from the test's own reading of its objects: each call and each
-    R_RISCV_TPREL_HI20, and for a global, the global (else the first weak) symbol of its name that an object the map
-    took defines in a section the map took."""
+    """sections.tsv and calls.tsv of out_tree's record, from the test's own reading of its objects. A map line takes
+    the k-th section of its name in the objects of its file and member when they lie in one object, are as many as
+    the map's lines of that name, and the line's linked size is not larger; any other line has no sha256, the map's
+    size and alignment, and no calls. calls.tsv has each call and each R_RISCV_TPREL_HI20, and for a global, the
+    global (else the first weak) symbol of its name that an object the map took defines in a section the map took."""
     objects = {("/work/lib/libshim.a", "a.o"): [REAL, STORES],
                ("/work/lib/libshim.a", "shim-local-access.o"): [LOCAL_ACCESS],
                (f"{copies}/2-shim-local-call.o", None): [local_call], ("/work/obj/shim-rustc-v0.o", None): [V0]}
     readings = {(where, i): read_object(data) for where, datas in objects.items() for i, data in enumerate(datas)}
-    sections, located, rows, seen = [], {}, {}, collections.Counter()
-    for _, size, align, text in map_lines(copies):
+    named = []
+    for _, linked, map_align, text in map_lines(copies):
         if text.startswith("<internal>"):
             continue
         at = text.rindex(":(")
         where, section = text[:at], text[at + 2:-1]
         file, member = (where[:where.index("(")], where[where.index("(") + 1:-1]) if where.endswith(")") else (
             where, None)
+        named.append((file, member, section, linked, map_align))
+    counts = collections.Counter(n[:3] for n in named)
+    sections, located, rows, seen = [], {}, {}, collections.Counter()
+    for file, member, section, linked, map_align in named:
         k = seen[(file, member, section)]
         seen[(file, member, section)] += 1
         found = [(i, index) for i in range(len(objects[(file, member)]))
                  for index, s in readings[((file, member), i)][0].items() if s[0] == section]
-        digest = ""
-        if k < len(found):
+        digest, size, align = "", linked, map_align
+        if len(found) == counts[(file, member, section)] and len({i for i, _ in found}) == 1 \
+                and linked <= readings[((file, member), found[k][0])][0][found[k][1]][3]:
             i, index = found[k]
             _, _, body, size, align = readings[((file, member), i)][0][index]
             digest = "" if body is None else sha(body)
@@ -236,6 +248,7 @@ def expected_tables(copies, local_call=LOCAL_CALL):
         for name, value, symbol_info, shndx in readings[(where, i)][1]:
             row = rows.get((where, i, shndx))
             if symbol_info >> 4 in (1, 2) and row is not None and name:
+                assert symbol_info & 0xF != 10  # no ifunc
                 rank = (symbol_info >> 4 != 1, row)
                 if name not in defined or rank < defined[name][0]:
                     defined[name] = (rank, f"{row}\t0x{value:x}")
@@ -244,21 +257,27 @@ def expected_tables(copies, local_call=LOCAL_CALL):
         if not section.startswith(".text"):
             continue
         _, symbols, relocations = readings[(where, i)]
-        for offset, info, addend in relocations.get(index, []):
+        found = sorted(relocations.get(index, []), key=lambda r: r[0])
+        # These objects hold no R_RISCV_ALIGN and no R_RISCV_RELAX: no relocation of theirs removes bytes, so each line
+        # has relax 0 and delta 0.
+        assert not [r for r in found if r[1] & 0xFFFFFFFF in (43, 51)]
+        for offset, info, addend in found:
             kind = {18: "call", 19: "call", 29: "tprel"}.get(info & 0xFFFFFFFF)
             if kind is None:
                 continue
             name, value, symbol_info, shndx = symbols[info >> 32]
             if symbol_info >> 4 == 0 or symbol_info & 0xF == 3:
-                calls.append(f"{row}\t0x{offset:x}\t{kind}\tlocal\t{rows.get((where, i, shndx), '-')}\t"
+                calls.append(f"{row}\t0x{offset:x}\t{kind}\t0\t0x0\tlocal\t{rows.get((where, i, shndx), '-')}\t"
                              f"0x{value + addend:x}\t-\t-\n")
             else:
                 if name in WRAPS:
                     name = "__wrap_" + name
                 elif name.startswith("__real_") and name[7:] in WRAPS:
                     name = name[7:]
+                weak = symbol_info >> 4 == 2 and shndx == 0 and name not in defined
                 definition = defined[name][1] if name in defined else "-\t-"
-                calls.append(f"{row}\t0x{offset:x}\t{kind}\tglobal\t{name}\t0x{addend:x}\t{definition}\n")
+                calls.append(f"{row}\t0x{offset:x}\t{kind}\t0\t0x0\t{'weak' if weak else 'global'}\t{name}\t"
+                             f"0x{addend:x}\t{definition}\n")
     return "".join(sections), "".join(calls)
 
 
@@ -357,21 +376,26 @@ def test_collect_writes_the_layout_tree(tmp_path):
     assert (entry / "output.tsv").read_text() == output
     assert (entry / "binary.sha256").read_text() == f"{sha(binary)}  unstripped\n{sha(binary[:300])}  stripped\n"
     rows = [line.split("\t") for line in (entry / "sections.tsv").read_text().splitlines()]
-    # The k-th line of a (file, member, section) is the k-th such member's section: shim-forwards.o's 8-byte
-    # __rust_alloc, then shim-stores.o's of 26 bytes. The input size and alignment are the object's, not the map's.
-    assert [r[5:] for r in rows[1:3]] == [["8", "2"], ["26", "2"]]
-    assert rows[10][4:] == ["", "64", "1"]  # .bss: SHT_NOBITS
-    assert rows[11][4:] == ["", "16", "8"]  # COMMON: no such section; the map's size and alignment
+    # Both members named a.o have a .text.__rust_alloc and a .text.__rust_dealloc, and lld's map lists the members it
+    # took in the order it took them: no line of those names can be told, so each has no sha256 and the map's size
+    # and alignment. The one member's __rust_realloc has the object's input size and alignment, not the map's.
+    assert [r[4:] for r in rows[1:4]] == [["", "4", "4"], ["", "26", "2"], ["", "8", "2"]]
+    realloc = next(s[2] for s in read_object(REAL)[0].values() if s[0] == ".text.__rust_realloc")
+    assert rows[4][4:] == [sha(realloc), "8", "2"]
+    assert rows[11][4:] == ["", "64", "1"]  # .bss: SHT_NOBITS
+    assert rows[12][4:] == ["", "16", "8"]  # COMMON: no such section; the map's size and alignment
     assert [r[1] for r in rows[7:9]] == [ORIGINAL, ORIGINAL]  # the allocation-failure copy, by its original
     assert [r[1] for r in rows[:7]] == [r[0] for r in rows[:7]]
     calls = [line.split("\t") for line in (entry / "calls.tsv").read_text().splitlines()]
-    assert ["1", "0x0", "call", "global", "__wrap___rdl_alloc", "0x0", "-", "-"] in calls  # a wrapped function
-    assert ["3", "0x0", "call", "global", "dalloc", "0x0", "-", "-"] in calls  # __real_dalloc
-    assert ["4", "0x0", "call", "global", "__rdl_realloc", "0x0", "-", "-"] in calls
-    assert ["5", "0x8", "call", "local", "6", "0x0", "-", "-"] in calls
-    assert ["5", "0x16", "call", "local", "-", "0x0", "-", "-"] in calls
-    assert ["7", "0x0", "call", "local", "8", "0x0", "-", "-"] in calls
-    assert not [c for c in calls if c[0] == "2"]
+    assert ["9", "0x0", "call", "0", "0x0", "global", "__wrap__RNvCs6UdHf40Qw6p_7___rustc11___rdl_alloc", "0x0", "-",
+            "-"] in calls  # a wrapped function
+    assert ["4", "0x0", "call", "0", "0x0", "global", "dalloc", "0x0", "-", "-"] in calls  # __real_dalloc
+    assert ["10", "0x0", "call", "0", "0x0", "global", "_RNvCs6UdHf40Qw6p_7___rustc13___rdl_dealloc", "0x0", "-",
+            "-"] in calls
+    assert ["5", "0x8", "call", "0", "0x0", "local", "6", "0x0", "-", "-"] in calls
+    assert ["5", "0x16", "call", "0", "0x0", "local", "-", "0x0", "-", "-"] in calls
+    assert ["7", "0x0", "call", "0", "0x0", "local", "8", "0x0", "-", "-"] in calls
+    assert not [c for c in calls if c[0] in ("1", "2", "3")]
 
 
 def test_collect_runs_as_a_command(tmp_path):
@@ -523,12 +547,13 @@ DUP0 = row(".text.dup", 0x11070, 0x10, file="/work/lib.a", member="dup.o")
 OTHER = row(".text.other", 0x11080, 0x10, file="/work/c.o")
 DUP1 = row(".text.dup", 0x11090, 0x10, file="/work/lib.a", member="dup.o", content="dup 1")
 # beta (row 2) calls alpha, a local symbol of a.o (row 1), at 0x4, and gamma, a global that only the binary's symbol
-# gives (no definition), at 0xc.
-CALLS = [("2", "0x4", "call", "local", "1", "0x0", "-", "-"), ("2", "0xc", "call", "global", "gamma", "0x0", "-", "-")]
+# gives (no definition), at 0xc. Each line has R_RISCV_RELAX (relax 1), and no byte in front of it was removed.
+CALLS = [("2", "0x4", "call", "1", "0x0", "local", "1", "0x0", "-", "-"),
+         ("2", "0xc", "call", "1", "0x0", "global", "gamma", "0x0", "-", "-")]
 # tv, a thread-local variable of b.o, lies in the TLS segment that starts at 0x12000. beta also reads it, with a lui at
 # 0x8 whose line names tv's definition, row 4.
 TV = dict(row(".tbss.tv", 0x12000, 4, file="/work/b.o"), sha256="")
-TLS_CALLS = CALLS + [("2", "0x8", "tprel", "global", "tv", "0x0", "4", "0x0")]
+TLS_CALLS = CALLS + [("2", "0x8", "tprel", "1", "0x0", "global", "tv", "0x0", "4", "0x0")]
 
 
 def output(text=0x11000, text_size=0x100, front=0x300, gamma=0x11030, tls=False):
@@ -652,6 +677,23 @@ def jal_gained():
              "placement": [placed(beta, cause="jal_reach", detail="offset=0xc;target=gamma;gained")]}, beta)
 
 
+# As CALLS, but lld relaxed beta's call of alpha at 0x4 at the base, so its call of gamma at 0xc is at 0x11020 + 0xc -
+# 4 = 0x11028 (delta 0x4).
+DELTA_CALLS = [CALLS[0], ("2", "0xc", "call", "1", "0x4", "global", "gamma", "0x0", "-", "-")]
+
+
+def jal_gained_past_a_relaxed_call():
+    # OSSV-675 review. At the base gamma lies 0x100000 bytes from beta's call site 0x11028, one past jal's reach: lld
+    # kept that call. From 0x1102c, the section's address plus the offset alone, gamma would lie in reach. In NEW,
+    # gamma lies in reach, so the call gained it.
+    far = dict(GAMMA, address=0x111028)
+    gamma = dict(GAMMA, address=0x11100, sha256=sha(b"gamma 2"))
+    beta = dict(BETA, address=0x11200)
+    return ({"rows": [TABLE, ALPHA, BETA, far, COMMENT], "calls": DELTA_CALLS, "out": output(gamma=0x111028)},
+            {"rows": [TABLE, ALPHA, beta, gamma, COMMENT], "calls": DELTA_CALLS, "out": output(gamma=0x11100),
+             "placement": [placed(beta, cause="jal_reach", detail="offset=0xc;target=gamma;gained")]}, beta)
+
+
 def repeated_key():
     dup0, dup1 = dict(DUP0, address=0x11300), dict(DUP1, address=0x11310)
     return ({"rows": BASE_ROWS + [DUP0, OTHER, DUP1]},
@@ -703,8 +745,8 @@ def tls_gained():
     return tls_reach(0x2000, 0x10, "gained")
 
 
-@pytest.mark.parametrize("scenario", [jal_lost, jal_gained, tls_lost, tls_gained, repeated_key, repeated_run_dragged,
-                                      alignment, readonly_growth])
+@pytest.mark.parametrize("scenario", [jal_lost, jal_gained, jal_gained_past_a_relaxed_call, tls_lost, tls_gained,
+                                      repeated_key, repeated_run_dragged, alignment, readonly_growth])
 def test_check_lists_a_function_that_moved_for_a_cause_the_trees_show(tmp_path, capsys, scenario):
     base, new, moved = scenario()
     status, lines = run_check(tmp_path, capsys, new, base)
@@ -781,6 +823,30 @@ def tls_wrong_way():
     return base, new, "beta"
 
 
+def jal_unrelaxable():
+    # OSSV-675 review. beta's call of alpha has no R_RISCV_RELAX (relax 0), so lld never relaxes it, wherever alpha
+    # goes: no cause rests on it.
+    _, new, _ = jal_lost()
+    calls = [("2", "0x4", "call", "0", "0x0", "local", "1", "0x0", "-", "-"), CALLS[1]]
+    return {"rows": BASE_ROWS, "calls": calls}, dict(new, calls=calls), "beta"
+
+
+def jal_no_delta():
+    # BASE's calls.tsv does not know the bytes that relaxation removed in front of the call: its base call site is
+    # not known.
+    _, new, _ = jal_lost()
+    calls = [("2", "0x4", "call", "1", "-", "local", "1", "0x0", "-", "-"),
+             ("2", "0xc", "call", "1", "-", "global", "gamma", "0x0", "-", "-")]
+    return {"rows": BASE_ROWS, "calls": calls}, dict(new, calls=calls), "beta"
+
+
+def tls_unrelaxable():
+    # The access to tv has no R_RISCV_RELAX: lld never relaxes it, wherever tv lies.
+    base, new, _ = tls_reach(0x7FF, 0x800, "lost")
+    calls = CALLS + [("2", "0x8", "tprel", "0", "0x0", "global", "tv", "0x0", "4", "0x0")]
+    return dict(base, calls=calls), dict(new, calls=calls), "beta"
+
+
 def no_cause():
     beta = dict(BETA, address=0x11100)
     return None, {"rows": [TABLE, ALPHA, beta, GAMMA, COMMENT], "placement": [placed(beta)]}, "beta"
@@ -790,9 +856,10 @@ def no_placement():
     return None, {"rows": [TABLE, ALPHA, dict(BETA, address=0x11100), GAMMA, COMMENT]}, "beta"
 
 
-@pytest.mark.parametrize("scenario", [jal_in_reach, jal_no_such_call, tls_within, tls_wrong_way, repeated_once,
-                                      repeated_run, repeated_run_unshown_drag, aligned, within_room, wrong_growth,
-                                      no_cause, no_placement])
+@pytest.mark.parametrize("scenario", [jal_in_reach, jal_no_such_call, jal_unrelaxable, jal_no_delta, tls_within,
+                                      tls_wrong_way, tls_unrelaxable, repeated_once, repeated_run,
+                                      repeated_run_unshown_drag, aligned, within_room, wrong_growth, no_cause,
+                                      no_placement])
 def test_check_fails_for_a_cause_the_trees_do_not_show(tmp_path, capsys, scenario):
     base, new, name = scenario()
     status, lines = run_check(tmp_path, capsys, new, base)
@@ -809,16 +876,39 @@ def test_check_exits_2_for_a_missing_file(tmp_path, capsys):
 
 @pytest.mark.parametrize("line", [
     "2\t0x4\tlocal\t1\t0x0",
-    "2\t0x4\tjump\tlocal\t1\t0x0\t-\t-",
-    "2\t0x4\tcall\tlocal\t1\t0x0\t3\t0x0",
-    "2\t0x4\tcall\tglobal\tgamma\t0x0\t5\t0x0",
-    "2\t0x4\tcall\tglobal\tgamma\t0x0\t3\t-",
-], ids=["old-columns", "type", "local-definition", "definition-past-the-rows", "half-a-definition"])
+    "2\t0x4\tcall\tlocal\t1\t0x0\t-\t-",
+    "2\t0x4\tjump\t1\t0x0\tlocal\t1\t0x0\t-\t-",
+    "2\t0x4\tcall\t2\t0x0\tlocal\t1\t0x0\t-\t-",
+    "2\t0x4\tcall\t1\t4\tlocal\t1\t0x0\t-\t-",
+    "2\t0x4\tcall\t1\t-0x4\tlocal\t1\t0x0\t-\t-",
+    "2\t0x4\tcall\t1\t0x0\textern\tgamma\t0x0\t-\t-",
+    "2\t0x4\tcall\t1\t0x0\tlocal\t1\t0x0\t3\t0x0",
+    "2\t0x4\tcall\t1\t0x0\tweak\tgamma\t0x0\t3\t0x0",
+    "2\t0x4\tcall\t1\t0x0\tglobal\tgamma\t0x0\t5\t0x0",
+    "2\t0x4\tcall\t1\t0x0\tglobal\tgamma\t0x0\t3\t-",
+], ids=["old-columns", "eight-columns", "type", "relax", "delta", "negative-delta", "kind", "local-definition",
+        "weak-definition", "definition-past-the-rows", "half-a-definition"])
 def test_check_exits_2_for_a_line_of_calls_that_does_not_read(tmp_path, capsys, line):
-    write_entry(tmp_path / "base", BASE_ROWS)
-    write_entry(tmp_path / "new", BASE_ROWS, calls=[line.split("\t")])
+    write_entry(tmp_path / "base", BASE_ROWS, calls=[])
+    entry = write_entry(tmp_path / "new", BASE_ROWS, calls=[line.split("\t")])
     assert layout.main(["check", str(tmp_path / "base"), str(tmp_path / "new")]) == 2
-    assert "calls.tsv: line 1 does not read" in capsys.readouterr().err
+    assert f"{entry / 'calls.tsv'}: line 1 does not read" in capsys.readouterr().err
+
+
+def test_calls_lines_of_each_kind_read_and_write_back(tmp_path):
+    # OSSV-675 review: relax and delta, and the kinds weak and ifunc.
+    lines = ["2\t0x4\tcall\t1\t0x0\tlocal\t1\t0x0\t-\t-", "2\t0x8\ttprel\t1\t0x4\tglobal\ttv\t0x0\t4\t0x0",
+             "2\t0xc\tcall\t0\t0x4\tglobal\tgamma\t-0x2\t-\t-", "2\t0x10\tcall\t1\t0x8\tweak\tw\t0x0\t-\t-",
+             "2\t0x14\tcall\t1\t-\tifunc\ti\t0x0\t-\t-", "2\t0x18\tcall\t1\t-\tlocal\t-\t0x10\t-\t-"]
+    (tmp_path / "calls.tsv").write_text("".join(line + "\n" for line in lines))
+    calls = layout.read_calls(str(tmp_path / "calls.tsv"), 5)
+    assert calls[2] == [layout.Call(2, 0x4, "call", True, 0, "local", 1, 0, None),
+                        layout.Call(2, 0x8, "tprel", True, 4, "global", "tv", 0, (4, 0)),
+                        layout.Call(2, 0xC, "call", False, 4, "global", "gamma", -2, None),
+                        layout.Call(2, 0x10, "call", True, 8, "weak", "w", 0, None),
+                        layout.Call(2, 0x14, "call", True, None, "ifunc", "i", 0, None),
+                        layout.Call(2, 0x18, "call", True, None, "local", None, 0x10, None)]
+    assert layout.calls_rows(calls[2]) == [line.split("\t") for line in lines]
 
 
 def test_check_exits_2_for_sections_that_do_not_match_the_map(tmp_path):
@@ -903,18 +993,20 @@ def laid_out(specs, start=0x11000):
     return found
 
 
-def link(found, calls=(), symbols=None, front=0x10400, tls=()):
+def link(found, calls=(), symbols=None, front=0x10400, tls=(), deltas=None, norelax=()):
     """A Layout of the .text input sections `found` and their calls [(row, offset, called global)]. Its output:
     .eh_frame in a read-only PT_LOAD from 0x10000 to `front`, .text over the sections in the next PT_LOAD, and
     .init_array and .fini_array in the PT_LOAD after it, where lld puts it (the next page, at the same offset), and
     the global symbols `symbols`. With `tls` [(section, address, size)], the link also takes these thread-local data
     sections of /work/t.o, rows after `found`, and its TLS segment is a .tdata over them; a call (row, offset,
     variable, (row, value)) is then a thread-local access of the variable that row and value define. The binary loads
-    each input."""
+    each input. Each call has R_RISCV_RELAX (relax 1), but those (row, offset) that `norelax` names, and lld removed
+    `deltas` {(row, offset): bytes} in front of it (by default none)."""
     by_row = collections.defaultdict(list)
     for row, offset, name, *defined in calls:
         line_type, definition = ("tprel", defined[0]) if defined else ("call", None)
-        by_row[row].append(layout.Call(row, offset, line_type, "global", name, 0, definition))
+        by_row[row].append(layout.Call(row, offset, line_type, (row, offset) not in norelax,
+                                       (deltas or {}).get((row, offset), 0), "global", name, 0, definition))
     start, end = min(i.address for i in found), max(i.address + i.linked for i in found)
     rw = (end + 0xFFF) // 0x1000 * 0x1000 + end % 0x1000
     sections = [layout.OutputSection(".eh_frame", 0x10300, front - 0x10300, 0x2),
@@ -1043,6 +1135,40 @@ def test_a_kept_function_whose_call_target_changed_address_moves_with_jal_reach(
                                                   "t": ("kept", 0x11010, "-", "-")}
 
 
+def test_a_kept_callers_site_is_its_offset_less_the_bytes_relaxation_removed_in_front_of_it():
+    # OSSV-675 review. lld relaxes c's call of k at 0x4 and removes 4 bytes, so c's call of t at 0x10 is at 0x11000 +
+    # 0x10 - 4 = 0x1100c (BASE's delta 0x4). t, at 0x11100c at the base, lies 0x100000 bytes from there, one past
+    # jal's reach, and lld keeps that call. In the new link t changed: in the hole that gone left, at 0x11030, t would
+    # be in reach of 0x1100c, and lld would relax the call and shrink c, which the plan keeps. With the input offset
+    # alone the site is 0x11010, from which t lies in reach at the base and in the hole: the plan put t there. From
+    # the site lld uses, t goes to the end, out of reach as at the base.
+    base = link([text_input(0, "c", 0x11000, 0x20), text_input(1, "k", 0x11020, 0x10),
+                 text_input(2, "gone", 0x11030, 0x40), text_input(3, "filler", 0x11070, 0xFFF9C),
+                 text_input(4, "t", 0x11100C, 0x10)], [(0, 4, "k"), (0, 0x10, "t")],
+                {"k": 0x11020, "t": 0x11100C}, deltas={(0, 0x10): 4})
+    found = laid_out([("c", 0x20, {}), ("k", 0x10, {}), ("filler", 0xFFF9C, {}), ("t", 0x10, {"content": "t 2"})])
+    probe = link(found, [(0, 4, "k"), (0, 0x10, "t")], {"k": found[1].address, "t": found[3].address})
+    assert where(planned(base, probe), probe) == {
+        "c": ("kept", 0x11000, "-", "-"), "k": ("kept", 0x11020, "-", "-"), "filler": ("kept", 0x11070, "-", "-"),
+        "t": ("end", 0x111010, "-", "-")}
+
+
+def test_a_call_with_no_relax_relocation_or_no_known_site_is_not_tested():
+    # OSSV-675 review. As in the test before, the link resolves t to a definition 4 MiB away. caller's call of t has
+    # no R_RISCV_RELAX: lld never relaxes it, so caller does not change, and keeps its base address.
+    base = link([text_input(0, "caller", 0x11000, 0x10), text_input(1, "t", 0x11010, 0x10)], [(0, 8, "t")],
+                {"t": 0x11010}, norelax={(0, 8)})
+    probe = link(laid_out([("caller", 0x10, {}), ("t", 0x10, {})]), [(0, 8, "t")], {"t": 0x400000},
+                 norelax={(0, 8)})
+    assert layout.call_tests(base, probe, layout.pair(base.inputs, probe.inputs)) == {}
+    assert where(planned(base, probe), probe) == {"caller": ("kept", 0x11000, "-", "-"),
+                                                  "t": ("kept", 0x11010, "-", "-")}
+    # A call whose BASE line has no delta has no known base call site.
+    base = link(base.inputs, [(0, 8, "t")], {"t": 0x11010}, deltas={(0, 8): None})
+    probe = link(probe.inputs, [(0, 8, "t")], {"t": 0x400000})
+    assert layout.call_tests(base, probe, layout.pair(base.inputs, probe.inputs)) == {}
+
+
 def test_a_kept_section_whose_thread_local_access_is_relaxed_otherwise_moves_with_tls_reach():
     # near reads tw and far reads tv, thread-local variables of t.o. In the probe link 0x7f0 bytes of new thread-local
     # data lie in front of them: tw now lies 0x7ff bytes into the TLS segment, the most whose access lld relaxes, and
@@ -1158,14 +1284,16 @@ def test_the_script_refuses_a_file_name_it_cannot_quote():
 
 # ── the append mode: the links ───────────────────────────────────────────────────────────────────────────────────────
 
-def relocatable(functions, variables=(), weak=()):
+def relocatable(functions, variables=(), weak=(), ifunc=()):
     """A riscv64 relocatable ELF64 object of [(name, bytes, alignment, [(offset, called function)])]: a section
-    .text.<name> for each, a global function <name> at its start, and an R_RISCV_CALL_PLT relocation for each call,
-    against a symbol of this object or an undefined one. A call (offset, symbol, type) gives a relocation of that
-    type instead, and a symbol of None the symbol 0 (R_RISCV_RELAX). `variables` [(section, bytes, alignment, name)]
-    adds a data section for each, with a global object <name> at its start: one whose name starts with .tdata or
-    .tbss is thread-local (SHF_TLS, STT_TLS), and a .tbss one holds no bytes (SHT_NOBITS, of the size of `bytes`).
-    The symbols that `weak` names are weak ones."""
+    .text.<name> for each, a global function <name> at its start, and for each call an R_RISCV_CALL_PLT relocation and
+    an R_RISCV_RELAX at its offset, as clang writes a call that lld may relax, against a symbol of this object or an
+    undefined one. A call (offset, symbol, type) gives that one relocation of that type instead, with no
+    R_RISCV_RELAX, and (offset, symbol, type, addend) that addend too; a symbol of None is the symbol 0, which
+    R_RISCV_RELAX and R_RISCV_ALIGN name. `variables` [(section, bytes, alignment, name)] adds a data section for
+    each, with a global object <name> at its start: one whose name starts with .tdata or .tbss is thread-local
+    (SHF_TLS, STT_TLS), and a .tbss one holds no bytes (SHT_NOBITS, of the size of `bytes`). The symbols that `weak`
+    names are weak ones, defined or undefined, and the functions that `ifunc` names are of type STT_GNU_IFUNC."""
     defined = [name for name, _, _, _ in functions] + [name for _, _, _, name in variables]
     names = defined + sorted({call[1] for _, _, _, calls in functions for call in calls if call[1] is not None}
                              - set(defined))
@@ -1177,17 +1305,24 @@ def relocatable(functions, variables=(), weak=()):
     strtab, symtab = b"\0", [bytes(24)]
     for k, name in enumerate(names):
         if k < len(defined):
-            kind = 0x2 if k < len(functions) else 0x6 if sections[k][2] & 0x400 else 0x1
+            kind = (0xA if name in ifunc else 0x2) if k < len(functions) else 0x6 if sections[k][2] & 0x400 else 0x1
             symtab.append(struct.pack("<IBBHQQ", len(strtab), (2 if name in weak else 1) << 4 | kind, 0, k + 1, 0,
                                       len(sections[k][3])))
         else:
-            symtab.append(struct.pack("<IBBHQQ", len(strtab), 0x10, 0, 0, 0, 0))
+            symtab.append(struct.pack("<IBBHQQ", len(strtab), (2 if name in weak else 1) << 4, 0, 0, 0, 0))
         strtab += name.encode() + b"\0"
     symbols = len(sections) + sum(1 for *_, calls in functions if calls) + 1
     for k, (name, _, _, calls) in enumerate(functions):
         if calls:
-            body = b"".join(struct.pack("<QQq", call[0], (0 if call[1] is None else names.index(call[1]) + 1) << 32
-                                        | (call[2] if len(call) > 2 else 19), 0) for call in calls)
+            relocations = []
+            for call in calls:
+                symbol = 0 if call[1] is None else names.index(call[1]) + 1
+                if len(call) == 2:
+                    relocations += [(call[0], symbol, 19, 0), (call[0], 0, 51, 0)]
+                else:
+                    relocations.append((call[0], symbol, call[2], call[3] if len(call) > 3 else 0))
+            body = b"".join(struct.pack("<QQq", offset, symbol << 32 | kind, addend)
+                            for offset, symbol, kind, addend in relocations)
             sections.append((f".rela.text.{name}", 4, 0x40, body, symbols, k + 1, 8, 24))
     sections += [(".symtab", 2, 0, b"".join(symtab), symbols + 1, 1, 8, 24), (".strtab", 3, 0, strtab, 0, 0, 1, 0)]
     shstrtab = b"\0" + b"".join(s[0].encode() + b"\0" for s in sections) + b".shstrtab\0"
@@ -1234,22 +1369,23 @@ def executable_of(sections, loads, symbols):
 
 
 def fake_linker(cwd, ro_end=0x10300, misplace=None, extra_load=False, backward=None, far=None, grown=None,
-                far_once=None, unrelaxed=None, hidden=(), made=None):
+                far_once=None, unrelaxed=None, hidden=(), made=None, relaxed=None):
     """The commands of the append mode (layout.run), with a stand-in for the compiler driver and lld, in `cwd`. For
     -###, the linker's line. Else a link of the objects and archives the command names: it lays out their .text
     sections one after another in input order, or as an append script puts them (each pattern's sections from the
     address before it, and the next PT_LOAD at the address the script gives), then their thread-local data sections
     (SHF_TLS: the .tdata ones before the .tbss ones, each in input order) in the output sections .tdata and .tbss,
     and writes lld's map (-Wl,-Map=) and an executable (-o). The read-only segment in front of .text ends at
-    `ro_end`. In a link with a script: `misplace` names a function whose map line it puts 0x10 bytes further,
-    `extra_load` adds a PT_LOAD, `backward` makes it fail as lld does when the script's line `backward` moves the
-    location counter backward, `far` ({function: address}) puts symbols elsewhere, `far_once` the same in the first
-    such link only, and `grown` ({function: bytes}) gives functions more linked bytes in the map. In every link,
-    `unrelaxed` ({function: bytes}) gives functions more linked bytes, in the map and before what follows them, as
-    lld does for an access it no longer relaxes wherever .text puts the function; a script's address below the end
-    of what came before it then fails as lld fails. The executable has no global symbol for the functions `hidden`
-    names, as lld writes a symbol of hidden visibility as a local one, and it has the symbols `made` ({name:
-    address}) that the linker makes, which no object defines."""
+    `ro_end`. Each function takes its input size, less the bytes that `relaxed` ({function: bytes}) names, which
+    lld's relaxation removes in every link. In a link with a script: `misplace` names a function whose map line it
+    puts 0x10 bytes further, `extra_load` adds a PT_LOAD, `backward` makes it fail as lld does when the script's line
+    `backward` moves the location counter backward, `far` ({function: address}) puts symbols elsewhere, `far_once`
+    the same in the first such link only, and `grown` ({function: bytes}) gives functions more linked bytes in the
+    map. In every link, `unrelaxed` ({function: bytes}) gives functions more linked bytes, in the map and before what
+    follows them, as lld does for an access it no longer relaxes wherever .text puts the function; a script's address
+    below the end of what came before it then fails as lld fails. The executable has no global symbol for the
+    functions `hidden` names, as lld writes a symbol of hidden visibility as a local one, and it has the symbols
+    `made` ({name: address}) that the linker makes, which no object defines."""
     extra = unrelaxed or {}
     scripted = []
 
@@ -1272,7 +1408,8 @@ def fake_linker(cwd, ro_end=0x10300, misplace=None, extra_load=False, backward=N
                 tls += [(named, s.name, s.size, s.align) for s in sections if s.flags & 0x400]
 
         def linked(k):
-            return found[k][3] + extra.get(found[k][2][len(".text."):], 0)
+            name = found[k][2][len(".text."):]
+            return found[k][3] - (relaxed or {}).get(name, 0) + extra.get(name, 0)
         script = next((w[len("-Wl,-T,"):] for w in words if w.startswith("-Wl,-T,")), None)
         text = (ro_end + 0xFFF) // 0x1000 * 0x1000 + ro_end % 0x1000
         addresses, rw = {}, None
@@ -1350,17 +1487,23 @@ def sources(new, tls=False, made=()):
     them, and small the same bytes at an alignment of 16. With `tls`, tail reads a thread-local variable (TLS_READ),
     in both sources: tv, which b.o defines in .tbss.tv, at the start of the TLS segment in the old source and after
     8 KiB of .tdata in the new one. entry also calls each function that `made` names, which no object defines: the
-    first at 0x18, the next 8 bytes further."""
-    main = relocatable([("entry", b"\1" * 0x40, 4,
+    first at 0x18, the next 8 bytes further. lld's relaxation removes bytes of entry and of tail (RELAXED)."""
+    main = relocatable([("entry", b"\1" * (0x40 + RELAXED["entry"]), 4,
                          [(0x8, "helper"), (0x10, "grow")] + [(0x18 + 8 * k, name) for k, name in enumerate(made)]),
                         ("grow", b"\x99" * 0x50 if new else b"\2" * 0x30, 4, []),
-                        ("tail", b"\3" * 0x20, 4, TLS_READ if tls else [])])
+                        ("tail", b"\3" * (0x20 + (RELAXED["tail"] if tls else 0)), 4, TLS_READ if tls else [])])
     member = relocatable([("helper", b"\5" * 0x18, 4, []), ("small", b"\6" * 0x8, 16 if new else 4, [])])
     variables = []
     if tls:
         variables = ([(".tdata.table", bytes(0x2000), 8, "table")] if new else []) + [(".tbss.tv", bytes(4), 4, "tv")]
     return {"main.o": main, "b.o": relocatable([("other", b"\4" * 0x60, 4, [])], variables),
             "lib.a": archive([("m.o", member)])}
+
+
+# The bytes that lld's relaxation removes of entry (of its relaxed calls), and of tail with `tls` (TLS_READ, relaxed
+# at the base), in every link of sources(): each takes 0x40 and 0x20 bytes there, and a link that no longer relaxes
+# them gives them back (fake_linker's grown and unrelaxed), up to the input size, as lld does.
+RELAXED = {"entry": 4, "tail": 8}
 
 
 COMMAND = ["clang", "main.o", "b.o", "lib.a"]
@@ -1370,12 +1513,13 @@ def tree_entry(root, directory, map_text, binary, placement=None):
     """root/plain/fuzz/, the layout tree's entry of a link of the files in `directory`, as collect writes it."""
     entry = root / "plain" / "fuzz"
     entry.mkdir(parents=True)
+    output = layout.output_rows(layout.Elf(binary, "fuzz"))
     found, calls = layout.describe(layout.read_map(map_text), layout.Objects(lambda f: (directory / f).read_bytes()),
-                                   lambda f: f, {"getenv"})
+                                   lambda f: f, {"getenv"}, layout.output_of(output, "fuzz"))
     (entry / "map").write_text(map_text)
     (entry / "sections.tsv").write_bytes(layout.tsv(layout.sections_rows(found)))
     (entry / "calls.tsv").write_bytes(layout.tsv(layout.calls_rows(calls)))
-    (entry / "output.tsv").write_bytes(layout.tsv(layout.output_rows(layout.Elf(binary, "fuzz"))))
+    (entry / "output.tsv").write_bytes(layout.tsv(output))
     (entry / "wraps").write_text("getenv\n")
     if placement is not None:
         (entry / "placement.tsv").write_bytes(placement)
@@ -1385,16 +1529,19 @@ def tree_entry(root, directory, map_text, binary, placement=None):
 def append_setup(tmp_path, monkeypatch, tls=False, made=None, **fake):
     """The base layout tree tmp_path/base of a link of the old sources in tmp_path/old, and the new sources in
     tmp_path/work, the working directory, with fake_linker(**fake) in place of the commands (sources(new, tls,
-    made)). The linker makes the symbols `made` ({name: address}) in every link. Returns the base entry."""
+    made)). The linker makes the symbols `made` ({name: address}) in every link, and its relaxation removes the bytes
+    of RELAXED. Returns the base entry."""
     for name, new in (("old", False), ("work", True)):
         (tmp_path / name).mkdir()
         for file, data in sources(new, tls, made or {}).items():
             (tmp_path / name / file).write_bytes(data)
+    relaxed = {name: n for name, n in RELAXED.items() if name != "tail" or tls}
     old = tmp_path / "old"
-    assert fake_linker(old, made=made)(COMMAND + [f"-Wl,-Map={old / 'map'}", "-o", str(old / "fuzz")]) == (0, "")
+    assert fake_linker(old, made=made, relaxed=relaxed)(COMMAND + [f"-Wl,-Map={old / 'map'}", "-o",
+                                                                   str(old / "fuzz")]) == (0, "")
     entry = tree_entry(tmp_path / "base", old, (old / "map").read_text(), (old / "fuzz").read_bytes())
     monkeypatch.chdir(tmp_path / "work")
-    monkeypatch.setattr(layout, "run", fake_linker(tmp_path / "work", made=made, **fake))
+    monkeypatch.setattr(layout, "run", fake_linker(tmp_path / "work", made=made, relaxed=relaxed, **fake))
     (tmp_path / "links").mkdir()
     return entry
 
@@ -1480,14 +1627,94 @@ def test_a_global_target_resolves_to_its_definition_in_the_links_objects(tmp_pat
     words = ["clang", *files, f"-Wl,-Map={tmp_path / 'map'}", "-o", str(tmp_path / "fuzz")]
     assert fake_linker(tmp_path, hidden={"f"}, made={"stub": 0x12000})(words) == (0, "")
     entry = tree_entry(tmp_path / "tree", tmp_path, (tmp_path / "map").read_text(), (tmp_path / "fuzz").read_bytes())
-    # The global g wins over the weak one before it, and of two weak h the first in the map's order.
+    # The global g wins over the weak one before it, and of two weak h the first in the map's order. Each call has
+    # R_RISCV_RELAX, and lld relaxes each, all in jal's reach: 4 bytes more lie in front of each call than of the one
+    # before it.
     assert [line.split("\t") for line in (entry / "calls.tsv").read_text().splitlines()] == [
-        ["0", "0x0", "call", "global", "f", "0x0", "5", "0x0"], ["0", "0x8", "call", "global", "g", "0x0", "3", "0x0"],
-        ["0", "0x10", "call", "global", "h", "0x0", "2", "0x0"],
-        ["0", "0x18", "call", "global", "stub", "0x0", "-", "-"]]
+        ["0", "0x0", "call", "1", "0x0", "global", "f", "0x0", "5", "0x0"],
+        ["0", "0x8", "call", "1", "0x4", "global", "g", "0x0", "3", "0x0"],
+        ["0", "0x10", "call", "1", "0x8", "global", "h", "0x0", "2", "0x0"],
+        ["0", "0x18", "call", "1", "0xc", "global", "stub", "0x0", "-", "-"]]
     tree = layout.read_layout(str(entry))
     assert "f" not in tree.output.symbols
     assert [layout.target_address(call, tree) for call in tree.calls[0]] == [0x11340, 0x11330, 0x11328, 0x12000]
+
+
+def test_each_line_gives_the_bytes_that_relaxation_removed_in_front_of_it():
+    # OSSV-675 review. lld 20's relax() walks the relocations of a section in offset order, and each is at the
+    # section's address plus its offset, less the bytes removed in front of it (delta). c is at 0x11000. Its call of k
+    # at 0x0 is in jal's reach: lld removes 4 bytes. Its R_RISCV_ALIGN at 0xc has 12 bytes of nops for an alignment
+    # of 16 (the next power of two at or above 12 + 2) and is at 0x11008: the 4 nops past 0x11010 go. Its call of t at
+    # 0x20, at 0x11018, is in reach and goes too. Its call of t at 0x30 has no R_RISCV_RELAX (relax 0). lld removes
+    # 12 bytes of c in all, whose 0x40 bytes take 0x34. In k, nothing lies in front of its call.
+    objects = {"main.o": relocatable([("c", bytes(0x40), 4, [(0x0, "k"), (0xC, None, 43, 12), (0x20, "t"),
+                                                            (0x30, "t", 19)]),
+                                      ("k", bytes(0x10), 4, [(0x4, "t")])])}
+    text = map_line(0x11000, 0x34, 4, "main.o:(.text.c)") + map_line(0x11034, 0xC, 4, "main.o:(.text.k)")
+    _, calls = layout.describe(layout.read_map(text), layout.Objects(objects.__getitem__), lambda f: f, set(),
+                               layout.Output([], [], {"t": 0x11100}))
+    assert [(c.row, c.offset, c.relax, c.delta) for c in calls] == [(0, 0x0, True, 0), (0, 0x20, True, 8),
+                                                                   (0, 0x30, False, 12), (1, 0x4, True, 0)]
+    # With t 1 MiB further, c's call of t at 0x20 keeps its 8 bytes: 4 bytes fewer lie in front of the next call.
+    _, calls = layout.describe(layout.read_map(text), layout.Objects(objects.__getitem__), lambda f: f, set(),
+                               layout.Output([], [], {"t": 0x211100}))
+    assert [c.delta for c in calls] == [0, 8, 8, 0]
+
+
+def test_an_undefined_weak_target_is_at_0_and_an_ifunc_has_no_address(tmp_path):
+    # OSSV-675 review. caller calls w, a weak function that no object defines and the binary does not name: lld gives
+    # it the value 0 in a static link, in jal's reach of 0x11300. It calls k, and i, an ifunc of i.o (STT_GNU_IFUNC),
+    # whose call goes through lld's PLT entry, which no tree holds: from that call on, the bytes that relaxation
+    # removed in front of each line are not known.
+    calls = [(0x0, "w"), (0x8, "k"), (0x10, "i"), (0x18, "k")]
+    files = {"main.o": relocatable([("caller", b"\1" * 0x20, 4, calls), ("k", b"\2" * 0x8, 4, [])], weak={"w"}),
+             "i.o": relocatable([("i", b"\3" * 0x8, 4, [])], ifunc={"i"})}
+    for file, data in files.items():
+        (tmp_path / file).write_bytes(data)
+    words = ["clang", *files, f"-Wl,-Map={tmp_path / 'map'}", "-o", str(tmp_path / "fuzz")]
+    assert fake_linker(tmp_path)(words) == (0, "")
+    entry = tree_entry(tmp_path / "tree", tmp_path, (tmp_path / "map").read_text(), (tmp_path / "fuzz").read_bytes())
+    assert [line.split("\t") for line in (entry / "calls.tsv").read_text().splitlines()] == [
+        ["0", "0x0", "call", "1", "0x0", "weak", "w", "0x0", "-", "-"],
+        ["0", "0x8", "call", "1", "0x4", "global", "k", "0x0", "1", "0x0"],
+        ["0", "0x10", "call", "1", "-", "ifunc", "i", "0x0", "-", "-"],
+        ["0", "0x18", "call", "1", "-", "global", "k", "0x0", "1", "0x0"]]
+    tree = layout.read_layout(str(entry))
+    assert "i" in tree.output.symbols
+    assert [layout.target_address(call, tree) for call in tree.calls[0]] == [0, 0x11320, None, 0x11320]
+    # A weak symbol that the binary names (one the linker makes) is where the binary puts it.
+    named = tree._replace(output=tree.output._replace(symbols={**tree.output.symbols, "w": 0x12000}))
+    assert layout.target_address(tree.calls[0][0], named) == 0x12000
+
+
+def test_a_map_line_whose_section_the_objects_do_not_tell_has_no_bytes_and_no_calls():
+    # OSSV-675 review. An archive of two members named a.o, REAL and STORES, whose .text.__rust_alloc sections take 8
+    # and 26 bytes, and a map that holds the second one's alone, a line of 0x1a bytes: lld's map lists the members it
+    # took in the order it took them, so the line could be either member's. It gets no sha256 (it moves as a changed
+    # function), the map's size and alignment, and none of REAL's calls.
+    lib = archive([("a.o", REAL), ("a.o", STORES)])
+    text = map_line(0x11000, 0x1A, 2, "/work/lib.a(a.o):(.text.__rust_alloc)")
+    inputs, calls = layout.describe(layout.read_map(text), layout.Objects({"/work/lib.a": lib}.__getitem__),
+                                    lambda f: f, set(), layout.Output([], [], {}))
+    assert [(i.sha256, i.size, i.align) for i in inputs] == [("", 0x1A, 2)] and calls == []
+    # An object with two sections .text.f, the first with a call.
+    two = {"/work/two.o": relocatable([("f", b"\1" * 8, 4, [(0x0, "g")]), ("f", b"\2" * 0x10, 4, [])])}
+
+    def described(*lines):
+        text = "".join(map_line(address, size, 4, "/work/two.o:(.text.f)") for address, size in lines)
+        return layout.describe(layout.read_map(text), layout.Objects(two.__getitem__), lambda f: f, set(),
+                               layout.Output([], [], {}))
+
+    # The map takes one of them (--gc-sections took the other): it could be either.
+    inputs, calls = described((0x11000, 8))
+    assert [(i.sha256, i.size) for i in inputs] == [("", 8)] and calls == []
+    # It takes both: the k-th line is the k-th section, as before.
+    inputs, calls = described((0x11000, 8), (0x11008, 0x10))
+    assert [(i.sha256, i.size) for i in inputs] == [(sha(b"\1" * 8), 8), (sha(b"\2" * 0x10), 0x10)]
+    assert [(c.row, c.offset, c.target) for c in calls] == [(0, 0x0, "g")]
+    # A line longer than its section is not that section (lld only removes bytes): the first one can be told no more.
+    inputs, calls = described((0x11000, 0x10), (0x11010, 8))
+    assert [(i.sha256, i.size) for i in inputs] == [("", 0x10), (sha(b"\2" * 0x10), 0x10)] and calls == []
 
 
 def test_append_links_normally_when_the_read_only_data_grew_past_its_room(tmp_path, monkeypatch, capsys):
@@ -1635,6 +1862,37 @@ def test_append_moves_a_kept_caller_whose_call_of_a_hidden_function_is_relaxed_o
     capsys.readouterr()
     assert layout.main(["check", str(tmp_path / "base"), str(tmp_path / "new")]) == 0
     assert lines_with(capsys.readouterr().out.splitlines(), "moved with a cause: caller", "jal_reach")
+
+
+def test_append_names_the_call_it_cannot_test_when_the_check_link_changes_a_kept_section(tmp_path, monkeypatch,
+                                                                                         capsys):
+    # OSSV-675 review. caller calls i, an ifunc, whose call goes through lld's PLT entry, whose address no tree holds:
+    # the append mode cannot test whether lld relaxes that call otherwise. When the check link gives caller 4 bytes
+    # more (as when lld no longer relaxes the call), the link stops, and the error names that call, not a defect of
+    # the mode.
+    def files(new):
+        return {"main.o": relocatable([("caller", b"\1" * 0x24, 4, [(0x8, "i")]),
+                                       ("g", b"\x99" * 0x30 if new else b"\2" * 0x10, 4, [])]),
+                "i.o": relocatable([("i", b"\3" * 0x8, 4, [])], ifunc={"i"})}
+    command = ["clang", "main.o", "i.o"]
+    for name, new in (("old", False), ("work", True)):
+        (tmp_path / name).mkdir()
+        for file, data in files(new).items():
+            (tmp_path / name / file).write_bytes(data)
+    old = tmp_path / "old"
+    assert fake_linker(old, relaxed={"caller": 4})(command + [f"-Wl,-Map={old / 'map'}", "-o", str(old / "fuzz")]) \
+        == (0, "")
+    entry = tree_entry(tmp_path / "base", old, (old / "map").read_text(), (old / "fuzz").read_bytes())
+    monkeypatch.chdir(tmp_path / "work")
+    monkeypatch.setattr(layout, "run", fake_linker(tmp_path / "work", relaxed={"caller": 4}, grown={"caller": 4}))
+    (tmp_path / "links").mkdir()
+    code = layout.main(["append", "--base", str(entry), "--work", str(tmp_path / "links"), "--script",
+                        str(tmp_path / "script.ld"), "--placement", str(tmp_path / "placement.tsv"), "--wraps",
+                        str(tmp_path / "wraps"), "--"] + command)
+    error = capsys.readouterr().err
+    assert code == 1
+    assert "caller (main.o)" in error and "offset 0x8 (i)" in error and "a defect of the append mode" not in error
+    assert not (tmp_path / "placement.tsv").exists()
 
 
 @pytest.mark.parametrize("words", [["--help"], ["collect", "--help"], ["check", "--help"], ["wraps", "--help"],
