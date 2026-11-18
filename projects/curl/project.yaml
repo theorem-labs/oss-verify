@@ -1,1 +1,1 @@
-{repo: "https://github.com/curl/curl#f190aa8ecea728e6ce7fb7a6250e03df4d4eaca5", primary_contact: "tester-probe@example.invalid", homepage: "https://curl.haxx.se", language: "c++", sanitizers: ["address", "undefined"], fuzz_targets: ["fuzz_bufq", "fuzz_fnmatch", "fuzz_url"]}
+{repo: "https://github.com/curl/curl#f190aa8ecea728e6ce7fb7a6250e03df4d4eaca5", primary_contact: "n/a", homepage: "https://curl.haxx.se", language: "c++", sanitizers: ["address", "undefined"], fuzz_targets: ["fuzz_bufq", "fuzz_fnmatch", "fuzz_url"]}
