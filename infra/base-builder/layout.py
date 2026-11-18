@@ -59,12 +59,16 @@ bytes: twins, which the trees cannot tell apart), alignment (its base address do
 readonly_growth (the segment in front of .text grew past the page that holds the base's first .text byte). A
 same-bytes function of a key with twins must move: at its base address, the trees do not show that the section there
 is the base's own, since lld may take the archive members of one name in another order. An entry of NEW whose
-placement.tsv marks a build that fell back to its normal link (normal_layout) is listed as `normal layout: <reason>`
-and fails nothing: a normal link keeps no base address, so the build claims none, and check does not verify the
-reason. It exits 1 when a function neither keeps its base address nor moves for a cause that the trees show, or when a
-same-bytes function of a key with twins lies at its base address, naming the function; 2 when a tree cannot be read
-(a placement.tsv in which some lines give normal_layout and others do not, or which gives two reasons, does not read)
-or the two share no (build, target); else 0.
+placement.tsv marks a build that fell back to its normal link (normal_layout) claims no base address, as a normal link
+keeps none, and check verifies the mark: each line of .text in its map (each .text input section, and each line of the
+linker's own between two of them) must lie at the end of the line before it, its address plus its linked size, rounded
+up to its alignment as the map gives it, as lld's normal link lays them out, so that a mark over an append build's
+layout fails. When the rule holds, the entry is listed as `normal layout: <reason>` and fails nothing else; check does
+not verify the reason. It exits 1 when a function neither keeps its base address nor moves for a cause that the trees
+show, or when a same-bytes function of a key with twins lies at its base address, naming the function, and when the
+.text of an entry marked normal_layout breaks that rule, naming the build and the first line that breaks it; 2 when a
+tree cannot be read (a placement.tsv in which some lines give normal_layout and others do not, or which gives two
+reasons, does not read) or the two share no (build, target); else 0.
 
 wraps prints the functions that the link COMMAND wraps, one a line, sorted: each --wrap=<f> of the linker command
 that the compiler driver gives for it with -###, with each @file expanded. It exits 2 when the command fails or gives
@@ -337,6 +341,24 @@ def map_entries(text):
 def is_text(section):
     """Whether an input section holds a function: its name is .text or starts with `.text.`."""
     return section == ".text" or section.startswith(".text.")
+
+
+def text_lines(entries):
+    """The lines of the output section .text of a map whose lines are `entries` (map_entries), in the map's order:
+    [(row, MapLine)] from its first line of a .text input section (is_text) to its last, with `row` the line's index
+    among the lines that name a file (read_map), or None for a line of the linker's own. A link with no script puts
+    each .text input section in .text (lld's getOutputSectionName), and lld's map lists the input sections of one
+    output section together, in address order, so that each line between two of them is one of .text. A line of the
+    linker's own can lie there, which read_map leaves out: the padding (.randomize_padding) that lld's
+    --randomize-section-padding puts in front of input sections. lld 20 makes no thunk for riscv64, whose calls it
+    relaxes instead, so that no other line of its own lies in .text."""
+    lines, row = [], 0
+    for line in entries:
+        own = line.file == "<internal>"
+        lines.append((None if own else row, line))
+        row += not own
+    text = [k for k, (_, line) in enumerate(lines) if is_text(line.section)]
+    return lines[text[0]:text[-1] + 1] if text else []
 
 
 # ── ELF files and ar archives ────────────────────────────────────────────────────────────────────────────────────────
@@ -896,7 +918,7 @@ def relaxed_calls(lines, inputs, relocated, output):
              for row, entries in targeted.items()}
     relaxed = {row: ([None] * len(entries), None) for row, entries in calls.items()}  # {row: ([delta], removed)}
     if output is not None:
-        view = Layout(inputs, {}, output, {}, set())
+        view = Layout(inputs, {}, output, {}, set(), [])
         removed = dict.fromkeys(firsts, 0)  # {target: the target delta of the round before}
         for passes in range(RELAX_PASSES + 1):
             if passes == RELAX_PASSES:
@@ -1034,9 +1056,9 @@ Load = collections.namedtuple("Load", "vaddr filesz memsz flags")
 Output = collections.namedtuple("Output", "sections loads symbols")
 Placement = collections.namedtuple("Placement", "base place address cause detail")
 # The layout of a link (read_layout): its inputs [Input], its calls {row: [Call]}, its Output, its placement
-# {(key_file, member, section, occurrence): Placement}, and `loaded`, the set of the rows whose map line the binary
-# loads (read_map).
-Layout = collections.namedtuple("Layout", "inputs calls output placement loaded")
+# {(key_file, member, section, occurrence): Placement}, `loaded`, the set of the rows whose map line the binary loads
+# (read_map), and `text`, the lines of its .text output section in its map (text_lines).
+Layout = collections.namedtuple("Layout", "inputs calls output placement loaded text")
 
 
 def sections_rows(inputs):
@@ -1199,14 +1221,16 @@ def normal_layout(placement):
 def read_layout(directory):
     """The entry <build>/<target>/ of a layout tree (Layout). Its map, sections.tsv, calls.tsv and output.tsv are
     required; placement.tsv is read when it is there (an append build). Raise LayoutError if one cannot be read."""
-    lines = read_map(text_of(read_regular(below(directory, "map"))))
+    entries = map_entries(text_of(read_regular(below(directory, "map"))))
+    lines = [line for line in entries if line.file != "<internal>"]
     inputs = read_sections(below(directory, "sections.tsv"), lines)
     calls = read_calls(below(directory, "calls.tsv"), len(inputs))
     output = read_output(below(directory, "output.tsv"))
     placement = {}
     if os.path.lexists(os.path.join(directory, "placement.tsv")):
         placement = read_placement(below(directory, "placement.tsv"))
-    return Layout(inputs, calls, output, placement, {row for row, line in enumerate(lines) if line.loaded})
+    return Layout(inputs, calls, output, placement, {row for row, line in enumerate(lines) if line.loaded},
+                  text_lines(entries))
 
 
 # ── collect ──────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -1652,14 +1676,37 @@ def text_change(base, new):
                                                             *[s.size if s else "-" for s in text])
 
 
+def normal_break(layout):
+    """Why the .text of the layout `layout` is not laid out as lld's normal link lays it out, naming the first line
+    that breaks the rule, or None. lld lays out the input sections of an output section one after another
+    (LinkerScript::assignOffsets): each at the end of the one before it, its address plus its linked size, rounded up
+    to its alignment, and its map gives the address, the linked size and the alignment of each. The lines are those
+    of .text (text_lines), the linker's own among them."""
+
+    def name(row, line):
+        return f"{line.file}:({line.section})" if row is None else function(layout.inputs[row])
+
+    for (row_before, before), (row, line) in zip(layout.text, layout.text[1:]):
+        end = before.address + before.size
+        expected = align_up(end, line.align)
+        if line.address != expected:
+            return (f"{name(row, line)} at {hex(line.address)}, where the line before it ({name(row_before, before)}) "
+                    f"ends at {hex(end)}, rounded up to {line.align}: {hex(expected)}")
+    return None
+
+
 def compare(label, base, new):
     """The comparison of one (build, target) of two layouts: (failures, information), each a list of lines. An append
-    build that fell back to its normal link (normal_layout) fails nothing, and its information is `<label>: normal
-    layout: <reason>` and the line of .text: a normal link keeps no base address, so the build claims none, and the
+    build that fell back to its normal link (normal_layout) claims no base address, as a normal link keeps none: its
+    information is `<label>: normal layout: <reason>` and the line of .text, and it fails only when its .text is not
+    laid out as lld's normal link lays it out (normal_break), so that a mark over an append build's layout fails. The
     reason is not verified."""
     reason = normal_layout(new.placement)
     if reason is not None:
-        return [], [f"{label}: normal layout: {reason}", text_change(base, new)]
+        why = normal_break(new)
+        failures = [f"FAIL {label}: its placement.tsv marks a normal layout, but .text is not laid out as lld's "
+                    f"normal link lays it out: {why}"] if why else []
+        return failures, [f"{label}: normal layout: {reason}", text_change(base, new)]
     pairing = pair(base.inputs, new.inputs)
     occurrence = occurrences(new.inputs)
     failures, moved, changed = [], [], []
@@ -1742,7 +1789,8 @@ def check(base_tree, new_tree):
         old, new = read_layout(below(base_tree, build, target)), read_layout(below(new_tree, build, target))
         failures, found = compare(f"{build}/{target}", old, new)
         failed += bool(failures)
-        normal += normal_layout(new.placement) is not None
+        # The last line counts the builds with a normal layout among those that pass.
+        normal += normal_layout(new.placement) is not None and not failures
         lines += found[:1] + failures + found[1:]
     for line in lines:
         print(line)
@@ -2250,13 +2298,13 @@ def pattern(i):
     return f'"{quotable(file)}"({script_name(i.section)})'
 
 
-def plan(base, probe, pairing, forced=None, internal=()):
+def plan(base, probe, pairing, tail, forced=None):
     """The plan (Plan) of an append link: where each .text input section of the probe link `probe` (Layout, with no
     placement) goes against the base layout `base`, with the pairing `pairing` (pair). It reads no file and runs
-    nothing. `forced` ({row: CallTest or TlsTest}) names kept sections that the check after the link moves with
-    jal_reach or tls_reach: they never return to their base addresses, where the check link would move them again,
-    so that the links of append end. `internal` ([MapLine]) are the lines of the linker's own sections of the probe
-    link's map (map_entries), which segment_tail counts.
+    nothing. `tail` is the probe link's segment_tail, as the caller computed it (None when the probe link has no
+    .text), which it gives call_tests too. `forced` ({row: CallTest or TlsTest}) names kept sections that the check
+    after the link moves with jal_reach or tls_reach: they never return to their base addresses, where the check link
+    would move them again, so that the links of append end.
 
     When the read-only data in front of .text grew past its room (readonly_growth), the link is a normal one: no
     script, each section at the probe's address. Else a same-bytes section with a thread-local access that lld
@@ -2308,7 +2356,6 @@ def plan(base, probe, pairing, forced=None, internal=()):
     base_text, _ = text_load(base.output)
     if base_text is None:
         raise LayoutError("BASE's output.tsv has no .text")
-    tail = segment_tail(probe, internal)
     if tail is None:
         raise LayoutError("the probe link's output.tsv has no .text")
     probe_end, tail_bytes, tail_align = tail
@@ -2539,7 +2586,8 @@ def append_link(label, entry, work, script, placement, wraps, renamed, command):
     base = read_layout(entry)
     key_file = key_file_for(read_renamed(renamed) if renamed else {}, os.path.realpath)
 
-    # The probe map's lines that name a file (read_map), and those of the linker's own sections, which plan counts.
+    # The probe map's lines that name a file (read_map), and those of the linker's own sections, which segment_tail
+    # counts in the tail after .text.
     entries = map_entries(text_of(read_regular(probe_map)))
     lines = [line for line in entries if line.file != "<internal>"]
     internal = [line for line in entries if line.file == "<internal>"]
@@ -2548,7 +2596,7 @@ def append_link(label, entry, work, script, placement, wraps, renamed, command):
     for call in calls:
         by_row[call.row].append(call)
     probe = Layout(inputs, by_row, binary_output(probe_binary), {},
-                   {row for row, line in enumerate(lines) if line.loaded})
+                   {row for row, line in enumerate(lines) if line.loaded}, text_lines(entries))
     pairing = pair(base.inputs, probe.inputs)
     text = [i for i in probe.inputs if is_text(i.section)]
 
@@ -2617,21 +2665,23 @@ def checked_plan(base, probe, pairing, lines, internal, work, script, command):
     with each cause's detail as the last check link shows it, and [(the probe link's Input, its address)] of each .text
     input section of the last check link, in its map's order; or the plan of a normal link and None, when the
     read-only data in front of .text grew past its room (plan). `lines` are the probe map's lines (read_map) and
-    `internal` those of the linker's own sections (map_entries). It writes the script of each plan to `script`, and
-    links with it in `work` with the link's `command`. Raise Fallback when a plan does; when a check link fails
-    (check_failure); when it does not put a kept section at its base address with its base linked size, and relaxes
-    no call or thread-local access of it otherwise; when the last check link does not show a jal_reach or tls_reach
-    cause (for one of a section that an earlier check link moved, the append mode never returns it, so that its links
-    end); when its PT_LOAD segments are not the probe link's, or two share a page; and when it takes a .text input
-    section that the probe link does not, or lacks one."""
+    `internal` those of the linker's own sections (map_entries), which segment_tail counts: the tail is computed once,
+    for the tests of the calls and for each plan. It writes the script of each plan to `script`, and links with it in
+    `work` with the link's `command`. Raise Fallback when a plan does; when a check link fails (check_failure); when
+    it does not put a kept section at its base address with its base linked size, and relaxes no call or thread-local
+    access of it otherwise; when the last check link does not show a jal_reach or tls_reach cause (for one of a
+    section that an earlier check link moved, the append mode never returns it, so that its links end); when its
+    PT_LOAD segments are not the probe link's, or two share a page; and when it takes a .text input section that the
+    probe link does not, or lacks one."""
     text = [i for i in probe.inputs if is_text(i.section)]
-    tests = call_tests(base, probe, pairing, segment_tail(probe, internal)).tests
+    tail = segment_tail(probe, internal)
+    tests = call_tests(base, probe, pairing, tail).tests
     tls = tls_tests(base, probe, pairing).tests
     names = map_index(lines)
     check_map, check_binary = os.path.join(work, "check.map"), os.path.join(work, "check")
     forced = {}
     while True:
-        planned = plan(base, probe, pairing, forced, internal)
+        planned = plan(base, probe, pairing, tail, forced)
         if planned.script is None:
             return planned, None
         write_new(script, planned.script.encode("utf-8", "surrogateescape"))
@@ -2736,9 +2786,12 @@ def main(argv=None):
                     "cause in NEW's placement.tsv that the two trees show (jal_reach, tls_reach, repeated_key, "
                     "alignment or readonly_growth); one of a key with two sections of the same bytes, which the trees "
                     "cannot tell apart, must move. A build of NEW that fell back to its normal link (normal_layout "
-                    "in its placement.tsv) is listed as \"normal layout: <reason>\" and fails nothing: a normal link "
-                    "keeps no base address, so the build claims none, and the check does not verify the reason. "
-                    "Exit 1 when a function fails, 2 when a tree cannot be read or the two share no (build, target).")
+                    "in its placement.tsv) claims no base address, as a normal link keeps none; its mark is verified: "
+                    "each line of .text in its map must lie at the end of the line before it, rounded up to its "
+                    "alignment, as lld's normal link lays them out. When it does, the build is listed as \"normal "
+                    "layout: <reason>\" and fails nothing else; the check does not verify the reason. Exit 1 when a "
+                    "function fails or a normal layout's .text breaks that rule, 2 when a tree cannot be read or the "
+                    "two share no (build, target).")
     checking.add_argument("base", metavar="BASE", help="the base build's layout tree")
     checking.add_argument("new", metavar="NEW", help="the append build's layout tree")
     wrapping = commands.add_parser(

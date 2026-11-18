@@ -1038,10 +1038,12 @@ def fell_back(rows, reasons=(FALLBACK,), causes=("normal_layout",)):
 def test_check_lists_a_build_that_fell_back_to_its_normal_link(tmp_path, capsys):
     # OSSV-675, R3: layout check lists a build that fell back to its normal link as "normal layout: <reason>", and the
     # architect's decision (dispatch://OSSV-675/comment/4c082109-3ce9-41cb-bd15-a055a29454bd): the build does not fail.
-    # In NEW's normal link beta moved and grew, and the twins lie at their base addresses. A normal link keeps no base
-    # address, so the build claims none: nothing fails, and nothing is kept. The control: with no such mark, the same
-    # tree fails for beta and for the twins.
-    rows = [TABLE, ALPHA, dict(BETA, address=0x11100, linked=0x14), GAMMA, COMMENT, TWIN0, TWIN1]
+    # In NEW's normal link lld removed 4 more bytes of beta, gamma needs an alignment of 16 and lies at its base
+    # address after 4 bytes of padding, and the twins lie at their base addresses: each .text line lies at the end of
+    # the line before it, rounded up to its alignment, as lld lays them out. A normal link keeps no base address, so
+    # the build claims none: nothing fails, and nothing is kept. The control: with no such mark, the same tree fails
+    # for beta and for the twins.
+    rows = [TABLE, ALPHA, dict(BETA, linked=0xC), dict(GAMMA, align=16), TWIN0, TWIN1, COMMENT]
     base = {"rows": BASE_ROWS + [TWIN0, TWIN1]}
     status, lines = run_check(tmp_path / "marked", capsys, {"rows": rows, "placement": fell_back(rows)}, base)
     assert (status, lines) == (0, [f"plain/fuzz: normal layout: {FALLBACK}",
@@ -1051,6 +1053,46 @@ def test_check_lists_a_build_that_fell_back_to_its_normal_link(tmp_path, capsys)
     assert status == 1
     assert [len(lines_with(lines, "FAIL", name)) for name in ("beta", "twin")] == [1, 2]
     assert lines[-1] == "layout check: 0 of 1 (build, target) pass"
+
+
+def test_check_fails_for_a_normal_layout_mark_over_an_append_builds_layout(tmp_path, capsys):
+    # OSSV-675 testing (dispatch://OSSV-675/comment/869a3c7a-8b52-4f94-88f4-ff801981d21b), R3: a build marked as a
+    # normal layout passes only when its .text lines are laid out as lld's normal link lays them out. NEW is an append
+    # build's tree: beta changed, grew and went to the end of .text, and alpha and gamma kept their base addresses, so
+    # that the hole beta left lies in front of gamma. With the append mode's own placement.tsv it passes. A copy whose
+    # placement.tsv marks every line normal_layout claims a normal link, which would put gamma at alpha's end: it
+    # fails, naming the build and gamma. At 4fc5f291 the copy passed, listed as a normal layout.
+    beta = dict(BETA, address=0x11070, linked=0x14, size=0x14, sha256=sha(b"beta 2"))
+    rows = [TABLE, ALPHA, GAMMA, beta, COMMENT]
+    placement = [placed(ALPHA, place="kept"), placed(GAMMA, place="kept"), placed(beta, place="end")]
+    status, lines = run_check(tmp_path / "append", capsys, {"rows": rows, "placement": placement})
+    assert status == 0, lines
+    assert lines_with(lines, "plain/fuzz: 2 kept, 0 moved with a cause, 1 changed or new, 0 failed")
+    status, lines = run_check(tmp_path / "forged", capsys, {"rows": rows, "placement": fell_back(rows)})
+    assert (status, lines) == (1, [
+        f"plain/fuzz: normal layout: {FALLBACK}",
+        "FAIL plain/fuzz: its placement.tsv marks a normal layout, but .text is not laid out as lld's normal link "
+        "lays it out: gamma (/work/b.o) at 0x11030, where the line before it (alpha (/work/a.o)) ends at 0x11020, "
+        "rounded up to 4: 0x11020",
+        "  .text: start 0x11000 -> 0x11000, size 256 -> 256",
+        "layout check: 0 of 1 (build, target) pass"])
+
+
+def test_check_counts_a_line_of_the_linkers_own_in_the_text_of_a_normal_layout(tmp_path, capsys):
+    # OSSV-675. lld's --randomize-section-padding puts padding of its own in front of input sections of .text: a line
+    # <internal>:(.randomize_padding) of the map, which read_map leaves out. The line after it lies at the padding's
+    # end, and the check counts the padding as a line of .text. Without that line, the same tree has a gap in front of
+    # gamma, and fails.
+    padding = row(".randomize_padding", 0x11030, 0x8, file="<internal>", align=1)
+    gamma = dict(GAMMA, address=0x11038)
+    rows = [TABLE, ALPHA, BETA, padding, gamma, COMMENT]
+    status, lines = run_check(tmp_path / "padded", capsys, {"rows": rows, "placement": fell_back(rows)})
+    assert (status, lines[-1]) == (0, "layout check: 1 of 1 (build, target) pass, 1 with a normal layout"), lines
+    rows.remove(padding)
+    status, lines = run_check(tmp_path / "gap", capsys, {"rows": rows, "placement": fell_back(rows)})
+    assert status == 1
+    assert lines_with(lines, "FAIL plain/fuzz", "gamma (/work/b.o) at 0x11038, where the line before it (beta "
+                      "(/work/a.o)) ends at 0x11030, rounded up to 4: 0x11030")
 
 
 def test_check_exits_2_for_a_placement_that_marks_a_fallback_on_some_lines_only_or_with_two_reasons(tmp_path, capsys):
@@ -1248,11 +1290,14 @@ def link(found, calls=(), symbols=None, front=0x10400, tls=(), deltas=None, nore
              layout.Load(start, after - start, after - start, 0x5), layout.Load(rw, 16, 16, 0x6)]
     inputs = found + data + more
     return layout.Layout(inputs, by_row, layout.Output(sections, loads, dict(symbols or {})), {},
-                         {i.row for i in inputs})
+                         {i.row for i in inputs}, [])
 
 
-def planned(base, probe):
-    return layout.plan(base, probe, layout.pair(base.inputs, probe.inputs))
+def planned(base, probe, forced=None, internal=()):
+    """layout.plan of the link `probe` against `base`, with the tail after the probe link's .text (segment_tail, which
+    counts the lines of the linker's own sections `internal`)."""
+    return layout.plan(base, probe, layout.pair(base.inputs, probe.inputs), layout.segment_tail(probe, internal),
+                       forced)
 
 
 def calls_tested(base, probe, pairing):
@@ -1569,9 +1614,8 @@ def test_the_script_ends_text_where_the_linkers_own_sections_after_it_keep_their
     assert [line.section for line in layout.read_map(mapping)] == [".text.grown", ".text.kept", "__lcxx_override"]
     internal = [line for line in layout.map_entries(mapping) if line.file == "<internal>"]
     assert [(line.address, line.align, line.section, line.loaded) for line in internal] == [(iplt, 16, ".iplt", True)]
-    pairing = layout.pair(base.inputs, probe.inputs)
-    assert "    . = 0x11fe0;\n  }\n" in layout.plan(base, probe, pairing).script
-    assert "    . = 0x11fe8;\n  }\n" in layout.plan(base, probe, pairing, internal=internal).script
+    assert "    . = 0x11fe0;\n  }\n" in planned(base, probe).script
+    assert "    . = 0x11fe8;\n  }\n" in planned(base, probe, internal=internal).script
 
 
 
@@ -1667,11 +1711,11 @@ def test_a_section_that_the_check_link_moved_never_returns():
     base, probe = reach_case()
     pairing = layout.pair(base.inputs, probe.inputs)
     test, = calls_tested(base, probe, pairing).tests[2]
-    assert where(layout.plan(base, probe, pairing, {2: test}), probe) == {
+    assert where(planned(base, probe, {2: test}), probe) == {
         "T": ("end", 0x211024, "-", "-"), "filler": ("kept", 0x11010, "-", "-"),
         "k": ("end", 0x210F24, "jal_reach", "offset=0x4;target=T;gained"), "filler2": ("kept", 0x111110, "-", "-"),
         "V": ("hole", 0x111010, "-", "-")}
-    assert where(layout.plan(base, probe, pairing), probe)["k"] == ("kept", 0x111010, "-", "-")
+    assert where(planned(base, probe), probe)["k"] == ("kept", 0x111010, "-", "-")
 
 
 def straddle_case(filler2):
@@ -1784,7 +1828,7 @@ def test_twins_that_sat_side_by_side_move_as_one_block_never_to_a_partners_base_
                  text_input(2, "k", 0x11020, 0x10)])
     probe = link(laid_out([("dup", 0x10, LIB), ("dup", 0x10, LIB), ("k", 0x10, {})]))
     pairing = layout.pair(base.inputs, probe.inputs)
-    plan = layout.plan(base, probe, pairing)
+    plan = planned(base, probe)
     assert [tuple(plan.places[row]) for row in range(3)] == [("end", 0x11030, "repeated_key", "-"),
                                                             ("end", 0x11040, "repeated_key", "-"),
                                                             ("kept", 0x11020, "-", "-")]
@@ -2304,7 +2348,7 @@ def test_a_target_inside_its_section_lies_where_the_relaxation_in_front_of_it_pu
     inputs, calls = describe_map(text, objects)
     assert [(c.row, c.offset, c.target, c.delta, c.target_delta) for c in calls] == [
         (0, 0x0, "f2", 0, 4), (0, 0x8, "k", 4, 0), (1, 0x0, "k", 0, 0)]
-    assert layout.target_address(calls[0], layout.Layout(inputs, {}, output, {}, set())) == 0x110FF0 + 0x10 - 4
+    assert layout.target_address(calls[0], layout.Layout(inputs, {}, output, {}, set(), [])) == 0x110FF0 + 0x10 - 4
     assert layout.calls_rows(calls[:1]) == [["0", "0x0", "call", "1", "0x0", "global", "f2", "0x0", "1", "0x10",
                                              "0x4"]]
     # A link with no output (the probe link) does not know those bytes, but knows that lld can remove up to 4.
@@ -2801,10 +2845,10 @@ def test_append_falls_back_to_the_normal_link_when_a_kept_section_calls_an_ifunc
     # OSSV-675, the architect's decision (dispatch://OSSV-675/comment/4c082109-3ce9-41cb-bd15-a055a29454bd), a planted
     # ifunc call: caller calls i, an ifunc, whose call goes through lld's PLT entry, whose address no tree holds. The
     # append mode cannot test whether lld relaxes that call as at the base, so it never links caller at its base
-    # address: the build falls back to its normal link, prints one line that names the call and why, and layout check
-    # lists the build as "normal layout: <reason>". At 8e0c6f16 the append link keeps caller, and stops only when the
-    # check link changes it. The control: the same call of an ordinary function stays in the append mode, and caller
-    # keeps its base address.
+    # address: the build falls back to its normal link, prints one line that names the call and why, and layout check,
+    # which finds its .text laid out as lld's normal link lays it out, lists the build as "normal layout: <reason>". At
+    # 8e0c6f16 the append link keeps caller, and stops only when the check link changes it. The control: the same call
+    # of an ordinary function stays in the append mode, and caller keeps its base address.
     command = ["clang", "main.o", "i.o"]
     root = tmp_path / "ifunc"
     entry = link_setup(root, monkeypatch, ifunc_files(True), command, relaxed={"caller": 4})
