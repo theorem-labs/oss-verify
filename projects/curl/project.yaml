@@ -10,3 +10,5 @@ sanitizers: [address, undefined]
 # and building libprotobuf-mutator and its protobuf for every sanitizer took about an hour each, past the time the
 # enrollment build is given.
 fuzz_targets: [fuzz_bufq, fuzz_fnmatch, fuzz_url]
+auto_ccs:
+  - tester-probe@example.invalid
