@@ -4,14 +4,15 @@
 # Modified 2026 by Theorem Labs, PBC: OSS Verify's enrollment files (build.sh, patch_style, harness sources and
 # patches beside project.yaml; .oss-verify/ in the project's repository), validation warnings, two new rows (the
 # n/a contact of a seeded project on an outside pull request; the project's status in the proofs index), a warning for
-# a fork's change to a seeded project, which enrollment refuses, and no package-rank row.
+# a fork's change to a seeded project, which enrollment refuses, no package-rank row, and the --facts option (the
+# criticality score and OSS-Fuzz as JSON).
 """Write the triage of an enrollment pull request: the comment for the pull request, and the full table for Theorem's
 reviewers, as Markdown.
 
     GITHUB_TOKEN=... uv run python3 .github/scripts/triage.py --repo theorem-labs/oss-verify --pr 123 \
-        [--summary <file>] [--full]
+        [--summary <file>] [--full] [--facts <file>]
     uv run python3 .github/scripts/triage.py --repo theorem-labs/oss-verify --local projects/<name> --login <you> \
-        [--body <file>]
+        [--body <file>] [--facts <file>]
 
 Run by .github/workflows/review.yml's triage-gather job, or by hand to see what it would say. Prints nothing when the
 pull request does not touch projects/. With --local, it writes the comment for a projects/<name>/ on this machine
@@ -23,6 +24,14 @@ The comment on the pull request is public, and carries only the rows in PUBLIC_R
 the license, whether an active maintainer opened it, its scope, oss-verify validate and the checklist. The full table
 has every row, and is for Theorem's reviewers: --summary appends it to a file (the workflow's job summary) in the
 same run, so that no API request is made twice, and --full prints it instead of the comment (the review reads it).
+
+--facts writes two values of the full table to a file as one JSON object, in the same run too, so that no API request
+is made twice: {"criticality_score": ..., "oss_fuzz": ...}. criticality_score is the number that the Criticality score
+row shows, to 5 places (the row shows 2). oss_fuzz is true when one of the OSS-Fuzz projects that this reads (the
+OSS_FUZZ_CANDIDATES projects whose names are most like the repository's) has this repository as its main_repo, and
+false when none of them has. A value is null when it is not known: the repository is not on github.com or GitHub does
+not find it, its row could not be checked, or the pull request has nothing to triage. The criticality_score of a fork
+is null too, because a fork is not scored.
 
 The pull request is read as data through the GitHub API: nothing from it is checked out or executed, and a read-only
 token is enough. The token goes to api.github.com alone, and no other host is contacted. Text from the pull request,
@@ -687,15 +696,18 @@ def oss_fuzz_projects(gh: GitHub, slug: str) -> tuple[list[str], dict[str, objec
     return found, namesakes
 
 
-def oss_fuzz_row(gh: GitHub, slug: str) -> tuple[str, str]:
-    """Is the repository in OSS-Fuzz, whose fuzz targets we verify?"""
+def oss_fuzz_row(gh: GitHub, slug: str, facts: dict) -> tuple[str, str]:
+    """Is the repository in OSS-Fuzz, whose fuzz targets we verify? The answer also goes in facts["oss_fuzz"]."""
     projects, namesakes = oss_fuzz_projects(gh, slug)
     if not projects and namesakes:
         others = "; ".join(f"{code(name)} there is for {code(main_repo)}" for name, main_repo in namesakes.items())
-        return INFO, f"no OSS-Fuzz project is for this repository, but {others}"
-    if not projects:
-        return INFO, "not found in OSS-Fuzz"
-    return OK, f"in OSS-Fuzz as {', '.join(code(name) for name in projects)}"
+        mark, result = INFO, f"no OSS-Fuzz project is for this repository, but {others}"
+    elif not projects:
+        mark, result = INFO, "not found in OSS-Fuzz"
+    else:
+        mark, result = OK, f"in OSS-Fuzz as {', '.join(code(name) for name in projects)}"
+    facts["oss_fuzz"] = bool(projects)  # last, so that a row that could not be checked records nothing
+    return mark, result
 
 
 def verifier_files_row(gh: GitHub, slug: str, ref: str | None, config: dict, beside: set[str]) -> tuple[str, str]:
@@ -815,7 +827,8 @@ def criticality_score(signals: dict[str, float]) -> float:
     return round(total / sum(weight for weight, _ in CRITICALITY_SIGNALS.values()), 5)
 
 
-def criticality_row(gh: GitHub, slug: str, meta: dict) -> tuple[str, str]:
+def criticality_row(gh: GitHub, slug: str, meta: dict, facts: dict) -> tuple[str, str]:
+    """The repository's criticality score. The score also goes in facts["criticality_score"]."""
     if meta["fork"]:
         # A fork carries its parent's commits and contributors, and would be given the parent's score.
         parent = (meta.get("parent") or {}).get("full_name")
@@ -827,6 +840,7 @@ def criticality_row(gh: GitHub, slug: str, meta: dict) -> tuple[str, str]:
     if low:
         result += f": low, and the project has under {FEW_STARS} stars"
     details = ", ".join(f"{name} {value:,}" for name, value in signals.items())
+    facts["criticality_score"] = score  # last, so that a row that could not be checked records nothing
     return (WARN if low else INFO), f"{result}<details><summary>signals</summary>{details}</details>"
 
 
@@ -845,8 +859,9 @@ def row(check: str, function, *arguments) -> tuple[str, str, str]:
     return mark, check, result
 
 
-def repository_rows(gh: GitHub, config: dict, beside: set[str], login: str) -> tuple[str, list[tuple]]:
-    """Return a Markdown description of the repository being enrolled, and the rows about it."""
+def repository_rows(gh: GitHub, config: dict, beside: set[str], login: str, facts: dict) -> tuple[str, list[tuple]]:
+    """Return a Markdown description of the repository being enrolled, and the rows about it. The rows Criticality
+    score and OSS-Fuzz put the values they show in `facts`."""
     repo = config.get("repo")
     if not repo:
         return "unknown", [(WARN, "Repository", "no project.yaml that names one")]
@@ -869,10 +884,10 @@ def repository_rows(gh: GitHub, config: dict, beside: set[str], login: str) -> t
         row("Stars / forks", popularity_row, meta),
         row("Fork", fork_row, meta),
         row("Outside participants", outsiders_row, gh, slug, meta, login),
-        row("Criticality score", criticality_row, gh, slug, meta),
+        row("Criticality score", criticality_row, gh, slug, meta, facts),
         row("License", license_row, gh, slug, meta),
         row("Opened by an active maintainer", maintainer_row, gh, slug, meta, login),
-        row("OSS-Fuzz", oss_fuzz_row, gh, slug),
+        row("OSS-Fuzz", oss_fuzz_row, gh, slug, facts),
         row(f"`{IN_REPO_DIRECTORY}/` in the repository", verifier_files_row, gh, slug, ref, config, beside),
     ]
 
@@ -880,9 +895,12 @@ def repository_rows(gh: GitHub, config: dict, beside: set[str], login: str) -> t
 class Triage(NamedTuple):
     """The public comment for the pull request, and the full table for Theorem's reviewers. Both are "" for a pull
     request that touches nothing under projects/. Only the comment starts with MARKER: the workflow finds the comment
-    to update by it, and the full table must never be taken for that comment."""
+    to update by it, and the full table must never be taken for that comment. criticality_score and oss_fuzz are the
+    values that the rows Criticality score and OSS-Fuzz show, or None when they are not known (--facts writes them)."""
     comment: str
     full: str
+    criticality_score: float | None = None
+    oss_fuzz: bool | None = None
 
 
 def table(rows: list[tuple]) -> str:
@@ -901,7 +919,8 @@ def report(gh: GitHub, repo: str, name: str, directory: pathlib.Path, login: str
     config = read_config(directory)
     beside = {path.name for path in directory.glob("*")}
 
-    described, rows = repository_rows(gh, config, beside, login)
+    facts = {}  # what --facts writes, from the rows that show it
+    described, rows = repository_rows(gh, config, beside, login, facts)
     if config.get("primary_contact") == validate.NO_CONTACT:
         rows.append(row("Seeded contact", seeded_contact_row, config, association))
     rows += [
@@ -918,6 +937,7 @@ def report(gh: GitHub, repo: str, name: str, directory: pathlib.Path, login: str
         f"<sub>Every check, for Theorem's reviewers: the comment on the pull request carries only the rows "
         f"{', '.join(PUBLIC_ROWS)}. Automated, from public data. It decides nothing: enrollment is decided case by case "
         f"([how to enroll a project](https://github.com/{repo}#enroll-a-project)).</sub>\n",
+        **facts,
     )
 
 
@@ -968,6 +988,8 @@ def main() -> int:
     parser.add_argument("--summary", type=pathlib.Path,
                         help="also append the full table, every row, to this file (the job summary)")
     parser.add_argument("--full", action="store_true", help="print the full table, every row, instead of the comment")
+    parser.add_argument("--facts", type=pathlib.Path,
+                        help="also write the criticality score and OSS-Fuzz, as one JSON object, to this file")
     options = parser.parse_args()
     gh = GitHub(os.environ.get("GITHUB_TOKEN"))
     if options.pr is not None:
@@ -983,6 +1005,11 @@ def main() -> int:
     if options.summary and result.full:
         with options.summary.open("a", encoding="utf-8") as summary:
             summary.write(result.full)
+    if options.facts:
+        with options.facts.open("w", encoding="utf-8") as facts:
+            json.dump({"criticality_score": result.criticality_score, "oss_fuzz": result.oss_fuzz}, facts,
+                      allow_nan=False)
+            facts.write("\n")
     sys.stdout.write(result.full if options.full else result.comment)
     return 0
 

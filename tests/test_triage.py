@@ -4,6 +4,7 @@
 import contextlib
 import importlib.util
 import io
+import json
 import os
 import pathlib
 import re
@@ -27,7 +28,8 @@ ENROLLED = "repo: https://example.invalid/example\nprimary_contact: security@lib
 
 
 class FakeGitHub:
-    """Answers from tables: `responses` for JSON (a missing path is a 404), `files` for raw bytes, `texts` for text."""
+    """Answers from tables: `responses` for JSON (a missing path is a 404), `files` for raw bytes, `texts` for text.
+    `fetched` lists the paths asked for as bytes or as text, as GitHub.text() asks through fetch()."""
 
     def __init__(self, responses=None, files=None, texts=None):
         self.responses, self.files, self.texts = responses or {}, files or {}, texts or {}
@@ -48,6 +50,7 @@ class FakeGitHub:
         return self.files[path], ""
 
     def text(self, path, whole=False, **params):
+        self.fetched.append(path)
         return self.texts.get(path)
 
     # The criticality score's and the GraphQL rows' requests: unanswered, as a token without access would see them.
@@ -155,18 +158,14 @@ class Rows(unittest.TestCase):
             self.assertEqual(mark, triage.WARN, association)
 
     def test_oss_fuzz_does_not_compare_primary_contact(self):
-        gh = FakeGitHub(
-            responses={"repos/google/oss-fuzz/git/trees/HEAD:projects": {"tree": [{"path": "example", "type": "tree"}]}},
-            texts={
-                "repos/google/oss-fuzz/contents/projects/example/project.yaml": (
-                    "main_repo: https://github.com/owner/example\nprimary_contact: security@libexample.dev\n"
-                )
-            },
-        )
+        gh = in_oss_fuzz(FakeGitHub(), {
+            "example": "main_repo: https://github.com/owner/example\nprimary_contact: security@libexample.dev\n"})
+        facts = {}
         self.assertEqual(
-            triage.oss_fuzz_row(gh, "owner/example"),
+            triage.oss_fuzz_row(gh, "owner/example", facts),
             (triage.OK, "in OSS-Fuzz as `example`"),
         )
+        self.assertEqual(facts, {"oss_fuzz": True})
 
     def test_proofs_index(self):
         self.assertEqual(triage.proofs_index_row(FakeGitHub(), "cjson")[0], triage.INFO)
@@ -291,6 +290,26 @@ def checks(text):
     return [line.split(" | ")[1] for line in text.splitlines() if line.startswith("| ") and " | Check | " not in line]
 
 
+# OSS-Fuzz's list of projects, and signals of the criticality score: FakeGitHub cannot answer the requests that
+# collect the signals.
+OSS_FUZZ_TREE = "repos/google/oss-fuzz/git/trees/HEAD:projects"
+LISTED = "main_repo: https://github.com/someone/libexample.git\n"
+SIGNALS = {"created_since": 72, "updated_since": 1, "contributor_count": 40, "org_count": 3, "commit_frequency": 2.5,
+           "recent_releases_count": 4, "closed_issues_count": 30, "updated_issues_count": 50, "comment_frequency": 2.1,
+           "dependents_count": 120}
+
+
+def oss_fuzz_project(name):
+    return f"repos/google/oss-fuzz/contents/projects/{name}/project.yaml"
+
+
+def in_oss_fuzz(gh, projects):
+    """The fake GitHub, with OSS-Fuzz's projects: each name with the text of its project.yaml."""
+    gh.responses[OSS_FUZZ_TREE] = {"tree": [{"path": name, "type": "tree"} for name in projects]}
+    gh.texts.update({oss_fuzz_project(name): text for name, text in projects.items()})
+    return gh
+
+
 class Comment(unittest.TestCase):
     @staticmethod
     def pull(yaml_text, association, files=None, changed=None, body=""):
@@ -375,7 +394,7 @@ class Comment(unittest.TestCase):
 
     def test_nothing_under_projects(self):
         gh = self.pull(SEEDED, "NONE", changed=["README.md"])
-        self.assertEqual(triage.triage(gh, REPO, 7), ("", ""))
+        self.assertEqual(triage.triage(gh, REPO, 7), ("", "", None, None))
 
     def test_a_withdrawal(self):
         gh = self.pull(SEEDED, "NONE")
@@ -463,7 +482,7 @@ class Comment(unittest.TestCase):
 
 class CommandLine(unittest.TestCase):
     """main(): the comment on standard output; --summary appends the full table to a file in the same run; --full
-    prints the full table instead."""
+    prints the full table instead; --facts writes the criticality score and OSS-Fuzz to a file in the same run."""
 
     def run_main(self, *arguments, gh=None):
         gh = gh or Comment.pull(ON_GITHUB, "NONE")
@@ -499,6 +518,122 @@ class CommandLine(unittest.TestCase):
             self.assertFalse(summary.exists())
         self.assertEqual(printed, "")
 
+    def test_facts_beside_the_full_table(self):
+        gh = in_oss_fuzz(Comment.pull(ON_GITHUB, "NONE"), {"libexample": LISTED, "example": "main_repo: x\n"})
+        with tempfile.TemporaryDirectory() as scratch, \
+                mock.patch.object(triage, "criticality_signals", return_value=SIGNALS) as collect:
+            facts = pathlib.Path(scratch) / "facts.json"
+            printed, gh = self.run_main("--full", "--facts", str(facts), gh=gh)
+            written = json.loads(facts.read_text())
+        self.assertEqual(checks(printed), EVERY_ROW)
+        self.assertEqual(written, {"criticality_score": triage.criticality_score(SIGNALS), "oss_fuzz": True})
+        # One run: the table and the file come from the same requests, and each is made once.
+        collect.assert_called_once()
+        self.assertEqual(gh.fetched.count(f"repos/{REPO}/contents/projects/example/project.yaml"), 1)
+        self.assertEqual([gh.fetched.count(oss_fuzz_project(name)) for name in ("libexample", "example")], [1, 1])
+
+    def test_facts_change_neither_the_output_nor_the_summary(self):
+        outputs = []
+        for facts in (False, True):
+            gh = in_oss_fuzz(Comment.pull(ON_GITHUB, "NONE"), {"libexample": LISTED})
+            with tempfile.TemporaryDirectory() as scratch, \
+                    mock.patch.object(triage, "criticality_signals", return_value=SIGNALS):
+                summary, path = pathlib.Path(scratch) / "summary", pathlib.Path(scratch) / "facts.json"
+                printed, _ = self.run_main("--summary", str(summary), *(["--facts", str(path)] if facts else []), gh=gh)
+                outputs.append((printed, summary.read_text()))
+                self.assertEqual(path.exists(), facts)
+        self.assertEqual(outputs[1], outputs[0])
+        self.assertEqual(checks(outputs[1][0]), list(triage.PUBLIC_ROWS))
+        self.assertEqual(checks(outputs[1][1]), EVERY_ROW)
+
+
+class Facts(unittest.TestCase):
+    """--facts: the values that the rows Criticality score and OSS-Fuzz show, as one JSON object in a file."""
+
+    NOT_KNOWN = {"criticality_score": None, "oss_fuzz": None}
+    run_main = CommandLine.run_main
+
+    def facts(self, gh, **collect):
+        """Run main() with --full --facts, and return what it printed and the JSON object in the file. `collect` says
+        how the stand-in for criticality_signals() answers: with SIGNALS when it is not given."""
+        with tempfile.TemporaryDirectory() as scratch, \
+                mock.patch.object(triage, "criticality_signals", **(collect or {"return_value": SIGNALS})):
+            path = pathlib.Path(scratch) / "facts.json"
+            path.write_text("before\n")  # replaced, not appended to
+            printed, _ = self.run_main("--full", "--facts", str(path), gh=gh)
+            written = path.read_text()
+        # One JSON object and a line end, with the two keys and no other.
+        self.assertTrue(written.startswith("{") and written.endswith("}\n"), written)
+        self.assertEqual(written.count("\n"), 1, written)
+        facts = json.loads(written)
+        self.assertEqual(sorted(facts), ["criticality_score", "oss_fuzz"])
+        return printed, facts
+
+    def test_a_fork_listed_in_oss_fuzz(self):
+        gh = in_oss_fuzz(Comment.pull(ON_GITHUB, "NONE"), {"libexample": LISTED})
+        forked = {**META, "fork": True, "parent": {"full_name": "upstream/libexample"}}
+        gh.responses["repos/someone/libexample"] = forked
+        printed, facts = self.facts(gh)
+        self.assertEqual(facts, {"criticality_score": None, "oss_fuzz": True})
+        self.assertIn("| ⚠️ | Criticality score | not scored: a fork of `upstream/libexample`", printed)
+
+    def test_the_score_that_the_row_shows(self):
+        printed, facts = self.facts(in_oss_fuzz(Comment.pull(ON_GITHUB, "NONE"), {}))
+        score = triage.criticality_score(SIGNALS)
+        self.assertNotEqual(score, round(score, 2))  # the file has more places than the row shows
+        self.assertEqual(facts["criticality_score"], score)
+        self.assertIn(f"| Criticality score | **{score:.2f}** on the [OpenSSF]", printed)
+        self.assertIs(facts["oss_fuzz"], False)
+
+    def test_a_namesake_for_another_repository(self):
+        gh = in_oss_fuzz(Comment.pull(ON_GITHUB, "NONE"),
+                         {"libexample": "main_repo: https://github.com/other/libexample\n"})
+        printed, facts = self.facts(gh)
+        self.assertIs(facts["oss_fuzz"], False)
+        self.assertIn("| ℹ️ | OSS-Fuzz | no OSS-Fuzz project is for this repository, but `libexample` there is for "
+                      "`https://github.com/other/libexample` |", printed)
+
+    def test_a_project_listed_in_oss_fuzz(self):
+        printed, facts = self.facts(in_oss_fuzz(Comment.pull(ON_GITHUB, "NONE"), {"libexample": LISTED}))
+        self.assertIs(facts["oss_fuzz"], True)
+        self.assertIn("| ✅ | OSS-Fuzz | in OSS-Fuzz as `libexample` |", printed)
+
+    def test_rows_that_could_not_be_checked(self):
+        # FakeGitHub has no OSS-Fuzz list here: it answers 404.
+        printed, facts = self.facts(Comment.pull(ON_GITHUB, "NONE"),
+                                    side_effect=triage.ApiError("fake", 404, "graphql"))
+        self.assertEqual(facts, self.NOT_KNOWN)
+        self.assertIn("| ⚠️ | Criticality score | could not be checked: ", printed)
+        self.assertIn("| ⚠️ | OSS-Fuzz | could not be checked: ", printed)
+
+    def test_a_repository_not_on_github(self):
+        printed, facts = self.facts(Comment.pull(SEEDED, "NONE"))
+        self.assertEqual(facts, self.NOT_KNOWN)
+        self.assertIn("not a github.com repository", printed)
+
+    def test_nothing_under_projects(self):
+        printed, facts = self.facts(Comment.pull(SEEDED, "NONE", changed=["README.md"]))
+        self.assertEqual(facts, self.NOT_KNOWN)
+        self.assertEqual(printed, "")
+
+    def test_a_withdrawal(self):
+        gh = Comment.pull(SEEDED, "NONE")
+        del gh.responses[f"repos/{REPO}/contents/projects/example"]
+        printed, facts = self.facts(gh)
+        self.assertEqual(facts, self.NOT_KNOWN)
+        self.assertIn("a withdrawal, nothing to triage", printed)
+
+    def test_a_local_directory(self):
+        # --local goes through the same rows as --pr.
+        with tempfile.TemporaryDirectory() as scratch, \
+                mock.patch.object(triage, "criticality_signals", return_value=SIGNALS):
+            directory = pathlib.Path(scratch) / "example"
+            directory.mkdir()
+            (directory / "project.yaml").write_text(ON_GITHUB)
+            gh = in_oss_fuzz(FakeGitHub({"repos/someone/libexample": META}), {"libexample": LISTED})
+            result = triage.triage_local(gh, REPO, directory, "someone", "")
+        self.assertEqual((result.criticality_score, result.oss_fuzz), (triage.criticality_score(SIGNALS), True))
+
 
 class Callers(unittest.TestCase):
     def test_the_workflow_puts_the_full_table_in_the_job_summary_and_the_comment_in_the_output(self):
@@ -528,12 +663,6 @@ class Callers(unittest.TestCase):
             output = (scratch / "output").read_text().split("\n")
         self.assertTrue(output[0].startswith("comment<<triage-"), output)
         self.assertEqual(output[1:3], ["COMMENT", output[0].removeprefix("comment<<")])
-
-    def test_the_review_reads_the_full_table(self):
-        gather = (ROOT / ".github" / "scripts" / "review-gather").read_text()
-        call = re.search(r"^.*\bkeep triage-today\.md (.*)$", gather, re.M)[1]
-        self.assertEqual(call.split(), ["python3", ".github/scripts/triage.py", "--repo", '"$REPO"', "--pr", '"$PR"',
-                                        "--full"])
 
 
 if __name__ == "__main__":

@@ -45,6 +45,7 @@ Of the test files, the cases (r), (s), (u), (w) and (x) import only tests/test_e
 stand-in API with its World, and uses only what World has before the move too. In a tree of the commit before the move
 (0666dceb750a), these cases fail on their own assertions.
 """
+import contextlib
 import datetime
 import hashlib
 import importlib.machinery
@@ -62,6 +63,7 @@ import tarfile
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 
 import yaml
 
@@ -518,7 +520,9 @@ class PullRequestWorkflows(unittest.TestCase):
 
 class FirstRunArtifact(Stand):
     """(s): Build run 900 of pull request 7 at HEAD completed, and review.yml runs on workflow_run. The run's artifact
-    build-results names pull request 8, or the head OTHER, or holds a diff of its own."""
+    build-results names pull request 8, or the head OTHER, or holds a diff of its own. And the sizes of the artifact,
+    which build.yaml's results job writes: take-build-results gives them as its output sizes, bound in size, and only
+    them when they have another shape; it reads an artifact from before sizes with none."""
 
     RUN, ARTIFACT = "900", 9001
     VARIANTS = (("another number", {"pr": 8}), ("another head", {"sha": OTHER}),
@@ -528,6 +532,9 @@ class FirstRunArtifact(Stand):
     TAKE = "Take the results of the Build run"
     GATHER = "Gather what the review reads, and the diff since the last review"
     POST = "Post the comment and record the verdict"
+    # The four outputs of take-build-results for the results of Build run 900 (results()).
+    HONEST = {"build": "The Build check success: ARTIFACT-RESULT.", "binaries": "ARTIFACT-BINARIES",
+              "checks": "ARTIFACT-CHECKS", "commit": ""}
     # Control (1): route takes the number and the head from the artifact, in place of the ones it read from the API.
     ROUTE_OUTPUTS = '          {\n            echo "pr=$PR"\n'
     FROM_ARTIFACT = (
@@ -549,7 +556,8 @@ class FirstRunArtifact(Stand):
     def results(self, change):
         """The results of Build run 900 of pull request 7 at HEAD, with `change`."""
         return {"schema": "oss-verify build results v1", "pr": 7, "project": "x", "sha": HEAD, "commit": "", "code": 0,
-                "result": "ARTIFACT-RESULT", "binaries": "ARTIFACT-BINARIES", "checks": "ARTIFACT-CHECKS", **change}
+                "result": "ARTIFACT-RESULT", "binaries": "ARTIFACT-BINARIES", "checks": "ARTIFACT-CHECKS",
+                "sizes": None, **change}
 
     def fixture(self, change, data=None):
         """The API: pull request 7 at HEAD, and Build run 900 whose artifact holds the results with `change`, or is the
@@ -593,7 +601,7 @@ class FirstRunArtifact(Stand):
                         "steps.project.outputs.name": "x"})
             rc, log, build = self.run_step(review, "gather", self.TAKE, ctx, tree)
             self.assertEqual(rc, 0, log)
-            self.assertEqual(build, {"build": no_result, "binaries": "", "checks": "", "commit": ""},
+            self.assertEqual(build, {"build": no_result, "binaries": "", "checks": "", "commit": "", "sizes": ""},
                              f"take-build-results' outputs ({label}): {log}")
             ctx.update({f"steps.build.outputs.{k}": v for k, v in build.items()})
             checkout = self.dir / "checkout"
@@ -615,7 +623,8 @@ class FirstRunArtifact(Stand):
                       if p.is_file() and "ARTIFACT-" in p.read_text(errors="replace")]
             self.assertEqual(marked, [], f"the gathered files ({label})")
             ctx.update({"needs.route.outputs.free": "", "needs.gather.result": "success",
-                        "needs.gather.outputs.checks": build["checks"], "needs.gather.outputs.screen": "true",
+                        "needs.gather.outputs.checks": build["checks"], "needs.gather.outputs.sizes": build["sizes"],
+                        "needs.gather.outputs.screen": "true",
                         "needs.gather.outputs.name": "x", "needs.screen.result": "success",
                         "needs.screen.outputs.verdict": "clean", "needs.screen.outputs.checks": "claude",
                         "needs.review.result": "success", "needs.review.outputs.comment": "Thanks.\n",
@@ -633,6 +642,10 @@ class FirstRunArtifact(Stand):
             self.assertTrue(sent[0]["body"]["body"].endswith(f"\n<!-- oss-verify-review-head {HEAD} -->\n"),
                             f"the comment job's post ({label})")
             self.assertEqual((sent[1]["body"]["head_sha"], sent[1]["body"]["external_id"]), (HEAD, PR),
+                             f"the comment job's post ({label})")
+            # The check run keeps the record of the review in its output.text, an HTML comment.
+            text = sent[1]["body"]["output"]["text"]
+            self.assertEqual((text[:5], text[-4:], json.loads(text[5:-4])["head"]), ("<!-- ", " -->", HEAD),
                              f"the comment job's post ({label})")
             # No call of the run (gh api, gh pr view or gh pr diff) names the artifact's number or head.
             named = [args for _, args in self.calls()
@@ -675,14 +688,8 @@ class FirstRunArtifact(Stand):
         struct.pack_into("<I", out, struct.unpack_from("<I", out, len(out) - 22 + 16)[0] + 24, len(data))
         return bytes(out)
 
-    def test_s_a_member_that_holds_more_than_its_header_says_gives_no_result_in_little_memory(self):
-        """The header of results.json says that it holds the results of this head alone. It holds them and 64 MiB of
-        spaces after them, deflated or in bzip2. take-build-results gives its no-result line, and takes less than
-        16 MiB of memory: a read of the whole member takes about 128 MiB. Its main runs in this process, so that
-        tracemalloc sees its memory. A deflated results.json that holds what its header says gives its results."""
-        import contextlib
-        import tracemalloc
-        from unittest import mock
+    def take_module(self):
+        """.github/scripts/take-build-results as a module of this process, so that a test runs its main here."""
         self.need(ROOT, ".github/scripts/take-build-results", ".github/scripts/steering.py",
                   ".github/scripts/artifact.py")
         saved = list(sys.path)
@@ -693,18 +700,47 @@ class FirstRunArtifact(Stand):
             loader.exec_module(take)
         finally:
             sys.path[:] = saved
-        env = {**self.env, "GH_TOKEN": WORKFLOW_TOKEN, "REPO": REPO, "BUILD_RUN": self.RUN, "PR": PR,
-               "HEAD_SHA": HEAD, "NAME": "x"}
+        return take
+
+    def take_env(self):
+        """The environment of take-build-results in the gather job, for Build run 900 of pull request 7 at HEAD."""
+        return {**self.env, "GH_TOKEN": WORKFLOW_TOKEN, "REPO": REPO, "BUILD_RUN": self.RUN, "PR": PR,
+                "HEAD_SHA": HEAD, "NAME": "x"}
+
+    def taken(self, take, results):
+        """The main of `take` (take_module), run in this process for Build run 900 whose artifact holds `results` as
+        results.json: (its exit status, its outputs, what it printed)."""
+        data = zipped({"results.json": json.dumps(results)})
+        self.assertLess(len(data), take.MAX_ARTIFACT_BYTES)
+        self.fixture({}, data)
+        self.output.write_text("")
+        printed = io.StringIO()
+        with mock.patch.dict(os.environ, self.take_env(), clear=True), contextlib.redirect_stdout(printed):
+            code = take.main()
+        return code, outputs(self.output.read_text()), printed.getvalue()
+
+    @staticmethod
+    def compact(value):
+        """`value` as one line of compact JSON."""
+        return json.dumps(value, separators=(",", ":"))
+
+    def test_s_a_member_that_holds_more_than_its_header_says_gives_no_result_in_little_memory(self):
+        """The header of results.json says that it holds the results of this head alone. It holds them and 64 MiB of
+        spaces after them, deflated or in bzip2. take-build-results gives its no-result line, and takes less than
+        16 MiB of memory: a read of the whole member takes about 128 MiB. Its main runs in this process, so that
+        tracemalloc sees its memory. A deflated results.json that holds what its header says gives its results."""
+        import tracemalloc
+        take = self.take_module()
+        env = self.take_env()
         text = json.dumps(self.results({}))
-        no_result = {"build": take.NO_RESULT, "binaries": "", "checks": "", "commit": ""}
+        no_result = {"build": take.NO_RESULT, "binaries": "", "checks": "", "commit": "", "sizes": ""}
         for label, data, want, said in (
                 ("deflated", self.understated("results.json", text, zipfile.ZIP_DEFLATED), no_result,
                  "the read failed (BadZipFile)"),
                 ("bzip2", self.understated("results.json", text, zipfile.ZIP_BZIP2), no_result,
                  f"Build run {self.RUN}'s results.json has the compression method 12, not stored or deflated."),
                 ("honest and deflated", zipped({"results.json": text}, zipfile.ZIP_DEFLATED),
-                 {"build": "The Build check success: ARTIFACT-RESULT.", "binaries": "ARTIFACT-BINARIES",
-                  "checks": "ARTIFACT-CHECKS", "commit": ""}, f"read the results of Build run {self.RUN}")):
+                 {**self.HONEST, "sizes": ""}, f"read the results of Build run {self.RUN}")):
             self.assertLess(len(data), 1 << 20, label)
             with zipfile.ZipFile(io.BytesIO(data)) as archive:
                 self.assertEqual(archive.getinfo("results.json").file_size, len(text), label)
@@ -723,6 +759,127 @@ class FirstRunArtifact(Stand):
             self.assertEqual(code, 0, printed.getvalue())
             self.assertEqual(outputs(self.output.read_text()), want, f"take-build-results' outputs ({label})")
             self.assertIn(f"take-build-results: {said}", printed.getvalue(), label)
+
+    def test_s_the_sizes_of_the_results_are_the_output_sizes_in_one_line_of_compact_json(self):
+        """The sizes of results.json, as .github/scripts/binary-sizes gives them, are the fifth output of
+        take-build-results. Null sizes give it empty."""
+        take = self.take_module()
+        sizes = {"parse": {"plain": {"text": 1000, "exec": 1200}, "asan": {"text": 3000, "exec": None}},
+                 "dump all": {"plain": {"text": 0, "exec": 950}}, "none built": {}}
+        code, got, printed = self.taken(take, self.results({"sizes": sizes}))
+        self.assertEqual((code, got), (0, {**self.HONEST, "sizes": (
+            '{"parse":{"plain":{"text":1000,"exec":1200},"asan":{"text":3000,"exec":null}},'
+            '"dump all":{"plain":{"text":0,"exec":950}},"none built":{}}')}), printed)
+        code, got, printed = self.taken(take, self.results({"sizes": None}))
+        self.assertEqual((code, got), (0, {**self.HONEST, "sizes": ""}), printed)
+
+    def test_s_results_from_before_sizes_give_every_other_output(self):
+        """A Build run keeps its artifact 30 days, so a review by hand of a head can read a results.json
+        that build.yaml wrote before it wrote sizes: the four other outputs are its results, and sizes is empty."""
+        take = self.take_module()
+        old = self.results({})
+        del old["sizes"]
+        code, got, printed = self.taken(take, old)
+        self.assertEqual((code, got), (0, {**self.HONEST, "sizes": ""}), printed)
+        self.assertIn(f"take-build-results: read the results of Build run {self.RUN}", printed)
+
+    def test_s_a_member_with_another_key_is_still_refused(self):
+        take = self.take_module()
+        old = self.results({})
+        del old["sizes"]
+        missing = self.results({})
+        del missing["checks"]
+        for label, results in (("an unknown key", self.results({"extra": 1})),
+                               ("an unknown key and no sizes", dict(old, extra=1)), ("no checks", missing)):
+            with self.subTest(label):
+                code, got, printed = self.taken(take, results)
+                self.assertEqual((code, got), (0, {"build": take.NO_RESULT, "binaries": "", "checks": "",
+                                                   "commit": "", "sizes": ""}), printed)
+                self.assertIn("take-build-results: results.json does not have the shape of 'oss-verify build results"
+                              " v1'.", printed)
+
+    def test_s_sizes_of_another_shape_give_no_sizes_and_keep_the_other_outputs(self):
+        """Sizes that are not those of binary-sizes give the output sizes empty, and only it. One line of
+        the log says why, and it names no text of the artifact."""
+        take = self.take_module()
+        plain = {"text": 1000, "exec": 1200}
+        for label, sizes in (("a list", [plain]), ("a text", "ARTIFACT-SIZES"), ("a number", 1), ("a boolean", True),
+                             ("a target that is not an object", {"ARTIFACT-TARGET": [plain]}),
+                             ("a build that is not an object", {"ARTIFACT-TARGET": {"plain": 1000}}),
+                             ("a build with an extra key",
+                              {"ARTIFACT-TARGET": {"plain": {**plain, "ARTIFACT-KEY": 1}}}),
+                             ("a build without exec", {"ARTIFACT-TARGET": {"plain": {"text": 1000}}}),
+                             ("a negative size", {"ARTIFACT-TARGET": {"plain": {"text": -1, "exec": 1200}}}),
+                             ("a float", {"ARTIFACT-TARGET": {"plain": {"text": 1000.0, "exec": 1200}}}),
+                             ("a boolean size", {"ARTIFACT-TARGET": {"plain": {"text": True, "exec": 1200}}}),
+                             ("a text size", {"ARTIFACT-TARGET": {"plain": {"text": "1000", "exec": 1200}}}),
+                             ("a NUL in a target name", {"ARTIFACT-\0TARGET": {"plain": plain}}),
+                             ("a NUL in a build name", {"ARTIFACT-TARGET": {"pl\0ain": plain}}),
+                             ("an empty target name", {"": {"plain": plain}}),
+                             ("an empty build name", {"ARTIFACT-TARGET": {"": plain}})):
+            with self.subTest(label):
+                code, got, printed = self.taken(take, self.results({"sizes": sizes}))
+                self.assertEqual((code, got), (0, {**self.HONEST, "sizes": ""}), printed)
+                said = [line for line in printed.splitlines() if "sizes" in line]
+                self.assertEqual(len(said), 1, printed)
+                self.assertNotIn("ARTIFACT-", printed)
+
+    def test_s_sizes_over_the_bound_keep_only_the_plain_build_of_each_target(self):
+        """The comment job's step gets the output sizes in one environment variable, and Linux starts no
+        process with one over 131,072 bytes. Sizes of 100,001 bytes of compact JSON, 4 builds of each target, keep
+        only the plain build of each target ({} for a target with none), and one line of the log says so. Sizes of
+        100,000 bytes keep every build."""
+        take = self.take_module()
+        builds = {build: {"text": 123456, "exec": 234567} for build in ("plain", "asan", "ubsan", "msan")}
+        sizes = {f"fuzz_{n:04d}": builds for n in range(100_000 // len(self.compact({"fuzz_0000": builds})))}
+        sizes["no_plain_build"] = {"asan": {"text": 1, "exec": 2}}
+        # The first target's name takes what is left, so that the JSON has exactly 100,000 bytes.
+        first = "fuzz_0000" + "_" * (100_000 - len(self.compact(sizes)))
+        sizes = {first if target == "fuzz_0000" else target: value for target, value in sizes.items()}
+        self.assertEqual(len(self.compact(sizes).encode()), 100_000)
+        code, got, printed = self.taken(take, self.results({"sizes": sizes}))
+        self.assertEqual((code, got), (0, {**self.HONEST, "sizes": self.compact(sizes)}), printed)
+        self.assertNotIn("sizes", printed)
+        # One byte more.
+        sizes = {target + "_" if target == first else target: value for target, value in sizes.items()}
+        self.assertEqual(len(self.compact(sizes).encode()), 100_001)
+        code, got, printed = self.taken(take, self.results({"sizes": sizes}))
+        plain = {target: {"plain": value["plain"]} if "plain" in value else {} for target, value in sizes.items()}
+        self.assertEqual(plain["no_plain_build"], {})
+        self.assertEqual((code, got), (0, {**self.HONEST, "sizes": self.compact(plain)}), printed)
+        self.assertLessEqual(len(got["sizes"].encode()), 100_000)
+        said = [line for line in printed.splitlines() if "sizes" in line]
+        self.assertEqual(len(said), 1, printed)
+
+    def test_s_sizes_still_over_the_bound_with_the_plain_builds_alone_give_no_sizes(self):
+        take = self.take_module()
+        sizes = {f"fuzz_{n:04d}_" + "x" * 80: {"plain": {"text": 123456, "exec": 234567}} for n in range(1000)}
+        self.assertGreater(len(self.compact(sizes).encode()), 100_000)
+        code, got, printed = self.taken(take, self.results({"sizes": sizes}))
+        self.assertEqual((code, got), (0, {**self.HONEST, "sizes": ""}), printed)
+        said = [line for line in printed.splitlines() if "sizes" in line]
+        self.assertEqual(len(said), 2, printed)
+
+    def test_s_the_results_job_writes_the_sizes_of_the_build_step_and_take_build_results_gives_them(self):
+        """build.yaml's results job, run here, writes the build step's output results_sizes (the sizes, cut at 100,000
+        bytes) into results.json as JSON, null when the output is empty. take-build-results gives them back as its
+        output sizes."""
+        build = self.workflow(ROOT, "build.yaml")
+        take = self.take_module()
+        line = '{"parse":{"asan":{"exec":3300,"text":3000},"plain":{"exec":1200,"text":1000}}}'
+        for given in (line, ""):
+            with self.subTest(sizes=given):
+                shutil.rmtree(self.temp / "results", ignore_errors=True)
+                built = {"name": "x", "sha": HEAD, "commit": "", "code": "0", "result": "ARTIFACT-RESULT",
+                         "binaries": "ARTIFACT-BINARIES", "checks": "ARTIFACT-CHECKS", "results_sizes": given}
+                ctx = {"github.event.pull_request.number": PR,
+                       **{f"needs.project-builds.outputs.{k}": v for k, v in built.items()}}
+                rc, log, _ = self.run_step(build, "results", "Write the results", ctx, self.dir)
+                self.assertEqual(rc, 0, log)
+                results = json.loads((self.temp / "results" / "results.json").read_text())
+                self.assertEqual(results, self.results({"sizes": json.loads(given) if given else None}))
+                code, got, printed = self.taken(take, results)
+                self.assertEqual((code, got), (0, {**self.HONEST, "sizes": given}), printed)
 
 
 class SteeringFiles(unittest.TestCase):
@@ -1074,11 +1231,12 @@ class HeldApproval(Stand):
         the verdict pass, but those of `changed`: what .github/scripts/review-verdict prints for those verdicts."""
         verdicts = json.dumps(dict(dict.fromkeys(self.check_ids(), "pass"), **changed))
         made = json.loads(subprocess.run([str(ROOT / ".github/scripts/review-verdict")],
-                                         env={**self.env, "VERDICTS": verdicts, "REASONS": "{}"}, check=True,
-                                         capture_output=True, text=True).stdout)
+                                         env={**self.env, "VERDICTS": verdicts, "REASONS": "{}", "HEAD_SHA": HEAD},
+                                         check=True, capture_output=True, text=True).stdout)
         return self.as_listed({"name": "Enrollment review", "head_sha": HEAD, "external_id": PR, "status": "completed",
                                "conclusion": made["conclusion"],
-                               "output": {"title": made["title"], "summary": made["summary"]}}, run_id)
+                               "output": {"title": made["title"], "summary": made["summary"], "text": made["text"]}},
+                              run_id)
 
     def held_runs(self, runs):
         self.serve(f"repos/{REPO}/actions/runs", {"workflow_runs": [

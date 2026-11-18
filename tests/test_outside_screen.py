@@ -7,8 +7,9 @@ route's trust step (who is screened, and the daily cap of .github/scripts/screen
 route and each answer of the screen (the jobs' conditions, evaluated as GitHub does), what the check review jobs
 (review.yml's collector, collect) reports, the run's concurrency, what each job holds, how the screen
 and the review take the gathered data (.github/scripts/take-review-data), the gather job's checks that the head did not
-move, the gather job run step by step for an outside account's enrollment (the project's source, the failed fetch, and
-the session the review resumes), the comment job's hold, and the review comment's line on the checks that ran. Of
+move, the gather job run step by step for an outside account's enrollment (the project's source, the failed fetch, the
+session the review resumes, and the criticality score and OSS-Fuzz of the triage and the Build run's sizes as the job's
+outputs), the comment job's hold, and the review comment's line on the checks that ran. Of
 build.yaml (Build), whose completed run starts review.yml: its events and its concurrency, and that its jobs hold none
 of the review's identities and decide nothing of its trust. .github/scripts/screen.py itself is tested in
 test_screen.py."""
@@ -1734,7 +1735,7 @@ class GatherJob(Runner):
     review-gather and take-review-data, against a project repository that is a local git repository (FAKE_GIT); then
     what the review job and the screen job each take of what it kept, and what the screen reads of it. The steps
     before it gave what take-project took (the project libx) and the Build run's results (BUILD, COMMIT, BINARIES,
-    CHECKS)."""
+    CHECKS, and the step build's output sizes when a test gives it)."""
 
     GATHER = "Gather what the review reads, and the diff since the last review"
     SESSION = "09227178-7bbf-4e5f-86db-8736e530ef01"
@@ -1801,9 +1802,12 @@ class GatherJob(Runner):
         (self.home / ".claude" / "projects" / "p" / f"{self.SESSION}.jsonl").write_text("{}\n")
         (self.home / ".claude" / "ossv-last-review").write_text(last)
 
-    def gather_job(self, trust="screen", commit=None, fetch_fails=False, compare_status=None, compare_diff=""):
+    def gather_job(self, trust="screen", commit=None, fetch_fails=False, compare_status=None, compare_diff="",
+                   sizes=None):
         """The gather job's steps from GATHER on, each whose if holds, in a checkout with nothing gathered yet: (the
-        first failing step's exit status or 0, the log, the job's outputs)."""
+        first failing step's exit status or 0, the log, the job's outputs). GitHub gives the outputs of a job that
+        failed too, from the steps that ran. `sizes` is the output sizes of the step build, which runs before GATHER
+        (none when it is None)."""
         shutil.rmtree(self.checkout / ".review", ignore_errors=True)
         shutil.rmtree(self.temp / "review-data", ignore_errors=True)
         (self.api / "compare-status").write_text(f"{compare_status}\n" if compare_status else "")
@@ -1812,18 +1816,21 @@ class GatherJob(Runner):
                "FETCH_FAILS": "1" if fetch_fails else ""}
         ctx = {"env.KIND": "enrollment", "env.TRUST": trust, "steps.project.outputs.kind": "enrollment",
                "steps.project.outputs.name": "libx"}
+        if sizes is not None:
+            ctx["steps.build.outputs.sizes"] = sizes
         steps = REVIEW_JOBS["gather"]["steps"]
         start = [s.get("name") for s in steps].index(self.GATHER)
-        log = ""
+        log, rc = "", 0
         for s in steps[start:]:
             if "run" not in s or ("if" in s and not evaluate(s["if"], ctx)):
                 continue
             rc, out, got = self.run_script(s["run"], cwd=self.checkout, **env)
             log += out
+            if "id" in s:
+                ctx.update({f"steps.{s['id']}.outputs.{k}": v for k, v in got.items()})
             if rc:
-                return rc, log, {}
-            ctx.update({f"steps.{s['id']}.outputs.{k}": v for k, v in got.items()})
-        return 0, log, {k: as_text(evaluate(v, ctx)) for k, v in REVIEW_JOBS["gather"]["outputs"].items()}
+                break
+        return rc, log, {k: as_text(evaluate(v, ctx)) for k, v in REVIEW_JOBS["gather"]["outputs"].items()}
 
     def take(self, job, digest):
         """take-review-data in a fresh checkout for `job`: the review job gives its home, the screen job none.
@@ -2002,6 +2009,91 @@ class OutsidersResume(GatherJob):
                            outputs={"screen": {"verdict": "clean", "checks": "claude"},
                                     "review": {"comment": "x", "held_object": "", "session": "41", "kind": "enrollment"}})
         self.assertEqual((got["screen"], got["review"], got["session"]), ("success", "success", "success"))
+
+
+class TriageFacts(GatherJob):
+    """The criticality score and OSS-Fuzz that .github/scripts/triage.py --facts writes in the same run as --full: the
+    step gather gives them, and the job gives them as its outputs criticality_score and oss_fuzz, for the comment
+    job's record, each as its JSON type or null. They go in no file that the gather job keeps."""
+
+    TABLE = "| OK | Criticality score | 0.07 |"
+    # The file of the stand-in triage.py's arguments, in the test's directory.
+    ARGV = "triage-argv.json"
+
+    def triage(self, facts):
+        """The stand-in triage.py: its arguments in the file ARGV of the test's directory, the full table on standard
+        output only for --full, and the text `facts` in the file after --facts."""
+        (self.checkout / ".github" / "scripts" / "triage.py").write_text(
+            "import json, sys\n"
+            f"json.dump(sys.argv[1:], open({str(self.dir / self.ARGV)!r}, 'w'))\n"
+            f"print({self.TABLE!r} if '--full' in sys.argv else 'THE-COMMENT')\n"
+            "if '--facts' in sys.argv:\n"
+            f"    open(sys.argv[sys.argv.index('--facts') + 1], 'w').write({facts!r})\n")
+
+    @staticmethod
+    def facts(outputs):
+        """The job's outputs criticality_score and oss_fuzz."""
+        return outputs["criticality_score"], outputs["oss_fuzz"]
+
+    def test_the_job_gives_the_score_and_oss_fuzz_and_the_review_the_full_table(self):
+        self.triage('{"criticality_score": 0.07123, "oss_fuzz": false}\n')
+        rc, log, outputs = self.gather_job()
+        self.assertEqual(rc, 0, log)
+        self.assertEqual(self.facts(outputs), ("0.07123", "false"))
+        # review-gather runs it with exactly these arguments: --full, and --facts with a file outside .review.
+        argv = json.loads((self.dir / self.ARGV).read_text())
+        self.assertEqual(argv[:-1], ["--repo", REPO, "--pr", "7", "--full", "--facts"])
+        facts = pathlib.Path(os.path.normpath(self.checkout / argv[-1]))
+        self.assertNotIn(self.checkout / ".review", [facts, *facts.parents])
+        review, _ = self.take("review", outputs["digest"])
+        self.assertEqual((review / ".review" / "triage-today.md").read_text(), f"{self.TABLE}\n(exit status 0)\n")
+        # The file of the facts is in no member of what the screen and the review take, and gone from the checkout.
+        with tarfile.open(self.temp / "review-data" / "review.tar") as tar:
+            names = tar.getnames()
+        self.assertIn(".review/triage-today.md", names)
+        self.assertEqual([n for n in names if "facts" in n], [])
+        self.assertEqual(list(self.checkout.rglob("*facts*")), [])
+        # The step writes them before it fetches the project's repository: a fetch that fails does not lose them.
+        rc, log, outputs = self.gather_job(fetch_fails=True)
+        self.assertNotEqual(rc, 0, log)
+        self.assertEqual(self.facts(outputs), ("0.07123", "false"))
+        self.assertEqual(list(self.checkout.rglob("*facts*")), [])
+
+    def test_a_value_of_another_type_or_a_file_that_is_not_one_object_gives_null(self):
+        with self.subTest(facts="no file: the stand-in of setUp"):
+            rc, log, outputs = self.gather_job()
+            self.assertEqual(rc, 0, log)
+            self.assertEqual(self.facts(outputs), ("null", "null"))
+        for facts, want in (('{"criticality_score": "x", "oss_fuzz": true}', ("null", "true")),
+                            ('{"criticality_score": true, "oss_fuzz": false}', ("null", "false")),
+                            ('{"criticality_score": 0.5, "oss_fuzz": "yes"}', ("0.5", "null")),
+                            ('{"criticality_score": 0.5, "oss_fuzz": tru', ("null", "null")),
+                            ("not JSON\n", ("null", "null")),
+                            ('[{"criticality_score": 0.5, "oss_fuzz": true}]', ("null", "null"))):
+            with self.subTest(facts=facts):
+                self.triage(facts)
+                rc, log, outputs = self.gather_job()
+                self.assertEqual(rc, 0, log)
+                self.assertEqual(self.facts(outputs), want)
+                self.assertEqual(list(self.checkout.rglob("*facts*")), [])
+
+
+class BuildSizes(GatherJob):
+    """The binaries' sizes of the Build run's results, which the step build (.github/scripts/take-build-results) gives
+    before the step gather: the job gives them as its output sizes, for the comment job's record, and empty when the
+    step gave none."""
+
+    SIZES = '{"parse":{"plain":{"text":1000,"exec":1200},"asan":{"text":3000,"exec":null}}}'
+
+    def test_the_job_gives_the_sizes_of_the_step_build(self):
+        rc, log, outputs = self.gather_job(sizes=self.SIZES)
+        self.assertEqual(rc, 0, log)
+        self.assertEqual(outputs["sizes"], self.SIZES)
+
+    def test_with_no_sizes_of_the_step_build_the_output_is_empty(self):
+        rc, log, outputs = self.gather_job()
+        self.assertEqual(rc, 0, log)
+        self.assertEqual(outputs["sizes"], "")
 
 
 class TrustWiring(unittest.TestCase):
