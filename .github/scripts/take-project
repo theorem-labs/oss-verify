@@ -240,9 +240,11 @@ fi
 # Same rule as NAME in oss-verify validate.
 [[ $name =~ ^[a-z0-9][a-z0-9._-]{0,62}$ ]] || fail "The directory name under projects/ must be a-z 0-9 . _ - (starting with a letter or digit, at most 63)."
 # A fork's enrollment of a project that the base branch's docs/seeded-projects.tsv marks seeded fails, whether it
-# changes the project's files or removes them (the top of this file). The table is read as data.
+# changes the project's files or removes them (the top of this file). The table is read as data. The generator ends
+# each line of the table with a newline, the last line too, and the test Committed keeps main's table as the generator
+# writes it.
 if [ "$same_repository" = false ] && [ -f docs/seeded-projects.tsv ]; then
-  while IFS=$'\t' read -r project seedable _ || [ -n "$project" ]; do
+  while IFS=$'\t' read -r project seedable _; do
     if [ "$project" = "$name" ] && [ "$seedable" = yes ]; then
       fail "projects/$name/ is the port of a project that we seeded: docs/seeded-projects.tsv marks it seeded. A change to the port can change that table. A pull request from a fork that changes projects/ cannot change the table, and the tests check runs no test on it. A maintainer of this repository carries such a change on a branch of this repository, where the tests check runs the test of the table. Ask in this pull request or in an issue."
     fi
