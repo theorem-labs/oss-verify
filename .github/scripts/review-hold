@@ -3,15 +3,18 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Sends every finding stored in the held-findings bucket to the disclosure route, and deletes each object once its
-# findings have their issues. It reads every object of the bucket, not only this run's own: a run that a newer push
-# cancelled after its review job stored a finding has no hold job of its own, and the next run's hold job sends that
-# finding instead. build.yaml's hold job runs it, one at a time in the repository (its concurrency group).
+# findings have their issues. review.yml's hold job runs it, one at a time in the repository (its concurrency group).
+# It reads every object of the bucket, not only this run's own: a run that was cancelled after its review job stored
+# a finding has no hold job of its own, and the next run's hold job sends that finding instead. A re-run of the same
+# Build run, or a newer run by hand for the same pull request, cancels a run. A newer push does not: review.yml
+# groups each run after a Build run by the id of that run, so the run of an older head runs on, and its gather job
+# keeps nothing when the head moved.
 #
 #   GCP_ACCESS_TOKEN=<token of ossv-app-comment> GH_TOKEN=<App token for HELD_FINDINGS_REPO> \
 #     READ_TOKEN=<token that can read this repository's issues> HELD_FINDINGS_REPO=<owner/name> REPO=<owner/name> \
 #     [CURRENT_OBJECT=<this run's object>] .github/scripts/review-hold <work directory>
 #
-# The bucket is theorem-agent-infra-oss-verify-held-findings (Theorem's infrastructure code): build.yaml's review job,
+# The bucket is theorem-agent-infra-oss-verify-held-findings (Theorem's infrastructure code): review.yml's review job,
 # as ossv-ci, creates objects in it: held/<run id>/<32 random hex digits> for a held finding, and
 # issue-drafts/<issue>/<run id>-<attempt> for an issue's draft, which this script never reads. The hold job, as
 # ossv-app-comment, can list, read and delete them; this script lists only held/. It reads at most 20 objects in one

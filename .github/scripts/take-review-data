@@ -2,7 +2,7 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 #
-# Takes what build.yaml's gather job kept, review.tar, into the screen job or the review job:
+# Takes what review.yml's gather job kept, review.tar, into the screen job or the review job:
 #
 #   DIGEST=<SHA-256> [NAME=<project>] .github/scripts/take-review-data <review.tar> [<home>]
 #
@@ -11,7 +11,9 @@
 # uploaded an artifact of that name in this run. The file is also refused when a member is not a regular file or a
 # directory (a symbolic or hard link could point outside), when a path is absolute or has a `..` part, and when a path
 # is outside .review/, projects/<NAME>/ (an enrollment's, as take-project wrote it) and the last review's session
-# (.claude/projects/ and .claude/ossv-last-review).
+# (.claude/projects/ and .claude/ossv-last-review). It is refused too when a member under projects/<NAME>/, at any
+# depth, has a name that matches CLAUDE*.md or AGENTS*.md in any case: Claude Code reads such a file beside a file
+# that it reads as instructions, so the review job never takes one, whatever the gather job did.
 #
 # .review/ and projects/<NAME>/ go into the working directory, the checkout of main: projects/<NAME>/ replaces main's
 # copy, as take-project does. The session goes into <home> only when <home> is given (the review job; the screen job
@@ -34,6 +36,8 @@ allowed='^\.review(/|$)|^\.claude/(projects(/|$)|ossv-last-review$)'
 [ -z "${NAME:-}" ] || allowed+="|^projects/${NAME//./\\.}(/|$)"
 ! grep -qvE "$allowed" "$RUNNER_TEMP/review-data-paths" || fail "review.tar holds a path outside what the review reads"
 ! grep -qE '^/|(^|/)\.\.(/|$)' "$RUNNER_TEMP/review-data-paths" || fail "review.tar holds an absolute or a .. path"
+[ -z "${NAME:-}" ] || ! grep -qiE "^projects/${NAME//./\\.}/(.*/)?(claude|agents)[^/]*\.md(/|$)" \
+  "$RUNNER_TEMP/review-data-paths" || fail "review.tar holds a CLAUDE*.md or an AGENTS*.md under projects/$NAME/"
 [ ! -e .review ] || fail ".review is there already"
 members=(.review)
 if [ -n "${NAME:-}" ] && grep -q "^projects/${NAME//./\\.}/" "$RUNNER_TEMP/review-data-paths"; then

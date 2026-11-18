@@ -13,11 +13,11 @@ reviewers, as Markdown.
     uv run python3 .github/scripts/triage.py --repo theorem-labs/oss-verify --local projects/<name> --login <you> \
         [--body <file>] [--facts <file>]
 
-Run by .github/workflows/triage.yaml, or by hand to see what it would say. Prints nothing when the pull request
-does not touch projects/. With --local, it writes the comment for a projects/<name>/ on this machine before any pull
-request exists, as opened by --login with the description in --body (default: .github/PULL_REQUEST_TEMPLATE.md,
-unticked). Without GITHUB_TOKEN, GitHub limits anonymous requests, and the rows that need GraphQL say "could not be
-checked".
+Run by .github/workflows/review.yml's triage-gather job, or by hand to see what it would say. Prints nothing when the
+pull request does not touch projects/. With --local, it writes the comment for a projects/<name>/ on this machine
+before any pull request exists, as opened by --login with the description in --body (default:
+.github/PULL_REQUEST_TEMPLATE.md, unticked). Without GITHUB_TOKEN, GitHub limits anonymous requests, and the rows
+that need GraphQL say "could not be checked".
 
 The comment on the pull request is public, and carries only the rows in PUBLIC_ROWS: whether the repository is a fork,
 the license, whether an active maintainer opened it, its scope, oss-verify validate and the checklist. The full table
@@ -384,7 +384,7 @@ def accepted_limit(name: str, copied: frozenset[str] = frozenset()) -> int | Non
 
 def fetch_project(gh: GitHub, repo: str, sha: str, name: str, directory: pathlib.Path) -> bool:
     """Recreate projects/<name>/ as it is at commit `sha` in `directory`, so oss-verify validate can check it like a
-    checkout. Return False if the pull request has no such directory (it withdraws the project).
+    checkout. Return False if the pull request has no such directory (it removes the project, or renames it).
 
     In a directory with more files than validate.py accepts, only project.yaml is downloaded and the other files are
     only named: validate.py refuses the directory for its size anyway, and a download per file would spend the
@@ -923,16 +923,19 @@ def triage(gh: GitHub, repo: str, number: int) -> Triage:
     names, _ = split_paths(paths)
     if not names:
         return Triage("", "")
-    name = names[0]
     with tempfile.TemporaryDirectory() as scratch:
-        directory = pathlib.Path(scratch) / name
-        # A name validate.py would refuse is not fetched; check_project() reports it without reading the directory.
-        if validate.NAME.fullmatch(name) and not fetch_project(gh, repo, pull["head"]["sha"], name, directory):
-            withdrawal = (f"### Enrollment triage: {code('projects/' + name)}\n\n"
-                          "This pull request removes the project's directory: a withdrawal, nothing to triage.\n")
-            return Triage(f"{MARKER}\n{withdrawal}", withdrawal)
-        return report(gh, repo, name, directory, pull["user"]["login"], pull.get("author_association") or "",
-                      pull.get("body") or "", paths, pull["changed_files"])
+        # A renamed project is touched under both names, and only the new one is left at the head commit. The first
+        # touched project still there is triaged, and its scope row names the others. Only a pull request that leaves
+        # none of them is a withdrawal.
+        for name in names:
+            directory = pathlib.Path(scratch) / name
+            # A name validate.py would refuse is not fetched; check_project() reports it without reading the directory.
+            if not validate.NAME.fullmatch(name) or fetch_project(gh, repo, pull["head"]["sha"], name, directory):
+                return report(gh, repo, name, directory, pull["user"]["login"], pull.get("author_association") or "",
+                              pull.get("body") or "", paths, pull["changed_files"])
+    withdrawal = (f"### Enrollment triage: {code('projects/' + names[0])}\n\n"
+                  "This pull request removes the project's directory: a withdrawal, nothing to triage.\n")
+    return Triage(f"{MARKER}\n{withdrawal}", withdrawal)
 
 
 def triage_local(gh: GitHub, repo: str, directory: pathlib.Path, login: str, body: str) -> Triage:

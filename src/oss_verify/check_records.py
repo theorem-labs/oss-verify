@@ -8,6 +8,7 @@ Each abort() call is a check. This finds what decides whether it runs (its guard
 (docs/build-contract.md, "The checks of a fuzz target"). Written for theorem-labs/oss-verify#24, by the agent that
 wrote it, and moved here when that pull request folded into this step.
 """
+import array
 import bisect
 import dataclasses
 import pathlib
@@ -78,6 +79,7 @@ def blank(text):
         return j
 
     i, line_start, skipping = 0, True, 0
+    quote = [-1, -1]  # the last `'` read as code, and where the number it may be in starts: see separator()
     while i < n:
         c = text[i]
         if c == "\n":
@@ -117,7 +119,7 @@ def blank(text):
             comments.append((i, j))
             wipe(i, j)
             i = j
-        elif c == '"' or (c == "'" and not separator(text, i)):
+        elif c == '"' or (c == "'" and not separator(text, i, quote)):
             j = i + 1
             while j < n and text[j] not in (c, "\n"):
                 j += 2 if text[j] == "\\" else 1
@@ -131,11 +133,18 @@ def blank(text):
     return "".join(code), comments
 
 
-def separator(text, at):
-    """True if the `'` at `at` is a C++14 digit separator: it is inside a number such as 1'000 or 0xDEAD'BEEF."""
+def separator(text, at, last=None):
+    """True if the `'` at `at` is a C++14 digit separator: it is inside a number such as 1'000 or 0xDEAD'BEEF.
+    `last`, if given, is [offset, start] of the `'` read before this one, and is set to this one's: the walk back
+    stops there, so a number such as 1'1'1'1 is read once, not once for each of its separators."""
     k = at - 1
     while k >= 0 and (text[k].isalnum() or text[k] in "_.'"):
+        if last is not None and k == last[0]:
+            k = last[1] - 1
+            break
         k -= 1
+    if last is not None:
+        last[:] = [at, k + 1]
     return at > k + 1 and text[k + 1].isdigit()
 
 
@@ -177,23 +186,21 @@ def condition(code, close, words=CONDITIONS):
     return (begin, close) if word in words else None
 
 
-def case_guard(code, colon):
-    """The `switch (...)` of the case or default label whose colon is at `colon`, or None."""
+def case_guard(code, colon, memo):
+    """The `switch (...)` of the case or default label whose colon is at `colon`, or None. The switch of a block is
+    found once, into `memo`: a switch may have many labels."""
     k = colon - 1
     while k >= 0 and code[k] not in ";{}":
         k -= 1
     if not LABEL.fullmatch(code[k + 1:colon].strip()):
         return None
-    depth = 0
-    for opener in range(k, -1, -1):
-        if code[opener] == "}":
-            depth += 1
-        elif code[opener] == "{":
-            if depth == 0:
-                before = previous(code, opener)
-                return condition(code, before, {"switch"}) if before >= 0 and code[before] == ")" else None
-            depth -= 1
-    return None
+    opener = enclosing_block(code, k + 1, memo)
+    if opener < 0:
+        return None
+    if ("switch", opener) not in memo:
+        before = previous(code, opener)
+        memo["switch", opener] = condition(code, before, {"switch"}) if before >= 0 and code[before] == ")" else None
+    return memo["switch", opener]
 
 
 def forward_matching(code, open_):
@@ -232,51 +239,68 @@ def else_guard(code, at):
     return (begin, close) if close >= 0 else None
 
 
-def enclosing_block(code, at):
-    """The offset of the `{` of the innermost block that holds offset `at`, or -1."""
-    depth = 0
-    for k in range(at - 1, -1, -1):
-        if code[k] == "}":
-            depth += 1
-        elif code[k] == "{":
-            if depth == 0:
-                return k
-            depth -= 1
-    return -1
+def enclosing_block(code, at, memo):
+    """The offset of the `{` of the innermost block that holds offset `at`, or -1. The braces of `code` are read once,
+    into `memo`: a block may hold many checks."""
+    if "blocks" not in memo:
+        memo["blocks"] = blocks(code)
+    braces, openers = memo["blocks"]
+    k = bisect.bisect_left(braces, at)
+    return openers[k - 1] if k else -1
 
 
-def block_guard(code, opener):
-    """The guard of the statements in the block that the `{` at `opener` opens, or None (a function's body)."""
+def blocks(code):
+    """The offset of each brace of `code`, and after each the `{` of the innermost block still open, or -1. A `}` with
+    no `{` open closes nothing. Arrays, not lists: a source may be all braces."""
+    braces, openers, stack = array.array("q"), array.array("q"), []
+    for found in re.finditer(r"[{}]", code):
+        if found[0] == "{":
+            stack.append(found.start())
+        elif stack:
+            stack.pop()
+        braces.append(found.start())
+        openers.append(stack[-1] if stack else -1)
+    return braces, openers
+
+
+def block_guard(code, opener, memo):
+    """The guard of the statements in the block that the `{` at `opener` opens, or None (a function's body). Found once
+    for each block, into `memo`: the guard may be long, and its block hold many checks."""
+    if ("block", opener) in memo:
+        return memo["block", opener]
     k = previous(code, opener)
     if k < 0:
-        return None
-    if code[k] == ")":
-        return condition(code, k)
-    if code[k] == ":":
-        return case_guard(code, k)
-    word, start = word_before(code, k)
-    return else_guard(code, start) if word == "else" else None
+        guard = None
+    elif code[k] == ")":
+        guard = condition(code, k)
+    elif code[k] == ":":
+        guard = case_guard(code, k, memo)
+    else:
+        word, start = word_before(code, k)
+        guard = else_guard(code, start) if word == "else" else None
+    memo["block", opener] = guard
+    return guard
 
 
-def guard_of(code, at):
+def guard_of(code, at, memo):
     """(start, end) offsets of the code that decides whether the abort() at `at` runs, or None if no condition in its
-    function does."""
+    function does. `memo` keeps what is found of the blocks of `code`, for its other checks: {} for a new source."""
     j = previous(code, at)
     if j < 0:
         return None
     if code[j] == "{":
-        return block_guard(code, j)
+        return block_guard(code, j, memo)
     if code[j] == ")":
         return condition(code, j)
     if code[j] == ":":
-        return case_guard(code, j)
+        return case_guard(code, j, memo)
     word, start = word_before(code, j)
     if word == "else":
         return else_guard(code, start)
     if code[j] in ";}":
         # After other statements: the guard of the block that holds them.
-        opener = enclosing_block(code, at)
-        return block_guard(code, opener) if opener >= 0 else None
+        opener = enclosing_block(code, at, memo)
+        return block_guard(code, opener, memo) if opener >= 0 else None
     return None
 
 
@@ -378,6 +402,17 @@ def find_checks(text, path=""):
         return offset - starts[line_of(offset) - 1] + 1
 
     source_lines = text.split("\n")
+    stripped = {}  # line -> its text without the white space around it: many checks may share one long line
+
+    def text_of(line):
+        if line not in stripped:
+            stripped[line] = source_lines[line - 1].strip()
+        return stripped[line]
+
+    # The lines that hold a comment, in order: of the lines of a guard, only these can hold a check's records, and a
+    # guard of many lines may be the guard of many checks.
+    commented = sorted(pieces)
+    memo = {}  # what guard_of() finds of the blocks of `code`
     checks = []
     for found in ABORT.finditer(code):
         kind = call_kind(code, found.start())
@@ -386,19 +421,20 @@ def find_checks(text, path=""):
             continue
         at = found.start() + found.group().rindex("abort")
         if kind == "expression":
-            checks.append(Check(line, None, path=path, column=column_of(at), text=source_lines[line - 1].strip(),
+            checks.append(Check(line, None, path=path, column=column_of(at), text=text_of(line),
                                 note="an abort() inside an expression is not read as a property check: write "
                                      "`if (!condition) abort();`"))
             continue
-        guard = guard_of(code, found.start())
+        guard = guard_of(code, found.start(), memo)
         first, last = (line_of(guard[0]), line_of(guard[1])) if guard else (line, line)
-        lines = set(above(first)) | set(range(first, last + 1)) | set(above(line)) | {line}
+        within = commented[bisect.bisect_left(commented, first):bisect.bisect_right(commented, last)]
+        lines = set(above(first)) | set(within) | set(above(line)) | {line}
         label = label_start(code, found.start())
         if label is not None:
             lines |= set(above(line_of(label)))
         check = Check(line, (first, last) if guard else None, path=path, column=column_of(at),
                       guard_at=(first, column_of(guard[0])) if guard else None,
-                      text=source_lines[first - 1].strip())
+                      text=text_of(first))
         parse_records([clean(part) for number in sorted(lines) for part in pieces.get(number, [])], check)
         if guard is None and (check.not_property is None or check.problems):
             check.note = ("no condition in its function guards this abort(), so no seed that passes reaches it: "

@@ -2164,7 +2164,8 @@ class ModelRelease(unittest.TestCase):
 
     def test_refuses_a_release_yaml_that_names_no_model(self):
         for text in ("release: x\n", self.RELEASE.replace("f1006fe8", "zz"),
-                     self.RELEASE.replace("https://github.com", "file://"), "- a list\n"):
+                     self.RELEASE.replace("https://github.com", "file://"), "- a list\n",
+                     "release: 2024-13-45\n", "created: 2024-01-01T25:00:00\n"):
             with self.assertRaises(Failed):
                 model_release.release_model(text=text)
 
