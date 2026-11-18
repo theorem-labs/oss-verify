@@ -1,1 +1,5 @@
 zlib-checksum_fuzzer.0001-inflate-memerr-totals.patch
+zlib-gzio_fuzzer.0001-inflate-memerr-totals.patch
+zlib-gzio_fuzzer.0002-gzseek-after-pushback.patch
+zlib-gzio_fuzzer.0003-oss-fuzz-16316.patch
+zlib-gzio_fuzzer.0004-oss-fuzz-16411.patch

@@ -7,7 +7,9 @@ link	ext/zlib-example_dict_fuzzer/src	ext/zlib-checksum_fuzzer/src
 link	ext/zlib-example_flush_fuzzer/src	ext/zlib-checksum_fuzzer/src
 link	ext/zlib-example_large_fuzzer/src	ext/zlib-checksum_fuzzer/src
 link	ext/zlib-example_small_fuzzer/src	ext/zlib-checksum_fuzzer/src
-link	ext/zlib-gzio_fuzzer/src	ext/zlib-checksum_fuzzer/src
+tree	ext/zlib-gzio_fuzzer/src	upstream/zlib
+patch	ext/zlib-gzio_fuzzer/src	zlib-gzio_fuzzer.0001-inflate-memerr-totals.patch
+patch	ext/zlib-gzio_fuzzer/src	zlib-gzio_fuzzer.0002-gzseek-after-pushback.patch
 link	ext/zlib-minigzip_fuzzer/src	ext/zlib-checksum_fuzzer/src
 link	ext/zlib-zlib_uncompress2_fuzzer/src	ext/zlib-checksum_fuzzer/src
 link	ext/zlib-zlib_uncompress3_fuzzer/src	ext/zlib-checksum_fuzzer/src
@@ -18,7 +20,10 @@ file	targets/zlib-example_dict_fuzzer/example_dict_fuzzer.c	https://raw.githubus
 file	targets/zlib-example_flush_fuzzer/example_flush_fuzzer.c	https://raw.githubusercontent.com/google/oss-fuzz/fadbcdfb9e96aaa26734fbc936ab64a6f4f18ab4/projects/zlib/example_flush_fuzzer.c	1b152a8b6db3bf0c6eeba482599510038d2a97b8e381a3e430762cd7d338b95f
 file	targets/zlib-example_large_fuzzer/example_large_fuzzer.c	https://raw.githubusercontent.com/google/oss-fuzz/fadbcdfb9e96aaa26734fbc936ab64a6f4f18ab4/projects/zlib/example_large_fuzzer.c	97d7b5add541cef673eabe725c360106f987fb5dbcfeb7ae52a87e60817b77b6
 file	targets/zlib-example_small_fuzzer/example_small_fuzzer.c	https://raw.githubusercontent.com/google/oss-fuzz/fadbcdfb9e96aaa26734fbc936ab64a6f4f18ab4/projects/zlib/example_small_fuzzer.c	5a7cd799a995e2df8d6883e8d6030bc0bf2f7db133d8e1773ce8cb328dd43839
-file	targets/zlib-gzio_fuzzer/gzio_fuzzer.c	https://raw.githubusercontent.com/google/oss-fuzz/955c6866c152471d78c7472c0f1f354343548b9f/projects/zlib/gzio_fuzzer.c	0c865cb880aaf5b5bb7b98ff8f369a78fe68193ae4dc8c595e5c2b1c7d1292e1
+file	ext/oss-fuzz-zlib/projects/zlib/gzio_fuzzer.c	https://raw.githubusercontent.com/google/oss-fuzz/955c6866c152471d78c7472c0f1f354343548b9f/projects/zlib/gzio_fuzzer.c	0c865cb880aaf5b5bb7b98ff8f369a78fe68193ae4dc8c595e5c2b1c7d1292e1
+patch	ext/oss-fuzz-zlib	zlib-gzio_fuzzer.0003-oss-fuzz-16316.patch
+patch	ext/oss-fuzz-zlib	zlib-gzio_fuzzer.0004-oss-fuzz-16411.patch
+link	targets/zlib-gzio_fuzzer/gzio_fuzzer.c	ext/oss-fuzz-zlib/projects/zlib/gzio_fuzzer.c
 file	targets/zlib-minigzip_fuzzer/minigzip_fuzzer.c	https://raw.githubusercontent.com/google/oss-fuzz/955c6866c152471d78c7472c0f1f354343548b9f/projects/zlib/minigzip_fuzzer.c	6fbd421114a7c9754b2d33e0fd9171664b323ff22fc6464da755d2dbec03211d
 file	targets/zlib-zlib_uncompress2_fuzzer/zlib_uncompress2_fuzzer.cc	https://raw.githubusercontent.com/google/oss-fuzz/955c6866c152471d78c7472c0f1f354343548b9f/projects/zlib/zlib_uncompress2_fuzzer.cc	afff986a00ba4cd11d9b72e9ccc9c103da0ee36712e92b40b89f9df5e914f6d4
 file	targets/zlib-zlib_uncompress3_fuzzer/zlib_uncompress3_fuzzer.cc	https://raw.githubusercontent.com/google/oss-fuzz/955c6866c152471d78c7472c0f1f354343548b9f/projects/zlib/zlib_uncompress3_fuzzer.cc	be171ee38f2c132fe9f99a9b0b9a2bbae2d9e41806719afafdf1e7cb5a652a48

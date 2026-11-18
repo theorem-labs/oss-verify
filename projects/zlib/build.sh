@@ -101,6 +101,7 @@ ov_target_build example_small_fuzzer
 ov_target_begin zlib-gzio_fuzzer
 build_lib() {
   oft_build_cmake
+  OFT_HARNESS_CFLAGS="-include unistd.h"
   oft_build_harness "gzio_fuzzer.c"
   oft_seal_getenv
   oft_seal_mkstemp
