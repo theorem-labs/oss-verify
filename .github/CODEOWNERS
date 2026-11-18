@@ -1,3 +1,9 @@
+# Agent instructions and skills at any depth; a pattern further down decides the owner of a file it also matches.
+**/AGENTS.md @theorem-labs/engineering
+**/CLAUDE.md @theorem-labs/engineering
+**/SKILL.md @theorem-labs/engineering
+skills/ @theorem-labs/engineering
+
 # review.md, review-change.md and review-issue.md say what the enrollment review and the change review check, and what
 # the draft reply to an issue says (.github/workflows/build.yaml reads main's copies), and
 # .claude/skills/write-to-maintainer/ says how every message to a maintainer is written and checked.
