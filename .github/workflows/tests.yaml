@@ -86,7 +86,7 @@ concurrency:
 
 jobs:
   route:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -219,7 +219,7 @@ jobs:
   suite:
     needs: route
     if: needs.route.outputs.suite == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -251,8 +251,10 @@ jobs:
           git -C "$RUNNER_TEMP/model" checkout -q --detach FETCH_HEAD
           echo "OSS_VERIFY_MODEL=$RUNNER_TEMP/model" >> "$GITHUB_ENV"
 
-      # The Docker tests (tests/test_builder.py, test_binary_checks_docker.py) need the toolchain image and are
-      # skipped here. tests/test_seeded_projects.py::Committed runs only when route asks for it (the top of this file).
+      # The Docker tests that need the toolchain image (tests/test_builder.py, test_binary_checks_docker.py,
+      # test_seed_runs_docker.py) are skipped here. tests/test_core_dump_filter.py runs here: it needs the runner's
+      # Docker, but no image to pull. -rs lists each skipped test with its reason, so the log shows what did not run.
+      # tests/test_seeded_projects.py::Committed runs only when route asks for it (the top of this file).
       - name: The tests in tests/
         env:
           TABLE: ${{ needs.route.outputs.table }}
@@ -261,7 +263,7 @@ jobs:
           if [ "$TABLE" != true ]; then
             deselect=(--deselect "tests/test_seeded_projects.py::Committed::test_docs_seeded_projects_tsv_is_what_the_generator_writes")
           fi
-          python3 -P -m pytest -q -p no:cacheprovider -c pyproject.toml "${deselect[@]}"
+          python3 -P -m pytest -q -p no:cacheprovider -c pyproject.toml -rs "${deselect[@]}"
 
       - name: Every project passes oss-verify validate
         run: python3 -P -m oss_verify validate < /dev/null
@@ -269,7 +271,7 @@ jobs:
   docs:
     needs: route
     if: needs.route.outputs.docs == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -303,7 +305,7 @@ jobs:
     name: tests
     needs: [route, suite, docs]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       # Only for the checkout of .github/scripts.

@@ -116,6 +116,23 @@ def docker_ready():
         return False
 
 
+# The first line of each script that run_in_container runs, as in infra/checks/run-seeds. The container's shell writes
+# 0 to /proc/self/coredump_filter, and every qemu run it starts keeps that value, so a run's core dump holds no memory.
+# Otherwise the dump of an ASan build's run holds its reserved address space of more than 100 GiB: where the host's
+# core_pattern is a pipe, that dump can outlast the time limit, and the run reads the time limit's status. A core
+# limit of 0 does not stop a dump to a pipe (OSSV-729's measurement).
+NO_CORE_MEMORY = "if [ -e /proc/self/coredump_filter ]; then echo 0 > /proc/self/coredump_filter; fi"
+
+
+def run_in_container(image, runner, *mounts):
+    """Run the sh script runner in a container of image with no network, with qemu-riscv64 at /qemu and each (host
+    path, container path) of mounts read-only. image is a tag that the test built, so docker never pulls it from a
+    registry. Returns the completed process, with its output as text."""
+    volumes = [arg for host, container in ((QEMU, "/qemu"), *mounts) for arg in ("-v", f"{host}:{container}:ro")]
+    return subprocess.run(["docker", "run", "--rm", "--network=none", "--pull=never", *volumes, "--entrypoint", "sh",
+                           image, "-c", f"{NO_CORE_MEMORY}\n{runner}"], capture_output=True, text=True, check=True)
+
+
 @unittest.skipUnless(os.environ.get("OV_DOCKER_TESTS") == "1" and docker_ready(),
                      "set OV_DOCKER_TESTS=1, with Docker and the toolchain image, to build the fixture")
 class Builder(unittest.TestCase):
@@ -175,11 +192,7 @@ class Builder(unittest.TestCase):
             for build in BUILDS:
                 shutil.copy(self.work / "out" / target / f"{target}.{build}", binaries)
         runner = f"q() {{ timeout 60 /qemu \"$@\"; }}\n{RUNNER}"
-        done = subprocess.run(
-            ["docker", "run", "--rm", "--network=none", "-v", f"{QEMU}:/qemu:ro", "-v", f"{inputs}:/in:ro",
-             "-v", f"{binaries}:/bin2:ro", "--entrypoint", "sh", TAG, "-c", runner.replace("/bin/", "/bin2/")],
-            capture_output=True, text=True, check=True,
-        )
+        done = run_in_container(TAG, runner.replace("/bin/", "/bin2/"), (inputs, "/in"), (binaries, "/bin2"))
         results = {}
         for line in done.stdout.splitlines():
             target, build, case, status = line.split(" ", 3)
@@ -222,11 +235,7 @@ class UbsanChecks(unittest.TestCase):
                     (inputs / f"case-{case}").write_bytes(b"\0" * 6 + case.encode())
                 runner = ('for c in /in/*; do timeout 60 /qemu /raw/example_fuzzer "$c" > /dev/null 2>&1; '
                           'echo "${c#/in/} $?"; done')
-                done = subprocess.run(
-                    ["docker", "run", "--rm", "--network=none", "-v", f"{QEMU}:/qemu:ro", "-v", f"{inputs}:/in:ro",
-                     "-v", f"{raw}:/raw:ro", "--entrypoint", "sh", tag, "-c", runner],
-                    capture_output=True, text=True, check=True,
-                )
+                done = run_in_container(tag, runner, (inputs, "/in"), (raw, "/raw"))
             finally:
                 subprocess.run(["docker", "image", "rm", tag], capture_output=True)
         results = dict(line.split() for line in done.stdout.splitlines())
@@ -255,11 +264,7 @@ class UbsanChecks(unittest.TestCase):
                                                   labels=check_build.work_label(work))
                         runner = ('for c in /in/*; do timeout 600 /qemu /raw/example_fuzzer "$c" > /dev/null 2>&1; '
                                   'echo "${c#/in/} $?"; done')
-                        done = subprocess.run(
-                            ["docker", "run", "--rm", "--network=none", "--ulimit", "core=0", "-v", f"{QEMU}:/qemu:ro",
-                             "-v", f"{inputs}:/in:ro", "-v", f"{raw}:/raw:ro", "--entrypoint", "sh", tag, "-c", runner],
-                            capture_output=True, text=True, check=True,
-                        )
+                        done = run_in_container(tag, runner, (inputs, "/in"), (raw, "/raw"))
                         results[build, checks[-1]] = dict(line.split() for line in done.stdout.splitlines())
             finally:
                 subprocess.run(["docker", "image", "rm", tag], capture_output=True)
@@ -331,11 +336,7 @@ class PythonBuilder(unittest.TestCase):
                   'timeout 600 /qemu /bin2/fuzz_example.$b "$c" > /dev/null 2>&1; echo "$b ${c#/in/case-} $?"; done; '
                   'printf "%s " "$b printed"; timeout 600 /qemu /bin2/fuzz_example.$b /in/case-p | tr "\\n" ,; echo; '
                   'done')
-        done = subprocess.run(
-            ["docker", "run", "--rm", "--network=none", "-v", f"{QEMU}:/qemu:ro", "-v", f"{inputs}:/in:ro",
-             "-v", f"{binaries}:/bin2:ro", "--entrypoint", "sh", PYTHON_TAG, "-c", runner],
-            capture_output=True, text=True, check=True,
-        )
+        done = run_in_container(PYTHON_TAG, runner, (inputs, "/in"), (binaries, "/bin2"))
         results = {tuple(line.split(" ", 2)[:2]): line.split(" ", 2)[2] for line in done.stdout.splitlines()}
         for case, status in PYTHON_EXPECTED.items():
             for build in BUILDS:
@@ -404,17 +405,16 @@ class RustBuilder(unittest.TestCase):
         binaries.mkdir()
         for build in BUILDS:
             shutil.copy(self.work / "out" / "example_fuzzer" / f"example_fuzzer.{build}", binaries)
-        # An AddressSanitizer detection in a Rust fuzz target takes minutes under qemu (about 160 s here), where a C
-        # fuzz target's takes seconds: the time limit is 600 s.
+        # An AddressSanitizer detection in a Rust fuzz target took minutes under qemu (about 160 s here, 234 s on
+        # ubuntu-24.04-16core): that was the core dump of the qemu process. With run_in_container's write to
+        # coredump_filter the dump holds no memory, and all the cases of this test run in less than a second there
+        # (OSSV-729's measurement). OSSV-729 keeps each helper's time limit, as its R2 asks, and measured no lower
+        # limit.
         runner = ('for b in plain ubsan asan asan-ubsan; do for c in /in/*; do '
                   'timeout 600 /qemu /bin2/example_fuzzer.$b "$c" > /dev/null 2>&1; echo "$b ${c#/in/case-} $?"; done; '
                   'printf "%s " "$b printed"; timeout 60 /qemu /bin2/example_fuzzer.$b /in/case-r | tr "\\n" ,; echo; '
                   'done')
-        done = subprocess.run(
-            ["docker", "run", "--rm", "--network=none", "-v", f"{QEMU}:/qemu:ro", "-v", f"{inputs}:/in:ro",
-             "-v", f"{binaries}:/bin2:ro", "--entrypoint", "sh", RUST_TAG, "-c", runner],
-            capture_output=True, text=True, check=True,
-        )
+        done = run_in_container(RUST_TAG, runner, (inputs, "/in"), (binaries, "/bin2"))
         results = {tuple(line.split(" ", 2)[:2]): line.split(" ", 2)[2] for line in done.stdout.splitlines()}
         for case, statuses in RUST_EXPECTED.items():
             for build, status in zip(BUILDS, statuses):
@@ -485,11 +485,7 @@ class GoBuilder(unittest.TestCase):
         runner = ('for c in /in/*; do timeout 120 /qemu /bin2/example_fuzzer.plain "$c" > /dev/null 2>&1; '
                   'echo "${c#/in/} $?"; done; printf "printed "; timeout 60 /qemu /bin2/example_fuzzer.plain '
                   '/in/case-r | tr "\\n" ,; echo')
-        done = subprocess.run(
-            ["docker", "run", "--rm", "--network=none", "-v", f"{QEMU}:/qemu:ro", "-v", f"{inputs}:/in:ro",
-             "-v", f"{binaries}:/bin2:ro", "--entrypoint", "sh", GO_TAG, "-c", runner],
-            capture_output=True, text=True, check=True,
-        )
+        done = run_in_container(GO_TAG, runner, (inputs, "/in"), (binaries, "/bin2"))
         results = dict(line.split(" ", 1) for line in done.stdout.splitlines())
         for case, status in GO_EXPECTED.items():
             with self.subTest(case=case):
@@ -574,11 +570,7 @@ class AllocationFailureOnCjson(unittest.TestCase):
             for build in BUILDS:
                 shutil.copy(self.work / "out" / target / f"{target}.{build}", binaries)
         runner = f"q() {{ timeout 60 /qemu \"$@\"; }}\n{CJSON_RUNNER}"
-        done = subprocess.run(
-            ["docker", "run", "--rm", "--network=none", "-v", f"{QEMU}:/qemu:ro", "-v", f"{inputs}:/in:ro",
-             "-v", f"{binaries}:/bin2:ro", "--entrypoint", "sh", CJSON_TAG, "-c", runner],
-            capture_output=True, text=True, check=True,
-        )
+        done = run_in_container(CJSON_TAG, runner, (inputs, "/in"), (binaries, "/bin2"))
         results = {tuple(line.split(" ")[:3]): line.split(" ")[3] for line in done.stdout.splitlines()}
         for build in BUILDS:
             for case in sorted(path.name for path in inputs.iterdir()):
