@@ -1,7 +1,7 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 """Tests for src/oss_verify/seeded_projects.py, that docs/seeded-projects.tsv is what it writes, and that every
-seeds/<name>/project.yaml has primary_contact: n/a:  uv run pytest"""
+seeds/<name>/project.yaml has primary_contact: n/a and no auto_ccs:  uv run pytest"""
 import difflib
 import hashlib
 import itertools
@@ -42,8 +42,9 @@ class Committed(unittest.TestCase):
 
 
 def seed_contacts(seeds):
-    """A line for each seeds/<name>/project.yaml under the directory `seeds` whose primary_contact, as
-    oss_verify.validate.load reads it, is not n/a: the file and its primary_contact, or why load refuses the file."""
+    """A line for each seeds/<name>/project.yaml under the directory `seeds` that can give findings to someone, as
+    oss_verify.validate.load reads it: its primary_contact is not n/a, or it has an auto_ccs that is not an empty list.
+    The line names the file and the value, or why load refuses the file."""
     lines = []
     for config_file in sorted(seeds.glob("*/project.yaml")):
         path = config_file.relative_to(seeds.parent)
@@ -55,28 +56,34 @@ def seed_contacts(seeds):
         contact = config.get("primary_contact") if isinstance(config, dict) else None
         if contact != "n/a":
             lines.append(f"{path}: primary_contact is {contact!r}, not 'n/a'")
+        ccs = config.get("auto_ccs", []) if isinstance(config, dict) else []
+        if ccs != []:
+            lines.append(f"{path}: auto_ccs is {ccs!r}, not absent or []")
     return lines
 
 
 class SeedContacts(unittest.TestCase):
-    """Every seeds/<name>/project.yaml has primary_contact: n/a. The contact of a seeded project goes in
-    projects/<name>/project.yaml, and .github/workflows/terms.yaml reads it only there: a branch that sets it needs the
-    adopter's record of the OSS Verify terms. A contact in seeds/ would skip that record. The tests check runs this test
-    for each change that is not only documentation, a change to seeds/ included."""
+    """Every seeds/<name>/project.yaml has primary_contact: n/a and no auto_ccs: it gives findings to no one. The
+    addresses of a seeded project go in projects/<name>/project.yaml, and .github/scripts/terms-accepted reads them
+    only there: a branch that adds one needs the adopter's record of the OSS Verify terms. An address in seeds/ would
+    skip that record. The tests check runs this test for each change that is not only documentation, a change to seeds/
+    included."""
 
-    def test_every_seed_port_has_primary_contact_n_a(self):
+    def test_every_seed_port_has_primary_contact_n_a_and_no_auto_ccs(self):
         self.assertTrue(list(seeded_projects.SEEDS.glob("*/project.yaml")), "seeds/ has no <name>/project.yaml")
         lines = seed_contacts(seeded_projects.SEEDS)
         if lines:
-            self.fail("Each seeds/<name>/project.yaml must have primary_contact: n/a. To adopt a seeded project, set "
-                      "its contact in projects/<name>/project.yaml (docs/project-yaml.md, Seeded projects). These "
-                      "do not:\n" + "\n".join(lines))
+            self.fail("Each seeds/<name>/project.yaml must have primary_contact: n/a and no auto_ccs. To adopt a "
+                      "seeded project, set its addresses in projects/<name>/project.yaml (docs/project-yaml.md, "
+                      "Seeded projects). These do not:\n" + "\n".join(lines))
 
-    def test_a_seed_port_with_another_contact_fails_the_check(self):
+    def test_a_seed_port_with_another_contact_or_an_auto_ccs_fails_the_check(self):
         # Negative control, on a seeds/ made here.
         with tempfile.TemporaryDirectory() as directory:
             seeds = pathlib.Path(directory) / "seeds"
             texts = {"kept": "repo: https://github.com/example/kept\nprimary_contact: n/a\n",
+                     "empty": "repo: https://github.com/example/empty\nprimary_contact: n/a\nauto_ccs: []\n",
+                     "cc": "repo: https://github.com/example/cc\nprimary_contact: n/a\nauto_ccs: [x@y.example]\n",
                      "x": "repo: https://github.com/example/x\nprimary_contact: maintainer@x.example\n",
                      "none": "repo: https://github.com/example/none\n",
                      "large": "primary_contact: n/a\n" + "#" * validate.MAX_CONFIG_BYTES}
@@ -84,6 +91,7 @@ class SeedContacts(unittest.TestCase):
                 (seeds / name).mkdir(parents=True)
                 (seeds / name / "project.yaml").write_text(text)
             self.assertEqual(seed_contacts(seeds), [
+                "seeds/cc/project.yaml: auto_ccs is ['x@y.example'], not absent or []",
                 "seeds/large/project.yaml: project.yaml is larger than 128 KiB",
                 "seeds/none/project.yaml: primary_contact is None, not 'n/a'",
                 "seeds/x/project.yaml: primary_contact is 'maintainer@x.example', not 'n/a'"])

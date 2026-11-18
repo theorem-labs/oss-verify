@@ -320,17 +320,29 @@ def check_urls(config):
         yield "homepage must be an https:// URL"
 
 
-def check_addresses(config):
-    """Yield a problem for auto_ccs that is not a list, and for each malformed email address."""
+def is_address_list(value):
+    """Whether `value`, the value of auto_ccs, is a list of strings."""
+    return isinstance(value, list) and all(isinstance(address, str) for address in value)
+
+
+def finding_addresses(config):
+    """The addresses that get findings from a project.yaml that is a mapping: primary_contact, unless it is n/a, and
+    each address of auto_ccs. A value that is not a string, and an auto_ccs that is not a list of strings, give none.
+    .github/scripts/terms-accepted reads the addresses of a seeded project with it."""
     addresses = []
     if isinstance(config.get("primary_contact"), str) and config["primary_contact"] != NO_CONTACT:
         addresses.append(config["primary_contact"])
+    if is_address_list(config.get("auto_ccs")):
+        addresses += config["auto_ccs"]
+    return addresses
+
+
+def check_addresses(config):
+    """Yield a problem for auto_ccs that is not a list, and for each malformed email address."""
     ccs = config.get("auto_ccs")
-    if isinstance(ccs, list) and all(isinstance(address, str) for address in ccs):
-        addresses += ccs
-    elif ccs is not None:
+    if ccs is not None and not is_address_list(ccs):
         yield "auto_ccs must be a list of addresses"
-    for address in addresses:
+    for address in finding_addresses(config):
         if not EMAIL.fullmatch(address):
             yield f"bad email {address!r}"
 
@@ -602,11 +614,8 @@ def config_warnings(config, files):
         warnings.append(
             "primary_contact is n/a: only a project we seeded may say that, and only until a maintainer adopts it"
         )
-    contacts = [config.get("primary_contact")]
-    if isinstance(config.get("auto_ccs"), list):
-        contacts += config["auto_ccs"]
-    for address in contacts:
-        if isinstance(address, str) and RESERVED_DOMAIN.fullmatch(address.rpartition("@")[2]):
+    for address in finding_addresses(config):
+        if RESERVED_DOMAIN.fullmatch(address.rpartition("@")[2]):
             warnings.append(f"{address} is a placeholder: its domain is reserved for examples, so no report reaches it")
     repo = config.get("repo")
     if isinstance(repo, str) and "#" in repo:

@@ -1,0 +1,369 @@
+#!/usr/bin/env python3
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+"""The check terms-accepted of .github/workflows/terms.yaml. It decides whether a pull request accepts the OSS Verify
+terms, or needs no box that accepts them.
+
+    BODY=... AUTHOR=<login> ASSOCIATION=<association> HEAD_REPOSITORY=<owner>/<name> REPOSITORY=<owner>/<name> \
+      PR=<number> HEAD_SHA=<commit> BASE_SHA=<commit> GH_TOKEN=... \
+      PYTHONPATH=src python3 .github/scripts/terms-accepted
+
+The variables are those of the pull_request event: the description, the login of the author and their association
+with this repository, the repository of the head, this repository, the number, and the head and base commits.
+terms.yaml runs this program from its checkout of the base commit, with PYTHONPATH set to the src/ of that checkout.
+While the base does not have this file, terms.yaml runs the copy of the merge commit in merge/, with merge/src
+(terms.yaml tells why). The program reads GitHub's API through `gh api` only, with a token that has no permission. It
+prints what it decides, each error as a line ::error::, and exits 0 when the check passes, else 1. PyYAML comes from
+the runner image only, and only the paths that load a project.yaml need it.
+
+From a fork. A bot (dependabot[bot] or github-actions[bot]) and a maintainer of this repository (association OWNER,
+MEMBER or COLLABORATOR) need no box. Else the check passes when the description ticks the box of the pull request
+template. Else it passes when the pull request changes no file under projects/, under either name of a renamed file:
+such a pull request enrolls nothing (terms.yaml). Else it fails.
+
+From a branch of this repository. Only an account with write access can push a branch, so the branch needs no box of
+its own. But it needs the adopter's record of the terms when it adopts a seeded project. The program reads the
+projects/<name>/project.yaml that the pull request changes and does not remove, under its new name only, of each
+project that docs/seeded-projects.tsv of the base marks yes in its second column. It loads the text of that file at
+the head and the text of the same path at the base, with load of src/oss_verify/validate.py, the reader of oss-verify
+validate: at most validate.MAX_CONFIG_BYTES, with yaml.safe_load. YAML reads the same key from many spellings: a
+quoted key, a space before the colon, a flow mapping, a block scalar, an alias. So the program compares the values
+that YAML gives, never the lines of a patch.
+
+The addresses that get findings are those that finding_addresses of validate.py gives, as check_addresses of
+oss-verify validate reads them: primary_contact, unless it is n/a, and each address of auto_ccs. The addresses are
+unknown when load refuses the text, the text is not a mapping, primary_contact is not there or is not a string, or
+auto_ccs is there and is not a list of strings. The branch adopts the project when the head gives findings to an
+address that the base does not give them to. So a change from one contact to another adopts the project, and so does
+an added auto_ccs address. A contact set back to n/a, or a removed auto_ccs address, adopts nothing. When the head
+gives findings to no one, the program does not read the base. A file that is not at the base (HTTP 404) gives
+findings to no one there. Unknown addresses at the head fail the check, because oss-verify validate refuses that file
+too. With unknown addresses at the base, each address at the head is new.
+
+The program reads the addresses from no other file: not from seeds/<name>/project.yaml, and not from the old name of a
+renamed file. This is enough because every seeds/<name>/project.yaml has primary_contact: n/a and no auto_ccs. A test
+in tests/test_seeded_projects.py holds this, and the tests check runs it for each change that is not only
+documentation, a change to seeds/ included. So an address gets into this repository only through
+projects/<name>/project.yaml, where this program reads it. A branch that moves seeds/<name>/ into projects/<name>/ and
+sets a contact adopts the project: at the base, projects/<name>/project.yaml is not there or has n/a.
+
+The record is the first line of the branch's description that is "Adoption: #<number>" or
+"Adoption: https://github.com/<this repository>/pull/<number>", with spaces after it or none. It names the adopter's
+pull request. That pull request must come from a fork (a deleted fork has no head repository), must not be opened by a
+bot, must tick the box, and must name projects/<name> in its description for each project that the branch adopts, and
+no other project. The program reads no file of that pull request: the record need not change projects/<name>/.
+
+Both paths read the files of the pull request with changed_files: every page, of a head that did not move while they
+are read. A read that fails, a list over the API's 3000 files, or a head that moves, decides nothing. On a branch,
+that fails the check. From a fork, the box is then needed.
+
+Each value that the API gives (a description, a file name, the text of a file, a login) is data. The program only
+compares it and prints it. No shell reads it: each argument of gh is a word of its own. The text of a file goes to
+yaml.safe_load only, which makes only plain data and runs no code. A project name goes into an API path only when
+validate.NAME matches it, and the number of the record only when it is digits.
+"""
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import tempfile
+
+# The most files that the API lists for a pull request.
+LISTED = 3000
+RAW = "Accept: application/vnd.github.raw"
+BOTS = ("dependabot[bot]", "github-actions[bot]")
+MAINTAINERS = ("OWNER", "MEMBER", "COLLABORATOR")
+# The box of the pull request template, ticked, at the start of a line, in any case. The class of spaces holds no line
+# end, so the box is on one line.
+BOX = re.compile(r"^[ \t\r\f\v]*[-*][ \t\r\f\v]+\[[xX]\][ \t\r\f\v]+I accept the \[OSS Verify terms\]"
+                 r"\(https://theorem\.dev/oss-verify/terms/?\)", re.IGNORECASE | re.MULTILINE | re.ASCII)
+# A path under projects/, at the start of a line of a file name, as take-project reads the list with grep.
+UNDER_PROJECTS = re.compile(r"^projects/", re.MULTILINE)
+PROJECT_YAML = re.compile(r"projects/([^/]+)/project\.yaml")
+# A project that a description names: projects/, then the longest run of the characters that a project name can have.
+# So projects/curlx names curlx, not curl, and https://github.com/<this repository>/tree/main/projects/curl names
+# curl. The name ends before a final period, so "I adopt projects/curl." names curl, and projects/curl.. names
+# "curl.". No name in docs/seeded-projects.tsv ends with a period.
+NAMED = re.compile(r"projects/([a-z0-9._-]+)")
+NUMBER = re.compile(r"[0-9]+")
+SPACES = re.compile(r"[ \t\n\r]*")
+# What a read of a file gives: the text, no file (HTTP 404), or another failure.
+READ, MISSING, FAILED = "read", "missing", "failed"
+
+
+def error(message):
+    print(f"::error::{message}")
+
+
+def fail(message):
+    error(message)
+    sys.exit(1)
+
+
+def gh(*arguments, stdout=subprocess.PIPE):
+    """gh api with `arguments`, each one word: its completed process, with its standard error."""
+    return subprocess.run(["gh", "api", *arguments], stdout=stdout, stderr=subprocess.PIPE, check=False)
+
+
+def read_json(path):
+    """The JSON value that the API gives for `path`, or None when the read fails or gives no JSON."""
+    run = gh(path)
+    if run.returncode != 0:
+        return None
+    try:
+        return json.loads(run.stdout)
+    except ValueError:
+        return None
+
+
+def json_values(data):
+    """The JSON values that the bytes `data` hold one after another, as gh --jq prints them, or None for other text."""
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    decoder, values, at = json.JSONDecoder(), [], 0
+    while (at := SPACES.match(text, at).end()) < len(text):
+        try:
+            value, at = decoder.raw_decode(text, at)
+        except ValueError:
+            return None
+        values.append(value)
+    return values
+
+
+def field(value, *keys):
+    """value[key][key]... for `keys`, or None where a value on the way is not a mapping."""
+    for key in keys:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def ticks_the_box(description):
+    return BOX.search(description) is not None
+
+
+def changed_files(repository, pr, head):
+    """The files of pull request `pr`, every page, each as {filename, previous_filename, status}, or None when the
+    list cannot decide: a read fails, the pull request changes more files than the API lists, or its head is not the
+    commit `head` before the list is read or after it."""
+    pull = read_json(f"repos/{repository}/pulls/{pr}")
+    changed = field(pull, "changed_files")
+    if field(pull, "head", "sha") != head or type(changed) is not int or not 0 <= changed <= LISTED:
+        return None
+    run = gh("--paginate", f"repos/{repository}/pulls/{pr}/files?per_page=100",
+             "--jq", ".[] | {filename, previous_filename, status}")
+    files = json_values(run.stdout) if run.returncode == 0 else None
+    if files is None or not all(isinstance(field(file, "filename"), str) for file in files):
+        return None
+    if field(read_json(f"repos/{repository}/pulls/{pr}"), "head", "sha") != head:
+        return None
+    return files
+
+
+def import_validate():
+    """oss_verify.validate, from PYTHONPATH. PyYAML comes from the runner image only. In run 44237068425, on image
+    ubuntu26/20261111.196, triage.yaml's "dpkg -s python3-yaml || apt-get ..." installed nothing: the image has
+    python3-yaml. Only the paths that load a project.yaml need it."""
+    try:
+        # validate.py ends the program when it cannot import yaml, so this imports yaml first.
+        import yaml  # noqa: F401
+        from oss_verify import validate
+    except ImportError:
+        fail("The runner image lacks PyYAML (python3-yaml), which .github/scripts/terms-accepted needs. Run this check "
+             "again on an image that has it.")
+    return validate
+
+
+def fetch(repository, commit, path, directory):
+    """Write the text of `path` at `commit` into directory/project.yaml. Return READ, MISSING when the API says that
+    the file is not there (HTTP 404), or FAILED when the read fails in another way."""
+    with open(directory / "project.yaml", "wb") as text:
+        run = gh("-H", RAW, f"repos/{repository}/contents/{path}?ref={commit}", stdout=text)
+    if run.returncode == 0:
+        return READ
+    return MISSING if b"(HTTP 404)" in run.stderr else FAILED
+
+
+def addresses_in(validate, directory):
+    """The addresses that get findings by directory/project.yaml, or None when they are unknown (the top of this file).
+    load refuses a text over validate.MAX_CONFIG_BYTES by its size, before it reads a byte of it."""
+    try:
+        config = validate.load(directory)
+    except ValueError:
+        return None
+    if not isinstance(config, dict) or not isinstance(config.get("primary_contact"), str):
+        return None
+    ccs = config.get("auto_ccs")
+    if ccs is not None and not validate.is_address_list(ccs):
+        return None
+    return validate.finding_addresses(config)
+
+
+def adoptions(repository, names, head, base):
+    """The projects among `names`, the seeded projects whose project.yaml the branch changes, that the branch adopts
+    (the top of this file)."""
+    validate = import_validate()
+    adopted = []
+    with tempfile.TemporaryDirectory() as directory:
+        directory = pathlib.Path(directory)
+        for name in names:
+            # oss-verify validate refuses another name of a directory under projects/.
+            if not validate.NAME.fullmatch(name):
+                continue
+            path = f"projects/{name}/project.yaml"
+            if fetch(repository, head, path, directory) != READ:
+                fail(f"{path} of this pull request could not be read. A push or an edit of the description runs this "
+                     "check again.")
+            at_head = addresses_in(validate, directory)
+            if at_head is None:
+                fail(f"oss-verify validate refuses {path} of this pull request: its text does not load, it is not a "
+                     "mapping, its primary_contact is not there or is not a string, or its auto_ccs is not a list of "
+                     "strings. Correct the file, then push.")
+            if not at_head:
+                continue
+            read = fetch(repository, base, path, directory)
+            if read == FAILED:
+                fail(f"{path} of the base branch could not be read. A push or an edit of the description runs this "
+                     "check again.")
+            at_base = [] if read == MISSING else addresses_in(validate, directory)
+            if at_base is None or set(at_head) - set(at_base):
+                adopted.append(name)
+    return adopted
+
+
+def record_number(description, repository):
+    """The number of the pull request that the first line "Adoption: ..." of `description` names, or None."""
+    url = f"https://github.com/{repository}/pull/"
+    for line in description.split("\n"):
+        line = line.rstrip(" \t\r")
+        if not line.startswith("Adoption: "):
+            continue
+        line = line.removeprefix("Adoption: ")
+        if line.startswith("#"):
+            number = line[1:]
+        elif line.startswith(url):
+            number = line.removeprefix(url)
+        else:
+            continue
+        if NUMBER.fullmatch(number):
+            return number
+    return None
+
+
+def named(description):
+    """Each projects/<name> that `description` names."""
+    names = (match[1].removesuffix(".") for match in NAMED.finditer(description))
+    return {f"projects/{name}" for name in names if name}
+
+
+def enrolls(files):
+    """Whether a path of `files` is under projects/, either name of a renamed file included."""
+    return any(isinstance(name, str) and UNDER_PROJECTS.search(name)
+               for file in files for name in (file["filename"], file.get("previous_filename")))
+
+
+def branch(environ):
+    """The check of a branch of this repository: its exit status."""
+    repository, pr, body = environ["REPOSITORY"], environ["PR"], environ["BODY"]
+    files = changed_files(repository, pr, environ["HEAD_SHA"])
+    if files is None:
+        fail("The files of this pull request could not be read for certain. A push or an edit of the description runs "
+             "this check again.")
+    # The projects whose project.yaml the pull request changes and does not remove, under its new name only.
+    matches = (PROJECT_YAML.fullmatch(file["filename"]) for file in files if file.get("status") != "removed")
+    names = list(dict.fromkeys(match[1] for match in matches if match))
+    seeded = []
+    if names:
+        run = gh("-H", RAW, f"repos/{repository}/contents/docs/seeded-projects.tsv?ref={environ['BASE_SHA']}")
+        if run.returncode != 0:
+            fail("docs/seeded-projects.tsv of the base branch could not be read. A push or an edit of the description "
+                 "runs this check again.")
+        # The table is read as data, as take-project reads it.
+        rows = (line.split("\t") for line in run.stdout.decode("utf-8", "replace").split("\n"))
+        marked = {row[0] for row in rows if len(row) > 1 and row[1] == "yes"}
+        seeded = [name for name in names if name in marked]
+    adopted = adoptions(repository, seeded, environ["HEAD_SHA"], environ["BASE_SHA"]) if seeded else []
+    if not adopted:
+        print("Opened from this repository, and it adopts no seeded project: no terms box needed.")
+        return 0
+    number = record_number(body, repository)
+    if number is None:
+        fail(f"This branch adopts {', '.join(sorted(adopted))}, which docs/seeded-projects.tsv marks seeded. Name the "
+             "adopter's pull request from their fork on a line 'Adoption: #<number>' of this description. That pull "
+             "request must tick 'I accept the OSS Verify terms' and name projects/<name> in its description for each "
+             "project that this branch adopts, and no other project. Editing the description runs this check again.")
+    if number == pr:
+        fail("The line Adoption: names this pull request itself. Name the adopter's pull request from their fork.")
+    record = read_json(f"repos/{repository}/pulls/{number}")
+    if record is None:
+        fail(f"Pull request #{number}, which the line Adoption: names, could not be read. Editing the description runs "
+             "this check again.")
+    failed = False
+    if field(record, "head", "repo", "full_name") == repository:
+        error(f"Pull request #{number} comes from a branch of this repository, not from a fork.")
+        failed = True
+    login = field(record, "user", "login")
+    login = login if isinstance(login, str) else ""
+    if login.endswith("[bot]"):
+        error(f"Pull request #{number} was opened by a bot, not by the adopter.")
+        failed = True
+    description = field(record, "body")
+    description = description if isinstance(description, str) else ""
+    if not ticks_the_box(description):
+        error(f"Pull request #{number} does not tick 'I accept the OSS Verify terms'.")
+        failed = True
+    # One record names each project that the branch adopts, and no other.
+    paths, mentioned = [f"projects/{name}" for name in adopted], named(description)
+    unnamed = [path for path in paths if path not in mentioned]
+    others = sorted(mentioned - set(paths))
+    if unnamed:
+        error(f"Pull request #{number} does not name {', '.join(unnamed)} in its description.")
+        failed = True
+    if others:
+        error(f"Pull request #{number} also names {', '.join(others)}. One record names each project that this branch "
+              "adopts, and no other.")
+        failed = True
+    if failed:
+        return 1
+    print(f"Pull request #{number}, from a fork by {login}, accepts the OSS Verify terms and names "
+          f"{', '.join(sorted(paths))}, and no other project: the adoption is recorded.")
+    return 0
+
+
+def fork(environ):
+    """The check of a pull request from a fork: its exit status."""
+    author, association = environ["AUTHOR"], environ["ASSOCIATION"]
+    # Bots, and the repository's own maintainers (as GitHub relates them to it), do not enroll through this form.
+    if author in BOTS:
+        print(f"Opened by {author}, a bot: no terms box needed.")
+        return 0
+    if association in MAINTAINERS:
+        print(f"Opened by a maintainer of this repository ({association}): no terms box needed.")
+        return 0
+    if ticks_the_box(environ["BODY"]):
+        print("The OSS Verify terms are accepted in the description.")
+        return 0
+    # Not an enrollment (terms.yaml). A list that cannot decide needs the box.
+    files = changed_files(environ["REPOSITORY"], environ["PR"], environ["HEAD_SHA"])
+    if files is not None and not enrolls(files):
+        print("Not an enrollment: this pull request changes no file under projects/, so no terms box is needed.")
+        return 0
+    error("Tick 'I accept the OSS Verify terms' in the pull request description. Editing the description runs this "
+          "check again.")
+    return 1
+
+
+def main():
+    environ = os.environ
+    if environ["HEAD_REPOSITORY"] == environ["REPOSITORY"]:
+        return branch(environ)
+    return fork(environ)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
