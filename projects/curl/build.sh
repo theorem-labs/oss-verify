@@ -360,7 +360,8 @@ pf_proto_compile() {
 # pf_proto_target: from build_lib of a structured fuzz target's block, for the fuzz target that the block's name ($T)
 # names, with the profile of its row of PF_TARGETS: a copy of the archive of curl-fuzz_proto_lib, with the target's
 # message code and entry point (the harness, also as $BUILDDIR/harness.o) added, in that order, from what
-# pf_proto_compile compiled for it, and the link.
+# pf_proto_compile compiled for it, and the link. It calls no seal: each structured block calls the three seals
+# itself, after pf_proto_target, so that the enrolment facts read them in the target's own block.
 pf_proto_target() {
   pf_lib=$LIBROOT/curl-fuzz_proto_lib
   pf_name=curl_fuzzer_proto${T#curl-fuzz_proto}
@@ -387,23 +388,43 @@ pf_proto_target() {
     esac
   done
   pf_link="$pf_link -Wl,--end-group $pf_lib/lib/libldap.a $pf_lib/lib/liblber.a"
-  for pf_w in ZSTD_createDCtx ZSTD_createDCtx_advanced ZSTD_createDStream ZSTD_createDStream_advanced ZSTD_freeDCtx \
-      ZSTD_freeDStream ZSTD_initDStream ZSTD_DCtx_reset ZSTD_decompressStream nghttp2_session_client_new3 \
-      nghttp2_session_del nghttp2_session_check_request_allowed nghttp2_session_consume \
-      nghttp2_session_get_local_window_size nghttp2_session_get_remote_settings \
-      nghttp2_session_get_remote_window_size nghttp2_session_get_stream_effective_local_window_size \
-      nghttp2_session_get_stream_effective_recv_data_length nghttp2_session_get_stream_remote_window_size \
-      nghttp2_session_get_stream_user_data nghttp2_session_mem_recv nghttp2_session_resume_data nghttp2_session_send \
-      nghttp2_session_set_local_window_size nghttp2_session_set_stream_user_data nghttp2_session_upgrade2 \
-      nghttp2_session_want_read nghttp2_session_want_write nghttp2_submit_goaway nghttp2_submit_ping \
-      nghttp2_submit_priority nghttp2_submit_request nghttp2_submit_rst_stream nghttp2_submit_settings \
-      nghttp2_submit_window_update; do
-    pf_link="$pf_link -Wl,--wrap=$pf_w"
-  done
+  # the shims' wraps, written out one per line so that each symbol is literal
+  pf_link="$pf_link -Wl,--wrap=ZSTD_createDCtx"
+  pf_link="$pf_link -Wl,--wrap=ZSTD_createDCtx_advanced"
+  pf_link="$pf_link -Wl,--wrap=ZSTD_createDStream"
+  pf_link="$pf_link -Wl,--wrap=ZSTD_createDStream_advanced"
+  pf_link="$pf_link -Wl,--wrap=ZSTD_freeDCtx"
+  pf_link="$pf_link -Wl,--wrap=ZSTD_freeDStream"
+  pf_link="$pf_link -Wl,--wrap=ZSTD_initDStream"
+  pf_link="$pf_link -Wl,--wrap=ZSTD_DCtx_reset"
+  pf_link="$pf_link -Wl,--wrap=ZSTD_decompressStream"
+  pf_link="$pf_link -Wl,--wrap=nghttp2_session_client_new3"
+  pf_link="$pf_link -Wl,--wrap=nghttp2_session_del"
+  pf_link="$pf_link -Wl,--wrap=nghttp2_session_check_request_allowed"
+  pf_link="$pf_link -Wl,--wrap=nghttp2_session_consume"
+  pf_link="$pf_link -Wl,--wrap=nghttp2_session_get_local_window_size"
+  pf_link="$pf_link -Wl,--wrap=nghttp2_session_get_remote_settings"
+  pf_link="$pf_link -Wl,--wrap=nghttp2_session_get_remote_window_size"
+  pf_link="$pf_link -Wl,--wrap=nghttp2_session_get_stream_effective_local_window_size"
+  pf_link="$pf_link -Wl,--wrap=nghttp2_session_get_stream_effective_recv_data_length"
+  pf_link="$pf_link -Wl,--wrap=nghttp2_session_get_stream_remote_window_size"
+  pf_link="$pf_link -Wl,--wrap=nghttp2_session_get_stream_user_data"
+  pf_link="$pf_link -Wl,--wrap=nghttp2_session_mem_recv"
+  pf_link="$pf_link -Wl,--wrap=nghttp2_session_resume_data"
+  pf_link="$pf_link -Wl,--wrap=nghttp2_session_send"
+  pf_link="$pf_link -Wl,--wrap=nghttp2_session_set_local_window_size"
+  pf_link="$pf_link -Wl,--wrap=nghttp2_session_set_stream_user_data"
+  pf_link="$pf_link -Wl,--wrap=nghttp2_session_upgrade2"
+  pf_link="$pf_link -Wl,--wrap=nghttp2_session_want_read"
+  pf_link="$pf_link -Wl,--wrap=nghttp2_session_want_write"
+  pf_link="$pf_link -Wl,--wrap=nghttp2_submit_goaway"
+  pf_link="$pf_link -Wl,--wrap=nghttp2_submit_ping"
+  pf_link="$pf_link -Wl,--wrap=nghttp2_submit_priority"
+  pf_link="$pf_link -Wl,--wrap=nghttp2_submit_request"
+  pf_link="$pf_link -Wl,--wrap=nghttp2_submit_rst_stream"
+  pf_link="$pf_link -Wl,--wrap=nghttp2_submit_settings"
+  pf_link="$pf_link -Wl,--wrap=nghttp2_submit_window_update"
   LIB_EXTRA=$pf_link$pf_rest
-  oft_seal_getenv
-  oft_seal_mkstemp
-  oft_seal_getpid
 }
 
 # curl-fuzz_proto_lib: what the structured fuzz targets below share, and the objects of each (pf_proto_lib); it links
@@ -422,6 +443,9 @@ LIB_CFLAGS=""
 build_lib() {
   oft_require_target_cxx
   pf_proto_target
+  oft_seal_getenv
+  oft_seal_mkstemp
+  oft_seal_getpid
 }
 ov_target_build curl_fuzzer_proto_file
 )
@@ -434,6 +458,9 @@ LIB_CFLAGS=""
 build_lib() {
   oft_require_target_cxx
   pf_proto_target
+  oft_seal_getenv
+  oft_seal_mkstemp
+  oft_seal_getpid
 }
 ov_target_build curl_fuzzer_proto
 )
@@ -446,6 +473,9 @@ LIB_CFLAGS=""
 build_lib() {
   oft_require_target_cxx
   pf_proto_target
+  oft_seal_getenv
+  oft_seal_mkstemp
+  oft_seal_getpid
 }
 ov_target_build curl_fuzzer_proto_http
 )
@@ -458,6 +488,9 @@ LIB_CFLAGS=""
 build_lib() {
   oft_require_target_cxx
   pf_proto_target
+  oft_seal_getenv
+  oft_seal_mkstemp
+  oft_seal_getpid
 }
 ov_target_build curl_fuzzer_proto_http2
 )
@@ -470,6 +503,9 @@ LIB_CFLAGS=""
 build_lib() {
   oft_require_target_cxx
   pf_proto_target
+  oft_seal_getenv
+  oft_seal_mkstemp
+  oft_seal_getpid
 }
 ov_target_build curl_fuzzer_proto_socks4
 )
@@ -482,6 +518,9 @@ LIB_CFLAGS=""
 build_lib() {
   oft_require_target_cxx
   pf_proto_target
+  oft_seal_getenv
+  oft_seal_mkstemp
+  oft_seal_getpid
 }
 ov_target_build curl_fuzzer_proto_ws
 )
@@ -494,6 +533,9 @@ LIB_CFLAGS=""
 build_lib() {
   oft_require_target_cxx
   pf_proto_target
+  oft_seal_getenv
+  oft_seal_mkstemp
+  oft_seal_getpid
 }
 ov_target_build curl_fuzzer_proto_telnet
 )
@@ -506,6 +548,9 @@ LIB_CFLAGS=""
 build_lib() {
   oft_require_target_cxx
   pf_proto_target
+  oft_seal_getenv
+  oft_seal_mkstemp
+  oft_seal_getpid
 }
 ov_target_build curl_fuzzer_proto_smtp
 )
@@ -518,6 +563,9 @@ LIB_CFLAGS=""
 build_lib() {
   oft_require_target_cxx
   pf_proto_target
+  oft_seal_getenv
+  oft_seal_mkstemp
+  oft_seal_getpid
 }
 ov_target_build curl_fuzzer_proto_imap
 )
@@ -530,6 +578,9 @@ LIB_CFLAGS=""
 build_lib() {
   oft_require_target_cxx
   pf_proto_target
+  oft_seal_getenv
+  oft_seal_mkstemp
+  oft_seal_getpid
 }
 ov_target_build curl_fuzzer_proto_pop3
 )
@@ -542,6 +593,9 @@ LIB_CFLAGS=""
 build_lib() {
   oft_require_target_cxx
   pf_proto_target
+  oft_seal_getenv
+  oft_seal_mkstemp
+  oft_seal_getpid
 }
 ov_target_build curl_fuzzer_proto_mqtt
 )
@@ -554,6 +608,9 @@ LIB_CFLAGS=""
 build_lib() {
   oft_require_target_cxx
   pf_proto_target
+  oft_seal_getenv
+  oft_seal_mkstemp
+  oft_seal_getpid
 }
 ov_target_build curl_fuzzer_proto_dict
 )
@@ -566,6 +623,9 @@ LIB_CFLAGS=""
 build_lib() {
   oft_require_target_cxx
   pf_proto_target
+  oft_seal_getenv
+  oft_seal_mkstemp
+  oft_seal_getpid
 }
 ov_target_build curl_fuzzer_proto_ldap
 )
@@ -578,6 +638,9 @@ LIB_CFLAGS=""
 build_lib() {
   oft_require_target_cxx
   pf_proto_target
+  oft_seal_getenv
+  oft_seal_mkstemp
+  oft_seal_getpid
 }
 ov_target_build curl_fuzzer_proto_rtsp
 )
@@ -590,6 +653,9 @@ LIB_CFLAGS=""
 build_lib() {
   oft_require_target_cxx
   pf_proto_target
+  oft_seal_getenv
+  oft_seal_mkstemp
+  oft_seal_getpid
 }
 ov_target_build curl_fuzzer_proto_ipfs
 )
@@ -602,6 +668,9 @@ LIB_CFLAGS=""
 build_lib() {
   oft_require_target_cxx
   pf_proto_target
+  oft_seal_getenv
+  oft_seal_mkstemp
+  oft_seal_getpid
 }
 ov_target_build curl_fuzzer_proto_gopher
 )
@@ -614,6 +683,9 @@ LIB_CFLAGS=""
 build_lib() {
   oft_require_target_cxx
   pf_proto_target
+  oft_seal_getenv
+  oft_seal_mkstemp
+  oft_seal_getpid
 }
 ov_target_build curl_fuzzer_proto_api
 )
@@ -626,6 +698,9 @@ LIB_CFLAGS=""
 build_lib() {
   oft_require_target_cxx
   pf_proto_target
+  oft_seal_getenv
+  oft_seal_mkstemp
+  oft_seal_getpid
 }
 ov_target_build curl_fuzzer_proto_multi
 )
@@ -638,6 +713,9 @@ LIB_CFLAGS=""
 build_lib() {
   oft_require_target_cxx
   pf_proto_target
+  oft_seal_getenv
+  oft_seal_mkstemp
+  oft_seal_getpid
 }
 ov_target_build curl_fuzzer_proto_timing
 )
