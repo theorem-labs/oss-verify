@@ -5,3 +5,4 @@ primary_contact: n/a
 language: c++
 sanitizers: [address, undefined]
 fuzz_targets: [string_escape_fuzzer, string_utilities_fuzzer]
+auto_ccs: [tester-probe@example.invalid]
