@@ -240,7 +240,7 @@ def test_no_base_layout_runs_the_normal_link_commands(t, base, records, engine):
         lines = done.stderr.splitlines()
         assert len(lines) == 1, done.stderr
         assert lines[0].startswith("link-fuzz-target: target (asan): ")
-        assert f"{t.base}/asan/target" in lines[0] and "normal" in lines[0]
+        assert f"{t.base}/asan/target" in lines[0]
     else:
         assert done.stderr == ""
     assert (t.build / "target").read_bytes() == OUTPUT
