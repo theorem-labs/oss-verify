@@ -573,11 +573,12 @@ def describe(lines, objects, key_file, wraps, output=None):
     The candidates of a map line are the sections of its name in the objects of its file and member
     (Objects.sections). When the candidates lie in one object (one member, or one plain object) and are as many as
     the map's lines of that (file, member, section), the k-th line is the k-th candidate, unless the line's linked
-    size is larger than the candidate's size (lld only removes bytes). Every other line is ambiguous: lld took only
-    some of the candidates (--gc-sections, or archive members it did not extract), or they lie in two or more
-    members of one name, which lld's map lists in the order it extracted them, not in the archive's. An ambiguous
-    line, as a line with no candidate (COMMON, or a piece of .eh_frame), gets no sha256 (so it never counts as same
-    bytes), the map's size and alignment, no calls, and no symbols for definitions.
+    size is larger than the candidate's size (lld only removes bytes). Else, when the map has one line of that name
+    and one candidate alone is as large as the line, the line is that candidate: the others cannot be it. Every other
+    line is ambiguous: lld took only some of the candidates (--gc-sections, or archive members it did not extract),
+    or they lie in two or more members of one name, which lld's map lists in the order it extracted them, not in the
+    archive's. An ambiguous line, as a line with no candidate (COMMON, or a piece of .eh_frame), gets no sha256 (so it
+    never counts as same bytes), the map's size and alignment, no calls, and no symbols for definitions.
 
     Each call and each thread-local access of a .text input section is a Call; a global one names its definition in
     the link's objects (definitions). Its delta comes from relaxation, with the addresses of this link: those of the
@@ -600,9 +601,14 @@ def describe(lines, objects, key_file, wraps, output=None):
         seen[name] += 1
         candidates = objects.sections(*name)
         digest, size, align = "", line.size, line.align
-        if len(candidates) == counts[name] and len({instance for instance, _, _ in candidates}) == 1 \
-                and line.size <= candidates[k][2].size:
-            instance, elf, section = candidates[k]
+        chosen = None
+        if len(candidates) == counts[name] and len({instance for instance, _, _ in candidates}) == 1:
+            chosen = candidates[k] if line.size <= candidates[k][2].size else None
+        elif counts[name] == 1:
+            fits = [candidate for candidate in candidates if line.size <= candidate[2].size]
+            chosen = fits[0] if len(fits) == 1 else None
+        if chosen is not None:
+            instance, elf, section = chosen
             if section.type != SHT_NOBITS:
                 digest = hashlib.sha256(elf.body(section)).hexdigest()
             size, align = section.size, section.align
