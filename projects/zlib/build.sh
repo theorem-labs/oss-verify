@@ -111,6 +111,21 @@ LIB_CFLAGS=""
 ov_target_build gzio_fuzzer
 )
 
+# minigzip_fuzzer: the release's target zlib-minigzip_fuzzer
+(
+ov_target_begin zlib-minigzip_fuzzer
+build_lib() {
+  oft_build_cmake
+  oft_build_harness "minigzip_fuzzer.c"
+  oft_seal_getenv
+  oft_seal_mkstemp
+  oft_seal_getpid
+}
+LIB_ARCHIVE="lib/liboft.a"
+LIB_CFLAGS=""
+ov_target_build minigzip_fuzzer
+)
+
 # zlib_uncompress2_fuzzer: the release's target zlib-zlib_uncompress2_fuzzer
 (
 ov_target_begin zlib-zlib_uncompress2_fuzzer
