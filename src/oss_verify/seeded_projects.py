@@ -43,8 +43,10 @@ tests/test_seeded_projects.py fails when docs/seeded-projects.tsv is not what th
 under seeds/, docs/seeded-projects.tsv, tests/test_seeded_projects.py, or a file under projects/<name>/ of a seeded
 project (a project with a row in seeds/builds.tsv). The top of that workflow lists these paths. A pull request that
 changes one of them runs this and commits docs/seeded-projects.tsv. A pull request from a fork that changes a file
-under projects/ runs no test there and cannot commit the table, so its change to a seeded port leaves the table stale
-until a pull request that runs Committed meets it.
+under projects/ runs no test there and cannot commit the table. So enrollment (.github/scripts/take-project) refuses
+a fork that changes the port of a project that docs/seeded-projects.tsv marks seeded, and such a change cannot merge
+from a fork. A branch of this repository carries it and runs Committed. A push to main that makes the table stale
+also runs Committed, and fails the check tests on main's commit.
 """
 import argparse
 import dataclasses
@@ -119,8 +121,14 @@ class Error(Exception):
 
 def tsv_fields(path, columns):
     """The fields of each row of a TSV file, one value for each of `columns`, without its comment lines (#) and its
-    line of column names."""
-    for line in path.read_text(encoding="utf-8").splitlines():
+    line of column names. A line ends at a newline only. Error for a file that holds another character at which
+    str.splitlines ends a line, such as a carriage return. The route job of .github/workflows/tests.yaml reads the
+    lines of seeds/builds.tsv between newlines, so the two read the same rows."""
+    for number, line in enumerate(path.read_bytes().decode("utf-8").split("\n"), 1):
+        # str.splitlines gives more than one line for the line and a character after it only when the line holds
+        # another line end.
+        if len((line + ".").splitlines()) != 1:
+            raise Error(f"{path}: line {number} holds a line end other than a newline: {line!r}")
         if not line or line.startswith("#") or line == "\t".join(columns):
             continue
         fields = line.split("\t")

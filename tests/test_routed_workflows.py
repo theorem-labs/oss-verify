@@ -354,16 +354,16 @@ TREE = {"README.md": "x\n", "AGENTS.md": "x\n", "docs/a.md": "x\n", "src/t.py": 
         "projects/kay/series": "kay.0001-checked.patch\n"}
 
 
-def route_tests(tmp_path, change, event="pull_request", before=None, fork=None):
+def route_tests(tmp_path, change, event="pull_request", before=None, fork=None, tree=None):
     """Run tests.yaml's "Which jobs the changes need" on a commit that makes `change` to TREE, as a run of a pull
-    request from a fork when `fork` is "true" or "false" (the workflow's FORK; unset by default). Return its
-    outputs."""
+    request from a fork when `fork` is "true" or "false" (the workflow's FORK; unset by default). `tree` holds files
+    that replace TREE's in the first commit. Return its outputs."""
     # git with no configuration from this machine, as in test_take_project.py.
     isolated = isolated_git_env(tmp_path)
     repo = tmp_path / "repo"
     repo.mkdir()
     git("init", "-q", "-b", "main", cwd=repo, env=isolated)
-    first = commit(repo, isolated, TREE)
+    first = commit(repo, isolated, {**TREE, **(tree or {})})
     commit(repo, isolated, change)
     git("remote", "add", "origin", f"file://{repo}", cwd=repo, env=isolated)
     paths = step(workflow("tests.yaml")["jobs"]["route"], "Which jobs the changes need")
@@ -398,6 +398,8 @@ def route_tests(tmp_path, change, event="pull_request", before=None, fork=None):
     ({"docs/seeded-projects.tsv": "y\n"}, {"docs": "true", "table": "true"}),
     ({"projects/kay/series": "y\n"}, {"suite": "true", "table": "true"}),
     ({"projects/kay/series": None}, {"suite": "true", "table": "true"}),
+    # A pull request that removes seeds/builds.tsv: route reads no such file, and the path is under seeds/.
+    ({"seeds/builds.tsv": None}, {"suite": "true", "table": "true"}),
     # A change to the port of a project that is not seeded, as its enrollment makes, and any other change: Committed
     # does not run.
     ({"projects/p/series": "y\n"}, {"suite": "true"}),
@@ -412,6 +414,19 @@ def test_tests_route_asks_for_the_jobs_a_pull_requests_changes_need(tmp_path, ch
 
 def test_tests_route_compares_a_push_with_the_commit_before_it(tmp_path):
     assert route_tests(tmp_path, {"docs/a.md": "y\n"}, event="push") == {"docs": "true"}
+
+
+def test_tests_route_runs_committed_for_a_push_that_changes_a_seeded_port(tmp_path):
+    # A push to main that makes the table stale runs Committed, which then fails the check tests on main's commit.
+    assert route_tests(tmp_path, {"projects/kay/series": "y\n"}, event="push") == {"suite": "true", "table": "true"}
+
+
+def test_tests_route_reads_a_last_row_that_no_newline_ends(tmp_path):
+    # The generator reads such a row of seeds/builds.tsv, so kay is seeded and a change to its port runs Committed.
+    builds = TREE["seeds/builds.tsv"].removesuffix("\n")
+    assert builds.endswith("\nkay\treproduces\tall binaries match the release's")
+    assert route_tests(tmp_path, {"projects/kay/series": "y\n"}, tree={"seeds/builds.tsv": builds}) == {
+        "suite": "true", "table": "true"}
 
 
 @pytest.mark.parametrize("change, outputs", [

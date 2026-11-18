@@ -181,11 +181,13 @@ name: "Build"
 # where a check is required, so the build job is never the required check itself. The build takes the project with
 # .github/scripts/take-project, for each commit on its own:
 #   - A pull request from a fork is judged on the files GitHub lists for it: one that changes a file under projects/
-#     fails if it changes anything but one project, which is built as it is at the fork's head. A pull request from a
-#     branch of this repository is judged on what merging it into the base branch changes (git merge-tree): it fails
-#     if the merge conflicts, and the one project the merge changes is built as the merge has it, whatever else the
-#     pull request changes; those other files are not taken. So a stacked branch whose parent is merged, a renamed
-#     project, or a project the base branch renamed since the branch left it, still has its one project built.
+#     fails if it changes anything but one project, which is built as it is at the fork's head. It also fails if
+#     docs/seeded-projects.tsv marks that project seeded, even when it removes the project: a maintainer carries a
+#     change to a seeded project on a branch of this repository. A pull request from a branch of this repository is
+#     judged on what merging it into the base branch changes (git merge-tree): it fails if the merge conflicts, and the
+#     one project the merge changes is built as the merge has it, whatever else the pull request changes; those other
+#     files are not taken. So a stacked branch whose parent is merged, a renamed project, or a project the base branch
+#     renamed since the branch left it, still has its one project built.
 #   - It passes with "nothing to build" in the summary for a pull request that changes no file or removes its project,
 #     for one from a fork that changes no file under projects/ (route reviews such a pull request as a change, so the
 #     build runs on it only when an App the review refuses started the run), and for one from a branch of this

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Adapted from the step of OSS Scanner's .github/workflows/build.yaml (https://github.com/anthropics/oss-scanner) that
 # takes a project from a pull request, Copyright 2026 Anthropic PBC, Apache-2.0. Modified 2026 by Theorem Labs, PBC:
-# OSS Verify's file names, every page of the changed files, and pull requests from branches of this repository that
-# are not enrollments.
+# OSS Verify's file names, every page of the changed files, pull requests from branches of this repository that are
+# not enrollments, and a fork's change to the port of a seeded project.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Takes projects/<name>/ from an enrollment pull request into the checkout of the base branch, and nothing else:
@@ -21,7 +21,8 @@
 # An enrollment changes only files directly inside one projects/<name>/. A path at any depth inside projects/<name>/
 # counts as a change to that project. A path not directly inside one projects/<name>/, a file in a subdirectory of a
 # project included, is outside it.
-#   - A pull request that changes no file, or removes its one project, passes with nothing to build or validate.
+#   - A pull request that changes no file, or removes its one project, passes with nothing to build or validate. A
+#     fork that removes a seeded project fails (below).
 #   - A pull request from a fork, a deleted fork included, is judged on the files GitHub lists for it.
 #       - No listed path under projects/ (a change to src/, docs/ or a workflow, say): it is not an enrollment. It
 #         passes with nothing to build or validate, and the log and step summary say so. The tests check
@@ -29,7 +30,12 @@
 #         decides whether to merge it.
 #       - Any listed path under projects/: it is an enrollment, and fails if it changes any path outside one
 #         projects/<name>/: a file outside projects/, a file in a subdirectory of a project, or a second project,
-#         one it renames or removes included. Otherwise its project is taken.
+#         one it renames or removes included. It also fails if docs/seeded-projects.tsv of the base branch marks its
+#         project seeded (yes in the second column), whether it changes that project or removes it. That table
+#         depends on the port of a seeded project, projects/<name>/. The fork can change no file outside
+#         projects/<name>/, so it cannot change the table, and the tests check (tests.yaml) runs no test on it. A
+#         maintainer carries such a change on a branch of this repository, where tests runs the test of the table.
+#         With no table, nothing fails for this rule. Otherwise its project is taken.
 #   - A pull request from a branch of this repository, which only an account with write access can push, is judged on
 #     what merging it into the base branch changes. GitHub's list is the three-dot diff from the merge base, so it can
 #     name a project that merging leaves as it is: a stacked branch's parent once the parent is squash-merged, or a
@@ -37,8 +43,9 @@
 #     base branch's checkout with `git merge-tree`, from the merge base GitHub reports, and fails if the merge
 #     conflicts, as GitHub's would. The paths the merge changes then decide, and a project the merge removes is not
 #     counted:
-#       - one project changed: that project is taken, as from a fork. The other files are not taken, and the log and
-#         step summary say how many there are; the project is checked with the base branch's tools.
+#       - one project changed: that project is taken, as from a fork, a seeded project included. The other files are
+#         not taken, and the log and step summary say how many there are; the project is checked with the base
+#         branch's tools.
 #       - no project, or several: it is not an enrollment. It passes with nothing to build or validate, and the log
 #         and step summary say so. The tests check (tests.yaml) runs this repository's tests and validates every
 #         project on such a pull request.
@@ -232,6 +239,15 @@ else
 fi
 # Same rule as NAME in oss-verify validate.
 [[ $name =~ ^[a-z0-9][a-z0-9._-]{0,62}$ ]] || fail "The directory name under projects/ must be a-z 0-9 . _ - (starting with a letter or digit, at most 63)."
+# A fork's enrollment of a project that the base branch's docs/seeded-projects.tsv marks seeded fails, whether it
+# changes the project's files or removes them (the top of this file). The table is read as data.
+if [ "$same_repository" = false ] && [ -f docs/seeded-projects.tsv ]; then
+  while IFS=$'\t' read -r project seedable _ || [ -n "$project" ]; do
+    if [ "$project" = "$name" ] && [ "$seedable" = yes ]; then
+      fail "projects/$name/ is the port of a project that we seeded: docs/seeded-projects.tsv marks it seeded. A change to the port can change that table. A pull request from a fork that changes projects/ cannot change the table, and the tests check runs no test on it. A maintainer of this repository carries such a change on a branch of this repository, where the tests check runs the test of the table. Ask in this pull request or in an issue."
+    fi
+  done < docs/seeded-projects.tsv
+fi
 
 git ls-tree -r -z "$source" -- "projects/$name/" > "$RUNNER_TEMP/tree"
 if [ ! -s "$RUNNER_TEMP/tree" ]; then

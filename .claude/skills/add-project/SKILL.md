@@ -175,7 +175,7 @@ Copy `templates/Dockerfile` and `templates/build.sh` into `projects/<name>/`, an
 - In `build.sh`, compile each fuzz target. Link it into `$OUT` with `$LIB_FUZZING_ENGINE`, through `$CC` or `$CXX`.
 - Make static riscv64 Linux programs. Do not use shared libraries, run a compiled program, use the network in `build.sh`, or strip a binary after the link.
 
-If a dependency needs a patch to build, add the patch to `projects/<name>/`, and list it in `series`. A change that fixes a bug in the project never goes in the project directory. If you adopt a seeded project, do step 2 of `docs/project-yaml.md`, "Seeded projects".
+If a dependency needs a patch to build, add the patch to `projects/<name>/`, and list it in `series`. A change that fixes a bug in the project never goes in the project directory. If you adopt a seeded project, do step 2 of `docs/project-yaml.md`, "Seeded projects". A pull request from a fork cannot change `projects/<name>/` of a seeded project: `enrollment` refuses it. So tell the maintainer to ask the maintainers of this repository for the change, in an issue or in the pull request that `enrollment` refuses. A maintainer of this repository then makes the change on a branch of this repository.
 
 ## 5. Write project.yaml
 

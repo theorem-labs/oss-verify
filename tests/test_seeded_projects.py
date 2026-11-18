@@ -494,10 +494,17 @@ class Table(unittest.TestCase):
                 "checked-patches.tsv": checked + "gone\tgone.0001-x.patch\t" + "0" * 64 + "\n"},
             "a line of column names of checked-patches.tsv that is not the file's": {
                 "checked-patches.tsv": checked.replace("project\tpatch\tsha256", "project\tpatch\tsum")},
+            # Every other character at which str.splitlines ends a line. The route job of .github/workflows/tests.yaml
+            # reads seeds/builds.tsv between newlines only, so it would read kay's row as part of dee's.
+            **{f"a line end {end!r} in builds.tsv": {"builds.tsv": builds.replace("\nkay\t", f"{end}kay\t")}
+               for end in ("\r", "\r\n", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")},
         }
         for case, changes in refused.items():
             with self.subTest(case), self.assertRaises(seeded_projects.Error):
                 self.table(changes)
+        # The message names the file and the line: dee's, which a carriage return ends.
+        with self.assertRaisesRegex(seeded_projects.Error, r"/seeds/builds\.tsv: line 4 holds a line end other than "):
+            self.table({"builds.tsv": builds.replace("\nkay\t", "\rkay\t")})
 
 
 if __name__ == "__main__":

@@ -182,6 +182,20 @@ WITH_ANOTHER_FILE = {
     "status": {**ENROLLMENT, "STATUS.md": "# Status\n"},
     "seeded": {**ENROLLMENT, "docs/seeded-projects.tsv": "demo\n"},
 }
+# docs/seeded-projects.tsv on main, in the form that src/oss_verify/seeded_projects.py writes: curl is seeded, and
+# sqlpage is not. Main has a port of each.
+SEEDED_TABLE = ("# Written by src/oss_verify/seeded_projects.py; do not edit.\n"
+                "project\tseedable\tbuild\tbuild notes\treason or notes\n"
+                "curl\tyes\treproduces\tall binaries match the release's\tfuzz_a: the release modified this harness\n"
+                "sqlpage\tno\t-\t-\tthe release did not build it\n")
+SEEDED_MAIN = {"docs/seeded-projects.tsv": SEEDED_TABLE, "projects/curl/project.yaml": PROJECT,
+               "projects/curl/build.sh": "#!/bin/bash\n", "projects/sqlpage/project.yaml": PROJECT,
+               "projects/sqlpage/build.sh": "#!/bin/bash\n"}
+NO_TABLE = {path: text for path, text in SEEDED_MAIN.items() if path != "docs/seeded-projects.tsv"}
+# A change to the build.sh of a port.
+CHANGED_BUILD = "#!/bin/bash\nmake\n"
+SEEDED_REFUSED = ("A maintainer of this repository carries such a change on a branch of this repository, where the "
+                  "tests check runs the test of the table.")
 # Branches whose three-dot list names a project that merging does not change, built from real commits. Each is
 # (files, removed, parent, landed) for PullRequest, and the one project merging changes.
 GIT = {"projects/git/project.yaml": PROJECT, "projects/git/Dockerfile": "FROM x\n",
@@ -327,6 +341,44 @@ def test_a_fork_that_changes_one_project_and_other_files_fails(tmp_path, head, c
     assert code == 1, log
     assert values.get("name", "") == ""
     assert f"outside projects/<name>/: {next(path for path in files if path not in ENROLLMENT)}" in log
+
+
+@pytest.mark.parametrize("head", ["someone/oss-verify", ""])
+@pytest.mark.parametrize("removed", [(), ("projects/curl",)], ids=["changes the port", "removes the port"])
+def test_a_fork_that_changes_the_port_of_a_seeded_project_fails(tmp_path, head, removed):
+    # docs/seeded-projects.tsv depends on the port of curl. A fork can change no file outside projects/curl/, and the
+    # tests check runs no test on it, so a maintainer carries the change on a branch of this repository.
+    pull = PullRequest(tmp_path, {} if removed else {"projects/curl/build.sh": CHANGED_BUILD}, removed=removed,
+                       on_main=SEEDED_MAIN)
+    code, log, values, summary = pull.run(head)
+    assert code == 1, log
+    assert values.get("name", "") == ""
+    assert ("::error::projects/curl/ is the port of a project that we seeded: docs/seeded-projects.tsv marks it "
+            "seeded.") in log
+    assert SEEDED_REFUSED in log
+    assert "nothing to validate" not in log + summary
+    assert (pull.checkout / "projects" / "curl" / "build.sh").read_text() == "#!/bin/bash\n"
+
+
+@pytest.mark.parametrize("head", ["someone/oss-verify", ""])
+@pytest.mark.parametrize("name, on_main", [("sqlpage", SEEDED_MAIN), ("curl", NO_TABLE)],
+                         ids=["a project that the table does not mark seeded", "a project with no table on main"])
+def test_a_fork_that_changes_the_port_of_a_project_that_is_not_seeded_is_taken(tmp_path, head, name, on_main):
+    pull = PullRequest(tmp_path, {f"projects/{name}/build.sh": CHANGED_BUILD}, on_main=on_main)
+    code, log, values, _ = pull.run(head)
+    assert code == 0, log
+    assert values["name"] == name
+    assert (pull.checkout / "projects" / name / "build.sh").read_text() == CHANGED_BUILD
+
+
+def test_a_branch_of_this_repository_that_changes_the_port_of_a_seeded_project_takes_it(tmp_path):
+    # The tests check runs Committed on the branch, so the branch carries the change to the port.
+    pull = PullRequest(tmp_path, {"projects/curl/build.sh": CHANGED_BUILD}, on_main=SEEDED_MAIN)
+    code, log, values, _ = pull.run(REPO)
+    assert code == 0, log
+    assert values["name"] == "curl"
+    assert SEEDED_REFUSED not in log
+    assert (pull.checkout / "projects" / "curl" / "build.sh").read_text() == CHANGED_BUILD
 
 
 @pytest.mark.parametrize("head", [REPO, "someone/oss-verify"])
