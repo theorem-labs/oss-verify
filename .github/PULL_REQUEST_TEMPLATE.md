@@ -11,6 +11,6 @@ Before I opened this pull request, I made sure of each point:
 - [ ] A `Dockerfile` and a `build.sh` are next to `project.yaml`. Or they are in one directory of the project's repository, and `dockerfile:` gives the path of the `Dockerfile`.
 - [ ] `patch_style.md` (optional) tells which findings, reports and patches I want, and how they must look. It is next to `project.yaml`, or in the project's repository at the path that `patch_style:` gives.
 
-To change the enrollment, edit `projects/<name>/`. To pause the project, set `disabled: true`. To leave, remove `projects/<name>/`.
+To change the enrollment, edit `projects/<name>/`. To pause the project, set `disabled: true`. To leave, remove `projects/<name>/`. For a project that we seeded, a maintainer of this repository makes each of these changes on a branch of this repository (`CONTRIBUTING.md`).
 
 Context (optional): what a reviewer must know about the project or its build, for example which fuzz targets matter most to you.
