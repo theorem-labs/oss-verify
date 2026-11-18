@@ -61,15 +61,18 @@ command (the compiler and every argument, the seals last; no -o, no map, no scri
 entry <tree>/<build>/<target>/, DIR an empty directory for its links, and --renamed an allocation-failure link's
 renamed. It writes the link's wraps to --wraps, links once normally (the probe link, DIR/probe), and plans where
 each .text input section goes: each same-bytes one at its base address, unless it moves for one of the causes above,
-and every other one into a hole before or between them or at the end of .text. It writes the lld script of that
-plan to --script, links with it (the check link, DIR/check), verifies that each kept section is at its base address
-with its base linked size (one whose call or thread-local access the check link relaxes otherwise moves, with
-jal_reach or tls_reach, and the plan runs again), that the PT_LOAD segments are the probe link's and that no two of
-them share a page, and writes placement.tsv to --placement. When the read-only data in front of .text grew past its
-room, it writes no script: the link is a normal one, and placement.tsv gives every same-bytes section
-readonly_growth. It exits 1 when a link fails, when the check link is not what the plan asks, or when a file or
-section name holds a double quote or a line break, which the script cannot quote; 2 when an input cannot be read;
-else 0.
+and every other one into a hole before or between them or at the end of .text. .text ends where the plan ends it, so
+that lld puts what follows .text in its PT_LOAD (libc++'s __lcxx_override, for one) where the plan's tests of the
+calls into it expect it. Each jal_reach cause that the plan finds holds in the final plan: a section that it moves
+for a call relaxed otherwise returns to its base address when no call of it is relaxed otherwise against that plan. It
+writes the lld script of that plan to --script, links with it (the check link, DIR/check), verifies that each kept
+section is at its base address with its base linked size (one whose call or thread-local access the check link
+relaxes otherwise moves, with jal_reach or tls_reach, and the plan runs again), that the PT_LOAD segments are the
+probe link's and that no two of them share a page, and writes placement.tsv to --placement. When the read-only data
+in front of .text grew past its room, it writes no script: the link is a normal one, and placement.tsv gives every
+same-bytes section readonly_growth. It exits 1 when a link fails, when the check link is not what the plan asks, or
+when a file or section name holds a double quote or a line break, which the script cannot quote; 2 when an input
+cannot be read; else 0.
 
 The builder image runs this file with its own python3, and the host runs its commands: it takes the standard library
 only, and the syntax of Python 3.9.
@@ -1460,8 +1463,9 @@ Place = collections.namedtuple("Place", "place address cause detail")
 # the bytes that relaxation removed in front of it at the base (BASE's delta), its target as BASE's call at that
 # offset names it (call_target), the base call site (the section's base address plus the offset, less the delta) and
 # the base target's address, the link's own call, and where the link's target is: in the .text input section `row`,
-# `value` bytes into it, or, with row None, at the address `value`.
-CallTest = collections.namedtuple("CallTest", "offset delta target site before call row value")
+# `value` bytes into it, or, with row None, at the address `value`, which lies in the tail after .text (segment_tail)
+# when `tail` is true.
+CallTest = collections.namedtuple("CallTest", "offset delta target site before call row value tail")
 # A thread-local access of a same-bytes .text input section (a tprel line), as the append mode tests it: its offset,
 # its target as BASE's line at that offset names it (call_target), the base target's offset from the start of BASE's
 # TLS segment (tls_offset), and the link's own line.
@@ -1531,9 +1535,14 @@ def call_tests(base, probe, pairing):
     the base, and in a link that keeps the section there with the base's relaxations in front of the call. The
     link's target is in the .text input section that holds it: the section of a local symbol or of a global's
     definition (target_row), or, for a target that no object defines, the section at its address in the link's
-    output (symbol_address). A target in no .text input section keeps the link's address."""
+    output (symbol_address). A target in no .text input section keeps the link's address, and is marked when it lies
+    in the tail after .text in its PT_LOAD (segment_tail), which lld lays out wherever .text ends."""
     text = sorted((i for i in probe.inputs if is_text(i.section) and i.linked), key=lambda i: (i.address, i.row))
     starts = [i.address for i in text]
+    tail = segment_tail(probe)
+
+    def outside(address):
+        return None, address, tail is not None and tail[0] <= address < tail[0] + tail[1]
 
     def where(call):
         found = target_row(call)
@@ -1542,14 +1551,14 @@ def call_tests(base, probe, pairing):
             if row is None:
                 return None
             target = probe.inputs[row]
-            return (row, value) if is_text(target.section) else (None, target.address + value)
+            return (row, value, False) if is_text(target.section) else outside(target.address + value)
         address = symbol_address(call, probe.output.symbols)
         if address is None:
             return None
         k = bisect.bisect_right(starts, address) - 1
         if k >= 0 and address < text[k].address + text[k].linked:
-            return text[k].row, address - text[k].address
-        return None, address
+            return text[k].row, address - text[k].address, False
+        return outside(address)
 
     tests = {}
     for i, old, call, before in paired_lines(base, probe, pairing, "call"):
@@ -1667,9 +1676,18 @@ def allowed(unit, addresses, own, wanted):
     return True
 
 
-def planned_target(test, planned):
-    """The address of the target of the call `test` when each .text input section is at its address in `planned`."""
-    return test.value if test.row is None else planned[test.row] + test.value
+def planned_target(test, planned, shift):
+    """The address of the target of the call `test` when each .text input section is at its address in `planned` and
+    the tail after .text (segment_tail) lies `shift` bytes from where the probe link put it."""
+    if test.row is not None:
+        return planned[test.row] + test.value
+    return test.value + shift if test.tail else test.value
+
+
+def relaxed_call(tests, planned, shift):
+    """The first of the calls `tests` ([CallTest]) that is relaxed otherwise at its base call site against its
+    planned target (planned_target), or None."""
+    return next((t for t in tests if relaxed_otherwise(t, planned_target(t, planned, shift))), None)
 
 
 def alloc_order(output):
@@ -1696,18 +1714,23 @@ def next_segment(base, probe):
 
 
 def segment_tail(probe):
-    """The bytes that the probe link puts after .text in the PT_LOAD that holds .text (an output section of libc++'s
-    overrides, __lcxx_override, for one), with room for their alignment: lld puts them after .text wherever .text
-    ends, so the code ends that much after .text. 0 when the probe has no such PT_LOAD."""
+    """(P, bytes, A) of the tail of the probe link, what it puts after .text in the PT_LOAD that holds .text (an
+    output section of libc++'s overrides, __lcxx_override, for one): P the end of its .text output section, bytes
+    the bytes from P to the end of that PT_LOAD (0 when no PT_LOAD holds .text), and A the largest alignment of the
+    probe's input sections there (1 when there are none). lld lays the tail out after .text wherever .text ends, each
+    output section at its alignment, which divides A: when .text ends at an address E that lies a multiple of A from
+    P, each tail section lies E - P bytes from where the probe link put it, and the PT_LOAD ends at E + bytes. None
+    when the probe link has no .text."""
     text, holder = text_load(probe.output)
+    if text is None:
+        return None
+    start = text.addr + text.size
     if holder is None:
-        return 0
+        return start, 0, 1
     load = probe.output.loads[holder]
-    start, end = text.addr + text.size, load.vaddr + load.memsz
-    if end <= start:
-        return 0
+    end = load.vaddr + load.memsz
     aligns = [i.align for i in probe.inputs if start <= i.address < end]
-    return end - start + max(aligns + [1]) - 1
+    return start, max(end - start, 0), max(aligns + [1])
 
 
 def quotable(name):
@@ -1734,25 +1757,40 @@ def plan(base, probe, pairing, forced=None):
     """The plan (Plan) of an append link: where each .text input section of the probe link `probe` (Layout, with no
     placement) goes against the base layout `base`, with the pairing `pairing` (pair). It reads no file and runs
     nothing. `forced` ({row: CallTest or TlsTest}) names kept sections that the check after the link moves with
-    jal_reach or tls_reach.
+    jal_reach or tls_reach: they never return to their base addresses, where the check link would move them again,
+    so that the links of append end.
 
     When the read-only data in front of .text grew past its room (readonly_growth), the link is a normal one: no
     script, each section at the probe's address. Else a same-bytes section with a thread-local access that lld
     relaxes otherwise in the probe link than at the base (tls_tests) moves with tls_reach: it changes size wherever
     it goes. Each same-bytes section that kept_set keeps occupies its base address and base linked size, and the
-    holes are the gaps between them from the base's .text address. Each other section moves: largest first, by the
-    bytes it takes (taken; ties: the probe map's order), into the first hole in address order where it fits at its
-    alignment, never at its own base address, and where each call from a kept section into it is relaxed as at the
-    base; else to the end of .text, one after another. The members of a repeated key that move are one block: one
-    pattern places them all, in input order. Then each call of each kept section is tested at its base call site
-    against its planned target: a kept section with a call relaxed otherwise moves with jal_reach, and the placement
-    runs again with the larger set of moved sections. Each round moves one section more, so it ends.
+    holes are the gaps between them from the base's .text address, less the base ranges that are reserved (below).
+    Each other section moves: largest first, by the bytes it takes (taken; ties: the probe map's order), into the
+    first hole in address order where it fits at its alignment, never at its own base address, and where each call
+    from a kept section into it is relaxed as at the base; else to the end of .text, one after another, past every
+    reserved range. The members of a repeated key that move are one block: one pattern places them all, in input
+    order. .text ends at E, the first address at or after the planned end whose distance from P is a multiple of A
+    (segment_tail), so that lld lays the tail after .text out E - P bytes from where the probe link put it. Then each
+    call of each kept section is tested at its base call site against its planned target (planned_target: a target
+    in the tail at its probe address plus E - P): a kept section with a call relaxed otherwise moves with jal_reach,
+    and the placement runs again with the larger set of moved sections. Each round moves one section more, so it
+    ends. A section that a round moves may return: its base range, and those of the other members of its key, are
+    reserved in the next rounds, and no other section goes there.
 
-    The script puts .text at the base's address, and each section, a kept run or a moved block once, at its address
-    in address order. When the planned end of .text, with what the probe link puts after .text in its PT_LOAD
-    (segment_tail), is at or below page_floor of the start S of BASE's next PT_LOAD, the script keeps that PT_LOAD at
-    S: the first section of the probe's next PT_LOAD at S with an empty body, which lld fills in its own order
-    (next_segment)."""
+    Then each section that may return, with the other members of its key, returns to its base address when none of
+    their calls is relaxed otherwise at its base call site against the plan: it was kept in a round, so one pattern
+    keeps the members of its key, and none of them has another cause. Nothing else moves: its slot stays empty, and
+    the end of .text and E stay. A return only puts targets back at their base addresses, where a kept section's
+    call into one is relaxed as at the base; a section whose cause rested on a call into one is tested again, until
+    none returns. Each section that stays moves with jal_reach and the first of its calls that is relaxed otherwise
+    against the final plan, which the two layouts then show (unshown), and a member of its key with no such call
+    moves with repeated_key, which the member with one shows (dragged).
+
+    The script puts .text at the base's address and each section, a kept run or a moved block once, at its address
+    in address order, and ends .text with `. = E;`, so that .text ends at E however much lld relaxes the sections at
+    the end. When E plus the bytes of the tail is at or below page_floor of the start S of BASE's next PT_LOAD, the
+    script keeps that PT_LOAD at S: the first section of the probe's next PT_LOAD at S with an empty body, which lld
+    fills in its own order (next_segment)."""
     text = [i for i in probe.inputs if is_text(i.section)]
     figures = readonly_growth(base.output, probe.output)
     if figures is not None and figures[0] > figures[1]:
@@ -1762,14 +1800,21 @@ def plan(base, probe, pairing, forced=None):
     base_text, _ = text_load(base.output)
     if base_text is None:
         raise LayoutError("BASE's output.tsv has no .text")
+    tail = segment_tail(probe)
+    if tail is None:
+        raise LayoutError("the probe link's output.tsv has no .text")
+    probe_end, tail_bytes, tail_align = tail
     start = base_text.addr
     tests = call_tests(base, probe, pairing)
+    partner = {i.row: base.inputs[pairing.partner[i.row]] for i in text if pairing.partner[i.row] is not None}
     forced = dict(forced or {})
     for row, found in tls_tests(base, probe, pairing).items():
         test = next((t for t in found if tls_otherwise(t, tls_offset(target_address(t.call, probe), probe.output))),
                     None)
         if test is not None:
             forced.setdefault(row, test)
+    # The rows of each section that a round moved with jal_reach, with the other members of its key: they may return.
+    returning = []
     while True:
         kept, causes = kept_set(base, probe, pairing, forced)
         movers = [i for i in text if i.row not in kept]
@@ -1783,8 +1828,7 @@ def plan(base, probe, pairing, forced=None):
                 units.append(blocks[i.key])
             blocks[i.key].append(i)
         units.sort(key=lambda unit: (-sum(taken(i) for i in unit), unit[0].row))
-        own = {i.row: base.inputs[pairing.partner[i.row]].address for i in movers
-               if pairing.partner[i.row] is not None}
+        own = {i.row: partner[i.row].address for i in movers if i.row in partner}
         # A call from a kept section must be relaxed as at the base; the call that moved a section with jal_reach
         # must stay relaxed otherwise, so that its cause holds.
         wanted = collections.defaultdict(list)
@@ -1795,11 +1839,14 @@ def plan(base, probe, pairing, forced=None):
         for row, test in sorted(forced.items()):
             if test.call.type == "call" and test.row is not None and test.row not in kept:
                 wanted[test.row].append((test, True))
+        ranges = [(old.address, old.address + old.linked) for old in kept.values()]
+        ranges += [(partner[row].address, partner[row].address + partner[row].linked)
+                   for rows in returning for row in rows]
         holes, end = [], start
-        for old in sorted(kept.values(), key=lambda i: (i.address, i.row)):
-            if old.address > end:
-                holes.append([end, old.address])
-            end = max(end, old.address + old.linked)
+        for low, high in sorted(ranges):
+            if low > end:
+                holes.append([end, low])
+            end = max(end, high)
         planned = {row: old.address for row, old in kept.items()}
         where = {}
         for unit in units:
@@ -1815,14 +1862,40 @@ def plan(base, probe, pairing, forced=None):
                 end, place = after, "end"
             for i, at in zip(unit, addresses):
                 planned[i.row], where[i.row] = at, place
+        # .text ends at E (text_end), a multiple of A from P, so that the tail lies E - P (shift) bytes further than in
+        # the probe link.
+        text_end = end + (probe_end - end) % tail_align
+        shift = text_end - probe_end
         moved = {}
         for row in sorted(kept):
-            test = next((t for t in tests.get(row, []) if relaxed_otherwise(t, planned_target(t, planned))), None)
+            test = relaxed_call(tests.get(row, []), planned, shift)
             if test is not None:
                 moved[row] = test
         if not moved:
             break
         forced.update(moved)
+        for row in sorted(moved):
+            key = probe.inputs[row].key
+            rows = tuple(i.row for i in text if i.key == key) if key in pairing.repeated else (row,)
+            if rows not in returning:
+                returning.append(rows)
+    # Each section that may return does when none of its calls, nor of the other members of its key, is relaxed
+    # otherwise against the plan, until none does; each that stays names a call that is.
+    back, more = set(), True
+    while more:
+        more = False
+        for rows in returning:
+            if rows[0] in back or any(relaxed_call(tests.get(row, []), planned, shift) for row in rows):
+                continue
+            for row in rows:
+                kept[row], planned[row] = partner[row], partner[row].address
+            back.update(rows)
+            more = True
+    for rows in returning:
+        if rows[0] not in back:
+            for row in rows:
+                test = relaxed_call(tests.get(row, []), planned, shift)
+                causes[row] = ("repeated_key", "-") if test is None else reach_cause(test)
     places, items, runs = {}, [], set()
     for i in text:
         if i.row not in kept:
@@ -1835,7 +1908,7 @@ def plan(base, probe, pairing, forced=None):
             runs.add(i.key)
             first = min((m for m in text if m.key == i.key), key=lambda m: (planned[m.row], m.row))
             items.append((planned[first.row], first.row, first))
-    items += [(planned[unit[0].row], unit[0].row, unit[0]) for unit in units]
+    items += [(planned[unit[0].row], unit[0].row, unit[0]) for unit in units if unit[0].row not in back]
     order = alloc_order(probe.output)
     at = next((k for k, (_, _, name) in enumerate(order) if name == ".text"), None)
     if not at:
@@ -1844,9 +1917,9 @@ def plan(base, probe, pairing, forced=None):
     for address, row, i in sorted(items, key=lambda item: item[:2]):
         out += [f"    . = {hex(address)};", f"    {pattern(i)}"]
         lines[len(out)] = row
-    out += ["  }", "}", f"INSERT AFTER {script_name(order[at - 1][2])};"]
+    out += [f"    . = {hex(text_end)};", "  }", "}", f"INSERT AFTER {script_name(order[at - 1][2])};"]
     found, next_start = next_segment(base.output, probe.output), None
-    if found is not None and end + segment_tail(probe) <= page_floor(found[0]):
+    if found is not None and text_end + tail_bytes <= page_floor(found[0]):
         next_start = found[0]
         out.append(f"SECTIONS {{ {script_name(found[1])} {hex(next_start)} : {{ }} }} "
                    f"INSERT BEFORE {script_name(found[2])};")

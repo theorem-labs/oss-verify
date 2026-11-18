@@ -993,34 +993,46 @@ def laid_out(specs, start=0x11000):
     return found
 
 
-def link(found, calls=(), symbols=None, front=0x10400, tls=(), deltas=None, norelax=()):
+def link(found, calls=(), symbols=None, front=0x10400, tls=(), deltas=None, norelax=(), tail=(), defined=None):
     """A Layout of the .text input sections `found` and their calls [(row, offset, called global)]. Its output:
     .eh_frame in a read-only PT_LOAD from 0x10000 to `front`, .text over the sections in the next PT_LOAD, and
     .init_array and .fini_array in the PT_LOAD after it, where lld puts it (the next page, at the same offset), and
     the global symbols `symbols`. With `tls` [(section, address, size)], the link also takes these thread-local data
     sections of /work/t.o, rows after `found`, and its TLS segment is a .tdata over them; a call (row, offset,
-    variable, (row, value)) is then a thread-local access of the variable that row and value define. The binary loads
-    each input. Each call has R_RISCV_RELAX (relax 1), but those (row, offset) that `norelax` names, and lld removed
-    `deltas` {(row, offset): bytes} in front of it (by default none)."""
+    variable, (row, value)) is then a thread-local access of the variable that row and value define. With `tail`
+    [(section, size, alignment)], it also takes these sections of /opt/lib/libc++.a(new.o), rows after those, which
+    lld puts after .text in the same PT_LOAD, one after another, each at its alignment and in an output section of
+    its name (libc++'s __lcxx_override, for one). `defined` ({global: (row, value)}) gives the definition in the
+    link's objects of a global that calls name. The binary loads each input. Each call has R_RISCV_RELAX (relax 1),
+    but those (row, offset) that `norelax` names, and lld removed `deltas` {(row, offset): bytes} in front of it (by
+    default none)."""
     by_row = collections.defaultdict(list)
-    for row, offset, name, *defined in calls:
-        line_type, definition = ("tprel", defined[0]) if defined else ("call", None)
+    for row, offset, name, *defined_at in calls:
+        line_type, definition = ("tprel", defined_at[0]) if defined_at else ("call", (defined or {}).get(name))
         by_row[row].append(layout.Call(row, offset, line_type, (row, offset) not in norelax,
                                        (deltas or {}).get((row, offset), 0), "global", name, 0, definition))
     start, end = min(i.address for i in found), max(i.address + i.linked for i in found)
-    rw = (end + 0xFFF) // 0x1000 * 0x1000 + end % 0x1000
+    after, more = end, []
+    for k, (section, size, align) in enumerate(tail):
+        after = (after + align - 1) // align * align
+        more.append(layout.Input(len(found) + len(tls) + k, after, size, "/opt/lib/libc++.a",
+                                 ("/opt/lib/libc++.a", "new.o", section), "new.o", section, sha(section.encode()),
+                                 size, align))
+        after += size
+    rw = (after + 0xFFF) // 0x1000 * 0x1000 + after % 0x1000
     sections = [layout.OutputSection(".eh_frame", 0x10300, front - 0x10300, 0x2),
-                layout.OutputSection(".text", start, end - start, 0x6),
-                layout.OutputSection(".init_array", rw, 8, 0x3), layout.OutputSection(".fini_array", rw + 8, 8, 0x3),
-                layout.OutputSection(".comment", 0, 0x10, 0x30)]
+                layout.OutputSection(".text", start, end - start, 0x6)]
+    sections += [layout.OutputSection(i.section, i.address, i.size, 0x6) for i in more]
+    sections += [layout.OutputSection(".init_array", rw, 8, 0x3), layout.OutputSection(".fini_array", rw + 8, 8, 0x3),
+                 layout.OutputSection(".comment", 0, 0x10, 0x30)]
     data = [layout.Input(len(found) + k, address, size, "/work/t.o", ("/work/t.o", "-", section), None, section,
                          sha(section.encode()), size, 8) for k, (section, address, size) in enumerate(tls)]
     if data:
         sections.append(layout.OutputSection(".tdata", data[0].address, data[-1].address + data[-1].size
                                              - data[0].address, 0x403))
     loads = [layout.Load(0x10000, front - 0x10000, front - 0x10000, 0x4),
-             layout.Load(start, end - start, end - start, 0x5), layout.Load(rw, 16, 16, 0x6)]
-    inputs = found + data
+             layout.Load(start, after - start, after - start, 0x5), layout.Load(rw, 16, 16, 0x6)]
+    inputs = found + data + more
     return layout.Layout(inputs, by_row, layout.Output(sections, loads, dict(symbols or {})), {},
                          {i.row for i in inputs})
 
@@ -1032,6 +1044,33 @@ def planned(base, probe):
 def where(plan, probe):
     """{function: (place, address, cause, detail)} of a plan."""
     return {probe.inputs[row].section[len(".text."):]: tuple(place) for row, place in plan.places.items()}
+
+
+def unverified(base, probe, plan, moved=None):
+    """{function: why} for each same-bytes section that `plan` moves with a cause that layout.py check does not verify
+    (unshown) in a link that puts each .text input section where the plan puts it, and each other input section that
+    `moved` ({row: address}) names at that address: each symbol of the probe link that lies in one of these sections
+    moves with it."""
+    pairing = layout.pair(base.inputs, probe.inputs)
+    at = {**(moved or {}), **{row: place.address for row, place in plan.places.items()}}
+    inputs = [i._replace(address=at.get(i.row, i.address)) for i in probe.inputs]
+    symbols = {}
+    for name, address in probe.output.symbols.items():
+        holder = next((i for i in probe.inputs if i.row in at and i.address <= address < i.address + i.linked), None)
+        symbols[name] = address if holder is None else at[holder.row] + address - holder.address
+    occurrence = layout.occurrences(inputs)
+    placement = {inputs[row].key + (occurrence[row],): layout.Placement(None, *place)
+                 for row, place in plan.places.items()}
+    new = probe._replace(inputs=inputs, placement=placement, output=probe.output._replace(symbols=symbols))
+    found = {}
+    for row, place in plan.places.items():
+        if place.cause != "-":
+            fn = inputs[row]
+            why = layout.unshown(placement[fn.key + (occurrence[row],)], fn, base.inputs[pairing.partner[row]], base,
+                                 new, pairing)
+            if why is not None:
+                found[fn.section[len(".text."):]] = why
+    return found
 
 
 def test_the_plan_fills_the_holes_largest_first_never_at_a_sections_own_address():
@@ -1082,11 +1121,57 @@ def test_what_follows_text_in_its_segment_counts_against_the_room_of_the_next_se
     probe = probe._replace(inputs=probe.inputs + [override],
                            output=layout.Output(sections, loads, probe.output.symbols))
     plan = planned(base, probe)
-    # .text ends at 0x11020 + 0xfc0 = 0x11fe0, below page_floor(0x12020) = 0x12000, and the overrides after it
-    # (with room for their alignment of 4) end at 0x11ff3 or past 0x12000.
+    # .text ends at 0x11020 + 0xfc0 = 0x11fe0, below page_floor(0x12020) = 0x12000, a multiple of the overrides'
+    # alignment of 4 from the probe's end of .text, 0x11fd0: the overrides after it end at 0x11ff0 or 0x12010.
     assert plan.places[0].address + 0xFC0 == 0x11FE0
     assert plan.next_start == (0x12020 if fits else None)
     assert ("INSERT BEFORE .fini_array;" in plan.script) == fits
+
+
+@pytest.mark.parametrize("size, text_end, fits", [(0xFC8, 0x11FE8, True), (0xFD8, 0x11FF8, False)],
+                         ids=["fits", "past"])
+def test_the_script_ends_text_where_the_tail_after_it_keeps_its_alignment(size, text_end, fits):
+    # OSSV-675 review. The overrides after .text need an alignment of 16. In the probe link .text ends at P = 0x11010
+    # + size, 8 bytes past a multiple of 16, and the overrides start 8 bytes later. The plan puts grown at the end,
+    # from 0x11018: its planned end, 0x11018 + size, is a multiple of 16, so .text ends 8 bytes later, at E, a
+    # multiple of 16 from P, and the overrides lie E - P bytes from where the probe link put them. The code then ends
+    # at E plus the tail's 0x18 bytes: at page_floor(0x12030) = 0x12000, or 0x10 bytes past it.
+    tail = [("__lcxx_override", 0x10, 16)]
+    base = link([text_input(0, "grown", 0x11000, 0x8), text_input(1, "kept", 0x11008, 0x10)], tail=tail)
+    probe = link(laid_out([("grown", size, {"content": "grown 2"}), ("kept", 0x10, {})]), tail=tail)
+    text = next(s for s in probe.output.sections if s.name == ".text")
+    plan = planned(base, probe)
+    assert plan.places[0][:2] == ("end", 0x11018)
+    assert (text_end - (text.addr + text.size)) % 16 == 0 and text_end == 0x11018 + size + 8
+    assert f"    . = {hex(text_end)};\n  }}\n}}\nINSERT AFTER .eh_frame;\n" in plan.script
+    assert plan.next_start == (0x12030 if fits else None)
+
+
+@pytest.mark.parametrize("by_symbol", [False, True], ids=["definition", "symbol"])
+def test_a_call_into_the_tail_after_text_is_tested_where_the_planned_end_puts_the_tail(by_symbol):
+    # OSSV-675 review. k calls _Znwm, libc++'s operator new, which lld puts after .text in the output section
+    # __lcxx_override, wherever .text ends; the link's objects define it, or the binary's symbol gives it. f grows by
+    # 8 bytes, so in the probe link the tail lies at 0x111018, in reach of k's base call site 0x11024, as at the base
+    # (0x111010). But the plan puts f at the end, from 0x111010 to 0x111038: .text ends there, and the tail then lies
+    # at 0x111038, out of reach. k moves (lost), into the hole in front of its own base range.
+    tail = [("__lcxx_override", 0x10, 4)]
+    calls = [(1, 4, "_Znwm")]
+    old = [text_input(0, "f", 0x11000, 0x20), text_input(1, "k", 0x11020, 0x10),
+           text_input(2, "filler", 0x11030, 0xFFFE0)]
+    new = laid_out([("f", 0x28, {"content": "f 2"}), ("k", 0x10, {}), ("filler", 0xFFFE0, {})])
+    if by_symbol:
+        base = link(old, calls, {"_Znwm": 0x111010}, tail=tail)
+        probe = link(new, calls, {"_Znwm": 0x111018}, tail=tail)
+    else:
+        base, probe = (link(found, calls, tail=tail, defined={"_Znwm": (3, 0)}) for found in (old, new))
+    assert (base.inputs[3].address, probe.inputs[3].address) == (0x111010, 0x111018)
+    plan = planned(base, probe)
+    assert where(plan, probe) == {"f": ("end", 0x111010, "-", "-"),
+                                  "k": ("hole", 0x11000, "jal_reach", "offset=0x4;target=_Znwm;lost"),
+                                  "filler": ("kept", 0x11030, "-", "-")}
+    assert "    . = 0x111038;\n  }\n" in plan.script
+    # layout.py check shows the cause in a link that puts the tail there.
+    assert unverified(base, probe, plan, {3: 0x111038}) == {}
 
 
 def test_a_plan_whose_read_only_data_grew_past_its_room_is_a_normal_link():
@@ -1114,15 +1199,16 @@ def test_a_kept_caller_whose_relaxation_a_moved_target_would_change_moves_with_j
     found = laid_out([("c1", 0x10, {}), ("f", 0x50, {"content": "f 2"}), ("pad", 0x10, {}),
                       ("g", 0x50, {"content": "g 2"}), ("filler", FILLER, {}), ("c2", 0x10, {})])
     probe = link(found, calls, {"f": found[1].address, "g": found[3].address})
-    # At the end, after c2, f is out of c1's reach (lost) and g in c2's (gained): both callers move, and the next
-    # round puts them into the holes, while f and g stay where the callers' causes hold.
+    # At the end, after c2, f is out of c1's reach (lost) and g in c2's (gained): both callers move. The next round
+    # keeps their base ranges free, for them to return, and puts them into the hole that f left; f and g go to the end
+    # again, past c2's base range, where the callers' causes hold.
     assert where(planned(base, probe), probe) == {
-        "c1": ("hole", 0x11040, "jal_reach", "offset=0x4;target=f;lost"),
-        "f": ("end", 0x11060 + FILLER, "-", "-"),
+        "c1": ("hole", 0x11010, "jal_reach", "offset=0x4;target=f;lost"),
+        "f": ("end", 0x11070 + FILLER, "-", "-"),
         "pad": ("kept", 0x11030, "-", "-"),
-        "g": ("end", 0x110B0 + FILLER, "-", "-"),
+        "g": ("end", 0x110C0 + FILLER, "-", "-"),
         "filler": ("kept", 0x11060, "-", "-"),
-        "c2": ("hole", 0x11000, "jal_reach", "offset=0x4;target=g;gained"),
+        "c2": ("hole", 0x11020, "jal_reach", "offset=0x4;target=g;gained"),
     }
 
 
@@ -1205,7 +1291,98 @@ def test_the_placement_ends_when_each_round_moves_another_caller():
                if name in ("p0", "p1", "p2", "p3", "filler"))
 
 
+def reach_case():
+    """(base, probe) of the OSSV-675 review's case of a cause that a later round takes away: T at 0x11000, a filler,
+    k at 0x111010 with a call of T at 0x4 (rows 0 to 2), and a second filler to 0x210f24; from k's base call site
+    0x111014, T lies out of reach. In the probe link T grows to 0x40 bytes, and V, a new function of 0xd0 bytes,
+    comes last."""
+    old = [text_input(0, "T", 0x11000, 0x10), text_input(1, "filler", 0x11010, 0x100000),
+           text_input(2, "k", 0x111010, 0x100), text_input(3, "filler2", 0x111110, 0xFFE14)]
+    new = laid_out([("T", 0x40, {"content": "T 2"}), ("filler", 0x100000, {}), ("k", 0x100, {}),
+                    ("filler2", 0xFFE14, {}), ("V", 0xD0, {})])
+    return link(old, [(2, 4, "T")], {"T": 0x11000}), link(new, [(2, 4, "T")], {"T": 0x11000})
+
+
+def test_a_section_that_a_round_moved_returns_when_its_cause_no_longer_holds():
+    # OSSV-675 review. The first round puts V and then T at the end, where T, at 0x210ff4, lies in reach of k's base
+    # call site: k moves (gained). The next round keeps k's base range free, and puts k at the end first, the
+    # largest, and V and T after it: T, at 0x2110f4, lies out of reach again, as at the base, so k's cause no longer
+    # holds. k returns to its base address, and nothing else moves.
+    base, probe = reach_case()
+    plan = planned(base, probe)
+    # Each cause holds, and no section that moves lies in k's base range.
+    assert unverified(base, probe, plan) == {}
+    assert all(place.address + layout.taken(probe.inputs[row]) <= 0x111010 or place.address >= 0x111110
+               for row, place in plan.places.items() if place.place != "kept")
+    assert where(plan, probe) == {
+        "T": ("end", 0x2110F4, "-", "-"), "filler": ("kept", 0x11010, "-", "-"), "k": ("kept", 0x111010, "-", "-"),
+        "filler2": ("kept", 0x111110, "-", "-"), "V": ("end", 0x211024, "-", "-")}
+
+
+def test_a_return_takes_the_cause_of_a_section_that_rested_on_a_call_into_it():
+    # As in reach_case, but k2, with a call of k at 0x4, and a pad lie in front of k, in the first filler's place:
+    # from k2's base call site 0x110e14, k lies in reach. The first round moves k (gained). The second puts k at the
+    # end, out of k2's reach, so k2 moves (lost). The third puts k at the end again, and T after it, out of k's
+    # reach: k's cause no longer holds, and k returns. Then k2's call of k is relaxed as at the base, and k2 returns.
+    old = [text_input(0, "T", 0x11000, 0x10), text_input(1, "filler", 0x11010, 0xFFE00),
+           text_input(2, "k2", 0x110E10, 0x10), text_input(3, "pad", 0x110E20, 0x1F0),
+           text_input(4, "k", 0x111010, 0x100), text_input(5, "filler2", 0x111110, 0xFFE14)]
+    new = laid_out([("T", 0x40, {"content": "T 2"}), ("filler", 0xFFE00, {}), ("k2", 0x10, {}), ("pad", 0x1F0, {}),
+                    ("k", 0x100, {}), ("filler2", 0xFFE14, {}), ("V", 0xD0, {})])
+    calls = [(2, 4, "k"), (4, 4, "T")]
+    base = link(old, calls, {"T": 0x11000, "k": 0x111010})
+    probe = link(new, calls, {"T": 0x11000, "k": new[4].address})
+    plan = planned(base, probe)
+    assert unverified(base, probe, plan) == {}
+    assert where(plan, probe) == {
+        "T": ("end", 0x2110F4, "-", "-"), "filler": ("kept", 0x11010, "-", "-"), "k2": ("kept", 0x110E10, "-", "-"),
+        "pad": ("kept", 0x110E20, "-", "-"), "k": ("kept", 0x111010, "-", "-"),
+        "filler2": ("kept", 0x111110, "-", "-"), "V": ("end", 0x211024, "-", "-")}
+
+
+def test_a_section_that_the_check_link_moved_never_returns():
+    # In reach_case, the check after a link moved k (append's forced). Were the plan to give k back its base address,
+    # the check link would move it again, and the links would not end: k stays moved with that cause, although the
+    # plan alone returns it, and its base range is free for other sections.
+    base, probe = reach_case()
+    pairing = layout.pair(base.inputs, probe.inputs)
+    test, = layout.call_tests(base, probe, pairing)[2]
+    assert where(layout.plan(base, probe, pairing, {2: test}), probe) == {
+        "T": ("end", 0x211024, "-", "-"), "filler": ("kept", 0x11010, "-", "-"),
+        "k": ("end", 0x210F24, "jal_reach", "offset=0x4;target=T;gained"), "filler2": ("kept", 0x111110, "-", "-"),
+        "V": ("hole", 0x111010, "-", "-")}
+    assert where(layout.plan(base, probe, pairing), probe)["k"] == ("kept", 0x111010, "-", "-")
+
+
 LIB = {"file": "/work/lib.a", "member": "dup.o"}
+
+
+@pytest.mark.parametrize("filler2, places", [
+    (0xFFE14, [("end", 0x2110F4, "-", "-"), ("kept", 0x11010, "-", "-"), ("kept", 0x111010, "-", "-"),
+               ("kept", 0x111090, "-", "-"), ("kept", 0x111110, "-", "-"), ("end", 0x211024, "-", "-")]),
+    (0xFFD00, [("end", 0x210FE0, "-", "-"), ("kept", 0x11010, "-", "-"),
+               ("end", 0x210E10, "jal_reach", "offset=0x4;target=T;gained"), ("end", 0x210E90, "repeated_key", "-"),
+               ("kept", 0x111110, "-", "-"), ("end", 0x210F10, "-", "-")]),
+], ids=["returns", "stays"])
+def test_a_repeated_key_returns_whole_when_no_call_of_its_members_is_relaxed_otherwise(filler2, places):
+    # As in reach_case, but k is two members of one key, side by side, and the first calls T. The first round moves
+    # that member (gained), and the next moves the key as one block to the end, with V and T after it. With the first
+    # filler2, T lies out of reach again: the member's cause no longer holds, and neither member has a call relaxed
+    # otherwise, so the key returns whole, and one pattern keeps it. With the second, 0x114 bytes shorter, T lies in
+    # reach: the member keeps its cause, and the other moves with it (repeated_key).
+    old = [text_input(0, "T", 0x11000, 0x10), text_input(1, "filler", 0x11010, 0x100000),
+           text_input(2, "dup", 0x111010, 0x80, **LIB), text_input(3, "dup", 0x111090, 0x80, content="dup 1", **LIB),
+           text_input(4, "filler2", 0x111110, filler2)]
+    new = laid_out([("T", 0x40, {"content": "T 2"}), ("filler", 0x100000, {}), ("dup", 0x80, LIB),
+                    ("dup", 0x80, {"content": "dup 1", **LIB}), ("filler2", filler2, {}), ("V", 0xD0, {})])
+    base, probe = link(old, [(2, 4, "T")], {"T": 0x11000}), link(new, [(2, 4, "T")], {"T": 0x11000})
+    plan = planned(base, probe)
+    assert unverified(base, probe, plan) == {}
+    assert [tuple(plan.places[row]) for row in range(6)] == places
+    assert plan.script.count('"/work/lib.a:dup.o"(.text.dup)') == 1
+    # No other section lies in the key's base range.
+    assert all(place.address + layout.taken(probe.inputs[row]) <= 0x111010 or place.address >= 0x111110
+               for row, place in plan.places.items() if row not in (2, 3))
 
 
 def test_a_repeated_key_that_did_not_sit_side_by_side_moves_as_one_block():
@@ -1227,7 +1404,7 @@ def test_a_repeated_key_that_did_not_sit_side_by_side_moves_as_one_block():
         ("kept", 0x11160, "-", "-")]
     # One pattern names both members.
     assert plan.script.count('"/work/lib.a:dup.o"(.text.dup)') == 1
-    assert '    . = 0x11180;\n    "/work/lib.a:dup.o"(.text.dup)\n  }\n' in plan.script
+    assert '    . = 0x11180;\n    "/work/lib.a:dup.o"(.text.dup)\n    . = 0x111a0;\n  }\n' in plan.script
 
 
 def test_a_repeated_key_that_sat_side_by_side_is_kept_with_one_pattern():
@@ -1238,7 +1415,7 @@ def test_a_repeated_key_that_sat_side_by_side_is_kept_with_one_pattern():
     assert [tuple(plan.places[row]) for row in range(3)] == [("kept", 0x11000, "-", "-"), ("kept", 0x11010, "-", "-"),
                                                             ("kept", 0x11020, "-", "-")]
     assert ('  {\n    . = 0x11000;\n    "/work/lib.a:dup.o"(.text.dup)\n    . = 0x11020;\n    "/work/a.o"(.text.k)\n'
-            '  }\n') in plan.script
+            '    . = 0x11030;\n  }\n') in plan.script
 
 
 def test_a_same_bytes_section_moves_when_its_base_address_does_not_meet_its_new_alignment():
@@ -1268,6 +1445,8 @@ def test_the_script_of_a_small_plan():
         # The end starts at grow's own base address, 0x11038: it goes to the next address of its alignment.
         "    . = 0x1103c;\n"
         '    "/work/a.o"(.text.grow)\n'
+        # .text ends where grow does: the probe link has nothing after .text in its PT_LOAD.
+        "    . = 0x1104c;\n"
         "  }\n"
         "}\n"
         "INSERT AFTER .eh_frame;\n"
@@ -1373,19 +1552,20 @@ def fake_linker(cwd, ro_end=0x10300, misplace=None, extra_load=False, backward=N
     """The commands of the append mode (layout.run), with a stand-in for the compiler driver and lld, in `cwd`. For
     -###, the linker's line. Else a link of the objects and archives the command names: it lays out their .text
     sections one after another in input order, or as an append script puts them (each pattern's sections from the
-    address before it, and the next PT_LOAD at the address the script gives), then their thread-local data sections
-    (SHF_TLS: the .tdata ones before the .tbss ones, each in input order) in the output sections .tdata and .tbss,
-    and writes lld's map (-Wl,-Map=) and an executable (-o). The read-only segment in front of .text ends at
-    `ro_end`. Each function takes its input size, less the bytes that `relaxed` ({function: bytes}) names, which
-    lld's relaxation removes in every link. In a link with a script: `misplace` names a function whose map line it
-    puts 0x10 bytes further, `extra_load` adds a PT_LOAD, `backward` makes it fail as lld does when the script's line
-    `backward` moves the location counter backward, `far` ({function: address}) puts symbols elsewhere, `far_once`
-    the same in the first such link only, and `grown` ({function: bytes}) gives functions more linked bytes in the
-    map. In every link, `unrelaxed` ({function: bytes}) gives functions more linked bytes, in the map and before what
-    follows them, as lld does for an access it no longer relaxes wherever .text puts the function; a script's address
-    below the end of what came before it then fails as lld fails. The executable has no global symbol for the
-    functions `hidden` names, as lld writes a symbol of hidden visibility as a local one, and it has the symbols
-    `made` ({name: address}) that the linker makes, which no object defines."""
+    address before it, .text up to at least the address the script gives last, and the next PT_LOAD at the address
+    the script gives), then their thread-local data sections (SHF_TLS: the .tdata ones before the .tbss ones, each in
+    input order) in the output sections .tdata and .tbss, and writes lld's map (-Wl,-Map=) and an executable (-o).
+    The read-only segment in front of .text ends at `ro_end`. Each function takes its input size, less the bytes that
+    `relaxed` ({function: bytes}) names, which lld's relaxation removes in every link. In a link with a script:
+    `misplace` names a function whose map line it puts 0x10 bytes further, `extra_load` adds a PT_LOAD, `backward`
+    makes it fail as lld does when the script's line `backward` moves the location counter backward, `far`
+    ({function: address}) puts symbols elsewhere, `far_once` the same in the first such link only, and `grown`
+    ({function: bytes}) gives functions more linked bytes in the map. In every link, `unrelaxed` ({function: bytes})
+    gives functions more linked bytes, in the map and before what follows them, as lld does for an access it no
+    longer relaxes wherever .text puts the function; a script's address below the end of what came before it then
+    fails as lld fails. The executable has no global symbol for the functions `hidden` names, as lld writes a symbol
+    of hidden visibility as a local one, and it has the symbols `made` ({name: address}) that the linker makes, which
+    no object defines."""
     extra = unrelaxed or {}
     scripted = []
 
@@ -1412,7 +1592,7 @@ def fake_linker(cwd, ro_end=0x10300, misplace=None, extra_load=False, backward=N
             return found[k][3] - (relaxed or {}).get(name, 0) + extra.get(name, 0)
         script = next((w[len("-Wl,-T,"):] for w in words if w.startswith("-Wl,-T,")), None)
         text = (ro_end + 0xFFF) // 0x1000 * 0x1000 + ro_end % 0x1000
-        addresses, rw = {}, None
+        addresses, rw, closing = {}, None, None
         if script:
             scripted.append(script)
             lines = pathlib.Path(script).read_text()
@@ -1436,12 +1616,14 @@ def fake_linker(cwd, ro_end=0x10300, misplace=None, extra_load=False, backward=N
                 counter = at
             pinned = re.search(r"\.init_array (0x[0-9a-f]+) :", lines)
             rw = int(pinned.group(1), 16) if pinned else None
+            last = re.search(r"\. = (0x[0-9a-f]+);\n  }", lines)
+            closing = int(last.group(1), 16) if last else None
         at = max([addresses[k] + linked(k) for k in addresses], default=text)
         for k, (_, _, _, _, align) in enumerate(found):
             if k not in addresses:
                 at = (at + align - 1) // align * align
                 addresses[k], at = at, at + linked(k)
-        end = max(addresses[k] + linked(k) for k in addresses)
+        end = max([addresses[k] + linked(k) for k in addresses] + ([closing] if closing else []))
         thread_local, at = [], end  # (address, the map's name, section, size, alignment)
         for named, section, size, align in sorted(tls, key=lambda t: t[1].startswith(".tbss")):
             at = (at + align - 1) // align * align
@@ -1553,7 +1735,8 @@ def run_append(tmp_path, entry):
 
 
 # The base link lays .text out from 0x11300: entry, grow, tail, other, helper and small, to 0x11410; its next PT_LOAD
-# starts at 0x12410. grow, at 0x11340, now takes 0x50 bytes; small, at 0x11408, needs an alignment of 16.
+# starts at 0x12410. grow, at 0x11340, now takes 0x50 bytes; small, at 0x11408, needs an alignment of 16. .text ends
+# where grow, at the end, does: 0x11458.
 SCRIPT_TEXT = """SECTIONS
 {
   .text 0x11300 :
@@ -1570,6 +1753,7 @@ SCRIPT_TEXT = """SECTIONS
     "lib.a:m.o"(.text.helper)
     . = 0x11408;
     "main.o"(.text.grow)
+    . = 0x11458;
   }
 }
 INSERT AFTER .eh_frame;
