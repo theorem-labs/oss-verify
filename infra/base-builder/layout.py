@@ -129,6 +129,9 @@ PN_XNUM = 0xFFFF
 MAX_BYTES = 1 << 30
 # lld stops a link whose relaxation has not settled after this many passes (finalizeAddressDependentContent).
 RELAX_PASSES = 30
+# The most candidates that the search for the assignments of the map lines of one name to its sections gives to a
+# line, all lines counted (assigned); past them, every line of that name is ambiguous.
+ASSIGNMENT_STEPS = 10000
 # The columns of a map line: address, load address, size (hexadecimal) and alignment (decimal, as lld writes it).
 MAP_COLUMNS = re.compile(r" *([0-9a-f]+) +[0-9a-f]+ +([0-9a-f]+) +([0-9]+) ")
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -565,20 +568,83 @@ def resolve(name, wraps):
     return name
 
 
+def assigned(sizes, candidates):
+    """The section of each map line of one (file, member, section), in map order, or None for an ambiguous line
+    ([(instance, Elf, Section) or None]): `sizes` are the lines' linked sizes, and `candidates` the sections of that
+    name (Objects.sections).
+
+    An assignment gives each line a candidate as large as it (lld only removes bytes), never the candidate of another
+    line (lld takes each section once), and gives the lines of the candidates of one object those candidates in their
+    order in the object (lld keeps that order, though --gc-sections may drop some of them). It orders nothing between
+    two objects, and so assumes nothing of where the lines of one member lie in the map: lld's map lists the members
+    of one name in the order lld took them, which the tree does not know. A line is paired with a candidate when
+    every assignment gives it that candidate. Every line is ambiguous when no assignment exists, and when the search,
+    which gives each line in map order each candidate that it can have, gives more than ASSIGNMENT_STEPS candidates
+    in all."""
+    places, groups = [], collections.defaultdict(list)  # groups: {instance: [index in candidates] in object order}
+    for j, (instance, _, _) in enumerate(candidates):
+        places.append(len(groups[instance]))
+        groups[instance].append(j)
+    # The place in its object of the last candidate given to a line, for each object; the count of the candidates
+    # past those places, which the lines not yet given one can have; (candidate, the place before it in its object)
+    # of each line given one, in map order; and the candidates that each line has in the assignments found.
+    last, free, chosen, given = dict.fromkeys(groups, -1), len(candidates), [], [set() for _ in sizes]
+
+    def options(line):
+        # The candidates that `line` can have after the lines before it, last first: each lies past the last
+        # candidate given in its object, leaves a candidate for each line after `line`, and is as large as `line`.
+        # The candidate at the place p of an object takes p - last of that object's candidates from the lines after
+        # `line`: itself and those it passes over.
+        reach = max(free - (len(sizes) - line - 1), 0)
+        found = [j for instance, members in groups.items()
+                 for j in members[last[instance] + 1:last[instance] + 1 + reach]
+                 if sizes[line] <= candidates[j][2].size]
+        return found[::-1]
+
+    stack, steps = [options(0)], 0
+    while stack:
+        if len(chosen) == len(stack):
+            # Take back the candidate of the last line given one, to give that line its next one.
+            j, before = chosen.pop()
+            free += places[j] - before
+            last[candidates[j][0]] = before
+        if not stack[-1]:
+            stack.pop()
+            continue
+        j = stack[-1].pop()
+        steps += 1
+        if steps > ASSIGNMENT_STEPS:
+            return [None] * len(sizes)
+        instance = candidates[j][0]
+        chosen.append((j, last[instance]))
+        free -= places[j] - last[instance]
+        last[instance] = places[j]
+        if len(chosen) < len(sizes):
+            stack.append(options(len(chosen)))
+            continue
+        for line, (j, _) in enumerate(chosen):
+            given[line].add(j)
+        if all(len(found) > 1 for found in given):
+            # No assignment that the search may still find can pair a line.
+            return [None] * len(sizes)
+    return [candidates[next(iter(found))] if len(found) == 1 else None for found in given]
+
+
 def describe(lines, objects, key_file, wraps, output=None):
     """The sections.tsv lines ([Input]) and the calls.tsv lines ([Call]) of a link: `lines` are its map's lines
     (read_map), `objects` its Objects, `key_file(file)` the file a section's key names, `wraps` the functions it
     wraps, and `output` its binary's Output (read_output), or None, for a link whose deltas are never used.
 
     The candidates of a map line are the sections of its name in the objects of its file and member
-    (Objects.sections). When the candidates lie in one object (one member, or one plain object) and are as many as
-    the map's lines of that (file, member, section), the k-th line is the k-th candidate, unless the line's linked
-    size is larger than the candidate's size (lld only removes bytes). Else, when the map has one line of that name
-    and one candidate alone is as large as the line, the line is that candidate: the others cannot be it. Every other
-    line is ambiguous: lld took only some of the candidates (--gc-sections, or archive members it did not extract),
-    or they lie in two or more members of one name, which lld's map lists in the order it extracted them, not in the
-    archive's. An ambiguous line, as a line with no candidate (COMMON, or a piece of .eh_frame), gets no sha256 (so it
-    never counts as same bytes), the map's size and alignment, no calls, and no symbols for definitions.
+    (Objects.sections), and its section is the candidate that every assignment of the map's lines of that (file,
+    member, section) to those candidates gives it (assigned). lld only removes bytes, takes each section once, and
+    keeps the sections of one name of one object in their order in the object, but lists the archive members of one
+    name in the order it took them, which the tree does not know. Every other line is ambiguous: lld took only some
+    of the candidates (--gc-sections, or archive members it did not extract), or they lie in two or more members of
+    one name, and the sizes leave the line two or more of them; or no assignment fits; or the search for the
+    assignments took more than its bound. An ambiguous line, as a line with no candidate (COMMON, or a piece of
+    .eh_frame), gets no sha256 (so it never counts as same bytes), the map's size and alignment, no calls, and no
+    symbols for definitions.
 
     Each call and each thread-local access of a .text input section is a Call; a global one names its definition in
     the link's objects (definitions). Its delta comes from relaxation, with the addresses of this link: those of the
@@ -593,20 +659,16 @@ def describe(lines, objects, key_file, wraps, output=None):
     with no `output`. The relaxation of a section depends on the target deltas of its calls, so each round relaxes
     every section with the target deltas of the round before, from 0, until they settle, as lld's passes do; past
     lld's last pass, none of them is known."""
-    inputs, located, rows, seen = [], {}, {}, collections.Counter()
-    counts = collections.Counter((line.file, line.member, line.section) for line in lines)
+    inputs, located, rows = [], {}, {}
+    named = collections.defaultdict(list)  # {(file, member, section): [the row of each of its lines, in map order]}
     for row, line in enumerate(lines):
-        name = (line.file, line.member, line.section)
-        k = seen[name]
-        seen[name] += 1
-        candidates = objects.sections(*name)
+        named[(line.file, line.member, line.section)].append(row)
+    paired = {}
+    for name, name_rows in named.items():
+        paired.update(zip(name_rows, assigned([lines[row].size for row in name_rows], objects.sections(*name))))
+    for row, line in enumerate(lines):
         digest, size, align = "", line.size, line.align
-        chosen = None
-        if len(candidates) == counts[name] and len({instance for instance, _, _ in candidates}) == 1:
-            chosen = candidates[k] if line.size <= candidates[k][2].size else None
-        elif counts[name] == 1:
-            fits = [candidate for candidate in candidates if line.size <= candidate[2].size]
-            chosen = fits[0] if len(fits) == 1 else None
+        chosen = paired[row]
         if chosen is not None:
             instance, elf, section = chosen
             if section.type != SHT_NOBITS:

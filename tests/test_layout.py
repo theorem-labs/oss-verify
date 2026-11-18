@@ -10,6 +10,8 @@ import collections
 import gzip
 import hashlib
 import importlib.util
+import itertools
+import math
 import os
 import pathlib
 import re
@@ -208,11 +210,11 @@ def out_tree(builds, copies="/tmp/ov/af.AAAAAA", local_call=LOCAL_CALL, placemen
 
 def expected_tables(copies, local_call=LOCAL_CALL):
     """sections.tsv and calls.tsv of out_tree's record, from the test's own reading of its objects. A map line takes
-    the k-th section of its name in the objects of its file and member when they lie in one object, are as many as
-    the map's lines of that name, and the line's linked size is not larger; else, the one line of a name takes the
-    one section of that name that is as large as it, when there is one alone; any other line has no sha256, the map's
-    size and alignment, and no calls. calls.tsv has each call and each R_RISCV_TPREL_HI20, and for a global, the
-    global (else the first weak) symbol of its name that an object the map took defines in a section the map took."""
+    the section of its name in the objects of its file and member that every assignment of the map's lines of that
+    name gives it: an assignment gives each line its own section, as large as the line, and the lines of the sections
+    of one object those sections in their order in the object. Any other line has no sha256, the map's size and
+    alignment, and no calls. calls.tsv has each call and each R_RISCV_TPREL_HI20, and for a global, the global (else
+    the first weak) symbol of its name that an object the map took defines in a section the map took."""
     objects = {("/work/lib/libshim.a", "a.o"): [REAL, STORES],
                ("/work/lib/libshim.a", "shim-local-access.o"): [LOCAL_ACCESS],
                (f"{copies}/2-shim-local-call.o", None): [local_call], ("/work/obj/shim-rustc-v0.o", None): [V0]}
@@ -226,21 +228,28 @@ def expected_tables(copies, local_call=LOCAL_CALL):
         file, member = (where[:where.index("(")], where[where.index("(") + 1:-1]) if where.endswith(")") else (
             where, None)
         named.append((file, member, section, linked, map_align))
-    counts = collections.Counter(n[:3] for n in named)
-    sections, located, rows, seen = [], {}, {}, collections.Counter()
-    for file, member, section, linked, map_align in named:
-        k = seen[(file, member, section)]
-        seen[(file, member, section)] += 1
-        found = [(i, index) for i in range(len(objects[(file, member)]))
-                 for index, s in readings[((file, member), i)][0].items() if s[0] == section]
+    # Each line's section: the one that every assignment of the lines of its name gives it, of all the ways to give
+    # them distinct sections of that name.
+    taken = collections.defaultdict(list)  # {(file, member, section): [index in named]}
+    for k, (file, member, section, _, _) in enumerate(named):
+        taken[(file, member, section)].append(k)
+    chosen = {}
+    for (file, member, section), ks in taken.items():
+        sizes = {(i, index): s[3] for i in range(len(objects[(file, member)]))
+                 for index, s in readings[((file, member), i)][0].items() if s[0] == section}
+        given = [set() for _ in ks]
+        for assignment in itertools.permutations(sizes, len(ks)):
+            fits = all(named[k][3] <= sizes[choice] for k, choice in zip(ks, assignment))
+            ordered = all(a[0] != b[0] or a[1] < b[1] for a, b in itertools.combinations(assignment, 2))
+            if fits and ordered:
+                for choices, choice in zip(given, assignment):
+                    choices.add(choice)
+        chosen.update((k, next(iter(choices)) if len(choices) == 1 else None) for k, choices in zip(ks, given))
+    sections, located, rows = [], {}, {}
+    for k, (file, member, section, linked, map_align) in enumerate(named):
         digest, size, align = "", linked, map_align
-        fits = [(i, index) for i, index in found if linked <= readings[((file, member), i)][0][index][3]]
-        if len(found) == counts[(file, member, section)] and len({i for i, _ in found}) == 1:
-            chosen = found[k] if found[k] in fits else None
-        else:
-            chosen = fits[0] if counts[(file, member, section)] == 1 and len(fits) == 1 else None
-        if chosen is not None:
-            i, index = chosen
+        if chosen[k] is not None:
+            i, index = chosen[k]
             _, _, body, size, align = readings[((file, member), i)][0][index]
             digest = "" if body is None else sha(body)
             located[len(sections)] = ((file, member), i, index, section)
@@ -384,11 +393,15 @@ def test_collect_writes_the_layout_tree(tmp_path):
     assert (entry / "output.tsv").read_text() == output
     assert (entry / "binary.sha256").read_text() == f"{sha(binary)}  unstripped\n{sha(binary[:300])}  stripped\n"
     rows = [line.split("\t") for line in (entry / "sections.tsv").read_text().splitlines()]
-    # Both members named a.o have a .text.__rust_alloc and a .text.__rust_dealloc, and lld's map lists the members it
-    # took in the order it took them: the two __rust_alloc lines cannot be told apart, nor the one __rust_dealloc line
-    # of 8 bytes, as large as either member's, so each has no sha256 and the map's size and alignment. The one
-    # member's __rust_realloc has the object's input size and alignment, not the map's.
-    assert [r[4:] for r in rows[1:4]] == [["", "4", "4"], ["", "26", "2"], ["", "8", "2"]]
+    # Both members named a.o, REAL and STORES, have a .text.__rust_alloc and a .text.__rust_dealloc, and lld's map
+    # lists the members it took in the order it took them. Only STORES's __rust_alloc, of 26 bytes, can hold the
+    # second __rust_alloc line, so the first one, of 4 bytes, is REAL's, of 8: each has its section's sha256, size and
+    # alignment. The one __rust_dealloc line of 8 bytes, as large as either member's, cannot be told: it has no sha256
+    # and the map's size and alignment. The one member's __rust_realloc has the object's input size and alignment, not
+    # the map's.
+    alloc = [next(s[2] for s in read_object(data)[0].values() if s[0] == ".text.__rust_alloc")
+             for data in (REAL, STORES)]
+    assert [r[4:] for r in rows[1:4]] == [[sha(alloc[0]), "8", "2"], [sha(alloc[1]), "26", "2"], ["", "8", "2"]]
     realloc = next(s[2] for s in read_object(REAL)[0].values() if s[0] == ".text.__rust_realloc")
     assert rows[4][4:] == [sha(realloc), "8", "2"]
     assert rows[11][4:] == ["", "64", "1"]  # .bss: SHT_NOBITS
@@ -404,7 +417,10 @@ def test_collect_writes_the_layout_tree(tmp_path):
     assert ["5", "0x8", "call", "0", "0x0", "local", "6", "0x0", "-", "-", "0x0"] in calls
     assert ["5", "0x16", "call", "0", "0x0", "local", "-", "0x0", "-", "-", "0x0"] in calls
     assert ["7", "0x0", "call", "0", "0x0", "local", "8", "0x0", "-", "-", "0x0"] in calls
-    assert not [c for c in calls if c[0] in ("1", "2", "3")]
+    # REAL's __rust_alloc calls __rdl_alloc, STORES's calls nothing, and the __rust_dealloc line, which cannot be told,
+    # has no calls.
+    assert [c for c in calls if c[0] in ("1", "2", "3")] == [
+        ["1", "0x0", "call", "0", "0x0", "global", "__rdl_alloc", "0x0", "-", "-", "0x0"]]
 
 
 def test_collect_runs_as_a_command(tmp_path):
@@ -2052,9 +2068,11 @@ def test_a_map_line_whose_section_the_objects_do_not_tell_has_no_bytes_and_no_ca
     inputs, calls = described((0x11000, 8), (0x11008, 0x10))
     assert [(i.sha256, i.size) for i in inputs] == [(sha(b"\1" * 8), 8), (sha(b"\2" * 0x10), 0x10)]
     assert [(c.row, c.offset, c.target) for c in calls] == [(0, 0x0, "g")]
-    # A line longer than its section is not that section (lld only removes bytes): the first one can be told no more.
+    # A line longer than its section is not that section (lld only removes bytes), and lld keeps the order of the
+    # sections of one object: the line of 0x10 bytes cannot be the first section, nor, before the line of 8 bytes, the
+    # second. No assignment fits, so neither line can be told.
     inputs, calls = described((0x11000, 0x10), (0x11010, 8))
-    assert [(i.sha256, i.size) for i in inputs] == [("", 0x10), (sha(b"\2" * 0x10), 0x10)] and calls == []
+    assert [(i.sha256, i.size) for i in inputs] == [("", 0x10), ("", 8)] and calls == []
 
 
 def test_the_one_map_line_of_a_name_is_the_one_section_as_large_as_it():
@@ -2080,9 +2098,13 @@ def test_the_one_map_line_of_a_name_is_the_one_section_as_large_as_it():
     # Two sections as large as the line: either could be it.
     inputs, calls = described([("a.o", REAL), ("a.o", STORES)], (0x11000, 8))
     assert [i.sha256 for i in inputs] == [""] and calls == []
-    # Two lines of the name in members of one name: lld's map lists the members in the order it took them, so the
-    # sizes do not tell which line is which member's.
+    # Two lines of the name in members of one name: lld's map lists the members in the order it took them, but only
+    # STORES's section can hold the line of 0x1a bytes, so the other line is REAL's, with its call.
     inputs, calls = described([("a.o", REAL), ("a.o", STORES)], (0x11000, 0x1A), (0x1101C, 8))
+    assert [i.sha256 for i in inputs] == [sha(body(STORES)), sha(body(REAL))]
+    assert [(c.row, c.offset, c.target) for c in calls] == [(1, 0x0, "__rdl_alloc")]
+    # Two lines of 8 bytes: each member's section can hold either line, so the sizes do not tell which is which.
+    inputs, calls = described([("a.o", REAL), ("a.o", STORES)], (0x11000, 8), (0x11008, 8))
     assert [i.sha256 for i in inputs] == ["", ""] and calls == []
     # In one object with two sections .text.f of 8 and 16 bytes, the one line of 16 bytes is the second.
     two = {"/work/two.o": relocatable([("f", b"\1" * 8, 4, [(0x0, "g")]), ("f", b"\2" * 0x10, 4, [])])}
@@ -2121,6 +2143,73 @@ def test_two_lines_of_a_name_in_members_of_one_name_get_their_bytes_when_only_on
             assert [i.sha256 for i in inputs] == [alone[name][0] for name in names]
             assert [[(c.offset, c.target) for c in calls if c.row == row] for row in (0, 1)] == [
                 alone[name][1] for name in names]
+
+
+def test_a_line_is_the_section_that_every_assignment_of_the_lines_of_its_name_gives_it():
+    # OSSV-675. Three members named a.o, REAL, STORES and EIGHT, whose .text.__rust_alloc sections take 8, 26 and 8
+    # bytes, and three map lines of 8, 0x1a and 8 bytes: every assignment gives the line of 0x1a bytes STORES's
+    # section, the only one that can hold it, so that line is STORES's. Each line of 8 bytes is REAL's in one
+    # assignment and EIGHT's in the other, so neither is paired.
+    eight = relocatable([("__rust_alloc", b"\4" * 8, 2, [])])
+    lib = {"/work/lib.a": archive([("a.o", REAL), ("a.o", STORES), ("a.o", eight)])}
+    text = "".join(map_line(address, size, 2, "/work/lib.a(a.o):(.text.__rust_alloc)")
+                   for address, size in ((0x11000, 8), (0x11008, 0x1A), (0x11024, 8)))
+    inputs, calls = layout.describe(layout.read_map(text), layout.Objects(lib.__getitem__), lambda f: f, set(),
+                                    layout.Output([], [], {}))
+    stores = next(s[2] for s in read_object(STORES)[0].values() if s[0] == ".text.__rust_alloc")
+    assert [(i.sha256, i.size) for i in inputs] == [("", 8), (sha(stores), 0x1A), ("", 8)] and calls == []
+    # One object with three sections .text.f of 8, 0x10 and 8 bytes, of which the map takes two (--gc-sections
+    # dropped one): the line of 0x10 bytes can only be the second, and the line of 8 bytes after it only the third,
+    # which lld keeps after the second.
+    three = {"/work/three.o": relocatable([("f", b"\1" * 8, 4, []), ("f", b"\2" * 0x10, 4, []),
+                                           ("f", b"\3" * 8, 4, [(0x0, "g")])])}
+    text = map_line(0x11000, 0x10, 4, "/work/three.o:(.text.f)") + map_line(0x11010, 8, 4, "/work/three.o:(.text.f)")
+    inputs, calls = layout.describe(layout.read_map(text), layout.Objects(three.__getitem__), lambda f: f, set(),
+                                    layout.Output([], [], {}))
+    assert [i.sha256 for i in inputs] == [sha(b"\2" * 0x10), sha(b"\3" * 8)]
+    assert [(c.row, c.offset, c.target) for c in calls] == [(1, 0x0, "g")]
+
+
+def test_no_line_of_a_name_is_paired_when_no_assignment_fits():
+    # OSSV-675. A line longer than every section of its name can be none of them (lld only removes bytes), so no
+    # assignment of the lines of that name fits, and none of them is paired: the objects do not hold what lld took.
+    lib = {"/work/lib.a": archive([("a.o", REAL), ("a.o", STORES)])}
+    text = "".join(map_line(address, size, 2, "/work/lib.a(a.o):(.text.__rust_alloc)")
+                   for address, size in ((0x11000, 0x1A), (0x1101C, 0x20)))
+    inputs, calls = layout.describe(layout.read_map(text), layout.Objects(lib.__getitem__), lambda f: f, set(),
+                                    layout.Output([], [], {}))
+    assert [(i.sha256, i.size) for i in inputs] == [("", 0x1A), ("", 0x20)] and calls == []
+    # So too in one object with two sections .text.f of 8 and 0x10 bytes, though the first line is as large as the
+    # first section, and has a call.
+    two = {"/work/two.o": relocatable([("f", b"\1" * 8, 4, [(0x0, "g")]), ("f", b"\2" * 0x10, 4, [])])}
+    text = map_line(0x11000, 8, 4, "/work/two.o:(.text.f)") + map_line(0x11008, 0x20, 4, "/work/two.o:(.text.f)")
+    inputs, calls = layout.describe(layout.read_map(text), layout.Objects(two.__getitem__), lambda f: f, set(),
+                                    layout.Output([], [], {}))
+    assert [(i.sha256, i.size) for i in inputs] == [("", 8), ("", 0x20)] and calls == []
+
+
+def test_every_line_of_a_name_is_ambiguous_when_the_search_for_its_assignments_passes_its_bound():
+    # OSSV-675. A line of 0x1a bytes, which of the sections .text.__rust_alloc of the members named a.o only STORES's
+    # can hold, and after it n lines of 8 bytes, which the sections of n members REAL can each hold: every assignment
+    # gives the first line STORES's section, and there are n! of them, each at least one step of the search. With n!
+    # past ASSIGNMENT_STEPS the search stops, and every line of that name is ambiguous, the first one too; a line of
+    # another name is not.
+    def described(n):
+        name = "/work/lib.a(a.o):(.text.__rust_alloc)"
+        text = (map_line(0x11000, 0x1A, 2, name) + "".join(map_line(0x1101C + 8 * k, 8, 2, name) for k in range(n))
+                + map_line(0x12000, 8, 4, "/work/one.o:(.text.f)"))
+        files = {"/work/lib.a": archive([("a.o", STORES)] + [("a.o", REAL)] * n),
+                 "/work/one.o": relocatable([("f", b"\1" * 8, 4, [])])}
+        inputs, _ = layout.describe(layout.read_map(text), layout.Objects(files.__getitem__), lambda f: f, set(),
+                                    layout.Output([], [], {}))
+        return [i.sha256 for i in inputs]
+
+    stores = sha(next(s[2] for s in read_object(STORES)[0].values() if s[0] == ".text.__rust_alloc"))
+    assert described(2) == [stores, "", "", sha(b"\1" * 8)]
+    n = 2
+    while math.factorial(n) <= layout.ASSIGNMENT_STEPS:
+        n += 1
+    assert described(n) == [""] * (n + 1) + [sha(b"\1" * 8)]
 
 
 def test_append_links_normally_when_the_read_only_data_grew_past_its_room(tmp_path, monkeypatch, capsys):
