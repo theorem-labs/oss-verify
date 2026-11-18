@@ -28,7 +28,6 @@ BASE_CFLAGS="-march=rv64g -mabi=lp64d -Os -g -ffunction-sections -fdata-sections
 # flags and bytes (docs/build-contract.md, "Frame pointers").
 case "${OFT_FRAME_POINTERS:-}" in
   "") ;;
-  1) BASE_CFLAGS="$BASE_CFLAGS -fno-omit-frame-pointer" ;;
   *)
     echo "toolchain.sh: OFT_FRAME_POINTERS must be 1 or unset (got '$OFT_FRAME_POINTERS')" >&2
     exit 1 ;;
