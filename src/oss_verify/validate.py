@@ -86,6 +86,9 @@ MAX_CORPUS_BYTES = 1024 * 1024  # the zip file
 MAX_CORPUS_INPUTS = 1024
 MAX_CORPUS_EXPANDED = 16 * 1024 * 1024  # all its inputs, uncompressed
 MAX_FILES = 64
+# The setting of a toolchain image with frame pointers. Only the toolchain image gives it, so a Dockerfile or build.sh
+# beside project.yaml does not name it (docs/build-contract.md, "Frame pointers").
+FRAME_POINTERS = "OFT_FRAME_POINTERS"
 
 NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,62}")
 # A file next to project.yaml: a plain name, as the build workflow takes it from a pull request.
@@ -516,8 +519,14 @@ def check_files(config, files):
         if text is None:
             yield f"{name} is larger than {limit // 1024} KiB (or not UTF-8 text)"
             continue
-        if name in ("Dockerfile", "build.sh") and not text.strip():
-            yield f"{name} is empty"
+        if name in ("Dockerfile", "build.sh"):
+            if not text.strip():
+                yield f"{name} is empty"
+            if FRAME_POINTERS in text:
+                yield (
+                    f"{name} names {FRAME_POINTERS}: only the toolchain image gives that setting "
+                    '(docs/build-contract.md, "Frame pointers")'
+                )
         if name in FILE_KEYS and config.get(FILE_KEYS[name]) is not None:
             yield f"{name} is given both beside project.yaml and as {FILE_KEYS[name]}: in your repository; one place only"
         if in_repo and name not in FILE_KEYS:

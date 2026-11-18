@@ -1,0 +1,23 @@
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "example-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.10"
+
+[dependencies.example]
+path = ".."
+
+[[bin]]
+name = "fp_probe"
+path = "fuzz_targets/fp_probe.rs"
+test = false
+doc = false
+bench = false
