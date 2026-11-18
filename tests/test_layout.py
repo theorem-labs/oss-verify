@@ -2091,6 +2091,38 @@ def test_the_one_map_line_of_a_name_is_the_one_section_as_large_as_it():
     assert [(i.sha256, i.size) for i in inputs] == [(sha(b"\2" * 0x10), 0x10)] and calls == []
 
 
+def test_two_lines_of_a_name_in_members_of_one_name_get_their_bytes_when_only_one_assignment_fits():
+    # OSSV-675 testing. CMake archives the objects of two sources of one base name in two directories (a/util.c and
+    # b/util.c) as two members of one name, util.c.o, and a static function of one name in both gives two sections of
+    # one name. When the link takes both sections, the two map lines are those two sections, in the order lld took
+    # the members. lld only removes bytes, so a line longer than one member's section is the other member's: with
+    # REAL's .text.__rust_alloc of 8 bytes and STORES's of 26, a line of 0x1a bytes is STORES's, and the other line
+    # REAL's, in either order of the lines and of the members. Each line must get its own member's bytes and calls.
+    # At ed935ac5 neither gets bytes, so the append mode moves both as changed functions and layout check lists them
+    # as changed, though neither changed: tests/fixtures/example with librk.a of two members named ov_rk.o, whose
+    # same-bytes helper_a stayed and helper_s moved with repeated_key at 76d299e2, lists helper_a and helper_s as
+    # "changed" in plain and asan at ed935ac5 (farm jobs farm/20261118t070728z-1a8003 and
+    # farm/20261118t073013z-9983a9).
+    def described(members, *lines):
+        text = "".join(map_line(address, size, 2, "/work/lib.a(a.o):(.text.__rust_alloc)") for address, size in lines)
+        return layout.describe(layout.read_map(text), layout.Objects({"/work/lib.a": archive(members)}.__getitem__),
+                               lambda f: f, set(), layout.Output([], [], {}))
+
+    # What each member alone gives its line: its bytes and its calls.
+    alone = {}
+    for name, data, size in (("REAL", REAL, 8), ("STORES", STORES, 0x1A)):
+        inputs, calls = described([("a.o", data)], (0x11000, size))
+        assert inputs[0].sha256
+        alone[name] = (inputs[0].sha256, [(c.offset, c.target) for c in calls])
+    for members in ([("a.o", REAL), ("a.o", STORES)], [("a.o", STORES), ("a.o", REAL)]):
+        for lines, names in ((((0x11000, 0x1A), (0x1101C, 8)), ("STORES", "REAL")),
+                             (((0x11000, 8), (0x11008, 0x1A)), ("REAL", "STORES"))):
+            inputs, calls = described(members, *lines)
+            assert [i.sha256 for i in inputs] == [alone[name][0] for name in names]
+            assert [[(c.offset, c.target) for c in calls if c.row == row] for row in (0, 1)] == [
+                alone[name][1] for name in names]
+
+
 def test_append_links_normally_when_the_read_only_data_grew_past_its_room(tmp_path, monkeypatch, capsys):
     # The new link's read-only segment ends at 0x11100: 0xe00 bytes past the base's 0x10300, whose room up to
     # page_floor(0x11300) was 0xd00.
