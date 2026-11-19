@@ -27,7 +27,9 @@ The move:
   (publish) toolchain-images-publish.yaml, the one workflow with packages: write for the frame-pointer images, runs on
        workflow_run, so GitHub runs main's copy of it. It acts only on a push run of toolchain-images.yaml on main
        of this repository that passed. It runs no docker, and no script of it reads GITHUB_SHA or holds an
-       expression. Its crane pin, its base rows and the image of its registry are toolchain-images.yaml's.
+       expression. Its crane pin, its package of the frame-pointer images, its base rows and the image of its
+       registry are toolchain-images.yaml's. Its push step copies the image of each base row to that one package,
+       ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain, under a tag that names the language of the row.
 The held runs (each test name holds the word held):
   route finds the held runs of a head on a run by hand. It counts the held runs that Held runs counts: neither counts a
   run of the oss-verify App's own label. The comment job approves them with a token of the oss-verify App that can
@@ -525,7 +527,8 @@ class PullRequestWorkflows(unittest.TestCase):
 class ToolchainPublish(Stand):
     """(publish): toolchain-images-publish.yaml (Toolchain images: publish) starts when a run of toolchain-images.yaml
     (Toolchain images) on main completes. Its one job, publish, has packages: write, and acts only when that run was
-    of toolchain-images.yaml, for a push to main of this repository, and passed."""
+    of toolchain-images.yaml, for a push to main of this repository, and passed. It copies the three images to one
+    package, each under a tag that names the language of its base row (OSSV-276)."""
 
     PUBLISH, IMAGES = "toolchain-images-publish.yaml", "toolchain-images.yaml"
     # The run of Toolchain images that completed: its event, its conclusion, its head branch, its head repository and
@@ -541,8 +544,81 @@ class ToolchainPublish(Stand):
     EVENT_CHECK = "github.event.workflow_run.event == 'push' && "
     # The condition of the publish job's if on the workflow file of the run, and the line end before it there.
     PATH_CHECK = f"\n      && github.event.workflow_run.path == '.github/workflows/{IMAGES}'"
-    # The crane pin of the workflow's env, which publish copies from toolchain-images.yaml.
-    CRANE = ("CRANE_VERSION", "CRANE_SHA256", "CRANE_ARCHIVE")
+    # The values of the workflow's env that publish copies from toolchain-images.yaml: the crane pin, and the one
+    # package of the frame-pointer images.
+    SHARED_ENV = ("CRANE_VERSION", "CRANE_SHA256", "CRANE_ARCHIVE", "FP_PACKAGE")
+    # The one package of the three frame-pointer images, and the tag of the image of each base row for the commit HEAD,
+    # which names the row's language.
+    PACKAGE = "ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain"
+    TAGS = {"oss-fuzz-theorems-2026.10": f"frame-pointers-{HEAD}",
+            "oss-fuzz-theorems-2026.10-rust": f"frame-pointers-rust-{HEAD}",
+            "oss-fuzz-theorems-2026.10-python": f"frame-pointers-python-{HEAD}"}
+    # The start of the name of publish's step that pushes.
+    PUSH = "unless ghcr.io holds it"
+    # The stand-in crane of the push step: a registry in $FAKE_CRANE/registry.json. Its images map a reference by
+    # digest (repository@digest) to a manifest and a configuration, and its tags map repository:tag to a digest. made
+    # maps a base image to the image that crane mutate --env OFT_FRAME_POINTERS=1 makes of it, with that image's
+    # digest. `manifest`, `config` and `digest` of a reference answer from the registry, and fail as crane does for a
+    # reference that it does not hold. `mutate <base> --env OFT_FRAME_POINTERS=1 -t <repository>:<tag>` puts the image
+    # made of the base there, and prints repository@digest, as crane does. `copy <from> <to>` puts the image of <from>
+    # at <to>. A command that writes to ghcr.io fails unless `auth login ghcr.io` read a password, with no logout after
+    # it: the login is the file $FAKE_CRANE/login. Each call goes to $FAKE_CRANE/calls: its arguments, as a JSON list on
+    # one line. The stand-in runs no other command.
+    CRANE = r"""#!/usr/bin/env python3
+import json
+import os
+import pathlib
+import sys
+
+home = pathlib.Path(os.environ["FAKE_CRANE"])
+args = sys.argv[1:]
+with open(home / "calls", "a") as calls:
+    calls.write(json.dumps(args) + "\n")
+registry = json.loads((home / "registry.json").read_text())
+
+
+def held(ref):
+    # (the digest, the image) of a reference by digest or by tag
+    repository, digest = ref.split("@", 1) if "@" in ref else (ref.rpartition(":")[0], registry["tags"].get(ref))
+    image = registry["images"].get(f"{repository}@{digest}")
+    if image is None:
+        sys.exit(f"Error: fetching manifest {ref}: MANIFEST_UNKNOWN: manifest unknown")
+    return digest, image
+
+
+def put(to, digest, image):
+    # the image at the reference by tag `to`; its repository
+    repository, _, tag = to.rpartition(":")
+    if not repository or "/" in tag:
+        sys.exit(f"the stand-in crane takes a reference by tag here, not {to}")
+    if to.startswith("ghcr.io/") and not (home / "login").exists():
+        sys.exit(f"Error: PUT {to}: UNAUTHORIZED: authentication required")
+    registry["images"][f"{repository}@{digest}"] = image
+    registry["tags"][to] = digest
+    return repository
+
+
+match args:
+    case ["auth", "login", "ghcr.io", "--username", _, "--password-stdin"]:
+        if not sys.stdin.read().strip():
+            sys.exit("Error: no password on the standard input")
+        (home / "login").touch()
+    case ["auth", "logout", "ghcr.io"]:
+        (home / "login").unlink(missing_ok=True)
+    case ["manifest" | "config" as part, ref]:
+        print(json.dumps(held(ref)[1][part]))
+    case ["digest", ref]:
+        print(held(ref)[0])
+    case ["mutate", base, "--env", "OFT_FRAME_POINTERS=1", "-t", to] if base in registry["made"]:
+        held(base)
+        made = registry["made"][base]
+        print(put(to, made["digest"], made["image"]) + "@" + made["digest"])
+    case ["copy", source, to]:
+        put(to, *held(source))
+    case _:
+        sys.exit(f"the stand-in crane does not run: crane {' '.join(args)}")
+(home / "registry.json").write_text(json.dumps(registry))
+"""
 
     def case(self, tree=ROOT):
         import test_outside_screen
@@ -577,14 +653,15 @@ class ToolchainPublish(Stand):
         self.assertIn("the runs that publish acts on", str(caught.exception))
 
     def copies_case(self, tree=ROOT):
-        """publish's copies of values of toolchain-images.yaml are equal to them: the crane pin of the workflow's env,
-        the base rows of the matrix (make's), and the image of the registry service (of each job that has one). A
-        change of one copy alone would show only on main, after the merge: publish would fail, or skip a row."""
+        """publish's copies of values of toolchain-images.yaml are equal to them: the crane pin and the package of the
+        frame-pointer images, of the workflow's env, the base rows of the matrix (make's), and the image of the
+        registry service (of each job that has one). A change of one copy alone would show only on main, after the
+        merge: publish would fail, skip a row, or push to a package that make does not read."""
         publish, images = self.workflow(tree, self.PUBLISH), self.workflow(tree, self.IMAGES)
         job = publish["jobs"]["publish"]
         # Each value: (publish's, toolchain-images.yaml's).
         values = {f"the env {name}": ((publish.get("env") or {}).get(name), (images.get("env") or {}).get(name))
-                  for name in self.CRANE}
+                  for name in self.SHARED_ENV}
         values["the base rows of the matrix (make's)"] = (job["strategy"]["matrix"]["base"],
                                                            images["jobs"]["make"]["strategy"]["matrix"]["base"])
         registries = {name: held["services"]["registry"]["image"] for name, held in images["jobs"].items()
@@ -598,7 +675,7 @@ class ToolchainPublish(Stand):
         self.assertEqual(differ, {}, f"the values of {self.PUBLISH} that differ from {self.IMAGES}'s, each as "
                                      f"(publish's, {self.IMAGES}'s): {'; '.join(differ)}")
 
-    def test_publish_has_the_crane_pin_base_rows_and_registry_image_of_toolchain_images(self):
+    def test_publish_has_the_env_base_rows_and_registry_image_of_toolchain_images(self):
         self.copies_case()
 
     def test_control_crane_version_changed_in_toolchain_images_alone(self):
@@ -611,6 +688,105 @@ class ToolchainPublish(Stand):
         with self.assertRaises(AssertionError) as caught:
             self.copies_case(changed)
         self.assertTrue(str(caught.exception).endswith(f"{self.IMAGES}'s): the env CRANE_VERSION"), caught.exception)
+
+    def test_control_fp_package_changed_in_publish_alone(self):
+        self.copies_case(self.copy_tree("unchanged"))
+        line = f"  FP_PACKAGE: {self.PACKAGE}\n"
+        changed = self.copy_tree("changed", [(f".github/workflows/{self.PUBLISH}", line,
+                                              line.replace(self.PACKAGE, f"{self.PACKAGE}-rust"))])
+        with self.assertRaises(AssertionError) as caught:
+            self.copies_case(changed)
+        self.assertTrue(str(caught.exception).endswith(f"{self.IMAGES}'s): the env FP_PACKAGE"), caught.exception)
+
+    @staticmethod
+    def digest_of(value):
+        return "sha256:" + hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+    def push_case(self, tree=ROOT):
+        """publish's push step (its name starts with PUSH), run for each base row of its matrix, with the stand-in
+        crane, the base rows of infra/toolchains.tsv, and the digest that make made from each row. ghcr.io holds no
+        frame-pointer image yet, so the step makes each image and copies it to ghcr.io. Each copy goes to PACKAGE,
+        under the tag of the row's language, and no command of crane names another package of ghcr.io, but to read
+        the base image."""
+        publish = self.workflow(tree, self.PUBLISH)
+        job = publish["jobs"]["publish"]
+        rows = job["strategy"]["matrix"]["base"]
+        steps = [s for s in job["steps"] if str(s.get("name", "")).startswith(self.PUSH)]
+        self.assertEqual(len(steps), 1, f"the steps of publish whose name starts with {self.PUSH!r}")
+        where = pathlib.Path(tempfile.mkdtemp(dir=self.dir))
+        # infra/toolchains.tsv, as publish's checkout gives it, with the base rows of this repository's file.
+        bases = {}
+        for line in (ROOT / "infra" / "toolchains.tsv").read_text().splitlines():
+            fields = line.split("\t")
+            if fields[0] in rows:
+                bases[fields[0]] = (line, fields[1])
+        self.assertEqual(sorted(bases), sorted(rows), "the base rows of infra/toolchains.tsv")
+        (where / "infra").mkdir()
+        (where / "infra" / "toolchains.tsv").write_text("".join(line + "\n" for line, _ in bases.values()))
+        # Each base image in the stand-in registry, and what crane mutate makes of it: the base image's configuration
+        # with OFT_FRAME_POINTERS=1 added, and a manifest that names it and the base image's layers. make made the same
+        # image: the artifact fp-digest-<row> gives its digest.
+        registry, made = {"images": {}, "tags": {}, "made": {}}, {}
+        (self.temp / "fp-digest").mkdir(exist_ok=True)
+        for row, (_, base) in bases.items():
+            config = {"architecture": "amd64", "os": "linux", "config": {"Env": ["PATH=/usr/local/bin:/usr/bin:/bin"]}}
+            manifest = {"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "size": 1,
+                                   "digest": self.digest_of(config)},
+                        "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "size": n + 1,
+                                    "digest": self.digest_of([row, n])} for n in range(3)]}
+            fp_config = {**config, "config": {"Env": [*config["config"]["Env"], "OFT_FRAME_POINTERS=1"]}}
+            fp_manifest = {**manifest, "config": {**manifest["config"], "digest": self.digest_of(fp_config)}}
+            made[row] = self.digest_of(fp_manifest)
+            registry["images"][base] = {"manifest": manifest, "config": config}
+            registry["made"][base] = {"digest": made[row], "image": {"manifest": fp_manifest, "config": fp_config}}
+            (self.temp / "fp-digest" / f"{row}.digest").write_text(made[row] + "\n")
+        home = where / "crane"
+        home.mkdir()
+        (home / "registry.json").write_text(json.dumps(registry))
+        # crane, where publish's step install crane puts it
+        (self.temp / "bin").mkdir(exist_ok=True)
+        (self.temp / "bin" / "crane").write_text(self.CRANE)
+        (self.temp / "bin" / "crane").chmod(0o755)
+        self.env.update(FAKE_CRANE=str(home), GITHUB_ACTOR="github-actions[bot]")
+        done, calls = {}, {}
+        for row in rows:
+            # Each row is a job of its own, on a runner of its own: no login of the job before.
+            (home / "login").unlink(missing_ok=True)
+            (home / "calls").write_text("")
+            ctx = {"github.token": WORKFLOW_TOKEN, "github.event.workflow_run.head_sha": HEAD, "matrix.base": row}
+            rc, log, _ = self.run_script(steps[0]["run"], where, **env_of(publish, "publish", steps[0], ctx))
+            done[row] = (rc, log)
+            calls[row] = [json.loads(line) for line in (home / "calls").read_text().splitlines()]
+        copies = {row: [(call[2], call[1].rpartition("@")[2]) for call in found if call[0] == "copy"]
+                  for row, found in calls.items()}
+        self.assertEqual(copies, {row: [(f"{self.PACKAGE}:{self.TAGS.get(row)}", made[row])] for row in rows},
+                         f"the targets of crane copy, each with the digest that it copies, for each base row: {done}")
+        for row, found in calls.items():
+            for call in found:
+                command = f"{row}: crane {' '.join(call)}"
+                # Only the base image of the row, which the step reads, is in another package than PACKAGE.
+                self.assertEqual([a for a in call if a.startswith("ghcr.io/") and a != bases[row][1]
+                                  and not a.startswith((f"{self.PACKAGE}:", f"{self.PACKAGE}@"))], [], command)
+                # Where a command writes: the target of crane copy, and the tag of crane mutate.
+                to = call[2:3] if call[0] == "copy" else call[call.index("-t") + 1:][:1] if "-t" in call else []
+                self.assertEqual([t for t in to if not t.startswith(("localhost:5000/", f"{self.PACKAGE}:"))], [],
+                                 f"where {command} writes")
+        for row, (rc, log) in done.items():
+            self.assertEqual(rc, 0, f"{row}: {log}")
+            self.assertIn(f"`{self.PACKAGE}@{made[row]}` (pushed under the tag {self.TAGS[row]})", log, row)
+
+    def test_publish_copies_each_image_to_the_one_package_under_the_tag_of_its_language(self):
+        self.push_case()
+
+    def test_control_publish_tag_in_the_package_of_the_base_image(self):
+        self.push_case(self.copy_tree("unchanged"))
+        changed = self.copy_tree("changed", [(f".github/workflows/{self.PUBLISH}",
+                                              'tag="$FP_PACKAGE:frame-pointers$language-$HEAD_SHA"',
+                                              'tag="$name:frame-pointers-$HEAD_SHA"')])
+        with self.assertRaises(AssertionError) as caught:
+            self.push_case(changed)
+        self.assertIn("the targets of crane copy", str(caught.exception))
 
     def test_publish_starts_on_the_completed_runs_on_main_of_toolchain_images_alone(self):
         # workflow_run names a workflow by its name: a rename of toolchain-images.yaml, or of its branch, would stop

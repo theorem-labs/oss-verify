@@ -19,9 +19,10 @@ name: "Toolchain images"
 #                 added to its environment. It fails if a file under /opt/musl-sysroot or /opt/asan-static-rt has a
 #                 different SHA-256 in the new image. Its step summary gives the digest, and the SHA-256 of the C
 #                 library and of the AddressSanitizer runtime in the two images. When infra/toolchains.tsv has the
-#                 row <base row>-frame-pointers, make also fails unless that row names the image that make made and
-#                 ghcr.io holds that image. Thus the pull request that adds the rows passes only after the images are
-#                 published. make keeps the digest in the artifact fp-digest-<base row>.
+#                 row <base row>-frame-pointers, make also fails unless that row names the image that make made, in
+#                 the package FP_PACKAGE, and ghcr.io holds that image. Thus the pull request that adds the rows
+#                 passes only after the images are published. make keeps the digest in the artifact
+#                 fp-digest-<base row>.
 #   probe         Once for each base image, after make. It makes the image again in its own registry, and fails
 #                 unless the digest is the digest that make made. Then .github/scripts/frame-pointers/probe builds the
 #                 builder FROM the base image and FROM the new image. It builds the probes of that directory with
@@ -39,11 +40,11 @@ name: "Toolchain images"
 #                 skipped.
 #
 # This file publishes nothing, and no job of it has a write permission. toolchain-images-publish.yaml (Toolchain
-# images: publish) puts the images on ghcr.io. GitHub starts it when a run of this file on main completes. Its job
-# publish acts only when that run was for a push to main and passed: make, probe and docker-tests passed for every
-# image. It takes the digest that make made from that run's artifact fp-digest-<base row>, and it pushes nothing unless
-# it makes the image again with that digest. Its header says how it publishes, and what grant lets its token push to
-# the packages of the release's toolchain images.
+# images: publish) puts the images on ghcr.io, all three in one package, FP_PACKAGE below, each under a tag that names
+# the language of its base image. GitHub starts it when a run of this file on main completes. Its job publish acts only
+# when that run was for a push to main and passed: make, probe and docker-tests passed for every image. It takes the
+# digest that make made from that run's artifact fp-digest-<base row>, and it pushes nothing unless it makes the image
+# again with that digest. Its header says how it publishes, and what grant lets its token push to this package.
 #
 # OS Verify's Legion controller owns a failed run of this workflow on main, and a failed run of
 # toolchain-images-publish.yaml.
@@ -55,8 +56,8 @@ name: "Toolchain images"
 # probe and docker-tests run code of the pull request: the builder (infra/base-builder), the probes and the tests.
 # They have contents: read and no secret. No job of this file has packages: write. Only publish has it, in
 # toolchain-images-publish.yaml, which GitHub runs from main's copy alone. This limits only these two files: after the
-# grant, a workflow file on any branch of this repository can ask for packages: write and push to the packages
-# (toolchain-images-publish.yaml's header).
+# grant, a workflow file on any branch of this repository can ask for packages: write and push to the package
+# FP_PACKAGE (toolchain-images-publish.yaml's header).
 
 on:
   pull_request:
@@ -95,6 +96,9 @@ env:
   CRANE_VERSION: v0.22.1
   CRANE_SHA256: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
   CRANE_ARCHIVE: go-containerregistry_Linux_x86_64.tar.gz
+  # The one package on ghcr.io of the frame-pointer images of all three base rows, where publish puts them
+  # (toolchain-images-publish.yaml). A frame-pointer row of infra/toolchains.tsv names an image in it.
+  FP_PACKAGE: ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain
 
 jobs:
   make:
@@ -157,7 +161,6 @@ jobs:
 
       - name: the frame-pointer row of infra/toolchains.tsv, if there is one, names this image, and ghcr.io holds it
         env:
-          NAME: ${{ steps.base.outputs.name }}
           MADE: ${{ steps.made.outputs.ref }}
         run: |
           set -euo pipefail
@@ -167,7 +170,7 @@ jobs:
             echo "infra/toolchains.tsv has no row $row yet: nothing to compare" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          want="$NAME@${MADE#*@}"
+          want="$FP_PACKAGE@${MADE#*@}"
           [ "$named" = "$want" ] ||
             { echo "::error::infra/toolchains.tsv's row $row names $named, but the image made from $BASE_ROW is $want"; exit 1; }
           crane manifest "$named" > /dev/null ||
