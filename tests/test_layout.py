@@ -7,6 +7,7 @@ No linker runs here. The objects are the riscv64 relocatable objects of tests/fi
 also read with a reader of their own; the map is the one of tests/fixtures/link-record/; the records and the layout
 trees are small files that each test writes."""
 import collections
+import errno
 import gzip
 import hashlib
 import importlib.util
@@ -3546,6 +3547,27 @@ def test_append_falls_back_when_its_guard_cannot_read_the_layout(tmp_path, monke
         assert run_append(tmp_path, entry, command) == 0
     fallen_back(tmp_path, capsys, f"{guarded}/calls.tsv: line 1 does not read")
     assert final_check(tmp_path) == 0, capsys.readouterr()
+
+
+def test_append_exits_2_naming_the_error_when_the_machine_fails_a_write_of_its_guards_entry(tmp_path, monkeypatch,
+                                                                                             capsys):
+    # OSSV-675, the guard: write_new raises ENOSPC for each file of the guard's entry (links/entry). append exits 2 and
+    # prints one line, `layout.py append: ` and the error. It writes no placement.tsv; the script of its plan stays.
+    command = ["clang", "main.o"]
+    entry = link_setup(tmp_path, monkeypatch, kept_call_files([(0x8, "g")], 4), command)
+    real, guarded = layout.write_new, str(tmp_path / "links" / "entry")
+    planted = OSError(errno.ENOSPC, "No space left on device")
+
+    def write(path, data):
+        if os.path.dirname(path) == guarded:
+            raise planted
+        real(path, data)
+    with monkeypatch.context() as patched:
+        patched.setattr(layout, "write_new", write)
+        assert run_append(tmp_path, entry, command) == 2
+    assert capsys.readouterr().err == f"layout.py append: {planted}\n"
+    assert not (tmp_path / "placement.tsv").exists()
+    assert (tmp_path / "script.ld").exists()
 
 
 def test_a_kept_twin_is_at_its_own_members_base_address_when_lld_takes_the_members_in_another_order(tmp_path,

@@ -157,8 +157,9 @@ layout() {
 # section goes, and links with the script of that plan there (the check link) to verify it. It writes the script, the
 # placement and the wraps into $work. When the read-only data in front of .text grew past its room, or when the plan
 # or the check link shows something the mode cannot test or keep (it prints one line that names it), it writes no
-# script: the two links below are then normal ones. Only when the probe link itself fails, or an input cannot be read,
-# does it exit with a status other than 0, and the link stops with that status (set -e), before it writes the output.
+# script: the two links below are then normal ones. Only when the probe link itself fails, an input cannot be read,
+# or an error of the machine (a full disk, for one) stops a write, does it exit with a status other than 0, and the link
+# stops with that status (set -e), before it writes the output.
 script=""
 if [ -n "$entry" ]; then
   work=$(mktemp -d /tmp/ov/append.XXXXXX)

@@ -118,14 +118,17 @@ thread-local access otherwise than at the base, or does not tell whether it rela
 earlier check link moved and whose cause the last one does not show, a cause that it does not show, PT_LOAD segments
 that are not the probe link's, a section that it takes or lacks), when layout.py check's own decision on the layout
 that append would keep fails it (the reason is `layout.py check would fail the layout: ` and the text of check's first
-failure after its label: the function, where it comes from, and what fails) or append cannot make or read back the
-entry of that decision (`layout.py check could not read the layout: ` and the error), and when a file or section name
-holds a double quote or a line break, which the script cannot quote. So an append build that keeps its layout passes
-layout.py check. append then writes no script (it removes one that is there), so that link-fuzz-target links
-normally; placement.tsv gives each .text input section of the probe link the place normal, its address there, the
-cause normal_layout and the reason; and it prints one line, `layout.py append: <target> (<build>): normal link:
-<reason>`, which names the function and its call, or the line of the script. It exits 1 when the probe link fails, as
-the normal link of the same command would; 2 when an input cannot be read; else 0.
+failure after its label: the function, where it comes from, and what fails) or append cannot make the entry of that
+decision from the final link or read it back (a LayoutError; the reason is `layout.py check could not read the layout: `
+and the error), and when a file or section name holds a double quote or a line break, which the script cannot quote. So
+an append build that keeps its layout passes layout.py check. append then writes no script (it removes one that is
+there), so that link-fuzz-target links normally; placement.tsv gives each .text input section of the probe link the
+place normal, its address there, the cause normal_layout and the reason; and it prints one line, `layout.py append:
+<target> (<build>): normal link: <reason>`, which names the function and its call, or the line of the script. An error
+of the machine while append writes a file (an OSError, such as a full disk), a file of the entry of that decision too,
+is no fallback: append prints `layout.py append: <error>` and exits 2, and link-fuzz-target stops the link. It exits 1
+when the probe link fails, as the normal link of the same command would; 2 when an input cannot be read or a file cannot
+be written; else 0.
 
 The builder image runs this file with its own python3, and the host runs its commands: it takes the standard library
 only, and the syntax of Python 3.9.
@@ -1346,8 +1349,9 @@ def entry_files(mapping, binary, name, objects, key_file, wraps, placement):
     calls.tsv, output.tsv and wraps, and placement.tsv when `placement` is not None. `mapping` is the bytes of the
     link's map, `binary` those of its unstripped binary, which `name` names in a message, `objects` its Objects,
     `key_file` describe's key_file, `wraps` the bytes of its wraps (one function a line) and `placement` those of its
-    placement.tsv. collect makes each entry of a record so (collect_target), and the append mode the entry of its last
-    check link, which is the final link (check_guard): one maker of the files that layout.py check reads."""
+    placement.tsv. collect makes each entry of a record so (collect_target), and the append mode the entry of its final
+    link, the last check link or, with no script (readonly_growth), the probe link (check_guard): one maker of the files
+    that layout.py check reads."""
     output = output_rows(Elf(binary, name))
     wrapped = {line for line in text_of(wraps).split("\n") if line}
     inputs, calls = describe(read_map(text_of(mapping)), objects, key_file, wrapped, output_of(output, name))
@@ -1866,20 +1870,20 @@ def normal_break(layout):
 
 
 def compare(label, base, new):
-    """The comparison of one (build, target) of two layouts: (failures, information), each a list of lines. A same-bytes
-    function is kept when it lies at its partner's base address with its partner's linked size, its key has no twins
-    (pair), and lld relaxes it as at the base (unkept): each line of NEW's calls.tsv for it matches the line of BASE
-    that it pairs with (line_pairs: the k-th line of one offset and type with the k-th), which the address and the size
-    do not show alone. Else it fails, unless it moved for a cause that NEW's placement.tsv gives and the two layouts
-    show (unshown). An append build that
-    fell back to its normal link (normal_layout) claims no base address, as a normal link keeps none: its information
-    is `<label>: normal layout: <reason>` and the line of .text, and it fails only when its .text is not laid out as
-    lld's normal link lays it out (normal_break), so that a mark over an append build's layout fails. The reason is
-    not verified."""
+    """The comparison of one (build, target) of two layouts: (failures, information), each a list of lines; layout.py
+    check prints each failure after `FAIL <label>: `, and the information as it is. A same-bytes function is kept when
+    it lies at its partner's base address with its partner's linked size, its key has no twins (pair), and lld relaxes
+    it as at the base (unkept): each line of NEW's calls.tsv for it matches the line of BASE that it pairs with
+    (line_pairs: the k-th line of one offset and type with the k-th), which the address and the size do not show alone.
+    Else it fails, unless it moved for a cause that NEW's placement.tsv gives and the two layouts show (unshown). An
+    append build that fell back to its normal link (normal_layout) claims no base address, as a normal link keeps none:
+    its information is `<label>: normal layout: <reason>` and the line of .text, and it fails only when its .text is not
+    laid out as lld's normal link lays it out (normal_break), so that a mark over an append build's layout fails. The
+    reason is not verified."""
     reason = normal_layout(new.placement)
     if reason is not None:
         why = normal_break(new)
-        failures = [f"FAIL {label}: its placement.tsv marks a normal layout, but .text is not laid out as lld's "
+        failures = ["its placement.tsv marks a normal layout, but .text is not laid out as lld's "
                     f"normal link lays it out: {why}"] if why else []
         return failures, [f"{label}: normal layout: {reason}", text_change(base, new)]
     pairing = pair(base.inputs, new.inputs)
@@ -1899,7 +1903,7 @@ def compare(label, base, new):
             continue
         if (old.address, old.linked) == (i.address, i.linked):
             if i.key in pairing.twins:
-                failures.append(f"FAIL {label}: {function(i)}: address {hex(i.address)}, linked size {i.linked}: it "
+                failures.append(f"{function(i)}: address {hex(i.address)}, linked size {i.linked}: it "
                                 "has the same bytes and lies at its partner's base address, but two sections of its "
                                 "key have the same bytes, which the trees cannot tell apart, and lld may take their "
                                 "archive members in another order: the trees do not show that the section at that "
@@ -1907,7 +1911,7 @@ def compare(label, base, new):
                 continue
             why = unkept(i, old, base, new)
             if why:
-                failures.append(f"FAIL {label}: {function(i)}: address {hex(i.address)}, linked size {i.linked}: it "
+                failures.append(f"{function(i)}: address {hex(i.address)}, linked size {i.linked}: it "
                                 "has the same bytes and lies at its partner's base address with its base linked size, "
                                 f"but the trees do not show that lld relaxes it as at the base: {why}")
                 continue
@@ -1916,12 +1920,12 @@ def compare(label, base, new):
         values = f"address {hex(old.address)} -> {hex(i.address)}, linked size {old.linked} -> {i.linked}"
         placement = new.placement.get(i.key + (occurrence[i.row],))
         if placement is None or placement.cause == "-":
-            failures.append(f"FAIL {label}: {function(i)}: {values}: it has the same bytes, and NEW's placement.tsv "
+            failures.append(f"{function(i)}: {values}: it has the same bytes, and NEW's placement.tsv "
                             "gives no cause for it to move")
             continue
         why = unshown(placement, i, old, base, new, pairing)
         if why:
-            failures.append(f"FAIL {label}: {function(i)}: {values}: the cause {placement.cause} "
+            failures.append(f"{function(i)}: {values}: the cause {placement.cause} "
                             f"({placement.detail}) does not hold: {why}")
         else:
             moved.append(f"  moved with a cause: {function(i)}: {placement.cause} ({placement.detail}): {values}")
@@ -1944,10 +1948,10 @@ def compare(label, base, new):
 def check_decision(label, base, directory):
     """layout.py check's decision on the entry `directory` of a layout tree against the base entry's Layout `base`:
     the entry is read as check reads it (read_layout) and compared as check compares each entry (compare, with
-    `label` in its lines). The text of the first FAIL line after `FAIL <label>: ` (the function, where it comes from,
-    and what fails), or None when compare finds no failure."""
+    `label`). compare's first failure as it is, which check prints after `FAIL <label>: ` (the function, where it
+    comes from, and what fails), or None when compare finds no failure."""
     failures, _ = compare(label, base, read_layout(directory))
-    return failures[0][len(f"FAIL {label}: "):] if failures else None
+    return failures[0] if failures else None
 
 
 def entries(tree):
@@ -1976,12 +1980,13 @@ def check(base_tree, new_tree):
     # last, so that a tree that cannot be read stops the check before it prints anything.
     lines, failed, normal = [], 0, 0
     for build, target in shared:
+        label = f"{build}/{target}"
         old, new = read_layout(below(base_tree, build, target)), read_layout(below(new_tree, build, target))
-        failures, found = compare(f"{build}/{target}", old, new)
+        failures, found = compare(label, old, new)
         failed += bool(failures)
         # The last line counts the builds with a normal layout among those that pass.
         normal += normal_layout(new.placement) is not None and not failures
-        lines += found[:1] + failures + found[1:]
+        lines += found[:1] + [f"FAIL {label}: {failure}" for failure in failures] + found[1:]
     for line in lines:
         print(line)
     for entry in base_entries:
@@ -2085,9 +2090,11 @@ class Fallback(Exception):
     (append_link): a section that a plan keeps has a call or a thread-local access that lld may relax and that the plan
     does not test or decide, or a line of calls.tsv that only one of the two links has, a check link fails or is not
     what the plan asks, layout.py check's own decision on the layout that the append mode would keep fails it or the
-    entry of that decision cannot be made or read back (check_guard), or a file or section name holds a double quote
-    or a line break, which the script cannot quote. Its text is the reason, for a person: it names the function and
-    its call, the line of the script, the cause of check's first failure, or the error."""
+    entry of that decision cannot be made or read back (a LayoutError in check_guard), or a file or section name holds a
+    double quote or a line break, which the script cannot quote. Its text is the reason, for a person: it names the
+    function and its call, the line of the script, the cause of check's first failure, or the error. An OSError while
+    check_guard writes the entry, an error of the machine such as a full disk, is no Fallback: append exits 2, naming
+    the error, and the link stops."""
 
 
 # Where the append mode puts a .text input section of the link: `place` (kept, hole, end, or normal for a normal
@@ -2831,14 +2838,15 @@ def append_link(label, entry, work, script, placement, wraps, renamed, command):
         planned, found = checked_plan(base, probe, pairing, lines, internal, work, script, command)
         # The final link: the last check link, with the script; with none (readonly_growth), a normal link of the same
         # command, which the probe link is.
-        final = "check" if planned.script is not None else "probe"
-        rows = tsv(placement_rows(found if planned.script is not None else at_probe, planned.places, pairing, base))
+        scripted = planned.script is not None
+        final, at_final = ("check", found) if scripted else ("probe", at_probe)
+        rows = tsv(placement_rows(at_final, planned.places, pairing, base))
         check_guard(label, base, work, final, objects, key_file, wraps_data, rows)
     except Fallback as error:
         reason = re.sub(r"[\t\n\r]", " ", str(error))
         places = {i.row: Place("normal", i.address, NORMAL_LAYOUT, reason) for i in text}
         return normal_link(tsv(placement_rows(at_probe, places, pairing, base)), f"normal link: {reason}")
-    if planned.script is None:
+    if not scripted:
         return normal_link(rows, f"the read-only data in front of .text grew by {planned.growth[0]} bytes, past its "
                            f"room of {planned.growth[1]} bytes, so this is a normal link, and every function whose "
                            "code did not change moves (readonly_growth)")
@@ -2867,7 +2875,9 @@ def check_guard(label, base, work, final, objects, key_file, wraps, placement):
     reads and compares them (check_decision). Raise Fallback, naming the cause of check's first failure, when check
     would fail the layout, and naming the error when the entry cannot be made or read back (a LayoutError, a defect of
     the append mode, which never stops a link for a change of the code): so an append build that keeps its layout
-    passes layout.py check, whatever reading of a line of calls.tsv the plan and check may come to differ in."""
+    passes layout.py check, whatever reading of a line of calls.tsv the plan and check may come to differ in. An OSError
+    while it writes the entry, an error of the machine such as a full disk, is raised as it is: append exits 2, naming
+    the error, and the link stops."""
     binary = os.path.join(work, final)
     directory = os.path.join(work, "entry")
     try:
@@ -3089,8 +3099,10 @@ def main(argv=None):
                     "line break, which the script cannot quote, write no script (the build falls back to its normal "
                     "link), give each .text input section of placement.tsv the cause normal_layout and the reason, "
                     "and print one line that names the function and its call, or the line of the script. So an "
-                    "append build that keeps its layout passes layout.py check. Exit 1 when the probe link fails, 2 "
-                    "when an input cannot be read.")
+                    "append build that keeps its layout passes layout.py check. An error of the machine while it "
+                    "writes a file (a full disk, for one), a file of that entry too, is no fallback: it stops the "
+                    "link, with exit 2, naming the error. Exit 1 when the probe link fails, 2 when an input cannot be "
+                    "read.")
     appending.add_argument("--base", required=True, metavar="ENTRY",
                            help="the base layout tree's entry <tree>/<build>/<target>/")
     appending.add_argument("--work", required=True, metavar="DIR", help="an empty directory for the links")
