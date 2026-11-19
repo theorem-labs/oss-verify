@@ -3323,6 +3323,232 @@ def test_append_and_layout_check_pair_two_calls_at_one_offset_alike(tmp_path, mo
         ".text.filler": ["kept", "0x11338", "-", "-"]}
 
 
+def guard_decisions(monkeypatch):
+    """The decisions of append's guard from here on (layout.check_decision, which layout.check_guard calls and
+    layout.check does not): a list that gets each one, None or the text of layout check's first failure."""
+    found, real = [], layout.check_decision
+
+    def recorded(label, base, directory):
+        found.append(real(label, base, directory))
+        return found[-1]
+    monkeypatch.setattr(layout, "check_decision", recorded)
+    return found
+
+
+# A side of a case of the differential test: the lines of calls.tsv of f in one link, each (offset, relax), and
+# whether a relaxable R_RISCV_TLSDESC_HI20 at 0x0 lies in front of them, so that their delta is - (unknown).
+SIDE_NONE, SIDE_RELAX_1, SIDE_RELAX_0 = ((), False), (((0x8, 1),), False), (((0x8, 0),), False)
+SIDE_NO_DELTA, SIDE_ONE_OFFSET = (((0x8, 1),), True), (((0x8, 1), (0x8, 1)), False)
+SIDE_TWO_OFFSETS = (((0x8, 1), (0x10, 1)), False)
+# (BASE's side, NEW's side): relax 0 or 1 on each side, a delta known or -, a line on one side only, and two lines at
+# one offset or at two.
+SIDE_PAIRS = [(SIDE_RELAX_1, SIDE_RELAX_1), (SIDE_RELAX_0, SIDE_RELAX_0), (SIDE_RELAX_1, SIDE_RELAX_0),
+              (SIDE_RELAX_0, SIDE_RELAX_1), (SIDE_NONE, SIDE_RELAX_1), (SIDE_RELAX_1, SIDE_NONE),
+              (SIDE_NONE, SIDE_RELAX_0), (SIDE_RELAX_0, SIDE_NONE), (SIDE_NO_DELTA, SIDE_NO_DELTA),
+              (SIDE_RELAX_1, SIDE_NO_DELTA), (SIDE_NO_DELTA, SIDE_RELAX_1), (SIDE_ONE_OFFSET, SIDE_ONE_OFFSET),
+              (SIDE_ONE_OFFSET, SIDE_RELAX_1), (SIDE_RELAX_1, SIDE_ONE_OFFSET), (SIDE_TWO_OFFSETS, SIDE_TWO_OFFSETS)]
+# The target of the first line of a side, for a call and for a thread-local access (tprel): in reach (near), in reach
+# at the base and out of it in the new link (far), or with no address (none: a global that no object defines and the
+# binary does not name). The second line of a side reaches t, or tw.
+SIDE_TARGETS = {"call": {"near": "t", "far": "h", "none": "u"}, "tprel": {"near": "tv", "far": "tv", "none": "uv"}}
+
+
+def differential_files(line_type, target, sides):
+    """files(new) of a case of the differential test: main.o holds f, which keeps its bytes, with the lines of its
+    side of `sides` (SIDE_PAIRS) against the target `target` (SIDE_TARGETS); t, which keeps its bytes; h, which changes
+    and grows; and the thread-local variables tv and tw in .tbss, at the start of the TLS segment. A far call reaches h,
+    which goes to the end of .text in the new link, past FILLER bytes of filler.o; a far thread-local access reaches
+    tv, which lies past 8 KiB of .tdata in the new link."""
+    far, kind = target == "far", layout.R_RISCV_CALL_PLT if line_type == "call" else layout.R_RISCV_TPREL_HI20
+
+    def files(new):
+        lines, unknown = sides[new]
+        relocations = [(0x0, "tv", layout.R_RISCV_TLSDESC_HI20), (0x0, None, layout.R_RISCV_RELAX)] if unknown else []
+        for k, (offset, relax) in enumerate(lines):
+            name = SIDE_TARGETS[line_type][target] if k == 0 else "t" if line_type == "call" else "tw"
+            relocations.append((offset, name, kind))
+            relocations += [(offset, None, layout.R_RISCV_RELAX)] if relax else []
+        variables = [(".tdata.table", bytes(0x2000), 8, "table")] if far and new and line_type == "tprel" else []
+        variables += [(".tbss.tv", bytes(4), 4, "tv"), (".tbss.tw", bytes(4), 4, "tw")]
+        found = {"main.o": relocatable([("f", b"\1" * 0x20, 4, relocations), ("t", b"\3" * 0x10, 4, []),
+                                        ("h", b"\x99" * 0x30 if new else b"\2" * 0x10, 4, [])], variables)}
+        if far and line_type == "call":
+            found["filler.o"] = relocatable([("filler", b"\4" * FILLER, 4, [])])
+        return found
+    return files
+
+
+def test_append_keeps_a_layout_only_when_layout_check_passes_it(tmp_path, monkeypatch, capsys):
+    # OSSV-675, the architect's scope: append exits 0 and keeps a layout that layout.py check then fails (exit 1) must
+    # not happen, whatever reading of a calls.tsv line the plan and check come to differ in. Each case is f, which
+    # keeps its bytes, with one or two lines of calls.tsv on each side (SIDE_PAIRS), calls or thread-local accesses
+    # (tprel), against a target in reach, out of it in the new link, or with no address (SIDE_TARGETS). In each, append
+    # exits 0 and layout.py check on the final link exits 0; when append keeps the layout, its guard ran once and
+    # found no failure, and when the build falls back to its normal link, the plan did and the guard did not run.
+    decisions, outcomes = guard_decisions(monkeypatch), collections.Counter()
+    cases = list(itertools.product(("call", "tprel"), ("near", "far", "none"), SIDE_PAIRS))
+    assert len(cases) == 90
+    for number, (line_type, target, sides) in enumerate(cases):
+        case, root = (line_type, target, sides), tmp_path / str(number)
+        command = ["clang", "main.o"] + (["filler.o"] if (line_type, target) == ("call", "far") else [])
+        entry = link_setup(root, monkeypatch, differential_files(line_type, target, sides), command)
+        decisions.clear()
+        assert run_append(root, entry, command) == 0, case
+        assert final_check(root) == 0, (case, capsys.readouterr())
+        if (root / "script.ld").exists():
+            assert decisions == [None], case
+            place, _, cause, _ = appended(root, capsys)[".text.f"]
+            outcomes[place if cause == "-" else cause] += 1
+        else:
+            assert decisions == [], case
+            fallen_back(root, capsys)
+            outcomes["normal"] += 1
+    assert set(outcomes) == {"kept", "jal_reach", "tls_reach", "normal"}, outcomes
+
+
+def test_append_falls_back_when_layout_check_would_fail_the_layout_it_keeps(tmp_path, monkeypatch, capsys):
+    # OSSV-675, the guard: append makes layout.py check's own decision on the layout it would keep. Here check's
+    # reading of a kept function is made to fail for f (layout.unkept, which only check reads, gives a reason for it),
+    # which the plan keeps at its base address: append falls back to its normal link, naming f and that reason, and
+    # layout.py check, unpatched, passes the final link. The control: unpatched, append keeps f.
+    command = ["clang", "main.o"]
+    root = tmp_path / "control"
+    entry = link_setup(root, monkeypatch, kept_call_files([(0x8, "g")], 4), command)
+    assert run_append(root, entry, command) == 0
+    assert appended(root, capsys)[".text.f"][:2] == ["kept", "0x11300"]
+    root = tmp_path / "guard"
+    entry = link_setup(root, monkeypatch, kept_call_files([(0x8, "g")], 4), command)
+    decisions, real = guard_decisions(monkeypatch), layout.unkept
+    with monkeypatch.context() as patched:
+        patched.setattr(layout, "unkept", lambda fn, old, base, new: "planted at offset 0x8"
+                        if fn.section == ".text.f" else real(fn, old, base, new))
+        assert run_append(root, entry, command) == 0
+    assert len(decisions) == 1 and decisions[0].startswith("f (main.o): address 0x11300"), decisions
+    assert decisions[0].endswith(": planted at offset 0x8"), decisions
+    reason = fallen_back(root, capsys, "f (main.o)", "0x11300", "planted at offset 0x8")
+    assert reason.endswith(decisions[0])
+    assert final_check(root) == 0, capsys.readouterr()
+
+
+def test_append_makes_layout_checks_decision_on_the_normal_link_of_readonly_growth(tmp_path, monkeypatch, capsys):
+    # OSSV-675, the guard on each layout that append keeps. The read-only data in front of .text grew past its room
+    # (test_append_links_normally_when_the_read_only_data_grew_past_its_room): append writes no script, and the final
+    # link is a normal link of the command, which the probe link is. The guard decides on the probe link's entry, with
+    # the placement.tsv that append writes, and finds no failure; layout.py check passes the final link. With
+    # layout.unshown, which only check reads, giving a reason for entry's readonly_growth, append falls back to its
+    # normal link, naming entry and that reason, and layout.py check, unpatched, passes the final link.
+    entry = append_setup(tmp_path, monkeypatch, ro_end=0x11100)
+    decisions = guard_decisions(monkeypatch)
+    assert run_append(tmp_path, entry) == 0
+    assert decisions == [None]
+    assert not (tmp_path / "script.ld").exists()
+    rows = [line.split("\t") for line in (tmp_path / "placement.tsv").read_text().splitlines()]
+    assert {row[8] for row in rows} == {"normal"} and {row[10] for row in rows} == {"readonly_growth", "-"}
+    links = tmp_path / "links"
+    assert (links / "entry" / "placement.tsv").read_bytes() == (tmp_path / "placement.tsv").read_bytes()
+    assert (links / "entry" / "map").read_bytes() == layout.record_map((links / "probe.map").read_bytes())
+    assert final_check(tmp_path) == 0, capsys.readouterr()
+    capsys.readouterr()
+    root = tmp_path / "fires"
+    entry = append_setup(root, monkeypatch, ro_end=0x11100)
+    decisions.clear()
+    real = layout.unshown
+    with monkeypatch.context() as patched:
+        patched.setattr(layout, "unshown", lambda placement, fn, *rest: "planted at entry"
+                        if fn.section == ".text.entry" else real(placement, fn, *rest))
+        assert run_append(root, entry) == 0
+    assert len(decisions) == 1 and decisions[0].startswith("entry (main.o): "), decisions
+    assert decisions[0].endswith(": planted at entry"), decisions
+    assert fallen_back(root, capsys, "entry (main.o)", "planted at entry").endswith(decisions[0])
+    assert final_check(root) == 0, capsys.readouterr()
+
+
+def record_awk():
+    """The awk program with which record_link (infra/base-builder/link-fuzz-target) keeps the lines of lld's map that
+    the record's map holds, as it is written there."""
+    text = (ROOT / "infra/base-builder/link-fuzz-target").read_text()
+    found = re.search(r"awk '(\{.*?\})' \"\$OV_RECORDS/map\.\$\$\" > \"\$rec/map\"", text, re.S)
+    assert found, "record_link's awk program"
+    return found.group(1)
+
+
+def lld_line(address, size, align, text):
+    """A line of lld's map: its four columns (writeHeader) and `text`."""
+    return f"{address:>16x} {address:>16x} {size:>8x} {align:>5} {text}\n"
+
+
+# lld's map of a link, with each kind of line that lld writes: the header, an assignment at the top and in an output
+# section, output sections, input sections (of an object, of an archive's member, of the linker's own, with a name
+# that is not ASCII, of a section that lld does not load, at 0), and symbols (one whose name holds `:(`); then lines
+# that test the rule: one with no columns, an empty one, one with a tab, one whose text starts with nine blanks, and
+# a last one with no line break after it.
+LLD_MAP = "".join([
+    f"{'VMA':>16} {'LMA':>16} {'Size':>8} {'Align':>5} Out     In      Symbol\n",
+    lld_line(0x10200, 0, 1, ". = 0x10200 + SIZEOF_HEADERS"),
+    lld_line(0x10200, 0x100, 8, ".eh_frame"),
+    lld_line(0x10200, 0x100, 8, "        <internal>:(.eh_frame)"),
+    lld_line(0x11300, 0x50, 4, ".text"),
+    lld_line(0x11300, 0, 1, "        . = 0x11300"),
+    lld_line(0x11300, 0x20, 4, "        main.o:(.text.f)"),
+    lld_line(0x11300, 0, 1, "                f"),
+    lld_line(0x11320, 0x10, 4, "        /work/lib.a(m.o):(.text.helper)"),
+    lld_line(0x11320, 0, 1, "                helper"),
+    lld_line(0x11330, 0x8, 1, "        <internal>:(.randomize_padding)"),
+    lld_line(0x11338, 0x10, 4, "        /work/\u00e9.o:(.text.\u00e9)"),
+    lld_line(0x11338, 0, 1, "                weird:(name"),
+    lld_line(0x11348, 0, 1, "        PROVIDE_HIDDEN(__text_end = .)"),
+    lld_line(0x12000, 0x4, 4, ".tbss"),
+    lld_line(0x12000, 0x4, 4, "        main.o:(.tbss.tv)"),
+    lld_line(0, 0x20, 1, ".comment"),
+    lld_line(0, 0x10, 1, "        <internal>:(.comment)"),
+    lld_line(0x10, 0x10, 1, "        main.o:(.comment)"),
+    "        orphan.o:(.text.no_columns)\n",
+    "\n",
+    lld_line(0x11348, 0x4, 4, "        tab.o:(.text.tab)\twith a tab"),
+    lld_line(0x11348, 0x4, 4, "         nine.o:(.text.nine)"),
+    lld_line(0x12004, 0x4, 4, "        last.o:(.text.last)")[:-1],
+]).encode()
+
+
+def test_the_guards_map_is_the_map_that_the_record_of_the_link_holds(tmp_path, monkeypatch):
+    # OSSV-675: the guard decides on the entry that collect writes from the link's record, whose map record_link keeps
+    # with an awk program. layout.record_map gives the bytes that the program, as link-fuzz-target writes it, gives of
+    # lld's map, with each kind of line, in the C locale and in a UTF-8 one. The guard's entry of an append link holds
+    # the map that the program gives of its check link's map.
+    program = record_awk()
+
+    def kept(data, locale="C"):
+        return subprocess.run(["awk", program], input=data, capture_output=True, check=True,
+                              env={**os.environ, "LC_ALL": locale}).stdout
+    assert len(kept(LLD_MAP).splitlines()) == 11
+    for locale in ("C", "C.UTF-8"):
+        assert layout.record_map(LLD_MAP) == kept(LLD_MAP, locale), locale
+    entry = append_setup(tmp_path, monkeypatch)
+    assert run_append(tmp_path, entry) == 0
+    links = tmp_path / "links"
+    assert (links / "entry" / "map").read_bytes() == kept((links / "check.map").read_bytes())
+
+
+def test_append_falls_back_when_its_guard_cannot_read_the_layout(tmp_path, monkeypatch, capsys):
+    # OSSV-675, the guard: an error while it makes or reads back its entry is a defect of the append mode, which never
+    # stops a link for a change of the code. Here the read-back of the guard's entry raises LayoutError: append exits
+    # 0 and falls back to its normal link, naming the error, and layout.py check passes the final link.
+    command = ["clang", "main.o"]
+    entry = link_setup(tmp_path, monkeypatch, kept_call_files([(0x8, "g")], 4), command)
+    real, guarded = layout.read_layout, str(tmp_path / "links" / "entry")
+
+    def read(directory):
+        if directory == guarded:
+            raise layout.LayoutError(f"{directory}/calls.tsv: line 1 does not read")
+        return real(directory)
+    with monkeypatch.context() as patched:
+        patched.setattr(layout, "read_layout", read)
+        assert run_append(tmp_path, entry, command) == 0
+    fallen_back(tmp_path, capsys, "layout.py check could not read the layout",
+                f"{guarded}/calls.tsv: line 1 does not read")
+    assert final_check(tmp_path) == 0, capsys.readouterr()
+
+
 def test_a_kept_twin_is_at_its_own_members_base_address_when_lld_takes_the_members_in_another_order(tmp_path,
                                                                                                     monkeypatch):
     # OSSV-675 testing. lib.a holds two members named m.o, and each holds helper_z, a static function with the same

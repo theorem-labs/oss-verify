@@ -101,9 +101,13 @@ no call of it is relaxed otherwise against that plan. It writes the lld script o
 is not, and whose call or thread-local access the check link relaxes otherwise, moves, with jal_reach or tls_reach, and
 the plan runs again) and that the check link relaxes each call and thread-local access of it there as at the base, that
 each jal_reach and tls_reach cause holds in the last check link, that the PT_LOAD segments are the probe link's and
-that no two of them share a page, and writes placement.tsv to --placement. When the read-only data in front of .text
-grew past its room, it writes no script: the link is a normal one, and placement.tsv gives every same-bytes section
-readonly_growth.
+that no two of them share a page. When the read-only data in front of .text grew past its room, it writes no script:
+the link is a normal one, and placement.tsv gives every same-bytes section readonly_growth. Last, it makes layout.py
+check's own decision on the layout it would keep: it makes the files of the layout tree's entry of the final link as
+collect makes them, with the map that the link's record will hold (record_map) and the placement.tsv it would write,
+in DIR/entry, and compares them with ENTRY as check compares an entry. The final link is the last check link (the same
+command, with the same script), or, with no script, a normal link of the same command, which the probe link is. Then
+it writes placement.tsv to --placement.
 
 append never stops a link for a change of the code. The build falls back to its normal link when a section that a plan
 keeps has a call or a thread-local access that lld may relax and that the plan does not test or decide (one whose delta
@@ -112,12 +116,16 @@ a check link fails (lld's error that it cannot move the location counter backwar
 asks (a kept section that it changes, a kept section at its base address and size of which it relaxes a call or a
 thread-local access otherwise than at the base, or does not tell whether it relaxes a call otherwise, a section that an
 earlier check link moved and whose cause the last one does not show, a cause that it does not show, PT_LOAD segments
-that are not the probe link's, a section that it takes or lacks), and when a file or section name holds a double quote
-or a line break, which the script cannot quote. append then writes no script (it removes one that is there), so that
-link-fuzz-target links normally; placement.tsv gives each .text input section of the probe link the place normal, its
-address there, the cause normal_layout and the reason; and it prints one line, `layout.py append: <target> (<build>):
-normal link: <reason>`, which names the function and its call, or the line of the script. It exits 1 when the probe
-link fails, as the normal link of the same command would; 2 when an input cannot be read; else 0.
+that are not the probe link's, a section that it takes or lacks), when layout.py check's own decision on the layout
+that append would keep fails it (the reason is `layout.py check would fail the layout: ` and the text of check's first
+failure after its label: the function, where it comes from, and what fails) or append cannot make or read back the
+entry of that decision (`layout.py check could not read the layout: ` and the error), and when a file or section name
+holds a double quote or a line break, which the script cannot quote. So an append build that keeps its layout passes
+layout.py check. append then writes no script (it removes one that is there), so that link-fuzz-target links
+normally; placement.tsv gives each .text input section of the probe link the place normal, its address there, the
+cause normal_layout and the reason; and it prints one line, `layout.py append: <target> (<build>): normal link:
+<reason>`, which names the function and its call, or the line of the script. It exits 1 when the probe link fails, as
+the normal link of the same command would; 2 when an input cannot be read; else 0.
 
 The builder image runs this file with its own python3, and the host runs its commands: it takes the standard library
 only, and the syntax of Python 3.9.
@@ -177,6 +185,9 @@ RELAX_PASSES = 30
 ASSIGNMENT_STEPS = 10000
 # The columns of a map line: address, load address, size (hexadecimal) and alignment (decimal, as lld writes it).
 MAP_COLUMNS = re.compile(r" *([0-9a-f]+) +[0-9a-f]+ +([0-9a-f]+) +([0-9]+) ")
+# The columns that record_link (infra/base-builder/link-fuzz-target) strips from the start of a copy of a line of lld's
+# map, with the blank after them, as its awk program writes them (record_map).
+RECORD_COLUMNS = re.compile(rb" *[0-9a-f]+ +[0-9a-f]+ +[0-9a-f]+ +[0-9]+ ")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 DECIMAL = re.compile(r"[0-9]{1,20}")
 HEX = re.compile(r"-?0x[0-9a-f]{1,16}")
@@ -351,6 +362,21 @@ def map_entries(text):
             file, member = file[:open_at], file[open_at + 1:-1]
         lines.append(MapLine(address, int(found.group(2), 16), int(found.group(3)), file, member, section, loaded))
     return lines
+
+
+def record_map(data):
+    """The map that a link's record holds, byte for byte, of the bytes `data` of lld's map: record_link in
+    infra/base-builder/link-fuzz-target keeps a line, with a line break after it, when the rest of the line past the
+    columns (RECORD_COLUMNS, at its start; the whole line when they are not there) starts with eight blanks and a
+    character that is not a blank, and holds `:(`, in the map's order. That is the rule of its awk program, which a
+    last line with no line break after it gets too: the input-section lines of the map (read_map)."""
+    kept = []
+    for line in data.split(b"\n"):
+        columns = RECORD_COLUMNS.match(line)
+        rest = line[columns.end():] if columns else line
+        if rest[:8] == b" " * 8 and rest[8:9] != b" " and b":(" in rest:
+            kept.append(line + b"\n")
+    return b"".join(kept)
 
 
 def is_text(section):
@@ -1315,15 +1341,45 @@ def store_reader(raw):
     return read
 
 
+def entry_files(mapping, binary, name, objects, key_file, wraps, placement):
+    """The files of a layout tree's entry of a link but binary.sha256 ({file name: bytes}): map, sections.tsv,
+    calls.tsv, output.tsv and wraps, and placement.tsv when `placement` is not None. `mapping` is the bytes of the
+    link's map, `binary` those of its unstripped binary, which `name` names in a message, `objects` its Objects,
+    `key_file` describe's key_file, `wraps` the bytes of its wraps (one function a line) and `placement` those of its
+    placement.tsv. collect makes each entry of a record so (collect_target), and the append mode the entry of its last
+    check link, which is the final link (check_guard): one maker of the files that layout.py check reads."""
+    output = output_rows(Elf(binary, name))
+    wrapped = {line for line in text_of(wraps).split("\n") if line}
+    inputs, calls = describe(read_map(text_of(mapping)), objects, key_file, wrapped, output_of(output, name))
+    files = {"map": mapping, "sections.tsv": tsv(sections_rows(inputs)), "calls.tsv": tsv(calls_rows(calls)),
+             "output.tsv": tsv(output), "wraps": wraps}
+    if placement is not None:
+        files["placement.tsv"] = placement
+    return files
+
+
+def write_entry(directory, files):
+    """Write the files `files` ({file name: bytes}, of TREE_FILES) of a layout tree's entry to `directory`, which is
+    made when it is not there, and remove each other file of TREE_FILES that stands there."""
+    os.makedirs(directory, exist_ok=True)
+    for file in TREE_FILES:
+        path = os.path.join(directory, file)
+        if file in files:
+            write_new(path, files[file])
+        elif os.path.lexists(path):
+            os.unlink(path)
+
+
 def collect_target(raw, name, binary, digest, store):
     """The files of the layout tree's entry of the fuzz target `name` of the build $OUT `raw`, whose bytes are
-    `binary` and their sha256 `digest`, with `store` the build's store_reader: {file name: bytes}. Raise LayoutError
-    when its record is incomplete, when it has no wraps, or when its store lacks a file its map names."""
+    `binary` and their sha256 `digest`, with `store` the build's store_reader: {file name: bytes} (entry_files, and
+    binary.sha256). Raise LayoutError when its record is incomplete, when it has no wraps, or when its store lacks a
+    file its map names."""
     record = below(raw, ".records", digest)
     mapping = read_regular(below(record, "map"))
     inputs = read_inputs(below(record, "inputs.tsv"))
     try:
-        wraps_data = read_regular(below(record, "wraps"))
+        wraps = read_regular(below(record, "wraps"))
     except LayoutError as error:
         raise LayoutError(f"the record has no wraps: {error}") from None
     renamed = {}
@@ -1333,26 +1389,15 @@ def collect_target(raw, name, binary, digest, store):
     if os.path.lexists(os.path.join(record, "placement.tsv")):
         placement = read_regular(below(record, "placement.tsv"))
     twin = read_regular(below(raw, ".stripped", digest))
-    wraps = {line for line in text_of(wraps_data).split("\n") if line}
 
     def read(file):
         if file not in inputs:
             raise LayoutError(f"the record's store lacks {file}: its inputs.tsv does not name it")
         return store(file, inputs[file][1])
 
-    key_file = key_file_for(renamed, lambda file: inputs[file][0])
-    output = output_rows(Elf(binary, name))
-    inputs_of, calls = describe(read_map(text_of(mapping)), Objects(read), key_file, wraps, output_of(output, name))
-    files = {
-        "map": mapping,
-        "sections.tsv": tsv(sections_rows(inputs_of)),
-        "calls.tsv": tsv(calls_rows(calls)),
-        "output.tsv": tsv(output),
-        "binary.sha256": f"{digest}  unstripped\n{hashlib.sha256(twin).hexdigest()}  stripped\n".encode(),
-        "wraps": wraps_data,
-    }
-    if placement is not None:
-        files["placement.tsv"] = placement
+    files = entry_files(mapping, binary, name, Objects(read), key_file_for(renamed, lambda file: inputs[file][0]),
+                        wraps, placement)
+    files["binary.sha256"] = f"{digest}  unstripped\n{hashlib.sha256(twin).hexdigest()}  stripped\n".encode()
     return files
 
 
@@ -1396,14 +1441,7 @@ def collect(builds, out, names=None):
     if not layouts:
         raise LayoutError(f"{builds} holds no link record")
     for (build, name), files in sorted(layouts.items()):
-        directory = os.path.join(out, build, name)
-        os.makedirs(directory, exist_ok=True)
-        for file in TREE_FILES:
-            path = os.path.join(directory, file)
-            if file in files:
-                write_new(path, files[file])
-            elif os.path.lexists(path):
-                os.unlink(path)
+        write_entry(os.path.join(out, build, name), files)
 
 
 # ── pairing ──────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -1902,6 +1940,15 @@ def compare(label, base, new):
     return failures, lines
 
 
+def check_decision(label, base, directory):
+    """layout.py check's decision on the entry `directory` of a layout tree against the base entry's Layout `base`:
+    the entry is read as check reads it (read_layout) and compared as check compares each entry (compare, with
+    `label` in its lines). The text of the first FAIL line after `FAIL <label>: ` (the function, where it comes from,
+    and what fails), or None when compare finds no failure."""
+    failures, _ = compare(label, base, read_layout(directory))
+    return failures[0][len(f"FAIL {label}: "):] if failures else None
+
+
 def entries(tree):
     """The (build, target) pairs of a layout tree: its directories <build>/<target>/."""
     try:
@@ -2036,8 +2083,10 @@ class Fallback(Exception):
     """Why the append mode cannot keep the base's addresses in a link, which then falls back to its normal link
     (append_link): a section that a plan keeps has a call or a thread-local access that lld may relax and that the plan
     does not test or decide, or a line of calls.tsv that only one of the two links has, a check link fails or is not
-    what the plan asks, or a file or section name holds a double quote or a line break, which the script cannot quote.
-    Its text is the reason, for a person: it names the function and its call, or the line of the script."""
+    what the plan asks, layout.py check's own decision on the layout that the append mode would keep fails it or the
+    entry of that decision cannot be made or read back (check_guard), or a file or section name holds a double quote
+    or a line break, which the script cannot quote. Its text is the reason, for a person: it names the function and
+    its call, the line of the script, the cause of check's first failure, or the error."""
 
 
 # Where the append mode puts a .text input section of the link: `place` (kept, hole, end, or normal for a normal
@@ -2725,8 +2774,9 @@ def placement_rows(found, places, pairing, base):
 
 def append(entry, work, script, placement, wraps, renamed, command):
     """The append mode (module docstring), for the base layout tree's entry `entry`: 0, also when the build falls
-    back to its normal link. Raise AppendError when the probe link fails, and LayoutError when an input cannot be
-    read."""
+    back to its normal link. It keeps a layout only when layout.py check's own decision on it passes (check_guard), so
+    that an append build that keeps its layout passes layout.py check. Raise AppendError when the probe link fails, and
+    LayoutError when an input cannot be read."""
     parts = os.path.normpath(entry).split(os.sep)
     label = f"{parts[-1]} ({parts[-2]})" if len(parts) > 1 else parts[-1]
     try:
@@ -2737,7 +2787,8 @@ def append(entry, work, script, placement, wraps, renamed, command):
 
 def append_link(label, entry, work, script, placement, wraps, renamed, command):
     wrapped = wraps_of(command)
-    write_new(wraps, "".join(f"{name}\n" for name in wrapped).encode("utf-8", "surrogateescape"))
+    wraps_data = "".join(f"{name}\n" for name in wrapped).encode("utf-8", "surrogateescape")
+    write_new(wraps, wraps_data)
     probe_map, probe_binary = os.path.join(work, "probe.map"), os.path.join(work, "probe")
     status, output = run(command + [f"-Wl,-Map={probe_map}", "-o", probe_binary])
     if status:
@@ -2754,7 +2805,9 @@ def append_link(label, entry, work, script, placement, wraps, renamed, command):
     # The probe link's lines with their deltas, as collect gives the final link's: call_tests and tls_tests skip a line
     # whose delta is not known, which layout.py check cannot verify.
     output = binary_output(probe_binary)
-    inputs, calls = describe(lines, Objects(read_linked), key_file, set(wrapped), output)
+    # The objects of the link, which the check links and the final link read too (check_guard).
+    objects = Objects(read_linked)
+    inputs, calls = describe(lines, objects, key_file, set(wrapped), output)
     by_row = collections.defaultdict(list)
     for call in calls:
         by_row[call.row].append(call)
@@ -2762,27 +2815,34 @@ def append_link(label, entry, work, script, placement, wraps, renamed, command):
                    {row for row, line in enumerate(lines) if line.loaded}, text_lines(entries))
     pairing = pair(base.inputs, probe.inputs)
     text = [i for i in probe.inputs if is_text(i.section)]
+    # Each .text input section at its address in the probe link, which a normal link of the same command gives it.
+    at_probe = [(i, i.address) for i in text]
 
-    def normal_link(places, message):
+    def normal_link(rows, message):
         # No script, so that link-fuzz-target links normally: each .text input section at the probe link's address.
         if os.path.lexists(script):
             os.unlink(script)
-        write_new(placement, tsv(placement_rows([(i, i.address) for i in text], places, pairing, base)))
+        write_new(placement, rows)
         print(f"layout.py append: {label}: {message}", file=sys.stderr)
         return 0
 
     try:
         planned, found = checked_plan(base, probe, pairing, lines, internal, work, script, command)
+        # The final link: the last check link, with the script; with none (readonly_growth), a normal link of the same
+        # command, which the probe link is.
+        final = "check" if planned.script is not None else "probe"
+        rows = tsv(placement_rows(found if planned.script is not None else at_probe, planned.places, pairing, base))
+        check_guard(label, base, work, final, objects, key_file, wraps_data, rows)
     except Fallback as error:
         reason = re.sub(r"[\t\n\r]", " ", str(error))
-        return normal_link({i.row: Place("normal", i.address, NORMAL_LAYOUT, reason) for i in text},
-                           f"normal link: {reason}")
+        places = {i.row: Place("normal", i.address, NORMAL_LAYOUT, reason) for i in text}
+        return normal_link(tsv(placement_rows(at_probe, places, pairing, base)), f"normal link: {reason}")
     if planned.script is None:
-        return normal_link(planned.places, f"the read-only data in front of .text grew by {planned.growth[0]} bytes, "
-                           f"past its room of {planned.growth[1]} bytes, so this is a normal link, and every function "
-                           "whose code did not change moves (readonly_growth)")
+        return normal_link(rows, f"the read-only data in front of .text grew by {planned.growth[0]} bytes, past its "
+                           f"room of {planned.growth[1]} bytes, so this is a normal link, and every function whose "
+                           "code did not change moves (readonly_growth)")
     places = planned.places
-    write_new(placement, tsv(placement_rows(found, places, pairing, base)))
+    write_new(placement, rows)
     kept = sum(place.place == "kept" for place in places.values())
     causes = collections.Counter(place.cause for place in places.values() if place.cause != "-")
     counts = ", ".join(f"{cause}: {causes[cause]}" for cause in CAUSES if causes[cause])
@@ -2792,6 +2852,31 @@ def append_link(label, entry, work, script, placement, wraps, renamed, command):
     print(f"layout.py append: {label}: {kept} kept, {sum(causes.values())} moved" + (f" ({counts})" if counts else "")
           + f", {changed} changed or new; {tail}", file=sys.stderr)
     return 0
+
+
+def check_guard(label, base, work, final, objects, key_file, wraps, placement):
+    """Make layout.py check's own decision on the layout that the append mode is about to keep, against the base
+    entry's Layout `base`: the decision of `layout.py check BASE NEW` for this (build, target) on the entry that
+    collect will write from the final link, whose map and binary are work/<final>.map and work/<final>: the last check
+    link (check), which the final link is (the same command, with the same script), or, for a normal link of
+    readonly_growth, the probe link (probe), which is a normal link of the same command. Its files are made as collect
+    makes them (entry_files), with the map that the link's record will hold (record_map), the link's Objects
+    `objects`, describe's key_file `key_file`, the bytes of its wraps `wraps` and those of the placement.tsv
+    `placement` that append is about to write. They are written to work/entry, and read back and compared as check
+    reads and compares them (check_decision). Raise Fallback, naming the cause of check's first failure, when check
+    would fail the layout, and naming the error when the entry cannot be made or read back (a LayoutError, a defect of
+    the append mode, which never stops a link for a change of the code): so an append build that keeps its layout
+    passes layout.py check, whatever reading of a line of calls.tsv the plan and check may come to differ in."""
+    binary = os.path.join(work, final)
+    directory = os.path.join(work, "entry")
+    try:
+        mapping = record_map(read_regular(os.path.join(work, f"{final}.map")))
+        write_entry(directory, entry_files(mapping, read_regular(binary), binary, objects, key_file, wraps, placement))
+        why = check_decision(label, base, directory)
+    except LayoutError as error:
+        raise Fallback(f"layout.py check could not read the layout: {error}") from None
+    if why:
+        raise Fallback(f"layout.py check would fail the layout: {why}")
 
 
 def pattern_sections(probe, row):
@@ -2990,14 +3075,20 @@ def main(argv=None):
                     "with its base linked size (one that is not, and whose call or thread-local access the check link "
                     "relaxes otherwise, moves, with jal_reach or tls_reach, and the plan runs again) and relaxed there "
                     "as at the base, that the PT_LOAD segments are the probe link's and that no two of them share a "
-                    "page, and write placement.tsv. When the read-only data in front of .text grew past its room, "
-                    "write no script (a normal link). Never stop a link for a change of the code: when a kept section "
-                    "has a call or a thread-local access that the plan cannot test or decide, when the check link "
-                    "fails or is not what the plan asks, or when a file or section name holds a double quote or a "
+                    "page. When the read-only data in front of .text grew past its room, write no script (a normal "
+                    "link). Then make layout.py check's own decision on the layout it would keep (the entry that "
+                    "collect would write from the final link, with the map that its record will hold and the "
+                    "placement.tsv it would write, against ENTRY: the final link is the last check link, or with no "
+                    "script the probe link), and write placement.tsv. Never stop a link for a change of the code: when "
+                    "a kept section has a call or a thread-local access that the plan cannot test or decide, when the "
+                    "check link fails or is not what the plan asks, when layout.py check would fail the layout it "
+                    "would keep (naming the cause of check's first failure) or the entry of that decision cannot be "
+                    "made or read back (naming the error), or when a file or section name holds a double quote or a "
                     "line break, which the script cannot quote, write no script (the build falls back to its normal "
                     "link), give each .text input section of placement.tsv the cause normal_layout and the reason, "
-                    "and print one line that names the function and its call, or the line of the script. Exit 1 when "
-                    "the probe link fails, 2 when an input cannot be read.")
+                    "and print one line that names the function and its call, or the line of the script. So an "
+                    "append build that keeps its layout passes layout.py check. Exit 1 when the probe link fails, 2 "
+                    "when an input cannot be read.")
     appending.add_argument("--base", required=True, metavar="ENTRY",
                            help="the base layout tree's entry <tree>/<build>/<target>/")
     appending.add_argument("--work", required=True, metavar="DIR", help="an empty directory for the links")
