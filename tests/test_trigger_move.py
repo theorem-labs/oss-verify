@@ -1036,6 +1036,80 @@ match args:
         self.assertIn("oss-fuzz-theorems-2026.10, none: make passes, publish fails", caught)
         self.assertIn("make gave no digest for oss-fuzz-theorems-2026.10: 'localhost:5000/", caught)
 
+    # make's line that writes the digest of its row, which probe, docker-tests and publish read.
+    DIGEST_WRITE = '          echo "${MADE#*@}" > "$RUNNER_TEMP/fp-digest/$BASE_ROW.digest"\n'
+
+    def no_digest_case(self, name, *changes):
+        """make's steps (run_make) for each base row of its matrix, on a table with no frame-pointer row, in a copy of
+        the repository whose line DIGEST_WRITE writes no file, with `changes` too. make must then fail at its upload of
+        the digest (if-no-files-found: error), so the run of Toolchain images on the pull request and on main fails
+        there, and not later, in publish on main, on 'make gave no digest'."""
+        tree = self.copy_tree(name, [(f".github/workflows/{self.IMAGES}", self.DIGEST_WRITE, "          true\n"),
+                                     *changes])
+        images = self.workflow(tree, self.IMAGES)
+        rows = images["jobs"]["make"]["strategy"]["matrix"]["base"]
+        bases = self.base_rows(rows)
+        registry, _, _ = self.registry_of(bases)
+        outcomes = {row: self.run_make(images, row, self.checkout_of(bases), self.crane_home(registry))[0]
+                    for row in rows}
+        self.assertEqual({row: outcome.startswith("fails at its upload of ") for row, outcome in outcomes.items()},
+                         dict.fromkeys(rows, True),
+                         f"make's outcome for each base row when no file is at the path of its upload: {outcomes}")
+
+    def test_make_fails_at_its_upload_when_no_digest_is_written(self):
+        self.no_digest_case("no digest")
+
+    def test_control_make_upload_without_if_no_files_found_error(self):
+        with self.assertRaises(AssertionError) as caught:
+            self.no_digest_case("no digest, no error", (f".github/workflows/{self.IMAGES}",
+                                                        "          if-no-files-found: error\n", ""))
+        self.assertIn("when no file is at the path of its upload", str(caught.exception))
+
+    def packages_case(self, tree=ROOT):
+        """publish's push step (run_push) for each base row of its matrix, with the digest that make made, on a table
+        with no frame-pointer row: ghcr.io holds no frame-pointer image, so the step makes each image, logs in and
+        copies it. After the grant, this job's token can write to every package that the grant covers, so each
+        command of crane names a reference of ghcr.io only in PACKAGE or as the row's base image, which the step reads,
+        and writes (the target of crane copy, the tag of crane mutate) only to its own registry (localhost:5000) or
+        PACKAGE."""
+        publish = self.workflow(tree, self.PUBLISH)
+        rows = publish["jobs"]["publish"]["strategy"]["matrix"]["base"]
+        bases = self.base_rows(rows)
+        registry, made, _ = self.registry_of(bases)
+        where, home = self.checkout_of(bases), self.crane_home(registry)
+        found = {}
+        for row in rows:
+            temp = pathlib.Path(tempfile.mkdtemp(dir=self.dir))
+            self.put_crane(temp / "bin")
+            (temp / "fp-digest").mkdir()
+            (temp / "fp-digest" / f"{row}.digest").write_text(made[row] + "\n")
+            rc, log, calls = self.run_push(publish, row, where, home, temp)
+            self.assertEqual(rc, 0, f"{row}: {log}")
+            found[row] = []
+            for call in calls:
+                writes = call[2:3] if call[0] == "copy" else call[call.index("-t") + 1:][:1] if "-t" in call else []
+                found[row] += [f"crane {' '.join(call)} names {arg}" for arg in call
+                               if arg.partition("/")[:2] == ("ghcr.io", "/") and arg != bases[row][1]
+                               and arg.partition("@")[0].partition(":")[0] != self.PACKAGE]
+                found[row] += [f"crane {' '.join(call)} writes to {to}" for to in writes
+                               if not to.startswith(("localhost:5000/", f"{self.PACKAGE}:", f"{self.PACKAGE}@"))]
+        self.assertEqual(found, dict.fromkeys(rows, []),
+                         "the commands of publish's crane that name a package of ghcr.io other than PACKAGE and the "
+                         "row's base image, or write outside PACKAGE and its own registry")
+
+    def test_publish_names_no_package_of_ghcr_io_but_the_one_and_the_base_image(self):
+        self.packages_case()
+
+    def test_control_publish_writes_to_a_second_package(self):
+        login = '            echo "$GH_TOKEN" | crane auth login ghcr.io --username "$GITHUB_ACTOR" --password-stdin\n'
+        changed = self.copy_tree("a second package", [(f".github/workflows/{self.PUBLISH}", login, login
+                                 + '            crane mutate "$base" --env OFT_FRAME_POINTERS=1'
+                                 ' -t "${name}-mirror:frame-pointers-$HEAD_SHA" > /dev/null\n')])
+        self.maxDiff = None  # the message then names each command that it found
+        with self.assertRaises(AssertionError) as caught:
+            self.packages_case(changed)
+        self.assertIn("-mirror:frame-pointers-", str(caught.exception))
+
     def test_publish_starts_on_the_completed_runs_on_main_of_toolchain_images_alone(self):
         # workflow_run names a workflow by its name: a rename of toolchain-images.yaml, or of its branch, would stop
         # publishing with no error. No other workflow has that name.
