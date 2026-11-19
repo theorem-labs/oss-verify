@@ -3329,8 +3329,8 @@ def guard_decisions(monkeypatch):
     layout.check does not): a list that gets each one, None or the text of layout check's first failure."""
     found, real = [], layout.check_decision
 
-    def recorded(label, base, directory):
-        found.append(real(label, base, directory))
+    def recorded(base, directory):
+        found.append(real(base, directory))
         return found[-1]
     monkeypatch.setattr(layout, "check_decision", recorded)
     return found
@@ -3531,9 +3531,10 @@ def test_the_guards_map_is_the_map_that_the_record_of_the_link_holds(tmp_path, m
 
 
 def test_append_falls_back_when_its_guard_cannot_read_the_layout(tmp_path, monkeypatch, capsys):
-    # OSSV-675, the guard: an error while it makes or reads back its entry is a defect of the append mode, which never
-    # stops a link for a change of the code. Here the read-back of the guard's entry raises LayoutError: append exits
-    # 0 and falls back to its normal link, naming the error, and layout.py check passes the final link.
+    # OSSV-675, the guard: a LayoutError while it makes or reads back its entry is a defect of the append mode, which
+    # never stops a link for a change of the code (an error of the machine while it writes its entry stops the link
+    # with exit 2: the next test). Here the read-back of the guard's entry raises LayoutError: append exits 0 and falls
+    # back to its normal link, naming the error, and layout.py check passes the final link.
     command = ["clang", "main.o"]
     entry = link_setup(tmp_path, monkeypatch, kept_call_files([(0x8, "g")], 4), command)
     real, guarded = layout.read_layout, str(tmp_path / "links" / "entry")

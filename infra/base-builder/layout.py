@@ -1945,12 +1945,12 @@ def compare(label, base, new):
     return failures, lines
 
 
-def check_decision(label, base, directory):
+def check_decision(base, directory):
     """layout.py check's decision on the entry `directory` of a layout tree against the base entry's Layout `base`:
-    the entry is read as check reads it (read_layout) and compared as check compares each entry (compare, with
-    `label`). compare's first failure as it is, which check prints after `FAIL <label>: ` (the function, where it
-    comes from, and what fails), or None when compare finds no failure."""
-    failures, _ = compare(label, base, read_layout(directory))
+    the entry is read as check reads it (read_layout) and compared as check compares each entry (compare, whose label
+    reaches only its information lines, which this drops). compare's first failure as it is, which check prints after
+    `FAIL <label>: ` (the function, where it comes from, and what fails), or None when compare finds no failure."""
+    failures, _ = compare("NEW", base, read_layout(directory))
     return failures[0] if failures else None
 
 
@@ -2841,7 +2841,7 @@ def append_link(label, entry, work, script, placement, wraps, renamed, command):
         scripted = planned.script is not None
         final, at_final = ("check", found) if scripted else ("probe", at_probe)
         rows = tsv(placement_rows(at_final, planned.places, pairing, base))
-        check_guard(label, base, work, final, objects, key_file, wraps_data, rows)
+        check_guard(base, work, final, objects, key_file, wraps_data, rows)
     except Fallback as error:
         reason = re.sub(r"[\t\n\r]", " ", str(error))
         places = {i.row: Place("normal", i.address, NORMAL_LAYOUT, reason) for i in text}
@@ -2863,7 +2863,7 @@ def append_link(label, entry, work, script, placement, wraps, renamed, command):
     return 0
 
 
-def check_guard(label, base, work, final, objects, key_file, wraps, placement):
+def check_guard(base, work, final, objects, key_file, wraps, placement):
     """Make layout.py check's own decision on the layout that the append mode is about to keep, against the base
     entry's Layout `base`: the decision of `layout.py check BASE NEW` for this (build, target) on the entry that
     collect will write from the final link, whose map and binary are work/<final>.map and work/<final>: the last check
@@ -2883,7 +2883,7 @@ def check_guard(label, base, work, final, objects, key_file, wraps, placement):
     try:
         mapping = record_map(read_regular(os.path.join(work, f"{final}.map")))
         write_entry(directory, entry_files(mapping, read_regular(binary), binary, objects, key_file, wraps, placement))
-        why = check_decision(label, base, directory)
+        why = check_decision(base, directory)
     except LayoutError as error:
         raise Fallback(f"layout.py check could not read the layout: {error}") from None
     if why:
