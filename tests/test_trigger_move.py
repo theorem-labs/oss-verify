@@ -35,6 +35,8 @@ The move:
   (artifacts) Each script of .github/scripts that reads a file of a Build run's artifact (read_member) reads an
        artifact and a file that build.yaml uploads, with if-no-files-found: error. A step before the upload, in its
        job, writes that file.
+  (workflow_run) Each name that a workflow_run trigger listens to is the name of exactly one workflow file of
+       .github/workflows.
 The held runs (each test name holds the word held):
   route finds the held runs of a head on a run by hand. It counts the held runs that Held runs counts: neither counts a
   run of the oss-verify App's own label. The comment job approves them with a token of the oss-verify App that can
@@ -1725,6 +1727,67 @@ class BuildArtifacts(Stand):
             self.case(changed)
         self.assertIn("take-build-results (line ", str(caught.exception))
         self.assertNotIn("enroll-dispatch (line ", str(caught.exception))
+
+
+class WorkflowRunNames(Stand):
+    """(workflow_run): a workflow_run trigger names the workflows that it listens to by their name:, not by their file.
+    A rename of one of them stops the trigger, and a second file with the same name starts it for the runs of that
+    file too. No run fails either way. So each name in the workflows of a workflow_run trigger is the name of exactly
+    one workflow file of .github/workflows."""
+
+    # The files that listen to a workflow_run at the head.
+    LISTENERS = {"enroll-dispatch.yml", "held-runs.yml", "review.yml", "toolchain-images-publish.yaml"}
+
+    def case(self, tree=ROOT):
+        """Each workflow file of `tree` with a workflow_run trigger, and each name in its workflows: exactly one
+        workflow file there has that name. GitHub gives a file with no name: the name of its path. The message names
+        each (listening file, name) that no file or more than one file has. Return the names that each listening file
+        listens to, and the files of each name."""
+        directory = tree / ".github" / "workflows"
+        workflows = {path.name: yaml.load(path.read_text(), Loader=YAML_LOADER)
+                     for path in sorted(directory.iterdir()) if path.suffix in (".yml", ".yaml")}
+        held = {}
+        for file, workflow in workflows.items():
+            held.setdefault(workflow.get("name") or f".github/workflows/{file}", []).append(file)
+        listens = {file: list((triggers(workflow)["workflow_run"] or {}).get("workflows") or [])
+                   for file, workflow in workflows.items() if "workflow_run" in triggers(workflow)}
+        self.assertLessEqual(self.LISTENERS, set(listens),
+                             f"the files of .github/workflows with workflow_run: {listens}")
+        wrong = [f"{file} names no workflow in workflow_run" for file, names in listens.items() if not names]
+        for file, names in listens.items():
+            for name in names:
+                files = held.get(name, [])
+                if len(files) != 1:
+                    wrong.append(f"{file} listens to {name!r}, the name of "
+                                 + (f"{len(files)} files: {', '.join(files)}" if files else "no workflow file"))
+        self.assertEqual(wrong, [], "the names of the workflow_run triggers that are not the name of exactly one "
+                                    "workflow file:" + "".join(f"\n  {line}" for line in wrong)
+                                    + f"\nThe files of each name: {held}")
+        return listens, held
+
+    def test_workflow_run_each_name_is_the_name_of_one_workflow_file(self):
+        self.case()
+
+    def test_control_workflow_run_tests_renamed_in_tests_yaml_alone(self):
+        self.case(self.copy_tree("unchanged"))
+        changed = self.copy_tree("changed", [(".github/workflows/tests.yaml", 'name: "Tests"\n',
+                                              'name: "Unit tests"\n')])
+        with self.assertRaises(AssertionError) as caught:
+            self.case(changed)
+        for file in ("enroll-dispatch.yml", "held-runs.yml"):
+            self.assertIn(f"{file} listens to 'Tests', the name of no workflow file", str(caught.exception))
+
+    def test_control_workflow_run_a_second_file_named_build(self):
+        # No file listens to Enroll dispatch, so only the name Build breaks: two files hold it.
+        self.case(self.copy_tree("unchanged"))
+        changed = self.copy_tree("changed", [(".github/workflows/enroll-dispatch.yml", "name: Enroll dispatch\n",
+                                              "name: Build\n")])
+        with self.assertRaises(AssertionError) as caught:
+            self.case(changed)
+        for file in ("held-runs.yml", "review.yml"):
+            self.assertIn(f"{file} listens to 'Build', the name of 2 files: build.yaml, enroll-dispatch.yml",
+                          str(caught.exception))
+        self.assertNotIn("listens to 'Triage'", str(caught.exception))
 
 
 class SteeringFiles(unittest.TestCase):
