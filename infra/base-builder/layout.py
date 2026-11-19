@@ -58,7 +58,14 @@ patterns cannot place it apart from another section of its key, or two sections 
 bytes: twins, which the trees cannot tell apart), alignment (its base address does not meet its new alignment) or
 readonly_growth (the segment in front of .text grew past the page that holds the base's first .text byte). A
 same-bytes function of a key with twins must move: at its base address, the trees do not show that the section there
-is the base's own, since lld may take the archive members of one name in another order. An entry of NEW whose
+is the base's own, since lld may take the archive members of one name in another order. A same-bytes function at its
+base address with its base linked size is kept only when lld relaxes it as at the base, which the address and the size
+do not show alone: lld removes the 4 bytes of a relaxed call and 4 fewer nops of an R_RISCV_ALIGN after it, and two
+calls that lld relaxes the other way round keep the size too. So the two functions must have the same lines of
+calls.tsv (offsets and types), and the two lines at each offset must have relax 0, which lld never relaxes, or relax 1
+and the same delta, which is known; then a call's site, its address plus the offset less the delta, must be in jal's
+reach of its target in BASE exactly when it is in reach of its target in NEW, and the variable of a thread-local access
+must lie in the reach of a relaxed access in BASE exactly when it does in NEW. An entry of NEW whose
 placement.tsv marks a build that fell back to its normal link (normal_layout) claims no base address, as a normal link
 keeps none, and check verifies the mark: the lines of .text in its map (each .text input section, and each line of the
 linker's own between two of them) must lie as lld's normal link lays them out, the first at the start of .text in its
@@ -66,10 +73,11 @@ output.tsv and each other at the end of the line before it, its address plus its
 alignment as the map gives it, and .text must end at the end of the last line, so that a mark over an append build's
 layout fails. When the rule holds, the entry is listed as `normal layout: <reason>` and fails nothing else; check does
 not verify the reason. It exits 1 when a function neither keeps its base address nor moves for a cause that the trees
-show, or when a same-bytes function of a key with twins lies at its base address, naming the function, and when the
-.text of an entry marked normal_layout breaks that rule, naming the build and the first line that breaks it; 2 when a
-tree cannot be read (a placement.tsv in which some lines give normal_layout and others do not, or which gives two
-reasons, does not read) or the two share no (build, target); else 0.
+show, when a same-bytes function of a key with twins lies at its base address, or when one that keeps its base address
+and linked size is not relaxed as at the base, naming the function, and when the .text of an entry marked normal_layout
+breaks that rule, naming the build and the first line that breaks it; 2 when a tree cannot be read (a placement.tsv in
+which some lines give normal_layout and others do not, or which gives two reasons, does not read) or the two share no
+(build, target); else 0.
 
 wraps prints the functions that the link COMMAND wraps, one a line, sorted: each --wrap=<f> of the linker command
 that the compiler driver gives for it with -###, with each @file expanded. It exits 2 when the command fails or gives
@@ -87,24 +95,26 @@ tested wherever lld's relaxation there may put its target; one whose target may 
 not decided: it moves nothing, and the build falls back to its normal link (below). Each jal_reach cause that the plan
 finds holds in the final plan: a section that it moves for a call relaxed otherwise returns to its base address when
 no call of it is relaxed otherwise against that plan. It writes the lld script of that plan to --script, links with it
-(the check link, DIR/check), verifies that each kept section is at its base address with its base linked size (one
-whose call or thread-local access the check link relaxes otherwise moves, with jal_reach or tls_reach, and the plan
-runs again), that each jal_reach and tls_reach cause holds in the last check link, that the PT_LOAD segments are the
-probe link's and that no two of them share a page, and writes placement.tsv to --placement. When the read-only data in
-front of .text grew past its room, it writes no script: the link is a normal one, and placement.tsv gives every
-same-bytes section readonly_growth.
+(the check link, DIR/check), verifies that each kept section is at its base address with its base linked size (one that
+is not, and whose call or thread-local access the check link relaxes otherwise, moves, with jal_reach or tls_reach, and
+the plan runs again) and that the check link relaxes each call and thread-local access of it there as at the base, that
+each jal_reach and tls_reach cause holds in the last check link, that the PT_LOAD segments are the probe link's and
+that no two of them share a page, and writes placement.tsv to --placement. When the read-only data in front of .text
+grew past its room, it writes no script: the link is a normal one, and placement.tsv gives every same-bytes section
+readonly_growth.
 
 append never stops a link for a change of the code. The build falls back to its normal link when a section that a plan
 keeps has a call or a thread-local access that lld may relax and that the plan does not test or decide, when a check
 link fails (lld's error that it cannot move the location counter backward, for one) or is not what the plan asks (a
-kept section that it changes, a section that an earlier check link moved and whose cause the last one does not show, a
-cause that it does not show, PT_LOAD segments that are not the probe link's, a section that it takes or lacks), and
-when a file or section name holds a double quote or a line break, which the script cannot quote. append then writes no
-script (it removes one that is there), so that link-fuzz-target links normally; placement.tsv gives each .text input
-section of the probe link the place normal, its address there, the cause normal_layout and the reason; and it prints
-one line, `layout.py append: <target> (<build>): normal link: <reason>`, which names the function and its call, or
-the line of the script. It exits 1 when the probe link fails, as the normal link of the same command would; 2 when an
-input cannot be read; else 0.
+kept section that it changes, a kept section at its base address and size of which it relaxes a call or a thread-local
+access otherwise than at the base, or does not tell whether it relaxes a call otherwise, a section that an earlier
+check link moved and whose cause the last one does not show, a cause that it does not show, PT_LOAD segments that are
+not the probe link's, a section that it takes or lacks), and when a file or section name holds a double quote or a line
+break, which the script cannot quote. append then writes no script (it removes one that is there), so that
+link-fuzz-target links normally; placement.tsv gives each .text input section of the probe link the place normal, its
+address there, the cause normal_layout and the reason; and it prints one line, `layout.py append: <target> (<build>):
+normal link: <reason>`, which names the function and its call, or the line of the script. It exits 1 when the probe
+link fails, as the normal link of the same command would; 2 when an input cannot be read; else 0.
 
 The builder image runs this file with its own python3, and the host runs its commands: it takes the standard library
 only, and the syntax of Python 3.9.
@@ -1659,6 +1669,66 @@ def unshown(placement, fn, old, base, new, pairing):
     return None
 
 
+def unkept(fn, old, base, new):
+    """Why the two layouts do not show that lld relaxes the same-bytes function `fn` (of NEW) as at the base, where it
+    lies at the base address and with the base linked size of its partner `old` of BASE, or None. The address and the
+    size alone do not show it: lld removes the 4 bytes of a relaxed call and 4 fewer nops of an R_RISCV_ALIGN after
+    it, and two calls that lld relaxes the other way round keep the size too. The calls.tsv lines of the two functions
+    must have the same offsets and types, and the two lines at each offset must be relaxed alike: a line with relax 0
+    on both sides is never relaxed; else both have relax 1 and the same delta, which is known, so that the line lies
+    at the same address in both; a call's site, the address plus the offset less the delta, is in jal's reach of its
+    target in BASE (target_address) exactly when it is in reach of its target in NEW; and a thread-local access's
+    variable lies in the reach of a relaxed access from the start of the TLS segment in BASE (tls_offset) exactly when
+    it does in NEW. The reason names the first line, in offset order, that breaks the rule."""
+    then_lines, now_lines = [sorted(tree.calls.get(i.row, []), key=lambda c: (c.offset, c.type))
+                             for tree, i in ((base, old), (new, fn))]
+
+    def named(line):
+        what = "call" if line.type == "call" else "thread-local access"
+        return f"its {what} at offset {hex(line.offset)} ({call_target(line)})"
+
+    counts = [collections.Counter((c.offset, c.type) for c in lines) for lines in (then_lines, now_lines)]
+    if counts[0] != counts[1]:
+        first = min(set(counts[0] - counts[1]) | set(counts[1] - counts[0]))
+        side = 0 if counts[0][first] > counts[1][first] else 1
+        line = next(c for c in (then_lines, now_lines)[side] if (c.offset, c.type) == first)
+        return f"{named(line)} is a line of {('BASE', 'NEW')[side]}'s calls.tsv only"
+    for then, now in zip(then_lines, now_lines):
+        if not (then.relax or now.relax):
+            continue
+        if not (then.relax and now.relax):
+            return (f"{named(now)} has R_RISCV_RELAX in {'BASE' if then.relax else 'NEW'}'s calls.tsv only (relax 1): "
+                    "lld may relax it in one link and never in the other")
+        if then.delta is None or now.delta is None:
+            return (f"{named(now)}: {'BASE' if then.delta is None else 'NEW'}'s calls.tsv gives no delta for it (-): "
+                    "the bytes that relaxation removed in front of it, and so where it lies, are not known")
+        if then.delta != now.delta:
+            return (f"{named(now)}: relaxation removed {hex(then.delta)} bytes in front of it in BASE and "
+                    f"{hex(now.delta)} in NEW")
+        if now.type == "call":
+            site = old.address + now.offset - then.delta
+            before, after = target_address(then, base), target_address(now, new)
+            if before is None or after is None:
+                return f"{named(now)}: its target has no address in {'BASE' if before is None else 'NEW'}"
+            reach = (in_reach(site, before), in_reach(site, after))
+            if reach[0] != reach[1]:
+                return (f"{named(now)}: from its call site {hex(site)}, its target in BASE, {hex(before)}, is "
+                        f"{'in' if reach[0] else 'out of'} jal's reach, and its target in NEW, {hex(after)}, "
+                        f"{'in' if reach[1] else 'out of'} it")
+            continue
+        before = tls_offset(tls_address(then, base), base.output)
+        after = tls_offset(tls_address(now, new), new.output)
+        if before is None or after is None:
+            return (f"{named(now)}: its variable has no offset in the TLS segment of "
+                    f"{'BASE' if before is None else 'NEW'}")
+        reach = (tls_relaxed(before), tls_relaxed(after))
+        if reach[0] != reach[1]:
+            return (f"{named(now)}: its variable lies {hex(before)} bytes into BASE's TLS segment, "
+                    f"{'in' if reach[0] else 'out of'} the reach of a relaxed access, and {hex(after)} bytes into "
+                    f"NEW's, {'in' if reach[1] else 'out of'} it")
+    return None
+
+
 # ── check ────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 def function(i):
@@ -1711,11 +1781,15 @@ def normal_break(layout):
 
 
 def compare(label, base, new):
-    """The comparison of one (build, target) of two layouts: (failures, information), each a list of lines. An append
-    build that fell back to its normal link (normal_layout) claims no base address, as a normal link keeps none: its
-    information is `<label>: normal layout: <reason>` and the line of .text, and it fails only when its .text is not
-    laid out as lld's normal link lays it out (normal_break), so that a mark over an append build's layout fails. The
-    reason is not verified."""
+    """The comparison of one (build, target) of two layouts: (failures, information), each a list of lines. A same-bytes
+    function is kept when it lies at its partner's base address with its partner's linked size, its key has no twins
+    (pair), and lld relaxes it as at the base (unkept): each line of NEW's calls.tsv for it matches BASE's line of its
+    partner at the same offset and of the same type, which the address and the size do not show alone. Else it fails,
+    unless it moved for a cause that NEW's placement.tsv gives and the two layouts show (unshown). An append build that
+    fell back to its normal link (normal_layout) claims no base address, as a normal link keeps none: its information
+    is `<label>: normal layout: <reason>` and the line of .text, and it fails only when its .text is not laid out as
+    lld's normal link lays it out (normal_break), so that a mark over an append build's layout fails. The reason is
+    not verified."""
     reason = normal_layout(new.placement)
     if reason is not None:
         why = normal_break(new)
@@ -1744,6 +1818,12 @@ def compare(label, base, new):
                                 "key have the same bytes, which the trees cannot tell apart, and lld may take their "
                                 "archive members in another order: the trees do not show that the section at that "
                                 "address is the base's own, so it must move, with repeated_key")
+                continue
+            why = unkept(i, old, base, new)
+            if why:
+                failures.append(f"FAIL {label}: {function(i)}: address {hex(i.address)}, linked size {i.linked}: it "
+                                "has the same bytes and lies at its partner's base address with its base linked size, "
+                                f"but the trees do not show that lld relaxes it as at the base: {why}")
                 continue
             kept += 1
             continue
@@ -2684,10 +2764,12 @@ def checked_plan(base, probe, pairing, lines, internal, work, script, command):
     for the tests of the calls and for each plan. It writes the script of each plan to `script`, and links with it in
     `work` with the link's `command`. Raise Fallback when a plan does; when a check link fails (check_failure); when
     it does not put a kept section at its base address with its base linked size, and relaxes no call or thread-local
-    access of it otherwise; when the last check link does not show a jal_reach or tls_reach cause (for one of a
-    section that an earlier check link moved, the append mode never returns it, so that its links end); when its
-    PT_LOAD segments are not the probe link's, or two share a page; and when it takes a .text input section that the
-    probe link does not, or lacks one."""
+    access of it otherwise; when it puts a kept section there, but relaxes a call or a thread-local access of it
+    otherwise than at the base, or does not tell whether it relaxes a call of it otherwise (the plan predicted that
+    call wrongly, and the size does not show it); when the last check link does not show a jal_reach or tls_reach
+    cause (for one of a section that an earlier check link moved, the append mode never returns it, so that its links
+    end); when its PT_LOAD segments are not the probe link's, or two share a page; and when it takes a .text input
+    section that the probe link does not, or lacks one."""
     text = [i for i in probe.inputs if is_text(i.section)]
     tail = segment_tail(probe, internal)
     tests = call_tests(base, probe, pairing, tail).tests
@@ -2720,13 +2802,28 @@ def checked_plan(base, probe, pairing, lines, internal, work, script, command):
             if i.row not in link.match:
                 raise Fallback(f"{function(i)} is not in the check link's map")
             old, line = base.inputs[pairing.partner[i.row]], checked[link.match[i.row]]
-            if i.row in at_base:
-                continue
             decided = [(t, relaxed_there(t, line.address, link, at_base)) for t in tests.get(i.row, [])]
             test = next((t for t, there in decided if there), None)
             if test is None:
                 test = next((t for t in tls.get(i.row, [])
                              if tls_otherwise(t, tls_offset(linked_target(t.call, link), link.output))), None)
+            if i.row in at_base:
+                # At its base address with its base linked size, a section can still be relaxed otherwise than at the
+                # base: lld removes the 4 bytes of a relaxed call and 4 fewer nops of an R_RISCV_ALIGN after it, and
+                # two calls that lld relaxes the other way round keep the size too. The plan predicted such a call
+                # wrongly, so the build falls back to its normal link: the section does not move.
+                kept_there = (f"{function(i)}: the check link keeps it at its base address {hex(old.address)} with "
+                              f"its base linked size of {old.linked} bytes")
+                if test is not None:
+                    what = "call" if test.call.type == "call" else "thread-local access"
+                    raise Fallback(f"{kept_there}, and relaxes its {what} at offset {hex(test.offset)} "
+                                   f"({test.target}) otherwise than at the base: the plan predicted it wrongly, and "
+                                   "the size does not show it")
+                why = untested([], [(t, linked_span(t, link, at_base)) for t, there in decided if there is None])
+                if why:
+                    raise Fallback(f"{kept_there}; the append mode cannot test whether lld relaxes "
+                                   f"{'these' if len(why) > 1 else 'this'} otherwise: {'; '.join(why)}")
+                continue
             if test is None:
                 kept_there = (f"{function(i)}: the script keeps it at {hex(old.address)} with {old.linked} bytes, and "
                               f"the check link puts it at {hex(line.address)} with {line.size} bytes")
@@ -2800,14 +2897,19 @@ def main(argv=None):
                     "input section has the same bytes must keep its base address and linked size, or move for a "
                     "cause in NEW's placement.tsv that the two trees show (jal_reach, tls_reach, repeated_key, "
                     "alignment or readonly_growth); one of a key with two sections of the same bytes, which the trees "
-                    "cannot tell apart, must move. A build of NEW that fell back to its normal link (normal_layout "
-                    "in its placement.tsv) claims no base address, as a normal link keeps none; its mark is verified: "
-                    "the first line of .text in its map must lie at the start of .text in its output.tsv, each other "
-                    "line at the end of the line before it, rounded up to its alignment, and .text must end at the "
-                    "last line's end, as lld's normal link lays them out. When the rule holds, the build is listed as "
-                    "\"normal layout: <reason>\" and fails nothing else; the check does not verify the reason. Exit 1 "
-                    "when a function fails or a normal layout's .text breaks that rule, 2 when a tree cannot be read "
-                    "or the two share no (build, target).")
+                    "cannot tell apart, must move. One that keeps its base address and linked size must also be "
+                    "relaxed as at the base, which the size does not show: each line of NEW's calls.tsv for it must "
+                    "match BASE's line at the same offset and of the same type, with relax 0 on both sides, or with "
+                    "relax 1 and the same known delta, and with a call's target in jal's reach of its site, or a "
+                    "thread-local variable in the reach of a relaxed access, in both trees or in neither. A build of "
+                    "NEW that fell back to its normal link (normal_layout in its placement.tsv) claims no base "
+                    "address, as a normal link keeps none; its mark is verified: the first line of .text in its map "
+                    "must lie at the start of .text in its output.tsv, each other line at the end of the line before "
+                    "it, rounded up to its alignment, and .text must end at the last line's end, as lld's normal link "
+                    "lays them out. When the rule holds, the build is listed as \"normal layout: <reason>\" and fails "
+                    "nothing else; the check does not verify the reason. Exit 1 when a function fails or a normal "
+                    "layout's .text breaks that rule, 2 when a tree cannot be read or the two share no (build, "
+                    "target).")
     checking.add_argument("base", metavar="BASE", help="the base build's layout tree")
     checking.add_argument("new", metavar="NEW", help="the append build's layout tree")
     wrapping = commands.add_parser(
@@ -2822,17 +2924,17 @@ def main(argv=None):
                     "command (no -o, no map, no script). Write the link's wraps, link once normally in DIR (the "
                     "probe link), plan where each .text input section goes, write the linker script of that plan, "
                     "link with it in DIR (the check link) and verify that each kept section is at its base address "
-                    "with its base linked size (a kept section whose call or thread-local access the check link "
-                    "relaxes otherwise moves, with jal_reach or tls_reach, and the plan runs again), that the "
-                    "PT_LOAD segments are the probe link's and that no two of them share a page, and write "
-                    "placement.tsv. When the read-only data in front of .text grew past its room, write no script (a "
-                    "normal link). Never stop a link for a change of the code: when a kept section has a call or a "
-                    "thread-local access that the plan cannot test or decide, when the check link fails or is not "
-                    "what the plan asks, or when a file or section name holds a double quote or a line break, which "
-                    "the script cannot quote, write no script (the build falls back to its normal link), give each "
-                    ".text input section of placement.tsv the cause normal_layout and the reason, and print one line "
-                    "that names the function and its call, or the line of the script. Exit 1 when the probe link "
-                    "fails, 2 when an input cannot be read.")
+                    "with its base linked size (one that is not, and whose call or thread-local access the check link "
+                    "relaxes otherwise, moves, with jal_reach or tls_reach, and the plan runs again) and relaxed there "
+                    "as at the base, that the PT_LOAD segments are the probe link's and that no two of them share a "
+                    "page, and write placement.tsv. When the read-only data in front of .text grew past its room, "
+                    "write no script (a normal link). Never stop a link for a change of the code: when a kept section "
+                    "has a call or a thread-local access that the plan cannot test or decide, when the check link "
+                    "fails or is not what the plan asks, or when a file or section name holds a double quote or a "
+                    "line break, which the script cannot quote, write no script (the build falls back to its normal "
+                    "link), give each .text input section of placement.tsv the cause normal_layout and the reason, "
+                    "and print one line that names the function and its call, or the line of the script. Exit 1 when "
+                    "the probe link fails, 2 when an input cannot be read.")
     appending.add_argument("--base", required=True, metavar="ENTRY",
                            help="the base layout tree's entry <tree>/<build>/<target>/")
     appending.add_argument("--work", required=True, metavar="DIR", help="an empty directory for the links")

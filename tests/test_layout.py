@@ -1016,6 +1016,120 @@ def test_check_lists_twins_that_moved_with_repeated_key(tmp_path, capsys):
                           f"address {hex(old['address'])} -> {hex(now['address'])}")
 
 
+def failed_once(lines, *facts):
+    """Whether check's lines hold one FAIL line, of the function beta of plain/fuzz at its base address, and it holds
+    each of `facts`."""
+    failed = lines_with(lines, "FAIL")
+    return len(failed) == 1 and lines_with(failed, "FAIL plain/fuzz: beta (/work/a.o)", hex(BETA["address"]), *facts)
+
+
+def gamma_at(base_gamma, new_gamma):
+    """BASE and NEW (write_entry's arguments) in which beta keeps its base address and its linked size, and gamma,
+    which beta calls at 0xc through its global symbol (CALLS), lies at `base_gamma` at the base, and has other bytes
+    and lies at `new_gamma` in NEW."""
+    gamma = dict(GAMMA, address=new_gamma, sha256=sha(b"gamma 2"))
+    return ({"rows": [TABLE, ALPHA, BETA, dict(GAMMA, address=base_gamma), COMMENT], "out": output(gamma=base_gamma)},
+            {"rows": [TABLE, ALPHA, BETA, gamma, COMMENT], "out": output(gamma=new_gamma)})
+
+
+@pytest.mark.parametrize("base_gamma, new_gamma", [(0x11030, 0x211000), (0x211000, 0x11100)], ids=["lost", "gained"])
+def test_check_fails_for_a_kept_function_whose_call_is_relaxed_otherwise_at_its_base_address_and_size(
+        tmp_path, capsys, base_gamma, new_gamma):
+    # OSSV-675 review, the finding at layout.py:2723 (R1: a wrong "kept" is a defect). beta keeps its base address
+    # 0x11020 and its linked size, but from its call site 0x1102c gamma lies in jal's reach in one tree and out of it
+    # in the other: lld relaxed its call at 0xc otherwise than at the base. With an R_RISCV_ALIGN after the call, lld
+    # then removes 4 bytes more or fewer of its nops, so that beta keeps its size, but not its bytes. At 0e22d538 the
+    # check counts beta as kept. The control: gamma moves, but stays in jal's reach, and beta is kept.
+    base, new = gamma_at(base_gamma, new_gamma)
+    status, lines = run_check(tmp_path / "relaxed", capsys, new, base)
+    assert status == 1
+    assert failed_once(lines, "0xc (gamma)", hex(base_gamma), hex(new_gamma)), lines
+    assert lines_with(lines, "plain/fuzz: 1 kept", "1 failed")
+    base, new = gamma_at(0x11030, 0x11100)
+    status, lines = run_check(tmp_path / "control", capsys, new, base)
+    assert status == 0, lines
+    assert lines_with(lines, "plain/fuzz: 2 kept", "0 failed")
+
+
+def flipped():
+    """(BASE, NEW, the call that the FAIL line names) of two calls that lld relaxes the other way round. At the base
+    lld relaxed beta's call of alpha at 0x4 and kept its call of gamma at 0xc, whose site 0x11028 lies 0x100000 bytes
+    from gamma, one past jal's reach (DELTA_CALLS). In NEW alpha and gamma changed: alpha lies out of reach of the
+    first call, and gamma in reach of the second, whose site is 0x1102c, so lld keeps the first and relaxes the second,
+    and beta keeps its size."""
+    alpha = dict(ALPHA, address=0x211000, sha256=sha(b"alpha 2"))
+    gamma = dict(GAMMA, address=0x11100, sha256=sha(b"gamma 2"))
+    return ({"rows": [TABLE, ALPHA, BETA, dict(GAMMA, address=0x111028), COMMENT], "calls": DELTA_CALLS,
+             "out": output(gamma=0x111028)},
+            {"rows": [TABLE, alpha, BETA, gamma, COMMENT], "out": output(gamma=0x11100)}, "0x4 (row:1+0x0)")
+
+
+def delta_only():
+    """As flipped, but in NEW alpha and gamma lie where they lay at the base, and NEW's calls.tsv gives no byte in front
+    of the call of gamma at 0xc (delta 0x0), where BASE's gives 4."""
+    base, _, _ = flipped()
+    return base, dict(base, calls=CALLS), "0xc (gamma)"
+
+
+@pytest.mark.parametrize("scenario", [flipped, delta_only])
+def test_check_fails_for_a_kept_function_whose_calls_were_relaxed_with_other_deltas(tmp_path, capsys, scenario):
+    # OSSV-675 review, the finding at layout.py:2723: beta keeps its base address and its linked size when lld relaxes
+    # its two calls the other way round, and then the bytes that relaxation removed in front of the second call (its
+    # delta) differ. At 0e22d538 the check counts beta as kept. The control: NEW as BASE, and beta is kept.
+    base, new, named = scenario()
+    status, lines = run_check(tmp_path / "relaxed", capsys, new, base)
+    assert status == 1
+    assert failed_once(lines, named), lines
+    status, lines = run_check(tmp_path / "control", capsys, base, base)
+    assert status == 0, lines
+    assert lines_with(lines, "plain/fuzz: 3 kept", "0 failed")
+
+
+# CALLS, but with no delta (-) for beta's call of gamma at 0xc.
+NO_DELTA_CALLS = [CALLS[0], ("2", "0xc", "call", "1", "-", "global", "gamma", "0x0", "-", "-", "0x0")]
+TLS_BASE = {"rows": [TABLE, ALPHA, BETA, GAMMA, TV, COMMENT], "calls": TLS_CALLS, "out": output(tls=True)}
+
+
+@pytest.mark.parametrize("base, new, named", [
+    ({"rows": BASE_ROWS}, {"rows": BASE_ROWS, "calls": NO_DELTA_CALLS}, "0xc (gamma)"),
+    ({"rows": BASE_ROWS, "calls": NO_DELTA_CALLS}, {"rows": BASE_ROWS}, "0xc (gamma)"),
+    ({"rows": BASE_ROWS}, {"rows": BASE_ROWS, "out": output().replace("symbol\tgamma\t0x11030\n", "")}, "0xc (gamma)"),
+    ({"rows": BASE_ROWS}, {"rows": BASE_ROWS, "calls": [CALLS[0], CALLS[1][:3] + ("0",) + CALLS[1][4:]]},
+     "0xc (gamma)"),
+    ({"rows": BASE_ROWS}, {"rows": BASE_ROWS, "calls": CALLS[:1]}, "0xc (gamma)"),
+    (TLS_BASE, dict(TLS_BASE, out=output()), "0x8 (tv)"),
+], ids=["no-delta-in-new", "no-delta-in-base", "no-target-address", "relax-in-base-only", "line-in-base-only",
+        "no-tls-offset"])
+def test_check_fails_for_a_kept_function_whose_calls_the_trees_do_not_match_or_cannot_verify(tmp_path, capsys, base,
+                                                                                            new, named):
+    # OSSV-675 review, the finding at layout.py:2723: beta keeps its base address and its linked size, but the trees
+    # do not show that lld relaxed it as at the base: a delta that is not known, a target with no address in NEW (no
+    # object defines gamma, and NEW's output.tsv does not name it), a line that only one tree marks R_RISCV_RELAX or
+    # holds, or a thread-local variable with no offset in a TLS segment. At 0e22d538 the check counts beta as kept.
+    status, lines = run_check(tmp_path, capsys, new, base)
+    assert status == 1
+    assert failed_once(lines, named), lines
+
+
+def test_check_fails_for_a_kept_function_whose_thread_local_access_is_relaxed_otherwise(tmp_path, capsys):
+    # OSSV-675 review, the finding at layout.py:2723, for a thread-local access: beta keeps its base address and its
+    # linked size, and reads tv at 0x8 (TLS_CALLS), which lies 0x7ff bytes into the TLS segment at the base, the most
+    # whose access lld relaxes, and 0x800 bytes into it in NEW. At 0e22d538 the check counts beta as kept. The control:
+    # tv at 0x7ff in both, and beta is kept.
+    def trees(new_offset):
+        return [dict(TLS_BASE, rows=[TABLE, ALPHA, BETA, GAMMA, dict(TV, address=0x12000 + offset), COMMENT])
+                for offset in (0x7FF, new_offset)]
+
+    base, new = trees(0x800)
+    status, lines = run_check(tmp_path / "relaxed", capsys, new, base)
+    assert status == 1
+    assert failed_once(lines, "0x8 (tv)", "0x7ff", "0x800"), lines
+    base, new = trees(0x7FF)
+    status, lines = run_check(tmp_path / "control", capsys, new, base)
+    assert status == 0, lines
+    assert lines_with(lines, "plain/fuzz: 3 kept", "0 failed")
+
+
 # The reason that append gives when a build falls back to its normal link (append_link).
 FALLBACK = ("beta (/work/a.o): the plan keeps it at 0x11020, and the append mode cannot test the call at offset 0x4 "
             "(i): its target is an ifunc, whose call goes through lld's PLT entry, whose address no tree holds")
@@ -1066,11 +1180,13 @@ def test_check_fails_for_a_normal_layout_mark_over_an_append_builds_layout(tmp_p
     # fails, naming the build and gamma. At 4fc5f291 the copy passed, listed as a normal layout.
     beta = dict(BETA, address=0x11070, linked=0x14, size=0x14, sha256=sha(b"beta 2"))
     rows = [TABLE, ALPHA, GAMMA, beta, COMMENT]
+    # beta's calls (CALLS), at its row in NEW: gamma, at row 2 there, keeps its base's calls, none.
+    calls = [("3",) + c[1:] for c in CALLS]
     placement = [placed(ALPHA, place="kept"), placed(GAMMA, place="kept"), placed(beta, place="end")]
-    status, lines = run_check(tmp_path / "append", capsys, {"rows": rows, "placement": placement})
+    status, lines = run_check(tmp_path / "append", capsys, {"rows": rows, "calls": calls, "placement": placement})
     assert status == 0, lines
     assert lines_with(lines, "plain/fuzz: 2 kept, 0 moved with a cause, 1 changed or new, 0 failed")
-    status, lines = run_check(tmp_path / "forged", capsys, {"rows": rows, "placement": fell_back(rows)})
+    status, lines = run_check(tmp_path / "forged", capsys, {"rows": rows, "calls": calls, "placement": fell_back(rows)})
     assert (status, lines[:1] + lines[2:]) == (1, [f"plain/fuzz: normal layout: {FALLBACK}",
                                                    "  .text: start 0x11000 -> 0x11000, size 256 -> 256",
                                                    "layout check: 0 of 1 (build, target) pass"]), lines
@@ -2964,6 +3080,77 @@ def test_append_falls_back_to_the_normal_link_when_a_kept_section_calls_into_a_t
     entry = link_setup(root, monkeypatch, twin_files(False), command)
     assert run_append(root, entry, command) == 0
     assert appended(root, capsys)[".text.user"][:2] == ["kept", "0x11340"]
+
+
+def kept_call_files(calls, align):
+    """files(new) of a link of main.o: f, at the start of .text, which holds the calls `calls` (relocatable) and keeps
+    its bytes, at an alignment of `align`, and g, which changes and grows."""
+    def files(new):
+        return {"main.o": relocatable([("f", b"\1" * 0x20, align, calls),
+                                       ("g", b"\x99" * 0x30 if new else b"\2" * 0x10, 4, [])])}
+    return files
+
+
+def removed_of_f(calls, align, symbols):
+    """The bytes of f (kept_call_files) at 0x11300 that lld's relaxation removes as layout.relaxation models it, with
+    the symbols that its calls reach at `symbols` ({name: address})."""
+    elf = layout.Elf(kept_call_files(calls, align)(False)["main.o"], "main.o")
+    view = layout.Layout([], {}, layout.Output([], [], symbols), {}, set(), [])
+    found = [(r, relaxable, layout.Call(0, r.offset, "call", relaxable, None, "global", elf.symbol(table, r.symbol).name,
+                                        0, None, 0, 0) if r.type == layout.R_RISCV_CALL_PLT else None)
+             for r, table, relaxable in layout.ordered_relocations(elf, elf.named(".text.f")[0])]
+    return layout.relaxation(0x11300, found, view, False)[1]
+
+
+def test_append_falls_back_when_the_check_link_relaxes_a_kept_call_otherwise_in_front_of_alignment_nops(
+        tmp_path, monkeypatch, capsys):
+    # OSSV-675 review, the finding at layout.py:2723 (R1: a wrong "kept" is a defect; a move or a fallback is not),
+    # the shape of an R_RISCV_ALIGN. f calls stub at 0x0, a symbol that the linker makes (as --defsym= does), and after
+    # the call holds 4 bytes of nops that align its code at 0x8 to 8 bytes (an R_RISCV_ALIGN). At the base stub lies at
+    # 0x12000, in jal's reach of f's call site 0x11300: lld relaxes the call, removes 4 of its bytes and keeps the 4
+    # nops. The check link puts stub 4 MiB away: lld keeps the call's 8 bytes and removes the nops instead. f takes
+    # 0x1c bytes both ways, as layout.relaxation finds, and the stand-in for lld gives it 0x1c bytes in every link: the
+    # check link puts f at its base address with its base linked size, but not with its bytes. At 0e22d538 the append
+    # mode keeps f. Now the build falls back to its normal link, naming f and its call. The control: a check link that
+    # puts stub where the base did stays in the append mode, and keeps f.
+    calls = [(0x0, "stub"), (0x8, None, layout.R_RISCV_ALIGN, 4)]
+    assert [removed_of_f(calls, 8, {"stub": stub}) for stub in (0x12000, 0x400000)] == [4, 4]
+    command = ["clang", "main.o"]
+    root = tmp_path / "relaxed"
+    entry = link_setup(root, monkeypatch, kept_call_files(calls, 8), command, made={"stub": 0x12000},
+                       relaxed={"f": 4}, far={"stub": 0x400000})
+    assert run_append(root, entry, command) == 0
+    fallen_back(root, capsys, "f (main.o)", "0x11300", "0x0 (stub)")
+    root = tmp_path / "control"
+    entry = link_setup(root, monkeypatch, kept_call_files(calls, 8), command, made={"stub": 0x12000},
+                       relaxed={"f": 4})
+    assert run_append(root, entry, command) == 0
+    assert appended(root, capsys)[".text.f"][:2] == ["kept", "0x11300"]
+
+
+def test_append_falls_back_when_the_check_link_relaxes_two_kept_calls_the_other_way_round(tmp_path, monkeypatch,
+                                                                                          capsys):
+    # OSSV-675 review, the finding at layout.py:2723, the shape of two calls. f calls near at 0x0 and away at 0x8, two
+    # symbols that the linker makes. At the base near lies at 0x12000, in jal's reach of the first call site 0x11300,
+    # and away at 0x111304, 0x100000 bytes from the second call site 0x11304 (lld removed 4 bytes of the first call),
+    # one past jal's reach: lld relaxes the first call and keeps the second. The check link puts near 4 MiB away and
+    # away at 0x12000: lld keeps the first call and relaxes the second. f takes 0x1c bytes both ways, as
+    # layout.relaxation finds, and the stand-in for lld gives it 0x1c bytes in every link: the check link puts f at
+    # its base address with its base linked size, but not with its bytes. At 0e22d538 the append mode keeps f. Now the
+    # build falls back to its normal link, naming f and its first call. The control: a check link that puts both
+    # symbols where the base did stays in the append mode, and keeps f.
+    calls = [(0x0, "near"), (0x8, "away")]
+    made, far = {"near": 0x12000, "away": 0x111304}, {"near": 0x400000, "away": 0x12000}
+    assert [removed_of_f(calls, 4, symbols) for symbols in (made, far)] == [4, 4]
+    command = ["clang", "main.o"]
+    root = tmp_path / "relaxed"
+    entry = link_setup(root, monkeypatch, kept_call_files(calls, 4), command, made=made, relaxed={"f": 4}, far=far)
+    assert run_append(root, entry, command) == 0
+    fallen_back(root, capsys, "f (main.o)", "0x11300", "0x0 (near)")
+    root = tmp_path / "control"
+    entry = link_setup(root, monkeypatch, kept_call_files(calls, 4), command, made=made, relaxed={"f": 4})
+    assert run_append(root, entry, command) == 0
+    assert appended(root, capsys)[".text.f"][:2] == ["kept", "0x11300"]
 
 
 def test_a_kept_twin_is_at_its_own_members_base_address_when_lld_takes_the_members_in_another_order(tmp_path,
