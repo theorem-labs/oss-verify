@@ -604,6 +604,12 @@ Input = collections.namedtuple("Input", "row address linked file key member sect
 # and None for a line read from calls.tsv.
 Call = collections.namedtuple("Call", "row offset type relax delta kind target value definition target_delta "
                                       "removable")
+# A relocation of a section in lld's order (ordered_relocations), with what the steps of describe add to it: `table`
+# the index of its symbol table, and `relaxable` whether the next relocation is R_RISCV_RELAX, so that lld may relax
+# it (lld's relaxable); `call` its Call, for a relocation whose target decides a relaxation (TARGETED), else None, and
+# `anchor` the offset of the symbol of that Call's target in its section (code_relocations); and `target` (row,
+# anchor) of a Call whose target delta this link's relaxation decides, else None (relaxed_calls).
+Reloc = collections.namedtuple("Reloc", "relocation table relaxable call anchor target", defaults=(None, 0, None))
 
 
 def member_text(member):
@@ -627,11 +633,16 @@ def resolve(name, wraps):
 
 def ordered_relocations(elf, section):
     """The relocations of the section `section` of the object `elf` in lld's order, by offset (lld sorts them
-    stably): [(Relocation, the index of its symbol table, relaxable)], where relaxable is whether the next relocation
-    is R_RISCV_RELAX, so that lld may relax it (lld's relaxable)."""
+    stably): [Reloc], with no call, anchor or target."""
     ordered = sorted(elf.relocations(section.index), key=lambda item: item[0].offset)
-    return [(relocation, table, k + 1 < len(ordered) and ordered[k + 1][0].type == R_RISCV_RELAX)
+    return [Reloc(relocation, table, k + 1 < len(ordered) and ordered[k + 1][0].type == R_RISCV_RELAX)
             for k, (relocation, table) in enumerate(ordered)]
+
+
+def relaxed_code(name, flags):
+    """Whether describe relaxes the input section named `name` with the section flags `flags`, as lld relaxes code
+    alone: a .text input section (is_text) or another section with SHF_EXECINSTR."""
+    return is_text(name) or bool(flags & SHF_EXECINSTR)
 
 
 def assigned(sizes, candidates):
@@ -735,16 +746,17 @@ def alike(candidates):
         if any(symbol.shndx == section.index and symbol.bind in (STB_GLOBAL, STB_WEAK) for symbol in elf.symbols()):
             return False
         found = []
-        for relocation, table, relaxable in ordered_relocations(elf, section):
+        for entry in ordered_relocations(elf, section):
+            relocation = entry.relocation
             if relocation.type not in MODELED:
                 continue
             named = None
             if relocation.symbol:
-                symbol = elf.symbol(table, relocation.symbol)
+                symbol = elf.symbol(entry.table, relocation.symbol)
                 if symbol.bind not in (STB_GLOBAL, STB_WEAK):
                     return False
                 named = (symbol.name, symbol.bind == STB_WEAK and symbol.shndx == SHN_UNDEF)
-            found.append((relocation.offset, relocation.type, relocation.addend, named, relaxable))
+            found.append((relocation.offset, relocation.type, relocation.addend, named, entry.relaxable))
         read.add(tuple(found))
     return len(read) == 1
 
@@ -760,12 +772,10 @@ def describe(lines, objects, key_file, wraps, output=None):
     lld's order."""
     inputs, located, twins, rows = matched_lines(lines, objects, key_file)
     relocated = code_relocations(lines, located, twins, rows, wraps)
-    relaxed = relaxed_calls(lines, inputs, relocated, output)
     calls = []
-    for row, (_, entries) in sorted(relocated.items()):
+    for row, (_, entries) in sorted(relaxed_calls(lines, inputs, relocated, output).items()):
         if is_text(lines[row].section):
-            calls += [call for (relocation, _, _, _), call in zip(entries, relaxed[row])
-                      if relocation.type in LINE_TYPES]
+            calls += [entry.call for entry in entries if entry.relocation.type in LINE_TYPES]
     return inputs, calls
 
 
@@ -822,27 +832,27 @@ def matched_lines(lines, objects, key_file):
 
 def code_relocations(lines, located, twins, rows, wraps):
     """Each relocation of each section of code of a link, in lld's order (ordered_relocations): {row: (the
-    EF_RISCV_RVC flag of its object, [(Relocation, relaxable, Call or None, anchor)])}, in row order, for each map
-    line of a .text input section or of another section with SHF_EXECINSTR that is one section (`located`) or a twin
-    line (`twins`), which has the relocations of the first of its candidates, which name no local symbol (alike).
-    `lines` and `wraps` are describe's, and `located`, `twins` and `rows` matched_lines's.
+    EF_RISCV_RVC flag of its object, [Reloc])}, in row order, for each map line of a section of code (relaxed_code)
+    that is one section (`located`) or a twin line (`twins`), which has the relocations of the first of its
+    candidates, which name no local symbol (alike). `lines` and `wraps` are describe's, and `located`, `twins` and
+    `rows` matched_lines's.
 
-    Each relocation whose target decides a relaxation (TARGETED) has a Call, with no delta, target delta or removable
-    (relaxed_calls gives them): each call and each thread-local access of a .text input section is one. A global one
-    names its definition in the link's objects (definitions), and one that an object of the link defines as an
-    STT_GNU_IFUNC is an ifunc one. Its anchor is the offset of its symbol in its section, which lld moves: the value
-    of a local symbol or of a global's definition, and else 0, as for a section symbol."""
+    Each relocation whose target decides a relaxation (TARGETED) gets its call, a Call with no delta, target delta or
+    removable (relaxed_calls gives them): each call and each thread-local access of a .text input section is one. A
+    global one names its definition in the link's objects (definitions), and one that an object of the link defines
+    as an STT_GNU_IFUNC is an ifunc one. Its anchor is the offset of its symbol in its section, which lld moves: the
+    value of a local symbol or of a global's definition, and else 0, as for a section symbol."""
     relocated = {}
     for row, (instance, elf, section) in sorted({**located, **twins}.items()):
         line = lines[row]
-        if not (is_text(line.section) or section.flags & SHF_EXECINSTR):
+        if not relaxed_code(line.section, section.flags):
             continue
         entries = []
-        for relocation, table, relaxable in ordered_relocations(elf, section):
-            call, anchor = None, 0
+        for entry in ordered_relocations(elf, section):
+            relocation = entry.relocation
             if relocation.type in TARGETED:
                 line_type = "call" if relocation.type in (R_RISCV_CALL, R_RISCV_CALL_PLT) else "tprel"
-                symbol = elf.symbol(table, relocation.symbol)
+                symbol, anchor = elf.symbol(entry.table, relocation.symbol), 0
                 if symbol.bind == STB_LOCAL or symbol.type == STT_SECTION:
                     if symbol.type == STT_GNU_IFUNC:
                         kind, target, value = "ifunc", symbol.name, relocation.addend
@@ -855,30 +865,32 @@ def code_relocations(lines, located, twins, rows, wraps):
                 else:
                     kind = "weak" if symbol.bind == STB_WEAK and symbol.shndx == SHN_UNDEF else "global"
                     target, value = resolve(symbol.name, wraps), relocation.addend
-                call = Call(row, relocation.offset, line_type, relaxable, None, kind, target, value, None, None, None)
-            entries.append((relocation, relaxable, call, anchor))
+                entry = entry._replace(call=Call(row, relocation.offset, line_type, entry.relaxable, None, kind,
+                                                 target, value, None, None, None), anchor=anchor)
+            entries.append(entry)
         relocated[row] = (elf.flags & EF_RISCV_RVC, entries)
-    found = definitions({call.target for _, entries in relocated.values() for _, _, call, _ in entries
-                         if call is not None and call.kind in ("global", "weak")}, lines, located, rows)
+    found = definitions({entry.call.target for _, entries in relocated.values() for entry in entries
+                         if entry.call is not None and entry.call.kind in ("global", "weak")}, lines, located, rows)
     # A global or weak reference that an object of the link defines is a global line, whose symbol is its definition,
     # or an ifunc one.
     for row, (rvc, entries) in relocated.items():
         defined = []
-        for relocation, relaxable, call, anchor in entries:
+        for entry in entries:
+            call = entry.call
             if call is not None and call.kind in ("global", "weak") and call.target in found:
                 at, value, symbol_type = found[call.target]
                 if symbol_type == STT_GNU_IFUNC:
-                    call = call._replace(kind="ifunc")
+                    entry = entry._replace(call=call._replace(kind="ifunc"))
                 else:
-                    call, anchor = call._replace(kind="global", definition=(at, value)), value
-            defined.append((relocation, relaxable, call, anchor))
+                    entry = entry._replace(call=call._replace(kind="global", definition=(at, value)), anchor=value)
+            defined.append(entry)
         relocated[row] = (rvc, defined)
     return relocated
 
 
 def relaxed_calls(lines, inputs, relocated, output):
-    """The Call of each relocation of each section of code of `relocated` (code_relocations), with its delta, its
-    target delta and its removable: {row: [Call, or None for a relocation with no Call]}, in the order of
+    """The relocations of each section of code of `relocated` (code_relocations), each Call with its delta, its
+    target delta and its removable: {row: (the EF_RISCV_RVC flag of its object, [Reloc])}, in the order of
     `relocated`. `lines` and `output` are describe's, and `inputs` the sections.tsv lines (matched_lines). A Call's
     delta comes from relaxation, with the addresses of this link: those of the map's lines, of the definitions, and of
     `output`'s symbols. With no `output`, every delta is None.
@@ -897,37 +909,38 @@ def relaxed_calls(lines, inputs, relocated, output):
     bounds = {}
     for row, (rvc, entries) in relocated.items():
         sums = [0]
-        for relocation, relaxable, _, _ in entries:
-            sums.append(sums[-1] + most_removed(relocation, relaxable, rvc))
-        bounds[row] = [relocation.offset for relocation, _, _, _ in entries], sums
+        for entry in entries:
+            sums.append(sums[-1] + most_removed(entry.relocation, entry.relaxable, rvc))
+        bounds[row] = [entry.relocation.offset for entry in entries], sums
     # Each relocation with its Call, which gets its removable, the most bytes that relaxation can remove in front of
     # the symbol of its target (None when the map did not take the target's section), and its target delta when no
-    # address decides it (0 when its removable is 0, else None); and the target (row, anchor) of each Call whose
-    # removable is neither, whose target delta this link's relaxation decides: {row: [(Relocation, relaxable, Call or
-    # None, target or None)]}, with {target: the index k of the first relocation of its section at or past its anchor,
-    # or the count of relocations when there is none}.
+    # address decides it (0 when its removable is 0, else None); and its target, (row, anchor) of each Call whose
+    # removable is neither, whose target delta this link's relaxation decides: {row: (EF_RISCV_RVC, [Reloc])}, with
+    # {target: the index k of the first relocation of its section at or past its anchor, or the count of relocations
+    # when there is none}.
     targeted, firsts = {}, {}
-    for row, (_, entries) in relocated.items():
-        targeted[row] = []
-        for relocation, relaxable, call, anchor in entries:
-            target = None
+    for row, (rvc, entries) in relocated.items():
+        found = []
+        for entry in entries:
+            call = entry.call
             if call is not None:
-                where, most = target_row(call), 0
-                if where is not None and anchor != 0:
+                where, most, target = target_row(call), 0, None
+                if where is not None and entry.anchor != 0:
                     if where[0] is None:
                         most = None
                     elif where[0] in bounds:
                         offsets, sums = bounds[where[0]]
-                        k = bisect.bisect_left(offsets, anchor)
+                        k = bisect.bisect_left(offsets, entry.anchor)
                         most = sums[k]
                         if most:
-                            target = (where[0], anchor)
+                            target = (where[0], entry.anchor)
                             firsts[target] = k
-                call = call._replace(target_delta=0 if most == 0 else None, removable=most)
-            targeted[row].append((relocation, relaxable, call, target))
-    calls = {row: [(relocation, relaxable, call) for relocation, relaxable, call, _ in entries]
-             for row, entries in targeted.items()}
-    relaxed = {row: ([None] * len(entries), None) for row, entries in calls.items()}  # {row: ([delta], removed)}
+                entry = entry._replace(call=call._replace(target_delta=0 if most == 0 else None, removable=most),
+                                       target=target)
+            found.append(entry)
+        targeted[row] = (rvc, found)
+    calls = targeted
+    relaxed = {row: ([None] * len(entries), None) for row, (_, entries) in calls.items()}  # {row: ([delta], removed)}
     if output is not None:
         view = Layout(inputs, {}, output, {}, set(), [])
         removed = dict.fromkeys(firsts, 0)  # {target: the target delta of the round before}
@@ -935,12 +948,11 @@ def relaxed_calls(lines, inputs, relocated, output):
             if passes == RELAX_PASSES:
                 # Past lld's last pass, none of the target deltas is known.
                 removed = dict.fromkeys(firsts)
-            calls = {row: [(relocation, relaxable,
-                            call if target is None else call._replace(target_delta=removed[target]))
-                           for relocation, relaxable, call, target in entries]
-                     for row, entries in targeted.items()}
-            relaxed = {row: relaxation(lines[row].address, found, view, relocated[row][0])
-                       for row, found in calls.items()}
+            calls = {row: (rvc, [entry if entry.target is None else
+                                 entry._replace(call=entry.call._replace(target_delta=removed[entry.target]))
+                                 for entry in entries])
+                     for row, (rvc, entries) in targeted.items()}
+            relaxed = {row: relaxation(lines[row].address, entries, view, rvc) for row, (rvc, entries) in calls.items()}
             settled = {}
             for (row, anchor), k in firsts.items():
                 deltas, total = relaxed[row]
@@ -948,15 +960,15 @@ def relaxed_calls(lines, inputs, relocated, output):
             if settled == removed or passes == RELAX_PASSES:
                 break
             removed = settled
-    return {row: [None if call is None else call._replace(delta=delta)
-                  for (_, _, call), delta in zip(found, relaxed[row][0])]
-            for row, found in calls.items()}
+    return {row: (rvc, [entry if entry.call is None else entry._replace(call=entry.call._replace(delta=delta))
+                        for entry, delta in zip(entries, relaxed[row][0])])
+            for row, (rvc, entries) in calls.items()}
 
 
 def relaxation(address, relocations, view, rvc):
     """lld's relaxation of a section of code at `address` in a static riscv64 link without --relax-gp (lld 20,
-    lld/ELF/Arch/RISCV.cpp, relax()): ([delta], removed). `relocations` are the section's [(Relocation, relaxable,
-    Call or None)] in lld's order (ordered_relocations), with the Call of each relocation of TARGETED; `view` a Layout
+    lld/ELF/Arch/RISCV.cpp, relax()): ([delta], removed). `relocations` are the section's relocations in lld's order
+    ([Reloc], ordered_relocations), with the call of each relocation of TARGETED (code_relocations); `view` a Layout
     of the link's inputs and Output, which give each target its address (target_address); `rvc` whether the object
     has EF_RISCV_RVC. Each delta is the bytes removed in front of that relocation (lld's delta: the relocation is at
     address + offset - delta), and `removed` the bytes removed in all. Each is None from the first relocation whose
@@ -974,8 +986,8 @@ def relaxation(address, relocations, view, rvc):
     offset in the TLS segment; a relaxable R_RISCV_TLSDESC_*, of which lld removes bytes that this does not model;
     and an R_RISCV_ALIGN whose nops do not reach its boundary, which lld refuses."""
     deltas, delta = [], 0
-    for relocation, relaxable, call in relocations:
-        remove = 0
+    for entry in relocations:
+        relocation, relaxable, call, remove = entry.relocation, entry.relaxable, entry.call, 0
         if delta is not None:
             site = address + relocation.offset - delta
             if relocation.type == R_RISCV_ALIGN:
@@ -1018,13 +1030,11 @@ def removable_bytes(elf, section):
     """The most bytes that lld's relaxation can remove from the section `section` of the object `elf` in all,
     wherever the link puts it and its targets: the sum of most_removed over each of its relocations, in lld's order
     (by offset, as describe relaxes it). 0 for a section with no relocation that lets lld remove a byte, and for a
-    section that holds no code (neither .text nor SHF_EXECINSTR), which describe never relaxes: lld relaxes code
-    alone."""
-    if not (is_text(section.name) or section.flags & SHF_EXECINSTR):
+    section that holds no code (relaxed_code), which describe never relaxes: lld relaxes code alone."""
+    if not relaxed_code(section.name, section.flags):
         return 0
     rvc = elf.flags & EF_RISCV_RVC
-    return sum(most_removed(relocation, relaxable, rvc)
-               for relocation, _, relaxable in ordered_relocations(elf, section))
+    return sum(most_removed(entry.relocation, entry.relaxable, rvc) for entry in ordered_relocations(elf, section))
 
 
 def definitions(names, lines, located, rows):
@@ -2017,9 +2027,10 @@ TlsTest = collections.namedtuple("TlsTest", "offset target before call")
 # offset order}, for each line of that type that lld may relax (relax 1 on a side) and that is not tested.
 Tests = collections.namedtuple("Tests", "tests skipped")
 # The plan of an append link (plan): `places` {row: Place} for each .text input section of the link, `script` the
-# text of the linker script (None for a normal link), `lines` {line of the script: the row whose pattern is on it},
-# `next_start` the address at which the script keeps the next PT_LOAD (None when it does not), and `growth` (N, M)
-# of readonly_growth for a normal link (else None).
+# text of the linker script (None for a normal link), `lines` {number of a line `. = <address>;` of the script, from
+# 1: (the row whose pattern is on the line before it, or None for none; the row whose pattern is on the line after
+# it, or None for the end of .text)}, `next_start` the address at which the script keeps the next PT_LOAD (None when
+# it does not), and `growth` (N, M) of readonly_growth for a normal link (else None).
 Plan = collections.namedtuple("Plan", "places script lines next_start growth")
 # A check link: its map's lines, {row of the probe link: index of its line in that map}, and its Output.
 Link = collections.namedtuple("Link", "lines match output")
@@ -2076,7 +2087,8 @@ def reach_cause(test):
 def paired_lines(base, probe, pairing, line_type):
     """(the link's Input, its BASE partner, the link's line, BASE's line at the same offset or None when BASE's
     partner has none) for each calls.tsv line of the type `line_type` of each same-bytes .text input section of the
-    link `probe` (Layout): in row order, then in offset order."""
+    link `probe` (Layout) that lld may relax (relax 1 on a side): in row order, then in offset order. A line with
+    relax 0 on both sides is never relaxed, so it never changes, and needs no test."""
     for i in probe.inputs:
         if not (is_text(i.section) and pairing.same[i.row]):
             continue
@@ -2086,16 +2098,19 @@ def paired_lines(base, probe, pairing, line_type):
             if line.type == line_type:
                 then.setdefault(line.offset, line)
         for line in sorted(probe.calls.get(i.row, []), key=lambda c: c.offset):
-            if line.type == line_type:
-                yield i, old, line, then.get(line.offset)
+            if line.type != line_type:
+                continue
+            before = then.get(line.offset)
+            if line.relax or before is not None and before.relax:
+                yield i, old, line, before
 
 
 def untestable(line, before):
     """Why the append mode cannot test whether lld relaxes the calls.tsv line `line` of a same-bytes .text input
     section as BASE's line `before` at the same offset (None when BASE has none), by what the two lines say: None
-    when they say nothing against a test. `line` or `before` has relax 1. A local symbol of a section with no row of
-    its own lies in a twin or an ambiguous map line (describe), which the tree cannot place, or in a section that the
-    map did not take."""
+    when they say nothing against a test. `line` or `before` has relax 1 (paired_lines). A local symbol of a section
+    with no row of its own lies in a twin or an ambiguous map line (describe), which the tree cannot place, or in a
+    section that the map did not take."""
     if before is None:
         return "BASE's calls.tsv has no such line"
     if not (line.relax and before.relax):
@@ -2147,8 +2162,6 @@ def call_tests(base, probe, pairing, tail):
 
     tests, skipped = {}, {}
     for i, old, call, before in paired_lines(base, probe, pairing, "call"):
-        if not (call.relax or before is not None and before.relax):
-            continue
         why = untestable(call, before)
         if why is None and before.delta is None:
             why = "the bytes that relaxation removed in front of it at the base are not known"
@@ -2184,8 +2197,6 @@ def tls_tests(base, probe, pairing):
     its inputs."""
     tests, skipped = {}, {}
     for i, _, line, before in paired_lines(base, probe, pairing, "tprel"):
-        if not (line.relax or before is not None and before.relax):
-            continue
         why = untestable(line, before)
         if why is None:
             offset = tls_offset(tls_address(before, base), base.output)
@@ -2393,13 +2404,14 @@ def pattern(i):
     return f'"{quotable(file)}"({script_name(i.section)})'
 
 
-def plan(base, probe, pairing, tail, forced=None):
+def plan(base, probe, pairing, tail, calls, accesses, forced=None):
     """The plan (Plan) of an append link: where each .text input section of the probe link `probe` (Layout, with no
     placement) goes against the base layout `base`, with the pairing `pairing` (pair). It reads no file and runs
-    nothing. `tail` is the probe link's segment_tail, as the caller computed it (None when the probe link has no
-    .text), which it gives call_tests too. `forced` ({row: CallTest or TlsTest}) names kept sections that the check
-    after the link moves with jal_reach or tls_reach: they never return to their base addresses, where the check link
-    would move them again, so that the links of append end.
+    nothing. `tail` is the probe link's segment_tail (None when the probe link has no .text), and `calls` and
+    `accesses` the probe link's call_tests, with that tail, and tls_tests (Tests), as the caller computed them once
+    for all its plans. `forced` ({row: CallTest or TlsTest}) names kept sections that the check after the link moves
+    with jal_reach or tls_reach: they never return to their base addresses, where the check link would move them
+    again, so that the links of append end.
 
     When the read-only data in front of .text grew past its room (readonly_growth), the link is a normal one: no
     script, each section at the probe's address. Else a same-bytes section with a thread-local access that lld
@@ -2455,7 +2467,6 @@ def plan(base, probe, pairing, tail, forced=None):
         raise LayoutError("the probe link's output.tsv has no .text")
     probe_end, tail_bytes, tail_align = tail
     start = base_text.addr
-    calls, accesses = call_tests(base, probe, pairing, tail), tls_tests(base, probe, pairing)
     tests = calls.tests
     partner = {i.row: base.inputs[pairing.partner[i.row]] for i in text if pairing.partner[i.row] is not None}
     forced = dict(forced or {})
@@ -2560,11 +2571,13 @@ def plan(base, probe, pairing, tail, forced=None):
     at = next((k for k, (_, _, name) in enumerate(order) if name == ".text"), None)
     if not at:
         raise LayoutError("the probe link has no SHF_ALLOC section before .text")
-    out, lines = ["SECTIONS", "{", f"  .text {hex(start)} :", "  {"], {}
+    out, lines, before = ["SECTIONS", "{", f"  .text {hex(start)} :", "  {"], {}, None
     for address, row, i in sorted(items, key=lambda item: item[:2]):
         out += [f"    . = {hex(address)};", f"    {pattern(i)}"]
-        lines[len(out)] = row
-    out += [f"    . = {hex(text_end)};", "  }", "}", f"INSERT AFTER {script_name(order[at - 1][2])};"]
+        lines[len(out) - 1], before = (before, row), row
+    out.append(f"    . = {hex(text_end)};")
+    lines[len(out)] = (before, None)
+    out += ["  }", "}", f"INSERT AFTER {script_name(order[at - 1][2])};"]
     found, next_start = next_segment(base.output, probe.output), None
     if found is not None and text_end + tail_bytes <= page_floor(found[0]):
         next_start = found[0]
@@ -2741,16 +2754,15 @@ def check_failure(planned, probe, status, output):
     front of it, which took more room than the plan gave them, and those of the pattern after it, which lld could not
     put at that address, or the end of .text. Else the exit status and lld's first line with an error."""
     backward = BACKWARD.search(output)
-    script = planned.script.split("\n")
-    if backward and 1 < int(backward.group(1)) <= len(script):
-        number = int(backward.group(1))
-        front, after = planned.lines.get(number - 1), planned.lines.get(number + 1)
-        if front is not None:
-            what = "end .text there" if after is None else \
-                f"put {pattern_sections(probe, after)} at {hex(planned.places[after].address)}"
-            return (f"lld cannot move the location counter backward at line {number} of the script, "
-                    f"`{script[number - 1].strip()}`: {pattern_sections(probe, front)}, on the line before, takes more "
-                    f"room than the plan gives it, so lld cannot {what}")
+    number = int(backward.group(1)) if backward else None
+    front, after = planned.lines.get(number, (None, None))
+    if front is not None:
+        moved_to = planned.script.split("\n")[number - 1].strip()
+        what = "end .text there" if after is None else \
+            f"put {pattern_sections(probe, after)} at {hex(planned.places[after].address)}"
+        return (f"lld cannot move the location counter backward at line {number} of the script, `{moved_to}`: "
+                f"{pattern_sections(probe, front)}, on the line before, takes more room than the plan gives it, so "
+                f"lld cannot {what}")
     error = next((line.strip() for line in output.split("\n") if "error:" in line), None)
     return f"the check link fails with exit status {status}" + (f": {error}" if error else "")
 
@@ -2760,8 +2772,8 @@ def checked_plan(base, probe, pairing, lines, internal, work, script, command):
     with each cause's detail as the last check link shows it, and [(the probe link's Input, its address)] of each .text
     input section of the last check link, in its map's order; or the plan of a normal link and None, when the
     read-only data in front of .text grew past its room (plan). `lines` are the probe map's lines (read_map) and
-    `internal` those of the linker's own sections (map_entries), which segment_tail counts: the tail is computed once,
-    for the tests of the calls and for each plan. It writes the script of each plan to `script`, and links with it in
+    `internal` those of the linker's own sections (map_entries), which segment_tail counts: the tail, call_tests and
+    tls_tests are computed once, for all the plans. It writes the script of each plan to `script`, and links with it in
     `work` with the link's `command`. Raise Fallback when a plan does; when a check link fails (check_failure); when
     it does not put a kept section at its base address with its base linked size, and relaxes no call or thread-local
     access of it otherwise; when it puts a kept section there, but relaxes a call or a thread-local access of it
@@ -2772,13 +2784,13 @@ def checked_plan(base, probe, pairing, lines, internal, work, script, command):
     section that the probe link does not, or lacks one."""
     text = [i for i in probe.inputs if is_text(i.section)]
     tail = segment_tail(probe, internal)
-    tests = call_tests(base, probe, pairing, tail).tests
-    tls = tls_tests(base, probe, pairing).tests
+    calls, accesses = call_tests(base, probe, pairing, tail), tls_tests(base, probe, pairing)
+    tests, tls = calls.tests, accesses.tests
     names = map_index(lines)
     check_map, check_binary = os.path.join(work, "check.map"), os.path.join(work, "check")
     forced = {}
     while True:
-        planned = plan(base, probe, pairing, tail, forced)
+        planned = plan(base, probe, pairing, tail, calls, accesses, forced)
         if planned.script is None:
             return planned, None
         write_new(script, planned.script.encode("utf-8", "surrogateescape"))

@@ -1450,9 +1450,11 @@ def link(found, calls=(), symbols=None, front=0x10400, tls=(), deltas=None, nore
 
 def planned(base, probe, forced=None, internal=()):
     """layout.plan of the link `probe` against `base`, with the tail after the probe link's .text (segment_tail, which
-    counts the lines of the linker's own sections `internal`)."""
-    return layout.plan(base, probe, layout.pair(base.inputs, probe.inputs), layout.segment_tail(probe, internal),
-                       forced)
+    counts the lines of the linker's own sections `internal`) and the tests of its calls and thread-local accesses,
+    each computed once."""
+    pairing, tail = layout.pair(base.inputs, probe.inputs), layout.segment_tail(probe, internal)
+    return layout.plan(base, probe, pairing, tail, layout.call_tests(base, probe, pairing, tail),
+                       layout.tls_tests(base, probe, pairing), forced)
 
 
 def calls_tested(base, probe, pairing):
@@ -2021,7 +2023,7 @@ def test_the_script_of_a_small_plan():
         "}\n"
         "INSERT AFTER .eh_frame;\n"
         "SECTIONS { .init_array 0x12040 : { } } INSERT BEFORE .fini_array;\n")
-    assert plan.lines == {6: 0, 8: 1, 10: 2, 12: 3}
+    assert plan.lines == {5: (None, 0), 7: (0, 1), 9: (1, 2), 11: (2, 3), 13: (3, None)}
 
 
 def test_the_script_refuses_a_file_name_it_cannot_quote():
@@ -2293,23 +2295,12 @@ def tree_entry(root, directory, map_text, binary, placement=None):
 
 
 def append_setup(tmp_path, monkeypatch, tls=False, made=None, **fake):
-    """The base layout tree tmp_path/base of a link of the old sources in tmp_path/old, and the new sources in
-    tmp_path/work, the working directory, with fake_linker(**fake) in place of the commands (sources(new, tls,
-    made)). The linker makes the symbols `made` ({name: address}) in every link, and its relaxation removes the bytes
-    of RELAXED. Returns the base entry."""
-    for name, new in (("old", False), ("work", True)):
-        (tmp_path / name).mkdir()
-        for file, data in sources(new, tls, made or {}).items():
-            (tmp_path / name / file).write_bytes(data)
+    """link_setup in tmp_path of the old and the new sources (sources(new, tls, made)) and COMMAND, with
+    fake_linker(**fake) in place of the commands of the append link. The linker makes the symbols `made` ({name:
+    address}) in every link, and its relaxation removes the bytes of RELAXED. Returns the base entry."""
     relaxed = {name: n for name, n in RELAXED.items() if name != "tail" or tls}
-    old = tmp_path / "old"
-    assert fake_linker(old, made=made, relaxed=relaxed)(COMMAND + [f"-Wl,-Map={old / 'map'}", "-o",
-                                                                   str(old / "fuzz")]) == (0, "")
-    entry = tree_entry(tmp_path / "base", old, (old / "map").read_text(), (old / "fuzz").read_bytes())
-    monkeypatch.chdir(tmp_path / "work")
-    monkeypatch.setattr(layout, "run", fake_linker(tmp_path / "work", made=made, relaxed=relaxed, **fake))
-    (tmp_path / "links").mkdir()
-    return entry
+    return link_setup(tmp_path, monkeypatch, lambda new: sources(new, tls, made or {}), COMMAND, append_only=fake,
+                      made=made, relaxed=relaxed)
 
 
 def run_append(tmp_path, entry, command=COMMAND):
@@ -2318,10 +2309,11 @@ def run_append(tmp_path, entry, command=COMMAND):
                         str(tmp_path / "wraps"), "--"] + command)
 
 
-def link_setup(root, monkeypatch, files, command, **fake):
+def link_setup(root, monkeypatch, files, command, append_only=None, **fake):
     """The base layout tree root/base of a link of the files files(False) in root/old, and the files files(True) in
-    root/work, the working directory, with fake_linker(**fake) in place of the commands of both: the base entry."""
-    root.mkdir()
+    root/work, the working directory, with fake_linker(**fake) in place of the commands of both, and the arguments
+    `append_only` ({name: value}) of fake_linker in those of the append link alone: the base entry."""
+    root.mkdir(exist_ok=True)
     for name, new in (("old", False), ("work", True)):
         (root / name).mkdir()
         for file, data in files(new).items():
@@ -2330,7 +2322,7 @@ def link_setup(root, monkeypatch, files, command, **fake):
     assert fake_linker(old, **fake)(command + [f"-Wl,-Map={old / 'map'}", "-o", str(old / "fuzz")]) == (0, "")
     entry = tree_entry(root / "base", old, (old / "map").read_text(), (old / "fuzz").read_bytes())
     monkeypatch.chdir(root / "work")
-    monkeypatch.setattr(layout, "run", fake_linker(root / "work", **fake))
+    monkeypatch.setattr(layout, "run", fake_linker(root / "work", **fake, **(append_only or {})))
     (root / "links").mkdir()
     return entry
 
@@ -3096,9 +3088,10 @@ def removed_of_f(calls, align, symbols):
     the symbols that its calls reach at `symbols` ({name: address})."""
     elf = layout.Elf(kept_call_files(calls, align)(False)["main.o"], "main.o")
     view = layout.Layout([], {}, layout.Output([], [], symbols), {}, set(), [])
-    found = [(r, relaxable, layout.Call(0, r.offset, "call", relaxable, None, "global", elf.symbol(table, r.symbol).name,
-                                        0, None, 0, 0) if r.type == layout.R_RISCV_CALL_PLT else None)
-             for r, table, relaxable in layout.ordered_relocations(elf, elf.named(".text.f")[0])]
+    found = [entry._replace(call=layout.Call(0, entry.relocation.offset, "call", entry.relaxable, None, "global",
+                                             elf.symbol(entry.table, entry.relocation.symbol).name, 0, None, 0, 0)
+                            if entry.relocation.type == layout.R_RISCV_CALL_PLT else None)
+             for entry in layout.ordered_relocations(elf, elf.named(".text.f")[0])]
     return layout.relaxation(0x11300, found, view, False)[1]
 
 
