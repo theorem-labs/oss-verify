@@ -161,16 +161,18 @@ name: "Review"
 #            conclusion is failure when one check is fail; success when each is pass or optional; and action_required
 #            when one is person, or when the screen held the pull request, the daily cap stopped it, or the gather,
 #            screen, review or hold job failed. Its summary lists each check that is not pass with the review's
-#            reason, or says why the review gave no verdicts. It is no check that the ruleset requires, so
-#            action_required never stops a person's merge. When the review gave its verdicts and the pull request is
-#            still at the run's head, the same step posts the review comment, with the checks' report folded under it,
-#            or replaces the one already there; any other outcome posts nothing, and the comment of an earlier head
-#            stays. Its step "Take the label review-held off" then deletes the App's hold comments from before and
-#            takes the label review-held off, so the review comment stays the App's only comment on an enrollment pull
-#            request. For a change pull request it posts the review comment the same way, with no check run. The
-#            comment starts with <!-- oss-verify-review -->, as the triage comment starts with its own marker; an
-#            enrollment's comment then gives the fixed first sentence of the check run's conclusion
-#            (.github/scripts/review-body).
+#            reason, or says why the review gave no verdicts. Its output.text keeps the record of the review for
+#            programs, in an HTML comment that GitHub does not show: the verdicts or the hold, and the criticality
+#            score, OSS-Fuzz and binary sizes that the gather job gave (review-verdict's docstring defines it). It is
+#            no check that the ruleset requires, so action_required never stops a person's merge. When the review gave
+#            its verdicts and the pull request is still at the run's head, the same step posts the review comment,
+#            with the checks' report folded under it, or replaces the one already there; any other outcome posts
+#            nothing, and the comment of an earlier head stays. Its step "Take the label review-held off" then deletes
+#            the App's hold comments from before and takes the label review-held off, so the review comment stays the
+#            App's only comment on an enrollment pull request. For a change pull request it posts the review comment
+#            the same way, with no check run. The comment starts with <!-- oss-verify-review -->, as the triage
+#            comment starts with its own marker; an enrollment's comment then gives the fixed first sentence of the
+#            check run's conclusion (.github/scripts/review-body).
 #            The review's text and the checks' report, which a pull request can steer, reach the comment only through
 #            .github/scripts/review-neutralize: with no mention, no reference to an issue or pull request, no unclosed
 #            HTML comment that hides what follows it, and no line that holds a marker of this comment, so no one else
@@ -897,6 +899,13 @@ jobs:
       name: ${{ steps.project.outputs.name }}
       # The report of the fuzz targets' checks from the Build run's results, for the review comment.
       checks: ${{ steps.build.outputs.checks }}
+      # The binaries' sizes from the Build run's results (take-build-results), for the record of the review that the
+      # comment job writes. It is empty when the step build did not run or read no sizes.
+      sizes: ${{ steps.build.outputs.sizes }}
+      # The repository's criticality score and whether it is in OSS-Fuzz, as review-gather gives them from the triage,
+      # for the same record. Each is empty when the step gather did not run.
+      criticality_score: ${{ steps.gather.outputs.criticality_score }}
+      oss_fuzz: ${{ steps.gather.outputs.oss_fuzz }}
     steps:
       # A push after the Build run that started this run: the head is no longer the one route read, and the push
       # started a run of its own, which reviews the new head. This job then keeps nothing. A read that fails decides
@@ -1795,11 +1804,13 @@ jobs:
     # daily cap (RECORD below), whether its head is held or not. Its step "Post the comment and
     # record the verdict" records one check run Enrollment review at the run's head (.github/scripts/review-verdict),
     # which names the pull request by its number (external_id): the review's verdicts, or that the screen held it,
-    # that the daily cap stopped it, or which job failed. With the review's verdicts and at the pull request's current
-    # head, the step also posts the review comment, or updates the one already there (.github/scripts/review-body);
-    # when the review held a finding back, only once the hold job sent it, because the comment says that it was sent.
-    # Any other outcome posts no comment and leaves the comment of an earlier head as it is: the review comment stays
-    # the App's only comment on an enrollment pull request.
+    # that the daily cap stopped it, or which job failed. Its output.text also keeps the record of the review, which
+    # GitHub does not show: the verdicts or the hold, with the criticality score, OSS-Fuzz and binary sizes that the
+    # gather job gave (review-verdict's docstring defines it). With the review's verdicts and at the pull request's
+    # current head, the step also posts the review comment, or updates the one already there
+    # (.github/scripts/review-body); when the review held a finding back, only once the hold job sent it, because the
+    # comment says that it was sent. Any other outcome posts no comment and leaves the comment of an earlier head as
+    # it is: the review comment stays the App's only comment on an enrollment pull request.
     # For a change pull request it posts the review's comment the same way, with no check run. For a change pull
     # request or an issue that the screen held, that could not be gathered or screened, whose screened review failed,
     # or that route held at the daily cap: it puts the label review-held on it and posts one comment that says so, in
@@ -2065,11 +2076,13 @@ jobs:
           echo "Held: labelled $HELD_LABEL, and said so."
 
       # The review comment of a change pull request; for an enrollment pull request that RECORD names, the check run
-      # Enrollment review too, from the same parsed verdicts, on every run this job runs for. Its outputs: posted=true
-      # when it posted the review comment, and recorded=true when it recorded the check run (the step after it then
-      # takes a hold off). Nothing on an approval or a replay. On a run by hand for a held head, a hold records nothing
-      # and posts nothing when the newest check run Enrollment review of the oss-verify App for this pull request at
-      # this head is a verdict of the review: that verdict stands. A hold replaces an earlier hold (below).
+      # Enrollment review too, from the same parsed verdicts, on every run this job runs for. The check run also keeps
+      # the record of the review in its output.text, which GitHub does not show (.github/scripts/review-verdict's
+      # docstring defines it). Its outputs: posted=true when it posted the review comment, and recorded=true when it
+      # recorded the check run (the step after it then takes a hold off). Nothing on an approval or a replay. On a run
+      # by hand for a held head, a hold records nothing and posts nothing when the newest check run Enrollment review
+      # of the oss-verify App for this pull request at this head is a verdict of the review: that verdict stands. A
+      # hold replaces an earlier hold (below).
       - name: Post the comment and record the verdict
         id: post
         if: env.APPROVE != 'true' && (env.RECORD == 'true' || (env.KIND == 'change' && env.HOLDING != 'true'))
@@ -2097,6 +2110,11 @@ jobs:
           REVIEW_RESULT: ${{ needs.review.result }}
           HELD: ${{ needs.review.outputs.held_object != '' }}
           HOLD_RESULT: ${{ needs.hold.result }}
+          # The values of the record of the review in the check run's output.text: the gather job's criticality score,
+          # OSS-Fuzz and binary sizes. Each is empty, so null in the record, when the gather job did not run.
+          CRITICALITY_SCORE: ${{ needs.gather.outputs.criticality_score }}
+          OSS_FUZZ: ${{ needs.gather.outputs.oss_fuzz }}
+          SIZES: ${{ needs.gather.outputs.sizes }}
         run: |
           set -euo pipefail
           # A pull request's comment only: a run for an issue has no pull request, and an issue's draft is never posted.
@@ -2144,6 +2162,7 @@ jobs:
           conclusion=""
           if [ "$RECORD" = true ]; then
             # review-verdict reads the review's VERDICTS and REASONS from this step's env, and none of them with HOLD.
+            # It reads HEAD_SHA, CRITICALITY_SCORE, OSS_FUZZ and SIZES for the record, with HOLD too.
             verdict=$(HOLD=$hold JOB=$job .github/scripts/review-verdict)
             conclusion=$(jq -r .conclusion <<< "$verdict")
           fi
@@ -2171,11 +2190,11 @@ jobs:
           [ "$RECORD" = true ] || exit 0
           # The one record of the verdict, at the head this run reviewed. It names its pull request: external_id is
           # the pull request's number, so that a second pull request at the same commit has a check run of its own.
-          # enroll-dispatch reads it. jq reads the verdict on its standard input: as an argument it can be more than
-          # the 131,072 bytes Linux takes in one.
+          # enroll-dispatch reads it. Its output.text is the record of the review that review-verdict made. jq reads
+          # the verdict on its standard input: as an argument it can be more than the 131,072 bytes Linux takes in one.
           jq --arg head "$HEAD_SHA" --arg pr "$PR" --arg url "$RUN_URL" \
             '{name: "Enrollment review", head_sha: $head, external_id: $pr, status: "completed", conclusion: .conclusion,
-              details_url: $url, output: {title: .title, summary: .summary}}' <<< "$verdict" \
+              details_url: $url, output: {title: .title, summary: .summary, text: .text}}' <<< "$verdict" \
             | gh api --method POST "repos/$REPO/check-runs" --input - > /dev/null
           echo "recorded=true" >> "$GITHUB_OUTPUT"
           echo "Recorded the check run Enrollment review of #$PR at $HEAD_SHA: $conclusion."

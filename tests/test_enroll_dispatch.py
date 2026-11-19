@@ -30,7 +30,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 # The workflow tests' expression evaluator and step runner with a stand-in gh: GitHub's expressions, evaluated as
 # test_outside_screen.py evaluates them (the dispatch job's if and env, and its steps' if and env). REVIEW is
 # review.yml, whose env holds ALLOWED_BOTS and whose route holds the bash function trusted, the rule that trusted ports.
-from test_outside_screen import REVIEW, Runner, as_text, evaluate  # noqa: E402
+from test_outside_screen import REVIEW, Runner, as_text, evaluate, interpolated  # noqa: E402
 
 LOADER = importlib.machinery.SourceFileLoader("enroll_dispatch", str(ROOT / ".github" / "scripts" / "enroll-dispatch"))
 SPEC = importlib.util.spec_from_loader("enroll_dispatch", LOADER)
@@ -1141,7 +1141,7 @@ class Merged(unittest.TestCase):
 
 class TheRecord(unittest.TestCase):
     """build.yaml's own code, run here: binary-sizes on a work directory, then the record job's script, then the
-    record read back as enroll-dispatch reads it."""
+    record read back as enroll-dispatch reads it, from the path of the job's upload of enrollment-record."""
 
     def test_binary_sizes_and_the_record_job_make_a_record_enroll_dispatch_takes(self):
         if not shutil.which("jq"):
@@ -1161,14 +1161,69 @@ class TheRecord(unittest.TestCase):
             (work / "manifest.yaml").write_text(yaml.safe_dump({"targets": targets}))
             sizes_line = subprocess.run([sys.executable, str(ROOT / ".github" / "scripts" / "binary-sizes"), str(work)],
                                         capture_output=True, text=True, check=True).stdout.strip()
-            script = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["jobs"]["record"][
-                "steps"][0]["run"]
+            job = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["jobs"]["record"]
+            script = job["steps"][0]["run"]
+            uploads = [step.get("with") or {} for step in job["steps"]
+                       if str(step.get("uses", "")).partition("@")[0] == "actions/upload-artifact"]
+            paths = [interpolated(up.get("path", ""), {"runner.temp": directory}) for up in uploads
+                     if up.get("name") == "enrollment-record"]
+            self.assertEqual(len(paths), 1, f"the record job's uploads of enrollment-record: {uploads}")
+            uploaded = pathlib.Path(paths[0])
             env = dict(os.environ, PR=str(PR), NAME="plugin-hostd", SHA=SHA, SIZES=sizes_line, RUNNER_TEMP=directory)
             subprocess.run(["bash", "-c", script], env=env, check=True)
-            rec = json.loads(pathlib.Path(directory, "record", "record.json").read_text())
+            self.assertTrue(uploaded.is_file(), f"the record job wrote no {uploaded}, the path of its upload")
+            rec = json.loads(uploaded.read_text())
         self.assertEqual(dispatch.record_problem(rec, SHA), "")
         self.assertEqual(rec["sizes"]["fuzz_a"]["plain"], {"text": 100, "exec": 3000})
         self.assertEqual(dispatch.oversized(rec), ["fuzz_b.plain (100 bytes of .text, 1,200,000 executable bytes)"])
+
+
+class SizesCut(unittest.TestCase):
+    """binary-sizes --cut, which build.yaml's build step runs for the results job: the sizes in at most BYTES bytes of
+    compact JSON, by the rule of take-build-results and review-verdict."""
+
+    @staticmethod
+    def cut(given, limit=100_000):
+        """binary-sizes --cut `limit`, with `given` on standard input."""
+        return subprocess.run([sys.executable, str(ROOT / ".github" / "scripts" / "binary-sizes"), "--cut", str(limit)],
+                              input=given, capture_output=True, text=True)
+
+    @staticmethod
+    def compact(value):
+        """`value` as binary-sizes prints it."""
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+    def test_sizes_that_fit_print_unchanged(self):
+        line = self.compact({"parse": {"asan": {"exec": 3300, "text": 3000}, "plain": {"exec": 1200, "text": 1000}}})
+        run = self.cut(line + "\n")
+        self.assertEqual((run.returncode, run.stdout, run.stderr), (0, line + "\n", ""))
+
+    def test_sizes_over_the_bound_keep_only_the_plain_build_of_each_target(self):
+        builds = {build: {"exec": 234567, "text": 123456} for build in ("asan", "msan", "plain", "ubsan")}
+        sizes = {f"fuzz_{n:04d}": builds for n in range(1000)}
+        sizes.update(no_plain_build={"asan": {"exec": 2, "text": 1}}, not_an_object=[1])
+        line = self.compact(sizes)
+        self.assertGreater(len(line), 100_000)
+        run = self.cut(line + "\n")
+        plain = {target: {"plain": builds["plain"]} for target in sizes}
+        plain.update(no_plain_build={}, not_an_object={})
+        self.assertEqual((run.returncode, run.stdout, run.stderr), (0, self.compact(plain) + "\n", ""))
+        self.assertLessEqual(len(run.stdout.removesuffix("\n").encode()), 100_000)
+
+    def test_plain_builds_still_over_the_bound_print_nothing_and_one_line_that_says_why(self):
+        sizes = {f"fuzz_{n:04d}_" + "x" * 80: {"plain": {"exec": 234567, "text": 123456}} for n in range(1000)}
+        self.assertGreater(len(self.compact(sizes)), 100_000)
+        run = self.cut(self.compact(sizes) + "\n")
+        self.assertEqual((run.returncode, run.stdout), (0, ""))
+        self.assertEqual(run.stderr.count("\n"), 1, run.stderr)
+        self.assertTrue(run.stderr.startswith("binary-sizes: "), run.stderr)
+        self.assertNotIn("fuzz_", run.stderr)
+
+    def test_an_empty_line_or_one_that_is_not_an_object_prints_nothing(self):
+        for given in ("", "\n", "[]\n"):
+            with self.subTest(given=given):
+                run = self.cut(given)
+                self.assertEqual((run.returncode, run.stdout, run.stderr), (0, "", ""))
 
 
 class Jobs(unittest.TestCase):

@@ -10,9 +10,14 @@ The fixture's Dockerfile and build.sh are templates/Dockerfile and templates/bui
 fuzz targets do one thing per first input byte, and the test checks the exit status of each in every build against
 docs/build-contract.md. Running the riscv64 binaries needs qemu-riscv64 (static) on this machine; without it, that part
 is skipped.
+
+FramePointers also needs the frame-pointer images that .github/workflows/toolchain-images.yaml makes, named by
+OV_FP_TOOLCHAIN_C and OV_FP_TOOLCHAIN_RUST. It skips unless both are set. That workflow's docker-tests job sets both,
+and fails if a test skips.
 """
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -107,13 +112,31 @@ done
 """
 
 
-def docker_ready():
-    """Whether Docker runs and the toolchain image the fixture builds FROM (the newest for C) is here."""
+def docker_ready(image=None):
+    """Whether Docker runs and a toolchain image is here: `image`, else the one the fixture builds FROM (the newest for
+    C)."""
     try:
-        return subprocess.run(["docker", "image", "inspect", check_build.newest_toolchain()],
+        return subprocess.run(["docker", "image", "inspect", image or check_build.newest_toolchain()],
                               capture_output=True).returncode == 0
     except OSError:
         return False
+
+
+# The first line of each script that run_in_container runs, as in infra/checks/run-seeds. The container's shell writes
+# 0 to /proc/self/coredump_filter, and every qemu run it starts keeps that value, so a run's core dump holds no memory.
+# Otherwise the dump of an ASan build's run holds its reserved address space of more than 100 GiB: where the host's
+# core_pattern is a pipe, that dump can outlast the time limit, and the run reads the time limit's status. A core
+# limit of 0 does not stop a dump to a pipe (OSSV-729's measurement).
+NO_CORE_MEMORY = "if [ -e /proc/self/coredump_filter ]; then echo 0 > /proc/self/coredump_filter; fi"
+
+
+def run_in_container(image, runner, *mounts):
+    """Run the sh script runner in a container of image with no network, with qemu-riscv64 at /qemu and each (host
+    path, container path) of mounts read-only. image is a tag that the test built, so docker never pulls it from a
+    registry. Returns the completed process, with its output as text."""
+    volumes = [arg for host, container in ((QEMU, "/qemu"), *mounts) for arg in ("-v", f"{host}:{container}:ro")]
+    return subprocess.run(["docker", "run", "--rm", "--network=none", "--pull=never", *volumes, "--entrypoint", "sh",
+                           image, "-c", f"{NO_CORE_MEMORY}\n{runner}"], capture_output=True, text=True, check=True)
 
 
 @unittest.skipUnless(os.environ.get("OV_DOCKER_TESTS") == "1" and docker_ready(),
@@ -175,11 +198,7 @@ class Builder(unittest.TestCase):
             for build in BUILDS:
                 shutil.copy(self.work / "out" / target / f"{target}.{build}", binaries)
         runner = f"q() {{ timeout 60 /qemu \"$@\"; }}\n{RUNNER}"
-        done = subprocess.run(
-            ["docker", "run", "--rm", "--network=none", "-v", f"{QEMU}:/qemu:ro", "-v", f"{inputs}:/in:ro",
-             "-v", f"{binaries}:/bin2:ro", "--entrypoint", "sh", TAG, "-c", runner.replace("/bin/", "/bin2/")],
-            capture_output=True, text=True, check=True,
-        )
+        done = run_in_container(TAG, runner.replace("/bin/", "/bin2/"), (inputs, "/in"), (binaries, "/bin2"))
         results = {}
         for line in done.stdout.splitlines():
             target, build, case, status = line.split(" ", 3)
@@ -222,11 +241,7 @@ class UbsanChecks(unittest.TestCase):
                     (inputs / f"case-{case}").write_bytes(b"\0" * 6 + case.encode())
                 runner = ('for c in /in/*; do timeout 60 /qemu /raw/example_fuzzer "$c" > /dev/null 2>&1; '
                           'echo "${c#/in/} $?"; done')
-                done = subprocess.run(
-                    ["docker", "run", "--rm", "--network=none", "-v", f"{QEMU}:/qemu:ro", "-v", f"{inputs}:/in:ro",
-                     "-v", f"{raw}:/raw:ro", "--entrypoint", "sh", tag, "-c", runner],
-                    capture_output=True, text=True, check=True,
-                )
+                done = run_in_container(tag, runner, (inputs, "/in"), (raw, "/raw"))
             finally:
                 subprocess.run(["docker", "image", "rm", tag], capture_output=True)
         results = dict(line.split() for line in done.stdout.splitlines())
@@ -255,11 +270,7 @@ class UbsanChecks(unittest.TestCase):
                                                   labels=check_build.work_label(work))
                         runner = ('for c in /in/*; do timeout 600 /qemu /raw/example_fuzzer "$c" > /dev/null 2>&1; '
                                   'echo "${c#/in/} $?"; done')
-                        done = subprocess.run(
-                            ["docker", "run", "--rm", "--network=none", "--ulimit", "core=0", "-v", f"{QEMU}:/qemu:ro",
-                             "-v", f"{inputs}:/in:ro", "-v", f"{raw}:/raw:ro", "--entrypoint", "sh", tag, "-c", runner],
-                            capture_output=True, text=True, check=True,
-                        )
+                        done = run_in_container(tag, runner, (inputs, "/in"), (raw, "/raw"))
                         results[build, checks[-1]] = dict(line.split() for line in done.stdout.splitlines())
             finally:
                 subprocess.run(["docker", "image", "rm", tag], capture_output=True)
@@ -331,11 +342,7 @@ class PythonBuilder(unittest.TestCase):
                   'timeout 600 /qemu /bin2/fuzz_example.$b "$c" > /dev/null 2>&1; echo "$b ${c#/in/case-} $?"; done; '
                   'printf "%s " "$b printed"; timeout 600 /qemu /bin2/fuzz_example.$b /in/case-p | tr "\\n" ,; echo; '
                   'done')
-        done = subprocess.run(
-            ["docker", "run", "--rm", "--network=none", "-v", f"{QEMU}:/qemu:ro", "-v", f"{inputs}:/in:ro",
-             "-v", f"{binaries}:/bin2:ro", "--entrypoint", "sh", PYTHON_TAG, "-c", runner],
-            capture_output=True, text=True, check=True,
-        )
+        done = run_in_container(PYTHON_TAG, runner, (inputs, "/in"), (binaries, "/bin2"))
         results = {tuple(line.split(" ", 2)[:2]): line.split(" ", 2)[2] for line in done.stdout.splitlines()}
         for case, status in PYTHON_EXPECTED.items():
             for build in BUILDS:
@@ -404,17 +411,16 @@ class RustBuilder(unittest.TestCase):
         binaries.mkdir()
         for build in BUILDS:
             shutil.copy(self.work / "out" / "example_fuzzer" / f"example_fuzzer.{build}", binaries)
-        # An AddressSanitizer detection in a Rust fuzz target takes minutes under qemu (about 160 s here), where a C
-        # fuzz target's takes seconds: the time limit is 600 s.
+        # An AddressSanitizer detection in a Rust fuzz target took minutes under qemu (about 160 s here, 234 s on
+        # ubuntu-24.04-16core): that was the core dump of the qemu process. With run_in_container's write to
+        # coredump_filter the dump holds no memory, and all the cases of this test run in less than a second there
+        # (OSSV-729's measurement). OSSV-729 keeps each helper's time limit, as its R2 asks, and measured no lower
+        # limit.
         runner = ('for b in plain ubsan asan asan-ubsan; do for c in /in/*; do '
                   'timeout 600 /qemu /bin2/example_fuzzer.$b "$c" > /dev/null 2>&1; echo "$b ${c#/in/case-} $?"; done; '
                   'printf "%s " "$b printed"; timeout 60 /qemu /bin2/example_fuzzer.$b /in/case-r | tr "\\n" ,; echo; '
                   'done')
-        done = subprocess.run(
-            ["docker", "run", "--rm", "--network=none", "-v", f"{QEMU}:/qemu:ro", "-v", f"{inputs}:/in:ro",
-             "-v", f"{binaries}:/bin2:ro", "--entrypoint", "sh", RUST_TAG, "-c", runner],
-            capture_output=True, text=True, check=True,
-        )
+        done = run_in_container(RUST_TAG, runner, (inputs, "/in"), (binaries, "/bin2"))
         results = {tuple(line.split(" ", 2)[:2]): line.split(" ", 2)[2] for line in done.stdout.splitlines()}
         for case, statuses in RUST_EXPECTED.items():
             for build, status in zip(BUILDS, statuses):
@@ -485,11 +491,7 @@ class GoBuilder(unittest.TestCase):
         runner = ('for c in /in/*; do timeout 120 /qemu /bin2/example_fuzzer.plain "$c" > /dev/null 2>&1; '
                   'echo "${c#/in/} $?"; done; printf "printed "; timeout 60 /qemu /bin2/example_fuzzer.plain '
                   '/in/case-r | tr "\\n" ,; echo')
-        done = subprocess.run(
-            ["docker", "run", "--rm", "--network=none", "-v", f"{QEMU}:/qemu:ro", "-v", f"{inputs}:/in:ro",
-             "-v", f"{binaries}:/bin2:ro", "--entrypoint", "sh", GO_TAG, "-c", runner],
-            capture_output=True, text=True, check=True,
-        )
+        done = run_in_container(GO_TAG, runner, (inputs, "/in"), (binaries, "/bin2"))
         results = dict(line.split(" ", 1) for line in done.stdout.splitlines())
         for case, status in GO_EXPECTED.items():
             with self.subTest(case=case):
@@ -574,11 +576,7 @@ class AllocationFailureOnCjson(unittest.TestCase):
             for build in BUILDS:
                 shutil.copy(self.work / "out" / target / f"{target}.{build}", binaries)
         runner = f"q() {{ timeout 60 /qemu \"$@\"; }}\n{CJSON_RUNNER}"
-        done = subprocess.run(
-            ["docker", "run", "--rm", "--network=none", "-v", f"{QEMU}:/qemu:ro", "-v", f"{inputs}:/in:ro",
-             "-v", f"{binaries}:/bin2:ro", "--entrypoint", "sh", CJSON_TAG, "-c", runner],
-            capture_output=True, text=True, check=True,
-        )
+        done = run_in_container(CJSON_TAG, runner, (inputs, "/in"), (binaries, "/bin2"))
         results = {tuple(line.split(" ")[:3]): line.split(" ")[3] for line in done.stdout.splitlines()}
         for build in BUILDS:
             for case in sorted(path.name for path in inputs.iterdir()):
@@ -594,6 +592,154 @@ class AllocationFailureOnCjson(unittest.TestCase):
                         self.assertEqual(counting, str(min(n + 1, CJSON_ALLOCATIONS)))
                     else:
                         self.assertEqual(counting, "0")
+
+
+# The frame-pointer images of .github/workflows/toolchain-images.yaml that FramePointers builds on, by the language of
+# the fixture: the row of infra/toolchains.tsv that the image is made from, and the variable that names the image. The
+# rows are taken by name, never as the newest for a language, so that these tests read the same images after
+# infra/toolchains.tsv has the frame-pointer rows too.
+FRAME_POINTER_IMAGES = {"c": ("oss-fuzz-theorems-2026.10", "OV_FP_TOOLCHAIN_C"),
+                        "rust": ("oss-fuzz-theorems-2026.10-rust", "OV_FP_TOOLCHAIN_RUST")}
+# What toolchain.sh adds to the C flags, and rust/recipes.sh to rustc's, on a frame-pointer image.
+FP_C_FLAG = "-fno-omit-frame-pointer"
+FP_RUST_FLAG = "-Cforce-frame-pointers=yes"
+
+
+def row_image(name):
+    """The image of the row of infra/toolchains.tsv named `name`."""
+    images = [image for row, image, _, _ in check_build.toolchains() if row == name]
+    if len(images) != 1:
+        raise check_build.Failed(f"infra/toolchains.tsv has {len(images)} rows named {name}, not 1")
+    return images[0]
+
+
+@unittest.skipUnless(os.environ.get("OV_DOCKER_TESTS") == "1"
+                     and all(os.environ.get(variable) for _, variable in FRAME_POINTER_IMAGES.values())
+                     and all(docker_ready(row_image(row)) for row, _ in FRAME_POINTER_IMAGES.values()),
+                     "set OV_DOCKER_TESTS=1, and OV_FP_TOOLCHAIN_C and OV_FP_TOOLCHAIN_RUST to the frame-pointer "
+                     "images (.github/workflows/toolchain-images.yaml makes them), with Docker and their base images, "
+                     "to build the fixtures on them")
+class FramePointers(unittest.TestCase):
+    """OFT_FRAME_POINTERS: the plain build of fixtures/example and fixtures/rust-example on each frame-pointer image and
+    on the base image it is made from. compile_build passes no -e of its caller and keeps no output, so these tests run
+    compile with compile_build's docker run arguments and their own -e, and read its output. A Rust build compiles the
+    standard library (minutes), so the Rust fixture is built only where a test reads its RUSTFLAGS line."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.scratch = tempfile.TemporaryDirectory(prefix="ov-test-frame-pointers.")
+        cls.work = pathlib.Path(cls.scratch.name)
+        cls.labels = check_build.work_label(cls.work)
+        jobs = {
+            "c": check_build.Job(name="example", directory=FIXTURE, repo="https://example.invalid/example", ref="",
+                                 dockerfile="", builds=["plain"], fuzz_targets=None),
+            "rust": check_build.Job(name="rust-example", directory=RUST_FIXTURE,
+                                    repo="https://example.invalid/rust-example", ref="", dockerfile="",
+                                    builds=["plain"], fuzz_targets=["example_fuzzer"], language="rust"),
+        }
+        # The project image of each fixture, on the base image ("base") and on the frame-pointer image ("fp").
+        cls.tags = {}
+        for language, (row, variable) in FRAME_POINTER_IMAGES.items():
+            for kind, toolchain in (("base", row_image(row)), ("fp", os.environ[variable])):
+                tag = f"oss-verify-test/{jobs[language].name}-frame-pointers:{kind}"
+                cls.tags[language, kind] = tag
+                check_build.build_project(jobs[language], "0" * 40, check_build.build_builder(toolchain), tag,
+                                          cls.work)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.scratch.cleanup()
+        for tag in cls.tags.values():
+            subprocess.run(["docker", "image", "rm", tag], capture_output=True)
+
+    def compile(self, language, kind, *settings):
+        """compile, the plain build, in the project image of `language` on the image of `kind` ("base" or "fp"), with
+        compile_build's docker run arguments and an -e for each of `settings`: its exit status, and its standard output
+        and standard error together."""
+        tag = self.tags[language, kind]
+        out = self.work / "out"
+        check_build.empty_directory(out, tag, labels=self.labels)
+        environment = [word for setting in settings for word in ("-e", setting)]
+        done = subprocess.run(
+            ["docker", "run", "--rm", "--init", "--network=none", *self.labels, "-e", "SANITIZER=none",
+             "-e", f"OV_OWNER={os.getuid()}:{os.getgid()}", *environment, "-v", f"{out}:/out", tag, "compile"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
+        return done.returncode, done.stdout
+
+    def flag_lines(self, language, output):
+        """[(line, the flag it has on a frame-pointer image)] for the lines of a build's output that give its flags:
+        compile's CFLAGS line and, in a Rust build, the Rust recipe's RUSTFLAGS line. A missing line fails the test."""
+        wanted = [(r"^compile: CFLAGS=.*$", FP_C_FLAG)]
+        if language == "rust":
+            wanted.append((r"^oft-rust: .* RUSTFLAGS=.*$", FP_RUST_FLAG))
+        lines = []
+        for pattern, flag in wanted:
+            found = re.findall(pattern, output, re.M)
+            self.assertTrue(found, f"no line {pattern} in the output of compile:\n{output[-4000:]}")
+            lines += [(line, flag) for line in found]
+        return lines
+
+    def built_with_frame_pointers(self, language):
+        code, output = self.compile(language, "fp")
+        self.assertEqual(code, 0, output[-4000:])
+        for line, flag in self.flag_lines(language, output):
+            self.assertIn(flag, line)
+
+    def built_without_frame_pointers(self, language, *settings):
+        code, output = self.compile(language, "base", *settings)
+        self.assertEqual(code, 0, output[-4000:])
+        for line, _ in self.flag_lines(language, output):
+            for flag in (FP_C_FLAG, FP_RUST_FLAG):
+                self.assertNotIn(flag, line)
+
+    def test_the_frame_pointer_image_builds_c_with_frame_pointers(self):
+        self.built_with_frame_pointers("c")
+
+    def test_the_frame_pointer_image_builds_rust_with_frame_pointers(self):
+        self.built_with_frame_pointers("rust")
+
+    def test_the_base_image_builds_c_without_frame_pointers(self):
+        self.built_without_frame_pointers("c")
+
+    def test_the_base_image_builds_rust_without_frame_pointers(self):
+        self.built_without_frame_pointers("rust")
+
+    def test_an_empty_oft_frame_pointers_on_the_base_image_builds_c_without_frame_pointers(self):
+        self.built_without_frame_pointers("c", "OFT_FRAME_POINTERS=")
+
+    def test_an_empty_oft_frame_pointers_on_the_base_image_builds_rust_without_frame_pointers(self):
+        self.built_without_frame_pointers("rust", "OFT_FRAME_POINTERS=")
+
+    def test_oft_frame_pointers_0_fails_the_build(self):
+        code, output = self.compile("c", "base", "OFT_FRAME_POINTERS=0")
+        self.assertEqual(code, 1, output[-4000:])
+        # The message names the variable and the value it refuses.
+        self.assertRegex(output, r"OFT_FRAME_POINTERS.*'0'")
+
+
+class NoFramePointerImage(unittest.TestCase):
+    """This file's own command, `OV_DOCKER_TESTS=1 uv run pytest`, on a machine with Docker and the base images but
+    with no frame-pointer image named (OV_FP_TOOLCHAIN_C and OV_FP_TOOLCHAIN_RUST unset): FramePointers skips, as each
+    other class of this file skips when its image is not here, and the run does not fail. The docker-tests job of
+    .github/workflows/toolchain-images.yaml fails on a skipped test by itself. A docker on PATH that says that each
+    image is here stands in for Docker and the base images."""
+
+    def test_frame_pointers_skips_when_no_frame_pointer_image_is_named(self):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(prefix="ov-test-no-frame-pointer-image.") as scratch:
+            docker = pathlib.Path(scratch) / "docker"
+            docker.write_text('#!/bin/sh\n[ "$1 $2" = "image inspect" ] && exit 0\necho "docker $*: not here" >&2\n'
+                              "exit 1\n")
+            docker.chmod(0o755)
+            environment = {name: value for name, value in os.environ.items()
+                           if name not in ("OV_FP_TOOLCHAIN_C", "OV_FP_TOOLCHAIN_RUST")}
+            environment.update(OV_DOCKER_TESTS="1", PATH=f"{scratch}{os.pathsep}{environment.get('PATH', '')}")
+            done = subprocess.run(
+                [sys.executable, "-P", "-m", "pytest", "-q", "-rs", "-p", "no:cacheprovider", "-c", "pyproject.toml",
+                 f"{pathlib.Path(__file__).resolve()}::FramePointers"],
+                cwd=root, env=environment, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300)
+        self.assertEqual(done.returncode, 0, done.stdout[-4000:] + done.stderr[-2000:])
+        self.assertRegex(done.stdout, r"(?m)^\d+ skipped in ", done.stdout[-4000:])
 
 
 if __name__ == "__main__":

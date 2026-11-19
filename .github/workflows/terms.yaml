@@ -1,32 +1,57 @@
 # Adapted from OSS Scanner's .github/workflows/terms.yaml (https://github.com/anthropics/oss-scanner), Copyright 2026
 # Anthropic PBC, Apache-2.0. Modified 2026 by Theorem Labs, PBC: the OSS Verify terms, the repository's maintainers
-# recognised by their association with it rather than by a list of logins, and no box for a pull request that enrolls
-# nothing.
+# recognised by their association with it rather than by a list of logins, no box for a pull request that enrolls
+# nothing, and the record of the terms that a branch names when it adopts a seeded project.
 name: "Terms"
 # An enrollment pull request must accept the OSS Verify terms: the box in the pull request template, ticked in the
 # description. This check fails until it is, and runs again whenever the description is edited. A branch of this
-# repository needs no box: only an account with write access, including a GitHub App, can push one.
+# repository needs no box of its own: only an account with write access, including a GitHub App, can push one.
+#
+# But a branch can adopt a seeded project: docs/seeded-projects.tsv of the base marks <name> yes, and with
+# projects/<name>/project.yaml the branch gives findings to an address that the base's file does not give them to.
+# The addresses that get findings are primary_contact, unless it is n/a, and each address of auto_ccs. So a change
+# from one contact to another is an adoption too, and so is an added auto_ccs address: the new address needs a record
+# of its own. enrollment refuses a pull request from a fork that changes a seeded project, so a maintainer of this
+# repository carries the adopter's change on a branch. The adopter's own pull request from their fork, which
+# enrollment refuses, ticks the box: it is their record that they accept the terms. The branch's description names it
+# on a line "Adoption: #<number>" (or with its URL). The check passes only when that pull request comes from a fork,
+# was not opened by a bot, ticks the box, and names projects/<name> in its description, and no other project
+# (docs/project-yaml.md, "Seeded projects"). The record need not change projects/<name>/: the check reads none of its
+# files. A branch names one record, so when the branch adopts several projects, that record names each of them, and
+# no other. The files of a branch are read on each run, every page of them. A read that fails, a list over the API's
+# 3000 files, or a head that moves while they are read, fails the check. .github/scripts/terms-accepted tells how the
+# check reads the addresses: with the reader of oss-verify validate.
 #
 # A pull request that changes no file under projects/ (a change to src/ or docs/, say) enrolls nothing, and needs no
 # box either: the terms govern the enrollment of a project. They say so in their first paragraph: "This OSS Verify
 # Agreement (the "Agreement") governs your ("Participant") enrollment of a project in OSS Verify", accepted "by ticking
 # "I accept the OSS Verify terms" in an enrollment pull request" (https://theorem.dev/oss-verify/terms/). Any other
-# contribution is under the Apache License 2.0, as CONTRIBUTING.md says. The files are read from the API only when the
-# box is not ticked, every page of them, renames under both names, as build.yaml's route reads them. A pull request
-# that changes more files than the 3000 the API lists, or whose head moves while they are read, needs the box.
+# contribution is under the Apache License 2.0, as CONTRIBUTING.md says. From a fork, the files are read from the API
+# only when the box is not ticked, every page of them, renames under both names, as build.yaml's route reads them. A
+# pull request that changes more files than the 3000 the API lists, or whose head moves while they are read, needs the
+# box.
 #
-# pull_request: the workflow file comes from the merge commit, so a pull request that changes it controls this run and
-# its check: a contributor could edit this check away in their own pull request. The code-owner rule on /.github/ of
-# .github/CODEOWNERS guards the merge of such a pull request. enroll-dispatch.yml sends no pull request for its
+# What runs, and from where. On pull_request, the workflow file comes from the merge commit, so the run: block of the
+# step below is the merge commit's. A pull request that changes this file runs its own copy, and so controls this run
+# and its check: a contributor could edit this check away in their own pull request. The code-owner rule on /.github/
+# of .github/CODEOWNERS guards the merge of such a pull request. enroll-dispatch.yml sends no pull request for its
 # theorem statements unless all its files are under one projects/<name>/ (the_project() of
 # .github/scripts/enroll-dispatch), and none that changes a steering file (.github/scripts/steering.py) until a person
-# approves its head. This job reads only the event's description and the list of the files the pull request changes,
-# never the pull request's code. Its token has no permission (permissions: {} below): the API
-# gives a public repository's pull request and its files to any token ("This endpoint can be used without
-# authentication or the aforementioned permissions if only public resources are requested",
+# approves its head. The run: block runs the program .github/scripts/terms-accepted and src/oss_verify/ from the
+# checkout of the base commit. Only while the base has no .github/scripts/terms-accepted does the job also check out
+# the merge commit, into merge/, and run the program and src/ from there (the step below tells why).
+#
+# The program reads the event's description and the list of the files the pull request changes. For a branch that
+# changes the project.yaml of a seeded project, it also reads docs/seeded-projects.tsv of the base, the text of that
+# project.yaml at the head and at the base, and the pull request that the description names. It reads each through
+# the API. Its token has no permission (permissions: {} below): the API gives a public repository's pull requests,
+# their files and its contents to any token ("This endpoint can be used without authentication or the aforementioned
+# permissions if only public resources are requested",
 # https://docs.github.com/en/rest/pulls/pulls#list-pull-requests-files), and a token is used, not none, for the
-# authenticated rate limit. The description reaches the script through an environment variable, never by ${{ }}
-# substitution into the script, so its text cannot become shell.
+# authenticated rate limit. The description reaches the program through an environment variable, never by ${{ }}
+# substitution into the run: block, so its text cannot become shell. Each value that the API gives (a description, a
+# file name, the text of a file, a login) is data too: the program only compares it and prints it, gives no shell any
+# of it, and loads the text of a file only with yaml.safe_load, which makes only plain data and runs no code.
 on:
   pull_request:
     types: [opened, edited, reopened, synchronize]
@@ -46,6 +71,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
+      # On pull_request, the base commit, not the merge commit that actions/checkout takes by default. The step below
+      # runs the base's .github/scripts/terms-accepted and src/oss_verify/.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      # Only while the base has no .github/scripts/terms-accepted (the step below tells why): the merge commit, which
+      # actions/checkout takes by default on pull_request, into merge/.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
+        if: hashFiles('.github/scripts/terms-accepted') == ''
+        with:
+          path: merge
+          persist-credentials: false
       - name: The description accepts the OSS Verify terms
         env:
           BODY: ${{ github.event.pull_request.body }}
@@ -57,42 +95,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          # No pipefail: grep -q below stops reading early, and printf's broken pipe must not read as no box.
-          set -eu
-          # A same-repository branch can only be pushed by an account with write access, including a GitHub App.
-          if [ "$HEAD_REPOSITORY" = "$REPOSITORY" ]; then
-            echo "Opened from this repository: no terms box needed."; exit 0
-          fi
-          # Bots, and the repository's own maintainers (as GitHub relates them to it), do not enroll through this form.
-          case "$AUTHOR" in
-            dependabot\[bot\]|github-actions\[bot\])
-              echo "Opened by $AUTHOR, a bot: no terms box needed."; exit 0 ;;
-          esac
-          case "$ASSOCIATION" in
-            OWNER|MEMBER|COLLABORATOR)
-              echo "Opened by a maintainer of this repository ($ASSOCIATION): no terms box needed."; exit 0 ;;
-          esac
-          if printf '%s\n' "$BODY" | grep -qiE '^[[:space:]]*[-*][[:space:]]+\[[xX]\][[:space:]]+I accept the \[OSS Verify terms\]\(https://theorem\.dev/oss-verify/terms/?\)'; then
-            echo "The OSS Verify terms are accepted in the description."; exit 0
-          fi
-          # Not an enrollment (the top of this file): no file under projects/, of a head that did not move meanwhile. A
-          # read that fails, a list over the API's 3000 files, or a head that moved, decides nothing: the box is needed.
-          # In an if condition bash -e stops nothing, so each step that can fail returns by hand.
-          not_an_enrollment() {
-            local pull changed paths
-            pull=$(gh api "repos/$REPOSITORY/pulls/$PR") || return 1
-            [ "$(jq -r .head.sha <<< "$pull")" = "$HEAD_SHA" ] || return 1
-            changed=$(jq -r .changed_files <<< "$pull") || return 1
-            [[ $changed =~ ^[0-9]+$ ]] && (( changed <= 3000 )) || return 1
-            paths=$(gh api --paginate "repos/$REPOSITORY/pulls/$PR/files?per_page=100" \
-              --jq '.[] | .filename, (.previous_filename // empty)') || return 1
-            ! grep -q '^projects/' <<< "$paths" || return 1
-            [ "$(gh api "repos/$REPOSITORY/pulls/$PR" --jq .head.sha)" = "$HEAD_SHA" ]
-          }
-          if not_an_enrollment; then
-            echo "Not an enrollment: this pull request changes no file under projects/, so no terms box is needed."
-            exit 0
-          fi
-          echo "::error::Tick 'I accept the OSS Verify terms' in the pull request description. Editing the description runs this check again."
-          exit 1
+          # The program and src/oss_verify/ of the base's checkout. The base has no program only while main lacks
+          # .github/scripts/terms-accepted: for the pull request that adds it, and for a pull request whose base is
+          # older than that. Only then does the merge commit's copy in merge/ run, with the merge commit's src/. That
+          # adds no trust: on pull_request, this run: block is the merge commit's already.
+          dir=.
+          [ -f .github/scripts/terms-accepted ] || dir=merge
+          PYTHONPATH="$dir/src" python3 "$dir/.github/scripts/terms-accepted"

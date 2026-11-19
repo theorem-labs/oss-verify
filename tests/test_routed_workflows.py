@@ -7,7 +7,8 @@ Each workflow has a route job that decides which jobs the run needs, and a colle
 collects every result with the collector, and reports the workflow's one check: the job required reports the check
 that the ruleset requires, and review.yml's job collect the check review jobs, which no ruleset requires. These check
 the collector's verdicts, the shape every routed workflow keeps (the collector waits for every job, and no job a route
-may skip reports a required check), and the routes' own steps, run on made-up changes.
+may skip reports a required check), and the routes' own steps, run on made-up changes. They also run the steps of
+tests.yaml's jobs that choose their tests from route's outputs.
 """
 import importlib.util
 import itertools
@@ -483,7 +484,8 @@ def test_an_issues_event_reaches_route_only_as_data(tmp_path, sender, author, as
 # --- tests.yaml's route, run on made-up commits ---
 
 
-def commit(directory, environment, files):
+def write_files(directory, files):
+    """Write `files` ({path: text, or None for no file}) under `directory`."""
     for path, text in files.items():
         file = directory / path
         if text is None:
@@ -491,24 +493,31 @@ def commit(directory, environment, files):
             continue
         file.parent.mkdir(parents=True, exist_ok=True)
         file.write_text(text)
+
+
+def commit(directory, environment, files):
+    write_files(directory, files)
     git("add", "-A", cwd=directory, env=environment)
     git("commit", "-q", "--allow-empty", "-m", "change", cwd=directory, env=environment)
     return git("rev-parse", "HEAD", cwd=directory, env=environment)
 
 
-TREE = {"README.md": "x\n", "AGENTS.md": "x\n", "docs/a.md": "x\n", "src/t.py": "x\n", "projects/p/project.yaml": "x\n"}
+# kay is a seeded project (it has a row in seeds/builds.tsv), and projects/kay/ is its port. p is not seeded.
+TREE = {"README.md": "x\n", "AGENTS.md": "x\n", "docs/a.md": "x\n", "src/t.py": "x\n", "projects/p/project.yaml": "x\n",
+        "seeds/builds.tsv": "# a comment\nproject\tresult\tdetail\nkay\treproduces\tall binaries match the release's\n",
+        "projects/kay/series": "kay.0001-checked.patch\n"}
 
 
-def route_tests(tmp_path, change, event="pull_request", before=None, fork=None):
+def route_tests(tmp_path, change, event="pull_request", before=None, fork=None, tree=None):
     """Run tests.yaml's "Which jobs the changes need" on a commit that makes `change` to TREE, as a run of a pull
-    request from a fork when `fork` is "true" or "false" (the workflow's FORK; unset by default). Return its
-    outputs."""
+    request from a fork when `fork` is "true" or "false" (the workflow's FORK; unset by default). `tree` holds files
+    that replace TREE's in the first commit. Return its outputs."""
     # git with no configuration from this machine, as in test_take_project.py.
     isolated = isolated_git_env(tmp_path)
     repo = tmp_path / "repo"
     repo.mkdir()
     git("init", "-q", "-b", "main", cwd=repo, env=isolated)
-    first = commit(repo, isolated, TREE)
+    first = commit(repo, isolated, {**TREE, **(tree or {})})
     commit(repo, isolated, change)
     git("remote", "add", "origin", f"file://{repo}", cwd=repo, env=isolated)
     paths = step(workflow("tests.yaml")["jobs"]["route"], "Which jobs the changes need")
@@ -534,26 +543,57 @@ def route_tests(tmp_path, change, event="pull_request", before=None, fork=None):
     ({".github/workflows/tests.yaml": "y\n"}, {"suite": "true"}),
     # A rename out of the documentation is a change to both names.
     ({"docs/a.md": None, "src/a.md": "x\n"}, {"suite": "true"}),
+    # A file that docs/seeded-projects.tsv depends on, the table, or its test: Committed runs too. A port of a seeded
+    # project is such a file.
+    ({"seeds/checked-patches.tsv": "y\n"}, {"suite": "true", "table": "true"}),
+    ({"src/oss_verify/seeded_projects.py": "y\n"}, {"suite": "true", "table": "true"}),
+    ({"src/oss_verify/validate.py": "y\n"}, {"suite": "true", "table": "true"}),
+    ({"tests/test_seeded_projects.py": "y\n"}, {"suite": "true", "table": "true"}),
+    ({"docs/seeded-projects.tsv": "y\n"}, {"docs": "true", "table": "true"}),
+    ({"projects/kay/series": "y\n"}, {"suite": "true", "table": "true"}),
+    ({"projects/kay/series": None}, {"suite": "true", "table": "true"}),
+    # A pull request that removes seeds/builds.tsv: route reads no such file, and the path is under seeds/.
+    ({"seeds/builds.tsv": None}, {"suite": "true", "table": "true"}),
+    # A change to the port of a project that is not seeded, as its enrollment makes, and any other change: Committed
+    # does not run.
+    ({"projects/p/series": "y\n"}, {"suite": "true"}),
+    ({"src/oss_verify/check.py": "y\n"}, {"suite": "true"}),
     # No change: nothing to run.
     ({}, {}),
 ])
 def test_tests_route_asks_for_the_jobs_a_pull_requests_changes_need(tmp_path, change, outputs):
     assert route_tests(tmp_path, change) == outputs
+    assert ("::Committed runs:" in (tmp_path / "summary").read_text()) == ("table" in outputs)
 
 
 def test_tests_route_compares_a_push_with_the_commit_before_it(tmp_path):
     assert route_tests(tmp_path, {"docs/a.md": "y\n"}, event="push") == {"docs": "true"}
 
 
+def test_tests_route_runs_committed_for_a_push_that_changes_a_seeded_port(tmp_path):
+    # A push to main that makes the table stale runs Committed, which then fails the check tests on main's commit.
+    assert route_tests(tmp_path, {"projects/kay/series": "y\n"}, event="push") == {"suite": "true", "table": "true"}
+
+
+def test_tests_route_reads_a_last_row_that_no_newline_ends(tmp_path):
+    # The generator reads such a row of seeds/builds.tsv, so kay is seeded and a change to its port runs Committed.
+    builds = TREE["seeds/builds.tsv"].removesuffix("\n")
+    assert builds.endswith("\nkay\treproduces\tall binaries match the release's")
+    assert route_tests(tmp_path, {"projects/kay/series": "y\n"}, tree={"seeds/builds.tsv": builds}) == {
+        "suite": "true", "table": "true"}
+
+
 @pytest.mark.parametrize("change, outputs", [
-    # An enrollment, or any change under projects/: no job runs a fork's code.
+    # An enrollment, or any change under projects/: no job runs a fork's code, not even Committed for a seeded port.
     ({"projects/p/project.yaml": "y\n"}, {}),
+    ({"projects/kay/series": "y\n"}, {}),
     ({"projects/p/project.yaml": "y\n", "src/t.py": "y\n"}, {}),
     ({"projects/p/project.yaml": None, "src/p.yaml": "x\n"}, {}),
     # No file under projects/: tested as a branch of this repository is.
     ({"src/t.py": "y\n"}, {"suite": "true"}),
     ({".github/workflows/tests.yaml": "y\n"}, {"suite": "true"}),
     ({"docs/a.md": "y\n"}, {"docs": "true"}),
+    ({"seeds/x.tsv": "y\n"}, {"suite": "true", "table": "true"}),
 ])
 def test_tests_route_runs_a_forks_change_only_when_it_changes_no_file_under_projects(tmp_path, change, outputs):
     assert route_tests(tmp_path, change, fork="true") == outputs
@@ -572,7 +612,7 @@ def test_tests_route_runs_a_branchs_change_under_projects(tmp_path):
     ("workflow_dispatch", ""),
 ])
 def test_tests_route_runs_everything_with_nothing_to_compare_with(tmp_path, event, before):
-    assert route_tests(tmp_path, {"docs/a.md": "y\n"}, event=event, before=before) == {"suite": "true"}
+    assert route_tests(tmp_path, {"docs/a.md": "y\n"}, event=event, before=before) == {"suite": "true", "table": "true"}
 
 
 def test_the_docs_job_runs_the_tests_it_names(tmp_path):
@@ -583,6 +623,31 @@ def test_the_docs_job_runs_the_tests_it_names(tmp_path):
         file, cls, test = node.split("::")
         source = (ROOT / file).read_text()
         assert re.search(rf"^class {cls}\b", source, re.M) and re.search(rf"^    def {test}\(", source, re.M), node
+
+
+COMMITTED = "tests/test_seeded_projects.py::Committed::test_docs_seeded_projects_tsv_is_what_the_generator_writes"
+TOOLCHAINS = "tests/test_check.py::Toolchains::test_infra_toolchains_tsv_is_the_one_file_that_names_a_toolchain_digest"
+
+
+@pytest.mark.parametrize("table", ["true", ""])
+def test_the_suite_and_docs_jobs_run_committed_only_when_route_asks_for_the_table(tmp_path, table):
+    # route's output table reaches each step as TABLE: "true", or "" when route does not write it. A stand-in python3
+    # records the arguments that pytest gets, and prints the line that the docs job's guard reads.
+    bin = tmp_path / "bin"
+    bin.mkdir()
+    (bin / "python3").write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$ARGV"\necho "1 passed"\n')
+    (bin / "python3").chmod(0o755)
+    named = {"suite": [] if table == "true" else ["--deselect", COMMITTED],
+             "docs": [TOOLCHAINS, COMMITTED] if table == "true" else [TOOLCHAINS]}
+    jobs = workflow("tests.yaml")["jobs"]
+    for job, name in (("suite", "The tests in tests/"), ("docs", "The tests that read the documentation")):
+        tests = step(jobs[job], name)
+        run = subprocess.run(["bash", "-e", "-c", tests["run"]], cwd=tmp_path, capture_output=True, text=True,
+                             env={**os.environ, "PATH": f"{bin}:{os.environ['PATH']}", "ARGV": str(tmp_path / "argv"),
+                                  "RUNNER_TEMP": str(tmp_path), "TABLE": table})
+        assert run.returncode == 0, run.stderr
+        argv = (tmp_path / "argv").read_text().splitlines()
+        assert [a for a in argv if a == "--deselect" or a.startswith("tests/")] == named[job], job
 
 
 # --- the triage comment: triage.yaml's one job, and review.yml's route after it ---
