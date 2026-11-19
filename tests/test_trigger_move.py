@@ -849,6 +849,42 @@ match args:
             self.row_case(changed)
         self.assertIn("the exit status of make's row check", str(caught.exception))
 
+    def digest_case(self, tree=ROOT):
+        """Where publish's push step finds the digest that make made: make uploads it as one artifact for each base row
+        (actions/upload-artifact, name and path), publish downloads every artifact that its pattern matches into one
+        directory (actions/download-artifact, merge-multiple), and the push step reads it there. push_case writes each
+        digest where the push step reads it, $RUNNER_TEMP/fp-digest/<row>.digest, and passes only then. So this case
+        holds the hand-over when each upload's name matches the download's pattern and its file lands at that path.
+        A rename on one side alone fails publish only on main, after the merge."""
+        images, publish = self.workflow(tree, self.IMAGES), self.workflow(tree, self.PUBLISH)
+        uploads = [s for s in images["jobs"]["make"]["steps"]
+                   if str(s.get("uses", "")).startswith("actions/upload-artifact@")]
+        downloads = [s for s in publish["jobs"]["publish"]["steps"]
+                     if str(s.get("uses", "")).startswith("actions/download-artifact@")]
+        self.assertEqual((len(uploads), len(downloads)), (1, 1), "make's upload and publish's download of the digests")
+        up, down = uploads[0]["with"], downloads[0]["with"]
+        self.assertIs(down.get("merge-multiple"), True, "publish puts every digest in one directory")
+        into = pathlib.PurePosixPath(render(down["path"], {"runner.temp": str(self.temp)}))
+        for row in images["jobs"]["make"]["strategy"]["matrix"]["base"]:
+            ctx = {"matrix.base": row, "runner.temp": "/the-runner-of-make"}
+            name, path = render(up["name"], ctx), pathlib.PurePosixPath(render(up["path"], ctx))
+            self.assertTrue(re.fullmatch(re.escape(down["pattern"]).replace(r"\*", ".*"), name),
+                            f"{row}: publish's pattern {down['pattern']!r} does not match make's artifact {name!r}")
+            self.assertEqual(into / path.name, pathlib.PurePosixPath(self.temp / "fp-digest" / f"{row}.digest"),
+                             f"{row}: where make's digest lands in publish's job")
+
+    def test_publish_reads_the_digest_that_make_uploads(self):
+        self.digest_case()
+        self.push_case()
+
+    def test_control_make_uploads_the_digest_under_another_name(self):
+        self.digest_case(self.copy_tree("unchanged"))
+        changed = self.copy_tree("changed", [(f".github/workflows/{self.IMAGES}", "name: fp-digest-${{ matrix.base }}",
+                                              "name: fp-made-${{ matrix.base }}")])
+        with self.assertRaises(AssertionError) as caught:
+            self.digest_case(changed)
+        self.assertIn("does not match make's artifact", str(caught.exception))
+
     def test_publish_starts_on_the_completed_runs_on_main_of_toolchain_images_alone(self):
         # workflow_run names a workflow by its name: a rename of toolchain-images.yaml, or of its branch, would stop
         # publishing with no error. No other workflow has that name.
