@@ -728,15 +728,73 @@ match args:
 
     @staticmethod
     def checks_out(step, workflow, job):
-        """The commit whose files actions/checkout, as the step `step` of the job `job` of `workflow`, checks out. None
-        when the job's token cannot read contents (grants: read or write): the checkout then fails, and gives no file.
-        This renders its ref in publish's context, where github.event.workflow_run.head_sha is HEAD, the commit that
-        make built, and github.sha is MAIN_SHA, main's newest commit. It matches no text of the ref. With no ref, or
-        with one that renders empty, actions/checkout takes the commit of the event: for workflow_run, github.sha."""
+        """The commit whose infra/toolchains.tsv actions/checkout, as the step `step` of the job `job` of `workflow`,
+        checks out. None when it gives no infra/toolchains.tsv: when the job's token cannot read contents (grants: read
+        or write), the checkout fails, and when its sparse checkout leaves that file out (sparse_takes), it gives other
+        files only. This renders its ref in publish's context, where github.event.workflow_run.head_sha is HEAD, the
+        commit that make built, and github.sha is MAIN_SHA, main's newest commit. It matches no text of the ref. With
+        no ref, or with one that renders empty, actions/checkout takes the commit of the event: for workflow_run,
+        github.sha."""
+        given = step.get("with") or {}
         if ToolchainPublish.grants(workflow, job, "contents") not in ("read", "write"):
             return None
+        if not ToolchainPublish.sparse_takes(given, "infra/toolchains.tsv"):
+            return None
         ctx = {"github.event.workflow_run.head_sha": HEAD, "github.sha": ToolchainPublish.MAIN_SHA}
-        return render((step.get("with") or {}).get("ref", ""), ctx) or ToolchainPublish.MAIN_SHA
+        return render(given.get("ref", ""), ctx) or ToolchainPublish.MAIN_SHA
+
+    @staticmethod
+    def sparse_takes(given, path):
+        """Whether actions/checkout, with the inputs `given`, checks out the file `path` of the tree. With no
+        sparse-checkout, or with one of no line, it checks out every file. Else it takes the lines of sparse-checkout,
+        each trimmed, and sparse-checkout-cone-mode, which is true unless it is false (the default of the pin's
+        action.yml). This renders the inputs, and reads each line as git does.
+          - Cone mode: actions/checkout runs git sparse-checkout set with the lines. Each line names a directory. git
+            checks out the files at the top of the tree, each file under a named directory, and each file directly in
+            a leading directory of a named one. So the line infra/toolchains.tsv, or infra/other.tsv, gives each file
+            directly in infra. git refuses a line that starts with / or !, or that holds one of *?[], and the checkout
+            then fails.
+          - Non-cone mode: actions/checkout writes the lines to .git/info/sparse-checkout, where each line is a pattern
+            of gitignore. git decides on the file first, then on each directory above it, the nearest first. At each,
+            the last line that matches decides, and a line that starts with ! leaves the file out. When no line
+            matches any of them, the file stays out. A line that starts with # is a comment. A line that ends in /
+            matches a directory only. A line with no other / matches the name at any depth. Else it matches the path
+            from the top, without a leading /, one segment at a time (fnmatch, so * does not cross a /), and a segment
+            ** matches any number of segments."""
+        sparse = given.get("sparse-checkout")
+        text = "\n".join(render(p, {}) for p in sparse) if isinstance(sparse, list) else render(sparse or "", {})
+        lines = [line.strip() for line in text.split("\n") if line.strip()]
+        if not lines:
+            return True
+        names = path.split("/")
+        if (render(given.get("sparse-checkout-cone-mode", ""), {}) or "true").upper() == "TRUE":
+            if any(line[0] in "/!" or any(c in line for c in "*?[]") for line in lines):
+                return False
+            parent = "/".join(names[:-1])
+            return not parent or any(path.startswith(f"{named}/") or f"{named}/".startswith(f"{parent}/")
+                                     for named in (line.rstrip("/") for line in lines))
+
+        def segments(have, want):
+            if not want:
+                return not have
+            if want[0] == "**":
+                return any(segments(have[n:], want[1:]) for n in range(len(have) + 1))
+            return bool(have) and fnmatch.fnmatchcase(have[0], want[0]) and segments(have[1:], want[1:])
+
+        def matches(pattern, at, directory):
+            if pattern.endswith("/") and not directory:
+                return False
+            pattern = pattern.rstrip("/")
+            if "/" not in pattern:
+                return fnmatch.fnmatchcase(at[-1], pattern)
+            return segments(at, pattern.removeprefix("/").split("/"))
+
+        for depth in range(len(names), 0, -1):
+            decided = [not line.startswith("!") for line in lines if not line.startswith("#")
+                       and matches(line.removeprefix("!"), names[:depth], depth < len(names))]
+            if decided:
+                return decided[-1]
+        return False
 
     def base_rows(self, rows):
         """Each of the base rows `rows` as this repository's infra/toolchains.tsv has it: (its line, its image)."""
@@ -806,23 +864,31 @@ match args:
             path.touch()
         return files
 
-    def run_push(self, publish, row, where, home, temp, drop=()):
+    def run_push(self, publish, row, where, home, temp):
         """publish's push step for the base row `row`, in `where`, with the stand-in registry of `home`. Its
         $RUNNER_TEMP is `temp`, which holds crane in bin/ and the job's GITHUB_PATH and GITHUB_ENV (file_commands).
         Each row is a job of its own, on a runner of its own: no login of a job before. When the job's token cannot
-        write packages (grants), the stand-in crane refuses each write to ghcr.io, as ghcr.io does. The names of
-        `drop` are left out of the step's env. Return (its exit status, its log, its calls of crane, each a list of
-        arguments)."""
+        write packages (grants), the stand-in crane refuses each write to ghcr.io, as ghcr.io does. Return (its exit
+        status, its log, its calls of crane, each a list of arguments)."""
         step = self.push_step(publish)
         (home / "login").unlink(missing_ok=True)
         (home / "calls").write_text("")
         ctx = {"github.token": WORKFLOW_TOKEN, "github.event.workflow_run.head_sha": HEAD, "matrix.base": row}
         denied = {} if self.grants(publish, "publish", "packages") == "write" else {"FAKE_CRANE_NO_PACKAGES_WRITE": "1"}
         files = {name: str(path) for name, path in self.file_commands(temp).items()}
-        env = {name: value for name, value in env_of(publish, "publish", step, ctx).items() if name not in drop}
-        rc, log, _ = self.run_script(step["run"], where, RUNNER_TEMP=str(temp), FAKE_CRANE=str(home), **denied,
-                                     **files, GITHUB_ACTOR="github-actions[bot]", **env)
+        rc, log, _ = self.run_script(step["run"], where, RUNNER_TEMP=str(temp), FAKE_CRANE=str(home),
+                                     GITHUB_ACTOR="github-actions[bot]", **denied, **files,
+                                     **env_of(publish, "publish", step, ctx))
         return rc, log, [json.loads(line) for line in (home / "calls").read_text().splitlines()]
+
+    def push_temp(self, row, digest):
+        """A new runner temp of publish's push step for the base row `row`: crane in bin/ (put_crane), and `digest`, the
+        digest that make made, at fp-digest/<row>.digest, where publish's download puts it."""
+        temp = pathlib.Path(tempfile.mkdtemp(dir=self.dir))
+        self.put_crane(temp / "bin")
+        (temp / "fp-digest").mkdir()
+        (temp / "fp-digest" / f"{row}.digest").write_text(digest + "\n")
+        return temp
 
     # The step of make that compares a frame-pointer row of infra/toolchains.tsv with the image that make made.
     ROW_CHECK = "the frame-pointer row of infra/toolchains.tsv, if there is one, names this image, and ghcr.io holds it"
@@ -955,13 +1021,13 @@ match args:
         ghcr.io holds the image that the row names, so only the comparison with the made image refuses a row. Each file
         that make uploads goes where publish's downloads of make's run put it (reads_run, lands). A download of
         publish's own run gets none of them. publish then runs on the same registry, and on the table of the commit
-        that its checkout gives (checks_out). Its sparse checkout must hold infra/toolchains.tsv. At HEAD, the commit
-        that make built, the table is make's. At any other commit, it is the table of main's newest commit, a later
-        one that moved the row's base line to another base image: the registry holds that image, and crane mutate
-        makes another image of it. publish's token has the permissions of its job (grants). Without actions read, a
-        download reads no run. Without contents read, the checkout gives no file. Without packages write, ghcr.io
-        refuses each write of the push step (run_push). publish's registry service is its own, and holds no image of
-        make's. The checks:
+        that its checkout gives (checks_out). At HEAD, the commit that make built, the table is make's. At any other
+        commit, it is the table of main's newest commit, a later one that moved the row's base line to another base
+        image: the registry holds that image, and crane mutate makes another image of it. A checkout that gives no
+        infra/toolchains.tsv gives no table: its sparse checkout leaves the file out (sparse_takes), or its token
+        cannot read contents. publish's token has the permissions of its job (grants). Without actions read, a
+        download reads no run. Without packages write, ghcr.io refuses each write of the push step (run_push).
+        publish's registry service is its own, and holds no image of make's. The checks:
           - make's row check and publish's step agree on each table: both pass, or both refuse the row,
           - make passes only the tables with no row or with the made image in PACKAGE,
           - where both pass and ghcr.io does not hold the image, publish copies the digest that make made to PACKAGE,
@@ -975,11 +1041,6 @@ match args:
         downloads = [down for down in inputs if self.reads_run(down, publish, "publish") == self.MAKE_RUN]
         checkouts = [s for s in publish["jobs"]["publish"]["steps"] if action_of(s) == "actions/checkout"]
         self.assertEqual(len(checkouts), 1, f"{self.RUN}: the checkouts of publish")
-        # With no sparse-checkout, the checkout holds every file.
-        sparse = (checkouts[0].get("with") or {}).get("sparse-checkout")
-        if sparse is not None:
-            paths = [render(p, {}) for p in sparse] if isinstance(sparse, list) else render(sparse, {}).split("\n")
-            self.assertIn("infra/toolchains.tsv", [p.strip() for p in paths], f"{self.RUN}: publish's sparse checkout")
         commit = self.checks_out(checkouts[0], publish, "publish")
         bases = self.base_rows(rows)
         registry, made, fp = self.registry_of(bases)
@@ -1023,8 +1084,8 @@ match args:
                         if to is not None:
                             pathlib.Path(to).parent.mkdir(parents=True, exist_ok=True)
                             shutil.copyfile(file, to)
-                # publish's checkout: no file when it fails, make's table at HEAD, else the table of main's newest
-                # commit
+                # publish's checkout: no table when it gives no infra/toolchains.tsv (checks_out), make's table at
+                # HEAD, else the table of main's newest commit
                 if commit is None:
                     there = pathlib.Path(tempfile.mkdtemp(dir=self.dir))
                 elif commit == HEAD:
@@ -1159,6 +1220,22 @@ match args:
         self.assertIn("oss-fuzz-theorems-2026.10, none: make passes, publish fails", caught)
         self.assertRegex(caught, r"awk: .*infra/toolchains\.tsv.*No such file or directory")
 
+    def test_control_publish_sparse_checkout_of_another_file(self):
+        # With cone mode off, the sparse checkout then takes infra/other.tsv alone, and leaves infra/toolchains.tsv out
+        # (sparse_takes). make stays whole, but publish fails.
+        publish = f".github/workflows/{self.PUBLISH}"
+        caught = self.handover_fails(self.RUN, (publish, "sparse-checkout: infra/toolchains.tsv",
+                                                "sparse-checkout: infra/other.tsv"))
+        self.assertIn("oss-fuzz-theorems-2026.10, none: make passes, publish fails", caught)
+        self.assertRegex(caught, r"awk: .*infra/toolchains\.tsv.*No such file or directory")
+
+    def test_control_publish_push_step_writes_github_env(self):
+        # The push step then changes the env of the job's later steps, in a job with packages: write.
+        line = '          PATH="$RUNNER_TEMP/bin:$PATH"\n'
+        caught = self.handover_fails(self.RUN, (f".github/workflows/{self.PUBLISH}", line,
+                                                line + '          echo "X=1" >> "$GITHUB_ENV"\n'))
+        self.assertIn("wrote GITHUB_PATH or GITHUB_ENV", caught)
+
     def test_control_publish_tag_in_the_package_of_the_base_image(self):
         # publish tags each image in the package of its base image. The Rust and the Python images then go to their
         # own packages, and publish's check of the image in FP_PACKAGE fails.
@@ -1224,8 +1301,17 @@ match args:
                                                         "          if-no-files-found: error\n", ""))
         self.assertIn("when no file is at the path of its upload", str(caught.exception))
 
+    def guard_fails(self, case, old, new=""):
+        """`case` passes on an unchanged copy of the tree, and fails on a copy whose publish file has `new` for `old`
+        (copy_tree). Return its message."""
+        case(self.copy_tree("unchanged"))
+        changed = self.copy_tree("changed", [(f".github/workflows/{self.PUBLISH}", old, new)])
+        with self.assertRaises(AssertionError) as caught:
+            case(changed)
+        return str(caught.exception)
+
     def packages_case(self, tree=ROOT):
-        """publish's push step (run_push) for each base row of its matrix, with the digest that make made, on a table
+        """publish's push step for each base row of its matrix (pushes), with the digest that make made, on a table
         with no frame-pointer row: ghcr.io holds no frame-pointer image, so the step makes each image, logs in and
         copies it. After the grant, this job's token can write to every package that the grant covers, so each
         command of crane names a reference of ghcr.io only in PACKAGE or as the row's base image, which the step reads,
@@ -1234,15 +1320,8 @@ match args:
         publish = self.workflow(tree, self.PUBLISH)
         rows = publish["jobs"]["publish"]["strategy"]["matrix"]["base"]
         bases = self.base_rows(rows)
-        registry, made, _ = self.registry_of(bases)
-        where, home = self.checkout_of(bases), self.crane_home(registry)
         found = {}
-        for row in rows:
-            temp = pathlib.Path(tempfile.mkdtemp(dir=self.dir))
-            self.put_crane(temp / "bin")
-            (temp / "fp-digest").mkdir()
-            (temp / "fp-digest" / f"{row}.digest").write_text(made[row] + "\n")
-            rc, log, calls = self.run_push(publish, row, where, home, temp)
+        for row, (rc, log, calls, _) in self.pushes(publish).items():
             self.assertEqual(rc, 0, f"{row}: {log}")
             found[row] = []
             for call in calls:
@@ -1261,13 +1340,11 @@ match args:
 
     def test_control_publish_writes_to_a_second_package(self):
         login = '            echo "$GH_TOKEN" | crane auth login ghcr.io --username "$GITHUB_ACTOR" --password-stdin\n'
-        changed = self.copy_tree("a second package", [(f".github/workflows/{self.PUBLISH}", login, login
-                                 + '            crane mutate "$base" --env OFT_FRAME_POINTERS=1'
-                                 ' -t "${name}-mirror:frame-pointers-$HEAD_SHA" > /dev/null\n')])
+        mirror = ('            crane mutate "$base" --env OFT_FRAME_POINTERS=1'
+                  ' -t "${name}-mirror:frame-pointers-$HEAD_SHA" > /dev/null\n')
         self.maxDiff = None  # the message then names each command that it found
-        with self.assertRaises(AssertionError) as caught:
-            self.packages_case(changed)
-        self.assertIn("-mirror:frame-pointers-", str(caught.exception))
+        caught = self.guard_fails(self.packages_case, login, login + mirror)
+        self.assertIn("-mirror:frame-pointers-", caught)
 
     # The faults of ghcr.io that publish's push step checks for after its push, or on an image that ghcr.io holds.
     FAULTS = ("none", "another digest for the tag", "other layers", "another configuration")
@@ -1292,19 +1369,16 @@ match args:
                     registry["images"][ref] = {**fp[row], "manifest": {**fp[row]["manifest"], "layers": layers}}
                 elif fault == "another configuration":
                     registry["images"][ref] = {**fp[row], "config": registry["images"][bases[row][1]]["config"]}
-                temp = pathlib.Path(tempfile.mkdtemp(dir=self.dir))
-                self.put_crane(temp / "real")
-                self.put_crane(temp / "bin")
+                temp = self.push_temp(row, made[row])
                 if fault == "another digest for the tag":
                     # crane digest of a tag of PACKAGE gives another digest; every other command is the stand-in's.
+                    self.put_crane(temp / "real")
                     real = temp / "real" / "crane"
                     (temp / "bin" / "crane").write_text(
                         "#!/usr/bin/env python3\nimport os\nimport sys\n"
                         f"if sys.argv[1:2] == ['digest'] and sys.argv[2].startswith({self.PACKAGE + ':'!r}):\n"
                         "    print('sha256:' + 'd' * 64)\nelse:\n"
                         f"    os.execv({str(real)!r}, [{str(real)!r}, *sys.argv[1:]])\n")
-                (temp / "fp-digest").mkdir()
-                (temp / "fp-digest" / f"{row}.digest").write_text(made[row] + "\n")
                 rc, log, _ = self.run_push(publish, row, where, self.crane_home(registry), temp)
                 results[(row, fault)] = (rc, log)
         self.assertEqual({key: rc == 0 for key, (rc, _) in results.items()},
@@ -1314,30 +1388,19 @@ match args:
     def test_publish_checks_the_image_on_ghcr_io(self):
         self.ghcr_case()
 
-    def ghcr_fails(self, name, old, new):
-        changed = self.copy_tree(name, [(f".github/workflows/{self.PUBLISH}", old, new)])
-        with self.assertRaises(AssertionError) as caught:
-            self.ghcr_case(changed)
-        self.assertIn("publish's push step passes only on an honest ghcr.io", str(caught.exception))
-
     def test_control_publish_without_its_check_of_the_pushed_digest(self):
-        self.ghcr_fails("no digest check", '            [ "$pushed" = "$want" ] ||\n', "            true ||\n")
+        caught = self.guard_fails(self.ghcr_case, '            [ "$pushed" = "$want" ] ||\n', "            true ||\n")
+        self.assertIn("publish's push step passes only on an honest ghcr.io", caught)
 
     def test_control_publish_without_its_check_of_the_layers(self):
-        self.ghcr_fails("no layers check", "'$b.layers == $n.layers and $b.mediaType == $n.mediaType'", "'true'")
+        caught = self.guard_fails(self.ghcr_case, "'$b.layers == $n.layers and $b.mediaType == $n.mediaType'",
+                                  "'true'")
+        self.assertIn("publish's push step passes only on an honest ghcr.io", caught)
 
     def test_control_publish_without_its_check_of_the_configuration(self):
-        self.ghcr_fails("no configuration check", """'($b | .config.Env += ["OFT_FRAME_POINTERS=1"]) == $n'""",
-                        "'true'")
-
-    def guard_fails(self, case, old, new=""):
-        """`case` passes on an unchanged copy of the tree, and fails on a copy whose publish file has `new` for `old`
-        (copy_tree). Return its message."""
-        case(self.copy_tree("unchanged"))
-        changed = self.copy_tree("changed", [(f".github/workflows/{self.PUBLISH}", old, new)])
-        with self.assertRaises(AssertionError) as caught:
-            case(changed)
-        return str(caught.exception)
+        caught = self.guard_fails(self.ghcr_case, """'($b | .config.Env += ["OFT_FRAME_POINTERS=1"]) == $n'""",
+                                  "'true'")
+        self.assertIn("publish's push step passes only on an honest ghcr.io", caught)
 
     # A stand-in curl: it writes the file $FAKE_CURL/archive at the path of its -o, and adds each address that it is
     # asked for to $FAKE_CURL/urls, one a line.
@@ -1409,13 +1472,12 @@ shutil.copyfile(home / "archive", args[args.index("-o") + 1])
         self.assertIn("install crane, with CRANE_SHA256 set to the archive's SHA-256: GITHUB_PATH and GITHUB_ENV",
                       caught)
 
-    def pushes(self, tree, drop=(), base=None):
-        """publish's push step (run_push) of `tree` for each base row of its matrix, with the digest that make made, on
-        a table with no frame-pointer row, where ghcr.io holds no frame-pointer image: the step makes the image, logs
-        in and copies it. With `base`, the row's base line names the image `base` instead. The names of `drop` are left
-        out of the step's env. Return for each row (its exit status, its log, its calls of crane, whether a login of
-        crane is left at its end)."""
-        publish = self.workflow(tree, self.PUBLISH)
+    def pushes(self, publish, base=None):
+        """publish's push step (run_push) of the workflow `publish` for each base row of its matrix, with the digest
+        that make made (push_temp), on a table with no frame-pointer row, where ghcr.io holds no frame-pointer image:
+        the step makes the image, logs in and copies it. With `base`, the row's base line names the image `base`
+        instead. Return for each row (its exit status, its log, its calls of crane, whether a login of crane is left
+        at its end)."""
         rows = publish["jobs"]["publish"]["strategy"]["matrix"]["base"]
         bases = self.base_rows(rows)
         found = {}
@@ -1425,11 +1487,7 @@ shutil.copyfile(home / "archive", args[args.index("-o") + 1])
             # and crane mutate makes of it the image that make made of the row's own base image.
             registry, made, _ = self.registry_of(table)
             home = self.crane_home(registry)
-            temp = pathlib.Path(tempfile.mkdtemp(dir=self.dir))
-            self.put_crane(temp / "bin")
-            (temp / "fp-digest").mkdir()
-            (temp / "fp-digest" / f"{row}.digest").write_text(made[row] + "\n")
-            rc, log, calls = self.run_push(publish, row, self.checkout_of(table), home, temp, drop)
+            rc, log, calls = self.run_push(publish, row, self.checkout_of(table), home, self.push_temp(row, made[row]))
             found[row] = (rc, log, calls, (home / "login").exists())
         return found
 
@@ -1439,11 +1497,13 @@ shutil.copyfile(home / "archive", args[args.index("-o") + 1])
         return "".join(f"\n{row}:\n{log}" for row, (_, log, _, _) in found.items())
 
     def unset_case(self, tree=ROOT):
-        """publish's push step (pushes) with no HEAD_SHA in its env. GitHub runs a step that names no shell with
+        """publish's push step (pushes) with HEAD_SHA taken out of its env. GitHub runs a step that names no shell with
         bash -e {0}, as run_script does, so only the step's own set -u stops it at the unset variable. Without it, the
         step pushes the image under the tag frame-pointers-, with no commit, and passes. It must fail with
         'HEAD_SHA: unbound variable' before its crane copy."""
-        found = self.pushes(tree, drop=("HEAD_SHA",))
+        publish = self.workflow(tree, self.PUBLISH)
+        del self.push_step(publish)["env"]["HEAD_SHA"]
+        found = self.pushes(publish)
         got = {row: (rc != 0, "HEAD_SHA: unbound variable" in log, [call for call in calls if call[0] == "copy"])
                for row, (rc, log, calls, _) in found.items()}
         self.assertEqual(got, dict.fromkeys(found, (True, True, [])),
@@ -1468,7 +1528,7 @@ shutil.copyfile(home / "archive", args[args.index("-o") + 1])
         made, so no comparison of the step refuses it. The step must fail with its error on the base row, and run no
         command of crane. Without that check, the step stops at ${BASH_REMATCH[1]}, which set -u refuses after a match
         that failed, and says nothing of the row."""
-        found = self.pushes(tree, base=self.FOREIGN)
+        found = self.pushes(self.workflow(tree, self.PUBLISH), base=self.FOREIGN)
         error = "::error::infra/toolchains.tsv has no row {} with a toolchain digest: '{}'"
         got = {row: (rc != 0, error.format(row, self.FOREIGN) in log, calls)
                for row, (rc, log, calls, _) in found.items()}
@@ -1490,7 +1550,7 @@ shutil.copyfile(home / "archive", args[args.index("-o") + 1])
         """publish's push step (pushes) on each row where ghcr.io does not hold the image: it logs in to copy the image.
         It must log out of ghcr.io after its copy and after its check of the digest of the pushed tag, and leave no
         login of crane (the stand-in's file $FAKE_CRANE/login) at its end."""
-        found = self.pushes(tree)
+        found = self.pushes(self.workflow(tree, self.PUBLISH))
         got = {}
         for row, (rc, _, calls, login) in found.items():
             pushed = [n for n, call in enumerate(calls)

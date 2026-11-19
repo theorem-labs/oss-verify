@@ -92,9 +92,9 @@ on:
 permissions: {}
 
 env:
-  # These values, the base rows of make's matrix and the image of its registry must stay equal to
-  # toolchain-images-publish.yaml's: test_publish_takes_what_toolchain_images_hands_over (tests/test_trigger_move.py)
-  # fails if one differs, as publish's own env comment says.
+  # These values, the base rows of make's matrix, the image of its registry and the pins of actions/checkout and
+  # actions/download-artifact must stay equal to toolchain-images-publish.yaml's:
+  # test_publish_takes_what_toolchain_images_hands_over (tests/test_trigger_move.py) fails if one differs.
   #
   # go-containerregistry's crane, pinned by version and by the SHA-256 of its release archive.
   CRANE_VERSION: v0.22.1

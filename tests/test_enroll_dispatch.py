@@ -30,7 +30,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 # The workflow tests' expression evaluator and step runner with a stand-in gh: GitHub's expressions, evaluated as
 # test_outside_screen.py evaluates them (the dispatch job's if and env, and its steps' if and env). REVIEW is
 # review.yml, whose env holds ALLOWED_BOTS and whose route holds the bash function trusted, the rule that trusted ports.
-from test_outside_screen import REVIEW, Runner, as_text, evaluate  # noqa: E402
+from test_outside_screen import REVIEW, Runner, as_text, evaluate, interpolated  # noqa: E402
 
 LOADER = importlib.machinery.SourceFileLoader("enroll_dispatch", str(ROOT / ".github" / "scripts" / "enroll-dispatch"))
 SPEC = importlib.util.spec_from_loader("enroll_dispatch", LOADER)
@@ -1165,7 +1165,7 @@ class TheRecord(unittest.TestCase):
             script = job["steps"][0]["run"]
             uploads = [step.get("with") or {} for step in job["steps"]
                        if str(step.get("uses", "")).partition("@")[0] == "actions/upload-artifact"]
-            paths = [up.get("path", "").replace("${{ runner.temp }}", directory) for up in uploads
+            paths = [interpolated(up.get("path", ""), {"runner.temp": directory}) for up in uploads
                      if up.get("name") == "enrollment-record"]
             self.assertEqual(len(paths), 1, f"the record job's uploads of enrollment-record: {uploads}")
             uploaded = pathlib.Path(paths[0])
