@@ -28,10 +28,13 @@ The move:
        workflow_run, so GitHub runs main's copy of it. It acts only on a push run of toolchain-images.yaml on main
        of this repository that passed. It runs no docker, and no script of it reads GITHUB_SHA or holds an
        expression. Each value that it holds and toolchain-images.yaml holds too is equal in both files. make's steps
-       and then its push step, run on the same infra/toolchains.tsv, pass or refuse the same frame-pointer rows. The
-       push step reads each digest where make's upload of it lands, and copies the image of each base row to the one
-       package of the frame-pointer images, ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain, under a tag that names
-       the language of the row.
+       and then its push step, run on the same infra/toolchains.tsv, pass or refuse the same frame-pointer rows:
+       publish checks out that file at the commit that make built, not at main's newest commit. The push step reads
+       each digest where make's upload of it lands. publish downloads that upload from the run of
+       toolchain-images.yaml that started it, with a token that can read actions, not from its own run, which holds
+       none of make's artifacts. The push step copies the image of each base row to the one package of the
+       frame-pointer images, ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain, under a tag that names the language of
+       the row.
   (artifacts) Each script of .github/scripts that reads a file of a Build run's artifact (read_member) reads an
        artifact and a file that build.yaml uploads, with if-no-files-found: error. The step that writes the file, run
        in (s) and in tests/test_enroll_dispatch.py, writes it at the path of the upload.
@@ -672,7 +675,8 @@ match args:
         """Where actions/download-artifact, with the inputs `down`, puts the file `file` of the artifact `artifact`, in
         a job whose runner.temp is `temp`: None if it does not download that artifact. An upload of one file holds it
         under its own name. A download by name, or a download with merge-multiple, puts each file in its path. Else
-        each artifact gets a directory of its own name there."""
+        each artifact gets a directory of its own name there. This takes the artifact to be in the run that the
+        download reads. make_then_publish gives make's files only to a download of make's run (reads_run)."""
         into = pathlib.PurePosixPath(render(down.get("path", ""), {"runner.temp": temp}))
         file = pathlib.PurePosixPath(file).name
         if "name" in down:
@@ -680,6 +684,43 @@ match args:
         if not fnmatch.fnmatchcase(artifact, down.get("pattern", "*")):
             return None
         return into / file if down.get("merge-multiple") is True else into / artifact / file
+
+    # The id of the run of Toolchain images that started publish, in which make uploaded its files. publish's own run
+    # has another id, and holds none of make's artifacts.
+    MAKE_RUN = "4242"
+
+    @staticmethod
+    def reads_run(down, workflow, job):
+        """The run whose artifacts actions/download-artifact, with the inputs `down`, reads in the job `job` of
+        `workflow`. It reads another run only when its run-id names that run, it has a github-token, and the job's
+        token can read actions (actions: read or write). With no run-id, or with no token, it reads the artifacts of
+        its own job's run: publish's own run. A token that cannot read actions reads no run: the API refuses it. The
+        token takes the job's permissions, or the workflow's when the job has none. A permissions block gives none to
+        each scope that it does not name, so {} gives none. read-all and write-all give each scope. With permissions
+        in neither, the token has the repository's default, which this file does not see: it counts as none. This
+        renders the inputs in publish's context, where github.event.workflow_run.id is MAKE_RUN and github.token is the
+        job's token. It matches no text of them. So a download reads make's run only when its run-id gives MAKE_RUN,
+        its github-token is not empty, and the job's token can read actions."""
+        if "run-id" not in down or not render(down.get("github-token", ""), {"github.token": WORKFLOW_TOKEN}):
+            return "publish's own run"
+        permissions = workflow["jobs"][job].get("permissions", workflow.get("permissions"))
+        actions = ({"read-all": "read", "write-all": "write"}.get(permissions) if isinstance(permissions, str)
+                   else (permissions or {}).get("actions"))
+        if actions not in ("read", "write"):
+            return "no run: the token cannot read actions"
+        return render(down["run-id"], {"github.event.workflow_run.id": ToolchainPublish.MAKE_RUN})
+
+    # main's newest commit: github.sha of publish's run, a later commit than HEAD, the commit that make built.
+    MAIN_SHA = "f" * 40
+
+    @staticmethod
+    def checks_out(step):
+        """The commit whose files actions/checkout, as the step `step` of publish's job, checks out. This renders its
+        ref in publish's context, where github.event.workflow_run.head_sha is HEAD, the commit that make built, and
+        github.sha is MAIN_SHA, main's newest commit. It matches no text of the ref. With no ref, or with one that
+        renders empty, actions/checkout takes the commit of the event: for workflow_run, github.sha."""
+        ctx = {"github.event.workflow_run.head_sha": HEAD, "github.sha": ToolchainPublish.MAIN_SHA}
+        return render((step.get("with") or {}).get("ref", ""), ctx) or ToolchainPublish.MAIN_SHA
 
     def base_rows(self, rows):
         """Each of the base rows `rows` as this repository's infra/toolchains.tsv has it: (its line, its image)."""
@@ -878,8 +919,12 @@ match args:
           - base package: a row that names the same digest in the package of the base image (the rows of #155 did),
           - other digest: a row that names another digest in PACKAGE.
         ghcr.io holds the image that the row names, so only the comparison with the made image refuses a row. Each file
-        that make uploads goes where publish's downloads put it (lands). publish then runs on the same table and
-        registry. Its registry service is its own, and holds no image of make's. The checks:
+        that make uploads goes where publish's downloads of make's run put it (reads_run, lands). A download of
+        publish's own run gets none of them. publish then runs on the same registry, and on the table of the commit
+        that its checkout gives (checks_out). Its sparse checkout must hold infra/toolchains.tsv. At HEAD, the commit
+        that make built, the table is make's. At any other commit, it is the table of main's newest commit, a later
+        one that moved the row's base line to another base image: the registry holds that image, and crane mutate
+        makes another image of it. publish's registry service is its own, and holds no image of make's. The checks:
           - make's row check and publish's step agree on each table: both pass, or both refuse the row,
           - make passes only the tables with no row or with the made image in PACKAGE,
           - where both pass and ghcr.io does not hold the image, publish copies the digest that make made to PACKAGE,
@@ -887,10 +932,29 @@ match args:
           - where ghcr.io holds it, publish pushes nothing, and its checks of the manifest and the configuration pass.
         Return the outcome on each table, as (make's, publish's, the copies of publish)."""
         rows = images["jobs"]["make"]["strategy"]["matrix"]["base"]
-        downloads = [s.get("with") or {} for s in publish["jobs"]["publish"]["steps"]
-                     if action_of(s) == "actions/download-artifact"]
+        inputs = [s.get("with") or {} for s in publish["jobs"]["publish"]["steps"]
+                  if action_of(s) == "actions/download-artifact"]
+        downloads = [down for down in inputs if self.reads_run(down, publish, "publish") == self.MAKE_RUN]
+        checkouts = [s for s in publish["jobs"]["publish"]["steps"] if action_of(s) == "actions/checkout"]
+        self.assertEqual(len(checkouts), 1, f"{self.RUN}: the checkouts of publish")
+        # With no sparse-checkout, the checkout holds every file.
+        sparse = (checkouts[0].get("with") or {}).get("sparse-checkout")
+        if sparse is not None:
+            paths = [render(p, {}) for p in sparse] if isinstance(sparse, list) else render(sparse, {}).split("\n")
+            self.assertIn("infra/toolchains.tsv", [p.strip() for p in paths], f"{self.RUN}: publish's sparse checkout")
+        commit = self.checks_out(checkouts[0])
         bases = self.base_rows(rows)
         registry, made, fp = self.registry_of(bases)
+        # main's newest commit moves the base line of a row to another base image, in the same package. registry_of
+        # takes the layers of an image from the name of its row, so under another name it gives that image other
+        # layers, and crane mutate makes another image of it.
+        moved = {}
+        for row, (line, base) in bases.items():
+            image = f"{base.partition('@')[0]}@{self.digest_of([row, self.MAIN_SHA])}"
+            moved[row] = (line.replace(base, image), image)
+        later, _, _ = self.registry_of({f"{row} at {self.MAIN_SHA}": value for row, value in moved.items()})
+        for part in ("images", "made"):
+            registry[part].update(later[part])
         other = "sha256:" + "e" * 64
         named, held, results, logs = {}, set(), {}, {}
         for row in rows:
@@ -899,7 +963,8 @@ match args:
                                ("base package", f"{package}@{made[row]}"), ("other digest", f"{self.PACKAGE}@{other}")):
                 key = (row, table)
                 named[key] = ref
-                where = self.checkout_of(bases, f"{row}-frame-pointers\t{ref}\n" if ref else "")
+                more = f"{row}-frame-pointers\t{ref}\n" if ref else ""
+                where = self.checkout_of(bases, more)
                 ghcr = json.loads(json.dumps(registry))
                 if ref:
                     ghcr["images"][ref] = fp[row]
@@ -920,7 +985,9 @@ match args:
                         if to is not None:
                             pathlib.Path(to).parent.mkdir(parents=True, exist_ok=True)
                             shutil.copyfile(file, to)
-                rc, log, calls = self.run_push(publish, row, where, home, temp)
+                # publish's checkout: make's table at HEAD, else the table of main's newest commit
+                there = where if commit == HEAD else self.checkout_of({**bases, row: moved[row]}, more)
+                rc, log, calls = self.run_push(publish, row, there, home, temp)
                 copies = [(call[2], call[1].rpartition("@")[2]) for call in calls if call[0] == "copy"]
                 results[key] = (make, self.outcome(rc, log, row), copies)
                 logs[key] = (make_log, log)
@@ -999,6 +1066,33 @@ match args:
              'echo "${MADE#*@}" > "$RUNNER_TEMP/fp-digest/$BASE_ROW.made"'))
         self.assertIn("oss-fuzz-theorems-2026.10, none: make passes, publish fails", caught)
         self.assertIn("make gave no digest for oss-fuzz-theorems-2026.10: '': nothing pushed", caught)
+
+    def test_control_publish_download_from_its_own_run(self):
+        # Without run-id and github-token, publish's download reads the artifacts of publish's own run, which holds
+        # none of make's. make stays whole, but publish downloads no digest.
+        publish = f".github/workflows/{self.PUBLISH}"
+        caught = self.handover_fails(
+            self.RUN, (publish, "          run-id: ${{ github.event.workflow_run.id }}\n", ""),
+            (publish, "          github-token: ${{ github.token }}\n", ""))
+        self.assertIn("oss-fuzz-theorems-2026.10, none: make passes, publish fails", caught)
+        self.assertIn("make gave no digest for oss-fuzz-theorems-2026.10: '': nothing pushed", caught)
+
+    def test_control_publish_without_actions_read(self):
+        # publish's job-level permissions then give actions none, so its token cannot read the artifacts of make's
+        # run. make stays whole, but publish downloads no digest.
+        line = "      actions: read   # to download the artifacts fp-digest-<base row> of the run of Toolchain images\n"
+        caught = self.handover_fails(self.RUN, (f".github/workflows/{self.PUBLISH}", line, ""))
+        self.assertIn("oss-fuzz-theorems-2026.10, none: make passes, publish fails", caught)
+        self.assertIn("make gave no digest for oss-fuzz-theorems-2026.10: '': nothing pushed", caught)
+
+    def test_control_publish_checks_out_main_not_the_built_commit(self):
+        # With no ref, publish checks out main's newest commit, whose infra/toolchains.tsv names another base image of
+        # the row. publish then makes another image than make made, and pushes nothing.
+        caught = self.handover_fails(self.RUN, (f".github/workflows/{self.PUBLISH}",
+                                                "          ref: ${{ github.event.workflow_run.head_sha }}\n", ""))
+        self.assertIn("oss-fuzz-theorems-2026.10, none: make passes, publish fails", caught)
+        self.assertIn("::error::the image made here from oss-fuzz-theorems-2026.10 is ", caught)
+        self.assertIn(", but make made sha256:", caught)
 
     def test_control_publish_tag_in_the_package_of_the_base_image(self):
         # publish tags each image in the package of its base image. The Rust and the Python images then go to their
