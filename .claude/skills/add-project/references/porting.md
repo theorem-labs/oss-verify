@@ -1,0 +1,10 @@
+# Port the build (step 4)
+
+- The builder builds `c`, `c++`, `rust`, `python` and `go` (`docs/project-yaml.md`, "language"). For another language, tell the maintainer that its builder is pending, and stop. A `go` project has the plain build only and gets no theorem statements yet: tell the maintainer.
+- C and C++: copy `templates/Dockerfile` and `templates/build.sh`, give them licence lines (step 3.8), and follow `docs/build-contract.md`, "What the Dockerfile must do" and "What build.sh must do". The hand-written examples are `projects/cjson/` and `tests/fixtures/example/`. Do not copy the form of the other projects and seeds: they are mostly ports of a release build through the helpers of `release-target.sh`.
+- Rust: the fuzz targets are the project's cargo-fuzz `[[bin]]`s. Write the build like `seeds/bincode/`. The lock in the project directory is that of the generated `oft-rust-shim` package, not the fuzz package's (`docs/build-contract.md`, "Rust fuzz targets", gives the steps that make it); get its crates with a `crates` line in `sources`. Do not set `ubsan_checks`.
+- Python: the fuzz targets are atheris harnesses. Write the build like `seeds/mdurl/`. Pin each file that `pip install` uses with a `file` line in `sources`. The seed corpus of each fuzz target is an input of its build.
+- Go: the OSS-Fuzz Go fuzz targets and its `build.sh`, as they are (`docs/build-contract.md`, "Go fuzz targets"). Write the build like `seeds/go-toml/`. Pin the modules in a `go.lock`, and get them with a `gomodules` line in `sources`. Leave out `sanitizers`, or give `sanitizers: []`.
+- Never write a commit id in the `Dockerfile`. Make static riscv64 programs: no shared libraries, no running a compiled program, no network in `build.sh`, and no strip after the link.
+- A dependency that needs a patch to build: put the patch in `projects/<name>/`, and list it in `series`. A change that fixes a bug in the project never goes in the project directory.
+- To adopt a seeded project, do step 2 of `docs/project-yaml.md`, "Seeded projects".

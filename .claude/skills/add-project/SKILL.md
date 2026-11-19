@@ -1,215 +1,85 @@
 ---
 name: add-project
-description: Enroll an open-source project in OSS Verify with its maintainer. Use when a maintainer asks to add, enroll or sign up a project for formal verification. Also use it to write fuzz targets that say what "correct" means for a library, including DSL fuzz targets (docs/dsl.md). Also use it to write a patch_style.md about findings, reports and patches. Also use it to port an OSS-Fuzz build to the OSS Verify builder. Makes projects/<name>/ (project.yaml, Dockerfile, build.sh, fuzz targets, patch_style.md) and a pull request that the maintainer opens.
+description: Use when a maintainer asks to enroll a project in OSS Verify, or when you write or correct a project's fuzz targets (DSL ones included), its patch_style.md, or a port of its OSS-Fuzz build to the OSS Verify builder.
 ---
 
 # Enroll a project in OSS Verify
 
-This skill is for a coding agent that helps a maintainer enroll a project. It gives the steps, the questions to ask and the checks to run.
+You help a maintainer make one directory, `projects/<name>/`, and a pull request that the maintainer opens.
 
-The result is one directory, `projects/<name>/`, and a pull request that the maintainer opens. Theorem then proves theorems about the binaries that these files build. Each answer about what "correct" means goes into the code and comments of the fuzz targets. No separate document holds it.
+Work only in `projects/<name>/`. First read `README.md` (and get the tools its "Enroll a project" lists), `docs/project-yaml.md`, `docs/build-contract.md`, `docs/what-gets-proven.md` and, for API-level fuzz targets, `docs/dsl.md`. Tell the maintainer what the README's "Who can enroll" says about our capacity.
 
-Before you start, read these documents: `README.md`, `docs/project-yaml.md`, `docs/build-contract.md`, `docs/what-gets-proven.md` and, for API-level fuzz targets, `docs/dsl.md`. Work only in `projects/<name>/`.
+## 1 and 2. Ask the maintainer
 
-A project of any size can enroll. Tell the maintainer what the README says in "Who can enroll": because of our capacity, we are most likely to respond quickly to a project in C whose plain binaries (`<target>.plain`) are statically linked and have less than 1 MB of code (the larger of the `.text` section and the executable segments, which can hold read-only data too), and an organisation that wants to help us take on more projects can write to oss-verify@theorem.dev.
-
-You need what the README's "Enroll a project" lists for `oss-verify check`. Steps 3.3 and 3.4 also need a native clang with libFuzzer, `llvm-profdata`, `llvm-cov` and `unzip`: on Ubuntu, `apt install clang llvm unzip`. To run the riscv64 binaries yourself (`docs/build-contract.md`, "Run a binary"), you need `qemu-riscv64`: on Ubuntu, `apt install qemu-user`.
-
-## 1. Ask what "correct" means
-
-Ask the maintainer each question. Do not guess an answer.
-
-1. **Entry points.** Which entry points do you want tested? Ask about the API areas, the functions and the call sequences. Do you want to keep your existing fuzz targets? Which new fuzz targets do you want?
-2. **Untrusted input.** Which functions get input that an attacker controls, for example a parser, a decoder or a protocol handler? Which inputs are trusted, for example the configuration?
-3. **Input size.** How large can a real input be? The driver refuses an input file of 64 MiB or more.
-4. **Expected outcomes.** Which outcomes are expected, for example an error code for malformed input, a size limit or a refused option? Each one must end as `return 0`. A statement accepts only the exit statuses 0 and 2.
-5. **Refused allocations.** Must the library survive a refused allocation? If yes, add an allocation-failure fuzz target (`docs/build-contract.md`, "Allocation-failure fuzz targets").
-6. **Properties.** Which properties must always be true, apart from "no crash"? Examples are a round trip (`decode(encode(x)) == x`), an invariant of a data structure, agreement between two APIs, and a limit on the size of an output.
-
-## 2. Ask about findings, reports and patches
-
-Ask the maintainer about each topic below. Write the answers in `patch_style.md`, as free text. Our AI reads this file before it sends a report or writes a patch. These topics are suggestions only. Leave out a topic that the maintainer does not care about.
-
-1. **Severity.** Do you want only security-critical findings, or all of them? How do you rate severity?
-2. **Findings without a patch.** Do you want findings that come without a patch, or only findings with a patch?
-3. **Reports.** Do you have other report preferences, for example one report for a group of related findings?
-4. **Bugs that no fuzz target can hit.** We can find such bugs while we prove. Do you want patches for them, or only for bugs that a fuzz target can hit?
-5. **Behaviour that you do not support.** A fuzz target can get to such behaviour, for example a refused allocation. Do you want a narrower fuzz target, or a library that handles the behaviour?
-6. **Documentation.** Do you want patches that change only the documentation?
-7. **Refactoring.** Do you want changes that make the code easier to verify? Only changes that keep the behaviour, or also minor changes that can fix bugs?
-8. **Proof of the same behaviour.** Must a refactoring come with a proof that the behaviour does not change?
-9. **Contribution policy.** Does the project have a policy on AI-generated contributions? Our agents obey it. Record a link to it.
-10. **Form.** Which code style, tests and commit format must a patch have? Do you want its text in Simplified Technical English (ASD-STE100): commit messages, comments and documentation?
-
-Tell the maintainer that findings and patches are generated by AI models, and they can be wrong or incomplete. We do not promise that a person reviews them before we send them.
+Before you talk to the maintainer, read [references/maintainer-questions.md](references/maintainer-questions.md): step 1 asks what "correct" means, for the fuzz targets, and step 2 asks about findings, reports and patches, for `patch_style.md`. Ask each question; do not guess an answer.
 
 ## 3. Write the fuzz targets
 
-Start from the project's existing fuzz targets that the maintainer keeps: its own, and those in its OSS-Fuzz directory. A fuzz target defines `int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)`. Then write the fuzz targets that the answers to step 1 need. For an entry point at the level of the API, start from the DSL ([docs/dsl.md](../../../docs/dsl.md)). A DSL fuzz target reads its input as a small program of API calls. The DSL is a starting point, not the only shape. A fuzz target of another shape is also correct if it obeys the rules of this step. Put each one in `projects/<name>/`, with a suffix that the project's language permits (`docs/project-yaml.md`, "language").
+Start from the fuzz targets the maintainer keeps (its own and its OSS-Fuzz ones), then write those that step 1 needs. A fuzz target defines `int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)`. For an API-level entry point, start from the DSL (`docs/dsl.md`); any shape that obeys this step is fine. Put each in `projects/<name>/`, with a suffix the project's language permits.
 
-> **WARNING:** OSS-Fuzz's fuzz targets often break these rules, and no tool finds it: `oss-verify validate` and `oss-verify check` pass them. Many return -1 for each malformed input, where 3.7 asks for 0. Some call an API and do not use its result, so they test nothing. Read each fuzz target that you keep against each rule of this step, and correct it.
-
-A proof is only as strong as its fuzz target. A weak fuzz target makes the theorems vacuous. Thus obey each rule in this step.
+A weak fuzz target makes the theorems vacuous. OSS-Fuzz's fuzz targets often break these rules, and `oss-verify validate` and `check` pass them: many return -1 for malformed input (3.7), and some ignore an API's result. Read each one you keep against each rule below, and correct it.
 
 ### 3.1 Drive the API
 
-Read the input as a small program. Let each byte or field select the next call and its arguments. Thus one fuzz target explores sequences of API calls. Make the decoding total: each input means a sequence, and the end of the input ends the sequence.
-
-Write one fuzz target for each group of properties or each API area. Each fuzz target gets its own statements. Put code that needs a different sanitizer configuration in a separate fuzz target.
-
-A DSL driver is a fuzz target of this kind, with the same shape: an `LLVMFuzzerTestOneInput` ([docs/dsl.md](../../../docs/dsl.md)). These rules apply to it:
-
-- Its program runs inside `LLVMFuzzerTestOneInput`, and takes its configuration from the payload.
-- It prints the observables of each operation.
-- A failure of the library is an observable, not an exit status.
-- Its expectations are checks that the input chooses (3.7).
-- The allocation mask of the input works as for each other fuzz target (`docs/build-contract.md`, "The driver").
+Read the input as a small program: each byte or field selects the next call and its arguments. Make the decoding total: every input is a sequence, ended by the end of the input. Write one fuzz target for each group of properties or API area; code that needs another sanitizer configuration is a separate fuzz target. A DSL driver also obeys `docs/build-contract.md`, "The fuzz targets".
 
 ### 3.2 Write each property as a check that aborts
 
-> **WARNING:** Do not use `assert()` for a property. Many builds define `NDEBUG`, for example CMake's `Release` build type. `NDEBUG` removes each `assert()`, and the property then disappears with no warning.
-
-Write each property as `if (!condition) abort();`, after the calls. Above it, write a comment that tells, in the maintainer's words, what it checks and why it must be true. A proof that the fuzz target halts with status 0 or 2 is then a proof of each property, for each input.
+Write `if (!condition) abort();` after the calls. Never `assert()`: a build that defines `NDEBUG`, such as CMake's `Release`, removes it without a warning. Above the check, a comment says in the maintainer's words what it checks and why it must be true. Compute the expected value from the input and the documented rule, not with the library's own function or state: such a check shows only that the library agrees with itself.
 
 ### 3.3 Show that each check runs
 
-Write a small set of example inputs. Together, they must run each API call and each property check at least once. This set is the coverage witness.
-
-1. Put the inputs in `projects/<name>/<target>_seed_corpus.zip`, as files at the top level of the zip file. OSS-Fuzz uses the same name (`docs/project-yaml.md`, "Seed corpora").
-2. Compile the fuzz target for your own machine with these flags: `-g -O0 -fsanitize=fuzzer -fprofile-instr-generate -fcoverage-mapping`. Link it with the library. If your clang has no libFuzzer, link a small `main` that calls `LLVMFuzzerTestOneInput` on each file.
-3. Unzip the inputs into a directory. Run the fuzz target on each of them: `LLVM_PROFILE_FILE=witness.profraw ./<target> <directory>/*`.
-4. Show the counts: `llvm-profdata merge -o witness.profdata witness.profraw`, then `llvm-cov show ./<target> -instr-profile=witness.profdata`.
-5. Make sure that the count of each API call and of each property check is more than 0. If a count is 0, add an input.
+A small set of inputs, the coverage witness, must run each API call and each property check at least once. Put the inputs at the top level of `projects/<name>/<target>_seed_corpus.zip` (`docs/project-yaml.md`, "Seed corpora"). Read [references/witness-and-breakage.md](references/witness-and-breakage.md) for the commands that show each count is more than 0.
 
 ### 3.4 Show that each property can fail
 
-For each property, find a breakage: a one-line change that makes the property fail on an input of the seed corpus.
-
-1. Make a one-line change that breaks the property, in the library or in the fuzz target. For example, flip a comparison or remove an update.
-2. Rebuild the fuzz target of 3.3.
-3. Find an input that makes the fuzz target abort. Run the fuzz target as a fuzzer, or write the input by hand. A run of a few minutes is usually enough: for example, `./<target> -max_total_time=120 <directory>`. Add the input to the seed corpus.
-4. Undo the change, and record it in the comment of the property, with the input:
+For each property, find a breakage: a one-line change, in the library or the fuzz target, that makes the property fail on an input of the seed corpus (the same reference says how). Undo the change, and record it with the input in the property's comment. The path starts at the `WORKDIR` of the `Dockerfile`, the line is its number at the commit `repo` names, and the old text occurs once on it (`docs/build-contract.md`, "The checks of a fuzz target"):
 
        /* The checksum of the block closes.
         * mutant: src/checksum.c:51 `return sum == 0;` -> `return 1;`
         * input: corrupt-block */
        if (!block_sums_to_zero(frame)) abort();
 
-   The path starts at the `WORKDIR` of the `Dockerfile`. The line is the line number at the commit that `repo` names. The old text occurs once on that line. `docs/build-contract.md`, "The checks of a fuzz target", gives the format.
-
-A property that no change can make fail checks nothing. Write it again. A stop that is not a property, for example `if (!buf) abort();` after a failed allocation, gets the line `not a property: <reason>` in its comment, in place of a record.
-
-A change of several lines can be a patch instead: save it with `git diff`, in one directory for all such patches, and set `mutants` in `project.yaml` to that directory ([docs/project-yaml.md](../../../docs/project-yaml.md#mutants)).
-
-**These checks run on each pull request.** The Build check measures steps 3.3 and 3.4 for a C or C++ project ([docs/build-contract.md](../../../docs/build-contract.md#the-checks-of-a-fuzz-target)). It builds the fuzz targets with coverage and runs each one on each seed input. Then it applies each breakage in turn, a `mutant:` record or a patch, builds again, and runs the seed inputs again. Then Claude reviews the fuzz targets against [review.md](../../../review.md): whether each check tests what its comment says, in both directions, and whether a check takes its expected value from the library under test. The maintainer sees one comment on the pull request, which the next push replaces. It asks for each fix, and under it, the Build check's report lists:
-
-- each check `if (...) abort();` that no seed input reaches;
-- each `mutant:` record whose input does not make its check fire, and each breakage patch that no seed input catches;
-- each check that no breakage, record or patch, makes fire.
-
-To see the same report before you open the pull request, run `uv run oss-verify check --no-shell --checks report.md <name>`. It needs `qemu-riscv64-static` on `PATH` ([docs/build-contract.md](../../../docs/build-contract.md#the-checks-of-a-fuzz-target) says how to get it).
+A property that no change can make fail checks nothing: write it again. A stop that is not a property, such as `if (!buf) abort();` after a failed allocation, gets `not a property: <reason>` in its comment in place of a record. A change of several lines can be a patch: save it with `git diff` into one directory for all such patches, and set `mutants` in `project.yaml` to it.
 
 ### 3.5 Make each run end quickly
 
-The decoding is total (3.1). Also bound each count, size and loop that comes from the input, for example with a modulus or a small maximum. Do not bound a value that the property needs to be large. Do not recurse on the depth of the input without a limit.
+Bound each count, size and loop that comes from the input (a modulus, a small maximum), but not a value that the property needs to be large. Do not recurse on the depth of the input without a limit.
 
 ### 3.6 Depend only on the input
 
-The statements use [Linux Process Semantics (LPS)](https://github.com/theorem-labs/rocq-linux-process-semantics), a formal model of a riscv64 Linux process. In LPS, a process has one thread, and the input is its only data. Thus obey these rules:
-
-- Do not start a thread.
-- Do not read a clock.
-- Take each random number from the input.
-- Do not use the network or the environment.
-- Open no file other than the input and temporary files.
+The statements use [Linux Process Semantics](https://github.com/theorem-labs/rocq-linux-process-semantics), in which a process has one thread and the input is its only data. Start no thread, read no clock, take each random number from the input, use no network or environment, and open no file but the input and temporary files.
 
 ### 3.7 Return 0 or -1
 
-> **WARNING:** Do not call `exit()` or `_exit()`. Do not catch all exceptions. Do not install a signal handler. Do not register an exit handler that does not return (`atexit` of a function that calls `_exit`, `_Exit`, `quick_exit` or `abort`, makes the `exit_group` system call, or jumps out of the handler). Do not call `std::set_terminate`. In Rust, do not replace the panic hook (`std::panic::set_hook`, `take_hook` or `update_hook`). Such code hides the failures that the statements must show ([build-contract.md](../../../docs/build-contract.md#what-the-driver-does-not-intercept)).
-
-A fuzz target can have two kinds of check. Each kind has its own result:
-
-1. **A property that the fuzz target states**, for example a round trip. A failure is a bug. Call `abort()` (3.2).
-2. **An expectation that the input chooses**, for example an `expect` frame of a DSL driver, in which the input predicts a value. A mismatch is normal, because most inputs predict wrongly. Evaluate each expectation. Then return -1 if one or more failed, or 0 if none failed.
-
-> **WARNING:** Do not return -1 for a failed property. libFuzzer reads -1 as "do not add this input to the corpus", not as a failure. The driver also counts -1 as a pass: exit status 0 today, and 3 in the next toolchain version. A halts statement accepts both, so it holds although the property fails.
-
-For a failed expectation, -1 is correct, for two causes:
-
-* The driver writes each return value on standard output. Thus the result of each expectation stays observable to the statements. Today the driver exits with status 0 after a -1. In the next toolchain version, it exits with status 3 (`docs/build-contract.md`, "Exit statuses").
-* libFuzzer keeps the inputs that predict wrongly out of the corpus.
-
-You can also return -1 to reject an input that is outside the domain of a property. Do this only for few inputs, because each check must run (3.3).
-
-In all other cases, return 0. Change each expected outcome into `return 0`, narrowly. Examine the library's error code, or catch the one exception type that the API documents.
+- Do not call `exit()` or `_exit()`, catch all exceptions, install a signal handler, register an exit handler that does not return, call `std::set_terminate`, or in Rust replace the panic hook: each hides failures (`docs/build-contract.md`, "What the driver does not intercept").
+- A failed property calls `abort()` (3.2), never `return -1`: libFuzzer reads -1 as "do not keep this input", and the driver counts -1 as a pass.
+- An expectation that the input chooses, such as an `expect` frame of a DSL driver, often fails, which is normal. Evaluate each, then return -1 if any failed, else 0; the driver prints the return value.
+- -1 can also reject an input outside a property's domain, for few inputs only (3.3).
+- Everything else returns 0. Turn each expected outcome into `return 0` narrowly: check the library's error code, or catch the one exception type the API documents.
 
 ### 3.8 Give each file its licence lines
 
-Each file of code that you put in `projects/<name>/` (fuzz targets, `Dockerfile`, `build.sh`, scripts) begins with licence lines: comment lines that say whose the file is and under which licence. Only lines that must come first, such as `#!`, a Dockerfile `# syntax=` line or a Python `coding:` line, go above them. Build patches, `project.yaml`, `sources`, `series`, `patch_style.md`, locks and seed inputs need none. The maintainer is the author of the contribution: ask them which name and organisation to give. Use the first of these cases that fits:
-
-1. **A seeded project's file that you adopt unchanged**, from `seeds/<name>/` or `projects/<name>/` of this repository: add nothing. [NOTICE](../../../NOTICE) and `seeds/UPSTREAM-CARRIED.tsv` give its licence. A seeded file that you change is case 3: keep its licence lines, for example the Google header of a seeded Python fuzz target. If it has none, give the licence that `seeds/UPSTREAM-CARRIED.tsv` names for it; if that file does not name it, give `Copyright 2026 Theorem Labs, PBC` and `SPDX-License-Identifier: Apache-2.0` (NOTICE). Keep the lines that NOTICE names by number (wazuh, mariadb) unchanged; NOTICE grants them wherever they are copied. Then add a `Modified` line. New build files written in the form of a seeded project's, as step 4 says for Rust, Python and Go, are case 4.
-2. **A file started from `templates/`, with no lines copied from elsewhere**: delete the template's comments and give it the lines of a file that the maintainer wrote (case 4), as `projects/cjson/Dockerfile` does. If it also holds lines copied from elsewhere, for example from an OSS-Fuzz `build.sh`, delete the template's comments and use case 3.
-3. **A file copied from elsewhere**, whole or in part: the project's repository, OSS-Fuzz, or another project. Keep its licence lines unchanged, for example the Google header of an OSS-Fuzz `build.sh`, as `seeds/go-toml/build.sh` does. If it has none, add `SPDX-License-Identifier: <its licence>`, as the LICENSE and NOTICE of the repository it came from say, and a line with the URL and commit it came from; add a `Copyright` line only when that repository names the holder. If the file was changed, also add one line under its licence lines that says who changed it, when, and what changed in this file, as [src/oss_verify/validate.py](../../../src/oss_verify/validate.py) does. For example: `Modified 2026 by Alex Doe: built with the OSS Verify builder.`
-4. **A file that the maintainer wrote**: `Copyright <year> <their name or organisation>` and `SPDX-License-Identifier: Apache-2.0`, as in `templates/build.sh`. A contribution is under the Apache License 2.0 ([CONTRIBUTING.md](../../../CONTRIBUTING.md)). If the project is under version 2 of the GNU GPL only (GPL-2.0-only), give `SPDX-License-Identifier: MIT OR Apache-2.0` instead, because GPL-2.0-only code cannot be linked with Apache-2.0 code ([NOTICE](../../../NOTICE)). For such a project, tell the maintainer that a fuzz target copied from OSS-Fuzz stays under Apache-2.0 and can keep its binaries from being published (NOTICE, wazuh and mariadb).
-
-Do not add a licence file, and do not change `LICENSE`, `LICENSES/` or `NOTICE`. In the pull request, say which files came from where. No check reads licence lines, so get them right before the maintainer opens the pull request.
+Each file of code in `projects/<name>/` (fuzz targets, `Dockerfile`, `build.sh`, scripts) begins with licence lines, below only a `#!`, `# syntax=` or `coding:` line. Build patches, `project.yaml`, `sources`, `series`, `patch_style.md`, locks and seed inputs need none. No check reads them. Before you write the first file, read [references/licence-lines.md](references/licence-lines.md) for the case of each kind of file. Add no licence file, and do not change `LICENSE`, `LICENSES/` or `NOTICE`.
 
 ## 4. Port the build
 
-Today the builder builds `c`, `c++`, `rust`, `python` and `go` projects (`docs/project-yaml.md`, "language"). A `go` project has the plain build only, and our tools do not write theorem statements for Go yet: tell the maintainer that the Go fuzz targets build today, but get no theorem statements yet. For another language, tell the maintainer that its builder is pending, and stop.
-
-For a `rust` project, the fuzz targets are cargo-fuzz `[[bin]]`s in the project's repository, and they are built with Rust nightly-2025-07-16 (rustc 1.90.0, LLVM 20.1.8) (`infra/toolchains.tsv`). Write the build files in the form of a ported Rust build, for example `seeds/bincode/`. The build makes a static-library package, `oft-rust-shim`, from each `[[bin]]`. Put the `Cargo.lock` of that generated package in the project directory, not the lock of the fuzz package, and get its crates with a `crates` line in `sources`. `docs/build-contract.md`, "Rust fuzz targets", gives the steps that make this lock. Do not set `ubsan_checks`.
-
-For a `python` project, the fuzz targets are atheris harnesses. Write the build files in the form of a ported Python build, for example `seeds/mdurl/`. Pin each file that `pip install` uses with a `file` line in `sources`. The seed corpus of each fuzz target is an input of its build.
-
-For a `go` project, the fuzz targets are its OSS-Fuzz Go fuzz targets, and `build.sh` is its OSS-Fuzz `build.sh`, as it is (`docs/build-contract.md`, "Go fuzz targets"). Write the build files in the form of a ported Go build, for example `seeds/go-toml/`. Pin the modules in a `go.lock`, and get them with a `gomodules` line in `sources`. Leave out `sanitizers`, or give `sanitizers: []`.
-
-Copy `templates/Dockerfile` and `templates/build.sh` into `projects/<name>/`, and give them their licence lines (3.8). Port the project's build (`docs/build-contract.md`). Two builds written by hand are small examples (`docs/build-contract.md`, "What the Dockerfile must do"): `projects/cjson/`, and the test project `tests/fixtures/example/`. The other projects in `projects/` and `seeds/` are mostly ports of a release build, which use the helpers of `release-target.sh`. For a `c` or `c++` project, do not copy their form for a new build.
-
-- In the `Dockerfile`, start with `FROM ${BASE_BUILDER}`.
-- Declare `ARG REPO` and `ARG COMMIT`.
-- Run `fetch-commit $SRC/<name>`. Add `--submodules` if the repository has submodules.
-- In the `Dockerfile`, get each dependency at a fixed version. Copy `build.sh` and the fuzz target sources into `$SRC`.
-- Never write a commit id in the `Dockerfile`.
-- In `build.sh`, build the library statically with `$CC`, `$CXX`, `$CFLAGS` and `$CXXFLAGS`. CMake finds `$CMAKE_TOOLCHAIN_FILE` without help.
-- In `build.sh`, compile each fuzz target. Link it into `$OUT` with `$LIB_FUZZING_ENGINE`, through `$CC` or `$CXX`.
-- Make static riscv64 Linux programs. Do not use shared libraries, run a compiled program, use the network in `build.sh`, or strip a binary after the link.
-
-If a dependency needs a patch to build, add the patch to `projects/<name>/`, and list it in `series`. A change that fixes a bug in the project never goes in the project directory. If you adopt a seeded project, do step 2 of `docs/project-yaml.md`, "Seeded projects".
+Read [references/porting.md](references/porting.md) before you write the `Dockerfile` and `build.sh`: it gives the rules for each language.
 
 ## 5. Write project.yaml
 
-Start from `templates/project.yaml` (`docs/project-yaml.md`). Fill in these fields:
-
-- `repo`, with `#<tag or branch>`;
-- `primary_contact`, the address that gets findings, which is public;
-- `language`, from the list in `docs/project-yaml.md`;
-- `fuzz_targets`, each fuzz target that you wrote or kept;
-- `patch_style`, if `patch_style.md` is in the project's repository;
-- `ubsan_checks`, only if the maintainer wants other UBSan checks than the default (see below);
-- each other field that the maintainer wants, for example `auto_ccs`, `pgp` and `publish`.
-
-Ask about `publish`: `after_fixes` (the default), `eager` or `never` (`docs/project-yaml.md`).
-
-For `ubsan_checks`, suggest the default: it is the list of OSS-Fuzz for the project's language, with `strict-flex-arrays`, and it is less likely to flag code that is not a bug. For example, it does not report an unsigned overflow, and it leaves `function` out of C code. Remove a check (`remove`) only when it flags code that is not a bug. Add a stricter check (`add`), for example `alignment` or `float-cast-overflow`, only on purpose. In both cases, write why in `reason`. The format of the field is provisional, and today's toolchain vintage does not apply it (`docs/project-yaml.md`, "ubsan_checks").
+Start from `templates/project.yaml`. Fill in `repo` with `#<tag or branch>`, `primary_contact` (public: it gets the findings), `language`, `fuzz_targets`, `patch_style` if `patch_style.md` is in the project's repository, and each other field the maintainer wants, such as `auto_ccs`, `pgp` and `publish` (ask; `after_fixes` by default). Leave out `ubsan_checks` unless the maintainer wants other checks than the default (`docs/project-yaml.md`, "ubsan_checks").
 
 ## 6. Check
 
-> **WARNING:** `oss-verify check` builds the `Dockerfile` with network access. Read the `Dockerfile` before you run `oss-verify check`.
+`oss-verify check` builds the `Dockerfile` with network access: read the `Dockerfile` first.
 
-1. Run `uv run oss-verify validate projects/<name>`. Correct each problem.
-2. Run `uv run oss-verify check --no-shell --twice <name>`. Correct each problem.
-3. Make sure that the fuzz targets that `oss-verify check` finds in each build are those in `fuzz_targets`.
-4. Make sure that `oss-verify check` tells you that the second build has the same bytes.
-5. Make sure that each property has a coverage witness (3.3) and a breakage (3.4): a `mutant:` record or a patch. `uv run oss-verify check --no-shell --checks report.md <name>` lists each check that misses one.
+1. Run `uv run oss-verify validate projects/<name>`, and correct each problem.
+2. Run `uv run oss-verify check --no-shell --twice <name>`, and correct each problem. The fuzz targets it finds in each build are those in `fuzz_targets`, and it reports that the second build has the same bytes.
+3. Each property has a coverage witness (3.3) and a breakage (3.4). For a C or C++ project, `uv run oss-verify check --no-shell --checks report.md <name>` (with `qemu-riscv64-static` on `PATH`) lists each check that misses one, as the pull request's Build check does.
 
 ## 7. Prepare the pull request
 
-1. Make a branch that changes only `projects/<name>/`.
-2. Write the pull request description from `.github/PULL_REQUEST_TEMPLATE.md`.
-3. In the context note, give a summary of what each fuzz target checks, in a few lines, and say which files came from where (3.8).
-4. Optional: show the triage comment that the pull request will get: `uv run python3 .github/scripts/triage.py --repo theorem-labs/oss-verify --local projects/<name> --login <maintainer's GitHub account> --body <a file holding the description>`. It has six rows: whether the repository is a fork, the licence, whether an active maintainer opened the pull request, the scope of the pull request, `oss-verify validate` and the checklist. Without `GITHUB_TOKEN`, its GraphQL rows say "could not be checked".
-5. Show the branch and the description to the maintainer.
-6. Let the maintainer open the pull request. Only the maintainer can confirm "I am a core maintainer" and "I accept the OSS Verify terms".
-
-When you finish, each file that you made is in `projects/<name>/`.
+1. Make a branch that changes only `projects/<name>/`. Write the description from `.github/PULL_REQUEST_TEMPLATE.md`; in its context note, say in a few lines what each fuzz target checks, and which files came from where (3.8).
+2. Optional: preview the triage comment, as `CONTRIBUTING.md`, "Review of an enrollment", says.
+3. Show the branch and the description to the maintainer. The maintainer opens the pull request: only they can confirm "I am a core maintainer" and accept the OSS Verify terms.
