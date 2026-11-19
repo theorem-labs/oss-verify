@@ -788,6 +788,67 @@ match args:
             self.push_case(changed)
         self.assertIn("the targets of crane copy", str(caught.exception))
 
+    # The step of make that compares a frame-pointer row of infra/toolchains.tsv with the image that make made.
+    ROW_CHECK = "the frame-pointer row of infra/toolchains.tsv, if there is one, names this image, and ghcr.io holds it"
+
+    def row_case(self, tree=ROOT):
+        """make's ROW_CHECK step, run for each base row of its matrix with the stand-in crane, on four tables: no
+        frame-pointer row; a row that names the made image in PACKAGE, which ghcr.io holds; a row that names the same
+        digest in the package of the base image (the rows of #155 did); and a row that names another digest in PACKAGE.
+        Only the first two pass: the pull request that adds the rows passes only when each row names the image that
+        make made, in the one package that publish pushes to."""
+        images = self.workflow(tree, self.IMAGES)
+        step = self.step(images, "make", self.ROW_CHECK)
+        rows = images["jobs"]["make"]["strategy"]["matrix"]["base"]
+        home = pathlib.Path(tempfile.mkdtemp(dir=self.dir))
+        (home / "crane").write_text(self.CRANE)
+        (home / "crane").chmod(0o755)
+        (home / "calls").write_text("")
+        other = "sha256:" + "e" * 64
+        results, refused = {}, set()
+        for row in rows:
+            made = self.digest_of(["made", row])
+            base = row.replace("oss-fuzz-theorems-2026.10", "ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain")
+            # ghcr.io holds each image that a row names, so only the comparison with the made image refuses a row.
+            held = {ref: {"manifest": {}, "config": {}} for ref in (f"{self.PACKAGE}@{made}", f"{base}@{made}",
+                                                                   f"{self.PACKAGE}@{other}")}
+            (home / "registry.json").write_text(json.dumps({"images": held, "tags": {}, "made": {}}))
+            # The base package of the C and C++ row is PACKAGE itself: for that row, the case base package names the
+            # made image, and passes.
+            refused |= {(row, "other digest")} | ({(row, "base package")} if base != self.PACKAGE else set())
+            ctx = {"matrix.base": row, "steps.made.outputs.ref": f"localhost:5000/x:frame-pointers@{made}"}
+            for case, named in (("none", None), ("made", f"{self.PACKAGE}@{made}"), ("base package", f"{base}@{made}"),
+                                ("other digest", f"{self.PACKAGE}@{other}")):
+                where = pathlib.Path(tempfile.mkdtemp(dir=self.dir))
+                (where / "infra").mkdir()
+                table = f"{row}\tghcr.io/theorem-labs/oss-fuzz-theorems-toolchain@sha256:{'0' * 64}\n"
+                if named:
+                    table += f"{row}-frame-pointers\t{named}\n"
+                (where / "infra" / "toolchains.tsv").write_text(table)
+                rc, log, _ = self.run_script(step["run"], where, PATH=f"{home}{os.pathsep}{self.env['PATH']}",
+                                             FAKE_CRANE=str(home), **env_of(images, "make", step, ctx))
+                results[(row, case)] = (rc, log)
+        self.assertEqual({key: rc for key, (rc, _) in results.items()},
+                         {(row, case): int((row, case) in refused)
+                          for row in rows for case in ("none", "made", "base package", "other digest")},
+                         f"the exit status of make's row check for each base row and table: {results}")
+        for row in rows:
+            self.assertIn("has no row", results[(row, "none")][1])
+            self.assertIn("the image made here, and ghcr.io holds it", results[(row, "made")][1])
+        for row, case in refused:
+            self.assertIn(f"but the image made from {row} is {self.PACKAGE}@", results[(row, case)][1])
+
+    def test_make_passes_a_frame_pointer_row_only_when_it_names_the_made_image_in_the_one_package(self):
+        self.row_case()
+
+    def test_control_make_row_check_without_its_comparison(self):
+        self.row_case(self.copy_tree("unchanged"))
+        changed = self.copy_tree("changed", [(f".github/workflows/{self.IMAGES}",
+                                              '          [ "$named" = "$want" ] ||\n', '          true ||\n')])
+        with self.assertRaises(AssertionError) as caught:
+            self.row_case(changed)
+        self.assertIn("the exit status of make's row check", str(caught.exception))
+
     def test_publish_starts_on_the_completed_runs_on_main_of_toolchain_images_alone(self):
         # workflow_run names a workflow by its name: a rename of toolchain-images.yaml, or of its branch, would stop
         # publishing with no error. No other workflow has that name.
