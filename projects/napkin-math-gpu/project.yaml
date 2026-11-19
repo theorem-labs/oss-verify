@@ -1,0 +1,5 @@
+homepage: https://github.com/gpu004/napkin-math-gpu
+repo: https://github.com/gpu004/napkin-math-gpu#1dc2965bfd6b8efae5551290a1d46eddd4d1cb80
+primary_contact: tushardzig@gmail.com
+language: rust
+fuzz_targets: [nccl_curve]
