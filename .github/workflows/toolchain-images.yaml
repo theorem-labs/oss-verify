@@ -49,13 +49,8 @@ name: "Toolchain images"
 # toolchain-images-publish.yaml.
 #
 # If make, probe or docker-tests fails in a run on main, publish does nothing for that run. Fix the cause, and run the
-# failed jobs of that run again: when the run then passes, its completion starts publish. If publish fails, fix the
-# cause. Then run publish again: run the failed jobs of that run of Toolchain images: publish again, or push a later
-# commit to main that changes a path below. A rerun of publish reads the digests that make made in the run of this file
-# that started it: GitHub keeps the artifact for 30 days.
-#
-# A row of infra/toolchains.tsv names an image only after the image is published. Thus the rows of these images come
-# in a pull request after the push.
+# failed jobs of that run again: when the run then passes, its completion starts publish. If publish fails,
+# toolchain-images-publish.yaml's header says how to run publish again.
 #
 # probe and docker-tests run code of the pull request: the builder (infra/base-builder), the probes and the tests.
 # They have contents: read and no secret. No job of this file has packages: write. Only publish has it, in

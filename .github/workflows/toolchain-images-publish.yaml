@@ -65,20 +65,25 @@ on:
 permissions: {}
 
 env:
-  # go-containerregistry's crane, pinned by version and by the SHA-256 of its release archive, as in
-  # toolchain-images.yaml.
+  # go-containerregistry's crane, pinned by version and by the SHA-256 of its release archive. These values, the base
+  # rows of publish's matrix and the image of its registry must stay equal to toolchain-images.yaml's:
+  # test_publish_has_the_crane_pin_base_rows_and_registry_image_of_toolchain_images (tests/test_trigger_move.py) fails
+  # if one differs.
   CRANE_VERSION: v0.22.1
   CRANE_SHA256: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
   CRANE_ARCHIVE: go-containerregistry_Linux_x86_64.tar.gz
 
 jobs:
   publish:
-    # A push run on main of this repository that passed. The branch alone does not say so: branches above also lets
-    # GitHub start this for a run of a pull request whose head is a branch named main, of a fork too.
+    # A push run on main of this repository that passed, of the file toolchain-images.yaml. The branch alone does not
+    # say so: branches above also lets GitHub start this for a run of a pull request whose head is a branch named main,
+    # of a fork too. workflows above finds the workflow by its name alone, so a run of another file with the name
+    # Toolchain images also starts this: the path of the run must be toolchain-images.yaml.
     if: >-
       github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success'
       && github.event.workflow_run.head_branch == 'main'
       && github.event.workflow_run.head_repository.full_name == github.repository
+      && github.event.workflow_run.path == '.github/workflows/toolchain-images.yaml'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -92,7 +97,8 @@ jobs:
         base: [oss-fuzz-theorems-2026.10, oss-fuzz-theorems-2026.10-rust, oss-fuzz-theorems-2026.10-python]
     services:
       registry:
-        # The image of the registry of toolchain-images.yaml's jobs, pinned by the same digest.
+        # The image of the registry of toolchain-images.yaml's jobs, pinned by the same digest. It must stay equal to
+        # theirs: test_publish_has_the_crane_pin_base_rows_and_registry_image_of_toolchain_images fails if it differs.
         image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
         ports:
           - 5000:5000

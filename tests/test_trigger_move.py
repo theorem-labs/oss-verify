@@ -26,8 +26,8 @@ The move:
        refuses one.
   (publish) toolchain-images-publish.yaml, the one workflow with packages: write for the frame-pointer images, runs on
        workflow_run, so GitHub runs main's copy of it. It acts only on a push run of toolchain-images.yaml on main
-       of this repository that passed, and pushes what that run built, with no docker. toolchain-images.yaml, which
-       runs on pull_request too, has no job with a write permission.
+       of this repository that passed. It runs no docker, and no script of it reads GITHUB_SHA or holds an
+       expression. Its crane pin, its base rows and the image of its registry are toolchain-images.yaml's.
 The held runs (each test name holds the word held):
   route finds the held runs of a head on a run by hand. It counts the held runs that Held runs counts: neither counts a
   run of the oss-verify App's own label. The comment job approves them with a token of the oss-verify App that can
@@ -525,31 +525,39 @@ class PullRequestWorkflows(unittest.TestCase):
 class ToolchainPublish(Stand):
     """(publish): toolchain-images-publish.yaml (Toolchain images: publish) starts when a run of toolchain-images.yaml
     (Toolchain images) on main completes. Its one job, publish, has packages: write, and acts only when that run was
-    for a push to main of this repository and passed."""
+    of toolchain-images.yaml, for a push to main of this repository, and passed."""
 
     PUBLISH, IMAGES = "toolchain-images-publish.yaml", "toolchain-images.yaml"
-    # The run of Toolchain images that completed: its event, its conclusion, its head branch and its head repository.
-    # A pull request from a fork, or from this repository, can have a head branch named main.
+    # The run of Toolchain images that completed: its event, its conclusion, its head branch, its head repository and
+    # its workflow file. A pull request from a fork, or from this repository, can have a head branch named main.
+    # workflow_run finds the workflow by its name, so a file of another path with the name Toolchain images starts
+    # publish too.
     EVENTS = ("push", "pull_request", "workflow_dispatch", "schedule", "merge_group")
     CONCLUSIONS = ("success", "failure", "cancelled", "skipped")
     BRANCHES = ("main", BRANCH)
     HEADS = (REPO, FORK)
+    PATHS = (f".github/workflows/{IMAGES}", ".github/workflows/other.yaml")
     # The condition of the publish job's if on the event, and what follows it there.
     EVENT_CHECK = "github.event.workflow_run.event == 'push' && "
+    # The condition of the publish job's if on the workflow file of the run, and the line end before it there.
+    PATH_CHECK = f"\n      && github.event.workflow_run.path == '.github/workflows/{IMAGES}'"
+    # The crane pin of the workflow's env, which publish copies from toolchain-images.yaml.
+    CRANE = ("CRANE_VERSION", "CRANE_SHA256", "CRANE_ARCHIVE")
 
     def case(self, tree=ROOT):
         import test_outside_screen
         job = self.workflow(tree, self.PUBLISH)["jobs"]["publish"]
         acts = set()
-        for run in itertools.product(self.EVENTS, self.CONCLUSIONS, self.BRANCHES, self.HEADS):
-            event, conclusion, branch, head = run
+        for run in itertools.product(self.EVENTS, self.CONCLUSIONS, self.BRANCHES, self.HEADS, self.PATHS):
+            event, conclusion, branch, head, path = run
             ctx = {"github.repository": REPO, "github.event.workflow_run.event": event,
                    "github.event.workflow_run.conclusion": conclusion,
                    "github.event.workflow_run.head_branch": branch,
-                   "github.event.workflow_run.head_repository.full_name": head}
+                   "github.event.workflow_run.head_repository.full_name": head,
+                   "github.event.workflow_run.path": path}
             if test_outside_screen.evaluate(job.get("if", "true"), ctx):
                 acts.add(run)
-        self.assertEqual(acts, {("push", "success", "main", REPO)}, "the runs that publish acts on")
+        self.assertEqual(acts, {("push", "success", "main", REPO, self.PATHS[0])}, "the runs that publish acts on")
 
     def test_publish_acts_only_on_a_push_run_on_main_of_this_repository_that_passed(self):
         self.case()
@@ -560,6 +568,49 @@ class ToolchainPublish(Stand):
         with self.assertRaises(AssertionError) as caught:
             self.case(changed)
         self.assertIn("the runs that publish acts on", str(caught.exception))
+
+    def test_control_publish_path_check_taken_out_of_the_jobs_if(self):
+        self.case(self.copy_tree("unchanged"))
+        changed = self.copy_tree("changed", [(f".github/workflows/{self.PUBLISH}", self.PATH_CHECK, "")])
+        with self.assertRaises(AssertionError) as caught:
+            self.case(changed)
+        self.assertIn("the runs that publish acts on", str(caught.exception))
+
+    def copies_case(self, tree=ROOT):
+        """publish's copies of values of toolchain-images.yaml are equal to them: the crane pin of the workflow's env,
+        the base rows of the matrix (make's), and the image of the registry service (of each job that has one). A
+        change of one copy alone would show only on main, after the merge: publish would fail, or skip a row."""
+        publish, images = self.workflow(tree, self.PUBLISH), self.workflow(tree, self.IMAGES)
+        job = publish["jobs"]["publish"]
+        # Each value: (publish's, toolchain-images.yaml's).
+        values = {f"the env {name}": ((publish.get("env") or {}).get(name), (images.get("env") or {}).get(name))
+                  for name in self.CRANE}
+        values["the base rows of the matrix (make's)"] = (job["strategy"]["matrix"]["base"],
+                                                           images["jobs"]["make"]["strategy"]["matrix"]["base"])
+        registries = {name: held["services"]["registry"]["image"] for name, held in images["jobs"].items()
+                      if "registry" in (held.get("services") or {})}
+        self.assertTrue(registries, f"{self.IMAGES}: no job has a registry service")
+        values.update({f"the image of the registry service ({name}'s)": (job["services"]["registry"]["image"], image)
+                       for name, image in registries.items()})
+        for what, (_, theirs) in values.items():
+            self.assertTrue(theirs, f"{self.IMAGES}: {what}")
+        differ = {what: pair for what, pair in values.items() if pair[0] != pair[1]}
+        self.assertEqual(differ, {}, f"the values of {self.PUBLISH} that differ from {self.IMAGES}'s, each as "
+                                     f"(publish's, {self.IMAGES}'s): {'; '.join(differ)}")
+
+    def test_publish_has_the_crane_pin_base_rows_and_registry_image_of_toolchain_images(self):
+        self.copies_case()
+
+    def test_control_crane_version_changed_in_toolchain_images_alone(self):
+        self.copies_case(self.copy_tree("unchanged"))
+
+        def other_crane(text):
+            return re.sub(r"(?m)^  CRANE_VERSION: .+$", r"\g<0>-other", text)
+
+        changed = self.copy_tree("changed", [(f".github/workflows/{self.IMAGES}", other_crane)])
+        with self.assertRaises(AssertionError) as caught:
+            self.copies_case(changed)
+        self.assertTrue(str(caught.exception).endswith(f"{self.IMAGES}'s): the env CRANE_VERSION"), caught.exception)
 
     def test_publish_starts_on_the_completed_runs_on_main_of_toolchain_images_alone(self):
         # workflow_run names a workflow by its name: a rename of toolchain-images.yaml, or of its branch, would stop
@@ -575,41 +626,17 @@ class ToolchainPublish(Stand):
         self.assertEqual(on["push"]["branches"], ["main"])
         self.assertEqual(publish["permissions"], {})
 
-    def test_publish_pushes_what_that_run_built_with_no_docker(self):
-        publish = self.workflow(ROOT, self.PUBLISH)
-        self.assertEqual(list(publish["jobs"]), ["publish"])
-        job = publish["jobs"]["publish"]
-        self.assertNotIn("environment", job)
-        self.assertEqual(job["permissions"], {"contents": "read", "actions": "read", "packages": "write"})
-        steps = job["steps"]
-        uses = [str(s.get("uses", "")).split("@")[0] for s in steps if "uses" in s]
-        self.assertEqual(uses, ["actions/checkout", "actions/download-artifact"])
-        # The checkout and the digests of the run of Toolchain images that completed, not of main's newest commit.
-        checkout, download = (s["with"] for s in steps if "uses" in s)
-        self.assertEqual((checkout.get("ref"), checkout.get("persist-credentials")),
-                         ("${{ github.event.workflow_run.head_sha }}", False))
-        self.assertEqual((download.get("run-id"), download.get("github-token")),
-                         ("${{ github.event.workflow_run.id }}", "${{ github.token }}"))
+    def test_publish_runs_no_docker_and_no_script_of_it_reads_github_sha_or_holds_an_expression(self):
+        steps = self.workflow(ROOT, self.PUBLISH)["jobs"]["publish"]["steps"]
         # crane alone: no step runs docker.
         for step in steps:
             run = "\n".join(line for line in str(step.get("run", "")).splitlines()
                             if not line.lstrip().startswith("#"))
             self.assertNotRegex(run, r"\bdocker\b", step.get("name"))
-        # The tag names the commit that run built, through the step's env. In a workflow_run run, GITHUB_SHA is main's
-        # newest commit. No script holds an expression.
+        # In a workflow_run run, GITHUB_SHA is main's newest commit, not the commit that the run of Toolchain images
+        # built. No script holds an expression.
         self.assertFalse([s.get("name") for s in steps if "GITHUB_SHA" in str(s.get("run", ""))
                           or "${{" in str(s.get("run", ""))])
-        push = self.step(publish, "publish", "unless ghcr.io holds it, make the image again, and copy it to ghcr.io if "
-                                             "it has the digest that make made")
-        self.assertEqual(push["env"]["HEAD_SHA"], "${{ github.event.workflow_run.head_sha }}")
-        self.assertIn('tag="$name:frame-pointers-$HEAD_SHA"', push["run"])
-        # toolchain-images.yaml runs code of a pull request: no job of it has a write permission.
-        images = self.workflow(ROOT, self.IMAGES)
-        self.assertEqual(images["permissions"], {})
-        for name, held in images["jobs"].items():
-            self.assertIsInstance(held.get("permissions"), dict, name)
-            self.assertEqual({scope: level for scope, level in held["permissions"].items()
-                              if level not in ("read", "none")}, {}, name)
 
 
 class FirstRunArtifact(Stand):
