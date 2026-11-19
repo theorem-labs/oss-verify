@@ -25,7 +25,7 @@ Read the input as a small program: each byte or field selects the next call and 
 
 ### 3.2 Write each property as a check that aborts
 
-Write `if (!condition) abort();` after the calls. Never `assert()`: a build that defines `NDEBUG`, such as CMake's `Release`, removes it without a warning. Above the check, a comment says in the maintainer's words what it checks and why it must be true. Compute the expected value from the input and the documented rule, not with the library's own function or state: such a check shows only that the library agrees with itself.
+Write `if (!condition) abort();` after the calls. Never `assert()`: a build that defines `NDEBUG`, such as CMake's `Release`, removes it without a warning. Above the check, a comment says in the maintainer's words what it checks and why it must be true. Compute the expected value from the input and the documented rule, not with the library's own function or state: such a check shows only that the library agrees with itself. A comparison of two public entry points is a property only when the comment says that they must agree, and they do not share the code that computes the value.
 
 ### 3.3 Show that each check runs
 
@@ -68,7 +68,7 @@ Read [references/porting.md](references/porting.md) before you write the `Docker
 
 ## 5. Write project.yaml
 
-Start from `templates/project.yaml`. Fill in `repo` with `#<tag or branch>`, `primary_contact` (public: it gets the findings), `language`, `fuzz_targets`, `patch_style` if `patch_style.md` is in the project's repository, and each other field the maintainer wants, such as `auto_ccs`, `pgp` and `publish` (ask; `after_fixes` by default). Leave out `ubsan_checks` unless the maintainer wants other checks than the default (`docs/project-yaml.md`, "ubsan_checks").
+Start from `templates/project.yaml`. Fill in `repo` with `#<tag or branch>`, `primary_contact` (public: it gets the findings), `language`, `fuzz_targets`, `patch_style` if `patch_style.md` is in the project's repository, and each other field the maintainer wants, such as `auto_ccs`, `pgp` and `publish` (ask; `after_fixes` by default). Leave out `ubsan_checks` unless the maintainer wants other checks than the default, and remove a check only when it flags code that is not a bug (`docs/project-yaml.md`, "ubsan_checks").
 
 ## 6. Check
 
