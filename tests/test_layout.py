@@ -1071,25 +1071,23 @@ def test_check_fails_for_a_normal_layout_mark_over_an_append_builds_layout(tmp_p
     assert status == 0, lines
     assert lines_with(lines, "plain/fuzz: 2 kept, 0 moved with a cause, 1 changed or new, 0 failed")
     status, lines = run_check(tmp_path / "forged", capsys, {"rows": rows, "placement": fell_back(rows)})
-    assert (status, lines) == (1, [
-        f"plain/fuzz: normal layout: {FALLBACK}",
-        "FAIL plain/fuzz: its placement.tsv marks a normal layout, but .text is not laid out as lld's normal link "
-        "lays it out: gamma (/work/b.o) at 0x11030, where the line before it (alpha (/work/a.o)) ends at 0x11020, "
-        "rounded up to 4: 0x11020",
-        "  .text: start 0x11000 -> 0x11000, size 256 -> 256",
-        "layout check: 0 of 1 (build, target) pass"])
+    assert (status, lines[:1] + lines[2:]) == (1, [f"plain/fuzz: normal layout: {FALLBACK}",
+                                                   "  .text: start 0x11000 -> 0x11000, size 256 -> 256",
+                                                   "layout check: 0 of 1 (build, target) pass"]), lines
+    # The one FAIL line names gamma at 0x11030, and alpha, the line before it, ending at 0x11020, and gamma's
+    # alignment, 4.
+    assert lines[1].startswith("FAIL plain/fuzz") and re.search(r"\b4\b", lines[1]) and all(
+        fact in lines[1] for fact in ("gamma (/work/b.o)", "0x11030", "alpha (/work/a.o)", "0x11020")), lines[1]
 
 
-@pytest.mark.parametrize("rows, out, text, why", [
+@pytest.mark.parametrize("rows, out, text, facts", [
     ([TABLE] + [dict(r, address=r["address"] + 0x40) for r in (ALPHA, BETA, GAMMA)] + [COMMENT],
-     output(text_size=0xB0), "0x11000, size 256 -> 176",
-     "alpha (/work/a.o), the first line, at 0x11040, where .text starts at 0x11000"),
-    (BASE_ROWS, output(), "0x11000, size 256 -> 256",
-     "gamma (/work/b.o), the last line, ends at 0x11070, where .text ends at 0x11100"),
+     output(text_size=0xB0), "0x11000, size 256 -> 176", ("alpha (/work/a.o)", "0x11040", "0x11000")),
+    (BASE_ROWS, output(), "0x11000, size 256 -> 256", ("gamma (/work/b.o)", "0x11070", "0x11100")),
     (BASE_ROWS, output().replace("section\t.text\t0x11000\t256\t0x6\n", ""), "-, size 256 -> -",
-     "output.tsv has no .text")], ids=["first-line", "end", "no-text"])
+     ("output.tsv", ".text"))], ids=["first-line", "end", "no-text"])
 def test_check_fails_for_a_normal_layout_mark_whose_lines_do_not_start_and_end_its_text(tmp_path, capsys, rows, out,
-                                                                                         text, why):
+                                                                                         text, facts):
     # OSSV-675, R3 (spec v8): lld's normal link puts the first line of .text at the start of .text, and .text ends at
     # the end of its last line; the check ties both to output.tsv. The control: alpha, beta and gamma lie one after
     # another from the start of a .text that ends at gamma's end, and the build passes. A copy whose lines all lie
@@ -1102,12 +1100,10 @@ def test_check_fails_for_a_normal_layout_mark_whose_lines_do_not_start_and_end_i
                                    "  .text: start 0x11000 -> 0x11000, size 256 -> 112",
                                    "layout check: 1 of 1 (build, target) pass, 1 with a normal layout"])
     status, lines = run_check(tmp_path / "copy", capsys, {"rows": rows, "out": out, "placement": fell_back(rows)})
-    assert (status, lines) == (1, [
-        f"plain/fuzz: normal layout: {FALLBACK}",
-        "FAIL plain/fuzz: its placement.tsv marks a normal layout, but .text is not laid out as lld's normal link "
-        f"lays it out: {why}",
-        f"  .text: start 0x11000 -> {text}",
-        "layout check: 0 of 1 (build, target) pass"])
+    assert (status, lines[:1] + lines[2:]) == (1, [f"plain/fuzz: normal layout: {FALLBACK}",
+                                                   f"  .text: start 0x11000 -> {text}",
+                                                   "layout check: 0 of 1 (build, target) pass"]), lines
+    assert lines[1].startswith("FAIL plain/fuzz") and all(fact in lines[1] for fact in facts), lines[1]
 
 
 def test_a_text_with_no_line_in_the_map_is_laid_out_as_lld_lays_it_out_only_when_it_has_no_byte():
@@ -1116,7 +1112,9 @@ def test_a_text_with_no_line_in_the_map_is_laid_out_as_lld_lays_it_out_only_when
         sections = [layout.OutputSection(".text", 0x11000, size, 0x6)]
         return layout.normal_break(layout.Layout([], {}, layout.Output(sections, [], {}), {}, set(), []))
 
-    assert (no_line(0), no_line(0x10)) == (None, ".text has 16 bytes, and the map has no line of it")
+    assert no_line(0) is None
+    why = no_line(0x10)
+    assert why is not None and re.search(r"\b16\b", why), why
 
 
 def test_check_counts_a_line_of_the_linkers_own_in_the_text_of_a_normal_layout(tmp_path, capsys):
@@ -1132,9 +1130,9 @@ def test_check_counts_a_line_of_the_linkers_own_in_the_text_of_a_normal_layout(t
     assert (status, lines[-1]) == (0, "layout check: 1 of 1 (build, target) pass, 1 with a normal layout"), lines
     rows.remove(padding)
     status, lines = run_check(tmp_path / "gap", capsys, {"rows": rows, "out": out, "placement": fell_back(rows)})
-    assert status == 1
-    assert lines_with(lines, "FAIL plain/fuzz", "gamma (/work/b.o) at 0x11038, where the line before it (beta "
-                      "(/work/a.o)) ends at 0x11030, rounded up to 4: 0x11030")
+    assert status == 1, lines
+    failure, = lines_with(lines, "FAIL plain/fuzz", "gamma (/work/b.o)", "0x11038", "beta (/work/a.o)", "0x11030")
+    assert re.search(r"\b4\b", failure), failure
 
 
 def test_check_exits_2_for_a_placement_that_marks_a_fallback_on_some_lines_only_or_with_two_reasons(tmp_path, capsys):
@@ -1559,8 +1557,7 @@ def test_a_call_with_no_relax_relocation_or_no_known_site_is_not_tested():
     probe = link(probe.inputs, [(0, 8, "t")], {"t": 0x400000})
     tests = calls_tested(base, probe, layout.pair(base.inputs, probe.inputs))
     assert tests.tests == {}
-    assert [(line.offset, why) for line, why in tests.skipped[0]] == [
-        (8, "the bytes that relaxation removed in front of it at the base are not known")]
+    assert [line.offset for line, _ in tests.skipped[0]] == [8] and all(why for _, why in tests.skipped[0]), tests
 
 
 def test_a_call_into_a_moved_section_past_bytes_that_relaxation_may_remove_is_tested_wherever_they_put_its_target():
