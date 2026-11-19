@@ -1868,9 +1868,10 @@ def normal_break(layout):
 def compare(label, base, new):
     """The comparison of one (build, target) of two layouts: (failures, information), each a list of lines. A same-bytes
     function is kept when it lies at its partner's base address with its partner's linked size, its key has no twins
-    (pair), and lld relaxes it as at the base (unkept): each line of NEW's calls.tsv for it matches BASE's line of its
-    partner at the same offset and of the same type, which the address and the size do not show alone. Else it fails,
-    unless it moved for a cause that NEW's placement.tsv gives and the two layouts show (unshown). An append build that
+    (pair), and lld relaxes it as at the base (unkept): each line of NEW's calls.tsv for it matches the line of BASE
+    that it pairs with (line_pairs: the k-th line of one offset and type with the k-th), which the address and the size
+    do not show alone. Else it fails, unless it moved for a cause that NEW's placement.tsv gives and the two layouts
+    show (unshown). An append build that
     fell back to its normal link (normal_layout) claims no base address, as a normal link keeps none: its information
     is `<label>: normal layout: <reason>` and the line of .text, and it fails only when its .text is not laid out as
     lld's normal link lays it out (normal_break), so that a mark over an append build's layout fails. The reason is
@@ -3047,9 +3048,10 @@ def main(argv=None):
                     "alignment or readonly_growth); one of a key with two sections of the same bytes, which the trees "
                     "cannot tell apart, must move. One that keeps its base address and linked size must also be "
                     "relaxed as at the base, which the size does not show: each line of NEW's calls.tsv for it must "
-                    "match BASE's line at the same offset and of the same type, with relax 0 on both sides, or with "
-                    "relax 1 and the same known delta, and with a call's target in jal's reach of its site, or a "
-                    "thread-local variable in the reach of a relaxed access, in both trees or in neither. A build of "
+                    "match the line of BASE that it pairs with (the k-th line of one offset and type with the k-th), "
+                    "with relax 0 on both sides, or with relax 1 and the same known delta, and with a call's target "
+                    "in jal's reach of its site, or a thread-local variable in the reach of a relaxed access, in both "
+                    "trees or in neither. A build of "
                     "NEW that fell back to its normal link (normal_layout in its placement.tsv) claims no base "
                     "address, as a normal link keeps none; its mark is verified: the first line of .text in its map "
                     "must lie at the start of .text in its output.tsv, each other line at the end of the line before "
