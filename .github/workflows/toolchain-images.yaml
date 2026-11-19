@@ -40,11 +40,11 @@ name: "Toolchain images"
 #                 skipped.
 #
 # This file publishes nothing, and no job of it has a write permission. toolchain-images-publish.yaml (Toolchain
-# images: publish) puts the images on ghcr.io, all three in one package, FP_PACKAGE below, each under a tag that names
-# the language of its base image. GitHub starts it when a run of this file on main completes. Its job publish acts only
-# when that run was for a push to main and passed: make, probe and docker-tests passed for every image. It takes the
-# digest that make made from that run's artifact fp-digest-<base row>, and it pushes nothing unless it makes the image
-# again with that digest. Its header says how it publishes, and what grant lets its token push to this package.
+# images: publish) puts the images on ghcr.io, all three in one package, FP_PACKAGE below. GitHub starts it when a run
+# of this file on main completes. Its job publish acts only when that run was for a push to main and passed: make,
+# probe and docker-tests passed for every image. It takes the digest that make made from that run's artifact
+# fp-digest-<base row>, and it pushes nothing unless it makes the image again with that digest. Its header says how it
+# publishes, and what grant lets its token push to this package.
 #
 # OS Verify's Legion controller owns a failed run of this workflow on main, and a failed run of
 # toolchain-images-publish.yaml.
@@ -92,6 +92,10 @@ on:
 permissions: {}
 
 env:
+  # These values, the base rows of make's matrix and the image of its registry must stay equal to
+  # toolchain-images-publish.yaml's: test_publish_takes_what_toolchain_images_hands_over (tests/test_trigger_move.py)
+  # fails if one differs, as publish's own env comment says.
+  #
   # go-containerregistry's crane, pinned by version and by the SHA-256 of its release archive.
   CRANE_VERSION: v0.22.1
   CRANE_SHA256: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0

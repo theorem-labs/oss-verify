@@ -1141,7 +1141,7 @@ class Merged(unittest.TestCase):
 
 class TheRecord(unittest.TestCase):
     """build.yaml's own code, run here: binary-sizes on a work directory, then the record job's script, then the
-    record read back as enroll-dispatch reads it."""
+    record read back as enroll-dispatch reads it, from the path of the job's upload of enrollment-record."""
 
     def test_binary_sizes_and_the_record_job_make_a_record_enroll_dispatch_takes(self):
         if not shutil.which("jq"):
@@ -1161,11 +1161,18 @@ class TheRecord(unittest.TestCase):
             (work / "manifest.yaml").write_text(yaml.safe_dump({"targets": targets}))
             sizes_line = subprocess.run([sys.executable, str(ROOT / ".github" / "scripts" / "binary-sizes"), str(work)],
                                         capture_output=True, text=True, check=True).stdout.strip()
-            script = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["jobs"]["record"][
-                "steps"][0]["run"]
+            job = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["jobs"]["record"]
+            script = job["steps"][0]["run"]
+            uploads = [step.get("with") or {} for step in job["steps"]
+                       if str(step.get("uses", "")).partition("@")[0] == "actions/upload-artifact"]
+            paths = [up.get("path", "").replace("${{ runner.temp }}", directory) for up in uploads
+                     if up.get("name") == "enrollment-record"]
+            self.assertEqual(len(paths), 1, f"the record job's uploads of enrollment-record: {uploads}")
+            uploaded = pathlib.Path(paths[0])
             env = dict(os.environ, PR=str(PR), NAME="plugin-hostd", SHA=SHA, SIZES=sizes_line, RUNNER_TEMP=directory)
             subprocess.run(["bash", "-c", script], env=env, check=True)
-            rec = json.loads(pathlib.Path(directory, "record", "record.json").read_text())
+            self.assertTrue(uploaded.is_file(), f"the record job wrote no {uploaded}, the path of its upload")
+            rec = json.loads(uploaded.read_text())
         self.assertEqual(dispatch.record_problem(rec, SHA), "")
         self.assertEqual(rec["sizes"]["fuzz_a"]["plain"], {"text": 100, "exec": 3000})
         self.assertEqual(dispatch.oversized(rec), ["fuzz_b.plain (100 bytes of .text, 1,200,000 executable bytes)"])
