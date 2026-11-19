@@ -222,7 +222,7 @@ We seeded some projects ourselves. A project whose proofs we publish in [oss-ver
 
 From [this commit of OSS-Fuzz](https://github.com/google/oss-fuzz/tree/bd2ce21991a94a362b92fb1bf25f86d5a1a60842), we seeded each project that our builder can build and that we can describe honestly. A seeded `project.yaml` gives only what the recorded build data tells, and no guess. [seeded-projects.tsv](seeded-projects.tsv) lists each of the 1,381 projects of OSS-Fuzz at that commit. For a project that we did not seed, it gives the reason.
 
-A core maintainer can adopt a seeded project:
+A core maintainer can adopt a seeded project. `enrollment` refuses a pull request from a fork that changes `projects/<name>/` of a seeded project. Such a change can change [seeded-projects.tsv](seeded-projects.tsv), and a pull request from a fork that changes `projects/` cannot change that table. So a maintainer of this repository makes the change on a branch of this repository, where the `tests` check runs the test of the table. To adopt a seeded project, make the change in a branch of your fork, and open its pull request with the checklist done, "I accept the OSS Verify terms" ticked, and `projects/<name>` in its description (the heading of the template names it). `enrollment` refuses that pull request, and it stays your record that you accept the terms. A maintainer of this repository then carries the change on a branch of this repository. The pull request of that branch names yours on a line `Adoption: #<number>` of its description. `terms-accepted` passes the branch only when your pull request comes from a fork, ticks the box, and names that project and no other. A later change of `primary_contact`, or an added `auto_ccs` address, of a seeded project needs the same record, from the new address. Every `seeds/<name>/project.yaml` keeps `primary_contact: n/a` and no `auto_ccs`: the addresses go in `projects/<name>/project.yaml`. Make the change with these steps:
 
 1. Copy its `projects/<name>/`, or its `seeds/<name>/`, to `projects/<name>/` in a branch of your fork.
 2. Remove each patch that fixes a bug. The directory of a seeded project whose proofs we publish can hold such a patch, but the directory of an enrolled project cannot ([above](#build-patches)). For each one, delete the patch file, its line in `series`, its `patch` line in `sources`, and its name where the `Dockerfile` or `build.sh` copies or applies it. `lay-out-sources` applies each `patch` line of `sources` in turn, and stops when those lines are not the patches that `series` lists, in the same order. So keep the patches that remain in their order in both files.
@@ -230,7 +230,7 @@ A core maintainer can adopt a seeded project:
 4. Remove the two comment lines.
 5. Do the steps in the [README](../README.md#enroll-a-project) from step 3.
 
-The build files of a seeded project come from the build recipe of that release. They make that release's binaries again, byte for byte. Keep them, or write your own. If a seeded project has no build files, [seeded-projects.tsv](seeded-projects.tsv) tells why. Add a `Dockerfile` and a `build.sh` before you open the pull request.
+The build files of a seeded project come from the build recipe of that release. They make that release's binaries again, byte for byte. A patch that the build files apply since the check of their seed port, or no longer apply, can change some of these binaries ([build-contract.md](build-contract.md#builds-ported-from-oss-fuzz-theorems)). The build notes in [seeded-projects.tsv](seeded-projects.tsv) name each such patch, and tell which binaries differ from the release's, or may differ. When the build notes of a project say that some binaries may differ and do not name them, each binary of that project may differ. Keep the build files, or write your own. If a seeded project has no build files, [seeded-projects.tsv](seeded-projects.tsv) tells why. Add a `Dockerfile` and a `build.sh` before you open the pull request.
 
 ## The files in the project directory
 
@@ -274,5 +274,6 @@ Each file must obey these rules:
 * Its size is at most 128 KiB for `project.yaml`.
 * Its size is at most 256 KiB for `build.sh`, a fuzz target source, a file that `sources` copies or reads, or a build patch.
 * Its size is at most 64 KiB for each other file.
+* The `Dockerfile` and `build.sh` do not name `OFT_FRAME_POINTERS`, because only the toolchain image gives that setting ([build-contract.md](build-contract.md#frame-pointers)).
 
 The project directory holds at most 64 files. Its name uses only `a-z 0-9 . _ -`, starts with a letter or digit, and has at most 63 characters.

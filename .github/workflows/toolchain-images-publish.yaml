@@ -1,0 +1,197 @@
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+name: "Toolchain images: publish"
+# toolchain-images-publish puts the frame-pointer toolchain images on ghcr.io. toolchain-images.yaml (Toolchain images)
+# makes them and checks them: its header says how. GitHub starts this workflow each time a run of Toolchain images on
+# the branch main completes. Its one job, publish, acts only when that run was for a push to main of this repository,
+# and passed: make, probe and docker-tests passed for every image. For any other run, publish is skipped.
+#
+# publish runs once for each base image (the matrix). It checks out infra/toolchains.tsv at the commit that the run of
+# Toolchain images built, and takes the digest that make made in that run from its artifact fp-digest-<base row>. It
+# fails, and pushes nothing, if the artifact gives no digest, or if the frame-pointer row names a different image. The
+# three images go to one package, FP_PACKAGE below: ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain, the package of
+# the C and C++ base image. If ghcr.io holds that digest in this package, publish pushes nothing. Else it makes the
+# image in a registry on the runner, as make does. It fails, and pushes nothing, unless that image has the digest that
+# make made. After this check, it copies that image, by its digest, to this package, under a tag that names the
+# language of its base image: frame-pointers-<commit> for the C and C++ image, frame-pointers-rust-<commit> for the
+# Rust image and frame-pointers-python-<commit> for the Python image. <commit> is the commit that the run of Toolchain
+# images built. It fails unless ghcr.io then gives the digest that make made. Then it checks the image on ghcr.io: it
+# fails unless the manifest names the base image's layers and has its media type, and unless the configuration is the
+# base image's with OFT_FRAME_POINTERS=1 added. Its step summary gives the digest. It runs crane, and no docker.
+#
+# It runs on workflow_run, so GitHub runs main's copy of this file, whatever the commit of the run that completed. Thus
+# main's file decides when publish acts and what it pushes. Toolchain images runs on pull_request too, and no job of
+# it has a write permission: the token has packages: write only here, in a job that acts only after make, probe and
+# docker-tests of a push run on main passed.
+#
+# The publish job of this file is the only route of these images to ghcr.io. No person and no agent pushes an image by
+# hand, with any token. No copy goes to a different registry or to a different package: publish pushes nothing to
+# oss-fuzz-theorems-toolchain-rust or oss-fuzz-theorems-toolchain-python. publish pushes with the job's GITHUB_TOKEN.
+# The package oss-fuzz-theorems-toolchain is linked to no repository. Thus this token can push to it only after an
+# organization owner gives theorem-labs/oss-verify the Write role under "Manage Actions access" in the settings of
+# oss-fuzz-theorems-toolchain. GitHub has no API for this. publish only reads the Rust and the Python base images, with
+# no token, so their packages need no grant.
+#
+# The grant is for the repository, not for this job. After the grant, every workflow run of theorem-labs/oss-verify
+# that asks for packages: write, on any branch, can push to the package oss-fuzz-theorems-toolchain and move its tags
+# with its GITHUB_TOKEN. GitHub runs the workflow file of the pushed commit. So a person or a bot that can push a branch
+# of this repository can write such a run. A run for a pull request from a fork gets a token that cannot write. A run
+# for a branch of this repository gets the permissions that its workflow file asks for. The package also holds the
+# release's own tags: 2026.10.0-rc.1, 2026.10.0-rc.2, 2026.10.0-rc.2-fix1 and the -base tag of each. So the controls
+# are the code owners' review of /.github/ on main (.github/CODEOWNERS) and who may push a branch of this repository.
+#
+# publish runs only on main, after the merge, so no pull-request run shows that it failed. OS Verify's Legion
+# controller owns a failed run of this workflow on main.
+#
+# If publish fails, fix the cause. Then run publish again: run the failed jobs of that run of Toolchain images: publish
+# again, or push a later commit to main that changes a path of the push trigger of toolchain-images.yaml. A rerun reads
+# the digests that make made in the run of Toolchain images that started it: GitHub keeps that run's artifacts for 30
+# days. A rerun runs this file as it was at the first run, so a fix of this file takes a later push.
+#
+# A row of infra/toolchains.tsv names an image only after the image is published. Thus the rows of these images come in
+# a pull request after the push.
+
+# Each run is named after the run of Toolchain images whose completion started it, by that run's id and attempt: the
+# run's own commit is main's newest. This workflow runs only on workflow_run, so both values are always set; they are
+# numbers, and run-name is a title, not a shell command.
+run-name: >-
+  Toolchain images: publish for run ${{ github.event.workflow_run.id }}
+  attempt ${{ github.event.workflow_run.run_attempt }}
+on:
+  workflow_run:
+    # By name: the name of toolchain-images.yaml. A rename of either stops publishing (tests/test_trigger_move.py).
+    workflows: ["Toolchain images"]
+    types: [completed]
+    branches: [main]
+
+permissions: {}
+
+env:
+  # These values, the base rows of publish's matrix and the image of its registry must stay equal to
+  # toolchain-images.yaml's: test_publish_takes_what_toolchain_images_hands_over (tests/test_trigger_move.py) fails
+  # if one differs.
+  #
+  # go-containerregistry's crane, pinned by version and by the SHA-256 of its release archive.
+  CRANE_VERSION: v0.22.1
+  CRANE_SHA256: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
+  CRANE_ARCHIVE: go-containerregistry_Linux_x86_64.tar.gz
+  # The one package on ghcr.io of the frame-pointer images of all three base rows. The tag of an image names the
+  # language of its base image.
+  FP_PACKAGE: ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain
+
+jobs:
+  publish:
+    # A push run on main of this repository that passed, of the file toolchain-images.yaml. The branch alone does not
+    # say so: branches above also lets GitHub start this for a run of a pull request whose head is a branch named main,
+    # of a fork too. workflows above finds the workflow by its name alone, so a run of another file with the name
+    # Toolchain images also starts this: the path of the run must be toolchain-images.yaml.
+    if: >-
+      github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.head_branch == 'main'
+      && github.event.workflow_run.head_repository.full_name == github.repository
+      && github.event.workflow_run.path == '.github/workflows/toolchain-images.yaml'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read   # to download the artifacts fp-digest-<base row> of the run of Toolchain images
+      packages: write # to push the image, when ghcr.io does not hold it yet
+    strategy:
+      fail-fast: false
+      matrix:
+        # the row of infra/toolchains.tsv to start from
+        base: [oss-fuzz-theorems-2026.10, oss-fuzz-theorems-2026.10-rust, oss-fuzz-theorems-2026.10-python]
+    services:
+      registry:
+        # The image of the registry of toolchain-images.yaml's jobs, pinned by the same digest. It must stay equal to
+        # theirs: test_publish_takes_what_toolchain_images_hands_over fails if it differs.
+        image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+        ports:
+          - 5000:5000
+    env:
+      BASE_ROW: ${{ matrix.base }}
+    steps:
+      # infra/toolchains.tsv at the commit that the run of Toolchain images built, from which make made the images. A
+      # workflow_run run's own commit is main's newest, which can be a later one.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+          sparse-checkout: infra/toolchains.tsv
+          sparse-checkout-cone-mode: false
+
+      # crane goes into $RUNNER_TEMP/bin, and the publish step puts that directory on its own PATH. No step writes
+      # GITHUB_PATH or GITHUB_ENV: this job holds packages: write.
+      - name: install crane
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/$CRANE_ARCHIVE" \
+            "https://github.com/google/go-containerregistry/releases/download/$CRANE_VERSION/$CRANE_ARCHIVE"
+          echo "$CRANE_SHA256  $RUNNER_TEMP/$CRANE_ARCHIVE" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/$CRANE_ARCHIVE" -C "$RUNNER_TEMP/bin" crane
+
+      # The digests that make made, from the artifacts of the run of Toolchain images that started this run. When
+      # ghcr.io does not hold the image, publish makes it again, and copies it to ghcr.io only if it has the digest of
+      # its base row.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2 (sha-pinned)
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          pattern: fp-digest-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/fp-digest
+
+      - name: unless ghcr.io holds it, make the image again, and copy it to ghcr.io if it has the digest that make made
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # The commit that the run of Toolchain images built, for the tag. In a workflow_run run, GITHUB_SHA is main's
+          # newest commit, which can be a later one.
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          PATH="$RUNNER_TEMP/bin:$PATH"
+          base=$(awk -F'\t' -v row="$BASE_ROW" '$1 == row { print $2 }' infra/toolchains.tsv)
+          [[ "$base" =~ ^ghcr\.io/theorem-labs/oss-fuzz-theorems-toolchain(-[a-z]+)?@sha256:[0-9a-f]{64}$ ]] ||
+            { echo "::error::infra/toolchains.tsv has no row $BASE_ROW with a toolchain digest: '$base'"; exit 1; }
+          # The language of the base image, for the tag: the end of its package's name, empty for the C and C++
+          # image, -rust or -python.
+          language=${BASH_REMATCH[1]}
+          name=${base%@*}
+          want=$(cat "$RUNNER_TEMP/fp-digest/$BASE_ROW.digest" 2> /dev/null || true)
+          [[ "$want" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+            { echo "::error::make gave no digest for $BASE_ROW: '$want': nothing pushed"; exit 1; }
+          ref="$FP_PACKAGE@$want"
+          # the frame-pointer row, once infra/toolchains.tsv has it, must name this image: else push nothing
+          named=$(awk -F'\t' -v row="$BASE_ROW-frame-pointers" '$1 == row { print $2 }' infra/toolchains.tsv)
+          [ -z "$named" ] || [ "$named" = "$ref" ] ||
+            { echo "::error::infra/toolchains.tsv's row $BASE_ROW-frame-pointers names $named, not $ref: nothing pushed"; exit 1; }
+          if crane manifest "$ref" > /dev/null 2>&1; then
+            how="already on ghcr.io, nothing pushed"
+          else
+            # Make the image in this job's registry, as make does, and compare its digest with make's. Nothing goes to
+            # ghcr.io before this comparison passes.
+            made=$(crane mutate "$base" --env OFT_FRAME_POINTERS=1 -t "localhost:5000/${name#ghcr.io/}:frame-pointers")
+            [ "${made#*@}" = "$want" ] ||
+              { echo "::error::the image made here from $BASE_ROW is $made, but make made $want: nothing pushed"; exit 1; }
+            echo "made $made: the digest that make made"
+            echo "$GH_TOKEN" | crane auth login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+            tag="$FP_PACKAGE:frame-pointers$language-$HEAD_SHA"
+            # Copy that image, by its digest. Thus ghcr.io gets the manifest whose digest this step compared.
+            crane copy "localhost:5000/${name#ghcr.io/}@$want" "$tag"
+            pushed=$(crane digest "$tag")
+            crane auth logout ghcr.io
+            [ "$pushed" = "$want" ] ||
+              { echo "::error::ghcr.io gives $pushed for the tag ${tag##*:}, but make made $want"; exit 1; }
+            how="pushed under the tag ${tag##*:}"
+          fi
+          # make's checks of the manifest and of the configuration, on the image on ghcr.io: the manifest names the
+          # base image's layers and has its media type, and the configuration is the base image's plus the one
+          # variable.
+          jq -e -n --argjson b "$(crane manifest "$base")" --argjson n "$(crane manifest "$ref")" \
+            '$b.layers == $n.layers and $b.mediaType == $n.mediaType' > /dev/null ||
+            { echo "::error::$ref does not name exactly the base image's layers"; exit 1; }
+          jq -e -n --argjson b "$(crane config "$base")" --argjson n "$(crane config "$ref")" \
+            '($b | .config.Env += ["OFT_FRAME_POINTERS=1"]) == $n' > /dev/null ||
+            { echo "::error::$ref's configuration is not the base image's with OFT_FRAME_POINTERS=1 added"; exit 1; }
+          echo "### $BASE_ROW, with frame pointers: \`$ref\` ($how)" | tee -a "$GITHUB_STEP_SUMMARY"

@@ -3,7 +3,8 @@
 # seeded, notes on what we took. The release's data is not public, and this file keeps what docs/seeded-projects.tsv
 # needs of it. A project that seeds/languages.tsv seeds, as one project or one for each of its repositories, has
 # - here: its notes come from that file. src/oss_verify/seeded_projects.py writes docs/seeded-projects.tsv from this
-# file, languages.tsv and builds.tsv.
+# file, languages.tsv, builds.tsv, checked-patches.tsv and each seeded project's port: its series, patches, sources
+# and build.sh.
 project	reason or notes
 abseil-cpp	string_escape_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; string_utilities_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
 abseil-py	the release did not build it (status language-pending: python)

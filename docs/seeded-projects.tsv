@@ -1,4 +1,4 @@
-# Written by src/oss_verify/seeded_projects.py; do not edit. Every OSS-Fuzz project at the commit of the oss-fuzz-theorems 2026.10 release: whether we seeded it, whether its seeded build reproduces the release's binaries (seeds/builds.tsv), and why not. A seeded project's fuzz targets are in its project.yaml, in seeds/<name>/ or projects/<name>/.
+# Written by src/oss_verify/seeded_projects.py; do not edit. Every OSS-Fuzz project at the commit of the oss-fuzz-theorems 2026.10 release: whether we seeded it, and why not. For a seeded project, build is what the check of its seed port found (seeds/builds.tsv). Its build notes also name each patch that the port applies since that check, or no longer applies (seeds/checked-patches.tsv). A seeded project's fuzz targets are in its project.yaml, in seeds/<name>/ or projects/<name>/.
 project	seedable	build	build notes	reason or notes
 abseil-cpp	yes	reproduces	all binaries match the release's	string_escape_fuzzer: the harness is in OSS-Fuzz's repository, not the project's; string_utilities_fuzzer: the harness is in OSS-Fuzz's repository, not the project's
 abseil-py	no	-	-	the release did not build it (status language-pending: python)
@@ -191,7 +191,7 @@ cubefs	no	-	-	the release did not build it (status language-pending: go)
 cups	no	-	-	the release did not build it (status too-large: size)
 cups-filters	no	-	-	no harness to seed: fuzz_cupsfilters_image_png_decoder (the release's patch 0001-ppdgenerator-private-cups-symbol-clash.patch edits cupsfilters/ppdgenerator.c, the library's own source)
 cura-engine	no	-	-	the release did not build it (status no-harness: none-at-commit)
-curl	yes	reproduces	all binaries match the release's	fuzz_bufq: the release modified this harness; its copy is not published yet; fuzz_fnmatch: the release modified this harness; its copy is not published yet
+curl	yes	reproduces	the seed port's check: all binaries match the release's; since that check the port applies curl-fuzz_bufq.0001-no-syscalls.patch to fuzz_bufq: the binaries of fuzz_bufq differ from the release's	fuzz_bufq: the release modified this harness; its copy is not published yet; fuzz_fnmatch: the release modified this harness; its copy is not published yet
 curvesapi	no	-	-	the release did not build it (status language-pending: jvm)
 cxxopts	yes	reproduces	all binaries match the release's	-
 cyclonedds	no	-	-	the release did not build it (status held: held)

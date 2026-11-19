@@ -24,7 +24,13 @@
 # /results/<id>.out and /results/<id>.err (how many bytes it wrote to standard output and standard error),
 # /results/<id>.trace (qemu's -strace log) and /results/<id>.calls (host-calls' log). A run that did not start has no
 # status file.
+#
+# The script's own shell writes 0 to /proc/self/coredump_filter, and every process it starts keeps that value, so a
+# run's core dump holds no memory. Otherwise the dump of an ASan build's run would hold its reserved address space of
+# more than 100 GiB: where the host's core_pattern is a pipe, that dump would not end within <seconds>, and an abort
+# would read as 137, the status of a stopped run.
 set -eu
+if [ -e /proc/self/coredump_filter ]; then echo 0 > /proc/self/coredump_filter; fi
 seconds=$1 total=$2
 end=$(($(date +%s) + total))
 guest=65534

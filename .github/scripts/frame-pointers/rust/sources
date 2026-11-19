@@ -1,0 +1,6 @@
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+# kind	path	arguments: see lay-out-sources
+tree	ext/example/src	upstream/example
+copy	targets/example/Cargo.lock	Cargo.lock
+crates	ext/example/vendor	targets/example/Cargo.lock	ext/example/src	fuzz	fp_probe

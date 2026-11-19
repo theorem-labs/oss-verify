@@ -919,6 +919,17 @@ def check_ids(rules):
     return found
 
 
+def record_in(case, text):
+    """The record of a review in `text`, a check run's output.text: its JSON in an HTML comment, at most the 65,535
+    characters of GitHub's output.text, with every key in its order. `case` is the test that asserts it."""
+    case.assertTrue(text.startswith("<!-- ") and text.endswith(" -->"), text[:80])
+    case.assertLessEqual(len(text), 65_535)
+    record = json.loads(text[5:-4])
+    case.assertEqual(list(record), ["schema", "head", "hold", "job", "verdicts", "criticality_score", "oss_fuzz",
+                                    "sizes"])
+    return record
+
+
 # Verdict keys that are no check id: a model that a pull request steers chooses the keys of its verdicts.
 HOSTILE_KEYS = ["x --> @octocat cli/cli#1 <!--", "F2 --> @octocat", "f2", "F2 ", " F2", "F2\n", "x\nF2", "FF2", "H1",
                 "2a", "", "-1", "F2\u2060", "\uff26\uff12"]
@@ -931,7 +942,8 @@ class PostingStep(Runner):
     """review.yml's comment step "Post the comment and record the verdict", and after it the step "Take the label
     review-held off" when its if holds, run with the stand-in gh of test_outside_screen, which keeps each request's
     method, endpoint and body: the review comment it posts or updates, for an enrollment the one check run Enrollment
-    review it records from the same verdicts (c1, c3), and the holds taken off after it."""
+    review it records from the same verdicts (c1, c3) with the record of the review in its output.text, and the holds
+    taken off after it."""
 
     STEP = "Post the comment and record the verdict"
     REPO = "theorem-labs/oss-verify"
@@ -964,7 +976,8 @@ class PostingStep(Runner):
                  "VERDICTS": "" if verdicts is None else json.dumps(verdicts), "REASONS": json.dumps(reasons or {}),
                  "CHECKS": "### new report\n" if kind == "enrollment" else "", "SCREENED": "",
                  "TRUST": "writer", "FREE": "", "GATHER_RESULT": "success", "SCREEN_RESULT": "skipped",
-                 "SCREEN_VERDICT": "", "REVIEW_RESULT": "success", "HELD": "false", "HOLD_RESULT": "success"}
+                 "SCREEN_VERDICT": "", "REVIEW_RESULT": "success", "HELD": "false", "HOLD_RESULT": "success",
+                 "CRITICALITY_SCORE": "", "OSS_FUZZ": "", "SIZES": ""}
         given.update(env)
         if name is None:
             name = "libreac" if kind == "enrollment" else ""
@@ -1010,8 +1023,18 @@ class PostingStep(Runner):
         run = runs[0]
         self.assertEqual((run["name"], run["head_sha"], run["external_id"], run["status"], run["details_url"],
                           sorted(run["output"])),
-                         ("Enrollment review", self.HEAD, "8", "completed", self.RUN_URL, ["summary", "title"]))
+                         ("Enrollment review", self.HEAD, "8", "completed", self.RUN_URL, ["summary", "text", "title"]))
         return run
+
+    @staticmethod
+    def shown(run):
+        """What a maintainer reads of the check run's output: its title and summary, without the record in its
+        text, which GitHub does not show."""
+        return {key: value for key, value in run["output"].items() if key != "text"}
+
+    def kept(self, run):
+        """The record of the review in the check run's output.text (record_in)."""
+        return record_in(self, run["output"]["text"])
 
     def first_sentence(self, requests):
         """The first visible line of the one comment the step sent."""
@@ -1044,7 +1067,7 @@ class PostingStep(Runner):
     def test_c1_a_every_check_passes(self):
         _, requests = self.post(verdicts=self.verdicts())
         run = self.record(requests)
-        self.assertEqual((run["conclusion"], run["output"]),
+        self.assertEqual((run["conclusion"], self.shown(run)),
                          ("success", {"title": SENTENCES["success"], "summary": SENTENCES["success"]}))
         self.assertEqual(self.first_sentence(requests), SENTENCES["success"])
 
@@ -1091,7 +1114,7 @@ class PostingStep(Runner):
             with self.subTest(job=job, env=env):
                 _, requests = self.post(verdicts=self.verdicts(), **env)
                 run = self.record(requests)
-                self.assertEqual((run["conclusion"], run["output"]),
+                self.assertEqual((run["conclusion"], self.shown(run)),
                                  ("action_required", {"title": f"The {job} job failed.", "summary":
                                   f"The {job} job of [this run]({self.RUN_URL}) failed, so the review gave no verdict. "
                                   + self.RERUN}))
@@ -1103,7 +1126,7 @@ class PostingStep(Runner):
         _, requests = self.post(review="", TRUST="cap", FREE="2026-11-10T00:00:00Z", GATHER_RESULT="skipped",
                                 REVIEW_RESULT="skipped", HOLD_RESULT="skipped", name="")
         run = self.record(requests)
-        self.assertEqual((run["conclusion"], run["output"]), ("action_required", {
+        self.assertEqual((run["conclusion"], self.shown(run)), ("action_required", {
             "title": "The daily cap of automated reviews held this pull request.",
             "summary": "The daily cap of automated reviews held this pull request. It comes from an account without "
                        "write access to this repository, and the automated reviews of such accounts reached their cap "
@@ -1190,7 +1213,9 @@ class PostingStep(Runner):
     def test_the_longest_verdict_reaches_the_check_run_in_no_argument_over_linuxs_limit(self):
         """Linux refuses to start a process with an argument over 131,072 bytes. The longest reasons the review job
         lets through, 31 of 1,500 characters that json.dumps writes as \\u escapes, make a verdict of about 280,000
-        bytes: the step gives it to no command as an argument, and the check run gets the whole summary."""
+        bytes: the step gives it to no command as an argument, and the check run gets the whole summary. The gather
+        job's sizes near their bound of 100,000 bytes (take-build-results) reach no argument either, and the record
+        keeps the plain build of each target."""
         shim = self.dir / "shim"
         shim.mkdir()
         (shim / "jq").write_text("#!/usr/bin/env bash\n"
@@ -1200,15 +1225,62 @@ class PostingStep(Runner):
         self.env.update(PATH=f"{shim}{os.pathsep}{self.env['PATH']}", JQ_ARGV=str(self.dir / "jq-argv"))
         ids = check_ids("review.md")
         reasons = {check: "é" * 1500 for check in ids}
+        builds = {build: {"text": 123456, "exec": 234567} for build in ("plain", "asan", "ubsan", "msan")}
+        sizes = {f"fuzz_{n:04d}": builds for n in range(600)}
+        given = json.dumps(sizes, separators=(",", ":"))
+        self.assertTrue(90_000 < len(given.encode()) <= 100_000, len(given))
         _, requests = self.post(verdicts=self.verdicts(**{check: "fail" for check in ids}),
-                                REASONS=json.dumps(reasons, ensure_ascii=False))
+                                REASONS=json.dumps(reasons, ensure_ascii=False), SIZES=given)
         run = self.record(requests)
         self.assertEqual(run["conclusion"], "failure")
         self.assertEqual(run["output"]["summary"].count("é" * 1500), len(ids))
+        self.assertEqual(self.kept(run)["sizes"], {target: {"plain": builds["plain"]} for target in sizes})
         self.assertGreater(len(json.dumps(run).encode()), 131_072)
         lengths = [int(n) for n in (self.dir / "jq-argv").read_text().split()]
         lengths += [len(a.encode()) for call in self.calls() for a in call]
         self.assertLess(max(lengths), 131_072)
+
+    def test_k1_the_record_of_a_review_has_its_verdicts_and_the_values_of_the_gather_job(self):
+        """The check run's output.text is the record of the review (review-verdict's docstring): at the step's head,
+        with no hold, the 31 verdicts that the summary counts, and the criticality score, OSS-Fuzz and binary sizes
+        that the gather job gave."""
+        verdicts = self.verdicts(D2="fail", E="person")
+        sizes = {"parse": {"plain": {"text": 1000, "exec": 1200}, "asan": {"text": 3000, "exec": 3300}},
+                 "dump": {"plain": {"text": 900, "exec": None}}}
+        _, requests = self.post(verdicts=verdicts, reasons={"D2": "No input.", "E": "A person's call."},
+                                CRITICALITY_SCORE="0.07123", OSS_FUZZ="false",
+                                SIZES=json.dumps(sizes, separators=(",", ":")))
+        record = self.kept(self.record(requests))
+        self.assertEqual(record, {"schema": "oss-verify/enrollment-review/1", "head": self.HEAD, "hold": None,
+                                  "job": None, "verdicts": verdicts, "criticality_score": 0.07123, "oss_fuzz": False,
+                                  "sizes": sizes})
+        self.assertEqual((list(record["verdicts"]), len(record["verdicts"])), (check_ids("review.md"), 31))
+        self.assertIs(record["oss_fuzz"], False)
+
+    def test_k2_the_record_of_each_hold_names_the_hold_and_the_job_and_has_no_verdict(self):
+        """Each hold through the step: the screen's and a failed job's, with the values that the gather job gave; and
+        the daily cap's, which no gather job ran for, so its values are empty and the record's are null. The review's
+        verdicts, when the step has them, are in no record of a hold."""
+        sizes = {"parse": {"plain": {"text": 1000, "exec": 1200}}}
+        values = {"CRITICALITY_SCORE": "0.5", "OSS_FUZZ": "true", "SIZES": json.dumps(sizes, separators=(",", ":"))}
+        gathered = {"criticality_score": 0.5, "oss_fuzz": True, "sizes": sizes}
+        holds = (("screen", None, dict(values, review="", TRUST="screen", SCREEN_RESULT="success",
+                                       SCREEN_VERDICT="held", REVIEW_RESULT="skipped"), gathered),
+                 ("cap", None, {"review": "", "TRUST": "cap", "FREE": "2026-11-10T00:00:00Z",
+                                "GATHER_RESULT": "skipped", "REVIEW_RESULT": "skipped", "HOLD_RESULT": "skipped",
+                                "name": ""}, {"criticality_score": None, "oss_fuzz": None, "sizes": None}),
+                 ("failed", "gather", dict(values, GATHER_RESULT="failure", REVIEW_RESULT="skipped"), gathered),
+                 ("failed", "screen", dict(values, TRUST="screen", SCREEN_RESULT="failure", REVIEW_RESULT="skipped"),
+                  gathered),
+                 ("failed", "review", dict(values, REVIEW_RESULT="failure"), gathered),
+                 ("failed", "hold", dict(values, HELD="true", HOLD_RESULT="failure"), gathered))
+        for hold, job, env, want in holds:
+            with self.subTest(hold=hold, job=job):
+                _, requests = self.post(verdicts=self.verdicts(), **env)
+                record = self.kept(self.record(requests))
+                self.assertEqual(record, {"schema": "oss-verify/enrollment-review/1", "head": self.HEAD, "hold": hold,
+                                          "job": job, "verdicts": {}, **want})
+                self.assertIs(record["oss_fuzz"], want["oss_fuzz"])
 
     def test_the_comment_stays_under_githubs_limit(self):
         _, requests = self.post(review="R" * 70_000, verdicts=self.verdicts(), CHECKS="C" * 20_000)
@@ -1244,14 +1316,44 @@ class PostingStep(Runner):
 
 class ReviewVerdict(unittest.TestCase):
     """.github/scripts/review-verdict: the conclusion, title and summary of the check run Enrollment review, from the
-    review's verdicts and reasons or from a hold, and the one list of check ids."""
+    review's verdicts and reasons or from a hold, the record of the review in its text, and the one list of check
+    ids."""
+
+    def call(self, *arguments, **env):
+        """Run review-verdict with `env` over a hold's values and the head HEAD40. A value of None leaves its variable
+        out, as CRITICALITY_SCORE, OSS_FUZZ and SIZES are when `env` does not give them."""
+        given = {**os.environ, "REVIEW_CAP": "24", "REVIEW_CAP_AUTHOR": "12", "REPO": "o/r", "PR": "8",
+                 "RUN_URL": "https://github.com/o/r/actions/runs/77", "HEAD_SHA": HEAD40, "CRITICALITY_SCORE": None,
+                 "OSS_FUZZ": None, "SIZES": None, **env}
+        return subprocess.run([str(ROOT / ".github" / "scripts" / "review-verdict"), *arguments], capture_output=True,
+                              text=True, env={name: value for name, value in given.items() if value is not None})
 
     def verdict(self, status=0, **env):
-        run = subprocess.run([str(ROOT / ".github" / "scripts" / "review-verdict")], capture_output=True, text=True,
-                             env={**os.environ, "REVIEW_CAP": "24", "REVIEW_CAP_AUTHOR": "12", "REPO": "o/r", "PR": "8",
-                                  "RUN_URL": "https://github.com/o/r/actions/runs/77", **env})
+        run = self.call(**env)
         self.assertEqual(run.returncode, status, run.stderr)
-        return json.loads(run.stdout) if status == 0 else None
+        if status:
+            self.assertEqual(run.stdout, "")
+            return None
+        got = json.loads(run.stdout)
+        self.assertEqual(list(got), ["conclusion", "title", "summary", "text"])
+        return got
+
+    def record(self, got):
+        """The record in the text that review-verdict printed (record_in)."""
+        return record_in(self, got["text"])
+
+    @staticmethod
+    def text_of(record):
+        """The text of a record, made as the record's contract says."""
+        data = json.dumps(record, ensure_ascii=True, separators=(",", ":"))
+        return "<!-- " + data.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026") + " -->"
+
+    @staticmethod
+    def review(**values):
+        """The record of a review at HEAD40 that gave no verdict (VERDICTS={}), with `values`."""
+        return {"schema": "oss-verify/enrollment-review/1", "head": HEAD40, "hold": None, "job": None,
+                "verdicts": {check: "person" for check in check_ids("review.md")}, "criticality_score": None,
+                "oss_fuzz": None, "sizes": None, **values}
 
     def test_its_ids_are_the_checklist_of_review_md_and_the_schema_requires_exactly_them(self):
         run = subprocess.run([str(ROOT / ".github" / "scripts" / "review-verdict"), "--ids"], capture_output=True,
@@ -1286,6 +1388,11 @@ class ReviewVerdict(unittest.TestCase):
         self.assertEqual(got["conclusion"], "action_required")
         self.assertEqual(got["summary"], SENTENCES["action_required"] + "\n\n- **C4** (person): The review gave no "
                          "verdict.\n- **F3** (person): The review gave no verdict.")
+        # The record counts each check as the summary does: C4 and F3 are person, and H1 is no check.
+        record = self.record(got)
+        self.assertEqual(record["verdicts"], {check: "person" if check in ("C4", "F3") else "pass"
+                                              for check in check_ids("review.md")})
+        self.assertEqual(list(record["verdicts"]), check_ids("review.md"))
 
     def test_the_summary_lists_the_worst_first_and_a_missing_reason_says_so(self):
         verdicts = {check: "pass" for check in check_ids("review.md")}
@@ -1324,6 +1431,149 @@ class ReviewVerdict(unittest.TestCase):
                     {"HOLD": "screen", "RUN_URL": "https://github.com/o/r/pull/8"}):
             with self.subTest(env=env):
                 self.verdict(status=2, **env)
+
+    def test_k1_the_record_of_a_review_has_every_verdict_and_the_values_of_the_run(self):
+        verdicts = {check: "pass" for check in check_ids("review.md")}
+        verdicts.update(D2="fail", E="person")
+        reasons = {"D2": "fuzz/seed_corpus.zip holds no input for the target parse.",
+                   "E": "Whether the project is critical enough is left to a person."}
+        sizes = {"parse": {"plain": {"text": 1000, "exec": 1200}, "asan": {"text": 3000, "exec": 3300}},
+                 "dump": {"plain": {"text": 900, "exec": 950}}}
+        got = self.verdict(VERDICTS=json.dumps(verdicts), REASONS=json.dumps(reasons), HEAD_SHA="c" * 40,
+                           CRITICALITY_SCORE="0.07", OSS_FUZZ="false", SIZES=json.dumps(sizes))
+        # What a maintainer reads does not change.
+        self.assertEqual((got["conclusion"], got["title"], got["summary"]), (
+            "failure", "The changes below are needed.",
+            "The changes below are needed.\n\n"
+            "- **D2** (fail): fuzz/seed_corpus.zip holds no input for the target parse.\n"
+            "- **E** (person): Whether the project is critical enough is left to a person."))
+        record = self.record(got)
+        self.assertEqual(record, {"schema": "oss-verify/enrollment-review/1", "head": "c" * 40, "hold": None,
+                                  "job": None, "verdicts": verdicts, "criticality_score": 0.07, "oss_fuzz": False,
+                                  "sizes": sizes})
+        self.assertEqual(list(record["verdicts"]), check_ids("review.md"))
+        self.assertIs(record["oss_fuzz"], False)
+
+    def test_k2_the_record_of_a_hold_names_the_hold_and_the_failed_job_and_has_no_verdict(self):
+        rerun = "`gh run rerun 77 --failed -R o/r` reviews it."
+        # Each hold: its environment, the record's job, the title and the summary. JOB names no job of a screen or
+        # cap hold, even when it is set.
+        holds = [({"HOLD": "screen", "JOB": "review"}, None, "The automated screen held this pull request.",
+                  "The automated screen held this pull request. It comes from, or holds the text of, an account "
+                  "without write access to this repository, so an automated screen reads it before the automated "
+                  "review does, and the screen did not pass it or could not read it. No review ran. Theorem decides "
+                  "the next step."),
+                 ({"HOLD": "cap", "FREE": "2026-11-10T00:00:00Z", "JOB": "gather"}, None,
+                  "The daily cap of automated reviews held this pull request.",
+                  "The daily cap of automated reviews held this pull request. It comes from an account without write "
+                  "access to this repository, and the automated reviews of such accounts reached their cap of 24 in "
+                  "24 hours, 12 for one author. From 2026-11-10 00:00 UTC, a push or "
+                  "`gh workflow run review.yml -R o/r -f pr=8` reviews it."),
+                 ({"HOLD": "failed", "JOB": "review"}, "review", "The review job failed.",
+                  "The review job of [this run](https://github.com/o/r/actions/runs/77) failed, so the review gave no "
+                  "verdict. `gh run rerun 77 --failed -R o/r` reviews it.")]
+        holds += [({"HOLD": "failed", "JOB": job}, job, f"The {job} job failed.",
+                   f"The {job} job of [this run](https://github.com/o/r/actions/runs/77) failed, so the review gave"
+                   f" no verdict. {rerun}") for job in ("gather", "screen", "hold")]
+        sizes = {"parse": {"plain": {"text": 1000, "exec": 1200}}}
+        given = {"CRITICALITY_SCORE": "0.5", "OSS_FUZZ": "true", "SIZES": json.dumps(sizes)}
+        for env, job, title, summary in holds:
+            for values, kept in (({}, {"criticality_score": None, "oss_fuzz": None, "sizes": None}),
+                                 (given, {"criticality_score": 0.5, "oss_fuzz": True, "sizes": sizes})):
+                with self.subTest(env=env, values=values):
+                    got = self.verdict(**env, **values)
+                    self.assertEqual((got["conclusion"], got["title"], got["summary"]),
+                                     ("action_required", title, summary))
+                    record = self.record(got)
+                    self.assertEqual(record, {"schema": "oss-verify/enrollment-review/1", "head": HEAD40,
+                                              "hold": env["HOLD"], "job": job, "verdicts": {}, **kept})
+                    self.assertIs(record["oss_fuzz"], kept["oss_fuzz"])
+
+    def test_a_value_of_another_kind_is_null(self):
+        """Only a finite JSON number that is not a boolean is a CRITICALITY_SCORE, only the text true or false is an
+        OSS_FUZZ, and only a JSON object is a SIZES."""
+        for name, texts in (("CRITICALITY_SCORE", ("", "x", "true", "NaN", "Infinity", "-Infinity", "1e999", "[1]",
+                                                   "null")),
+                            ("OSS_FUZZ", ("", "1", "True", "null")),
+                            ("SIZES", ("", "[]", "not json", "null"))):
+            for text in texts:
+                with self.subTest(name=name, text=text):
+                    self.assertEqual(self.record(self.verdict(VERDICTS="{}", **{name: text})), self.review())
+        for text, score in (("1", 1), ("-0.01", -0.01)):
+            with self.subTest(score=text):
+                got = self.record(self.verdict(VERDICTS="{}", CRITICALITY_SCORE=text))["criticality_score"]
+                self.assertEqual(got, score)
+                self.assertNotIsInstance(got, bool)
+
+    def test_a_record_needs_the_commit_of_its_check_run(self):
+        for head in (None, "", HEAD40.upper(), HEAD40[:39], "g" * 40, HEAD40[:39] + "\n"):
+            for env in ({"VERDICTS": "{}"}, {"HOLD": "screen"}, {"HOLD": "failed", "JOB": "review"}):
+                with self.subTest(head=head, env=env):
+                    self.verdict(status=2, HEAD_SHA=head, **env)
+        # The list of check ids and the first sentence need none.
+        for arguments in (["--ids"], ["--sentence", "success"]):
+            with self.subTest(arguments=arguments):
+                run = self.call(*arguments, HEAD_SHA=None)
+                self.assertEqual(run.returncode, 0, run.stderr)
+
+    def test_a_target_name_cannot_end_the_comment_or_reach_a_reader_as_markdown(self):
+        name = "x --> <b>shown</b> @octocat &amp; <!-- y"
+        sizes = {name: {"plain": {"text": 1000, "exec": 1200}}}
+        got = self.verdict(VERDICTS="{}", SIZES=json.dumps(sizes))
+        text = got["text"]
+        # The only < and > are the comment's own, and no & starts a character reference.
+        self.assertEqual((text.count("<"), text.count(">"), text.count("&")), (1, 1, 0), text)
+        self.assertEqual(self.record(got)["sizes"], sizes)
+
+    def test_a_text_at_githubs_limit_keeps_every_build(self):
+        builds = {"plain": {"text": 123456, "exec": 234567}, "asan": {"text": 345678, "exec": 456789}}
+        # The targets that fit: each is `"target-0000":{...}` and a comma, in the `{}` of a record with no target.
+        each = len(json.dumps({"target-0000": builds}, separators=(",", ":"))) - 1
+        empty = len(self.text_of(self.review(sizes={})))
+        sizes = {f"target-{n:04d}": builds for n in range((65_535 - empty) // each)}
+        # The last target's name takes what is left, so that the text has exactly 65,535 characters.
+        short = len(self.text_of(self.review(sizes=sizes)))
+        last = sizes.popitem()[0]
+        sizes[last + "-" * (65_535 - short)] = builds
+        self.assertEqual(len(self.text_of(self.review(sizes=sizes))), 65_535)
+        self.assertLess(len(json.dumps(sizes).encode()), 131_072)
+        got = self.verdict(VERDICTS="{}", SIZES=json.dumps(sizes))
+        self.assertEqual(got["text"], self.text_of(self.review(sizes=sizes)))
+        # One character more, and each target keeps only its plain build.
+        sizes[sizes.popitem()[0] + "-"] = builds
+        self.assertEqual(len(self.text_of(self.review(sizes=sizes))), 65_536)
+        self.assertLess(len(json.dumps(sizes).encode()), 131_072)
+        got = self.verdict(VERDICTS="{}", SIZES=json.dumps(sizes))
+        self.assertEqual(self.record(got), self.review(sizes={target: {"plain": builds["plain"]} for target in sizes}))
+
+    def test_a_longer_text_keeps_only_the_plain_build_of_each_target(self):
+        builds = {build: {"text": 123456, "exec": 234567} for build in ("plain", "asan", "ubsan", "msan")}
+        sizes = {f"fuzz_{n:04d}_decode_the_whole_input_of_the_file": builds for n in range(400)}
+        sizes.update(no_plain_build={"asan": {"text": 1, "exec": 2}}, not_an_object=None)
+        given = json.dumps(sizes)
+        self.assertLess(len(given.encode()), 131_072)
+        self.assertGreater(len(self.text_of(self.review(sizes=sizes))), 65_535)
+        got = self.verdict(VERDICTS="{}", SIZES=given)
+        plain = {target: {"plain": builds["plain"]} for target in sizes}
+        plain.update(no_plain_build={}, not_an_object={})
+        record = self.record(got)
+        self.assertEqual(record, self.review(sizes=plain))
+        self.assertEqual(list(record["sizes"]), list(sizes))
+
+    def test_a_text_still_too_long_has_no_sizes_and_says_why(self):
+        sizes = {f"fuzz_{n:04d}_" + "x" * 50: {"plain": {"text": 123456, "exec": 234567}} for n in range(1000)}
+        given = json.dumps(sizes)
+        self.assertLess(len(given.encode()), 131_072)
+        # Each target has only its plain build, and the text is still too long.
+        self.assertGreater(len(self.text_of(self.review(sizes=sizes))), 65_535)
+        run = self.call(VERDICTS="{}", CRITICALITY_SCORE="0.07", OSS_FUZZ="true", SIZES=given)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        got = json.loads(run.stdout)
+        self.assertEqual(list(got), ["conclusion", "title", "summary", "text"])
+        self.assertEqual(self.record(got), self.review(criticality_score=0.07, oss_fuzz=True))
+        # One line in the step's log says why.
+        self.assertEqual(run.stderr.count("\n"), 1, run.stderr)
+        self.assertTrue(run.stderr.startswith("review-verdict: ") and "sizes" in run.stderr, run.stderr)
 
     def test_the_first_sentence_of_each_conclusion(self):
         for conclusion, sentence in SENTENCES.items():

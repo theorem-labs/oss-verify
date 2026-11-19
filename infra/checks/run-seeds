@@ -13,7 +13,13 @@
 # its own and stopped after <seconds>. It writes /results/<target>/<n>.status, the run's exit status (137 when it was
 # stopped), and /results/<target>/<n>.profraw, the profile that a coverage build writes. With <total seconds> above 0,
 # all runs stop after that time, and an input that did not finish has no status file.
+#
+# The script's own shell writes 0 to /proc/self/coredump_filter, and every process it starts keeps that value, so a
+# run's core dump holds no memory. Otherwise the dump of an ASan build's run would hold its reserved address space of
+# more than 100 GiB: where the host's core_pattern is a pipe, that dump would not end within <seconds>, and an abort
+# would read as 137, the status of a stopped run.
 set -eu
+if [ -e /proc/self/coredump_filter ]; then echo 0 > /proc/self/coredump_filter; fi
 jobs=$1 seconds=$2 total=${3:-0}
 cd /inputs
 limit=""
