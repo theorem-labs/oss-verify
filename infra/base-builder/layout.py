@@ -53,19 +53,21 @@ base's address and linked size, unless NEW's placement.tsv names a cause that th
 in it with relax 1 would be relaxed otherwise at its base call site: its base address plus the call's offset, less
 the bytes that relaxation removed in front of the call at the base; each target at its section's address plus its
 offset there, less the target delta of the call's line), tls_reach (a thread-local access in it with relax 1 is
-relaxed otherwise: its variable crossed the bound of 2 KiB from the start of the TLS segment), repeated_key (lld's
-patterns cannot place it apart from another section of its key, or two sections of its key on one side have the same
-bytes: twins, which the trees cannot tell apart), alignment (its base address does not meet its new alignment) or
-readonly_growth (the segment in front of .text grew past the page that holds the base's first .text byte). A
-same-bytes function of a key with twins must move: at its base address, the trees do not show that the section there
-is the base's own, since lld may take the archive members of one name in another order. A same-bytes function at its
-base address with its base linked size is kept only when lld relaxes it as at the base, which the address and the size
-do not show alone: lld removes the 4 bytes of a relaxed call and 4 fewer nops of an R_RISCV_ALIGN after it, and two
-calls that lld relaxes the other way round keep the size too. So the two functions must have the same lines of
-calls.tsv (offsets and types), and the two lines at each offset must have relax 0, which lld never relaxes, or relax 1
-and the same delta, which is known; then a call's site, its address plus the offset less the delta, must be in jal's
-reach of its target in BASE exactly when it is in reach of its target in NEW, and the variable of a thread-local access
-must lie in the reach of a relaxed access in BASE exactly when it does in NEW. An entry of NEW whose
+relaxed otherwise: its variable crossed the bound of 2 KiB from the start of the TLS segment; the detail of either
+names the line by its offset and its target at the base, which no other line of the function at the base may have),
+repeated_key (lld's patterns cannot place it apart from another section of its key, or two sections of its key on one
+side have the same bytes: twins, which the trees cannot tell apart), alignment (its base address does not meet its new
+alignment) or readonly_growth (the segment in front of .text grew past the page that holds the base's first .text
+byte). A same-bytes function of a key with twins must move: at its base address, the trees do not show that the
+section there is the base's own, since lld may take the archive members of one name in another order. A same-bytes
+function at its base address with its base linked size is kept only when lld relaxes it as at the base, which the
+address and the size do not show alone: lld removes the 4 bytes of a relaxed call and 4 fewer nops of an
+R_RISCV_ALIGN after it, and two calls that lld relaxes the other way round keep the size too. So the two functions
+must have the same lines of calls.tsv (offsets and types), which pair in their order (the k-th line of one offset and
+type with the k-th), and the two lines of each pair must have relax 0, which lld never relaxes, or relax 1 and the
+same delta, which is known; then a call's site, its address plus the offset less the delta, must be in jal's reach of
+its target in BASE exactly when it is in reach of its target in NEW, and the variable of a thread-local access must
+lie in the reach of a relaxed access in BASE exactly when it does in NEW. An entry of NEW whose
 placement.tsv marks a build that fell back to its normal link (normal_layout) claims no base address, as a normal link
 keeps none, and check verifies the mark: the lines of .text in its map (each .text input section, and each line of the
 linker's own between two of them) must lie as lld's normal link lays them out, the first at the start of .text in its
@@ -763,15 +765,14 @@ def alike(candidates):
     return len(read) == 1
 
 
-def describe(lines, objects, key_file, wraps, output=None):
+def describe(lines, objects, key_file, wraps, output):
     """The sections.tsv lines ([Input]) and the calls.tsv lines ([Call]) of a link: `lines` are its map's lines
     (read_map), `objects` its Objects, `key_file(file)` the file a section's key names, `wraps` the functions it
-    wraps, and `output` its binary's Output (read_output), or None, for a link whose deltas are never used. Three
-    steps give them: matched_lines matches the map's lines to the sections of the objects and gives the sections.tsv
-    lines, code_relocations gives each relocation of each section of code with the call or the thread-local access of
-    each one whose target decides a relaxation, and relaxed_calls relaxes the sections of code until the deltas settle.
-    The calls.tsv lines are the calls and the thread-local accesses of the .text input sections, in row order, then in
-    lld's order."""
+    wraps, and `output` its binary's Output (read_output). Three steps give them: matched_lines matches the map's
+    lines to the sections of the objects and gives the sections.tsv lines, code_relocations gives each relocation of
+    each section of code with the call or the thread-local access of each one whose target decides a relaxation, and
+    relaxed_calls relaxes the sections of code until the deltas settle. The calls.tsv lines are the calls and the
+    thread-local accesses of the .text input sections, in row order, then in lld's order."""
     inputs, located, twins, rows = matched_lines(lines, objects, key_file)
     relocated = code_relocations(lines, located, twins, rows, wraps)
     calls = []
@@ -895,17 +896,17 @@ def relaxed_calls(lines, inputs, relocated, output):
     target delta and its removable: {row: (the EF_RISCV_RVC flag of its object, [Reloc])}, in the order of
     `relocated`. `lines` and `output` are describe's, and `inputs` the sections.tsv lines (matched_lines). A Call's
     delta comes from relaxation, with the addresses of this link: those of the map's lines, of the definitions, and of
-    `output`'s symbols. With no `output`, every delta is None.
+    `output`'s symbols.
 
     lld relaxes each section of code (SHF_EXECINSTR), and moves each symbol of it by the bytes it removed in front of
     the symbol, never a section symbol (its anchors). A line's target_delta is those bytes for the symbol of its
     target: the delta of the first relocation of the target's section at or past the symbol's offset there, or the
     bytes removed in all when there is none. It is 0 when no relocation in front of the symbol can remove a byte
     (removable 0: a target at the start of its section, a section symbol, a section that holds no code, and a target
-    that only the binary's symbol places, whose value lld wrote), and None when the map did not take the section, or
-    with no `output`. The relaxation of a section depends on the target deltas of its calls, so each round relaxes
-    every section with the target deltas of the round before, from 0, until they settle, as lld's passes do; past
-    lld's last pass, none of them is known."""
+    that only the binary's symbol places, whose value lld wrote), and None when the map did not take the section. The
+    relaxation of a section depends on the target deltas of its calls, so each round relaxes every section with the
+    target deltas of the round before, from 0, until they settle, as lld's passes do; past lld's last pass, none of
+    them is known."""
     # The offset of each relocation of each section, and the most bytes that relaxation can remove in front of each
     # (most_removed) and in all: {row: ([offset], [the bytes in front of the k-th relocation, for each k, then all])}.
     bounds = {}
@@ -941,26 +942,25 @@ def relaxed_calls(lines, inputs, relocated, output):
                                        target=target)
             found.append(entry)
         calls[row] = (rvc, found)
-    relaxed = {row: ([None] * len(entries), None) for row, (_, entries) in calls.items()}  # {row: ([delta], removed)}
-    if output is not None:
-        view = Layout(inputs, {}, output, {}, set(), [])
-        removed = dict.fromkeys(firsts, 0)  # {target: the target delta of the round before}
-        for passes in range(RELAX_PASSES + 1):
-            if passes == RELAX_PASSES:
-                # Past lld's last pass, none of the target deltas is known.
-                removed = dict.fromkeys(firsts)
-            calls = {row: (rvc, [entry if entry.target is None else
-                                 entry._replace(call=entry.call._replace(target_delta=removed[entry.target]))
-                                 for entry in entries])
-                     for row, (rvc, entries) in calls.items()}
-            relaxed = {row: relaxation(lines[row].address, entries, view, rvc) for row, (rvc, entries) in calls.items()}
-            settled = {}
-            for (row, anchor), k in firsts.items():
-                deltas, total = relaxed[row]
-                settled[(row, anchor)] = deltas[k] if k < len(deltas) else total
-            if settled == removed or passes == RELAX_PASSES:
-                break
-            removed = settled
+    view = Layout(inputs, {}, output, {}, set(), [])
+    removed = dict.fromkeys(firsts, 0)  # {target: the target delta of the round before}
+    for passes in range(RELAX_PASSES + 1):
+        if passes == RELAX_PASSES:
+            # Past lld's last pass, none of the target deltas is known.
+            removed = dict.fromkeys(firsts)
+        calls = {row: (rvc, [entry if entry.target is None else
+                             entry._replace(call=entry.call._replace(target_delta=removed[entry.target]))
+                             for entry in entries])
+                 for row, (rvc, entries) in calls.items()}
+        # {row: ([delta], removed)} of this round
+        relaxed = {row: relaxation(lines[row].address, entries, view, rvc) for row, (rvc, entries) in calls.items()}
+        settled = {}
+        for (row, anchor), k in firsts.items():
+            deltas, total = relaxed[row]
+            settled[(row, anchor)] = deltas[k] if k < len(deltas) else total
+        if settled == removed or passes == RELAX_PASSES:
+            break
+        removed = settled
     return {row: (rvc, [entry if entry.call is None else entry._replace(call=entry.call._replace(delta=delta))
                         for entry, delta in zip(entries, relaxed[row][0])])
             for row, (rvc, entries) in calls.items()}
@@ -1605,9 +1605,37 @@ def tls_address(line, layout):
     return None if target_row(line) is None else target_address(line, layout)
 
 
+def line_pairs(base, old, new, fn):
+    """The calls.tsv lines of the function `old` of BASE (`base`, a Layout) and of its partner `fn` of NEW (`new`),
+    paired: [(BASE's line, NEW's line)], in offset order, then in type order (call before tprel). The k-th line of one
+    offset and type on one side pairs with the k-th on the other, in the order of each tree's calls.tsv (lld's order),
+    and a line that only one side has has None in the other side's place. Each reader of the lines of two partners
+    pairs them here, and no other code pairs lines by their offsets: layout.py check (unkept, unshown) and the append
+    mode (paired_lines, and so call_tests and tls_tests), so that the line that check verifies is the line that the
+    plan tested."""
+    sides = []
+    for tree, i in ((base, old), (new, fn)):
+        found = collections.defaultdict(list)
+        for line in tree.calls.get(i.row, []):
+            found[(line.offset, line.type)].append(line)
+        sides.append(found)
+    then, now = sides
+    return [lines for key in sorted(set(then) | set(now)) for lines in itertools.zip_longest(then[key], now[key])]
+
+
+def cause_pairs(pairs, line_type, offset, target):
+    """The pairs of lines `pairs` (line_pairs) that the detail offset=<offset>;target=<target> of a jal_reach or
+    tls_reach cause names, for lines of the type `line_type`: those whose BASE line has that offset and that target as
+    call_target names it. The append mode names the line of its test so (reach_cause): the offset, and the target of
+    BASE's line. The detail names one pair only when this gives one: two pairs at one offset whose BASE lines have the
+    same target differ only in their order, which the detail does not give."""
+    return [(then, now) for then, now in pairs if then is not None and (then.offset, then.type) == (offset, line_type)
+            and call_target(then) == target]
+
+
 def line_reach(then, now, old, base, new):
     """What decides whether lld relaxes BASE's calls.tsv line `then` of the function `old` and NEW's line `now` of its
-    partner, of one type at one offset, and whether the trees tell it: (why, site, before, after, reached). For a
+    partner, a pair of lines (line_pairs), and whether the trees tell it: (why, site, before, after, reached). For a
     call, whose BASE delta is known: its base call site `site`, the address of `old` plus the offset less BASE's
     delta; the address of its target in BASE and in NEW (target_address); and whether each lies in jal's reach of the
     site. For a thread-local access: no site (None); the offset of its variable from the start of BASE's and of NEW's
@@ -1643,7 +1671,9 @@ def dragged(fn, base, new, pairing):
 
 def unshown(placement, fn, old, base, new, pairing):
     """Why the two layouts do not show the cause that NEW's placement gives for the same-bytes function `fn` (of NEW,
-    paired with `old` of BASE) to move, or None when they show it."""
+    paired with `old` of BASE) to move, or None when they show it. A jal_reach or tls_reach cause names its pair of
+    lines (line_pairs) by the offset and BASE's target (cause_pairs), as the append mode recorded it: no such pair, or
+    two of them, fail it."""
     cause, detail = placement.cause, placement.detail
     if cause in ("jal_reach", "tls_reach"):
         found = re.fullmatch(r"offset=(0x[0-9a-f]+);target=(.+);(lost|gained)", detail)
@@ -1651,13 +1681,14 @@ def unshown(placement, fn, old, base, new, pairing):
             return "the detail does not read as offset=0x<offset>;target=<target>;lost or gained"
         offset, named, lost = int(found.group(1), 16), found.group(2), found.group(3) == "lost"
         line_type, what = ("call", "call") if cause == "jal_reach" else ("tprel", "thread-local access")
-        then = next((c for c in base.calls.get(old.row, [])
-                     if c.type == line_type and c.offset == offset and call_target(c) == named), None)
-        if then is None:
+        named_pairs = cause_pairs(line_pairs(base, old, new, fn), line_type, offset, named)
+        if not named_pairs:
             return f"BASE's calls.tsv gives the function no such {what}"
-        now = next((c for c in new.calls.get(fn.row, []) if c.type == line_type and c.offset == offset), None)
+        if len(named_pairs) > 1:
+            return f"BASE's calls.tsv gives the function more than one such {what}, and the detail does not tell which"
+        (then, now), = named_pairs
         if now is None:
-            return f"NEW's calls.tsv gives the function no {what} at that offset"
+            return f"NEW's calls.tsv gives the function no {what} at that offset to pair with BASE's"
         if not (then.relax and now.relax):
             return (f"the {what} has no R_RISCV_RELAX in {'NEW' if then.relax else 'BASE'}'s calls.tsv (relax 0): "
                     "lld never relaxes it")
@@ -1706,21 +1737,19 @@ def unkept(fn, old, base, new):
     lies at the base address and with the base linked size of its partner `old` of BASE, or None. The address and the
     size alone do not show it: lld removes the 4 bytes of a relaxed call and 4 fewer nops of an R_RISCV_ALIGN after
     it, and two calls that lld relaxes the other way round keep the size too. The calls.tsv lines of the two functions
-    must have the same offsets and types, and the two lines at each offset must be relaxed alike: a line with relax 0
-    on both sides is never relaxed; else both have relax 1 and the same delta, which is known, so that the line lies
-    at the same address in both; a call's site, the address plus the offset less the delta, is in jal's reach of its
-    target in BASE (target_address) exactly when it is in reach of its target in NEW; and a thread-local access's
-    variable lies in the reach of a relaxed access from the start of the TLS segment in BASE (tls_offset) exactly when
-    it does in NEW. The reason names the first line, in offset order, that breaks the rule."""
-    then_lines, now_lines = [sorted(tree.calls.get(i.row, []), key=lambda c: (c.offset, c.type))
-                             for tree, i in ((base, old), (new, fn))]
-    counts = [collections.Counter((c.offset, c.type) for c in lines) for lines in (then_lines, now_lines)]
-    if counts[0] != counts[1]:
-        first = min(set(counts[0] - counts[1]) | set(counts[1] - counts[0]))
-        side = 0 if counts[0][first] > counts[1][first] else 1
-        line = next(c for c in (then_lines, now_lines)[side] if (c.offset, c.type) == first)
-        return f"its {line_name(line)} is a line of {('BASE', 'NEW')[side]}'s calls.tsv only"
-    for then, now in zip(then_lines, now_lines):
+    must pair (line_pairs): as many on each side of each offset and type. The two lines of each pair must be relaxed
+    alike: a line with relax 0 on both sides is never relaxed; else both have relax 1 and the same delta, which is
+    known, so that the line lies at the same address in both; a call's site, the address plus the offset less the
+    delta, is in jal's reach of its target in BASE (target_address) exactly when it is in reach of its target in NEW;
+    and a thread-local access's variable lies in the reach of a relaxed access from the start of the TLS segment in
+    BASE (tls_offset) exactly when it does in NEW. The reason names the first line, in the pairs' order, that only one
+    side has, or else the first pair that breaks the rule."""
+    pairs = line_pairs(base, old, new, fn)
+    for then, now in pairs:
+        if then is None or now is None:
+            side, line = ("NEW", now) if then is None else ("BASE", then)
+            return f"its {line_name(line)} is a line of {side}'s calls.tsv only"
+    for then, now in pairs:
         if not (then.relax or now.relax):
             continue
         if not (then.relax and now.relax):
@@ -2016,19 +2045,19 @@ class Fallback(Exception):
 # section of a link that fell back to its normal link, normal_layout and the reason.
 Place = collections.namedtuple("Place", "place address cause detail")
 # A call of a same-bytes .text input section, as the append mode tests it at the section's base address: its offset,
-# the bytes that relaxation removed in front of it at the base (BASE's delta), its target as BASE's call at that
-# offset names it (call_target), the base call site (the section's base address plus the offset, less the delta) and
-# the base target's address, the link's own call, and where the link's target is: in the .text input section `row`,
-# `value` bytes into it, or, with row None, at the address `value`, which lies in the tail after .text (segment_tail)
-# when `tail` is true. lld's relaxation may remove up to the call's removable bytes in front of the target, wherever
-# the plan puts its section. `fixed` is the target's address when its section stays at its base address with the
-# base's relaxation: the base address plus the value when no byte can be removed in front of the target, else BASE's
-# target address when BASE's call names the same target (the base partner of its section, at the same value), else
-# None.
+# the bytes that relaxation removed in front of it at the base (BASE's delta), its target as BASE's line of its pair
+# (line_pairs) names it (call_target), the base call site (the section's base address plus the offset, less the
+# delta) and the base target's address, the link's own call, and where the link's target is: in the .text input
+# section `row`, `value` bytes into it, or, with row None, at the address `value`, which lies in the tail after .text
+# (segment_tail) when `tail` is true. lld's relaxation may remove up to the call's removable bytes in front of the
+# target, wherever the plan puts its section. `fixed` is the target's address when its section stays at its base
+# address with the base's relaxation: the base address plus the value when no byte can be removed in front of the
+# target, else BASE's target address when BASE's call names the same target (the base partner of its section, at the
+# same value), else None.
 CallTest = collections.namedtuple("CallTest", "offset delta target site before call row value tail fixed")
 # A thread-local access of a same-bytes .text input section (a tprel line), as the append mode tests it: its offset,
-# its target as BASE's line at that offset names it (call_target), the base target's offset from the start of BASE's
-# TLS segment (tls_offset), and the link's own line.
+# its target as BASE's line of its pair (line_pairs) names it (call_target), the base target's offset from the start
+# of BASE's TLS segment (tls_offset), and the link's own line.
 TlsTest = collections.namedtuple("TlsTest", "offset target before call")
 # What call_tests or tls_tests gives for the same-bytes .text input sections of a link: `tests` {row: [CallTest or
 # TlsTest], in offset order}, and `skipped` {row: [(the link's calls.tsv line, or BASE's for a line that only BASE has,
@@ -2085,7 +2114,8 @@ def tls_otherwise(test, offset):
 
 def reach_cause(test):
     """(cause, detail) of a kept section that the test `test` moves, as unshown reads them: jal_reach for a call
-    (CallTest), tls_reach for a thread-local access (TlsTest)."""
+    (CallTest), tls_reach for a thread-local access (TlsTest). The detail names the test's pair of lines by its offset
+    and BASE's target (cause_pairs), which no other pair of the section has (untestable)."""
     if test.call.type == "tprel":
         cause, relaxed = "tls_reach", tls_relaxed(test.before)
     else:
@@ -2094,33 +2124,31 @@ def reach_cause(test):
 
 
 def paired_lines(base, probe, pairing, line_type):
-    """(the link's Input, its BASE partner, the link's line, BASE's line) for each calls.tsv line of the type
-    `line_type` of each same-bytes .text input section of the link `probe` (Layout) that lld may relax (relax 1 on a
-    side), or that only one side has: in row order, then in offset order. The lines of one offset pair in their
-    order, as layout.py check pairs them (unkept), and a line with no partner has None in its partner's place: check
-    fails a kept section with such a line, whatever its relax. A line with relax 0 on both sides is never relaxed, so
-    it never changes, and needs no test."""
+    """(the link's Input, its BASE partner, the link's line, BASE's line, all the pairs of the two sections' lines) for
+    each pair of calls.tsv lines (line_pairs) of the type `line_type` of each same-bytes .text input section of the
+    link `probe` (Layout) and its BASE partner that lld may relax (relax 1 on a side), or in which one side has no
+    line: in row order, then in the pairs' order. These are the pairs that layout.py check reads (unkept, unshown), and
+    a line with no partner has None in its partner's place: check fails a kept section with such a line, whatever its
+    relax. A pair with relax 0 on both sides is never relaxed, so it never changes, and needs no test."""
     for i in probe.inputs:
         if not (is_text(i.section) and pairing.same[i.row]):
             continue
         old = base.inputs[pairing.partner[i.row]]
-        now, then = collections.defaultdict(list), collections.defaultdict(list)
-        for lines, tree, row in ((now, probe, i.row), (then, base, old.row)):
-            for line in tree.calls.get(row, []):
-                if line.type == line_type:
-                    lines[line.offset].append(line)
-        for offset in sorted(set(now) | set(then)):
-            for line, before in itertools.zip_longest(now[offset], then[offset]):
-                if line is None or before is None or line.relax or before.relax:
-                    yield i, old, line, before
+        pairs = line_pairs(base, old, probe, i)
+        for before, line in pairs:
+            if (before if line is None else line).type == line_type and (
+                    line is None or before is None or line.relax or before.relax):
+                yield i, old, line, before, pairs
 
 
-def untestable(line, before):
+def untestable(line, before, pairs):
     """Why the append mode cannot test whether lld relaxes the calls.tsv line `line` of a same-bytes .text input
-    section as BASE's line `before` at the same offset, by what the two lines say: None when they say nothing against
+    section as BASE's line `before` of its pair (line_pairs), by what the lines say: None when they say nothing against
     a test. Either is None when its side has no such line, which layout.py check fails whatever its relax; else `line`
     or `before` has relax 1 (paired_lines). A local symbol of a section with no row of its own lies in a twin or an
-    ambiguous map line (describe), which the tree cannot place, or in a section that the map did not take."""
+    ambiguous map line (describe), which the tree cannot place, or in a section that the map did not take. `pairs` are
+    all the pairs of the two sections' lines: a test that moves its section names its pair by the offset and BASE's
+    target (reach_cause), and layout.py check fails a cause that names two pairs (cause_pairs)."""
     if before is None:
         return "BASE's calls.tsv has no such line"
     if line is None:
@@ -2132,26 +2160,29 @@ def untestable(line, before):
     if any(c.kind == "local" and c.target is None for c in (line, before)):
         return ("its target is a local symbol of a section that has no row: a twin or an ambiguous line of the map, "
                 "which the tree cannot place, or a section that the map did not take")
+    if len(cause_pairs(pairs, before.type, before.offset, call_target(before))) > 1:
+        return ("BASE's calls.tsv gives the function another such line at this offset with the same target, and the "
+                "detail of a cause, which names a line by its offset and its target, cannot tell the two apart")
     return None
 
 
 def call_tests(base, probe, pairing, tail):
     """The tests of the calls of each same-bytes .text input section of the link `probe` (Layout), and each call that
     lld may relax, or that only one side has, and that is not tested, with why (Tests). A call with relax 0 on both
-    sides is never relaxed, so it never changes, and needs no test. A call is tested when BASE's partner has a call at
-    the same offset, both lines have relax 1, the two lines say nothing against a test (untestable), BASE's line has a
-    delta, both targets have an address, and the link's line has a delta: layout.py check fails a kept section whose
-    line has no delta in BASE or in NEW (unkept), and the final link takes the inputs of this one. Its base call site
-    is BASE's address of the section plus the offset, less BASE's delta: lld's site of the call at the base, and in a
-    link that keeps the section there with the base's relaxations in front of the call. The link's target is in the
-    .text input section that holds it: the section of a local symbol or of a global's definition (target_row), or,
-    for a target that no object defines, the section at its address in the link's output (symbol_address). A target
-    in no .text input section keeps the link's address, and is marked when it lies in the tail after .text in its
-    PT_LOAD, `tail` (the probe link's segment_tail, as the caller computed it, or None), which lld lays out wherever
-    .text ends. Where a section that stays at its base address puts the target (`fixed`) comes from the base: lld
-    relaxes the section there as at the base, so BASE's target address holds when BASE's call names the same target;
-    when it names another, and lld may remove bytes in front of the target, the plan does not know where the target
-    lies."""
+    sides is never relaxed, so it never changes, and needs no test. A call is tested when BASE's partner has a call that
+    pairs with it (line_pairs), both lines have relax 1, the two lines say nothing against a test (untestable), BASE's
+    line has a delta, both targets have an address, and the link's line has a delta: layout.py check fails a kept
+    section whose line has no delta in BASE or in NEW (unkept), and the final link takes the inputs of this one. Its
+    base call site is BASE's address of the section plus the offset, less BASE's delta: lld's site of the call at the
+    base, and in a link that keeps the section there with the base's relaxations in front of the call. The link's
+    target is in the .text input section that holds it: the section of a local symbol or of a global's definition
+    (target_row), or, for a target that no object defines, the section at its address in the link's output
+    (symbol_address). A target in no .text input section keeps the link's address, and is marked when it lies in the
+    tail after .text in its PT_LOAD, `tail` (the probe link's segment_tail, as the caller computed it, or None), which
+    lld lays out wherever .text ends. Where a section that stays at its base address puts the target (`fixed`) comes
+    from the base: lld relaxes the section there as at the base, so BASE's target address holds when BASE's call names
+    the same target; when it names another, and lld may remove bytes in front of the target, the plan does not know
+    where the target lies."""
     text = sorted((i for i in probe.inputs if is_text(i.section) and i.linked), key=lambda i: (i.address, i.row))
     starts = [i.address for i in text]
 
@@ -2175,8 +2206,8 @@ def call_tests(base, probe, pairing, tail):
         return outside(address)
 
     tests, skipped = {}, {}
-    for i, old, call, before in paired_lines(base, probe, pairing, "call"):
-        why = untestable(call, before)
+    for i, old, call, before, pairs in paired_lines(base, probe, pairing, "call"):
+        why = untestable(call, before, pairs)
         if why is None and before.delta is None:
             why = "the bytes that relaxation removed in front of it at the base are not known"
         if why is None:
@@ -2207,14 +2238,14 @@ def call_tests(base, probe, pairing, tail):
 def tls_tests(base, probe, pairing):
     """The tests of the thread-local accesses of each same-bytes .text input section of the link `probe` (Layout),
     and each access that lld may relax, or that only one side has, and that is not tested, with why (Tests). An access
-    with relax 0 on both sides is never relaxed, and needs no test. An access is tested when BASE's partner has one at
-    the same offset, both lines have relax 1, the two lines say nothing against a test (untestable), both targets lie
-    in a TLS segment, and both lines have a delta: layout.py check fails a kept section whose line has no delta in
-    BASE or in NEW (unkept), and the final link takes the inputs of this one. The offset in the TLS segment does not
-    depend on where .text puts the function: the probe link gives the one of every link of its inputs."""
+    with relax 0 on both sides is never relaxed, and needs no test. An access is tested when BASE's partner has one that
+    pairs with it (line_pairs), both lines have relax 1, the two lines say nothing against a test (untestable), both
+    targets lie in a TLS segment, and both lines have a delta: layout.py check fails a kept section whose line has no
+    delta in BASE or in NEW (unkept), and the final link takes the inputs of this one. The offset in the TLS segment
+    does not depend on where .text puts the function: the probe link gives the one of every link of its inputs."""
     tests, skipped = {}, {}
-    for i, _, line, before in paired_lines(base, probe, pairing, "tprel"):
-        why = untestable(line, before)
+    for i, _, line, before, pairs in paired_lines(base, probe, pairing, "tprel"):
+        why = untestable(line, before, pairs)
         if why is None:
             offset = tls_offset(tls_address(before, base), base.output)
             if offset is None:

@@ -887,6 +887,14 @@ def jal_no_such_call():
     return base, new, "beta"
 
 
+def jal_two_such_calls():
+    # OSSV-675 review 5976663568. BASE's calls.tsv gives beta two calls of alpha at 0x4, as NEW's does: the detail
+    # names both lines, and does not tell which one moved beta.
+    _, new, _ = jal_lost()
+    calls = [CALLS[0], CALLS[0], CALLS[1]]
+    return {"rows": BASE_ROWS, "calls": calls}, dict(new, calls=calls), "beta"
+
+
 def repeated_once():
     beta = dict(BETA, address=0x11100)
     return None, {"rows": [TABLE, ALPHA, beta, GAMMA, COMMENT],
@@ -975,9 +983,9 @@ def no_placement():
 
 
 @pytest.mark.parametrize("scenario", [jal_in_reach, jal_removed_target_bytes_not_counted, jal_no_such_call,
-                                      jal_unrelaxable, jal_no_delta, tls_within, tls_wrong_way, tls_unrelaxable,
-                                      repeated_once, repeated_run, repeated_run_unshown_drag, aligned, within_room,
-                                      wrong_growth, no_cause, no_placement])
+                                      jal_two_such_calls, jal_unrelaxable, jal_no_delta, tls_within, tls_wrong_way,
+                                      tls_unrelaxable, repeated_once, repeated_run, repeated_run_unshown_drag, aligned,
+                                      within_room, wrong_growth, no_cause, no_placement])
 def test_check_fails_for_a_cause_the_trees_do_not_show(tmp_path, capsys, scenario):
     base, new, name = scenario()
     status, lines = run_check(tmp_path, capsys, new, base)
@@ -1733,16 +1741,17 @@ def test_a_local_call_into_a_line_with_no_row_is_not_tested_and_the_plan_does_no
 
 def test_the_plan_pairs_the_lines_of_one_offset_as_layout_check_does():
     # OSSV-675, the class of the review's finding at layout.py:2166. layout.py check pairs the calls.tsv lines of a
-    # function by offset and type, as many on each side (unkept). BASE gives caller two calls at 0x8, and the probe
-    # link one: the second has no partner, which check fails whatever its relax. At 01eb86dc the plan pairs the probe
-    # link's call with the first one and never reads the second: it keeps caller. Now call_tests tests the first pair
-    # and skips the second line, and the plan falls back, naming caller and the call.
+    # function by offset and type, the k-th with the k-th (line_pairs). BASE gives caller two calls of t at 0x8, and the
+    # probe link one: the second has no partner, which check fails whatever its relax. At 01eb86dc the plan pairs the
+    # probe link's call with the first one and never reads the second: it keeps caller. Now call_tests skips both: the
+    # second has no partner, and a cause's detail, offset=0x8;target=t, would name either of BASE's two lines. The plan
+    # falls back, naming caller and the call.
     base = link([text_input(0, "caller", 0x11000, 0x10), text_input(1, "t", 0x11010, 0x10)], [(0, 8, "t"), (0, 8, "t")],
                 {"t": 0x11010})
     probe = link(laid_out([("caller", 0x10, {}), ("t", 0x10, {})]), [(0, 8, "t")], {"t": 0x11010})
     tests = calls_tested(base, probe, layout.pair(base.inputs, probe.inputs))
-    assert [test.offset for test in tests.tests[0]] == [8]
-    assert [line.offset for line, _ in tests.skipped[0]] == [8]
+    assert tests.tests == {}
+    assert [line.offset for line, _ in tests.skipped[0]] == [8, 8]
     with pytest.raises(layout.Fallback, match=r"^caller \(/work/a\.o\): ") as error:
         planned(base, probe)
     reason = str(error.value)
@@ -2486,10 +2495,10 @@ def test_a_global_target_resolves_to_its_definition_in_the_links_objects(tmp_pat
 
 def describe_map(text, files, symbols=()):
     """layout.describe of the map `text` (map_line) of a link of the objects and archives `files` ({file: bytes}) that
-    wraps no function, with each section keyed by its own file: with an output of no section and no segment whose
-    global symbols are `symbols` ({name: address}), or with no output when `symbols` is None."""
-    output = None if symbols is None else layout.Output([], [], dict(symbols))
-    return layout.describe(layout.read_map(text), layout.Objects(files.__getitem__), lambda f: f, set(), output)
+    wraps no function, with each section keyed by its own file, and an output of no section and no segment whose
+    global symbols are `symbols` ({name: address})."""
+    return layout.describe(layout.read_map(text), layout.Objects(files.__getitem__), lambda f: f, set(),
+                           layout.Output([], [], dict(symbols)))
 
 
 def described(members, *lines):
@@ -2536,9 +2545,6 @@ def test_a_target_inside_its_section_lies_where_the_relaxation_in_front_of_it_pu
     assert layout.target_address(calls[0], layout.Layout(inputs, {}, output, {}, set(), [])) == 0x110FF0 + 0x10 - 4
     assert layout.calls_rows(calls[:1]) == [["0", "0x0", "call", "1", "0x0", "global", "f2", "0x0", "1", "0x10",
                                              "0x4"]]
-    # A link with no output (the probe link) does not know those bytes, but knows that lld can remove up to 4.
-    _, calls = describe_map(text, objects, None)
-    assert [(c.target_delta, c.removable) for c in calls] == [(None, 4), (0, 0), (0, 0)]
 
 
 def test_an_undefined_weak_target_is_at_0_and_an_ifunc_has_no_address(tmp_path):
@@ -3287,6 +3293,34 @@ def test_append_falls_back_when_a_kept_section_has_a_line_of_calls_that_one_link
     assert run_append(tmp_path, entry, command) == 0
     assert final_check(tmp_path) == 0, capsys.readouterr()
     fallen_back(tmp_path, capsys, "f (main.o)", "0x11300", "0x8 (stub)")
+
+
+@pytest.mark.parametrize("targets", [("g", "h"), ("h", "h")], ids=["two-targets", "one-target"])
+def test_append_and_layout_check_pair_two_calls_at_one_offset_alike(tmp_path, monkeypatch, capsys, targets):
+    # OSSV-675 review 5976663568, the thread at layout.py:1658. f keeps its bytes and holds two calls at 0x8, each an
+    # R_RISCV_CALL_PLT with an R_RISCV_RELAX after it, as `.reloc` in assembly can write them. At the base both
+    # targets lie in jal's reach of f's call sites: g at 0x11318, and h at 0x11328. h changes, grows and goes to the
+    # end of .text, past FILLER bytes. At 678cf1dc, with calls of g and of h, the append mode moves f with jal_reach for
+    # its call of h, the second line at 0x8, and layout.py check reads NEW's first line at 0x8, the call of g, against
+    # BASE's call of h: append exits 0 and check exits 1. Now each pairs the k-th line of one offset and type with the
+    # k-th (line_pairs), and check shows the cause. With two calls of h, a cause's detail, offset=0x8;target=h, would
+    # name either line: the append mode tests neither, and falls back to its normal link.
+    def files(new):
+        return {"main.o": relocatable([("f", b"\1" * 0x20, 4, [(0x8, target) for target in targets]),
+                                       ("g", b"\2" * 0x10, 4, []),
+                                       ("h", b"\x99" * 0x30 if new else b"\3" * 0x10, 4, [])]),
+                "filler.o": relocatable([("filler", b"\4" * FILLER, 4, [])])}
+    command = ["clang", "main.o", "filler.o"]
+    entry = link_setup(tmp_path, monkeypatch, files, command, relaxed={"f": 8})
+    assert run_append(tmp_path, entry, command) == 0
+    assert final_check(tmp_path) == 0, capsys.readouterr()
+    if targets == ("h", "h"):
+        fallen_back(tmp_path, capsys, "f (main.o)", "0x11300", "0x8 (h)")
+        return
+    assert appended(tmp_path, capsys) == {
+        ".text.f": ["end", "0x191368", "jal_reach", "offset=0x8;target=h;lost"],
+        ".text.g": ["kept", "0x11318", "-", "-"], ".text.h": ["end", "0x191338", "-", "-"],
+        ".text.filler": ["kept", "0x11338", "-", "-"]}
 
 
 def test_a_kept_twin_is_at_its_own_members_base_address_when_lld_takes_the_members_in_another_order(tmp_path,
