@@ -104,13 +104,14 @@ grew past its room, it writes no script: the link is a normal one, and placement
 readonly_growth.
 
 append never stops a link for a change of the code. The build falls back to its normal link when a section that a plan
-keeps has a call or a thread-local access that lld may relax and that the plan does not test or decide, when a check
-link fails (lld's error that it cannot move the location counter backward, for one) or is not what the plan asks (a
-kept section that it changes, a kept section at its base address and size of which it relaxes a call or a thread-local
-access otherwise than at the base, or does not tell whether it relaxes a call otherwise, a section that an earlier
-check link moved and whose cause the last one does not show, a cause that it does not show, PT_LOAD segments that are
-not the probe link's, a section that it takes or lacks), and when a file or section name holds a double quote or a line
-break, which the script cannot quote. append then writes no script (it removes one that is there), so that
+keeps has a call or a thread-local access that lld may relax and that the plan does not test or decide (one whose delta
+is not known at the base or in the probe link, for one) or a line of calls.tsv that only one of the two links has, when
+a check link fails (lld's error that it cannot move the location counter backward, for one) or is not what the plan
+asks (a kept section that it changes, a kept section at its base address and size of which it relaxes a call or a
+thread-local access otherwise than at the base, or does not tell whether it relaxes a call otherwise, a section that an
+earlier check link moved and whose cause the last one does not show, a cause that it does not show, PT_LOAD segments
+that are not the probe link's, a section that it takes or lacks), and when a file or section name holds a double quote
+or a line break, which the script cannot quote. append then writes no script (it removes one that is there), so that
 link-fuzz-target links normally; placement.tsv gives each .text input section of the probe link the place normal, its
 address there, the cause normal_layout and the reason; and it prints one line, `layout.py append: <target> (<build>):
 normal link: <reason>`, which names the function and its call, or the line of the script. It exits 1 when the probe
@@ -123,6 +124,7 @@ import argparse
 import bisect
 import collections
 import hashlib
+import itertools
 import os
 import re
 import shlex
@@ -1998,9 +2000,9 @@ class AppendError(Exception):
 class Fallback(Exception):
     """Why the append mode cannot keep the base's addresses in a link, which then falls back to its normal link
     (append_link): a section that a plan keeps has a call or a thread-local access that lld may relax and that the plan
-    does not test or decide, a check link fails or is not what the plan asks, or a file or section name holds a double
-    quote or a line break, which the script cannot quote. Its text is the reason, for a person: it names the function
-    and its call, or the line of the script."""
+    does not test or decide, or a line of calls.tsv that only one of the two links has, a check link fails or is not
+    what the plan asks, or a file or section name holds a double quote or a line break, which the script cannot quote.
+    Its text is the reason, for a person: it names the function and its call, or the line of the script."""
 
 
 # Where the append mode puts a .text input section of the link: `place` (kept, hole, end, or normal for a normal
@@ -2023,8 +2025,9 @@ CallTest = collections.namedtuple("CallTest", "offset delta target site before c
 # TLS segment (tls_offset), and the link's own line.
 TlsTest = collections.namedtuple("TlsTest", "offset target before call")
 # What call_tests or tls_tests gives for the same-bytes .text input sections of a link: `tests` {row: [CallTest or
-# TlsTest], in offset order}, and `skipped` {row: [(the link's calls.tsv line, why it is not tested, for a person)], in
-# offset order}, for each line of that type that lld may relax (relax 1 on a side) and that is not tested.
+# TlsTest], in offset order}, and `skipped` {row: [(the link's calls.tsv line, or BASE's for a line that only BASE has,
+# why it is not tested, for a person)], in offset order}, for each line of that type that lld may relax (relax 1 on a
+# side) or that only one side has (paired_lines), and that is not tested.
 Tests = collections.namedtuple("Tests", "tests skipped")
 # The plan of an append link (plan): `places` {row: Place} for each .text input section of the link, `script` the
 # text of the linker script (None for a normal link), `lines` {number of a line `. = <address>;` of the script, from
@@ -2085,34 +2088,37 @@ def reach_cause(test):
 
 
 def paired_lines(base, probe, pairing, line_type):
-    """(the link's Input, its BASE partner, the link's line, BASE's line at the same offset or None when BASE's
-    partner has none) for each calls.tsv line of the type `line_type` of each same-bytes .text input section of the
-    link `probe` (Layout) that lld may relax (relax 1 on a side): in row order, then in offset order. A line with
-    relax 0 on both sides is never relaxed, so it never changes, and needs no test."""
+    """(the link's Input, its BASE partner, the link's line, BASE's line) for each calls.tsv line of the type
+    `line_type` of each same-bytes .text input section of the link `probe` (Layout) that lld may relax (relax 1 on a
+    side), or that only one side has: in row order, then in offset order. The lines of one offset pair in their
+    order, as layout.py check pairs them (unkept), and a line with no partner has None in its partner's place: check
+    fails a kept section with such a line, whatever its relax. A line with relax 0 on both sides is never relaxed, so
+    it never changes, and needs no test."""
     for i in probe.inputs:
         if not (is_text(i.section) and pairing.same[i.row]):
             continue
         old = base.inputs[pairing.partner[i.row]]
-        then = {}
-        for line in base.calls.get(old.row, []):
-            if line.type == line_type:
-                then.setdefault(line.offset, line)
-        for line in sorted(probe.calls.get(i.row, []), key=lambda c: c.offset):
-            if line.type != line_type:
-                continue
-            before = then.get(line.offset)
-            if line.relax or before is not None and before.relax:
-                yield i, old, line, before
+        now, then = collections.defaultdict(list), collections.defaultdict(list)
+        for lines, tree, row in ((now, probe, i.row), (then, base, old.row)):
+            for line in tree.calls.get(row, []):
+                if line.type == line_type:
+                    lines[line.offset].append(line)
+        for offset in sorted(set(now) | set(then)):
+            for line, before in itertools.zip_longest(now[offset], then[offset]):
+                if line is None or before is None or line.relax or before.relax:
+                    yield i, old, line, before
 
 
 def untestable(line, before):
     """Why the append mode cannot test whether lld relaxes the calls.tsv line `line` of a same-bytes .text input
-    section as BASE's line `before` at the same offset (None when BASE has none), by what the two lines say: None
-    when they say nothing against a test. `line` or `before` has relax 1 (paired_lines). A local symbol of a section
-    with no row of its own lies in a twin or an ambiguous map line (describe), which the tree cannot place, or in a
-    section that the map did not take."""
+    section as BASE's line `before` at the same offset, by what the two lines say: None when they say nothing against
+    a test. Either is None when its side has no such line, which layout.py check fails whatever its relax; else `line`
+    or `before` has relax 1 (paired_lines). A local symbol of a section with no row of its own lies in a twin or an
+    ambiguous map line (describe), which the tree cannot place, or in a section that the map did not take."""
     if before is None:
         return "BASE's calls.tsv has no such line"
+    if line is None:
+        return "this link's calls.tsv has no such line"
     if not (line.relax and before.relax):
         return "only one link has R_RISCV_RELAX for it"
     if "ifunc" in (line.kind, before.kind):
@@ -2125,19 +2131,21 @@ def untestable(line, before):
 
 def call_tests(base, probe, pairing, tail):
     """The tests of the calls of each same-bytes .text input section of the link `probe` (Layout), and each call that
-    lld may relax and that is not tested, with why (Tests). A call with relax 0 on both sides is never relaxed, so it
-    never changes, and needs no test. A call is tested when BASE's partner has a call at the same offset, both lines
-    have relax 1, the two lines say nothing against a test (untestable), BASE's line has a delta, and both targets
-    have an address. Its base call site is BASE's address of the section plus the offset, less BASE's delta: lld's
-    site of the call at the base, and in a link that keeps the section there with the base's relaxations in front of
-    the call. The link's target is in the .text input section that holds it: the section of a local symbol or of a
-    global's definition (target_row), or, for a target that no object defines, the section at its address in the
-    link's output (symbol_address). A target in no .text input section keeps the link's address, and is marked when
-    it lies in the tail after .text in its PT_LOAD, `tail` (the probe link's segment_tail, as the caller computed it,
-    or None), which lld lays out wherever .text ends. Where a section that stays at its base address puts the target
-    (`fixed`) comes from the base: lld relaxes the section there as at the base, so BASE's target address holds when
-    BASE's call names the same target; when it names another, and lld may remove bytes in front of the target, the
-    plan does not know where the target lies."""
+    lld may relax, or that only one side has, and that is not tested, with why (Tests). A call with relax 0 on both
+    sides is never relaxed, so it never changes, and needs no test. A call is tested when BASE's partner has a call at
+    the same offset, both lines have relax 1, the two lines say nothing against a test (untestable), BASE's line has a
+    delta, both targets have an address, and the link's line has a delta: layout.py check fails a kept section whose
+    line has no delta in BASE or in NEW (unkept), and the final link takes the inputs of this one. Its base call site
+    is BASE's address of the section plus the offset, less BASE's delta: lld's site of the call at the base, and in a
+    link that keeps the section there with the base's relaxations in front of the call. The link's target is in the
+    .text input section that holds it: the section of a local symbol or of a global's definition (target_row), or,
+    for a target that no object defines, the section at its address in the link's output (symbol_address). A target
+    in no .text input section keeps the link's address, and is marked when it lies in the tail after .text in its
+    PT_LOAD, `tail` (the probe link's segment_tail, as the caller computed it, or None), which lld lays out wherever
+    .text ends. Where a section that stays at its base address puts the target (`fixed`) comes from the base: lld
+    relaxes the section there as at the base, so BASE's target address holds when BASE's call names the same target;
+    when it names another, and lld may remove bytes in front of the target, the plan does not know where the target
+    lies."""
     text = sorted((i for i in probe.inputs if is_text(i.section) and i.linked), key=lambda i: (i.address, i.row))
     starts = [i.address for i in text]
 
@@ -2172,8 +2180,10 @@ def call_tests(base, probe, pairing, tail):
                        if target_row(before) is not None else "its target has no address at the base")
             elif now is None:
                 why = "its target has no address in this link"
+            elif call.delta is None:
+                why = "the bytes that relaxation removed in front of it in this link are not known"
         if why is not None:
-            skipped.setdefault(i.row, []).append((call, why))
+            skipped.setdefault(i.row, []).append((before if call is None else call, why))
             continue
         row, value, _ = now
         fixed = None
@@ -2190,11 +2200,12 @@ def call_tests(base, probe, pairing, tail):
 
 def tls_tests(base, probe, pairing):
     """The tests of the thread-local accesses of each same-bytes .text input section of the link `probe` (Layout),
-    and each access that lld may relax and that is not tested, with why (Tests). An access with relax 0 on both sides
-    is never relaxed, and needs no test. An access is tested when BASE's partner has one at the same offset, both
-    lines have relax 1, the two lines say nothing against a test (untestable), and both targets lie in a TLS segment.
-    Its offset there does not depend on where .text puts the function: the probe link gives the one of every link of
-    its inputs."""
+    and each access that lld may relax, or that only one side has, and that is not tested, with why (Tests). An access
+    with relax 0 on both sides is never relaxed, and needs no test. An access is tested when BASE's partner has one at
+    the same offset, both lines have relax 1, the two lines say nothing against a test (untestable), both targets lie
+    in a TLS segment, and both lines have a delta: layout.py check fails a kept section whose line has no delta in
+    BASE or in NEW (unkept), and the final link takes the inputs of this one. The offset in the TLS segment does not
+    depend on where .text puts the function: the probe link gives the one of every link of its inputs."""
     tests, skipped = {}, {}
     for i, _, line, before in paired_lines(base, probe, pairing, "tprel"):
         why = untestable(line, before)
@@ -2204,19 +2215,23 @@ def tls_tests(base, probe, pairing):
                 why = "its target has no offset in BASE's TLS segment"
             elif tls_offset(tls_address(line, probe), probe.output) is None:
                 why = "its target has no offset in this link's TLS segment"
+            elif before.delta is None:
+                why = "the bytes that relaxation removed in front of it at the base are not known"
+            elif line.delta is None:
+                why = "the bytes that relaxation removed in front of it in this link are not known"
         if why is not None:
-            skipped.setdefault(i.row, []).append((line, why))
+            skipped.setdefault(i.row, []).append((before if line is None else line, why))
             continue
         tests.setdefault(i.row, []).append(TlsTest(line.offset, call_target(before), offset, line))
     return Tests(tests, skipped)
 
 
 def untested(skipped, undecided):
-    """For a person, each call and thread-local access of a same-bytes .text input section that lld may relax and that
-    the append mode does not test or does not decide, and why ([str], in offset order): `skipped` are the section's
-    lines of call_tests' and tls_tests' skipped, each with why, and `undecided` [(CallTest, span)] its calls whose
-    target lies in a span (planned_span or linked_span: (low, high), or None when it is not known) that does not tell
-    whether lld relaxes the call otherwise (otherwise gives None)."""
+    """For a person, each call and thread-local access of a same-bytes .text input section that lld may relax, or
+    that only one side has, and that the append mode does not test or does not decide, and why ([str], in offset
+    order): `skipped` are the section's lines of call_tests' and tls_tests' skipped, each with why, and `undecided`
+    [(CallTest, span)] its calls whose target lies in a span (planned_span or linked_span: (low, high), or None when
+    it is not known) that does not tell whether lld relaxes the call otherwise (otherwise gives None)."""
     found = list(skipped)
     for test, span in undecided:
         if span is None:
@@ -2443,11 +2458,12 @@ def plan(base, probe, pairing, tail, calls, accesses, forced=None):
     moves with repeated_key, which the member with one shows (dragged).
 
     A section that the final plan keeps is linked only when the plan tests and decides each of its calls and
-    thread-local accesses that lld may relax: else lld may relax it otherwise than at the base, and two such calls
-    that lld relaxed the other way round would keep the section's size, not its bytes. Raise Fallback, naming the
-    first kept section with a call or an access that call_tests or tls_tests skips, or with a call that its
-    planned_span does not decide (otherwise gives None), and that call (untested); and, for a file or section name
-    that holds a double quote or a line break, quotable does.
+    thread-local accesses that lld may relax, and when the base and the probe link have the same lines of it: else
+    lld may relax it otherwise than at the base, and two such calls that lld relaxed the other way round would keep
+    the section's size, not its bytes; and layout.py check fails a kept section with a line that only one side has.
+    Raise Fallback, naming the first kept section with a call or an access that call_tests or tls_tests skips, or
+    with a call that its planned_span does not decide (otherwise gives None), and that call (untested); and, for a
+    file or section name that holds a double quote or a line break, quotable does.
 
     The script puts .text at the base's address and each section, a kept run or a moved block once, at its address
     in address order, and ends .text with `. = E;`, so that .text ends at E however much lld relaxes the sections at
@@ -2699,11 +2715,14 @@ def append_link(label, entry, work, script, placement, wraps, renamed, command):
     entries = map_entries(text_of(read_regular(probe_map)))
     lines = [line for line in entries if line.file != "<internal>"]
     internal = [line for line in entries if line.file == "<internal>"]
-    inputs, calls = describe(lines, Objects(read_linked), key_file, set(wrapped))
+    # The probe link's lines with their deltas, as collect gives the final link's: call_tests and tls_tests skip a line
+    # whose delta is not known, which layout.py check cannot verify.
+    output = binary_output(probe_binary)
+    inputs, calls = describe(lines, Objects(read_linked), key_file, set(wrapped), output)
     by_row = collections.defaultdict(list)
     for call in calls:
         by_row[call.row].append(call)
-    probe = Layout(inputs, by_row, binary_output(probe_binary), {},
+    probe = Layout(inputs, by_row, output, {},
                    {row for row, line in enumerate(lines) if line.loaded}, text_lines(entries))
     pairing = pair(base.inputs, probe.inputs)
     text = [i for i in probe.inputs if is_text(i.section)]

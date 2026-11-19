@@ -1414,7 +1414,7 @@ def link(found, calls=(), symbols=None, front=0x10400, tls=(), deltas=None, nore
     but those (row, offset) that `norelax` names, and lld removed `deltas` {(row, offset): bytes} in front of it (by
     default none). lld removed `removed` {(row, offset): bytes} in front of the call's target (its target delta, by
     default none), and may remove up to `removable` {(row, offset): bytes} there (by default none), as describe gives
-    a probe link's lines: the target delta of a call that removable names is not known."""
+    each line its removable: the target delta of a call that removable names is not known."""
     by_row = collections.defaultdict(list)
     for row, offset, name, *defined_at in calls:
         line_type, definition = ("tprel", defined_at[0]) if defined_at else ("call", (defined or {}).get(name))
@@ -1729,6 +1729,24 @@ def test_a_local_call_into_a_line_with_no_row_is_not_tested_and_the_plan_does_no
         planned(base, probe)
     reason = str(error.value)
     assert "0x11000" in reason and "0x4 (row:-+0x0)" in reason, reason
+
+
+def test_the_plan_pairs_the_lines_of_one_offset_as_layout_check_does():
+    # OSSV-675, the class of the review's finding at layout.py:2166. layout.py check pairs the calls.tsv lines of a
+    # function by offset and type, as many on each side (unkept). BASE gives caller two calls at 0x8, and the probe
+    # link one: the second has no partner, which check fails whatever its relax. At 01eb86dc the plan pairs the probe
+    # link's call with the first one and never reads the second: it keeps caller. Now call_tests tests the first pair
+    # and skips the second line, and the plan falls back, naming caller and the call.
+    base = link([text_input(0, "caller", 0x11000, 0x10), text_input(1, "t", 0x11010, 0x10)], [(0, 8, "t"), (0, 8, "t")],
+                {"t": 0x11010})
+    probe = link(laid_out([("caller", 0x10, {}), ("t", 0x10, {})]), [(0, 8, "t")], {"t": 0x11010})
+    tests = calls_tested(base, probe, layout.pair(base.inputs, probe.inputs))
+    assert [test.offset for test in tests.tests[0]] == [8]
+    assert [line.offset for line, _ in tests.skipped[0]] == [8]
+    with pytest.raises(layout.Fallback, match=r"^caller \(/work/a\.o\): ") as error:
+        planned(base, probe)
+    reason = str(error.value)
+    assert "0x11000" in reason and "0x8 (t)" in reason, reason
 
 
 def test_a_call_into_a_kept_section_past_bytes_that_relaxation_removed_is_tested_where_the_base_put_its_target():
@@ -3144,6 +3162,85 @@ def test_append_falls_back_when_the_check_link_relaxes_two_kept_calls_the_other_
     entry = link_setup(root, monkeypatch, kept_call_files(calls, 4), command, made=made, relaxed={"f": 4})
     assert run_append(root, entry, command) == 0
     assert appended(root, capsys)[".text.f"][:2] == ["kept", "0x11300"]
+
+
+def final_check(root):
+    """layout.py check of the base tree root/base and the tree root/new of the link that link-fuzz-target makes after
+    an append link in `root`, with append's placement.tsv: the check link when append wrote a script, else the probe
+    link, which stands for the normal link of the same command. Its exit status."""
+    links, name = root / "links", "check" if (root / "script.ld").exists() else "probe"
+    tree_entry(root / "new", root / "work", (links / f"{name}.map").read_text(), (links / name).read_bytes(),
+               (root / "placement.tsv").read_bytes())
+    return layout.main(["check", str(root / "base"), str(root / "new")])
+
+
+def test_append_falls_back_when_a_kept_sections_thread_local_access_follows_a_relaxable_tls_descriptor(
+        tmp_path, monkeypatch, capsys):
+    # OSSV-675 review 5973052531, the thread at layout.py:2166. f reads tv at 0x10 (TLS_READ) after a relaxable
+    # R_RISCV_TLSDESC_HI20 at 0x0, of which lld may remove bytes that layout.relaxation does not model: both trees give
+    # the access the delta -, which layout.py check cannot verify (unkept). At 01eb86dc tls_tests reads no delta: it
+    # tests the access, append keeps f, and check fails f. Now the build falls back to its normal link, naming f and
+    # the access, and check passes.
+    calls = [(0x0, "tv", layout.R_RISCV_TLSDESC_HI20), (0x0, None, layout.R_RISCV_RELAX)]
+    calls += [(offset + 0x10, symbol, kind) for offset, symbol, kind in TLS_READ]
+
+    def files(new):
+        return {"main.o": relocatable([("f", b"\1" * 0x20, 4, calls),
+                                       ("g", b"\x99" * 0x30 if new else b"\2" * 0x10, 4, [])],
+                                      [(".tbss.tv", bytes(4), 4, "tv")])}
+    command = ["clang", "main.o"]
+    entry = link_setup(tmp_path, monkeypatch, files, command, relaxed={"f": 8})
+    assert run_append(tmp_path, entry, command) == 0
+    assert final_check(tmp_path) == 0, capsys.readouterr()
+    fallen_back(tmp_path, capsys, "f (main.o)", "0x11300", "0x10 (tv)")
+
+
+@pytest.mark.parametrize("filler", [0x10, 0x100000], ids=["kept", "jal_reach"])
+def test_append_falls_back_when_a_kept_sections_call_has_no_delta_in_the_new_link(tmp_path, monkeypatch, capsys,
+                                                                                 filler):
+    # OSSV-675 review 5973052531, the thread at layout.py:2166. f calls g at 0x8, a global 0x10 bytes into the section
+    # of c, as an assembly file with two functions in one section has. At the base c calls nothing, and BASE gives f's
+    # call the delta 0x0. c changes, and in the new link calls i, an ifunc, at 0x4, in front of g: from there on, the
+    # bytes that lld's relaxation removes in c are not known, so neither is where g lies, nor whether lld relaxes f's
+    # call, and the probe link and the final link give that call the delta -. At 01eb86dc call_tests reads BASE's delta
+    # only and tests the call: with `filler` bytes of filler after c, append keeps f (kept), or moves it with
+    # jal_reach when c goes to the end, out of reach of f's call (jal_reach), and check fails f, which it cannot verify
+    # (unkept), or its cause, whose target has no address in NEW (unshown). Now the build falls back to its normal
+    # link, naming f and its call, and check passes.
+    def files(new):
+        c = ("c", b"\x99" * 0x30, 4, [(0x4, "i")]) if new else ("c", b"\2" * 0x20, 4, [])
+        return {"main.o": relocatable([("f", b"\1" * 0x20, 4, [(0x8, "g")])]),
+                "c.o": relocatable([c], labels=[("g", "c", 0x10)]),
+                "filler.o": relocatable([("filler", b"\4" * filler, 4, [])]),
+                "i.o": relocatable([("i", b"\3" * 0x8, 4, [])], ifunc={"i"})}
+    command = ["clang", "main.o", "c.o", "filler.o", "i.o"]
+    entry = link_setup(tmp_path, monkeypatch, files, command, relaxed={"f": 4})
+    assert run_append(tmp_path, entry, command) == 0
+    assert final_check(tmp_path) == 0, capsys.readouterr()
+    fallen_back(tmp_path, capsys, "f (main.o)", "0x11300", "0x8 (g)")
+
+
+@pytest.mark.parametrize("old_calls, new_calls", [
+    ([(0x8, "stub")], []),
+    ([(0x8, "stub", layout.R_RISCV_CALL_PLT)], []),
+    ([], [(0x8, "stub", layout.R_RISCV_CALL_PLT)]),
+], ids=["base-only", "base-only-relax-0", "new-only-relax-0"])
+def test_append_falls_back_when_a_kept_section_has_a_line_of_calls_that_one_link_has_only(tmp_path, monkeypatch,
+                                                                                         capsys, old_calls,
+                                                                                         new_calls):
+    # OSSV-675, the class of the review's finding at layout.py:2166. f has the same bytes in both links, which are the
+    # bytes before relocation, and a call at 0x8 in one of them only, with R_RISCV_RELAX or without it. stub, a symbol
+    # that the linker makes, lies 4 MiB away, out of jal's reach. layout.py check fails a kept function with a line of
+    # calls.tsv that only one tree has, whatever its relax (unkept). At 01eb86dc the plan reads only the probe link's
+    # lines that lld may relax: append keeps f, and check fails f. Now the build falls back to its normal link, naming
+    # f and the call, and check passes.
+    def files(new):
+        return kept_call_files(new_calls if new else old_calls, 4)(new)
+    command = ["clang", "main.o"]
+    entry = link_setup(tmp_path, monkeypatch, files, command, made={"stub": 0x400000})
+    assert run_append(tmp_path, entry, command) == 0
+    assert final_check(tmp_path) == 0, capsys.readouterr()
+    fallen_back(tmp_path, capsys, "f (main.o)", "0x11300", "0x8 (stub)")
 
 
 def test_a_kept_twin_is_at_its_own_members_base_address_when_lld_takes_the_members_in_another_order(tmp_path,
