@@ -68,8 +68,8 @@ permissions: {}
 
 env:
   # These values, the base rows of publish's matrix and the image of its registry must stay equal to
-  # toolchain-images.yaml's: test_publish_has_the_env_base_rows_and_registry_image_of_toolchain_images
-  # (tests/test_trigger_move.py) fails if one differs.
+  # toolchain-images.yaml's: test_publish_takes_what_toolchain_images_hands_over (tests/test_trigger_move.py) fails
+  # if one differs.
   #
   # go-containerregistry's crane, pinned by version and by the SHA-256 of its release archive.
   CRANE_VERSION: v0.22.1
@@ -104,7 +104,7 @@ jobs:
     services:
       registry:
         # The image of the registry of toolchain-images.yaml's jobs, pinned by the same digest. It must stay equal to
-        # theirs: test_publish_has_the_env_base_rows_and_registry_image_of_toolchain_images fails if it differs.
+        # theirs: test_publish_takes_what_toolchain_images_hands_over fails if it differs.
         image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
         ports:
           - 5000:5000
