@@ -31,10 +31,10 @@ The move:
        and then its push step, run on the same infra/toolchains.tsv, pass or refuse the same frame-pointer rows:
        publish checks out that file at the commit that make built, not at main's newest commit. The push step reads
        each digest where make's upload of it lands. publish downloads that upload from the run of
-       toolchain-images.yaml that started it, with a token that can read actions, not from its own run, which holds
-       none of make's artifacts. The push step copies the image of each base row to the one package of the
-       frame-pointer images, ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain, under a tag that names the language of
-       the row.
+       toolchain-images.yaml that started it, not from its own run, which holds none of make's artifacts. The push
+       step copies the image of each base row to the one package of the frame-pointer images,
+       ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain, under a tag that names the language of the row. Its job's
+       token can read contents for the checkout, read actions for the download, and write packages for the copy.
   (artifacts) Each script of .github/scripts that reads a file of a Build run's artifact (read_member) reads an
        artifact and a file that build.yaml uploads, with if-no-files-found: error. The step that writes the file, run
        in (s) and in tests/test_enroll_dispatch.py, writes it at the path of the upload.
@@ -576,8 +576,9 @@ class ToolchainPublish(Stand):
     # reference that it does not hold. `mutate <base> --env OFT_FRAME_POINTERS=1 -t <repository>:<tag>` puts the image
     # made of the base there, and prints repository@digest, as crane does. `copy <from> <to>` puts the image of <from>
     # at <to>. A command that writes to ghcr.io fails unless `auth login ghcr.io` read a password, with no logout after
-    # it: the login is the file $FAKE_CRANE/login. Each call goes to $FAKE_CRANE/calls: its arguments, as a JSON list on
-    # one line. The stand-in runs no other command.
+    # it: the login is the file $FAKE_CRANE/login. With FAKE_CRANE_NO_PACKAGES_WRITE=1, which run_push sets for a job
+    # whose token cannot write packages, such a command also fails, as ghcr.io refuses that token (DENIED). Each call
+    # goes to $FAKE_CRANE/calls: its arguments, as a JSON list on one line. The stand-in runs no other command.
     CRANE = r"""#!/usr/bin/env python3
 import json
 import os
@@ -607,6 +608,8 @@ def put(to, digest, image):
         sys.exit(f"the stand-in crane takes a reference by tag here, not {to}")
     if to.startswith("ghcr.io/") and not (home / "login").exists():
         sys.exit(f"Error: PUT {to}: UNAUTHORIZED: authentication required")
+    if to.startswith("ghcr.io/") and os.environ.get("FAKE_CRANE_NO_PACKAGES_WRITE") == "1":
+        sys.exit(f"Error: PUT {to}: DENIED: permission_denied: write_package")
     registry["images"][f"{repository}@{digest}"] = image
     registry["tags"][to] = digest
     return repository
@@ -685,6 +688,19 @@ match args:
             return None
         return into / file if down.get("merge-multiple") is True else into / artifact / file
 
+    @staticmethod
+    def grants(workflow, job, scope):
+        """The level, none, read or write, that the token of the job `job` of `workflow` has for the scope `scope`. The
+        token takes the job's permissions, or the workflow's when the job has none. A permissions block gives none to
+        each scope that it does not name, so {} gives none. read-all and write-all give each scope read or write. With
+        permissions in neither, the token has the repository's default, which this file does not see: it counts as
+        none. publish's checkout needs contents read (checks_out), its download of make's run actions read
+        (reads_run), and its push packages write (run_push)."""
+        permissions = workflow["jobs"][job].get("permissions", workflow.get("permissions"))
+        if isinstance(permissions, str):
+            return {"read-all": "read", "write-all": "write"}.get(permissions, "none")
+        return (permissions or {}).get(scope, "none")
+
     # The id of the run of Toolchain images that started publish, in which make uploaded its files. publish's own run
     # has another id, and holds none of make's artifacts.
     MAKE_RUN = "4242"
@@ -693,20 +709,14 @@ match args:
     def reads_run(down, workflow, job):
         """The run whose artifacts actions/download-artifact, with the inputs `down`, reads in the job `job` of
         `workflow`. It reads another run only when its run-id names that run, it has a github-token, and the job's
-        token can read actions (actions: read or write). With no run-id, or with no token, it reads the artifacts of
-        its own job's run: publish's own run. A token that cannot read actions reads no run: the API refuses it. The
-        token takes the job's permissions, or the workflow's when the job has none. A permissions block gives none to
-        each scope that it does not name, so {} gives none. read-all and write-all give each scope. With permissions
-        in neither, the token has the repository's default, which this file does not see: it counts as none. This
+        token can read actions (grants: read or write). With no run-id, or with no token, it reads the artifacts of
+        its own job's run: publish's own run. A token that cannot read actions reads no run: the API refuses it. This
         renders the inputs in publish's context, where github.event.workflow_run.id is MAKE_RUN and github.token is the
         job's token. It matches no text of them. So a download reads make's run only when its run-id gives MAKE_RUN,
         its github-token is not empty, and the job's token can read actions."""
         if "run-id" not in down or not render(down.get("github-token", ""), {"github.token": WORKFLOW_TOKEN}):
             return "publish's own run"
-        permissions = workflow["jobs"][job].get("permissions", workflow.get("permissions"))
-        actions = ({"read-all": "read", "write-all": "write"}.get(permissions) if isinstance(permissions, str)
-                   else (permissions or {}).get("actions"))
-        if actions not in ("read", "write"):
+        if ToolchainPublish.grants(workflow, job, "actions") not in ("read", "write"):
             return "no run: the token cannot read actions"
         return render(down["run-id"], {"github.event.workflow_run.id": ToolchainPublish.MAKE_RUN})
 
@@ -714,11 +724,14 @@ match args:
     MAIN_SHA = "f" * 40
 
     @staticmethod
-    def checks_out(step):
-        """The commit whose files actions/checkout, as the step `step` of publish's job, checks out. This renders its
-        ref in publish's context, where github.event.workflow_run.head_sha is HEAD, the commit that make built, and
-        github.sha is MAIN_SHA, main's newest commit. It matches no text of the ref. With no ref, or with one that
-        renders empty, actions/checkout takes the commit of the event: for workflow_run, github.sha."""
+    def checks_out(step, workflow, job):
+        """The commit whose files actions/checkout, as the step `step` of the job `job` of `workflow`, checks out. None
+        when the job's token cannot read contents (grants: read or write): the checkout then fails, and gives no file.
+        This renders its ref in publish's context, where github.event.workflow_run.head_sha is HEAD, the commit that
+        make built, and github.sha is MAIN_SHA, main's newest commit. It matches no text of the ref. With no ref, or
+        with one that renders empty, actions/checkout takes the commit of the event: for workflow_run, github.sha."""
+        if ToolchainPublish.grants(workflow, job, "contents") not in ("read", "write"):
+            return None
         ctx = {"github.event.workflow_run.head_sha": HEAD, "github.sha": ToolchainPublish.MAIN_SHA}
         return render((step.get("with") or {}).get("ref", ""), ctx) or ToolchainPublish.MAIN_SHA
 
@@ -781,12 +794,15 @@ match args:
     def run_push(self, publish, row, where, home, temp):
         """publish's push step for the base row `row`, in `where`, with the stand-in registry of `home`. Its
         $RUNNER_TEMP is `temp`, which holds crane in bin/. Each row is a job of its own, on a runner of its own: no
-        login of a job before. Return (its exit status, its log, its calls of crane, each a list of arguments)."""
+        login of a job before. When the job's token cannot write packages (grants), the stand-in crane refuses each
+        write to ghcr.io, as ghcr.io does. Return (its exit status, its log, its calls of crane, each a list of
+        arguments)."""
         step = self.push_step(publish)
         (home / "login").unlink(missing_ok=True)
         (home / "calls").write_text("")
         ctx = {"github.token": WORKFLOW_TOKEN, "github.event.workflow_run.head_sha": HEAD, "matrix.base": row}
-        rc, log, _ = self.run_script(step["run"], where, RUNNER_TEMP=str(temp), FAKE_CRANE=str(home),
+        denied = {} if self.grants(publish, "publish", "packages") == "write" else {"FAKE_CRANE_NO_PACKAGES_WRITE": "1"}
+        rc, log, _ = self.run_script(step["run"], where, RUNNER_TEMP=str(temp), FAKE_CRANE=str(home), **denied,
                                      GITHUB_ACTOR="github-actions[bot]", **env_of(publish, "publish", step, ctx))
         return rc, log, [json.loads(line) for line in (home / "calls").read_text().splitlines()]
 
@@ -924,7 +940,10 @@ match args:
         that its checkout gives (checks_out). Its sparse checkout must hold infra/toolchains.tsv. At HEAD, the commit
         that make built, the table is make's. At any other commit, it is the table of main's newest commit, a later
         one that moved the row's base line to another base image: the registry holds that image, and crane mutate
-        makes another image of it. publish's registry service is its own, and holds no image of make's. The checks:
+        makes another image of it. publish's token has the permissions of its job (grants). Without actions read, a
+        download reads no run. Without contents read, the checkout gives no file. Without packages write, ghcr.io
+        refuses each write of the push step (run_push). publish's registry service is its own, and holds no image of
+        make's. The checks:
           - make's row check and publish's step agree on each table: both pass, or both refuse the row,
           - make passes only the tables with no row or with the made image in PACKAGE,
           - where both pass and ghcr.io does not hold the image, publish copies the digest that make made to PACKAGE,
@@ -942,7 +961,7 @@ match args:
         if sparse is not None:
             paths = [render(p, {}) for p in sparse] if isinstance(sparse, list) else render(sparse, {}).split("\n")
             self.assertIn("infra/toolchains.tsv", [p.strip() for p in paths], f"{self.RUN}: publish's sparse checkout")
-        commit = self.checks_out(checkouts[0])
+        commit = self.checks_out(checkouts[0], publish, "publish")
         bases = self.base_rows(rows)
         registry, made, fp = self.registry_of(bases)
         # main's newest commit moves the base line of a row to another base image, in the same package. registry_of
@@ -985,8 +1004,14 @@ match args:
                         if to is not None:
                             pathlib.Path(to).parent.mkdir(parents=True, exist_ok=True)
                             shutil.copyfile(file, to)
-                # publish's checkout: make's table at HEAD, else the table of main's newest commit
-                there = where if commit == HEAD else self.checkout_of({**bases, row: moved[row]}, more)
+                # publish's checkout: no file when it fails, make's table at HEAD, else the table of main's newest
+                # commit
+                if commit is None:
+                    there = pathlib.Path(tempfile.mkdtemp(dir=self.dir))
+                elif commit == HEAD:
+                    there = where
+                else:
+                    there = self.checkout_of({**bases, row: moved[row]}, more)
                 rc, log, calls = self.run_push(publish, row, there, home, temp)
                 copies = [(call[2], call[1].rpartition("@")[2]) for call in calls if call[0] == "copy"]
                 results[key] = (make, self.outcome(rc, log, row), copies)
@@ -1093,6 +1118,22 @@ match args:
         self.assertIn("oss-fuzz-theorems-2026.10, none: make passes, publish fails", caught)
         self.assertIn("::error::the image made here from oss-fuzz-theorems-2026.10 is ", caught)
         self.assertIn(", but make made sha256:", caught)
+
+    def test_control_publish_without_packages_write(self):
+        # publish's job-level permissions then give packages none, so ghcr.io refuses its copy of the image that it
+        # made. On a table where ghcr.io does not hold that image, make stays whole, but publish fails.
+        line = "      packages: write # to push the image, when ghcr.io does not hold it yet\n"
+        caught = self.handover_fails(self.RUN, (f".github/workflows/{self.PUBLISH}", line, ""))
+        self.assertIn("oss-fuzz-theorems-2026.10, none: make passes, publish fails", caught)
+        self.assertIn(f"Error: PUT {self.PACKAGE}:{self.TAGS['oss-fuzz-theorems-2026.10']}: DENIED: "
+                      "permission_denied: write_package", caught)
+
+    def test_control_publish_without_contents_read(self):
+        # publish's job-level permissions then give contents none, so its checkout fails and gives no
+        # infra/toolchains.tsv. make stays whole, but publish fails.
+        caught = self.handover_fails(self.RUN, (f".github/workflows/{self.PUBLISH}", "      contents: read\n", ""))
+        self.assertIn("oss-fuzz-theorems-2026.10, none: make passes, publish fails", caught)
+        self.assertRegex(caught, r"awk: .*infra/toolchains\.tsv.*No such file or directory")
 
     def test_control_publish_tag_in_the_package_of_the_base_image(self):
         # publish tags each image in the package of its base image. The Rust and the Python images then go to their
