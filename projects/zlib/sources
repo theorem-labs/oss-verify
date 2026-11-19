@@ -15,7 +15,9 @@ link	ext/zlib-zlib_uncompress2_fuzzer/src	ext/zlib-checksum_fuzzer/src
 link	ext/zlib-zlib_uncompress3_fuzzer/src	ext/zlib-checksum_fuzzer/src
 link	ext/zlib-zlib_uncompress_fuzzer/src	ext/zlib-checksum_fuzzer/src
 file	targets/zlib-checksum_fuzzer/checksum_fuzzer.c	https://raw.githubusercontent.com/google/oss-fuzz/fadbcdfb9e96aaa26734fbc936ab64a6f4f18ab4/projects/zlib/checksum_fuzzer.c	4ffc600043431fce3481bf7236988ecdcd247548f555e542e8b71dc39c10945b
-file	targets/zlib-compress_fuzzer/compress_fuzzer.c	https://raw.githubusercontent.com/google/oss-fuzz/fadbcdfb9e96aaa26734fbc936ab64a6f4f18ab4/projects/zlib/compress_fuzzer.c	f8f339398b43a6dd3fbb5112d8518eef115149ae45fc50d987382fa1ca29befb
+file	ext/oss-fuzz-zlib/projects/zlib/compress_fuzzer.c	https://raw.githubusercontent.com/google/oss-fuzz/fadbcdfb9e96aaa26734fbc936ab64a6f4f18ab4/projects/zlib/compress_fuzzer.c	f8f339398b43a6dd3fbb5112d8518eef115149ae45fc50d987382fa1ca29befb
+patch	ext/oss-fuzz-zlib	zlib-compress_fuzzer.0001-oss-fuzz-16582.patch
+link	targets/zlib-compress_fuzzer/compress_fuzzer.c	ext/oss-fuzz-zlib/projects/zlib/compress_fuzzer.c
 file	targets/zlib-example_dict_fuzzer/example_dict_fuzzer.c	https://raw.githubusercontent.com/google/oss-fuzz/fadbcdfb9e96aaa26734fbc936ab64a6f4f18ab4/projects/zlib/example_dict_fuzzer.c	f6d0673d0be1f5c2b4826535a2bdd5805844815b31e4a9772933cc5e17d9c7c6
 file	targets/zlib-example_flush_fuzzer/example_flush_fuzzer.c	https://raw.githubusercontent.com/google/oss-fuzz/fadbcdfb9e96aaa26734fbc936ab64a6f4f18ab4/projects/zlib/example_flush_fuzzer.c	1b152a8b6db3bf0c6eeba482599510038d2a97b8e381a3e430762cd7d338b95f
 file	targets/zlib-example_large_fuzzer/example_large_fuzzer.c	https://raw.githubusercontent.com/google/oss-fuzz/fadbcdfb9e96aaa26734fbc936ab64a6f4f18ab4/projects/zlib/example_large_fuzzer.c	97d7b5add541cef673eabe725c360106f987fb5dbcfeb7ae52a87e60817b77b6
