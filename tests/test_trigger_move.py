@@ -1245,6 +1245,67 @@ match args:
             self.packages_case(changed)
         self.assertIn("-mirror:frame-pointers-", str(caught.exception))
 
+    # The faults of ghcr.io that publish's push step checks for after its push, or on an image that ghcr.io holds.
+    FAULTS = ("none", "another digest for the tag", "other layers", "another configuration")
+
+    def ghcr_case(self, tree=ROOT):
+        """publish's push step (run_push) for each base row of its matrix, with the digest that make made, on a ghcr.io
+        that is honest (none) and on three faults: it gives another digest for the tag that the step pushed; it holds
+        the image at PACKAGE@<digest> with layers other than the base image's; it holds it with a configuration other
+        than the base image's plus OFT_FRAME_POINTERS=1. The step must pass only on the honest one: else a run on main
+        ends green with an image that the rows of infra/toolchains.tsv would then name."""
+        publish = self.workflow(tree, self.PUBLISH)
+        rows = publish["jobs"]["publish"]["strategy"]["matrix"]["base"]
+        bases = self.base_rows(rows)
+        where = self.checkout_of(bases)
+        results = {}
+        for row in rows:
+            for fault in self.FAULTS:
+                registry, made, fp = self.registry_of(bases)
+                ref = f"{self.PACKAGE}@{made[row]}"
+                if fault == "other layers":
+                    layers = fp[row]["manifest"]["layers"][:-1]
+                    registry["images"][ref] = {**fp[row], "manifest": {**fp[row]["manifest"], "layers": layers}}
+                elif fault == "another configuration":
+                    registry["images"][ref] = {**fp[row], "config": registry["images"][bases[row][1]]["config"]}
+                temp = pathlib.Path(tempfile.mkdtemp(dir=self.dir))
+                self.put_crane(temp / "real")
+                self.put_crane(temp / "bin")
+                if fault == "another digest for the tag":
+                    # crane digest of a tag of PACKAGE gives another digest; every other command is the stand-in's.
+                    real = temp / "real" / "crane"
+                    (temp / "bin" / "crane").write_text(
+                        "#!/usr/bin/env python3\nimport os\nimport sys\n"
+                        f"if sys.argv[1:2] == ['digest'] and sys.argv[2].startswith({self.PACKAGE + ':'!r}):\n"
+                        "    print('sha256:' + 'd' * 64)\nelse:\n"
+                        f"    os.execv({str(real)!r}, [{str(real)!r}, *sys.argv[1:]])\n")
+                (temp / "fp-digest").mkdir()
+                (temp / "fp-digest" / f"{row}.digest").write_text(made[row] + "\n")
+                rc, log, _ = self.run_push(publish, row, where, self.crane_home(registry), temp)
+                results[(row, fault)] = (rc, log)
+        self.assertEqual({key: rc == 0 for key, (rc, _) in results.items()},
+                         {(row, fault): fault == "none" for row in rows for fault in self.FAULTS},
+                         f"publish's push step passes only on an honest ghcr.io: {results}")
+
+    def test_publish_checks_the_image_on_ghcr_io(self):
+        self.ghcr_case()
+
+    def ghcr_fails(self, name, old, new):
+        changed = self.copy_tree(name, [(f".github/workflows/{self.PUBLISH}", old, new)])
+        with self.assertRaises(AssertionError) as caught:
+            self.ghcr_case(changed)
+        self.assertIn("publish's push step passes only on an honest ghcr.io", str(caught.exception))
+
+    def test_control_publish_without_its_check_of_the_pushed_digest(self):
+        self.ghcr_fails("no digest check", '            [ "$pushed" = "$want" ] ||\n', "            true ||\n")
+
+    def test_control_publish_without_its_check_of_the_layers(self):
+        self.ghcr_fails("no layers check", "'$b.layers == $n.layers and $b.mediaType == $n.mediaType'", "'true'")
+
+    def test_control_publish_without_its_check_of_the_configuration(self):
+        self.ghcr_fails("no configuration check", """'($b | .config.Env += ["OFT_FRAME_POINTERS=1"]) == $n'""",
+                        "'true'")
+
     def test_publish_starts_on_the_completed_runs_on_main_of_toolchain_images_alone(self):
         # workflow_run names a workflow by its name: a rename of toolchain-images.yaml, or of its branch, would stop
         # publishing with no error. No other workflow has that name.
