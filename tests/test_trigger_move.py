@@ -35,6 +35,9 @@ The move:
        step copies the image of each base row to the one package of the frame-pointer images,
        ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain, under a tag that names the language of the row. Its job's
        token can read contents for the checkout, read actions for the download, and write packages for the copy.
+       publish installs crane only from the archive with the SHA-256 of its pin, and no step of it writes
+       GITHUB_PATH or GITHUB_ENV. Its push step stops at an unset variable before it copies, and at a base row
+       outside the toolchain packages before any command of crane. It logs out of ghcr.io after its push.
   (artifacts) Each script of .github/scripts that reads a file of a Build run's artifact (read_member) reads an
        artifact and a file that build.yaml uploads, with if-no-files-found: error. The step that writes the file, run
        in (s) and in tests/test_enroll_dispatch.py, writes it at the path of the upload.
@@ -791,19 +794,34 @@ match args:
         self.assertEqual(len(steps), 1, f"the steps of publish whose name starts with {self.PUSH!r}")
         return steps[0]
 
-    def run_push(self, publish, row, where, home, temp):
+    @staticmethod
+    def file_commands(temp):
+        """GITHUB_PATH and GITHUB_ENV of a job whose runner.temp is `temp`, as {name: path}, where GitHub's runner keeps
+        them. A step that writes to one changes the PATH or the env of the job's later steps. A file that is not there
+        yet starts empty."""
+        files = {"GITHUB_PATH": temp / "_runner_file_commands" / "add_path",
+                 "GITHUB_ENV": temp / "_runner_file_commands" / "set_env"}
+        for path in files.values():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+        return files
+
+    def run_push(self, publish, row, where, home, temp, drop=()):
         """publish's push step for the base row `row`, in `where`, with the stand-in registry of `home`. Its
-        $RUNNER_TEMP is `temp`, which holds crane in bin/. Each row is a job of its own, on a runner of its own: no
-        login of a job before. When the job's token cannot write packages (grants), the stand-in crane refuses each
-        write to ghcr.io, as ghcr.io does. Return (its exit status, its log, its calls of crane, each a list of
+        $RUNNER_TEMP is `temp`, which holds crane in bin/ and the job's GITHUB_PATH and GITHUB_ENV (file_commands).
+        Each row is a job of its own, on a runner of its own: no login of a job before. When the job's token cannot
+        write packages (grants), the stand-in crane refuses each write to ghcr.io, as ghcr.io does. The names of
+        `drop` are left out of the step's env. Return (its exit status, its log, its calls of crane, each a list of
         arguments)."""
         step = self.push_step(publish)
         (home / "login").unlink(missing_ok=True)
         (home / "calls").write_text("")
         ctx = {"github.token": WORKFLOW_TOKEN, "github.event.workflow_run.head_sha": HEAD, "matrix.base": row}
         denied = {} if self.grants(publish, "publish", "packages") == "write" else {"FAKE_CRANE_NO_PACKAGES_WRITE": "1"}
+        files = {name: str(path) for name, path in self.file_commands(temp).items()}
+        env = {name: value for name, value in env_of(publish, "publish", step, ctx).items() if name not in drop}
         rc, log, _ = self.run_script(step["run"], where, RUNNER_TEMP=str(temp), FAKE_CRANE=str(home), **denied,
-                                     GITHUB_ACTOR="github-actions[bot]", **env_of(publish, "publish", step, ctx))
+                                     **files, GITHUB_ACTOR="github-actions[bot]", **env)
         return rc, log, [json.loads(line) for line in (home / "calls").read_text().splitlines()]
 
     # The step of make that compares a frame-pointer row of infra/toolchains.tsv with the image that make made.
@@ -949,6 +967,7 @@ match args:
           - where both pass and ghcr.io does not hold the image, publish copies the digest that make made to PACKAGE,
             under the tag of the row's language (TAGS),
           - where ghcr.io holds it, publish pushes nothing, and its checks of the manifest and the configuration pass.
+          - on no table does publish's push step write GITHUB_PATH or GITHUB_ENV (file_commands).
         Return the outcome on each table, as (make's, publish's, the copies of publish)."""
         rows = images["jobs"]["make"]["strategy"]["matrix"]["base"]
         inputs = [s.get("with") or {} for s in publish["jobs"]["publish"]["steps"]
@@ -975,7 +994,7 @@ match args:
         for part in ("images", "made"):
             registry[part].update(later[part])
         other = "sha256:" + "e" * 64
-        named, held, results, logs = {}, set(), {}, {}
+        named, held, results, logs, written = {}, set(), {}, {}, {}
         for row in rows:
             package = bases[row][1].partition("@")[0]
             for table, ref in (("none", None), ("made", f"{self.PACKAGE}@{made[row]}"),
@@ -1016,6 +1035,8 @@ match args:
                 copies = [(call[2], call[1].rpartition("@")[2]) for call in calls if call[0] == "copy"]
                 results[key] = (make, self.outcome(rc, log, row), copies)
                 logs[key] = (make_log, log)
+                written[key] = {name: path.read_text() for name, path in self.file_commands(temp).items()
+                                if path.read_text()}
 
         def shown(keys):
             return "".join(f"\n{key}, make:\n{logs[key][0]}{key}, publish:\n{logs[key][1]}" for key in keys)
@@ -1039,6 +1060,9 @@ match args:
         for key in both:
             how = "already on ghcr.io, nothing pushed" if key in held else f"pushed under the tag {self.TAGS[key[0]]}"
             self.assertIn(f"`{self.PACKAGE}@{made[key[0]]}` ({how})", logs[key][1], f"{self.RUN}: {key}")
+        self.assertEqual({key: files for key, files in written.items() if files}, {},
+                         f"{self.RUN}: the tables on which publish's push step wrote GITHUB_PATH or GITHUB_ENV, which "
+                         "change the PATH or the env of the job's later steps")
         return results
 
     def test_publish_takes_what_toolchain_images_hands_over(self):
@@ -1305,6 +1329,184 @@ match args:
     def test_control_publish_without_its_check_of_the_configuration(self):
         self.ghcr_fails("no configuration check", """'($b | .config.Env += ["OFT_FRAME_POINTERS=1"]) == $n'""",
                         "'true'")
+
+    def guard_fails(self, case, old, new=""):
+        """`case` passes on an unchanged copy of the tree, and fails on a copy whose publish file has `new` for `old`
+        (copy_tree). Return its message."""
+        case(self.copy_tree("unchanged"))
+        changed = self.copy_tree("changed", [(f".github/workflows/{self.PUBLISH}", old, new)])
+        with self.assertRaises(AssertionError) as caught:
+            case(changed)
+        return str(caught.exception)
+
+    # A stand-in curl: it writes the file $FAKE_CURL/archive at the path of its -o, and adds each address that it is
+    # asked for to $FAKE_CURL/urls, one a line.
+    CURL = r"""#!/usr/bin/env python3
+import os
+import pathlib
+import shutil
+import sys
+
+home = pathlib.Path(os.environ["FAKE_CURL"])
+args = sys.argv[1:]
+with open(home / "urls", "a") as urls:
+    urls.writelines(arg + "\n" for arg in args if arg.startswith(("http://", "https://")))
+shutil.copyfile(home / "archive", args[args.index("-o") + 1])
+"""
+
+    def install_case(self, tree=ROOT):
+        """publish's step install crane, with the stand-in CURL first on PATH, which gives a tar.gz of one file, crane.
+        The step must fetch CRANE_ARCHIVE of the release CRANE_VERSION of go-containerregistry. The workflow's pin
+        CRANE_SHA256 is not the SHA-256 of this archive, so the step must fail and put no crane in $RUNNER_TEMP/bin.
+        With CRANE_SHA256 set to the archive's own SHA-256, it must put the archive's crane there. After each run,
+        GITHUB_PATH and GITHUB_ENV (file_commands) are still empty: a step that writes them changes the PATH or the env
+        of the push step, in a job with packages: write."""
+        publish = self.workflow(tree, self.PUBLISH)
+        step = self.step(publish, "publish", "install crane")
+        fake = pathlib.Path(tempfile.mkdtemp(dir=self.dir))
+        (fake / "bin").mkdir()
+        (fake / "bin" / "curl").write_text(self.CURL)
+        (fake / "bin" / "curl").chmod(0o755)
+        crane = b"#!/bin/sh\necho the crane of the archive\n"
+        with tarfile.open(fake / "archive", "w:gz") as archive:
+            member = tarfile.TarInfo("crane")
+            member.size, member.mode = len(crane), 0o755
+            archive.addfile(member, io.BytesIO(crane))
+        own = hashlib.sha256((fake / "archive").read_bytes()).hexdigest()
+        pin = env_of(publish, "publish", step, {})
+        self.assertNotEqual(own, pin["CRANE_SHA256"])
+        url = ("https://github.com/google/go-containerregistry/releases/download/"
+               f"{pin['CRANE_VERSION']}/{pin['CRANE_ARCHIVE']}")
+        for what, given in (("an archive whose SHA-256 is not CRANE_SHA256", {}),
+                            ("CRANE_SHA256 set to the archive's SHA-256", {"CRANE_SHA256": own})):
+            temp = pathlib.Path(tempfile.mkdtemp(dir=self.dir))
+            files = self.file_commands(temp)
+            (fake / "urls").write_text("")
+            rc, log, _ = self.run_script(step["run"], self.dir, RUNNER_TEMP=str(temp), FAKE_CURL=str(fake),
+                                         PATH=f"{fake / 'bin'}{os.pathsep}{self.env['PATH']}",
+                                         **{name: str(path) for name, path in files.items()},
+                                         **env_of(publish, "publish", step, {}, given))
+            self.assertEqual((fake / "urls").read_text().splitlines(), [url],
+                             f"install crane, with {what}: the addresses that curl fetched")
+            installed = temp / "bin" / "crane"
+            self.assertEqual((rc == 0, installed.is_file() and installed.read_bytes() == crane), (bool(given),) * 2,
+                             f"install crane, with {what}: (it passes, crane is in $RUNNER_TEMP/bin). Its log:\n{log}")
+            self.assertEqual({name: path.read_text() for name, path in files.items()}, dict.fromkeys(files, ""),
+                             f"install crane, with {what}: GITHUB_PATH and GITHUB_ENV after the step")
+
+    def test_publish_installs_crane_only_from_the_archive_of_its_pin(self):
+        self.install_case()
+
+    def test_control_publish_install_without_its_check_of_the_archive(self):
+        caught = self.guard_fails(self.install_case,
+                                  '          echo "$CRANE_SHA256  $RUNNER_TEMP/$CRANE_ARCHIVE" | sha256sum -c -\n')
+        self.assertIn("install crane, with an archive whose SHA-256 is not CRANE_SHA256: (it passes, crane is in "
+                      "$RUNNER_TEMP/bin)", caught)
+
+    def test_control_publish_install_writes_github_path(self):
+        tar = '          tar -xzf "$RUNNER_TEMP/$CRANE_ARCHIVE" -C "$RUNNER_TEMP/bin" crane\n'
+        caught = self.guard_fails(self.install_case, tar, tar + '          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"\n')
+        self.assertIn("install crane, with CRANE_SHA256 set to the archive's SHA-256: GITHUB_PATH and GITHUB_ENV",
+                      caught)
+
+    def pushes(self, tree, drop=(), base=None):
+        """publish's push step (run_push) of `tree` for each base row of its matrix, with the digest that make made, on
+        a table with no frame-pointer row, where ghcr.io holds no frame-pointer image: the step makes the image, logs
+        in and copies it. With `base`, the row's base line names the image `base` instead. The names of `drop` are left
+        out of the step's env. Return for each row (its exit status, its log, its calls of crane, whether a login of
+        crane is left at its end)."""
+        publish = self.workflow(tree, self.PUBLISH)
+        rows = publish["jobs"]["publish"]["strategy"]["matrix"]["base"]
+        bases = self.base_rows(rows)
+        found = {}
+        for row in rows:
+            table = {**bases, row: (bases[row][0].replace(bases[row][1], base), base)} if base else bases
+            # registry_of takes the layers of an image from the name of its row, so the stand-in registry holds `base`,
+            # and crane mutate makes of it the image that make made of the row's own base image.
+            registry, made, _ = self.registry_of(table)
+            home = self.crane_home(registry)
+            temp = pathlib.Path(tempfile.mkdtemp(dir=self.dir))
+            self.put_crane(temp / "bin")
+            (temp / "fp-digest").mkdir()
+            (temp / "fp-digest" / f"{row}.digest").write_text(made[row] + "\n")
+            rc, log, calls = self.run_push(publish, row, self.checkout_of(table), home, temp, drop)
+            found[row] = (rc, log, calls, (home / "login").exists())
+        return found
+
+    @staticmethod
+    def logs_of(found):
+        """The log of each row of `found` (pushes), for a message."""
+        return "".join(f"\n{row}:\n{log}" for row, (_, log, _, _) in found.items())
+
+    def unset_case(self, tree=ROOT):
+        """publish's push step (pushes) with no HEAD_SHA in its env. GitHub runs a step that names no shell with
+        bash -e {0}, as run_script does, so only the step's own set -u stops it at the unset variable. Without it, the
+        step pushes the image under the tag frame-pointers-, with no commit, and passes. It must fail with
+        'HEAD_SHA: unbound variable' before its crane copy."""
+        found = self.pushes(tree, drop=("HEAD_SHA",))
+        got = {row: (rc != 0, "HEAD_SHA: unbound variable" in log, [call for call in calls if call[0] == "copy"])
+               for row, (rc, log, calls, _) in found.items()}
+        self.assertEqual(got, dict.fromkeys(found, (True, True, [])),
+                         "publish's push step with no HEAD_SHA in its env, on each row: (it fails, it says 'HEAD_SHA: "
+                         "unbound variable', its crane copies). Its logs:" + self.logs_of(found))
+
+    def test_publish_push_step_stops_at_an_unset_variable(self):
+        self.unset_case()
+
+    def test_control_publish_push_step_without_set_euo_pipefail(self):
+        caught = self.guard_fails(self.unset_case,
+                                  '          set -euo pipefail\n          PATH="$RUNNER_TEMP/bin:$PATH"\n',
+                                  '          PATH="$RUNNER_TEMP/bin:$PATH"\n')
+        self.assertIn("publish's push step with no HEAD_SHA in its env, on each row: (it fails, it says", caught)
+
+    # An image outside the toolchain packages of ghcr.io, which a base row of infra/toolchains.tsv must not name.
+    FOREIGN = "docker.io/library/debian@sha256:" + "d" * 64
+
+    def foreign_case(self, tree=ROOT):
+        """publish's push step (pushes) on a table whose base row names FOREIGN, an image outside the toolchain
+        packages. The stand-in registry holds it, and crane mutate makes of it the image with the digest that make
+        made, so no comparison of the step refuses it. The step must fail with its error on the base row, and run no
+        command of crane. Without that check, the step stops at ${BASH_REMATCH[1]}, which set -u refuses after a match
+        that failed, and says nothing of the row."""
+        found = self.pushes(tree, base=self.FOREIGN)
+        error = "::error::infra/toolchains.tsv has no row {} with a toolchain digest: '{}'"
+        got = {row: (rc != 0, error.format(row, self.FOREIGN) in log, calls)
+               for row, (rc, log, calls, _) in found.items()}
+        self.assertEqual(got, dict.fromkeys(found, (True, True, [])),
+                         f"publish's push step on a base row that names {self.FOREIGN}, on each row: (it fails, it "
+                         "says that infra/toolchains.tsv has no such row with a toolchain digest, its commands of "
+                         "crane). Its logs:" + self.logs_of(found))
+
+    def test_publish_refuses_a_base_row_outside_the_toolchain_packages(self):
+        self.foreign_case()
+
+    def test_control_publish_without_its_check_of_the_base_row(self):
+        caught = self.guard_fails(self.foreign_case, "            { echo \"::error::infra/toolchains.tsv has no row "
+                                  "$BASE_ROW with a toolchain digest: '$base'\"; exit 1; }\n", "            true\n")
+        self.assertIn(f"publish's push step on a base row that names {self.FOREIGN}, on each row: (it fails, it says",
+                      caught)
+
+    def logout_case(self, tree=ROOT):
+        """publish's push step (pushes) on each row where ghcr.io does not hold the image: it logs in to copy the image.
+        It must log out of ghcr.io after its copy and after its check of the digest of the pushed tag, and leave no
+        login of crane (the stand-in's file $FAKE_CRANE/login) at its end."""
+        found = self.pushes(tree)
+        got = {}
+        for row, (rc, _, calls, login) in found.items():
+            pushed = [n for n, call in enumerate(calls)
+                      if call[0] == "copy" or call == ["digest", f"{self.PACKAGE}:{self.TAGS[row]}"]]
+            got[row] = (rc, len(pushed) == 2 and ["auth", "logout", "ghcr.io"] in calls[max(pushed) + 1:], login)
+        self.assertEqual(got, dict.fromkeys(found, (0, True, False)),
+                         "publish's push step on each row: (its exit status, a logout of ghcr.io after its copy and "
+                         "its check of the pushed tag, a login of crane left at its end). Its logs:"
+                         + self.logs_of(found))
+
+    def test_publish_logs_out_of_ghcr_io_after_its_push(self):
+        self.logout_case()
+
+    def test_control_publish_without_its_logout(self):
+        caught = self.guard_fails(self.logout_case, "            crane auth logout ghcr.io\n")
+        self.assertIn("publish's push step on each row: (its exit status, a logout of ghcr.io after its copy", caught)
 
     def test_publish_starts_on_the_completed_runs_on_main_of_toolchain_images_alone(self):
         # workflow_run names a workflow by its name: a rename of toolchain-images.yaml, or of its branch, would stop
