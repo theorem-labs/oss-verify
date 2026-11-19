@@ -5,7 +5,7 @@ primary_contact: n/a
 homepage: https://curl.haxx.se
 language: c++
 sanitizers: [address, undefined]
-# The cURL tree holds publication until Sami decides it (dispatch://OSSV-286/spec, R6 and A7).
+# The cURL tree holds publication until Sami decides it (the cURL spec, OSSV-286, R6 and A7).
 publish: never
 # build.sh builds the 24 fuzz targets below. fuzz_bufq and fuzz_fnmatch keep the release's build: their binaries reach
 # no TLS code, and a build with TLS off changes fuzz_bufq's plain and UBSan code. Every other target is built with TLS
