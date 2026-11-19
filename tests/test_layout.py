@@ -3544,8 +3544,7 @@ def test_append_falls_back_when_its_guard_cannot_read_the_layout(tmp_path, monke
     with monkeypatch.context() as patched:
         patched.setattr(layout, "read_layout", read)
         assert run_append(tmp_path, entry, command) == 0
-    fallen_back(tmp_path, capsys, "layout.py check could not read the layout",
-                f"{guarded}/calls.tsv: line 1 does not read")
+    fallen_back(tmp_path, capsys, f"{guarded}/calls.tsv: line 1 does not read")
     assert final_check(tmp_path) == 0, capsys.readouterr()
 
 
