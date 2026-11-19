@@ -766,7 +766,7 @@ match args:
             for call in found:
                 command = f"{row}: crane {' '.join(call)}"
                 # Only the base image of the row, which the step reads, is in another package than PACKAGE.
-                self.assertEqual([a for a in call if a.startswith("ghcr.io/") and a != bases[row][1]
+                self.assertEqual([a for a in call if a.partition("/")[:2] == ("ghcr.io", "/") and a != bases[row][1]
                                   and not a.startswith((f"{self.PACKAGE}:", f"{self.PACKAGE}@"))], [], command)
                 # Where a command writes: the target of crane copy, and the tag of crane mutate.
                 to = call[2:3] if call[0] == "copy" else call[call.index("-t") + 1:][:1] if "-t" in call else []
