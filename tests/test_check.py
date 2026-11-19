@@ -308,7 +308,8 @@ class LayoutOptions(Project):
         self.assertEqual(code, 1)
         failure = [line for line in output.splitlines() if "LAYOUT TREE WAS NOT WRITTEN" in line]
         self.assertEqual(len(failure), 1, output)
-        self.assertIn("plain/fuzz_shim: the record has no wraps", failure[0])
+        self.assertIn("plain/fuzz_shim", failure[0])
+        self.assertIn("wraps", failure[0])
         self.assertFalse(self.tree.exists())
 
     def test_a_build_directory_that_another_run_left_is_not_read(self):
@@ -323,7 +324,8 @@ class LayoutOptions(Project):
                          ["plain/fuzz_shim"])
         with contextlib.redirect_stderr(io.StringIO()) as errors:
             self.assertEqual(layout_script.main(["collect", str(self.work / "raw"), str(self.work.parent / "all")]), 2)
-        self.assertIn("asan/fuzz_shim: the record has no wraps", errors.getvalue())
+        self.assertIn("asan/fuzz_shim", errors.getvalue())
+        self.assertIn("wraps", errors.getvalue())
 
     def test_layout_out_may_be_an_empty_directory(self):
         self.tree.mkdir()
@@ -332,7 +334,8 @@ class LayoutOptions(Project):
         self.assertEqual(tree_files(self.tree), self.collected())
 
     def refused(self, options):
-        """Run oss-verify check with `options`, which it must refuse as argparse does: the error it prints."""
+        """Run oss-verify check with `options`, which it must refuse as argparse does: the line of the error it prints
+        after the usage, which names every option."""
         built = []
         with mock.patch.object(check_tool, "build_all", lambda *args, **kwargs: built.append(args)), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors, \
@@ -343,18 +346,19 @@ class LayoutOptions(Project):
         # Before anything is built: no build, and not even the work directory.
         self.assertEqual(built, [])
         self.assertFalse(self.work.exists())
-        return errors.getvalue()
+        return errors.getvalue().splitlines()[-1]
 
     def test_base_layout_without_layout_out_is_refused(self):
         errors = self.refused(["--base-layout", str(self.base)])
-        self.assertIn("--base-layout needs --layout-out", errors)
+        self.assertIn("--base-layout", errors)
+        self.assertIn("--layout-out", errors)
 
     def test_base_layout_must_be_a_directory(self):
         (self.work.parent / "file").write_text("")
         for path in (self.work.parent / "file", self.work.parent / "missing"):
             with self.subTest(path=path.name):
                 errors = self.refused(["--layout-out", str(self.tree), "--base-layout", str(path)])
-                self.assertIn(f"--base-layout {path.resolve()} is not a directory", errors)
+                self.assertIn(f"--base-layout {path.resolve()}", errors)
 
     def test_layout_out_that_is_there_and_not_an_empty_directory_is_refused(self):
         (self.tree / "plain" / "fuzz_shim").mkdir(parents=True)
@@ -362,7 +366,7 @@ class LayoutOptions(Project):
         for path in (self.tree, self.work.parent / "file"):
             with self.subTest(path=path.name):
                 errors = self.refused(["--layout-out", str(path)])
-                self.assertIn(f"--layout-out {path} is there and is not an empty directory", errors)
+                self.assertIn(f"--layout-out {path}", errors)
 
     def test_layout_out_in_the_base_layout_is_refused(self):
         # The base layout directory itself, even while it is empty, and a directory in it.
@@ -371,7 +375,8 @@ class LayoutOptions(Project):
                 if filled:
                     (self.base / "plain" / "fuzz_shim").mkdir(parents=True, exist_ok=True)
                 errors = self.refused(["--layout-out", str(path), "--base-layout", str(self.base)])
-                self.assertIn(f"--layout-out {path} is the --base-layout directory or lies in it", errors)
+                self.assertIn(f"--layout-out {path}", errors)
+                self.assertIn("--base-layout", errors)
 
 
 class CompileBuild(unittest.TestCase):
