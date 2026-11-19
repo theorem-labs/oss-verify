@@ -60,9 +60,10 @@ readonly_growth (the segment in front of .text grew past the page that holds the
 same-bytes function of a key with twins must move: at its base address, the trees do not show that the section there
 is the base's own, since lld may take the archive members of one name in another order. An entry of NEW whose
 placement.tsv marks a build that fell back to its normal link (normal_layout) claims no base address, as a normal link
-keeps none, and check verifies the mark: each line of .text in its map (each .text input section, and each line of the
-linker's own between two of them) must lie at the end of the line before it, its address plus its linked size, rounded
-up to its alignment as the map gives it, as lld's normal link lays them out, so that a mark over an append build's
+keeps none, and check verifies the mark: the lines of .text in its map (each .text input section, and each line of the
+linker's own between two of them) must lie as lld's normal link lays them out, the first at the start of .text in its
+output.tsv and each other at the end of the line before it, its address plus its linked size, rounded up to its
+alignment as the map gives it, and .text must end at the end of the last line, so that a mark over an append build's
 layout fails. When the rule holds, the entry is listed as `normal layout: <reason>` and fails nothing else; check does
 not verify the reason. It exits 1 when a function neither keeps its base address nor moves for a cause that the trees
 show, or when a same-bytes function of a key with twins lies at its base address, naming the function, and when the
@@ -1679,19 +1680,33 @@ def text_change(base, new):
 def normal_break(layout):
     """Why the .text of the layout `layout` is not laid out as lld's normal link lays it out, naming the first line
     that breaks the rule, or None. lld lays out the input sections of an output section one after another
-    (LinkerScript::assignOffsets): each at the end of the one before it, its address plus its linked size, rounded up
-    to its alignment, and its map gives the address, the linked size and the alignment of each. The lines are those
-    of .text (text_lines), the linker's own among them."""
+    (LinkerScript::assignOffsets): the first at the start of the output section, each other at the end of the one
+    before it, its address plus its linked size, rounded up to its alignment, and the output section ends at the last
+    one's end. The layout's map gives the address, the linked size and the alignment of each line, and its output.tsv
+    the address and the size of .text. The lines are those of .text (text_lines), the linker's own among them. An
+    output.tsv with no .text breaks the rule, and a .text with no line must have no byte."""
+    text = text_load(layout.output)[0]
+    if text is None:
+        return "output.tsv has no .text"
+    if not layout.text:
+        return None if text.size == 0 else f".text has {text.size} bytes, and the map has no line of it"
 
     def name(row, line):
         return f"{line.file}:({line.section})" if row is None else function(layout.inputs[row])
 
+    row, first = layout.text[0]
+    if first.address != text.addr:
+        return f"{name(row, first)}, the first line, at {hex(first.address)}, where .text starts at {hex(text.addr)}"
     for (row_before, before), (row, line) in zip(layout.text, layout.text[1:]):
         end = before.address + before.size
         expected = align_up(end, line.align)
         if line.address != expected:
             return (f"{name(row, line)} at {hex(line.address)}, where the line before it ({name(row_before, before)}) "
                     f"ends at {hex(end)}, rounded up to {line.align}: {hex(expected)}")
+    row, last = layout.text[-1]
+    end = last.address + last.size
+    if end != text.addr + text.size:
+        return f"{name(row, last)}, the last line, ends at {hex(end)}, where .text ends at {hex(text.addr + text.size)}"
     return None
 
 
@@ -2787,11 +2802,12 @@ def main(argv=None):
                     "alignment or readonly_growth); one of a key with two sections of the same bytes, which the trees "
                     "cannot tell apart, must move. A build of NEW that fell back to its normal link (normal_layout "
                     "in its placement.tsv) claims no base address, as a normal link keeps none; its mark is verified: "
-                    "each line of .text in its map must lie at the end of the line before it, rounded up to its "
-                    "alignment, as lld's normal link lays them out. When it does, the build is listed as \"normal "
-                    "layout: <reason>\" and fails nothing else; the check does not verify the reason. Exit 1 when a "
-                    "function fails or a normal layout's .text breaks that rule, 2 when a tree cannot be read or the "
-                    "two share no (build, target).")
+                    "the first line of .text in its map must lie at the start of .text in its output.tsv, each other "
+                    "line at the end of the line before it, rounded up to its alignment, and .text must end at the "
+                    "last line's end, as lld's normal link lays them out. When the rule holds, the build is listed as "
+                    "\"normal layout: <reason>\" and fails nothing else; the check does not verify the reason. Exit 1 "
+                    "when a function fails or a normal layout's .text breaks that rule, 2 when a tree cannot be read "
+                    "or the two share no (build, target).")
     checking.add_argument("base", metavar="BASE", help="the base build's layout tree")
     checking.add_argument("new", metavar="NEW", help="the append build's layout tree")
     wrapping = commands.add_parser(

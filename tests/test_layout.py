@@ -1039,11 +1039,13 @@ def test_check_lists_a_build_that_fell_back_to_its_normal_link(tmp_path, capsys)
     # OSSV-675, R3: layout check lists a build that fell back to its normal link as "normal layout: <reason>", and the
     # architect's decision (dispatch://OSSV-675/comment/4c082109-3ce9-41cb-bd15-a055a29454bd): the build does not fail.
     # In NEW's normal link lld removed 4 more bytes of beta, gamma needs an alignment of 16 and lies at its base
-    # address after 4 bytes of padding, and the twins lie at their base addresses: each .text line lies at the end of
-    # the line before it, rounded up to its alignment, as lld lays them out. A normal link keeps no base address, so
-    # the build claims none: nothing fails, and nothing is kept. The control: with no such mark, the same tree fails
-    # for beta and for the twins.
-    rows = [TABLE, ALPHA, dict(BETA, linked=0xC), dict(GAMMA, align=16), TWIN0, TWIN1, COMMENT]
+    # address after 4 bytes of padding, the twins lie at their base addresses, and other, a new function, lies after
+    # them: alpha lies at the start of .text, each other .text line at the end of the line before it, rounded up to its
+    # alignment, and .text ends at other's end, as lld lays them out. A normal link keeps no base address, so the build
+    # claims none: nothing fails, and nothing is kept. The control: with no such mark, the same tree fails for beta and
+    # for the twins.
+    other = dict(OTHER, address=0x11090, linked=0x70, size=0x70)
+    rows = [TABLE, ALPHA, dict(BETA, linked=0xC), dict(GAMMA, align=16), TWIN0, TWIN1, other, COMMENT]
     base = {"rows": BASE_ROWS + [TWIN0, TWIN1]}
     status, lines = run_check(tmp_path / "marked", capsys, {"rows": rows, "placement": fell_back(rows)}, base)
     assert (status, lines) == (0, [f"plain/fuzz: normal layout: {FALLBACK}",
@@ -1078,18 +1080,58 @@ def test_check_fails_for_a_normal_layout_mark_over_an_append_builds_layout(tmp_p
         "layout check: 0 of 1 (build, target) pass"])
 
 
+@pytest.mark.parametrize("rows, out, text, why", [
+    ([TABLE] + [dict(r, address=r["address"] + 0x40) for r in (ALPHA, BETA, GAMMA)] + [COMMENT],
+     output(text_size=0xB0), "0x11000, size 256 -> 176",
+     "alpha (/work/a.o), the first line, at 0x11040, where .text starts at 0x11000"),
+    (BASE_ROWS, output(), "0x11000, size 256 -> 256",
+     "gamma (/work/b.o), the last line, ends at 0x11070, where .text ends at 0x11100"),
+    (BASE_ROWS, output().replace("section\t.text\t0x11000\t256\t0x6\n", ""), "-, size 256 -> -",
+     "output.tsv has no .text")], ids=["first-line", "end", "no-text"])
+def test_check_fails_for_a_normal_layout_mark_whose_lines_do_not_start_and_end_its_text(tmp_path, capsys, rows, out,
+                                                                                         text, why):
+    # OSSV-675, R3 (spec v8): lld's normal link puts the first line of .text at the start of .text, and .text ends at
+    # the end of its last line; the check ties both to output.tsv. The control: alpha, beta and gamma lie one after
+    # another from the start of a .text that ends at gamma's end, and the build passes. A copy whose lines all lie
+    # 0x40 above the start of .text fails, naming the build and alpha, the first line; a copy whose .text ends 0x90
+    # bytes past gamma's end fails, naming gamma, the last line; and a copy whose output.tsv has no .text fails. At
+    # 70cc88da each copy passed, listed as a normal layout.
+    status, lines = run_check(tmp_path / "control", capsys,
+                              {"rows": BASE_ROWS, "out": output(text_size=0x70), "placement": fell_back(BASE_ROWS)})
+    assert (status, lines) == (0, [f"plain/fuzz: normal layout: {FALLBACK}",
+                                   "  .text: start 0x11000 -> 0x11000, size 256 -> 112",
+                                   "layout check: 1 of 1 (build, target) pass, 1 with a normal layout"])
+    status, lines = run_check(tmp_path / "copy", capsys, {"rows": rows, "out": out, "placement": fell_back(rows)})
+    assert (status, lines) == (1, [
+        f"plain/fuzz: normal layout: {FALLBACK}",
+        "FAIL plain/fuzz: its placement.tsv marks a normal layout, but .text is not laid out as lld's normal link "
+        f"lays it out: {why}",
+        f"  .text: start 0x11000 -> {text}",
+        "layout check: 0 of 1 (build, target) pass"])
+
+
+def test_a_text_with_no_line_in_the_map_is_laid_out_as_lld_lays_it_out_only_when_it_has_no_byte():
+    # OSSV-675, R3: with no line of .text in the map, lld's normal link ends .text at its start.
+    def no_line(size):
+        sections = [layout.OutputSection(".text", 0x11000, size, 0x6)]
+        return layout.normal_break(layout.Layout([], {}, layout.Output(sections, [], {}), {}, set(), []))
+
+    assert (no_line(0), no_line(0x10)) == (None, ".text has 16 bytes, and the map has no line of it")
+
+
 def test_check_counts_a_line_of_the_linkers_own_in_the_text_of_a_normal_layout(tmp_path, capsys):
     # OSSV-675. lld's --randomize-section-padding puts padding of its own in front of input sections of .text: a line
     # <internal>:(.randomize_padding) of the map, which read_map leaves out. The line after it lies at the padding's
-    # end, and the check counts the padding as a line of .text. Without that line, the same tree has a gap in front of
-    # gamma, and fails.
+    # end, and the check counts the padding as a line of .text, which ends at gamma's end. Without that line, the same
+    # tree has a gap in front of gamma, and fails.
     padding = row(".randomize_padding", 0x11030, 0x8, file="<internal>", align=1)
     gamma = dict(GAMMA, address=0x11038)
     rows = [TABLE, ALPHA, BETA, padding, gamma, COMMENT]
-    status, lines = run_check(tmp_path / "padded", capsys, {"rows": rows, "placement": fell_back(rows)})
+    out = output(text_size=0x78)
+    status, lines = run_check(tmp_path / "padded", capsys, {"rows": rows, "out": out, "placement": fell_back(rows)})
     assert (status, lines[-1]) == (0, "layout check: 1 of 1 (build, target) pass, 1 with a normal layout"), lines
     rows.remove(padding)
-    status, lines = run_check(tmp_path / "gap", capsys, {"rows": rows, "placement": fell_back(rows)})
+    status, lines = run_check(tmp_path / "gap", capsys, {"rows": rows, "out": out, "placement": fell_back(rows)})
     assert status == 1
     assert lines_with(lines, "FAIL plain/fuzz", "gamma (/work/b.o) at 0x11038, where the line before it (beta "
                       "(/work/a.o)) ends at 0x11030, rounded up to 4: 0x11030")
