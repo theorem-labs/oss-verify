@@ -2015,12 +2015,18 @@ def test_a_same_bytes_section_moves_when_its_base_address_does_not_meet_its_new_
                                                   "misses": ("end", 0x11020, "alignment", "align=32")}
 
 
-def test_the_script_of_a_small_plan():
+def small_plan():
+    """(probe, plan) of a small link: main, helper of the member m.o of lib.a, odd, whose section name the script
+    quotes, and grow, which grows and goes to the end."""
     base = link([text_input(0, "main", 0x11000, 0x20), text_input(1, "helper", 0x11020, 0x10, "/work/lib.a", "m.o"),
                  text_input(2, "odd", 0x11030, 0x8, section=".text.odd-name"), text_input(3, "grow", 0x11038, 0x8)])
     probe = link(laid_out([("main", 0x20, {}), ("helper", 0x10, {"file": "/work/lib.a", "member": "m.o"}),
                            ("odd", 0x8, {"section": ".text.odd-name"}), ("grow", 0x10, {"content": "grow 2"})]))
-    plan = planned(base, probe)
+    return probe, planned(base, probe)
+
+
+def test_the_script_of_a_small_plan():
+    _, plan = small_plan()
     assert plan.script == (
         "SECTIONS\n"
         "{\n"
@@ -2041,7 +2047,25 @@ def test_the_script_of_a_small_plan():
         "}\n"
         "INSERT AFTER .eh_frame;\n"
         "SECTIONS { .init_array 0x12040 : { } } INSERT BEFORE .fini_array;\n")
-    assert plan.lines == {5: (None, 0), 7: (0, 1), 9: (1, 2), 11: (2, 3), 13: (3, None)}
+
+
+@pytest.mark.parametrize("number, address, around", [
+    # Line 9 of small_plan's script is the address of odd: helper, on the line before, took more room than the plan
+    # gave it.
+    (9, 0x11030, ["helper (/work/lib.a(m.o))", "odd-name (/work/a.o)"]),
+    # Line 13 ends .text: grow, on the line before, took more room than the plan gave it.
+    (13, 0x1104C, ["grow (/work/a.o)"]),
+], ids=["address", "end"])
+def test_a_backward_error_of_the_check_link_names_the_line_and_the_functions_around_it(number, address, around):
+    # OSSV-675 review 5973052531, the thread at tests/test_layout.py:2026. lld's error names a line of the script;
+    # the reason names that line, its address, and the functions on each side of it, with their objects.
+    probe, plan = small_plan()
+    output = (f"ld.lld: error: /work/script.ld:{number}: unable to move location counter ({hex(address + 4)}) "
+              f"backward to {hex(address)} for section '.text'\nclang: error: linker command failed with exit code 1\n")
+    reason = layout.check_failure(plan, probe, 1, output)
+    functions = ["main (/work/a.o)", "helper (/work/lib.a(m.o))", "odd-name (/work/a.o)", "grow (/work/a.o)"]
+    assert [f for f in functions if f in reason] == around, reason
+    assert f"line {number} " in reason and hex(address) in reason, reason
 
 
 def test_the_script_refuses_a_file_name_it_cannot_quote():
@@ -3057,6 +3081,28 @@ def test_append_falls_back_to_the_normal_link_when_the_plan_cannot_decide_a_kept
     assert run_append(root, entry, command) == 0
     rows = appended(root, capsys)
     assert (rows[".text.c"][:2], rows[".text.M"][:2]) == (["kept", "0x11300"], ["end", "0x1112f0"])
+
+
+def test_append_falls_back_when_the_check_link_does_not_decide_a_call_of_a_kept_section_at_its_base_address(
+        tmp_path, monkeypatch, capsys):
+    # OSSV-675 review 5973052531, the thread at layout.py:2834. As in the test before, c, at 0x11300, calls f2, 0x10
+    # bytes into M, in front of which M's call of k lets lld remove up to 4 bytes wherever M goes. With 0xc bytes less
+    # of filler, the plan puts M at the end, at 0x1112e4: f2 lies from 0x1112f0 to 0x1112f4, in jal's reach of c's
+    # call site 0x11304 wherever lld's relaxation puts it, as at the base, and the plan keeps c. The check link puts
+    # c at its base address with its base linked size, and M 0x10 bytes further than the script asks (misplace): there
+    # f2 lies from 0x111300, in reach, to 0x111304, one past it. The check link does not tell whether lld relaxes c's
+    # call as at the base, so the build falls back to its normal link, naming c and that call. The control: a check
+    # link that puts M where the script asks stays in the append mode, and keeps c.
+    command = ["clang", "main.o"]
+    root = tmp_path / "misplaced"
+    entry = link_setup(root, monkeypatch, undecided_files(0xFFFA4), command, append_only={"misplace": "M"})
+    assert run_append(root, entry, command) == 0
+    fallen_back(root, capsys, "c (main.o)", "0x11300", "0x4 (f2)", "0x111300", "0x111304")
+    root = tmp_path / "control"
+    entry = link_setup(root, monkeypatch, undecided_files(0xFFFA4), command)
+    assert run_append(root, entry, command) == 0
+    rows = appended(root, capsys)
+    assert (rows[".text.c"][:2], rows[".text.M"][:2]) == (["kept", "0x11300"], ["end", "0x1112e4"])
 
 
 def twin_files(twins):

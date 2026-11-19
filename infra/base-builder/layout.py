@@ -920,7 +920,7 @@ def relaxed_calls(lines, inputs, relocated, output):
     # removable is neither, whose target delta this link's relaxation decides: {row: (EF_RISCV_RVC, [Reloc])}, with
     # {target: the index k of the first relocation of its section at or past its anchor, or the count of relocations
     # when there is none}.
-    targeted, firsts = {}, {}
+    calls, firsts = {}, {}
     for row, (rvc, entries) in relocated.items():
         found = []
         for entry in entries:
@@ -940,8 +940,7 @@ def relaxed_calls(lines, inputs, relocated, output):
                 entry = entry._replace(call=call._replace(target_delta=0 if most == 0 else None, removable=most),
                                        target=target)
             found.append(entry)
-        targeted[row] = (rvc, found)
-    calls = targeted
+        calls[row] = (rvc, found)
     relaxed = {row: ([None] * len(entries), None) for row, (_, entries) in calls.items()}  # {row: ([delta], removed)}
     if output is not None:
         view = Layout(inputs, {}, output, {}, set(), [])
@@ -953,7 +952,7 @@ def relaxed_calls(lines, inputs, relocated, output):
             calls = {row: (rvc, [entry if entry.target is None else
                                  entry._replace(call=entry.call._replace(target_delta=removed[entry.target]))
                                  for entry in entries])
-                     for row, (rvc, entries) in targeted.items()}
+                     for row, (rvc, entries) in calls.items()}
             relaxed = {row: relaxation(lines[row].address, entries, view, rvc) for row, (rvc, entries) in calls.items()}
             settled = {}
             for (row, anchor), k in firsts.items():
@@ -1554,6 +1553,14 @@ def call_target(call):
     return call.target
 
 
+def line_name(line, target=None):
+    """A line of calls.tsv for a person, as each message of layout.py check and of the append mode names it: a call
+    or a thread-local access (by its type), its offset and its target, as call_target names it, or `target` (a test
+    names the target as BASE's line does)."""
+    what = "call" if line.type == "call" else "thread-local access"
+    return f"{what} at offset {hex(line.offset)} ({call_target(line) if target is None else target})"
+
+
 def target_row(call):
     """(row, value): the input section that the target of the calls.tsv line `call` lies in, and how far into it: a
     local symbol's section (row None when the map did not take it), or a global's definition. None for a target that
@@ -1598,6 +1605,28 @@ def tls_address(line, layout):
     return None if target_row(line) is None else target_address(line, layout)
 
 
+def line_reach(then, now, old, base, new):
+    """What decides whether lld relaxes BASE's calls.tsv line `then` of the function `old` and NEW's line `now` of its
+    partner, of one type at one offset, and whether the trees tell it: (why, site, before, after, reached). For a
+    call, whose BASE delta is known: its base call site `site`, the address of `old` plus the offset less BASE's
+    delta; the address of its target in BASE and in NEW (target_address); and whether each lies in jal's reach of the
+    site. For a thread-local access: no site (None); the offset of its variable from the start of BASE's and of NEW's
+    TLS segment (tls_offset); and whether lld relaxes an access to each (tls_relaxed). `why` is None, or the reason
+    for a person that the trees do not tell, naming the tree where the target has no address, or the variable no
+    offset in the TLS segment; the other four are then None."""
+    if then.type == "call":
+        site = old.address + then.offset - then.delta
+        before, after = target_address(then, base), target_address(now, new)
+        if before is None or after is None:
+            return f"its target has no address in {'BASE' if before is None else 'NEW'}", None, None, None, None
+        return None, site, before, after, (in_reach(site, before), in_reach(site, after))
+    before, after = tls_offset(tls_address(then, base), base.output), tls_offset(tls_address(now, new), new.output)
+    if before is None or after is None:
+        return (f"its variable has no offset in the TLS segment of {'BASE' if before is None else 'NEW'}", None, None,
+                None, None)
+    return None, None, before, after, (tls_relaxed(before), tls_relaxed(after))
+
+
 def dragged(fn, base, new, pairing):
     """Whether another same-bytes member of the repeated key of `fn` (of NEW) moved for a cause of its own that the
     two layouts show: one pattern places every member of a key, so the others move with it, with repeated_key."""
@@ -1632,29 +1661,20 @@ def unshown(placement, fn, old, base, new, pairing):
         if not (then.relax and now.relax):
             return (f"the {what} has no R_RISCV_RELAX in {'NEW' if then.relax else 'BASE'}'s calls.tsv (relax 0): "
                     "lld never relaxes it")
-        before, after = target_address(then, base), target_address(now, new)
-        if cause == "jal_reach":
-            if then.delta is None:
-                return ("BASE's calls.tsv gives no delta for the call: the bytes that relaxation removed in front of "
-                        "it, and so its base call site, are not known")
-            site = old.address + offset - then.delta
-            if before is None or after is None:
-                return "a target of the call has no address in its tree"
-            reach = (in_reach(site, before), in_reach(site, after))
-            if reach != (lost, not lost):
-                return (f"from the base call site {hex(site)}, the base target {hex(before)} is "
-                        f"{'in' if reach[0] else 'out of'} reach and the new target {hex(after)} "
-                        f"{'in' if reach[1] else 'out of'} reach")
+        if cause == "jal_reach" and then.delta is None:
+            return ("BASE's calls.tsv gives no delta for the call: the bytes that relaxation removed in front of it, "
+                    "and so its base call site, are not known")
+        why, site, before, after, reach = line_reach(then, now, old, base, new)
+        if why:
+            return why
+        if reach == (lost, not lost):
             return None
-        before, after = tls_offset(tls_address(then, base), base.output), tls_offset(tls_address(now, new), new.output)
-        if before is None or after is None:
-            return "a target of the thread-local access has no offset in the TLS segment of its tree"
-        reach = (tls_relaxed(before), tls_relaxed(after))
-        if reach != (lost, not lost):
-            return (f"the base target lies {hex(before)} bytes into the TLS segment, {'in' if reach[0] else 'out of'} "
-                    f"the reach of a relaxed access, and the new target {hex(after)}, "
-                    f"{'in' if reach[1] else 'out of'} it")
-        return None
+        if cause == "jal_reach":
+            return (f"from the base call site {hex(site)}, the base target {hex(before)} is "
+                    f"{'in' if reach[0] else 'out of'} reach and the new target {hex(after)} "
+                    f"{'in' if reach[1] else 'out of'} reach")
+        return (f"the base target lies {hex(before)} bytes into the TLS segment, {'in' if reach[0] else 'out of'} "
+                f"the reach of a relaxed access, and the new target {hex(after)}, {'in' if reach[1] else 'out of'} it")
     if cause == "repeated_key":
         if fn.key not in pairing.repeated:
             return "its key occurs once on each side"
@@ -1694,50 +1714,36 @@ def unkept(fn, old, base, new):
     it does in NEW. The reason names the first line, in offset order, that breaks the rule."""
     then_lines, now_lines = [sorted(tree.calls.get(i.row, []), key=lambda c: (c.offset, c.type))
                              for tree, i in ((base, old), (new, fn))]
-
-    def named(line):
-        what = "call" if line.type == "call" else "thread-local access"
-        return f"its {what} at offset {hex(line.offset)} ({call_target(line)})"
-
     counts = [collections.Counter((c.offset, c.type) for c in lines) for lines in (then_lines, now_lines)]
     if counts[0] != counts[1]:
         first = min(set(counts[0] - counts[1]) | set(counts[1] - counts[0]))
         side = 0 if counts[0][first] > counts[1][first] else 1
         line = next(c for c in (then_lines, now_lines)[side] if (c.offset, c.type) == first)
-        return f"{named(line)} is a line of {('BASE', 'NEW')[side]}'s calls.tsv only"
+        return f"its {line_name(line)} is a line of {('BASE', 'NEW')[side]}'s calls.tsv only"
     for then, now in zip(then_lines, now_lines):
         if not (then.relax or now.relax):
             continue
         if not (then.relax and now.relax):
-            return (f"{named(now)} has R_RISCV_RELAX in {'BASE' if then.relax else 'NEW'}'s calls.tsv only (relax 1): "
-                    "lld may relax it in one link and never in the other")
+            return (f"its {line_name(now)} has R_RISCV_RELAX in {'BASE' if then.relax else 'NEW'}'s calls.tsv only "
+                    "(relax 1): lld may relax it in one link and never in the other")
         if then.delta is None or now.delta is None:
-            return (f"{named(now)}: {'BASE' if then.delta is None else 'NEW'}'s calls.tsv gives no delta for it (-): "
-                    "the bytes that relaxation removed in front of it, and so where it lies, are not known")
+            return (f"its {line_name(now)}: {'BASE' if then.delta is None else 'NEW'}'s calls.tsv gives no delta for "
+                    "it (-): the bytes that relaxation removed in front of it, and so where it lies, are not known")
         if then.delta != now.delta:
-            return (f"{named(now)}: relaxation removed {hex(then.delta)} bytes in front of it in BASE and "
+            return (f"its {line_name(now)}: relaxation removed {hex(then.delta)} bytes in front of it in BASE and "
                     f"{hex(now.delta)} in NEW")
-        if now.type == "call":
-            site = old.address + now.offset - then.delta
-            before, after = target_address(then, base), target_address(now, new)
-            if before is None or after is None:
-                return f"{named(now)}: its target has no address in {'BASE' if before is None else 'NEW'}"
-            reach = (in_reach(site, before), in_reach(site, after))
-            if reach[0] != reach[1]:
-                return (f"{named(now)}: from its call site {hex(site)}, its target in BASE, {hex(before)}, is "
-                        f"{'in' if reach[0] else 'out of'} jal's reach, and its target in NEW, {hex(after)}, "
-                        f"{'in' if reach[1] else 'out of'} it")
+        why, site, before, after, reach = line_reach(then, now, old, base, new)
+        if why:
+            return f"its {line_name(now)}: {why}"
+        if reach[0] == reach[1]:
             continue
-        before = tls_offset(tls_address(then, base), base.output)
-        after = tls_offset(tls_address(now, new), new.output)
-        if before is None or after is None:
-            return (f"{named(now)}: its variable has no offset in the TLS segment of "
-                    f"{'BASE' if before is None else 'NEW'}")
-        reach = (tls_relaxed(before), tls_relaxed(after))
-        if reach[0] != reach[1]:
-            return (f"{named(now)}: its variable lies {hex(before)} bytes into BASE's TLS segment, "
-                    f"{'in' if reach[0] else 'out of'} the reach of a relaxed access, and {hex(after)} bytes into "
-                    f"NEW's, {'in' if reach[1] else 'out of'} it")
+        if now.type == "call":
+            return (f"its {line_name(now)}: from its call site {hex(site)}, its target in BASE, {hex(before)}, is "
+                    f"{'in' if reach[0] else 'out of'} jal's reach, and its target in NEW, {hex(after)}, "
+                    f"{'in' if reach[1] else 'out of'} it")
+        return (f"its {line_name(now)}: its variable lies {hex(before)} bytes into BASE's TLS segment, "
+                f"{'in' if reach[0] else 'out of'} the reach of a relaxed access, and {hex(after)} bytes into "
+                f"NEW's, {'in' if reach[1] else 'out of'} it")
     return None
 
 
@@ -2242,8 +2248,7 @@ def untested(skipped, undecided):
                    f"target's section, so that the target lies somewhere from {hex(span[0])} to {hex(span[1])}: in "
                    "jal's reach of the call or out of it")
         found.append((test.call, why))
-    return [f"the {'call' if line.type == 'call' else 'thread-local access'} at offset {hex(line.offset)} "
-            f"({call_target(line)}): {why}" for line, why in sorted(found, key=lambda item: item[0].offset)]
+    return [f"the {line_name(line)}: {why}" for line, why in sorted(found, key=lambda item: item[0].offset)]
 
 
 def kept_set(base, probe, pairing, forced):
@@ -2846,27 +2851,23 @@ def checked_plan(base, probe, pairing, lines, internal, work, script, command):
                 kept_there = (f"{function(i)}: the check link keeps it at its base address {hex(old.address)} with "
                               f"its base linked size of {old.linked} bytes")
                 if test is not None:
-                    what = "call" if test.call.type == "call" else "thread-local access"
-                    raise Fallback(f"{kept_there}, and relaxes its {what} at offset {hex(test.offset)} "
-                                   f"({test.target}) otherwise than at the base: the plan predicted it wrongly, and "
-                                   "the size does not show it")
-                why = untested([], [(t, linked_span(t, link, at_base)) for t, there in decided if there is None])
-                if why:
-                    raise Fallback(f"{kept_there}; the append mode cannot test whether lld relaxes "
-                                   f"{'these' if len(why) > 1 else 'this'} otherwise: {'; '.join(why)}")
+                    raise Fallback(f"{kept_there}, and relaxes its {line_name(test.call, test.target)} otherwise than "
+                                   "at the base: the plan predicted it wrongly, and the size does not show it")
+            elif test is not None:
+                moved[i.row] = test
                 continue
-            if test is None:
+            else:
                 kept_there = (f"{function(i)}: the script keeps it at {hex(old.address)} with {old.linked} bytes, and "
                               f"the check link puts it at {hex(line.address)} with {line.size} bytes")
-                # The plan keeps no section with a line that call_tests or tls_tests skips (plan), so that only a call
-                # whose target the check link does not put in jal's reach or out of it is not tested here.
-                why = untested([], [(t, linked_span(t, link, at_base)) for t, there in decided if there is None])
-                if why:
-                    raise Fallback(f"{kept_there}; the append mode cannot test whether lld relaxes "
-                                   f"{'these' if len(why) > 1 else 'this'} otherwise: {'; '.join(why)}")
+            # The plan keeps no section with a line that call_tests or tls_tests skips (plan), so that only a call
+            # whose target the check link does not put in jal's reach or out of it is not tested here.
+            why = untested([], [(t, linked_span(t, link, at_base)) for t, there in decided if there is None])
+            if why:
+                raise Fallback(f"{kept_there}; the append mode cannot test whether lld relaxes "
+                               f"{'these' if len(why) > 1 else 'this'} otherwise: {'; '.join(why)}")
+            if i.row not in at_base:
                 raise Fallback(f"{kept_there}, and no call or thread-local access of it is relaxed otherwise: a "
                                "defect of the append mode")
-            moved[i.row] = test
         if not moved:
             break
         forced.update(moved)
@@ -2883,8 +2884,8 @@ def checked_plan(base, probe, pairing, lines, internal, work, script, command):
         else:
             continue
         if not shown and place.cause == "jal_reach" and row in forced:
-            raise Fallback(f"{function(probe.inputs[row])}: a check link moved it for its call at offset "
-                           f"{hex(forced[row].offset)} ({forced[row].target}), and no call of it is relaxed otherwise "
+            raise Fallback(f"{function(probe.inputs[row])}: a check link moved it for its "
+                           f"{line_name(forced[row].call, forced[row].target)}, and no call of it is relaxed otherwise "
                            "at its base address in the last check link: its cause rested on a call whose target the "
                            "last check link puts where lld relaxes the call as at the base, as in a section that the "
                            "plan put back at its base address, and the append mode never returns a function that a "
