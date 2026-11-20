@@ -1,0 +1,16 @@
+# THORNode: the THORChain node (a Cosmos SDK state machine) and Bifrost, its observer and signer for external chains.
+repo: https://gitlab.com/thorchain/thornode.git#develop
+primary_contact: cbarraford@gmail.com
+homepage: https://thorchain.org
+language: go
+sanitizers: []
+fuzz_targets:
+  - fuzz_parse_memo
+  - fuzz_new_address
+  - fuzz_new_asset
+  - fuzz_share_math
+  - fuzz_zcash_parse_tx
+  - fuzz_zcash_decode_address
+  - fuzz_ss58
+  - fuzz_solana_rpc_version
+publish: after_fixes
