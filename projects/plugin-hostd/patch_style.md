@@ -1,6 +1,6 @@
 # Patch style and report preferences
 
-plugin-hostd is FreeMixer's plugin supervisor. It speaks mod-host's command protocol to its controller, runs each CLAP
+plugin-hostd is OpenMixer's plugin supervisor. It speaks mod-host's command protocol to its controller, runs each CLAP
 or LV2 plugin in a worker process of its own, and relays what the workers write back. Two byte streams reach it from
 outside: the commands of any local client on its command socket, and each worker's feedback socket. The command
 parser and dispatcher (`src/verbs.c`) and the feedback relay (`src/relay.c`) read them, so they are the code that
@@ -9,7 +9,7 @@ matters most here, and the two fuzz targets drive them.
 ## How findings and patches land
 
 Nothing from the pipeline enters plugin-hostd as it is. A maintainer reads each finding, reproduces it against the
-plugin-hostd harness and build, and writes the fix in FreeMixer/plugin-hostd as an ordinary change. A patch you send
+plugin-hostd harness and build, and writes the fix in Open-Mixer/plugin-hostd as an ordinary change. A patch you send
 is a description of a fix, and we re-author it before it lands.
 
 Every commit in plugin-hostd is signed. No attribution line, trailer, or generated-by marker enters the history. When
