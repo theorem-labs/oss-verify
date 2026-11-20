@@ -1,0 +1,16 @@
+# libsurface: the device behaviour of a motorised control surface, for OpenMixer: the motor-fader
+# policy (never fight the hand), touch, the bank window, the board shadow and its replay, the meter
+# step and the ring renderer. The fuzz targets drive the core through the calls a backend and a host
+# make, and the key table of the Control|24. Pinned to the head of main.
+repo: https://github.com/Open-Mixer/libsurface#60fbb9c03d291342f372e8b9dc03f48e8903322e
+primary_contact: linuxnow@gmail.com
+homepage: https://github.com/Open-Mixer/libsurface
+language: c
+sanitizers: [address, undefined]
+mutants: fuzz/sabotage
+fuzz_targets:
+  - fuzz_pure
+  - fuzz_board
+  - fuzz_bank
+  - fuzz_motor
+  - fuzz_keys
