@@ -6,8 +6,19 @@ name: "Maintainer confirmed"
 # other than the author after the head commit was pushed, enroll-dispatch skips its maintainer check (.github/scripts/enroll-dispatch).
 # Only an account with at least triage access to this repository can put a label on. This workflow holds no
 # permission, checks out nothing, and runs no code of the pull request.
+# With the repository's default setting, GitHub holds the labeled run of a first-time contributor's pull request until
+# someone with write access approves it. Held runs (.github/workflows/held-runs.yml) starts review.yml for such a
+# head, which approves the held runs after its screen passes the pull request. Held runs and review.yml's route job
+# leave out a held run whose actor is oss-verify[bot]: the App's own label (review-held, review-passed, size-review) is
+# no new event at the head.
+#
+# pull_request: the workflow file comes from the merge commit, so a pull request that changes it controls this run.
+# The code-owner rule on /.github/ of .github/CODEOWNERS guards the merge of such a pull request. enroll-dispatch.yml
+# sends no pull request for its theorem statements unless all its files are under one projects/<name>/ (the_project()
+# of .github/scripts/enroll-dispatch), and none that changes a steering file (.github/scripts/steering.py) until a
+# person approves its head.
 on:
-  pull_request_target:
+  pull_request:
     types: [labeled]
 permissions: {}
 jobs:

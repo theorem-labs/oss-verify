@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
-"""The screen of .github/workflows/build.yaml: whether the text of a pull request or an issue from an account without
+"""The screen of .github/workflows/review.yml: whether the text of a pull request or an issue from an account without
 write access may go to the review without a person.
 
     python3 .github/scripts/screen.py <the .review directory> [<the projects/<name> directory>]
+    python3 .github/scripts/screen.py --sign-in
 
 Up to three independent checks read the text that the review would read, and each answers one word, clean or
 suspicious. SCREEN_CHECKS names the ones that run, and must name Model Armor:
@@ -23,13 +24,29 @@ failed, text that holds characters that hide it (HIDING), or more text than MAX_
 text joined, each source under its label, so that text split over several comments or fields is read together. A
 held item gets no review; a person decides.
 
+A sign-in that fails is the one exception: it gives no verdict. The screen signs in with three token reads:
+GitHub's identity token (identity_token), Microsoft Entra's access token (entra_token, for prompt_shields) and
+Anthropic's token exchange (anthropic_token, for claude). When one of them refuses, cannot reach its endpoint, or
+gives no token (SignInError), the screen stops there. It writes nothing to GITHUB_OUTPUT, stores no reason, prints
+which sign-in failed, and exits 1, so the Screen step fails. review.yml then holds the item as for a screen that
+failed. For a held head, that run does not count as a screen, and .github/workflows/held-runs.yml starts the screen
+again. A setting that is missing, and no time left, are not such a failure: they hold the item, as for a check.
+
+With --sign-in, the screen makes its sign-ins and nothing more. For each check that SCREEN_CHECKS names and that
+signs in (SIGN_INS), it makes the same requests as that check makes, and discards the token. It reads no text of the
+item, writes nothing to GITHUB_OUTPUT, and stores nothing. A sign-in that fails stops it as it stops the screen: it
+prints the same line and exits 1. A setting that is missing is not such a failure: it stops that check's sign-in
+alone, and the Screen step later holds the item for it. With no failed sign-in, it exits 0. review.yml runs it
+before the screen job's mark for the daily cap, so the cap does not count a run whose sign-in to Microsoft Entra or
+Anthropic is refused.
+
 What each check answered, and why the text could not be screened, is the reason. It goes as one JSON object to the
 private bucket REASON_BUCKET, and nowhere else: this file writes the verdict and the names of the checks that ran to
 GITHUB_OUTPUT and one line to its standard output, and nothing more, so the run's public log and its outputs never
 hold the reason. No check can act on the text: the text is sent to each service as data, the model has no tool, and
 what comes back is read for its one word and nothing else.
 
-Every setting is an environment variable that build.yaml sets; the tokens come from GitHub's identity token, which
+Every setting is an environment variable that review.yml sets; the tokens come from GitHub's identity token, which
 the job's environment review-screen alone can exchange for them.
 
 This is the screen of theorem-labs/rocq-linux-process-semantics's review.yml, with the same checks, limits and
@@ -128,6 +145,12 @@ class CheckError(Exception):
     """A check that could not answer. Its message goes to the reason only."""
 
 
+class SignInError(Exception):
+    """A sign-in that failed: one of the three token reads refused, could not reach its endpoint, or gave no token. It
+    stops the screen, with no verdict. Its message names the sign-in and the kind of failure, never a token, and goes
+    to the public log."""
+
+
 def env(name):
     value = os.environ.get(name, "")
     if not value:
@@ -166,7 +189,7 @@ KEPT_STATUS = re.compile(r"\(exit status (\d+)\)\n?\Z")
 #   head/    each file a change changes, as the pull request has it: pr.diff holds every line the pull request
 #            changed in it, and pr.diff must be a diff that shows it as text, so each file here need only be text.
 #   source/  the project's repository at the built commit: the repository an enrollment names, not text the pull
-#            request carries, and far more text than MAX_CHARS. build.yaml's header says that it is not screened; the
+#            request carries, and far more text than MAX_CHARS. review.yml's header says that it is not screened; the
 #            review of every enrollment reads it, whoever wrote the pull request.
 NOT_SENT_DIRECTORIES = ("head", "source")
 # A seed corpus's listing of its inputs in hexadecimal (review-gather): a row is an offset, 16 bytes and their text.
@@ -351,6 +374,12 @@ def joined(found):
 # fuzz target the project's build script wrote, in a span too. code() turns a backtick in that text into an
 # apostrophe, so nothing in it can end its span: every such string is one span, and the screen reads the spans
 # of these three files and nothing else of them.
+# The files under build/ come from a Build run that ran main's code: review.yml takes them from a Build run
+# (.github/scripts/take-build-results) only for a pull request that changes no steering file
+# (.github/scripts/steering.py), and the merge commit of such a pull request holds main's .github/, src/, infra/ and
+# seeds/. When it takes nothing, build/result.md holds a fixed line of take-build-results or nothing, and the other
+# two are empty. So the shape of build/binaries.md here, and of build/result.md below, is the shape that main's code
+# writes.
 IN_SPANS = ("triage-today.md", "triage-comment.md", os.path.join("build", "binaries.md"))
 SPAN = re.compile(r"`([^`\n]*)`")
 # The files of .review that main's own scripts write, which the screen does not read. Each is addressed to a
@@ -366,11 +395,12 @@ SPAN = re.compile(r"`([^`\n]*)`")
 #   review-comment-authors.txt  review-gather's list of the review comments' logins, one a line, which the gather
 #                               job and all_review_comments_are_ours() read; a login is letters, digits and
 #                               hyphens, and carries no prose.
-#   source.txt                  review-gather's fixed line in place of the project's repository when the build
-#                               resolved no commit of it: there is no source to read.
+#   source.txt                  review-gather's fixed line in place of the project's repository when no built
+#                               commit of it came from the Build run: there is no source to read.
 #   template-history.txt        git log of this repository's pull request template.
 #   validate.txt                oss-verify validate on projects/<name>/, every line of which the diff adds.
-#   build/result.md             the build job's own one-line result.
+#   build/result.md             the build job's own one-line result, or the fixed line of take-build-results when
+#                               it read none (the comment above IN_SPANS).
 # Five more files keep only our shape, and the project decides text inside them that no other source carries,
 # so each is read: triage-today.md, triage-comment.md and build/binaries.md through their code spans (IN_SPANS),
 # and these two whole:
@@ -384,7 +414,7 @@ GENERATED = frozenset({"checks.json", "checklist.txt", "description.md", "review
 
 def writers():
     """The logins of the item's comments', reviews' and review comments' authors that have write access, which
-    build.yaml's gather job asked GitHub about (SCREEN_WRITERS). Their text is this project's own: an agent of
+    review.yml's gather job asked GitHub about (SCREEN_WRITERS). Their text is this project's own: an agent of
     ours answering the review, or a maintainer asking the author for a change, is not the outside text this
     screen is for, and it is written to be read by the review. Empty when the gather job could not tell them
     apart, and then every comment is read, as before."""
@@ -597,9 +627,10 @@ def pieces(text, size, overlap):
 
 # --- HTTP ---------------------------------------------------------------------------------------------------------
 
-def http(method, url, body=None, headers=None, form=False, attempts=4):
-    """The JSON answer of one request. Retries a 429 or a 5xx, and a connection that fails; any other answer that is
-    not 2xx, an answer that is not JSON, and a request after DEADLINE, is a CheckError."""
+def http(method, url, body=None, headers=None, form=False, attempts=4, fail=CheckError):
+    """The JSON answer of one request. Retries a 429 or a 5xx, and a connection that fails. Any other answer that is
+    not 2xx, an answer that is not JSON, and a request that still fails after the last attempt raise fail: a
+    CheckError, or a SignInError for a sign-in. A request after DEADLINE is a CheckError, also for a sign-in."""
     data = None
     headers = dict(headers or {})
     if body is not None:
@@ -628,26 +659,62 @@ def http(method, url, body=None, headers=None, form=False, attempts=4):
                 if retry.isdigit():
                     time.sleep(min(int(retry), 30))
                 continue
-            raise CheckError(last) from None
+            raise fail(last) from None
         except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
             last = f"{type(e).__name__} reaching {urllib.parse.urlsplit(url).netloc}: {e}"
             continue
         try:
             return json.loads(raw)
         except ValueError:
-            raise CheckError(f"an answer from {urllib.parse.urlsplit(url).netloc} that is not JSON") from None
-    raise CheckError(last)
+            raise fail(f"an answer from {urllib.parse.urlsplit(url).netloc} that is not JSON") from None
+    raise fail(last)
+
+
+def sign_in(service, field, method, url, body=None, headers=None, form=False):
+    """The token of one sign-in, the string at field of its answer, or a SignInError that names service and the kind
+    of failure. The caller reads the settings of the request first, so a missing one is a CheckError."""
+    try:
+        answer = http(method, url, body, headers, form, fail=SignInError)
+    except SignInError as e:
+        raise SignInError(f"{service}: {outcome('error', str(e))}") from None
+    token = answer.get(field) if isinstance(answer, dict) else None
+    if not isinstance(token, str) or not token:
+        raise SignInError(f"{service}: an answer with no token")
+    return token
 
 
 def identity_token(audience):
     """A GitHub Actions identity token for audience: the job's environment review-screen is in its claims."""
     url = env("ACTIONS_ID_TOKEN_REQUEST_URL")
     url += ("&" if "?" in url else "?") + urllib.parse.urlencode({"audience": audience})
-    answer = http("GET", url, headers={"Authorization": "Bearer " + env("ACTIONS_ID_TOKEN_REQUEST_TOKEN")})
-    token = answer.get("value") if isinstance(answer, dict) else None
-    if not isinstance(token, str) or not token:
-        raise CheckError("GitHub gave no identity token")
-    return token
+    return sign_in("GitHub's identity token", "value", "GET", url,
+                   headers={"Authorization": "Bearer " + env("ACTIONS_ID_TOKEN_REQUEST_TOKEN")})
+
+
+def entra_token():
+    """Microsoft Entra's access token for Prompt Shields, for GitHub's identity token with Entra's audience: the
+    federated credential of the managed identity AZURE_CLIENT_ID admits the job's environment review-screen."""
+    return sign_in("Microsoft Entra's access token", "access_token", "POST",
+                   f"{env('AZURE_LOGIN_URL')}/{env('AZURE_TENANT_ID')}/oauth2/v2.0/token", {
+                       "client_id": env("AZURE_CLIENT_ID"),
+                       "scope": "https://cognitiveservices.azure.com/.default",
+                       "grant_type": "client_credentials",
+                       "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+                       "client_assertion": identity_token("api://AzureADTokenExchange"),
+                   }, form=True)
+
+
+def anthropic_token():
+    """Anthropic's token for the model, from its token exchange of GitHub's identity token with Anthropic's audience:
+    the federation rule ANTHROPIC_FEDERATION_RULE_ID admits the job's environment review-screen."""
+    return sign_in("Anthropic's token exchange", "access_token", "POST", f"{env('ANTHROPIC_URL')}/v1/oauth/token", {
+        "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        "assertion": identity_token("https://api.anthropic.com"),
+        "federation_rule_id": env("ANTHROPIC_FEDERATION_RULE_ID"),
+        "organization_id": env("ANTHROPIC_ORGANIZATION_ID"),
+        "service_account_id": env("ANTHROPIC_SERVICE_ACCOUNT_ID"),
+        "workspace_id": env("ANTHROPIC_WORKSPACE_ID"),
+    })
 
 
 # --- the three checks ---------------------------------------------------------------------------------------------
@@ -688,15 +755,7 @@ def prompt_shields(found):
     """Prompt Shields, with the text as its documents: up to five pieces and 10,000 characters a request. An attack
     found in any document is a match. The service answers for each document it was sent, and for the fixed user
     prompt, which must never be an attack."""
-    token = http("POST", f"{env('AZURE_LOGIN_URL')}/{env('AZURE_TENANT_ID')}/oauth2/v2.0/token", {
-        "client_id": env("AZURE_CLIENT_ID"),
-        "scope": "https://cognitiveservices.azure.com/.default",
-        "grant_type": "client_credentials",
-        "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
-        "client_assertion": identity_token("api://AzureADTokenExchange"),
-    }, form=True).get("access_token")
-    if not isinstance(token, str) or not token:
-        raise CheckError("Microsoft Entra gave no access token")
+    token = entra_token()
     url = f"{env('CONTENT_SAFETY_URL')}/contentsafety/text:shieldPrompt?api-version={SHIELD_API_VERSION}"
     labelled = list(enumerate(pieces(joined(found), SHIELD_PIECE, SHIELD_OVERLAP), 1))
     batches, batch = [], []
@@ -766,17 +825,8 @@ def claude(found):
     what the file is for. Each question is asked CLAUDE_ANSWERS times and its word is the majority, since the
     model answers at its own temperature (the gateway's model takes no other) and one answer on a long ordinary
     text is a coin with a small bias. Either question's word suspicious holds the item."""
+    token = anthropic_token()
     base = env("ANTHROPIC_URL")
-    token = http("POST", f"{base}/v1/oauth/token", {
-        "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
-        "assertion": identity_token("https://api.anthropic.com"),
-        "federation_rule_id": env("ANTHROPIC_FEDERATION_RULE_ID"),
-        "organization_id": env("ANTHROPIC_ORGANIZATION_ID"),
-        "service_account_id": env("ANTHROPIC_SERVICE_ACCOUNT_ID"),
-        "workspace_id": env("ANTHROPIC_WORKSPACE_ID"),
-    }).get("access_token")
-    if not isinstance(token, str) or not token:
-        raise CheckError("Anthropic gave no access token")
     style = [(s, t) for s, t in found if PATCH_STYLE_PATH.fullmatch(s)]
     questions = [("the text", [(s, t) for s, t in found if not PATCH_STYLE_PATH.fullmatch(s)], None)]
     if style:
@@ -798,6 +848,8 @@ def claude(found):
 
 
 CHECKS = {"model_armor": model_armor, "prompt_shields": prompt_shields, "claude": claude}
+# The checks that sign in, and the sign-in of each, which --sign-in makes alone (sign_ins).
+SIGN_INS = {"prompt_shields": entra_token, "claude": anthropic_token}
 
 
 def listed():
@@ -813,7 +865,8 @@ def listed():
 
 # --- the verdict --------------------------------------------------------------------------------------------------
 
-# How the checks' words make the verdict. Whatever the rule, a check that cannot answer holds the item.
+# How the checks' words make the verdict. Whatever the rule, a check that cannot answer holds the item. A sign-in that
+# fails gives no words and no verdict (SignInError).
 #   any                        held when any check answers suspicious.
 #   two_of_three               held when two of the three answer suspicious: the two detectors decide when they
 #                              agree, and the model breaks a tie.
@@ -859,12 +912,17 @@ def combine(words, name):
     return "held" if RULES[name][1](words) else "clean"
 
 
-def run_checks(found, ran):
-    """Each check's result, as the reason records it."""
+def run_checks(found, ran, sign_in_stops=True):
+    """Each check's result, as the reason records it. A sign-in that fails (SignInError) stops the screen there. With
+    sign_in_stops false, as for a measurement, it is that check's error instead."""
     results = {}
     for name in ran:
         try:
             word, detail = CHECKS[name](found)
+        except SignInError as e:
+            if sign_in_stops:
+                raise
+            word, detail = "error", {"error": str(e)[:2000]}
         except CheckError as e:
             word, detail = "error", {"error": str(e)[:2000]}
         except Exception as e:   # a fault of this file: no answer, and so held
@@ -874,8 +932,9 @@ def run_checks(found, ran):
 
 
 def screen(review, project=None):
-    """The verdict, the names of the checks that ran, and the reason. Each check SCREEN_CHECKS names runs; one that
-    cannot answer, or a setting of it that is missing, holds the item; SCREEN_RULE makes the verdict of their words."""
+    """The verdict, the names of the checks that ran, and the reason. Each check SCREEN_CHECKS names runs. One that
+    cannot answer, or a setting of it that is missing, holds the item. A sign-in that fails stops the screen, with no
+    verdict (SignInError). SCREEN_RULE makes the verdict of the checks' words."""
     found, unscreenable = parts(review, project)
     reason = {"sources": [[s, len(t)] for s, t in found], "unscreenable": unscreenable, "checks": {}}
     try:
@@ -918,7 +977,7 @@ def measure():
         found = [(s, t) for s, t in item["parts"]]
         hidden = [c for c in (hiding(t) for _s, t in found) if c]
         for _ in range(repeats):
-            words = {} if hidden else {c: r["word"] for c, r in run_checks(found, ran).items()}
+            words = {} if hidden else {c: r["word"] for c, r in run_checks(found, ran, sign_in_stops=False).items()}
             results.append({"name": item["name"], "label": item["label"], "words": words, "hidden": hidden})
     table = {}
     for name, (needs, _f) in RULES.items():
@@ -990,6 +1049,38 @@ def store(reason):
         r.read()
 
 
+# --- the sign-ins alone -------------------------------------------------------------------------------------------
+
+def sign_ins():
+    """The sign-ins of the checks SCREEN_CHECKS names (SIGN_INS), each as its check makes it, and the one line for the
+    public log. It reads no text of the item and discards each token. A SignInError stops it, as it stops the screen.
+    Any other failure stops that check's sign-in alone, and a list that is not valid stops every sign-in: the Screen
+    step later holds the item for each of them."""
+    try:
+        ran = listed()
+    except CheckError:
+        return "The screen's sign-ins: none, since SCREEN_CHECKS is not a list the screen takes."
+    outcomes = []
+    for name in ran:
+        if name not in SIGN_INS:
+            continue
+        try:
+            SIGN_INS[name]()
+            outcomes.append(f"{name}: signed in")
+        except SignInError:
+            raise
+        except Exception as e:   # a setting that is missing, or a fault of this file: the kind of failure alone
+            outcomes.append(f"{name}: not signed in ({outcome('error', str(e))})")
+    return f"The screen's sign-ins: {'; '.join(outcomes) or 'none, since no listed check signs in'}."
+
+
+def no_verdict(error):
+    """A sign-in that failed (SignInError): one line that names it, and exit status 1, so that the step fails. There is
+    no verdict and no reason, and the line holds no token."""
+    print(f"::error::The screen could not sign in, and gives no verdict ({error}).")
+    return 1
+
+
 def main():
     if sys.argv[1:] == ["--measure"]:
         global DEADLINE
@@ -999,12 +1090,20 @@ def main():
         except Exception as e:   # the message names a setting or a service, never a text of the set
             print(f"The measurement failed: {type(e).__name__}: {str(e)[:300]}", file=sys.stderr)
             return 1
+    if sys.argv[1:] == ["--sign-in"]:
+        try:
+            print(sign_ins())
+        except SignInError as e:
+            return no_verdict(e)
+        return 0
     if len(sys.argv) not in (2, 3):
-        print("usage: screen.py <the .review directory> [<the projects/<name> directory>] | screen.py --measure",
-              file=sys.stderr)
+        print("usage: screen.py <the .review directory> [<the projects/<name> directory>] | screen.py --measure"
+              " | screen.py --sign-in", file=sys.stderr)
         return 2
     try:
         verdict, ran, reason = screen(*sys.argv[1:])
+    except SignInError as e:
+        return no_verdict(e)
     except Exception as e:   # a fault of this file before the checks: held, and the fault goes to the reason only
         verdict, ran, reason = "held", [], {"fault": f"{type(e).__name__}: {str(e)[:2000]}"}
     reason.update(verdict=verdict, ran=ran, repository=os.environ.get("REPOSITORY", ""),

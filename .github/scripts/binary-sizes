@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
-"""Print each binary's two sizes, as one line of JSON, for build.yaml's record of a build:
+"""Print each binary's two sizes, as one line of JSON, for build.yaml's record of a build, or cut such a line:
 
     uv run python3 .github/scripts/binary-sizes <oss-verify check's work directory>
+    uv run python3 .github/scripts/binary-sizes --cut BYTES < <one line of sizes>
 
 {target: {build: {"text": <the .text section's bytes>, "exec": <the bytes the loader maps executable>}}}, from the
 manifest.yaml oss-verify check wrote there and the files in its out/. A value that cannot be read is null. The
 enrollment size line (1 MB of a plain binary, enroll-dispatch) is applied to the larger of the two: the .text section's
 size is what oss-verify check shows, and the executable segments' size is what a build cannot shrink by renaming or
 resizing a section (src/oss_verify/manifest.py, executable_bytes).
+
+--cut reads one line of these sizes on standard input and prints them in at most BYTES bytes of the same JSON, on one
+line, for build.yaml's results job: the job gets them in one environment variable, and Linux starts no process with a
+variable over 131,072 bytes. It prints all the builds when they fit, else only the "plain" build of each target ({} for
+a target with no plain build, or whose value is not an object), else nothing, and then one line on standard error says
+why. .github/scripts/take-build-results and .github/scripts/review-verdict cut the sizes by the same rule. For a line
+that is empty or not a JSON object, it prints nothing.
 """
 import json
 import pathlib
@@ -33,5 +41,38 @@ def sizes(work):
     return out
 
 
+def compact(value):
+    """`value` as one line of compact JSON. json.dumps escapes each character that is not ASCII, so the length of the
+    text is its count of bytes."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def cut(line, limit):
+    """The sizes of `line` in at most `limit` bytes of compact JSON: all the builds, else only the plain build of each
+    target, else ''. A line that is not a JSON object gives ''."""
+    try:
+        value = json.loads(line)
+    except ValueError:
+        return ""
+    if not isinstance(value, dict):
+        return ""
+    text = compact(value)
+    if len(text) <= limit:
+        return text
+    plain = {target: {"plain": builds["plain"]} if isinstance(builds, dict) and "plain" in builds else {}
+             for target, builds in value.items()}
+    text = compact(plain)
+    if len(text) <= limit:
+        return text
+    print(f"binary-sizes: the sizes of the plain builds are over {limit:,} bytes of JSON, so it prints no sizes",
+          file=sys.stderr)
+    return ""
+
+
 if __name__ == "__main__":
-    print(json.dumps(sizes(pathlib.Path(sys.argv[1])), sort_keys=True, separators=(",", ":")))
+    if sys.argv[1:2] == ["--cut"]:
+        text = cut(sys.stdin.readline(), int(sys.argv[2]))
+        if text:
+            print(text)
+    else:
+        print(compact(sizes(pathlib.Path(sys.argv[1]))))

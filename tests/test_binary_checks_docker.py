@@ -20,20 +20,12 @@ from oss_verify import check_build
 from oss_verify import check_links
 from oss_verify import manifest
 from oss_verify import validate
+from test_builder import docker_ready
 
 FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "example"
 TAG = "oss-verify-test/example-records:latest"
 QEMU = shutil.which("qemu-riscv64-static")
 BUILDS = ["plain", "ubsan", "asan"]
-
-
-def docker_ready():
-    """Whether Docker runs and the pinned toolchain image is here."""
-    try:
-        return subprocess.run(["docker", "image", "inspect", check_build.newest_toolchain()],
-                              capture_output=True).returncode == 0
-    except OSError:
-        return False
 
 
 @unittest.skipUnless(os.environ.get("OV_DOCKER_TESTS") == "1" and docker_ready(),

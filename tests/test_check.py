@@ -5,6 +5,7 @@ import contextlib
 import io
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,7 @@ from oss_verify import check as check_tool
 from oss_verify import check_build
 from oss_verify import manifest
 from oss_verify import validate
+from test_layout import layout as layout_script, out_tree
 from test_manifest import PT_DYNAMIC, PT_INTERP, PT_LOAD, elf
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -225,6 +227,210 @@ class Binaries(Project):
         self.assertEqual(lines[-1].count("|"), 6)
         self.assertEqual(lines[-1].count("`"), 2)
         self.assertFalse(any(character in lines[-1] for character in "<>@"))
+
+
+def tree_files(root):
+    """{path below root: bytes} of each file of a directory tree."""
+    return {path.relative_to(root).as_posix(): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
+
+
+class LayoutOptions(Project):
+    """oss-verify check --layout-out writes the layout tree of the first build (infra/base-builder/layout.py
+    collect), and --base-layout, which needs it, makes each build, the second of --twice too, an append build."""
+
+    def setUp(self):
+        super().setUp()
+        self.tree = self.work.parent / "layout"
+        self.base = self.work.parent / "base"
+        self.base.mkdir()
+
+    def check(self, options, damage=None):
+        """Run oss-verify check with `options`, each build_all leaving raw/<build>/ for each build of the run as compile
+        does with link records (test_layout.out_tree; the second one's with a placement.tsv), with `damage` done to
+        the first one's plain record: (exit code, output, record, layout and base_layout of each build_all, with
+        build_all's default for one it is not given, and the layout tree's files when the second build ran)."""
+        calls, seen = [], []
+
+        def build_all(job, commit, work, *args, **kwargs):
+            calls.append(kwargs)
+            if len(calls) > 1:
+                seen.append(tree_files(self.tree) if self.tree.exists() else None)
+            record = out_tree(work / "raw", placement=None if len(calls) == 1 else "the second build's\n")
+            for build in job.builds:
+                if build != "plain":
+                    shutil.copytree(work / "raw" / "plain", work / "raw" / build, symlinks=True)
+            if damage is not None and len(calls) == 1:
+                damage(record)
+            built = {target: {build: entry for build, entry in by_build.items() if build in job.builds}
+                     for target, by_build in FIRST.items()}
+            binaries(work / "out", built)
+            return "builder", "project", ["demo_fuzzer"], built
+
+        code, output, _ = self.main(options, build_all)
+        defaults = {"record": False, "layout": False, "base_layout": None}
+        return code, output, [{name: kwargs.get(name, default) for name, default in defaults.items()}
+                              for kwargs in calls], seen
+
+    def collected(self):
+        """The files that layout.py collect writes for the first build's raw/."""
+        expected = self.work.parent / "expected"
+        self.assertEqual(layout_script.main(["collect", str(self.work / "raw"), str(expected)]), 0)
+        return tree_files(expected)
+
+    def test_layout_out_records_the_links_and_writes_the_layout_tree(self):
+        code, output, calls, _ = self.check(["--layout-out", str(self.tree)])
+        self.assertEqual(code, 0, output)
+        # layout=True records the links too: compile_build gives such a build OV_RECORD=1 (CompileBuild).
+        self.assertEqual(calls, [{"record": False, "layout": True, "base_layout": None}])
+        self.assertEqual(sorted(path.name for path in (self.tree / "plain" / "fuzz_shim").iterdir()),
+                         ["binary.sha256", "calls.tsv", "map", "output.tsv", "sections.tsv", "wraps"])
+        self.assertEqual(tree_files(self.tree), self.collected())
+        self.assertIn(f"layout tree: {self.tree}", output)
+
+    def test_base_layout_makes_each_build_an_append_build_and_the_layout_tree_is_the_first_build_s(self):
+        code, output, calls, seen = self.check(["--twice", "--layout-out", str(self.tree), "--base-layout",
+                                                str(self.base)])
+        self.assertEqual(code, 0, output)
+        self.assertEqual(calls, [{"record": False, "layout": True, "base_layout": self.base.resolve()}] * 2)
+        # Written from the first build's raw/, before the second build ran; the second one's is twice/raw/.
+        self.assertEqual(seen, [self.collected()])
+        self.assertEqual(tree_files(self.tree), self.collected())
+
+    def test_without_the_options_nothing_changes(self):
+        code, output, calls, _ = self.check(["--twice"])
+        self.assertEqual(code, 0, output)
+        self.assertEqual(calls, [{"record": False, "layout": False, "base_layout": None}] * 2)
+        self.assertNotIn("layout tree", output)
+        self.assertFalse(self.tree.exists())
+
+    def test_a_record_with_no_wraps_stops_the_run_with_exit_1(self):
+        code, output, _, _ = self.check(["--layout-out", str(self.tree)], lambda record: (record / "wraps").unlink())
+        self.assertEqual(code, 1)
+        failure = [line for line in output.splitlines() if "LAYOUT TREE WAS NOT WRITTEN" in line]
+        self.assertEqual(len(failure), 1, output)
+        self.assertIn("plain/fuzz_shim", failure[0])
+        self.assertIn("wraps", failure[0])
+        self.assertFalse(self.tree.exists())
+
+    def test_a_build_directory_that_another_run_left_is_not_read(self):
+        # An earlier run's asan build, whose record has no wraps: a collect of each directory of raw/ stops on it.
+        out_tree(self.work.parent / "earlier")
+        shutil.copytree(self.work.parent / "earlier" / "plain", self.work / "raw" / "asan", symlinks=True)
+        for wraps in (self.work / "raw" / "asan" / ".records").glob("*/wraps"):
+            wraps.unlink()
+        code, output, _, _ = self.check(["--build", "plain", "--layout-out", str(self.tree)])
+        self.assertEqual(code, 0, output)
+        self.assertEqual([path.relative_to(self.tree).as_posix() for path in sorted(self.tree.glob("*/*"))],
+                         ["plain/fuzz_shim"])
+        with contextlib.redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(layout_script.main(["collect", str(self.work / "raw"), str(self.work.parent / "all")]), 2)
+        self.assertIn("asan/fuzz_shim", errors.getvalue())
+        self.assertIn("wraps", errors.getvalue())
+
+    def test_layout_out_may_be_an_empty_directory(self):
+        self.tree.mkdir()
+        code, output, _, _ = self.check(["--layout-out", str(self.tree)])
+        self.assertEqual(code, 0, output)
+        self.assertEqual(tree_files(self.tree), self.collected())
+
+    def refused(self, options):
+        """Run oss-verify check with `options`, which it must refuse as argparse does: the line of the error it prints
+        after the usage, which names every option."""
+        built = []
+        with mock.patch.object(check_tool, "build_all", lambda *args, **kwargs: built.append(args)), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors, \
+                self.assertRaises(SystemExit) as stop:
+            check_tool.main(["--no-shell", "--toolchain", TOOLCHAIN, "--dir", str(self.work), *options,
+                             str(self.project)])
+        self.assertEqual(stop.exception.code, 2)
+        # Before anything is built: no build, and not even the work directory.
+        self.assertEqual(built, [])
+        self.assertFalse(self.work.exists())
+        return errors.getvalue().splitlines()[-1]
+
+    def test_base_layout_without_layout_out_is_refused(self):
+        errors = self.refused(["--base-layout", str(self.base)])
+        self.assertIn("--base-layout", errors)
+        self.assertIn("--layout-out", errors)
+
+    def test_base_layout_must_be_a_directory(self):
+        (self.work.parent / "file").write_text("")
+        for path in (self.work.parent / "file", self.work.parent / "missing"):
+            with self.subTest(path=path.name):
+                errors = self.refused(["--layout-out", str(self.tree), "--base-layout", str(path)])
+                self.assertIn(f"--base-layout {path.resolve()}", errors)
+
+    def test_layout_out_that_is_there_and_not_an_empty_directory_is_refused(self):
+        (self.tree / "plain" / "fuzz_shim").mkdir(parents=True)
+        (self.work.parent / "file").write_text("")
+        for path in (self.tree, self.work.parent / "file"):
+            with self.subTest(path=path.name):
+                errors = self.refused(["--layout-out", str(path)])
+                self.assertIn(f"--layout-out {path}", errors)
+
+    def test_layout_out_in_the_base_layout_is_refused(self):
+        # The base layout directory itself, even while it is empty, and a directory in it.
+        for path, filled in ((self.base, False), (self.base, True), (self.base / "new", True)):
+            with self.subTest(path=path.name, filled=filled):
+                if filled:
+                    (self.base / "plain" / "fuzz_shim").mkdir(parents=True, exist_ok=True)
+                errors = self.refused(["--layout-out", str(path), "--base-layout", str(self.base)])
+                self.assertIn(f"--layout-out {path}", errors)
+                self.assertIn("--base-layout", errors)
+
+
+class CompileBuild(unittest.TestCase):
+    """The docker run command of compile_build: with a base layout tree, the tree mounted read-only and named by
+    OV_BASE_LAYOUT, with the records and OV_LAYOUT; with neither a layout nor a base layout, today's command."""
+
+    LABELS = ["--label", "work=/w"]
+
+    def command(self, **options):
+        """(the one docker run command of compile_build for an asan build into a new directory, that directory)."""
+        commands = []
+
+        def run(*argv, quiet=False):
+            commands.append(list(argv))
+            return 0
+
+        with tempfile.TemporaryDirectory() as scratch, mock.patch.object(check_build, "run", run), \
+                mock.patch.dict(os.environ), contextlib.redirect_stdout(io.StringIO()):
+            os.environ.pop("OFT_MAKE_JOBS", None)
+            out = pathlib.Path(scratch) / "out"
+            check_build.compile_build("tag", "asan", "address", out, labels=self.LABELS, **options)
+        self.assertEqual(len(commands), 1)
+        return commands[0], out
+
+    def test_without_a_layout_the_command_is_today_s(self):
+        owner = f"OV_OWNER={os.getuid()}:{os.getgid()}"
+        command, out = self.command()
+        self.assertEqual(command, ["docker", "run", "--rm", "--init", "--network=none", "--label", "work=/w",
+                                   "-e", "SANITIZER=address", "-e", owner, "-v", f"{out}:/out", "tag", "compile"])
+        command, out = self.command(record=True)
+        self.assertEqual(command, ["docker", "run", "--rm", "--init", "--network=none", "--label", "work=/w",
+                                   "-e", "SANITIZER=address", "-e", owner, "-e", "OV_RECORD=1", "-v", f"{out}:/out",
+                                   "tag", "compile"])
+
+    def test_a_layout_records_the_links_with_ov_layout(self):
+        owner = f"OV_OWNER={os.getuid()}:{os.getgid()}"
+        for options in ({"layout": True}, {"layout": True, "record": True}):
+            with self.subTest(**options):
+                command, out = self.command(**options)
+                self.assertEqual(command, ["docker", "run", "--rm", "--init", "--network=none", "--label", "work=/w",
+                                           "-e", "SANITIZER=address", "-e", owner, "-e", "OV_RECORD=1",
+                                           "-e", "OV_LAYOUT=1", "-v", f"{out}:/out", "tag", "compile"])
+
+    def test_a_base_layout_is_mounted_read_only(self):
+        owner = f"OV_OWNER={os.getuid()}:{os.getgid()}"
+        base = pathlib.Path("/layouts/base")
+        for options in ({}, {"layout": True, "record": True}):
+            with self.subTest(**options):
+                command, out = self.command(base_layout=base, **options)
+                self.assertEqual(command, ["docker", "run", "--rm", "--init", "--network=none", "--label", "work=/w",
+                                           "-e", "SANITIZER=address", "-e", owner, "-e", "OV_RECORD=1",
+                                           "-e", "OV_LAYOUT=1", "-v", "/layouts/base:/ov-base-layout:ro",
+                                           "-e", "OV_BASE_LAYOUT=/ov-base-layout", "-v", f"{out}:/out", "tag",
+                                           "compile"])
 
 
 class UbsanSettings(unittest.TestCase):

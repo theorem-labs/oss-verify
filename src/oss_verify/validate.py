@@ -86,6 +86,9 @@ MAX_CORPUS_BYTES = 1024 * 1024  # the zip file
 MAX_CORPUS_INPUTS = 1024
 MAX_CORPUS_EXPANDED = 16 * 1024 * 1024  # all its inputs, uncompressed
 MAX_FILES = 64
+# The setting of a toolchain image with frame pointers. Only the toolchain image gives it, so a Dockerfile or build.sh
+# beside project.yaml does not name it (docs/build-contract.md, "Frame pointers").
+FRAME_POINTERS = "OFT_FRAME_POINTERS"
 
 NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,62}")
 # A file next to project.yaml: a plain name, as the build workflow takes it from a pull request.
@@ -320,17 +323,29 @@ def check_urls(config):
         yield "homepage must be an https:// URL"
 
 
-def check_addresses(config):
-    """Yield a problem for auto_ccs that is not a list, and for each malformed email address."""
+def is_address_list(value):
+    """Whether `value`, the value of auto_ccs, is a list of strings."""
+    return isinstance(value, list) and all(isinstance(address, str) for address in value)
+
+
+def finding_addresses(config):
+    """The addresses that get findings from a project.yaml that is a mapping: primary_contact, unless it is n/a, and
+    each address of auto_ccs. A value that is not a string, and an auto_ccs that is not a list of strings, give none.
+    .github/scripts/terms-accepted reads the addresses of a seeded project with it."""
     addresses = []
     if isinstance(config.get("primary_contact"), str) and config["primary_contact"] != NO_CONTACT:
         addresses.append(config["primary_contact"])
+    if is_address_list(config.get("auto_ccs")):
+        addresses += config["auto_ccs"]
+    return addresses
+
+
+def check_addresses(config):
+    """Yield a problem for auto_ccs that is not a list, and for each malformed email address."""
     ccs = config.get("auto_ccs")
-    if isinstance(ccs, list) and all(isinstance(address, str) for address in ccs):
-        addresses += ccs
-    elif ccs is not None:
+    if ccs is not None and not is_address_list(ccs):
         yield "auto_ccs must be a list of addresses"
-    for address in addresses:
+    for address in finding_addresses(config):
         if not EMAIL.fullmatch(address):
             yield f"bad email {address!r}"
 
@@ -504,8 +519,14 @@ def check_files(config, files):
         if text is None:
             yield f"{name} is larger than {limit // 1024} KiB (or not UTF-8 text)"
             continue
-        if name in ("Dockerfile", "build.sh") and not text.strip():
-            yield f"{name} is empty"
+        if name in ("Dockerfile", "build.sh"):
+            if not text.strip():
+                yield f"{name} is empty"
+            if FRAME_POINTERS in text:
+                yield (
+                    f"{name} names {FRAME_POINTERS}: only the toolchain image gives that setting "
+                    '(docs/build-contract.md, "Frame pointers")'
+                )
         if name in FILE_KEYS and config.get(FILE_KEYS[name]) is not None:
             yield f"{name} is given both beside project.yaml and as {FILE_KEYS[name]}: in your repository; one place only"
         if in_repo and name not in FILE_KEYS:
@@ -602,11 +623,8 @@ def config_warnings(config, files):
         warnings.append(
             "primary_contact is n/a: only a project we seeded may say that, and only until a maintainer adopts it"
         )
-    contacts = [config.get("primary_contact")]
-    if isinstance(config.get("auto_ccs"), list):
-        contacts += config["auto_ccs"]
-    for address in contacts:
-        if isinstance(address, str) and RESERVED_DOMAIN.fullmatch(address.rpartition("@")[2]):
+    for address in finding_addresses(config):
+        if RESERVED_DOMAIN.fullmatch(address.rpartition("@")[2]):
             warnings.append(f"{address} is a placeholder: its domain is reserved for examples, so no report reaches it")
     repo = config.get("repo")
     if isinstance(repo, str) and "#" in repo:

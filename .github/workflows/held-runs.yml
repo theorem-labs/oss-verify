@@ -1,0 +1,455 @@
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+name: Held runs
+# Starts the screen of a pull request whose runs GitHub holds. With the repository's default setting, GitHub holds
+# each run of a first-time contributor's pull request (status action_required) until someone with write access
+# approves it. Events run the default branch's copy of this file, main's (the triggers, below): a run of Build, Triage
+# or Tests that ended, a push to main, an issue opened or reopened, or a run by hand on main. Its one step lists
+# every held run of the event pull_request, and groups the runs by head repository, head branch and head commit: a
+# head. For each head, it finds the pull request into the default branch from that repository and branch:
+#   open, at the head        When a held run of the head is not screened (below), the step starts a run by hand of
+#                            review.yml on main:
+#                              gh workflow run review.yml -R theorem-labs/oss-verify --ref main -f pr=<n>
+#                            That run screens the pull request from the API. When the screen passes, the run approves
+#                            the held runs of the head (review.yml, the table of a run by hand). When the screen of the
+#                            newest run gave a verdict and a later job of it failed, the step re-runs the failed jobs
+#                            of that run, and starts no run, unless that run had its 50 re-runs or GitHub refuses the
+#                            re-run (below).
+#   merged, at the head or   When a held run of the head is of .github/workflows/enroll-merged.yml, and no replay of
+#   at its merge commit      that file for the pull request (event workflow_dispatch, title merged #<n>) was created at
+#                            or after it, the step starts the same run by hand of review.yml. That run replays the
+#                            merge with the oss-verify App's token (review.yml, the table of a run by hand), so that
+#                            enroll-dispatch.yml runs on its completion. The step never starts enroll-merged.yml
+#                            itself: a run that a job's GITHUB_TOKEN starts starts no workflow_run when it completes.
+#                            While a run by hand of review.yml for the pull request is not complete, the step starts
+#                            nothing. When the newest such run was created at or after the held run and less than an
+#                            hour ago, the step starts nothing too: at most one start an hour.
+# Any other head gets nothing: no pull request has it, its pull request closed without a merge, the head moved, or no
+# held run of a merged head is of enroll-merged.yml. In one run of this file, the step starts at most one run of
+# review.yml for each pull request. Its summary has one line for each head: what it started or re-ran, or why it left
+# the head.
+# A held run of .github/workflows/maintainer-confirmed.yml whose actor is oss-verify[bot] is left out before the step
+# groups the runs. The oss-verify App put on the label that started it (review-held, review-passed, size-review or
+# another label of the App), and that label is no new event at the head. So the run makes no head, and it does not
+# change the newest held run of a head. A label that a person or another account put on counts, and gets one more
+# screen (below). route in review.yml has the same rule when it finds the held runs of a head on a run by hand. Keep
+# the two rules equal.
+# GitHub gives at most 1,000 runs of a list of runs with a filter (actor, branch, check_suite_id, created, event,
+# head_sha or status), newest first. The list of the held runs and each list of runs by hand are such lists. So when a
+# read of a list gives 1,000 runs, the step reads the list again for the runs created from a bound to the oldest run
+# that it read (both included), until a read gives fewer than 1,000 runs. The bound of the held runs is 30 days before
+# now: GitHub deletes a run that waits for approval after 30 days.
+# The step reads the runs by hand of each file once, from the earliest bound of a head. The bound of a head is the
+# earlier of the creation of its newest held run (for a merged head, of its newest held run of enroll-merged.yml) and
+# three hours before now. Each head decides only from the runs created at or after its own bound.
+# When the read of the default branch or of the held runs fails, the step fails at once. When a read, a re-run or a
+# start for one head fails, the line of that head says why, the step goes on to the next head, and the step fails at
+# its end. Then the run is red, and the next event tries again.
+# The rules "at most once an hour" below read the times of runs from the API, not the time of this run. So they hold
+# whatever event starts this file. A head that an hour rule leaves waits for the first event after that hour.
+#
+# A held run counts as screened when a workflow_dispatch run of review.yml for its pull request (title Pull request
+# <n>, the only kind of run that approves) was created after it, and that run counts. A workflow_run run of Review
+# (title Review of run <id>) screens too, but it approves nothing, so it does not count. A run counts only when it
+# ended in success and its job screen ended in success. Then its screen gave a verdict from the model, passed or
+# held, and when that verdict passed, its approval step approved the held runs. A run that failed does not count.
+# Examples are a screen that cannot sign in or cannot get a model token (.github/scripts/screen.py then fails and
+# gives no verdict), a comment job that cannot sign in, and an approval that failed. A run that the daily cap stopped
+# has no job screen, so it does not count either. While a run of review.yml for the pull request is not complete (a
+# re-run of its failed jobs too), the step starts nothing for it. When no run counts, the newest run created after the
+# newest held run decides:
+#   - Its job screen ended in success and the run did not: the screen gave a verdict, and a later job failed. The step
+#     re-runs the failed jobs of that run (POST repos/theorem-labs/oss-verify/actions/runs/<id>/rerun-failed-jobs), at
+#     most once an hour by the start of the run's latest attempt (run_started_at), and starts no new run. The verdict
+#     of the screen stands, nothing screens the head again, and the daily caps count that run once. GitHub runs at
+#     most 50 re-runs of a run, and no re-run of a run older than 30 days. In these two cases the step starts a new
+#     run of the head in place of the re-run, and that run screens the head again:
+#       - The 50 re-runs: GitHub answers a 51st re-run with a failed check suite, not with an answer of HTTP 4xx. So
+#         the step reads the limit before the call, from the run's run_attempt (1 for the first attempt, and one more
+#         for each re-run). At attempt 51 or more, the run had its 50 re-runs, and the step calls no re-run. A run with
+#         no run_attempt, or with a run_attempt that is not a number, is not at the limit: the step re-runs it.
+#       - The 30 days: GitHub refuses the re-run of an older run. A refusal is an answer of HTTP 4xx, for which gh
+#         prints gh: <message> (HTTP 4xx), or gh: HTTP 4xx when the answer has no message.
+#     Any other failure of the re-run (an answer of HTTP 5xx, or no answer) is no refusal: the step starts no run, and
+#     the line of the head says that the re-run failed (above). When the App's installation never accepts actions:
+#     write, the step re-runs the failed jobs of such a run at most once an hour, with no cost to the caps, until the
+#     run had its 50 re-runs or GitHub refuses the re-run. Then a new run screens the head, and the same occurs to that
+#     run, until a person repairs the App. A person sees this as a failed comment job at the head.
+#   - Else (that run gave no verdict, or no run came after the newest held run): the step starts the head again, at
+#     most once an hour after the newest run of any time, also when a new held run comes in that hour.
+# So a head started before the three applies of dispatch://INFRA-3746, which admit review.yml's sign-ins at different
+# times, is screened again or re-run after the last of them, with no person.
+# Each new held event at a head gets one screen that gives a verdict, and other events alone get no more: the step
+# starts a new run of a head only when no run came after its newest held run, the newest that came gave no verdict,
+# that run had its 50 re-runs, or GitHub refused the re-run of that run. A head that the screen held keeps its held
+# runs, all older than that screen, and gets no new screen. This is no rescreen loop of a held item
+# (dispatch://OSSV-202's rule). A new event at that head that GitHub holds (an edit of the description runs Terms, a
+# person's label runs Maintainer confirmed) has a held run newer than the screen, and gets one more screen.
+#
+# The job holds no identity and no secret, so no admission of dispatch://INFRA-3369 covers it. Its token is the job's
+# GITHUB_TOKEN, with two permissions and no other: actions: write, to start runs, to re-run the failed jobs of a run
+# and to read runs and their jobs, and pull-requests: read, to read pull requests. (actions: write also lets a token
+# cancel and delete runs. The step does neither.) The job checks out nothing and runs no code of a pull request. GitHub
+# creates a workflow_dispatch run that a job's GITHUB_TOKEN starts (docs.github.com, "Triggering a workflow from a
+# workflow"). The run of review.yml that the step starts has the actor github-actions[bot]. review.yml gives such a run
+# only its held path (the screen, then the approval of the held runs or the record of the hold) and its replay of a
+# merge. Such a run writes no triage comment, and it does nothing when the head is no longer held (the top of
+# review.yml).
+
+# Events only, never a schedule. Each event below runs main's copy of this file. A held run starts no workflow_run when
+# GitHub holds it, so a held head waits for the next of these events in the repository.
+on:
+  # A run of the pull requests' own workflows that ended: Build, Triage and Tests run for each push of a pull request
+  # whose runs GitHub does not hold, and for an approved run of a held head.
+  workflow_run:
+    workflows: [Build, Triage, Tests]
+    types: [completed]
+  # A merge, or any other push to main.
+  push:
+    branches: [main]
+  issues:
+    types: [opened, reopened]
+  # A run by hand, on main only (the job's if).
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  # One run at a time in the repository. A new run waits for the run in progress, and does not cancel it. Every waiting
+  # run keeps its place (queue: max), so no event's run is cancelled by a later one
+  # (https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).
+  group: held-runs
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  held-runs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    # actions: write to start runs, to re-run failed jobs and to read runs and their jobs, pull-requests: read to read
+    # pull requests.
+    permissions: {actions: write, pull-requests: read}
+    steps:
+      - name: Start a screen for each held head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          say() { echo "$1"; echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
+          now=$EPOCHSECONDS
+          # The default branch comes from the API, the same way for every event.
+          default=$(gh api "repos/$REPO" --jq .default_branch)
+          [[ $default =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "::error::GitHub gave no default branch of $REPO."; exit 1; }
+          base=$(jq -rn --arg b "$default" '$b | @uri')
+
+          # window <endpoint> <filter> <bound> [<created>]: lines gets the runs of <endpoint> (a list of runs, with
+          # its query), each run once, as the lines that the jq <filter> gives. A line starts with the id of its run
+          # and the run's created_at in seconds, split at U+001F. The first read asks for the runs created <created>
+          # (GitHub's search syntax), or for each run when there is no <created>. GitHub gives at most 1,000 runs of
+          # a list with a filter (the top of this file). So while a read gives 1,000 runs or more, window reads the
+          # runs created from <bound> to the oldest run of that read, both included. It returns 1 when a read fails, and
+          # when a read again gives 1,000 runs or more with no run older than the read before: no read can then go on.
+          window() {
+            local endpoint=$1 filter=$2 bound=$3 created=${4:-} page line id at count oldest upper=""
+            local -a range
+            local -A seen=()
+            lines=""
+            while true; do
+              range=()
+              if [ -n "$created" ]; then range=(-f "created=$created"); fi
+              page=$(gh api --paginate --method GET "${range[@]}" "$endpoint" --jq "$filter") || return 1
+              count=0 oldest=""
+              while IFS= read -r line; do
+                [ -n "$line" ] || continue
+                id=${line%%$'\x1f'*} at=${line#*$'\x1f'}
+                at=${at%%$'\x1f'*}
+                count=$(( count + 1 ))
+                if [[ $at =~ ^[0-9]+$ ]] && { [ -z "$oldest" ] || (( at < oldest )); }; then oldest=$at; fi
+                if [ -z "${seen[$id]+kept}" ]; then seen[$id]=kept; lines+=$line$'\n'; fi
+              done <<< "$page"
+              if (( count < 1000 )); then return 0; fi
+              [ -n "$oldest" ] || return 1
+              if [ -n "$upper" ] && (( oldest >= upper )); then return 1; fi
+              upper=$oldest
+              created="$bound..$(jq -rn --argjson t "$oldest" '$t | todate')" || return 1
+            done
+          }
+
+          # The held runs: id, created_at in seconds, file, head commit, head repository, head branch and actor, split
+          # at U+001F. GitHub deletes a run that waits for approval after 30 days, so a read of the held runs again
+          # (window) starts 30 days before now. A head is its repository, branch and commit, split at U+001F. newest:
+          # the newest created_at of the head's held runs. merge: the newest created_at of its held runs of
+          # enroll-merged.yml. heads: each head once, in the order GitHub lists their runs, newest first.
+          month=$(jq -rn --argjson t "$(( now - 30 * 86400 ))" '$t | todate')
+          window "repos/$REPO/actions/runs?status=action_required&event=pull_request&per_page=100" \
+            '.workflow_runs[] | [(.id | tostring), (.created_at | fromdateiso8601 | tostring), .path // "",
+                                 .head_sha // "", .head_repository.full_name // "", .head_branch // "",
+                                 .actor.login // ""] | join("\u001f")' "$month" \
+            || { echo "::error::GitHub gave no held runs of $REPO."; exit 1; }
+          declare -A newest=() merge=()
+          heads=()
+          while IFS=$'\x1f' read -r id created path sha repository branch actor; do
+            [ -n "${id:-}" ] || continue
+            # The oss-verify App's own label (the top of this file).
+            if [[ $path == .github/workflows/maintainer-confirmed.yml && $actor == "oss-verify[bot]" ]]; then
+              say "Held run $id: left. The oss-verify App put on the label that started it, and that label is no new event at the head."
+              continue
+            fi
+            # A deleted fork gives no head repository.
+            if ! [[ $id =~ ^[0-9]+$ && $sha =~ ^[0-9a-f]{40}$ && $repository =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$
+                    && -n $branch && $created =~ ^[0-9]+$ ]]; then
+              say "Held run $id: left. GitHub gives no head commit, head repository or head branch of it."
+              continue
+            fi
+            head=$repository$'\x1f'$branch$'\x1f'$sha
+            if [ -z "${newest[$head]:-}" ]; then heads+=("$head"); newest[$head]=$created; fi
+            if (( created > ${newest[$head]} )); then newest[$head]=$created; fi
+            if [ "$path" = .github/workflows/enroll-merged.yml ] && (( created > ${merge[$head]:-0} )); then
+              merge[$head]=$created
+            fi
+          done <<< "$lines"
+          if (( ${#heads[@]} == 0 )); then say "No run is held."; exit 0; fi
+
+          # earliest: the bound of this pass in seconds, the earliest bound of a head. The bound of a head is the
+          # earlier of its since (one, below) and three hours before now. A run that counts, a run whose failed jobs
+          # the step re-runs and a replay of a merge come at or after the held run. The hour rules read the last hour,
+          # and no run by hand of review.yml or enroll-merged.yml runs for three hours. So a run before the bound of a
+          # head changes nothing that the step decides for that head.
+          earliest=$(( now - 10800 ))
+          for head in "${heads[@]}"; do
+            if (( ${newest[$head]} < earliest )); then earliest=${newest[$head]}; fi
+            if (( ${merge[$head]:-$earliest} < earliest )); then earliest=${merge[$head]}; fi
+          done
+
+          # by_hand <file>: runs gets the runs by hand of .github/workflows/<file> (event workflow_dispatch) created at
+          # or after earliest: id, created_at in seconds, title, status, conclusion, run_started_at (the start of the
+          # run's latest attempt) in seconds and run_attempt (1 for the first attempt, and one more for each re-run,
+          # empty when GitHub gives none), split at U+001F. It reads each file once in a pass (listed), only when a
+          # head needs it, and returns 1 when the read fails.
+          declare -A listed=()
+          by_hand() {
+            local from
+            if [ -z "${listed[$1]+read}" ]; then
+              from=$(jq -rn --argjson t "$earliest" '$t | todate') || return 1
+              window "repos/$REPO/actions/workflows/$1/runs?event=workflow_dispatch&per_page=100" \
+                '.workflow_runs[] | select(.event == "workflow_dispatch") | [(.id | tostring),
+                   (.created_at | fromdateiso8601 | tostring), .display_title // "", .status // "", .conclusion // "",
+                   (.run_started_at | fromdateiso8601 | tostring), (.run_attempt // "" | tostring)] | join("\u001f")' \
+                "$from" ">=$from" || return 1
+              listed[$1]=$lines
+            fi
+            runs=${listed[$1]}
+          }
+          # verdict <run id>: gave[<run id>] gets true when the job screen of the run concluded success, else false.
+          # screen.py exits 0 with each verdict, clean or held, and exits 1 when a sign-in fails, so a job screen
+          # that ended success gave a verdict. A run that the daily cap stopped has no job screen. It reads the jobs of
+          # a run once, and returns 1 when the read fails.
+          declare -A gave=()
+          verdict() {
+            local jobs
+            if [ -z "${gave[$1]:-}" ]; then
+              jobs=$(gh api --paginate "repos/$REPO/actions/runs/$1/jobs?per_page=100" \
+                --jq '.jobs[] | select(.name == "screen" and .conclusion == "success") | .id') || return 1
+              gave[$1]=false
+              if [ -n "$jobs" ]; then gave[$1]=true; fi
+            fi
+          }
+          # counts <run id> <its conclusion>: counted[<run id>] gets true when the run counts as a screen (the top
+          # of this file), else false. It counts when the run ended success and its job screen gave a verdict. A run
+          # ends success only when none of its jobs failed, so a comment job that cannot sign in or approve makes it a
+          # failure. Of the runs that did not end success, the step reads the jobs only of the newest run after the
+          # newest held run (one, below). It returns 1 when the read of the jobs fails.
+          declare -A counted=()
+          counts() {
+            if [ -z "${counted[$1]:-}" ]; then
+              if [ "$2" = success ]; then
+                verdict "$1" || return 1
+                counted[$1]=${gave[$1]}
+              else
+                counted[$1]=false
+              fi
+            fi
+          }
+          # The pull requests for which this run started review.yml.
+          declare -A dispatched=()
+          # pulled[<owner>:<branch>]: the pull requests that one (below) reads for a head repository's owner and branch.
+          # The step reads each list once, so the heads of one branch make one read.
+          declare -A pulled=()
+          # fail <head> <why>: the line of a head for which a read, a re-run or a start failed. The step goes on to the
+          # next head, and fails at its end (failed).
+          failed=false
+          fail() { say "$1: failed. $2 The step goes on to the next head, and fails at its end."; failed=true; }
+          # start <why> <line>: starts review.yml for the pull request of the head that one reads (number), and says
+          # the line of the head (at), <line>. When the start fails, the line of the head says <why> (fail).
+          start() {
+            gh workflow run review.yml -R "$REPO" --ref main -f "pr=$number" || { fail "$at" "$1"; return; }
+            dispatched[$number]=true
+            say "$at: $2"
+          }
+
+          # one <head>: what the head gets (the top of this file), and its line of the summary. A read, a re-run or a
+          # start that fails makes the head's line (fail), and one returns.
+          one() {
+            local repository branch sha at of list n state merged into to ref from at_sha at_merge number="" kind=""
+            local since bound runs id title status conclusion created started attempt said refusal last="" after="" i
+            local -a ids=() statuses=() conclusions=() times=() starts=() attempts=()
+            IFS=$'\x1f' read -r repository branch sha <<< "$1"
+            at="Head ${sha:0:7} of $repository:$branch"
+            # The pull requests into the default branch from the head's repository and branch, with route's filter
+            # head=<owner>:<branch> (review.yml): number, state, merged, base, base repository, head branch, head
+            # repository, head commit and merge commit, split at U+001F. Once for each <owner>:<branch> (pulled).
+            of="${repository%%/*}:$(jq -rn --arg b "$branch" '$b | @uri')"
+            if [ -z "${pulled[$of]+read}" ]; then
+              list=$(gh api --paginate "repos/$REPO/pulls?state=all&base=$base&head=$of&per_page=100" \
+                --jq '.[] | [(.number | tostring), .state // "", (.merged_at != null | tostring), .base.ref // "",
+                             .base.repo.full_name // "", .head.ref // "", .head.repo.full_name // "", .head.sha // "",
+                             .merge_commit_sha // ""] | join("\u001f")') \
+                || { fail "$at" "GitHub gave no pull requests from $of."; return; }
+              pulled[$of]=$list
+            fi
+            # The open one at the head, else a merged one whose head commit or merge commit is the head's commit.
+            while IFS=$'\x1f' read -r n state merged into to ref from at_sha at_merge; do
+              [[ ${n:-} =~ ^[1-9][0-9]*$ && $into == "$default" && $to == "$REPO" && $ref == "$branch" ]] || continue
+              if [[ $state == open && $at_sha == "$sha" && $from == "$repository" ]]; then
+                number=$n kind=open
+                break
+              fi
+              if [[ -z $kind && $merged == true && ($at_sha == "$sha" || $at_merge == "$sha") ]]; then
+                number=$n kind=merged
+              fi
+            done <<< "${pulled[$of]}"
+            if [ -z "$kind" ]; then
+              say "$at: left. No open pull request into $default is at this head, and no merged one has it as its head or merge commit: the head moved, or the pull request is closed."
+              return
+            fi
+
+            # since: the creation of the newest held run of the head, for a merged head of its newest held run of
+            # enroll-merged.yml.
+            since=${newest[$1]}
+            if [ "$kind" = merged ]; then
+              at+=", merged pull request $number"
+              if [ -z "${merge[$1]:-}" ]; then
+                say "$at: left. No held run of this head is of enroll-merged.yml."
+                return
+              fi
+              since=${merge[$1]}
+            else
+              at+=", pull request $number"
+            fi
+            if [ -n "${dispatched[$number]:-}" ]; then
+              say "$at: left. This run started review.yml for the pull request already."
+              return
+            fi
+            if [ "$kind" = merged ]; then
+              by_hand enroll-merged.yml || { fail "$at" "GitHub gave no runs by hand of enroll-merged.yml."; return; }
+              while IFS=$'\x1f' read -r id created title status conclusion started attempt; do
+                [[ ${id:-} =~ ^[0-9]+$ && $title == "merged #$number" && $created =~ ^[0-9]+$ ]] || continue
+                if (( created >= since )); then
+                  say "$at: left. Run $id of enroll-merged.yml replayed the merge after the held run."
+                  return
+                fi
+              done <<< "$runs"
+            fi
+
+            # The runs by hand of review.yml for this pull request, created at or after the bound of the head (the
+            # earlier of since and three hours before now): the runs that a read from that bound gives. A run of
+            # another title is not one of them: a workflow_run run (Review of run <id>) approves nothing and replays
+            # nothing.
+            by_hand review.yml || { fail "$at" "GitHub gave no runs by hand of review.yml."; return; }
+            bound=$(( since < now - 10800 ? since : now - 10800 ))
+            while IFS=$'\x1f' read -r id created title status conclusion started attempt; do
+              [[ ${id:-} =~ ^[0-9]+$ && $title == "Pull request $number" && $created =~ ^[0-9]+$
+                 && $started =~ ^[0-9]+$ ]] || continue
+              (( created >= bound )) || continue
+              ids+=("$id") statuses+=("$status") conclusions+=("$conclusion") times+=("$created") starts+=("$started")
+              attempts+=("$attempt")
+            done <<< "$runs"
+            # Screened: a run created at or after the newest held run counts.
+            if [ "$kind" = open ]; then
+              for i in "${!ids[@]}"; do
+                if (( times[i] >= since )); then
+                  counts "${ids[i]}" "${conclusions[i]}" \
+                    || { fail "$at" "GitHub gave no jobs of run ${ids[i]} of review.yml."; return; }
+                  if [ "${counted[${ids[i]}]}" = true ]; then
+                    say "$at: left. Run ${ids[i]} of review.yml screened the head after its newest held run, and ended success."
+                    return
+                  fi
+                fi
+              done
+            fi
+            # Any run not complete: nothing. last: the newest run. after: the newest run created at or after since.
+            for i in "${!ids[@]}"; do
+              if [ "${statuses[i]}" != completed ]; then
+                say "$at: left. Run ${ids[i]} of review.yml for the pull request is not complete."
+                return
+              fi
+              if [ -z "$last" ] || (( times[i] > times[last] )); then last=$i; fi
+              if (( times[i] >= since )) && { [ -z "$after" ] || (( times[i] > times[after] )); }; then after=$i; fi
+            done
+            # A merged head: at most one start an hour after the newest run, when that run came after the held run.
+            if [ "$kind" = merged ]; then
+              if [ -n "$last" ] && (( times[last] >= since && now - times[last] < 3600 )); then
+                say "$at: left. Run ${ids[last]} of review.yml for the pull request came after the held run of enroll-merged.yml, and is less than an hour old. The step starts review.yml again an hour after it."
+                return
+              fi
+              start "GitHub refused to start review.yml." "started review.yml, which replays the merge with the oss-verify App's token, so that enroll-dispatch.yml runs on its completion."
+              return
+            fi
+            # When the screen of that run gave a verdict and the run did not end success, a later job failed. The step
+            # re-runs the failed jobs of the run, at most once an hour by the start of its latest attempt, and starts
+            # no new run: the verdict stands, and nothing screens the head again. GitHub runs at most 50 re-runs of a
+            # run (the top of this file). A run at attempt 51 or more had its 50 re-runs, so the step calls no re-run,
+            # and a new run screens the head again. A run with no run_attempt, or with a run_attempt that is not a
+            # number, is not at the limit. When GitHub refuses the re-run (a run older than 30 days), a new run screens
+            # the head again too. A refusal is an answer of HTTP 4xx (gh: <message> (HTTP 4xx), or gh: HTTP 4xx). After
+            # any other failure of the re-run, the step starts no run, and the line of the head says that the re-run
+            # failed (fail).
+            if [ -n "$after" ]; then
+              verdict "${ids[after]}" \
+                || { fail "$at" "GitHub gave no jobs of run ${ids[after]} of review.yml."; return; }
+              if [ "${gave[${ids[after]}]}" = true ] && [ "${conclusions[after]}" != success ]; then
+                if (( now - starts[after] < 3600 )); then
+                  say "$at: left. The screen of run ${ids[after]} of review.yml gave a verdict after the newest held run of the head, and a later job failed. The latest attempt of the run started less than an hour ago. An hour after that start, the step re-runs its failed jobs, or starts a new run of the head when the run had GitHub's 50 re-runs."
+                  return
+                fi
+                if [[ ${attempts[after]} =~ ^[1-9][0-9]*$ ]] && (( attempts[after] > 50 )); then
+                  start "GitHub refused to start review.yml." \
+                    "started review.yml. Run ${ids[after]} of review.yml is at attempt ${attempts[after]}: it had GitHub's 50 re-runs, so a new run screens the head again."
+                  return
+                fi
+                if said=$(gh api --method POST "repos/$REPO/actions/runs/${ids[after]}/rerun-failed-jobs" \
+                            2>&1 > /dev/null); then
+                  say "$at: re-ran the failed jobs of run ${ids[after]} of review.yml. Its screen gave a verdict after the newest held run of the head, and a later job failed. The verdict stands, and nothing screens the head again."
+                  return
+                fi
+                refusal='(^|[ (])HTTP 4[0-9]{2}($|[^0-9])'
+                if ! [[ $said =~ $refusal ]]; then
+                  fail "$at" "GitHub gave no answer to the re-run of the failed jobs of run ${ids[after]} of review.yml."
+                  return
+                fi
+                start "GitHub refused the re-run of the failed jobs of run ${ids[after]} of review.yml, and the start of review.yml." \
+                  "started review.yml. GitHub refused the re-run of the failed jobs of run ${ids[after]} of review.yml (GitHub runs no re-run of a run older than 30 days), so a new run screens the head again."
+                return
+              fi
+            fi
+            # Else the newest run after the newest held run gave no verdict, or no run came after it. When the newest
+            # run of any time does not count and was created less than an hour ago, the head waits: at most one start
+            # an hour.
+            if [ -n "$last" ] && (( now - times[last] < 3600 )); then
+              counts "${ids[last]}" "${conclusions[last]}" \
+                || { fail "$at" "GitHub gave no jobs of run ${ids[last]} of review.yml."; return; }
+              if [ "${counted[${ids[last]}]}" != true ]; then
+                say "$at: left. Run ${ids[last]} of review.yml does not count as a screen: the run or its job screen did not end success. The run is less than an hour old, and the step starts the head again an hour after it."
+                return
+              fi
+            fi
+            start "GitHub refused to start review.yml." "started review.yml. No run by hand of review.yml after the newest held run of the head counts as a screen."
+          }
+
+          for head in "${heads[@]}"; do one "$head"; done
+          if [ "$failed" = true ]; then
+            echo "::error::A read, a re-run or a start of GitHub failed for a head (its line above). The next event tries again."
+            exit 1
+          fi
