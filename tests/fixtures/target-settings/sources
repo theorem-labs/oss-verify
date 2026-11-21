@@ -1,0 +1,22 @@
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+# kind	path	arguments: see lay-out-sources
+# The library tree of the first target key, with its vendored file. Each other target key links to it.
+copy	ext/fxs-limit/src/CMakeLists.txt	CMakeLists.txt
+copy	ext/fxs-limit/src/fxs.c	fxs.c
+copy	ext/fxs-limit/src/fxs.h	fxs.h
+copy	ext/fxs-limit/src/oft-vendor/v.c	v.c
+link	ext/fxs-libc/src	ext/fxs-limit/src
+link	ext/fxs-paths/src	ext/fxs-limit/src
+link	ext/fxs-none/src	ext/fxs-limit/src
+link	ext/fxs-undeclared/src	ext/fxs-limit/src
+# The files of each target key: its harness and, when its block makes a C library, the source of marker.o.
+copy	targets/fxs-limit/step_fuzzer.c	step_fuzzer.c
+copy	targets/fxs-libc/marker_fuzzer.c	marker_fuzzer.c
+copy	targets/fxs-libc/marker.c	marker.c
+copy	targets/fxs-paths/paths_fuzzer.c	paths_fuzzer.c
+copy	targets/fxs-none/paths_fuzzer.c	paths_fuzzer.c
+copy	targets/fxs-undeclared/marker_fuzzer.c	marker_fuzzer.c
+copy	targets/fxs-undeclared/marker.c	marker.c
+# The harness of the two links that build.sh makes at its top level.
+copy	oss-style/step_fuzzer.c	step_fuzzer.c
