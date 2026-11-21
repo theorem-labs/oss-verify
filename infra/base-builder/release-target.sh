@@ -33,6 +33,13 @@
 # respelling of paths, which a build from its recipe never uses. The link names $LIB_FUZZING_ENGINE, so
 # link-fuzz-target makes it in the release's order, with the seals build_lib added. Added: when compile records the
 # build (oss-verify check --checks), a front before each shim that records each compile (record-compile).
+#
+# A fuzz target's block can turn off the path rewrite: it sets OV_PATH_REWRITE=off in its subshell, before
+# ov_target_begin. The shims then give each source path to the compiler as the build gives it. They rewrite no path to
+# a /src name, they make no relative oft-vendor path absolute, and they add no -fmacro-prefix-map or
+# -fdebug-prefix-map. They keep -DOFT_RELEASE_BUILD=1, the -march pin and their other words. The neutral names under
+# /src and the record fronts stay. With OV_PATH_REWRITE unset, the shims are the release's. Any other value stops the
+# build.
 
 # shellcheck source=recipes.sh
 . /usr/local/lib/oss-verify/recipes.sh
@@ -85,8 +92,11 @@ oft_write_cc_shim() {
 }
 
 # ov_release_layout <target> [<dependency> ...]: the release layout for a target and its dependencies, and the
-# compiler shims that rewrite paths into it.
+# compiler shims that rewrite paths into it. With OV_PATH_REWRITE=off, the shims rewrite no path (above).
 ov_release_layout() {
+  if [ -n "${OV_PATH_REWRITE+x}" ] && [ "$OV_PATH_REWRITE" != off ]; then
+    echo "ov_release_layout: OV_PATH_REWRITE must be off or unset, not '$OV_PATH_REWRITE'" >&2; exit 1
+  fi
   OFT_REL_FLAGS=""
   OFT_REL_CASES=""
   OFT_SYSROOT_FLAG=""
@@ -122,6 +132,20 @@ while [ "$i" -lt "$n" ]; do
   set -- "$@" "$a"
   i=$((i+1))
 done'
+  # OV_PATH_REWRITE=off: of the flags above, the shims keep -DOFT_RELEASE_BUILD=1 alone. Their pin is the pin of
+  # toolchain.sh's shims: it changes -march and no other argument.
+  if [ "${OV_PATH_REWRITE-}" = off ]; then
+    OFT_REL_CASES=""
+    OFT_REL_FLAGS=" -DOFT_RELEASE_BUILD=1"
+    # shellcheck disable=SC2016 # the shims' own text, which expands when a shim runs
+    OFT_ARCH_PIN='n=$#; i=0
+while [ "$i" -lt "$n" ]; do
+  a=$1; shift
+  case "$a" in -march=rv*) a=-march=rv64g ;; esac
+  set -- "$@" "$a"
+  i=$((i+1))
+done'
+  fi
   oft_write_cc_shim "$SHIM/$CHOST-clang-plain" \
     'clang --config=/opt/asan-static/musl.cfg'
   oft_write_cc_shim "$SHIM/$CHOST-clang++-plain" \
@@ -144,7 +168,9 @@ done'
 
 # ov_target_begin <target> [<dependency> ...]: what the release's build sets up for a target before it reads the
 # pin. The variables compile adds for OSS-Fuzz-style builds stay set for this script but are no longer exported, so
-# that the target's build sees the environment the release's did; it runs from / as the release's did.
+# that the target's build sees the environment the release's did; it runs from / as the release's did. To turn off
+# the path rewrite, set OV_PATH_REWRITE=off before this call (above). The dependencies that the block builds with
+# ov_target_dependency use the same shims, so the setting applies to them too.
 ov_target_begin() {
   T=${1:?ov_target_begin needs the release target}
   LIBREL=build/lib/$FLAV
