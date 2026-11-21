@@ -351,6 +351,89 @@ class RealRecord(unittest.TestCase):
         self.assertTrue(all(check_links.runtime_kind(p) for p, _s in provided))
 
 
+class RealRecordWithLibc(unittest.TestCase):
+    """The reading of a record whose build declares its own C library (OV_LIBC): tests/fixtures/link-record/.
+
+    The record is the asan build's link of libc_fuzzer, a fuzz target of the test project
+    tests/fixtures/target-settings/. The build cluster wrote it in the job farm/20261121t204015z-09eeff, which built
+    that project with the tools at commit 05b3b763d715 (dispatch://OSSV-866). The fixture keeps the record as the
+    build wrote it, with its map gzipped (gzip -n -9). Its libc file declares a copy of the toolchain image's C
+    library, whose libc.a has one more member, marker.o. A record written here says what its writer believes a link
+    records, so the reading of the libc file is held against a record a build wrote, for the reason that RealRecord
+    gives.
+    """
+
+    RECORD = pathlib.Path(__file__).resolve().parent / "fixtures/link-record/fxs-libc_fuzzer.asan"
+    # The rows of the record's libc file: {file name: (real path, sha256)}.
+    LIBC = {
+        "libc.a": ("/work/build/lib/asan/fxs-libc.libc/lib/libc.a",
+                   "9a6179f160c2b0666befdab91bddb9dfba39800c9b4a177ffd5aa3e7ab306eb2"),
+        "crt1.o": ("/work/build/lib/asan/fxs-libc.libc/lib/crt1.o",
+                   "111e0dda16a02983fee66cc70e332b41860dccad42d8fb0990776814ef70930a"),
+        "crti.o": ("/work/build/lib/asan/fxs-libc.libc/lib/crti.o",
+                   "a6e2f8732e64c9664569346d4e5b8937e8c560beca9122a4dbeaf89e9cd37e4b"),
+        "crtn.o": ("/work/build/lib/asan/fxs-libc.libc/lib/crtn.o",
+                   "3a7c0db23f66cca64d8f40be4ffc5c26a1371a0f0291e5a161c2dac2f66a6a47"),
+    }
+    # The files of the declared C library that the link took. It took no crti.o and no crtn.o.
+    TOOK = ["crt1.o", "libc.a"]
+    # The files of the toolchain image that this link took and whose code --gc-sections left in the binary. The
+    # image's libc.a and crt1.o are not among them: the record has no row for them.
+    IN_BINARY = ["clang_rt.crtbegin.o", "libclang_rt.asan.a", "libclang_rt.builtins.a", "libunwind.a"]
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = pathlib.Path(tmp.name)
+        self.image, self.other = RealRecord.split((self.RECORD / "inputs.tsv").read_text().splitlines())
+
+    def written(self, skipped=()):
+        """read_record on the fixture's record, written in its own $OUT: each file of the record as the build wrote
+        it, with the map decompressed and the paths `skipped` after the driver's paths."""
+        directory = self.tmp / ".records" / RealRecord.DIGEST
+        directory.mkdir(parents=True)
+        for path in self.RECORD.iterdir():
+            if path.name == "map.gz":
+                (directory / "map").write_bytes(gzip.decompress(path.read_bytes()))
+            else:
+                (directory / path.name).write_bytes(path.read_bytes())
+        with open(directory / "driver", "a") as stream:
+            stream.write("".join(f"{path}\n" for path in skipped))
+        return check_links.read_record(self.tmp, RealRecord.DIGEST)
+
+    def test_the_libc_file_is_read(self):
+        """read_record reads the four rows of the libc file that the build wrote."""
+        self.assertEqual(self.written().libc, self.LIBC)
+
+    def test_the_declared_libc_is_provided(self):
+        """project_code, with the record's files under /opt as the image. The declared libc.a and crt1.o are among the
+        provided files, with their real paths and sha256, beside the image's files whose code is in the binary. No
+        problem names OV_LIBC. The other problems are about the project's files, whose bytes the fixture does not
+        keep, and this test does not examine them."""
+        names = {pathlib.PurePosixPath(real).name for real in self.image}
+        self.assertFalse(names & {"libc.a", "crt1.o"}, "the record has no row for the image's libc.a or crt1.o")
+        _code, provided, problems = check_links.project_code(self.written(), self.image)
+        self.assertEqual(sorted(provided),
+                         sorted([(real, sha256) for real, sha256 in self.image.items()
+                                 if pathlib.PurePosixPath(real).name in self.IN_BINARY]
+                                + [self.LIBC[name] for name in self.TOOK]))
+        self.assertEqual([problem for problem in problems if "OV_LIBC" in problem], [])
+
+    def test_the_list_names_the_declared_libc(self):
+        """analyse with this record as the record of a plain build. The plain build examines none of the project's
+        code. The driver file names the project's files that are not of the declared C library, so the reader skips
+        them, as in ReaderKeptNothing, and needs none of their bytes. The list names the image's files whose code is
+        in the binary, and the declared crt1.o and libc.a, with the kind libc and the sha256 of the libc file."""
+        declared = {real for real, _sha256 in self.LIBC.values()}
+        record = self.written([real for real in self.other if real not in declared])
+        result = check_links.analyse({"plain": record}, self.image)["plain"]
+        self.assertEqual(result["instrumented"]["result"], "plain", result["instrumented"]["detail"])
+        listing = result["uninstrumented"]
+        self.assertEqual([entry["name"] for entry in listing if entry["kind"] != "libc"], self.IN_BINARY)
+        self.assertEqual([entry for entry in listing if entry["kind"] == "libc"],
+                         [{"name": name, "kind": "libc", "sha256": self.LIBC[name][1]} for name in self.TOOK])
+
+
 class ReaderKeptNothing(unittest.TestCase):
     """A map with non-blank lines of which the reader keeps no input section: the record a build wrote, or its parts.
 
