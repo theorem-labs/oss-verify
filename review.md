@@ -75,6 +75,16 @@ The triage row "Checklist" counts only the ticked boxes. It does not compare the
 3. **The build is reproducible.** The `build` check passed, and the log ends with `reproducible: all N binaries are byte for byte the same in the second build`, or `rebuild.result` is `identical`: **pass**.
 4. **The contact field is present.** `primary_contact` is set and is not `n/a`: **pass**.
 5. **The build files.** Read the `Dockerfile`, `build.sh`, `sources` and each patch in `series`. Each image is pinned by digest, and each dependency comes from a lockfile or from a line in `sources` with a commit or a SHA-256: **pass**. A build patch must change only how the project builds (`docs/project-yaml.md`, "Build patches"). A patch that fixes a bug is **fail**.
+
+   A `build.sh` that sets `OV_LIBC` gives the link of a fuzz target a C library that the build makes (`docs/build-contract.md`, "The C library"). Check 4 of "The checks of the binaries" examines no file of that C library as the project's code. Thus it does not examine an object of the project that the build puts in that `libc.a`. Read the commands of `build.sh` that build the C library. Check each of these:
+   - The source of the C library comes from a line in `sources` with a commit or a SHA-256.
+   - Each patch of the C library is a patch in `series`, or a file of `DIR`, under any name, that a line of `sources` lays out and that `build.sh` applies. No patch puts the project's code in the C library.
+   - The C library's own build makes `libc.a`, `crt1.o`, `crti.o` and `crtn.o`: for musl, its `configure` and `make`. That build can run a compiler that names none of the toolchain's `--config` files.
+   - `build.sh` builds the C library outside `$BUILDDIR`.
+   - The four files are in one directory, as the C library's `make install` puts them.
+   - `libc.a` holds only the objects that the C library's own build makes. No other command adds an object to it or changes it, during that build or after it.
+
+   When each of these is true, this part of C5 is **pass**. When the evidence shows that one is false, for example a `libc.a` with another object, it is **fail**. When the evidence is not clear, it is **person**. With `OV_LIBC`, the verdict of C5 is the worse of its two parts.
 6. **Terms.** The `terms-accepted` check passed. If the description says that an agent accepted the terms for the maintainer, write it in the summary.
 7. **Licence lines (add-project step 3.8).** Each file of code in `DIR` (fuzz targets, `Dockerfile`, `build.sh`, scripts) begins with comment lines that say whose it is and its licence, after only a `#!`, `# syntax=` or `coding:` line. Build patches, `project.yaml`, `sources`, `series`, `patch_style.md`, locks and seed inputs need none. A file of a seeded project that is adopted unchanged, the same bytes as in `seeds/<name>/` or as `projects/<name>/` on the base branch, needs none either: NOTICE gives its licence (step 3.8, case 1). A file copied from elsewhere keeps its licence lines, and a changed copy has a `Modified` line. A file that the maintainer wrote is `Apache-2.0`, or `MIT OR Apache-2.0` for a GPL-2.0-only project. Each file that breaks this is **fail**: name it and the lines to add. A file whose origin you cannot tell is **person**.
 

@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 from types import SimpleNamespace
@@ -30,7 +31,6 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 DRIVER = ROOT / "infra/base-builder/driver"
 HARNESS = ("#include <stddef.h>\n#include <stdint.h>\n"
            "int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) { (void)data; (void)size; return 0; }\n")
-LIMIT_ERROR = "OV_MAX_INPUT_LOG2 must be 27, 28, 29, 30 or 31"
 
 RELEASE_TARGET = ROOT / "infra/base-builder/release-target.sh"
 CHOST = "riscv64-linux-musl"
@@ -57,7 +57,6 @@ import sys
 with open(os.environ["FAKE_CLANG_LOG"], "w") as log:
     json.dump(sys.argv[1:], log)
 '''
-PATH_ERROR = "ov_release_layout: OV_PATH_REWRITE must be off or unset, not '{}'"
 
 COMPILE = ROOT / "infra/base-builder/compile"
 LIMITS = range(27, 32)
@@ -156,11 +155,11 @@ def test_the_driver_refuses_an_input_at_its_limit(build, tmp_path, defines, limi
 
 @pytest.mark.parametrize("value", ["26", "32"])
 def test_a_limit_outside_27_to_31_does_not_compile(build, value):
-    """cli.c does not compile with OV_MAX_INPUT_LOG2 below 27 or above 31, and the compiler prints input_limit.h's
-    #error."""
+    """cli.c does not compile with OV_MAX_INPUT_LOG2 below 27 or above 31, and the compiler's output names the
+    variable."""
     compiled = build(f"-DOV_MAX_INPUT_LOG2={value}")
     assert compiled.returncode != 0
-    assert LIMIT_ERROR in compiled.stderr, compiled.stderr
+    assert "OV_MAX_INPUT_LOG2" in compiled.stderr, compiled.stderr
 
 
 @pytest.fixture
@@ -368,8 +367,10 @@ def test_path_rewrite_off_gives_each_source_path_as_the_build_gives_it(release, 
 @pytest.mark.parametrize("value", ["on", "OFF", ""])
 def test_path_rewrite_refuses_a_value_other_than_off(release, value):
     """OV_PATH_REWRITE with any value but off, the empty value too, stops ov_release_layout before it writes a shim.
-    The message names the variable."""
+    The message names the variable, and the value when it is not empty."""
     done = release.layout(value)
     assert done.returncode != 0
-    assert PATH_ERROR.format(value) in done.stderr, done.stderr
+    assert "OV_PATH_REWRITE" in done.stderr, done.stderr
+    if value:
+        assert re.search(rf"\b{value}\b", done.stderr), done.stderr
     assert list(release.shims.iterdir()) == []

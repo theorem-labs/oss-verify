@@ -135,7 +135,6 @@ done'
   # OV_PATH_REWRITE=off: of the flags above, the shims keep -DOFT_RELEASE_BUILD=1 alone. Their pin is the pin of
   # toolchain.sh's shims: it changes -march and no other argument.
   if [ "${OV_PATH_REWRITE-}" = off ]; then
-    OFT_REL_CASES=""
     OFT_REL_FLAGS=" -DOFT_RELEASE_BUILD=1"
     # shellcheck disable=SC2016 # the shims' own text, which expands when a shim runs
     OFT_ARCH_PIN='n=$#; i=0

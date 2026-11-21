@@ -26,8 +26,8 @@ target two results:
    listed in the same way, with kind libc: each file that the link took with the declared real path and bytes, by the
    name of its row in the record. The map names no crti.o or crtn.o, so the list names the declared libc.a and
    crt1.o. They are in path order too: a build makes them under /work, after the image's files. A build that declares
-   a C library has no list, and an error, when the link did not take the declared libc.a, or when it took a libc.a,
-   crt1.o, crti.o or crtn.o of the toolchain image. A map
+   a C library has no list, and an error, when the link did not take the declared libc.a, or when it took the libc.a
+   or crt1.o of the toolchain image. A map
    with non-blank lines of which the reader kept no input section gives no list either, and an error that names the
    number of the map's non-blank lines, the number read as input sections, 0 kept and the first line. In an
    AddressSanitizer build, the one exempt allocator shim is listed too, as {name, kind: rust-allocator-shim, sha256}:
@@ -90,8 +90,8 @@ allocation-failure link's renamed copy; a prebuilt object), and a member with no
 its attributes took out (record-compile), are judged by their checks only, as before, and a member with nothing to
 check then fails with its archive. The records are written inside the build's own container, so a build.sh
 that sets out to deceive the check can; the review of the pull request is what stands against that. The same holds
-for a declared C library: this checks its declaration, and the review checks that the build makes it from the sources
-that its project pins.
+for a declared C library: this checks its declaration, and check C5 of review.md checks that the build makes it with
+the C library's own build, from the sources that its project pins, and puts no other object in its libc.a.
 """
 import array
 import dataclasses
@@ -929,7 +929,8 @@ def project_code(record, image):
     provides ([(real path, sha256)]), and problems ([text]). `image` maps a real path under /opt to the toolchain
     image's sha256 of it. A file of the declared C library is one whose real path and sha256 are a row of the record's
     libc file (Record.libc). With a declared C library, two more things are problems: a link that did not take the
-    declared libc.a, and a link that took a libc.a, crt1.o, crti.o or crtn.o of the toolchain image."""
+    declared libc.a, and a link that took the libc.a or crt1.o of the toolchain image. The map names no crti.o or
+    crtn.o, so the name check below never meets them."""
     code, provided, problems = [], [], []
     declared, took_libc = declared_libc(record), False
     members = {}
