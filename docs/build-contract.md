@@ -261,7 +261,7 @@ A build can give one fuzz target three settings. Each setting is an environment 
 
 A build that sets none of them makes the links, the compiler wrappers and the binaries that the rest of this page describes, byte for byte.
 
-A ported build ([below](#builds-ported-from-oss-fuzz-theorems)) builds each fuzz target in a subshell of its own: the block of that fuzz target. Give a setting in the block, so that it applies to that fuzz target only:
+A ported build ([below](#builds-ported-from-oss-fuzz-theorems)) builds each fuzz target in a subshell of its own: the block of that fuzz target. Give a setting in the block, so that it applies to that fuzz target only. The path rewrite has one exception ([below](#the-path-rewrite)):
 
     (
     OV_PATH_REWRITE=off                            # before ov_target_begin
@@ -320,6 +320,10 @@ In a ported build, the compiler wrappers that `release-target.sh` writes give th
 They keep `-DOFT_RELEASE_BUILD=1`, their other words, and the `-march` pin, which changes each `-march=rv*` to `-march=rv64g`. `ov_target_begin` still makes the neutral names under `/src`, as symbolic links. When `compile` records the build, each compile still writes its record.
 
 Set `OV_PATH_REWRITE=off` in the block, before `ov_target_begin`, which writes the wrappers. The dependencies that the block builds with `ov_target_dependency` use the same wrappers, so the setting applies to them too. With any other value, the empty one too, `ov_target_begin` stops the build. Only `release-target.sh` reads `OV_PATH_REWRITE`. A `build.sh` that does not source that file has no path rewrite to disable.
+
+The wrappers are files in `/tmp/shim`, and they stay after the block ends. The `$CC` and `$CXX` of `compile` run these files in the `plain`, `asan` and `asan-ubsan` builds. They also run them in the `ubsan` build, unless the checks of that build name `vptr` or `libcxx-hardening`. Then `toolchain.sh` writes other wrappers for it ([toolchain.sh](../infra/base-builder/toolchain.sh)).
+
+Thus a compile through `$CC` or `$CXX` that `build.sh` makes outside the blocks runs the wrappers of the last block that called `ov_target_begin`. After a block with `OV_PATH_REWRITE=off`, the compile gets no path rewrite. After a block without the setting, the compile gets the path rewrite of that block. Before the first block, it runs the wrappers of `toolchain.sh`, which rewrite no path. If such a compile must get a path rewrite, put it after a block that does not set `OV_PATH_REWRITE`.
 
 ## The driver
 
