@@ -115,10 +115,11 @@ if [ -n "${OV_BASE_LAYOUT:-}" ]; then
   fi
 fi
 
-# The directories this link makes in /tmp/ov: an allocation-failure link's copies, an append link's $work and the
-# temporary directory of a declared C library (all below). The record keeps what it needs of them, in its own files
-# and in its store, and nothing reads them once the script has ended, so they go then, whether the link succeeded or
-# failed. A removal that fails says so on standard error and leaves the link's exit status as it is.
+# The directories this link makes in /tmp/ov: an allocation-failure link's copies, an append link's $work, the
+# temporary directory of a declared C library, and the directories in which the link writes its stripped twin and its
+# record before it renames them (all below). The record keeps what it needs of them, in its own files and in its
+# store, and nothing reads them once the script has ended, so they go then, whether the link succeeded or failed. A
+# removal that fails says so on standard error and leaves the link's exit status as it is.
 made=()
 trap 'rm -rf -- ${made[@]+"${made[@]}"} || true' EXIT
 
@@ -264,8 +265,13 @@ tail=(${script:+"$script"})
 link -o "$out"
 tail=(${script:+"$script"})
 sum=$(sha256sum "$out" | cut -d' ' -f1)
-link -Wl,--strip-all -o "$OV_TWINS/$sum.tmp"
-mv -f "$OV_TWINS/$sum.tmp" "$OV_TWINS/$sum"
+# The stripped twin is linked in a directory of this link's own, $OV_TWINS/.link.XXXXXX/, and then renamed to
+# $OV_TWINS/<sum> in one step. Thus two links that make the same bytes at the same time each rename their own file,
+# and compile, which takes $OV_TWINS/<sha256> by its name, sees all of a twin or none of it.
+twin_tmp=$(mktemp -d "$OV_TWINS/.link.XXXXXX")
+made+=("$twin_tmp")
+link -Wl,--strip-all -o "$twin_tmp/$sum"
+mv -f "$twin_tmp/$sum" "$OV_TWINS/$sum"
 # The quiet twin (below) is a normal link, with no script: its driver objects are other files, which no pattern of the
 # script names, and a quiet link that failed would leave no record at all.
 tail=()
@@ -293,11 +299,20 @@ tail=()
 # Every input is also kept, by its sha256, in $OV_RECORDS/store/: what the build made is gone when its container
 # ends, and the checks examine its code. A record that cannot be written is left out, with a warning: the link itself
 # has succeeded, and the checks then say that the target has no record.
-rec=$OV_RECORDS/$sum
+#
+# The link writes the record in $rec, a directory of its own, $OV_RECORDS/.link.XXXXXX/<sum>/, and then renames it to
+# $OV_RECORDS/<sum> in one step. Thus a link of the same bytes that runs at the same time, or a later one, sees all of
+# the record or none of it. When $OV_RECORDS/<sum> is already there, another link of the same bytes wrote it: the link
+# keeps that record, and its own goes with its directory (made, above). No link removes a record that another link
+# wrote. compile takes $OV_RECORDS/<sum> and the store by their names, and never a directory .link.XXXXXX.
+rec_tmp=""
 # `set -e` does not apply inside the condition of an `if`, so each step says `|| return 1` for itself.
 record_link() {
-  rm -rf "$rec" || return 1
-  mkdir -p "$rec" "$OV_RECORDS/store" || return 1
+  mkdir -p "$OV_RECORDS/store" || return 1
+  rec_tmp=$(mktemp -d "$OV_RECORDS/.link.XXXXXX") || return 1
+  made+=("$rec_tmp")
+  local rec=$rec_tmp/$sum
+  mkdir "$rec" || return 1
   awk '{
     line = $0
     sub(/^ *[0-9a-f]+ +[0-9a-f]+ +[0-9a-f]+ +[0-9]+ /, "", line)
@@ -346,9 +361,10 @@ record_link() {
     driver=$quiet
     link -Wl,--strip-all -o "$rec/quiet" || return 1
   fi
-  return 0
+  # mv -T renames the directory itself, and never moves it into an $OV_RECORDS/<sum> that is already there.
+  mv -T -- "$rec" "$OV_RECORDS/$sum" 2>/dev/null || [ -d "$OV_RECORDS/$sum" ] || return 1
 }
 if ! record_link; then
   echo "link-fuzz-target: warning: the record of the link of $out could not be written; its binary checks will say so" >&2
-  rm -rf "$rec" "$OV_RECORDS/map.$$"
+  rm -rf -- ${rec_tmp:+"$rec_tmp"} "$OV_RECORDS/map.$$"
 fi

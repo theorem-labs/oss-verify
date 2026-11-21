@@ -6,9 +6,10 @@ uv run pytest tests/test_append_link.py
 
 No linker runs here. The script runs as tests/test_allocation_library_links.py runs it: a copy, with /tmp/ov/ replaced
 by a scratch directory. The compiler is a stand-in that logs each command and writes the output and the map it is
-asked for. Beside the copy, layout.py is a stand-in that logs its command and writes what layout.py append writes, and
-llvm-objcopy one that logs the file it is given. The script removes the directories it makes in /tmp/ov/ when it
-ends: a test takes their names from those logs (gone).
+asked for; for the tests of links that make the same bytes at the same time, it can also wait, fail, or run a second
+link (COMPILER). Beside the copy, layout.py is a stand-in that logs its command and writes what layout.py append
+writes, and llvm-objcopy one that logs the file it is given. The script removes the directories it makes in /tmp/ov/
+when it ends: a test takes their names from those logs (gone).
 
 It also tests the settings that the build of one fuzz target can give its link, against the same commands:
 OV_MAX_INPUT_LOG2, the driver's input limit, and OV_LIBC, the C library that the build declares."""
@@ -17,6 +18,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 from types import SimpleNamespace
 
@@ -39,14 +41,33 @@ PLACEMENT = ("fuzzer.o\t-\t.text.LLVMFuzzerTestOneInput\t0\tfuzzer.o\t-\t.text.L
 WRAPS = "getenv\ngetpid\n"
 
 COMPILER = r'''#!/usr/bin/env python3
-"""A stand-in for the compiler: it logs its command, writes OUTPUT to its -o file and MAP to its -Wl,-Map= file."""
+"""A stand-in for the compiler: it logs its command, writes OUTPUT to its -o file and MAP to its -Wl,-Map= file.
+
+A compile is of one of three kinds: quiet, the quiet twin (a driver object named *-quiet.o); twin, the stripped twin
+(-Wl,--strip-all); output, any other. Three settings change what a compile does:
+  FAKE_CC_FAIL   the compile of this kind writes nothing and exits with 1.
+  FAKE_CC_SLEEP  each compile waits this number of seconds after it has written its files.
+  FAKE_CC_NEST   {"at": <kind>, "argv": <command>, "env": <variables>, "result": <file>}: after it has written its
+                 files, the compile of the kind at runs a whole second link, argv, in the same directory, with the
+                 environment of this compile, with no FAKE_CC_NEST, and with env. It writes the exit status and the
+                 standard error of that link to result."""
 import json
 import os
+import subprocess
 import sys
+import time
 
 with open(os.environ["FAKE_CC_LOG"], "a") as log:
     log.write(json.dumps(sys.argv) + "\n")
 words = sys.argv[1:]
+if any(word.endswith("-quiet.o") for word in words):
+    kind = "quiet"
+elif "-Wl,--strip-all" in words:
+    kind = "twin"
+else:
+    kind = "output"
+if os.environ.get("FAKE_CC_FAIL") == kind:
+    sys.exit(1)
 for k, word in enumerate(words):
     if word == "-o":
         with open(words[k + 1], "wb") as out:
@@ -54,6 +75,15 @@ for k, word in enumerate(words):
     elif word.startswith("-Wl,-Map="):
         with open(word[len("-Wl,-Map="):], "w") as out:
             out.write(@MAP@)
+if os.environ.get("FAKE_CC_SLEEP"):
+    time.sleep(float(os.environ["FAKE_CC_SLEEP"]))
+nest = json.loads(os.environ.get("FAKE_CC_NEST") or "null")
+if nest and nest["at"] == kind:
+    env = {name: value for name, value in os.environ.items() if name != "FAKE_CC_NEST"}
+    env.update(nest["env"])
+    done = subprocess.run(nest["argv"], env=env, capture_output=True, text=True, timeout=30)
+    with open(nest["result"], "w") as result:
+        json.dump({"returncode": done.returncode, "stderr": done.stderr}, result)
 '''.replace("@OUTPUT@", repr(OUTPUT)).replace("@MAP@", repr(MAP))
 
 LAYOUT = r'''"""A stand-in for layout.py: it logs its command, its working directory and the renamed file that append is
@@ -129,10 +159,9 @@ def t(tmp_path):
     (build / "libfixture.a").write_bytes(b"!<arch>\nlibfixture\n")
     cc_log, layout_log, objcopy_log = tmp_path / "cc.jsonl", tmp_path / "layout.jsonl", tmp_path / "objcopy.log"
 
-    def run(engine="normal-engine", records=False, layout=False, base_layout=None, script_kind="pins", status=0,
-            extra=None):
-        """link-fuzz-target <cc> fuzzer.o <engine> -pthread -o target libfixture.a, in build/, in the asan build;
-        `base_layout` None leaves OV_BASE_LAYOUT unset. `extra` holds more environment variables for the script."""
+    def environment(records=False, layout=False, base_layout=None, script_kind="pins", status=0, extra=None):
+        """Writes link.env, and returns the environment of the script, for the asan build; `base_layout` None leaves
+        OV_BASE_LAYOUT unset. `extra` holds more environment variables for the script."""
         (ov / "link.env").write_text(
             "OV_LFE='normal-engine'\nOV_DRIVER='cli.o adapter.o'\nOV_CLI='cli.o'\n"
             f"OV_SILENT_LD='{SILENT}'\nOV_SEALS='{' '.join(SEALS)}'\nOV_TWINS='{twins}'\n"
@@ -148,14 +177,28 @@ def t(tmp_path):
         if base_layout is not None:
             env["OV_BASE_LAYOUT"] = str(base_layout)
         env.update(extra or {})
-        return subprocess.run([str(script), str(cc), "fuzzer.o", engine, "-pthread", "-o", "target", "libfixture.a"],
-                              cwd=build, env=env, capture_output=True, text=True, timeout=30)
+        return env
+
+    def command(engine="normal-engine"):
+        """link-fuzz-target <cc> fuzzer.o <engine> -pthread -o target libfixture.a."""
+        return [str(script), str(cc), "fuzzer.o", engine, "-pthread", "-o", "target", "libfixture.a"]
+
+    def run(engine="normal-engine", records=False, layout=False, base_layout=None, script_kind="pins", status=0,
+            extra=None):
+        """The command, in build/, in the environment (above)."""
+        env = environment(records, layout, base_layout, script_kind, status, extra)
+        return subprocess.run(command(engine), cwd=build, env=env, capture_output=True, text=True, timeout=30)
+
+    # The directory that a link makes for its stripped twin in OV_TWINS, or for its record in OV_RECORDS.
+    own = re.compile(rf"^({re.escape(str(twins))}|{re.escape(str(records))})/\.link\.[0-9A-Za-z]{{6}}/")
 
     def compiles():
-        """Each command the compiler got, with the process id in the map's name written $$."""
+        """Each command the compiler got, with the process id in the map's name written $$, and the random part of the
+        name of a link's own directory in OV_TWINS or OV_RECORDS (own) written XXXXXX."""
         if not cc_log.exists():
             return []
-        return [[re.sub(r"^(-Wl,-Map=.*/map\.)[0-9]+$", r"\1$$", word) for word in json.loads(line)]
+        return [[own.sub(r"\1/.link.XXXXXX/", re.sub(r"^(-Wl,-Map=.*/map\.)[0-9]+$", r"\1$$", word))
+                 for word in json.loads(line)]
                 for line in cc_log.read_text().splitlines()]
 
     def layout_calls():
@@ -178,8 +221,9 @@ def t(tmp_path):
         assert directory.parent == ov and re.fullmatch(rf"{prefix}\.\w{{6}}", directory.name), directory
         return directory
 
-    return SimpleNamespace(run=run, compiles=compiles, layout_calls=layout_calls, gone=gone, cc=str(cc), ov=ov,
-                           twins=twins, records=records, build=build, base=base, entry=base / "asan" / "target")
+    return SimpleNamespace(run=run, environment=environment, command=command, compiles=compiles,
+                           layout_calls=layout_calls, gone=gone, cc=str(cc), ov=ov, twins=twins, records=records,
+                           build=build, base=base, entry=base / "asan" / "target")
 
 
 def inputs(t, engine):
@@ -194,18 +238,19 @@ def inputs(t, engine):
 def normal_links(t, engine, records):
     """The compiler's commands of a normal link for the link of `run`, argument for argument, as link-fuzz-target ran
     them at 889360251058: the output link, with OV_RECORDS the map argument last; the stripped twin into OV_TWINS; and
-    with OV_RECORDS the quiet twin, with the quiet driver."""
+    with OV_RECORDS the quiet twin, with the quiet driver. Only the -o files of the two twins are not those of
+    889360251058: each is in a directory of the link's own (compiles), from which the link renames it."""
     driver, quiet = DRIVERS[engine]
     own = inputs(t, engine)
     links = [
         [t.cc, "-static", "-no-pie", "-Wl,--gc-sections", "-o", "target", *driver, SILENT, *own, *SEALS]
         + ([f"-Wl,-Map={t.records}/map.$$"] if records else []),
-        [t.cc, "-static", "-no-pie", "-Wl,--gc-sections", "-Wl,--strip-all", "-o", f"{t.twins}/{SUM}.tmp", *driver,
-         SILENT, *own, *SEALS],
+        [t.cc, "-static", "-no-pie", "-Wl,--gc-sections", "-Wl,--strip-all", "-o", f"{t.twins}/.link.XXXXXX/{SUM}",
+         *driver, SILENT, *own, *SEALS],
     ]
     if records:
         links.append([t.cc, "-static", "-no-pie", "-Wl,--gc-sections", "-Wl,--strip-all", "-o",
-                      f"{t.records}/{SUM}/quiet", *quiet, SILENT, *own, *SEALS])
+                      f"{t.records}/.link.XXXXXX/{SUM}/quiet", *quiet, SILENT, *own, *SEALS])
     return links
 
 
@@ -432,10 +477,10 @@ def test_a_bad_input_limit_stops_the_link(t, value):
 LIBC_FILES = ("libc.a", "crt1.o", "crti.o", "crtn.o")
 
 
-def libc_files(t, leave_out=None):
-    """Stand-ins for a C library that a build made, in musl/lib/ beside build/: libc.a, an archive, and the start files
-    crt1.o, crti.o and crtn.o, each an ELF file. The file `leave_out` is not made. Returns the directory."""
-    directory = t.build.parent / "musl" / "lib"
+def libc_files(t, leave_out=None, under="musl"):
+    """Stand-ins for a C library that a build made, in <under>/lib/ beside build/: libc.a, an archive, and the start
+    files crt1.o, crti.o and crtn.o, each an ELF file. The file `leave_out` is not made. Returns the directory."""
+    directory = t.build.parent / under / "lib"
     directory.mkdir(parents=True, exist_ok=True)
     for name in LIBC_FILES:
         if name != leave_out:
@@ -500,7 +545,9 @@ def test_a_declared_libc_reaches_each_link(t, engine, records):
 
 def test_the_libc_directory_keeps_its_name(t):
     """A second link with the same OV_LIBC finds the directory and uses it: the same name, the same four links, and
-    no directory inside it. A C library with other bytes gets another directory."""
+    no directory inside it. A C library with other bytes gets another directory. The stand-in compiler makes the same
+    bytes with it, so the record stays the one that the first link wrote
+    (test_a_later_link_of_the_same_bytes_keeps_the_record)."""
     lib = libc_files(t)
     for _ in range(2):
         done = t.run(records=t.records, extra={"OV_LIBC": str(lib / "libc.a")})
@@ -509,11 +556,12 @@ def test_the_libc_directory_keeps_its_name(t):
     assert t.compiles() == with_libc(directory, normal_links(t, "normal-engine", True)) * 2
     assert sorted(p.name for p in directory.iterdir()) == sorted(LIBC_FILES)
     assert [p.name for p in t.ov.glob("libc*")] == [directory.name]
+    rows = libc_rows(lib)
     (lib / "crt1.o").write_bytes(b"\x7fELF another crt1.o\n")
     done = t.run(records=t.records, extra={"OV_LIBC": str(lib / "libc.a")})
     assert done.returncode == 0, done.stderr
     assert len(list(t.ov.glob("libc-*"))) == 2
-    assert (t.records / SUM / "libc").read_text() == libc_rows(lib)
+    assert (t.records / SUM / "libc").read_text() == rows
 
 
 def test_a_declared_libc_reaches_the_append_mode(t):
@@ -573,3 +621,136 @@ def test_a_bad_libc_declaration_stops_the_link(t, case):
     assert not (t.build / "target").exists()
     assert list(t.twins.iterdir()) == []
     assert not list(t.ov.glob("libc*"))
+
+
+# Links that make the same bytes, and so the same twin and record names, at the same time: build.sh can run two links
+# of one output, or of two outputs with the same bytes, in parallel.
+
+
+def left(directory):
+    """The names in `directory`: each link removes its own directory (.link.XXXXXX) in OV_TWINS or OV_RECORDS, and its
+    map, when it ends."""
+    return sorted(p.name for p in directory.iterdir())
+
+
+def complete_record(t, build=None):
+    """Checks that the record of SUM is the whole record of a normal link in `build` (build/ by default): its map, its
+    driver, inputs.tsv for the fuzzer.o of that directory, and the quiet twin."""
+    record = t.records / SUM
+    fuzzer = (build or t.build) / "fuzzer.o"
+    body = fuzzer.read_bytes()
+    assert (record / "map").read_text() == MAP.splitlines(keepends=True)[1]
+    assert (record / "driver").read_text().splitlines() == (DRIVERS["normal-engine"][0]
+                                                             + [word for word in SEALS if word.endswith(".o")])
+    assert (record / "inputs.tsv").read_text() == (
+        f"fuzzer.o\t{os.path.realpath(fuzzer)}\t{hashlib.sha256(body).hexdigest()}\t{len(body)}\n")
+    assert (record / "quiet").read_bytes() == OUTPUT
+
+
+def nested(t, at, fail=""):
+    """The setting of the stand-in compiler (FAKE_CC_NEST) with which its compile `at` ("twin" or "quiet") runs a whole
+    second link of the same output, in build/, after it has written its own output and before it returns: the second
+    link makes the same bytes while the first one runs. In the second link, the compile `fail` fails. second(t) reads
+    what the second link did."""
+    return {"FAKE_CC_NEST": json.dumps({"at": at, "argv": t.command(), "env": {"FAKE_CC_FAIL": fail},
+                                        "result": str(t.build.parent / "second.json")})}
+
+
+def second(t):
+    """The exit status and the standard error of the second link that nested started."""
+    return json.loads((t.build.parent / "second.json").read_text())
+
+
+@pytest.mark.parametrize("records", [False, True], ids=["no-records", "records"])
+def test_a_link_of_the_same_bytes_during_the_stripped_twin(t, records):
+    """A second link of the same bytes runs while the first one links its stripped twin, after the compiler has written
+    the twin (nested). Each link links its twin in a directory of its own and renames it to OV_TWINS/<sum>, so that
+    neither takes the file of the other. At 7f9f4902 both linked to OV_TWINS/<sum>.tmp: the second link moved the
+    file, and then the mv of the first failed. Both links exit with 0 and run the normal link's commands. The twin is
+    there, with OV_RECORDS the whole record too, and no directory of a link is left."""
+    done = t.run(records=t.records if records else False, extra=nested(t, "twin"))
+    assert done.returncode == 0, done.stderr
+    assert second(t) == {"returncode": 0, "stderr": ""}
+    assert done.stderr == ""
+    links = normal_links(t, "normal-engine", records)
+    assert t.compiles() == links[:2] + links + links[2:]
+    assert (t.build / "target").read_bytes() == OUTPUT
+    assert (t.twins / SUM).read_bytes() == OUTPUT
+    assert left(t.twins) == [SUM]
+    if records:
+        assert record_files(t) == NORMAL_RECORD
+        complete_record(t)
+        assert left(t.records) == [SUM, "store"]
+    else:
+        assert left(t.records) == []
+
+
+def test_a_failed_record_of_the_same_bytes_removes_no_other_record(t):
+    """A second link of the same bytes runs while the first one links its quiet twin, after the compiler has written
+    the quiet twin (nested), and the quiet link of the second link fails: the second link cannot write its record, and
+    says so. Each link writes its record in a directory of its own and renames it to OV_RECORDS/<sum>, and a link
+    whose record failed removes only its own directory and its own map. At 7f9f4902 both wrote in OV_RECORDS/<sum>/,
+    and the second link removed it, with the files that the first link had written there. Both links exit with 0. The
+    record of the first link is there, whole, and no directory of a link is left."""
+    done = t.run(records=t.records, extra=nested(t, "quiet", fail="quiet"))
+    assert done.returncode == 0, done.stderr
+    assert done.stderr == ""
+    assert second(t) == {"returncode": 0, "stderr": "link-fuzz-target: warning: the record of the link of target "
+                                                    "could not be written; its binary checks will say so\n"}
+    assert (t.records / SUM).is_dir()
+    assert record_files(t) == NORMAL_RECORD
+    complete_record(t)
+    links = normal_links(t, "normal-engine", True)
+    assert t.compiles() == links + links
+    assert (t.twins / SUM).read_bytes() == OUTPUT
+    assert left(t.twins) == [SUM]
+    assert left(t.records) == [SUM, "store"]
+
+
+def test_a_later_link_of_the_same_bytes_keeps_the_record(t):
+    """A second link that makes the same bytes, here with a C library at another path, finds the record that the first
+    link wrote and keeps it: a link never removes a record that another link wrote. Both links exit with 0, one whole
+    record is there, and no directory of a link is left."""
+    first, other = libc_files(t), libc_files(t, under="other-musl")
+    for lib in (first, other):
+        done = t.run(records=t.records, extra={"OV_LIBC": str(lib / "libc.a")})
+        assert done.returncode == 0, done.stderr
+        assert done.stderr == ""
+    assert record_files(t) == sorted(NORMAL_RECORD + ["libc"])
+    assert (t.records / SUM / "libc").read_text() == libc_rows(first)
+    complete_record(t)
+    assert (t.twins / SUM).read_bytes() == OUTPUT
+    assert left(t.twins) == [SUM]
+    assert left(t.records) == [SUM, "store"]
+
+
+# The number of links that test_links_of_the_same_bytes_at_the_same_time runs at the same time.
+LINKS = 12
+
+
+def test_links_of_the_same_bytes_at_the_same_time(t):
+    """LINKS links that make the same bytes run at the same time, with OV_RECORDS. Each runs in a build directory of
+    its own, whose fuzzer.o has other bytes, and with a C library of its own (OV_LIBC). The stand-in compiler waits 0.2
+    seconds after each output, so that the links write their twins and their records at the same time. Each link exits
+    with 0. The twin is there, and one whole record, whose inputs.tsv and libc come from one link. No directory of a
+    link is left. At 7f9f4902 the mv of a twin failed, and the record was missing, or held the files of two links."""
+    env = t.environment(records=t.records, extra={"FAKE_CC_SLEEP": "0.2"})
+    builds = []
+    for n in range(LINKS):
+        build = t.build.parent / f"build{n}"
+        shutil.copytree(t.build, build)
+        (build / "fuzzer.o").write_bytes(b"\x7fELF fuzzer.o of link %d\n" % n)
+        builds.append((build, libc_files(t, under=f"musl{n}")))
+    processes = [subprocess.Popen(t.command(), cwd=build, env={**env, "OV_LIBC": str(lib / "libc.a")},
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for build, lib in builds]
+    ends = [(process.communicate(timeout=60)[1], process.returncode) for process in processes]
+    assert [(build.name, stderr, status) for (build, _), (stderr, status) in zip(builds, ends)
+            if (stderr, status) != ("", 0)] == []
+    assert (t.twins / SUM).read_bytes() == OUTPUT
+    assert left(t.twins) == [SUM]
+    assert left(t.records) == [SUM, "store"]
+    assert record_files(t) == sorted(NORMAL_RECORD + ["libc"])
+    real = (t.records / SUM / "inputs.tsv").read_text().split("\t")[1]
+    (build, lib), = [(build, lib) for build, lib in builds if os.path.realpath(build / "fuzzer.o") == real]
+    complete_record(t, build)
+    assert (t.records / SUM / "libc").read_text() == libc_rows(lib)
