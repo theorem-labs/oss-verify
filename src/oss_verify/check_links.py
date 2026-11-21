@@ -5,7 +5,8 @@
 
 compile records each link of a fuzz target when oss-verify check asks (infra/base-builder/link-fuzz-target, "the record
 of this link"): the linker's map, each file the map names with its real path and SHA-256, the driver's objects, the
-copies an allocation-failure link made, and a copy of every input. It also records each compile that runs a compiler
+copies an allocation-failure link made, the files of a C library that the build declares (OV_LIBC), and a copy of
+every input. It also records each compile that runs a compiler
 shim (infra/base-builder/record-compile), one line of $OUT/.records/compiles.jsonl for each object a compile wrote: the
 SHA-256 of its bytes, its source, the SHA-256 of the source's bytes, that source's language, the no_sanitize attributes
 of the preprocessed source and the SHA-256 of the object compiled with them taken out ($OUT/.records/nosan/), and every
@@ -20,7 +21,13 @@ target two results:
    list. No sanitizer instruments these files in any build, as in OSS-Fuzz's
    sanitizer builds: {name: <file name>, kind: libc | compiler-rt | sanitizer-runtime | cxx-runtime | fortran-runtime
    | image-library, sha256}, sorted by the file's path in the image. A file is the toolchain image's when its path is
-   under /opt and the toolchain image has those bytes at that path (oss-verify check reads them from the image). A map
+   under /opt and the toolchain image has those bytes at that path (oss-verify check reads them from the image). A C
+   library that the build declares (link-fuzz-target, OV_LIBC: a libc.a, with crt1.o, crti.o and crtn.o beside it) is
+   listed in the same way, with kind libc: each file that the link took with the declared real path and bytes, by the
+   name of its row in the record. The map names no crti.o or crtn.o, so the list names the declared libc.a and
+   crt1.o. They are in path order too: a build makes them under /work, after the image's files. A build that declares
+   a C library has no list, and an error, when the link did not take the declared libc.a, or when it took a libc.a,
+   crt1.o, crti.o or crtn.o of the toolchain image. A map
    with non-blank lines of which the reader kept no input section gives no list either, and an error that names the
    number of the map's non-blank lines, the number read as input sections, 0 kept and the first line. In an
    AddressSanitizer build, the one exempt allocator shim is listed too, as {name, kind: rust-allocator-shim, sha256}:
@@ -36,8 +43,8 @@ target two results:
    every build, by design, and is not listed.
 
 2. Whether the project's own code is instrumented, in each sanitizer build. The project's code is every object and
-   archive member the link took, with code in a loaded section of the binary (parse_map), that is neither the
-   driver's nor the toolchain image's. In the AddressSanitizer
+   archive member the link took, with code in a loaded section of the binary (parse_map), that is not the driver's,
+   the toolchain image's or the declared C library's. In the AddressSanitizer
    builds (asan, asan-ubsan), each one with code must refer to __asan_init or __asan_version_mismatch_check_*, as the
    constructor that AddressSanitizer adds to each instrumented object does. rustc's allocator shim is the one
    exception (at most one such member): an object that defines at least one global function, every function of which,
@@ -82,7 +89,9 @@ compile wrote (a compiler run by its own name, not through a shim; an object cha
 allocation-failure link's renamed copy; a prebuilt object), and a member with no check whose record cannot say what
 its attributes took out (record-compile), are judged by their checks only, as before, and a member with nothing to
 check then fails with its archive. The records are written inside the build's own container, so a build.sh
-that sets out to deceive the check can; the review of the pull request is what stands against that.
+that sets out to deceive the check can; the review of the pull request is what stands against that. The same holds
+for a declared C library: this checks its declaration, and the review checks that the build makes it from the sources
+that its project pins.
 """
 import array
 import dataclasses
@@ -108,6 +117,8 @@ SANITIZER_RUNTIME = re.compile(r"libclang_rt\..*\.a")
 FORTRAN_RUNTIME = re.compile(r"lib(Fortran[A-Za-z]*|flang[A-Za-z_.]*|gfortran|quadmath)\.a")
 # musl's C library: its start files, libc.a, its empty stub archives, and libssp_nonshared.a.
 LIBC = re.compile(r"(crt1|crti|crtn|Scrt1|rcrt1)\.o|lib(c|m|rt|pthread|crypt|util|xnet|resolv|dl|ssp_nonshared)\.a")
+# The files of a C library that a build declares (link-fuzz-target, OV_LIBC), in the order of the record's libc file.
+DECLARED_LIBC = ("libc.a", "crt1.o", "crti.o", "crtn.o")
 SYSROOT_LIB = re.compile(r"/opt/[^/]+(/[^/]+)*/usr/lib/[^/]+\.a")
 # rustc's allocator shim defines only these: allocator forwards and marker functions.
 RUST_ALLOCATOR_SHIM = re.compile(r"__rust_(alloc|dealloc|realloc|alloc_zeroed|alloc_error_handler|"
@@ -270,7 +281,8 @@ def read_regular(path, limit=MAX_RECORD_BYTES):
 
 @dataclasses.dataclass
 class Record:
-    """One link's record (link-fuzz-target): the map's input sections, the files they came from, and the driver."""
+    """One link's record (link-fuzz-target): the map's input sections, the files they came from, the driver, and the
+    C library that the build declares, if it declares one."""
 
     taken: list  # [(file as the map names it, member or None, section, size)]
     inputs: dict  # {file as the map names it: (real path, sha256, bytes)}
@@ -281,6 +293,8 @@ class Record:
     compiles: "Compiles | None" = None  # the build's compile records, if it has them
     # The reader's own problem with the record: a map with non-blank lines of which it kept no input section, or None
     problem: str | None = None
+    # The C library that the build declares (OV_LIBC), from the record's libc file: {file name: (real path, sha256)}
+    libc: dict = dataclasses.field(default_factory=dict)
 
     def store(self, sha256):
         """The bytes of the input with this SHA-256, checked. Raise RecordError if they were not kept."""
@@ -635,6 +649,7 @@ def read_record(raw, sha256, compiles=None):
     try:
         mapping, rows, driver = text("map"), text("inputs.tsv").splitlines(), text("driver").split()
         renamed_rows = text("renamed").splitlines() if os.path.lexists(directory / "renamed") else []
+        libc_rows = text("libc").splitlines() if os.path.lexists(directory / "libc") else None
     except RecordError as error:
         raise RecordError(f"the link record is incomplete: {error}") from None
     inputs, renamed = {}, {}
@@ -647,6 +662,19 @@ def read_record(raw, sha256, compiles=None):
         fields = row.split("\t")
         if len(fields) == 3 and re.fullmatch(r"[0-9a-f]{64}", fields[2]):
             renamed[fields[0]] = (fields[1], fields[2])
+    # The declared C library: each of its four files once, by an absolute path and a sha256. A libc file that says less
+    # does not say which C library the link took, so the record is incomplete.
+    libc = {}
+    for row in libc_rows or []:
+        fields = row.split("\t")
+        if not (len(fields) == 3 and fields[0] in DECLARED_LIBC and fields[0] not in libc
+                and fields[1].startswith("/") and re.fullmatch(r"[0-9a-f]{64}", fields[2])):
+            raise RecordError(f"the link record is incomplete: libc: the row {row[:200]!r} is not <name> <absolute "
+                              f"path> <sha256>, with a name of {', '.join(DECLARED_LIBC)} that no other row has")
+        libc[fields[0]] = (fields[1], fields[2])
+    if libc_rows is not None and len(libc) != len(DECLARED_LIBC):
+        raise RecordError("the link record is incomplete: libc names no "
+                          + ", ".join(name for name in DECLARED_LIBC if name not in libc))
     quiet = None
     try:
         quiet = below(directory, "quiet")
@@ -662,7 +690,7 @@ def read_record(raw, sha256, compiles=None):
             first = lines[0].strip(" \t")
             problem = (f"the reader kept no input section of the link's map: {len(lines)} non-blank lines, {read} "
                        f"read as input sections, 0 kept; the first line: {first}")
-    return Record(taken, inputs, set(driver), renamed, pathlib.Path(raw), quiet, compiles, problem)
+    return Record(taken, inputs, set(driver), renamed, pathlib.Path(raw), quiet, compiles, problem, libc)
 
 
 def runtime_kind(path):
@@ -881,10 +909,29 @@ def shim_entry(c):
     return entry, None
 
 
+def declared_libc(record):
+    """The files of the C library that the build declares (Record.libc): {(real path, sha256): file name}."""
+    return {(path, sha256): name for name, (path, sha256) in record.libc.items()}
+
+
+def libc_note(record):
+    """The sentence of each build's detail that names the C library the build declares and the sha256 of each of its
+    files, or None if the build declares none."""
+    if not record.libc:
+        return None
+    return ("the build declares its own C library (OV_LIBC), whose files no sanitizer instruments: "
+            + ", ".join(f"{name} ({record.libc[name][0]}, sha256 {record.libc[name][1]})"
+                        for name in DECLARED_LIBC if name in record.libc))
+
+
 def project_code(record, image):
-    """The project's code that a link took ([Code]), the files that the toolchain image provides ([(real path,
-    sha256)]), and problems ([text]). `image` maps a real path under /opt to the toolchain image's sha256 of it."""
+    """The project's code that a link took ([Code]), the files that the toolchain image or the declared C library
+    provides ([(real path, sha256)]), and problems ([text]). `image` maps a real path under /opt to the toolchain
+    image's sha256 of it. A file of the declared C library is one whose real path and sha256 are a row of the record's
+    libc file (Record.libc). With a declared C library, two more things are problems: a link that did not take the
+    declared libc.a, and a link that took a libc.a, crt1.o, crti.o or crtn.o of the toolchain image."""
     code, provided, problems = [], [], []
+    declared, took_libc = declared_libc(record), False
     members = {}
     for file, member, _, _ in record.taken:
         members.setdefault(file, set())
@@ -899,8 +946,18 @@ def project_code(record, image):
             continue
         # An allocation-failure link's copy stands for its original, whose allocator calls it renames.
         original, original_sha256 = record.renamed.get(real, (real, sha256))
+        # A file of the declared C library is never the project's code. A file at the declared path with other bytes
+        # is the project's code.
+        if (original, original_sha256) in declared:
+            provided.append((original, original_sha256))
+            took_libc = took_libc or declared[(original, original_sha256)] == "libc.a"
+            continue
         if original.startswith("/opt/") and image.get(original) == original_sha256:
             provided.append((original, original_sha256))
+            image_name = pathlib.PurePosixPath(original).name
+            if declared and image_name in DECLARED_LIBC:
+                problems.append(f"the link took {original}, the toolchain image's {image_name}, beside the C library "
+                                "that the build declares (OV_LIBC)")
             continue
         try:
             data = record.store(sha256)
@@ -920,6 +977,10 @@ def project_code(record, image):
                 problems.append(f"the link took {name}({member}), which this does not find in the archive")
         else:
             code.append(Code(name, object_facts(data), None, data))
+    if declared and not took_libc:
+        path, sha256 = record.libc["libc.a"]
+        problems.append(f"the link did not take the C library that the build declares (OV_LIBC): {path}, "
+                        f"sha256 {sha256}")
     return [c for c in code if not is_seal(c.facts)], provided, problems
 
 
@@ -1238,7 +1299,12 @@ def analyse(records, image, dwarf_units=None, checkouts=(), assembly_sources=Non
         # others. Every static link takes the C library, so an empty list means the record named nothing; the facts'
         # schema asks for at least one entry too.
         listing, unknown = [], []
+        declared = declared_libc(record)
         for real, sha256 in sorted(provided):
+            if (real, sha256) in declared:
+                # A file of the declared C library: kind libc, by the name of its row in the record's libc file.
+                listing.append({"name": declared[(real, sha256)], "kind": "libc", "sha256": sha256})
+                continue
             kind = runtime_kind(real)
             if kind is None:
                 unknown.append(f"{real}: a file of the toolchain image that no kind names "
@@ -1253,8 +1319,12 @@ def analyse(records, image, dwarf_units=None, checkouts=(), assembly_sources=Non
 
     for build, problems in problems_of.items():
         result, code = results[build], scanned[build]
+        # Each build's detail names the declared C library, which no build examines as the project's code.
+        declared_note = libc_note(records[build])
         if build not in SANITIZER_BUILDS:
             detail = PLAIN_DETAIL
+            if declared_note:
+                detail += "; " + declared_note
             if problems:
                 detail += "; " + "; ".join(listed(problems))
             result["instrumented"] = {"result": "error" if result.pop("incomplete") else "plain", "detail": detail}
@@ -1320,7 +1390,7 @@ def analyse(records, image, dwarf_units=None, checkouts=(), assembly_sources=Non
             if plain_c:
                 found.append(f"{len(plain_c)} of {len(with_code)} objects with code refer to no AddressSanitizer "
                              "constructor: " + ", ".join(listed(plain_c)))
-        notes, shown = ([shim_note] if shim_note else []), 0
+        notes, shown = [note for note in (shim_note, declared_note) if note], 0
         if build in UBSAN_BUILDS:
             # Each object and archive member is judged first by the compile that wrote its bytes, when the build
             # recorded one: one that carried the build's UBSan flags is instrumented, whatever its traps (code with

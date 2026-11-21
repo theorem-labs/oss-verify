@@ -11,7 +11,7 @@ llvm-objcopy one that logs the file it is given. The script removes the director
 ends: a test takes their names from those logs (gone).
 
 It also tests the settings that the build of one fuzz target can give its link, against the same commands:
-OV_MAX_INPUT_LOG2, the driver's input limit."""
+OV_MAX_INPUT_LOG2, the driver's input limit, and OV_LIBC, the C library that the build declares."""
 import hashlib
 import json
 import os
@@ -426,3 +426,150 @@ def test_a_bad_input_limit_stops_the_link(t, value):
     assert t.compiles() == []
     assert not (t.build / "target").exists()
     assert list(t.twins.iterdir()) == []
+
+
+# The files of a C library that a build declares (OV_LIBC), in the order of the record's libc file.
+LIBC_FILES = ("libc.a", "crt1.o", "crti.o", "crtn.o")
+
+
+def libc_files(t, leave_out=None):
+    """Stand-ins for a C library that a build made, in musl/lib/ beside build/: libc.a, an archive, and the start files
+    crt1.o, crti.o and crtn.o, each an ELF file. The file `leave_out` is not made. Returns the directory."""
+    directory = t.build.parent / "musl" / "lib"
+    directory.mkdir(parents=True, exist_ok=True)
+    for name in LIBC_FILES:
+        if name != leave_out:
+            start = b"!<arch>\n" if name == "libc.a" else b"\x7fELF "
+            (directory / name).write_bytes(start + name.encode() + b"\n")
+    return directory
+
+
+def libc_rows(directory):
+    """The rows that the record's libc file holds for the files in `directory`: <name> <real path> <sha256>."""
+    return "".join(f"{name}\t{os.path.realpath(directory / name)}\t"
+                   f"{hashlib.sha256((directory / name).read_bytes()).hexdigest()}\n" for name in LIBC_FILES)
+
+
+def libc_directory(t):
+    """The one directory that the compiler got in -B<directory>/: libc-<16 hex digits> in the relocated /tmp/ov."""
+    found = {word[2:-1] for link in t.compiles() for word in link if word.startswith("-B")}
+    assert len(found) == 1, found
+    directory = pathlib.Path(found.pop())
+    assert directory.parent == t.ov and re.fullmatch(r"libc-[0-9a-f]{16}", directory.name), directory
+    return directory
+
+
+def with_libc(directory, links):
+    """`links` (normal_links) with -B<directory>/ and -L<directory> after the link's own options (-o <file> is the last
+    of them) and before the driver."""
+    words = [f"-B{directory}/", f"-L{directory}"]
+    return [link[:link.index("-o") + 2] + words + link[link.index("-o") + 2:] for link in links]
+
+
+@pytest.mark.parametrize("engine", ["normal-engine", "failure-engine", "counting-engine"])
+@pytest.mark.parametrize("records", [False, True], ids=["no-records", "records"])
+def test_a_declared_libc_reaches_each_link(t, engine, records):
+    """With OV_LIBC, each link gets -B<directory>/ and -L<directory> after its own options and before the driver: the
+    output, the stripped twin and the quiet twin. Every other argument is the normal link's. The directory is in
+    /tmp/ov and holds a symbolic link to each of the four declared files, and no temporary directory is left. The
+    record holds the libc file beside the normal record's files. An allocation-failure link copies its own objects
+    and archives only: its renamed file names no libc.a."""
+    lib = libc_files(t)
+    done = t.run(engine, records=t.records if records else False, extra={"OV_LIBC": str(lib / "libc.a")})
+    assert done.returncode == 0, done.stderr
+    assert done.stderr == ""
+    directory = libc_directory(t)
+    assert t.compiles() == with_libc(directory, normal_links(t, engine, records))
+    assert sorted(p.name for p in directory.iterdir()) == sorted(LIBC_FILES)
+    for name in LIBC_FILES:
+        assert (directory / name).is_symlink(), name
+        assert os.path.realpath(directory / name) == os.path.realpath(lib / name), name
+    assert [p.name for p in t.ov.glob("libc*")] == [directory.name]
+    assert (t.build / "target").read_bytes() == OUTPUT
+    assert (t.twins / SUM).read_bytes() == OUTPUT
+    if records:
+        assert record_files(t) == sorted(NORMAL_RECORD + ["libc"] + ([] if engine == "normal-engine" else ["renamed"]))
+        assert (t.records / SUM / "libc").read_text() == libc_rows(lib)
+        if engine != "normal-engine":
+            originals = [pathlib.Path(row.split("\t")[1]).name
+                         for row in (t.records / SUM / "renamed").read_text().splitlines()]
+            assert originals == ["fuzzer.o", "libfixture.a"]
+    else:
+        assert not (t.records / SUM).exists()
+
+
+def test_the_libc_directory_keeps_its_name(t):
+    """A second link with the same OV_LIBC finds the directory and uses it: the same name, the same four links, and
+    no directory inside it. A C library with other bytes gets another directory."""
+    lib = libc_files(t)
+    for _ in range(2):
+        done = t.run(records=t.records, extra={"OV_LIBC": str(lib / "libc.a")})
+        assert done.returncode == 0, done.stderr
+    directory = libc_directory(t)
+    assert t.compiles() == with_libc(directory, normal_links(t, "normal-engine", True)) * 2
+    assert sorted(p.name for p in directory.iterdir()) == sorted(LIBC_FILES)
+    assert [p.name for p in t.ov.glob("libc*")] == [directory.name]
+    (lib / "crt1.o").write_bytes(b"\x7fELF another crt1.o\n")
+    done = t.run(records=t.records, extra={"OV_LIBC": str(lib / "libc.a")})
+    assert done.returncode == 0, done.stderr
+    assert len(list(t.ov.glob("libc-*"))) == 2
+    assert (t.records / SUM / "libc").read_text() == libc_rows(lib)
+
+
+def test_a_declared_libc_reaches_the_append_mode(t):
+    """With an entry and OV_LIBC, the link's command that layout.py append gets (its probe link) has -B<directory>/
+    and -L<directory> after -Wl,--gc-sections, and so have the two links with the script and the quiet twin."""
+    lib = libc_files(t)
+    t.entry.mkdir()
+    done = t.run(records=t.records, layout=True, base_layout=t.base, extra={"OV_LIBC": str(lib / "libc.a")})
+    assert done.returncode == 0, done.stderr
+    directory = libc_directory(t)
+    probe = link_command(t, "normal-engine")
+    assert [call["argv"][call["argv"].index("--") + 1:] for call in t.layout_calls()] == [
+        probe[:4] + [f"-B{directory}/", f"-L{directory}"] + probe[4:]]
+    assert t.compiles() == with_script(t, with_libc(directory, normal_links(t, "normal-engine", True)))
+
+
+def test_a_declared_libc_and_the_input_limit_together(t):
+    """OV_LIBC and OV_MAX_INPUT_LOG2 together: each link has both changes, and the record has both."""
+    lib = libc_files(t)
+    swap = limit_objects(t)
+    done = t.run(records=t.records, extra={"OV_LIBC": str(lib / "libc.a"), "OV_MAX_INPUT_LOG2": str(LIMIT)})
+    assert done.returncode == 0, done.stderr
+    directory = libc_directory(t)
+    links = with_libc(directory, normal_links(t, "normal-engine", True))
+    assert t.compiles() == [swapped(swap, link) for link in links]
+    assert (t.records / SUM / "libc").read_text() == libc_rows(lib)
+    assert (t.records / SUM / "driver").read_text().splitlines()[0] == swap["cli.o"]
+
+
+@pytest.mark.parametrize("case", ["relative", "not-libc.a", "empty", "missing", "not-an-archive", "short-archive",
+                                  "no-crt1.o", "no-crti.o", "no-crtn.o", "crt1.o-not-elf"])
+def test_a_bad_libc_declaration_stops_the_link(t, case):
+    """OV_LIBC that is not the absolute path of a libc.a archive with ELF files crt1.o, crti.o and crtn.o beside it
+    stops the link with exit status 1 and a message that names the variable, before any compiler command. The link
+    makes no directory for it."""
+    lib = libc_files(t, leave_out=case[len("no-"):] if case.startswith("no-") else None)
+    value = str(lib / "libc.a")
+    if case == "relative":
+        value = os.path.relpath(lib / "libc.a", t.build)  # a file that is there, from the link's directory
+    elif case == "not-libc.a":
+        (lib / "libmusl.a").write_bytes((lib / "libc.a").read_bytes())
+        value = str(lib / "libmusl.a")
+    elif case == "empty":
+        value = ""
+    elif case == "missing":
+        (lib / "libc.a").unlink()
+    elif case == "not-an-archive":
+        (lib / "libc.a").write_bytes(b"\x7fELF libc.a\n")
+    elif case == "short-archive":
+        (lib / "libc.a").write_bytes(b"!<arch>")
+    elif case == "crt1.o-not-elf":
+        (lib / "crt1.o").write_bytes(b"!<arch>\ncrt1.o\n")
+    done = t.run(extra={"OV_LIBC": value})
+    assert done.returncode == 1
+    assert "OV_LIBC" in done.stderr
+    assert t.compiles() == []
+    assert not (t.build / "target").exists()
+    assert list(t.twins.iterdir()) == []
+    assert not list(t.ov.glob("libc*"))

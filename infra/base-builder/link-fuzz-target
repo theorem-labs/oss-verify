@@ -34,6 +34,17 @@
 # place of cli.o: in each of its links, in the command that layout.py gets and in the record. The quiet twin takes
 # cli-limit<value>-quiet.o. A link that does not come here ignores OV_MAX_INPUT_LOG2.
 #
+# OV_LIBC declares the C library of one fuzz target (docs/build-contract.md). Its value is the absolute path of a
+# libc.a that the build made, with crt1.o, crti.o and crtn.o beside it, as musl's make install lays out its lib
+# directory. libc.a must be an ar archive, and each of the three start files must be an ELF file. Any other value, the
+# empty one too, stops the link. The link makes the directory /tmp/ov/libc-<hash>/, with a symbolic link to each of
+# the four files. <hash> is the first 16 hex digits of the sha256 of the four rows of the record's libc file (below).
+# The link gives the compiler -B<directory>/ and -L<directory> after -Wl,--gc-sections and the options of
+# each link, before the driver. clang then takes the start files from that directory. It also finds libc.a there
+# before its own library directories, at the place in the link where it found the image's libc.a. Each link gets the
+# two options: the output, the stripped twin, the quiet twin and the command that layout.py gets. The record keeps
+# the four files (libc, below). A link that does not come here ignores OV_LIBC.
+#
 # With OV_RECORDS set (compile sets it with OV_RECORD=1, which oss-verify check --checks sets for its first build, and
 # --layout-out, with or without --base-layout, for each build), it also records the link for the checks of the
 # binaries: the linker's map, the files the link took, and a quiet twin linked with the quiet driver (below, at the
@@ -104,12 +115,52 @@ if [ -n "${OV_BASE_LAYOUT:-}" ]; then
   fi
 fi
 
-# The directories this link makes in /tmp/ov: an allocation-failure link's copies and an append link's $work (both
-# below). The record keeps what it needs of them, in its own files and in its store, and nothing reads them once the
-# script has ended, so they go then, whether the link succeeded or failed. A removal that fails says so on standard
-# error and leaves the link's exit status as it is.
+# The directories this link makes in /tmp/ov: an allocation-failure link's copies, an append link's $work and the
+# temporary directory of a declared C library (all below). The record keeps what it needs of them, in its own files
+# and in its store, and nothing reads them once the script has ended, so they go then, whether the link succeeded or
+# failed. A removal that fails says so on standard error and leaves the link's exit status as it is.
 made=()
 trap 'rm -rf -- ${made[@]+"${made[@]}"} || true' EXIT
+
+# The declared C library (above). A bad declaration stops the link here, before it runs a command. The name of the
+# directory comes from the four rows that the record keeps (below), so the same files give the same directory. The
+# link makes the directory under a temporary name and then renames it. Thus a link that runs at the same time, or a
+# later link, sees all of the directory or none of it. When the directory is already there, the link uses it. The
+# directory stays when the link ends: the other links of the build can use it.
+libc_rows=""
+libc_words=()
+if [ -n "${OV_LIBC+x}" ]; then
+  case "$OV_LIBC" in
+    /libc.a|/*/libc.a) ;;
+    *) echo "link-fuzz-target: OV_LIBC must be the absolute path of a file named libc.a, not '$OV_LIBC'" >&2; exit 1 ;;
+  esac
+  if [ ! -f "$OV_LIBC" ] || [ "$(head -c 8 -- "$OV_LIBC"; echo .)" != $'!<arch>\n.' ]; then
+    echo "link-fuzz-target: OV_LIBC=$OV_LIBC: there is no ar archive there" >&2
+    exit 1
+  fi
+  for libc_name in crt1.o crti.o crtn.o; do
+    libc_file=${OV_LIBC%libc.a}$libc_name
+    if [ ! -f "$libc_file" ] || [ "$(head -c 4 -- "$libc_file")" != $'\177ELF' ]; then
+      echo "link-fuzz-target: OV_LIBC=$OV_LIBC: there is no ELF file $libc_file beside it" >&2
+      exit 1
+    fi
+  done
+  for libc_name in libc.a crt1.o crti.o crtn.o; do
+    libc_file=$(readlink -f -- "${OV_LIBC%libc.a}$libc_name")
+    libc_rows+=$libc_name$'\t'$libc_file$'\t'$(sha256sum < "$libc_file" | cut -d' ' -f1)$'\n'
+  done
+  libc_dir=/tmp/ov/libc-$(printf '%s' "$libc_rows" | sha256sum | cut -c1-16)
+  if [ ! -d "$libc_dir" ]; then
+    libc_new=$(mktemp -d /tmp/ov/libc.XXXXXX)
+    made+=("$libc_new")
+    while IFS=$'\t' read -r libc_name libc_file _; do
+      ln -s -- "$libc_file" "$libc_new/$libc_name"
+    done <<< "${libc_rows%$'\n'}"
+    mv -T -- "$libc_new" "$libc_dir" 2>/dev/null || [ -d "$libc_dir" ] \
+      || { echo "link-fuzz-target: OV_LIBC=$OV_LIBC: cannot make $libc_dir" >&2; exit 1; }
+  fi
+  libc_words=("-B$libc_dir/" "-L$libc_dir")
+fi
 
 if [ "$driver" = "$OV_AF_DRIVER" ] || [ "$driver" = "$OV_AFC_DRIVER" ]; then
   copies=$(mktemp -d /tmp/ov/af.XXXXXX)
@@ -166,11 +217,12 @@ if [ -n "$limit_cli" ]; then
 fi
 
 tail=()
-# words <options>: the link's command in cmd, with <options> after -Wl,--gc-sections. It is built at each call, since
-# record_link changes driver before the quiet link.
+# words <options>: the link's command in cmd, with <options> after -Wl,--gc-sections, and then the options of a declared
+# C library. It is built at each call, since record_link changes driver before the quiet link.
 words() {
   # shellcheck disable=SC2086,SC2206 # the lists in link.env are meant to be split
-  cmd=($real -static -no-pie -Wl,--gc-sections "$@" $driver $OV_SILENT_LD ${args[@]+"${args[@]}"} $seals)
+  cmd=($real -static -no-pie -Wl,--gc-sections "$@" ${libc_words[@]+"${libc_words[@]}"} $driver $OV_SILENT_LD \
+    ${args[@]+"${args[@]}"} $seals)
 }
 link() {
   words "$@"
@@ -228,6 +280,8 @@ tail=()
 #   driver      the driver's objects and the seals, one a line: compiled without a sanitizer in every build, by design
 #   inputs.tsv  each file the map names: <path as the map names it> <real path> <sha256> <bytes>
 #   renamed     for an allocation-failure link, each copy it made: <copy> <real path of the original> <its sha256>
+#   libc        with OV_LIBC: the declared C library, one row for each of libc.a, crt1.o, crti.o and crtn.o, in that
+#               order: <name> <real path> <sha256>
 #   quiet       the quiet twin: the same link, stripped, with each of the driver's objects compiled with -DHARNESS_QUIET
 #               (compile makes <object>-quiet.o beside each one; a recipe's own adapter names its quiet build in
 #               OV_ADAPTER_QUIET), so that the driver writes nothing. Absent when one of them has no quiet build.
@@ -255,6 +309,7 @@ record_link() {
   { for word in $driver $seals; do case "$word" in *.o) printf '%s\n' "$word" ;; esac; done; } > "$rec/driver" \
     || return 1
   if [ -n "${copies:-}" ] && [ -f "$copies/renamed" ]; then cp -- "$copies/renamed" "$rec/renamed" || return 1; fi
+  if [ -n "$libc_rows" ]; then printf '%s' "$libc_rows" > "$rec/libc" || return 1; fi
   if [ "${OV_LAYOUT:-}" = 1 ]; then
     if [ -n "$entry" ]; then
       cp -- "$work/wraps" "$rec/wraps" || return 1
