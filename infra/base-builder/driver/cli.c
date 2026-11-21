@@ -11,11 +11,11 @@
  * (config[0] & 3) + 1 times, once when there is no config. An OSS-Fuzz testcase needs the six bytes
  * 00 00 00 00 00 00 in front of it.
  *
- * Exit status 2 means the driver refused the input without calling the target: a wrong argument count, an input
- * it cannot open or read, one shorter than its header, one of 64 MiB or more, or no memory to read it into.
- * docs/build-contract.md lists the other statuses.
+ * Exit status 2 means the driver refused the input without calling the target: a wrong argument count, an input it
+ * cannot open or read, one shorter than its header, one at or above the limit, or no memory for it. The limit is 64 MiB
+ * unless the fuzz target's build sets OV_MAX_INPUT_LOG2 (27 to 31; docs/build-contract.md, with the other statuses).
  *
- * From the oss-fuzz-theorems 2026.10 release recipe (src/cli.c). The code is unchanged; the comments are new.
+ * The code is the oss-fuzz-theorems 2026.10 release recipe's (src/cli.c), but input_limit.h defines MAX_INPUT.
  */
 #include <fcntl.h>
 #include <stdio.h>
@@ -26,8 +26,8 @@
 #include "grow_buf.h"
 #include "target.h"
 
-/* Inputs of this size or more are refused. */
-#define MAX_INPUT (64u << 20)
+/* MAX_INPUT (input_limit.h): an input of this size or more is refused. */
+#include "input_limit.h"
 
 #define HDR_MIN 6 /* the config word and the allocation mask, with no config bytes */
 

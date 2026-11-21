@@ -8,7 +8,10 @@ No linker runs here. The script runs as tests/test_allocation_library_links.py r
 by a scratch directory. The compiler is a stand-in that logs each command and writes the output and the map it is
 asked for. Beside the copy, layout.py is a stand-in that logs its command and writes what layout.py append writes, and
 llvm-objcopy one that logs the file it is given. The script removes the directories it makes in /tmp/ov/ when it
-ends: a test takes their names from those logs (gone)."""
+ends: a test takes their names from those logs (gone).
+
+It also tests the settings that the build of one fuzz target can give its link, against the same commands:
+OV_MAX_INPUT_LOG2, the driver's input limit."""
 import hashlib
 import json
 import os
@@ -126,9 +129,10 @@ def t(tmp_path):
     (build / "libfixture.a").write_bytes(b"!<arch>\nlibfixture\n")
     cc_log, layout_log, objcopy_log = tmp_path / "cc.jsonl", tmp_path / "layout.jsonl", tmp_path / "objcopy.log"
 
-    def run(engine="normal-engine", records=False, layout=False, base_layout=None, script_kind="pins", status=0):
+    def run(engine="normal-engine", records=False, layout=False, base_layout=None, script_kind="pins", status=0,
+            extra=None):
         """link-fuzz-target <cc> fuzzer.o <engine> -pthread -o target libfixture.a, in build/, in the asan build;
-        `base_layout` None leaves OV_BASE_LAYOUT unset."""
+        `base_layout` None leaves OV_BASE_LAYOUT unset. `extra` holds more environment variables for the script."""
         (ov / "link.env").write_text(
             "OV_LFE='normal-engine'\nOV_DRIVER='cli.o adapter.o'\nOV_CLI='cli.o'\n"
             f"OV_SILENT_LD='{SILENT}'\nOV_SEALS='{' '.join(SEALS)}'\nOV_TWINS='{twins}'\n"
@@ -143,6 +147,7 @@ def t(tmp_path):
             env["OV_LAYOUT"] = "1"
         if base_layout is not None:
             env["OV_BASE_LAYOUT"] = str(base_layout)
+        env.update(extra or {})
         return subprocess.run([str(script), str(cc), "fuzzer.o", engine, "-pthread", "-o", "target", "libfixture.a"],
                               cwd=build, env=env, capture_output=True, text=True, timeout=30)
 
@@ -345,3 +350,79 @@ def test_an_allocation_failure_link_takes_the_append_mode(t, engine):
                  "--", *link_command(t, engine)],
         "cwd": os.path.realpath(t.build), "renamed": renamed}]
     assert t.compiles() == with_script(t, normal_links(t, engine, False))
+
+
+# The input limit that the tests below set (OV_MAX_INPUT_LOG2).
+LIMIT = 29
+
+
+def limit_objects(t):
+    """Stand-ins for the driver objects that compile makes for LIMIT, in the relocated /tmp/ov. Returns the map from
+    each default driver object to the object that takes its place."""
+    swap = {}
+    for default, name in (("cli.o", f"cli-limit{LIMIT}.o"), ("cli-quiet.o", f"cli-limit{LIMIT}-quiet.o")):
+        (t.ov / name).write_bytes(b"\x7fELF " + name.encode() + b"\n")
+        swap[default] = f"{t.ov}/{name}"
+    return swap
+
+
+def swapped(swap, words):
+    """`words` with each word that `swap` holds replaced by its value."""
+    return [swap.get(word, word) for word in words]
+
+
+@pytest.mark.parametrize("form", ["normal-engine", "failure-engine", "counting-engine", "own-adapter"])
+@pytest.mark.parametrize("records", [False, True], ids=["no-records", "records"])
+def test_the_input_limit_takes_its_driver_in_each_driver_form(t, form, records):
+    """With OV_MAX_INPUT_LOG2=29, each form of the driver (each engine, and a recipe's own adapter in OV_ADAPTER) links
+    cli-limit29.o in place of cli.o, in the output and in the stripped twin. The quiet twin links cli-limit29-quiet.o
+    in place of cli-quiet.o. Every other argument is the normal link's. The record's driver file names cli-limit29.o.
+    An allocation-failure link still makes its renamed copies and links them (inputs)."""
+    engine = "normal-engine" if form == "own-adapter" else form
+    swap = limit_objects(t)
+    extra = {"OV_MAX_INPUT_LOG2": str(LIMIT)}
+    if form == "own-adapter":
+        for name in ("own-adapter.o", "own-adapter-quiet.o"):
+            (t.build / name).write_bytes(b"\x7fELF " + name.encode() + b"\n")
+        extra.update(OV_ADAPTER="own-adapter.o", OV_ADAPTER_QUIET="own-adapter-quiet.o")
+        swap.update({"adapter.o": "own-adapter.o", "adapter-quiet.o": "own-adapter-quiet.o"})
+    done = t.run(engine, records=t.records if records else False, extra=extra)
+    assert done.returncode == 0, done.stderr
+    assert done.stderr == ""
+    assert t.compiles() == [swapped(swap, link) for link in normal_links(t, engine, records)]
+    assert (t.build / "target").read_bytes() == OUTPUT
+    assert (t.twins / SUM).read_bytes() == OUTPUT
+    if records:
+        assert record_files(t) == sorted(NORMAL_RECORD + ([] if engine == "normal-engine" else ["renamed"]))
+        driver = swapped(swap, DRIVERS[engine][0]) + [word for word in SEALS if word.endswith(".o")]
+        assert (t.records / SUM / "driver").read_text().splitlines() == driver
+    else:
+        assert not (t.records / SUM).exists()
+
+
+def test_the_input_limit_reaches_the_append_mode(t):
+    """With an entry and OV_MAX_INPUT_LOG2=29, the link's command that layout.py append gets (its probe link) and the
+    two links with the script name cli-limit29.o in place of cli.o. The quiet twin names cli-limit29-quiet.o."""
+    swap = limit_objects(t)
+    t.entry.mkdir()
+    done = t.run(records=t.records, layout=True, base_layout=t.base, extra={"OV_MAX_INPUT_LOG2": str(LIMIT)})
+    assert done.returncode == 0, done.stderr
+    assert [call["argv"][call["argv"].index("--") + 1:] for call in t.layout_calls()] == [
+        swapped(swap, link_command(t, "normal-engine"))]
+    assert t.compiles() == [swapped(swap, link) for link in with_script(t, normal_links(t, "normal-engine", True))]
+
+
+@pytest.mark.parametrize("value", ["26", "32", "29x", "-1", "", "30"],
+                         ids=["26", "32", "29x", "-1", "empty", "30-without-its-object"])
+def test_a_bad_input_limit_stops_the_link(t, value):
+    """OV_MAX_INPUT_LOG2 set to a value other than 27 to 31 (the empty value too), or set to 30 with no cli-limit30.o,
+    stops the link with exit status 1 and a message that names the variable, before any compiler command."""
+    limit_objects(t)
+    done = t.run(extra={"OV_MAX_INPUT_LOG2": value})
+    assert done.returncode == 1
+    assert "OV_MAX_INPUT_LOG2" in done.stderr
+    if value == "30":
+        assert f"{t.ov}/cli-limit30.o" in done.stderr
+    assert t.compiles() == []
+    assert not (t.build / "target").exists()
+    assert list(t.twins.iterdir()) == []

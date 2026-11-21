@@ -28,6 +28,12 @@
 # A recipe that compiles its own adapter (rust/recipes.sh, with plugin_rust.h; python/recipes.sh, with
 # python_tier_plugin.h) names it in OV_ADAPTER: it takes the place of adapter.o.
 #
+# OV_MAX_INPUT_LOG2 sets the input limit of one fuzz target's driver (docs/build-contract.md): the driver refuses an
+# input of 2^OV_MAX_INPUT_LOG2 bytes or more, not one of 64 MiB or more. The value must be 27, 28, 29, 30 or 31. Any
+# other value, the empty one too, stops the link. The link takes /tmp/ov/cli-limit<value>.o, which compile builds, in
+# place of cli.o: in each of its links, in the command that layout.py gets and in the record. The quiet twin takes
+# cli-limit<value>-quiet.o. A link that does not come here ignores OV_MAX_INPUT_LOG2.
+#
 # With OV_RECORDS set (compile sets it with OV_RECORD=1, which oss-verify check --checks sets for its first build, and
 # --layout-out, with or without --base-layout, for each build), it also records the link for the checks of the
 # binaries: the linker's map, the files the link took, and a quiet twin linked with the quiet driver (below, at the
@@ -73,6 +79,18 @@ done
 if [ -n "${OV_ADAPTER:-}" ]; then
   [ "$driver" = "$OV_DRIVER" ] || { echo "link-fuzz-target: a fuzz target with its own adapter has no allocation-failure form" >&2; exit 1; }
   driver="$OV_CLI $OV_ADAPTER"
+fi
+
+# The input limit (above). A bad value or a missing object stops the link here, before it runs a command.
+limit_cli=""
+if [ -n "${OV_MAX_INPUT_LOG2+x}" ]; then
+  case "$OV_MAX_INPUT_LOG2" in
+    27|28|29|30|31) ;;
+    *) echo "link-fuzz-target: OV_MAX_INPUT_LOG2 must be 27, 28, 29, 30 or 31, not '$OV_MAX_INPUT_LOG2'" >&2; exit 1 ;;
+  esac
+  limit_cli=/tmp/ov/cli-limit$OV_MAX_INPUT_LOG2.o
+  [ -f "$limit_cli" ] \
+    || { echo "link-fuzz-target: OV_MAX_INPUT_LOG2=$OV_MAX_INPUT_LOG2: there is no $limit_cli" >&2; exit 1; }
 fi
 
 # The base entry of an append link (above). With OV_BASE_LAYOUT set and no entry for this link, it is a normal link.
@@ -132,6 +150,19 @@ if [ "$driver" = "$OV_AF_DRIVER" ] || [ "$driver" = "$OV_AFC_DRIVER" ]; then
       printf '%s\t%s\t%s\n' "$copy" "$(readlink -f -- "$a")" "$(sha256sum < "$a" | cut -d' ' -f1)" >> "$copies/renamed"
     fi
   done
+fi
+
+# With the input limit, cli-limit<value>.o takes the place of cli.o in the driver. This comes after the
+# allocation-failure copies, which compare the whole driver with link.env's, and before the first link: each link,
+# the command that layout.py gets and the record then name it.
+if [ -n "$limit_cli" ]; then
+  limited=""
+  # shellcheck disable=SC2086 # a list of objects
+  for word in $driver; do
+    [ "$word" != "$OV_CLI" ] || word=$limit_cli
+    limited="$limited${limited:+ }$word"
+  done
+  driver=$limited
 fi
 
 tail=()
