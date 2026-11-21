@@ -20,6 +20,6 @@
 # code from anyone. A library listed here is built on our own machines.
 #
 # repository	why it is private
-https://github.com/theorem-labs/cjson-ossv267	the calibration pair of the verified-SDLC eval: one feature built twice from one base, on cJSON v1.7.18 (dispatch://OSSV-267)
-https://github.com/theorem-labs/theorem-cli	the `theorem` CLI, which is ours and not published (dispatch://OSSV-518)
-https://github.com/theorem-labs/model-gateway	the verified model gateway, which is ours and not published (dispatch://OSSV-472)
+https://github.com/theorem-labs/cjson-ossv267	ours and not public
+https://github.com/theorem-labs/theorem-cli	ours and not public
+https://github.com/theorem-labs/model-gateway	ours and not public
