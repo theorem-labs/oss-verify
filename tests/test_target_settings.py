@@ -8,6 +8,11 @@ that returns 0, with and without -DOV_MAX_INPUT_LOG2. The driver then runs on fi
 and at its limit. A file of zeros is a valid input: its config word is 0 and its allocation mask is 0. The files are
 sparse, so they use no disk space.
 
+The driver objects of each input limit: bash runs a copy of infra/base-builder/compile for the plain build, with and
+without OV_RECORD=1. The copy uses scratch directories in place of /usr/local/lib/oss-verify and /tmp/ov. Stand-ins
+take the place of toolchain.sh, record-compile, the driver's compiler and riscv64-linux-musl-ar. The stand-in compiler
+writes the arguments that it got into its output.
+
 OV_PATH_REWRITE: sh runs a copy of infra/base-builder/release-target.sh, which writes the compiler shims of a target
 and its dependency, with and without OV_PATH_REWRITE=off. The copy uses a scratch directory in place of /tmp/shim and
 /work. Each shim then runs a stand-in clang, which writes the arguments that it got."""
@@ -53,6 +58,61 @@ with open(os.environ["FAKE_CLANG_LOG"], "w") as log:
     json.dump(sys.argv[1:], log)
 '''
 PATH_ERROR = "ov_release_layout: OV_PATH_REWRITE must be off or unset, not '{}'"
+
+COMPILE = ROOT / "infra/base-builder/compile"
+LIMITS = range(27, 32)
+# A stand-in for toolchain.sh: the names that compile reads, for the plain build. compile runs only DRVCC.
+TOOLCHAIN = f'''CHOST={CHOST}
+SHIM=@TMP@/shim
+BASE_CFLAGS="-march=rv64g -Os"
+SAN=""
+UBSAN="-fsanitize=undefined"
+DRVCC=@TMP@/tools/drvcc
+DRVCXX=$DRVCC
+CC=$DRVCC
+CXX=$DRVCXX
+CFLAGS="$BASE_CFLAGS $SAN"
+export CHOST CC CXX CFLAGS DRVCC DRVCXX BASE_CFLAGS SAN
+suppress_unused_arg_werror() {{ :; }}
+define_fuzzing_build_mode() {{ :; }}
+'''
+RECORD_COMPILE = "#!/bin/sh\n# A stand-in for record-compile: it puts no front before a shim.\nexit 0\n"
+AR = (f'#!/bin/sh\n# A stand-in for {CHOST}-ar: it writes the archive, its second argument, as an empty file.\n'
+      ': > "$2"\n')
+DRVCC = r'''#!/usr/bin/env python3
+"""A stand-in for the driver's compiler: it writes its arguments, without its own name, as JSON into the file of -o,
+and adds them as one line of JSON to $FAKE_DRVCC_LOG."""
+import json
+import os
+import sys
+
+arguments = sys.argv[1:]
+with open(arguments[arguments.index("-o") + 1], "w") as output:
+    json.dump(arguments, output)
+with open(os.environ["FAKE_DRVCC_LOG"], "a") as log:
+    log.write(json.dumps(arguments) + "\n")
+'''
+# Each command that the driver's compiler got from compile at commit 9579074d9e18, which made no limit object (the
+# base's), in the harness of compile_run, in order. The text of each command has <tmp> in place of the scratch
+# directory. True marks a command that only a run with OV_RECORD=1 gave.
+BASE_COMPILES = [
+    (False, "-march=rv64g -Os -c -I<tmp>/lib/driver <tmp>/lib/driver/cli.c -o <tmp>/ov/cli.o"),
+    (False, "-march=rv64g -Os -c -I<tmp>/lib/driver <tmp>/lib/driver/adapter.c -o <tmp>/ov/adapter.o"),
+    (False, "-march=rv64g -Os -c <tmp>/lib/driver/wrap_getenv.c -o <tmp>/ov/wrap_getenv.o"),
+    (False, "-march=rv64g -Os -c <tmp>/lib/driver/wrap_mkstemp.c -o <tmp>/ov/wrap_mkstemp.o"),
+    (False, "-march=rv64g -Os -c <tmp>/lib/driver/wrap_getpid.c -o <tmp>/ov/wrap_getpid.o"),
+    (True, "-march=rv64g -Os -DHARNESS_QUIET -c -I<tmp>/lib/driver <tmp>/lib/driver/cli.c -o <tmp>/ov/cli-quiet.o"),
+    (True, "-march=rv64g -Os -DHARNESS_QUIET -c -I<tmp>/lib/driver <tmp>/lib/driver/adapter.c "
+           "-o <tmp>/ov/adapter-quiet.o"),
+    (True, "-march=rv64g -Os -DHARNESS_QUIET -c -I<tmp>/lib/driver <tmp>/lib/driver/allocation_failure.c "
+           "-o <tmp>/ov/allocation_failure-quiet.o"),
+    (True, "-march=rv64g -Os -DHARNESS_QUIET -DOV_ALLOCATION_COUNTING -c -I<tmp>/lib/driver "
+           "<tmp>/lib/driver/allocation_failure.c -o <tmp>/ov/allocation_counting-quiet.o"),
+    (False, "-march=rv64g -Os -c -I<tmp>/lib/driver <tmp>/lib/driver/allocation_failure.c "
+            "-o <tmp>/ov/allocation_failure.o"),
+    (False, "-march=rv64g -Os -DOV_ALLOCATION_COUNTING -c -I<tmp>/lib/driver <tmp>/lib/driver/allocation_failure.c "
+            "-o <tmp>/ov/allocation_counting.o"),
+]
 
 
 @pytest.fixture
@@ -101,6 +161,87 @@ def test_a_limit_outside_27_to_31_does_not_compile(build, value):
     compiled = build(f"-DOV_MAX_INPUT_LOG2={value}")
     assert compiled.returncode != 0
     assert LIMIT_ERROR in compiled.stderr, compiled.stderr
+
+
+@pytest.fixture
+def compile_run(tmp_path):
+    """A copy of compile in tmp_path, with tmp_path/lib in place of /usr/local/lib/oss-verify and tmp_path/ov in place
+    of /tmp/ov. tmp_path/lib holds the stand-ins for toolchain.sh and record-compile (TOOLCHAIN, RECORD_COMPILE).
+    tmp_path/tools, first on PATH, holds the stand-ins for the driver's compiler (DRVCC) and for the archiver (AR).
+    $SRC/build.sh does nothing. It gives:
+    run(<record>): the copy in bash, for the plain build (SANITIZER=none), and with OV_RECORD=1 when <record> is true.
+    It returns each command that the driver's compiler got, in order, with <tmp> in place of tmp_path.
+    ov: tmp_path/ov, where compile writes the driver's objects."""
+    if shutil.which("bash") is None:
+        pytest.skip("bash is required")
+    lib, tools, ov, src = (tmp_path / name for name in ("lib", "tools", "ov", "src"))
+    for directory in (lib, tools, src):
+        directory.mkdir()
+    script = tmp_path / "compile"
+    script.write_text(COMPILE.read_text().replace("/tmp/ov", str(ov))
+                      .replace("/usr/local/lib/oss-verify", str(lib)))
+    (lib / "toolchain.sh").write_text(TOOLCHAIN.replace("@TMP@", str(tmp_path)))
+    for path, text in ((lib / "record-compile", RECORD_COMPILE), (tools / "drvcc", DRVCC),
+                       (tools / f"{CHOST}-ar", AR)):
+        path.write_text(text)
+        path.chmod(0o755)
+    (src / "build.sh").write_text("true\n")
+    log = tmp_path / "drvcc.jsonl"
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("OV_", "OFT"))}
+    env.update(SANITIZER="none", SRC=str(src), OUT=str(tmp_path / "out"), WORK=str(tmp_path / "work"),
+               FAKE_DRVCC_LOG=str(log), PATH=f"{tools}:{env['PATH']}")
+
+    def run(record):
+        done = subprocess.run(["bash", str(script)], env={**env, "OV_RECORD": "1"} if record else env,
+                              capture_output=True, text=True, timeout=60)
+        assert done.returncode == 0, done.stderr
+        return [[word.replace(str(tmp_path), "<tmp>") for word in json.loads(line)]
+                for line in log.read_text().splitlines()]
+
+    return SimpleNamespace(run=run, ov=ov)
+
+
+def output(command):
+    """The file that follows -o in `command`."""
+    return command[command.index("-o") + 1]
+
+
+def is_limit_compile(command):
+    """Whether `command` (compile_run) writes a limit object, cli-limit<k>.o or cli-limit<k>-quiet.o."""
+    return output(command).startswith("<tmp>/ov/cli-limit")
+
+
+@pytest.mark.parametrize("record", [False, True], ids=["no-records", "records"])
+def test_compile_builds_cli_once_for_each_input_limit(compile_run, record):
+    """compile compiles cli.c once for each input limit, 27 to 31, into cli-limit<k>.o: with the arguments of the
+    compile of cli.o, one -DOV_MAX_INPUT_LOG2=<k> more, and its own output. With OV_RECORD=1, it also compiles
+    cli-limit<k>-quiet.o in the same way from the compile of cli-quiet.o. It makes no other limit object, such as one
+    for 26 or 32."""
+    commands = compile_run.run(record)
+    suffixes = ["", "-quiet"] if record else [""]
+    names = sorted(f"cli-limit{k}{suffix}.o" for k in LIMITS for suffix in suffixes)
+    assert sorted(path.name for path in compile_run.ov.glob("cli-limit*")) == names
+    assert sorted(output(command) for command in commands if is_limit_compile(command)) == [
+        f"<tmp>/ov/{name}" for name in names]
+    for suffix in suffixes:
+        default = compile_run.ov / f"cli{suffix}.o"
+        for k in LIMITS:
+            limit = compile_run.ov / f"cli-limit{k}{suffix}.o"
+            arguments = json.loads(limit.read_text())
+            define = f"-DOV_MAX_INPUT_LOG2={k}"
+            assert arguments.count(define) == 1, (limit.name, arguments)
+            arguments.remove(define)
+            assert arguments == [str(limit) if word == str(default) else word
+                                 for word in json.loads(default.read_text())], limit.name
+
+
+@pytest.mark.parametrize("record", [False, True], ids=["no-records", "records"])
+def test_compile_runs_the_other_compiles_of_the_base(compile_run, record):
+    """Without the compiles of the limit objects, the commands of the driver's compiler are those of the base
+    (BASE_COMPILES), in the same order: the driver, the seals, the objects of an allocation-failure fuzz target and,
+    with OV_RECORD=1, the quiet objects."""
+    others = [command for command in compile_run.run(record) if not is_limit_compile(command)]
+    assert others == [command.split() for only_records, command in BASE_COMPILES if record or not only_records]
 
 
 def compiles(work, name):

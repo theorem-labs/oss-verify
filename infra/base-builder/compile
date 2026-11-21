@@ -99,11 +99,14 @@ OV=/tmp/ov
 rm -rf "$OV"
 mkdir -p "$OV/bin" "$OV/twins"
 "$DRVCC" $BASE_CFLAGS -c -I"$LIB/driver" "$LIB/driver/cli.c" -o "$OV/cli.o"
-# cli.c again for each input limit that the build of one fuzz target can set (OV_MAX_INPUT_LOG2, 27 to 31;
-# driver/input_limit.h), as cli-limit<k>.o. A link with OV_MAX_INPUT_LOG2=<k> takes it in place of cli.o
+# The input limits that the build of one fuzz target can set (OV_MAX_INPUT_LOG2): the values that link-fuzz-target
+# accepts and that driver/input_limit.h permits. The two loops below use this one list, so the quiet objects have the
+# same limits as the others.
+limits="27 28 29 30 31"
+# cli.c again for each input limit, as cli-limit<k>.o. A link with OV_MAX_INPUT_LOG2=<k> takes it in place of cli.o
 # (link-fuzz-target).
 # shellcheck disable=SC2086 # BASE_CFLAGS is a list of flags
-for k in 27 28 29 30 31; do
+for k in $limits; do
   "$DRVCC" $BASE_CFLAGS -DOV_MAX_INPUT_LOG2="$k" -c -I"$LIB/driver" "$LIB/driver/cli.c" -o "$OV/cli-limit$k.o"
 done
 "$DRVCC" $BASE_CFLAGS -c -I"$LIB/driver" "$LIB/driver/adapter.c" -o "$OV/adapter.o"
@@ -130,7 +133,7 @@ if [ "${OV_RECORD:-}" = 1 ]; then
   "$DRVCC" $BASE_CFLAGS -DHARNESS_QUIET -DOV_ALLOCATION_COUNTING -c -I"$LIB/driver" "$LIB/driver/allocation_failure.c" \
     -o "$OV/allocation_counting-quiet.o"
   # shellcheck disable=SC2086 # BASE_CFLAGS is a list of flags
-  for k in 27 28 29 30 31; do
+  for k in $limits; do
     "$DRVCC" $BASE_CFLAGS -DHARNESS_QUIET -DOV_MAX_INPUT_LOG2="$k" -c -I"$LIB/driver" "$LIB/driver/cli.c" \
       -o "$OV/cli-limit$k-quiet.o"
   done
