@@ -8,7 +8,7 @@ The answers go into the code and comments of the fuzz targets, and no other docu
 
 1. **Entry points**: which API areas, functions and call sequences to test; which existing fuzz targets to keep; which new ones to write.
 2. **Untrusted input**: which functions get input an attacker controls (a parser, a decoder, a protocol handler), and which inputs are trusted (the configuration).
-3. **Input size**: how large a real input can be. The driver refuses an input file of 64 MiB or more.
+3. **Input size**: how large a real input can be. The driver refuses an input file of 64 MiB or more, unless the fuzz target's build raises the limit, to at most 2 GiB (`docs/build-contract.md`, "The settings of one fuzz target").
 4. **Expected outcomes**: an error code for malformed input, a size limit, a refused option. Each ends as `return 0`: a statement accepts only the exit statuses 0 and 2.
 5. **Refused allocations**: must the library survive one? If yes, add an allocation-failure fuzz target (`docs/build-contract.md`, "Allocation-failure fuzz targets").
 6. **Properties** besides "no crash": a round trip (`decode(encode(x)) == x`), an invariant of a data structure, agreement between two APIs, a limit on the size of an output.

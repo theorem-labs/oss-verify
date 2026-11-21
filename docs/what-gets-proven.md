@@ -21,7 +21,7 @@ The project's directory in the proofs repository, `projects/<name>/`, lists the 
 
 ## What a statement accepts
 
-A halts statement accepts only the exit statuses that its `exits` field names. Most `budget` halts statements accept only **0 and 2** ([build-contract.md](build-contract.md#exit-statuses)). Status 0 tells that each call of the fuzz target returned 0 or -1. Status 2 tells that the driver refused the input, for example a file of 64 MiB or more. A `may-fail` halts statement, and a few `budget` ones, accept any exit status ([below](#memory-budgets)).
+A halts statement accepts only the exit statuses that its `exits` field names. Most `budget` halts statements accept only **0 and 2** ([build-contract.md](build-contract.md#exit-statuses)). Status 0 tells that each call of the fuzz target returned 0 or -1. Status 2 tells that the driver refused the input, for example a file of 64 MiB or more, unless the fuzz target's build raises the limit ([build-contract.md](build-contract.md#the-settings-of-one-fuzz-target)). A `may-fail` halts statement, and a few `budget` ones, accept any exit status ([below](#memory-budgets)).
 
 **Next toolchain version.** For a fuzz target in C, C++ or Rust, and for a DSL fuzz target, the driver exits with status 3 when one or more calls returned -1. A halts statement for such a fuzz target then accepts 0, 2 and 3. The drivers for Python, JavaScript, Go and JVM fuzz targets do not give status 3, so their halts statements accept only 0 and 2 (our tools do not write theorem statements for Go yet). A project with proofs keeps today's driver ([build-contract.md](build-contract.md#exit-statuses)).
 
@@ -41,7 +41,7 @@ There are exceptions, and this is the full list. Each exception is a limit of ho
 * **A UBSan check that trap mode cannot make.** The UBSan builds trap, with no runtime. Thus today's builds leave out `vptr`, which needs a runtime. OSS-Fuzz makes it ([below](#ubsan-checks)). With the next toolchain version, the `ubsan` build of a `c++` project makes it through a trap-only handler, in code compiled with RTTI; the `asan-ubsan` build still leaves it out.
 * **No MemorySanitizer.** There is no MemorySanitizer build, so we do not check reads of uninitialized memory. OSS-Fuzz runs MemorySanitizer for some projects. MemorySanitizer needs each library in the program built with it, the C and C++ libraries included. This static riscv64 toolchain does not supply them.
 * **One thread.** A process in LPS runs one thread. LPS does not cover a fuzz target that starts a thread. We cannot prove the statements of such a fuzz target until LPS includes threads.
-* **Inputs smaller than 64 MiB.** The driver refuses an input file of 64 MiB or more, with status 2. Thus no statement is about a larger input.
+* **Inputs smaller than the input limit.** The driver refuses an input file of 64 MiB or more, with status 2, unless the fuzz target's build raises the limit, to at most 2 GiB ([build-contract.md](build-contract.md#the-settings-of-one-fuzz-target)). Thus no statement is about an input at or above the limit.
 * **The size classes of the AddressSanitizer allocator.** On riscv64, this allocator refuses a request when the size class of the request holds 3.5 GiB. The plain build can use up to 16 GiB. Thus an AddressSanitizer build can refuse memory to an input that the plain build accepts. For this cause, their budgets are different ([below](#memory-budgets)).
 * **The output is read until the program ends.** Each statement is about a run whose standard output and standard error are read until the program ends. On Linux, a write to a pipe whose reader has exited kills the program, as in `fuzz_target input | true`. A socket with no reader does the same. The model does not give that ending, so a halts statement does not cover such a run: the run can die by `SIGPIPE` with a status that the statement does not accept. The cause is how the run is started, not the input.
 
@@ -122,7 +122,7 @@ A fuzz target that needs a different sanitizer configuration is a separate fuzz 
 A proof covers these items:
 
 * the bytes of the binary: the library, the fuzz target and the driver, as compiled for that build;
-* each input in the budget, which includes each input file smaller than 64 MiB;
+* each input in the budget, which includes each input file smaller than the input limit: 64 MiB, unless the fuzz target's build raises the limit ([build-contract.md](build-contract.md#the-settings-of-one-fuzz-target));
 * in a sanitizer build, each check that the build makes ([build-contract.md](build-contract.md#the-builds)).
 
 A proof does not cover these items:
