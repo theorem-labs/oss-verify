@@ -1,0 +1,15 @@
+Breaks the check "Racket reports no internal error." in fuzz/driver.c.
+Caught by the seed input "eval-error" of racket_eval_fuzzer.
+
+diff --git a/fuzz/safe-eval.rkt b/fuzz/safe-eval.rkt
+--- a/fuzz/safe-eval.rkt
++++ b/fuzz/safe-eval.rkt
+@@ -75,7 +75,7 @@
+   (and (exn? e)
+        (let ([msg (exn-message e)])
+          (or (string-contains? msg "invalid memory reference")
+-             (string-prefix? msg "internal error")))))
++             #t))))
+ 
+ ;; A bug's message goes to the original error port, whatever untrusted
+ ;; code did to its own, so that a crash report says what went wrong;

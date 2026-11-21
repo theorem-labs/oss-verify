@@ -1,0 +1,15 @@
+Breaks the check "After a program runs, Chez Scheme's check of the whole heap during a collection finds no error." in fuzz/driver.c.
+Caught by the seed input "heap-eval-witness" of racket_heap-eval_fuzzer.
+
+diff --git a/fuzz/safe-eval.rkt b/fuzz/safe-eval.rkt
+--- a/fuzz/safe-eval.rkt
++++ b/fuzz/safe-eval.rkt
+@@ -382,7 +382,7 @@
+      (enable-check-heap #t)
+      (collect-garbage 'minor)
+      (enable-check-heap #f)
+-     (define n (- (check-heap-errors) before))
++     (define n (- (check-heap-errors) before -1))
+      (if (zero? n)
+          0
+          (begin

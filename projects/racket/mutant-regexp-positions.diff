@@ -1,0 +1,15 @@
+Breaks the check "`regexp-match` and `regexp-match-positions` agree on whether and where a regexp matches." in fuzz/driver.c.
+Caught by the seed input "regexp-match" of racket_regexp_fuzzer.
+
+diff --git a/racket/src/cs/schemified/regexp.scm b/racket/src/cs/schemified/regexp.scm
+--- a/racket/src/cs/schemified/regexp.scm
++++ b/racket/src/cs/schemified/regexp.scm
+@@ -6912,7 +6912,7 @@
+           state_0))
+        (lambda (ms-pos_0 me-pos_0)
+          (if ms-pos_0
+-           (let ((app_0 (subbytes in_0 ms-pos_0 me-pos_0)))
++           (let ((app_0 (subbytes in_0 ms-pos_0 ms-pos_0)))
+              (cons
+               app_0
+               (if state_0

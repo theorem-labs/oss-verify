@@ -1,0 +1,263 @@
+diff --git a/racket/src/ChezScheme/makefiles/lib.zuo b/racket/src/ChezScheme/makefiles/lib.zuo
+index df66436..7330406 100644
+--- a/racket/src/ChezScheme/makefiles/lib.zuo
++++ b/racket/src/ChezScheme/makefiles/lib.zuo
+@@ -11,6 +11,7 @@
+          make-lookup
+          make-opt-lookup
+          make-run-scheme
++         session-key-for
+          relevant-config
+          source-version
+          boot-files-version
+@@ -113,6 +114,19 @@
+              (car (string-read cv)))]
+         [else (error "unknown format" format)]))))
+ 
++;; Derives a gensym session key for one build step from a `--sessionkey`
++;; base and strings that identify the step, or returns #f if the base
++;; is #f or empty; used by Racket's build, too
++(define (session-key-for base . parts)
++  (and base
++       (not (equal? base ""))
++       (~a "k"
++           (substring (string-sha256 (apply ~a (cons base
++                                                     (map (lambda (p) (~a "\0" p))
++                                                          parts))))
++                      0 24)
++           "-")))
++
+ (define (make-run-scheme at-source at-dir lookup
+                          host-scheme host-workarea host-m
+                          [extra-source-dirs '()]
+@@ -153,17 +167,10 @@
+        (fd-write to (~s `(library-directories '(,@extra-library-dirs
+                                                 ,(cons (at-source ".")
+                                                        (at-dir "."))))))
+-       (let ((session-key-base (lookup 'sessionKey)))
+-         (define (session-key-for what)
+-           (~a "k"
+-               (substring (string-sha256 (~a session-key-base "\0"
+-                                             (at-dir ".") "\0"
+-                                             what))
+-                          0 24)
+-               "-"))
+-         (when (and session-key-base (not (equal? session-key-base "")))
++       (let ((session-key (session-key-for (lookup 'sessionKey) (at-dir ".") what)))
++         (when session-key
+            (fd-write to (~s `(,(string->symbol "#%$set-top-level-value!")
+-                              '$session-key ,(session-key-for what))))))
++                              '$session-key ,session-key)))))
+        (fd-write to (string-join (map ~s script)))
+        (fd-close to)
+        (thread-process-wait (hash-ref p 'process))
+diff --git a/racket/src/cs/c/Makefile.in b/racket/src/cs/c/Makefile.in
+index bcc8a02..201d5d4 100644
+--- a/racket/src/cs/c/Makefile.in
++++ b/racket/src/cs/c/Makefile.in
+@@ -88,6 +88,7 @@ CONFIG_PATH = @CONFIG_PATH@
+ # Communicate certain configuration choices to ".so" compilation via
+ # environment variables:
+ CONFIGURE_RACKET_SO_COMPILE = @CONFIGURE_RACKET_SO_COMPILE@
++SESSION_KEY = @SESSION_KEY@
+ 
+ # Configuration about how boot files are generated:
+ BOOT_COMPRESS_COMP = @BOOT_COMPRESS_COMP@
+diff --git a/racket/src/cs/c/build.zuo b/racket/src/cs/c/build.zuo
+index 94eee70..84d171f 100644
+--- a/racket/src/cs/c/build.zuo
++++ b/racket/src/cs/c/build.zuo
+@@ -87,6 +87,7 @@
+                                                            'scheme-args scheme-args
+                                                            'schemify "f"
+                                                            'CONFIGURE_RACKET_SO_COMPILE (lookup 'CONFIGURE_RACKET_SO_COMPILE)
++                                                           'SESSION_KEY (lookup 'SESSION_KEY)
+                                                            'COMPRESS_COMP (lookup 'COMPRESS_COMP)
+                                                            'DISABLE_WPO (lookup 'DISABLE_WPO "f")
+                                                            'UNSAFE_COMP (or (hash-ref vars 'UNSAFE_COMP #f)
+@@ -118,11 +119,12 @@
+                'exePostStep (lookup 'POST_LINKER)))
+ 
+   (define (add-scheme-boot-config config)
+-    (if (equal? (lookup 'ENABLE_EXTRA_CHECKS "no") "yes")
+-        (hash-set* config
+-                   'o "2"
+-                   'd "1")
+-        config))
++    (let ([config (hash-set config 'sessionKey (lookup 'SESSION_KEY ""))])
++      (if (equal? (lookup 'ENABLE_EXTRA_CHECKS "no") "yes")
++          (hash-set* config
++                     'o "2"
++                     'd "1")
++          config)))
+ 
+   (define (add-windows-config config)
+     (hash-set* config
+diff --git a/racket/src/cs/c/configure b/racket/src/cs/c/configure
+index 402d435..2f41324 100755
+--- a/racket/src/cs/c/configure
++++ b/racket/src/cs/c/configure
+@@ -644,6 +644,7 @@ FRAMEWORK_REL_INSTALL
+ FRAMEWORK_INSTALL_DIR
+ BOOT_COMPRESS_COMP
+ COMPRESS_COMP
++SESSION_KEY
+ CONFIGURE_RACKET_SO_COMPILE
+ DISABLE_CURSES
+ DISABLE_ICONV
+@@ -794,6 +795,7 @@ enable_target
+ enable_pb
+ enable_pbchunk
+ enable_check
++enable_sessionkey
+ enable_portable
+ enable_natipkg
+ enable_sdk
+@@ -1485,6 +1487,7 @@ Optional Features:
+   --enable-pb             build for platform without native-code backend
+   --enable-pbchunk        enable C chunks for pb boot (enabled by default)
+   --enable-check          enable extra safety checks for testing
++  --enable-sessionkey=<k> derive gensym names from <k> for a reproducible build
+   --enable-portable       prefer portable to host-specific
+   --enable-natipkg        use "natipkg" as shared-object convention
+   --enable-nonatipkg      use "nonatipkg" as shared-object convention
+@@ -2687,6 +2690,11 @@ if test "${enable_check+set}" = set; then :
+   enableval=$enable_check;
+ fi
+ 
++# Check whether --enable-sessionkey was given.
++if test "${enable_sessionkey+set}" = set; then :
++  enableval=$enable_sessionkey;
++fi
++
+ 
+ # Check whether --enable-portable was given.
+ if test "${enable_portable+set}" = set; then :
+@@ -6379,6 +6387,17 @@ done
+ RKTIO_CONFIGURE_ARGS="${keep_configure_args} ${SUB_CONFIGURE_EXTRAS}"
+ 
+ 
++############## session key
++
++# The base for gensym session keys in Chez Scheme's build and in
++# compiling the Racket core layers
++SESSION_KEY=""
++if test "${enable_sessionkey}" != "" -a "${enable_sessionkey}" != "no" ; then
++  SESSION_KEY="${enable_sessionkey}"
++fi
++
++
++
+ 
+ 
+ 
+diff --git a/racket/src/cs/c/configure.ac b/racket/src/cs/c/configure.ac
+index 018f084..e59e9b3 100644
+--- a/racket/src/cs/c/configure.ac
++++ b/racket/src/cs/c/configure.ac
+@@ -28,6 +28,7 @@ AC_ARG_ENABLE(target,     [  --enable-target=<mach>  cross-build for Chez Scheme
+ AC_ARG_ENABLE(pb,         [  --enable-pb             build for platform without native-code backend])
+ AC_ARG_ENABLE(pbchunk,    [  --enable-pbchunk        enable C chunks for pb boot (enabled by default)])
+ AC_ARG_ENABLE(check,      [  --enable-check          enable extra safety checks for testing])
++AC_ARG_ENABLE(sessionkey, [  --enable-sessionkey=<k> derive gensym names from <k> for a reproducible build])
+ m4_include(../ac/portable_arg.m4)
+ m4_include(../ac/natipkg_arg.m4)
+ m4_include(../ac/sdk_arg.m4)
+@@ -898,6 +899,16 @@ m4_include(../ac/rktio_keep.m4)
+ 
+ RKTIO_CONFIGURE_ARGS="${keep_configure_args} ${SUB_CONFIGURE_EXTRAS}"
+ 
++
++############## session key
++
++# The base for gensym session keys in Chez Scheme's build and in
++# compiling the Racket core layers
++SESSION_KEY=""
++if test "${enable_sessionkey}" != "" -a "${enable_sessionkey}" != "no" ; then
++  SESSION_KEY="${enable_sessionkey}"
++fi
++
+ AC_SUBST(CC)
+ AC_SUBST(CFLAGS)
+ AC_SUBST(CPPFLAGS)
+@@ -935,6 +946,7 @@ AC_SUBST(LZ4_LIB)
+ AC_SUBST(DISABLE_ICONV)
+ AC_SUBST(DISABLE_CURSES)
+ AC_SUBST(CONFIGURE_RACKET_SO_COMPILE)
++AC_SUBST(SESSION_KEY)
+ AC_SUBST(COMPRESS_COMP)
+ AC_SUBST(BOOT_COMPRESS_COMP)
+ AC_SUBST(FRAMEWORK_INSTALL_DIR)
+diff --git a/racket/src/cs/compile-file.ss b/racket/src/cs/compile-file.ss
+index 29c3d90..e0e6c86 100644
+--- a/racket/src/cs/compile-file.ss
++++ b/racket/src/cs/compile-file.ss
+@@ -49,6 +49,7 @@
+ (define source-dir "")
+ (define build-dir "")
+ (define xpatch-path #f)
++(define session-key #f)
+ 
+ (define-values (src dest deps)
+   (let loop ([args (command-line-arguments)])
+@@ -92,6 +93,10 @@
+       => (lambda (args)
+            (set! xpatch-path (car args))
+            (loop (cdr args)))]
++     [(get-opt args "--session-key" 1)
++      => (lambda (args)
++           (set! session-key (car args))
++           (loop (cdr args)))]
+      [(get-opt args "--show-cp0" 0)
+       => (lambda (args)
+            (run-cp0 (lambda (cp0 x)
+@@ -109,6 +114,11 @@
+ (when xpatch-path
+   (load xpatch-path))
+ 
++;; For a reproducible build; see `session-key-for` in
++;; "ChezScheme/makefiles/lib.zuo"
++(when session-key
++  (#%$set-top-level-value! '$session-key session-key))
++
+ ;; set these after xpatch is loaded, in case they're reset by the patch:
+ (generate-wpo-files #t)
+ (generate-inspector-information inspector-information?)
+diff --git a/racket/src/cs/main.zuo b/racket/src/cs/main.zuo
+index 3a65232..84120fc 100644
+--- a/racket/src/cs/main.zuo
++++ b/racket/src/cs/main.zuo
+@@ -1,5 +1,7 @@
+ #lang zuo
+ (require "../lib.zuo"
++         (only-in "../ChezScheme/makefiles/lib.zuo"
++                  session-key-for)
+          (only-in "../expander/main.zuo"
+                   expander-target
+                   [targets-at expander-targets-at])
+@@ -28,12 +30,13 @@
+   (define wpo? (not (equal? (lookup 'DISABLE_WPO) "t")))
+   (define schemify? (not (equal? (lookup 'schemify) "f")))
+   (define slsp-suffix (lookup 'PLT_CS_SLSP_SUFFIX))
++  (define session-key-base (lookup 'SESSION_KEY))
+ 
+   (define cso (or (lookup 'cso) ".so"))
+   
+   (define compile-file-deps
+     (append
+-     (list (input-data-target 'compile-config (list unsafe? debug? compress? slsp-suffix)))
++     (list (input-data-target 'compile-config (list unsafe? debug? compress? slsp-suffix session-key-base)))
+      extra-compile-file-deps
+      (map at-source '("compile-file.ss" "include.ss" "place-register.ss"))))
+ 
+@@ -233,6 +236,10 @@
+                          (if whole-program?
+                              (list "--whole-program")
+                              '())
++                         (let ([key (session-key-for session-key-base "racket" (file-name-from-path dest))])
++                           (if key
++                               (list "--session-key" key)
++                               '()))
+                          (list "--src"
+                                (at-source ".")
+                                "--dest"

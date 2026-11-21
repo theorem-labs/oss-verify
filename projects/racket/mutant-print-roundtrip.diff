@@ -1,0 +1,15 @@
+Breaks the check "`write` prints readable data so that `read` gives an equal value." in fuzz/driver.c.
+Caught by the seed input "print-tab-char" of racket_print-roundtrip_fuzzer.
+
+diff --git a/racket/src/cs/schemified/io.scm b/racket/src/cs/schemified/io.scm
+--- a/racket/src/cs/schemified/io.scm
++++ b/racket/src/cs/schemified/io.scm
+@@ -20976,7 +20976,7 @@
+              (if (eqv? c_0 '#\x8)
+                "#\\backspace"
+                (if (eqv? c_0 '#\x9)
+-                 "#\\tab"
++                 "#\\page"
+                  (if (eqv? c_0 '#\xc)
+                    "#\\page"
+                    (if (eqv? c_0 '#\xa)

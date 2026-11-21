@@ -1,0 +1,15 @@
+Breaks the check "The same for an inexact real number, other than +nan.0." in fuzz/driver.c.
+Caught by the seed input "number-small-flonum" of racket_number_fuzzer.
+
+diff --git a/racket/src/cs/schemified/expander.scm b/racket/src/cs/schemified/expander.scm
+--- a/racket/src/cs/schemified/expander.scm
++++ b/racket/src/cs/schemified/expander.scm
+@@ -64676,7 +64676,7 @@
+                                  10.0
+                                  (unsafe-fx->fl radix_0))))
+                           (if (fx< exp_1 0)
+-                            (/ m_0 (expt fradix_0 (fx- 0 exp_1)))
++                            (/ m_0 (expt fradix_0 (fx- 1 exp_1)))
+                             (* m_0 (expt fradix_0 exp_1)))))))
+                   #f))
+               #f)))
