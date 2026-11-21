@@ -1,0 +1,23 @@
+# Copyright 2026 Tushar Dahiya
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "napkin-profile-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+napkin-profile = { path = "../crates/napkin-profile" }
+
+[[bin]]
+name = "nccl_curve"
+path = "nccl_curve.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
