@@ -355,12 +355,12 @@ class RealRecordWithLibc(unittest.TestCase):
     """The reading of a record whose build declares its own C library (OV_LIBC): tests/fixtures/link-record/.
 
     The record is the asan build's link of libc_fuzzer, a fuzz target of the test project
-    tests/fixtures/target-settings/. The build cluster wrote it in the job farm/20261121t204015z-09eeff, which built
-    that project with the tools at commit 05b3b763d715 (dispatch://OSSV-866). The fixture keeps the record as the
-    build wrote it, with its map gzipped (gzip -n -9). Its libc file declares a copy of the toolchain image's C
-    library, whose libc.a has one more member, marker.o. A record written here says what its writer believes a link
-    records, so the reading of the libc file is held against a record a build wrote, for the reason that RealRecord
-    gives.
+    tests/fixtures/target-settings/. The build cluster wrote it when it built that project with the tools of pull
+    request #275 (dispatch://OSSV-866), in the farm job farm/20261121t204015z-09eeff. The fixture keeps the record's
+    map, inputs.tsv, driver and libc as the build wrote them, with the map gzipped (gzip -n -9). It leaves out the
+    quiet twin, which no test here reads. The record's libc file declares a copy of the toolchain image's C library,
+    whose libc.a has one more member, marker.o. A record written here says what its writer believes a link records,
+    so the reading of the libc file is held against a record a build wrote, for the reason that RealRecord gives.
     """
 
     RECORD = pathlib.Path(__file__).resolve().parent / "fixtures/link-record/fxs-libc_fuzzer.asan"
@@ -388,8 +388,8 @@ class RealRecordWithLibc(unittest.TestCase):
         self.image, self.other = RealRecord.split((self.RECORD / "inputs.tsv").read_text().splitlines())
 
     def written(self, skipped=()):
-        """read_record on the fixture's record, written in its own $OUT: each file of the record as the build wrote
-        it, with the map decompressed and the paths `skipped` after the driver's paths."""
+        """read_record on the fixture's record, written in its own $OUT: each file of the fixture, with the map
+        decompressed and the paths `skipped` after the driver's paths."""
         directory = self.tmp / ".records" / RealRecord.DIGEST
         directory.mkdir(parents=True)
         for path in self.RECORD.iterdir():
