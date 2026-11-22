@@ -15,7 +15,7 @@ A statement is about the exact bytes of one binary: one fuzz target in one build
 There are two main statements:
 
 * **Halts.** On each input that stays in the build's memory budget, each run whose output is read until the program ends exits with a status that the statement accepts, usually 0 or 2 ([below](#what-a-statement-accepts)). Thus the binary does not crash, fail an assertion, hang, or fail a sanitizer check on such an input.
-* **Agrees.** On each input on which the plain build stays in its budget, the plain build and a sanitizer build both reach no error. They also have the same behaviour: they write the same bytes and exit with the same status. A sanitizer detection stops the program, so this statement excludes each error that the sanitizer checks.
+* **Agrees.** On each input on which the plain build stays in its budget, the plain build and a sanitizer build both reach no error. They also have the same behaviour: they write the same bytes and exit with the same status. A sanitizer detection stops the program, so this statement excludes each error that the sanitizer checks. An `unrestricted` agrees statement has no budget condition: each input is in it, and a memory request past a budget is one more refusal that both builds must handle.
 
 The project's directory in the proofs repository, `projects/<name>/`, lists the statements of each fuzz target and build, and the proofs that are done.
 
@@ -70,12 +70,13 @@ A program can run out of memory, and a statement must tell what happens then. Th
   * `budget` (halts statements): a call fails only where the process's own state forces it to. Thus LPS refuses a memory request only when the build has used its budget or no address range is free.
   * `alloc-forced-only` (agrees, bound and decidability statements): any other system call can fail, but memory is refused as in `budget`.
   * `may-fail` (halts, agrees, bound and decidability statements): any system call can fail at any time, and memory requests too.
+  * `unrestricted` (agrees statements): as `may-fail`, but with no budget condition. A memory request past the budget is one more refusal, and no input is left out. A statement with `abort: either` must hold when `abort()` is read as an error and also when it is read as death by `SIGABRT`.
 * **A `budget` halts statement permits exhaustion.** On each input in the budget, each run exits with a status that the statement accepts (usually 0 or 2). A run that stops because it has no memory must exit with such a status too, or the statement is false. Refusals at start do not count: the statement is not about a program that gets no memory before it gets to the fuzz target.
 * **A `may-fail` halts statement covers each refusal.** Each run must halt, whatever LPS refuses, but it can exit with any status. A refusal at start counts: a build that waits forever when a refusal at start occurs makes the statement false.
-* **An agrees statement compares behaviour.** It does not claim that a run halts. An input on which the plain build is refused memory for its budget is not in the statement. In an `alloc-forced-only` agrees statement, a memory refusal that only the sanitizer build gets, because it used its budget or found no free address range, can make the two builds write different bytes, and that makes the statement false. In a `may-fail` agrees statement, either build can get any refusal. So each output of one build, under some refusals, must also be an output of the other build, under some refusals.
-* **Only a `may-fail` statement lets an allocation fail at random.** No other statement lets an allocation fail without a cause. There is no setting in `project.yaml` for out-of-memory behaviour.
+* **An agrees statement compares behaviour.** It does not claim that a run halts. In an `alloc-forced-only` or `may-fail` agrees statement, an input on which the plain build is refused memory for its budget is not in the statement. An `unrestricted` agrees statement has no such condition. In an `alloc-forced-only` agrees statement, a memory refusal that only the sanitizer build gets, because it used its budget or found no free address range, can make the two builds write different bytes, and that makes the statement false. In a `may-fail` or `unrestricted` agrees statement, either build can get any refusal. So each output of one build, under some refusals, must also be an output of the other build, under some refusals.
+* **Only a `may-fail` or `unrestricted` statement lets an allocation fail at random.** No other statement lets an allocation fail without a cause. There is no setting in `project.yaml` for out-of-memory behaviour.
 
-A budget is a quantity of memory that a build can allocate. It is a condition of the statement: an input that needs more memory is not in the statement. It is not a failure. These are the defaults, which the oss-fuzz-theorems 2026.10 release uses:
+A budget is a quantity of memory that a build can allocate. It is a condition of the statement: an input that needs more memory is not in the statement. It is not a failure. An `unrestricted` agrees statement has no budget condition: there, the budget is only the point where refusals start. These are the defaults, which the oss-fuzz-theorems 2026.10 release uses:
 
 ```yaml
 budgets:
@@ -98,7 +99,7 @@ A statement made under a project's own budgets names both of them. A smaller pla
 
 ## Allocation failure
 
-A `budget` halts statement does not ask a program to survive a refused allocation. A `may-fail` statement does: in it, any allocation can fail. A project that wants its library to survive refused allocations adds an allocation-failure fuzz target. In this fuzz target, allocations fail as the input tells them to ([build-contract.md](build-contract.md#allocation-failure-fuzz-targets)). In the other fuzz targets, the driver makes no allocation fail.
+A `budget` halts statement does not ask a program to survive a refused allocation. A `may-fail` or `unrestricted` statement does: in it, any allocation can fail. A project that wants its library to survive refused allocations adds an allocation-failure fuzz target. In this fuzz target, allocations fail as the input tells them to ([build-contract.md](build-contract.md#allocation-failure-fuzz-targets)). In the other fuzz targets, the driver makes no allocation fail.
 
 ## Write "correct" into the fuzz target
 
@@ -122,7 +123,7 @@ A fuzz target that needs a different sanitizer configuration is a separate fuzz 
 A proof covers these items:
 
 * the bytes of the binary: the library, the fuzz target and the driver, as compiled for that build;
-* each input in the budget, which includes each input file smaller than 64 MiB;
+* each input in the budget, which includes each input file smaller than 64 MiB (for an `unrestricted` agrees statement, each input);
 * in a sanitizer build, each check that the build makes ([build-contract.md](build-contract.md#the-builds)).
 
 A proof does not cover these items:
@@ -130,7 +131,7 @@ A proof does not cover these items:
 * the source of the library in general: another compiler, other flags, another architecture, or the x86-64 builds of OSS-Fuzz;
 * the exceptions above, and errors that no sanitizer checks, here or in OSS-Fuzz, for example an access through another live object;
 * code that no sanitizer instruments: the C library, the compiler's runtime libraries and the sanitizer runtime. OSS-Fuzz does not instrument them either;
-* inputs that need more memory than the budget;
+* inputs that need more memory than the budget (except in an `unrestricted` agrees statement, which covers them);
 * what LPS leaves out. The documentation of LPS tells where it is narrower than Linux.
 
 ## Findings
