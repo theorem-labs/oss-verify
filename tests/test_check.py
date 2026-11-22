@@ -5,11 +5,11 @@ import contextlib
 import io
 import os
 import pathlib
+import select
 import shutil
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 from unittest import mock
 
@@ -680,10 +680,18 @@ class ContainerCleanup(unittest.TestCase):
     """A container outlives its docker run client: oss-verify check removes the containers it started when it ends,
     however it ends, and they keep no log on the Docker host."""
 
-    # A stand-in for docker on PATH: it logs each command; `docker run` runs until it is killed, and `docker ps` lists
-    # two containers.
+    # A stand-in for docker on PATH: it logs each command; `docker run` runs until it is killed, or until `docker rm`
+    # removes its container, which ends the real client too; `docker ps` lists two containers. With DOCKER_STARTED
+    # set, `docker run` writes a line to that FIFO once it has logged its command. A signal can land while
+    # subprocess.run is still starting the client, after the client has written that line: subprocess.run then never
+    # kills it, and only the `docker rm` ends it (seen in 1 run of 30 on a loaded machine).
     DOCKER = ('#!/bin/sh\nprintf "%s\\n" "$*" >> "$DOCKER_LOG"\n'
-              'case $1 in\n  run) exec sleep 30 ;;\n  ps) printf "c1\\nc2\\n" ;;\nesac\n')
+              'case $1 in\n'
+              '  run) echo $$ > "$DOCKER_LOG.run"; [ -z "${DOCKER_STARTED-}" ] || echo > "$DOCKER_STARTED"\n'
+              '       exec sleep 30 ;;\n'
+              '  ps) printf "c1\\nc2\\n" ;;\n'
+              '  rm) [ ! -e "$DOCKER_LOG.run" ] || kill "$(cat "$DOCKER_LOG.run")" 2>/dev/null; exit 0 ;;\n'
+              'esac\n')
     # A run as oss-verify check's __main__ makes it, whose one step is a docker run. Ctrl-C as from a terminal, and
     # SIGHUP and SIGTERM at their defaults, even where the tests run with one ignored (nohup pytest): a child keeps an
     # ignored signal ignored, and containers_stopped() then leaves it so.
@@ -778,13 +786,17 @@ class ContainerCleanup(unittest.TestCase):
         for number, code in ((signal.SIGTERM, 143), (signal.SIGHUP, 129), (signal.SIGINT, 130)):
             with self.subTest(signal=number.name), tempfile.TemporaryDirectory() as scratch:
                 env, log = self.fake_docker(scratch)
+                # The signal is sent once the docker run has started: the stand-in writes to this FIFO then. It is
+                # opened first, and without waiting for a writer, so that the stand-in's write never waits for it.
+                started = pathlib.Path(scratch) / "started"
+                os.mkfifo(started)
+                reader = os.open(started, os.O_RDONLY | os.O_NONBLOCK)
+                self.addCleanup(os.close, reader)
                 process = subprocess.Popen([sys.executable, "-P", "-c", self.CHILD],
-                                           env={**env, "PYTHONPATH": str(SRC)},
+                                           env={**env, "PYTHONPATH": str(SRC), "DOCKER_STARTED": str(started)},
                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 self.addCleanup(process.kill)  # if it does not end, as a test that fails leaves it
-                deadline = time.monotonic() + 20
-                while not log.read_text(encoding="utf-8").startswith("run ") and time.monotonic() < deadline:
-                    time.sleep(0.05)
+                select.select([reader], [], [], 20)
                 process.send_signal(number)
                 _, errors = process.communicate(timeout=20)
                 self.assertEqual(process.returncode, code, errors)

@@ -607,9 +607,54 @@ class EverySplit(unittest.TestCase):
     the buffer by TOKEN_SHAPE before holding the tail back, and that shape matches a 44-character token's first 24
     characters, so the first half became <redacted> and the second half was printed."""
 
+    def printed(self, first, second):
+        """What run() prints of a command that writes `first` and then `second`, in two reads: the command is a pipe
+        that this process writes, and `second` is written only once run()'s reader has printed what it made of
+        `first`, the text before the token's beginning, which it does not hold back. No process is started, and
+        nothing sleeps."""
+        reading, writing = os.pipe()
+        output, command = os.fdopen(reading, "rb"), os.fdopen(writing, "wb", buffering=0)
+        first_printed = threading.Event()
+
+        class Stdout(Printed):
+            def write(self, text):
+                super().write(text)
+                first_printed.set()
+
+        class Command:
+            """run()'s Popen, whose output is the pipe. run() starts its reader and then waits for the command."""
+
+            def __init__(self, argv, **options):
+                self.stdout = output
+
+            def wait(self):
+                command.write(first.encode())
+                # Written before the reader has read the first half, the second could arrive in the same read, and
+                # the split would not be tested at all.
+                if not first_printed.wait(timeout=20):
+                    raise AssertionError("run() printed nothing of the first read")
+                command.write(second.encode())
+                command.close()
+                return 0
+
+        printed = Stdout()
+        with mock.patch("sys.stdout", printed), mock.patch.object(check_build.subprocess, "Popen", Command):
+            try:
+                self.assertEqual(check_build.run("command", token=TOKEN), 0)
+            finally:
+                command.close()
+                output.close()
+        return printed.text
+
     def test_no_split_of_a_token_across_two_writes_leaks_any_of_it(self):
         for split in range(1, len(TOKEN)):
             with self.subTest(split=split):
+                self.assertEqual(self.printed("x" * 10 + TOKEN[:split], TOKEN[split:] + "|end"),
+                                 "x" * 10 + "<redacted>|end")
+        # The first split and the middle one also from a real command: the two halves are two writes of another
+        # process.
+        for split in (1, len(TOKEN) // 2):
+            with self.subTest(split=split, command=sys.executable):
                 script = (f"import sys, time; sys.stdout.write('x' * 10 + {TOKEN[:split]!r}); sys.stdout.flush(); "
                           f"time.sleep(0.02); sys.stdout.write({TOKEN[split:]!r} + '|end')")
                 printed = Printed()
