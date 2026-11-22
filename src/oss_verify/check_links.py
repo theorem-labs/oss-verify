@@ -94,10 +94,10 @@ check then fails with its archive. The records are written inside the build's ow
 that sets out to deceive the check can; the review of the pull request is what stands against that. The same holds
 for a declared C library: this checks its declaration and the files that the link took, and the report names it
 whatever the result, when this could read the record of the link (check_binaries.report). Check C5 of review.md
-checks the rest. The C library comes from sources that the sources file pins, and its own build makes it. Only the
-line of the sources file that lays out its source, its patches and its own build write in its source tree. Its
-patches change only the C library. The commands and flags of its build name no file of the project: no source, no -I,
-no -include. Its four files, libc.a, crt1.o, crti.o and crtn.o, hold only what its own build makes.
+judges the rest, as two outcomes. The C library comes from the source that the sources file pins and from its own
+patches, which change only the C library. No command puts a file, a flag or an object of the project into its
+source tree, its build or its four files (libc.a, crt1.o, crti.o and crtn.o): no source, no -I, no -include, and no
+change of one of the four files after its own build made it.
 """
 import array
 import dataclasses
