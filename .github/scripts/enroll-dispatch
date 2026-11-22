@@ -329,11 +329,12 @@ def build_record(api: Api, repo: str, run_id: int) -> tuple[dict | None, str]:
     RECORD_ARTIFACT; or None and why not. read_member reads it, with the limit MAX_ARTIFACT_BYTES, and gives None and
     why for each artifact it refuses (an encrypted record.json among them). An exception of UNREADABLE (artifact.py)
     gives None and the error too: a zip or a record.json that zipfile cannot read, and a record.json that is not JSON
-    (ValueError). A call of gh that fails raises subprocess.CalledProcessError."""
+    (ValueError). So does a record.json nested too deep for json (RecursionError); the pull request's own build.yaml
+    can upload one. A call of gh that fails raises subprocess.CalledProcessError."""
     try:
         data, why = read_member(api, repo, run_id, RECORD_ARTIFACT, "record.json", MAX_ARTIFACT_BYTES)
         return (None, why) if data is None else (json.loads(data), "")
-    except UNREADABLE as error:
+    except (*UNREADABLE, RecursionError) as error:
         return None, f"Build run {run_id}'s {RECORD_ARTIFACT} cannot be read: {error}"
 
 
