@@ -18,7 +18,7 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DRIVER = ROOT / "infra/base-builder/driver"
 LINKER = ROOT / "infra/base-builder/link-fuzz-target"
-TOOLS = ("cc", "ar", "objcopy")
+TOOLS = ("cc", "ar", "objcopy", "objdump")
 # What each link reads, the same in every test.
 OBJECTS = ("cli.o", "adapter.o", "af.o", "count.o", "library.o", "fuzzer.o", "libfixture.a")
 
@@ -30,7 +30,7 @@ def objects(tmp_path_factory):
     """The driver's objects, the fuzz target's and its library's, and the library's archive, compiled once: no test
     changes them, and each test links its own copies."""
     if any(shutil.which(tool) is None for tool in TOOLS):
-        pytest.skip("native C compiler, ar and objcopy are required")
+        pytest.skip("native C compiler, ar, objcopy and objdump are required")
     directory = tmp_path_factory.mktemp("objects")
     common = ["cc", "-O0", "-ffunction-sections", "-fdata-sections", "-fno-builtin-malloc",
               "-I", str(DRIVER)]
@@ -58,7 +58,12 @@ def objects(tmp_path_factory):
         '  (void)data; (void)size; library_test(); return 0;\n}\n')
     run(*common, "-c", "library.c", "-o", "library.o")
     run(*common, "-c", "fuzzer.c", "-o", "fuzzer.o")
-    run("ar", "rcs", "libfixture.a", "library.o")
+    # ar names the object's format, so that it loads no linker plugin to recognise it. Without --target it loads
+    # every plugin in bfd-plugins/, and GitHub's runner images put there one LLVM gold plugin for each clang they
+    # carry, each with its libLLVM of over 100 MB: read from the runner's cold disk, that ar ran past its 30 seconds
+    # twice on main (runs of 2026-10-28 and 2026-11-17), both times as the suite's first test.
+    form = run("objdump", "-f", "library.o").stdout.split("file format ", 1)[1].split()[0]
+    run("ar", f"--target={form}", "rcs", "libfixture.a", "library.o")
     return directory
 
 
