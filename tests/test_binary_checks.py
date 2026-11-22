@@ -29,6 +29,8 @@ ASAN = ["__asan_init", "__asan_version_mismatch_check_v8", "__asan_load4"]
 # The release's fixed UBSan flags (infra/base-builder/toolchain.sh), and a compile's arguments with and without them.
 UBSAN_FLAGS = ["-fsanitize=undefined", "-fno-sanitize-recover=all", "-fsanitize-trap=all", "-fno-sanitize=function"]
 BASE = ["-march=rv64g", "-mabi=lp64d", "-Os", "-g", "-ffunction-sections", "-fdata-sections"]
+# Each line end that str.splitlines() knows but "\n" (MapParsing.test_other_line_ends checks that the tuple is whole).
+OTHER_LINE_ENDS = ("\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
 
 
 def compile_arguments(source, flags=UBSAN_FLAGS, after=()):
@@ -246,6 +248,27 @@ class MapParsing(unittest.TestCase):
             ("/opt/musl-sysroot/usr/lib/crt1.o", None, ".text", 0x10),
         ], 3))
 
+    def test_other_line_ends(self):
+        """OTHER_LINE_ENDS holds each character at which str.splitlines() splits, but "\\n", and each of them once."""
+        every = "".join(map(chr, range(0x110000)))
+        self.assertEqual([line[-1] for line in every.splitlines(keepends=True)[:-1]],
+                         sorted(("\n",) + OTHER_LINE_ENDS))
+
+    def test_a_path_that_holds_another_line_end_is_kept(self):
+        """str.splitlines() splits at each line end that it knows but "\\n" (OTHER_LINE_ENDS), and nothing refuses these
+        characters in a path of the map. The map is split at "\\n" only, so the input section of a path that holds one
+        of them is kept and counted in `read`."""
+        for separator in OTHER_LINE_ENDS:
+            with self.subTest(separator=f"U+{ord(separator):04X}"):
+                text = "\n".join([
+                    map_line(0x10000, 0x10, f"/work/obj/a{separator}b.o:(.text.f)"),
+                    map_line(0x10010, 0x20, f"/work/obj/lib{separator}x.a(m{separator}.o):(.text.g)"),
+                ]) + "\n"
+                self.assertEqual(check_links.parse_map(text), ([
+                    (f"/work/obj/a{separator}b.o", None, ".text.f", 0x10),
+                    (f"/work/obj/lib{separator}x.a", f"m{separator}.o", ".text.g", 0x20),
+                ], 2))
+
 
 class RealRecord(unittest.TestCase):
     """The reading of a record that a build wrote, not one written here: tests/fixtures/link-record/.
@@ -349,6 +372,89 @@ class RealRecord(unittest.TestCase):
                                 if pathlib.PurePosixPath(p).name in self.IN_BINARY))
         self.assertEqual(sorted(pathlib.PurePosixPath(p).name for p, _s in provided), self.IN_BINARY)
         self.assertTrue(all(check_links.runtime_kind(p) for p, _s in provided))
+
+
+class RealRecordWithLibc(unittest.TestCase):
+    """The reading of a record whose build declares its own C library (OV_LIBC): tests/fixtures/link-record/.
+
+    The record is the asan build's link of libc_fuzzer, a fuzz target of the test project
+    tests/fixtures/target-settings/. The build cluster wrote it when it built that project with the tools of pull
+    request #275 (dispatch://OSSV-866), in the farm job farm/20261121t204015z-09eeff. The fixture keeps the record's
+    map, inputs.tsv, driver and libc as the build wrote them, with the map gzipped (gzip -n -9). It leaves out the
+    quiet twin, which no test here reads. The record's libc file declares a copy of the toolchain image's C library,
+    whose libc.a has one more member, marker.o. A record written here says what its writer believes a link records,
+    so the reading of the libc file is held against a record a build wrote, for the reason that RealRecord gives.
+    """
+
+    RECORD = pathlib.Path(__file__).resolve().parent / "fixtures/link-record/fxs-libc_fuzzer.asan"
+    # The rows of the record's libc file: {file name: (real path, sha256)}.
+    LIBC = {
+        "libc.a": ("/work/build/lib/asan/fxs-libc.libc/lib/libc.a",
+                   "9a6179f160c2b0666befdab91bddb9dfba39800c9b4a177ffd5aa3e7ab306eb2"),
+        "crt1.o": ("/work/build/lib/asan/fxs-libc.libc/lib/crt1.o",
+                   "111e0dda16a02983fee66cc70e332b41860dccad42d8fb0990776814ef70930a"),
+        "crti.o": ("/work/build/lib/asan/fxs-libc.libc/lib/crti.o",
+                   "a6e2f8732e64c9664569346d4e5b8937e8c560beca9122a4dbeaf89e9cd37e4b"),
+        "crtn.o": ("/work/build/lib/asan/fxs-libc.libc/lib/crtn.o",
+                   "3a7c0db23f66cca64d8f40be4ffc5c26a1371a0f0291e5a161c2dac2f66a6a47"),
+    }
+    # The files of the declared C library that the link took. It took no crti.o and no crtn.o.
+    TOOK = ["crt1.o", "libc.a"]
+    # The files of the toolchain image that this link took and whose code --gc-sections left in the binary. The
+    # image's libc.a and crt1.o are not among them: the record has no row for them.
+    IN_BINARY = ["clang_rt.crtbegin.o", "libclang_rt.asan.a", "libclang_rt.builtins.a", "libunwind.a"]
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = pathlib.Path(tmp.name)
+        self.image, self.other = RealRecord.split((self.RECORD / "inputs.tsv").read_text().splitlines())
+
+    def written(self, skipped=()):
+        """read_record on the fixture's record, written in its own $OUT: each file of the fixture, with the map
+        decompressed and the paths `skipped` after the driver's paths."""
+        directory = self.tmp / ".records" / RealRecord.DIGEST
+        directory.mkdir(parents=True)
+        for path in self.RECORD.iterdir():
+            if path.name == "map.gz":
+                (directory / "map").write_bytes(gzip.decompress(path.read_bytes()))
+            else:
+                (directory / path.name).write_bytes(path.read_bytes())
+        with open(directory / "driver", "a") as stream:
+            stream.write("".join(f"{path}\n" for path in skipped))
+        return check_links.read_record(self.tmp, RealRecord.DIGEST)
+
+    def test_the_libc_file_is_read(self):
+        """read_record reads the four rows of the libc file that the build wrote."""
+        self.assertEqual(self.written().libc, self.LIBC)
+
+    def test_the_declared_libc_is_provided(self):
+        """project_code, with the record's files under /opt as the image. The declared libc.a and crt1.o are among the
+        provided files, with their real paths and sha256, beside the image's files whose code is in the binary. No
+        problem names OV_LIBC. The other problems are about the project's files, whose bytes the fixture does not
+        keep, and this test does not examine them."""
+        names = {pathlib.PurePosixPath(real).name for real in self.image}
+        self.assertFalse(names & {"libc.a", "crt1.o"}, "the record has no row for the image's libc.a or crt1.o")
+        _code, provided, problems = check_links.project_code(self.written(), self.image)
+        self.assertEqual(sorted(provided),
+                         sorted([(real, sha256) for real, sha256 in self.image.items()
+                                 if pathlib.PurePosixPath(real).name in self.IN_BINARY]
+                                + [self.LIBC[name] for name in self.TOOK]))
+        self.assertEqual([problem for problem in problems if "OV_LIBC" in problem], [])
+
+    def test_the_list_names_the_declared_libc(self):
+        """analyse with this record as the record of a plain build. The plain build examines none of the project's
+        code. The driver file names the project's files that are not of the declared C library, so the reader skips
+        them, as in ReaderKeptNothing, and needs none of their bytes. The list names the image's files whose code is
+        in the binary, and the declared crt1.o and libc.a, with the kind libc and the sha256 of the libc file."""
+        declared = {real for real, _sha256 in self.LIBC.values()}
+        record = self.written([real for real in self.other if real not in declared])
+        result = check_links.analyse({"plain": record}, self.image)["plain"]
+        self.assertEqual(result["instrumented"]["result"], "plain", result["instrumented"]["detail"])
+        listing = result["uninstrumented"]
+        self.assertEqual([entry["name"] for entry in listing if entry["kind"] != "libc"], self.IN_BINARY)
+        self.assertEqual([entry for entry in listing if entry["kind"] == "libc"],
+                         [{"name": name, "kind": "libc", "sha256": self.LIBC[name][1]} for name in self.TOOK])
 
 
 class ReaderKeptNothing(unittest.TestCase):
@@ -646,6 +752,93 @@ class Records(unittest.TestCase):
         (self.raw / ".records" / "store" / digest).write_bytes(b"other")
         with self.assertRaises(check_links.RecordError):
             record.store(digest)
+
+    # The libc file of a link whose build declares its C library (link-fuzz-target, OV_LIBC).
+    LIBC_ROWS = [("libc.a", "/work/b/musl/lib/libc.a", "1" * 64), ("crt1.o", "/work/b/musl/lib/crt1.o", "2" * 64),
+                 ("crti.o", "/work/b/musl/lib/crti.o", "3" * 64), ("crtn.o", "/work/b/musl/lib/crtn.o", "4" * 64)]
+
+    def write_libc(self, rows):
+        (self.directory / "libc").write_text("".join("\t".join(row) + "\n" for row in rows), encoding="utf-8")
+
+    def test_a_libc_file_is_read(self):
+        self.write_libc(self.LIBC_ROWS)
+        record = check_links.read_record(self.raw, "a" * 64)
+        self.assertEqual(record.libc, {name: (path, sha256) for name, path, sha256 in self.LIBC_ROWS})
+        # The rows in another order say the same.
+        self.write_libc(self.LIBC_ROWS[::-1])
+        self.assertEqual(check_links.read_record(self.raw, "a" * 64).libc, record.libc)
+
+    def test_a_libc_path_that_holds_another_line_end_is_read(self):
+        """A libc file whose four real paths each hold a line end that str.splitlines() knows but "\\n"
+        (OTHER_LINE_ENDS) is read whole, because the libc file is split at "\\n" only. link-fuzz-target refuses
+        [[:cntrl:]] in these real paths, so in the C locale only \\x85, U+2028 and U+2029 get to the libc file. The
+        test uses each line end all the same."""
+        for separator in OTHER_LINE_ENDS:
+            with self.subTest(separator=f"U+{ord(separator):04X}"):
+                rows = [(name, path + separator + "x", sha256) for name, path, sha256 in self.LIBC_ROWS]
+                self.write_libc(rows)
+                self.assertEqual(check_links.read_record(self.raw, "a" * 64).libc,
+                                 {name: (path, sha256) for name, path, sha256 in rows})
+
+    def test_an_object_whose_path_holds_another_line_end_is_examined(self):
+        """A map line and an inputs.tsv row that name an object whose real path holds a line end that str.splitlines()
+        knows but "\\n" (OTHER_LINE_ENDS) are read whole, so the record has the object, and project_code examines it
+        and does not leave it out."""
+        body = elf_object(NOP, defined=["f"], comment=True)
+        digest = hashlib.sha256(body).hexdigest()
+        (self.raw / ".records" / "store" / digest).write_bytes(body)
+        for separator in OTHER_LINE_ENDS:
+            with self.subTest(separator=f"U+{ord(separator):04X}"):
+                path = f"/work/obj/a{separator}b.o"
+                (self.directory / "map").write_text(map_line(0x10000, 4, f"{path}:(.text.f)") + "\n", encoding="utf-8")
+                (self.directory / "inputs.tsv").write_text(f"{path}\t{path}\t{digest}\t{len(body)}\n", encoding="utf-8")
+                record = check_links.read_record(self.raw, "a" * 64)
+                self.assertEqual(record.taken, [(path, None, ".text.f", 4)])
+                self.assertEqual(record.inputs, {path: (path, digest, len(body))})
+                self.assertIsNone(record.problem)
+                code, provided, problems = check_links.project_code(record, {})
+                self.assertEqual(([c.label for c in code], provided, problems), ([f"a{separator}b.o"], [], []))
+
+    def test_a_renamed_path_that_holds_another_line_end_is_read(self):
+        """A row of the renamed file whose real paths hold a line end that str.splitlines() knows but "\\n"
+        (OTHER_LINE_ENDS) is read whole."""
+        rows = [(f"/tmp/copies/{n}-a{separator}b.o", f"/work/obj/a{separator}b.o", str(n) * 64)
+                for n, separator in enumerate(OTHER_LINE_ENDS, 1)]
+        (self.directory / "renamed").write_text("".join("\t".join(row) + "\n" for row in rows), encoding="utf-8")
+        self.assertEqual(check_links.read_record(self.raw, "a" * 64).renamed,
+                         {copy: (original, sha256) for copy, original, sha256 in rows})
+
+    def test_a_record_with_no_libc_file_declares_no_libc(self):
+        self.assertEqual(check_links.read_record(self.raw, "a" * 64).libc, {})
+
+    def test_a_bad_libc_file_makes_the_record_incomplete(self):
+        """A libc file that does not name each of the four files once, with an absolute path and a sha256 in three
+        fields, does not say which C library the link declared."""
+        rows, last = self.LIBC_ROWS[:3], self.LIBC_ROWS[3]
+        cases = {
+            "a missing name": rows,
+            "a repeated name": rows + [last, rows[0]],
+            "a name in place of another": rows + [("crti.o",) + last[1:]],
+            "an unknown name": rows + [("libm.a",) + last[1:]],
+            "a relative path": rows + [(last[0], "musl/lib/crtn.o", last[2])],
+            "an empty path": rows + [(last[0], "", last[2])],
+            "a sha256 that is not hex": rows + [last[:2] + ("g" * 64,)],
+            "a short sha256": rows + [last[:2] + ("4" * 63,)],
+            "a row with two fields": rows + [last[:2]],
+            "a row with four fields": rows + [last + ("1",)],
+            "an empty file": [],
+        }
+        for case, case_rows in cases.items():
+            self.write_libc(case_rows)
+            with self.assertRaises(check_links.RecordError, msg=case):
+                check_links.read_record(self.raw, "a" * 64)
+
+    def test_a_libc_link_is_refused(self):
+        secret = self.raw / "secret"
+        secret.write_text("".join("\t".join(row) + "\n" for row in self.LIBC_ROWS))
+        (self.directory / "libc").symlink_to(secret)
+        with self.assertRaises(check_links.RecordError):
+            check_links.read_record(self.raw, "a" * 64)
 
 
 class Analyse(unittest.TestCase):
@@ -947,7 +1140,7 @@ class Analyse(unittest.TestCase):
                          "targets": {"t": {build: {"elf": {"result": "pass"}, "system_calls": {"result": "pass"},
                                                    "quiet_loud": {"result": "pass"},
                                                    "instrumented": result["instrumented"]}}}}
-                text = check_binaries.report(block, {"t": {build: None}}, [build])
+                text = check_binaries.report(block, {"t": {build: None}}, [build], {"t": {build: None}})
                 self.assertIn("**not decided**", text)
                 self.assertIn("not recorded", text)
         finally:
@@ -1607,6 +1800,258 @@ class Analyse(unittest.TestCase):
         self.assertEqual(result["instrumented"]["result"], "fail")
         self.assertIn("libnew.a(x.o)", result["instrumented"]["detail"])
 
+    # A C library that the build declares (link-fuzz-target, OV_LIBC), as musl's make install lays out its lib
+    # directory, here in the build directory. No sanitizer instruments it: its code refers to no AddressSanitizer
+    # constructor and holds no UBSan trap.
+    MUSL = "/work/b/musl/lib/"
+    MUSL_LIBC = {"memcpy.lo": elf_object(LW + RET, defined=["memcpy"], files=["memcpy.c"], comment=True)}
+    MUSL_CRT1 = elf_object(NOP, defined=["_start"], files=["crt1.c"], comment=True)
+
+    def declared_record(self, archives, runtimes=(ZLIB,), take=True, declare=True):
+        """A Record (record) whose link also took the C library under MUSL: libc.a's member and crt1.o, with their
+        bytes in the store. With `take` False, the link took neither. With `declare`, the build declares that C
+        library: the record's libc field names the four files, libc.a and crt1.o with the sha256 of the bytes kept."""
+        loose = {}
+        if take:
+            archives = {**archives, self.MUSL + "libc.a": self.MUSL_LIBC}
+            loose = {self.MUSL + "crt1.o": self.MUSL_CRT1}
+        record = self.record(archives, runtimes=runtimes, loose=loose)
+        if declare:
+            record.libc = {"libc.a": (self.MUSL + "libc.a", hashlib.sha256(archive(self.MUSL_LIBC)).hexdigest()),
+                           "crt1.o": (self.MUSL + "crt1.o", hashlib.sha256(self.MUSL_CRT1).hexdigest()),
+                           "crti.o": (self.MUSL + "crti.o", "3" * 64), "crtn.o": (self.MUSL + "crtn.o", "4" * 64)}
+        return record
+
+    def declared_builds(self, **options):
+        """analyse of the four builds of a link that took the project's code, instrumented as each build wants it, an
+        image library, and the C library under MUSL (declared_record, with `options`)."""
+        project = {"plain": elf_object(LW + RET, defined=["f"], files=["lib.c"], comment=True),
+                   "ubsan": elf_object(LW + UNIMP + RET, defined=["f"], files=["lib.c"], comment=True),
+                   "asan": elf_object(LW + RET, defined=["f"], undefined=ASAN, files=["lib.c"], comment=True),
+                   "asan-ubsan": elf_object(LW + UNIMP + RET, defined=["f"], undefined=ASAN, files=["lib.c"],
+                                            comment=True)}
+        return self.analyse({build: self.declared_record({"/work/b/libproject.a": {"lib.c.o": body}}, **options)
+                             for build, body in project.items()})
+
+    def declared_line(self, binary):
+        """The line at the end of the report that names the C library of declared_record for `binary`."""
+        return (f"- `{binary}`: "
+                f"`libc.a` `{self.MUSL}libc.a` sha256 `{hashlib.sha256(archive(self.MUSL_LIBC)).hexdigest()}`, "
+                f"`crt1.o` `{self.MUSL}crt1.o` sha256 `{hashlib.sha256(self.MUSL_CRT1).hexdigest()}`, "
+                f"`crti.o` `{self.MUSL}crti.o` sha256 `{'3' * 64}`, `crtn.o` `{self.MUSL}crtn.o` sha256 `{'4' * 64}`")
+
+    def test_a_declared_libc_is_listed_and_exempt_in_each_build(self):
+        """The declared libc.a and crt1.o are listed by name, with kind libc and the sha256 of the declared bytes,
+        after the image's files (path order). No build reads them as the project's code: the plain build is plain,
+        and the three sanitizer builds pass. Each build's detail names the four declared files and their sha256."""
+        libc_sha256 = hashlib.sha256(archive(self.MUSL_LIBC)).hexdigest()
+        crt1_sha256 = hashlib.sha256(self.MUSL_CRT1).hexdigest()
+        for build, result in self.declared_builds().items():
+            self.assertEqual(result["uninstrumented"], [
+                {"name": "libz.a", "kind": "image-library", "sha256": "f" * 64},
+                {"name": "crt1.o", "kind": "libc", "sha256": crt1_sha256},
+                {"name": "libc.a", "kind": "libc", "sha256": libc_sha256},
+            ], build)
+            self.assertEqual(result["instrumented"]["result"], "plain" if build == "plain" else "pass", (build, result))
+            detail = result["instrumented"]["detail"]
+            if build == "plain":
+                self.assertTrue(detail.startswith(check_links.PLAIN_DETAIL), detail)
+            for name, sha256 in (("libc.a", libc_sha256), ("crt1.o", crt1_sha256), ("crti.o", "3" * 64),
+                                 ("crtn.o", "4" * 64)):
+                self.assertIn(f"{name} ({self.MUSL}{name}, sha256 {sha256})", detail, build)
+
+    def test_the_report_names_a_declared_libc(self):
+        """The report of the four builds of test_a_declared_libc_is_listed_and_exempt_in_each_build, whose results
+        are pass, and plain in the plain build. The enrollment's review reads the report, which gives a detail only
+        for the other results, so the report names the C library that each build's record declares (binary_checks
+        gives the record's libc file): each build's cell of uninstrumented code says so, and a line at the end of the
+        report gives the path and the sha256 of each of the four files, none cut. The same builds with no declared C
+        library give the report that such a build always got, also when the note is in their detail: the report does
+        not read the detail for it. With a failure, these lines come after "What each failure is", so a cut from the
+        end takes them first."""
+        builds = ["plain", "ubsan", "asan", "asan-ubsan"]
+        results = self.declared_builds()
+        libc = self.declared_record({}, take=False).libc
+        libc_sha256 = hashlib.sha256(archive(self.MUSL_LIBC)).hexdigest()
+        crt1_sha256 = hashlib.sha256(self.MUSL_CRT1).hexdigest()
+        note = ("the build declares its own C library (OV_LIBC), whose files no sanitizer instruments: "
+                + ", ".join(f"{name} ({self.MUSL}{name}, sha256 {sha256})"
+                            for name, sha256 in (("libc.a", libc_sha256), ("crt1.o", crt1_sha256),
+                                                 ("crti.o", "3" * 64), ("crtn.o", "4" * 64))))
+
+        def report(instrumented, declared_libc):
+            """The report of the four builds, with each one's instrumented result from `instrumented`, and
+            `declared_libc` as the C library of each."""
+            block = {"model": {"name": "m", "commit": "f" * 40, "release": "x"}, "inputs": {"t": ["a"]},
+                     "targets": {"t": {build: {"elf": {"result": "pass"}, "system_calls": {"result": "pass"},
+                                               "quiet_loud": {"result": "pass"}, "instrumented": instrumented[build]}
+                                       for build in builds}}}
+            return check_binaries.report(block, {"t": {build: results[build]["uninstrumented"] for build in builds}},
+                                         builds, {"t": {build: declared_libc for build in builds}})
+
+        head = ("### The checks of the binaries\n\n"
+                "Against the process model the published proofs use: `m` at `ffffffffffff` (release `x`, from its "
+                "release.yaml).\n"
+                f"Each fuzz target ran on the empty input and up to {check_binaries.MAX_SEEDS} seed inputs (`t`: 1). "
+                "docs/build-contract.md, \"The checks of the binaries\", says what each check proves.\n\n"
+                "| binary | ELF and instructions | system calls | quiet and loud | instrumented | uninstrumented code "
+                "|\n|---|---|---|---|---|---|\n")
+        rows = ("| `t.plain` | pass | pass | pass | not instrumented (plain) | 3 files{} |\n"
+                "| `t.ubsan` | pass | pass | pass | pass | 3 files{} |\n"
+                "| `t.asan` | pass | pass | pass | pass | 3 files{} |\n"
+                "| `t.asan-ubsan` | pass | pass | pass | pass | 3 files{} |\n")
+        declared = {build: results[build]["instrumented"] for build in builds}
+        for build in builds:
+            self.assertIn("; " + note, declared[build]["detail"], build)
+        # With no declared C library, and so no note, the report is the one that the same results got before.
+        undeclared = {build: {**declared[build], "detail": declared[build]["detail"].replace("; " + note, "")}
+                      for build in builds}
+        self.assertEqual(report(undeclared, None), head + rows.format(*[""] * 4))
+        self.assertEqual(report(declared, None), head + rows.format(*[""] * 4))
+        noted = rows.format(*[", a declared C library"] * 4)
+        listing = ("These builds declare their own C library (OV_LIBC). Check C5 of review.md says what the review "
+                   "checks:\n\n" + "".join(self.declared_line(f"t.{build}") + "\n" for build in builds))
+        self.assertEqual(report(declared, libc), head + noted + "\n" + listing)
+        failed = {**declared, "asan": {**declared["asan"], "result": "fail"}}
+        self.assertEqual(report(failed, libc),
+                         head + noted.replace("| `t.asan` | pass | pass | pass | pass |",
+                                              "| `t.asan` | pass | pass | pass | **fail** |")
+                         + f"\nWhat each failure is:\n\n- `t.asan`, instrumented: `{declared['asan']['detail']}`\n\n"
+                         + listing)
+
+    def test_the_report_names_a_declared_libc_of_a_record_with_a_problem(self):
+        """A record of which the reader kept no input section of the map (Record.problem), in builds that declare a C
+        library: the problem is each build's whole detail, with no note, and the result is error. read_record has
+        read the record's libc file, so the report names the C library all the same, in the cell and in a line at the
+        end, with the path and the sha256 of each of the four files."""
+        problem = ("the reader kept no input section of the link's map: 3 non-blank lines, 3 read as input sections, "
+                   "0 kept; the first line: <internal>:(.comment)")
+        records = {}
+        for build in ("plain", "asan"):
+            records[build] = self.declared_record({"/work/b/libproject.a": {"lib.c.o": good()}})
+            records[build].problem = problem
+        results = self.analyse(records)
+        self.assertEqual(results["asan"], {"uninstrumented": None,
+                                           "instrumented": {"result": "error", "detail": problem}})
+        self.assertEqual(results["plain"]["instrumented"]["detail"], f"{check_links.PLAIN_DETAIL}; {problem}")
+        block = {"model": {"name": "m", "commit": "f" * 40, "release": "x"}, "inputs": {"t": ["a"]},
+                 "targets": {"t": {build: {"elf": {"result": "pass"}, "system_calls": {"result": "pass"},
+                                           "quiet_loud": {"result": "pass"}, "instrumented": result["instrumented"]}
+                                   for build, result in results.items()}}}
+        text = check_binaries.report(block, {"t": {"plain": None, "asan": None}}, ["plain", "asan"],
+                                     {"t": {build: record.libc for build, record in records.items()}})
+        for build in ("plain", "asan"):
+            self.assertIn(f"| `t.{build}` | pass | pass | pass | **not decided** | not recorded, a declared C "
+                          "library |\n", text)
+            self.assertIn(f"- `t.{build}`, instrumented: ", text)
+        self.assertTrue(text.endswith("These builds declare their own C library (OV_LIBC). Check C5 of review.md says "
+                                      f"what the review checks:\n\n{self.declared_line('t.plain')}\n"
+                                      f"{self.declared_line('t.asan')}\n"), text)
+
+    def test_the_report_gives_each_declared_file_whole(self):
+        """The paths of the test project's asan-ubsan build of libc_fuzzer: tests/fixtures/target-settings/ makes its C
+        library under /work/build/lib/$FLAV, and FLAV is asanubsan in that build. The report gives each path and each
+        sha256 whole. A path of more than 300 characters is cut, and the sha256 of its file is still whole."""
+        block = {"model": {"name": "m", "commit": "f" * 40, "release": "x"}, "inputs": {"t": ["a"]},
+                 "targets": {"t": {"asan-ubsan": {
+                     "elf": {"result": "pass"}, "system_calls": {"result": "pass"}, "quiet_loud": {"result": "pass"},
+                     "instrumented": {"result": "pass", "detail": "1 objects with code, all instrumented"}}}}}
+        long = "/work/" + "d" * 300 + "/lib/"
+        for lib, shown in (("/work/build/lib/asanubsan/fxs-libc.libc/lib/", None),
+                           (long, "/work/" + "d" * 293 + "…")):
+            libc = {name: (lib + name, str(n) * 64) for n, name in enumerate(check_links.DECLARED_LIBC, 1)}
+            text = check_binaries.report(block, {"t": {"asan-ubsan": []}}, ["asan-ubsan"], {"t": {"asan-ubsan": libc}})
+            self.assertIn("| `t.asan-ubsan` | pass | pass | pass | pass | 0 files, a declared C library |\n", text)
+            line = ", ".join(f"`{name}` `{shown or lib + name}` sha256 `{str(n) * 64}`"
+                             for n, name in enumerate(check_links.DECLARED_LIBC, 1))
+            self.assertTrue(text.endswith(f"\n\n- `t.asan-ubsan`: {line}\n"), text)
+
+    def test_a_declared_path_cannot_change_the_list(self):
+        """link-fuzz-target takes any absolute path that ends in /libc.a. So a declared path can hold "; ", which also
+        joins the parts of a detail, and text that reads as the crtn.o entry of the detail's note, with a sha256 that
+        is not the file's. The report makes each line from the four files of the record, not from the detail: the
+        line of a plain build with a problem after the note gives each path whole and the four real sha256 values."""
+        lib = f"/work/a; b/crtn.o (x, sha256 {'9' * 64})/lib/"
+        libc = {name: (lib + name, str(n) * 64) for n, name in enumerate(check_links.DECLARED_LIBC, 1)}
+        note = check_links.libc_note(check_links.Record([], {}, set(), {}, self.raw, None, libc=libc))
+        problem = ("/opt/musl-sysroot/usr/lib/libnew.a: a file of the toolchain image that no kind names "
+                   "(src/oss_verify/check_links.py, runtime_kind)")
+        block = {"model": {"name": "m", "commit": "f" * 40, "release": "x"}, "inputs": {"t": ["a"]},
+                 "targets": {"t": {"plain": {
+                     "elf": {"result": "pass"}, "system_calls": {"result": "pass"}, "quiet_loud": {"result": "pass"},
+                     "instrumented": {"result": "error", "detail": f"{check_links.PLAIN_DETAIL}; {note}; {problem}"}}}}}
+        text = check_binaries.report(block, {"t": {"plain": None}}, ["plain"], {"t": {"plain": libc}})
+        self.assertIn("| **not decided** | not recorded, a declared C library |\n", text)
+        self.assertTrue(text.endswith(
+            f"\n\n- `t.plain`: `libc.a` `{lib}libc.a` sha256 `{'1' * 64}`, `crt1.o` `{lib}crt1.o` sha256 `{'2' * 64}`, "
+            f"`crti.o` `{lib}crti.o` sha256 `{'3' * 64}`, `crtn.o` `{lib}crtn.o` sha256 `{'4' * 64}`\n"), text)
+
+    def test_the_same_libc_undeclared_fails_the_asan_builds(self):
+        """The control: the same C library with no declaration is the project's code, uninstrumented, as before."""
+        results = self.declared_builds(declare=False)
+        for build in ("asan", "asan-ubsan"):
+            result = results[build]["instrumented"]
+            self.assertEqual(result["result"], "fail", (build, result))
+            self.assertIn("2 of 3 objects with code refer to no AddressSanitizer constructor", result["detail"])
+            self.assertIn("libc.a(memcpy.lo)", result["detail"])
+        self.assertEqual(results["plain"]["uninstrumented"],
+                         [{"name": "libz.a", "kind": "image-library", "sha256": "f" * 64}])
+
+    def test_an_undeclared_archive_beside_a_declared_libc_is_judged_as_before(self):
+        """An uninstrumented archive that the build does not declare fails AddressSanitizer's check. The plain
+        build's counts, the UndefinedBehaviorSanitizer's baseline, hold no declared file."""
+        other = {"o.c.o": elf_object(LW + RET, defined=["g"], files=["o.c"], comment=True)}
+        asan = self.declared_record({"/work/b/libproject.a": {"lib.c.o": good()}, "/work/b/libother.a": other})
+        result = self.analyse({"asan": asan})["asan"]["instrumented"]
+        self.assertEqual(result["result"], "fail", result)
+        self.assertIn("1 of 2 objects with code refer to no AddressSanitizer constructor: libother.a(o.c.o)",
+                      result["detail"])
+        plain = self.declared_record({"/work/b/libproject.a": {"lib.c.o": elf_object(LW + RET, defined=["f"],
+                                                                                      comment=True)},
+                                      "/work/b/libother.a": other})
+        code, _provided, problems = check_links.project_code(plain, self.IMAGE)
+        self.assertEqual(problems, [])
+        self.assertEqual(check_links.ub_count(code), {"libproject.a": 0, "libother.a": 0})
+        ubsan = self.declared_record({"/work/b/libproject.a": {"lib.c.o": elf_object(LW + UNIMP + RET, defined=["f"],
+                                                                                      comment=True)},
+                                      "/work/b/libother.a": other})
+        result = self.analyse({"plain": plain, "ubsan": ubsan})["ubsan"]["instrumented"]
+        self.assertEqual(result["result"], "fail", result)
+        self.assertIn("libother.a: 0 UBSan traps and UB checks, the plain build's 0", result["detail"])
+        self.assertNotIn("libc.a: ", result["detail"])
+
+    def test_a_declared_libc_the_link_did_not_take_is_an_error(self):
+        """A declaration that the link ignored: the list would name a C library that the binary does not hold, so
+        each build has no list and the result error."""
+        for build, result in self.declared_builds(take=False).items():
+            self.assertIsNone(result["uninstrumented"], build)
+            self.assertEqual(result["instrumented"]["result"], "error", (build, result))
+            self.assertIn(f"the link did not take the C library that the build declares (OV_LIBC): {self.MUSL}libc.a",
+                          result["instrumented"]["detail"])
+
+    def test_an_image_libc_file_beside_a_declared_libc_is_an_error(self):
+        """The image's libc.a, or the image's crt1.o, beside a declared C library: the link took two C libraries, so
+        each build has no list and the result error."""
+        for path in (self.LIBC, self.CRT1):
+            for build, result in self.declared_builds(runtimes=(path, self.ZLIB)).items():
+                self.assertIsNone(result["uninstrumented"], (path, build))
+                self.assertEqual(result["instrumented"]["result"], "error", (path, build, result))
+                self.assertIn(f"the link took {path}, the toolchain image's {path.rsplit('/', 1)[-1]}, beside the C "
+                              "library that the build declares (OV_LIBC)", result["instrumented"]["detail"])
+
+    def test_other_bytes_at_the_declared_path_are_the_projects_code(self):
+        """A libc.a at the declared path whose bytes are not the declared ones is the project's code, judged as any
+        other archive, and the declared libc.a counts as not taken."""
+        record = self.declared_record({"/work/b/libproject.a": {"lib.c.o": good()}})
+        record.libc["libc.a"] = (self.MUSL + "libc.a", "9" * 64)
+        result = self.analyse({"asan": record})["asan"]
+        self.assertIsNone(result["uninstrumented"])
+        self.assertEqual(result["instrumented"]["result"], "error", result)
+        detail = result["instrumented"]["detail"]
+        self.assertIn("1 of 2 objects with code refer to no AddressSanitizer constructor: libc.a(memcpy.lo)", detail)
+        self.assertIn(f"the link did not take the C library that the build declares (OV_LIBC): {self.MUSL}libc.a",
+                      detail)
+
     def test_no_record(self):
         result = self.analyse({"asan": "compile recorded no link of it"})["asan"]
         self.assertIsNone(result["uninstrumented"])
@@ -1621,7 +2066,7 @@ class Analyse(unittest.TestCase):
                      "targets": {"t": {"plain": {"elf": {"result": "pass"}, "system_calls": {"result": "pass"},
                                                  "quiet_loud": {"result": "pass"},
                                                  "instrumented": result["instrumented"]}}}}
-            text = check_binaries.report(block, {"t": {"plain": None}}, ["plain"])
+            text = check_binaries.report(block, {"t": {"plain": None}}, ["plain"], {"t": {"plain": None}})
             self.assertIn("| `t.plain` | pass | pass | pass | **not decided** | not recorded |", text)
             self.assertIn(f"What each failure is:\n\n- `t.plain`, instrumented: `no link record: {why}`", text)
 
@@ -1639,7 +2084,7 @@ class Analyse(unittest.TestCase):
                  "targets": {"t": {"plain": {"elf": {"result": "pass"}, "system_calls": {"result": "pass"},
                                              "quiet_loud": {"result": "pass"},
                                              "instrumented": result["instrumented"]}}}}
-        text = check_binaries.report(block, {"t": {"plain": None}}, ["plain"])
+        text = check_binaries.report(block, {"t": {"plain": None}}, ["plain"], {"t": {"plain": None}})
         self.assertIn("| `t.plain` | pass | pass | pass | not instrumented (plain) | no list (Go code only) |", text)
         # No sanitizer instruments Go code, so a sanitizer build of a Go program decides nothing.
         self.assertEqual(self.analyse({"asan": program})["asan"]["instrumented"]["result"], "error")
@@ -2239,7 +2684,8 @@ class Runs(unittest.TestCase):
                                              "quiet_loud": {"result": "not-run", "detail": "no quiet twin: a Go "
                                                                                            "program"},
                                              "instrumented": {"result": "plain"}}}}}
-        text = check_binaries.report(block, {"t": {"plain": [{"name": "libc.a", "kind": "libc"}]}}, ["plain"])
+        text = check_binaries.report(block, {"t": {"plain": [{"name": "libc.a", "kind": "libc"}]}}, ["plain"],
+                                     {"t": {"plain": None}})
         self.assertIn("**not decided** (not run)", text)
         self.assertIn("quiet and loud: `no quiet twin: a Go program`", text)
         # A run that never started: its status is the tracer's, and decides nothing.
@@ -2411,12 +2857,20 @@ class Runs(unittest.TestCase):
 
     def test_binary_checks_gives_check_3_the_reason_of_check_2(self):
         """binary_checks() itself, with its docker and model steps replaced: with no model, check 2 reads no run, and
-        check 3 names check 2's reason, not that each run fell short of its input."""
+        check 3 names check 2's reason, not that each run fell short of its input. The third value is the C library
+        that the record of each binary declares: the record's libc file, or None for a record that declares none, for
+        a Go program and for a binary with no record."""
         from unittest import mock
         import types
         work = self.results / "work"
-        (work / "out" / "t").mkdir(parents=True)
-        (work / "out" / "t" / "t.plain").write_bytes(b"\x7fELF")
+        declared = {name: (f"/work/b/musl/lib/{name}", str(n) * 64)
+                    for n, name in enumerate(check_links.DECLARED_LIBC, 1)}
+        records = {"t": "no record", "u": check_links.Record([], {}, set(), {}, work, None, libc=declared),
+                   "v": check_links.Record([], {}, set(), {}, work, None),
+                   "w": check_links.GoProgram("go1.27.1", {})}
+        for target in records:
+            (work / "out" / target).mkdir(parents=True)
+            (work / "out" / target / f"{target}.plain").write_bytes(b"\x7fELF")
 
         def release_model():
             raise Failed("no release.yaml")
@@ -2435,16 +2889,18 @@ class Runs(unittest.TestCase):
         with mock.patch.object(model_release, "release_model", release_model), \
                 mock.patch.object(check_links, "read_compiles", lambda raw: {}), \
                 mock.patch.object(check_links, "analyse", lambda *arguments: link), \
-                mock.patch.multiple(check_binaries, record_of=lambda *arguments: ("no record", b"quiet"),
+                mock.patch.multiple(check_binaries, record_of=lambda raw, target, compiles: (records[target], b"quiet"),
                                     image_hashes=lambda *arguments, **options: {},
                                     dwarf_reader=lambda *arguments: None, assembly_reader=lambda *arguments: None,
                                     seed_inputs=lambda directory, target: [(check_binaries.EMPTY,
                                                                             check_binaries.HEADER)],
                                     qemu_version=lambda qemu: self.QEMU, run_job=run_job), \
                 mock.patch.object(check_binaries.check_checks, "qemu", lambda: "/bin/true"):
-            block, _ = check_binaries.binary_checks(types.SimpleNamespace(builds=["plain"], directory=work), "tag",
-                                                    "toolchain", ["t"], {"t": {"plain": {"file": "t.plain"}}}, {},
-                                                    work, labels=[])
+            block, _, libc = check_binaries.binary_checks(
+                types.SimpleNamespace(builds=["plain"], directory=work), "tag", "toolchain", list(records),
+                {target: {"plain": {"file": f"{target}.plain"}} for target in records}, {}, work, labels=[])
+        self.assertEqual(libc, {"t": {"plain": None}, "u": {"plain": declared}, "v": {"plain": None},
+                                "w": {"plain": None}})
         checks = block["targets"]["t"]["plain"]
         self.assertEqual(checks["system_calls"], {"result": "error",
                                                   "detail": "the model could not be read: no release.yaml"})
@@ -2483,7 +2939,7 @@ class Runs(unittest.TestCase):
                               "system_calls": {"result": "fail", "detail": "uname: not in the table"},
                               "quiet_loud": {"result": "pass"}, "instrumented": {"result": "pass"}}}}}
         listing = {"t": {"plain": [{"name": "libc.a", "kind": "libc"}], "asan": None}}
-        text = check_binaries.report(block, listing, ["plain", "asan"])
+        text = check_binaries.report(block, listing, ["plain", "asan"], {"t": {"plain": None, "asan": None}})
         self.assertIn("| ELF and instructions | system calls | quiet and loud | instrumented |", text)
         self.assertIn("| `t.plain` | pass | pass | pass | not instrumented (plain) | 1 files |", text)
         self.assertIn("| `t.asan` | pass | **fail** | pass | pass | not recorded |", text)

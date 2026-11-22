@@ -23,6 +23,11 @@
 # LLVMFuzzerTestOneInput). The stripped twin of each executable in $OUT is saved as $OUT/.stripped/<sha256 of the
 # executable>: those are the bytes that are published and that statements are about.
 #
+# Before build.sh runs, it also compiles the driver's cli.c once for each input limit that the build of one fuzz
+# target can set: /tmp/ov/cli-limit<k>.o for k = 27 to 31 and, with OV_RECORD=1 (below), /tmp/ov/cli-limit<k>-quiet.o.
+# A link with OV_MAX_INPUT_LOG2=<k> takes them in place of cli.o and cli-quiet.o (link-fuzz-target). They change no
+# other object and no link that does not set OV_MAX_INPUT_LOG2.
+#
 # Set OV_OWNER=<uid>:<gid> to have $OUT handed to that owner at the end.
 #
 # Set OV_RECORD=1 to have each fuzz target's link recorded, with a quiet twin, in $OUT/.records/<sha256 of the
@@ -94,6 +99,16 @@ OV=/tmp/ov
 rm -rf "$OV"
 mkdir -p "$OV/bin" "$OV/twins"
 "$DRVCC" $BASE_CFLAGS -c -I"$LIB/driver" "$LIB/driver/cli.c" -o "$OV/cli.o"
+# The input limits that the build of one fuzz target can set (OV_MAX_INPUT_LOG2): the values that link-fuzz-target
+# accepts and that driver/input_limit.h permits. The two loops below use this one list, so the quiet objects have the
+# same limits as the others.
+limits="27 28 29 30 31"
+# cli.c again for each input limit, as cli-limit<k>.o. A link with OV_MAX_INPUT_LOG2=<k> takes it in place of cli.o
+# (link-fuzz-target).
+# shellcheck disable=SC2086 # BASE_CFLAGS is a list of flags
+for k in $limits; do
+  "$DRVCC" $BASE_CFLAGS -DOV_MAX_INPUT_LOG2="$k" -c -I"$LIB/driver" "$LIB/driver/cli.c" -o "$OV/cli-limit$k.o"
+done
 "$DRVCC" $BASE_CFLAGS -c -I"$LIB/driver" "$LIB/driver/adapter.c" -o "$OV/adapter.o"
 for seal in getenv mkstemp getpid; do
   "$DRVCC" $BASE_CFLAGS -c "$LIB/driver/wrap_$seal.c" -o "$OV/wrap_$seal.o"
@@ -117,6 +132,11 @@ if [ "${OV_RECORD:-}" = 1 ]; then
   done
   "$DRVCC" $BASE_CFLAGS -DHARNESS_QUIET -DOV_ALLOCATION_COUNTING -c -I"$LIB/driver" "$LIB/driver/allocation_failure.c" \
     -o "$OV/allocation_counting-quiet.o"
+  # shellcheck disable=SC2086 # BASE_CFLAGS is a list of flags
+  for k in $limits; do
+    "$DRVCC" $BASE_CFLAGS -DHARNESS_QUIET -DOV_MAX_INPUT_LOG2="$k" -c -I"$LIB/driver" "$LIB/driver/cli.c" \
+      -o "$OV/cli-limit$k-quiet.o"
+  done
   # The build's own sanitizer flags, by language, which src/oss_verify/check_links.py judges each recorded compile by
   # ($SAN, with c_exclude for C), and of them the UndefinedBehaviorSanitizer's ($UBSAN, in the ubsan and asan-ubsan
   # builds).

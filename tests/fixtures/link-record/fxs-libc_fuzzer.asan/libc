@@ -1,0 +1,4 @@
+libc.a	/work/build/lib/asan/fxs-libc.libc/lib/libc.a	9a6179f160c2b0666befdab91bddb9dfba39800c9b4a177ffd5aa3e7ab306eb2
+crt1.o	/work/build/lib/asan/fxs-libc.libc/lib/crt1.o	111e0dda16a02983fee66cc70e332b41860dccad42d8fb0990776814ef70930a
+crti.o	/work/build/lib/asan/fxs-libc.libc/lib/crti.o	a6e2f8732e64c9664569346d4e5b8937e8c560beca9122a4dbeaf89e9cd37e4b
+crtn.o	/work/build/lib/asan/fxs-libc.libc/lib/crtn.o	3a7c0db23f66cca64d8f40be4ffc5c26a1371a0f0291e5a161c2dac2f66a6a47
