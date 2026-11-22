@@ -610,8 +610,10 @@ class EverySplit(unittest.TestCase):
     def printed(self, first, second):
         """What run() prints of a command that writes `first` and then `second`, in two reads: the command is a pipe
         that this process writes, and `second` is written only once run()'s reader has printed what it made of
-        `first`. No process is started, and nothing sleeps."""
+        `first`, the text before the token's beginning, which it does not hold back. No process is started, and
+        nothing sleeps."""
         reading, writing = os.pipe()
+        output, command = os.fdopen(reading, "rb"), os.fdopen(writing, "wb", buffering=0)
         first_printed = threading.Event()
 
         class Stdout(Printed):
@@ -623,18 +625,25 @@ class EverySplit(unittest.TestCase):
             """run()'s Popen, whose output is the pipe. run() starts its reader and then waits for the command."""
 
             def __init__(self, argv, **options):
-                self.stdout = os.fdopen(reading, "rb")
+                self.stdout = output
 
             def wait(self):
-                os.write(writing, first.encode())
-                first_printed.wait(timeout=5)
-                os.write(writing, second.encode())
-                os.close(writing)
+                command.write(first.encode())
+                # Written before the reader has read the first half, the second could arrive in the same read, and
+                # the split would not be tested at all.
+                if not first_printed.wait(timeout=20):
+                    raise AssertionError("run() printed nothing of the first read")
+                command.write(second.encode())
+                command.close()
                 return 0
 
         printed = Stdout()
         with mock.patch("sys.stdout", printed), mock.patch.object(check_build.subprocess, "Popen", Command):
-            self.assertEqual(check_build.run("command", token=TOKEN), 0)
+            try:
+                self.assertEqual(check_build.run("command", token=TOKEN), 0)
+            finally:
+                command.close()
+                output.close()
         return printed.text
 
     def test_no_split_of_a_token_across_two_writes_leaks_any_of_it(self):
