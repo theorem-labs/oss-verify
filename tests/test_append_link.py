@@ -665,7 +665,7 @@ def second(t):
 def test_a_link_of_the_same_bytes_during_the_stripped_twin(t, records):
     """A second link of the same bytes runs while the first one links its stripped twin, after the compiler has written
     the twin (nested). Each link links its twin in a directory of its own and renames it to OV_TWINS/<sum>, so that
-    neither takes the file of the other. At 7f9f4902 both linked to OV_TWINS/<sum>.tmp: the second link moved the
+    neither takes the file of the other. At 9579074d both linked to OV_TWINS/<sum>.tmp: the second link moved the
     file, and then the mv of the first failed. Both links exit with 0 and run the normal link's commands. The twin is
     there, with OV_RECORDS the whole record too, and no directory of a link is left."""
     done = t.run(records=t.records if records else False, extra=nested(t, "twin"))
@@ -689,7 +689,7 @@ def test_a_failed_record_of_the_same_bytes_removes_no_other_record(t):
     """A second link of the same bytes runs while the first one links its quiet twin, after the compiler has written
     the quiet twin (nested), and the quiet link of the second link fails: the second link cannot write its record, and
     says so. Each link writes its record in a directory of its own and renames it to OV_RECORDS/<sum>, and a link
-    whose record failed removes only its own directory and its own map. At 7f9f4902 both wrote in OV_RECORDS/<sum>/,
+    whose record failed removes only its own directory and its own map. At 9579074d both wrote in OV_RECORDS/<sum>/,
     and the second link removed it, with the files that the first link had written there. Both links exit with 0. The
     record of the first link is there, whole, and no directory of a link is left."""
     done = t.run(records=t.records, extra=nested(t, "quiet", fail="quiet"))
@@ -733,7 +733,7 @@ def test_links_of_the_same_bytes_at_the_same_time(t):
     its own, whose fuzzer.o has other bytes, and with a C library of its own (OV_LIBC). The stand-in compiler waits 0.2
     seconds after each output, so that the links write their twins and their records at the same time. Each link exits
     with 0. The twin is there, and one whole record, whose inputs.tsv and libc come from one link. No directory of a
-    link is left. At 7f9f4902 the mv of a twin failed, and the record was missing, or held the files of two links."""
+    link is left. At 9579074d the mv of a twin failed, and the record was missing, or held the files of two links."""
     env = t.environment(records=t.records, extra={"FAKE_CC_SLEEP": "0.2"})
     builds = []
     for n in range(LINKS):

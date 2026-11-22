@@ -509,6 +509,10 @@ def binary_checks(job, tag, toolchain, targets, entries, sources, work, *, label
 # instrument" are results a reader may take as good.
 RESULT_WORDS = {"pass": "pass", "fail": "**fail**", "error": "**not decided**", "stale": "**stale model**",
                 "not-run": "**not decided** (not run)", "plain": "not instrumented (plain)"}
+# The most characters of the line below the table that gives a declared C library (check_links.libc_note). The note
+# has 420 characters and the paths of its four files, so the line holds the whole note when each path has at most 145
+# characters, and libc.a's sha256, which is first, when libc.a's path has at most 831.
+LIBC_NOTE_LIMIT = 1000
 
 
 def report(block, uninstrumented, builds):
@@ -527,7 +531,7 @@ def report(block, uninstrumented, builds):
               "the binaries\", says what each check proves.", "",
               "| binary | ELF and instructions | system calls | quiet and loud | instrumented | uninstrumented code |",
               "|---|---|---|---|---|---|"]
-    problems = []
+    problems, declared = [], []
     for target, by_build in block["targets"].items():
         for build in builds:
             results = by_build[build]
@@ -540,12 +544,23 @@ def report(block, uninstrumented, builds):
             cells = [RESULT_WORDS.get(results[key]["result"], results[key]["result"])
                      for key in ("elf", "system_calls", "quiet_loud", "instrumented")]
             name = f"{target}.{build}"
+            # The enrollment's review reads this report, which gives the detail only of a result that is not pass or
+            # plain. So a build that declares its own C library says so in its cell, and the note of its detail is in
+            # a line below the table, whatever the result. The note ends at the next "; " of the detail.
+            detail = results["instrumented"].get("detail") or ""
+            at = detail.find(check_links.DECLARED_LIBC_NOTE)
+            if at >= 0:
+                files += ", a declared C library"
+                declared.append(f"- {code(name)}: {code(detail[at:].split('; ', 1)[0], LIBC_NOTE_LIMIT)}")
             lines.append(f"| {check_checks.cell(name)} | {' | '.join(cells)} | {files} |")
             for key, title in (("elf", "ELF and instructions"), ("system_calls", "system calls"),
                                ("quiet_loud", "quiet and loud"), ("instrumented", "instrumented")):
                 if results[key]["result"] not in ("pass", "plain"):
                     problems.append(f"- {code(name)}, {title}: {code(results[key]['detail'], 600)}")
     lines.append("")
+    if declared:
+        lines += ["These builds declare their own C library (OV_LIBC). Check C5 of review.md says what the review "
+                  "checks:", "", *declared, ""]
     if problems:
         lines += ["What each failure is:", "", *problems, ""]
     return "\n".join(lines)

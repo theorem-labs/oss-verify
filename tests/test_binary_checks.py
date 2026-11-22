@@ -1790,6 +1790,70 @@ class Analyse(unittest.TestCase):
                                  ("crtn.o", "4" * 64)):
                 self.assertIn(f"{name} ({self.MUSL}{name}, sha256 {sha256})", detail, build)
 
+    def test_the_report_names_a_declared_libc(self):
+        """The report of the four builds of test_a_declared_libc_is_listed_and_exempt_in_each_build, whose results
+        are pass, and plain in the plain build. The enrollment's review reads the report, which gives a detail only
+        for the other results, so the report names the declared C library: each build's cell of uninstrumented code
+        says so, and a line below the table gives the note of its detail, with each file's path and sha256, none cut.
+        The same builds without the note give the report that a build without a declared C library always got."""
+        builds = ["plain", "ubsan", "asan", "asan-ubsan"]
+        results = self.declared_builds()
+        note = ("the build declares its own C library (OV_LIBC), whose files no sanitizer instruments: "
+                + ", ".join(f"{name} ({self.MUSL}{name}, sha256 {sha256})"
+                            for name, sha256 in (("libc.a", hashlib.sha256(archive(self.MUSL_LIBC)).hexdigest()),
+                                                 ("crt1.o", hashlib.sha256(self.MUSL_CRT1).hexdigest()),
+                                                 ("crti.o", "3" * 64), ("crtn.o", "4" * 64))))
+
+        def report(instrumented):
+            """The report of the four builds, with each one's instrumented result from `instrumented`."""
+            block = {"model": {"name": "m", "commit": "f" * 40, "release": "x"}, "inputs": {"t": ["a"]},
+                     "targets": {"t": {build: {"elf": {"result": "pass"}, "system_calls": {"result": "pass"},
+                                               "quiet_loud": {"result": "pass"}, "instrumented": instrumented[build]}
+                                       for build in builds}}}
+            return check_binaries.report(block, {"t": {build: results[build]["uninstrumented"] for build in builds}},
+                                         builds)
+
+        head = ("### The checks of the binaries\n\n"
+                "Against the process model the published proofs use: `m` at `ffffffffffff` (release `x`, from its "
+                "release.yaml).\n"
+                "Each fuzz target ran on the empty input and up to 8 seed inputs (`t`: 1). docs/build-contract.md, "
+                "\"The checks of the binaries\", says what each check proves.\n\n"
+                "| binary | ELF and instructions | system calls | quiet and loud | instrumented | uninstrumented code "
+                "|\n|---|---|---|---|---|---|\n")
+        rows = ("| `t.plain` | pass | pass | pass | not instrumented (plain) | 3 files{} |\n"
+                "| `t.ubsan` | pass | pass | pass | pass | 3 files{} |\n"
+                "| `t.asan` | pass | pass | pass | pass | 3 files{} |\n"
+                "| `t.asan-ubsan` | pass | pass | pass | pass | 3 files{} |\n")
+        declared = {build: results[build]["instrumented"] for build in builds}
+        for build in builds:
+            self.assertIn("; " + note, declared[build]["detail"], build)
+        # Without the note, the report is the one that the same results got before the report read the note.
+        undeclared = {build: {**declared[build], "detail": declared[build]["detail"].replace("; " + note, "")}
+                      for build in builds}
+        self.assertEqual(report(undeclared), head + rows.format(*[""] * 4))
+        self.assertEqual(report(declared),
+                         head + rows.format(*[", a declared C library"] * 4) + "\n"
+                         "These builds declare their own C library (OV_LIBC). Check C5 of review.md says what the "
+                         "review checks:\n\n"
+                         + "".join(f"- `t.{build}`: `{note}`\n" for build in builds))
+
+    def test_the_report_gives_a_long_declared_libc_note_whole(self):
+        """A note with the paths of the test project's asan-ubsan build of libc_fuzzer: tests/fixtures/target-settings/
+        makes its C library under /work/build/lib/$FLAV, and FLAV is asanubsan in that build. The note is longer than
+        the 600 characters of a failure's line. The report gives it whole, with each file's sha256."""
+        lib = "/work/build/lib/asanubsan/fxs-libc.libc/lib/"
+        note = ("the build declares its own C library (OV_LIBC), whose files no sanitizer instruments: "
+                + ", ".join(f"{name} ({lib}{name}, sha256 {str(n) * 64})"
+                            for n, name in enumerate(check_links.DECLARED_LIBC, 1)))
+        self.assertGreater(len(note), 600)
+        block = {"model": {"name": "m", "commit": "f" * 40, "release": "x"}, "inputs": {"t": ["a"]},
+                 "targets": {"t": {"asan-ubsan": {
+                     "elf": {"result": "pass"}, "system_calls": {"result": "pass"}, "quiet_loud": {"result": "pass"},
+                     "instrumented": {"result": "pass", "detail": "1 objects with code, all instrumented; " + note}}}}}
+        text = check_binaries.report(block, {"t": {"asan-ubsan": []}}, ["asan-ubsan"])
+        self.assertIn("| `t.asan-ubsan` | pass | pass | pass | pass | 0 files, a declared C library |\n", text)
+        self.assertTrue(text.endswith(f"\n\n- `t.asan-ubsan`: `{note}`\n"), text)
+
     def test_the_same_libc_undeclared_fails_the_asan_builds(self):
         """The control: the same C library with no declaration is the project's code, uninstrumented, as before."""
         results = self.declared_builds(declare=False)

@@ -7,11 +7,6 @@ limit of the binaries. Needs Docker and the toolchain image:
     OV_DOCKER_TESTS=1 uv run pytest tests/test_target_settings_docker.py
 
 The runs of the binaries need qemu-riscv64-static on PATH; without it, they are skipped.
-
-Each test reads only `raw`, the $OUT directory of each build, and the runs of the binaries also use the toolchain
-image. setUpClass alone builds with Docker. To check $OUT directories that were built in a different place, give `raw`
-those directories in a subclass whose setUpClass does not build, and which clears the skip of this class
-(__unittest_skip__ = False).
 """
 import os
 import pathlib

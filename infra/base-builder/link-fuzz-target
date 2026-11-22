@@ -305,13 +305,13 @@ tail=()
 # the record or none of it. When $OV_RECORDS/<sum> is already there, another link of the same bytes wrote it: the link
 # keeps that record, and its own goes with its directory (made, above). No link removes a record that another link
 # wrote. compile takes $OV_RECORDS/<sum> and the store by their names, and never a directory .link.XXXXXX.
-rec_tmp=""
 # `set -e` does not apply inside the condition of an `if`, so each step says `|| return 1` for itself.
 record_link() {
+  local rec_tmp rec
   mkdir -p "$OV_RECORDS/store" || return 1
   rec_tmp=$(mktemp -d "$OV_RECORDS/.link.XXXXXX") || return 1
   made+=("$rec_tmp")
-  local rec=$rec_tmp/$sum
+  rec=$rec_tmp/$sum
   mkdir "$rec" || return 1
   awk '{
     line = $0
@@ -366,5 +366,7 @@ record_link() {
 }
 if ! record_link; then
   echo "link-fuzz-target: warning: the record of the link of $out could not be written; its binary checks will say so" >&2
-  rm -rf -- ${rec_tmp:+"$rec_tmp"} "$OV_RECORDS/map.$$"
+  # The EXIT trap removes the directory of the record (made, above). A removal that fails does not change the exit
+  # status of the link.
+  rm -f -- "$OV_RECORDS/map.$$" || true
 fi

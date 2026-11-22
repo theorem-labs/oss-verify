@@ -119,6 +119,9 @@ FORTRAN_RUNTIME = re.compile(r"lib(Fortran[A-Za-z]*|flang[A-Za-z_.]*|gfortran|qu
 LIBC = re.compile(r"(crt1|crti|crtn|Scrt1|rcrt1)\.o|lib(c|m|rt|pthread|crypt|util|xnet|resolv|dl|ssp_nonshared)\.a")
 # The files of a C library that a build declares (link-fuzz-target, OV_LIBC), in the order of the record's libc file.
 DECLARED_LIBC = ("libc.a", "crt1.o", "crti.o", "crtn.o")
+# The opening words of the note in each build's detail that names the declared C library (libc_note). The report of
+# the checks of the binaries finds the note by them (check_binaries.report).
+DECLARED_LIBC_NOTE = "the build declares its own C library (OV_LIBC)"
 SYSROOT_LIB = re.compile(r"/opt/[^/]+(/[^/]+)*/usr/lib/[^/]+\.a")
 # rustc's allocator shim defines only these: allocator forwards and marker functions.
 RUST_ALLOCATOR_SHIM = re.compile(r"__rust_(alloc|dealloc|realloc|alloc_zeroed|alloc_error_handler|"
@@ -919,7 +922,7 @@ def libc_note(record):
     files, or None if the build declares none."""
     if not record.libc:
         return None
-    return ("the build declares its own C library (OV_LIBC), whose files no sanitizer instruments: "
+    return (DECLARED_LIBC_NOTE + ", whose files no sanitizer instruments: "
             + ", ".join(f"{name} ({record.libc[name][0]}, sha256 {record.libc[name][1]})"
                         for name in DECLARED_LIBC if name in record.libc))
 
