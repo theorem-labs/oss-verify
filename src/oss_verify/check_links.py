@@ -24,10 +24,12 @@ target two results:
    under /opt and the toolchain image has those bytes at that path (oss-verify check reads them from the image). A C
    library that the build declares (link-fuzz-target, OV_LIBC: a libc.a, with crt1.o, crti.o and crtn.o beside it) is
    listed in the same way, with kind libc: each file that the link took with the declared real path and bytes, by the
-   name of its row in the record. The map names no crti.o or crtn.o, so the list names the declared libc.a and
-   crt1.o. They are in path order too: a build makes them under /work, after the image's files. A build that declares
-   a C library has no list, and an error, when the link did not take the declared libc.a, or when it took the libc.a
-   or crt1.o of the toolchain image. A map
+   name of its row in the record. The declared libc.a and crt1.o always have code in the binary, and its crti.o or
+   crtn.o only when that file's source has code: musl's crti.o and crtn.o for riscv64 are built from empty sources, so
+   with musl the list names neither. The listed files of the C library are in path order too: a build makes them
+   under /work, after the image's files. A build that declares a C library has no list, and an error, when the link
+   did not take the declared libc.a, or when it took a file of the toolchain image's C library: its libc.a, crt1.o,
+   crti.o or crtn.o. A map
    with non-blank lines of which the reader kept no input section gives no list either, and an error that names the
    number of the map's non-blank lines, the number read as input sections, 0 kept and the first line. In an
    AddressSanitizer build, the one exempt allocator shim is listed too, as {name, kind: rust-allocator-shim, sha256}:
@@ -95,7 +97,7 @@ whatever the result, when this could read the record of the link (check_binaries
 checks the rest. The C library comes from sources that the sources file pins, and its own build makes it. Only the
 line of the sources file that lays out its source, its patches and its own build write in its source tree. Its
 patches change only the C library. The commands and flags of its build name no file of the project: no source, no -I,
-no -include. Its libc.a holds no other object.
+no -include. Its four files, libc.a, crt1.o, crti.o and crtn.o, hold only what its own build makes.
 """
 import array
 import dataclasses
@@ -940,8 +942,9 @@ def project_code(record, image):
     provides ([(real path, sha256)]), and problems ([text]). `image` maps a real path under /opt to the toolchain
     image's sha256 of it. A file of the declared C library is one whose real path and sha256 are a row of the record's
     libc file (Record.libc). With a declared C library, two more things are problems: a link that did not take the
-    declared libc.a, and a link that took the libc.a or crt1.o of the toolchain image. The map names no crti.o or
-    crtn.o, so the name check below never meets them."""
+    declared libc.a, and a link that took a file of the toolchain image named libc.a, crt1.o, crti.o or crtn.o (a file
+    of the image's C library). A crti.o or crtn.o has code in the binary only when its source has code: musl's crti.o
+    and crtn.o for riscv64 have none."""
     code, provided, problems = [], [], []
     declared, took_libc = declared_libc(record), False
     members = {}
