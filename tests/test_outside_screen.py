@@ -13,7 +13,9 @@ outputs), the comment job's hold, and the review comment's line on the checks th
 build.yaml (Build), whose completed run starts review.yml: its events and its concurrency, and that its jobs hold none
 of the review's identities and decide nothing of its trust. .github/scripts/screen.py itself is tested in
 test_screen.py."""
+import copy
 import datetime
+import functools
 import hashlib
 import io
 import itertools
@@ -33,11 +35,26 @@ import yaml
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / ".github" / "scripts"
 WORKFLOWS = ROOT / ".github" / "workflows"
+
+
+@functools.cache
+def parsed_workflow(name):
+    # PyYAML's C parser when it is built, else its Python one: review.yml is long, and the C parser reads it many times
+    # faster. Each file is parsed once per process, however many tests read it.
+    return yaml.load((WORKFLOWS / name).read_text(), Loader=getattr(yaml, "CSafeLoader", yaml.SafeLoader))
+
+
+def read_workflow(name):
+    """The workflow file `name` of .github/workflows, parsed. Each call gives its own copy, so a test that changes
+    what it got changes no other test's workflow."""
+    return copy.deepcopy(parsed_workflow(name))
+
+
 # Build builds a pull request on pull_request. Review, main's copy, reviews the pull request when the Build run
 # completes (workflow_run), and an issue on its own events, and runs by hand.
-BUILD = yaml.safe_load((WORKFLOWS / "build.yaml").read_text())
+BUILD = read_workflow("build.yaml")
 BUILD_JOBS = BUILD["jobs"]
-REVIEW = yaml.safe_load((WORKFLOWS / "review.yml").read_text())
+REVIEW = read_workflow("review.yml")
 REVIEW_JOBS = REVIEW["jobs"]
 REPO = "theorem-labs/oss-verify"
 
@@ -71,12 +88,25 @@ jq -r "$filter" "$file"
 """
 
 
-def evaluate(expression, ctx):
-    """A GitHub Actions expression, with or without ${{ }}, as GitHub evaluates it for what these tests need: string,
-    whole number, boolean and null literals, contexts looked up whole in ctx (a missing one is null), == and !=
-    (strings compared without case), !, && and || (which give an operand, not a boolean), parentheses, and the
-    functions format, cancelled and always. cancelled() is false: these tests run no cancelled run."""
-    text = str(expression).strip()
+def truthy(value):
+    """An expression's value as a condition: null, false, '' and 0 are false."""
+    return value not in (None, False, "", 0)
+
+
+def equal(a, b):
+    """== of two values: null is '', and strings compare without case."""
+    a = "" if a is None else a
+    b = "" if b is None else b
+    if isinstance(a, str) and isinstance(b, str):
+        return a.lower() == b.lower()
+    return a == b
+
+
+@functools.cache
+def compiled(expression):
+    """The expression `expression`, parsed once into a function that evaluates it on a context. The tests evaluate the
+    same few expressions on many contexts (one test about 98,000 times), so each is read once."""
+    text = expression.strip()
     if text.startswith("${{") and text.endswith("}}"):
         text = text[3:-2]
     tokens = re.findall(r"\s*('(?:[^']|'')*'|&&|\|\||==|!=|!|\(|\)|,|[0-9]+(?![A-Za-z_])|[A-Za-z_][A-Za-z0-9_.\-]*)", text)
@@ -93,32 +123,26 @@ def evaluate(expression, ctx):
         pos[0] += 1
         return t
 
-    def truthy(v):
-        return v not in (None, False, "", 0)
-
-    def eq(a, b):
-        a = "" if a is None else a
-        b = "" if b is None else b
-        if isinstance(a, str) and isinstance(b, str):
-            return a.lower() == b.lower()
-        return a == b
+    def constant(value):
+        return lambda ctx: value
 
     def primary():
         t = take()
         if t == "(":
-            v = disjunction()
+            run = disjunction()
             take(")")
-            return v
+            return run
         if t == "!":
-            return not truthy(primary())
+            operand = primary()
+            return lambda ctx: not truthy(operand(ctx))
         if t.startswith("'"):
-            return t[1:-1].replace("''", "'")
+            return constant(t[1:-1].replace("''", "'"))
         if t.isdigit():
-            return int(t)
+            return constant(int(t))
         if t in ("true", "false"):
-            return t == "true"
+            return constant(t == "true")
         if t == "null":
-            return None
+            return constant(None)
         if peek() == "(":
             take("(")
             args = []
@@ -128,38 +152,74 @@ def evaluate(expression, ctx):
                     take(",")
             take(")")
             if t == "format":
-                return re.sub(r"\{(\d+)\}", lambda m: as_text(args[1 + int(m.group(1))]), args[0])
+                def formatted(ctx):
+                    values = [arg(ctx) for arg in args]
+                    return re.sub(r"\{(\d+)\}", lambda m: as_text(values[1 + int(m.group(1))]), values[0])
+                return formatted
             assert t in ("cancelled", "always") and not args, "no such function here: " + t
-            return t == "always"
-        return ctx.get(t)
+            return constant(t == "always")
+        return lambda ctx: ctx.get(t)
 
+    # Each chain of one operator is a list of its operands, evaluated in a loop: a function nested for each operator
+    # would make a long chain deeper than Python's recursion limit.
     def comparison():
-        v = primary()
+        first, rest = primary(), []
         while peek() in ("==", "!="):
-            op = take()
-            w = primary()
-            v = eq(v, w) if op == "==" else not eq(v, w)
-        return v
+            rest.append((take(), primary()))
+        if not rest:
+            return first
+
+        def run(ctx):
+            v = first(ctx)
+            for op, operand in rest:
+                w = operand(ctx)
+                v = equal(v, w) if op == "==" else not equal(v, w)
+            return v
+        return run
 
     def conjunction():
-        v = comparison()
+        operands = [comparison()]
         while peek() == "&&":
             take()
-            w = comparison()
-            v = w if truthy(v) else v
-        return v
+            operands.append(comparison())
+        if len(operands) == 1:
+            return operands[0]
+
+        def run(ctx):
+            v = operands[0](ctx)
+            for operand in operands[1:]:
+                w = operand(ctx)
+                v = w if truthy(v) else v
+            return v
+        return run
 
     def disjunction():
-        v = conjunction()
+        operands = [conjunction()]
         while peek() == "||":
             take()
-            w = conjunction()
-            v = v if truthy(v) else w
-        return v
+            operands.append(conjunction())
+        if len(operands) == 1:
+            return operands[0]
 
-    v = disjunction()
+        def run(ctx):
+            v = operands[0](ctx)
+            for operand in operands[1:]:
+                w = operand(ctx)
+                v = v if truthy(v) else w
+            return v
+        return run
+
+    run = disjunction()
     assert pos[0] == len(toks), (toks[pos[0]:], text)
-    return v
+    return run
+
+
+def evaluate(expression, ctx):
+    """A GitHub Actions expression, with or without ${{ }}, as GitHub evaluates it for what these tests need: string,
+    whole number, boolean and null literals, contexts looked up whole in ctx (a missing one is null), == and !=
+    (strings compared without case), !, && and || (which give an operand, not a boolean), parentheses, and the
+    functions format, cancelled and always. cancelled() is false: these tests run no cancelled run."""
+    return compiled(str(expression))(ctx)
 
 
 def as_text(v):
@@ -2171,7 +2231,7 @@ class RunWiring(unittest.TestCase):
                 self.assertEqual((self.group(ctx, BUILD), self.cancels(ctx, BUILD)), ("build-pull_request-7", True))
         on = REVIEW.get("on", REVIEW.get(True))
         self.assertEqual(sorted(on), ["issues", "workflow_dispatch", "workflow_run"])
-        triage = yaml.safe_load((WORKFLOWS / "triage.yaml").read_text())
+        triage = read_workflow("triage.yaml")
         self.assertEqual(on["workflow_run"], {"workflows": [BUILD["name"], triage["name"]], "types": ["completed"]})
         self.assertEqual(on["issues"], {"types": ["opened", "edited", "reopened"]})
         self.assertEqual(sorted(on["workflow_dispatch"]["inputs"]),

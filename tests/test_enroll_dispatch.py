@@ -27,16 +27,17 @@ import zipfile
 import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-# The workflow tests' expression evaluator and step runner with a stand-in gh: GitHub's expressions, evaluated as
-# test_outside_screen.py evaluates them (the dispatch job's if and env, and its steps' if and env). REVIEW is
-# review.yml, whose env holds ALLOWED_BOTS and whose route holds the bash function trusted, the rule that trusted ports.
-from test_outside_screen import REVIEW, Runner, as_text, evaluate, interpolated  # noqa: E402
+# The workflow tests' workflow reader, expression evaluator and step runner with a stand-in gh: GitHub's expressions,
+# evaluated as test_outside_screen.py evaluates them (the dispatch job's if and env, and its steps' if and env). REVIEW
+# is review.yml, whose env holds ALLOWED_BOTS and whose route holds the bash function trusted, the rule that trusted
+# ports.
+from test_outside_screen import REVIEW, Runner, as_text, evaluate, interpolated, read_workflow  # noqa: E402
 
 LOADER = importlib.machinery.SourceFileLoader("enroll_dispatch", str(ROOT / ".github" / "scripts" / "enroll-dispatch"))
 SPEC = importlib.util.spec_from_loader("enroll_dispatch", LOADER)
 dispatch = importlib.util.module_from_spec(SPEC)
 LOADER.exec_module(dispatch)
-ENROLL_DISPATCH = yaml.safe_load((ROOT / ".github" / "workflows" / "enroll-dispatch.yml").read_text())
+ENROLL_DISPATCH = read_workflow("enroll-dispatch.yml")
 # The maintainer check reads the network; every test but those of the class Maintainer sees it pass, and Maintainer
 # tests the real one with a stand-in API.
 REAL_STANDING = dispatch.standing
@@ -1114,8 +1115,7 @@ class Merged(unittest.TestCase):
     def test_the_send_step_says_merged_only_for_a_merge(self):
         if not shutil.which("jq"):
             self.skipTest("jq is not installed")
-        steps = yaml.safe_load((ROOT / ".github" / "workflows" / "enroll-dispatch.yml").read_text())["jobs"][
-            "dispatch"]["steps"]
+        steps = read_workflow("enroll-dispatch.yml")["jobs"]["dispatch"]["steps"]
         script = [s for s in steps if s.get("name") == "Send enrollment-checked to the private repository"][0]["run"]
         sent = {}
         with tempfile.TemporaryDirectory() as directory:
@@ -1161,7 +1161,7 @@ class TheRecord(unittest.TestCase):
             (work / "manifest.yaml").write_text(yaml.safe_dump({"targets": targets}))
             sizes_line = subprocess.run([sys.executable, str(ROOT / ".github" / "scripts" / "binary-sizes"), str(work)],
                                         capture_output=True, text=True, check=True).stdout.strip()
-            job = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yaml").read_text())["jobs"]["record"]
+            job = read_workflow("build.yaml")["jobs"]["record"]
             script = job["steps"][0]["run"]
             uploads = [step.get("with") or {} for step in job["steps"]
                        if str(step.get("uses", "")).partition("@")[0] == "actions/upload-artifact"]
@@ -1551,7 +1551,7 @@ def stand_in_gh(directory):
 @functools.cache
 def enroll_dispatch_jobs():
     """enroll-dispatch.yml's decide and dispatch jobs."""
-    jobs = yaml.safe_load((ROOT / ".github" / "workflows" / "enroll-dispatch.yml").read_text())["jobs"]
+    jobs = read_workflow("enroll-dispatch.yml")["jobs"]
     names = [step.get("name") for step in jobs["dispatch"]["steps"]]
     if any(names.count(name) != 1 for name in (CHECK, TAKE_OFF, SEND, PUT_ON)):
         raise AssertionError(f"the dispatch job's steps are {names}")

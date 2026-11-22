@@ -21,6 +21,8 @@ import yaml
 
 from oss_verify import validate
 
+from test_outside_screen import read_workflow
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 REPOSITORY = "theorem-labs/oss-verify"
 HEAD = "a" * 40
@@ -199,7 +201,7 @@ def terms(tmp_path, files, body=UNTICKED, head_repository="someone/oss-verify", 
         (tmp_path / "merge" / ".github" / "scripts").mkdir(parents=True)
         (tmp_path / "merge" / ".github" / "scripts" / "terms-accepted").write_text(merge_program)
         (tmp_path / "merge" / "src").symlink_to(ROOT / "src")
-    flow = yaml.safe_load((ROOT / ".github" / "workflows" / "terms.yaml").read_text())
+    flow = read_workflow("terms.yaml")
     [step] = [step for step in flow["jobs"]["terms-accepted"]["steps"]
               if step.get("name") == "The description accepts the OSS Verify terms"]
     env = {**os.environ, "PATH": f"{stub}{os.pathsep}{os.environ['PATH']}", "STUB": str(stub), "STUB_BASE": BASE,
@@ -834,7 +836,7 @@ def test_the_job_checks_out_the_merge_commit_into_merge_only_while_the_base_has_
     # The step's run: falls back to merge/, so the job checks the merge commit out there, and only then. hashFiles reads
     # the checkout at the top of the workspace, so the checkout into merge/ comes after the step with id: parent, which
     # checks out the first parent of the merge commit there.
-    flow = yaml.safe_load((ROOT / ".github" / "workflows" / "terms.yaml").read_text())
+    flow = read_workflow("terms.yaml")
     steps = flow["jobs"]["terms-accepted"]["steps"]
     checkouts = [n for n, step in enumerate(steps) if step.get("uses", "").startswith("actions/checkout@")]
     [merge] = [n for n in checkouts if steps[n].get("with", {}).get("path") == "merge"]

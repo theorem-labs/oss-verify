@@ -19,9 +19,8 @@ import re
 import subprocess
 
 import pytest
-import yaml
 
-from test_outside_screen import evaluate
+from test_outside_screen import evaluate, read_workflow as workflow
 from test_take_project import git, isolated_git_env
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -36,10 +35,6 @@ COLLECTORS = {**{name: ("required", check) for name, check in REQUIRED.items()},
               "review.yml": ("collect", "review jobs")}
 # The checks the default branch's ruleset requires.
 RULESET = {"enrollment", "project-builds", "terms-accepted", "tests"}
-
-
-def workflow(name):
-    return yaml.safe_load((WORKFLOWS / name).read_text())
 
 
 def step(job, name):
@@ -124,7 +119,7 @@ def test_every_required_check_has_a_static_name():
     # blocked until a push. So each required check is reported by exactly one job, under a plain name.
     reporters = {}
     for path in sorted([*WORKFLOWS.glob("*.yaml"), *WORKFLOWS.glob("*.yml")]):
-        for job_id, job in yaml.safe_load(path.read_text())["jobs"].items():
+        for job_id, job in workflow(path.name)["jobs"].items():
             name = str(job.get("name", job_id))
             # An expression that can give a required name, such as `... && 'other' || 'tests'`.
             literals = set(re.findall(r"'([^']*)'", name)) if "${{" in name else set()
