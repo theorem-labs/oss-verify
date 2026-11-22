@@ -654,7 +654,9 @@ def read_record(raw, sha256, compiles=None):
     try:
         mapping, rows, driver = text("map"), text("inputs.tsv").splitlines(), text("driver").split()
         renamed_rows = text("renamed").splitlines() if os.path.lexists(directory / "renamed") else []
-        libc_rows = text("libc").splitlines() if os.path.lexists(directory / "libc") else None
+        # Split libc at "\n" only: str.splitlines() also splits at U+0085, U+2028 and U+2029, and link-fuzz-target
+        # lets these characters through in a real path. An empty file gives one empty row, which is not a record.
+        libc_rows = text("libc").removesuffix("\n").split("\n") if os.path.lexists(directory / "libc") else None
     except RecordError as error:
         raise RecordError(f"the link record is incomplete: {error}") from None
     inputs, renamed = {}, {}

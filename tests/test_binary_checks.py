@@ -745,6 +745,16 @@ class Records(unittest.TestCase):
         self.write_libc(self.LIBC_ROWS[::-1])
         self.assertEqual(check_links.read_record(self.raw, "a" * 64).libc, record.libc)
 
+    def test_a_libc_path_that_holds_a_unicode_line_separator_is_read(self):
+        """link-fuzz-target refuses [[:cntrl:]] in the real paths, but in the C locale it lets U+0085, U+2028 and
+        U+2029 through. str.splitlines() splits at each of them, so the libc file is split at newlines only."""
+        separators = ["\u0085", "\u2028", "\u2029"]
+        rows = [(name, path + separator + "x", sha256)
+                for (name, path, sha256), separator in zip(self.LIBC_ROWS, separators)] + self.LIBC_ROWS[3:]
+        self.write_libc(rows)
+        self.assertEqual(check_links.read_record(self.raw, "a" * 64).libc,
+                         {name: (path, sha256) for name, path, sha256 in rows})
+
     def test_a_record_with_no_libc_file_declares_no_libc(self):
         self.assertEqual(check_links.read_record(self.raw, "a" * 64).libc, {})
 
