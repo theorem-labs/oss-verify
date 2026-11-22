@@ -22,6 +22,7 @@ import io
 import os
 import pathlib
 import platform
+import secrets
 import shutil
 import subprocess
 import sys
@@ -33,7 +34,9 @@ from unittest import mock
 from oss_verify import check_binaries
 from oss_verify import check_checks
 
-TAG = "oss-verify-test/host-usr:latest"
+# The tag's suffix is this process's own, so that two processes on one Docker daemon (two workers of pytest-xdist, or two
+# runs of the suite) never import, run or remove each other's image.
+TAG = f"oss-verify-test/host-usr:{secrets.token_hex(6)}"
 ZERO = "00000000"
 NO_FAULT = "this host starts processes with coredump_filter 0, so this test cannot show the fix"
 # The stand-in for qemu-riscv64. run-seeds runs it as /ovc-qemu /bins/<target> /inputs/<target>/<n>, as root, and it

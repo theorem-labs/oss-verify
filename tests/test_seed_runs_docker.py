@@ -29,10 +29,10 @@ from oss_verify import check_binaries
 from oss_verify import check_build
 from oss_verify import check_checks
 from oss_verify import validate
-from test_builder import docker_ready
+from test_builder import RUN, docker_ready
 
 FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "example"
-TAG = "oss-verify-test/example-seed-runs:latest"
+TAG = f"oss-verify-test/example-seed-runs:{RUN}"
 QEMU = shutil.which("qemu-riscv64-static")
 BUILD = "asan-ubsan"
 # The C fuzz target: tests/fixtures/example/build.sh links it to $OUT/example_fuzzer.

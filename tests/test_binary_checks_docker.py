@@ -20,10 +20,10 @@ from oss_verify import check_build
 from oss_verify import check_links
 from oss_verify import manifest
 from oss_verify import validate
-from test_builder import docker_ready
+from test_builder import RUN, docker_ready
 
 FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "example"
-TAG = "oss-verify-test/example-records:latest"
+TAG = f"oss-verify-test/example-records:{RUN}"
 QEMU = shutil.which("qemu-riscv64-static")
 BUILDS = ["plain", "ubsan", "asan"]
 
