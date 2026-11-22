@@ -87,10 +87,13 @@ class PullRequest:
 
     The repositories are built once per pytest process (each xdist worker is one) for each set of arguments, and each
     test takes its own copy of them in its tmp_path: building them is about 15 git processes, the larger part of a
-    test's time, and many tests take the same pull request."""
+    test's time, and many tests take the same pull request. Main's first commit, which depends only on `on_main`, is
+    built once too, and each pull request's origin starts as a copy of it."""
 
     # The pull requests built so far, by their arguments: each a PullRequest in its own directory.
     built = {}
+    # Main's first commit, by `on_main`: the directory of a repository that holds it, and its commit.
+    mains = {}
     # The directory they are built in; the fixture pull_requests_built_once sets it.
     root = None
     # The names of their directories. Never the count of `built`: a build that fails stores nothing, and the next
@@ -110,29 +113,39 @@ class PullRequest:
         self.origin, self.checkout = tmp_path / "origin", tmp_path / "checkout"
         shutil.copytree(built.origin, self.origin, symlinks=True)
         shutil.copytree(built.checkout, self.checkout, symlinks=True)
-        # The checkout fetches from this test's origin, not from the one it was copied from.
-        config = self.checkout / ".git" / "config"
-        text = config.read_text()
-        assert f"url = file://{built.origin}\n" in text, text
-        config.write_text(text.replace(f"url = file://{built.origin}\n", f"url = file://{self.origin}\n"))
+        # The checkout fetches from this test's origin, not from the one it was copied from. git writes the setting,
+        # as it escapes a path that holds a quote or a backslash.
+        git("config", "remote.origin.url", f"file://{self.origin}", cwd=self.checkout, env=self.env)
         self.other, self.sha, self.merge_base, self.paths = built.other, built.sha, built.merge_base, list(built.paths)
+
+    def first_commit(self, on_main):
+        """A repository whose main is main's first commit: projects/other/ and the files `on_main`."""
+        key = json.dumps(on_main)
+        if key not in self.mains:
+            directory = self.root / f"main-{next(self.names)}"
+            directory.mkdir()
+            env = isolated_git_env(directory)
+            origin = directory / "origin"
+            git("init", "-q", "-b", "main", str(origin), env=env)
+            (origin / "projects" / "other").mkdir(parents=True)
+            (origin / "projects" / "other" / "project.yaml").write_text(PROJECT)
+            # More files in main's first commit, before the branch leaves it.
+            for path, text in (on_main or {}).items():
+                (origin / path).parent.mkdir(parents=True, exist_ok=True)
+                (origin / path).write_text(text)
+            git("add", "-A", cwd=origin, env=env)
+            git("commit", "-q", "-m", "main", cwd=origin, env=env)
+            self.mains[key] = origin, git("rev-parse", "main", cwd=origin, env=env)
+        return self.mains[key]
 
     def build(self, directory, files, removed, parent, landed, renamed, on_main, checkout):
         directory.mkdir()
         self.tmp = directory
         self.env = isolated_git_env(directory)
         self.origin = origin = directory / "origin"
-        git("init", "-q", "-b", "main", str(origin), env=self.env)
-        (origin / "projects" / "other").mkdir(parents=True)
-        (origin / "projects" / "other" / "project.yaml").write_text(PROJECT)
-        # More files in main's first commit, before the branch leaves it.
-        for path, text in (on_main or {}).items():
-            (origin / path).parent.mkdir(parents=True, exist_ok=True)
-            (origin / path).write_text(text)
-        git("add", "-A", cwd=origin, env=self.env)
-        git("commit", "-q", "-m", "main", cwd=origin, env=self.env)
-        # Another commit the pull request's head can move to.
-        self.other = git("rev-parse", "main", cwd=origin, env=self.env)
+        # self.other: another commit the pull request's head can move to.
+        first, self.other = self.first_commit(on_main)
+        shutil.copytree(first, origin, symlinks=True)
         git("checkout", "-q", "-b", "pull", cwd=origin, env=self.env)
         if parent:
             self.commit(parent, "parent")
@@ -243,6 +256,7 @@ def pull_requests_built_once(tmp_path_factory):
     PullRequest.root = tmp_path_factory.mktemp("pull-requests")
     yield
     PullRequest.built.clear()
+    PullRequest.mains.clear()
 
 
 ENROLLMENT = {"projects/demo/project.yaml": PROJECT, "projects/demo/Dockerfile": "FROM x\n",
