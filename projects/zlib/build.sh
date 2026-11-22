@@ -174,3 +174,4 @@ LIB_ARCHIVE="lib/liboft.a"
 LIB_CFLAGS=""
 ov_target_build zlib_uncompress_fuzzer
 )
+# scratch
