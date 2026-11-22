@@ -40,7 +40,11 @@ check passes and a run of binary-sizes fails, the step writes a warning and a su
 It writes no output of binary-sizes, and its exit status does not change.
 
 Each test reads the workflow files from one directory: the repository's .github/workflows, or the directory that a
-caller gives. So a control can run a test on a changed copy of the workflows.
+caller gives. So a control can run a test on a changed copy of the workflows. A control (its name starts with
+test_control) copies the workflows into a temporary directory. It runs a test's case on that copy, where the case
+passes. Then it changes a second copy, runs the case there, and asserts that the case fails. Three controls change the
+step with id: parent of the four jobs: it checks out the second parent, it only runs true, or it runs a script of the
+checkout. One control changes the build step: it writes no warning when binary-sizes fails, as at a417ab88.
 """
 import collections
 import hashlib
@@ -49,8 +53,10 @@ import pathlib
 import re
 import secrets
 import shlex
+import shutil
 import subprocess
 import tempfile
+import textwrap
 
 import pytest
 import yaml
@@ -129,6 +135,29 @@ BINARY_SIZES = {
 # An expression that names the event's base.sha, in any case of letters (GitHub reads names without case), with
 # github.event.pull_request['base']['sha'] read as github.event.pull_request.base.sha.
 BASE_SHA = re.compile(r"pull_request\s*\.\s*base\s*\.\s*sha\b", re.I)
+# The sizes lines of the build step at a417ab88 (build.yaml:290-303 there), without their indentation. A run of
+# binary-sizes that fails leaves the sizes empty, and the step writes no warning. A control puts them in place of
+# SIZES_LINES.
+SILENT_SIZES = r"""# For the record job and the results job: each binary's .text bytes and executable bytes
+# (.github/scripts/binary-sizes), as one line of JSON {target: {build: {text, exec}}}, with null for a size
+# that could not be read.
+sizes=$(python3 .github/scripts/binary-sizes ~/.cache/oss-verify-check/"$NAME" 2> /dev/null < /dev/null || true)
+[[ $sizes == "{"*"}" && $sizes != *$'\n'* ]] || sizes=""
+# For the results job: sizes in at most 100,000 bytes of JSON. The job gets them in one environment variable,
+# and Linux starts no process with a variable over 131,072 bytes: with all the builds of a large project, the
+# job could not start, and the review would get no result of the build. binary-sizes --cut keeps all the
+# builds, else the plain build of each target, else nothing, as take-build-results does, so the record of the
+# review keeps the plain builds of a large project. An error leaves it empty.
+results_sizes=""
+[ -z "$sizes" ] \
+  || results_sizes=$(python3 .github/scripts/binary-sizes --cut 100000 <<< "$sizes") || results_sizes=""
+[[ $results_sizes == "{"*"}" && $results_sizes != *$'\n'* ]] || results_sizes=""
+"""
+# The sizes lines of the build step: from the comment that SILENT_SIZES also starts with, to the line of the random
+# delimiter. The group indent is their indentation.
+SIZES_LINES = r"(?ms)^(?P<indent> +)# For the record job and the results job:.*?(?=^(?P=indent)# A random delimiter)"
+# The run: of the step with id: parent, with its block. The group head is the step's text from id: to `run: `.
+PARENT_RUN = r"(?m)^(?P<head>(?P<indent> +)id: parent\n(?:(?P=indent).*\n)*?(?P=indent)run: )\|\n(?:(?P=indent)  .*\n)+"
 
 # The stand-in gh. It logs each call: each argument ended by NUL, and the call by \1. It serves only the compare API's
 # status, `gh api repos/<owner>/<repo>/compare/<a>...<b> --jq .status`, with @STATUS@. With the status error, it fails
@@ -681,6 +710,53 @@ def binary_sizes(tmp_path, case, workflows=WORKFLOWS):
         assert marker not in text, f"{where}: the step's {kind} holds the output of binary-sizes:\n{text}"
 
 
+# --- the controls ---
+
+
+def control_copies(tmp_path, targets, pattern, new):
+    """The two copies of the repository's .github/workflows that a control reads: tmp_path/unchanged, and
+    tmp_path/changed, in which the text that the regular expression `pattern` finds becomes `new`, a template of re.sub
+    or a function of the match. `targets` are the steps that the change is for, each (<file>:<job>, the step's id). In
+    the file of each target, `pattern` finds one text, and the change changes the run: of that step and nothing else."""
+    unchanged, changed = tmp_path / "unchanged", tmp_path / "changed"
+    for copy in (unchanged, changed):
+        shutil.copytree(WORKFLOWS, copy)
+    for label, step_id in targets:
+        name, job = label.split(":")
+        text, count = re.subn(pattern, new, (changed / name).read_text())
+        assert count == 1, f"{label}: the control finds its text {count} times, not once"
+        (changed / name).write_text(text)
+        before, after = load(unchanged, name), load(changed, name)
+        steps = [step for workflow in (before, after) for step in workflow["jobs"][job]["steps"]
+                 if step.get("id") == step_id]
+        assert len(steps) == 2 and steps[0].get("run") != steps[1].get("run"), \
+            f"{label}: the control does not change the run: of the step with id: {step_id}"
+        steps[0]["run"] = steps[1]["run"]
+        assert before == after, f"{label}: the control changes more than the run: of the step with id: {step_id}"
+    return unchanged, changed
+
+
+def fails_only_on_the_change(tmp_path, copies, said, case, *args):
+    """Run case(<a new directory>, *args, workflows=<a copy>) on the unchanged copy of `copies`, where it passes. Then
+    run it on the changed copy, where it must fail with a message that holds `said`. pytest indents the lines of a
+    message, so each run of spaces and newlines counts as one space."""
+    unchanged, changed = copies
+    case(pathlib.Path(tempfile.mkdtemp(prefix="case-", dir=tmp_path)), *args, workflows=unchanged)
+    with pytest.raises(AssertionError) as caught:
+        case(pathlib.Path(tempfile.mkdtemp(prefix="case-", dir=tmp_path)), *args, workflows=changed)
+    assert " ".join(said.split()) in " ".join(str(caught.value).split()), \
+        f"the case failed, but its message does not say {said!r}:\n{caught.value}"
+
+
+def step_control(tmp_path, pattern, new, said):
+    """A control of the step with id: parent: control_copies changes that step in each of the four jobs. Then
+    the_step_checks_out_the_first_parent fails for each job, and its message holds `said`."""
+    copies = control_copies(tmp_path, [(label, "parent") for label in JOBS], pattern, new)
+    for label in JOBS:
+        fails_only_on_the_change(tmp_path, copies, f"{label} (compare: ahead): {said}",
+                                 the_step_checks_out_the_first_parent, label)
+
+
 # --- the tests ---
 
 
@@ -725,3 +801,27 @@ def test_the_job_runs_the_first_parents_tools(tmp_path, label):
 @pytest.mark.parametrize("case", list(BINARY_SIZES))
 def test_binary_sizes(tmp_path, case):
     binary_sizes(tmp_path, case)
+
+
+def test_control_a_step_that_checks_out_the_second_parent(tmp_path):
+    # HEAD is then P2, the pull request's head.
+    step_control(tmp_path, r'--detach "\$parent"', "--detach HEAD^2", "HEAD is P2, not P1, detached")
+
+
+def test_control_a_step_that_only_runs_true(tmp_path):
+    # HEAD then stays at M, and the step gives no output.
+    step_control(tmp_path, PARENT_RUN, r"\g<head>true\n", "HEAD is M, not P1, detached")
+
+
+def test_control_a_step_that_runs_a_script_of_the_checkout(tmp_path):
+    # The step runs collect of M, whose files are the pull request's, before it checks out P1.
+    step_control(tmp_path, r"(?m)^( +)merge=\$\(git rev-parse HEAD\)$", r"\1.github/scripts/collect || true\n\g<0>",
+                 "the step ran files of the checkout:\nM .github/scripts/collect")
+
+
+def test_control_a_build_step_with_the_silent_fallback(tmp_path):
+    # The sizes lines of a417ab88: the plain run of binary-sizes fails, and the step writes no warning.
+    copies = control_copies(tmp_path, [("build.yaml:project-builds", "build")], SIZES_LINES,
+                            lambda found: textwrap.indent(SILENT_SIZES, found["indent"]))
+    fails_only_on_the_change(tmp_path, copies, "the build step's warnings are [], not ::warning::binary-sizes exited 1",
+                             binary_sizes, "the plain run fails")

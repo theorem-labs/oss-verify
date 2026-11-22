@@ -29,14 +29,14 @@ name: "Validate"
 # enroll-dispatch.yml sends no pull request for its theorem statements unless all its files are under one
 # projects/<name>/ (the_project() of .github/scripts/enroll-dispatch), and none that changes a steering file
 # (.github/scripts/steering.py) until a person approves its head. The validate job checks out the first parent of the
-# merge commit: the base branch's commit on which GitHub built the merge. So take-project reads the base branch's head,
-# and the validator is the base branch's. This file and those tools then come from one commit of the base branch: a
-# tool of another commit can lack an option that this file gives it. GitHub, not the pull request, chooses the first
-# parent, and the step after the checkout fails unless that parent is a commit of the base branch. So the pull request
-# controls neither tool. Until that step ends, the checkout holds the merge commit's files, so the step is inline and
-# runs only git and gh. Only the files directly inside the one projects/<name>/ are taken from the pull request, as
-# regular files written from git's object store, and they are read as data, never run. No job gets a secret, cache,
-# artifact or write permission. Never add one.
+# merge commit: the base branch's commit on which GitHub built the merge. So take-project judges the pull request
+# against that commit, and the validator is the base branch's. This file and those tools then come from one commit of
+# the base branch: a tool of another commit can lack an option that this file gives it. GitHub, not the pull request,
+# chooses the first parent, and the step after the checkout fails unless that parent is a commit of the base branch.
+# So the pull request controls neither tool. Until that step ends, the checkout holds the merge commit's files, so the
+# step is inline and runs only git and gh. Only the files directly inside the one projects/<name>/ are taken from the
+# pull request, as regular files written from git's object store, and they are read as data, never run. No job gets a
+# secret, cache, artifact or write permission. Never add one.
 #
 # To validate a pull request's project by number (a run by hand stays: it reads a project as data, builds nothing,
 # and holds no secret and only a read-only token):
