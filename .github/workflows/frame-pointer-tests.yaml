@@ -154,29 +154,8 @@ jobs:
           OV_FP_TOOLCHAIN_RUST: ${{ steps.made.outputs.rust }}
         run: |
           set -o pipefail
-          # INFRA-5316, for this pull request's first run only: how many cores the serial Docker builds use. The builds
-          # run in containers, children of dockerd, not of pytest: so /usr/bin/time gives pytest's own CPU time, and
-          # /proc/stat (user, nice, system, irq, softirq and steal, in clock ticks) the machine's, every 5 s.
-          echo "nproc: $(nproc); docker info NCPU: $(docker info --format '{{.NCPU}}')"
-          busy() { awk '$1 == "cpu" { print $2 + $3 + $4 + $7 + $8 + $9 }' /proc/stat; }
-          ( last=$(busy) start=$(date +%s)
-            while sleep 5; do
-              now=$(busy)
-              echo "$(( $(date +%s) - start )) s: $(( (now - last) * 100 / ($(getconf CLK_TCK) * 5 * $(nproc)) ))% of the cores"
-              last=$now
-            done > "$RUNNER_TEMP/cpu" ) &
-          sampler=$!
-          ticks=$(busy) started=$(date +%s) status=0
-          [ -x /usr/bin/time ] || sudo apt-get install -y -qq time
-          /usr/bin/time -v -o "$RUNNER_TEMP/time" python3 -P -m pytest -rs -p no:cacheprovider -c pyproject.toml \
-            --durations=0 tests/test_builder.py -k FramePointers | tee "$RUNNER_TEMP/pytest" || status=$?
-          cpu=$(( ($(busy) - ticks) / $(getconf CLK_TCK) )) wall=$(( $(date +%s) - started ))
-          kill "$sampler" || true
-          cat "$RUNNER_TEMP/cpu"
-          grep -E 'Elapsed|User time|System time|Percent of CPU' "$RUNNER_TEMP/time"
-          echo "nproc $(nproc): the tests took $wall s, and the machine's CPU time over them was $cpu s" \
-               "($(( 100 * cpu / ($(nproc) * (wall > 0 ? wall : 1)) ))% of its cores)" | tee -a "$GITHUB_STEP_SUMMARY"
-          [ "$status" -eq 0 ] || exit "$status"
+          python3 -P -m pytest -rs -p no:cacheprovider -c pyproject.toml tests/test_builder.py -k FramePointers \
+            | tee "$RUNNER_TEMP/pytest"
           # Each test must run and pass: a test that skips (no Docker, no base image, no frame-pointer image named) is
           # a failure here.
           if ! grep -qE '[0-9]+ passed' "$RUNNER_TEMP/pytest" || grep -q '^SKIPPED' "$RUNNER_TEMP/pytest"; then
