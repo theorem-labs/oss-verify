@@ -546,21 +546,26 @@ def report(block, uninstrumented, builds):
             name = f"{target}.{build}"
             # The enrollment's review reads this report, which gives the detail only of a result that is not pass or
             # plain. So a build that declares its own C library says so in its cell, and the note of its detail is in
-            # a line below the table, whatever the result. The note ends at the next "; " of the detail.
+            # a line at the end of the report, whatever the result. The note ends after its crtn.o entry, or else at
+            # the next "; " of the detail.
             detail = results["instrumented"].get("detail") or ""
             at = detail.find(check_links.DECLARED_LIBC_NOTE)
             if at >= 0:
                 files += ", a declared C library"
-                declared.append(f"- {code(name)}: {code(detail[at:].split('; ', 1)[0], LIBC_NOTE_LIMIT)}")
+                end = check_links.DECLARED_LIBC_NOTE_END.search(detail, at)
+                note = detail[at:end.end()] if end else detail[at:].split("; ", 1)[0]
+                declared.append(f"- {code(name)}: {code(note, LIBC_NOTE_LIMIT)}")
             lines.append(f"| {check_checks.cell(name)} | {' | '.join(cells)} | {files} |")
             for key, title in (("elf", "ELF and instructions"), ("system_calls", "system calls"),
                                ("quiet_loud", "quiet and loud"), ("instrumented", "instrumented")):
                 if results[key]["result"] not in ("pass", "plain"):
                     problems.append(f"- {code(name)}, {title}: {code(results[key]['detail'], 600)}")
     lines.append("")
+    if problems:
+        lines += ["What each failure is:", "", *problems, ""]
+    # The copies of the report in CI are cut from their end. The list of the declared C libraries can be long, so it
+    # comes last, and a cut takes it before a failure's line.
     if declared:
         lines += ["These builds declare their own C library (OV_LIBC). Check C5 of review.md says what the review "
                   "checks:", "", *declared, ""]
-    if problems:
-        lines += ["What each failure is:", "", *problems, ""]
     return "\n".join(lines)

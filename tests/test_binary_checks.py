@@ -1794,8 +1794,9 @@ class Analyse(unittest.TestCase):
         """The report of the four builds of test_a_declared_libc_is_listed_and_exempt_in_each_build, whose results
         are pass, and plain in the plain build. The enrollment's review reads the report, which gives a detail only
         for the other results, so the report names the declared C library: each build's cell of uninstrumented code
-        says so, and a line below the table gives the note of its detail, with each file's path and sha256, none cut.
-        The same builds without the note give the report that a build without a declared C library always got."""
+        says so, and a line at the end of the report gives the note of its detail, with each file's path and sha256,
+        none cut. The same builds without the note give the report that a build without a declared C library always
+        got. With a failure, these lines come after "What each failure is", so a cut from the end takes them first."""
         builds = ["plain", "ubsan", "asan", "asan-ubsan"]
         results = self.declared_builds()
         note = ("the build declares its own C library (OV_LIBC), whose files no sanitizer instruments: "
@@ -1831,11 +1832,16 @@ class Analyse(unittest.TestCase):
         undeclared = {build: {**declared[build], "detail": declared[build]["detail"].replace("; " + note, "")}
                       for build in builds}
         self.assertEqual(report(undeclared), head + rows.format(*[""] * 4))
-        self.assertEqual(report(declared),
-                         head + rows.format(*[", a declared C library"] * 4) + "\n"
-                         "These builds declare their own C library (OV_LIBC). Check C5 of review.md says what the "
-                         "review checks:\n\n"
-                         + "".join(f"- `t.{build}`: `{note}`\n" for build in builds))
+        noted = rows.format(*[", a declared C library"] * 4)
+        listing = ("These builds declare their own C library (OV_LIBC). Check C5 of review.md says what the review "
+                   "checks:\n\n" + "".join(f"- `t.{build}`: `{note}`\n" for build in builds))
+        self.assertEqual(report(declared), head + noted + "\n" + listing)
+        failed = {**declared, "asan": {**declared["asan"], "result": "fail"}}
+        self.assertEqual(report(failed),
+                         head + noted.replace("| `t.asan` | pass | pass | pass | pass |",
+                                              "| `t.asan` | pass | pass | pass | **fail** |")
+                         + f"\nWhat each failure is:\n\n- `t.asan`, instrumented: `{declared['asan']['detail']}`\n\n"
+                         + listing)
 
     def test_the_report_gives_a_long_declared_libc_note_whole(self):
         """A note with the paths of the test project's asan-ubsan build of libc_fuzzer: tests/fixtures/target-settings/
@@ -1853,6 +1859,25 @@ class Analyse(unittest.TestCase):
         text = check_binaries.report(block, {"t": {"asan-ubsan": []}}, ["asan-ubsan"])
         self.assertIn("| `t.asan-ubsan` | pass | pass | pass | pass | 0 files, a declared C library |\n", text)
         self.assertTrue(text.endswith(f"\n\n- `t.asan-ubsan`: `{note}`\n"), text)
+
+    def test_the_report_ends_a_declared_libc_note_after_crtn_o(self):
+        """link-fuzz-target takes any absolute path that ends in /libc.a, so a declared path can hold "; ", which also
+        joins the parts of a detail. The report ends the note after its crtn.o entry, which libc_note writes last. So
+        the line of a plain build with a problem after the note gives the whole note, with each file's sha256, and
+        not the problem."""
+        lib = "/work/a; b/lib/"
+        note = ("the build declares its own C library (OV_LIBC), whose files no sanitizer instruments: "
+                + ", ".join(f"{name} ({lib}{name}, sha256 {str(n) * 64})"
+                            for n, name in enumerate(check_links.DECLARED_LIBC, 1)))
+        problem = ("/opt/musl-sysroot/usr/lib/libnew.a: a file of the toolchain image that no kind names "
+                   "(src/oss_verify/check_links.py, runtime_kind)")
+        block = {"model": {"name": "m", "commit": "f" * 40, "release": "x"}, "inputs": {"t": ["a"]},
+                 "targets": {"t": {"plain": {
+                     "elf": {"result": "pass"}, "system_calls": {"result": "pass"}, "quiet_loud": {"result": "pass"},
+                     "instrumented": {"result": "error", "detail": f"{check_links.PLAIN_DETAIL}; {note}; {problem}"}}}}}
+        text = check_binaries.report(block, {"t": {"plain": None}}, ["plain"])
+        self.assertIn("| **not decided** | not recorded, a declared C library |\n", text)
+        self.assertTrue(text.endswith(f"\n\n- `t.plain`: `{note}`\n"), text)
 
     def test_the_same_libc_undeclared_fails_the_asan_builds(self):
         """The control: the same C library with no declaration is the project's code, uninstrumented, as before."""

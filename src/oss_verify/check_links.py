@@ -91,10 +91,11 @@ its attributes took out (record-compile), are judged by their checks only, as be
 check then fails with its archive. The records are written inside the build's own container, so a build.sh
 that sets out to deceive the check can; the review of the pull request is what stands against that. The same holds
 for a declared C library: this checks its declaration and the files that the link took, and the report names it
-whatever the result (check_binaries.report). Check C5 of review.md checks the rest. The C library comes from sources
-that the sources file pins, and its own build makes it. Only the line of the sources file that lays out its source,
-its patches and its own build write in its source tree. Its patches change only the C library. The commands and flags
-of its build name no file of the project: no source, no -I, no -include. Its libc.a holds no other object.
+whatever the result, when this could read the record of the link (check_binaries.report). Check C5 of review.md
+checks the rest. The C library comes from sources that the sources file pins, and its own build makes it. Only the
+line of the sources file that lays out its source, its patches and its own build write in its source tree. Its
+patches change only the C library. The commands and flags of its build name no file of the project: no source, no -I,
+no -include. Its libc.a holds no other object.
 """
 import array
 import dataclasses
@@ -125,6 +126,10 @@ DECLARED_LIBC = ("libc.a", "crt1.o", "crti.o", "crtn.o")
 # The opening words of the note in each build's detail that names the declared C library (libc_note). The report of
 # the checks of the binaries finds the note by them (check_binaries.report).
 DECLARED_LIBC_NOTE = "the build declares its own C library (OV_LIBC)"
+# The last entry of that note, crtn.o's: libc_note writes the four files in the order of DECLARED_LIBC, and read_record
+# asks for all four. A declared path can hold "; ", so the report ends the note after this entry, not at the next "; "
+# of the detail (check_binaries.report).
+DECLARED_LIBC_NOTE_END = re.compile(r"crtn\.o \(.*?, sha256 [0-9a-f]{64}\)")
 SYSROOT_LIB = re.compile(r"/opt/[^/]+(/[^/]+)*/usr/lib/[^/]+\.a")
 # rustc's allocator shim defines only these: allocator forwards and marker functions.
 RUST_ALLOCATOR_SHIM = re.compile(r"__rust_(alloc|dealloc|realloc|alloc_zeroed|alloc_error_handler|"
