@@ -3571,6 +3571,31 @@ def test_append_exits_2_naming_the_error_when_the_machine_fails_a_write_of_its_g
     assert (tmp_path / "script.ld").exists()
 
 
+@pytest.mark.parametrize("file, name, field, first", [
+    ("c\tx.o", "extra", "c\tx.o", ""), ("c.o", "a\tb", ".text.a\tb", ""),
+    ('c"\tx.o', "extra", 'c"\tx.o',
+     "'c\"\\tx.o' holds a double quote or a line break, which a linker script cannot name; ")])
+def test_append_falls_back_with_no_placement_when_a_file_or_section_name_holds_a_tab(tmp_path, monkeypatch, capsys,
+                                                                                    file, name, field, first):
+    # The change adds an object whose file name, or the name of whose .text section, holds a tab, which no line of
+    # placement.tsv can hold (tsv). append falls back to its normal link, as for a name that the script cannot quote,
+    # and never stops the link: it exits 0, writes no script and no placement.tsv (it removes one that is there), so
+    # that link-fuzz-target leaves the link's record out, and prints one line that names the field. A name that the
+    # script cannot quote either gives both reasons.
+    def files(new):
+        found = sources(new)
+        if new:
+            found[file] = relocatable([(name, b"\7" * 0x10, 4, [])])
+        return found
+    entry = link_setup(tmp_path, monkeypatch, files, COMMAND, relaxed={"entry": 4})
+    (tmp_path / "placement.tsv").write_text("an earlier link's\n")
+    assert run_append(tmp_path, entry, COMMAND + [file]) == 0
+    assert capsys.readouterr().err == (f"layout.py append: fuzz (plain): normal link: {first}placement.tsv cannot "
+                                       f"name a section: {field!r} holds a tab or a line break\n")
+    assert not (tmp_path / "script.ld").exists()
+    assert not (tmp_path / "placement.tsv").exists()
+
+
 def test_a_kept_twin_is_at_its_own_members_base_address_when_lld_takes_the_members_in_another_order(tmp_path,
                                                                                                     monkeypatch):
     # OSSV-675 testing. lib.a holds two members named m.o, and each holds helper_z, a static function with the same
