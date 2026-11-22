@@ -234,14 +234,16 @@ jobs:
           persist-credentials: false
 
       # strace: a test in tests/ checks that the review's helpers keep the GitHub token out of each process's arguments.
-      - name: Install PyYAML, pytest and strace
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml python3-pytest strace
+      # pytest-xdist: the tests in tests/ run in parallel (that step says why).
+      - name: Install PyYAML, pytest, pytest-xdist and strace
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml python3-pytest python3-pytest-xdist strace
 
       # The binary checks' rules (oss_verify.binary_isa, oss_verify.syscall_shapes) are tested against the files of the
       # public process model at the commit they were written against, fetched anonymously. Each python3 -c and -m here
-      # runs with -P, which keeps the top of the checkout off sys.path, so that no file or directory there shadows a
-      # module (.github/CODEOWNERS owns the top's .py files and pyproject.toml). pytest runs with -c pyproject.toml, so
-      # that it reads no other configuration file, such as one that a change adds under tests/, which has no owner.
+      # runs with -P, or with PYTHONSAFEPATH=1, which does the same (the tests in tests/): either keeps the top of the
+      # checkout off sys.path, so that no file or directory there shadows a module (.github/CODEOWNERS owns the top's .py
+      # files and pyproject.toml). pytest runs with -c pyproject.toml, so that it reads no other configuration file, such
+      # as one that a change adds under tests/, which has no owner.
       - name: The process model the binary checks were written against
         run: |
           commit=$(python3 -P -c 'from oss_verify import binary_isa, syscall_shapes
@@ -256,15 +258,23 @@ jobs:
       # test_seed_runs_docker.py) are skipped here. tests/test_core_dump_filter.py runs here: it needs the runner's
       # Docker, but no image to pull. -rs lists each skipped test with its reason, so the log shows what did not run.
       # tests/test_seeded_projects.py::Committed runs only when route asks for it (the top of this file).
+      # The tests run in parallel, in one pytest-xdist worker for each core of the runner (-n "$(nproc)"): many of them
+      # start processes, and in series this step took most of the check's time. With --dist worksteal, a worker that has
+      # no test left takes tests that another worker has not started, so the slow tests near the end do not wait in one
+      # worker's queue. pytest-xdist starts each worker as a python3 -c without -P, so the step sets PYTHONSAFEPATH=1: it
+      # keeps the top of the checkout off sys.path in each worker, and in each python3 that a test starts, as -P does.
+      # --durations=30 lists the 30 slowest tests.
       - name: The tests in tests/
         env:
           TABLE: ${{ needs.route.outputs.table }}
+          PYTHONSAFEPATH: "1"
         run: |
           deselect=()
           if [ "$TABLE" != true ]; then
             deselect=(--deselect "tests/test_seeded_projects.py::Committed::test_docs_seeded_projects_tsv_is_what_the_generator_writes")
           fi
-          python3 -P -m pytest -q -p no:cacheprovider -c pyproject.toml -rs "${deselect[@]}"
+          python3 -P -m pytest -q -p no:cacheprovider -c pyproject.toml -rs -n "$(nproc)" --dist worksteal --durations=30 \
+            "${deselect[@]}"
 
       - name: Every project passes oss-verify validate
         run: python3 -P -m oss_verify validate < /dev/null

@@ -29,10 +29,10 @@ from oss_verify import check_binaries
 from oss_verify import check_build
 from oss_verify import check_checks
 from oss_verify import validate
-from test_builder import docker_ready
+from test_builder import RUN, docker_ready
 
 FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "example"
-TAG = "oss-verify-test/example-seed-runs:latest"
+TAG = f"oss-verify-test/example-seed-runs:{RUN}"
 QEMU = shutil.which("qemu-riscv64-static")
 BUILD = "asan-ubsan"
 # The C fuzz target: tests/fixtures/example/build.sh links it to $OUT/example_fuzzer.
@@ -70,6 +70,9 @@ class SeedRuns(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.scratch = tempfile.TemporaryDirectory(prefix="ov-test-seed-runs.")
+        # Class cleanups run when setUpClass fails too, so a compile failure removes this process's image as well.
+        cls.addClassCleanup(cls.scratch.cleanup)
+        cls.addClassCleanup(subprocess.run, ["docker", "image", "rm", TAG], capture_output=True)
         cls.work = pathlib.Path(cls.scratch.name)
         cls.labels = check_build.work_label(cls.work)
         job = check_build.Job(name="example", directory=FIXTURE, repo="https://example.invalid/example", ref="",
@@ -79,11 +82,6 @@ class SeedRuns(unittest.TestCase):
         # As oss-verify check --checks compiles: with records, so that compile also makes the quiet twin. The records
         # change no byte of the binary (tests/test_binary_checks_docker.py, test_records_change_no_byte).
         check_build.compile_build(TAG, BUILD, validate.BUILDS[BUILD], cls.raw, labels=cls.labels, record=True)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.scratch.cleanup()
-        subprocess.run(["docker", "image", "rm", TAG], capture_output=True)
 
     def setUp(self):
         # run_all and run_job read these when they start the runs.

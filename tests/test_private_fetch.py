@@ -675,7 +675,7 @@ class WhichFailure(unittest.TestCase):
 
     def test_the_container_tells_a_connection_failure_from_a_refusal(self):
         # A port nothing listens on: ls-remote fails, and the message must not say "not authorised".
-        with tempfile.TemporaryDirectory() as work:
+        with tempfile.TemporaryDirectory() as work, closed_port() as port:
             secret = pathlib.Path(work) / "token"
             secret.write_text(TOKEN, encoding="utf-8")
             environment = {
@@ -685,7 +685,7 @@ class WhichFailure(unittest.TestCase):
                 "OSS_VERIFY_TOKEN_FILE": str(secret), "OSS_VERIFY_TOKEN_REPO": "127.0.0.1/secret.git",
                 "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "protocol.http.allow",
                 "GIT_CONFIG_VALUE_0": "always",
-                "GIT_CONFIG_KEY_1": f"url.http://127.0.0.1:{closed_port()}/.insteadOf",
+                "GIT_CONFIG_KEY_1": f"url.http://127.0.0.1:{port}/.insteadOf",
                 "GIT_CONFIG_VALUE_1": "https://private.test/",
             }
             done = subprocess.run(["sh", str(FETCH_COMMIT), str(pathlib.Path(work) / "checkout")],
@@ -1257,11 +1257,14 @@ def repo_of(dockerfile):
     return found.group(1) if found else ""
 
 
+@contextlib.contextmanager
 def closed_port():
-    """A loopback port nothing listens on: bound and closed, so a connection to it is refused."""
+    """A loopback port nothing listens on, while the block runs: a socket holds it bound and does not listen, so a
+    connection to it is refused. The socket stays bound until the block ends, so no other process can take the port
+    in the meantime, such as a test server in another pytest-xdist worker, whose answer would replace the refusal."""
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
+        yield probe.getsockname()[1]
 
 
 if __name__ == "__main__":

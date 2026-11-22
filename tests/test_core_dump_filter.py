@@ -32,8 +32,9 @@ from unittest import mock
 
 from oss_verify import check_binaries
 from oss_verify import check_checks
+from test_builder import RUN
 
-TAG = "oss-verify-test/host-usr:latest"
+TAG = f"oss-verify-test/host-usr:{RUN}"
 ZERO = "00000000"
 NO_FAULT = "this host starts processes with coredump_filter 0, so this test cannot show the fix"
 # The stand-in for qemu-riscv64. run-seeds runs it as /ovc-qemu /bins/<target> /inputs/<target>/<n>, as root, and it
@@ -120,6 +121,8 @@ class CoreDumpFilter(unittest.TestCase):
                 raise AssertionError(message + ", which the runners of tests.yaml have")
             raise unittest.SkipTest(message)
         archive, mounts = host_root()
+        # Class cleanups run when setUpClass fails too, so a failure after import removes this process's image as well.
+        cls.addClassCleanup(subprocess.run, ["docker", "image", "rm", TAG], capture_output=True)
         imported = subprocess.run(["docker", "import", "-", TAG], input=archive, capture_output=True)
         if imported.returncode != 0:
             raise AssertionError(f"docker import exited {imported.returncode}: "
@@ -130,15 +133,11 @@ class CoreDumpFilter(unittest.TestCase):
         cls.control = subprocess.run(["docker", "run", "--rm", "--init", "--network=none", *cls.labels, "--entrypoint",
                                       "/bin/sh", TAG, "-c", CONTROL], capture_output=True, text=True)
         cls.scratch = tempfile.TemporaryDirectory(prefix="ov-test-core-dump-filter.")
+        cls.addClassCleanup(cls.scratch.cleanup)
         cls.work = pathlib.Path(cls.scratch.name)
         cls.stand_in = cls.work / "qemu"
         cls.stand_in.write_text(STAND_IN)
         cls.stand_in.chmod(0o755)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.scratch.cleanup()
-        subprocess.run(["docker", "image", "rm", TAG], capture_output=True)
 
     def setUp(self):
         if self.control.returncode != 0:

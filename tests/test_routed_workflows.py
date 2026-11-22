@@ -650,6 +650,28 @@ def test_the_suite_and_docs_jobs_run_committed_only_when_route_asks_for_the_tabl
         assert [a for a in argv if a == "--deselect" or a.startswith("tests/")] == named[job], job
 
 
+def test_the_suite_runs_one_worker_for_each_core_each_with_the_top_of_the_checkout_off_sys_path(tmp_path):
+    # The suite step's own env and script, with a stand-in nproc that says 3, and a stand-in python3 that records its
+    # arguments and the PYTHONSAFEPATH it gets. Each pytest-xdist worker inherits that environment (the step's comment).
+    bin = tmp_path / "bin"
+    bin.mkdir()
+    (bin / "nproc").write_text("#!/bin/sh\necho 3\n")
+    (bin / "python3").write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$ARGV"\n'
+                                 'printf "%s\\n" "${PYTHONSAFEPATH-unset}" > "$ARGV.safepath"\n')
+    for name in ("nproc", "python3"):
+        (bin / name).chmod(0o755)
+    tests = step(workflow("tests.yaml")["jobs"]["suite"], "The tests in tests/")
+    ambient = {name: value for name, value in os.environ.items() if name != "PYTHONSAFEPATH"}
+    run = subprocess.run(["bash", "-e", "-c", tests["run"]], cwd=tmp_path, capture_output=True, text=True,
+                         env={**ambient, **tests["env"], "PATH": f"{bin}:{os.environ['PATH']}",
+                              "ARGV": str(tmp_path / "argv"), "RUNNER_TEMP": str(tmp_path), "TABLE": "true"})
+    assert run.returncode == 0, run.stderr
+    argv = (tmp_path / "argv").read_text().splitlines()
+    assert argv[argv.index("-n") + 1] == "3" and argv[argv.index("--dist") + 1] == "worksteal", argv
+    assert "--durations=30" in argv, argv
+    assert (tmp_path / "argv.safepath").read_text() == "1\n"
+
+
 # --- the triage comment: triage.yaml's one job, and review.yml's route after it ---
 
 
