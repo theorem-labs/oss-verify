@@ -8,11 +8,13 @@ terms, or needs no box that accepts them.
       PR=<number> HEAD_SHA=<commit> BASE_SHA=<commit> GH_TOKEN=... \
       PYTHONPATH=src python3 .github/scripts/terms-accepted
 
-The variables are those of the pull_request event: the description, the login of the author and their association
-with this repository, the repository of the head, this repository, the number, and the head and base commits.
-terms.yaml runs this program from its checkout of the base commit, with PYTHONPATH set to the src/ of that checkout.
-While the base does not have this file, terms.yaml runs the copy of the merge commit in merge/, with merge/src
-(terms.yaml tells why). The program reads GitHub's API through `gh api` only, with a token that has no permission. It
+Each variable but BASE_SHA comes from the pull_request event: the description, the login of the author and their
+association with this repository, the repository of the head, this repository, the number, and the head commit.
+BASE_SHA is the first parent of the merge commit: the base branch's commit on which GitHub built the merge. terms.yaml
+checks out that commit, and runs this program from it, with PYTHONPATH set to its src/. So the program reads
+docs/seeded-projects.tsv and each project.yaml of the base at the commit that it and terms.yaml come from (terms.yaml
+tells why). While that commit does not have this file, terms.yaml runs the copy of the merge commit in merge/, with
+merge/src. The program reads GitHub's API through `gh api` only, with a token that has no permission. It
 prints what it decides, each error as a line ::error::, and exits 0 when the check passes, else 1. PyYAML comes from
 the runner image only, and only the paths that load a project.yaml need it.
 

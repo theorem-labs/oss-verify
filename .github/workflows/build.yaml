@@ -57,13 +57,14 @@ name: "Build"
 #   - It fails for a pull request into any branch but the default one. The ruleset that requires the check guards only
 #     the default branch, so this failure blocks nothing, and it keeps a result judged against another branch from
 #     ever standing as a pass on the head commit if the base is then changed to the default branch.
-#   - It fails if the pull request's head or base moves while the step reads it; the next run (for a newer commit, or
-#     after a change of base) checks it again.
+#   - It fails if the pull request's head or base moves while take-project reads it; the next run (for a newer commit,
+#     or after a change of base) checks it again.
 # It does not run on edited, which GitHub sends for an edit of the title or description (nothing the build judges
 # changes; before, such an edit built the project again in full) and for a change of base. It runs only for a pull
-# request into main (the trigger's branches, below). After a change of base to main, a push or closing and reopening
-# the pull request runs it again. The review is of a commit too: an edit of the description alone is reviewed with the
-# next push.
+# request into main (the trigger's branches, below). After a change of base to main, push a commit to run it again. A
+# reopen can start a run on GitHub's merge into the earlier base, and project-builds refuses a merge whose first parent
+# is not a commit of main (below). The review is of a commit too: an edit of the description alone is reviewed with
+# the next push.
 # It runs on ready_for_review too: enroll-dispatch.yml starts no statements for a draft pull request, and the
 # completion of this run, when the draft is marked ready, starts review.yml, whose completion has it decide again.
 # A failure is usually the project's, but it can be the runner's: GitHub's runner may run out of disk or time on a
@@ -72,9 +73,10 @@ name: "Build"
 # <name>` on a larger machine and says so in the pull request; the check stays red until a rerun passes, so merging
 # before then needs a bypass of the ruleset that requires it.
 #
-# The trigger is pull_request: each run takes this file and the scripts it runs from the merge commit of the pull
-# request and its base branch, which the pull request can change. A pull request that changes them controls its own
-# run, its checks and its artifacts. That is safe for this repository because:
+# The trigger is pull_request: each run takes this file from the merge commit of the pull request and its base branch,
+# which the pull request can change. The job required also runs .github/scripts/collect of that merge commit. A pull
+# request that changes them controls its own run, its checks and its artifacts. That is safe for this repository
+# because:
 #   - The merge of a pull request that changes a workflow or a script needs the approval of a code owner. Each is a
 #     steering file (.github/scripts/steering.py), under the path /.github/ of .github/CODEOWNERS.
 #   - enroll-dispatch.yml sends no pull request that changes a steering file for its theorem statements until a person
@@ -84,8 +86,13 @@ name: "Build"
 #   - With the repository's default setting, GitHub holds each run of a first-time contributor's pull request until
 #     someone with write access approves it. Held runs (.github/workflows/held-runs.yml) starts a run by hand of
 #     review.yml for such a head, which approves its held runs after the screen passes the pull request.
-# The merge commit's workflow and scripts run, so project-builds checks out the base commit for its tools: take-project
-# and oss-verify check are the base branch's. Of the pull request, the job takes and runs only this:
+# project-builds takes its tools, take-project and oss-verify check, from the first parent of the merge commit: the
+# base branch's commit on which GitHub built the merge. When the pull request does not change this file, this file and
+# those tools come from one commit of the base branch: a script of another commit can lack an option that this file
+# gives it, as the binary-sizes of an older base lacked --cut (#272). GitHub, not the pull request, chooses the first
+# parent, and the step after the checkout fails unless that parent is a commit of the base branch. So the pull request
+# controls none of those tools. Until that step ends, the checkout holds the merge commit's files, so the step is inline
+# and runs only git and gh. Of the pull request, the job takes and runs only this:
 #   - Only the files directly inside the one projects/<name>/ are taken from the pull request, as regular files written
 #     from git's object store.
 #   - Its Dockerfile runs only inside `docker build`, and its build.sh and the fuzz targets only inside
@@ -188,12 +195,47 @@ jobs:
       # sizes, cut at 100,000 bytes, for the results job (the build step says why).
       results_sizes: ${{ steps.build.outputs.results_sizes }}
     steps:
-      # The base commit, not the merge commit that pull_request checks out by default: take-project and oss-verify
-      # check are the base branch's, and take-project reads this HEAD as the base branch's head.
+      # The merge commit that GitHub built and its two parents. The next step checks out the first parent: the base
+      # branch's commit on which GitHub built the merge (the top of this file says why).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 2
           persist-credentials: false
+
+      - name: Check out the first parent of the merge commit
+        id: parent
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+        run: |
+          # Inline, and it runs only git and gh: until this step ends, the checkout is the merge commit, whose files are
+          # the pull request's.
+          merge=$(git rev-parse HEAD)
+          read -r -a commits <<< "$(git rev-list --parents -n 1 HEAD)"
+          if (( ${#commits[@]} != 3 )); then
+            echo "::error::The commit $merge of this run has $(( ${#commits[@]} - 1 )) parents in its checkout, not the two of GitHub's merge commit of a pull request: this job takes no tools from it."
+            exit 1
+          fi
+          parent=${commits[1]}
+          # The head of the base branch, by its name, with no encoding of the name in a URL. ls-remote matches the end
+          # of each ref name, so refs/heads/a/refs/heads/$BASE matches too: only the line of refs/heads/$BASE counts.
+          remote=$(git ls-remote origin "refs/heads/$BASE") || remote=""
+          head=""
+          while read -r sha ref; do
+            if [ "$ref" = "refs/heads/$BASE" ]; then head=$sha; fi
+          done <<< "$remote"
+          [ -n "$head" ] || { echo "::error::The base branch $BASE could not be read from the repository."; exit 1; }
+          status=$(gh api "repos/$REPO/compare/$parent...$head" --jq .status) \
+            || { echo "::error::GitHub could not compare $parent with the head of $BASE."; exit 1; }
+          case $status in
+            identical|ahead) ;;
+            *) echo "::error::GitHub built this run's merge commit $merge on $parent, which is not in the history of $BASE (compare: $status): a merge into an earlier base. Push a commit to the branch to run this check again: a rerun checks out the same merge commit."
+               exit 1 ;;
+          esac
+          git checkout --quiet --detach "$parent"
+          echo "sha=$parent" >> "$GITHUB_OUTPUT"
+          echo "Checked out $parent, the first parent of the merge commit $merge: this job runs the tools of $BASE at that commit."
 
       - name: Take projects/<name>/ from the pull request, and nothing else
         id: project
@@ -289,18 +331,36 @@ jobs:
           [[ $commit =~ ^[0-9a-f]{40}$ ]] || commit=""
           # For the record job and the results job: each binary's .text bytes and executable bytes
           # (.github/scripts/binary-sizes), as one line of JSON {target: {build: {text, exec}}}, with null for a size
-          # that could not be read.
-          sizes=$(python3 .github/scripts/binary-sizes ~/.cache/oss-verify-check/"$NAME" 2> /dev/null < /dev/null || true)
+          # that could not be read. A run of binary-sizes that fails gives no sizes, and sizes_code keeps its exit
+          # status. When oss-verify check passed, a warning and the step summary then give that exit status, and no
+          # other text: after ::$resume:: the runner reads workflow commands again, and an error of the script can hold
+          # a target name, which the pull request chooses. So the standard error of each run goes to /dev/null.
+          sizes_code=0
+          sizes=$(python3 .github/scripts/binary-sizes ~/.cache/oss-verify-check/"$NAME" 2> /dev/null < /dev/null) \
+            || { sizes_code=$?; sizes=""; }
           [[ $sizes == "{"*"}" && $sizes != *$'\n'* ]] || sizes=""
           # For the results job: sizes in at most 100,000 bytes of JSON. The job gets them in one environment variable,
           # and Linux starts no process with a variable over 131,072 bytes: with all the builds of a large project, the
           # job could not start, and the review would get no result of the build. binary-sizes --cut keeps all the
           # builds, else the plain build of each target, else nothing, as take-build-results does, so the record of the
-          # review keeps the plain builds of a large project. An error leaves it empty.
+          # review keeps the plain builds of a large project. When the --cut run fails, results_sizes stays empty, and
+          # sizes_code keeps its exit status. When the --cut run exits 0 and prints nothing, the step logs its own line
+          # that says why.
           results_sizes=""
-          [ -z "$sizes" ] \
-            || results_sizes=$(python3 .github/scripts/binary-sizes --cut 100000 <<< "$sizes") || results_sizes=""
+          if [ -n "$sizes" ]; then
+            if results_sizes=$(python3 .github/scripts/binary-sizes --cut 100000 <<< "$sizes" 2> /dev/null); then
+              if [ -z "$results_sizes" ]; then
+                echo "binary-sizes --cut gave no sizes: those of the plain builds are over 100,000 bytes of JSON."
+              fi
+            else
+              sizes_code=$?; results_sizes=""
+            fi
+          fi
           [[ $results_sizes == "{"*"}" && $results_sizes != *$'\n'* ]] || results_sizes=""
+          if [ "$code" = 0 ] && [ "$sizes_code" != 0 ]; then
+            echo "::warning::binary-sizes exited $sizes_code: the sizes are missing."
+            { echo; echo "binary-sizes exited $sizes_code: the sizes are missing."; } >> "$GITHUB_STEP_SUMMARY"
+          fi
           # A random delimiter, so that no text can end an output early.
           delimiter="output-$(openssl rand -hex 16)"
           {

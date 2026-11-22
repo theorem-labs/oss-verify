@@ -831,17 +831,22 @@ def test_a_branch_reads_descriptions_texts_file_names_and_logins_only_as_data(tm
 
 
 def test_the_job_checks_out_the_merge_commit_into_merge_only_while_the_base_has_no_program():
-    # The step's run: falls back to merge/, so the job checks the merge commit out there, and only then.
+    # The step's run: falls back to merge/, so the job checks the merge commit out there, and only then. hashFiles reads
+    # the checkout at the top of the workspace, so the checkout into merge/ comes after the step with id: parent, which
+    # checks out the first parent of the merge commit there.
     flow = yaml.safe_load((ROOT / ".github" / "workflows" / "terms.yaml").read_text())
     steps = flow["jobs"]["terms-accepted"]["steps"]
-    base, merge, step = steps
-    assert base["uses"].startswith("actions/checkout@") and "if" not in base
-    assert base["with"] == {"ref": "${{ github.event.pull_request.base.sha }}", "persist-credentials": False}
-    assert merge["uses"] == base["uses"]
-    assert merge["if"] == "hashFiles('.github/scripts/terms-accepted') == ''"
-    assert merge["with"] == {"path": "merge", "persist-credentials": False}
-    assert step["name"] == "The description accepts the OSS Verify terms"
-    assert "PYTHONPATH" not in step["env"]
+    checkouts = [n for n, step in enumerate(steps) if step.get("uses", "").startswith("actions/checkout@")]
+    [merge] = [n for n in checkouts if steps[n].get("with", {}).get("path") == "merge"]
+    [parent] = [n for n, step in enumerate(steps) if step.get("id") == "parent"]
+    [program] = [n for n, step in enumerate(steps)
+                 if step.get("name") == "The description accepts the OSS Verify terms"]
+    assert checkouts[0] < parent < merge < program
+    assert "if" not in steps[checkouts[0]]
+    assert steps[merge]["uses"] == steps[checkouts[0]]["uses"]
+    assert steps[merge]["if"] == "hashFiles('.github/scripts/terms-accepted') == ''"
+    assert steps[merge]["with"] == {"path": "merge", "persist-credentials": False}
+    assert "PYTHONPATH" not in steps[program]["env"]
 
 
 def test_a_base_without_the_program_runs_the_merge_commits_copy(tmp_path):

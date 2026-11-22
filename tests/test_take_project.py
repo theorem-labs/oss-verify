@@ -42,6 +42,14 @@ else
   cat "$STUB_GH/pull.json"
 fi
 """
+# git, first on PATH: it logs the arguments of each call to $STUB_GIT_LOG, each ended by NUL and the call by \1, and
+# runs the real git, $STUB_GIT_REAL.
+STUB_GIT = r"""#!/usr/bin/env bash
+{ printf '%s\0' "$@"; printf '\1'; } >> "$STUB_GIT_LOG"
+exec "$STUB_GIT_REAL" "$@"
+"""
+# The checkouts in which take-project runs (PullRequest).
+CHECKOUTS = ("main", "first parent")
 
 pytestmark = pytest.mark.skipif(shutil.which("jq") is None, reason="take-project needs jq, as on GitHub's runners")
 
@@ -66,10 +74,18 @@ class PullRequest:
     for a parent that changed in review, or another pull request that landed first, and `renamed` a (source,
     destination) that main moves with git mv in the same commit. Either way the API's list is what
     GitHub's is, the three-dot diff from the merge base, with a renamed file under both names, and the API's merge
-    base is git's. The checkout is main alone at depth 1, as actions/checkout makes it, so the pull request's commit
-    and the merge base are there only once take-project fetches them."""
+    base is git's.
 
-    def __init__(self, tmp_path, files, removed=(), parent=None, landed=None, renamed=None, on_main=None):
+    `checkout` is the checkout in which take-project runs:
+      - main: main alone at depth 1, as actions/checkout makes a checkout of one commit. The pull request's commit and
+        the merge base are there only once take-project fetches them.
+      - first parent: the checkout of build.yaml's project-builds job and of validate.yaml. refs/pull/7/merge is
+        GitHub's merge of the pull request's commit into main: main is its first parent, and the pull request's commit
+        its second. actions/checkout fetches it at depth 2 and checks it out, and then the job's step with id: parent
+        checks out its first parent, main. The pull request's commit is there already, as the merge's second parent."""
+
+    def __init__(self, tmp_path, files, removed=(), parent=None, landed=None, renamed=None, on_main=None,
+                 checkout="main"):
         self.tmp = tmp_path
         self.env = isolated_git_env(tmp_path)
         self.origin = origin = tmp_path / "origin"
@@ -99,10 +115,26 @@ class PullRequest:
             self.commit((parent if landed is None else landed) or {}, "landed on main after the branch left it")
         self.merge_base = git("merge-base", "main", "pull", cwd=origin, env=self.env)
         self.checkout = tmp_path / "checkout"
-        git("clone", "-q", "--single-branch", "--branch", "main", "--depth", "1", f"file://{origin}",
-            str(self.checkout), env=self.env)
-        assert subprocess.run(["git", "cat-file", "-e", self.sha], cwd=self.checkout, env=self.env,
-                              capture_output=True).returncode != 0, "the checkout already has the pull request's commit"
+        if checkout == "main":
+            git("clone", "-q", "--single-branch", "--branch", "main", "--depth", "1", f"file://{origin}",
+                str(self.checkout), env=self.env)
+            assert subprocess.run(["git", "cat-file", "-e", self.sha], cwd=self.checkout, env=self.env,
+                                  capture_output=True).returncode != 0, \
+                "the checkout already has the pull request's commit"
+        else:
+            assert checkout == "first parent", checkout
+            main = git("rev-parse", "main", cwd=origin, env=self.env)
+            tree = git("merge-tree", "--write-tree", "main", self.sha, cwd=origin, env=self.env)
+            merge = git("commit-tree", tree, "-p", main, "-p", self.sha, "-m", f"Merge {self.sha} into {main}",
+                        cwd=origin, env=self.env)
+            git("update-ref", "refs/pull/7/merge", merge, cwd=origin, env=self.env)
+            git("init", "-q", str(self.checkout), env=self.env)
+            git("remote", "add", "origin", f"file://{origin}", cwd=self.checkout, env=self.env)
+            git("fetch", "-q", "--no-tags", "--depth=2", "origin", "+refs/pull/7/merge:refs/remotes/pull/7/merge",
+                cwd=self.checkout, env=self.env)
+            git("checkout", "-q", "--detach", "refs/remotes/pull/7/merge", cwd=self.checkout, env=self.env)
+            git("checkout", "-q", "--detach", "HEAD^1", cwd=self.checkout, env=self.env)
+            assert git("rev-parse", "HEAD", cwd=self.checkout, env=self.env) == main, "the checkout is not main"
         if removed or parent or landed or renamed:
             self.paths = git("diff", "--no-renames", "--name-only", "main...pull", cwd=origin, env=self.env).split("\n")
         else:
@@ -122,14 +154,15 @@ class PullRequest:
         started by hand; default: the commit), `api` the head the API gives (default: the commit), and `base` the
         branch the pull request targets; main is the default branch. `api_after` and `base_after` are the head and
         base it gives once the files are listed (default: no change), and `fails_after` makes its later answers fail.
-        Return (exit code, output, outputs, summary)."""
+        Return (exit code, output, outputs, summary). git_calls() then gives the run's calls of git."""
         answers = self.tmp / "gh"
         stubs = self.tmp / "stubs"
         for directory in (answers, stubs):
             shutil.rmtree(directory, ignore_errors=True)
             directory.mkdir()
-        (stubs / "gh").write_text(STUB_GH)
-        (stubs / "gh").chmod(0o755)
+        for name, text in (("gh", STUB_GH), ("git", STUB_GIT)):
+            (stubs / name).write_text(text)
+            (stubs / name).chmod(0o755)
         listed = self.paths if listed is None else listed
         head = {"full_name": head_repository} if head_repository else None
         changed = len(listed) if changed is None else changed
@@ -153,13 +186,20 @@ class PullRequest:
         outputs, summary = self.tmp / "output", self.tmp / "summary"
         outputs.write_text("")
         summary.write_text("")
+        self.git_log = self.tmp / "git-calls"
+        self.git_log.write_text("")
         env = {**self.env, "PATH": f"{stubs}{os.pathsep}{self.env['PATH']}", "STUB_GH": str(answers),
+               "STUB_GIT_LOG": str(self.git_log), "STUB_GIT_REAL": shutil.which("git", path=self.env["PATH"]),
                "GH_TOKEN": "stub-token", "REPO": REPO, "PR": "7", "HEAD_SHA": self.sha if event is None else event,
                "RUNNER_TEMP": str(temp), "GITHUB_OUTPUT": str(outputs), "GITHUB_STEP_SUMMARY": str(summary)}
         done = subprocess.run([str(SCRIPT), "validate"], cwd=self.checkout, env=env, capture_output=True, text=True,
                               check=False)
         values = dict(line.split("=", 1) for line in outputs.read_text().splitlines())
         return done.returncode, done.stdout + done.stderr, values, summary.read_text()
+
+    def git_calls(self):
+        """The arguments of each call of git in the last run."""
+        return [call.split("\0")[:-1] for call in self.git_log.read_text().split("\1")[:-1]]
 
 
 ENROLLMENT = {"projects/demo/project.yaml": PROJECT, "projects/demo/Dockerfile": "FROM x\n",
@@ -227,15 +267,18 @@ LISTED_BUT_NOT_MERGED = {
 }
 
 
+@pytest.mark.parametrize("checkout", CHECKOUTS)
 @pytest.mark.parametrize("head", [REPO, "someone/oss-verify"])
-def test_an_enrollment_is_taken(tmp_path, head):
-    pull = PullRequest(tmp_path, ENROLLMENT)
+def test_an_enrollment_is_taken(tmp_path, head, checkout):
+    pull = PullRequest(tmp_path, ENROLLMENT, checkout=checkout)
     code, log, values, _ = pull.run(head)
     assert code == 0, log
     assert values["name"] == "demo"
     assert values["same_repository"] == ("true" if head == REPO else "false")
     for path, text in ENROLLMENT.items():
         assert (pull.checkout / path).read_text() == text
+    # take-project fetched the pull request's commit once: the git stand-in logs each call.
+    assert len([call for call in pull.git_calls() if "fetch" in call]) == 1, pull.git_calls()
     # The token authorized the fetch alone: no git configuration keeps it.
     found = subprocess.run(["git", "config", "--show-origin", "--get-regexp", "extraheader"], cwd=pull.checkout,
                            env=pull.env, capture_output=True, text=True, check=False)
@@ -265,11 +308,12 @@ def test_a_fork_that_changes_two_projects_and_nothing_else_fails(tmp_path, head)
     assert not (pull.checkout / "projects" / "demo").exists()
 
 
+@pytest.mark.parametrize("checkout", CHECKOUTS)
 @pytest.mark.parametrize("head", ["someone/oss-verify", ""])
 @pytest.mark.parametrize("change", OUTSIDE_PROJECTS)
-def test_a_fork_that_changes_no_file_under_projects_is_not_an_enrollment(tmp_path, head, change):
+def test_a_fork_that_changes_no_file_under_projects_is_not_an_enrollment(tmp_path, head, change, checkout):
     # tests.yaml runs this repository's tests on it, and review.yml gives it a change review.
-    pull = PullRequest(tmp_path, NOT_A_PROJECT[change])
+    pull = PullRequest(tmp_path, NOT_A_PROJECT[change], checkout=checkout)
     code, log, values, summary = pull.run(head)
     assert code == 0, log
     assert values.get("name", "") == ""
@@ -280,9 +324,12 @@ def test_a_fork_that_changes_no_file_under_projects_is_not_an_enrollment(tmp_pat
     assert expected in summary
     # Its paths are not refused as outside a project.
     assert "outside projects/<name>/" not in log
-    # Nothing of the fork is fetched.
-    assert subprocess.run(["git", "cat-file", "-e", pull.sha], cwd=pull.checkout, env=pull.env,
-                          capture_output=True).returncode != 0
+    # Nothing of the fork is fetched: take-project runs no git fetch. In the checkout of main alone, the fork's commit
+    # is not there either. In the first parent's checkout, actions/checkout put it there as the merge's second parent.
+    assert [call for call in pull.git_calls() if "fetch" in call] == [], pull.git_calls()
+    if checkout == "main":
+        assert subprocess.run(["git", "cat-file", "-e", pull.sha], cwd=pull.checkout, env=pull.env,
+                              capture_output=True).returncode != 0
 
 
 @pytest.mark.parametrize("head", ["someone/oss-verify", ""])
@@ -397,11 +444,15 @@ def test_a_file_in_a_subdirectory_of_the_project_fails(tmp_path, head, files):
         assert "outside projects/<name>/: projects/demo/sub/notes.txt" in log
 
 
-@pytest.mark.parametrize("case", list(LISTED_BUT_NOT_MERGED))
-def test_a_branch_of_this_repository_whose_merge_changes_one_project_takes_it(tmp_path, case):
+# Every case in the checkout of main alone, and two in the first parent's: a stacked branch whose parent landed, and a
+# branch that removes one project and adds another.
+@pytest.mark.parametrize("case, checkout", [(case, "main") for case in LISTED_BUT_NOT_MERGED]
+                         + [(case, "first parent") for case in ("stacked on a squash-merged parent",
+                                                                "a removed project and a new one")])
+def test_a_branch_of_this_repository_whose_merge_changes_one_project_takes_it(tmp_path, case, checkout):
     # GitHub lists the three-dot diff, which names two projects; merging changes one, and that one is taken.
     files, removed, parent, landed, name = LISTED_BUT_NOT_MERGED[case]
-    pull = PullRequest(tmp_path, files, removed=removed, parent=parent, landed=landed)
+    pull = PullRequest(tmp_path, files, removed=removed, parent=parent, landed=landed, checkout=checkout)
     assert len({path.split("/")[1] for path in pull.paths}) == 2, pull.paths
     code, log, values, summary = pull.run(REPO)
     assert code == 0, log
@@ -571,8 +622,7 @@ def test_a_pull_request_into_another_branch_fails(tmp_path, head, change):
 
 
 def test_a_pull_request_whose_base_changes_to_main_is_taken(tmp_path):
-    # After a change of base, the next run (a push, or closing and reopening) against main takes the project as for any
-    # enrollment.
+    # After a change of base, the next run (a push) against main takes the project as for any enrollment.
     pull = PullRequest(tmp_path, ENROLLMENT)
     code, log, _, _ = pull.run("someone/oss-verify", base="licence/driver-mit-or-apache")
     assert code == 1, log
