@@ -82,13 +82,42 @@ class PullRequest:
       - first parent: the checkout of build.yaml's project-builds job and of validate.yaml. refs/pull/7/merge is
         GitHub's merge of the pull request's commit into main: main is its first parent, and the pull request's commit
         its second. actions/checkout fetches it at depth 2 and checks it out, and then the job's step with id: parent
-        checks out its first parent, main. The pull request's commit is there already, as the merge's second parent."""
+        checks out its first parent, main. The pull request's commit is there already, as the merge's second parent.
+
+    The repositories are built once per pytest process (each xdist worker is one) for each set of arguments, and each
+    test takes its own copy of them in its tmp_path: building them is about 15 git processes, the larger part of a
+    test's time, and many tests take the same pull request."""
+
+    # The pull requests built so far, by their arguments: each a PullRequest in its own directory.
+    built = {}
+    # The directory they are built in; the fixture pull_requests_built_once sets it.
+    root = None
 
     def __init__(self, tmp_path, files, removed=(), parent=None, landed=None, renamed=None, on_main=None,
                  checkout="main"):
+        key = json.dumps([files, list(removed), parent, landed, renamed, on_main, checkout])
+        if key not in self.built:
+            built = object.__new__(PullRequest)
+            built.build(self.root / str(len(self.built)), files, removed, parent, landed, renamed, on_main, checkout)
+            self.built[key] = built
+        built = self.built[key]
         self.tmp = tmp_path
         self.env = isolated_git_env(tmp_path)
-        self.origin = origin = tmp_path / "origin"
+        self.origin, self.checkout = tmp_path / "origin", tmp_path / "checkout"
+        shutil.copytree(built.origin, self.origin, symlinks=True)
+        shutil.copytree(built.checkout, self.checkout, symlinks=True)
+        # The checkout fetches from this test's origin, not from the one it was copied from.
+        config = self.checkout / ".git" / "config"
+        text = config.read_text()
+        assert f"url = file://{built.origin}\n" in text, text
+        config.write_text(text.replace(f"url = file://{built.origin}\n", f"url = file://{self.origin}\n"))
+        self.other, self.sha, self.merge_base, self.paths = built.other, built.sha, built.merge_base, list(built.paths)
+
+    def build(self, directory, files, removed, parent, landed, renamed, on_main, checkout):
+        directory.mkdir()
+        self.tmp = directory
+        self.env = isolated_git_env(directory)
+        self.origin = origin = directory / "origin"
         git("init", "-q", "-b", "main", str(origin), env=self.env)
         (origin / "projects" / "other").mkdir(parents=True)
         (origin / "projects" / "other" / "project.yaml").write_text(PROJECT)
@@ -114,7 +143,7 @@ class PullRequest:
         if parent or landed or renamed:
             self.commit((parent if landed is None else landed) or {}, "landed on main after the branch left it")
         self.merge_base = git("merge-base", "main", "pull", cwd=origin, env=self.env)
-        self.checkout = tmp_path / "checkout"
+        self.checkout = directory / "checkout"
         if checkout == "main":
             git("clone", "-q", "--single-branch", "--branch", "main", "--depth", "1", f"file://{origin}",
                 str(self.checkout), env=self.env)
@@ -200,6 +229,16 @@ class PullRequest:
     def git_calls(self):
         """The arguments of each call of git in the last run."""
         return [call.split("\0")[:-1] for call in self.git_log.read_text().split("\1")[:-1]]
+
+
+# Session, not module: a worker of pytest-xdist can run this module's tests between other modules' tests, and each
+# return to the module would otherwise build every pull request again.
+@pytest.fixture(scope="session", autouse=True)
+def pull_requests_built_once(tmp_path_factory):
+    """The directory in which PullRequest builds each pull request once."""
+    PullRequest.root = tmp_path_factory.mktemp("pull-requests")
+    yield
+    PullRequest.built.clear()
 
 
 ENROLLMENT = {"projects/demo/project.yaml": PROJECT, "projects/demo/Dockerfile": "FROM x\n",
