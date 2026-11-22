@@ -108,6 +108,13 @@ env:
   # (toolchain-images-publish.yaml). A frame-pointer row of infra/toolchains.tsv names an image in it.
   FP_PACKAGE: ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain
 
+concurrency:
+  # A pull request's newer run cancels its older one, whose head the newer push replaced: the newer run judges the newer
+  # head. A push to main has a group of its own, the commit's, so a later push never cancels it: publish acts only on a
+  # push run that passed, so a cancelled one would leave its images unpublished.
+  group: ${{ github.event_name == 'push' && format('toolchain-images-push-{0}', github.sha) || format('toolchain-images-{0}-{1}', github.event_name, github.event.pull_request.number) }}
+  cancel-in-progress: true
+
 jobs:
   make:
     runs-on: ubuntu-24.04

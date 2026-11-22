@@ -69,6 +69,15 @@ env:
   CRANE_SHA256: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
   CRANE_ARCHIVE: go-containerregistry_Linux_x86_64.tar.gz
 
+concurrency:
+  # As in toolchain-images.yaml: a pull request's newer run cancels its older one, and a later push to main never
+  # cancels a push run, whose changes no later run would test (the paths filter compares a push with the commit before
+  # it). When Toolchain images calls this file, github.workflow is the caller's name. So the group of the called job
+  # differs from the caller's own group, and from the group of a run of this file on its own trigger for the same pull
+  # request or commit: neither cancels the other.
+  group: ${{ github.event_name == 'push' && format('frame-pointer-tests-{0}-push-{1}', github.workflow, github.sha) || format('frame-pointer-tests-{0}-{1}-{2}', github.workflow, github.event_name, github.event.pull_request.number) }}
+  cancel-in-progress: true
+
 jobs:
   docker-tests:
     runs-on: ubuntu-24.04
