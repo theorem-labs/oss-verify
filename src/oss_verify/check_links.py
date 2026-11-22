@@ -612,7 +612,7 @@ def parse_map(text):
     of a map."""
     taken, read = [], 0
     loaded, previous = False, None
-    for line in text.splitlines():
+    for line in text.split("\n"):  # at "\n" only: read_record says why
         found = MAP_COLUMNS.match(line)
         if not found:
             continue
@@ -652,10 +652,11 @@ def read_record(raw, sha256, compiles=None):
         return read_regular(below(directory, name)).decode("utf-8", "replace")
 
     try:
-        mapping, rows, driver = text("map"), text("inputs.tsv").splitlines(), text("driver").split()
-        renamed_rows = text("renamed").splitlines() if os.path.lexists(directory / "renamed") else []
-        # Split libc at "\n" only: str.splitlines() also splits at U+0085, U+2028 and U+2029, and link-fuzz-target
-        # lets these characters through in a real path. An empty file gives one empty row, which is not a record.
+        # Split the map (parse_map) and the rows at "\n" only: str.splitlines() also splits at U+0085, U+2028 and
+        # U+2029, and link-fuzz-target lets these characters through in a real path. An empty line or row is not a
+        # record; an empty libc file gives one empty row, which makes the record incomplete.
+        mapping, rows, driver = text("map"), text("inputs.tsv").split("\n"), text("driver").split()
+        renamed_rows = text("renamed").split("\n") if os.path.lexists(directory / "renamed") else []
         libc_rows = text("libc").removesuffix("\n").split("\n") if os.path.lexists(directory / "libc") else None
     except RecordError as error:
         raise RecordError(f"the link record is incomplete: {error}") from None

@@ -246,6 +246,20 @@ class MapParsing(unittest.TestCase):
             ("/opt/musl-sysroot/usr/lib/crt1.o", None, ".text", 0x10),
         ], 3))
 
+    def test_a_path_that_holds_a_unicode_line_separator_is_kept(self):
+        """link-fuzz-target lets U+0085, U+2028 and U+2029 through in a real path, and str.splitlines() splits at each
+        of them. The map is split at newlines only, so such a path's input section is kept and counted in `read`."""
+        for separator in ("\u0085", "\u2028", "\u2029"):
+            with self.subTest(separator=f"U+{ord(separator):04X}"):
+                text = "\n".join([
+                    map_line(0x10000, 0x10, f"/work/obj/a{separator}b.o:(.text.f)"),
+                    map_line(0x10010, 0x20, f"/work/obj/lib{separator}x.a(m{separator}.o):(.text.g)"),
+                ]) + "\n"
+                self.assertEqual(check_links.parse_map(text), ([
+                    (f"/work/obj/a{separator}b.o", None, ".text.f", 0x10),
+                    (f"/work/obj/lib{separator}x.a", f"m{separator}.o", ".text.g", 0x20),
+                ], 2))
+
 
 class RealRecord(unittest.TestCase):
     """The reading of a record that a build wrote, not one written here: tests/fixtures/link-record/.
@@ -754,6 +768,32 @@ class Records(unittest.TestCase):
         self.write_libc(rows)
         self.assertEqual(check_links.read_record(self.raw, "a" * 64).libc,
                          {name: (path, sha256) for name, path, sha256 in rows})
+
+    def test_an_object_whose_path_holds_a_unicode_line_separator_is_examined(self):
+        """A map line and an inputs.tsv row that name an object whose real path holds U+0085, U+2028 or U+2029 are read
+        whole, so the record has the object, and project_code examines it and does not leave it out."""
+        body = elf_object(NOP, defined=["f"], comment=True)
+        digest = hashlib.sha256(body).hexdigest()
+        (self.raw / ".records" / "store" / digest).write_bytes(body)
+        for separator in ("\u0085", "\u2028", "\u2029"):
+            with self.subTest(separator=f"U+{ord(separator):04X}"):
+                path = f"/work/obj/a{separator}b.o"
+                (self.directory / "map").write_text(map_line(0x10000, 4, f"{path}:(.text.f)") + "\n", encoding="utf-8")
+                (self.directory / "inputs.tsv").write_text(f"{path}\t{path}\t{digest}\t{len(body)}\n", encoding="utf-8")
+                record = check_links.read_record(self.raw, "a" * 64)
+                self.assertEqual(record.taken, [(path, None, ".text.f", 4)])
+                self.assertEqual(record.inputs, {path: (path, digest, len(body))})
+                self.assertIsNone(record.problem)
+                code, provided, problems = check_links.project_code(record, {})
+                self.assertEqual(([c.label for c in code], provided, problems), ([f"a{separator}b.o"], [], []))
+
+    def test_a_renamed_path_that_holds_a_unicode_line_separator_is_read(self):
+        """A row of the renamed file whose real paths hold U+0085, U+2028 or U+2029 is read whole."""
+        rows = [(f"/tmp/copies/{n}-a{separator}b.o", f"/work/obj/a{separator}b.o", str(n) * 64)
+                for n, separator in enumerate(("\u0085", "\u2028", "\u2029"), 1)]
+        (self.directory / "renamed").write_text("".join("\t".join(row) + "\n" for row in rows), encoding="utf-8")
+        self.assertEqual(check_links.read_record(self.raw, "a" * 64).renamed,
+                         {copy: (original, sha256) for copy, original, sha256 in rows})
 
     def test_a_record_with_no_libc_file_declares_no_libc(self):
         self.assertEqual(check_links.read_record(self.raw, "a" * 64).libc, {})
