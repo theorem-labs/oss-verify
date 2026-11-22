@@ -264,7 +264,13 @@ jobs:
           if [ "$TABLE" != true ]; then
             deselect=(--deselect "tests/test_seeded_projects.py::Committed::test_docs_seeded_projects_tsv_is_what_the_generator_writes")
           fi
-          python3 -P -m pytest -q -p no:cacheprovider -c pyproject.toml -rs "${deselect[@]}"
+          # A measurement for INFRA-5316, removed before merge: the step's wall time and CPU time, and the cores it has.
+          echo "nproc: $(nproc)"
+          status=0
+          /usr/bin/time -v -o "$RUNNER_TEMP/time" \
+            python3 -P -m pytest -q -p no:cacheprovider -c pyproject.toml -rs "${deselect[@]}" || status=$?
+          grep -E 'Elapsed|User time|System time|Percent of CPU' "$RUNNER_TEMP/time"
+          exit "$status"
 
       - name: Every project passes oss-verify validate
         run: python3 -P -m oss_verify validate < /dev/null
