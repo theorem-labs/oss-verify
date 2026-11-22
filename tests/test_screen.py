@@ -104,9 +104,11 @@ class Services:
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.url = f"http://127.0.0.1:{self.server.server_port}"
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
 
     def close(self):
+        # shutdown() returns once serve_forever() next looks at its flag, which it does each poll_interval: at the
+        # default 0.5 s, each close (one per test, and one per subtest that calls fresh()) waited up to half a second.
         self.server.shutdown()
         self.server.server_close()
 
