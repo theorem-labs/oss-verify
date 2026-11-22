@@ -259,9 +259,11 @@ jobs:
       # Docker, but no image to pull. -rs lists each skipped test with its reason, so the log shows what did not run.
       # tests/test_seeded_projects.py::Committed runs only when route asks for it (the top of this file).
       # The tests run in parallel, in one pytest-xdist worker for each core of the runner (-n "$(nproc)"): many of them
-      # start processes, and in series this step took most of the check's time. pytest-xdist starts each worker as a
-      # python3 -c without -P, so the step sets PYTHONSAFEPATH=1: it keeps the top of the checkout off sys.path in each
-      # worker, and in each python3 that a test starts, as -P does. --durations=30 lists the 30 slowest tests.
+      # start processes, and in series this step took most of the check's time. With --dist worksteal, a worker that has
+      # no test left takes tests that another worker has not started, so the slow tests near the end do not wait in one
+      # worker's queue. pytest-xdist starts each worker as a python3 -c without -P, so the step sets PYTHONSAFEPATH=1: it
+      # keeps the top of the checkout off sys.path in each worker, and in each python3 that a test starts, as -P does.
+      # --durations=30 lists the 30 slowest tests.
       - name: The tests in tests/
         env:
           TABLE: ${{ needs.route.outputs.table }}
@@ -275,8 +277,8 @@ jobs:
           echo "nproc: $(nproc)"
           status=0
           /usr/bin/time -v -o "$RUNNER_TEMP/time" \
-            python3 -P -m pytest -q -p no:cacheprovider -c pyproject.toml -rs -n "$(nproc)" --durations=30 "${deselect[@]}" \
-            || status=$?
+            python3 -P -m pytest -q -p no:cacheprovider -c pyproject.toml -rs -n "$(nproc)" --dist worksteal --durations=30 \
+            "${deselect[@]}" || status=$?
           grep -E 'Elapsed|User time|System time|Percent of CPU' "$RUNNER_TEMP/time"
           exit "$status"
 
