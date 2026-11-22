@@ -92,12 +92,11 @@ allocation-failure link's renamed copy; a prebuilt object), and a member with no
 its attributes took out (record-compile), are judged by their checks only, as before, and a member with nothing to
 check then fails with its archive. The records are written inside the build's own container, so a build.sh
 that sets out to deceive the check can; the review of the pull request is what stands against that. The same holds
-for a declared C library: this checks its declaration and the files that the link took, and the report names it
-whatever the result, when this could read the record of the link (check_binaries.report). Check C5 of review.md
-judges the rest, as two outcomes. The C library comes from the source that the sources file pins and from its own
-patches, which change only the C library. No command and no line of the sources file puts a file, a flag or an
-object of the project into its source tree, its build or its four files (libc.a, crt1.o, crti.o and crtn.o): no
-source, no -I and no -include. No command changes one of the four files after its own build made it.
+for a C library that a build declares (OV_LIBC). For it, this module checks that the record's libc file names its
+four files, that the link took the declared libc.a, and that the link took no file of the toolchain image's C library
+(above). It examines no file of the declared C library as the project's code. The report names the declared C
+library whatever the result, from the record's libc file, when it could read the record (check_binaries.report).
+Check C5 of review.md judges the rest, by the rule in docs/build-contract.md, "The C library".
 """
 import array
 import dataclasses
@@ -125,13 +124,6 @@ FORTRAN_RUNTIME = re.compile(r"lib(Fortran[A-Za-z]*|flang[A-Za-z_.]*|gfortran|qu
 LIBC = re.compile(r"(crt1|crti|crtn|Scrt1|rcrt1)\.o|lib(c|m|rt|pthread|crypt|util|xnet|resolv|dl|ssp_nonshared)\.a")
 # The files of a C library that a build declares (link-fuzz-target, OV_LIBC), in the order of the record's libc file.
 DECLARED_LIBC = ("libc.a", "crt1.o", "crti.o", "crtn.o")
-# The opening words of the note in each build's detail that names the declared C library (libc_note). The report of
-# the checks of the binaries finds the note by them (check_binaries.report).
-DECLARED_LIBC_NOTE = "the build declares its own C library (OV_LIBC)"
-# The last entry of that note, crtn.o's: libc_note writes the four files in the order of DECLARED_LIBC, and read_record
-# asks for all four. A declared path can hold "; ", so the report ends the note after this entry, not at the next "; "
-# of the detail (check_binaries.report).
-DECLARED_LIBC_NOTE_END = re.compile(r"crtn\.o \(.*?, sha256 [0-9a-f]{64}\)")
 SYSROOT_LIB = re.compile(r"/opt/[^/]+(/[^/]+)*/usr/lib/[^/]+\.a")
 # rustc's allocator shim defines only these: allocator forwards and marker functions.
 RUST_ALLOCATOR_SHIM = re.compile(r"__rust_(alloc|dealloc|realloc|alloc_zeroed|alloc_error_handler|"
@@ -932,7 +924,7 @@ def libc_note(record):
     files, or None if the build declares none."""
     if not record.libc:
         return None
-    return (DECLARED_LIBC_NOTE + ", whose files no sanitizer instruments: "
+    return ("the build declares its own C library (OV_LIBC), whose files no sanitizer instruments: "
             + ", ".join(f"{name} ({record.libc[name][0]}, sha256 {record.libc[name][1]})"
                         for name in DECLARED_LIBC if name in record.libc))
 

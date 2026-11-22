@@ -37,8 +37,10 @@
 # OV_LIBC declares the C library of one fuzz target (docs/build-contract.md). Its value is the absolute path of a
 # libc.a that the build made, with crt1.o, crti.o and crtn.o beside it, as musl's make install lays out its lib
 # directory. libc.a must be an ar archive, and each of the three start files must be an ELF file. Any other value, the
-# empty one too, stops the link. The link makes the directory /tmp/ov/libc-<hash>/, with a symbolic link to each of
-# the four files. <hash> is the first 16 hex digits of the sha256 of the four rows of the record's libc file (below).
+# empty one too, stops the link. A control character, such as a tab or a newline, in the real path of one of the four
+# files would split the rows of the record's libc file, so it stops the link; a control character in the value stops
+# the link too. The link makes the directory /tmp/ov/libc-<hash>/, with a symbolic link to each of the four files.
+# <hash> is the first 16 hex digits of the sha256 of the four rows of the record's libc file (below).
 # The link gives the compiler -B<directory>/ and -L<directory> after -Wl,--gc-sections and the options of
 # each link, before the driver. clang then takes the start files from that directory. It also finds libc.a there
 # before its own library directories, at the place in the link where it found the image's libc.a. Each link gets the
@@ -132,6 +134,9 @@ libc_rows=""
 libc_words=()
 if [ -n "${OV_LIBC+x}" ]; then
   case "$OV_LIBC" in
+    *[[:cntrl:]]*)
+      echo "link-fuzz-target: OV_LIBC must hold no control character, such as a tab or a newline, not $(printf %q "$OV_LIBC")" >&2
+      exit 1 ;;
     /libc.a|/*/libc.a) ;;
     *) echo "link-fuzz-target: OV_LIBC must be the absolute path of a file named libc.a, not '$OV_LIBC'" >&2; exit 1 ;;
   esac
@@ -147,7 +152,14 @@ if [ -n "${OV_LIBC+x}" ]; then
     fi
   done
   for libc_name in libc.a crt1.o crti.o crtn.o; do
-    libc_file=$(readlink -f -- "${OV_LIBC%libc.a}$libc_name")
+    # The "." keeps a newline at the end of the real path. Without it, the command substitution removes that newline.
+    libc_file=$(readlink -f -- "${OV_LIBC%libc.a}$libc_name" && echo .)
+    libc_file=${libc_file%$'\n.'}
+    case "$libc_file" in
+      *[[:cntrl:]]*)
+        echo "link-fuzz-target: OV_LIBC=$OV_LIBC: the real path of its $libc_name must hold no control character, such as a tab or a newline, not $(printf %q "$libc_file")" >&2
+        exit 1 ;;
+    esac
     libc_rows+=$libc_name$'\t'$libc_file$'\t'$(sha256sum < "$libc_file" | cut -d' ' -f1)$'\n'
   done
   libc_dir=/tmp/ov/libc-$(printf '%s' "$libc_rows" | sha256sum | cut -c1-16)

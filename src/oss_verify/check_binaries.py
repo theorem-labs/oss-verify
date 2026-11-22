@@ -384,7 +384,8 @@ def staleness(root, module, release):
 def binary_checks(job, tag, toolchain, targets, entries, sources, work, *, labels):
     """Run the four checks on every binary. `tag` is the project image, whose checkouts `sources` names (the
     manifest's sources); the runs are in the toolchain image. Return (the manifest's binary_checks block, {target:
-    {build: uninstrumented list or None}})."""
+    {build: uninstrumented list or None}}, {target: {build: the C library that the build declares, or None}}). The
+    C library is the record's libc file (check_links.Record.libc): {file name: (real path, sha256)}."""
     home = work / "binaries"
     check_build.empty_directory(home, toolchain, labels=labels)
 
@@ -472,10 +473,10 @@ def binary_checks(job, tag, toolchain, targets, entries, sources, work, *, label
 
     block = {"model": release or {"error": model}, "qemu": version,
              "inputs": {t: [name for name, _ in inputs[t]] for t in targets}, "targets": {}}
-    uninstrumented = {}
+    uninstrumented, libc = {}, {}
     for target in targets:
         block["targets"][target] = {}
-        uninstrumented[target] = {}
+        uninstrumented[target], libc[target] = {}, {}
         for build in job.builds:
             binary = work / "out" / target / entries[target][build]["file"]
             record = records[(target, build)]
@@ -494,13 +495,14 @@ def binary_checks(job, tag, toolchain, targets, entries, sources, work, *, label
                 agreement = {"result": "error", "detail": why}
             link = links[target][build]
             uninstrumented[target][build] = link["uninstrumented"]
+            libc[target][build] = record.libc if isinstance(record, check_links.Record) and record.libc else None
             block["targets"][target][build] = {
                 "elf": guarded(elf_check, binary, isa_stale),
                 "system_calls": calls,
                 "quiet_loud": agreement,
                 "instrumented": link["instrumented"],
             }
-    return block, uninstrumented
+    return block, uninstrumented, libc
 
 
 # ── the report ───────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -509,14 +511,11 @@ def binary_checks(job, tag, toolchain, targets, entries, sources, work, *, label
 # instrument" are results a reader may take as good.
 RESULT_WORDS = {"pass": "pass", "fail": "**fail**", "error": "**not decided**", "stale": "**stale model**",
                 "not-run": "**not decided** (not run)", "plain": "not instrumented (plain)"}
-# The most characters of the line below the table that gives a declared C library (check_links.libc_note). The note
-# has 420 characters and the paths of its four files, so the line holds the whole note when each path has at most 145
-# characters, and libc.a's sha256, which is first, when libc.a's path has at most 831.
-LIBC_NOTE_LIMIT = 1000
 
 
-def report(block, uninstrumented, builds):
-    """The Markdown report of the step."""
+def report(block, uninstrumented, builds, libc):
+    """The Markdown report of the step. `libc` is binary_checks' third value: the C library that each build
+    declares, or None."""
     code = check_checks.code
     lines = ["### The checks of the binaries", ""]
     model = block["model"]
@@ -545,16 +544,15 @@ def report(block, uninstrumented, builds):
                      for key in ("elf", "system_calls", "quiet_loud", "instrumented")]
             name = f"{target}.{build}"
             # The enrollment's review reads this report, which gives the detail only of a result that is not pass or
-            # plain. So a build that declares its own C library says so in its cell, and the note of its detail is in
-            # a line at the end of the report, whatever the result. The note ends after its crtn.o entry, or else at
-            # the next "; " of the detail.
-            detail = results["instrumented"].get("detail") or ""
-            at = detail.find(check_links.DECLARED_LIBC_NOTE)
-            if at >= 0:
+            # plain. So a build that declares its own C library says so in its cell, and a line at the end of the
+            # report gives the path and the sha256 of each of its files, whatever the result. They come from the
+            # record's libc file, not from the text of the detail, which the project's paths can change.
+            libc_files = libc[target][build]
+            if libc_files:
                 files += ", a declared C library"
-                end = check_links.DECLARED_LIBC_NOTE_END.search(detail, at)
-                note = detail[at:end.end()] if end else detail[at:].split("; ", 1)[0]
-                declared.append(f"- {code(name)}: {code(note, LIBC_NOTE_LIMIT)}")
+                declared.append(f"- {code(name)}: " + ", ".join(
+                    f"{code(file)} {code(libc_files[file][0], 300)} sha256 {code(libc_files[file][1], 64)}"
+                    for file in check_links.DECLARED_LIBC if file in libc_files))
             lines.append(f"| {check_checks.cell(name)} | {' | '.join(cells)} | {files} |")
             for key, title in (("elf", "ELF and instructions"), ("system_calls", "system calls"),
                                ("quiet_loud", "quiet and loud"), ("instrumented", "instrumented")):

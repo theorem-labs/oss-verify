@@ -592,14 +592,33 @@ def test_a_declared_libc_and_the_input_limit_together(t):
 
 
 @pytest.mark.parametrize("case", ["relative", "not-libc.a", "empty", "missing", "not-an-archive", "short-archive",
-                                  "no-crt1.o", "no-crti.o", "no-crtn.o", "crt1.o-not-elf"])
+                                  "no-crt1.o", "no-crti.o", "no-crtn.o", "crt1.o-not-elf", "tab", "newline",
+                                  "tab-in-real-path", "newline-ending-real-path"])
 def test_a_bad_libc_declaration_stops_the_link(t, case):
     """OV_LIBC that is not the absolute path of a libc.a archive with ELF files crt1.o, crti.o and crtn.o beside it
-    stops the link with exit status 1 and a message that names the variable, before any compiler command. The link
-    makes no directory for it."""
-    lib = libc_files(t, leave_out=case[len("no-"):] if case.startswith("no-") else None)
+    stops the link with exit status 1 and a message that names the variable, before any compiler command. A control
+    character in the real path of one of the four files would split the rows of the record's libc file, so it stops
+    the link; a control character in OV_LIBC stops the link too. In tab and newline, OV_LIBC goes through a symbolic
+    link whose name holds the character, so only the value holds it. In tab-in-real-path, OV_LIBC goes through a
+    symbolic link to a directory whose name holds a tab, so only the real path holds it; in newline-ending-real-path,
+    libc.a is a symbolic link to a file whose name ends in a newline, which a command substitution would remove. In
+    those four cases the four files are there, so only the check of the value or of the real path stops the link, and
+    the message says which one. The link makes no directory for it."""
+    control = case in ("tab", "newline", "tab-in-real-path", "newline-ending-real-path")
+    lib = libc_files(t, leave_out=case[len("no-"):] if case.startswith("no-") else None,
+                     under="mu\tsl" if case == "tab-in-real-path" else "musl")
     value = str(lib / "libc.a")
-    if case == "relative":
+    if case in ("tab", "newline"):
+        link = t.build.parent / ("mu\tsl" if case == "tab" else "mu\nsl")
+        link.symlink_to(lib.parent)
+        value = str(link / "lib" / "libc.a")
+    elif case == "tab-in-real-path":
+        (t.build.parent / "musl").symlink_to(lib.parent)
+        value = str(t.build.parent / "musl" / "lib" / "libc.a")
+    elif case == "newline-ending-real-path":
+        (lib / "libc.a").rename(lib / "libc.a\n")
+        (lib / "libc.a").symlink_to(lib / "libc.a\n")
+    elif case == "relative":
         value = os.path.relpath(lib / "libc.a", t.build)  # a file that is there, from the link's directory
     elif case == "not-libc.a":
         (lib / "libmusl.a").write_bytes((lib / "libc.a").read_bytes())
@@ -617,6 +636,9 @@ def test_a_bad_libc_declaration_stops_the_link(t, case):
     done = t.run(extra={"OV_LIBC": value})
     assert done.returncode == 1
     assert "OV_LIBC" in done.stderr
+    if control:
+        assert "control character" in done.stderr
+        assert ("real path" in done.stderr) == case.endswith("real-path")
     assert t.compiles() == []
     assert not (t.build / "target").exists()
     assert list(t.twins.iterdir()) == []

@@ -499,9 +499,9 @@ def main(argv=None):
         # The checks of the binaries, into the manifest: per build, the uninstrumented list in the harness.yaml shape,
         # and the four results in its binary_checks block.
         try:
-            block, uninstrumented = check_binaries.binary_checks(job, tag, toolchain, targets, entries,
-                                                                 data["sources"], work,
-                                                                 labels=check_build.work_label(work))
+            block, uninstrumented, libc = check_binaries.binary_checks(job, tag, toolchain, targets, entries,
+                                                                       data["sources"], work,
+                                                                       labels=check_build.work_label(work))
             for target, by_build in uninstrumented.items():
                 for build, listing in by_build.items():
                     # No list where the check could not make a whole one: the facts must never say that a build links
@@ -510,7 +510,7 @@ def main(argv=None):
                         data["targets"][target]["builds"][build]["uninstrumented"] = listing
             data["binary_checks"] = block
             manifest.write_manifest(work / "manifest.yaml", data)
-            binaries = check_binaries.report(block, uninstrumented, job.builds)
+            binaries = check_binaries.report(block, uninstrumented, job.builds, libc)
         # Any error: the step must never change oss-verify check's exit status.
         except Exception as failure:
             binaries = ("### The checks of the binaries\n\n`oss-verify check --checks` could not run them: "
