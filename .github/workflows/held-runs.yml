@@ -99,8 +99,11 @@ name: Held runs
 # Events only, never a schedule. Each event below runs main's copy of this file. A held run starts no workflow_run when
 # GitHub holds it, so a held head waits for the next of these events in the repository.
 on:
-  # A run of the pull requests' own workflows that ended: Build, Triage and Tests run for each push of a pull request
-  # whose runs GitHub does not hold, and for an approved run of a held head.
+  # A run of the pull requests' own workflows that ended: Build and Tests run for each push of a pull request whose
+  # runs GitHub does not hold, and for an approved run of a held head. Triage runs for those too, but only when the
+  # pull request changes a file under projects/ (its paths filter, and its limits, in triage.yaml). So an edit of the
+  # description of any other pull request starts no run of this file (Terms, which runs on it, is not listed here),
+  # and a held head waits for the next event.
   workflow_run:
     workflows: [Build, Triage, Tests]
     types: [completed]
