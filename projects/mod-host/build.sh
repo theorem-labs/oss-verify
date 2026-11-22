@@ -19,3 +19,4 @@ for h in protocol dispatch scenario statepaths; do
   $CC $CFLAGS -std=gnu99 -D_GNU_SOURCE -Isrc -c "fuzz/fuzz_$h.c" -o "$WORK/fuzz_$h.o"
   $CC $CFLAGS "$WORK/fuzz_$h.o" -o "$OUT/fuzz_$h" $LIB_FUZZING_ENGINE "$WORK/libmodhost-protocol.a" -lpthread -lm
 done
+# scratch
