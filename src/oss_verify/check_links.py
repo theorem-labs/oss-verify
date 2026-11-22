@@ -95,9 +95,9 @@ that sets out to deceive the check can; the review of the pull request is what s
 for a declared C library: this checks its declaration and the files that the link took, and the report names it
 whatever the result, when this could read the record of the link (check_binaries.report). Check C5 of review.md
 judges the rest, as two outcomes. The C library comes from the source that the sources file pins and from its own
-patches, which change only the C library. No command puts a file, a flag or an object of the project into its
-source tree, its build or its four files (libc.a, crt1.o, crti.o and crtn.o): no source, no -I, no -include, and no
-change of one of the four files after its own build made it.
+patches, which change only the C library. No command and no line of the sources file puts a file, a flag or an
+object of the project into its source tree, its build or its four files (libc.a, crt1.o, crti.o and crtn.o): no
+source, no -I and no -include. No command changes one of the four files after its own build made it.
 """
 import array
 import dataclasses
