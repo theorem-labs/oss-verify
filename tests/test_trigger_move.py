@@ -512,13 +512,33 @@ class Stand(unittest.TestCase):
 class PullRequestWorkflows(unittest.TestCase):
     """(r), (x) and (base): the events of each workflow, and what the jobs hold and run."""
 
-    def workflows(self):
-        found = sorted(p for p in (ROOT / ".github" / "workflows").iterdir() if p.suffix in (".yml", ".yaml"))
+    def workflows(self, directory=ROOT / ".github" / "workflows"):
+        found = sorted(p for p in directory.iterdir() if p.suffix in (".yml", ".yaml"))
         self.assertTrue(found)
         return found
 
     def test_r_no_pull_request_target_and_a_pull_request_job_holds_nothing(self):
-        for path in self.workflows():
+        self.r_case()
+
+    def test_control_r_a_calling_job_with_secrets_inherit(self):
+        # toolchain-images.yaml's docker-tests calls frame-pointer-tests.yaml; with secrets: inherit it would pass that
+        # workflow every secret, and the file would hold no text "secrets.".
+        copies = {}
+        for name in ("unchanged", "changed"):
+            copies[name] = pathlib.Path(self.enterContext(tempfile.TemporaryDirectory())) / "workflows"
+            shutil.copytree(ROOT / ".github" / "workflows", copies[name])
+        calling = copies["changed"] / "toolchain-images.yaml"
+        line = "      check-make-digests: true\n"
+        self.assertEqual(calling.read_text().count(line), 1, "the line of docker-tests that the control follows")
+        calling.write_text(calling.read_text().replace(line, line + "    secrets: inherit\n"))
+        self.r_case(copies["unchanged"])
+        with self.assertRaises(AssertionError) as caught:
+            self.r_case(copies["changed"])
+        self.assertIn("toolchain-images.yaml, the job docker-tests", str(caught.exception))
+
+    def r_case(self, directory=ROOT / ".github" / "workflows"):
+        """(r) on the workflow files of `directory`."""
+        for path in self.workflows(directory):
             text = path.read_text()
             workflow = yaml.load(text, Loader=YAML_LOADER)
             on = triggers(workflow)
@@ -530,6 +550,9 @@ class PullRequestWorkflows(unittest.TestCase):
             for where, holder in holders:
                 if holder is not workflow:
                     self.assertNotIn("environment", holder, f"{path.name}, {where}")
+                    # A job that calls a workflow passes it a secret by its key secrets (secrets: inherit passes all),
+                    # with no text "secrets." in the file.
+                    self.assertNotIn("secrets", holder, f"{path.name}, {where}")
                 permissions = holder.get("permissions")
                 if permissions is None:
                     # A job with no permissions of its own takes the workflow's.
@@ -942,7 +965,8 @@ match args:
         The case runs the parts in this order, and stops after the part `upto`. Return what each part that ran
         found."""
         publish, images = self.workflow(tree, self.PUBLISH), self.workflow(tree, self.IMAGES)
-        parts = {self.EQUAL: self.shared_values, self.RUN: self.make_then_publish}
+        parts = {self.EQUAL: lambda publish, images: self.shared_values(publish, images, tree),
+                 self.RUN: self.make_then_publish}
         self.assertIn(upto, parts, "the part of handover_case to stop after")
         found = []
         for part, run in parts.items():
@@ -950,35 +974,50 @@ match args:
             if part == upto:
                 return tuple(found)
 
-    def shared_values(self, publish, images):
+    def shared_values(self, publish, images, tree):
         """Part 1 of handover_case: the values that both files hold, each as (publish's, toolchain-images.yaml's):
           - each name of the workflow's env that both files define,
           - each pin in toolchain-images.yaml of an action that publish uses, and publish's pin of it,
           - the image and the ports of each service of publish, in each job of toolchain-images.yaml with that service,
           - each key of publish's matrix (make's), and each name of publish's job env that make's job env has too.
+        A job of toolchain-images.yaml that calls a workflow of `tree` (uses: ./<path>) has no steps, services or env
+        there: the called workflow holds them, and a caller's env does not reach it. So the jobs and the env of that
+        workflow count as toolchain-images.yaml's here, and their values name its path.
         Each kind has at least one value, and each pair is equal. The message names each value that differs. Other
         tests hold the trigger: case runs publish's if over PATHS, and
         test_publish_starts_on_the_completed_runs_on_main_of_toolchain_images_alone holds its workflows and branches."""
         job, make = publish["jobs"]["publish"], images["jobs"]["make"]
         kinds = {"the env": {}, "the actions": {}, "the services": {}, "the matrix": {}, "the job env": {}}
-        theirs = images.get("env") or {}
-        for name, value in (publish.get("env") or {}).items():
-            if name in theirs:
-                kinds["the env"][f"the env {name}"] = (value, theirs[name])
+        # Each job, by the words that name it in a value ("make's"), and each env, by the words after its names.
+        jobs, envs = {}, {"": images.get("env") or {}}
+        for name, held in images["jobs"].items():
+            called = str(held.get("uses", ""))
+            if not called:
+                jobs[f"{name}'s"] = held
+                continue
+            self.assertTrue(called.startswith("./"), f"{self.EQUAL}: the job {name} calls {called}, outside the tree")
+            self.need(tree, called[2:])
+            workflow = yaml.load((tree / called[2:]).read_text(), Loader=YAML_LOADER)
+            envs[f" of {called[2:]}"] = workflow.get("env") or {}
+            jobs.update({f"{called[2:]} {inner}'s": job_of for inner, job_of in workflow["jobs"].items()})
+        for where, theirs in envs.items():
+            for name, value in (publish.get("env") or {}).items():
+                if name in theirs:
+                    kinds["the env"][f"the env {name}{where}"] = (value, theirs[name])
         pins = {}
         for step in job["steps"]:
             if action_of(step):
                 pins.setdefault(action_of(step), set()).add(step["uses"].partition("@")[2])
-        for name, held in images["jobs"].items():
+        for who, held in jobs.items():
             for n, step in enumerate(held.get("steps") or [], 1):
                 if action_of(step) in pins:
-                    kinds["the actions"][f"the pin of {action_of(step)} ({name}'s step {n})"] = (
+                    kinds["the actions"][f"the pin of {action_of(step)} ({who} step {n})"] = (
                         " ".join(sorted(pins[action_of(step)])), step["uses"].partition("@")[2])
         for service, given in (job.get("services") or {}).items():
-            for name, held in images["jobs"].items():
+            for who, held in jobs.items():
                 if service in (held.get("services") or {}):
                     for key in ("image", "ports"):
-                        kinds["the services"][f"the {key} of the service {service} ({name}'s)"] = (
+                        kinds["the services"][f"the {key} of the service {service} ({who})"] = (
                             given.get(key), held["services"][service].get(key))
         for key, value in job["strategy"]["matrix"].items():
             kinds["the matrix"][f"the matrix {key} (make's)"] = (value, make["strategy"]["matrix"].get(key))
@@ -1176,6 +1215,86 @@ match args:
 
         caught = self.handover_fails(self.EQUAL, (f".github/workflows/{self.IMAGES}", other_crane))
         self.assertTrue(caught.endswith(f"{self.IMAGES}'s): the env CRANE_VERSION"), caught)
+
+    def test_control_crane_version_changed_in_frame_pointer_tests_alone(self):
+        # frame-pointer-tests.yaml, which toolchain-images.yaml's docker-tests calls, holds its own copy of the env.
+        def other_crane(text):
+            return re.sub(r"(?m)^  CRANE_VERSION: .+$", r"\g<0>-other", text)
+
+        caught = self.handover_fails(self.EQUAL, (f".github/workflows/{self.FP_TESTS}", other_crane))
+        self.assertTrue(caught.endswith(f"the env CRANE_VERSION of .github/workflows/{self.FP_TESTS}"), caught)
+
+    # frame-pointer-tests.yaml, the base rows that its step FP_MAKE reads, and that step: it makes the two images that
+    # FramePointers builds on. It compares each with make's digest only when toolchain-images.yaml calls the file.
+    FP_TESTS = "frame-pointer-tests.yaml"
+    FP_ROWS = ("oss-fuzz-theorems-2026.10", "oss-fuzz-theorems-2026.10-rust")
+    FP_MAKE = "make the C and C++ image and the Rust image, with the digests that make made when make ran"
+    # A stand-in docker: `docker pull --quiet <image>` passes, and each call goes to $FAKE_DOCKER_CALLS. It runs no other
+    # command.
+    DOCKER = ('#!/bin/sh\necho "$*" >> "$FAKE_DOCKER_CALLS"\n[ "$1 $2" = "pull --quiet" ] && [ $# -eq 3 ] && exit 0\n'
+              'echo "the stand-in docker does not run: docker $*" >&2\nexit 1\n')
+
+    def fp_make(self, check, digests=None):
+        """frame-pointer-tests.yaml's step FP_MAKE, with the stand-in crane and docker, on this repository's FP_ROWS.
+        check is inputs.check-make-digests: True when toolchain-images.yaml calls the file, None on the file's own
+        trigger. digests, a function of the digests that crane mutate makes ({row: digest}), gives the files of make's
+        artifact, fp-digest/<row>.digest; with no digests there is no fp-digest directory. Return its exit status, its
+        log, its outputs, the digests that crane mutate makes, and the images that docker pulled."""
+        tests = self.workflow(ROOT, self.FP_TESTS)
+        step = self.step(tests, "docker-tests", self.FP_MAKE)
+        bases = self.base_rows(self.FP_ROWS)
+        registry, made, _ = self.registry_of(bases)
+        home, temp = self.crane_home(registry), pathlib.Path(tempfile.mkdtemp(dir=self.dir))
+        self.put_crane(temp / "bin")
+        (temp / "bin" / "docker").write_text(self.DOCKER)
+        (temp / "bin" / "docker").chmod(0o755)
+        if digests is not None:
+            (temp / "fp-digest").mkdir()
+            for row, digest in digests(made).items():
+                (temp / "fp-digest" / f"{row}.digest").write_text(digest + "\n")
+        calls = temp / "docker-calls"
+        calls.write_text("")
+        rc, log, got = self.run_script(step["run"], self.checkout_of(bases), RUNNER_TEMP=str(temp),
+                                       FAKE_CRANE=str(home), FAKE_DOCKER_CALLS=str(calls),
+                                       PATH=f"{temp / 'bin'}{os.pathsep}{self.env['PATH']}",
+                                       **env_of(tests, "docker-tests", step, {"inputs.check-make-digests": check}))
+        pulled = [line.removeprefix("pull --quiet ") for line in calls.read_text().splitlines()]
+        return rc, log, got, made, pulled
+
+    def fp_images(self, made):
+        """The images that FP_MAKE gives FramePointers, as its outputs c and rust: each made in the runner's registry,
+        by the digest that crane mutate makes. And the images that it pulls, row by row in FP_ROWS' order: the base
+        image, then the image made."""
+        bases = self.base_rows(self.FP_ROWS)
+        refs = {row: f"localhost:5000/{bases[row][1].partition('@')[0].removeprefix('ghcr.io/')}@{made[row]}"
+                for row in self.FP_ROWS}
+        pulled = [image for row in self.FP_ROWS for image in (bases[row][1], refs[row])]
+        return {"c": refs[self.FP_ROWS[0]], "rust": refs[self.FP_ROWS[1]]}, pulled
+
+    def test_frame_pointer_tests_compares_with_make_only_when_called(self):
+        # Called by toolchain-images.yaml, with make's digests: each image has make's digest.
+        rc, log, got, made, pulled = self.fp_make(True, lambda made: made)
+        self.assertEqual((rc, (got, pulled)), (0, self.fp_images(made)), log)
+        self.assertEqual(log.count(", the digest that make made"), 2, log)
+        # On its own trigger, with no make job and no fp-digest: it compares nothing, and gives the same images.
+        rc, log, got, made, pulled = self.fp_make(None)
+        self.assertEqual((rc, (got, pulled)), (0, self.fp_images(made)), log)
+        self.assertEqual(log.count("; no make job in this run, so no digest to compare it with"), 2, log)
+
+    def test_frame_pointer_tests_called_fails_without_makes_digest_or_on_another(self):
+        c, rust = self.FP_ROWS
+        cases = {
+            "no fp-digest": (None, f"::error::make gave no digest for {c}: ''"),
+            "no digest of the Rust row": (lambda made: {c: made[c]}, f"::error::make gave no digest for {rust}: ''"),
+            "another digest of the C row": (lambda made: {**made, c: "sha256:" + "0" * 64},
+                                            f"but make made sha256:{'0' * 64}"),
+        }
+        for case, (digests, error) in cases.items():
+            with self.subTest(case=case):
+                rc, log, got, _, _ = self.fp_make(True, digests)
+                self.assertNotEqual(rc, 0, log)
+                self.assertIn(error, log)
+                self.assertNotIn("rust", got, log)
 
     def test_control_fp_package_changed_in_publish_alone(self):
         line = f"  FP_PACKAGE: {self.PACKAGE}\n"
