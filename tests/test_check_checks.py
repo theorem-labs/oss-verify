@@ -16,17 +16,16 @@ import tempfile
 import unittest
 import zipfile
 
-import yaml
-
 from oss_verify import check_checks
 from oss_verify import check_records
 from oss_verify import validate
 
 # The function of test_enroll_dispatch.py that marks the first member of a zip as encrypted.
 from test_enroll_dispatch import marked_encrypted  # noqa: E402
-# The workflow tests' expression evaluator and step runner with a stand-in gh, and review.yml and its jobs.
+# The workflow tests' workflow reader, expression evaluator and step runner with a stand-in gh, and review.yml and its
+# jobs.
 from test_outside_screen import (REVIEW, REVIEW_JOBS, Runner, comment_job_env, evaluate, interpolated,  # noqa: E402
-                                 step)
+                                 read_workflow, step)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -519,11 +518,8 @@ class WorkflowArguments(unittest.TestCase):
     # sends held findings, and its triage job posts the triage comment, with the App's token.
     KEY_JOBS = {"review.yml": ("comment", "hold", "triage"), "enroll-dispatch.yml": ("dispatch",)}
 
-    def workflow(self, name):
-        return yaml.safe_load((ROOT / ".github" / "workflows" / name).read_text())
-
     def steps(self, workflow):
-        return [step for job in self.workflow(workflow)["jobs"].values() for step in job["steps"] if "run" in step]
+        return [step for job in read_workflow(workflow)["jobs"].values() for step in job["steps"] if "run" in step]
 
     def argument_problems(self, run, name):
         """Where `run` gives $name to a process as an argument, as far as this test can read: [] if nowhere.
@@ -596,7 +592,7 @@ class WorkflowArguments(unittest.TestCase):
         # (its environment, review-screen; ScreenJob).
         for workflow, want in (("review.yml", {"review", "comment", "hold", "screen", "triage"}),
                                ("build.yaml", set()), ("triage.yaml", set()), ("enroll-dispatch.yml", {"dispatch"})):
-            parsed = self.workflow(workflow)
+            parsed = read_workflow(workflow)
             default = parsed.get("permissions") or {}
             got = set()
             for name, job in parsed["jobs"].items():
@@ -625,7 +621,7 @@ class WorkflowArguments(unittest.TestCase):
         key = "\n".join(key_lines) + "\n"
 
         def steps(workflow, job, name):
-            found = [s for s in self.workflow(workflow)["jobs"][job]["steps"] if s.get("name") == name]
+            found = [s for s in read_workflow(workflow)["jobs"][job]["steps"] if s.get("name") == name]
             self.assertEqual(len(found), 1, f"{workflow} {job} {name}")
             return found[0]["run"]
 
@@ -755,7 +751,7 @@ class WorkflowArguments(unittest.TestCase):
 
     def test_only_the_key_jobs_can_read_the_app_key(self):
         for workflow, key_jobs in self.KEY_JOBS.items():
-            jobs = self.workflow(workflow)["jobs"]
+            jobs = read_workflow(workflow)["jobs"]
             for key_job in key_jobs:
                 self.assertIn(key_job, jobs, workflow)
             self.assertEqual(self.app_key_jobs_problems(jobs, key_jobs), [], workflow)
@@ -768,7 +764,7 @@ class WorkflowArguments(unittest.TestCase):
         key = "\n".join(stand_in_key()) + "\n"
         payload = base64.b64encode(key.encode()).decode()
         for workflow, key_job in [(w, j) for w, js in self.KEY_JOBS.items() for j in js]:
-            steps = [s for s in self.workflow(workflow)["jobs"][key_job]["steps"]
+            steps = [s for s in read_workflow(workflow)["jobs"][key_job]["steps"]
                      if s.get("name") == "Read the oss-verify App's key"]
             self.assertEqual(len(steps), 1, workflow)
             with tempfile.TemporaryDirectory() as directory:
@@ -802,12 +798,12 @@ class WorkflowArguments(unittest.TestCase):
                       "${{ 'comment' }}", {"name": "${{ 'comment' }}"}, "Comment",
                       {"name": "${{ github.ref == 'x' && 'enroll-review' || 'COMMENT' }}", "deployment": False},
                       "${{ format('com{0}', 'ment') }}", {"name": "${{ format('com{0}', 'ment') }}"}):
-            jobs = self.workflow("review.yml")["jobs"]
+            jobs = read_workflow("review.yml")["jobs"]
             jobs["review"]["environment"] = shape
             self.assertTrue(self.app_key_jobs_problems(jobs, self.KEY_JOBS["review.yml"]),
                             f"review with environment {shape!r} was not refused")
         for shape in ({"name": "comment"}, "${{ 'comment' }}", {"name": "comment", "url": "https://example.invalid"}):
-            jobs = self.workflow("review.yml")["jobs"]
+            jobs = read_workflow("review.yml")["jobs"]
             jobs["comment"]["environment"] = shape
             self.assertTrue(self.app_key_jobs_problems(jobs, self.KEY_JOBS["review.yml"]),
                             f"comment with environment {shape!r} was not refused")
@@ -835,12 +831,13 @@ class GoogleIdentities(unittest.TestCase):
     JOBS = {("review.yml", "screen"), ("review.yml", "review"), ("review.yml", "hold"), ("review.yml", "comment"),
             ("review.yml", "triage"), ("enroll-dispatch.yml", "dispatch")}
 
-    def identities(self, directory):
-        """The (file, job) pairs of the workflows in `directory` that name a provider or an account, and each way that
-        one of these jobs breaks the rules of POOLS, as "<file> <job>: <why>"."""
+    def identities(self):
+        """The (file, job) pairs of the workflows of .github/workflows that name a provider or an account, and each way
+        that one of these jobs breaks the rules of POOLS, as "<file> <job>: <why>"."""
         checked, problems = set(), []
+        directory = ROOT / ".github" / "workflows"
         for path in sorted([*directory.glob("*.yml"), *directory.glob("*.yaml")]):
-            workflow = yaml.safe_load(path.read_text())
+            workflow = read_workflow(path.name)
             for name, job in (workflow.get("jobs") or {}).items():
                 job_env = {**(workflow.get("env") or {}), **(job.get("env") or {})}
                 named, why = {"provider": set(), "account": set()}, []
@@ -887,7 +884,7 @@ class GoogleIdentities(unittest.TestCase):
         return checked, problems
 
     def test_each_job_signs_in_through_its_pools_project_and_accounts(self):
-        checked, problems = self.identities(ROOT / ".github" / "workflows")
+        checked, problems = self.identities()
         self.assertEqual(problems, [], "these jobs break the rules of POOLS")
         self.assertEqual(checked, self.JOBS, "the (file, job) pairs that name a provider or an account")
 
@@ -2257,9 +2254,8 @@ else:
         # The review job's step, run as the runner runs it, with a stand-in curl for the bucket: of the finding it
         # stores, the job's output, the log and the job summary of this public repository hold nothing but the
         # object's name, and that name is what the hold job reads the finding by.
-        [script] = [s["run"] for s in
-                    yaml.safe_load((ROOT / ".github" / "workflows" / "review.yml").read_text())["jobs"]["review"]
-                    ["steps"] if s.get("name") == "Store the held finding for the hold job"]
+        [script] = [s["run"] for s in REVIEW_JOBS["review"]["steps"]
+                    if s.get("name") == "Store the held finding for the hold job"]
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             (root / "bin").mkdir()
@@ -3342,8 +3338,7 @@ class StoreSignInGate(unittest.TestCase):
     cause."""
 
     def gate(self, outcome, event="issues"):
-        flow = yaml.safe_load((ROOT / ".github" / "workflows" / "review.yml").read_text())
-        [step] = [s for s in flow["jobs"]["review"]["steps"]
+        [step] = [s for s in REVIEW_JOBS["review"]["steps"]
                   if s.get("name") == "Stop before the model when the draft cannot be stored"]
         with tempfile.TemporaryDirectory() as directory:
             summary = pathlib.Path(directory) / "summary"
