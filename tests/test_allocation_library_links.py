@@ -60,8 +60,8 @@ def objects(tmp_path_factory):
     run(*common, "-c", "fuzzer.c", "-o", "fuzzer.o")
     # ar names the object's format, so that it loads no linker plugin to recognise it. Without --target it loads
     # every plugin in bfd-plugins/, and GitHub's runner images put there one LLVM gold plugin for each clang they
-    # carry, each with its libLLVM of over 100 MB: read from the runner's cold disk, that ar ran past its 30 seconds
-    # twice on main (runs of 2026-10-28 and 2026-11-17), both times as the suite's first test.
+    # carry, each with its libLLVM of over 100 MB. This ar ran past its 30 seconds twice on main (runs of 2026-10-28
+    # and 2026-11-17), both times in the suite's first test, the first to load those plugins on a fresh runner.
     form = run("objdump", "-f", "library.o").stdout.split("file format ", 1)[1].split()[0]
     run("ar", f"--target={form}", "rcs", "libfixture.a", "library.o")
     return directory
