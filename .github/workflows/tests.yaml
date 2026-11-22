@@ -126,7 +126,7 @@ jobs:
           case $status in
             identical|ahead) ;;
             # A rerun uses the event's GITHUB_SHA (https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs).
-            *) echo "::error::This run checked out GitHub's merge into an earlier base, not $BASE (its first parent $parent is $status from $BASE). Push a commit to the branch to run it again: a rerun checks out the same merge."
+            *) echo "::error::This run checked out GitHub's merge into an earlier base, not $BASE (its first parent $parent is not in the history of $BASE, compare: $status). Push a commit to the branch to run it again: a rerun checks out the same merge."
                exit 1 ;;
           esac
 
@@ -315,11 +315,12 @@ jobs:
       # On a pull request, the merge commit that GitHub built and its two parents. This job runs no code of a fork.
       # For a fork's run, the next step checks out the first parent of the merge commit, a commit of the base branch
       # and not of the fork, and the job takes .github/scripts/collect from it. GitHub built the merge that this
-      # workflow file comes from on that first parent, so this file and collect come from one commit of the base
-      # branch. The newest commit of the default branch is not always that commit: the branch can move after GitHub
-      # builds the merge, and again before a rerun. On a push, a run by hand, or a pull request from a branch of this
-      # repository, the next step does not run, and the job takes collect from the commit of the run. (A fork's pull
-      # request can change this workflow itself, so the maintainer who merges a fork's change to it reads that change.)
+      # workflow file comes from on that first parent. So, when the pull request does not change this file, this file
+      # and collect come from one commit of the base branch. The newest commit of the default branch is not always that
+      # commit: the branch can move after GitHub builds the merge, and again before a rerun. On a push, a run by hand,
+      # or a pull request from a branch of this repository, the next step does not run, and the job takes collect from
+      # the commit of the run. (A fork's pull request can change this workflow itself, so the maintainer who merges a
+      # fork's change to it reads that change.)
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with:
           fetch-depth: 2
@@ -355,7 +356,7 @@ jobs:
             || { echo "::error::GitHub could not compare $parent with the head of $BASE."; exit 1; }
           case $status in
             identical|ahead) ;;
-            *) echo "::error::GitHub built this run's merge commit $merge on $parent, which is $status from $BASE: a merge into an earlier base. Push a commit to the branch to run this check again: a rerun checks out the same merge commit."
+            *) echo "::error::GitHub built this run's merge commit $merge on $parent, which is not in the history of $BASE (compare: $status): a merge into an earlier base. Push a commit to the branch to run this check again: a rerun checks out the same merge commit."
                exit 1 ;;
           esac
           git checkout --quiet --detach "$parent"

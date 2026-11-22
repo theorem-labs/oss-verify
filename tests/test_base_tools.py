@@ -30,8 +30,9 @@ makes each checkout from that checkout's own with: inputs, as actions/checkout v
 runs a step with no shell:. A stand-in gh answers the compare API with the status of the case. These tests check:
   - The step with id: parent checks out P1, detached. It gives P1 as its output sha, logs it, and runs no file of the
     checkout.
-  - The step refuses a merge that is behind the base branch or diverged from it, a compare that fails, and a merge
-    commit with one parent or three.
+  - The step refuses a merge whose first parent is not in the history of the base branch (the compare answers behind
+    or diverged), a compare that fails, a base branch that git ls-remote does not list, and a merge commit with one
+    parent or three.
   - The step does not run on a run by hand of validate.yaml, or on a pull request from a branch in tests.yaml.
   - Each job runs its scripts, and src/oss_verify/, from P1.
 
@@ -39,8 +40,8 @@ test_binary_sizes runs the build step of build.yaml with a stand-in oss-verify c
 check passes and a run of binary-sizes fails, the step writes a warning and a summary sentence with the exit status.
 It writes no output of binary-sizes, and its exit status does not change.
 
-Each test reads the workflow files from one directory: the repository's .github/workflows, or the directory that a
-caller gives. So a control can run a test on a changed copy of the workflows. A control (its name starts with
+The tests read the repository's .github/workflows. Two cases, the_step_checks_out_the_first_parent and binary_sizes,
+read a directory that a caller gives, so a control can run them on a changed copy. A control (its name starts with
 test_control) copies the workflows into a temporary directory. It runs a test's case on that copy, where the case
 passes. Then it changes a second copy, runs the case there, and asserts that the case fails. Three controls change the
 step with id: parent of the four jobs: it checks out the second parent, it only runs true, or it runs a script of the
@@ -100,14 +101,16 @@ MESSAGES = {"M": "Merge P2 into P1", "M1": "Merge P2 into P1, with one parent",
 SIGNATURE = "Test <test@example.org> 1767225600 +0000"
 # The with: inputs that the checkout model reads. It refuses a checkout with any other input.
 CHECKOUT_INPUTS = {"ref", "fetch-depth", "persist-credentials", "sparse-checkout", "path"}
-# The cases of test_the_step_refuses: the run's merge commit (its github.sha), and the stand-in gh's answer to the
-# compare ("error": gh fails as on an error of the API).
+# The cases of test_the_step_refuses: the run's merge commit (its github.sha), the stand-in gh's answer to the compare
+# ("error": gh fails as on an error of the API), and the pull request's base branch. The scratch repository has no
+# branch gone, and gh answers ahead there, so only the step's own check of the base branch can refuse that case.
 REFUSALS = {
-    "behind": ("M", "behind"),
-    "diverged": ("M", "diverged"),
-    "compare fails": ("M", "error"),
-    "one parent": ("M1", "ahead"),
-    "three parents": ("M3", "ahead"),
+    "behind": ("M", "behind", "main"),
+    "diverged": ("M", "diverged", "main"),
+    "compare fails": ("M", "error", "main"),
+    "one parent": ("M1", "ahead", "main"),
+    "three parents": ("M3", "ahead", "main"),
+    "no base branch": ("M", "ahead", "gone"),
 }
 # The cases of test_the_step_skips_where_r1_says: the run, and the words that name it.
 SKIPS = {
@@ -343,9 +346,11 @@ class JobRun:
     actions/checkout: each checkout by the checkout model, and each run: step under bash -e. `status` is the stand-in
     gh's answer to the compare. The run is of pull request 7 (from FORK, or from this repository when `fork` is false),
     or a run by hand on main. On pull_request, the run's github.sha is the merge commit `merge` (M, M1 or M3). The
-    checkout fetches github.sha by its SHA, so refs/pull/7/merge, which stays at M, does not change the run."""
+    checkout fetches github.sha by its SHA, so refs/pull/7/merge, which stays at M, does not change the run. `base` is
+    the pull request's base branch. The repository's default branch stays main."""
 
-    def __init__(self, tmp_path, scratch, workflows, label, merge="M", status="ahead", event="pull_request", fork=True):
+    def __init__(self, tmp_path, scratch, workflows, label, merge="M", status="ahead", event="pull_request", fork=True,
+                 base="main"):
         self.label, self.scratch = label, scratch
         name, self.job = label.split(":")
         self.workflow = load(workflows, name)
@@ -360,7 +365,7 @@ class JobRun:
         if event == "pull_request":
             ctx.update({"github.sha": commits[merge], "github.ref": "refs/pull/7/merge",
                         "github.event.pull_request.number": 7,
-                        "github.event.pull_request.base.ref": "main",
+                        "github.event.pull_request.base.ref": base,
                         "github.event.pull_request.base.sha": commits["B"],
                         "github.event.pull_request.base.repo.default_branch": "main",
                         "github.event.pull_request.head.sha": commits["P2"],
@@ -505,61 +510,6 @@ def expressions(where, text):
     return found
 
 
-# --- the workflow files ---
-
-
-def no_workflow_names_the_events_base_sha(workflows=WORKFLOWS):
-    named = []
-    for path in sorted(pathlib.Path(workflows).glob("*.y*ml")):
-        for where, text in strings(load(workflows, path.name)):
-            for expression in expressions(where, text):
-                if BASE_SHA.search(re.sub(r"\[\s*'([^']*)'\s*\]", r".\1", expression)):
-                    named.append(f"{path.name}: {where}: {' '.join(expression.split())}")
-    assert not named, "These expressions name the event's pull_request.base.sha:\n" + "\n".join(named)
-
-
-def no_pull_request_checkout_names_a_ref(workflows=WORKFLOWS):
-    named = []
-    for path in sorted(pathlib.Path(workflows).glob("*.y*ml")):
-        workflow = load(workflows, path.name)
-        if "pull_request" not in triggers(workflow):
-            continue
-        for job_id, job in (workflow.get("jobs") or {}).items():
-            for step in job.get("steps") or []:
-                if action_of(step) == "actions/checkout" and "ref" in (step.get("with") or {}):
-                    named.append(f"{path.name}:{job_id}: ref: {step['with']['ref']}")
-    assert not named, "These checkouts of a workflow that starts on pull_request name a ref:\n" + "\n".join(named)
-
-
-def the_step_follows_the_checkout(label, workflows=WORKFLOWS):
-    name, job = label.split(":")
-    steps = from_checkout(label, load(workflows, name)["jobs"][job]["steps"])
-    inputs = steps[0].get("with") or {}
-    wrong = []
-    if str(inputs.get("fetch-depth")) != "2":
-        wrong.append(f"the checkout has fetch-depth: {inputs['fetch-depth']}" if "fetch-depth" in inputs
-                     else "the checkout has no fetch-depth")
-    if "ref" in inputs:
-        wrong.append(f"the checkout names ref: {inputs['ref']}")
-    if label == "tests.yaml:required" and str(inputs.get("sparse-checkout", "")).split() != [".github/scripts"]:
-        wrong.append("the checkout lost sparse-checkout: .github/scripts")
-    step = steps[1] if len(steps) > 1 else {}
-    if step.get("id") != "parent" or "run" not in step or "uses" in step:
-        wrong.append(f"the next step, {describe(step)}, is not a run: step with id: parent")
-    elif inner(step.get("if")) != JOBS[label]:
-        wrong.append(f"the step with id: parent has if: {step.get('if')}, not {JOBS[label] or 'none'}")
-    assert not wrong, f"{label}: " + "; ".join(wrong) + " (R1: fetch-depth: 2, no ref, then the step with id: parent)"
-
-
-def terms_gives_base_sha_the_first_parent(workflows=WORKFLOWS):
-    steps = load(workflows, "terms.yaml")["jobs"]["terms-accepted"]["steps"]
-    found = [step for step in steps if ".github/scripts/terms-accepted" in str(step.get("run", ""))]
-    assert len(found) == 1, f"terms.yaml:terms-accepted: {len(found)} steps run .github/scripts/terms-accepted"
-    value = (found[0].get("env") or {}).get("BASE_SHA")
-    assert inner(value) == "steps.parent.outputs.sha", \
-        f"terms.yaml:terms-accepted: BASE_SHA is {value}, not ${{{{ steps.parent.outputs.sha }}}}"
-
-
 # --- the step with id: parent, run in the scratch repository ---
 
 
@@ -586,63 +536,6 @@ def the_step_checks_out_the_first_parent(tmp_path, scratch, label, status, workf
         f"{where}: the step ran files of the checkout:\n" + scratch.named("\n".join(run.host.trapped()))
     assert run.host.calls() == [["api", f"repos/{REPO}/compare/{p1}...{n}", "--jq", ".status"]], \
         f"{where}: gh was not called once, for the compare of P1 with N: {scratch.named(str(run.host.calls()))}"
-
-
-def the_step_refuses(tmp_path, scratch, label, case, workflows=WORKFLOWS):
-    merge, status = REFUSALS[case]
-    run = JobRun(tmp_path, scratch, workflows, label, merge=merge, status=status)
-    step = run.parent()
-    where = f"{label} ({case})"
-    assert step is not None, f"{where}: no step has id: parent, so nothing refuses the run"
-    ran = run.run_to(step)
-    assert not ran.skipped, f"{where}: the step with id: parent did not run: its if: is false"
-    assert ran.code != 0, f"{where}: the step exited 0:\n{scratch.named(ran.log)}"
-    errors = [line for line in commands(ran.log) if line.startswith("::error::")]
-    assert errors, f"{where}: the step wrote no ::error:: line:\n{scratch.named(ran.log)}"
-    if case in ("behind", "diverged"):
-        assert any("push a commit" in line.lower() for line in errors), \
-            f"{where}: the ::error:: line does not say to push a commit:\n{scratch.named(ran.log)}"
-    assert "sha" not in outputs(ran.output), f"{where}: the step gave the output sha:\n{scratch.named(ran.output)}"
-    assert run.host.trapped() == [], \
-        f"{where}: the step ran files of the checkout:\n" + scratch.named("\n".join(run.host.trapped()))
-
-
-def the_step_skips_where_r1_says(tmp_path, scratch, label, workflows=WORKFLOWS):
-    given, why = SKIPS[label]
-    run = JobRun(tmp_path, scratch, workflows, label, **given)
-    after = run.steps[1] if len(run.steps) > 1 else {}
-    assert after.get("id") == "parent", f"{label}: the step after the checkout, {describe(after)}, has no id: parent"
-    ran = run.run_to(after)
-    where = f"{label} ({why})"
-    assert ran.skipped, f"{where}: the step with id: parent ran:\n{scratch.named(ran.log)}"
-    head, commit = run.head(), run.ctx["github.sha"]
-    assert head == commit, f"{where}: HEAD is {scratch.name(head)}, not the run's commit {scratch.name(commit)}"
-    assert run.host.calls() == [] and run.host.trapped() == [], f"{where}: the run called gh or ran a trap"
-
-
-def the_job_runs_the_first_parents_tools(tmp_path, scratch, label, workflows=WORKFLOWS):
-    p1 = scratch.commits["P1"]
-    run = JobRun(tmp_path, scratch, workflows, label)
-    tools = TOOLS[label]
-    found = [step for step in run.steps if tools[0] in str(step.get("run", ""))]
-    assert found, f"{label}: no step runs {tools[0]}"
-    ran = run.run_to(found[0])
-    if label == "validate.yaml:validate" and ran.code == 0:
-        named = [step for step in run.steps if step.get("name") == VALIDATE_STEP]
-        assert len(named) == 1, f"{label}: {len(named)} steps are named {VALIDATE_STEP!r}"
-        ran = run.run_step(named[0])
-    assert not ran.skipped and ran.code == 0, \
-        f"{label}: the step {describe(run.results[-1][0])} did not pass:\n{scratch.named(ran.log)}"
-    trapped = run.host.trapped()
-    commits = sorted({line.split(" ", 1)[0] for line in trapped if not line.startswith("BASE_SHA=")})
-    assert commits == ["P1"], (f"{label}: $TRAP_LOG names {', '.join(commits) or 'no commit'}, not P1 alone:\n"
-                               + scratch.named("\n".join(trapped)))
-    for path in tools:
-        assert f"P1 {path}" in trapped, f"{label}: {path} of P1 did not run:\n" + scratch.named("\n".join(trapped))
-    if label == "terms.yaml:terms-accepted":
-        assert f"BASE_SHA={p1}" in trapped, \
-            f"{label}: terms-accepted got another BASE_SHA than P1:\n" + scratch.named("\n".join(trapped))
-        assert not (run.workspace / "merge").exists(), f"{label}: P1 has terms-accepted, but merge/ was checked out"
 
 
 # --- the build step and binary-sizes ---
@@ -766,20 +659,56 @@ def scratch(tmp_path_factory):
 
 
 def test_no_workflow_names_the_events_base_sha():
-    no_workflow_names_the_events_base_sha()
+    named = []
+    for path in sorted(WORKFLOWS.glob("*.y*ml")):
+        for where, text in strings(load(WORKFLOWS, path.name)):
+            for expression in expressions(where, text):
+                if BASE_SHA.search(re.sub(r"\[\s*'([^']*)'\s*\]", r".\1", expression)):
+                    named.append(f"{path.name}: {where}: {' '.join(expression.split())}")
+    assert not named, "These expressions name the event's pull_request.base.sha:\n" + "\n".join(named)
 
 
 def test_no_pull_request_checkout_names_a_ref():
-    no_pull_request_checkout_names_a_ref()
+    named = []
+    for path in sorted(WORKFLOWS.glob("*.y*ml")):
+        workflow = load(WORKFLOWS, path.name)
+        if "pull_request" not in triggers(workflow):
+            continue
+        for job_id, job in (workflow.get("jobs") or {}).items():
+            for step in job.get("steps") or []:
+                if action_of(step) == "actions/checkout" and "ref" in (step.get("with") or {}):
+                    named.append(f"{path.name}:{job_id}: ref: {step['with']['ref']}")
+    assert not named, "These checkouts of a workflow that starts on pull_request name a ref:\n" + "\n".join(named)
 
 
 @pytest.mark.parametrize("label", list(JOBS))
 def test_the_step_follows_the_checkout(label):
-    the_step_follows_the_checkout(label)
+    name, job = label.split(":")
+    steps = from_checkout(label, load(WORKFLOWS, name)["jobs"][job]["steps"])
+    inputs = steps[0].get("with") or {}
+    wrong = []
+    if str(inputs.get("fetch-depth")) != "2":
+        wrong.append(f"the checkout has fetch-depth: {inputs['fetch-depth']}" if "fetch-depth" in inputs
+                     else "the checkout has no fetch-depth")
+    if "ref" in inputs:
+        wrong.append(f"the checkout names ref: {inputs['ref']}")
+    if label == "tests.yaml:required" and str(inputs.get("sparse-checkout", "")).split() != [".github/scripts"]:
+        wrong.append("the checkout lost sparse-checkout: .github/scripts")
+    step = steps[1] if len(steps) > 1 else {}
+    if step.get("id") != "parent" or "run" not in step or "uses" in step:
+        wrong.append(f"the next step, {describe(step)}, is not a run: step with id: parent")
+    elif inner(step.get("if")) != JOBS[label]:
+        wrong.append(f"the step with id: parent has if: {step.get('if')}, not {JOBS[label] or 'none'}")
+    assert not wrong, f"{label}: " + "; ".join(wrong) + " (R1: fetch-depth: 2, no ref, then the step with id: parent)"
 
 
 def test_terms_gives_base_sha_the_first_parent():
-    terms_gives_base_sha_the_first_parent()
+    steps = load(WORKFLOWS, "terms.yaml")["jobs"]["terms-accepted"]["steps"]
+    found = [step for step in steps if ".github/scripts/terms-accepted" in str(step.get("run", ""))]
+    assert len(found) == 1, f"terms.yaml:terms-accepted: {len(found)} steps run .github/scripts/terms-accepted"
+    value = (found[0].get("env") or {}).get("BASE_SHA")
+    assert inner(value) == "steps.parent.outputs.sha", \
+        f"terms.yaml:terms-accepted: BASE_SHA is {value}, not ${{{{ steps.parent.outputs.sha }}}}"
 
 
 @pytest.mark.parametrize("label, status", [pytest.param(label, status, id=f"{label}-{status}")
@@ -791,17 +720,64 @@ def test_the_step_checks_out_the_first_parent(tmp_path, scratch, label, status):
 @pytest.mark.parametrize("label, case", [pytest.param(label, case, id=f"{label}-{case}")
                                          for label in JOBS for case in REFUSALS])
 def test_the_step_refuses(tmp_path, scratch, label, case):
-    the_step_refuses(tmp_path, scratch, label, case)
+    merge, status, base = REFUSALS[case]
+    run = JobRun(tmp_path, scratch, WORKFLOWS, label, merge=merge, status=status, base=base)
+    step = run.parent()
+    where = f"{label} ({case})"
+    assert step is not None, f"{where}: no step has id: parent, so nothing refuses the run"
+    ran = run.run_to(step)
+    assert not ran.skipped, f"{where}: the step with id: parent did not run: its if: is false"
+    assert ran.code != 0, f"{where}: the step exited 0:\n{scratch.named(ran.log)}"
+    errors = [line for line in commands(ran.log) if line.startswith("::error::")]
+    assert errors, f"{where}: the step wrote no ::error:: line:\n{scratch.named(ran.log)}"
+    if case in ("behind", "diverged"):
+        assert any("push a commit" in line.lower() for line in errors), \
+            f"{where}: the ::error:: line does not say to push a commit:\n{scratch.named(ran.log)}"
+    if case == "no base branch":
+        assert run.host.calls() == [], f"{where}: the step called gh: {scratch.named(str(run.host.calls()))}"
+    assert "sha" not in outputs(ran.output), f"{where}: the step gave the output sha:\n{scratch.named(ran.output)}"
+    assert run.host.trapped() == [], \
+        f"{where}: the step ran files of the checkout:\n" + scratch.named("\n".join(run.host.trapped()))
 
 
 @pytest.mark.parametrize("label", list(SKIPS))
 def test_the_step_skips_where_r1_says(tmp_path, scratch, label):
-    the_step_skips_where_r1_says(tmp_path, scratch, label)
+    given, why = SKIPS[label]
+    run = JobRun(tmp_path, scratch, WORKFLOWS, label, **given)
+    after = run.steps[1] if len(run.steps) > 1 else {}
+    assert after.get("id") == "parent", f"{label}: the step after the checkout, {describe(after)}, has no id: parent"
+    ran = run.run_to(after)
+    where = f"{label} ({why})"
+    assert ran.skipped, f"{where}: the step with id: parent ran:\n{scratch.named(ran.log)}"
+    head, commit = run.head(), run.ctx["github.sha"]
+    assert head == commit, f"{where}: HEAD is {scratch.name(head)}, not the run's commit {scratch.name(commit)}"
+    assert run.host.calls() == [] and run.host.trapped() == [], f"{where}: the run called gh or ran a trap"
 
 
 @pytest.mark.parametrize("label", list(JOBS))
 def test_the_job_runs_the_first_parents_tools(tmp_path, scratch, label):
-    the_job_runs_the_first_parents_tools(tmp_path, scratch, label)
+    p1 = scratch.commits["P1"]
+    run = JobRun(tmp_path, scratch, WORKFLOWS, label)
+    tools = TOOLS[label]
+    found = [step for step in run.steps if tools[0] in str(step.get("run", ""))]
+    assert found, f"{label}: no step runs {tools[0]}"
+    ran = run.run_to(found[0])
+    if label == "validate.yaml:validate" and ran.code == 0:
+        named = [step for step in run.steps if step.get("name") == VALIDATE_STEP]
+        assert len(named) == 1, f"{label}: {len(named)} steps are named {VALIDATE_STEP!r}"
+        ran = run.run_step(named[0])
+    assert not ran.skipped and ran.code == 0, \
+        f"{label}: the step {describe(run.results[-1][0])} did not pass:\n{scratch.named(ran.log)}"
+    trapped = run.host.trapped()
+    commits = sorted({line.split(" ", 1)[0] for line in trapped if not line.startswith("BASE_SHA=")})
+    assert commits == ["P1"], (f"{label}: $TRAP_LOG names {', '.join(commits) or 'no commit'}, not P1 alone:\n"
+                               + scratch.named("\n".join(trapped)))
+    for path in tools:
+        assert f"P1 {path}" in trapped, f"{label}: {path} of P1 did not run:\n" + scratch.named("\n".join(trapped))
+    if label == "terms.yaml:terms-accepted":
+        assert f"BASE_SHA={p1}" in trapped, \
+            f"{label}: terms-accepted got another BASE_SHA than P1:\n" + scratch.named("\n".join(trapped))
+        assert not (run.workspace / "merge").exists(), f"{label}: P1 has terms-accepted, but merge/ was checked out"
 
 
 @pytest.mark.parametrize("case", list(BINARY_SIZES))

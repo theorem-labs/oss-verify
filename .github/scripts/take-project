@@ -183,9 +183,7 @@ tree_of() {
 }
 
 # A branch of this repository: count what merging changes (see the top of this file). HEAD is the commit that the job
-# checked out. In build.yaml, and in validate.yaml on pull_request, it is the first parent of the merge commit, a
-# commit of the base branch. In review.yml it is main. On a run of validate.yaml by hand (workflow_dispatch), it is the
-# commit of the branch or tag that the run was started on.
+# checked out (the top of this file names it for each caller).
 if [ "$same_repository" = true ]; then
   base_head=$(git rev-parse HEAD)
   compare=$(gh api "repos/$REPO/compare/$base_head...$sha?per_page=1")

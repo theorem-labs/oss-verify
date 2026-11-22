@@ -87,12 +87,12 @@ name: "Build"
 #     someone with write access approves it. Held runs (.github/workflows/held-runs.yml) starts a run by hand of
 #     review.yml for such a head, which approves its held runs after the screen passes the pull request.
 # project-builds takes its tools, take-project and oss-verify check, from the first parent of the merge commit: the
-# base branch's commit on which GitHub built the merge. So this file and those tools come from one commit of the base
-# branch: a script of another commit can lack an option that this file gives it, as the binary-sizes of an older base
-# lacked --cut (#272). GitHub, not the pull request, chooses the first parent, and the step after the checkout fails
-# unless that parent is a commit of the base branch. So the pull request controls none of those tools. Until that step
-# ends, the checkout holds the merge commit's files, so the step is inline and runs only git and gh. Of the pull
-# request, the job takes and runs only this:
+# base branch's commit on which GitHub built the merge. When the pull request does not change this file, this file and
+# those tools come from one commit of the base branch: a script of another commit can lack an option that this file
+# gives it, as the binary-sizes of an older base lacked --cut (#272). GitHub, not the pull request, chooses the first
+# parent, and the step after the checkout fails unless that parent is a commit of the base branch. So the pull request
+# controls none of those tools. Until that step ends, the checkout holds the merge commit's files, so the step is inline
+# and runs only git and gh. Of the pull request, the job takes and runs only this:
 #   - Only the files directly inside the one projects/<name>/ are taken from the pull request, as regular files written
 #     from git's object store.
 #   - Its Dockerfile runs only inside `docker build`, and its build.sh and the fuzz targets only inside
@@ -230,7 +230,7 @@ jobs:
             || { echo "::error::GitHub could not compare $parent with the head of $BASE."; exit 1; }
           case $status in
             identical|ahead) ;;
-            *) echo "::error::GitHub built this run's merge commit $merge on $parent, which is $status from $BASE: a merge into an earlier base. Push a commit to the branch to run this check again: a rerun checks out the same merge commit."
+            *) echo "::error::GitHub built this run's merge commit $merge on $parent, which is not in the history of $BASE (compare: $status): a merge into an earlier base. Push a commit to the branch to run this check again: a rerun checks out the same merge commit."
                exit 1 ;;
           esac
           git checkout --quiet --detach "$parent"
@@ -343,14 +343,17 @@ jobs:
           # and Linux starts no process with a variable over 131,072 bytes: with all the builds of a large project, the
           # job could not start, and the review would get no result of the build. binary-sizes --cut keeps all the
           # builds, else the plain build of each target, else nothing, as take-build-results does, so the record of the
-          # review keeps the plain builds of a large project. An error leaves it empty. When it prints nothing, the step
-          # logs its own line that says why.
+          # review keeps the plain builds of a large project. When the --cut run fails, results_sizes stays empty, and
+          # sizes_code keeps its exit status. When the --cut run exits 0 and prints nothing, the step logs its own line
+          # that says why.
           results_sizes=""
           if [ -n "$sizes" ]; then
-            results_sizes=$(python3 .github/scripts/binary-sizes --cut 100000 <<< "$sizes" 2> /dev/null) \
-              || { sizes_code=$?; results_sizes=""; }
-            if [ "$sizes_code" = 0 ] && [ -z "$results_sizes" ]; then
-              echo "binary-sizes --cut gave no sizes: those of the plain builds are over 100,000 bytes of JSON."
+            if results_sizes=$(python3 .github/scripts/binary-sizes --cut 100000 <<< "$sizes" 2> /dev/null); then
+              if [ -z "$results_sizes" ]; then
+                echo "binary-sizes --cut gave no sizes: those of the plain builds are over 100,000 bytes of JSON."
+              fi
+            else
+              sizes_code=$?; results_sizes=""
             fi
           fi
           [[ $results_sizes == "{"*"}" && $results_sizes != *$'\n'* ]] || results_sizes=""
