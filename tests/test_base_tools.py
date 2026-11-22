@@ -71,23 +71,20 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 REPO = "theorem-labs/oss-verify"
 # The head repository of each pull request here but one: tests.yaml takes the first parent only for a fork.
 FORK = "someone/oss-verify"
-# The four jobs, as <file>:<job>, and the if: of the step with id: parent in each. None: the step has no if:.
-JOBS = {
-    "build.yaml:project-builds": None,
-    "validate.yaml:validate": "github.event_name == 'pull_request'",
-    "terms.yaml:terms-accepted": None,
-    "tests.yaml:required": "env.FORK == 'true'",
-}
-# The files of the checkout that each job runs. The first one is run by the first run: step after the step with
-# id: parent.
-TOOLS = {
-    "build.yaml:project-builds": (".github/scripts/take-project",),
-    "validate.yaml:validate": (".github/scripts/take-project", "src/oss_verify/__main__.py"),
-    "terms.yaml:terms-accepted": (".github/scripts/terms-accepted",),
-    "tests.yaml:required": (".github/scripts/collect",),
-}
 # validate's step after take-project. It runs src/oss_verify/ of the checkout.
 VALIDATE_STEP = "Check projects/<name>/ with oss-verify validate"
+# The four jobs, as <file>:<job>, each a Job. parent_if: the if: of the step with id: parent, or None for no if:.
+# sparse: the sparse-checkout of the job's first checkout, or None for no sparse-checkout. tools: the files of the
+# checkout that the job runs. The first run: step after the step with id: parent runs the first file. next_step: the
+# name of the step that runs the other files after that step, or None. base_sha: whether a file of tools gets BASE_SHA.
+Job = collections.namedtuple("Job", "parent_if sparse tools next_step base_sha")
+JOBS = {
+    "build.yaml:project-builds": Job(None, None, (".github/scripts/take-project",), None, False),
+    "validate.yaml:validate": Job("github.event_name == 'pull_request'", None,
+                                  (".github/scripts/take-project", "src/oss_verify/__main__.py"), VALIDATE_STEP, False),
+    "terms.yaml:terms-accepted": Job(None, None, (".github/scripts/terms-accepted",), None, True),
+    "tests.yaml:required": Job("env.FORK == 'true'", ".github/scripts", (".github/scripts/collect",), None, False),
+}
 # The paths of the traps in each commit. python3 -m oss_verify needs src/oss_verify/__init__.py too: without it, an
 # installed oss_verify would come before the checkout's.
 TRAPS = (".github/scripts/take-project", ".github/scripts/collect", ".github/scripts/terms-accepted",
@@ -102,15 +99,18 @@ SIGNATURE = "Test <test@example.org> 1767225600 +0000"
 # The with: inputs that the checkout model reads. It refuses a checkout with any other input.
 CHECKOUT_INPUTS = {"ref", "fetch-depth", "persist-credentials", "sparse-checkout", "path"}
 # The cases of test_the_step_refuses: the run's merge commit (its github.sha), the stand-in gh's answer to the compare
-# ("error": gh fails as on an error of the API), and the pull request's base branch. The scratch repository has no
-# branch gone, and gh answers ahead there, so only the step's own check of the base branch can refuse that case.
+# ("error": gh fails as on an error of the API), and the pull request's base branch. Then what the step does: gh_calls,
+# the number of its calls of gh, and push_a_commit, whether its ::error:: lines say to push a commit. The scratch
+# repository has no branch gone, and gh answers ahead there, so only the step's own check of the base branch can refuse
+# that case. The step must make that check before the compare, so gh_calls is 0 there.
+Refusal = collections.namedtuple("Refusal", "merge status base gh_calls push_a_commit")
 REFUSALS = {
-    "behind": ("M", "behind", "main"),
-    "diverged": ("M", "diverged", "main"),
-    "compare fails": ("M", "error", "main"),
-    "one parent": ("M1", "ahead", "main"),
-    "three parents": ("M3", "ahead", "main"),
-    "no base branch": ("M", "ahead", "gone"),
+    "behind": Refusal("M", "behind", "main", 1, True),
+    "diverged": Refusal("M", "diverged", "main", 1, True),
+    "compare fails": Refusal("M", "error", "main", 1, False),
+    "one parent": Refusal("M1", "ahead", "main", 0, False),
+    "three parents": Refusal("M3", "ahead", "main", 0, False),
+    "no base branch": Refusal("M", "ahead", "gone", 0, False),
 }
 # The cases of test_the_step_skips_where_r1_says: the run, and the words that name it.
 SKIPS = {
@@ -123,15 +123,17 @@ SIZES = '{"demo_fuzzer":{"plain":{"exec":4096,"text":1024}}}'
 NO_CUT_SIZES = "binary-sizes --cut gave no sizes: those of the plain builds are over 100,000 bytes of JSON."
 # A case of test_binary_sizes. check: the exit status of oss-verify check. plain and cut: what the plain run and the
 # --cut run of binary-sizes do, each (what it prints: sizes, nothing or marker; its exit status), or None for a run
-# that does not happen. Then what the build step does: code, its exit status; warned, the exit status that its warning
-# and its summary sentence give, or None for no warning; sizes and results_sizes, whether those outputs are set;
-# no_cut_line, whether it logs NO_CUT_SIZES.
+# that does not happen. A run that fails can print valid sizes too: the step must not use them. Then what the build
+# step does: code, its exit status; warned, the exit status that its warning and its summary sentence give, or None for
+# no warning; sizes and results_sizes, whether those outputs are set; no_cut_line, whether it logs NO_CUT_SIZES.
 Sizes = collections.namedtuple("Sizes", "check plain cut code warned sizes results_sizes no_cut_line")
 BINARY_SIZES = {
     "no run fails": Sizes(0, ("sizes", 0), ("sizes", 0), 0, None, True, True, False),
     "the plain run fails": Sizes(0, ("marker", 1), None, 0, 1, False, False, False),
     "the plain run exits 3": Sizes(0, ("marker", 3), None, 0, 3, False, False, False),
+    "the plain run prints sizes and exits 3": Sizes(0, ("sizes", 3), None, 0, 3, False, False, False),
     "the cut run fails": Sizes(0, ("sizes", 0), ("marker", 1), 0, 1, True, False, False),
+    "the cut run prints sizes and exits 3": Sizes(0, ("sizes", 0), ("sizes", 3), 0, 3, True, False, False),
     "the cut run prints nothing": Sizes(0, ("sizes", 0), ("nothing", 0), 0, None, True, False, True),
     "oss-verify check fails": Sizes(1, ("marker", 1), None, 1, None, False, False, False),
 }
@@ -593,8 +595,8 @@ def binary_sizes(tmp_path, case, workflows=WORKFLOWS):
     for key, given in (("sizes", want.sizes), ("results_sizes", want.results_sizes)):
         assert values.get(key, "") == (SIZES if given else ""), \
             f"{where}: the output {key} is {values.get(key)!r}, not {'the sizes' if given else 'empty'}"
-    if want.no_cut_line:
-        assert NO_CUT_SIZES in ran.log.splitlines(), f"{where}: the log does not say {NO_CUT_SIZES!r}:\n{ran.log}"
+    assert (NO_CUT_SIZES in ran.log.splitlines()) == want.no_cut_line, \
+        f"{where}: the log {'does not say' if want.no_cut_line else 'says'} {NO_CUT_SIZES!r}:\n{ran.log}"
     asked = ["plain"] + (["--cut"] if want.cut else [])
     got = runs.read_text().splitlines() if runs.exists() else []
     assert got == asked, f"{where}: binary-sizes ran {got}, not {asked}"
@@ -683,8 +685,9 @@ def test_no_pull_request_checkout_names_a_ref():
 
 @pytest.mark.parametrize("label", list(JOBS))
 def test_the_step_follows_the_checkout(label):
-    name, job = label.split(":")
-    steps = from_checkout(label, load(WORKFLOWS, name)["jobs"][job]["steps"])
+    name, job_id = label.split(":")
+    job = JOBS[label]
+    steps = from_checkout(label, load(WORKFLOWS, name)["jobs"][job_id]["steps"])
     inputs = steps[0].get("with") or {}
     wrong = []
     if str(inputs.get("fetch-depth")) != "2":
@@ -692,13 +695,14 @@ def test_the_step_follows_the_checkout(label):
                      else "the checkout has no fetch-depth")
     if "ref" in inputs:
         wrong.append(f"the checkout names ref: {inputs['ref']}")
-    if label == "tests.yaml:required" and str(inputs.get("sparse-checkout", "")).split() != [".github/scripts"]:
-        wrong.append("the checkout lost sparse-checkout: .github/scripts")
+    sparse, want = str(inputs.get("sparse-checkout") or "").split(), job.sparse.split() if job.sparse else []
+    if sparse != want:
+        wrong.append(f"the checkout's sparse-checkout lines are {sparse}, not {want}")
     step = steps[1] if len(steps) > 1 else {}
     if step.get("id") != "parent" or "run" not in step or "uses" in step:
         wrong.append(f"the next step, {describe(step)}, is not a run: step with id: parent")
-    elif inner(step.get("if")) != JOBS[label]:
-        wrong.append(f"the step with id: parent has if: {step.get('if')}, not {JOBS[label] or 'none'}")
+    elif inner(step.get("if")) != job.parent_if:
+        wrong.append(f"the step with id: parent has if: {step.get('if')}, not {job.parent_if or 'none'}")
     assert not wrong, f"{label}: " + "; ".join(wrong) + " (R1: fetch-depth: 2, no ref, then the step with id: parent)"
 
 
@@ -720,21 +724,24 @@ def test_the_step_checks_out_the_first_parent(tmp_path, scratch, label, status):
 @pytest.mark.parametrize("label, case", [pytest.param(label, case, id=f"{label}-{case}")
                                          for label in JOBS for case in REFUSALS])
 def test_the_step_refuses(tmp_path, scratch, label, case):
-    merge, status, base = REFUSALS[case]
-    run = JobRun(tmp_path, scratch, WORKFLOWS, label, merge=merge, status=status, base=base)
+    want = REFUSALS[case]
+    run = JobRun(tmp_path, scratch, WORKFLOWS, label, merge=want.merge, status=want.status, base=want.base)
     step = run.parent()
     where = f"{label} ({case})"
     assert step is not None, f"{where}: no step has id: parent, so nothing refuses the run"
     ran = run.run_to(step)
     assert not ran.skipped, f"{where}: the step with id: parent did not run: its if: is false"
+    calls = run.host.calls()
+    assert len(calls) == want.gh_calls, \
+        f"{where}: the step called gh {len(calls)} times, not {want.gh_calls}: {scratch.named(str(calls))}\n" \
+        + scratch.named(ran.log)
     assert ran.code != 0, f"{where}: the step exited 0:\n{scratch.named(ran.log)}"
     errors = [line for line in commands(ran.log) if line.startswith("::error::")]
     assert errors, f"{where}: the step wrote no ::error:: line:\n{scratch.named(ran.log)}"
-    if case in ("behind", "diverged"):
-        assert any("push a commit" in line.lower() for line in errors), \
-            f"{where}: the ::error:: line does not say to push a commit:\n{scratch.named(ran.log)}"
-    if case == "no base branch":
-        assert run.host.calls() == [], f"{where}: the step called gh: {scratch.named(str(run.host.calls()))}"
+    advised = any("push a commit" in line.lower() for line in errors)
+    assert advised == want.push_a_commit, \
+        f"{where}: the case {'expects' if want.push_a_commit else 'does not expect'} the advice to push a commit, " \
+        f"but the ::error:: lines {'say it' if advised else 'do not say it'}:\n{scratch.named(ran.log)}"
     assert "sha" not in outputs(ran.output), f"{where}: the step gave the output sha:\n{scratch.named(ran.output)}"
     assert run.host.trapped() == [], \
         f"{where}: the step ran files of the checkout:\n" + scratch.named("\n".join(run.host.trapped()))
@@ -758,13 +765,14 @@ def test_the_step_skips_where_r1_says(tmp_path, scratch, label):
 def test_the_job_runs_the_first_parents_tools(tmp_path, scratch, label):
     p1 = scratch.commits["P1"]
     run = JobRun(tmp_path, scratch, WORKFLOWS, label)
-    tools = TOOLS[label]
+    job = JOBS[label]
+    tools = job.tools
     found = [step for step in run.steps if tools[0] in str(step.get("run", ""))]
     assert found, f"{label}: no step runs {tools[0]}"
     ran = run.run_to(found[0])
-    if label == "validate.yaml:validate" and ran.code == 0:
-        named = [step for step in run.steps if step.get("name") == VALIDATE_STEP]
-        assert len(named) == 1, f"{label}: {len(named)} steps are named {VALIDATE_STEP!r}"
+    if job.next_step and ran.code == 0:
+        named = [step for step in run.steps if step.get("name") == job.next_step]
+        assert len(named) == 1, f"{label}: {len(named)} steps are named {job.next_step!r}"
         ran = run.run_step(named[0])
     assert not ran.skipped and ran.code == 0, \
         f"{label}: the step {describe(run.results[-1][0])} did not pass:\n{scratch.named(ran.log)}"
@@ -774,10 +782,14 @@ def test_the_job_runs_the_first_parents_tools(tmp_path, scratch, label):
                                + scratch.named("\n".join(trapped)))
     for path in tools:
         assert f"P1 {path}" in trapped, f"{label}: {path} of P1 did not run:\n" + scratch.named("\n".join(trapped))
-    if label == "terms.yaml:terms-accepted":
+    given = any(line.startswith("BASE_SHA=") for line in trapped)
+    assert given == job.base_sha, \
+        f"{label}: the job must give {'a' if job.base_sha else 'no'} BASE_SHA= line to $TRAP_LOG, but it gave " \
+        f"{'none' if job.base_sha else 'one'}:\n" + scratch.named("\n".join(trapped))
+    if job.base_sha:
         assert f"BASE_SHA={p1}" in trapped, \
-            f"{label}: terms-accepted got another BASE_SHA than P1:\n" + scratch.named("\n".join(trapped))
-        assert not (run.workspace / "merge").exists(), f"{label}: P1 has terms-accepted, but merge/ was checked out"
+            f"{label}: {tools[0]} got another BASE_SHA than P1:\n" + scratch.named("\n".join(trapped))
+        assert not (run.workspace / "merge").exists(), f"{label}: P1 has {tools[0]}, but merge/ was checked out"
 
 
 @pytest.mark.parametrize("case", list(BINARY_SIZES))
