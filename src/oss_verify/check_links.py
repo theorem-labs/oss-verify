@@ -587,7 +587,7 @@ def go_program(data):
 
 
 def parse_map(text):
-    """The pair (taken, read) for an lld map. `taken` is the input sections that reach the binary: [(file, member or
+    r"""The pair (taken, read) for an lld map. `taken` is the input sections that reach the binary: [(file, member or
     None, section, size)]. `read` is the number of lines that read as input sections (below). A link's
     record holds the map's input section lines alone (infra/base-builder/link-fuzz-target): four columns of
     numbers — address, load address, size, alignment — then eight blanks and <file>:(<section>) or
@@ -609,10 +609,13 @@ def parse_map(text):
     `read` counts the lines in the full shape of an input section: four columns of numbers, eight spaces, then text
     that ends in ")" and holds ":(" after its first character. It counts them whether or not their output section is
     loaded, and whether or not they are <internal>. read_record gives the count when the reader kept no input section
-    of a map."""
+    of a map.
+
+    The lines are `text` split at "\n" alone, because str.splitlines() also splits at \r, \v, \f, \x1c, \x1d, \x1e,
+    \x85, U+2028 and U+2029, and nothing refuses these characters in a path of the map."""
     taken, read = [], 0
     loaded, previous = False, None
-    for line in text.split("\n"):  # at "\n" only: read_record says why
+    for line in text.split("\n"):
         found = MAP_COLUMNS.match(line)
         if not found:
             continue
@@ -652,9 +655,8 @@ def read_record(raw, sha256, compiles=None):
         return read_regular(below(directory, name)).decode("utf-8", "replace")
 
     try:
-        # Split the map (parse_map) and the rows at "\n" only: str.splitlines() also splits at U+0085, U+2028 and
-        # U+2029, and link-fuzz-target lets these characters through in a real path. An empty line or row is not a
-        # record; an empty libc file gives one empty row, which makes the record incomplete.
+        # The rows are split at "\n" only, for the reason that parse_map's docstring gives. An empty row of inputs.tsv
+        # or renamed is not a record; an empty libc file gives one empty row, which makes the record incomplete.
         mapping, rows, driver = text("map"), text("inputs.tsv").split("\n"), text("driver").split()
         renamed_rows = text("renamed").split("\n") if os.path.lexists(directory / "renamed") else []
         libc_rows = text("libc").removesuffix("\n").split("\n") if os.path.lexists(directory / "libc") else None

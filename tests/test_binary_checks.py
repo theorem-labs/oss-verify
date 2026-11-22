@@ -29,6 +29,8 @@ ASAN = ["__asan_init", "__asan_version_mismatch_check_v8", "__asan_load4"]
 # The release's fixed UBSan flags (infra/base-builder/toolchain.sh), and a compile's arguments with and without them.
 UBSAN_FLAGS = ["-fsanitize=undefined", "-fno-sanitize-recover=all", "-fsanitize-trap=all", "-fno-sanitize=function"]
 BASE = ["-march=rv64g", "-mabi=lp64d", "-Os", "-g", "-ffunction-sections", "-fdata-sections"]
+# Each line end that str.splitlines() knows but "\n" (MapParsing.test_other_line_ends checks that the tuple is whole).
+OTHER_LINE_ENDS = ("\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
 
 
 def compile_arguments(source, flags=UBSAN_FLAGS, after=()):
@@ -246,10 +248,17 @@ class MapParsing(unittest.TestCase):
             ("/opt/musl-sysroot/usr/lib/crt1.o", None, ".text", 0x10),
         ], 3))
 
-    def test_a_path_that_holds_a_unicode_line_separator_is_kept(self):
-        """link-fuzz-target lets U+0085, U+2028 and U+2029 through in a real path, and str.splitlines() splits at each
-        of them. The map is split at newlines only, so such a path's input section is kept and counted in `read`."""
-        for separator in ("\u0085", "\u2028", "\u2029"):
+    def test_other_line_ends(self):
+        """OTHER_LINE_ENDS holds each character at which str.splitlines() splits, but "\\n", and each of them once."""
+        every = "".join(map(chr, range(0x110000)))
+        self.assertEqual([line[-1] for line in every.splitlines(keepends=True)[:-1]],
+                         sorted(("\n",) + OTHER_LINE_ENDS))
+
+    def test_a_path_that_holds_another_line_end_is_kept(self):
+        """str.splitlines() splits at each line end that it knows but "\\n" (OTHER_LINE_ENDS), and nothing refuses these
+        characters in a path of the map. The map is split at "\\n" only, so the input section of a path that holds one
+        of them is kept and counted in `read`."""
+        for separator in OTHER_LINE_ENDS:
             with self.subTest(separator=f"U+{ord(separator):04X}"):
                 text = "\n".join([
                     map_line(0x10000, 0x10, f"/work/obj/a{separator}b.o:(.text.f)"),
@@ -749,7 +758,7 @@ class Records(unittest.TestCase):
                  ("crti.o", "/work/b/musl/lib/crti.o", "3" * 64), ("crtn.o", "/work/b/musl/lib/crtn.o", "4" * 64)]
 
     def write_libc(self, rows):
-        (self.directory / "libc").write_text("".join("\t".join(row) + "\n" for row in rows))
+        (self.directory / "libc").write_text("".join("\t".join(row) + "\n" for row in rows), encoding="utf-8")
 
     def test_a_libc_file_is_read(self):
         self.write_libc(self.LIBC_ROWS)
@@ -759,23 +768,26 @@ class Records(unittest.TestCase):
         self.write_libc(self.LIBC_ROWS[::-1])
         self.assertEqual(check_links.read_record(self.raw, "a" * 64).libc, record.libc)
 
-    def test_a_libc_path_that_holds_a_unicode_line_separator_is_read(self):
-        """link-fuzz-target refuses [[:cntrl:]] in the real paths, but in the C locale it lets U+0085, U+2028 and
-        U+2029 through. str.splitlines() splits at each of them, so the libc file is split at newlines only."""
-        separators = ["\u0085", "\u2028", "\u2029"]
-        rows = [(name, path + separator + "x", sha256)
-                for (name, path, sha256), separator in zip(self.LIBC_ROWS, separators)] + self.LIBC_ROWS[3:]
-        self.write_libc(rows)
-        self.assertEqual(check_links.read_record(self.raw, "a" * 64).libc,
-                         {name: (path, sha256) for name, path, sha256 in rows})
+    def test_a_libc_path_that_holds_another_line_end_is_read(self):
+        """A libc file whose four real paths each hold a line end that str.splitlines() knows but "\\n"
+        (OTHER_LINE_ENDS) is read whole, because the libc file is split at "\\n" only. link-fuzz-target refuses
+        [[:cntrl:]] in these real paths, so in the C locale only \\x85, U+2028 and U+2029 get to the libc file. The
+        test uses each line end all the same."""
+        for separator in OTHER_LINE_ENDS:
+            with self.subTest(separator=f"U+{ord(separator):04X}"):
+                rows = [(name, path + separator + "x", sha256) for name, path, sha256 in self.LIBC_ROWS]
+                self.write_libc(rows)
+                self.assertEqual(check_links.read_record(self.raw, "a" * 64).libc,
+                                 {name: (path, sha256) for name, path, sha256 in rows})
 
-    def test_an_object_whose_path_holds_a_unicode_line_separator_is_examined(self):
-        """A map line and an inputs.tsv row that name an object whose real path holds U+0085, U+2028 or U+2029 are read
-        whole, so the record has the object, and project_code examines it and does not leave it out."""
+    def test_an_object_whose_path_holds_another_line_end_is_examined(self):
+        """A map line and an inputs.tsv row that name an object whose real path holds a line end that str.splitlines()
+        knows but "\\n" (OTHER_LINE_ENDS) are read whole, so the record has the object, and project_code examines it
+        and does not leave it out."""
         body = elf_object(NOP, defined=["f"], comment=True)
         digest = hashlib.sha256(body).hexdigest()
         (self.raw / ".records" / "store" / digest).write_bytes(body)
-        for separator in ("\u0085", "\u2028", "\u2029"):
+        for separator in OTHER_LINE_ENDS:
             with self.subTest(separator=f"U+{ord(separator):04X}"):
                 path = f"/work/obj/a{separator}b.o"
                 (self.directory / "map").write_text(map_line(0x10000, 4, f"{path}:(.text.f)") + "\n", encoding="utf-8")
@@ -787,10 +799,11 @@ class Records(unittest.TestCase):
                 code, provided, problems = check_links.project_code(record, {})
                 self.assertEqual(([c.label for c in code], provided, problems), ([f"a{separator}b.o"], [], []))
 
-    def test_a_renamed_path_that_holds_a_unicode_line_separator_is_read(self):
-        """A row of the renamed file whose real paths hold U+0085, U+2028 or U+2029 is read whole."""
+    def test_a_renamed_path_that_holds_another_line_end_is_read(self):
+        """A row of the renamed file whose real paths hold a line end that str.splitlines() knows but "\\n"
+        (OTHER_LINE_ENDS) is read whole."""
         rows = [(f"/tmp/copies/{n}-a{separator}b.o", f"/work/obj/a{separator}b.o", str(n) * 64)
-                for n, separator in enumerate(("\u0085", "\u2028", "\u2029"), 1)]
+                for n, separator in enumerate(OTHER_LINE_ENDS, 1)]
         (self.directory / "renamed").write_text("".join("\t".join(row) + "\n" for row in rows), encoding="utf-8")
         self.assertEqual(check_links.read_record(self.raw, "a" * 64).renamed,
                          {copy: (original, sha256) for copy, original, sha256 in rows})
