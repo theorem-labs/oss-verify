@@ -500,6 +500,9 @@ class PullRequestWorkflows(unittest.TestCase):
             for where, holder in holders:
                 if holder is not workflow:
                     self.assertNotIn("environment", holder, f"{path.name}, {where}")
+                    # A job that calls a workflow passes it a secret by its key secrets (secrets: inherit passes all),
+                    # with no text "secrets." in the file.
+                    self.assertNotIn("secrets", holder, f"{path.name}, {where}")
                 permissions = holder.get("permissions")
                 if permissions is None:
                     # A job with no permissions of its own takes the workflow's.
@@ -912,7 +915,8 @@ match args:
         The case runs the parts in this order, and stops after the part `upto`. Return what each part that ran
         found."""
         publish, images = self.workflow(tree, self.PUBLISH), self.workflow(tree, self.IMAGES)
-        parts = {self.EQUAL: self.shared_values, self.RUN: self.make_then_publish}
+        parts = {self.EQUAL: lambda publish, images: self.shared_values(publish, images, tree),
+                 self.RUN: self.make_then_publish}
         self.assertIn(upto, parts, "the part of handover_case to stop after")
         found = []
         for part, run in parts.items():
@@ -920,35 +924,50 @@ match args:
             if part == upto:
                 return tuple(found)
 
-    def shared_values(self, publish, images):
+    def shared_values(self, publish, images, tree):
         """Part 1 of handover_case: the values that both files hold, each as (publish's, toolchain-images.yaml's):
           - each name of the workflow's env that both files define,
           - each pin in toolchain-images.yaml of an action that publish uses, and publish's pin of it,
           - the image and the ports of each service of publish, in each job of toolchain-images.yaml with that service,
           - each key of publish's matrix (make's), and each name of publish's job env that make's job env has too.
+        A job of toolchain-images.yaml that calls a workflow of `tree` (uses: ./<path>) has no steps, services or env
+        there: the called workflow holds them, and a caller's env does not reach it. So the jobs and the env of that
+        workflow count as toolchain-images.yaml's here, and their values name its path.
         Each kind has at least one value, and each pair is equal. The message names each value that differs. Other
         tests hold the trigger: case runs publish's if over PATHS, and
         test_publish_starts_on_the_completed_runs_on_main_of_toolchain_images_alone holds its workflows and branches."""
         job, make = publish["jobs"]["publish"], images["jobs"]["make"]
         kinds = {"the env": {}, "the actions": {}, "the services": {}, "the matrix": {}, "the job env": {}}
-        theirs = images.get("env") or {}
-        for name, value in (publish.get("env") or {}).items():
-            if name in theirs:
-                kinds["the env"][f"the env {name}"] = (value, theirs[name])
+        # Each job, by the words that name it in a value ("make's"), and each env, by the words after its names.
+        jobs, envs = {}, {"": images.get("env") or {}}
+        for name, held in images["jobs"].items():
+            called = str(held.get("uses", ""))
+            if not called:
+                jobs[f"{name}'s"] = held
+                continue
+            self.assertTrue(called.startswith("./"), f"{self.EQUAL}: the job {name} calls {called}, outside the tree")
+            self.need(tree, called[2:])
+            workflow = yaml.load((tree / called[2:]).read_text(), Loader=YAML_LOADER)
+            envs[f" of {called[2:]}"] = workflow.get("env") or {}
+            jobs.update({f"{called[2:]} {inner}'s": job_of for inner, job_of in workflow["jobs"].items()})
+        for where, theirs in envs.items():
+            for name, value in (publish.get("env") or {}).items():
+                if name in theirs:
+                    kinds["the env"][f"the env {name}{where}"] = (value, theirs[name])
         pins = {}
         for step in job["steps"]:
             if action_of(step):
                 pins.setdefault(action_of(step), set()).add(step["uses"].partition("@")[2])
-        for name, held in images["jobs"].items():
+        for who, held in jobs.items():
             for n, step in enumerate(held.get("steps") or [], 1):
                 if action_of(step) in pins:
-                    kinds["the actions"][f"the pin of {action_of(step)} ({name}'s step {n})"] = (
+                    kinds["the actions"][f"the pin of {action_of(step)} ({who} step {n})"] = (
                         " ".join(sorted(pins[action_of(step)])), step["uses"].partition("@")[2])
         for service, given in (job.get("services") or {}).items():
-            for name, held in images["jobs"].items():
+            for who, held in jobs.items():
                 if service in (held.get("services") or {}):
                     for key in ("image", "ports"):
-                        kinds["the services"][f"the {key} of the service {service} ({name}'s)"] = (
+                        kinds["the services"][f"the {key} of the service {service} ({who})"] = (
                             given.get(key), held["services"][service].get(key))
         for key, value in job["strategy"]["matrix"].items():
             kinds["the matrix"][f"the matrix {key} (make's)"] = (value, make["strategy"]["matrix"].get(key))

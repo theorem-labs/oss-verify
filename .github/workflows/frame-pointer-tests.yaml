@@ -1,0 +1,155 @@
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+name: "Frame-pointer tests"
+# frame-pointer-tests runs the class FramePointers of tests/test_builder.py. Its one job, docker-tests, makes the C and
+# C++ frame-pointer image and the Rust one from their base rows of infra/toolchains.tsv, as make of
+# toolchain-images.yaml does (crane mutate, in a registry on the runner). These tests build tests/fixtures/example and
+# tests/fixtures/rust-example on the base images and on the new images. They fail unless each build on a new image has
+# the flags. They fail if a build on a base image has them, with OFT_FRAME_POINTERS not set or set to the empty value.
+# They fail unless compile fails on a base image with OFT_FRAME_POINTERS=0. docker-tests also fails if a test is skipped.
+#
+# The job runs in two ways:
+#   - toolchain-images.yaml (Toolchain images) calls this file (workflow_call) as its job docker-tests, after make,
+#     with check-make-digests. The job then fails unless each image that it makes has the digest that make made in
+#     that run (make's artifact fp-digest-<base row>). Publish (toolchain-images-publish.yaml) acts only when that whole
+#     run passed, this job too.
+#   - This file runs on its own trigger for a change of a file that these tests read and that the images do not
+#     depend on: the tests, the fixture tests/fixtures/example, src/oss_verify/check_build.py, pyproject.toml, or this
+#     file. For such a change, no make job runs (toolchain-images.yaml's paths are the inputs of the images), so the
+#     job checks no digest against make: it tests the images that it makes from the same base rows with the same
+#     crane mutate. This run publishes nothing: publish starts only for a run of Toolchain images.
+# GitHub's paths filter picks a whole workflow, not a job. Thus a change of both kinds of file runs both workflows, and
+# these tests run in each. toolchain-images.yaml's paths name this file too, so a change of it runs the job both ways.
+#
+# The job runs code of the pull request: the builder (infra/base-builder), the tests and the fixtures. It has
+# contents: read and no secret, and no job of this file has a write permission. When Toolchain images calls it, GitHub
+# gives it no secret unless the caller passes one, which docker-tests of toolchain-images.yaml does not, and a token
+# with the caller job's permissions (contents: read) or fewer
+# (https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations).
+#
+# The tests run in one pytest process, not one for each core (pytest-xdist): they share the four project images that
+# FramePointers.setUpClass builds and tearDownClass removes by fixed tags, so workers would build them each and remove
+# them under each other.
+#
+# This check is not required by the ruleset, so GitHub's paths filter, which leaves a skipped workflow's check pending,
+# blocks no merge.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    paths:
+      - .github/workflows/frame-pointer-tests.yaml
+      - tests/test_builder.py
+      - tests/fixtures/example/**
+      - src/oss_verify/check_build.py
+      - pyproject.toml
+  push:
+    branches: [main]
+    # The same paths as pull_request's.
+    paths:
+      - .github/workflows/frame-pointer-tests.yaml
+      - tests/test_builder.py
+      - tests/fixtures/example/**
+      - src/oss_verify/check_build.py
+      - pyproject.toml
+  workflow_call:
+    inputs:
+      check-make-digests:
+        description: Fail unless each image made here has the digest in make's artifact fp-digest-<base row> of this run
+        type: boolean
+        default: false
+
+permissions: {}
+
+env:
+  # The same values as toolchain-images.yaml's (tests/test_trigger_move.py compares them with publish's): a caller's env
+  # does not reach a called workflow.
+  # go-containerregistry's crane, pinned by version and by the SHA-256 of its release archive.
+  CRANE_VERSION: v0.22.1
+  CRANE_SHA256: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
+  CRANE_ARCHIVE: go-containerregistry_Linux_x86_64.tar.gz
+
+jobs:
+  docker-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    services:
+      registry:
+        # docker.io/library/registry:2, pinned by the digest of its image index, as in toolchain-images.yaml.
+        image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+        ports:
+          - 5000:5000
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
+        with:
+          persist-credentials: false
+
+      - name: install crane
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/$CRANE_ARCHIVE" \
+            "https://github.com/google/go-containerregistry/releases/download/$CRANE_VERSION/$CRANE_ARCHIVE"
+          echo "$CRANE_SHA256  $RUNNER_TEMP/$CRANE_ARCHIVE" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/$CRANE_ARCHIVE" -C "$RUNNER_TEMP/bin" crane
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # make's digests, from this run of Toolchain images. A run on this file's own trigger has no make job.
+      - if: inputs.check-make-digests
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2 (sha-pinned)
+        with:
+          pattern: fp-digest-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/fp-digest
+
+      - name: make the C and C++ image and the Rust image, with the digests that make made when make ran
+        id: made
+        env:
+          CHECK_MAKE: ${{ inputs.check-make-digests }}
+        run: |
+          set -euo pipefail
+          for row in oss-fuzz-theorems-2026.10 oss-fuzz-theorems-2026.10-rust; do
+            base=$(awk -F'\t' -v row="$row" '$1 == row { print $2 }' infra/toolchains.tsv)
+            [[ "$base" =~ ^ghcr\.io/theorem-labs/oss-fuzz-theorems-toolchain(-[a-z]+)?@sha256:[0-9a-f]{64}$ ]] ||
+              { echo "::error::infra/toolchains.tsv has no row $row with a toolchain digest: '$base'"; exit 1; }
+            name=${base%@*}
+            ref=$(crane mutate "$base" --env OFT_FRAME_POINTERS=1 -t "localhost:5000/${name#ghcr.io/}:frame-pointers")
+            [[ "$ref" =~ @sha256:[0-9a-f]{64}$ ]] || { echo "::error::crane gave no digest: '$ref'"; exit 1; }
+            if [ "$CHECK_MAKE" = true ]; then
+              want=$(cat "$RUNNER_TEMP/fp-digest/$row.digest" 2> /dev/null || true)
+              [[ "$want" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::make gave no digest for $row: '$want'"; exit 1; }
+              [ "${ref#*@}" = "$want" ] ||
+                { echo "::error::the image made here from $row is $ref, but make made $want"; exit 1; }
+              echo "$row: made $ref, the digest that make made"
+            else
+              echo "$row: made $ref; no make job in this run, so no digest to compare it with"
+            fi
+            # The tests skip unless the base image is here, and build a builder FROM each of the two images.
+            docker pull --quiet "$base" > /dev/null
+            docker pull --quiet "$ref" > /dev/null
+            case $row in
+              *-rust) echo "rust=$ref" >> "$GITHUB_OUTPUT" ;;
+              *) echo "c=$ref" >> "$GITHUB_OUTPUT" ;;
+            esac
+          done
+
+      - name: Install PyYAML and pytest
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml python3-pytest
+
+      - name: The FramePointers tests of tests/test_builder.py, on the base images and on the frame-pointer images
+        env:
+          OV_DOCKER_TESTS: "1"
+          OV_FP_TOOLCHAIN_C: ${{ steps.made.outputs.c }}
+          OV_FP_TOOLCHAIN_RUST: ${{ steps.made.outputs.rust }}
+        run: |
+          set -o pipefail
+          python3 -P -m pytest -rs -p no:cacheprovider -c pyproject.toml tests/test_builder.py -k FramePointers \
+            | tee "$RUNNER_TEMP/pytest"
+          # Each test must run and pass: a test that skips (no Docker, no base image, no frame-pointer image named) is
+          # a failure here.
+          if ! grep -qE '[0-9]+ passed' "$RUNNER_TEMP/pytest" || grep -q '^SKIPPED' "$RUNNER_TEMP/pytest"; then
+            echo "::error::A FramePointers test did not run."
+            exit 1
+          fi

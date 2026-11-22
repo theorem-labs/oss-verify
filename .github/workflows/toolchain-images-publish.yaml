@@ -4,7 +4,11 @@ name: "Toolchain images: publish"
 # toolchain-images-publish puts the frame-pointer toolchain images on ghcr.io. toolchain-images.yaml (Toolchain images)
 # makes them and checks them: its header says how. GitHub starts this workflow each time a run of Toolchain images on
 # the branch main completes. Its one job, publish, acts only when that run was for a push to main of this repository,
-# and passed: make, probe and docker-tests passed for every image. For any other run, publish is skipped.
+# and passed: make, probe and docker-tests passed for every image. For any other run, publish is skipped. docker-tests is
+# the job of frame-pointer-tests.yaml that Toolchain images calls. A run of frame-pointer-tests.yaml on its own trigger
+# (Frame-pointer tests: a change of the tests or of src/oss_verify/check_build.py alone, which changes no image) does
+# not start this workflow, and a push to main that changes only such files runs no Toolchain images: then nothing is
+# published, and no run looks for make's artifact.
 #
 # publish runs once for each base image (the matrix). It checks out infra/toolchains.tsv at the commit that the run of
 # Toolchain images built, and takes the digest that make made in that run from its artifact fp-digest-<base row>. It
