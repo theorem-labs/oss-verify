@@ -3133,4 +3133,9 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    # A name that is not UTF-8 is read with surrogateescape (text_of), and check and wraps print it. They print it
+    # with the bytes it had, as under the C locale: a strict standard output, as under en_US.UTF-8, would stop at it.
+    # A closed standard output is None, and is left as it is.
+    if sys.stdout is not None:
+        sys.stdout.reconfigure(errors="surrogateescape")
     sys.exit(main())
