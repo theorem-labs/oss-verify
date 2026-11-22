@@ -43,9 +43,11 @@ It writes no output of binary-sizes, and its exit status does not change.
 The tests read the repository's .github/workflows. Two cases, the_step_checks_out_the_first_parent and binary_sizes,
 read a directory that a caller gives, so a control can run them on a changed copy. A control (its name starts with
 test_control) copies the workflows into a temporary directory. It runs a test's case on that copy, where the case
-passes. Then it changes a second copy, runs the case there, and asserts that the case fails. Three controls change the
-step with id: parent of the four jobs: it checks out the second parent, it only runs true, or it runs a script of the
-checkout. One control changes the build step: it writes no warning when binary-sizes fails, as at a417ab88.
+passes. The copy is the same for each control, so only the first control of a case and its arguments in a process
+runs it there, and the others read its pass (fails_only_on_the_change). Then it changes a second copy, runs the case
+there, and asserts that the case fails. Three controls change the step with id: parent of the four jobs: it checks out
+the second parent, it only runs true, or it runs a script of the checkout. One control changes the build step: it
+writes no warning when binary-sizes fails, as at a417ab88.
 """
 import collections
 import hashlib
@@ -60,11 +62,10 @@ import tempfile
 import textwrap
 
 import pytest
-import yaml
 
 from test_outside_screen import evaluate
 from test_take_project import git, isolated_git_env
-from test_trigger_move import YAML_LOADER, action_of, as_text, env_of, outputs, render, triggers
+from test_trigger_move import action_of, as_text, env_of, outputs, parse, render, triggers
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -186,7 +187,7 @@ Ran = collections.namedtuple("Ran", "code log output summary skipped", defaults=
 
 
 def load(workflows, name):
-    return yaml.load((pathlib.Path(workflows) / name).read_text(), Loader=YAML_LOADER)
+    return parse((pathlib.Path(workflows) / name).read_text())
 
 
 def describe(step):
@@ -630,12 +631,21 @@ def control_copies(tmp_path, targets, pattern, new):
     return unchanged, changed
 
 
+# The cases that passed on the unchanged copy of control_copies in this process, each as (the case, its arguments).
+UNCHANGED_PASSES = set()
+
+
 def fails_only_on_the_change(tmp_path, copies, said, case, *args):
     """Run case(<a new directory>, *args, workflows=<a copy>) on the unchanged copy of `copies`, where it passes. Then
     run it on the changed copy, where it must fail with a message that holds `said`. pytest indents the lines of a
-    message, so each run of spaces and newlines counts as one space."""
+    message, so each run of spaces and newlines counts as one space. The unchanged copy is the repository's
+    .github/workflows, byte for byte, so each control would run the same case on the same files there: the first control
+    of a case and its arguments in this process runs it, and the others read its pass from UNCHANGED_PASSES. A failure
+    is not kept, so each control runs the case again and fails."""
     unchanged, changed = copies
-    case(pathlib.Path(tempfile.mkdtemp(prefix="case-", dir=tmp_path)), *args, workflows=unchanged)
+    if (case, args) not in UNCHANGED_PASSES:
+        case(pathlib.Path(tempfile.mkdtemp(prefix="case-", dir=tmp_path)), *args, workflows=unchanged)
+        UNCHANGED_PASSES.add((case, args))
     with pytest.raises(AssertionError) as caught:
         case(pathlib.Path(tempfile.mkdtemp(prefix="case-", dir=tmp_path)), *args, workflows=changed)
     assert " ".join(said.split()) in " ".join(str(caught.value).split()), \

@@ -57,8 +57,9 @@ that says it.
 Each case runs the steps and the scripts of the workflows with stand-ins: this file's gh, which gives the API's answers
 from files and records each call with its GH_TOKEN, and for the screen the stand-in services of tests/test_screen.py.
 A changed-code control (its name holds the word control) copies the scripts and the workflows into a temporary
-directory. It runs its case on that copy, where the case passes. Then it changes a second copy, runs the case there,
-and asserts that the case fails.
+directory. It runs its case on that copy, where the case passes. The copy is the same for each control of a case, so
+only the first of them in a process runs it, and the others read its pass (Stand.passes_unchanged). Then it changes a
+second copy, runs the case there, and asserts that the case fails.
 
 Of the test files, the cases (r), (s), (u), (w) and (x) import only tests/test_enroll_dispatch.py: (w) makes its
 stand-in API with its World, and uses only what World has before the move too. In a tree of the commit before the move
@@ -66,8 +67,10 @@ stand-in API with its World, and uses only what World has before the move too. I
 """
 import ast
 import contextlib
+import copy
 import datetime
 import fnmatch
+import functools
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -190,6 +193,17 @@ LOOKUP = re.compile(r"[A-Za-z_][A-Za-z0-9_.\-]*")
 YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
 
+@functools.cache
+def parsed(text):
+    return yaml.load(text, Loader=YAML_LOADER)
+
+
+def parse(text):
+    """The YAML `text`, parsed once in this process for each text: the tests read the same workflows many times. Each
+    call gets a copy of its own, so that a test that changes what it got changes no other test's."""
+    return copy.deepcopy(parsed(text))
+
+
 def as_text(value):
     """A value as an env or an output gets it."""
     return "true" if value is True else "false" if value is False else "" if value is None else str(value)
@@ -269,6 +283,11 @@ def ago(minutes):
 def members(path):
     with tarfile.open(path) as archive:
         return archive.getnames()
+
+
+# The cases that passed on an unchanged copy of the tree in this process (Stand.passes_unchanged), each as (its class,
+# its name, its arguments).
+UNCHANGED_PASSES = set()
 
 
 class Stand(unittest.TestCase):
@@ -365,7 +384,7 @@ class Stand(unittest.TestCase):
 
     def workflow(self, tree, name):
         self.need(tree, f".github/workflows/{name}")
-        return yaml.load((tree / ".github" / "workflows" / name).read_text(), Loader=YAML_LOADER)
+        return parse((tree / ".github" / "workflows" / name).read_text())
 
     def step(self, workflow, job, name):
         found = [s for s in workflow["jobs"][job]["steps"] if s.get("name") == name]
@@ -402,6 +421,17 @@ class Stand(unittest.TestCase):
             self.assertNotEqual(new, text, path)
             file.write_text(new)
         return tree
+
+    def passes_unchanged(self, case, *args, **kwargs):
+        """case(<an unchanged copy of the tree>, *args, **kwargs) passes. A control runs this before it runs its case
+        on its changed copy, so that only its change can make the case fail there. An unchanged copy is the tree
+        itself, byte for byte, so each control of a case would run the same case on the same files: the first control
+        of a case and its arguments in this process runs it, and the others read its pass from UNCHANGED_PASSES. A
+        failure is not kept, so each control runs the case again and fails."""
+        key = (type(self), case.__name__, args, tuple(sorted(kwargs.items())))
+        if key not in UNCHANGED_PASSES:
+            case(self.copy_tree("unchanged"), *args, **kwargs)
+            UNCHANGED_PASSES.add(key)
 
     def main_checkout(self, where, tree=ROOT):
         """`where` as the checkout of main that the gather job makes: the scripts of `tree`, with a stand-in
@@ -520,7 +550,7 @@ class PullRequestWorkflows(unittest.TestCase):
     def test_x_no_workflow_with_workflow_dispatch_builds_the_code_of_a_pull_request(self):
         builds = []
         for path in self.workflows():
-            workflow = yaml.load(path.read_text(), Loader=YAML_LOADER)
+            workflow = parse(path.read_text())
             on = triggers(workflow)
             for name, job in workflow["jobs"].items():
                 for step in job.get("steps") or []:
@@ -538,7 +568,7 @@ class PullRequestWorkflows(unittest.TestCase):
         # A run for a pull request into another branch would give the pull request into main from the same branch and
         # commit a second review or triage.
         for name in ("build.yaml", "triage.yaml"):
-            on = triggers(yaml.load((ROOT / ".github" / "workflows" / name).read_text(), Loader=YAML_LOADER))
+            on = triggers(parse((ROOT / ".github" / "workflows" / name).read_text()))
             self.assertIn("pull_request", on, name)
             self.assertEqual({k: v for k, v in (on["pull_request"] or {}).items() if k.startswith("branches")},
                              {"branches": ["main"]}, name)
@@ -659,14 +689,14 @@ match args:
         self.case()
 
     def test_control_publish_event_check_taken_out_of_the_jobs_if(self):
-        self.case(self.copy_tree("unchanged"))
+        self.passes_unchanged(self.case)
         changed = self.copy_tree("changed", [(f".github/workflows/{self.PUBLISH}", self.EVENT_CHECK, "")])
         with self.assertRaises(AssertionError) as caught:
             self.case(changed)
         self.assertIn("the runs that publish acts on", str(caught.exception))
 
     def test_control_publish_path_check_taken_out_of_the_jobs_if(self):
-        self.case(self.copy_tree("unchanged"))
+        self.passes_unchanged(self.case)
         changed = self.copy_tree("changed", [(f".github/workflows/{self.PUBLISH}", self.PATH_CHECK, "")])
         with self.assertRaises(AssertionError) as caught:
             self.case(changed)
@@ -1133,7 +1163,7 @@ match args:
         """handover_case passes on an unchanged copy of the tree, and fails on a copy with `changes` (copy_tree). Its
         message names the part `part`. On each copy, the case stops after `part`, so the parts after it do not run.
         Return the message."""
-        self.handover_case(self.copy_tree("unchanged"), upto=part)
+        self.passes_unchanged(self.handover_case, upto=part)
         changed = self.copy_tree("changed", changes)
         with self.assertRaises(AssertionError) as caught:
             self.handover_case(changed, upto=part)
@@ -1304,7 +1334,7 @@ match args:
     def guard_fails(self, case, old, new=""):
         """`case` passes on an unchanged copy of the tree, and fails on a copy whose publish file has `new` for `old`
         (copy_tree). Return its message."""
-        case(self.copy_tree("unchanged"))
+        self.passes_unchanged(case)
         changed = self.copy_tree("changed", [(f".github/workflows/{self.PUBLISH}", old, new)])
         with self.assertRaises(AssertionError) as caught:
             case(changed)
@@ -1574,7 +1604,7 @@ shutil.copyfile(home / "archive", args[args.index("-o") + 1])
         publish, images = self.workflow(ROOT, self.PUBLISH), self.workflow(ROOT, self.IMAGES)
         self.assertEqual(triggers(publish), {"workflow_run": {"workflows": [images["name"]], "types": ["completed"],
                                                              "branches": ["main"]}})
-        names = [yaml.load(p.read_text(), Loader=YAML_LOADER).get("name")
+        names = [parse(p.read_text()).get("name")
                  for p in sorted((ROOT / ".github" / "workflows").iterdir()) if p.suffix in (".yml", ".yaml")]
         self.assertEqual(names.count(images["name"]), 1, names)
         on = triggers(images)
@@ -1733,7 +1763,7 @@ class FirstRunArtifact(Stand):
         self.case()
 
     def test_control_s_route_reads_the_artifact(self):
-        self.case(self.copy_tree("unchanged"))
+        self.passes_unchanged(self.case)
         changed = self.copy_tree("changed", [(".github/workflows/review.yml", self.ROUTE_OUTPUTS,
                                               self.FROM_ARTIFACT + self.ROUTE_OUTPUTS)])
         with self.assertRaises(AssertionError) as caught:
@@ -1741,7 +1771,7 @@ class FirstRunArtifact(Stand):
         self.assertIn("route's outputs (another number)", str(caught.exception))
 
     def test_control_s_take_build_results_compares_nothing(self):
-        self.case(self.copy_tree("unchanged"))
+        self.passes_unchanged(self.case)
         changed = self.copy_tree("changed", [(".github/scripts/take-build-results", self.COMPARISON, "")])
         with self.assertRaises(AssertionError) as caught:
             self.case(changed)
@@ -2043,7 +2073,7 @@ class BuildArtifacts(Stand):
         self.case()
 
     def test_control_artifacts_build_results_renamed_in_build_yaml_alone(self):
-        self.case(self.copy_tree("unchanged"))
+        self.passes_unchanged(self.case)
         changed = self.copy_tree("changed", [(self.BUILD, "name: build-results\n", "name: build-output\n")])
         with self.assertRaises(AssertionError) as caught:
             self.case(changed)
@@ -2053,7 +2083,7 @@ class BuildArtifacts(Stand):
     def test_control_artifacts_results_json_renamed_in_build_yaml_alone(self):
         # The results job writes build.json and uploads it. build.yaml stays whole, but take-build-results reads
         # results.json.
-        self.case(self.copy_tree("unchanged"))
+        self.passes_unchanged(self.case)
         changed = self.copy_tree("changed", [
             (self.BUILD, "path: ${{ runner.temp }}/results/results.json",
              "path: ${{ runner.temp }}/results/build.json"),
@@ -2079,7 +2109,7 @@ class WorkflowRunNames(Stand):
         each (listening file, name) that no file or more than one file has. Return the names that each listening file
         listens to, and the files of each name."""
         directory = tree / ".github" / "workflows"
-        workflows = {path.name: yaml.load(path.read_text(), Loader=YAML_LOADER)
+        workflows = {path.name: parse(path.read_text())
                      for path in sorted(directory.iterdir()) if path.suffix in (".yml", ".yaml")}
         held = {}
         for file, workflow in workflows.items():
@@ -2104,7 +2134,7 @@ class WorkflowRunNames(Stand):
         self.case()
 
     def test_control_workflow_run_tests_renamed_in_tests_yaml_alone(self):
-        self.case(self.copy_tree("unchanged"))
+        self.passes_unchanged(self.case)
         changed = self.copy_tree("changed", [(".github/workflows/tests.yaml", 'name: "Tests"\n',
                                               'name: "Unit tests"\n')])
         with self.assertRaises(AssertionError) as caught:
@@ -2114,7 +2144,7 @@ class WorkflowRunNames(Stand):
 
     def test_control_workflow_run_a_second_file_named_build(self):
         # No file listens to Enroll dispatch, so only the name Build breaks: two files hold it.
-        self.case(self.copy_tree("unchanged"))
+        self.passes_unchanged(self.case)
         changed = self.copy_tree("changed", [(".github/workflows/enroll-dispatch.yml", "name: Enroll dispatch\n",
                                               "name: Build\n")])
         with self.assertRaises(AssertionError) as caught:
@@ -2259,8 +2289,12 @@ class SteeringGate(Stand):
         dispatch.standing = lambda config, login: ""
         return dispatch
 
+    def case_first_in(self, tree):
+        """case_first for the copy of enroll-dispatch in `tree` (load)."""
+        self.case_first(self.load(tree))
+
     def test_control_w_gate_taken_out_of_decision(self):
-        self.case_first(self.load(self.copy_tree("unchanged")))
+        self.passes_unchanged(self.case_first_in)
         changed = self.load(self.copy_tree("changed", [(".github/scripts/enroll-dispatch", self.GATE, self.NO_GATE)]))
         with self.assertRaises(AssertionError) as caught:
             self.case_first(changed)
@@ -2311,10 +2345,10 @@ class RunByHandOffMain(Stand):
         self.case()
 
     def test_control_z2_main_check_taken_out_of_each_jobs_if(self):
-        self.case(self.copy_tree("unchanged"))
+        self.passes_unchanged(self.case)
 
         def no_main_check(text):
-            workflow = yaml.load(text, Loader=YAML_LOADER)
+            workflow = parse(text)
             changed = set()
             for name, job in workflow["jobs"].items():
                 if MAIN_CHECK in str(job.get("if", "")):
@@ -2591,14 +2625,14 @@ class HeldApproval(Stand):
         self.case_held_verdict(ROOT)
 
     def test_held_control_verdict_condition_taken_out_of_the_approval_step(self):
-        self.case_held_verdict(self.copy_tree("unchanged"))
+        self.passes_unchanged(self.case_held_verdict)
         changed = self.copy_tree("changed", [(".github/workflows/review.yml", self.APPROVE_IF, self.APPROVE_IF_ANY)])
         with self.assertRaises(AssertionError) as caught:
             self.case_held_verdict(changed)
         self.assertIn("the approval of a head that the screen held", str(caught.exception))
 
     def test_held_control_verdict_refusal_taken_out_of_approve_held(self):
-        self.case_held_verdict(self.copy_tree("unchanged"))
+        self.passes_unchanged(self.case_held_verdict)
         changed = self.copy_tree("changed", [(".github/scripts/approve-held", self.REFUSAL, "")])
         with self.assertRaises(AssertionError) as caught:
             self.case_held_verdict(changed)
@@ -2890,7 +2924,7 @@ class HeldApproval(Stand):
         self.case_merge_run_as_github_lists_it(ROOT)
 
     def test_held_control_route_checks_a_merge_run_by_its_status_alone(self):
-        self.case_merge_run_as_github_lists_it(self.copy_tree("unchanged"))
+        self.passes_unchanged(self.case_merge_run_as_github_lists_it)
         changed = self.copy_tree("changed", [(".github/workflows/review.yml", self.HELD_MERGE, self.STATUS_ALONE)])
         with self.assertRaises(AssertionError) as caught:
             self.case_merge_run_as_github_lists_it(changed)
@@ -3015,7 +3049,7 @@ class HeldScreen(Stand):
         self.case_no_token(ROOT)
 
     def test_held_control_screen_sign_in_failure_turned_into_a_held_verdict(self):
-        self.case_no_token(self.copy_tree("unchanged"))
+        self.passes_unchanged(self.case_no_token)
         changed = self.copy_tree("changed", [(".github/scripts/screen.py", self.STOPS, self.HOLDS)])
         with self.assertRaises(AssertionError) as caught:
             self.case_no_token(changed)
@@ -3136,7 +3170,7 @@ class HeldRuns(Stand):
         for run_id, printed in broken.items():
             self.serve_error(f"repos/{REPO}/actions/runs/{run_id}/rerun-failed-jobs", printed)
         since = len(self.calls())
-        workflow = yaml.safe_load(self.workflow_text)
+        workflow = parse(self.workflow_text)
         before = datetime.datetime.now(datetime.timezone.utc)
         rc, log, _ = self.run_step(workflow, "held-runs", self.STEP,
                                    {"github.token": WORKFLOW_TOKEN, "github.repository": REPO}, self.temp)
@@ -3572,14 +3606,14 @@ class HeldRuns(Stand):
         # reopened, and a run by hand, in one concurrency group whose waiting runs keep their places. A run by hand
         # runs on main alone.
         import test_outside_screen
-        workflow = yaml.safe_load(self.workflow_text)
+        workflow = parse(self.workflow_text)
         self.assertEqual(workflow["name"], "Held runs")
         self.assertEqual(triggers(workflow), {
             "workflow_run": {"workflows": ["Build", "Triage", "Tests"], "types": ["completed"]},
             "push": {"branches": ["main"]},
             "issues": {"types": ["opened", "reopened"]},
             "workflow_dispatch": None})
-        names = {yaml.safe_load((ROOT / ".github" / "workflows" / f).read_text())["name"]
+        names = {parse((ROOT / ".github" / "workflows" / f).read_text())["name"]
                  for f in ("build.yaml", "triage.yaml", "tests.yaml")}
         self.assertEqual(names, {"Build", "Triage", "Tests"})
         self.assertEqual(workflow["concurrency"], {"group": "held-runs", "cancel-in-progress": False, "queue": "max"})
