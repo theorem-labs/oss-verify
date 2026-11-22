@@ -101,9 +101,9 @@ name: Held runs
 on:
   # A run of the pull requests' own workflows that ended: Build and Tests run for each push of a pull request whose
   # runs GitHub does not hold, and for an approved run of a held head. Triage runs for those too, but only when the
-  # pull request changes a file under projects/ (its paths filter, and its limits, in triage.yaml): an event that the
-  # filter skips, an edit of the description among them, starts no run of this file, and a held head waits for the
-  # next event.
+  # pull request changes a file under projects/ (its paths filter, and its limits, in triage.yaml). So an edit of the
+  # description of any other pull request starts no run of this file (Terms, which runs on it, is not listed here),
+  # and a held head waits for the next event.
   workflow_run:
     workflows: [Build, Triage, Tests]
     types: [completed]

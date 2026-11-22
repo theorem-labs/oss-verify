@@ -47,11 +47,12 @@ on:
     # request into another branch gives the pull request into main from the same branch and commit a second triage.
     branches: [main]
     # Only a pull request that changes a file under projects/: review.yml writes a triage comment for no other. Before
-    # this filter, each event of any other pull request ran this job and, on its completion, review.yml's route and
-    # collect (route stopped with "touches nothing under projects/"), enroll-dispatch.yml's decide after that Review
-    # run, and held-runs.yml's sweep. GitHub matches the filter against the files that the pull request changes (its
-    # three-dot diff, from the merge base to the head), not those of the latest push alone, on each event of the types
-    # below: an edit of the description of a pull request that changes nothing under projects/ starts no run either.
+    # this filter, each push and each edit of the description (not of the title alone, below) of any other pull
+    # request ran this job and, on its completion, review.yml's route and collect (route stopped with "touches
+    # nothing under projects/"), enroll-dispatch.yml's decide after that Review run, and held-runs.yml's sweep. GitHub
+    # matches the filter against the files that the pull request changes (its three-dot diff, from the merge base to
+    # the head), not those of the latest push alone, on each event of the types below: an edit of the description of a
+    # pull request that changes nothing under projects/ starts no run either.
     # A run needs both filters, branches and paths, to match. A pull request whose later pushes take back each of its
     # changes under projects/ starts no more runs, and its comment stays as it was.
     # Where the filter and route can differ, route still reads the pull request's files and decides:
@@ -63,9 +64,10 @@ on:
     #   - When GitHub cannot make the diff in time, the run starts, and route writes no comment when nothing is under
     #     projects/. A pull request that changes this file controls its own run (above).
     # (https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onpushpull_requestpull_request_targetpathspaths-ignore)
-    # held-runs.yml sweeps every held head of the repository when a run of Triage, Build or Tests completes. An event
-    # that this filter skips starts no sweep, so a held head waits for the next event (a run of Build or Tests that
-    # completes, a push to main, an issue), with no bound on the wait.
+    # held-runs.yml sweeps every held head of the repository when a run of Triage, Build or Tests completes. A push
+    # that this filter skips still starts the sweep through Build and Tests. An edit of the description that it skips
+    # starts none (Terms, which runs on it, starts no sweep), so a held head waits for the next event (a run of Build
+    # or Tests that completes, a push to main, an issue), with no bound on the wait.
     # A workflow that its paths filter skips leaves its checks pending, and a pending check that the ruleset requires
     # blocks the merge. The check triage is not required (the ruleset requires enrollment, project-builds,
     # terms-accepted and tests), so the skip blocks nothing. Never put a paths filter on a workflow that posts a
