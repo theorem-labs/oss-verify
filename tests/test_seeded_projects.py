@@ -66,8 +66,8 @@ class SeedContacts(unittest.TestCase):
     """Every seeds/<name>/project.yaml has primary_contact: n/a and no auto_ccs: it gives findings to no one. The
     addresses of a seeded project go in projects/<name>/project.yaml, and .github/scripts/terms-accepted reads them
     only there: a branch that adds one needs the adopter's record of the OSS Verify terms. An address in seeds/ would
-    skip that record. The tests check runs this test for each change that is not only documentation, a change to seeds/
-    included."""
+    skip that record. The tests check runs this test for every change but a fork's change to projects/, which enrollment
+    refuses if it changes seeds/."""
 
     def test_every_seed_port_has_primary_contact_n_a_and_no_auto_ccs(self):
         self.assertTrue(list(seeded_projects.SEEDS.glob("*/project.yaml")), "seeds/ has no <name>/project.yaml")
@@ -554,10 +554,10 @@ class Table(unittest.TestCase):
         for case, changes in refused.items():
             with self.subTest(case), self.assertRaises(seeded_projects.Error):
                 self.table(changes)
-        # Every other character at which str.splitlines ends a line, put at the end of dee's row (line 4). The route job
-        # of .github/workflows/tests.yaml reads seeds/builds.tsv between newlines only, so it reads such a character as
-        # part of a row: kay's name after the character, or, for "\r\n", a "\r" at the end of dee's last field.
-        # tsv_fields refuses each at dee's line, before it splits the line into fields.
+        # Every other character at which str.splitlines ends a line, put at the end of dee's row (line 4). A line ends at
+        # a newline only, so such a character would be part of a row: kay's name after the character, or, for "\r\n", a
+        # "\r" at the end of dee's last field. tsv_fields refuses each at dee's line, before it splits the line into
+        # fields.
         for end in ("\r", "\r\n", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
             with self.subTest(end=end), self.assertRaisesRegex(
                     seeded_projects.Error, r"/seeds/builds\.tsv: line 4 holds a line end other than a newline"):

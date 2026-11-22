@@ -14,8 +14,8 @@ Needs Docker, the newest C toolchain image, and qemu-riscv64-static on PATH:
 
     OV_DOCKER_TESTS=1 uv run pytest tests/test_seed_runs_docker.py
 
-So the suite job of tests.yaml skips it. tests/test_core_dump_filter.py, which suite runs, checks the coredump_filter
-of each run without them.
+So the job tests of tests.yaml leaves it out (its DOCKER_TESTS). tests/test_core_dump_filter.py, which that job runs,
+checks the coredump_filter of each run without them.
 """
 import os
 import pathlib

@@ -5,59 +5,41 @@ name: "Tests"
 # runs the pull request's code, with GitHub's pull_request event: a run from a fork gets a read-only token and no
 # secret. While the author has no merged contribution here, GitHub holds the run until it is approved: review.yml
 # approves it after its automated screen passes the pull request (.github/workflows/held-runs.yml starts that screen).
-# A pull request from a fork that changes a file under projects/ is an enrollment: for it route checks out the merge
-# only to read, as data, the paths it changes and the merge's seeds/builds.tsv, no job runs its code, and the check
-# passes with "not run" in its summary. enrollment (validate.yaml) refuses such a fork if it changes anything but one
-# projects/<name>/, or if that project is seeded, and project-builds (build.yaml) builds that project. A pull request
-# from a fork that changes no file under projects/ (a change to src/, say) is tested as a branch of this repository is,
-# and review.yml gives it a change review.
+# A pull request from a fork that changes a file under projects/ is an enrollment: for it the job reads, as data, only
+# the paths that GitHub's merge changes, runs no code of the fork, and passes with "not run" in its summary. enrollment
+# (validate.yaml) refuses such a fork if it changes anything but one projects/<name>/, or if that project is seeded, and
+# project-builds (build.yaml) builds that project. A pull request from a fork that changes no file under projects/ (a
+# change to src/, say) is tested as a branch of this repository is, and review.yml gives it a change review.
 #
-# Each commit is judged on its own changes: for a pull request, GitHub's merge of it against the base branch; for a push
-# to main, against the commit before the push. The jobs:
-#   route     decides which of the two jobs below the changes need, from the paths they change (git diff, renames as
-#             both names):
-#               - only documentation (docs/, and the Markdown files at the top but README.md, which a test reads):
-#                 docs, which runs the tests that read those files;
-#               - anything else: suite;
-#               - nothing: neither.
-#             A pull request from a fork that changes a file under projects/ runs neither (above). A run started by
-#             hand, or a push whose earlier commit cannot be read, runs suite.
-#             route also decides if the job it asks for runs Committed, the test in tests/test_seeded_projects.py that
-#             docs/seeded-projects.tsv is what src/oss_verify/seeded_projects.py writes. Committed runs when a changed
-#             path is a file that the table depends on, the table, or its test: src/oss_verify/seeded_projects.py,
-#             src/oss_verify/validate.py (the generator reads each series with it), a file under seeds/, a file under
-#             projects/<name>/ of a seeded project (its port), docs/seeded-projects.tsv or
-#             tests/test_seeded_projects.py. A seeded project is a project with a row in seeds/builds.tsv. route reads
-#             that file of the commit as data and runs no code of the change. Committed also runs when there is no
-#             earlier commit to compare with. Other changes do not run it. Thus a pull request that makes the table
-#             stale fails the check tests, and Committed's message names the command that writes the table. A pull
-#             request from a fork that changes a file under projects/ runs no job here (above), and enrollment refuses
-#             it if it changes a file outside one projects/<name>/. enrollment also refuses it if
-#             docs/seeded-projects.tsv marks that project seeded, so a fork's change to the port of a seeded project
-#             cannot merge. A branch of this repository carries such a change, and runs Committed. A push to main that
-#             makes the table stale also runs Committed, and fails the check tests on main's commit.
-#   suite     the tests in tests, and oss-verify validate on every project. It runs Committed only when route asks
-#             for it.
-#   docs      the tests that read the documentation: tests/test_check.py's test that no tracked file but
-#             infra/toolchains.tsv names a toolchain digest, which reads every file git tracks, the documentation too;
-#             and Committed, when route asks for it. A new test that reads the documentation goes here as well.
-#   required  always runs, after the others, and reports the required check tests (.github/scripts/collect): it passes
-#             only if route passed, each job route asked for passed, and the other was skipped. A skipped job counts as
-#             a pass where a check is required, so neither suite nor docs is the required check.
+# One job, tests, reports the required check tests. It has no if:, so it runs on every event this workflow takes, and
+# the check is never a skipped job, which GitHub counts as a pass where a check is required. Each run tests the whole
+# tree of its commit (for a pull request, GitHub's merge of it into the base branch), whatever paths the change touches:
+# no step chooses tests by the changed paths. The steps, in order:
+#   - On a pull request: it targets the default branch, and the checkout is GitHub's merge into it (below).
+#   - On a pull request from a fork: whether the merge changes a file under projects/ (git diff against the merge's
+#     first parent, renames as both names). If it does, the step says "Not run" in the summary, and each step after it
+#     is skipped, so the job passes having run no code of the fork. These first steps run only git, gh and jq, and read
+#     the event and the merge's paths as data.
+#   - The tests in tests/ but the Docker tests (DOCKER_TESTS, below), which fail the job if any test skips, and
+#     oss-verify validate on every project.
+# tests/test_seeded_projects.py's Committed, the test that docs/seeded-projects.tsv is what
+# src/oss_verify/seeded_projects.py writes, runs in every run, so a change that makes the table stale fails the check
+# tests, and Committed's message names the command that writes the table. A fork's change to projects/ runs no test
+# (above), and enrollment refuses it if docs/seeded-projects.tsv marks that project seeded, so a fork's change to the
+# port of a seeded project cannot merge: a branch of this repository carries such a change.
 #
-# On a pull request the checkout is GitHub's merge of it into its base branch. route fails for a pull request into any
+# On a pull request the checkout is GitHub's merge of it into its base branch. The job fails for a pull request into any
 # branch but the default one, as enrollment and project-builds do (build.yaml says why). The workflow does not run on
 # edited, which GitHub sends for an edit of the title or description (nothing this judges changes) and for a change
 # of base. After a change of base, push a commit to run it again; until then a pull request into another branch keeps
-# its failed check, and one moved to the default branch from another keeps the failure it got there. route also fails
+# its failed check, and one moved to the default branch from another keeps the failure it got there. The job also fails
 # unless the merge's first parent is on the base branch: a run after a change of base, such as one started by a reopen
 # or a rerun, can check out a merge into the earlier base (https://github.com/actions/checkout/issues/919). It then says
-# to push a commit, since a rerun checks out the same merge. required does the same check for a fork's run, before it
-# takes .github/scripts/collect from that first parent.
+# to push a commit, since a rerun checks out the same merge.
 #
 # No job gets a secret, cache, artifact or write permission. Never add one. The contents: read token goes to
-# actions/checkout and to the steps of route and required that ask the API where the merge's first parent is, never
-# to a step that runs the branch's code.
+# actions/checkout and to the step that asks the API where the merge's first parent is, never to a step that runs the
+# branch's code.
 #
 # To run it on a branch:
 #   gh workflow run tests.yaml --ref <branch>
@@ -74,27 +56,34 @@ on:
 permissions: {}
 
 env:
-  # A pull request from a fork: when it changes a file under projects/, route asks for no job, so no step runs its code
-  # (the top of this file). The required job never runs a fork's code.
+  # A pull request from a fork: when it changes a file under projects/, no step runs its code (the top of this file).
   FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+  # The Docker tests: the files whose tests build fixtures in the toolchain images, most of them running the binaries
+  # under qemu-riscv64-static (all but NoFramePointerImage of tests/test_builder.py, which needs no image). The job tests
+  # leaves the whole files out (--ignore), so none of their tests counts as a skip there.
+  # .github/workflows/frame-pointer-tests.yaml runs the class FramePointers of tests/test_builder.py.
+  DOCKER_TESTS: >-
+    tests/test_builder.py tests/test_append_docker.py tests/test_binary_checks_docker.py tests/test_seed_runs_docker.py
+    tests/test_target_settings_docker.py
 
 concurrency:
-  # A pull request's newer run cancels its older one, which loses nothing: each run judges the merge against the base.
-  # A push to main has a group of its own, the commit's: route compares a push with the commit before it, so a later
-  # push must never cancel it, or the changes of the cancelled push would never be tested.
-  group: ${{ github.event_name == 'push' && format('tests-push-{0}', github.sha) || format('tests-{0}-{1}', github.event_name, github.event.pull_request.number || github.ref) }}
+  # One group for each pull request, and one for the pushes to main (github.ref is then refs/heads/main): a newer run
+  # cancels the older one. That loses nothing, since each run tests the whole tree of its commit, never the changes
+  # since an earlier one, and the newer commit holds the older one's changes. A run by hand has the group of its branch.
+  group: tests-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  route:
+  tests:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
+      # For actions/checkout, and for the compare call of the step "The checkout is the merge into the base branch".
       contents: read
-    outputs:
-      suite: ${{ steps.paths.outputs.suite }}
-      docs: ${{ steps.paths.outputs.docs }}
-      table: ${{ steps.paths.outputs.table }}
+    # This repository's package, for python3 -P -c and -m: -P keeps the top of the checkout off sys.path, and
+    # PYTHONPATH names its src/ alone. pytest reads the same directory from pyproject.toml's pythonpath.
+    env:
+      PYTHONPATH: ${{ github.workspace }}/src
     steps:
       - name: The pull request targets the default branch
         if: github.event_name == 'pull_request'
@@ -110,7 +99,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with:
           persist-credentials: false
-          # The commit and its parents, for its changes against its first parent.
+          # The commit and its parents: the next two steps read a pull request's merge against its first parent.
           fetch-depth: 2
 
       - name: The checkout is the merge into the base branch
@@ -130,112 +119,31 @@ jobs:
                exit 1 ;;
           esac
 
-      - name: Which jobs the changes need
-        id: paths
-        env:
-          EVENT: ${{ github.event_name }}
-          BEFORE: ${{ github.event.before }}
+      # Inline, and it runs only git: the checkout holds the fork's files, and nothing of them runs here. Each step after
+      # this one runs only when this step did not find an enrollment.
+      - name: A fork's change to projects/ runs no code here
+        id: fork
+        if: env.FORK == 'true'
         run: |
           set -euo pipefail
           say() { echo "$1"; echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
-          from=""
-          case $EVENT in
-            pull_request) from=HEAD^1 ;;
-            # The commit main was at before the push, fetched without credentials (the repository is public). A new
-            # branch's push, or one whose earlier commit cannot be fetched, has none to compare with.
-            push)
-              if [[ $BEFORE =~ ^[0-9a-f]{40}$ && ! $BEFORE =~ ^0+$ ]] \
-                  && git fetch --quiet --no-tags --depth=1 origin "$BEFORE"; then
-                from=$BEFORE
-              fi ;;
-          esac
-          if [ -z "$from" ]; then
-            echo "suite=true" >> "$GITHUB_OUTPUT"
-            echo "table=true" >> "$GITHUB_OUTPUT"
-            say "suite and tests/test_seeded_projects.py::Committed run: a $EVENT run has no earlier commit to compare with."
-            exit 0
-          fi
-          git diff --no-renames --name-only -z "$from" HEAD > "$RUNNER_TEMP/paths"
-          # The seeded projects: for each line of seeds/builds.tsv in the commit, the text before its first tab. A line
-          # ends at a newline, or at the end of the file. The step skips empty lines, comment lines (#) and the line of
-          # column names, as the generator does (tsv_fields in src/oss_verify/seeded_projects.py). The generator also
-          # ends a line only at a newline: it refuses a file that holds another character at which str.splitlines ends a
-          # line, such as a carriage return. It also refuses a row without a value in each of its columns. So for a file
-          # that the generator accepts, the step reads the same rows as the generator, and the text before the first tab
-          # of a row is its first field. A change to the file runs Committed (seeds/* below), which fails when the
-          # generator refuses the file. seeded holds one name on each line, between newlines. The step reads the file
-          # with git as data and runs nothing from it. With no such file, no project is seeded.
-          seeded=$'\n'
-          if [ "$(git cat-file -t HEAD:seeds/builds.tsv 2>/dev/null)" = blob ]; then
-            git cat-file blob HEAD:seeds/builds.tsv > "$RUNNER_TEMP/builds.tsv"
-            while IFS= read -r line || [ -n "$line" ]; do
-              case $line in
-                ''|'#'*|$'project\tresult\tdetail') ;;
-                *) seeded+="${line%%$'\t'*}"$'\n' ;;
-              esac
-            done < "$RUNNER_TEMP/builds.tsv"
-          fi
-          changed=0 other=0 projects=0 table=0
+          git diff --no-renames --name-only -z HEAD^1 HEAD > "$RUNNER_TEMP/paths"
+          changed=0 projects=0
           while IFS= read -r -d '' path; do
             changed=$((changed + 1))
             [[ $path == projects/* ]] && projects=$((projects + 1))
-            # The files docs/seeded-projects.tsv depends on, the table, and its test (the top of this file). A path
-            # under projects/ is one of them when its first name after projects/ is the name of a seeded project.
-            case $path in
-              src/oss_verify/seeded_projects.py|src/oss_verify/validate.py|seeds/*|docs/seeded-projects.tsv|tests/test_seeded_projects.py)
-                table=$((table + 1)) ;;
-              projects/*)
-                name=${path#projects/}
-                if [[ $seeded == *$'\n'"${name%%/*}"$'\n'* ]]; then
-                  table=$((table + 1))
-                fi ;;
-            esac
-            # docs/, and a Markdown file at the top but README.md (tests/test_triage.py reads it).
-            if [[ $path == docs/* || ( $path != */* && $path == *.md && $path != README.md ) ]]; then
-              continue
-            fi
-            other=$((other + 1))
           done < "$RUNNER_TEMP/paths"
-          if [ "${FORK:-false}" = true ] && (( projects )); then
+          if (( projects )); then
+            echo "enrollment=true" >> "$GITHUB_OUTPUT"
             say "Not run: this pull request is from a fork and changes $projects of its $changed files under projects/, so it is an enrollment, and this workflow runs no code of a fork's enrollment. enrollment checks that it changes only one projects/<name>/, of a project that docs/seeded-projects.tsv does not mark seeded, and project-builds builds that project."
-            exit 0
-          fi
-          if (( other )); then
-            echo "suite=true" >> "$GITHUB_OUTPUT"
-            say "suite runs: $other of the $changed changed files are not documentation."
-          elif (( changed )); then
-            echo "docs=true" >> "$GITHUB_OUTPUT"
-            say "docs runs: the $changed changed files are all documentation."
           else
-            say "Nothing runs: the commit changes no file."
+            say "The tests run: this pull request is from a fork and changes none of its $changed files under projects/."
           fi
-          inputs="src/oss_verify/seeded_projects.py, src/oss_verify/validate.py, seeds/, projects/<name>/ of a seeded project"
-          if (( table )); then
-            echo "table=true" >> "$GITHUB_OUTPUT"
-            say "tests/test_seeded_projects.py::Committed runs: $table of the $changed changed files are docs/seeded-projects.tsv, its test, or files it depends on ($inputs)."
-          elif (( changed )); then
-            say "tests/test_seeded_projects.py::Committed does not run: no changed file is docs/seeded-projects.tsv, its test, or a file it depends on ($inputs)."
-          fi
-
-  suite:
-    needs: route
-    if: needs.route.outputs.suite == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    # This repository's package, for python3 -P -c and -m: -P keeps the top of the checkout off sys.path, and
-    # PYTHONPATH names its src/ alone. pytest reads the same directory from pyproject.toml's pythonpath.
-    env:
-      PYTHONPATH: ${{ github.workspace }}/src
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
-        with:
-          persist-credentials: false
 
       # strace: a test in tests/ checks that the review's helpers keep the GitHub token out of each process's arguments.
       # pytest-xdist: the tests in tests/ run in parallel (that step says why).
       - name: Install PyYAML, pytest, pytest-xdist and strace
+        if: steps.fork.outputs.enrollment != 'true'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml python3-pytest python3-pytest-xdist strace
 
       # The binary checks' rules (oss_verify.binary_isa, oss_verify.syscall_shapes) are tested against the files of the
@@ -245,6 +153,7 @@ jobs:
       # files and pyproject.toml). pytest runs with -c pyproject.toml, so that it reads no other configuration file, such
       # as one that a change adds under tests/, which has no owner.
       - name: The process model the binary checks were written against
+        if: steps.fork.outputs.enrollment != 'true'
         run: |
           commit=$(python3 -P -c 'from oss_verify import binary_isa, syscall_shapes
           assert binary_isa.MODEL_COMMIT == syscall_shapes.MODEL_COMMIT, "the two checks name two model commits"
@@ -254,10 +163,11 @@ jobs:
           git -C "$RUNNER_TEMP/model" checkout -q --detach FETCH_HEAD
           echo "OSS_VERIFY_MODEL=$RUNNER_TEMP/model" >> "$GITHUB_ENV"
 
-      # The Docker tests that need the toolchain image (tests/test_builder.py, test_binary_checks_docker.py,
-      # test_seed_runs_docker.py) are skipped here. tests/test_core_dump_filter.py runs here: it needs the runner's
-      # Docker, but no image to pull. -rs lists each skipped test with its reason, so the log shows what did not run.
-      # tests/test_seeded_projects.py::Committed runs only when route asks for it (the top of this file).
+      # Every test in tests/ but the Docker tests, which --ignore leaves out (DOCKER_TESTS, the top of this file).
+      # tests/test_core_dump_filter.py runs here: it needs the runner's Docker, but no image to pull. -rs lists each
+      # skipped test with its reason, and a skip fails the step: each test here needs only what this runner has (strace,
+      # the model's checkout, jq, cc, Docker), so a skip means one of them is missing, and the check must not pass
+      # without the test. pytest's last line counts the tests ("N passed, M skipped in ...").
       # The tests run in parallel, in one pytest-xdist worker for each core of the runner (-n "$(nproc)"): many of them
       # start processes, and in series this step took most of the check's time. With --dist worksteal, a worker that has
       # no test left takes tests that another worker has not started, so the slow tests near the end do not wait in one
@@ -265,119 +175,19 @@ jobs:
       # keeps the top of the checkout off sys.path in each worker, and in each python3 that a test starts, as -P does.
       # --durations=30 lists the 30 slowest tests.
       - name: The tests in tests/
+        if: steps.fork.outputs.enrollment != 'true'
         env:
-          TABLE: ${{ needs.route.outputs.table }}
           PYTHONSAFEPATH: "1"
         run: |
-          deselect=()
-          if [ "$TABLE" != true ]; then
-            deselect=(--deselect "tests/test_seeded_projects.py::Committed::test_docs_seeded_projects_tsv_is_what_the_generator_writes")
-          fi
+          set -o pipefail
+          read -r -a ignored <<< "$DOCKER_TESTS"
           python3 -P -m pytest -q -p no:cacheprovider -c pyproject.toml -rs -n "$(nproc)" --dist worksteal --durations=30 \
-            "${deselect[@]}"
+            "${ignored[@]/#/--ignore=}" | tee "$RUNNER_TEMP/pytest"
+          if tail -n 1 "$RUNNER_TEMP/pytest" | grep -qE '(^|[ ,])[0-9]+ skipped'; then
+            echo "::error::A test skipped here (each SKIPPED line above names one, and why): each test of this job must run."
+            exit 1
+          fi
 
       - name: Every project passes oss-verify validate
+        if: steps.fork.outputs.enrollment != 'true'
         run: python3 -P -m oss_verify validate < /dev/null
-
-  docs:
-    needs: route
-    if: needs.route.outputs.docs == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
-        with:
-          persist-credentials: false
-
-      - name: Install PyYAML and pytest
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml python3-pytest
-
-      - name: The tests that read the documentation
-        env:
-          TABLE: ${{ needs.route.outputs.table }}
-        run: |
-          set -o pipefail
-          tests=("tests/test_check.py::Toolchains::test_infra_toolchains_tsv_is_the_one_file_that_names_a_toolchain_digest")
-          # tests/test_seeded_projects.py::Committed runs only when route asks for it (the top of this file).
-          if [ "$TABLE" = true ]; then
-            tests+=("tests/test_seeded_projects.py::Committed::test_docs_seeded_projects_tsv_is_what_the_generator_writes")
-          fi
-          python3 -P -m pytest -q -p no:cacheprovider -c pyproject.toml -rs "${tests[@]}" | tee "$RUNNER_TEMP/pytest"
-          # Each test here must run and pass: one skips itself outside a git checkout.
-          if ! grep -qE '^[0-9]+ passed' "$RUNNER_TEMP/pytest" || grep -qE '[0-9]+ skipped' "$RUNNER_TEMP/pytest"; then
-            echo "::error::A test that reads the documentation did not run."
-            exit 1
-          fi
-
-  required:
-    # The required check tests (the top of this file). A static name: GitHub reports the check under it on every run.
-    name: tests
-    needs: [route, suite, docs]
-    if: always()
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      # Only for the checkout of .github/scripts and for the compare call of the step after it, on a fork's run.
-      contents: read
-    steps:
-      # On a pull request, the merge commit that GitHub built and its two parents. This job runs no code of a fork.
-      # For a fork's run, the next step checks out the first parent of the merge commit, a commit of the base branch
-      # and not of the fork, and the job takes .github/scripts/collect from it. GitHub built the merge that this
-      # workflow file comes from on that first parent. So, when the pull request does not change this file, this file
-      # and collect come from one commit of the base branch. The newest commit of the default branch is not always that
-      # commit: the branch can move after GitHub builds the merge, and again before a rerun. On a push, a run by hand,
-      # or a pull request from a branch of this repository, the next step does not run, and the job takes collect from
-      # the commit of the run. (A fork's pull request can change this workflow itself, so the maintainer who merges a
-      # fork's change to it reads that change.)
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
-        with:
-          fetch-depth: 2
-          persist-credentials: false
-          sparse-checkout: .github/scripts
-
-      - name: Check out the first parent of the merge commit
-        id: parent
-        if: env.FORK == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          BASE: ${{ github.event.pull_request.base.ref }}
-        run: |
-          # Inline, and it runs only git and gh: until this step ends, the checkout is the merge commit, whose files are
-          # the pull request's.
-          merge=$(git rev-parse HEAD)
-          read -r -a commits <<< "$(git rev-list --parents -n 1 HEAD)"
-          if (( ${#commits[@]} != 3 )); then
-            echo "::error::The commit $merge of this run has $(( ${#commits[@]} - 1 )) parents in its checkout, not the two of GitHub's merge commit of a pull request: this job takes no tools from it."
-            exit 1
-          fi
-          parent=${commits[1]}
-          # The head of the base branch, by its name, with no encoding of the name in a URL. ls-remote matches the end
-          # of each ref name, so refs/heads/a/refs/heads/$BASE matches too: only the line of refs/heads/$BASE counts.
-          remote=$(git ls-remote origin "refs/heads/$BASE") || remote=""
-          head=""
-          while read -r sha ref; do
-            if [ "$ref" = "refs/heads/$BASE" ]; then head=$sha; fi
-          done <<< "$remote"
-          [ -n "$head" ] || { echo "::error::The base branch $BASE could not be read from the repository."; exit 1; }
-          status=$(gh api "repos/$REPO/compare/$parent...$head" --jq .status) \
-            || { echo "::error::GitHub could not compare $parent with the head of $BASE."; exit 1; }
-          case $status in
-            identical|ahead) ;;
-            *) echo "::error::GitHub built this run's merge commit $merge on $parent, which is not in the history of $BASE (compare: $status): a merge into an earlier base. Push a commit to the branch to run this check again: a rerun checks out the same merge commit."
-               exit 1 ;;
-          esac
-          git checkout --quiet --detach "$parent"
-          echo "sha=$parent" >> "$GITHUB_OUTPUT"
-          echo "Checked out $parent, the first parent of the merge commit $merge: this job runs the tools of $BASE at that commit."
-
-      - name: Every job route asked for passed, and no other ran
-        env:
-          ROUTE: ${{ needs.route.result }}
-          SUITE: ${{ needs.suite.result }}
-          ASKED_SUITE: ${{ needs.route.outputs.suite == 'true' }}
-          DOCS: ${{ needs.docs.result }}
-          ASKED_DOCS: ${{ needs.route.outputs.docs == 'true' }}
-        run: .github/scripts/collect "$ROUTE" "suite:$SUITE:$ASKED_SUITE" "docs:$DOCS:$ASKED_DOCS"
