@@ -27,9 +27,12 @@ name: "Review"
 #            (Dependabot's, say): .github/scripts/actor-kind decides that as the action does, by the account's type,
 #            with the one list of admitted Apps, ALLOWED_BOTS below. An enrollment is reviewed with the results of
 #            that Build run (route's output build_run). After a Triage run, route asks for the triage comment alone
-#            (its output triage), when the pull request touches projects/. An issue of this repository is an issue,
-#            which asks for the review alone: on its own event (opened, edited, reopened) when the issue waits for us,
-#            and on a run started for it (gh workflow run review.yml -f issue=<n>), once route has read that the
+#            (its output triage), when the pull request touches projects/. triage.yaml's paths filter starts Triage
+#            only for such a pull request, with limits that triage.yaml tells (renames, which route counts under both
+#            names, the 3,000-file limit, a diff that times out, a pull request that changes triage.yaml), so route
+#            still reads the pull request's files and decides. An issue of this repository is an issue, which asks
+#            for the review alone: on its own event (opened, edited, reopened) when the issue waits for us, and on a
+#            run started for it (gh workflow run review.yml -f issue=<n>), once route has read that the
 #            number is an issue and not a pull request. An issue's event is ours, and route asks for nothing, when
 #            someone who is not the issue's author sent it (only a person with access to this repository can: GitHub
 #            lets no one else edit or reopen another person's issue), when an owner or a member of the organization
