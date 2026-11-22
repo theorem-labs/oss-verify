@@ -12,8 +12,9 @@ docs/build-contract.md. Running the riscv64 binaries needs qemu-riscv64 (static)
 is skipped.
 
 FramePointers also needs the frame-pointer images that .github/workflows/toolchain-images.yaml makes, named by
-OV_FP_TOOLCHAIN_C and OV_FP_TOOLCHAIN_RUST. It skips unless both are set. That workflow's docker-tests job sets both,
-and fails if a test skips.
+OV_FP_TOOLCHAIN_C and OV_FP_TOOLCHAIN_RUST. It skips unless both are set. The docker-tests job of
+.github/workflows/frame-pointer-tests.yaml makes the images again, sets both, and fails if a test skips. That workflow
+runs for a change of this file; toolchain-images.yaml calls the same job.
 """
 import os
 import pathlib
@@ -721,7 +722,7 @@ class NoFramePointerImage(unittest.TestCase):
     """This file's own command, `OV_DOCKER_TESTS=1 uv run pytest`, on a machine with Docker and the base images but
     with no frame-pointer image named (OV_FP_TOOLCHAIN_C and OV_FP_TOOLCHAIN_RUST unset): FramePointers skips, as each
     other class of this file skips when its image is not here, and the run does not fail. The docker-tests job of
-    .github/workflows/toolchain-images.yaml fails on a skipped test by itself. A docker on PATH that says that each
+    .github/workflows/frame-pointer-tests.yaml fails on a skipped test by itself. A docker on PATH that says that each
     image is here stands in for Docker and the base images."""
 
     def test_frame_pointers_skips_when_no_frame_pointer_image_is_named(self):
