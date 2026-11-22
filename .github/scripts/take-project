@@ -9,13 +9,15 @@
 #
 #   GH_TOKEN=... REPO=<owner>/<name> PR=<number> [HEAD_SHA=<commit>] .github/scripts/take-project build|validate
 #
-# build.yaml's project-builds job and validate.yaml run it from the first parent of GitHub's merge commit.
-# actions/checkout first writes the merge commit's tree, and the job's step with id: parent replaces it with the first
-# parent's before take-project runs. review.yml's gather job runs it from its checkout of main. So it never runs from
-# the pull request's own files, and HEAD is a commit of the base branch. The pull request's files are read from git's
-# object store and written as regular files: take-project checks out nothing of the pull request and runs nothing of
-# it. The token authorizes only the one `git fetch` of the pull request's commit, and is never saved in git's
-# configuration.
+# build.yaml's project-builds job, and validate.yaml's validate job on pull_request, run it from the first parent of
+# GitHub's merge commit. actions/checkout first writes the merge commit's tree, and the job's step with id: parent
+# replaces it with the first parent's before take-project runs. review.yml's gather job runs it from its checkout of
+# main. So on these runs take-project never runs from the pull request's own files, and HEAD is a commit of the base
+# branch. On a run of validate.yaml by hand (workflow_dispatch), the step with id: parent does not run: take-project
+# runs from the commit of the branch or tag that the run was started on, and HEAD is that commit. The pull request's
+# files are read from git's object store and written as regular files: take-project checks out nothing of the pull
+# request and runs nothing of it. The token authorizes only the one `git fetch` of the pull request's commit, and is
+# never saved in git's configuration.
 #
 # Every check is for the pull request as it targets the default branch. A pull request into another branch fails with
 # "This pull request targets <base>, not <default>", so that a result judged against another branch never stands as
@@ -180,9 +182,10 @@ tree_of() {
   [ "$(git cat-file -t "$id")" != tree ] || echo "$id"
 }
 
-# A branch of this repository: count what merging changes (see the top of this file). HEAD is the base branch's
-# commit that the job checked out: the first parent of the merge commit in build.yaml and validate.yaml, main in
-# review.yml.
+# A branch of this repository: count what merging changes (see the top of this file). HEAD is the commit that the job
+# checked out. In build.yaml, and in validate.yaml on pull_request, it is the first parent of the merge commit, a
+# commit of the base branch. In review.yml it is main. On a run of validate.yaml by hand (workflow_dispatch), it is the
+# commit of the branch or tag that the run was started on.
 if [ "$same_repository" = true ]; then
   base_head=$(git rev-parse HEAD)
   compare=$(gh api "repos/$REPO/compare/$base_head...$sha?per_page=1")

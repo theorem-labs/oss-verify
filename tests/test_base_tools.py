@@ -35,7 +35,7 @@ runs a step with no shell:. A stand-in gh answers the compare API with the statu
   - The step does not run on a run by hand of validate.yaml, or on a pull request from a branch in tests.yaml.
   - Each job runs its scripts, and src/oss_verify/, from P1.
 
-The last test runs the build step of build.yaml with a stand-in oss-verify check and binary-sizes. When oss-verify
+test_binary_sizes runs the build step of build.yaml with a stand-in oss-verify check and binary-sizes. When oss-verify
 check passes and a run of binary-sizes fails, the step writes a warning and a summary sentence with the exit status.
 It writes no output of binary-sizes, and its exit status does not change.
 
@@ -77,7 +77,7 @@ JOBS = {
     "terms.yaml:terms-accepted": None,
     "tests.yaml:required": "env.FORK == 'true'",
 }
-# The files of the checkout that each job runs. The first one is the file of the first step after the step with
+# The files of the checkout that each job runs. The first one is run by the first run: step after the step with
 # id: parent.
 TOOLS = {
     "build.yaml:project-builds": (".github/scripts/take-project",),
@@ -92,7 +92,7 @@ VALIDATE_STEP = "Check projects/<name>/ with oss-verify validate"
 TRAPS = (".github/scripts/take-project", ".github/scripts/collect", ".github/scripts/terms-accepted",
          ".github/scripts/binary-sizes", "src/oss_verify/__init__.py", "src/oss_verify/__main__.py")
 # The commits of the scratch repository, each with its parents. P3 is the third parent of M3, an octopus merge. M1 is
-# a merge commit with one parent. refs/pull/7/merge names M, M1 or M3.
+# a merge commit with one parent. A run's github.sha names M, M1 or M3.
 COMMITS = (("B", ()), ("P1", ("B",)), ("P2", ("B",)), ("P3", ("B",)), ("N", ("P1",)), ("M", ("P1", "P2")),
            ("M1", ("P1",)), ("M3", ("P1", "P2", "P3")))
 MESSAGES = {"M": "Merge P2 into P1", "M1": "Merge P2 into P1, with one parent",
@@ -100,8 +100,8 @@ MESSAGES = {"M": "Merge P2 into P1", "M1": "Merge P2 into P1, with one parent",
 SIGNATURE = "Test <test@example.org> 1767225600 +0000"
 # The with: inputs that the checkout model reads. It refuses a checkout with any other input.
 CHECKOUT_INPUTS = {"ref", "fetch-depth", "persist-credentials", "sparse-checkout", "path"}
-# The cases of test_the_step_refuses: the commit at refs/pull/7/merge, and the stand-in gh's answer to the compare
-# ("error": gh fails as on an error of the API).
+# The cases of test_the_step_refuses: the run's merge commit (its github.sha), and the stand-in gh's answer to the
+# compare ("error": gh fails as on an error of the API).
 REFUSALS = {
     "behind": ("M", "behind"),
     "diverged": ("M", "diverged"),
@@ -244,13 +244,16 @@ def data(text):
 
 
 class Scratch:
-    """The scratch repository of one test: a bare repository under tmp_path, read over file://. It has
+    """The scratch repository of this module's tests: a bare repository under `directory`, read over file://. It has
     uploadpack.allowFilter, for the filter of a sparse checkout, and uploadpack.allowAnySHA1InWant, for a fetch of a
-    commit by its SHA. main is at N, refs/pull/7/head at P2, and refs/pull/7/merge at `merge` (M, M1 or M3)."""
+    commit by its SHA. main is at N, refs/pull/7/head at P2, and refs/pull/7/merge at M. The branch a/refs/heads/main
+    is at B: git ls-remote origin refs/heads/main lists it too, because git matches the end of each ref name. It sorts
+    before main, so a step that takes the first line of that list compares P1 with B, not with N. The tests share this
+    repository: none of them writes to it or to the HOME of `env`."""
 
-    def __init__(self, tmp_path, merge="M"):
-        self.env = isolated_git_env(tmp_path)
-        self.origin = tmp_path / "origin.git"
+    def __init__(self, directory):
+        self.env = isolated_git_env(directory)
+        self.origin = directory / "origin.git"
         git("init", "-q", "--bare", "-b", "main", str(self.origin), env=self.env)
         git("config", "uploadpack.allowFilter", "true", cwd=self.origin, env=self.env)
         git("config", "uploadpack.allowAnySHA1InWant", "true", cwd=self.origin, env=self.env)
@@ -266,14 +269,14 @@ class Scratch:
             for path in TRAPS:
                 stream.append(f"M 100755 inline {path}\n".encode() + data(trap(name, path)))
             stream.append(b"\n")
-        for ref, name in (("refs/heads/main", "N"), ("refs/pull/7/head", "P2"), ("refs/pull/7/merge", merge)):
+        for ref, name in (("refs/heads/main", "N"), ("refs/heads/a/refs/heads/main", "B"), ("refs/pull/7/head", "P2"),
+                          ("refs/pull/7/merge", "M")):
             stream.append(f"reset {ref}\nfrom :{marks[name]}\n\n".encode())
-        exported = tmp_path / "marks"
+        exported = directory / "marks"
         subprocess.run(["git", "fast-import", "--quiet", f"--export-marks={exported}"], cwd=self.origin,
                        input=b"".join(stream), env=self.env, check=True, capture_output=True)
         by_mark = dict(line.split() for line in exported.read_text().splitlines())
         self.commits = {name: by_mark[f":{n}"] for name, n in marks.items()}
-        self.merge = self.commits[merge]
 
     def name(self, sha):
         """The name of a commit of this repository, or the text itself."""
@@ -339,9 +342,10 @@ class JobRun:
     """One run of the job `label` in the scratch repository, as GitHub runs it. It runs the steps from the job's first
     actions/checkout: each checkout by the checkout model, and each run: step under bash -e. `status` is the stand-in
     gh's answer to the compare. The run is of pull request 7 (from FORK, or from this repository when `fork` is false),
-    or a run by hand on main."""
+    or a run by hand on main. On pull_request, the run's github.sha is the merge commit `merge` (M, M1 or M3). The
+    checkout fetches github.sha by its SHA, so refs/pull/7/merge, which stays at M, does not change the run."""
 
-    def __init__(self, tmp_path, scratch, workflows, label, status="ahead", event="pull_request", fork=True):
+    def __init__(self, tmp_path, scratch, workflows, label, merge="M", status="ahead", event="pull_request", fork=True):
         self.label, self.scratch = label, scratch
         name, self.job = label.split(":")
         self.workflow = load(workflows, name)
@@ -354,7 +358,7 @@ class JobRun:
         ctx = {"github.event_name": event, "github.repository": REPO, "github.token": "stand-in-token",
                "github.workspace": str(self.workspace), "github.event.repository.default_branch": "main"}
         if event == "pull_request":
-            ctx.update({"github.sha": scratch.merge, "github.ref": "refs/pull/7/merge",
+            ctx.update({"github.sha": commits[merge], "github.ref": "refs/pull/7/merge",
                         "github.event.pull_request.number": 7,
                         "github.event.pull_request.base.ref": "main",
                         "github.event.pull_request.base.sha": commits["B"],
@@ -559,37 +563,34 @@ def terms_gives_base_sha_the_first_parent(workflows=WORKFLOWS):
 # --- the step with id: parent, run in the scratch repository ---
 
 
-def the_step_checks_out_the_first_parent(tmp_path, label, workflows=WORKFLOWS):
-    scratch = Scratch(tmp_path)
+def the_step_checks_out_the_first_parent(tmp_path, scratch, label, status, workflows=WORKFLOWS):
     p1, m, n = (scratch.commits[name] for name in ("P1", "M", "N"))
-    for status in ("ahead", "identical"):
-        run = JobRun(tmp_path, scratch, workflows, label, status=status)
-        step = run.parent()
-        if step is None:
-            run.run_to(run.steps[0])
-            raise AssertionError(f"{label}: no step has id: parent, and the checkout holds "
-                                 f"{scratch.name(run.head())}, not P1")
-        ran = run.run_to(step)
-        where = f"{label} (compare: {status})"
-        assert not ran.skipped, f"{where}: the step with id: parent did not run: its if: is false"
-        assert ran.code == 0, f"{where}: the step exited {ran.code}:\n{scratch.named(ran.log)}"
-        head = run.head()
-        assert head == p1 and run.detached(), \
-            f"{where}: HEAD is {scratch.name(head)}{'' if run.detached() else ' on a branch'}, not P1, detached"
-        assert ran.output.splitlines().count(f"sha={p1}") == 1 and outputs(ran.output).get("sha") == p1, \
-            f"{where}: $GITHUB_OUTPUT does not hold sha=P1 once:\n{scratch.named(ran.output)}"
-        assert f"Checked out {p1}, the first parent of the merge commit {m}:" in ran.log, \
-            f"{where}: the log does not say that the step checked out P1 of M:\n{scratch.named(ran.log)}"
-        assert run.host.trapped() == [], \
-            f"{where}: the step ran files of the checkout:\n" + scratch.named("\n".join(run.host.trapped()))
-        assert run.host.calls() == [["api", f"repos/{REPO}/compare/{p1}...{n}", "--jq", ".status"]], \
-            f"{where}: gh was not called once, for the compare of P1 with N: {scratch.named(str(run.host.calls()))}"
-
-
-def the_step_refuses(tmp_path, label, case, workflows=WORKFLOWS):
-    merge, status = REFUSALS[case]
-    scratch = Scratch(tmp_path, merge=merge)
     run = JobRun(tmp_path, scratch, workflows, label, status=status)
+    step = run.parent()
+    if step is None:
+        run.run_to(run.steps[0])
+        raise AssertionError(f"{label}: no step has id: parent, and the checkout holds "
+                             f"{scratch.name(run.head())}, not P1")
+    ran = run.run_to(step)
+    where = f"{label} (compare: {status})"
+    assert not ran.skipped, f"{where}: the step with id: parent did not run: its if: is false"
+    assert ran.code == 0, f"{where}: the step exited {ran.code}:\n{scratch.named(ran.log)}"
+    head = run.head()
+    assert head == p1 and run.detached(), \
+        f"{where}: HEAD is {scratch.name(head)}{'' if run.detached() else ' on a branch'}, not P1, detached"
+    assert ran.output.splitlines().count(f"sha={p1}") == 1 and outputs(ran.output).get("sha") == p1, \
+        f"{where}: $GITHUB_OUTPUT does not hold sha=P1 once:\n{scratch.named(ran.output)}"
+    assert f"Checked out {p1}, the first parent of the merge commit {m}:" in ran.log, \
+        f"{where}: the log does not say that the step checked out P1 of M:\n{scratch.named(ran.log)}"
+    assert run.host.trapped() == [], \
+        f"{where}: the step ran files of the checkout:\n" + scratch.named("\n".join(run.host.trapped()))
+    assert run.host.calls() == [["api", f"repos/{REPO}/compare/{p1}...{n}", "--jq", ".status"]], \
+        f"{where}: gh was not called once, for the compare of P1 with N: {scratch.named(str(run.host.calls()))}"
+
+
+def the_step_refuses(tmp_path, scratch, label, case, workflows=WORKFLOWS):
+    merge, status = REFUSALS[case]
+    run = JobRun(tmp_path, scratch, workflows, label, merge=merge, status=status)
     step = run.parent()
     where = f"{label} ({case})"
     assert step is not None, f"{where}: no step has id: parent, so nothing refuses the run"
@@ -606,9 +607,8 @@ def the_step_refuses(tmp_path, label, case, workflows=WORKFLOWS):
         f"{where}: the step ran files of the checkout:\n" + scratch.named("\n".join(run.host.trapped()))
 
 
-def the_step_skips_where_r1_says(tmp_path, label, workflows=WORKFLOWS):
+def the_step_skips_where_r1_says(tmp_path, scratch, label, workflows=WORKFLOWS):
     given, why = SKIPS[label]
-    scratch = Scratch(tmp_path)
     run = JobRun(tmp_path, scratch, workflows, label, **given)
     after = run.steps[1] if len(run.steps) > 1 else {}
     assert after.get("id") == "parent", f"{label}: the step after the checkout, {describe(after)}, has no id: parent"
@@ -620,8 +620,7 @@ def the_step_skips_where_r1_says(tmp_path, label, workflows=WORKFLOWS):
     assert run.host.calls() == [] and run.host.trapped() == [], f"{where}: the run called gh or ran a trap"
 
 
-def the_job_runs_the_first_parents_tools(tmp_path, label, workflows=WORKFLOWS):
-    scratch = Scratch(tmp_path)
+def the_job_runs_the_first_parents_tools(tmp_path, scratch, label, workflows=WORKFLOWS):
     p1 = scratch.commits["P1"]
     run = JobRun(tmp_path, scratch, workflows, label)
     tools = TOOLS[label]
@@ -748,16 +747,22 @@ def fails_only_on_the_change(tmp_path, copies, said, case, *args):
         f"the case failed, but its message does not say {said!r}:\n{caught.value}"
 
 
-def step_control(tmp_path, pattern, new, said):
+def step_control(tmp_path, scratch, pattern, new, said):
     """A control of the step with id: parent: control_copies changes that step in each of the four jobs. Then
-    the_step_checks_out_the_first_parent fails for each job, and its message holds `said`."""
+    the_step_checks_out_the_first_parent, with the compare ahead, fails for each job, and its message holds `said`."""
     copies = control_copies(tmp_path, [(label, "parent") for label in JOBS], pattern, new)
     for label in JOBS:
         fails_only_on_the_change(tmp_path, copies, f"{label} (compare: ahead): {said}",
-                                 the_step_checks_out_the_first_parent, label)
+                                 the_step_checks_out_the_first_parent, scratch, label, "ahead")
 
 
 # --- the tests ---
+
+
+@pytest.fixture(scope="module")
+def scratch(tmp_path_factory):
+    """The scratch repository of this module's tests, made once: no test changes it."""
+    return Scratch(tmp_path_factory.mktemp("scratch"))
 
 
 def test_no_workflow_names_the_events_base_sha():
@@ -777,25 +782,26 @@ def test_terms_gives_base_sha_the_first_parent():
     terms_gives_base_sha_the_first_parent()
 
 
-@pytest.mark.parametrize("label", list(JOBS))
-def test_the_step_checks_out_the_first_parent(tmp_path, label):
-    the_step_checks_out_the_first_parent(tmp_path, label)
+@pytest.mark.parametrize("label, status", [pytest.param(label, status, id=f"{label}-{status}")
+                                           for label in JOBS for status in ("ahead", "identical")])
+def test_the_step_checks_out_the_first_parent(tmp_path, scratch, label, status):
+    the_step_checks_out_the_first_parent(tmp_path, scratch, label, status)
 
 
 @pytest.mark.parametrize("label, case", [pytest.param(label, case, id=f"{label}-{case}")
                                          for label in JOBS for case in REFUSALS])
-def test_the_step_refuses(tmp_path, label, case):
-    the_step_refuses(tmp_path, label, case)
+def test_the_step_refuses(tmp_path, scratch, label, case):
+    the_step_refuses(tmp_path, scratch, label, case)
 
 
 @pytest.mark.parametrize("label", list(SKIPS))
-def test_the_step_skips_where_r1_says(tmp_path, label):
-    the_step_skips_where_r1_says(tmp_path, label)
+def test_the_step_skips_where_r1_says(tmp_path, scratch, label):
+    the_step_skips_where_r1_says(tmp_path, scratch, label)
 
 
 @pytest.mark.parametrize("label", list(JOBS))
-def test_the_job_runs_the_first_parents_tools(tmp_path, label):
-    the_job_runs_the_first_parents_tools(tmp_path, label)
+def test_the_job_runs_the_first_parents_tools(tmp_path, scratch, label):
+    the_job_runs_the_first_parents_tools(tmp_path, scratch, label)
 
 
 @pytest.mark.parametrize("case", list(BINARY_SIZES))
@@ -803,19 +809,20 @@ def test_binary_sizes(tmp_path, case):
     binary_sizes(tmp_path, case)
 
 
-def test_control_a_step_that_checks_out_the_second_parent(tmp_path):
+def test_control_a_step_that_checks_out_the_second_parent(tmp_path, scratch):
     # HEAD is then P2, the pull request's head.
-    step_control(tmp_path, r'--detach "\$parent"', "--detach HEAD^2", "HEAD is P2, not P1, detached")
+    step_control(tmp_path, scratch, r'--detach "\$parent"', "--detach HEAD^2", "HEAD is P2, not P1, detached")
 
 
-def test_control_a_step_that_only_runs_true(tmp_path):
+def test_control_a_step_that_only_runs_true(tmp_path, scratch):
     # HEAD then stays at M, and the step gives no output.
-    step_control(tmp_path, PARENT_RUN, r"\g<head>true\n", "HEAD is M, not P1, detached")
+    step_control(tmp_path, scratch, PARENT_RUN, r"\g<head>true\n", "HEAD is M, not P1, detached")
 
 
-def test_control_a_step_that_runs_a_script_of_the_checkout(tmp_path):
+def test_control_a_step_that_runs_a_script_of_the_checkout(tmp_path, scratch):
     # The step runs collect of M, whose files are the pull request's, before it checks out P1.
-    step_control(tmp_path, r"(?m)^( +)merge=\$\(git rev-parse HEAD\)$", r"\1.github/scripts/collect || true\n\g<0>",
+    step_control(tmp_path, scratch, r"(?m)^( +)merge=\$\(git rev-parse HEAD\)$",
+                 r"\1.github/scripts/collect || true\n\g<0>",
                  "the step ran files of the checkout:\nM .github/scripts/collect")
 
 
