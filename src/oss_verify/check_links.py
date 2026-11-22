@@ -90,8 +90,11 @@ allocation-failure link's renamed copy; a prebuilt object), and a member with no
 its attributes took out (record-compile), are judged by their checks only, as before, and a member with nothing to
 check then fails with its archive. The records are written inside the build's own container, so a build.sh
 that sets out to deceive the check can; the review of the pull request is what stands against that. The same holds
-for a declared C library: this checks its declaration, and check C5 of review.md checks that the build makes it with
-the C library's own build, from the sources that its project pins, and puts no other object in its libc.a.
+for a declared C library: this checks its declaration and the files that the link took, and the report names it
+whatever the result (check_binaries.report). Check C5 of review.md checks the rest. The C library comes from sources
+that the sources file pins, and its own build makes it. Only the line of the sources file that lays out its source,
+its patches and its own build write in its source tree. Its patches change only the C library. The commands and flags
+of its build name no file of the project: no source, no -I, no -include. Its libc.a holds no other object.
 """
 import array
 import dataclasses

@@ -258,11 +258,13 @@ The seed corpus of a `python` project is an input of the build of its fuzz targe
 
 ### Build patches
 
-`series` lists each patch that the build applies, one file name on each line, in order. We ignore empty lines and lines that start with `#`. List each patch exactly once.
+`series` lists each patch that the build applies, one file name on each line, in order, but not the patches of a C library that the build declares (below). We ignore empty lines and lines that start with `#`. List each patch exactly once.
 
 The build applies each patch with `git apply` under `core.symlinks=false`, so a patch cannot make a symbolic link: a link in a patch becomes a regular file holding the text of its target.
 
-A patch of an enrolled project can only change how the project builds. For example, it can make the build static, set up cross-compilation, correct a version stamp or make a generated file. A change that fixes a bug never goes in the directory of your project. We send it to you as a patch, with its finding ([what-gets-proven.md](what-gets-proven.md#findings)). If a proof needed that patch, we publish the patch with the proof ([what-gets-proven.md](what-gets-proven.md#publishing)). Only the directory of a seeded project whose proofs we publish can hold such a patch ([build-contract.md](build-contract.md#build-patches)).
+A patch in the `series` of an enrolled project can only change how the project builds. For example, it can make the build static, set up cross-compilation, correct a version stamp or make a generated file. A change that fixes a bug never goes in the directory of your project. We send it to you as a patch, with its finding ([what-gets-proven.md](what-gets-proven.md#findings)). If a proof needed that patch, we publish the patch with the proof ([what-gets-proven.md](what-gets-proven.md#publishing)). Only the directory of a seeded project whose proofs we publish can hold such a patch ([build-contract.md](build-contract.md#build-patches)).
+
+A build can declare its own C library ([build-contract.md](build-contract.md#the-c-library)). A patch of that C library is a file of the project directory. Its name does not end in `.patch`, because `oss-verify validate` asks `series` to list each file with that ending. A `copy` line of `sources` lays it out, and `build.sh` applies it to the source tree of the C library. It changes only the C library, and puts no code of the project in it.
 
 ### Rules for each file
 

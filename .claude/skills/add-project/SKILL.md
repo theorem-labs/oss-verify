@@ -60,7 +60,7 @@ The statements use [Linux Process Semantics](https://github.com/theorem-labs/roc
 
 ### 3.8 Give each file its licence lines
 
-Each file of code in `projects/<name>/` (fuzz targets, `Dockerfile`, `build.sh`, scripts) begins with licence lines, below only a `#!`, `# syntax=` or `coding:` line. Build patches, `project.yaml`, `sources`, `series`, `patch_style.md`, locks and seed inputs need none. No check reads them. Before you write the first file, read [references/licence-lines.md](references/licence-lines.md) for the case of each kind of file. Add no licence file, and do not change `LICENSE`, `LICENSES/` or `NOTICE`.
+Each file of code in `projects/<name>/` (fuzz targets, `Dockerfile`, `build.sh`, scripts) begins with licence lines, below only a `#!`, `# syntax=` or `coding:` line. Build patches, the patches of a C library that the build declares (`docs/build-contract.md`, "The C library"), `project.yaml`, `sources`, `series`, `patch_style.md`, locks and seed inputs need none. No check reads them. Before you write the first file, read [references/licence-lines.md](references/licence-lines.md) for the case of each kind of file. Add no licence file, and do not change `LICENSE`, `LICENSES/` or `NOTICE`.
 
 ## 4. Port the build
 

@@ -274,7 +274,7 @@ A ported build ([below](#builds-ported-from-oss-fuzz-theorems)) builds each fuzz
 
 The path rewrite has one exception ([below](#the-path-rewrite)).
 
-`link-fuzz-target` reads `OV_MAX_INPUT_LOG2` and `OV_LIBC` from its environment, so export them. `ov_target_begin` reads `OV_PATH_REWRITE` in the shell of the block, so an assignment is sufficient.
+`link-fuzz-target` reads `OV_MAX_INPUT_LOG2` and `OV_LIBC` from its environment, so export them. `ov_target_begin` reads `OV_PATH_REWRITE` in the shell of the block, so an assignment is sufficient. The tools read the environment. Thus an `ENV` line of the `Dockerfile` sets a variable for each block and each link, and an `export` in the build files of the project's source sets it for each link after it. The report of the checks names each C library that a build declares, whatever sets it ([below](#the-c-library)).
 
 For a link that `build.sh` makes itself, you can give `OV_MAX_INPUT_LOG2` or `OV_LIBC` on that one command:
 
@@ -304,11 +304,18 @@ When `compile` records the links, the record of the link holds one more file, `l
 * The list is in path order. Thus a C library under `/work` comes after the files of the toolchain image.
 * No build examines a file of the declared C library as the project's code. A file at the declared path with other bytes is the project's code.
 * The detail of each build names the declared C library and the SHA-256 of each of its files.
+* The report of the checks ([below](#the-checks-of-the-binaries)) names each binary whose build declares a C library, whatever its results are. Its cell in the column "uninstrumented code" ends with "a declared C library". A list under the table gives the note of its detail: the path and the SHA-256 of each file of the C library. The enrollment review reads this report.
 * In each build, the result is `error`, with no list, when the link did not take the declared `libc.a`. It is also `error`, with no list, when the link took the `libc.a` or `crt1.o` of the toolchain image.
 
 Build the C library outside `$BUILDDIR`, for example in `$LIBROOT/$T.libc/lib/`. `oft_build_cmake`, `oft_build_autotools` and `oft_build_meson` end with `oft_merge_archives`, which merges the archives under `$BUILDDIR` into the archive of the target. The link would then take a `libc.a` under `$BUILDDIR` as the project's code.
 
-The tools check the declaration and the files that the link took. They do not check where the C library comes from, or which objects its `libc.a` holds. The block must build the C library with the C library's own build, from sources that its `sources` file pins. It must add no other object to `libc.a`. The enrollment review checks this in its check C5 ([review.md](../review.md)).
+The tools check the declaration and the files that the link took. They do not check where the C library comes from, what goes into its source tree, what its own build reads or which objects its `libc.a` holds. The enrollment review checks these rules in its check C5 ([review.md](../review.md)):
+
+* The source of the C library comes from a line of `sources` with a commit or a SHA-256.
+* The patches of the C library are not in `series` ([below](#build-patches)). Each one is a file of the project directory whose name does not end in `.patch`. A `copy` line of `sources` lays it out, and `build.sh` applies it to the source tree of the C library. It changes only the C library, and puts no code of the project in it.
+* Only three things write in the source tree of the C library: the line of `sources` that lays out its source, its patches and its own build. No other command and no other line of `sources` adds a file to that tree or changes a file in it.
+* The C library's own build makes the four files: for musl, its `configure` and `make`. The commands of that build, and the flags that they get, name no file or directory of the project's source or of the project directory. Thus they give the compiler no source, no `-I` directory and no `-include` file of the project.
+* `libc.a` holds only the objects that the C library's own build makes. No other command adds an object to it or changes an object in it.
 
 ### The path rewrite
 
@@ -737,8 +744,10 @@ We checked each port with `uv run oss-verify check --lock`, against each `harnes
 
 ## Build patches
 
-`series` lists each patch that the build applies, one time each, in order. In a ported build, `lay-out-sources` applies each `patch` line of `sources`, and stops when those lines are not the patches that `series` lists, in the same order.
+`series` lists each patch that the build applies, one time each, in order, but not the patches of a C library that the build declares. In a ported build, `lay-out-sources` applies each `patch` line of `sources`, and stops when those lines are not the patches that `series` lists, in the same order.
 
 `lay-out-sources` applies each patch with `git apply` under `core.symlinks=false`, so a patch cannot make a symbolic link: a link in a patch becomes a regular file holding the text of its target. The setting is passed on that one command, never put in a clone's config, where it would break a working tree's own links.
 
-A patch of an enrolled project can only change how the project builds: static linking, cross-compilation, a version stamp or a generated file. A change that fixes a bug never goes in the directory of an enrolled project. We send it to the project as a patch, with its finding ([what-gets-proven.md](what-gets-proven.md#findings)). If a proof needed that patch, we publish the patch with the proof ([what-gets-proven.md](what-gets-proven.md#publishing)). The directory of a seeded project whose proofs we publish can also hold a patch that fixes a bug, once the finding of that bug is public. A proof can then be about the build with the fix. The facts list each such patch ([what-gets-proven.md](what-gets-proven.md#publishing)).
+A patch in the `series` of an enrolled project can only change how the project builds: static linking, cross-compilation, a version stamp or a generated file. A change that fixes a bug never goes in the directory of an enrolled project. We send it to the project as a patch, with its finding ([what-gets-proven.md](what-gets-proven.md#findings)). If a proof needed that patch, we publish the patch with the proof ([what-gets-proven.md](what-gets-proven.md#publishing)). The directory of a seeded project whose proofs we publish can also hold a patch that fixes a bug, once the finding of that bug is public. A proof can then be about the build with the fix. The facts list each such patch ([what-gets-proven.md](what-gets-proven.md#publishing)).
+
+A patch of a C library that the build declares ([above](#the-c-library)) is a file of the project directory. Its name does not end in `.patch`, because `oss-verify validate` asks `series` to list each file with that ending. A `copy` line of `sources` lays it out, and `build.sh` applies it to the source tree of the C library. It changes only the C library, and puts no code of the project in it.
