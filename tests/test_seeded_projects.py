@@ -524,6 +524,31 @@ class Table(unittest.TestCase):
         self.assertIn("\ncee\tno\t-\t-\tcee_fuzzer: the release modified this harness\n",
                       self.table({"builds.tsv": builds}))
 
+    def test_a_repository_with_the_name_of_its_oss_fuzz_project(self):
+        # multi is a repository of OSS-Fuzz's project multi, beside multi-a and multi-b.
+        languages = self.FILES["languages.tsv"] + language_row("multi", "multi", "rust", "fuzz_m")
+        builds = self.FILES["builds.tsv"] + "multi\treproducible\t2 binaries\n"
+        lines = self.table({"languages.tsv": languages, "builds.tsv": builds}).splitlines()
+        self.assertEqual([line for line in lines if line.startswith("multi")], [
+            "multi\tyes\treproducible\t2 binaries\tthe release built it in its Rust build, which it did not publish",
+            "multi-a\tyes\treproducible\t4 binaries\tthe release built it in its Rust build, which it did not publish; "
+            "one of the repositories of OSS-Fuzz's project multi, each a project here; the release held back these "
+            "builds: asan",
+            "multi-b\tyes\treproducible\t8 binaries\tthe release built it in its Rust build, which it did not publish; "
+            "one of the repositories of OSS-Fuzz's project multi, each a project here",
+        ])
+        # Without its builds row, it is a language seed with no builds row.
+        with self.assertRaisesRegex(seeded_projects.Error, "seeds/languages.tsv seeds multi, but seeds/builds.tsv "
+                                    "has no row for it"):
+            self.table({"languages.tsv": languages})
+        # A project named multi that is a repository of another OSS-Fuzz project is not one of multi's: its builds
+        # row is refused, as the row of a project we seeded as its repositories.
+        release = self.FILES["oss-fuzz-projects.tsv"] + "other\t-\n"
+        languages = self.FILES["languages.tsv"] + language_row("multi", "other", "rust", "fuzz_m")
+        with self.assertRaisesRegex(seeded_projects.Error, "seeds/builds.tsv has a row for multi, which we seeded as "
+                                    "multi-a, multi-b"):
+            self.table({"oss-fuzz-projects.tsv": release, "languages.tsv": languages, "builds.tsv": builds})
+
     def test_refusals(self):
         release, builds = self.FILES["oss-fuzz-projects.tsv"], self.FILES["builds.tsv"]
         checked = self.FILES["checked-patches.tsv"]

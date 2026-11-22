@@ -606,7 +606,10 @@ def table(seeds=SEEDS, projects=PROJECTS):
         if (name in languages or name in split) and notes != "-":
             raise Error(f"seeds/oss-fuzz-projects.tsv has notes on {name}, whose notes come from "
                         "seeds/languages.tsv: give -")
-        if name in split and name in builds:
+        # A repository may have the name of its OSS-Fuzz project: its own row of seeds/languages.tsv names that
+        # project as its oss_fuzz. The repository is seeded from that row, so it needs a builds row as any other.
+        own = name in languages and languages[name]["oss_fuzz"] == name
+        if name in split and not own and name in builds:
             raise Error(f"seeds/builds.tsv has a row for {name}, which we seeded as "
                         f"{', '.join(sorted(split[name]))}: one project for each of its repositories")
         if name in split and name not in languages:
