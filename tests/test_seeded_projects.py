@@ -413,6 +413,52 @@ class Table(unittest.TestCase):
                                  SINCE + "applies kay.0002-new.patch, whose fuzz targets this table cannot name: "
                                  "some of its binaries may differ from the release's" + KAY_NOTES)
 
+    def test_lines_that_the_shell_reads_in_other_words(self):
+        # A block of kay-q, mostly with the dependency key kay-dep, and a patch at the tree ext/kay-dep/src that
+        # kay-fuzz_d reads too. The shell gives ov_target_begin the same words for kay-dep and "kay-dep", and it ends
+        # the word kay-dep; before the ;. So the table cannot name the fuzz targets when a line of a call has such a
+        # word, or when a call is not the first word of its line. A comment line does not count. A call after a ( or
+        # a ; is in a block of its own, so the ov_target_build after it is not in the block of kay-fuzz_e.
+        build = self.PORT["projects/kay/build.sh"] + "# fuzz_q: the release's target kay-q\n"
+        cannot = (SINCE + "applies kay.0002-new.patch, whose fuzz targets this table cannot name: some of its binaries "
+                  "may differ from the release's" + KAY_NOTES)
+        both = (SINCE + "applies kay.0002-new.patch to fuzz_d, fuzz_q: the binaries of fuzz_d, fuzz_q differ from the "
+                "release's" + KAY_NOTES)
+        cases = {
+            "plain words": ("(\nov_target_begin kay-q kay-dep\nov_target_build fuzz_q\n)\n", "ext/kay-dep/src", both),
+            "a comment that quotes a call": (
+                "(\n# ov_target_begin kay-q \"kay-dep\"; ov_target_build \"fuzz_q\"\n"
+                "ov_target_begin kay-q kay-dep\nov_target_build fuzz_q\n)\n", "ext/kay-dep/src", both),
+            "a quoted key": (
+                "(\nov_target_begin kay-q \"kay-dep\"\nov_target_build fuzz_q\n)\n", "ext/kay-dep/src", cannot),
+            "a key in single quotes": (
+                "(\nov_target_begin kay-q 'kay-dep'\nov_target_build fuzz_q\n)\n", "ext/kay-dep/src", cannot),
+            "a key that a ; ends": (
+                "(\nov_target_begin kay-q kay-dep; ov_target_build fuzz_q\n)\n", "ext/kay-dep/src", cannot),
+            "a key that && ends": (
+                "(\nov_target_begin kay-q kay-dep && ov_target_build fuzz_q\n)\n", "ext/kay-dep/src", cannot),
+            "a key in a variable": (
+                "(\nD=kay-dep\nov_target_begin kay-q $D\nov_target_build fuzz_q\n)\n", "ext/kay-dep/src", cannot),
+            "a quoted fuzz target": (
+                "(\nov_target_begin kay-q kay-dep\nov_target_build \"fuzz_q\"\n)\n", "ext/kay-dep/src", cannot),
+            "a call after a (": ("( ov_target_begin kay-q\nov_target_build fuzz_q\n)\n", "ext/kay-fuzz_e/src", cannot),
+            "a call after another command": (
+                "(\ntrue; ov_target_begin kay-q\nov_target_build fuzz_q\n)\n", "ext/kay-fuzz_e/src", cannot),
+            "a call that is not the first word": (
+                "(\ncommand ov_target_begin kay-q\nov_target_build fuzz_q\n)\n", "ext/kay-fuzz_e/src", cannot),
+            "a call after an assignment": (
+                "(\nX=1 ov_target_begin kay-q\nov_target_build fuzz_q\n)\n", "ext/kay-fuzz_e/src", cannot),
+            "a call right after a (": ("(ov_target_begin kay-q\nov_target_build fuzz_q\n)\n", "ext/kay-fuzz_e/src",
+                                      cannot),
+            "a lone key that a ; ends": (
+                "(\nov_target_begin kay-q kay-dep;\nov_target_build fuzz_q\n)\n", "ext/kay-dep/src", cannot),
+        }
+        for case, (block, at, row) in cases.items():
+            with self.subTest(case):
+                ports = self.new_patch(at, build=build + block)
+                ports["projects/kay/sources"] += "tree\text/kay-q/src\tupstream/kay\n"
+                self.assertEqual(self.row("kay", ports=ports), row)
+
     def test_what_lay_out_sources_refuses_the_step_budget_and_keys_with_other_characters(self):
         build = self.PORT["projects/kay/build.sh"]
         cannot = (SINCE + "applies kay.0002-new.patch, whose fuzz targets this table cannot name: some of its binaries "
