@@ -7,6 +7,7 @@ request and the pull request's commit fetched with git. They cover what the pull
 show: a pull request from a fork, one that is not an enrollment, one that changes more files than one page lists, and
 one whose head moves while the script reads it.
 """
+import itertools
 import json
 import os
 import pathlib
@@ -92,13 +93,16 @@ class PullRequest:
     built = {}
     # The directory they are built in; the fixture pull_requests_built_once sets it.
     root = None
+    # The names of their directories. Never the count of `built`: a build that fails stores nothing, and the next
+    # build would take its name and fail on the directory it left.
+    names = itertools.count()
 
     def __init__(self, tmp_path, files, removed=(), parent=None, landed=None, renamed=None, on_main=None,
                  checkout="main"):
         key = json.dumps([files, list(removed), parent, landed, renamed, on_main, checkout])
         if key not in self.built:
             built = object.__new__(PullRequest)
-            built.build(self.root / str(len(self.built)), files, removed, parent, landed, renamed, on_main, checkout)
+            built.build(self.root / str(next(self.names)), files, removed, parent, landed, renamed, on_main, checkout)
             self.built[key] = built
         built = self.built[key]
         self.tmp = tmp_path
