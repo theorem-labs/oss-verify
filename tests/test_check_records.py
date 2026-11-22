@@ -176,6 +176,11 @@ class Speed(unittest.TestCase):
             self.assertEqual(len(found), 4096)
             self.assertEqual({(check.guard, check.note) for check in found}, {((2, 262146), None)})
 
+    def test_a_directive_with_many_digit_separators_is_read_in_linear_time(self):
+        """A directive's separators are read as the code's are: the number is read once, not once for each `'`."""
+        (found,) = self.timed("#if X == " + "1'" * 32768 + "1\n#endif\nvoid f(int x) {\n  if (x) abort();\n}\n")
+        self.assertEqual((found.line, found.guard, found.note), (4, (4, 4), None))
+
     def test_the_checks_on_one_long_line_share_its_text(self):
         """The text of a line is found once, however many checks are on it. A copy for each check took memory that
         grew with the square of the line: 8,192 checks on one line of 172 KB held 1.4 GB of copies."""

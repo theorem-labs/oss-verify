@@ -83,14 +83,15 @@ def blank(text, directives=None):
         """The end of the directive at `start`, and its text with each comment in it replaced by spaces. Comments go
         before directives (translation phases 3 and 4): a /* that a directive line opens takes the directive on to the
         line of its */, and an abort() in a comment is not in the directive."""
-        j, spans = start, []
+        j, spans, last = start, [], [-1, -1]  # last: see separator(), so 1'1'1'1 is read once here too
         while j < n and not (text[j] == "\n" and text[j - 1] != "\\" and text[j - 2:j] != "\\\r"):
             if text.startswith("/*", j):
                 k = text.find("*/", j + 2)
                 k = n if k < 0 else k + 2
             elif text.startswith("//", j):
                 k = directive_end(j)
-            elif text[j] == '"' or (text[j] == "'" and not separator(text, j)):  # a /* in a literal opens no comment
+            # A /* in a literal opens no comment.
+            elif text[j] == '"' or (text[j] == "'" and not separator(text, j, last)):
                 k = j + 1
                 while k < n and text[k] not in (text[j], "\n"):
                     k += 2 if text[k] == "\\" else 1
