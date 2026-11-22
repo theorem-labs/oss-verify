@@ -69,10 +69,12 @@ ALLOWED_BOTS=${ALLOWED_BOTS:-}
 now=$(date -u -d "${NOW:-now}" +%s) || fail "Not a time: ${NOW:-}."
 SINCE=$(date -u -d "@$((now - 86400))" +%Y-%m-%dT%H:%M:%SZ)
 export SINCE
-# id, creation time, status, event, actor, and for a run by hand the number of the item its name gives.
+# id, creation time, status, event, actor, and for a run by hand the number of the item its name gives. A run made
+# exactly 24 hours before NOW has left the 24 hours, so at free, its creation time plus 24 hours, it no longer counts.
+# The API's created filter also gives that run; the jq is what leaves it out.
 # shellcheck disable=SC2016 # $ENV is jq's, read from this script's environment
 runs=$(gh api --method GET --paginate "repos/$REPO/actions/workflows/review.yml/runs" -f created=">=$SINCE" \
-  -F per_page=100 --jq '.workflow_runs[] | select(.id < ($ENV.RUN_ID | tonumber) and .created_at >= $ENV.SINCE)
+  -F per_page=100 --jq '.workflow_runs[] | select(.id < ($ENV.RUN_ID | tonumber) and .created_at > $ENV.SINCE)
     | "\(.id) \(.created_at) \(.status // "-") \(.event) \(.actor.login // "-")"
       + " \((.display_title // "" | capture("^(Pull request|Issue) (?<n>[1-9][0-9]*)$").n) // "-")"') \
   || fail "GitHub did not give this workflow's runs of the last 24 hours."

@@ -603,6 +603,18 @@ class DailyCap(Runner):
         self.assertEqual(self.cap("mallory")[2], {"count": "30", "account_count": "12", "capped": "true",
                                                   "free": self.freed(15)})
 
+    def test_at_the_time_it_frees_it_is_not_capped(self):
+        """free is the first second this run is allowed: at free, the oldest counted run has left the 24 hours. Its
+        creation time has seconds, as GitHub's created_at has."""
+        # The oldest of 24 was made at 2026-11-09T00:00:37Z.
+        self.runs(*self.screened(self.CAP, start=-37 / 3600))
+        for now, want in (("2026-11-10T00:00:36Z", {"count": "24", "capped": "true", "free": "2026-11-10T00:00:37Z"}),
+                          ("2026-11-10T00:00:37Z", {"count": "23", "capped": "false", "free": ""})):
+            with self.subTest(now=now):
+                self.env["NOW"] = now
+                rc, out, got = self.cap("zed")
+                self.assertEqual((rc, {k: got.get(k) for k in want}), (0, want), out)
+
     def test_only_earlier_screened_runs_of_outside_accounts_in_24_hours_count(self):
         self.runs((10, 25, "workflow_run", "o0", self.SCREENED),  # over 24 hours old
                   (11, 1, "workflow_run", "o1", self.UNMARKED),  # no trust screen: capped, or a writer's trust
@@ -1406,6 +1418,13 @@ class Hold(Runner):
                     f"From 2026-11-10 00:00 UTC, {change} or `gh workflow run review.yml -R {REPO} {start}` reviews "
                     "it.\n\n"
                     "<!-- oss-verify-held-run 100 -->\n"])
+        # The minute it names is rounded up: the minute a time with seconds falls in starts before the cap frees.
+        for free, shown in (("2026-11-10T00:00:37Z", "2026-11-10 00:01"), ("2026-11-10T00:00:01Z", "2026-11-10 00:01"),
+                            ("2026-11-10T23:59:59Z", "2026-11-11 00:00")):
+            with self.subTest(free=free):
+                self.api.joinpath("args").unlink(missing_ok=True)
+                _calls, bodies, _ = self.hold("cap", free=free)
+                self.assertIn(f" From {shown} UTC, a push or ", bodies[0])
         # A cap with no time it frees holds nothing.
         rc, out, _ = self.run_script(step("comment", self.STEP)["run"], PR="", NUMBER="9", TRUST="cap", HEAD_SHA="a" * 40,
                                      REVIEW="skipped", RUN_ID="100", FREE="")

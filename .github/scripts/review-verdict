@@ -218,6 +218,8 @@ def from_hold(hold):
             free = datetime.datetime.strptime(os.environ.get("FREE", ""), "%Y-%m-%dT%H:%M:%SZ")
         except ValueError:
             die("FREE is not a time such as 2026-11-09T12:00:00Z")
+        # The summary names the minute, rounded up: the minute FREE falls in can start before the cap frees.
+        free += datetime.timedelta(seconds=59)
         title = CAP_HOLD
         summary = (f"{title} It comes from an account without write access to this repository, and the automated"
                    f" reviews of such accounts reached their cap of {cap} in 24 hours, {author} for one author. From"

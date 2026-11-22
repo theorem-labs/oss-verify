@@ -2048,7 +2048,9 @@ jobs:
           if [ "$TRUST" = cap ]; then
             [[ $FREE =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
               || { echo "::error::no time the daily cap frees: $FREE"; exit 1; }
-            free=$(date -u -d "$FREE" '+%Y-%m-%d %H:%M UTC')
+            # The minute, rounded up: the minute FREE falls in can start before the cap frees.
+            at=$(date -u -d "$FREE" +%s)
+            free=$(date -u -d "@$((at + 59))" '+%Y-%m-%d %H:%M UTC')
             why="It comes from an account without write access to this repository, and the automated reviews of such accounts reached their cap of $REVIEW_CAP in 24 hours, $REVIEW_CAP_AUTHOR for one author."
             ask="From $free, $change or \`gh workflow run review.yml -R $REPO -f $input=$NUMBER\` reviews it."
           elif [ "$REVIEW" = failure ] || [ "$REVIEW" = cancelled ]; then

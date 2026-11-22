@@ -1470,6 +1470,14 @@ class ReviewVerdict(unittest.TestCase):
                                               "hold": env["HOLD"], "job": job, "verdicts": {}, **kept})
                     self.assertIs(record["oss_fuzz"], kept["oss_fuzz"])
 
+    def test_the_time_a_capped_pull_request_is_told_is_not_before_it_frees(self):
+        # FREE has seconds. The minute it falls in starts before the cap frees, so the summary names the next minute.
+        for free, shown in (("2026-11-10T00:00:37Z", "2026-11-10 00:01"), ("2026-11-10T00:00:01Z", "2026-11-10 00:01"),
+                            ("2026-11-10T23:59:59Z", "2026-11-11 00:00"), ("2026-11-10T00:01:00Z", "2026-11-10 00:01")):
+            with self.subTest(free=free):
+                got = self.verdict(HOLD="cap", FREE=free)
+                self.assertIn(f"From {shown} UTC, a push or ", got["summary"])
+
     def test_a_value_of_another_kind_is_null(self):
         """Only a finite JSON number that is not a boolean is a CRITICALITY_SCORE, only the text true or false is an
         OSS_FUZZ, and only a JSON object is a SIZES."""
