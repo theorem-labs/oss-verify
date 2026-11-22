@@ -57,8 +57,8 @@ name: "Build"
 #   - It fails for a pull request into any branch but the default one. The ruleset that requires the check guards only
 #     the default branch, so this failure blocks nothing, and it keeps a result judged against another branch from
 #     ever standing as a pass on the head commit if the base is then changed to the default branch.
-#   - It fails if the pull request's head or base moves while the step reads it; the next run (for a newer commit, or
-#     after a change of base) checks it again.
+#   - It fails if the pull request's head or base moves while take-project reads it; the next run (for a newer commit,
+#     or after a change of base) checks it again.
 # It does not run on edited, which GitHub sends for an edit of the title or description (nothing the build judges
 # changes; before, such an edit built the project again in full) and for a change of base. It runs only for a pull
 # request into main (the trigger's branches, below). After a change of base to main, push a commit to run it again. A
