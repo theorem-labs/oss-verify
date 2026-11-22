@@ -70,6 +70,9 @@ class SeedRuns(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.scratch = tempfile.TemporaryDirectory(prefix="ov-test-seed-runs.")
+        # Class cleanups run when setUpClass fails too, so a compile failure removes this process's image as well.
+        cls.addClassCleanup(cls.scratch.cleanup)
+        cls.addClassCleanup(subprocess.run, ["docker", "image", "rm", TAG], capture_output=True)
         cls.work = pathlib.Path(cls.scratch.name)
         cls.labels = check_build.work_label(cls.work)
         job = check_build.Job(name="example", directory=FIXTURE, repo="https://example.invalid/example", ref="",
@@ -79,11 +82,6 @@ class SeedRuns(unittest.TestCase):
         # As oss-verify check --checks compiles: with records, so that compile also makes the quiet twin. The records
         # change no byte of the binary (tests/test_binary_checks_docker.py, test_records_change_no_byte).
         check_build.compile_build(TAG, BUILD, validate.BUILDS[BUILD], cls.raw, labels=cls.labels, record=True)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.scratch.cleanup()
-        subprocess.run(["docker", "image", "rm", TAG], capture_output=True)
 
     def setUp(self):
         # run_all and run_job read these when they start the runs.

@@ -30,8 +30,10 @@ from oss_verify import manifest
 from oss_verify import validate
 
 FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "example"
-# Each tag here ends in RUN, a suffix that is this process's own, so that two processes on one Docker daemon (two workers
-# of pytest-xdist, or two runs of the suite) never build, run or remove each other's image.
+# Each tag here, and in the Docker tests that import RUN, ends in RUN, a suffix that is this process's own, so that two
+# processes on one Docker daemon (two workers of pytest-xdist, or two runs of the suite) never build, run or remove each
+# other's image. Each class removes its image with a class cleanup, which runs when setUpClass fails too, unlike
+# tearDownClass: a failed build leaves no image behind, under a tag that no later run would use again.
 RUN = secrets.token_hex(6)
 TAG = f"oss-verify-test/example:{RUN}"
 QEMU = shutil.which("qemu-riscv64-static") or shutil.which("qemu-riscv64")
@@ -149,6 +151,9 @@ class Builder(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.scratch = tempfile.TemporaryDirectory(prefix="ov-test-builder.")
+        # Class cleanups run last first, so the image goes before its scratch directory.
+        cls.addClassCleanup(cls.scratch.cleanup)
+        cls.addClassCleanup(subprocess.run, ["docker", "image", "rm", TAG], capture_output=True)
         cls.work = pathlib.Path(cls.scratch.name)
         job = check_build.Job(name="example", directory=FIXTURE, repo="https://example.invalid/example", ref="",
                               dockerfile="", builds=BUILDS, fuzz_targets=None)
@@ -162,11 +167,6 @@ class Builder(unittest.TestCase):
         cls.found = {build: manifest.discover(directory) for build, directory in cls.raw.items()}
         cls.targets, cls.problems = manifest.resolve_targets(cls.found)
         cls.entries, cls.missing = manifest.collect(cls.raw, cls.targets, cls.work / "out")
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.scratch.cleanup()
-        subprocess.run(["docker", "image", "rm", TAG], capture_output=True)
 
     def test_discovery(self):
         self.assertEqual(self.problems, [])
@@ -309,6 +309,8 @@ class PythonBuilder(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.scratch = tempfile.TemporaryDirectory(prefix="ov-test-python.")
+        cls.addClassCleanup(cls.scratch.cleanup)
+        cls.addClassCleanup(subprocess.run, ["docker", "image", "rm", PYTHON_TAG], capture_output=True)
         cls.work = pathlib.Path(cls.scratch.name)
         job = check_build.Job(name="python-example", directory=PYTHON_FIXTURE,
                               repo="https://example.invalid/python-example", ref="", dockerfile="", builds=BUILDS,
@@ -323,11 +325,6 @@ class PythonBuilder(unittest.TestCase):
         found = {build: manifest.discover(directory) for build, directory in cls.raw.items()}
         cls.targets, cls.problems = manifest.resolve_targets(found, job.fuzz_targets)
         cls.entries, cls.missing = manifest.collect(cls.raw, cls.targets, cls.work / "out")
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.scratch.cleanup()
-        subprocess.run(["docker", "image", "rm", PYTHON_TAG], capture_output=True)
 
     def test_discovery(self):
         self.assertEqual((self.problems, self.missing, self.targets), ([], [], ["fuzz_example"]))
@@ -383,6 +380,8 @@ class RustBuilder(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.scratch = tempfile.TemporaryDirectory(prefix="ov-test-rust.")
+        cls.addClassCleanup(cls.scratch.cleanup)
+        cls.addClassCleanup(subprocess.run, ["docker", "image", "rm", RUST_TAG], capture_output=True)
         cls.work = pathlib.Path(cls.scratch.name)
         job = check_build.Job(name="rust-example", directory=RUST_FIXTURE, repo="https://example.invalid/rust-example",
                               ref="", dockerfile="", builds=BUILDS, fuzz_targets=["example_fuzzer"], language="rust")
@@ -396,11 +395,6 @@ class RustBuilder(unittest.TestCase):
         found = {build: manifest.discover(directory) for build, directory in cls.raw.items()}
         cls.targets, cls.problems = manifest.resolve_targets(found, job.fuzz_targets)
         cls.entries, cls.missing = manifest.collect(cls.raw, cls.targets, cls.work / "out")
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.scratch.cleanup()
-        subprocess.run(["docker", "image", "rm", RUST_TAG], capture_output=True)
 
     def test_discovery(self):
         self.assertEqual((self.problems, self.missing, self.targets), ([], [], ["example_fuzzer"]))
@@ -452,6 +446,8 @@ class GoBuilder(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.scratch = tempfile.TemporaryDirectory(prefix="ov-test-go.")
+        cls.addClassCleanup(cls.scratch.cleanup)
+        cls.addClassCleanup(subprocess.run, ["docker", "image", "rm", GO_TAG], capture_output=True)
         cls.work = pathlib.Path(cls.scratch.name)
         job = check_build.Job(name="go-example", directory=GO_FIXTURE, repo="https://example.invalid/go-example",
                               ref="", dockerfile="", builds=["plain"], fuzz_targets=["example_fuzzer"], language="go")
@@ -462,11 +458,6 @@ class GoBuilder(unittest.TestCase):
         found = {build: manifest.discover(directory) for build, directory in cls.raw.items()}
         cls.targets, cls.problems = manifest.resolve_targets(found, job.fuzz_targets)
         cls.entries, cls.missing = manifest.collect(cls.raw, cls.targets, cls.work / "out")
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.scratch.cleanup()
-        subprocess.run(["docker", "image", "rm", GO_TAG], capture_output=True)
 
     def test_discovery(self):
         self.assertEqual((self.problems, self.missing, self.targets), ([], [], ["example_fuzzer"]))
@@ -538,6 +529,8 @@ class AllocationFailureOnCjson(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.scratch = tempfile.TemporaryDirectory(prefix="ov-test-cjson.")
+        cls.addClassCleanup(cls.scratch.cleanup)
+        cls.addClassCleanup(subprocess.run, ["docker", "image", "rm", CJSON_TAG], capture_output=True)
         cls.work = pathlib.Path(cls.scratch.name)
         job = check_build.Job(name="cjson", directory=CJSON, repo="https://github.com/DaveGamble/cJSON", ref="",
                               dockerfile="", builds=BUILDS, fuzz_targets=None)
@@ -551,11 +544,6 @@ class AllocationFailureOnCjson(unittest.TestCase):
         found = {build: manifest.discover(directory) for build, directory in raw.items()}
         cls.targets, _ = manifest.resolve_targets(found)
         cls.entries, _ = manifest.collect(raw, cls.targets, cls.work / "out")
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.scratch.cleanup()
-        subprocess.run(["docker", "image", "rm", CJSON_TAG], capture_output=True)
 
     def test_the_fuzz_target_keeps_the_release_s_bytes(self):
         self.assertEqual(self.targets, ["cjson_read_fuzzer", "cjson_read_fuzzer_allocation_counting",
@@ -632,6 +620,7 @@ class FramePointers(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.scratch = tempfile.TemporaryDirectory(prefix="ov-test-frame-pointers.")
+        cls.addClassCleanup(cls.scratch.cleanup)
         cls.work = pathlib.Path(cls.scratch.name)
         cls.labels = check_build.work_label(cls.work)
         jobs = {
@@ -647,14 +636,9 @@ class FramePointers(unittest.TestCase):
             for kind, toolchain in (("base", row_image(row)), ("fp", os.environ[variable])):
                 tag = f"oss-verify-test/{jobs[language].name}-frame-pointers:{kind}-{RUN}"
                 cls.tags[language, kind] = tag
+                cls.addClassCleanup(subprocess.run, ["docker", "image", "rm", tag], capture_output=True)
                 check_build.build_project(jobs[language], "0" * 40, check_build.build_builder(toolchain), tag,
                                           cls.work)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.scratch.cleanup()
-        for tag in cls.tags.values():
-            subprocess.run(["docker", "image", "rm", tag], capture_output=True)
 
     def compile(self, language, kind, *settings):
         """compile, the plain build, in the project image of `language` on the image of `kind` ("base" or "fp"), with

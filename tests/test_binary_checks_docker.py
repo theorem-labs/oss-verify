@@ -34,6 +34,9 @@ class Records(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.scratch = tempfile.TemporaryDirectory(prefix="ov-test-records.")
+        # Class cleanups run when setUpClass fails too, so a compile failure removes this process's image as well.
+        cls.addClassCleanup(cls.scratch.cleanup)
+        cls.addClassCleanup(subprocess.run, ["docker", "image", "rm", TAG], capture_output=True)
         cls.work = pathlib.Path(cls.scratch.name)
         job = check_build.Job(name="example", directory=FIXTURE, repo="https://example.invalid/example", ref="",
                               dockerfile="", builds=BUILDS, fuzz_targets=None)
@@ -47,11 +50,6 @@ class Records(unittest.TestCase):
         cls.raw = {build: cls.work / "recorded" / build for build in BUILDS}
         cls.targets, _ = manifest.resolve_targets({b: manifest.discover(d) for b, d in cls.raw.items()})
         cls.entries, _ = manifest.collect(cls.raw, cls.targets, cls.work / "out")
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.scratch.cleanup()
-        subprocess.run(["docker", "image", "rm", TAG], capture_output=True)
 
     def test_records_change_no_byte(self):
         for build in BUILDS:
