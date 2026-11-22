@@ -10,9 +10,9 @@ dependencies = ["pyyaml"]
 oss-verify = "oss_verify.__main__:main"
 
 # What the tests need besides the package: `uv run pytest` installs them. tests.yaml installs the same from Ubuntu's
-# packages (python3-pytest; the runner image has python3-cryptography).
+# packages (python3-pytest and python3-pytest-xdist; the runner image has python3-cryptography).
 [dependency-groups]
-dev = ["pytest", "cryptography"]
+dev = ["pytest", "pytest-xdist", "cryptography"]
 
 [build-system]
 requires = ["uv_build>=0.12,<0.13"]
