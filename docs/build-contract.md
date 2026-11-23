@@ -86,6 +86,7 @@ The builder does not hold `frames.py`, so step 2 mounts it from this repository.
 | `$LIB_FUZZING_ENGINE` | the driver, which takes the place of libFuzzer in each fuzz target ([below](#the-driver)) |
 | `$LIB_ALLOCATION_FAILURE_ENGINE` | the driver of an allocation-failure fuzz target ([below](#allocation-failure-fuzz-targets)) |
 | `$LIB_ALLOCATION_COUNTING_ENGINE` | the same, with counting mode on, for sweep and test builds that we never publish |
+| `$LIB_DSL_ENGINE` | the driver of a DSL fuzz target, whose program is a script that the payload holds ([below](#dsl-fuzz-targets)) |
 | `$SANITIZER` | `none`, `undefined`, `address` or `address-undefined` |
 | `$ARCHITECTURE`, `$FUZZING_ENGINE` | `riscv64`; `none`, the OSS-Fuzz name for a driver that runs inputs from files |
 | `$CMAKE_TOOLCHAIN_FILE` | a CMake toolchain file for this build. CMake 3.21 and later find it without help. |
@@ -282,7 +283,7 @@ For a link that `build.sh` makes itself, you can give `OV_MAX_INPUT_LOG2` or `OV
 
 Outside the blocks, a setting applies to each later block, and an `export` reaches each later link. Thus in a `build.sh` with no blocks, as an OSS-Fuzz `build.sh` is, an `export` at the top level applies to each fuzz target that `build.sh` links after it.
 
-Only a link that goes to `link-fuzz-target` reads `OV_MAX_INPUT_LOG2` and `OV_LIBC` ([above](#how-a-fuzz-target-is-linked)). A link that names none of `$LIB_FUZZING_ENGINE`, `$LIB_ALLOCATION_FAILURE_ENGINE` and `$LIB_ALLOCATION_COUNTING_ENGINE` ignores them.
+Only a link that goes to `link-fuzz-target` reads `OV_MAX_INPUT_LOG2` and `OV_LIBC` ([above](#how-a-fuzz-target-is-linked)). A link that names none of `$LIB_FUZZING_ENGINE`, `$LIB_ALLOCATION_FAILURE_ENGINE`, `$LIB_ALLOCATION_COUNTING_ENGINE` and `$LIB_DSL_ENGINE` ignores them.
 
 ### The input limit
 
@@ -449,13 +450,64 @@ To find which allocations an input makes, link a sweep or test build with `$LIB_
 
 `tests/test_builder.py` checks the mask, counting mode and `std::bad_alloc` in all four builds, with each engine. It also builds cJSON's fuzz target with both engines ([tests/fixtures/cjson](../tests/fixtures/cjson/build.sh)). The test shows three results. The fuzz target keeps the release's bytes. An input that makes 21 allocations gets the same count in each build. If any one allocation fails, or all fail, the fuzz target still exits with 0.
 
+## DSL fuzz targets
+
+A DSL fuzz target is a driver of our own whose program is a script in the payload: a list of calls of the library's API, which the driver runs on live objects and whose results it prints. It defines no `LLVMFuzzerTestOneInput`. Its own C or C++ code, the driver objects, defines the four functions that `cli.c` calls (`target_name`, `target_alloc_init`, `target_alloc_count` and `target_run`, [target.h](../infra/base-builder/driver/target.h)), in place of `adapter.c`. The input has the format of [the driver](#the-driver), and the exit statuses are the driver's own: the status that `target_run` returns.
+
+The driver makes the library's calls of chosen functions fail, as the input tells it to, through renames. A map is a file of pairs `<old> <new>`, one a line; `#` starts a comment. The link renames each call of `<old>` to `<new>` in copies of the library's archives, and the target's trampolines, objects compiled with no sanitizer as the driver is, define `<new>`. Two kinds of map:
+
+* `OV_DSL_REDEFS`: renamed in the library and in the driver objects, for example the allocators, so that one schedule counts the allocations of both.
+* `OV_DSL_LIBRARY_REDEFS`: renamed in the library alone, for example the system calls of its file functions, which the trampolines answer from a file in memory. A driver object that names either side of such a pair stops the link: the driver reaches what the map renames only through the trampolines' own functions.
+
+A block declares the target in its environment, before `ov_target_build_dsl`:
+
+| variable | value |
+|---|---|
+| `OV_DSL_DRIVER` | the driver objects (`ov_dsl_driver` adds one) |
+| `OV_DSL_TRAMPOLINES` | the trampoline objects (`ov_dsl_trampoline` adds one) |
+| `OV_DSL_REDEFS`, `OV_DSL_LIBRARY_REDEFS` | the maps: at least one, in either variable |
+| `OV_DSL_ALLOW` | with a library map: the allow list of the census (below) |
+
+Each is a list of absolute paths, separated by spaces.
+
+    (
+    ov_target_begin zlib-api-driver
+    build_lib() {
+      oft_build_cmake
+      ov_dsl_driver dsl.c            # /work/targets/$T/dsl.c, with $CC, $CFLAGS and the library's include paths
+      ov_dsl_trampoline aef_alloc.c  # with $DRVCC $BASE_CFLAGS: no sanitizer, as cli.o
+      oft_seal_getenv
+      oft_seal_mkstemp
+      oft_seal_getpid
+    }
+    LIB_ARCHIVE="lib/liboft.a"
+    export OV_DSL_REDEFS="/work/targets/$T/aef_alloc.redefs"
+    ov_target_build_dsl api-driver
+    )
+
+`ov_dsl_driver` also compiles each driver object with `-DHARNESS_QUIET`, as `<name>-quiet.o`, for the quiet twin. `ov_target_build_dsl` links `$LIB_DSL_ENGINE`, the library's archive and `LIB_EXTRA`, through `link-fuzz-target`:
+
+    <compiler> -static -no-pie -Wl,--gc-sections cli.o <driver objects' copies> [<silent reports>] <the link's own arguments, the library's archives as copies> <trampolines> <seals>
+
+The link takes the library's archives and object files by name: it refuses `-l`, `-Wl,` options but `-Wl,--wrap=<name>`, `-Xlinker`, response files, configuration files, source files and LLVM bitcode, which could hide a call from the renames ([dsl.py](../infra/base-builder/dsl.py)). The library is each archive that the link names outside the toolchain image's `/opt`. Before it links, `dsl.py` stops the link when:
+
+* a map has a malformed line or no pair, or the maps rename one name twice, give two names one new name, or name one name as old and new;
+* the library defines an old name itself, or the library or a driver object names a new name already;
+* a pair does not move every reference from the old name to the new one in a copy, or a copy has another number of undefined symbols (conservation);
+* a map renames no reference at all: a schedule over nothing;
+* with a library map, a name that the library's copies leave undefined is not defined by the library, is no new name, is no sanitizer's name (`__asan_`, `__ubsan_`, `__sanitizer_`, `__start_`, `__stop_`) and is no line of `OV_DSL_ALLOW` (the census). So each call of the library that no map answers is a line of a file that the review reads, and a call that can reach the kernel belongs in a map, not on that list.
+
+The first link traces each new name (`-Wl,-y`). The link stops, and its output is removed, unless each new name is defined by one trampoline and no other file; each reference comes from a library copy, a driver object's copy or a trampoline, and a library map's new names only from the library; and the link takes a reference from the library to at least one new name of each library map.
+
+`compile` lists each DSL fuzz target in `$OUT/.dsl-fuzz-targets`, and `oss-verify check` finds it there, as it finds a Go fuzz target. The record of the link ([below](#the-checks-of-the-binaries)) names the trampolines as driver objects, compiled with no sanitizer, and each copy as the file that it stands for, in `renamed`; the driver objects are the project's code, compiled with the build's flags. The quiet twin takes the copies of the driver objects' quiet builds.
+
 ## The fuzz targets
 
-A fuzz target is an executable in the `$OUT` of a build whose ELF symbol table defines `LLVMFuzzerTestOneInput`. This is the OSS-Fuzz rule, but we read the symbol table in place of the bytes of the file. A fuzz target must be in each build. A Go program has no `LLVMFuzzerTestOneInput`. Thus `compile` lists the Go fuzz targets in `$OUT/.go-fuzz-targets`, and `oss-verify check` reads that list ([below](#go-fuzz-targets)).
+A fuzz target is an executable in the `$OUT` of a build whose ELF symbol table defines `LLVMFuzzerTestOneInput`. This is the OSS-Fuzz rule, but we read the symbol table in place of the bytes of the file. A fuzz target must be in each build. A Go program has no `LLVMFuzzerTestOneInput`, and nor has a DSL fuzz target. Thus `compile` lists the Go fuzz targets in `$OUT/.go-fuzz-targets` and the DSL fuzz targets in `$OUT/.dsl-fuzz-targets`, and `oss-verify check` reads those lists ([below](#go-fuzz-targets), [above](#dsl-fuzz-targets)).
 
 `fuzz_targets` in `project.yaml` names the fuzz targets to verify. Without it, we verify each fuzz target that we find. `oss-verify check` copies the published binary of each fuzz target to `out/<target>/<target>.<build>`. It ignores each other file in `$OUT`.
 
-A DSL driver is a fuzz target too: an `LLVMFuzzerTestOneInput` that runs a small program from its payload, and takes its configuration from the payload. It prints the observables of each operation. A failure of the library is one of these observables, not an exit status. The allocation mask works as for each other fuzz target.
+A DSL driver is a fuzz target too: either an `LLVMFuzzerTestOneInput`, or a DSL fuzz target ([above](#dsl-fuzz-targets)), that runs a small program from its payload, and takes its configuration from the payload. It prints the observables of each operation. A failure of the library is one of these observables, not an exit status. The allocation mask works as for each other fuzz target.
 
 A proof is only as strong as its fuzz target. Thus each fuzz target must obey the rules in step 3 of [the add-project skill](../.claude/skills/add-project/SKILL.md):
 

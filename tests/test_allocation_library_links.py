@@ -84,7 +84,7 @@ def native_link(objects, tmp_path):
     settings = scratch / "link.env"
     settings.write_text(
         "OV_LFE='normal-engine'\nOV_DRIVER='cli.o adapter.o'\n"
-        "OV_AFE='failure-engine'\nOV_AFC='counting-engine'\n"
+        "OV_AFE='failure-engine'\nOV_AFC='counting-engine'\nOV_DSLE='dsl-engine'\n"
         "OV_AF_DRIVER='cli.o af.o'\nOV_AFC_DRIVER='cli.o count.o'\n"
         "OV_SEALS=''\nOV_SILENT_LD=''\nOV_AF_RENAME='--redefine-sym malloc=__ov_malloc'\n"
         f"OV_TWINS='{twins}'\n")

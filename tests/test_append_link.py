@@ -166,7 +166,7 @@ def t(tmp_path):
             "OV_LFE='normal-engine'\nOV_DRIVER='cli.o adapter.o'\nOV_CLI='cli.o'\n"
             f"OV_SILENT_LD='{SILENT}'\nOV_SEALS='{' '.join(SEALS)}'\nOV_TWINS='{twins}'\n"
             "OV_AFE='failure-engine'\nOV_AF_DRIVER='cli.o af.o'\n"
-            "OV_AFC='counting-engine'\nOV_AFC_DRIVER='cli.o count.o'\n"
+            "OV_AFC='counting-engine'\nOV_AFC_DRIVER='cli.o count.o'\nOV_DSLE='dsl-engine'\n"
             f"OV_RECORDS='{records if records else ''}'\n"
             "OV_AF_RENAME='--redefine-sym malloc=__ov_malloc'\nOV_BUILD='asan'\n")
         env = {k: v for k, v in os.environ.items() if not k.startswith("OV_")}
