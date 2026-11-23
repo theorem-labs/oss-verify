@@ -36,9 +36,9 @@ file	targets/zlib-zlib_uncompress3_fuzzer/zlib_uncompress3_fuzzer.cc	https://raw
 file	targets/zlib-zlib_uncompress_fuzzer/zlib_uncompress_fuzzer.cc	https://raw.githubusercontent.com/google/oss-fuzz/fadbcdfb9e96aaa26734fbc936ab64a6f4f18ab4/projects/zlib/zlib_uncompress_fuzzer.cc	518f9e2d49f4d64ffff78fafe3422d2441ce23e357b62d0e8c661fa6c7d3d9a9
 copy	targets/zlib-api-driver/dsl.c	api-driver.dsl.c
 copy	targets/zlib-api-driver/dsl.h	api-driver.dsl.h
-copy	targets/zlib-api-driver/aef_alloc.h	api-driver.aef_alloc.h
-copy	targets/zlib-api-driver/aef_alloc.redefs	api-driver.aef_alloc.redefs
+copy	targets/zlib-api-driver/tramp_alloc.h	api-driver.tramp_alloc.h
+copy	targets/zlib-api-driver/tramp_alloc.redefs	api-driver.tramp_alloc.redefs
 copy	targets/zlib-api-driver/faultalloc.h	api-driver.faultalloc.h
-copy	targets/zlib-api-driver/aef_alloc.c	aef_alloc.c
+copy	targets/zlib-api-driver/tramp_alloc.c	tramp_alloc.c
 copy	targets/zlib-api-driver/emit.h	emit.h
 copy	targets/zlib-api-driver/target.h	target.h

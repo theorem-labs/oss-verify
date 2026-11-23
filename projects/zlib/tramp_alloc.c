@@ -1,13 +1,13 @@
-/* aef_alloc.c - the one schedule, the one counter, and the C-family
+/* tramp_alloc.c - the one schedule, the one counter, and the C-family
  * trampolines the renamed library archives resolve to.
  *
- * See aef_alloc.h for what a bit means and why the library is the only thing
+ * See tramp_alloc.h for what a bit means and why the library is the only thing
  * that can reach this file. What is specific to this translation unit:
  *
  * COMPILED WITH THE DRIVER'S COMPILER, not the library's -- the same recipe
  * as cli.o and wrap_getenv.o -- so this object is byte-identical across the
  * plain, asan, ubsan and gcc flavours of one target and across targets, and
- * check_driver_object can say so by hash. An instrumented trampoline would
+ * the driver-object check can say so by hash. An instrumented trampoline would
  * put a sanitizer-runtime call between the library's request and the
  * allocator on one side of the T2 pair and not the other.
  *
@@ -16,7 +16,7 @@
  * would tick its own schedule, or need an unscheduled escape name that the
  * rename map would then have to know about.
  *
- * THE REAL FUNCTIONS ARE THE SYSTEM'S DECLARATIONS. aef_malloc calls malloc,
+ * THE REAL FUNCTIONS ARE THE SYSTEM'S DECLARATIONS. tramp_malloc calls malloc,
  * declared by <stdlib.h>; on the target that reference is musl's, or in the
  * asan flavours whatever the sealed runtime's --wrap list redirects it to.
  * This object is not passed through the rename, so its own references keep
@@ -38,7 +38,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
-#include "aef_alloc.h"
+#include "tramp_alloc.h"
 
 /* Belt and braces for the three names not every libc header exposes; see the
  * header comment. Standard prototypes, so a libc that does declare them
@@ -58,116 +58,116 @@ extern void *reallocarray(void *ptr, size_t nmemb, size_t size);
 }
 #endif
 
-static uint32_t aef_bits32 = 0;
-static uint8_t aef_ext[AEF_ALLOC_EXT_MAX];
-static size_t aef_ext_len = 0;
-static unsigned aef_n = 0;
-static int aef_armed = 0;
+static uint32_t tramp_bits32 = 0;
+static uint8_t tramp_ext[TRAMP_ALLOC_EXT_MAX];
+static size_t tramp_ext_len = 0;
+static unsigned tramp_n = 0;
+static int tramp_armed = 0;
 
-void aef_alloc_arm(uint32_t bits32) {
-  aef_bits32 = bits32;
-  aef_n = 0;
-  aef_armed = 1;
+void tramp_alloc_arm(uint32_t bits32) {
+  tramp_bits32 = bits32;
+  tramp_n = 0;
+  tramp_armed = 1;
 }
 
-void aef_alloc_extend(const uint8_t *p, size_t n) {
+void tramp_alloc_extend(const uint8_t *p, size_t n) {
   if (p == NULL) n = 0;
-  if (n > AEF_ALLOC_EXT_MAX) n = AEF_ALLOC_EXT_MAX;
-  if (n) memcpy(aef_ext, p, n);
-  aef_ext_len = n;
+  if (n > TRAMP_ALLOC_EXT_MAX) n = TRAMP_ALLOC_EXT_MAX;
+  if (n) memcpy(tramp_ext, p, n);
+  tramp_ext_len = n;
 }
 
 /* The 4.1 predicate: bit i of the schedule, 0 past whatever was installed. */
-static int aef_bit(unsigned i) {
+static int tramp_bit(unsigned i) {
   size_t k;
   unsigned j;
-  if (i < 32u) return (int)((aef_bits32 >> i) & 1u);
+  if (i < 32u) return (int)((tramp_bits32 >> i) & 1u);
   k = (size_t)(i - 32u) >> 3;
   j = (i - 32u) & 7u;
-  if (k >= aef_ext_len) return 0;
-  return (int)((aef_ext[k] >> j) & 1u);
+  if (k >= tramp_ext_len) return 0;
+  return (int)((tramp_ext[k] >> j) & 1u);
 }
 
-int aef_alloc_deny(void) {
+int tramp_alloc_deny(void) {
   unsigned i;
-  if (!aef_armed) return 0;
-  i = aef_n++;
-  return aef_bit(i);
+  if (!tramp_armed) return 0;
+  i = tramp_n++;
+  return tramp_bit(i);
 }
 
-unsigned aef_alloc_count(void) { return aef_n; }
+unsigned tramp_alloc_count(void) { return tramp_n; }
 
-int aef_alloc_can_fire(void) {
+int tramp_alloc_can_fire(void) {
   size_t k;
   unsigned first;
-  if (!aef_armed) return 0;
-  if (aef_n < 32u && (aef_bits32 >> aef_n) != 0u) return 1;
-  /* Extension bits at index >= max(aef_n, 32): the rest of the byte the
+  if (!tramp_armed) return 0;
+  if (tramp_n < 32u && (tramp_bits32 >> tramp_n) != 0u) return 1;
+  /* Extension bits at index >= max(tramp_n, 32): the rest of the byte the
    * index falls in, then any nonzero byte after it. */
-  first = aef_n < 32u ? 0u : aef_n - 32u;
+  first = tramp_n < 32u ? 0u : tramp_n - 32u;
   k = (size_t)first >> 3;
-  if (k >= aef_ext_len) return 0;
-  if ((aef_ext[k] >> (first & 7u)) != 0u) return 1;
-  for (k++; k < aef_ext_len; k++)
-    if (aef_ext[k]) return 1;
+  if (k >= tramp_ext_len) return 0;
+  if ((tramp_ext[k] >> (first & 7u)) != 0u) return 1;
+  for (k++; k < tramp_ext_len; k++)
+    if (tramp_ext[k]) return 1;
   return 0;
 }
 
-/* The driver's arena allocator: the real malloc, no tick (aef_alloc.h). */
-void *aef_alloc_raw_malloc(size_t size) { return malloc(size); }
+/* The driver's arena allocator: the real malloc, no tick (tramp_alloc.h). */
+void *tramp_alloc_raw_malloc(size_t size) { return malloc(size); }
 
 /* The trampolines. One tick each, FIRST, before any argument is looked at;
  * on denial the pointer-returning ones behave as a failed allocation does on
  * both libcs this tier links against (NULL, errno ENOMEM), and
- * aef_posix_memalign as musl's own does (it returns errno after aligned_alloc
+ * tramp_posix_memalign as musl's own does (it returns errno after aligned_alloc
  * set it, so ENOMEM in both places). Otherwise: the real call, its result
  * returned untouched. */
-void *aef_malloc(size_t size) {
-  if (aef_alloc_deny()) { errno = ENOMEM; return NULL; }
+void *tramp_malloc(size_t size) {
+  if (tramp_alloc_deny()) { errno = ENOMEM; return NULL; }
   return malloc(size);
 }
 
-void *aef_calloc(size_t nmemb, size_t size) {
-  if (aef_alloc_deny()) { errno = ENOMEM; return NULL; }
+void *tramp_calloc(size_t nmemb, size_t size) {
+  if (tramp_alloc_deny()) { errno = ENOMEM; return NULL; }
   return calloc(nmemb, size);
 }
 
-void *aef_realloc(void *ptr, size_t size) {
-  if (aef_alloc_deny()) { errno = ENOMEM; return NULL; }
+void *tramp_realloc(void *ptr, size_t size) {
+  if (tramp_alloc_deny()) { errno = ENOMEM; return NULL; }
   return realloc(ptr, size);
 }
 
-void *aef_reallocarray(void *ptr, size_t nmemb, size_t size) {
-  if (aef_alloc_deny()) { errno = ENOMEM; return NULL; }
+void *tramp_reallocarray(void *ptr, size_t nmemb, size_t size) {
+  if (tramp_alloc_deny()) { errno = ENOMEM; return NULL; }
   return reallocarray(ptr, nmemb, size);
 }
 
-void *aef_aligned_alloc(size_t alignment, size_t size) {
-  if (aef_alloc_deny()) { errno = ENOMEM; return NULL; }
+void *tramp_aligned_alloc(size_t alignment, size_t size) {
+  if (tramp_alloc_deny()) { errno = ENOMEM; return NULL; }
   return aligned_alloc(alignment, size);
 }
 
-void *aef_memalign(size_t alignment, size_t size) {
-  if (aef_alloc_deny()) { errno = ENOMEM; return NULL; }
+void *tramp_memalign(size_t alignment, size_t size) {
+  if (tramp_alloc_deny()) { errno = ENOMEM; return NULL; }
   return memalign(alignment, size);
 }
 
-void *aef_valloc(size_t size) {
-  if (aef_alloc_deny()) { errno = ENOMEM; return NULL; }
+void *tramp_valloc(size_t size) {
+  if (tramp_alloc_deny()) { errno = ENOMEM; return NULL; }
   return valloc(size);
 }
 
-int aef_posix_memalign(void **memptr, size_t alignment, size_t size) {
-  if (aef_alloc_deny()) { errno = ENOMEM; return ENOMEM; }
+int tramp_posix_memalign(void **memptr, size_t alignment, size_t size) {
+  if (tramp_alloc_deny()) { errno = ENOMEM; return ENOMEM; }
   return posix_memalign(memptr, alignment, size);
 }
 
-char *aef_strdup(const char *s) {
-  if (aef_alloc_deny()) { errno = ENOMEM; return NULL; }
+char *tramp_strdup(const char *s) {
+  if (tramp_alloc_deny()) { errno = ENOMEM; return NULL; }
   return strdup(s);
 }
 
-char *aef_strndup(const char *s, size_t n) {
-  if (aef_alloc_deny()) { errno = ENOMEM; return NULL; }
+char *tramp_strndup(const char *s, size_t n) {
+  if (tramp_alloc_deny()) { errno = ENOMEM; return NULL; }
   return strndup(s, n);
 }
