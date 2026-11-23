@@ -1,35 +1,11 @@
-zlib gz_fetch(): in transparent (COPY) mode, point x.next at the output buffer BEFORE gz_load() fills it, so a
+zlib gz_fetch(): in transparent (COPY) mode, point x.next at the output buffer before gz_load() fills it, so a
 read that delivers some bytes and then fails leaves x.next at those bytes.
 
-Defect. gz_fetch's COPY case (gzread.c:271-275 at 99623ef7) calls gz_load(state, state->out, ...) and sets
-state->x.next = state->out only after gz_load returns 0. When read() first delivers some bytes and then fails
-with an error other than EAGAIN, gz_load leaves the count in x.have and returns -1, so gz_fetch returns before
-the assignment and x.next still points where the previous buffer ended. gz_read then copies x.have bytes from
-that stale pointer (gzread.c:369). When the previous buffer was used up, x.next is one past the end of
-state->out, and the copy reads past the heap block; otherwise the bytes returned are not the ones just read.
+Without it, gz_read copies x.have bytes from a stale pointer (gzread.c:369 at 99623ef7), which can read past the
+output buffer.
 
-Fix. The assignment moves above the gz_load call. On success x.next = out as before; nothing else changes.
-
-Upstream. madler/zlib pull request #1363, "Preserve partial transparent output after read error" (open on
-2026-11-15), head commit 37627fd3bb4726e064e43cbc048e740e8c6478c0, its only commit (parent 757f0527, gzread.c
-+1/-1). The diff below is that commit's diff, unchanged; its index line names gzread.c's blob at aef's pin
-99623ef7 (b18f01bf9), which is the PR base's, and it applies there with `patch -p1 --fuzz=0`. Pull request
-#1374 ("Reset the transparent-read output pointer before loading data", gzread.c +1/-1) is another form of the
-same fix; ZLIB-8 carries #1363's.
-
-Scope. This patch is applied to the build of targets/zlib-sysfail_fuzzer ONLY, by the pin key LIB_PATCHES
-(tools/ossfuzz/recipes.sh aef_lib_patches, on the build's copy of the tree): no other zlib target, and not
-ext/zlib-sysfail_fuzzer/src, changes. The default patch stack (patches/github.com/madler/zlib/99623ef7.../)
-does not carry it. A release build (AEF_RELEASE=1) applies none of LIB_PATCHES: it is a library-defect fix,
-and the public release ships the library without those.
-
-Provenance. ZLIB-8 (2026-11-15): Jason's answer "No new report; patch it" for the system-call failure driver.
-The driver reaches this bug with targets/zlib-sysfail_fuzzer/planted-1363.dsl (a 1-byte read, then EIO); on an
-unpatched build the ASan flavours abort there (status 134), and with this patch every flavour runs it to the
-end (tests/check_sys_schedule.sh S5).
-
-Author of the fix: the pull request's author (GitHub cla7aye15I4nd). Carried unchanged by Claude Opus 5.5
-(aef, 2026-11-15).
+Upstream: madler/zlib pull request #1363, head commit 37627fd3bb4726e064e43cbc048e740e8c6478c0, its only commit.
+The diff below is that commit's diff, unchanged.
 
 diff --git a/gzread.c b/gzread.c
 index b18f01bf9..fbade87f2 100644
