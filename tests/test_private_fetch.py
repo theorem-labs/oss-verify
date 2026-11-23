@@ -253,6 +253,22 @@ class FetchCommit(unittest.TestCase):
                 self.assertNotIn(token, said)
                 self.assertNotIn(token[4:], said)
 
+    def test_a_trace_a_configuration_file_sets_is_not_written(self):
+        # trace2's targets can be set in a configuration file. fetch-commit sets each target's variable to 0, and that
+        # alone stops it: `-c trace2.eventTarget=` and the like did not (measured on git 2.43).
+        for target in ("eventTarget", "normalTarget", "perfTarget"):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as work:
+                trace = pathlib.Path(work) / "trace"
+                config = pathlib.Path(work) / "gitconfig"
+                config.write_text(f"[trace2]\n\t{target} = {trace}\n\tenvVars = OSS_VERIFY_TOKEN_FILE\n",
+                                  encoding="utf-8")
+                code, said, _ = self.fetch("secret.git", self.commits["secret"], TOKEN,
+                                           changes={"GIT_CONFIG_GLOBAL": str(config)})
+                self.assertEqual(code, 0, said)
+                written = trace.read_text(encoding="utf-8", errors="replace") if trace.exists() else ""
+                self.assertNotIn(TOKEN, written)
+                self.assertFalse(trace.exists(), written[:500])
+
     def test_a_wrong_token_says_it_was_not_authorised_and_names_the_token(self):
         code, said, _ = self.fetch("secret.git", self.commits["secret"], OTHER_TOKEN)
         self.assertEqual(code, 1)
@@ -834,18 +850,23 @@ class Unreadable(unittest.TestCase):
 class TheSecondReview(unittest.TestCase):
     """What the second non-author review measured at 1eb1c2a, and what this change does about it."""
 
-    def test_a_real_configured_trace_holds_no_token(self):
-        with tempfile.TemporaryDirectory() as work:
-            trace = pathlib.Path(work) / "trace.json"
-            config = pathlib.Path(work) / "gitconfig"
-            config.write_text(f"[trace2]\n\teventTarget = {trace}\n\tenvVars = {check_build.GIT_TOKEN_ENV}\n",
-                              encoding="utf-8")
-            argv = check_build.git("ls-remote", "--", "https://127.0.0.1:1/x", token=True)
-            environment = {**check_build.git_environment(TOKEN, "https://127.0.0.1/x"),
-                           "GIT_CONFIG_GLOBAL": str(config), "GIT_CONFIG_SYSTEM": "/dev/null"}
-            subprocess.run(argv, capture_output=True, text=True, env=environment)
-            written = trace.read_text(encoding="utf-8", errors="replace") if trace.exists() else ""
-        self.assertNotIn(TOKEN, written)
+    def test_a_trace_a_configuration_file_sets_is_not_written(self):
+        # trace2's targets can be set in a configuration file, where trace2.envVars can name the variable that holds
+        # the token, which GIT_TRACE_REDACT does not redact. git_environment() sets each target's variable to 0, and
+        # that alone stops it: `-c trace2.eventTarget=` and the like did not (measured on git 2.43).
+        for target in ("eventTarget", "normalTarget", "perfTarget"):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as work:
+                trace = pathlib.Path(work) / "trace"
+                config = pathlib.Path(work) / "gitconfig"
+                config.write_text(f"[trace2]\n\t{target} = {trace}\n\tenvVars = {check_build.GIT_TOKEN_ENV}\n",
+                                  encoding="utf-8")
+                argv = check_build.git("ls-remote", "--", "https://127.0.0.1:1/x", token=True)
+                environment = {**check_build.git_environment(TOKEN, "https://127.0.0.1/x"),
+                               "GIT_CONFIG_GLOBAL": str(config), "GIT_CONFIG_SYSTEM": "/dev/null"}
+                subprocess.run(argv, capture_output=True, text=True, env=environment)
+                written = trace.read_text(encoding="utf-8", errors="replace") if trace.exists() else ""
+                self.assertNotIn(TOKEN, written)
+                self.assertFalse(trace.exists(), written[:500])
 
     def test_the_host_sends_the_path_so_the_helper_can_match_on_it(self):
         # Without credential.useHttpPath the request carries no path, the helper can only match the host, and it

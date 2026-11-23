@@ -217,14 +217,6 @@ def output(*argv, env=None, token=None):
     return done.stdout
 
 
-# What turns git's own tracing off on the command line, where it outranks any configuration file. The environment
-# is cleared too (GIT_TRACING), but that is not enough on its own: trace2's targets are configuration, and
-# `trace2.envVars` names environment variables to WRITE INTO the trace, which GIT_TRACE_REDACT does not redact. A
-# review measured a whole token in a trace file that way.
-NO_TRACING = ("trace2.eventTarget=", "trace2.normalTarget=", "trace2.perfTarget=", "trace2.envVars=",
-              "trace2.configParams=")
-
-
 def git(*args, token=False):
     """git, over https only, even if a URL or a server redirect asks for another protocol.
 
@@ -232,15 +224,14 @@ def git(*args, token=False):
     host happens to have. With `token`: one credential helper in place of that empty list, the builder's own, which
     reads the token from OSS_VERIFY_GIT_TOKEN in the environment of this git process (git_environment()) and
     answers for one repository; `credential.useHttpPath` so the request carries the path the helper matches on,
-    without which the helper can only match the host and answers for every repository on it; and every trace
-    target emptied. The token itself is in no command line.
+    without which the helper can only match the host and answers for every repository on it. The token itself is in
+    no command line, and git_environment() turns git's tracing off.
     """
     os.environ["GIT_TERMINAL_PROMPT"] = "0"
     helper = ["-c", "credential.helper="]
     if token:
         helper += ["-c", f"credential.helper=!{shlex.quote(str(CREDENTIAL_HELPER))}",
                    "-c", "credential.useHttpPath=true"]
-        helper += [argument for setting in NO_TRACING for argument in ("-c", setting)]
     return ["git", *helper, "-c", "protocol.allow=never", "-c", "protocol.https.allow=always", *args]
 
 
@@ -263,9 +254,10 @@ def git_environment(token, repo=None):
     token, which leaves the process this one's environment as before."""
     if not token:
         return None
-    # Each is SET to 0, not removed: git reads trace2's targets from configuration as well, before `-c` is
-    # applied, and `trace2.envVars` names environment variables to write INTO the trace, which GIT_TRACE_REDACT
-    # does not redact. An environment variable of 0 turns that target off whatever the configuration says.
+    # Each is SET to 0, not removed: trace2's targets can also be set in a configuration file, where trace2.envVars
+    # can name environment variables to write INTO the trace, which GIT_TRACE_REDACT does not redact. An environment
+    # variable of 0 turns its target off whatever the configuration says; `-c trace2.eventTarget=` and the like do
+    # not (measured on git 2.43: the configured trace was still written, with the token in it).
     environment = {key: value for key, value in os.environ.items() if key not in GIT_TRACING_REMOVED}
     environment.update({name: "0" for name in GIT_TRACING})
     environment["GIT_TRACE2_ENV_VARS"] = ""
