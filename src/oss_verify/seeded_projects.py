@@ -399,7 +399,7 @@ def target_blocks(build, steps):
     """What the table reads of the text of a build.sh, without its comment lines (whose first character that is not
     blank is #): (blocks, other).
       - blocks: [(keys, fuzz targets)] for each ov_target_begin line: the block's key and dependency keys, each once,
-        and the fuzz targets that the ov_target_build lines after it name.
+        and the fuzz targets that the ov_target_build and ov_target_build_dsl lines after it name.
       - other: the text of the lines that are not ov_target_begin lines, with a newline between two lines.
     None if `steps` run out (see text_lines)."""
     lines = text_lines(build, steps)
@@ -411,7 +411,7 @@ def target_blocks(build, steps):
         if words[:1] == ["ov_target_begin"]:
             blocks.append((list(dict.fromkeys(words[1:])), []))
         elif not words or not words[0].startswith("#"):
-            if words[:1] == ["ov_target_build"] and words[1:] and blocks:
+            if words[:1] in (["ov_target_build"], ["ov_target_build_dsl"]) and words[1:] and blocks:
                 blocks[-1][1].append(words[1])
             other.append(line)
     return blocks, "\n".join(other)
