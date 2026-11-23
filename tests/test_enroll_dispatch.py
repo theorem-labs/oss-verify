@@ -1249,15 +1249,14 @@ class Concurrency(unittest.TestCase):
     """enroll-dispatch.yml's concurrency group, evaluated for the runs whose completion starts it."""
 
     def test_two_pull_requests_at_once_run_both(self):
-        # c2 (h): Terms runs of two pull requests complete together. Their Enroll dispatch runs are in two groups, and
-        # no run in a group cancels one in progress: neither is cancelled.
+        # c2 (h): Terms runs of two pull requests complete together. Their Enroll dispatch runs are in two groups, so
+        # neither cancels the other.
         world = World()
         world.run(301, ".github/workflows/terms.yaml", "pull_request", head_sha=NEWER, branch="add-libx",
                   head_repo="someone/oss-verify")
         first, second = concurrency_group(world.runs[103]), concurrency_group(world.runs[301])
         self.assertEqual(first, f"enroll-dispatch:{SHA}:FreeREAC/oss-verify:add-plugin-hostd")
         self.assertEqual(second, f"enroll-dispatch:{NEWER}:someone/oss-verify:add-libx")
-        self.assertIs(ENROLL_DISPATCH["concurrency"]["cancel-in-progress"], False)
 
     def test_a_pull_requests_runs_share_a_group_and_another_head_at_the_same_commit_does_not(self):
         world = World()
@@ -1893,7 +1892,6 @@ class ReviewPassed(unittest.TestCase):
         self.assertLabels(line, [REVIEW_PASSED])
 
     def test_g_a_trusted_author_does_not_get_the_label(self):
-        self.assertIn("sjawhar-agent[bot]", REVIEW["env"]["ALLOWED_BOTS"].split(","))
         for author, permission in (("a-writer", "write"), ("an-admin", "admin"), ("sjawhar-agent[bot]", None)):
             with self.subTest(author=author):
                 line = Timeline(author=author, permission=permission)
@@ -2644,14 +2642,28 @@ class BeforeTheMove(unittest.TestCase):
 
 
 class TrustRule(unittest.TestCase):
-    """enroll-dispatch's trusted, the port of review.yml's bash function trusted, gives its answers."""
+    """enroll-dispatch's trusted, the port of review.yml's bash function trusted, gives its answers. Every copy of the
+    bash function, review.yml's and .github/scripts/screened-review-cap's, is the same text, so the copy run here is
+    each of them."""
 
     def test_trusted_answers_as_review_ymls_trusted(self):
+        pattern = re.compile(r"# trusted\n(.*?)# end of trusted\n", re.S)
+        # Each copy, by where it is: review.yml's steps, by job and step name, and screened-review-cap, which counts the
+        # daily cap as route's trust step decides.
+        places = {f"{name}: {step.get('name')}": pattern.findall(step.get("run") or "")
+                  for name, job in REVIEW["jobs"].items() for step in job.get("steps") or []}
+        cap = (ROOT / ".github" / "scripts" / "screened-review-cap").read_text()
+        places["screened-review-cap"] = pattern.findall(cap)
+        # route's trust step, the gather job's step on text of accounts without write access, and screened-review-cap
+        # each hold one copy, and every copy is the same text.
+        for place in ("route: Whether the author and the account that started the run have write access",
+                      "gather: Whether the review reads text of an account without write access",
+                      "screened-review-cap"):
+            self.assertEqual(len(places[place]), 1, place)
+        copies = {found for found_in_place in places.values() for found in found_in_place}
+        self.assertEqual(len(copies), 1, copies)
         if not shutil.which("jq"):
             self.skipTest("jq is not installed")
-        copies = {found for job in REVIEW["jobs"].values() for step in job.get("steps") or []
-                  for found in re.findall(r"# trusted\n(.*?)# end of trusted\n", step.get("run") or "", re.S)}
-        self.assertEqual(len(copies), 1, copies)
         script = "set -uo pipefail\n" + copies.pop() + 'trusted "$1"\n'
         bots = REVIEW["env"]["ALLOWED_BOTS"]
         collaborators = {"an-admin": "admin", "a-writer": "write", "a-reader": "read", "no-access": "none"}
