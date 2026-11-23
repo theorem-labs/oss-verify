@@ -1,7 +1,7 @@
 #!/bin/sh -e
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
-# Modified 2026 by Theorem Labs, PBC: the DSL fuzz target api-driver, which is not of the release.
+# Modified 2026 by Theorem Labs, PBC: the DSL fuzz targets api-driver and sysfail_fuzzer, which are not of the release.
 #
 # Generated from the build recipe of the oss-fuzz-theorems 2026.10 release.
 #
@@ -153,6 +153,32 @@ build_lib() {
 LIB_ARCHIVE="lib/liboft.a"
 LIB_CFLAGS=""
 ov_target_build minigzip_fuzzer
+)
+
+# sysfail_fuzzer: not a target of the release. A DSL fuzz target, api-driver's driver with 31 more operations: zlib's
+# gz file functions over one file in memory, whose open, read, write, lseek, close and fcntl calls fail as the script
+# tells them to. Its own tree carries the inflate fix of madler/zlib #1390 and three fixes of zlib's gz layer
+# (zlib-sysfail_fuzzer.0002 to 0004). zlib's allocations and the driver's own go to aef_alloc.c's trampolines
+# (sysfail_fuzzer.aef_alloc.redefs), and zlib's six system calls, in zlib alone, to aef_sys.c's
+# (sysfail_fuzzer.aef_sys.redefs). Each other function that zlib calls is a line of sysfail_fuzzer.sys.allow.
+(
+ov_target_begin zlib-sysfail_fuzzer
+build_lib() {
+  oft_build_cmake
+  if [ -f "$BUILDDIR/src/zconf.h" ]; then mv "$BUILDDIR/src/zconf.h" "$BUILDDIR/src/zconf.h.included" || return 1; fi
+  ov_dsl_driver dsl.c
+  ov_dsl_trampoline aef_alloc.c
+  ov_dsl_trampoline aef_sys.c
+  oft_seal_getenv
+  oft_seal_mkstemp
+  oft_seal_getpid
+}
+LIB_ARCHIVE="lib/liboft.a"
+LIB_CFLAGS=""
+export OV_DSL_REDEFS="/work/targets/$T/aef_alloc.redefs"
+export OV_DSL_LIBRARY_REDEFS="/work/targets/$T/aef_sys.redefs"
+export OV_DSL_ALLOW="/work/targets/$T/sys.allow"
+ov_target_build_dsl sysfail_fuzzer
 )
 
 # zlib_uncompress2_fuzzer: the release's target zlib-zlib_uncompress2_fuzzer
