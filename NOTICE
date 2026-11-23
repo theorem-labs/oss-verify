@@ -13,6 +13,10 @@ of the GNU GPL be linked with them, which the Apache License, Version 2.0 does n
 someone else's code under the Apache License, Version 2.0 with such a program still combines the two, as the wazuh
 and mariadb fuzz targets do (below).
 
+projects/zlib/compress_roundtrip_full_fuzzer.c is ours and is licensed under MIT OR Apache-2.0 too, though it has no
+SPDX line, because a line added at its top would move the line numbers that its sanitizer builds hold, and so the
+bytes of its pinned binaries.
+
 It adapts files from OSS Scanner (https://github.com/anthropics/oss-scanner), Copyright 2026 Anthropic PBC,
 licensed under the Apache License, Version 2.0. Each adapted file keeps OSS Scanner's copyright and SPDX lines
 where it had them, and says what was changed:
