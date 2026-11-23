@@ -1,0 +1,28 @@
+# aef_sys.redefs - the six file system calls, renamed to the trampolines of
+# src/aef_sys.c (the in-memory file and the system-call failure schedule).
+#
+# Applied by build.sh ONLY for a pin that sets DSL_SYSFAIL=1, and only to the
+# DERIVED copy of the pin-built library archive under build/obj/<flav>/<t>/
+# (the same copy the allocation rename writes, in the same llvm-objcopy call).
+# Never to dsl.o, cli.o, libc.a, libc++, libunwind or the sanitizer runtime:
+# cli.c reads the input with the real open/read/close before the program runs,
+# so the driver's own input reading cannot fail, and musl's stdio reaches the
+# kernel through its internal syscall wrappers, not these names, so the
+# driver's stdout cannot either.
+#
+# Format: one `old new` pair per line; `#` starts a comment (the shape
+# src/aef_alloc.redefs uses and llvm-objcopy --redefine-syms reads).
+#
+# DELIBERATELY ABSENT: open64, lseek64, fcntl64, pread, pwrite, readv, writev,
+# creat, openat. zlib 1.4 at the pinned commit references none of them in any
+# flavour (llvm-nm -u over libaef.a; under musl gzlib.c:12-16 picks lseek), so
+# each pair here is conserved exactly, and build.sh's census refuses an archive
+# that references any other name outside its allowlist
+# (targets/<t>/sys.allow) -- a later pin that starts calling one of these
+# fails the build instead of reaching the kernel unscheduled.
+open aef_sys_open
+read aef_sys_read
+write aef_sys_write
+lseek aef_sys_lseek
+close aef_sys_close
+fcntl aef_sys_fcntl
