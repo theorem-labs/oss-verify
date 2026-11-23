@@ -1801,16 +1801,16 @@ class GatherJob(Runner):
         subprocess.run([git, "add", "-A"], **quiet)
         subprocess.run([git, "-c", "commit.gpgsign=false", "commit", "-qm", "x"], **quiet)
         self.commit = subprocess.run([git, "rev-parse", "HEAD"], text=True, **quiet).stdout.strip()
-        # The checkout of main: review-gather and take-review-data are this repository's own, triage.py a stand-in
-        # (it reads GitHub), and projects/libx/ the pull request's, as take-project leaves it.
+        # The checkout of main: review-gather, take-review-data and the rules of oss-verify validate (validate_rules)
+        # are this repository's own, triage.py a stand-in (it reads GitHub), and projects/libx/ the pull request's, as
+        # take-project leaves it. It has no src/: the gather job loads no code from it.
         self.checkout = self.dir / "checkout"
         scripts = self.checkout / ".github" / "scripts"
         scripts.mkdir(parents=True)
-        for name in ("review-gather", "take-review-data"):
+        for name in ("review-gather", "take-review-data", "validate_rules"):
             (scripts / name).symlink_to(SCRIPTS / name)
         (scripts / "triage.py").write_text('print("| OK | triage |")\n')
         (self.checkout / ".github" / "PULL_REQUEST_TEMPLATE.md").symlink_to(ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md")
-        (self.checkout / "src").symlink_to(ROOT / "src")
         (self.checkout / "projects" / "libx").mkdir(parents=True)
         (self.checkout / "projects" / "libx" / "project.yaml").write_text("repo: https://github.com/mallory/libx#v1\n")
         self.home = self.dir / "gather-home"

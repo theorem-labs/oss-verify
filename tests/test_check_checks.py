@@ -2465,7 +2465,7 @@ class SeedHex(unittest.TestCase):
         import tracemalloc
         from unittest import mock
         gather = (ROOT / ".github" / "scripts" / "review-gather").read_text()
-        opener = "python3 - \"$zip\" \"$out/seeds/$target.hex.txt\" <<'EOF'\n"
+        opener = "python3 -P - \"$zip\" \"$out/seeds/$target.hex.txt\" <<'EOF'\n"
         start = gather.index(opener) + len(opener)
         script = gather[start:gather.index("\nEOF\n", start) + 1]
         stored, deflated, spaces, size = bytes(range(256)) * 3, b"seed " * 200, b" " * (1 << 20), 64 << 20
@@ -3495,8 +3495,10 @@ class Owners(unittest.TestCase):
         owned = [[pattern, *teams] for pattern in (
             # Agent instructions and skills at any depth (the first patterns of CODEOWNERS).
             "**/AGENTS.md", "**/CLAUDE.md", "**/SKILL.md", "skills/",
-            # What changes what a workflow runs (the top of CODEOWNERS).
-            "/.github/", "/src/", "/infra/", "/seeds/", ".claude/", "CLAUDE*.md", "AGENTS*.md", "/.mcp.json", "/*.py",
+            # What changes what a workflow runs (the top of CODEOWNERS). src/ has no owner, by Sami's choice
+            # (dispatch://OSSV-276/ask/6c92b099-08f4-4177-aa5a-6a3fc6292878); .github/scripts/steering.py keeps it a
+            # steering file.
+            "/.github/", "/infra/", "/seeds/", ".claude/", "CLAUDE*.md", "AGENTS*.md", "/.mcp.json", "/*.py",
             "/pytest.ini", "/.pytest.ini", "/pyproject.toml", "/uv.lock", "/.python-version", "/setup.cfg",
             "/tox.ini",
             "/review.md", "/review-change.md", "/review-issue.md", "/.claude/skills/write-to-maintainer/",

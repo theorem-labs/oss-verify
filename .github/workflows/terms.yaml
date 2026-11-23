@@ -38,16 +38,17 @@ name: "Terms"
 # theorem statements unless all its files are under one projects/<name>/ (the_project() of
 # .github/scripts/enroll-dispatch), and none that changes a steering file (.github/scripts/steering.py) until a person
 # approves its head. The job checks out the first parent of the merge commit: the base branch's commit on which GitHub
-# built the merge. The run: block runs the program .github/scripts/terms-accepted and src/oss_verify/ from that
-# checkout, and gives the program that commit as BASE_SHA. So the program and the files of the base that the program
-# reads come from one commit of the base branch. When the pull request does not change this file, this file comes from
-# that commit too: the program of another commit can read a variable that this file does not give it. GitHub, not the
-# pull request, chooses the first parent, and the step after the checkout fails unless that parent is a commit of the
-# base branch. Until that step ends, the checkout holds the merge commit's files, so the step is inline and runs only
-# git and gh. This workflow runs on edited, which GitHub sends for a change of base too. Such a run can get GitHub's
-# merge into the earlier base. The step then fails, and a push to the branch runs the check again. Only while the first
-# parent has no .github/scripts/terms-accepted does the job also check out the merge commit, into merge/, and run the
-# program and src/ from there (the checkout into merge/ below tells why).
+# built the merge. The run: block runs the program .github/scripts/terms-accepted from that checkout, with the rules of
+# oss-verify validate beside it (.github/scripts/validate_rules/, never src/, which has no code owner), and gives the
+# program that commit as BASE_SHA. So the program and the files of the base that the program reads come from one
+# commit of the base branch. When the pull request does not change this file, this file comes from that commit too:
+# the program of another commit can read a variable that this file does not give it. GitHub, not the pull request,
+# chooses the first parent, and the step after the checkout fails unless that parent is a commit of the base branch.
+# Until that step ends, the checkout holds the merge commit's files, so the step is inline and runs only git and gh.
+# This workflow runs on edited, which GitHub sends for a change of base too. Such a run can get GitHub's merge into the
+# earlier base. The step then fails, and a push to the branch runs the check again. Only while the first parent has no
+# .github/scripts/terms-accepted does the job also check out the merge commit, into merge/, and run the program from
+# there (the checkout into merge/ below tells why).
 #
 # The program reads the event's description and the list of the files the pull request changes. For a branch that
 # changes the project.yaml of a seeded project, it also reads docs/seeded-projects.tsv at BASE_SHA, the text of that
@@ -145,10 +146,10 @@ jobs:
           # The first parent of the merge commit, the commit of the checkout (the top of this file).
           BASE_SHA: ${{ steps.parent.outputs.sha }}
         run: |
-          # The program and src/oss_verify/ of the checkout, the first parent of the merge commit. The first parent has
-          # no program only on a branch that #227 did not reach (the checkout into merge/ above). Only then does the
-          # merge commit's copy in merge/ run, with the merge commit's src/. That adds no trust: on pull_request, this
-          # run: block is the merge commit's already.
+          # The program of the checkout, the first parent of the merge commit, with the rules of oss-verify validate
+          # beside it. The first parent has no program only on a branch that #227 did not reach (the checkout into
+          # merge/ above). Only then does the merge commit's copy in merge/ run. That adds no trust: on pull_request,
+          # this run: block is the merge commit's already.
           dir=.
           [ -f .github/scripts/terms-accepted ] || dir=merge
-          PYTHONPATH="$dir/src" python3 "$dir/.github/scripts/terms-accepted"
+          python3 "$dir/.github/scripts/terms-accepted"

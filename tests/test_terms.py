@@ -6,8 +6,9 @@ The check needs the box that accepts the OSS Verify terms in an enrollment's des
 that changes no file under projects/, which enrolls nothing. A branch of this repository that adopts a seeded project
 names the adopter's pull request from their fork, which ticks the box and names the project: their record that they
 accept the terms. The step runs .github/scripts/terms-accepted, which reads the addresses that get findings as
-oss-verify validate reads them: with load and finding_addresses of oss_verify.validate. The step runs in a temporary
-directory, as in the checkout of the base, where .github/scripts and src are links to this repository's.
+oss-verify validate reads them: with load and finding_addresses of validate_rules.validate, the copy of
+oss_verify.validate beside it. The step runs in a temporary directory, as in the checkout of the base, where
+.github/scripts is a link to this repository's, and which has no src/: the program loads no code from it.
 """
 import json
 import os
@@ -157,12 +158,12 @@ def terms(tmp_path, files, body=UNTICKED, head_repository="someone/oss-verify", 
     `files` (each as `entry` takes it, with its texts as `texts` gives them; changed_files: `changed`, by default their
     number). The API gives `api_head` as its head, and `after_head` on every later read, docs/seeded-projects.tsv of the
     base as `table` (None: a 404), and each other pull request of `others`, {number: pull request}. The step runs in
-    `tmp_path`, as in the checkout of the base: .github/scripts and src there are links to this repository's. With
-    `no_yaml`, src there is a directory with a link to oss_verify and a yaml.py that raises ImportError, as on a runner
+    `tmp_path`, as in the checkout of the base: .github/scripts there is a link to this repository's, and there is no
+    src. With `no_yaml`, the step's PYTHONPATH names a directory whose yaml.py raises ImportError, as on a runner
     without PyYAML. With `base_program` False, the base is older than .github/scripts/terms-accepted: its
-    .github/scripts is an empty directory, and it has no src. With `merge_program`, merge/ is the checkout of the merge
-    commit: its .github/scripts/terms-accepted has the text `merge_program`, and its src is a link to this
-    repository's. Return (exit code, output, calls)."""
+    .github/scripts is an empty directory. With `merge_program`, merge/ is the checkout of the merge commit: its
+    .github/scripts/terms-accepted has the text `merge_program`, and its .github/scripts/validate_rules is a link to
+    this repository's. Return (exit code, output, calls)."""
     stub = tmp_path / "stub"
     stub.mkdir()
     (stub / "gh").write_text(STUB_GH)
@@ -191,22 +192,24 @@ def terms(tmp_path, files, body=UNTICKED, head_repository="someone/oss-verify", 
         scripts.mkdir()
     else:
         scripts.symlink_to(ROOT / ".github" / "scripts")
-        if no_yaml:
-            (tmp_path / "src").mkdir()
-            (tmp_path / "src" / "oss_verify").symlink_to(ROOT / "src" / "oss_verify")
-            (tmp_path / "src" / "yaml.py").write_text('raise ImportError("no PyYAML on this runner")\n')
-        else:
-            (tmp_path / "src").symlink_to(ROOT / "src")
+    no_pyyaml = {}
+    if no_yaml:
+        (tmp_path / "no-pyyaml").mkdir()
+        (tmp_path / "no-pyyaml" / "yaml.py").write_text('raise ImportError("no PyYAML on this runner")\n')
+        no_pyyaml = {"PYTHONPATH": str(tmp_path / "no-pyyaml")}
     if merge_program is not None:
         (tmp_path / "merge" / ".github" / "scripts").mkdir(parents=True)
         (tmp_path / "merge" / ".github" / "scripts" / "terms-accepted").write_text(merge_program)
-        (tmp_path / "merge" / "src").symlink_to(ROOT / "src")
+        (tmp_path / "merge" / ".github" / "scripts" / "validate_rules").symlink_to(
+            ROOT / ".github" / "scripts" / "validate_rules")
     flow = read_workflow("terms.yaml")
     [step] = [step for step in flow["jobs"]["terms-accepted"]["steps"]
               if step.get("name") == "The description accepts the OSS Verify terms"]
-    env = {**os.environ, "PATH": f"{stub}{os.pathsep}{os.environ['PATH']}", "STUB": str(stub), "STUB_BASE": BASE,
+    # The step sets no PYTHONPATH, so none comes from this process either (the tests check sets it to src/).
+    env = {**{name: value for name, value in os.environ.items() if name != "PYTHONPATH"},
+           "PATH": f"{stub}{os.pathsep}{os.environ['PATH']}", "STUB": str(stub), "STUB_BASE": BASE,
            "BODY": body, "AUTHOR": author, "ASSOCIATION": association, "HEAD_REPOSITORY": head_repository,
-           "REPOSITORY": REPOSITORY, "GH_TOKEN": "x", "PR": "7", "HEAD_SHA": HEAD, "BASE_SHA": BASE}
+           "REPOSITORY": REPOSITORY, "GH_TOKEN": "x", "PR": "7", "HEAD_SHA": HEAD, "BASE_SHA": BASE, **no_pyyaml}
     # bash -e, as GitHub runs a step's run, and no longer than the job's timeout-minutes.
     run = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=tmp_path, env=env, capture_output=True, text=True,
                          timeout=60 * flow["jobs"]["terms-accepted"]["timeout-minutes"])
@@ -837,12 +840,14 @@ def test_the_job_checks_out_the_merge_commit_into_merge_only_while_the_base_has_
     assert steps[merge]["uses"] == steps[checkouts[0]]["uses"]
     assert steps[merge]["if"] == "hashFiles('.github/scripts/terms-accepted') == ''"
     assert steps[merge]["with"] == {"path": "merge", "persist-credentials": False}
+    # The program takes the rules of oss-verify validate from beside it, never from src/, which has no code owner.
     assert "PYTHONPATH" not in steps[program]["env"]
+    assert "PYTHONPATH" not in steps[program]["run"]
 
 
 def test_a_base_without_the_program_runs_the_merge_commits_copy(tmp_path):
-    # The pull request that adds .github/scripts/terms-accepted, or one whose base is older than that. The base has
-    # neither the program nor this src/, so only merge/'s copy, with merge/src, can decide as below.
+    # The pull request that adds .github/scripts/terms-accepted, or one whose base is older than that. The base has no
+    # program, so only merge/'s copy, with the rules beside it in merge/.github/scripts, can decide as below.
     program = (ROOT / ".github" / "scripts" / "terms-accepted").read_text()
     code, out, _ = branch(tmp_path, body="Carries the adoption of curl.\n", base_program=False, merge_program=program)
     assert code == 1, out
