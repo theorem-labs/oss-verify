@@ -18,13 +18,16 @@ classes need, makes the frame-pointer images of its FramePointers class again an
 test skips. So does toolchain-images.yaml's job docker-tests (.github/workflows/frame-pointer-tests.yaml) for these two
 classes, on the images that its job make made.
 """
+import contextlib
 import os
 import pathlib
 import re
 import secrets
 import shutil
 import subprocess
+import sys
 import tempfile
+import threading
 import unittest
 
 from oss_verify import check_build
@@ -164,6 +167,26 @@ def compile_builds(tag, raw, labels, **options):
     build, rustc on core and std in a Rust one), so one after another the builds left most of the cores idle."""
     at_once(lambda build: check_build.compile_build(tag, build, validate.BUILDS[build], raw[build], labels=labels,
                                                     **options), raw)
+
+
+class Streams:
+    """sys.stdout for builds that run at once (compile_builds): check_build.run copies the output of each docker run in
+    a thread of its own, so a thread's text is one run's. Each thread's text is kept apart, so that no line of one run
+    is cut by another's, and all of it goes to `out` as well."""
+
+    def __init__(self, out):
+        self.out, self.written = out, {}
+
+    def write(self, text):
+        self.written.setdefault(threading.current_thread(), []).append(text)
+        return self.out.write(text)
+
+    def flush(self):
+        self.out.flush()
+
+    def texts(self):
+        """What each thread wrote, a text for each."""
+        return ["".join(parts) for parts in self.written.values()]
 
 
 @unittest.skipUnless(os.environ.get("OV_DOCKER_TESTS") == "1" and docker_ready(),
@@ -310,10 +333,76 @@ class UbsanChecks(unittest.TestCase):
 
 
 PYTHON_FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "python-example"
-PYTHON_TAG = f"oss-verify-test/python-example:{RUN}"
 # Payload first byte -> exit status in each build of the Python fixture (fixtures/python-example/pkg/example): an
 # uncaught exception exits 79, a MemoryError 2, a SystemExit 77. The same in all four builds.
 PYTHON_EXPECTED = {"": 0, "a": 0, "p": 0, "e": 79, "m": 2, "x": 77}
+# The answers of CPython's configure in the Python builder (infra/base-builder/python/config-cache): for each build, in
+# <this>/<flav>/config.cache, which that build's configure starts from (python/recipes.sh, oft_py_runtime), with what
+# that configure could see in <this>/<flav>/seen (oft_py_seen).
+PYTHON_CONFIG = "/usr/local/lib/oss-verify/python/config"
+# For each flavour given: the flavour, then the number of answers of its config.cache, the compiler and the flags that
+# they were got with, the number of lines of its seen and the first of them; or "none". configure reads the cache by
+# sourcing it, and so does this.
+PYTHON_CACHES = r"""for f; do
+  c=/usr/local/lib/oss-verify/python/config/$f/config.cache s=/usr/local/lib/oss-verify/python/config/$f/seen
+  if [ -s "$c" ]; then
+    (. "$c"; printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$f" "$(grep -c '^ac_cv_' "$c")" "$ac_cv_env_CC_value" \
+      "$ac_cv_env_CFLAGS_value" "$(wc -l < "$s")" "$(head -n 1 "$s")")
+  else
+    printf '%s\tnone\n' "$f"
+  fi
+done
+"""
+# A package of Alpine's that the Python toolchain image does not hold, which a project's Dockerfile could install.
+PYTHON_EXTRA_PACKAGE = "tree"
+# Layers of a project's Dockerfile that change what CPython's configure can see without a file of the builder's
+# directories (python/seen.py): {name: the Dockerfile's lines after FROM}. tools: an ENV PATH that adds a directory
+# holding a pkg-config, which configure looks for on PATH; variable: one more variable.
+PYTHON_GUARD_LAYERS = {
+    "tools": ("RUN mkdir -p /opt/oft-test-tools/bin"
+              " && printf '#!/bin/sh\\nexit 1\\n' > /opt/oft-test-tools/bin/pkg-config"
+              " && chmod 755 /opt/oft-test-tools/bin/pkg-config\nENV PATH=/opt/oft-test-tools/bin:$PATH\n"),
+    "variable": "ENV OFT_TEST_VARIABLE=1\n",
+}
+# A build.sh for compile, as the plain build: the guard of the builder's answers (python/recipes.sh,
+# oft_py_answers_seen) and its status, and nothing more.
+PYTHON_GUARD = r"""#!/bin/sh -e
+[ -z "${BASH_VERSION:-}" ] || exec sh -e "$0"
+. /usr/local/lib/oss-verify/release-target.sh
+mkdir -p /work/ext/oft-py-control/src
+(
+ov_target_begin oft-py-control
+. /usr/local/lib/oss-verify/python/recipes.sh
+rt=$OFT_PY_RTS/$FLAV
+oft_py_new_rt "$rt"
+status=0; oft_py_answers_seen "$rt" || status=$?
+echo "control: the guard returned $status"
+)
+"""
+# A build.sh for compile, as the plain build: CPython's configure of the build's runtime (python/recipes.sh,
+# oft_py_runtime_configure), then its exit status and how many times configure loaded a cache, and nothing more of the
+# build. With a file answers beside it that names a build's flavour, the answers of that build stand in this build's
+# place first: a file, not a variable, which the guard would see (python/seen.py).
+PYTHON_CONTROL = r"""#!/bin/sh -e
+[ -z "${BASH_VERSION:-}" ] || exec sh -e "$0"
+. /usr/local/lib/oss-verify/release-target.sh
+mkdir -p /work/ext/oft-py-control/src
+(
+ov_target_begin oft-py-control
+. /usr/local/lib/oss-verify/python/recipes.sh
+if [ -f "$SRC/answers" ]; then
+  cp "$OFT_PY_CONFIG/$(cat "$SRC/answers")/config.cache" "$OFT_PY_CONFIG/$FLAV/config.cache"
+fi
+rt=$OFT_PY_RTS/$FLAV
+status=0; oft_py_runtime_configure "$rt" || status=$?
+echo "control: configure exited $status, and loaded a cache $(grep -c '^configure: loading cache ' "$rt/configure.log") times"
+)
+"""
+
+
+def flav(build):
+    """compile's FLAV of a build: its name without the hyphen (the directory of its runtime and of its answers)."""
+    return build.replace("-", "")
 
 
 def toolchain_ready(language):
@@ -328,28 +417,148 @@ def toolchain_ready(language):
 @unittest.skipUnless(os.environ.get("OV_DOCKER_TESTS") == "1" and toolchain_ready("python"),
                      "set OV_DOCKER_TESTS=1, with Docker and the Python toolchain image, to build the Python fixture")
 class PythonBuilder(unittest.TestCase):
-    """fixtures/python-example: an atheris harness, built with python/recipes.sh in each build. Getting its build
-    backend needs the network."""
+    """fixtures/python-example: an atheris harness, built with python/recipes.sh in each build, and beside the builds
+    the controls of the configure cache: two stop once configure has run, and the others once its guard has decided.
+    Getting the fixture's build backend needs the network."""
 
     @classmethod
     def setUpClass(cls):
         cls.scratch = tempfile.TemporaryDirectory(prefix="ov-test-python.")
         cls.addClassCleanup(cls.scratch.cleanup)
-        cls.addClassCleanup(subprocess.run, ["docker", "image", "rm", PYTHON_TAG], capture_output=True)
+        cls.tag = f"oss-verify-test/python-example:{RUN}"
+        cls.addClassCleanup(subprocess.run, ["docker", "image", "rm", cls.tag], capture_output=True)
         cls.work = pathlib.Path(cls.scratch.name)
         job = check_build.Job(name="python-example", directory=PYTHON_FIXTURE,
-                              repo="https://example.invalid/python-example", ref="", dockerfile="", builds=BUILDS,
-                              fuzz_targets=["fuzz_example"], language="python")
-        builder = check_build.build_builder(check_build.newest_toolchain("python"))
-        check_build.build_project(job, "0" * 40, builder, PYTHON_TAG, cls.work)
+                              repo="https://example.invalid/python-example", ref="", dockerfile="",
+                              builds=BUILDS, fuzz_targets=["fuzz_example"], language="python")
+        cls.builder = check_build.build_builder(check_build.newest_toolchain("python"))
+        check_build.build_project(job, "0" * 40, cls.builder, cls.tag, cls.work)
         cls.raw = {build: cls.work / "raw" / build for build in BUILDS}
-        compile_builds(PYTHON_TAG, cls.raw, check_build.work_label(cls.work))
+        # What the builds print, a text for each docker run (test_each_configure_started_from_its_builds_answers), and,
+        # beside them, the controls of test_a_build_refuses_the_answers_of_another_build,
+        # test_a_build_with_one_more_package_asks_every_question_itself and the guard's (guard_controls).
+        streams = Streams(sys.stdout)
+        with contextlib.redirect_stdout(streams):
+            _, cls.refused, cls.with_package, cls.guarded = at_once(lambda run: run(), (
+                lambda: compile_builds(cls.tag, cls.raw, check_build.work_label(cls.work)), cls.refuse,
+                cls.configure_with_one_more_package, cls.guard_controls))
+        cls.outputs = streams.texts()
         found = {build: manifest.discover(directory) for build, directory in cls.raw.items()}
         cls.targets, cls.problems = manifest.resolve_targets(found, job.fuzz_targets)
         cls.entries, cls.missing = manifest.collect(cls.raw, cls.targets, cls.work / "out")
 
+    @classmethod
+    def control_configure(cls, name, image, *settings, script=PYTHON_CONTROL, answers=None):
+        """compile of `script` (by default PYTHON_CONTROL), as the plain build, in a container of `image`, with an -e
+        for each of `settings`, its build.sh in <work>/<name>, with a file answers that names `answers` if given: the
+        completed process, with its standard output and standard error together."""
+        source = cls.work / name
+        source.mkdir()
+        (source / "build.sh").write_text(script)
+        if answers:
+            (source / "answers").write_text(answers)
+        environment = [word for setting in settings for word in ("-e", setting)]
+        return subprocess.run(["docker", "run", "--rm", "--init", "--network=none", "--pull=never",
+                               *check_build.work_label(cls.work), "-e", "SANITIZER=none", "-e", "SRC=/control",
+                               *environment, "-v", f"{source}:/control:ro", image, "compile"],
+                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                              errors="replace")
+
+    def configured_in_full(self, done, why):
+        """A control, control_configure's completed process `done`: the plain build's configure did not start from the
+        builder's answers, said `why` (a pattern), asked every question itself, exited 0 and loaded no cache; compile
+        then ended, as PYTHON_CONTROL builds nothing more. The rest of a build after a whole configure is the
+        release's recipe, which a build with no answers of the builder runs, and the bytes of such a build are the same
+        as from the answers (INFRA-5359)."""
+        self.assertEqual(done.returncode, 0, done.stdout[-4000:])
+        lines = re.findall(r"(?m)^oft-py: runtime plain: .*$|^control: .*$", done.stdout)
+        self.assertEqual(len(lines), 3, done.stdout[-4000:])
+        self.assertRegex(lines[0], why)
+        self.assertEqual(lines[1:], ["oft-py: runtime plain: configure asked every question itself",
+                                     "control: configure exited 0, and loaded a cache 0 times"], done.stdout[-4000:])
+
+    @classmethod
+    def refuse(cls):
+        """The plain build's configure in the builder, with the asan build's answers in place of its own."""
+        return cls.control_configure("refusal", cls.builder, answers="asan")
+
+    @classmethod
+    def configure_with_one_more_package(cls):
+        """The plain build's configure in the fixture's project image with PYTHON_EXTRA_PACKAGE installed, as a layer
+        of a project's Dockerfile installs it (apk, with the network)."""
+        tag = f"oss-verify-test/python-example-package:{RUN}"
+        cls.addClassCleanup(subprocess.run, ["docker", "image", "rm", tag], capture_output=True)
+        context = cls.work / "package"
+        context.mkdir()
+        (context / "Dockerfile").write_text(f"FROM {cls.tag}\nRUN apk add --no-cache {PYTHON_EXTRA_PACKAGE}\n")
+        if check_build.run("docker", "build", "--progress=plain", "-t", tag, str(context)) != 0:
+            raise check_build.Failed(f"the image with {PYTHON_EXTRA_PACKAGE} does not build")
+        return cls.control_configure("package-control", tag)
+
+    @classmethod
+    def guard_controls(cls):
+        """The guard alone (PYTHON_GUARD), as the plain build: in the fixture's project image as oss-verify check
+        --checks runs a build (with its records), and in that image with each layer of PYTHON_GUARD_LAYERS. {name:
+        the completed process}, "checks" for the first."""
+        done = {"checks": cls.control_configure("guard-checks", cls.tag, "OV_RECORD=1", "OFT_MAKE_JOBS=2",
+                                                script=PYTHON_GUARD)}
+        for name, layers in PYTHON_GUARD_LAYERS.items():
+            tag = f"oss-verify-test/python-example-{name}:{RUN}"
+            cls.addClassCleanup(subprocess.run, ["docker", "image", "rm", tag], capture_output=True)
+            context = cls.work / f"guard-{name}"
+            context.mkdir()
+            (context / "Dockerfile").write_text(f"FROM {cls.tag}\n{layers}")
+            if check_build.run("docker", "build", "--progress=plain", "-t", tag, str(context)) != 0:
+                raise check_build.Failed(f"the image with the layer {name} does not build")
+            done[name] = cls.control_configure(f"guard-{name}-run", tag, script=PYTHON_GUARD)
+        return done
+
+    def guard_said(self, name):
+        """The guard's lines of the guard control `name`: what it said, and its status."""
+        done = self.guarded[name]
+        self.assertEqual(done.returncode, 0, done.stdout[-4000:])
+        return re.findall(r"(?m)^oft-py: runtime plain: .*$|^control: .*$", done.stdout)
+
     def test_discovery(self):
         self.assertEqual((self.problems, self.missing, self.targets), ([], [], ["fuzz_example"]))
+
+    def test_each_build_has_its_own_answers_of_configure(self):
+        """The Python builder holds a config.cache for each build, of CPython's configure as that build runs it: each
+        holds answers, and records the compiler and the flags that they were got with (ac_cv_env_CC_value,
+        ac_cv_env_CFLAGS_value), which autoconf compares with a later configure's, and what that configure could see
+        (seen). So each build's flags name its own build directory, and only the sanitizer builds' flags sanitize,
+        those of asan and asan-ubsan for addresses."""
+        done = subprocess.run(["docker", "run", "--rm", "--network=none", "--pull=never", "--entrypoint", "sh",
+                               self.builder, "-c", PYTHON_CACHES, "sh", *map(flav, BUILDS)],
+                              capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        caches = {fields[0]: fields[1:] for fields in (line.split("\t") for line in done.stdout.splitlines())}
+        self.assertEqual(sorted(caches), sorted(map(flav, BUILDS)), done.stdout)
+        for build in BUILDS:
+            with self.subTest(build=build):
+                self.assertEqual(len(caches[flav(build)]), 5, f"no config.cache for {build}: {caches[flav(build)]}")
+                answers, cc, cflags, seen, first = caches[flav(build)]
+                self.assertGreater(int(answers), 0)
+                self.assertTrue(cc, cflags)
+                self.assertIn(f"-fmacro-prefix-map=/work/build/pyrt/{flav(build)}/=", cflags)
+                self.assertEqual("-fsanitize=" in cflags, build != "plain", cflags)
+                self.assertEqual("-fsanitize=address" in cflags, "asan" in build, cflags)
+                # What its configure could see: the package database's hash, then the paths.
+                self.assertGreater(int(seen or 0), 1, first)
+                self.assertRegex(first, r"^package database \S+ [0-9a-f]{64}$")
+        self.assertEqual(len({tuple(caches[flav(build)][1:3]) for build in BUILDS}), len(BUILDS), caches)
+
+    def test_each_configure_started_from_its_builds_answers(self):
+        """The configure of each build loaded its own build's config.cache, as configure's own output says
+        (oft_py_runtime_configure's line from its configure.log): the fixture's project image shows configure what
+        the builder's did. The runtime's directory is the build's flavour (flav)."""
+        runtimes = [line for text in self.outputs for line in re.findall(r"(?m)^oft-py: runtime .*$", text)]
+        started = [found.groups() for line in runtimes
+                   if (found := re.match(r"oft-py: runtime (\S+): configure started from the builder's \d+ answers "
+                                         r"\((\S+)\)$", line))]
+        self.assertEqual(sorted(started),
+                         sorted((flav(build), f"{PYTHON_CONFIG}/{flav(build)}/config.cache") for build in BUILDS),
+                         runtimes)
 
     @unittest.skipUnless(QEMU, "no qemu-riscv64 on this machine")
     def test_exit_statuses(self):
@@ -361,11 +570,11 @@ class PythonBuilder(unittest.TestCase):
         binaries.mkdir()
         for build in BUILDS:
             shutil.copy(self.work / "out" / "fuzz_example" / f"fuzz_example.{build}", binaries)
-        runner = ('for b in plain ubsan asan asan-ubsan; do for c in /in/*; do '
+        runner = (f'for b in {" ".join(BUILDS)}; do for c in /in/*; do '
                   'timeout 600 /qemu /bin2/fuzz_example.$b "$c" > /dev/null 2>&1; echo "$b ${c#/in/case-} $?"; done; '
                   'printf "%s " "$b printed"; timeout 600 /qemu /bin2/fuzz_example.$b /in/case-p | tr "\\n" ,; echo; '
                   'done')
-        done = run_in_container(PYTHON_TAG, runner, (inputs, "/in"), (binaries, "/bin2"))
+        done = run_in_container(self.tag, runner, (inputs, "/in"), (binaries, "/bin2"))
         results = {tuple(line.split(" ", 2)[:2]): line.split(" ", 2)[2] for line in done.stdout.splitlines()}
         for case, status in PYTHON_EXPECTED.items():
             for build in BUILDS:
@@ -374,6 +583,45 @@ class PythonBuilder(unittest.TestCase):
         for build in BUILDS:
             # The loud build writes what the harness prints, then the driver writes the return value.
             self.assertEqual(results[(build, "printed")], "printed,0,", build)
+
+    def test_a_build_refuses_the_answers_of_another_build(self):
+        """The control of autoconf's own check (oft_py_configure_from_cache): the plain build's configure, given the
+        asan build's answers in place of its own, refuses them, since the compiler and the flags recorded with them
+        changed, and asks every question itself."""
+        self.configured_in_full(self.refused, r"configure refused the builder's answers \(\S+\): configure: error: "
+                                              r"`(CC|CFLAGS)' has changed since the previous run")
+
+    def test_a_build_with_one_more_package_asks_every_question_itself(self):
+        """The control of the package guard (oft_py_seen): in the project image with one more package, which a
+        project's Dockerfile installed, the plain build's configure does not start from the builder's answers, says
+        that the package database differs, and asks every question itself."""
+        self.configured_in_full(self.with_package, r"configure can see another environment or other files here than "
+                                                   r"when the builder got its answers \(\S+\): \d+ lines differ, such "
+                                                   r"as .*package database")
+
+    def test_the_guard_takes_the_answers_in_a_build_with_the_records_of_the_checks(self):
+        """The guard's control: in the fixture's project image, as oss-verify check --checks runs the plain build (with
+        OV_RECORD and OFT_MAKE_JOBS, which seen.py leaves out), it takes the builder's answers."""
+        self.assertEqual(self.guard_said("checks"), ["control: the guard returned 0"],
+                         self.guarded["checks"].stdout[-4000:])
+
+    def test_a_directory_of_tools_on_path_refuses_the_answers(self):
+        """A project's Dockerfile that adds a directory holding a pkg-config to PATH (ENV PATH): the guard refuses the
+        builder's answers, and says that PATH differs."""
+        said = self.guard_said("tools")
+        self.assertEqual(said[1:], ["control: the guard returned 1"], self.guarded["tools"].stdout[-4000:])
+        self.assertRegex(said[0], r"configure can see another environment or other files here than when the builder "
+                                  r"got its answers \(\S+\): \d+ lines differ, such as -environment PATH=\S+ "
+                                  r"\+environment PATH=\S*/opt/oft-test-tools/bin:")
+
+    def test_one_more_variable_refuses_the_answers(self):
+        """A project's Dockerfile that sets one more variable (ENV): the guard refuses the builder's answers, and names
+        the variable."""
+        said = self.guard_said("variable")
+        self.assertEqual(said[1:], ["control: the guard returned 1"], self.guarded["variable"].stdout[-4000:])
+        self.assertRegex(said[0], r"configure can see another environment or other files here than when the builder "
+                                  r"got its answers \(\S+\): 1 lines differ, such as "
+                                  r"\+environment OFT_TEST_VARIABLE=1 $")
 
 
 RUST_FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "rust-example"

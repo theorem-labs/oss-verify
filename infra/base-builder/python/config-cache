@@ -1,0 +1,34 @@
+#!/bin/sh -e
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+#
+# config-cache <sanitizer> <dir>: on the Python toolchain image, CPython's configure once, as the build of <sanitizer>
+# (compile's SANITIZER: none, address, undefined or address-undefined) runs it, and its answers in
+# <dir>/<flav>/config.cache, <flav> being compile's FLAV of that build (python/recipes.sh, oft_py_config_cache).
+# infra/base-builder/Dockerfile runs it in a stage of its own for each build and copies <dir> into the builder, so that
+# the configure of that build of each Python project starts from these answers (oft_py_runtime) rather than asking all
+# of them again. On another toolchain image it leaves <dir> empty.
+#
+# It runs compile on a build.sh of its own, so the configure gets that build's compiler, flags and layout, as in a
+# project's build.
+sanitizer=${1:?config-cache needs the sanitizer of the build}
+out=${2:?config-cache needs the directory to write}
+mkdir -p "$out"
+. /usr/local/lib/oss-verify/python/recipes.sh
+[ -f "$OFT_PY_TARBALL" ] || exit 0
+
+src=$(mktemp -d)
+cat > "$src/build.sh" <<'EOF'
+#!/bin/sh -e
+[ -z "${BASH_VERSION:-}" ] || exec sh -e "$0"
+. /usr/local/lib/oss-verify/release-target.sh
+mkdir -p /work/ext/oft-py-config/src
+(
+ov_target_begin oft-py-config
+. /usr/local/lib/oss-verify/python/recipes.sh
+oft_py_config_cache "$OV_CONFIG_CACHE_DIR/$FLAV"
+)
+EOF
+OV_CONFIG_CACHE_DIR=$out SRC=$src SANITIZER=$sanitizer compile
+set -- "$out"/*/config.cache
+[ $# = 1 ] && [ -s "$1" ] || { echo "config-cache: the configure wrote no $out/<flav>/config.cache" >&2; exit 1; }

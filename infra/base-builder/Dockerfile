@@ -13,7 +13,7 @@
 # that lists the toolchains (docs/build-contract.md, "Toolchains"). The parser directive on line 1 keeps BuildKit from
 # warning, on every build, that the argument has no default.
 ARG TOOLCHAIN
-FROM ${TOOLCHAIN}
+FROM ${TOOLCHAIN} AS builder
 
 # SECURITY: the builder trusts no root of eMudhra's emSign CAs or of Comodo's AAA Certificate Services: private keys of
 # intermediates under them are compromised (Mozilla's security blog, 2026-10-20, names eMudhra's; the intermediates
@@ -33,7 +33,7 @@ COPY compile fetch-commit git-credential-oss-verify lay-out-sources /usr/local/b
 RUN chmod 0755 /usr/local/bin/compile /usr/local/bin/fetch-commit /usr/local/bin/lay-out-sources \
                /usr/local/bin/git-credential-oss-verify \
                /usr/local/lib/oss-verify/link-fuzz-target /usr/local/lib/oss-verify/record-compile \
-               /usr/local/lib/oss-verify/go/compile-go \
+               /usr/local/lib/oss-verify/go/compile-go /usr/local/lib/oss-verify/python/config-cache \
  && mkdir -p /src /work /out
 
 ENV SRC=/src \
@@ -41,4 +41,24 @@ ENV SRC=/src \
     OUT=/out \
     SANITIZER=none
 WORKDIR /src
+
+# CPython's configure, once for each of the four builds, on the Python toolchain image (python/config-cache): each
+# build's configure starts from the answers of its own (python/recipes.sh, oft_py_runtime) and runs only the checks
+# that autoconf does not cache; autoconf takes the answers only with the compiler, flags and environment that they were
+# got with. A stage for each build, so that BuildKit runs the four configures at once and the builder keeps none of the
+# files they write. On another toolchain image the directory is empty.
+FROM builder AS python-config-plain
+RUN /usr/local/lib/oss-verify/python/config-cache none /oft-py-config
+FROM builder AS python-config-ubsan
+RUN /usr/local/lib/oss-verify/python/config-cache undefined /oft-py-config
+FROM builder AS python-config-asan
+RUN /usr/local/lib/oss-verify/python/config-cache address /oft-py-config
+FROM builder AS python-config-asanubsan
+RUN /usr/local/lib/oss-verify/python/config-cache address-undefined /oft-py-config
+
+FROM builder
+COPY --from=python-config-plain /oft-py-config/ /usr/local/lib/oss-verify/python/config/
+COPY --from=python-config-ubsan /oft-py-config/ /usr/local/lib/oss-verify/python/config/
+COPY --from=python-config-asan /oft-py-config/ /usr/local/lib/oss-verify/python/config/
+COPY --from=python-config-asanubsan /oft-py-config/ /usr/local/lib/oss-verify/python/config/
 CMD ["compile"]

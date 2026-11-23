@@ -14,7 +14,8 @@
 #
 # CPython is C, so each build compiles it with that build's compiler and flags, as a library. oft_py_build:
 #
-#   oft_py_runtime   the build's libpython3.11.a, built once in a container for all its targets
+#   oft_py_runtime   the build's libpython3.11.a, built once in a container for all its targets; its configure starts
+#                    from the answers that the builder image's build got once for this build (config-cache)
 #   oft_py_install   the project's own `pip install` (what its OSS-Fuzz build.sh does), with no network, from the
 #                    files at /work/ext/<target>/pydist, each pinned by sha256 in the sources file
 #   oft_py_freeze    the module closure (pyclosure.py: what an import can reach, and what a run over the seeds at
@@ -27,7 +28,15 @@
 # phase only, the malloc allocator, a fixed sys.executable that does not exist, no select.epoll, hash seed 0).
 #
 # From the build recipe of the oss-fuzz-theorems 2026.10 release (tools/python/recipe.sh), in its release mode: the same
-# paths, names, flags and steps. The comments are new, and the stock runtime is left out.
+# paths, names, flags and steps. The comments are new, and the stock runtime is left out. Also new: CPython's configure
+# in each build starts from the answers that the builder image's build got for that build, with its compiler and flags
+# (oft_py_config_cache), where the release's asked every question in each build. The bytes stay the same: the answers
+# are those that the build's own configure gets, and autoconf takes them only where the compiler, the flags and the
+# other variables that it records with them (its precious variables) are the same as when it got them
+# (oft_py_configure_from_cache). On that release's Python toolchain, each build published the same fuzz target from its
+# own build's answers as without them, and made the same libpython3.11.a, libexpat.a, libmpdec.a, pyconfig.h and link
+# variables even from the plain build's answers, byte for byte (INFRA-5359). Of the files compared, only the build
+# directory's Makefile differs, and no output holds it: it records configure's arguments.
 
 OFT_PY_DIR=/usr/local/lib/oss-verify/python
 # The toolchain image's Python: the CPython tarball and a native CPython 3.11.13 built from it.
@@ -45,6 +54,8 @@ OFT_PY_FILE_MAP=/oft/pyrt/build/
 # The patched source tree, one for all four builds, at the release's path for it: configure records its own path, and
 # the binaries hold it, 237 times in an asan build. The name is the release's hash of the tarball and the patches.
 OFT_PY_SRC=/work/build/pyrt/src-64ef29c99f3ea59d
+# The build directories of the runtimes, <this>/<flav> for each build.
+OFT_PY_RTS=/work/build/pyrt
 
 oft_py_fail() { echo "oft-py: $*" >&2; return 1; }
 
@@ -61,28 +72,137 @@ oft_py_source() {
   : > "$OFT_PY_SRC/.oft-src-ok"
 }
 
-# oft_py_runtime: the build's libpython3.11.a, in /work/build/pyrt/<flav>, built once in a container.
+# The answers of CPython's configure that the builder image's build gets once for each build (config-cache,
+# oft_py_config_cache), in <this>/<flav>/config.cache, compile's FLAV of the build, with what that configure could see
+# (<this>/<flav>/seen, oft_py_seen). Not there: the configure asks everything itself.
+OFT_PY_CONFIG=$OFT_PY_DIR/config
+
+# oft_py_new_rt <rt>: a new build directory <rt> for CPython's configure, with the runtime's Setup.local.
+oft_py_new_rt() {
+  rm -rf "$1" && mkdir -p "$1/Modules" && cp "$OFT_PY_DIR/Setup.local" "$1/Modules/Setup.local"
+}
+
+# oft_py_seen: what CPython's configure can see here besides its precious variables, which autoconf compares itself
+# (oft_py_configure_from_cache), as seen.py writes it: the SHA-256 of the package database; each variable of the
+# environment but those that differ from one run to the next (seen.py's ENVIRONMENT_LEFT_OUT, which says why); then
+# each entry under the directories that hold the headers, libraries, pkg-config files and programs that it looks for
+# and under each directory on PATH: a file with its permissions, size and modification time, a directory with its
+# permissions, a symbolic link with its target. A package that a project's Dockerfile installs, a variable that it or
+# build.sh sets (an ENV PATH that adds a directory of tools, say), or a file that it or build.sh adds, removes,
+# rewrites or makes executable there, changes it. An edit that keeps a file's size and modification time is not seen,
+# by design (seen.py says why).
+oft_py_seen() {
+  "$OFT_PY_BPY" "$OFT_PY_DIR/seen.py"
+}
+
+# oft_py_answers_seen <rt>: whether this container shows CPython's configure what the builder's configure for this
+# build saw (OFT_PY_CONFIG/<flav>/seen, beside its answers): 0 if it does; 1 if not, when it says how many lines differ
+# and shows the first; 2 if oft_py_seen fails. This container's lines go to <rt>/seen.
+oft_py_answers_seen() {
+  _seen=$OFT_PY_CONFIG/$FLAV/seen
+  oft_py_seen > "$1/seen" || return 2
+  cmp -s "$_seen" "$1/seen" && return 0
+  echo "oft-py: runtime $FLAV: configure can see another environment or other files here than when the builder got" \
+    "its answers ($_seen): $(diff -u "$_seen" "$1/seen" 2>/dev/null | grep -c '^[-+][^-+]') lines differ, such as" \
+    "$(diff -u "$_seen" "$1/seen" 2>/dev/null | grep '^[-+][^-+]' | head -n 3 | tr '\n' ' ')"
+  return 1
+}
+
+# oft_py_configure <rt> [<argument> ...]: CPython's configure for this build, in its build directory <rt>, with the
+# arguments before its own; its output goes to <rt>/configure.log. A cross build, out of the source tree. The two
+# ac_cv_file values are what configure asks for in a cross build; ipv6 needs a run-time getaddrinfo probe that a cross
+# build cannot run. configure is run through the path the compiler shims give the tree (/src/repo/... for /work/...),
+# which it records. CFLAGS are a library's, the runtime's define, and a prefix map that gives the build directory's own
+# files one __FILE__ spelling.
+oft_py_configure() {
+  _rt=$1; shift
+  ( cd "$_rt" && CONFIG_SITE= "/src/repo${OFT_PY_SRC#/work}/configure" "$@" \
+      --host="$CHOST" --build=x86_64-pc-linux-gnu \
+      --with-build-python="$OFT_PY_BPY" --prefix="$OFT_PY_PREFIX" \
+      --disable-shared --without-ensurepip --disable-test-modules --disable-ipv6 \
+      ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no \
+      CC="$CC" CFLAGS="$BASE_CFLAGS $SAN $OFT_PY_CPY_DEFS -fmacro-prefix-map=$_rt/=$OFT_PY_FILE_MAP -fmacro-prefix-map=/src/repo${_rt#/work}/=$OFT_PY_FILE_MAP" \
+      CPPFLAGS= LDFLAGS= ) > "$_rt/configure.log" 2>&1
+}
+
+# oft_py_configure_failed <rt>: the end of the log of the configure that failed in <rt>, and a failure.
+oft_py_configure_failed() {
+  tail -40 "$1/configure.log" >&2; return 1
+}
+
+# oft_py_configure_from_cache <rt> <cache>: oft_py_configure in the new build directory <rt> (oft_py_new_rt), starting
+# from the answers in <cache>, autoconf's cache file, copied to <rt>/config.cache. The status is 0 when configure ran,
+# 2 when it refused the answers, and 1 when it failed otherwise. The cache records the precious variables that the
+# answers were got with (ac_cv_env_*: CC, CFLAGS, CPPFLAGS, LDFLAGS and the others that configure declares), and
+# autoconf compares each with this configure's before it reads an answer: a cache of another compiler, other flags or
+# another environment, such as another build's, is refused.
+oft_py_configure_from_cache() {
+  cp "$2" "$1/config.cache" || return 1
+  oft_py_configure "$1" --cache-file=config.cache && return 0
+  if grep -q 'changes in the environment can compromise the build' "$1/configure.log"; then return 2; fi
+  return 1
+}
+
+# oft_py_config_cache <dir>: CPython's configure, once, as this build (compile's FLAV) runs it, and its answers in
+# <dir>/config.cache (autoconf's cache file), for the builder image (config-cache), with what it could see in
+# <dir>/seen (oft_py_seen). The cache is kept whole: with the precious variables that configure got the answers with
+# (ac_cv_env_*), which autoconf compares with a later configure's before it takes them (oft_py_configure_from_cache).
+# What else configure reads (the compiler, the musl sysroot, the program it looks for, the CPython tarball and patch,
+# Setup.local) comes from the toolchain image and this directory, before any project's Dockerfile runs: oft_py_runtime
+# takes the answers only where its container shows the same as seen.
+oft_py_config_cache() {
+  oft_py_source || return 1
+  _rt=$OFT_PY_RTS/$FLAV
+  oft_py_new_rt "$_rt" && mkdir -p "$1" || return 1
+  oft_py_seen > "$1/seen" || return 1
+  oft_py_configure "$_rt" --cache-file=config.cache || { oft_py_configure_failed "$_rt"; return 1; }
+  cp "$_rt/config.cache" "$1/config.cache" || return 1
+  echo "oft-py: $(grep -c '^ac_cv_' "$1/config.cache") answers of configure for the $FLAV build in $1/config.cache, which saw $(wc -l < "$1/seen") lines of $1/seen"
+}
+
+# oft_py_runtime_configure <rt>: CPython's configure for this build in the new build directory <rt> (oft_py_new_rt),
+# from the answers that the builder image's build got for this build (OFT_PY_CONFIG/<flav>/config.cache) where this
+# container shows what that configure saw (oft_py_seen) and autoconf takes them (oft_py_configure_from_cache); without
+# them, or where either refuses them, configure asks every question itself. It says which, in configure's own words
+# (configure.log): tests/test_builder.py's Python classes read these lines, and their controls stop after this.
+oft_py_runtime_configure() {
+  oft_py_source || return 1
+  _cache=$OFT_PY_CONFIG/$FLAV/config.cache
+  oft_py_new_rt "$1" || return 1
+  _from=none
+  if [ -s "$_cache" ]; then
+    _from=0; oft_py_answers_seen "$1" || _from=$?
+    case $_from in
+      0) oft_py_configure_from_cache "$1" "$_cache" || _from=$? ;;
+      1) _from=unseen ;;
+      *) return 1 ;;
+    esac
+  fi
+  case $_from in
+    0) if grep -q '^configure: loading cache ' "$1/configure.log"; then
+         echo "oft-py: runtime $FLAV: configure started from the builder's $(grep -c '^ac_cv_' "$_cache") answers ($_cache)"
+       else
+         echo "oft-py: runtime $FLAV: configure asked every question itself"
+       fi ;;
+    2|unseen|none)
+      if [ "$_from" = 2 ]; then
+        echo "oft-py: runtime $FLAV: configure refused the builder's answers ($_cache): $(grep -m1 'has changed since the previous run' "$1/configure.log")"
+      fi
+      oft_py_new_rt "$1" || return 1
+      oft_py_configure "$1" || { oft_py_configure_failed "$1"; return 1; }
+      echo "oft-py: runtime $FLAV: configure asked every question itself" ;;
+    *) oft_py_configure_failed "$1"; return 1 ;;
+  esac
+}
+
+# oft_py_runtime: the build's libpython3.11.a, in OFT_PY_RTS/<flav>, built once in a container: its configure
+# (oft_py_runtime_configure), then make.
 oft_py_runtime() {
   oft_py_source || return 1
-  rt=/work/build/pyrt/$FLAV
+  rt=$OFT_PY_RTS/$FLAV
   if [ ! -f "$rt/.oft-built" ]; then
-    rm -rf "$rt"
-    mkdir -p "$rt/Modules"
-    cp "$OFT_PY_DIR/Setup.local" "$rt/Modules/Setup.local"
     t0=$(date +%s)
-    # A cross build, out of the source tree. The two ac_cv_file values are what configure asks for in a cross build;
-    # ipv6 needs a run-time getaddrinfo probe that a cross build cannot run. configure is run through the path the
-    # compiler shims give the tree (/src/repo/... for /work/...), which it records. CFLAGS are a library's, the
-    # runtime's define, and a prefix map that gives the build directory's own files one __FILE__ spelling.
-    if ! ( cd "$rt" && CONFIG_SITE= "/src/repo${OFT_PY_SRC#/work}/configure" \
-          --host="$CHOST" --build=x86_64-pc-linux-gnu \
-          --with-build-python="$OFT_PY_BPY" --prefix="$OFT_PY_PREFIX" \
-          --disable-shared --without-ensurepip --disable-test-modules --disable-ipv6 \
-          ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no \
-          CC="$CC" CFLAGS="$BASE_CFLAGS $SAN $OFT_PY_CPY_DEFS -fmacro-prefix-map=$rt/=$OFT_PY_FILE_MAP -fmacro-prefix-map=/src/repo${rt#/work}/=$OFT_PY_FILE_MAP" \
-          CPPFLAGS= LDFLAGS= ) > "$rt/configure.log" 2>&1; then
-      tail -40 "$rt/configure.log" >&2; return 1
-    fi
+    oft_py_runtime_configure "$rt" || return 1
     if ! ( cd "$rt" && make -j"$(oft_jobs)" libpython3.11.a Modules/expat/libexpat.a \
           Modules/_decimal/libmpdec/libmpdec.a ) > "$rt/make.log" 2>&1; then
       grep -n -m20 -E 'error|Error' "$rt/make.log" >&2; tail -30 "$rt/make.log" >&2; return 1
