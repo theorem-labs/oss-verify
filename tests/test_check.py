@@ -10,6 +10,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -482,7 +484,8 @@ class Buildkit(unittest.TestCase):
             self.calls.append(argv)
             return probe_status if argv == self.PROBE else 0
 
-        with mock.patch.object(check_build, "run", run), mock.patch.object(check_build, "step"), \
+        with tempfile.TemporaryDirectory() as cache, mock.patch.object(check_build, "CACHE", pathlib.Path(cache)), \
+                mock.patch.object(check_build, "run", run), mock.patch.object(check_build, "step"), \
                 mock.patch.object(check_build.shutil, "which", lambda name: f"/usr/bin/{name}"):
             check_build.build_builder(TOOLCHAIN)
 
@@ -505,6 +508,83 @@ class Buildkit(unittest.TestCase):
         self.assertEqual(self.calls[0], self.PROBE)
         self.assertEqual(self.calls[1][:3], ("docker", "build", "--progress=plain"))
         self.assertNotIn("--help", self.calls[1])
+
+
+class BuilderTurns(unittest.TestCase):
+    """build_builder: two runs that build the same builder at once take turns. Two BuildKit builds that export one tag
+    together fail the second with "image ... already exists" (Docker 29's containerd image store), as two pytest-xdist
+    workers of the Docker tests did on the C builder (INFRA-5359)."""
+
+    def most_at_once(self, toolchains, turn, lock=check_build.cache_lock):
+        """The most `docker build`s of a builder that ran at once, with build_builder called for each of `toolchains`
+        in a thread of its own (check_build.in_threads), and the tag that each call returned; a call's failure is
+        raised. The turns are `lock` (cache_lock by default). Each stand-in `docker build` waits until every call has
+        asked for its turn, then until every build has started a `docker build`, for at most `turn` seconds: a build
+        that waits for its turn has not started one by then, and a build that does not wait starts one at once."""
+        changed, active, most, asked, started = threading.Condition(), [0], [0], [0], [0]
+
+        @contextlib.contextmanager
+        def asking(entry):
+            with changed:
+                asked[0] += 1
+                changed.notify_all()
+            with lock(entry):
+                yield
+
+        def run(*argv, quiet=False):
+            if "--help" in argv:
+                return 0
+            with changed:
+                active[0] += 1
+                started[0] += 1
+                most[0] = max(most[0], active[0])
+                changed.notify_all()
+                self.assertTrue(changed.wait_for(lambda: asked[0] == len(toolchains), timeout=60), "a call never asked")
+                changed.wait_for(lambda: started[0] == len(toolchains), timeout=turn)
+                active[0] -= 1
+            return 0
+
+        with tempfile.TemporaryDirectory() as cache, mock.patch.object(check_build, "CACHE", pathlib.Path(cache)), \
+                mock.patch.object(check_build, "run", run), mock.patch.object(check_build, "step"), \
+                mock.patch.object(check_build, "cache_lock", asking), \
+                mock.patch.object(check_build.shutil, "which", lambda name: f"/usr/bin/{name}"):
+            tags = check_build.in_threads(check_build.build_builder, toolchains, len(toolchains))
+        for tag in tags:
+            if isinstance(tag, BaseException):
+                raise tag
+        return most[0], tags
+
+    def test_two_builds_of_one_builder_take_turns(self):
+        most, tags = self.most_at_once([TOOLCHAIN, TOOLCHAIN], turn=1)
+        self.assertEqual((most, len(set(tags))), (1, 1), tags)
+        # The control: without the turns, the two builds are in `docker build` at once, and this finds it. Both start
+        # one at once, so the long bound costs no time.
+        most, _ = self.most_at_once([TOOLCHAIN, TOOLCHAIN], turn=60, lock=lambda entry: contextlib.nullcontext())
+        self.assertEqual(most, 2)
+
+    def test_two_builders_build_at_once(self):
+        most, tags = self.most_at_once([TOOLCHAIN, check_build.newest_toolchain("rust")], turn=60)
+        self.assertEqual((most, len(set(tags))), (2, 2), tags)
+
+    def test_a_cache_that_cannot_hold_the_lock_still_builds(self):
+        """The lock is a courtesy to a second run: a run whose cache directory cannot be written (a read-only home,
+        with --dir elsewhere) still builds the builder, with --no-cache too."""
+        calls = []
+
+        def run(*argv, quiet=False):
+            calls.append(argv)
+            return 0
+
+        with tempfile.TemporaryDirectory() as scratch, mock.patch.object(check_build, "run", run), \
+                mock.patch.object(check_build, "step"), mock.patch.object(check_build, "say"), \
+                mock.patch.object(check_build.shutil, "which", lambda name: f"/usr/bin/{name}"):
+            blocked = pathlib.Path(scratch) / "a-file"
+            blocked.write_text("")
+            with mock.patch.object(check_build, "CACHE", blocked):
+                check_build.build_builder(TOOLCHAIN, no_cache=True)
+        builds = [argv for argv in calls if "--help" not in argv]
+        self.assertEqual(len(builds), 1, calls)
+        self.assertIn("--no-cache", builds[0])
 
 
 class ProjectTag(unittest.TestCase):

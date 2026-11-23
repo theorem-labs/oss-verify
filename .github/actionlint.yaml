@@ -1,6 +1,6 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
-# actionlint's configuration (https://github.com/rhysd/actionlint/blob/main/docs/config.md). The job tests of
+# actionlint's configuration (https://github.com/rhysd/actionlint/blob/main/docs/config.md). The job suite of
 # .github/workflows/tests.yaml runs actionlint over .github/workflows/, and fails on any finding not ignored here. Each
 # ignore below is one exact message, for a key of GitHub's workflow syntax that actionlint (1.7.12, its newest release)
 # does not know yet. Fix any other finding at its cause.

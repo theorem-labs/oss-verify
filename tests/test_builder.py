@@ -11,10 +11,12 @@ fuzz targets do one thing per first input byte, and the test checks the exit sta
 docs/build-contract.md. Running the riscv64 binaries needs qemu-riscv64 (static) on this machine; without it, that part
 is skipped.
 
-FramePointers also needs the frame-pointer images that .github/workflows/toolchain-images.yaml makes, named by
-OV_FP_TOOLCHAIN_C and OV_FP_TOOLCHAIN_RUST. It skips unless both are set. The docker-tests job of
-.github/workflows/frame-pointer-tests.yaml makes the images again, sets both, and fails if a test skips. That workflow
-runs for a change of this file; toolchain-images.yaml calls the same job.
+FramePointersC and FramePointersRust also need the frame-pointer images that .github/workflows/toolchain-images.yaml
+makes, named by OV_FP_TOOLCHAIN_C and OV_FP_TOOLCHAIN_RUST: each skips unless its own is set. The job docker of
+.github/workflows/tests.yaml runs every test of this file in shards: each shard pulls the toolchain images that its
+classes need, makes the frame-pointer images of its FramePointers class again and sets its variable, and fails if a
+test skips. So does toolchain-images.yaml's job docker-tests (.github/workflows/frame-pointer-tests.yaml) for these two
+classes, on the images that its job make made.
 """
 import os
 import pathlib
@@ -145,6 +147,25 @@ def run_in_container(image, runner, *mounts):
                            image, "-c", f"{NO_CORE_MEMORY}\n{runner}"], capture_output=True, text=True, check=True)
 
 
+def at_once(function, items):
+    """function(item) for each of `items`, all at once, each in a thread of its own (check_build.in_threads): what each
+    call returned, in the order of `items`. The first failure is raised once every call has ended."""
+    items = list(items)
+    outcomes = check_build.in_threads(function, items, len(items))
+    for outcome in outcomes:
+        if isinstance(outcome, BaseException):
+            raise outcome
+    return outcomes
+
+
+def compile_builds(tag, raw, labels, **options):
+    """check_build.compile_build of each build of `raw` ({build: the directory of its $OUT}), all at once, each in a
+    container of its own, with `options`. Most of one build is one process at a time (CPython's configure in a Python
+    build, rustc on core and std in a Rust one), so one after another the builds left most of the cores idle."""
+    at_once(lambda build: check_build.compile_build(tag, build, validate.BUILDS[build], raw[build], labels=labels,
+                                                    **options), raw)
+
+
 @unittest.skipUnless(os.environ.get("OV_DOCKER_TESTS") == "1" and docker_ready(),
                      "set OV_DOCKER_TESTS=1, with Docker and the toolchain image, to build the fixture")
 class Builder(unittest.TestCase):
@@ -159,11 +180,8 @@ class Builder(unittest.TestCase):
                               dockerfile="", builds=BUILDS, fuzz_targets=None)
         builder = check_build.build_builder()
         check_build.build_project(job, "0" * 40, builder, TAG, cls.work)
-        cls.raw = {}
-        for build in BUILDS:
-            cls.raw[build] = cls.work / "raw" / build
-            check_build.compile_build(TAG, build, validate.BUILDS[build], cls.raw[build],
-                                      labels=check_build.work_label(cls.work))
+        cls.raw = {build: cls.work / "raw" / build for build in BUILDS}
+        compile_builds(TAG, cls.raw, check_build.work_label(cls.work))
         cls.found = {build: manifest.discover(directory) for build, directory in cls.raw.items()}
         cls.targets, cls.problems = manifest.resolve_targets(cls.found)
         cls.entries, cls.missing = manifest.collect(cls.raw, cls.targets, cls.work / "out")
@@ -265,17 +283,24 @@ class UbsanChecks(unittest.TestCase):
             for case in "flm":
                 (inputs / f"case-{case}").write_bytes(b"\0" * 6 + case.encode())
             results = {}
+            variants = [(build, sanitizer, checks)
+                        for build, sanitizer in (("ubsan", "undefined"), ("asan-ubsan", "address-undefined"))
+                        for checks in (["array-bounds"], ["array-bounds", "strict-flex-arrays"])]
+            runner = ('for c in /in/*; do timeout 600 /qemu /raw/example_fuzzer "$c" > /dev/null 2>&1; '
+                      'echo "${c#/in/} $?"; done')
+
+            def compile_and_run(variant):
+                build, sanitizer, checks = variant
+                raw = work / f"raw-{build}-{len(checks)}"
+                check_build.compile_build(tag, build, sanitizer, raw, (checks, ["vptr"], []),
+                                          labels=check_build.work_label(work))
+                done = run_in_container(tag, runner, (inputs, "/in"), (raw, "/raw"))
+                return dict(line.split() for line in done.stdout.splitlines())
+
             try:
                 check_build.build_project(job, "0" * 40, check_build.build_builder(), tag, work)
-                for build, sanitizer in (("ubsan", "undefined"), ("asan-ubsan", "address-undefined")):
-                    for checks in (["array-bounds"], ["array-bounds", "strict-flex-arrays"]):
-                        raw = work / f"raw-{build}-{len(checks)}"
-                        check_build.compile_build(tag, build, sanitizer, raw, (checks, ["vptr"], []),
-                                                  labels=check_build.work_label(work))
-                        runner = ('for c in /in/*; do timeout 600 /qemu /raw/example_fuzzer "$c" > /dev/null 2>&1; '
-                                  'echo "${c#/in/} $?"; done')
-                        done = run_in_container(tag, runner, (inputs, "/in"), (raw, "/raw"))
-                        results[build, checks[-1]] = dict(line.split() for line in done.stdout.splitlines())
+                for (build, _, checks), found in zip(variants, at_once(compile_and_run, variants)):
+                    results[build, checks[-1]] = found
             finally:
                 subprocess.run(["docker", "image", "rm", tag], capture_output=True)
         for build in ("ubsan", "asan-ubsan"):
@@ -317,11 +342,8 @@ class PythonBuilder(unittest.TestCase):
                               fuzz_targets=["fuzz_example"], language="python")
         builder = check_build.build_builder(check_build.newest_toolchain("python"))
         check_build.build_project(job, "0" * 40, builder, PYTHON_TAG, cls.work)
-        cls.raw = {}
-        for build in BUILDS:
-            cls.raw[build] = cls.work / "raw" / build
-            check_build.compile_build(PYTHON_TAG, build, validate.BUILDS[build], cls.raw[build],
-                                      labels=check_build.work_label(cls.work))
+        cls.raw = {build: cls.work / "raw" / build for build in BUILDS}
+        compile_builds(PYTHON_TAG, cls.raw, check_build.work_label(cls.work))
         found = {build: manifest.discover(directory) for build, directory in cls.raw.items()}
         cls.targets, cls.problems = manifest.resolve_targets(found, job.fuzz_targets)
         cls.entries, cls.missing = manifest.collect(cls.raw, cls.targets, cls.work / "out")
@@ -387,11 +409,8 @@ class RustBuilder(unittest.TestCase):
                               ref="", dockerfile="", builds=BUILDS, fuzz_targets=["example_fuzzer"], language="rust")
         builder = check_build.build_builder(check_build.newest_toolchain("rust"))
         check_build.build_project(job, "0" * 40, builder, RUST_TAG, cls.work)
-        cls.raw = {}
-        for build in BUILDS:
-            cls.raw[build] = cls.work / "raw" / build
-            check_build.compile_build(RUST_TAG, build, validate.BUILDS[build], cls.raw[build],
-                                      labels=check_build.work_label(cls.work))
+        cls.raw = {build: cls.work / "raw" / build for build in BUILDS}
+        compile_builds(RUST_TAG, cls.raw, check_build.work_label(cls.work))
         found = {build: manifest.discover(directory) for build, directory in cls.raw.items()}
         cls.targets, cls.problems = manifest.resolve_targets(found, job.fuzz_targets)
         cls.entries, cls.missing = manifest.collect(cls.raw, cls.targets, cls.work / "out")
@@ -536,11 +555,8 @@ class AllocationFailureOnCjson(unittest.TestCase):
                               dockerfile="", builds=BUILDS, fuzz_targets=None)
         builder = check_build.build_builder()
         check_build.build_project(job, CJSON_COMMIT, builder, CJSON_TAG, cls.work)
-        raw = {}
-        for build in BUILDS:
-            raw[build] = cls.work / "raw" / build
-            check_build.compile_build(CJSON_TAG, build, validate.BUILDS[build], raw[build],
-                                      labels=check_build.work_label(cls.work))
+        raw = {build: cls.work / "raw" / build for build in BUILDS}
+        compile_builds(CJSON_TAG, raw, check_build.work_label(cls.work))
         found = {build: manifest.discover(directory) for build, directory in raw.items()}
         cls.targets, _ = manifest.resolve_targets(found)
         cls.entries, _ = manifest.collect(raw, cls.targets, cls.work / "out")
@@ -586,10 +602,10 @@ class AllocationFailureOnCjson(unittest.TestCase):
                         self.assertEqual(counting, "0")
 
 
-# The frame-pointer images of .github/workflows/toolchain-images.yaml that FramePointers builds on, by the language of
-# the fixture: the row of infra/toolchains.tsv that the image is made from, and the variable that names the image. The
-# rows are taken by name, never as the newest for a language, so that these tests read the same images after
-# infra/toolchains.tsv has the frame-pointer rows too.
+# The frame-pointer images of .github/workflows/toolchain-images.yaml that FramePointersC and FramePointersRust build
+# on, by the language of the fixture: the row of infra/toolchains.tsv that the image is made from, and the variable that
+# names the image. The rows are taken by name, never as the newest for a language, so that these tests read the same
+# images after infra/toolchains.tsv has the frame-pointer rows too.
 FRAME_POINTER_IMAGES = {"c": ("oss-fuzz-theorems-2026.10", "OV_FP_TOOLCHAIN_C"),
                         "rust": ("oss-fuzz-theorems-2026.10-rust", "OV_FP_TOOLCHAIN_RUST")}
 # What toolchain.sh adds to the C flags, and rust/recipes.sh to rustc's, on a frame-pointer image.
@@ -605,60 +621,79 @@ def row_image(name):
     return images[0]
 
 
-@unittest.skipUnless(os.environ.get("OV_DOCKER_TESTS") == "1"
-                     and all(os.environ.get(variable) for _, variable in FRAME_POINTER_IMAGES.values())
-                     and all(docker_ready(row_image(row)) for row, _ in FRAME_POINTER_IMAGES.values()),
-                     "set OV_DOCKER_TESTS=1, and OV_FP_TOOLCHAIN_C and OV_FP_TOOLCHAIN_RUST to the frame-pointer "
-                     "images (.github/workflows/toolchain-images.yaml makes them), with Docker and their base images, "
-                     "to build the fixtures on them")
-class FramePointers(unittest.TestCase):
-    """OFT_FRAME_POINTERS: the plain build of fixtures/example and fixtures/rust-example on each frame-pointer image and
-    on the base image it is made from. compile_build passes no -e of its caller and keeps no output, so these tests run
-    compile with compile_build's docker run arguments and their own -e, and read its output. A Rust build compiles the
-    standard library (minutes), so the Rust fixture is built only where a test reads its RUSTFLAGS line."""
+def frame_pointer_images_here(language):
+    """Whether the tests of `language` can run: OV_DOCKER_TESTS is 1, the variable of its frame-pointer image is set,
+    and Docker has the base image of that image."""
+    row, variable = FRAME_POINTER_IMAGES[language]
+    return os.environ.get("OV_DOCKER_TESTS") == "1" and bool(os.environ.get(variable)) and docker_ready(row_image(row))
+
+
+def frame_pointers_skip(language):
+    """The reason a class of FramePointers skips without the images of `language`."""
+    row, variable = FRAME_POINTER_IMAGES[language]
+    return (f"set OV_DOCKER_TESTS=1, and {variable} to the frame-pointer image made from {row} "
+            "(.github/workflows/toolchain-images.yaml makes it), with Docker and that base image, to build the "
+            "fixture on them")
+
+
+class FramePointers:
+    """OFT_FRAME_POINTERS: the plain build of one fixture on a frame-pointer image and on the base image it is made from,
+    in a class for each language: FramePointersC (fixtures/example) and FramePointersRust (fixtures/rust-example). Each
+    class needs only its own language's two images, and builds the fixture's project image on each of them, so the two
+    classes run apart, each on a pytest-xdist worker of its own. compile_build passes no -e of its caller and keeps no
+    output, so these tests run compile with compile_build's docker run arguments and their own -e, and read its output.
+    A Rust build compiles the standard library (minutes), so each compile that a test of the class reads (runs) runs
+    once, in setUpClass, all at once, each into an $OUT of its own, as do the builds of the two project images."""
+
+    # The language of the fixture: a key of FRAME_POINTER_IMAGES.
+    language = None
+    # The compiles that the tests of the class read: (kind, settings), for compile().
+    runs = ()
 
     @classmethod
     def setUpClass(cls):
-        cls.scratch = tempfile.TemporaryDirectory(prefix="ov-test-frame-pointers.")
+        cls.scratch = tempfile.TemporaryDirectory(prefix=f"ov-test-frame-pointers-{cls.language}.")
         cls.addClassCleanup(cls.scratch.cleanup)
         cls.work = pathlib.Path(cls.scratch.name)
         cls.labels = check_build.work_label(cls.work)
-        jobs = {
-            "c": check_build.Job(name="example", directory=FIXTURE, repo="https://example.invalid/example", ref="",
-                                 dockerfile="", builds=["plain"], fuzz_targets=None),
-            "rust": check_build.Job(name="rust-example", directory=RUST_FIXTURE,
-                                    repo="https://example.invalid/rust-example", ref="", dockerfile="",
-                                    builds=["plain"], fuzz_targets=["example_fuzzer"], language="rust"),
-        }
-        # The project image of each fixture, on the base image ("base") and on the frame-pointer image ("fp").
-        cls.tags = {}
-        for language, (row, variable) in FRAME_POINTER_IMAGES.items():
-            for kind, toolchain in (("base", row_image(row)), ("fp", os.environ[variable])):
-                tag = f"oss-verify-test/{jobs[language].name}-frame-pointers:{kind}-{RUN}"
-                cls.tags[language, kind] = tag
-                cls.addClassCleanup(subprocess.run, ["docker", "image", "rm", tag], capture_output=True)
-                check_build.build_project(jobs[language], "0" * 40, check_build.build_builder(toolchain), tag,
-                                          cls.work)
+        if cls.language == "rust":
+            job = check_build.Job(name="rust-example", directory=RUST_FIXTURE,
+                                  repo="https://example.invalid/rust-example", ref="", dockerfile="", builds=["plain"],
+                                  fuzz_targets=["example_fuzzer"], language="rust")
+        else:
+            job = check_build.Job(name="example", directory=FIXTURE, repo="https://example.invalid/example", ref="",
+                                  dockerfile="", builds=["plain"], fuzz_targets=None)
+        row, variable = FRAME_POINTER_IMAGES[cls.language]
+        # The project image of the fixture, on the base image ("base") and on the frame-pointer image ("fp").
+        toolchains = {"base": row_image(row), "fp": os.environ[variable]}
+        cls.tags = {kind: f"oss-verify-test/{job.name}-frame-pointers:{kind}-{RUN}" for kind in toolchains}
+        for tag in cls.tags.values():
+            cls.addClassCleanup(subprocess.run, ["docker", "image", "rm", tag], capture_output=True)
+        at_once(lambda kind: check_build.build_project(job, "0" * 40, check_build.build_builder(toolchains[kind]),
+                                                       cls.tags[kind], cls.work), toolchains)
+        cls.results = dict(zip(cls.runs, at_once(cls.compile, cls.runs)))
 
-    def compile(self, language, kind, *settings):
-        """compile, the plain build, in the project image of `language` on the image of `kind` ("base" or "fp"), with
-        compile_build's docker run arguments and an -e for each of `settings`: its exit status, and its standard output
-        and standard error together."""
-        tag = self.tags[language, kind]
-        out = self.work / "out"
-        check_build.empty_directory(out, tag, labels=self.labels)
+    @classmethod
+    def compile(cls, run):
+        """compile, the plain build, for run = (kind, settings): in the project image on the image of `kind` ("base" or
+        "fp"), with compile_build's docker run arguments and an -e for each of `settings`, into an $OUT of its own: its
+        exit status, and its standard output and standard error together."""
+        kind, settings = run
+        tag = cls.tags[kind]
+        out = cls.work / f"out-{cls.runs.index(run)}"
+        check_build.empty_directory(out, tag, labels=cls.labels)
         environment = [word for setting in settings for word in ("-e", setting)]
         done = subprocess.run(
-            ["docker", "run", "--rm", "--init", "--network=none", *self.labels, "-e", "SANITIZER=none",
+            ["docker", "run", "--rm", "--init", "--network=none", *cls.labels, "-e", "SANITIZER=none",
              "-e", f"OV_OWNER={os.getuid()}:{os.getgid()}", *environment, "-v", f"{out}:/out", tag, "compile"],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
         return done.returncode, done.stdout
 
-    def flag_lines(self, language, output):
+    def flag_lines(self, output):
         """[(line, the flag it has on a frame-pointer image)] for the lines of a build's output that give its flags:
         compile's CFLAGS line and, in a Rust build, the Rust recipe's RUSTFLAGS line. A missing line fails the test."""
         wanted = [(r"^compile: CFLAGS=.*$", FP_C_FLAG)]
-        if language == "rust":
+        if self.language == "rust":
             wanted.append((r"^oft-rust: .* RUSTFLAGS=.*$", FP_RUST_FLAG))
         lines = []
         for pattern, flag in wanted:
@@ -667,42 +702,54 @@ class FramePointers(unittest.TestCase):
             lines += [(line, flag) for line in found]
         return lines
 
-    def built_with_frame_pointers(self, language):
-        code, output = self.compile(language, "fp")
+    def built_with_frame_pointers(self):
+        code, output = self.results["fp", ()]
         self.assertEqual(code, 0, output[-4000:])
-        for line, flag in self.flag_lines(language, output):
+        for line, flag in self.flag_lines(output):
             self.assertIn(flag, line)
 
-    def built_without_frame_pointers(self, language, *settings):
-        code, output = self.compile(language, "base", *settings)
+    def built_without_frame_pointers(self, *settings):
+        code, output = self.results["base", settings]
         self.assertEqual(code, 0, output[-4000:])
-        for line, _ in self.flag_lines(language, output):
+        for line, _ in self.flag_lines(output):
             for flag in (FP_C_FLAG, FP_RUST_FLAG):
                 self.assertNotIn(flag, line)
 
-    def test_the_frame_pointer_image_builds_c_with_frame_pointers(self):
-        self.built_with_frame_pointers("c")
 
-    def test_the_frame_pointer_image_builds_rust_with_frame_pointers(self):
-        self.built_with_frame_pointers("rust")
+@unittest.skipUnless(frame_pointer_images_here("c"), frame_pointers_skip("c"))
+class FramePointersC(FramePointers, unittest.TestCase):
+    language = "c"
+    runs = (("fp", ()), ("base", ()), ("base", ("OFT_FRAME_POINTERS=",)), ("base", ("OFT_FRAME_POINTERS=0",)))
+
+    def test_the_frame_pointer_image_builds_c_with_frame_pointers(self):
+        self.built_with_frame_pointers()
 
     def test_the_base_image_builds_c_without_frame_pointers(self):
-        self.built_without_frame_pointers("c")
-
-    def test_the_base_image_builds_rust_without_frame_pointers(self):
-        self.built_without_frame_pointers("rust")
+        self.built_without_frame_pointers()
 
     def test_an_empty_oft_frame_pointers_on_the_base_image_builds_c_without_frame_pointers(self):
-        self.built_without_frame_pointers("c", "OFT_FRAME_POINTERS=")
-
-    def test_an_empty_oft_frame_pointers_on_the_base_image_builds_rust_without_frame_pointers(self):
-        self.built_without_frame_pointers("rust", "OFT_FRAME_POINTERS=")
+        self.built_without_frame_pointers("OFT_FRAME_POINTERS=")
 
     def test_oft_frame_pointers_0_fails_the_build(self):
-        code, output = self.compile("c", "base", "OFT_FRAME_POINTERS=0")
+        code, output = self.results["base", ("OFT_FRAME_POINTERS=0",)]
         self.assertEqual(code, 1, output[-4000:])
         # The message names the variable and the value it refuses.
         self.assertRegex(output, r"OFT_FRAME_POINTERS.*'0'")
+
+
+@unittest.skipUnless(frame_pointer_images_here("rust"), frame_pointers_skip("rust"))
+class FramePointersRust(FramePointers, unittest.TestCase):
+    language = "rust"
+    runs = (("fp", ()), ("base", ()), ("base", ("OFT_FRAME_POINTERS=",)))
+
+    def test_the_frame_pointer_image_builds_rust_with_frame_pointers(self):
+        self.built_with_frame_pointers()
+
+    def test_the_base_image_builds_rust_without_frame_pointers(self):
+        self.built_without_frame_pointers()
+
+    def test_an_empty_oft_frame_pointers_on_the_base_image_builds_rust_without_frame_pointers(self):
+        self.built_without_frame_pointers("OFT_FRAME_POINTERS=")
 
 
 if __name__ == "__main__":

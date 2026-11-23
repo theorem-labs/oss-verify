@@ -1,17 +1,18 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the routed workflows (build.yaml, review.yml) and their collector, .github/scripts/collect, for the
-workflows of one job that report a required check (tests.yaml, validate.yaml), and for the condition of triage.yaml's
-one job:  uv run pytest
+"""Tests for the routed workflows (build.yaml, review.yml) and their collector, .github/scripts/collect, for tests.yaml
+and validate.yaml, which report a required check with no route, and for the condition of triage.yaml's one job:
+uv run pytest
 
 A routed workflow has a route job that decides which jobs the run needs, and a collector job that always runs last,
 collects every result with the collector, and reports the workflow's one check: build.yaml's job required reports the
 check that the ruleset requires, and review.yml's job collect the check review jobs, which no ruleset requires. These
 check the collector's verdicts, the shape every routed workflow keeps (the collector waits for every job, and no job a
-route may skip reports a required check), and the routes' own steps, run on made-up changes. tests.yaml and
-validate.yaml have one job each, which reports their required check and runs on every event. These also run the steps
-of tests.yaml's job: the step that keeps a fork's change to projects/ from running any code, and the step that runs the
-tests.
+route may skip reports a required check), and the routes' own steps, run on made-up changes. validate.yaml has one
+job, which reports its required check and runs on every event. tests.yaml has the jobs suite and docker, which run on
+every event, and the job tests, which reports the required check after both. These also run the steps of tests.yaml's
+jobs: the checks of a pull request's base, the step that keeps a fork's change to projects/ from running any code, the
+steps that run the tests, and the step of the job tests.
 """
 import importlib.util
 import itertools
@@ -37,7 +38,7 @@ REQUIRED = {"build.yaml": "project-builds", "validate.yaml": "enrollment", "test
 # review.yml's is no required check: a check of a workflow_run or workflow_dispatch run never satisfies one.
 COLLECTORS = {"build.yaml": ("required", REQUIRED["build.yaml"]), "review.yml": ("collect", "review jobs")}
 # Each workflow of one job, and the required check that its job reports.
-ONE_JOB = {name: REQUIRED[name] for name in ("tests.yaml", "validate.yaml")}
+ONE_JOB = {"validate.yaml": REQUIRED["validate.yaml"]}
 # The checks the default branch's ruleset requires.
 RULESET = {"enrollment", "project-builds", "terms-accepted", "tests"}
 
@@ -513,11 +514,12 @@ def commit(directory, environment, files):
 
 
 TREE = {"README.md": "x\n", "docs/a.md": "x\n", "src/t.py": "x\n", "projects/p/project.yaml": "x\n"}
-# tests.yaml's step that keeps a fork's change to projects/ from running code, and the steps before it, which run only
-# git, gh and jq, or check out the commit (each by its name, or by its action).
+# tests.yaml's step that keeps a fork's change to projects/ from running code, in its jobs suite and docker, and the steps
+# before it in each job, which run only git, gh and jq, or check out the commit (each by its name, or by its action).
 FORK_STEP = "A fork's change to projects/ runs no code here"
-BEFORE_FORK_STEP = ["The pull request targets the default branch", "actions/checkout",
-                    "The checkout is the merge into the base branch"]
+BEFORE_FORK_STEP = {"suite": ["The pull request targets the default branch", "actions/checkout",
+                              "The checkout is the merge into the base branch"],
+                    "docker": ["actions/checkout"]}
 # A class of the Docker tests: it skips unless OV_DOCKER_TESTS is 1.
 DOCKER_CLASS = re.compile(r'@unittest\.skipUnless\(os\.environ\.get\("OV_DOCKER_TESTS"\) == "1"')
 
@@ -530,8 +532,8 @@ COMPARE_GH = ('#!/bin/sh\necho "$*" >> "$GH_LOG"\n'
 TRAP = '#!/bin/sh\necho "$0" >> "$TRAPPED"\n'
 
 
-def job_of_tests():
-    return workflow("tests.yaml")["jobs"]["tests"]
+def job_of_tests(job="suite"):
+    return workflow("tests.yaml")["jobs"][job]
 
 
 def fork_step(tmp_path, change):
@@ -632,15 +634,16 @@ def test_the_check_fails_unless_the_checkout_is_the_merge_into_the_base_branch(t
     assert calls == [f"api repos/o/r/compare/{parent}...a%2Fb%20c --jq .status"]
     assert trapped == []
 
-
-
-def test_no_step_after_the_fork_step_runs_for_a_forks_enrollment():
-    steps = job_of_tests()["steps"]
+@pytest.mark.parametrize("job", sorted(BEFORE_FORK_STEP))
+def test_no_step_after_the_fork_step_runs_for_a_forks_enrollment(job):
+    steps = job_of_tests(job)["steps"]
     names = [s.get("name") or s["uses"].split("@")[0] for s in steps]
     at = names.index(FORK_STEP)
     # Before it, only steps that run no file of the checkout.
-    assert names[:at] == BEFORE_FORK_STEP
+    assert names[:at] == BEFORE_FORK_STEP[job]
     fork = steps[at]
+    # docker's copy of the step is suite's, which the tests above run.
+    assert fork == step(job_of_tests("suite"), FORK_STEP)
     assert fork["id"] == "fork"
     assert [bool(evaluate(fork["if"], {"env.FORK": value})) for value in ("true", "false")] == [True, False]
     assert steps[at + 1:], "no step after the fork step"
@@ -651,11 +654,23 @@ def test_no_step_after_the_fork_step_runs_for_a_forks_enrollment():
             assert bool(evaluate(later["if"], ctx)) == runs, (later.get("name"), found)
 
 
-def run_the_tests_step(tmp_path, last_line, status=0):
-    """Run tests.yaml's step "The tests in tests/", with its own env and the workflow's DOCKER_TESTS, a stand-in nproc
-    that says 3, and a stand-in python3 that records its arguments and the PYTHONSAFEPATH it gets, prints `last_line`
-    as pytest's last line, and exits `status`. Each pytest-xdist worker inherits that environment (the step's comment).
-    Return the step's exit status, its output, and pytest's arguments after -m pytest."""
+# The step of each of tests.yaml's jobs suite and docker that runs pytest.
+TESTS_STEP = {"suite": "The tests in tests/", "docker": "The Docker tests"}
+
+
+def shards():
+    """tests.yaml's shards of the job docker: [(shard, its pytest-xdist workers, its tests)]."""
+    return [(entry["shard"], entry["workers"], entry["tests"].split())
+            for entry in job_of_tests("docker")["strategy"]["matrix"]["include"]]
+
+
+def run_the_tests_step(tmp_path, last_line, status=0, job="suite", shard=None):
+    """Run the TESTS_STEP of tests.yaml's `job`, with its own env, the workflow's DOCKER_TESTS and, for docker, the
+    matrix values of `shard` (the first by default), a stand-in nproc that says 3, and a stand-in python3 that records
+    its arguments and the PYTHONSAFEPATH it gets, prints `last_line` as pytest's last line, and exits `status`. Each
+    pytest-xdist worker inherits that environment (the step's comment). Return the step's exit status, its output, and
+    pytest's arguments after -m pytest."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
     bin = tmp_path / "bin"
     bin.mkdir()
     (bin / "nproc").write_text("#!/bin/sh\necho 3\n")
@@ -665,10 +680,16 @@ def run_the_tests_step(tmp_path, last_line, status=0):
     for name in ("nproc", "python3"):
         (bin / name).chmod(0o755)
     flow = workflow("tests.yaml")
-    tests = step(flow["jobs"]["tests"], "The tests in tests/")
+    tests = step(flow["jobs"][job], TESTS_STEP[job])
+    matrix = {}
+    if job == "docker":
+        [entry] = [e for e in flow["jobs"]["docker"]["strategy"]["matrix"]["include"]
+                   if e["shard"] == (shard or shards()[0][0])]
+        matrix = {"${{ matrix.tests }}": entry["tests"], "${{ matrix.workers }}": str(entry["workers"])}
+    env = {name: matrix.get(value, value) for name, value in tests["env"].items()}
     ambient = {name: value for name, value in os.environ.items() if name != "PYTHONSAFEPATH"}
     run = subprocess.run(["bash", "-e", "-c", tests["run"]], cwd=tmp_path, capture_output=True, text=True,
-                         env={**ambient, **tests["env"], "DOCKER_TESTS": flow["env"]["DOCKER_TESTS"],
+                         env={**ambient, **env, "DOCKER_TESTS": flow["env"]["DOCKER_TESTS"],
                               "PATH": f"{bin}:{os.environ['PATH']}", "ARGV": str(tmp_path / "argv"),
                               "RUNNER_TEMP": str(tmp_path)})
     argv = (tmp_path / "argv").read_text().splitlines()
@@ -692,24 +713,44 @@ def test_the_tests_run_on_every_core_and_all_but_the_docker_tests_run(tmp_path):
     assert sorted(docker) == marked
 
 
-@pytest.mark.parametrize("last_line, status, fails", [
-    ("5 passed in 1.00s", 0, False),
-    ("5 passed, 2 deselected in 1.00s", 0, False),
-    # A test that skipped fails the step, as does pytest's own failure.
-    ("5 passed, 1 skipped in 1.00s", 0, True),
-    ("1 skipped in 1.00s", 0, True),
-    ("1 failed, 4 passed in 1.00s", 1, True),
-])
-def test_the_tests_step_fails_when_a_test_skips(tmp_path, last_line, status, fails):
-    code, out, _ = run_the_tests_step(tmp_path, last_line, status)
-    assert (code != 0) == fails, out
-    assert ("::error::A test skipped here" in out) == (fails and status == 0), out
+@pytest.mark.parametrize("shard, workers, tests", shards())
+def test_each_docker_shard_runs_its_tests_on_its_workers(tmp_path, shard, workers, tests):
+    code, out, argv = run_the_tests_step(tmp_path, "5 passed in 1.00s", job="docker", shard=shard)
+    assert code == 0, out
+    # The shard's workers, whatever the runner's cores (the job's comment says why), each with whole classes.
+    assert argv[argv.index("-n") + 1] == str(workers) and argv[argv.index("--dist") + 1] == "loadscope", argv
+    assert "--durations=30" in argv, argv
+    # The shard's classes and files, and nothing left out or chosen by keyword or marker.
+    assert [a for a in argv if a.startswith("tests")] == tests
+    assert not [a for a in argv if a.startswith(("--ignore", "--deselect", "-k", "-m"))], argv
+    env = step(job_of_tests("docker"), TESTS_STEP["docker"])["env"]
+    assert env["OV_DOCKER_TESTS"] == "1", env
+    assert env["OV_FP_TOOLCHAIN_C"] == "${{ steps.images.outputs.c }}", env
+    assert env["OV_FP_TOOLCHAIN_RUST"] == "${{ steps.images.outputs.rust }}", env
 
 
-# The Docker tests' files, which no job of tests.yaml runs yet: the pull request of the branch INFRA-5359-docker-job
-# adds the job docker, which runs them, and empties this list.
-RUN_BY_NO_JOB_YET = ["tests/test_builder.py", "tests/test_append_docker.py", "tests/test_binary_checks_docker.py",
-                     "tests/test_seed_runs_docker.py", "tests/test_target_settings_docker.py"]
+def twice_or_never(groups, docker):
+    """The tests of `docker` (a set of node ids) that no group of `groups` (sets of node ids) holds, and those that two
+    or more hold, and the tests the groups hold that are not of `docker`."""
+    counts = {}
+    for group in groups:
+        for test in group:
+            counts[test] = counts.get(test, 0) + 1
+    return docker - set(counts), {t for t, n in counts.items() if n > 1}, set(counts) - docker
+
+
+def test_every_docker_test_is_in_exactly_one_shard():
+    """The shards of the job docker partition the tests of DOCKER_TESTS: none is in no shard, none in two, and no shard
+    runs a test of another file. Controls: a class left out of every shard is found, and so is one in two shards."""
+    docker = collected(*workflow("tests.yaml")["env"]["DOCKER_TESTS"].split())
+    groups = {shard: collected(*tests) for shard, _, tests in shards()}
+    assert twice_or_never(groups.values(), docker) == (set(), set(), set())
+    python = {test for test in groups["python"]}
+    assert python and all("::PythonBuilder::" in test for test in python), python
+    left_out = twice_or_never([g for shard, g in groups.items() if shard != "python"], docker)
+    assert left_out == (python, set(), set()), left_out
+    doubled = twice_or_never([*groups.values(), python], docker)
+    assert doubled == (set(), python, set()), doubled
 
 
 def collected(*arguments):
@@ -725,30 +766,141 @@ def collected(*arguments):
     return ids
 
 
-def selection(tmp_path):
-    """The arguments of pytest that choose the tests of the job tests, as run_the_tests_step finds them: its arguments
-    but -n, --dist, --durations, -q and -rs, which choose how the tests run and what pytest prints, not which."""
-    _, _, argv = run_the_tests_step(tmp_path, "1 passed in 1.00s")
-    chosen, skip = [], False
-    for argument in argv:
-        if skip:
-            skip = False
-        elif argument in ("-n", "--dist"):
-            skip = True
-        elif not argument.startswith("--durations=") and argument not in ("-q", "-rs"):
-            chosen.append(argument)
+# The step of tests.yaml's docker that pulls the toolchain images of its shard and makes its frame-pointer images.
+IMAGES_STEP = "Pull the toolchain images, and make the frame-pointer images"
+# Stand-ins for that step and for the Docker tests' skip conditions. docker: `docker pull --quiet <image>` adds the image
+# to the file $PULLED, and `docker image inspect <image>` (docker_ready and toolchain_ready in tests/test_builder.py)
+# finds only an image listed there. crane: `crane mutate ... -t <tag>` names the image it made by a digest.
+IMAGES_DOCKER = ('#!/bin/bash\ncase "$1 $2" in\n'
+                 '  "pull --quiet") echo "$3" >> "$PULLED" ;;\n'
+                 '  "image inspect") grep -qxF -- "$3" "$PULLED" ;;\n'
+                 '  *) exit 1 ;;\nesac\n')
+IMAGES_CRANE = ('#!/bin/bash\nwhile [ $# -gt 0 ]; do [ "$1" = -t ] && tag=$2; shift; done\n'
+                'echo "${tag%:*}@sha256:$(printf %064d 0)"\n')
+# Run with the node ids of the Docker tests' classes, or their files: for each class (each TestCase of a file), a line
+# "<class node id>\t<why the class, or a test of it, skips>", empty where none skips. Importing a file evaluates its
+# classes' skipUnless.
+SKIPS = r"""
+import importlib, pathlib, sys, unittest
+for spec in sys.argv[1:]:
+    path, _, name = spec.partition("::")
+    module = importlib.import_module(pathlib.Path(path).stem)
+    classes = [getattr(module, name)] if name else [
+        found for found in vars(module).values()
+        if isinstance(found, type) and issubclass(found, unittest.TestCase) and found.__module__ == module.__name__]
+    for cls in classes:
+        reasons = [cls.__unittest_skip_why__] if getattr(cls, "__unittest_skip__", False) else []
+        for test in unittest.TestLoader().getTestCaseNames(cls):
+            if getattr(getattr(cls, test), "__unittest_skip__", False):
+                reasons.append(f"{test}: {getattr(cls, test).__unittest_skip_why__}")
+        print(f"{path}::{cls.__name__}\t{'; '.join(reasons)}")
+"""
+
+
+def shard_skips(tmp_path, shard, edit=lambda text: text, **change):
+    """Run tests.yaml's IMAGES_STEP (its script through `edit`) as in the docker shard `shard`, with `change` to its
+    matrix entry, on IMAGES_DOCKER and IMAGES_CRANE, and check that it pulled each frame-pointer image that it names in
+    its outputs; then, where Docker has only the images that the step pulled and with the env of the shard's TESTS_STEP
+    (the step's outputs filled in), and a stand-in qemu-riscv64-static, read the skip conditions of the shard's classes
+    (SKIPS). Return {class node id: why it, or a test of it, skips, or ""}."""
+    tmp_path.mkdir(parents=True)
+    bin = tmp_path / "bin"
+    bin.mkdir()
+    for name, text in (("docker", IMAGES_DOCKER), ("crane", IMAGES_CRANE), ("qemu-riscv64-static", "#!/bin/sh\n"),
+                       ("python3", f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')):
+        (bin / name).write_text(text)
+        (bin / name).chmod(0o755)
+    docker = job_of_tests("docker")
+    [entry] = [e for e in docker["strategy"]["matrix"]["include"] if e["shard"] == shard]
+    ctx = {f"matrix.{key}": str(value) for key, value in {**entry, **change}.items()}
+    pulled, outputs = tmp_path / "pulled", tmp_path / "outputs"
+    pulled.touch()
+    outputs.touch()
+    ambient = {name: value for name, value in os.environ.items() if not name.startswith("OV_")}
+    standing = {**ambient, "PATH": f"{bin}:{os.environ['PATH']}", "PULLED": str(pulled)}
+    images = step(docker, IMAGES_STEP)
+    env = {name: interpolated(str(value), ctx) for name, value in images["env"].items()}
+    run = subprocess.run(["bash", "-e", "-c", edit(images["run"])], cwd=ROOT, capture_output=True, text=True,
+                         env={**standing, **env, "GITHUB_OUTPUT": str(outputs), "PYTHONPATH": str(ROOT / "src")})
+    assert run.returncode == 0, run.stdout + run.stderr
+    made = dict(line.split("=", 1) for line in outputs.read_text().splitlines())
+    # FramePointers skips only without the base image or the variable, so this checks the frame-pointer image itself.
+    assert set(made.values()) <= set(pulled.read_text().split()), ("a frame-pointer image not pulled", made)
+    ctx.update((f"steps.images.outputs.{name}", image) for name, image in made.items())
+    env = {name: interpolated(str(value), ctx) for name, value in step(docker, TESTS_STEP["docker"])["env"].items()}
+    run = subprocess.run([sys.executable, "-P", "-c", SKIPS, *ctx["matrix.tests"].split()], cwd=ROOT,
+                         capture_output=True, text=True, timeout=300,
+                         env={**standing, **env, "PYTHONPATH": f"{ROOT / 'src'}{os.pathsep}{ROOT / 'tests'}"})
+    assert run.returncode == 0, run.stdout[-4000:] + run.stderr[-4000:]
+    return dict(line.split("\t", 1) for line in run.stdout.splitlines())
+
+
+def test_each_class_of_a_docker_shard_finds_the_images_it_needs_there(tmp_path):
+    """Each shard of docker pulls the toolchain images, and makes the frame-pointer images, that its classes need: where
+    Docker has only the images that the shard's IMAGES_STEP pulled, with its TESTS_STEP's env, no class of the shard,
+    and no test of one, skips. Each class asks Docker for the images it needs in its own skipUnless, so this reads its
+    need from there. The classes read are all that pytest collects of the shard. Controls: the shard python without
+    the Python image, and the shard c without its frame-pointer row, are found, and so is a step that makes a
+    frame-pointer image and does not pull it."""
+    for shard, _, tests in shards():
+        skips = shard_skips(tmp_path / shard, shard)
+        assert set(skips) == {"::".join(test.split("::")[:2]) for test in collected(*tests)}, (shard, skips)
+        assert {name: why for name, why in skips.items() if why} == {}, shard
+    python = shard_skips(tmp_path / "python-on-c", "python", languages="c")
+    assert list(python) == ["tests/test_builder.py::PythonBuilder"], python
+    assert "the Python toolchain image" in python["tests/test_builder.py::PythonBuilder"], python
+    c = shard_skips(tmp_path / "c-without-frame-pointers", "c", frame_pointers="")
+    assert {name for name, why in c.items() if why} == {"tests/test_builder.py::FramePointersC"}, c
+    assert "OV_FP_TOOLCHAIN_C" in c["tests/test_builder.py::FramePointersC"], c
+    with pytest.raises(AssertionError, match="a frame-pointer image not pulled"):
+        shard_skips(tmp_path / "rust-made-not-pulled", "rust",
+                    edit=lambda text: text.replace('docker pull --quiet "$ref" > /dev/null\n', ""))
+
+
+def selection(tmp_path, job):
+    """The arguments of pytest that choose the tests in the TESTS_STEP of tests.yaml's `job`, as run_the_tests_step
+    finds them (for docker, those of every shard together): its arguments but -n, --dist, --durations, -q and -rs,
+    which choose how the tests run and what pytest prints, not which tests run."""
+    chosen = []
+    for shard in ([name for name, _, _ in shards()] if job == "docker" else [None]):
+        _, _, argv = run_the_tests_step(tmp_path / job / (shard or "all"), "1 passed in 1.00s", job=job, shard=shard)
+        skip = False
+        for argument in argv:
+            if skip:
+                skip = False
+            elif argument in ("-n", "--dist"):
+                skip = True
+            elif not argument.startswith("--durations=") and argument not in ("-q", "-rs"):
+                chosen.append(argument)
     return chosen
 
 
-def test_every_test_runs_in_the_job_tests_or_is_listed_as_run_by_no_job_yet(tmp_path):
-    """Each test that pytest collects under tests/ is one that the job tests runs, or one of RUN_BY_NO_JOB_YET's files:
-    no selection leaves out a test unnoticed. A control leaves a class out of the job's selection, and finds it."""
-    assert RUN_BY_NO_JOB_YET == workflow("tests.yaml")["env"]["DOCKER_TESTS"].split()
-    chosen, everything, listed = selection(tmp_path), collected(), collected(*RUN_BY_NO_JOB_YET)
-    assert everything - collected(*chosen) - listed == set()
+def test_every_test_runs_in_suite_or_in_docker(tmp_path):
+    """Each test that pytest collects under tests/ is one that suite or docker runs: no selection of one job leaves
+    out a test that the other does not run. A control leaves a class out of both, and finds it."""
+    for job in TESTS_STEP:
+        (tmp_path / job).mkdir()
+    suite, docker = selection(tmp_path, "suite"), selection(tmp_path, "docker")
+    everything, in_docker = collected(), collected(*docker)
+    assert everything - collected(*suite) - in_docker == set()
     left_out = "tests/test_no_frame_pointer_image.py::NoFramePointerImage"
-    found = everything - collected(*chosen, "--deselect", left_out) - listed
+    found = everything - collected(*suite, "--deselect", left_out) - in_docker
     assert found == {f"{left_out}::test_frame_pointers_skips_when_no_frame_pointer_image_is_named"}, found
+
+
+@pytest.mark.parametrize("job", sorted(TESTS_STEP))
+@pytest.mark.parametrize("last_line, status, fails", [
+    ("5 passed in 1.00s", 0, False),
+    ("5 passed, 2 deselected in 1.00s", 0, False),
+    # A test that skipped fails the step, as does pytest's own failure.
+    ("5 passed, 1 skipped in 1.00s", 0, True),
+    ("1 skipped in 1.00s", 0, True),
+    ("1 failed, 4 passed in 1.00s", 1, True),
+])
+def test_the_tests_step_fails_when_a_test_skips(tmp_path, job, last_line, status, fails):
+    code, out, _ = run_the_tests_step(tmp_path, last_line, status, job=job)
+    assert (code != 0) == fails, out
+    assert ("::error::A test skipped here" in out) == (fails and status == 0), out
 
 
 def test_a_newer_run_of_a_pull_request_or_of_main_cancels_the_older():
@@ -763,10 +915,38 @@ def test_a_newer_run_of_a_pull_request_or_of_main_cancels_the_older():
     # Two pushes to main share one group, as do two pushes of one pull request.
     assert group("push", "refs/heads/main", older) == group("push", "refs/heads/main", newer)
     assert group("pull_request", "refs/pull/7/merge", older, 7) == group("pull_request", "refs/pull/7/merge", newer, 7)
-    # Another pull request, and a run by hand on main, cancel neither.
+    # Another pull request cancels neither.
     groups = {group("push", "refs/heads/main", older), group("pull_request", "refs/pull/7/merge", older, 7),
-              group("pull_request", "refs/pull/8/merge", older, 8), group("workflow_dispatch", "refs/heads/main", older)}
-    assert len(groups) == 4, groups
+              group("pull_request", "refs/pull/8/merge", older, 8)}
+    assert len(groups) == 3, groups
+
+
+def test_the_required_check_tests_passes_only_when_suite_and_docker_passed(tmp_path):
+    job = workflow("tests.yaml")["jobs"]["tests"]
+    # It always runs, after both, and runs nothing of the checkout: one run step, with no token.
+    assert (job["needs"], job["if"], job["permissions"]) == (["suite", "docker"], "always()", {})
+    [gate] = job["steps"]
+    assert set(gate) == {"name", "env", "run"}, gate
+    assert gate["env"] == {"SUITE": "${{ needs.suite.result }}", "DOCKER": "${{ needs.docker.result }}"}
+    results = ("success", "failure", "cancelled", "skipped", "")
+    for suite, docker in itertools.product(results, repeat=2):
+        summary = tmp_path / f"summary-{suite}-{docker}"
+        run = subprocess.run(["bash", "-e", "-c", gate["run"]], capture_output=True, text=True,
+                             env={**os.environ, "SUITE": suite, "DOCKER": docker, "GITHUB_STEP_SUMMARY": str(summary)})
+        passes = suite == docker == "success"
+        assert (run.returncode == 0) == passes, (suite, docker, run.stdout)
+        errors = [line for line in run.stdout.splitlines() if line.startswith("::error::")]
+        assert len(errors) == (suite != "success") + (docker != "success"), (suite, docker, run.stdout)
+
+
+def test_the_docker_job_runs_for_every_event_but_a_pull_request_into_another_branch():
+    condition = workflow("tests.yaml")["jobs"]["docker"]["if"]
+    for ctx, runs in (({"github.event_name": "push"}, True),
+                      ({"github.event_name": "pull_request", "github.event.pull_request.base.ref": "main",
+                        "github.event.pull_request.base.repo.default_branch": "main"}, True),
+                      ({"github.event_name": "pull_request", "github.event.pull_request.base.ref": "ci/other",
+                        "github.event.pull_request.base.repo.default_branch": "main"}, False)):
+        assert bool(evaluate(condition, ctx)) == runs, ctx
 
 
 @pytest.mark.parametrize("name", ["tests.yaml", "validate.yaml"])
@@ -781,8 +961,8 @@ def test_no_job_reads_or_writes_the_actions_cache(name):
     ("actionlint and shellcheck pass the workflows", ("ACTIONLINT", "SHELLCHECK")),
     ("The package builds, installs and runs", ("UV",)),
 ])
-def test_the_job_checks_each_tool_it_fetches_by_its_sha256(name, tools):
-    checks = step(job_of_tests(), name)
+def test_the_suite_checks_each_tool_it_fetches_by_its_sha256(name, tools):
+    checks = step(job_of_tests("suite"), name)
     for tool in tools:
         assert re.fullmatch(r"\d+\.\d+\.\d+", str(checks["env"][f"{tool}_VERSION"])), tool
         assert re.fullmatch(r"[0-9a-f]{64}", checks["env"][f"{tool}_SHA256"]), tool
@@ -792,9 +972,9 @@ def test_the_job_checks_each_tool_it_fetches_by_its_sha256(name, tools):
 
 
 def test_the_package_check_builds_with_uvs_own_backend_and_runs_the_installed_package():
-    run = step(job_of_tests(), "The package builds, installs and runs")["run"]
+    run = step(job_of_tests("suite"), "The package builds, installs and runs")["run"]
     # uv builds offline only with the backend it bundles: the version that pyproject.toml's uv_build range names.
-    version = step(job_of_tests(), "The package builds, installs and runs")["env"]["UV_VERSION"]
+    version = step(job_of_tests("suite"), "The package builds, installs and runs")["env"]["UV_VERSION"]
     pyproject = (ROOT / "pyproject.toml").read_text()
     low, high = re.search(r'requires = \["uv_build>=([\d.]+),<([\d.]+)"\]', pyproject).groups()
     as_tuple = lambda text: tuple(int(part) for part in text.split("."))
@@ -802,6 +982,25 @@ def test_the_package_check_builds_with_uvs_own_backend_and_runs_the_installed_pa
     assert "uv build --offline --wheel" in run
     assert "--require-hashes -r" in run
     assert 'env -u PYTHONPATH "$package/venv/bin/oss-verify" --help' in run
+
+
+def test_the_docker_job_makes_the_images_as_toolchain_images_yaml_does():
+    """docker's crane and registry are toolchain-images.yaml's, and its shards make the frame-pointer images of the base
+    rows that tests/test_builder.py's FramePointersC and FramePointersRust build on, each row in one shard: the step
+    makes those of its shard's frame_pointers."""
+    from test_builder import FRAME_POINTER_IMAGES
+
+    tests, images = workflow("tests.yaml"), workflow("toolchain-images.yaml")
+    for name in ("CRANE_VERSION", "CRANE_SHA256", "CRANE_ARCHIVE"):
+        assert tests["env"][name] == images["env"][name], name
+    assert tests["jobs"]["docker"]["services"]["registry"] == images["jobs"]["make"]["services"]["registry"]
+    pull = step(tests["jobs"]["docker"], IMAGES_STEP)
+    assert pull["env"]["FRAME_POINTERS"] == "${{ matrix.frame_pointers }}", pull["env"]
+    rows = re.findall(r"(?m)^for row in (.+); do$", pull["run"])
+    assert rows == ['"${rows[@]}"'], pull["run"]
+    made = [row for entry in tests["jobs"]["docker"]["strategy"]["matrix"]["include"]
+            for row in entry["frame_pointers"].split()]
+    assert sorted(made) == sorted(row for row, _ in FRAME_POINTER_IMAGES.values())
 
 
 # --- the triage comment: triage.yaml's one job, and review.yml's route after it ---

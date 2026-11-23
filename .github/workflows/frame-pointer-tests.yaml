@@ -1,25 +1,19 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 name: "Frame-pointer tests"
-# frame-pointer-tests runs the class FramePointers of tests/test_builder.py. Its one job, docker-tests, makes the C and
-# C++ frame-pointer image and the Rust one from their base rows of infra/toolchains.tsv, as make of
-# toolchain-images.yaml does (crane mutate, in a registry on the runner). These tests build tests/fixtures/example and
-# tests/fixtures/rust-example on the base images and on the new images. They fail unless each build on a new image has
-# the flags. They fail if a build on a base image has them, with OFT_FRAME_POINTERS not set or set to the empty value.
-# They fail unless compile fails on a base image with OFT_FRAME_POINTERS=0. docker-tests also fails if a test is skipped.
+# frame-pointer-tests runs the classes FramePointersC and FramePointersRust of tests/test_builder.py (-k FramePointers).
+# Its one job, docker-tests, makes the C and C++ frame-pointer image and the Rust one from their base rows of
+# infra/toolchains.tsv, as make of toolchain-images.yaml does (crane mutate, in a registry on the runner). These tests
+# build tests/fixtures/example and tests/fixtures/rust-example on the base images and on the new images. They fail
+# unless each build on a new image has the flags. They fail if a build on a base image has them, with
+# OFT_FRAME_POINTERS not set or set to the empty value. They fail unless compile fails on a base image with
+# OFT_FRAME_POINTERS=0. docker-tests also fails if a test is skipped.
 #
-# The job runs in two ways:
-#   - toolchain-images.yaml (Toolchain images) calls this file (workflow_call) as its job docker-tests, after make,
-#     with check-make-digests. The job then fails unless each image that it makes has the digest that make made in
-#     that run (make's artifact fp-digest-<base row>). Publish (toolchain-images-publish.yaml) acts only when that whole
-#     run passed, this job too.
-#   - This file runs on its own trigger for a change of a file that these tests read and that the images do not
-#     depend on: the tests, the fixture tests/fixtures/example, src/oss_verify/check_build.py, pyproject.toml, or this
-#     file. For such a change, no make job runs (toolchain-images.yaml's paths are the inputs of the images), so the
-#     job checks no digest against make: it tests the images that it makes from the same base rows with the same
-#     crane mutate. This run publishes nothing: publish starts only for a run of Toolchain images.
-# GitHub's paths filter picks a whole workflow, not a job. Thus a change of both kinds of file runs both workflows, and
-# these tests run in each. toolchain-images.yaml's paths name this file too, so a change of it runs the job both ways.
+# toolchain-images.yaml (Toolchain images) calls this file (workflow_call) as its job docker-tests, after make. The job
+# fails unless each image that it makes has the digest that make made in that run (make's artifact fp-digest-<base
+# row>). Publish (toolchain-images-publish.yaml) acts only when that whole run passed, this job too. The file has no
+# trigger of its own: for any other change, the job docker of tests.yaml runs these tests, on the images that it makes
+# from the same base rows with the same crane mutate, with every other Docker test.
 #
 # The job runs code of the pull request: the builder (infra/base-builder), the tests and the fixtures. It has
 # contents: read and no secret, and no job of this file has a write permission. When Toolchain images calls it, GitHub
@@ -27,37 +21,11 @@ name: "Frame-pointer tests"
 # with the caller job's permissions (contents: read) or fewer
 # (https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations).
 #
-# The tests run in one pytest process, not one for each core (pytest-xdist): they share the four project images that
-# FramePointers.setUpClass builds and tearDownClass removes by fixed tags, so workers would build them each and remove
-# them under each other.
-#
-# This check is not required by the ruleset, so GitHub's paths filter, which leaves a skipped workflow's check pending,
-# blocks no merge.
+# The tests run in one pytest process, not one for each core (pytest-xdist). Each of the two classes builds its own two
+# project images, so they can run on two workers, as the job docker of tests.yaml runs them with the other Docker tests.
 
 on:
-  pull_request:
-    types: [opened, reopened, synchronize]
-    paths:
-      - .github/workflows/frame-pointer-tests.yaml
-      - tests/test_builder.py
-      - tests/fixtures/example/**
-      - src/oss_verify/check_build.py
-      - pyproject.toml
-  push:
-    branches: [main]
-    # The same paths as pull_request's.
-    paths:
-      - .github/workflows/frame-pointer-tests.yaml
-      - tests/test_builder.py
-      - tests/fixtures/example/**
-      - src/oss_verify/check_build.py
-      - pyproject.toml
   workflow_call:
-    inputs:
-      check-make-digests:
-        description: Fail unless each image made here has the digest in make's artifact fp-digest-<base row> of this run
-        type: boolean
-        default: false
 
 permissions: {}
 
@@ -72,9 +40,8 @@ env:
 concurrency:
   # As in toolchain-images.yaml: a pull request's newer run cancels its older one, and a later push to main never
   # cancels a push run, whose changes no later run would test (the paths filter compares a push with the commit before
-  # it). When Toolchain images calls this file, github.workflow is the caller's name. So the group of the called job
-  # differs from the caller's own group, and from the group of a run of this file on its own trigger for the same pull
-  # request or commit: neither cancels the other.
+  # it). github.workflow is the caller's name, Toolchain images, so the group of the called job differs from the
+  # caller's own group: neither cancels the other.
   group: ${{ github.event_name == 'push' && format('frame-pointer-tests-{0}-push-{1}', github.workflow, github.sha) || format('frame-pointer-tests-{0}-{1}-{2}', github.workflow, github.event_name, github.event.pull_request.number) }}
   cancel-in-progress: true
 
@@ -105,18 +72,15 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$CRANE_ARCHIVE" -C "$RUNNER_TEMP/bin" crane
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
-      # make's digests, from this run of Toolchain images. A run on this file's own trigger has no make job.
-      - if: inputs.check-make-digests
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2 (sha-pinned)
+      # make's digests, from this run of Toolchain images.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2 (sha-pinned)
         with:
           pattern: fp-digest-*
           merge-multiple: true
           path: ${{ runner.temp }}/fp-digest
 
-      - name: make the C and C++ image and the Rust image, with the digests that make made when make ran
+      - name: make the C and C++ image and the Rust image, with the digests that make made
         id: made
-        env:
-          CHECK_MAKE: ${{ inputs.check-make-digests }}
         run: |
           set -euo pipefail
           for row in oss-fuzz-theorems-2026.10 oss-fuzz-theorems-2026.10-rust; do
@@ -126,15 +90,11 @@ jobs:
             name=${base%@*}
             ref=$(crane mutate "$base" --env OFT_FRAME_POINTERS=1 -t "localhost:5000/${name#ghcr.io/}:frame-pointers")
             [[ "$ref" =~ @sha256:[0-9a-f]{64}$ ]] || { echo "::error::crane gave no digest: '$ref'"; exit 1; }
-            if [ "$CHECK_MAKE" = true ]; then
-              want=$(cat "$RUNNER_TEMP/fp-digest/$row.digest" 2> /dev/null || true)
-              [[ "$want" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::make gave no digest for $row: '$want'"; exit 1; }
-              [ "${ref#*@}" = "$want" ] ||
-                { echo "::error::the image made here from $row is $ref, but make made $want"; exit 1; }
-              echo "$row: made $ref, the digest that make made"
-            else
-              echo "$row: made $ref; no make job in this run, so no digest to compare it with"
-            fi
+            want=$(cat "$RUNNER_TEMP/fp-digest/$row.digest" 2> /dev/null || true)
+            [[ "$want" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::make gave no digest for $row: '$want'"; exit 1; }
+            [ "${ref#*@}" = "$want" ] ||
+              { echo "::error::the image made here from $row is $ref, but make made $want"; exit 1; }
+            echo "$row: made $ref, the digest that make made"
             # The tests skip unless the base image is here, and build a builder FROM each of the two images.
             docker pull --quiet "$base" > /dev/null
             docker pull --quiet "$ref" > /dev/null

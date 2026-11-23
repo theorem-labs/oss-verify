@@ -548,15 +548,23 @@ def require_buildkit():
 
 def build_builder(image=None, suffix="", no_cache=False):
     """Build the builder image from infra/base-builder, FROM the toolchain `image` (the newest for C if None). Return
-    its tag."""
+    its tag. Two runs on this host that build the same builder at once take turns (cache_lock), and the second finds
+    the first's layers in Docker's build cache: two BuildKit builds that export one tag together fail the second with
+    "image ... already exists" (Docker 29's containerd image store). The turn is a courtesy to another run: where the
+    cache directory cannot hold its lock (a read-only home), the build goes on without it."""
     image = image or newest_toolchain()
     tag = f"oss-verify-base-builder:{tree_hash(BUILDER_DIR)[:16]}-{toolchain_id(image)}{suffix}"
     require_buildkit()
     step(f"docker build: the builder ({tag}), FROM {image}")
     cache = ["--no-cache"] if no_cache else []
-    if run("docker", "build", "--progress=plain", *cache, "--build-arg", f"TOOLCHAIN={image}", "-t", tag,
-           str(BUILDER_DIR)) != 0:
-        raise Failed("the builder image does not build (is the toolchain image available?)")
+    with contextlib.ExitStack() as turn:
+        try:
+            turn.enter_context(cache_lock(CACHE / "builders" / tag))
+        except OSError as error:
+            say(f"note: no turn for the builder: {error}. Another run that builds it at the same time can fail.")
+        if run("docker", "build", "--progress=plain", *cache, "--build-arg", f"TOOLCHAIN={image}", "-t", tag,
+               str(BUILDER_DIR)) != 0:
+            raise Failed("the builder image does not build (is the toolchain image available?)")
     return tag
 
 

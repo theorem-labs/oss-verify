@@ -6,35 +6,47 @@ name: "Tests"
 # event: a run from a fork gets a read-only token and no secret. While the author has no merged contribution here,
 # GitHub holds the run until it is approved: review.yml approves it after its automated screen passes the pull request
 # (.github/workflows/held-runs.yml starts that screen).
-# A pull request from a fork that changes a file under projects/ is an enrollment: for it the job reads, as data, only
-# the paths that GitHub's merge changes, runs no code of the fork, and passes with "not run" in its summary. enrollment
-# (validate.yaml) refuses such a fork if it changes anything but one projects/<name>/, or if that project is seeded, and
-# project-builds (build.yaml) builds that project. A pull request from a fork that changes no file under projects/ (a
-# change to src/, say) is tested as a branch of this repository is, and review.yml gives it a change review.
+# A pull request from a fork that changes a file under projects/ is an enrollment: for it the jobs suite and docker
+# read, as data, only the paths that GitHub's merge changes, run no code of the fork, and pass with "not run" in their
+# summary. enrollment (validate.yaml) refuses such a fork if it changes anything but one projects/<name>/, or if that
+# project is seeded, and project-builds (build.yaml) builds that project. A pull request from a fork that changes no
+# file under projects/ (a change to src/, say) is tested as a branch of this repository is, and review.yml gives it a
+# change review.
 #
-# One job, tests, reports the required check tests. It has no if:, so it runs on every event this workflow takes, and
-# the check is never a skipped job, which GitHub counts as a pass where a check is required. Each run tests the whole
-# tree of its commit (for a pull request, GitHub's merge of it into the base branch), whatever paths the change touches:
-# no step chooses tests by the changed paths. The steps, in order:
-#   - On a pull request: it targets the default branch, and the checkout is GitHub's merge into it (below).
-#   - On a pull request from a fork: whether the merge changes a file under projects/ (git diff against the merge's
-#     first parent, renames as both names). If it does, the step says "Not run" in the summary, and each step after it
-#     is skipped, so the job passes having run no code of the fork. These first steps run only git, gh and jq, and read
-#     the event and the merge's paths as data.
-#   - The tests in tests/ but the Docker tests (DOCKER_TESTS, below), which fail the job if any test skips,
-#     oss-verify validate on every project, actionlint and shellcheck over the workflows, and the package's wheel,
-#     built, installed and run.
+# Each run tests the whole tree of its commit (for a pull request, GitHub's merge of it into the base branch), whatever
+# paths the change touches: no step chooses tests by the changed paths. The jobs:
+#   suite   On a pull request: it checks that the pull request targets the default branch, and that the checkout is
+#           GitHub's merge into it (below). On a pull request from a fork: whether the merge changes a file under
+#           projects/ (git diff against the merge's first parent, renames as both names). If it does, the step says "Not
+#           run" in the summary, and each step after it is skipped, so the job passes having run no code of the fork.
+#           These first steps run only git, gh and jq, and read the event and the merge's paths as data. Then the tests
+#           in tests/ but the Docker tests (DOCKER_TESTS, below), oss-verify validate on every project, actionlint and
+#           shellcheck over the workflows, and the package's wheel, built, installed and run.
+#   docker  The Docker tests: every test of DOCKER_TESTS, on the newest toolchain images of infra/toolchains.tsv, on the
+#           frame-pointer images that it makes from two of them as toolchain-images.yaml does, and with
+#           qemu-riscv64-static. A matrix of shards, each on a runner of its own: each shard runs the classes or files
+#           that its entry names, on the images that its entry names, those its classes need. Every test of
+#           DOCKER_TESTS is in exactly one shard, and each class of a shard finds there the images it needs
+#           (tests/test_routed_workflows.py checks both). Its first step after the checkout is suite's step for a fork's
+#           change to projects/, with the same text, so it runs no code of a fork's enrollment either. It does not run
+#           for a pull request into another branch than the default one, for which suite fails.
+#   tests   The required check tests: it passes only if suite and every shard of docker passed. It always runs, after
+#           both, and runs nothing of the checkout. GitHub counts a skipped job as a pass where a check is required, so
+#           neither suite nor docker reports the check.
+# suite and docker run side by side, so a run takes as long as the longer of them, and fail if a test skips: each of
+# their tests needs only what its runner has, so a skip means that something is missing, such as strace, the model's
+# checkout, an image or qemu, and the check must not pass without the test.
 # tests/test_seeded_projects.py's Committed, the test that docs/seeded-projects.tsv is what
 # src/oss_verify/seeded_projects.py writes, runs in every run, so a change that makes the table stale fails the check
 # tests, and Committed's message names the command that writes the table. A fork's change to projects/ runs no test
 # (above), and enrollment refuses it if docs/seeded-projects.tsv marks that project seeded, so a fork's change to the
 # port of a seeded project cannot merge: a branch of this repository carries such a change.
 #
-# On a pull request the checkout is GitHub's merge of it into its base branch. The job fails for a pull request into any
+# On a pull request the checkout is GitHub's merge of it into its base branch. suite fails for a pull request into any
 # branch but the default one, as enrollment and project-builds do (build.yaml says why). The workflow does not run on
 # edited, which GitHub sends for an edit of the title or description (nothing this judges changes) and for a change
 # of base. After a change of base, push a commit to run it again; until then a pull request into another branch keeps
-# its failed check, and one moved to the default branch from another keeps the failure it got there. The job also fails
+# its failed check, and one moved to the default branch from another keeps the failure it got there. suite also fails
 # unless the merge's first parent is on the base branch: a run after a change of base, such as one started by a reopen
 # or a rerun, can check out a merge into the earlier base (https://github.com/actions/checkout/issues/919). It then says
 # to push a commit, since a rerun checks out the same merge.
@@ -56,16 +68,15 @@ name: "Tests"
 # pull request and on the push. Of the 270 commits on main from 2026-10-01 to 2026-11-22, 36 changed projects/; 26 of
 # those were pull requests, 17 of them from forks.
 # pull_request has no paths filter: the ruleset reads the check tests from a pull request's run, and a filter there
-# would leave that check pending, which blocks the merge (triage.yaml). To test main by hand, run this on main (below).
+# would leave that check pending, which blocks the merge (triage.yaml).
 #
 # No job gets a secret, cache, artifact or write permission. Never add one. The contents: read token goes to
-# actions/checkout and to the step that asks the API where the merge's first parent is, never to a step that runs the
-# branch's code.
+# actions/checkout and to suite's step that asks the API where the merge's first parent is, never to a step that runs
+# the branch's code. docker pulls only public images, and its registry, a service container on its runner, holds only
+# the frame-pointer images that it makes.
 #
-# To run it on a branch:
-#   gh workflow run tests.yaml --ref <branch>
-# Such a run reports a check named tests too, but a check from a workflow_dispatch run never satisfies a ruleset's
-# required check (https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks#checks-from-some-workflow-jobs-are-not-evaluated).
+# There is no run by hand: no workflow that starts by hand builds code (tests/test_trigger_move.py, case (x)), and
+# docker builds the fixtures. Push a commit to a pull request to run it.
 
 on:
   pull_request:
@@ -74,7 +85,6 @@ on:
   push:
     branches: [main]
     paths: ["projects/**"]
-  workflow_dispatch:
 
 permissions: {}
 
@@ -85,23 +95,26 @@ env:
   # A pull request from a fork: when it changes a file under projects/, no step runs its code (the top of this file).
   FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
   # The Docker tests: the files whose tests build fixtures in the toolchain images, most of them running the binaries
-  # under qemu-riscv64-static. The job tests leaves the whole files out (--ignore), so none of their tests counts as a
-  # skip there. tests/test_routed_workflows.py lists them as run by no job yet (RUN_BY_NO_JOB_YET), and checks that every
-  # other test runs here.
-  # .github/workflows/frame-pointer-tests.yaml runs the class FramePointers of tests/test_builder.py.
+  # under qemu-riscv64-static. suite leaves the whole files out (--ignore), so none of their tests counts as a skip
+  # there, and docker runs them. tests/test_routed_workflows.py checks that each test runs in one of the two jobs.
   DOCKER_TESTS: >-
     tests/test_builder.py tests/test_append_docker.py tests/test_binary_checks_docker.py tests/test_seed_runs_docker.py
     tests/test_target_settings_docker.py
+  # docker's crane: go-containerregistry's, pinned by version and by the SHA-256 of its release archive, the same as
+  # toolchain-images.yaml's (tests/test_routed_workflows.py compares them).
+  CRANE_VERSION: v0.22.1
+  CRANE_SHA256: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
+  CRANE_ARCHIVE: go-containerregistry_Linux_x86_64.tar.gz
 
 concurrency:
   # One group for each pull request, and one for the pushes to main (github.ref is then refs/heads/main): a newer run
   # cancels the older one. That loses nothing, since each run tests the whole tree of its commit, never the changes
-  # since an earlier one, and the newer commit holds the older one's changes. A run by hand has the group of its branch.
+  # since an earlier one, and the newer commit holds the older one's changes.
   group: tests-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  tests:
+  suite:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -146,8 +159,8 @@ jobs:
                exit 1 ;;
           esac
 
-      # Inline, and it runs only git: the checkout holds the fork's files, and nothing of them runs here. Each step after
-      # this one runs only when this step did not find an enrollment.
+      # Inline, and it runs only git: the checkout holds the fork's files, and nothing of them runs here. Each step
+      # after this one runs only when this step did not find an enrollment.
       - name: A fork's change to projects/ runs no code here
         id: fork
         if: env.FORK == 'true'
@@ -164,7 +177,7 @@ jobs:
             echo "enrollment=true" >> "$GITHUB_OUTPUT"
             say "Not run: this pull request is from a fork and changes $projects of its $changed files under projects/, so it is an enrollment, and this workflow runs no code of a fork's enrollment. enrollment checks that it changes only one projects/<name>/, of a project that docs/seeded-projects.tsv does not mark seeded, and project-builds builds that project."
           else
-            say "The tests run: this pull request is from a fork and changes none of its $changed files under projects/."
+            say "The tests run: this pull request is from a fork, and none of its $changed files is under projects/."
           fi
 
       # strace: a test in tests/ checks that the review's helpers keep the GitHub token out of each process's arguments.
@@ -273,3 +286,201 @@ jobs:
           env -u PYTHONPATH "$package/venv/bin/oss-verify" --help
           installed=$(env -u PYTHONPATH "$package/venv/bin/python" -P -c 'import oss_verify; print(oss_verify.__file__)')
           [[ $installed == "$package/venv/"* ]] || { echo "::error::oss_verify ran from $installed, not the wheel"; exit 1; }
+
+  docker:
+    # Not for a pull request into another branch: suite fails for it, and so does the check tests.
+    if: >-
+      github.event_name != 'pull_request'
+      || github.event.pull_request.base.ref == github.event.pull_request.base.repo.default_branch
+    name: docker (${{ matrix.shard }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    # The shards. The Docker tests are CPU-bound: on one 4-core runner they took 3290-3323 CPU-s, in 1080-1094 s (an
+    # n2d-standard-4 VM, AMD Milan as on GitHub's runner, at 2fa3b63, INFRA-5359), so even with the builds of each class
+    # at once one runner needs about 14 minutes for them. Each shard is whole classes, or whole files, so a setUpClass
+    # builds once, and each has a runner's 4 cores: python is PythonBuilder alone (4 CPython builds), rust the two
+    # classes that build Rust's standard library, and c and records split the rest about evenly by their CPU. workers
+    # is the shard's pytest-xdist workers: one for each class that the shard can run beside another without leaving the
+    # cores to one. languages are the languages whose newest toolchain image the shard pulls, and frame_pointers the
+    # rows of infra/toolchains.tsv whose frame-pointer image it makes: the images that its classes need, and no other,
+    # as pulling all of them took each shard 87-141 s. fail-fast is off, so each shard reports its own tests; the check
+    # tests waits for all of them.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: python
+            workers: 1
+            languages: python
+            frame_pointers: ""
+            tests: tests/test_builder.py::PythonBuilder
+          - shard: rust
+            workers: 2
+            languages: rust
+            frame_pointers: oss-fuzz-theorems-2026.10-rust
+            tests: tests/test_builder.py::RustBuilder tests/test_builder.py::FramePointersRust
+          - shard: c
+            workers: 2
+            languages: c go
+            frame_pointers: oss-fuzz-theorems-2026.10
+            tests: >-
+              tests/test_builder.py::Builder tests/test_builder.py::UbsanChecks tests/test_builder.py::GoBuilder
+              tests/test_builder.py::AllocationFailureOnCjson tests/test_builder.py::FramePointersC
+          - shard: records
+            workers: 2
+            languages: c
+            frame_pointers: ""
+            tests: >-
+              tests/test_append_docker.py tests/test_binary_checks_docker.py tests/test_seed_runs_docker.py
+              tests/test_target_settings_docker.py
+    permissions:
+      contents: read
+    services:
+      registry:
+        # docker.io/library/registry:2, pinned by the digest of its image index, the image of toolchain-images.yaml's
+        # registry (tests/test_routed_workflows.py compares them). crane puts the frame-pointer images in it.
+        image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+        ports:
+          - 5000:5000
+    env:
+      PYTHONPATH: ${{ github.workspace }}/src
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
+        with:
+          persist-credentials: false
+          # The commit and its parents: the next step reads a pull request's merge against its first parent.
+          fetch-depth: 2
+
+      # suite's step, with the same text (tests/test_routed_workflows.py compares them). Inline, and it runs only git:
+      # the checkout holds the fork's files, and nothing of them runs here. Each step after this one runs only when this
+      # step did not find an enrollment.
+      - name: A fork's change to projects/ runs no code here
+        id: fork
+        if: env.FORK == 'true'
+        run: |
+          set -euo pipefail
+          say() { echo "$1"; echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
+          git diff --no-renames --name-only -z HEAD^1 HEAD > "$RUNNER_TEMP/paths"
+          changed=0 projects=0
+          while IFS= read -r -d '' path; do
+            changed=$((changed + 1))
+            [[ $path == projects/* ]] && projects=$((projects + 1))
+          done < "$RUNNER_TEMP/paths"
+          if (( projects )); then
+            echo "enrollment=true" >> "$GITHUB_OUTPUT"
+            say "Not run: this pull request is from a fork and changes $projects of its $changed files under projects/, so it is an enrollment, and this workflow runs no code of a fork's enrollment. enrollment checks that it changes only one projects/<name>/, of a project that docs/seeded-projects.tsv does not mark seeded, and project-builds builds that project."
+          else
+            say "The tests run: this pull request is from a fork, and none of its $changed files is under projects/."
+          fi
+
+      # The images and the fixtures' builds take 8 GB of the runner's 145 GB disk (104 GB free before them, 96 GB after,
+      # with build.yaml's removals of unused toolchains, on this workflow's run at 7aa0e6b on 2026-11-23): so nothing is
+      # removed to make room. crane makes the frame-pointer images. qemu-riscv64-static runs the fixtures' riscv64
+      # binaries, as in build.yaml: Debian 13's qemu-user 1:10.0.11+ds-0+deb13u1, pinned by its SHA-256 at its
+      # snapshot.debian.org address, and taken out of its package, not installed, so it is registered with no kernel's
+      # binfmt_misc.
+      - name: Install PyYAML, pytest, pytest-xdist, crane and qemu-riscv64-static
+        if: steps.fork.outputs.enrollment != 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml python3-pytest python3-pytest-xdist
+          mkdir -p "$RUNNER_TEMP/bin" "$RUNNER_TEMP/qemu"
+          curl -fsSL -o "$RUNNER_TEMP/$CRANE_ARCHIVE" \
+            "https://github.com/google/go-containerregistry/releases/download/$CRANE_VERSION/$CRANE_ARCHIVE"
+          echo "$CRANE_SHA256  $RUNNER_TEMP/$CRANE_ARCHIVE" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$CRANE_ARCHIVE" -C "$RUNNER_TEMP/bin" crane
+          cd "$RUNNER_TEMP/qemu"
+          deb=qemu-user_10.0.11+ds-0+deb13u1_amd64.deb
+          curl -fsSL --retry 3 -o "$deb" https://snapshot.debian.org/file/a0eaa62f815efb2361d43b1e3f8011c17ad9123a
+          echo "6b6fea55551fbcc1eb30e146ad5abdfbb49f8fa8c5998016242126de4d7f80df  $deb" | sha256sum -c --quiet
+          dpkg-deb -x "$deb" .
+          ln -s qemu-riscv64 usr/bin/qemu-riscv64-static
+          usr/bin/qemu-riscv64-static --version | grep -q 'version 10\.0\.11'
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/qemu/usr/bin" >> "$GITHUB_PATH"
+
+      # The toolchain images of this shard (the matrix above): the newest toolchain image of each of its languages
+      # (oss_verify.check_build.newest_toolchain), which the Docker tests build on, each pinned by its digest. Then the
+      # frame-pointer images of its frame_pointers rows, for FramePointersC and FramePointersRust
+      # (tests/test_builder.py's FRAME_POINTER_IMAGES): for each row, the row's image with OFT_FRAME_POINTERS=1, made as
+      # make of toolchain-images.yaml makes it (crane mutate, into the registry on this runner), and the base image,
+      # which those tests build on too.
+      - name: Pull the toolchain images, and make the frame-pointer images
+        id: images
+        if: steps.fork.outputs.enrollment != 'true'
+        env:
+          LANGUAGES: ${{ matrix.languages }}
+          FRAME_POINTERS: ${{ matrix.frame_pointers }}
+        run: |
+          set -euo pipefail
+          read -r -a languages <<< "$LANGUAGES"
+          read -r -a rows <<< "$FRAME_POINTERS"
+          images=$(python3 -P -c 'import sys
+          from oss_verify import check_build
+          print(*sorted({check_build.newest_toolchain(language) for language in sys.argv[1:]}))' "${languages[@]}")
+          for image in $images; do
+            [[ "$image" =~ ^ghcr\.io/theorem-labs/[a-z0-9-]+@sha256:[0-9a-f]{64}$ ]] ||
+              { echo "::error::infra/toolchains.tsv names a toolchain image with no digest: '$image'"; exit 1; }
+            docker pull --quiet "$image" > /dev/null
+          done
+          for row in "${rows[@]}"; do
+            base=$(awk -F'\t' -v row="$row" '$1 == row { print $2 }' infra/toolchains.tsv)
+            [[ "$base" =~ ^ghcr\.io/theorem-labs/oss-fuzz-theorems-toolchain(-[a-z]+)?@sha256:[0-9a-f]{64}$ ]] ||
+              { echo "::error::infra/toolchains.tsv has no row $row with a toolchain digest: '$base'"; exit 1; }
+            name=${base%@*}
+            ref=$(crane mutate "$base" --env OFT_FRAME_POINTERS=1 -t "localhost:5000/${name#ghcr.io/}:frame-pointers")
+            [[ "$ref" =~ @sha256:[0-9a-f]{64}$ ]] || { echo "::error::crane gave no digest: '$ref'"; exit 1; }
+            docker pull --quiet "$base" > /dev/null
+            docker pull --quiet "$ref" > /dev/null
+            echo "$row: made $ref"
+            case $row in
+              *-rust) echo "rust=$ref" >> "$GITHUB_OUTPUT" ;;
+              *) echo "c=$ref" >> "$GITHUB_OUTPUT" ;;
+            esac
+          done
+          df -h /
+
+      # The tests of this shard (the matrix above), on its pytest-xdist workers. --dist loadscope keeps the tests of a
+      # class on one worker, so that its setUpClass builds its images once; each class runs the builds of its fixture at
+      # once (tests/test_builder.py, compile_builds). A skip fails the step, as in suite.
+      - name: The Docker tests
+        if: steps.fork.outputs.enrollment != 'true'
+        env:
+          OV_DOCKER_TESTS: "1"
+          OV_FP_TOOLCHAIN_C: ${{ steps.images.outputs.c }}
+          OV_FP_TOOLCHAIN_RUST: ${{ steps.images.outputs.rust }}
+          PYTHONSAFEPATH: "1"
+          SHARD_TESTS: ${{ matrix.tests }}
+          WORKERS: ${{ matrix.workers }}
+        run: |
+          set -o pipefail
+          read -r -a tests <<< "$SHARD_TESTS"
+          python3 -P -m pytest -q -p no:cacheprovider -c pyproject.toml -rs -n "$WORKERS" --dist loadscope --durations=30 \
+            "${tests[@]}" | tee "$RUNNER_TEMP/pytest"
+          if tail -n 1 "$RUNNER_TEMP/pytest" | grep -qE '(^|[ ,])[0-9]+ skipped'; then
+            echo "::error::A test skipped here (each SKIPPED line above names one, and why): each test of this job must run."
+            exit 1
+          fi
+
+  tests:
+    # The required check tests (the top of this file). A static name: GitHub reports the check under it on every run.
+    needs: [suite, docker]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: suite and docker passed
+        env:
+          SUITE: ${{ needs.suite.result }}
+          DOCKER: ${{ needs.docker.result }}
+        run: |
+          failed=0
+          for job in "suite:$SUITE" "docker:$DOCKER"; do
+            if [ "${job#*:}" != success ]; then
+              echo "::error::${job%%:*}: ${job#*:}, not success"
+              failed=1
+            fi
+          done
+          [ "$failed" = 1 ] || echo "suite and docker passed." | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$failed"
