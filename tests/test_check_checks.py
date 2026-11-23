@@ -532,15 +532,17 @@ class ImageFiles(unittest.TestCase):
 
 
 class WorkflowArguments(unittest.TestCase):
-    """What review.yml and enroll-dispatch.yml do with the credentials they hold, as far as their text shows it: each
-    named credential reaches a command through a pipe or a shell builtin and never as a process's argument; and in
-    these files and in build.yaml and triage.yaml, only the jobs that run no code of the pull request can ask for a
-    GitHub identity token. This reads the files; it does not run them, so it proves nothing about what a called script
-    does with what it is given."""
+    """What review.yml, enroll-dispatch.yml and required-checks.yml do with the credentials they hold, as far as their
+    text shows it: each named credential reaches a command through a pipe or a shell builtin and never as a process's
+    argument; and in these files and in build.yaml and triage.yaml, only the jobs that run no code of the pull request
+    can ask for a GitHub identity token. This reads the files; it does not run them, so it proves nothing about what a
+    called script does with what it is given."""
 
     # The jobs of each workflow that read the App's key, in the GitHub Environment `comment`: review.yml's hold job
-    # sends held findings, and its triage job posts the triage comment, with the App's token.
-    KEY_JOBS = {"review.yml": ("comment", "hold", "triage"), "enroll-dispatch.yml": ("dispatch",)}
+    # sends held findings, and its triage job posts the triage comment, with the App's token. required-checks.yml's post
+    # job posts the four required checks with it, from its own environment, required-checks (KEY_ENVIRONMENTS).
+    KEY_JOBS = {"review.yml": ("comment", "hold", "triage"), "enroll-dispatch.yml": ("dispatch",),
+                "required-checks.yml": ("post",)}
 
     def steps(self, workflow):
         return [step for job in read_workflow(workflow)["jobs"].values() for step in job["steps"] if "run" in step]
@@ -580,7 +582,8 @@ class WorkflowArguments(unittest.TestCase):
         # The App's key and the base64 it is decoded from are shell variables of their step, so they are named here
         # by those names, beside the environment variables.
         for workflow, names in (("review.yml", ("GCP_ACCESS_TOKEN", "key", "payload")),
-                                ("enroll-dispatch.yml", ("GCP_ACCESS_TOKEN", "key", "payload"))):
+                                ("enroll-dispatch.yml", ("GCP_ACCESS_TOKEN", "key", "payload")),
+                                ("required-checks.yml", ("GCP_ACCESS_TOKEN", "key", "payload"))):
             steps = self.steps(workflow)
             for name in names:
                 used = 0
@@ -615,7 +618,8 @@ class WorkflowArguments(unittest.TestCase):
         # The screen job runs no code of the pull request either, and its token reaches only the screen's identities
         # (its environment, review-screen; ScreenJob).
         for workflow, want in (("review.yml", {"review", "comment", "hold", "screen", "triage"}),
-                               ("build.yaml", set()), ("triage.yaml", set()), ("enroll-dispatch.yml", {"dispatch"})):
+                               ("build.yaml", set()), ("triage.yaml", set()), ("enroll-dispatch.yml", {"dispatch"}),
+                               ("required-checks.yml", {"post"})):
             parsed = read_workflow(workflow)
             default = parsed.get("permissions") or {}
             got = set()
@@ -735,33 +739,47 @@ class WorkflowArguments(unittest.TestCase):
                     self.assertNotIn(value, path.read_text(), path.name)
 
     APP_ACCOUNT = "ossv-app-comment@theorem-agent-root.iam.gserviceaccount.com"
+    # Each GitHub Environment whose jobs may read the App's key, and the one account its jobs sign in as: `comment` for
+    # review.yml's and enroll-dispatch.yml's key jobs, and `required-checks`, of its own account, which reads the key
+    # alone, for required-checks.yml's post job (Theorem's infrastructure code).
+    KEY_ACCOUNTS = {"comment": APP_ACCOUNT,
+                    "required-checks": "ossv-required-checks@theorem-agent-root.iam.gserviceaccount.com"}
+    # The environment of each workflow's key jobs, `comment` unless named here.
+    KEY_ENVIRONMENTS = {"required-checks.yml": "required-checks"}
 
-    def app_key_jobs_problems(self, jobs, key_jobs=("comment",)):
+    def app_key_jobs_problems(self, jobs, key_jobs=("comment",), environment="comment"):
         """Why these jobs could let a job other than `key_jobs` read the App's key, or [] if they cannot.
 
-        The account that reads the key can be acted as only by an oss-verify job whose identity token carries
-        `environment: comment` (Theorem's infrastructure code). GitHub accepts an environment as a string,
+        An account that reads the key can be acted as only by an oss-verify job whose identity token carries one of
+        the environments of KEY_ACCOUNTS (Theorem's infrastructure code). GitHub accepts an environment as a string,
         as an object with `name`, and through an expression, and compares names without regard to case. An expression
         can compute `comment` from text that does not contain it (format('com{0}', 'ment')), so another job's
-        environment is refused if it holds an expression at all, or if its text names `comment` in any case; the
-        review job's own, the plain name enroll-review, passes. The key jobs' must be the plain name `comment`, with
-        nothing but `deployment: false` beside it."""
+        environment is refused if it holds an expression at all, or if its text names one of those environments in
+        any case; the review job's own, the plain name enroll-review, passes. The key jobs' must be the plain name
+        `environment`, with nothing but `deployment: false` beside it, and sign in as that environment's account."""
         problems = []
+        account = self.KEY_ACCOUNTS[environment]
         for name, job in jobs.items():
             if name in key_jobs:
-                if job.get("environment") not in ("comment", {"name": "comment", "deployment": False}):
-                    problems.append(f"{name}: environment {job.get('environment')!r}, want the plain name 'comment'")
-                if (job.get("env") or {}).get("GCP_SERVICE_ACCOUNT") != self.APP_ACCOUNT:
-                    problems.append(f"{name}: does not sign in as {self.APP_ACCOUNT}")
+                if job.get("environment") not in (environment, {"name": environment, "deployment": False}):
+                    problems.append(f"{name}: environment {job.get('environment')!r}, want the plain name "
+                                    f"{environment!r}")
+                if (job.get("env") or {}).get("GCP_SERVICE_ACCOUNT") != account:
+                    problems.append(f"{name}: does not sign in as {account}")
+                for other in set(self.KEY_ACCOUNTS.values()) - {account}:
+                    if other in json.dumps(job):
+                        problems.append(f"{name}: names {other}")
             else:
                 text = json.dumps(job.get("environment", ""))
                 if "${{" in text:
                     problems.append(f"{name}: its environment ({job['environment']!r}) is an expression")
-                if "comment" in text.lower():
-                    problems.append(f"{name}: its environment ({job['environment']!r}) names comment; only "
-                                    f"{', '.join(key_jobs)} may")
-                if self.APP_ACCOUNT in json.dumps(job):
-                    problems.append(f"{name}: names {self.APP_ACCOUNT}")
+                for key_environment in self.KEY_ACCOUNTS:
+                    if key_environment in text.lower():
+                        problems.append(f"{name}: its environment ({job['environment']!r}) names {key_environment}; "
+                                        f"only {', '.join(key_jobs)} may")
+                for key_account in self.KEY_ACCOUNTS.values():
+                    if key_account in json.dumps(job):
+                        problems.append(f"{name}: names {key_account}")
         return problems
 
     def test_only_the_key_jobs_can_read_the_app_key(self):
@@ -769,7 +787,21 @@ class WorkflowArguments(unittest.TestCase):
             jobs = read_workflow(workflow)["jobs"]
             for key_job in key_jobs:
                 self.assertIn(key_job, jobs, workflow)
-            self.assertEqual(self.app_key_jobs_problems(jobs, key_jobs), [], workflow)
+            self.assertEqual(self.app_key_jobs_problems(jobs, key_jobs, self.KEY_ENVIRONMENTS.get(workflow, "comment")),
+                             [], workflow)
+
+    def test_the_required_checks_poster_reads_the_key_through_its_own_environment_alone(self):
+        jobs = read_workflow("required-checks.yml")["jobs"]
+        for environment in ("comment", {"name": "comment", "deployment": False}):
+            changed = json.loads(json.dumps(jobs))
+            changed["post"]["environment"] = environment
+            self.assertTrue(self.app_key_jobs_problems(changed, ("post",), "required-checks"), environment)
+        changed = json.loads(json.dumps(jobs))
+        changed["post"]["env"]["GCP_SERVICE_ACCOUNT"] = self.APP_ACCOUNT
+        self.assertTrue(self.app_key_jobs_problems(changed, ("post",), "required-checks"))
+        changed = json.loads(json.dumps(jobs))
+        changed["read"]["environment"] = "required-checks"
+        self.assertTrue(self.app_key_jobs_problems(changed, ("post",), "required-checks"))
 
     @unittest.skipUnless(shutil.which("jq") and shutil.which("base64"), "the key step needs jq and base64")
     def test_the_app_key_is_masked_in_every_key_job(self):
@@ -844,7 +876,7 @@ class GoogleIdentities(unittest.TestCase):
     INPUTS = {"workload_identity_provider": "provider", "service_account": "account"}
     # The jobs that sign in to Google, by file. The test must find each of them, so that it cannot pass on no job.
     JOBS = {("review.yml", "screen"), ("review.yml", "review"), ("review.yml", "hold"), ("review.yml", "comment"),
-            ("review.yml", "triage"), ("enroll-dispatch.yml", "dispatch")}
+            ("review.yml", "triage"), ("enroll-dispatch.yml", "dispatch"), ("required-checks.yml", "post")}
 
     def identities(self):
         """The (file, job) pairs of the workflows of .github/workflows that name a provider or an account, and each way
@@ -3771,8 +3803,12 @@ class Owners(unittest.TestCase):
         # The workflows with a credential today: the check reads them, so it can fail.
         self.assertEqual(sorted(reads), [f".github/workflows/{name}" for name in (
             "codeql-actions.yml", "codeql-c-cpp.yml", "codeql-python.yml", "codeql.yml",
-            "enroll-dispatch.yml", "held-runs.yml", "review.yml", "toolchain-images-publish.yaml")])
+            "enroll-dispatch.yml", "held-runs.yml", "required-checks.yml", "review.yml",
+            "toolchain-images-publish.yaml")])
         self.assertIn(".github/scripts/review-gather", reads[".github/workflows/review.yml"])
+        # The poster's post job reads the script that its read job ran, through its outputs: both owned.
+        self.assertIn(".github/scripts/required-check", reads[".github/workflows/required-checks.yml"])
+        self.assertIn(".github/scripts/artifact.py", reads[".github/workflows/required-checks.yml"])
         self.assertIn(".github/scripts/review-neutralize", reads[".github/workflows/review.yml"])
         self.assertIn(".github/workflows/codeql.yml", reads[".github/workflows/codeql-python.yml"])
         self.assertIn(".github/codeql/codeql-config.yml", reads[".github/workflows/codeql-python.yml"])
