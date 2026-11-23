@@ -15,7 +15,7 @@ The move:
        .github/scripts/take-build-results gives its fixed line, the gather job reads the text and the diff from the
        API, and the comment job posts to that pull request at that head.
   (u)  The list of .github/scripts/steering.py is the list of the last patterns of .github/CODEOWNERS, which give a file
-       to @theorem-labs/engineering and @theorem-labs/research.
+       to @theorem-labs/engineering and @theorem-labs/research, at commit 62081ee and today.
   (w)  Enroll dispatch sends no enrollment that changes a steering file, and puts no label on it, until a person
        approved its head: for an open pull request and for a merge.
   (x)  No workflow with workflow_dispatch builds the code of a pull request (oss-verify check, docker).
@@ -36,6 +36,11 @@ The move:
        publish installs crane only from the archive with the SHA-256 of its pin, and no step of it writes
        GITHUB_PATH or GITHUB_ENV. Its push step stops at an unset variable before it copies, and at a base row
        outside the toolchain packages before any command of crane. It logs out of ghcr.io after its push.
+  (artifacts) Each script of .github/scripts that reads a file of a Build run's artifact (read_member) reads an
+       artifact and a file that build.yaml uploads, with if-no-files-found: error. The step that writes the file, run
+       in (s) and in tests/test_enroll_dispatch.py, writes it at the path of the upload.
+  (workflow_run) Each name that a workflow_run trigger listens to is the name of exactly one workflow file of
+       .github/workflows.
 The held runs (each test name holds the word held):
   route finds the held runs of a head on a run by hand. It counts the held runs that Held runs counts: neither counts a
   run of the oss-verify App's own label. The comment job approves them with a token of the oss-verify App that can
@@ -57,6 +62,7 @@ Of the test files, the cases (r), (s), (u), (w) and (x) import only tests/test_e
 stand-in API with its World, and uses only what World has before the move too. In a tree of the commit before the move
 (0666dceb750a), these cases fail on their own assertions.
 """
+import ast
 import contextlib
 import copy
 import datetime
@@ -1699,6 +1705,15 @@ shutil.copyfile(home / "archive", args[args.index("-o") + 1])
         caught = self.guard_fails(self.logout_case, "            crane auth logout ghcr.io\n")
         self.assertIn("publish's push step on each row: (its exit status, a logout of ghcr.io after its copy", caught)
 
+    def test_publish_starts_on_the_runs_of_toolchain_images_by_its_name_alone(self):
+        # workflow_run names a workflow by its name: a rename of toolchain-images.yaml, or of the name publish listens
+        # to, would stop publishing with no error. No other workflow has that name.
+        publish, images = self.workflow(ROOT, self.PUBLISH), self.workflow(ROOT, self.IMAGES)
+        self.assertEqual(triggers(publish)["workflow_run"]["workflows"], [images["name"]])
+        names = [parse(p.read_text()).get("name")
+                 for p in sorted((ROOT / ".github" / "workflows").iterdir()) if p.suffix in (".yml", ".yaml")]
+        self.assertEqual(names.count(images["name"]), 1, names)
+
     def test_publish_runs_no_docker_and_no_script_of_it_reads_github_sha_or_holds_an_expression(self):
         steps = self.workflow(ROOT, self.PUBLISH)["jobs"]["publish"]["steps"]
         # crane alone: no step runs docker.
@@ -2084,8 +2099,173 @@ class FirstRunArtifact(Stand):
                 self.assertEqual((code, got), (0, {**self.HONEST, "sizes": given}), printed)
 
 
+class BuildArtifacts(Stand):
+    """(artifacts): each script of .github/scripts that reads a file of an artifact of a Build run (read_member of
+    artifact.py) reads an artifact and a file that build.yaml uploads. The upload fails when the file is absent
+    (if-no-files-found: error). A rename on one side alone shows only when a later run reads the artifact: no run of
+    the pull request that makes the rename reads it. FirstRunArtifact and tests/test_enroll_dispatch.py's TheRecord
+    run the steps that write the two files, and read each file at the path of its upload."""
+
+    BUILD = ".github/workflows/build.yaml"
+    # The readers at the head, each as (the script, the artifact, the file): review.yml's gather job runs
+    # take-build-results, and enroll-dispatch.yml runs enroll-dispatch.
+    READERS = {("take-build-results", "build-results", "results.json"),
+               ("enroll-dispatch", "enrollment-record", "record.json")}
+
+    @staticmethod
+    def string(node, constants):
+        """The string that the argument `node` gives: a string, or a name of `constants`. Else None."""
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        return constants.get(node.id) if isinstance(node, ast.Name) else None
+
+    def readers(self, tree):
+        """Each call of read_member in a Python script of `tree`'s .github/scripts, as (the script, its line, the
+        artifact, the file). An argument that is a name gives the string that the top level of the script assigns to
+        that name. An argument that this cannot read gives None."""
+        scripts, found = tree / ".github" / "scripts", []
+        for path in sorted(scripts.rglob("*")):
+            if not path.is_file() or "__pycache__" in path.parts:
+                continue
+            first = path.read_bytes().split(b"\n", 1)[0]
+            if path.suffix != ".py" and not (first.startswith(b"#!") and b"python" in first):
+                continue
+            module = ast.parse(path.read_text(encoding="utf-8"), str(path))
+            constants = {node.targets[0].id: node.value.value for node in module.body
+                         if isinstance(node, ast.Assign) and len(node.targets) == 1
+                         and isinstance(node.targets[0], ast.Name) and isinstance(node.value, ast.Constant)
+                         and isinstance(node.value.value, str)}
+            for node in ast.walk(module):
+                func = node.func if isinstance(node, ast.Call) else None
+                if getattr(func, "id", getattr(func, "attr", None)) != "read_member":
+                    continue
+                # artifact.py's read_member(api, repo, run, name, member, limit)
+                given = dict(zip(("api", "repo", "run", "name", "member", "limit"), node.args))
+                given.update((keyword.arg, keyword.value) for keyword in node.keywords if keyword.arg)
+                found.append((path.relative_to(scripts).as_posix(), node.lineno,
+                              *(self.string(given.get(argument), constants) for argument in ("name", "member"))))
+        return found
+
+    def case(self, tree=ROOT):
+        """Each reader (readers) reads an artifact that an upload of build.yaml (actions/upload-artifact) gives. The
+        upload has the artifact's name, its path ends in /<the file>, and it has if-no-files-found: error. The message
+        names each reader that no upload gives its file. Return the readers and the uploads."""
+        build = self.workflow(tree, "build.yaml")
+        readers = self.readers(tree)
+        self.assertLessEqual(self.READERS, {(script, artifact, member) for script, _, artifact, member in readers},
+                             f"the calls of read_member in .github/scripts: {readers}")
+        uploads = []
+        for job, held in build["jobs"].items():
+            for step in held.get("steps") or []:
+                if action_of(step) != "actions/upload-artifact":
+                    continue
+                up = step.get("with") or {}
+                path = render(up.get("path", ""), {"runner.temp": "$RUNNER_TEMP"})
+                uploads.append((job, up.get("name"), path, up.get("if-no-files-found")))
+        missing = [f"{script} (line {line}) reads {member} of the artifact {artifact}"
+                   for script, line, artifact, member in readers
+                   if not any(artifact and member and name == artifact and path.endswith(f"/{member}")
+                              and flag == "error" for _, name, path, flag in uploads)]
+        self.assertEqual(missing, [], f"the readers of a Build run's artifact whose artifact or file {self.BUILD} does "
+                                      f"not upload. Its uploads, each as (the job, the artifact, the path, "
+                                      f"if-no-files-found): {uploads}")
+        return readers, uploads
+
+    def test_artifacts_each_reader_reads_a_file_that_build_yaml_uploads(self):
+        self.case()
+
+    def test_control_artifacts_build_results_renamed_in_build_yaml_alone(self):
+        self.passes_unchanged(self.case)
+        changed = self.copy_tree("changed", [(self.BUILD, "name: build-results\n", "name: build-output\n")])
+        with self.assertRaises(AssertionError) as caught:
+            self.case(changed)
+        self.assertIn("take-build-results (line ", str(caught.exception))
+        self.assertNotIn("enroll-dispatch (line ", str(caught.exception))
+
+    def test_control_artifacts_results_json_renamed_in_build_yaml_alone(self):
+        # The results job writes build.json and uploads it. build.yaml stays whole, but take-build-results reads
+        # results.json.
+        self.passes_unchanged(self.case)
+        changed = self.copy_tree("changed", [
+            (self.BUILD, "path: ${{ runner.temp }}/results/results.json",
+             "path: ${{ runner.temp }}/results/build.json"),
+            (self.BUILD, '> "$RUNNER_TEMP/results/results.json"', '> "$RUNNER_TEMP/results/build.json"')])
+        with self.assertRaises(AssertionError) as caught:
+            self.case(changed)
+        self.assertIn("take-build-results (line ", str(caught.exception))
+        self.assertNotIn("enroll-dispatch (line ", str(caught.exception))
+
+
+class WorkflowRunNames(Stand):
+    """(workflow_run): a workflow_run trigger names the workflows that it listens to by their name:, not by their file.
+    A rename of one of them stops the trigger, and a second file with the same name starts it for the runs of that
+    file too. No run fails either way. So each name in the workflows of a workflow_run trigger is the name of exactly
+    one workflow file of .github/workflows."""
+
+    # The files that listen to a workflow_run at the head.
+    LISTENERS = {"enroll-dispatch.yml", "held-runs.yml", "review.yml", "toolchain-images-publish.yaml"}
+
+    def case(self, tree=ROOT):
+        """Each workflow file of `tree` with a workflow_run trigger, and each name in its workflows: exactly one
+        workflow file there has that name. GitHub gives a file with no name: the name of its path. The message names
+        each (listening file, name) that no file or more than one file has. Return the names that each listening file
+        listens to, and the files of each name."""
+        directory = tree / ".github" / "workflows"
+        workflows = {path.name: parse(path.read_text())
+                     for path in sorted(directory.iterdir()) if path.suffix in (".yml", ".yaml")}
+        held = {}
+        for file, workflow in workflows.items():
+            held.setdefault(workflow.get("name") or f".github/workflows/{file}", []).append(file)
+        listens = {file: list((triggers(workflow)["workflow_run"] or {}).get("workflows") or [])
+                   for file, workflow in workflows.items() if "workflow_run" in triggers(workflow)}
+        self.assertLessEqual(self.LISTENERS, set(listens),
+                             f"the files of .github/workflows with workflow_run: {listens}")
+        wrong = [f"{file} names no workflow in workflow_run" for file, names in listens.items() if not names]
+        for file, names in listens.items():
+            for name in names:
+                files = held.get(name, [])
+                if len(files) != 1:
+                    wrong.append(f"{file} listens to {name!r}, the name of "
+                                 + (f"{len(files)} files: {', '.join(files)}" if files else "no workflow file"))
+        self.assertEqual(wrong, [], "the names of the workflow_run triggers that are not the name of exactly one "
+                                    "workflow file:" + "".join(f"\n  {line}" for line in wrong)
+                                    + f"\nThe files of each name: {held}")
+        return listens, held
+
+    def test_workflow_run_each_name_is_the_name_of_one_workflow_file(self):
+        self.case()
+
+    def test_control_workflow_run_tests_renamed_in_tests_yaml_alone(self):
+        self.passes_unchanged(self.case)
+        changed = self.copy_tree("changed", [(".github/workflows/tests.yaml", 'name: "Tests"\n',
+                                              'name: "Unit tests"\n')])
+        with self.assertRaises(AssertionError) as caught:
+            self.case(changed)
+        for file in ("enroll-dispatch.yml", "held-runs.yml"):
+            self.assertIn(f"{file} listens to 'Tests', the name of no workflow file", str(caught.exception))
+
+    def test_control_workflow_run_a_second_file_named_build(self):
+        # No file listens to Enroll dispatch, so only the name Build breaks: two files hold it.
+        self.passes_unchanged(self.case)
+        changed = self.copy_tree("changed", [(".github/workflows/enroll-dispatch.yml", "name: Enroll dispatch\n",
+                                              "name: Build\n")])
+        with self.assertRaises(AssertionError) as caught:
+            self.case(changed)
+        for file in ("held-runs.yml", "review.yml"):
+            self.assertIn(f"{file} listens to 'Build', the name of 2 files: build.yaml, enroll-dispatch.yml",
+                          str(caught.exception))
+        self.assertNotIn("listens to 'Triage'", str(caught.exception))
+
+
 class SteeringFiles(unittest.TestCase):
     """(u): the list of steering files."""
+
+    # The patterns of .github/CODEOWNERS at commit 62081ee (#194), the last commit that changed them, in their order.
+    CODEOWNERS_62081EE = (
+        "/.github/", "/src/", "/infra/", "/seeds/", ".claude/", "CLAUDE*.md", "AGENTS*.md", "/.mcp.json", "/*.py",
+        "/pytest.ini", "/.pytest.ini", "/pyproject.toml", "/uv.lock", "/.python-version", "/setup.cfg", "/tox.ini",
+        "/review.md", "/review-change.md", "/review-issue.md", "/.claude/skills/write-to-maintainer/",
+        "/.github/CODEOWNERS")
 
     def test_u_the_steering_files_are_the_last_owned_patterns_of_codeowners(self):
         path = ROOT / ".github" / "scripts" / "steering.py"
@@ -2093,6 +2273,7 @@ class SteeringFiles(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("steering_of_this_test", path)
         steering = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(steering)
+        self.assertEqual(list(steering.STEERING), list(self.CODEOWNERS_62081EE))
         for name in (".github/workflows/build.yaml", ".github/workflows/review.yml", "projects/x/AGENTS.md",
                      "projects/x/.claude/settings.json", "docs/CLAUDE.md"):
             self.assertTrue(steering.is_steering(name), name)
@@ -3508,12 +3689,22 @@ class HeldRuns(Stand):
         self.assertEqual(len(self.reads["held"]), 2, self.reads)
 
     def test_held_runs_workflow_holds_no_identity_and_runs_by_hand_on_main_alone(self):
-        # It holds no secret and no identity. Its job runs on each event of its triggers, and on a run by hand only on
-        # main.
+        # It holds no secret and no identity, and its token can do no more than the step needs: start and re-run runs
+        # (actions: write) and read pull requests (pull-requests: read). Its job runs on each event of its triggers,
+        # and on a run by hand only on main.
         import test_outside_screen
-        jobs = parse(self.workflow_text)["jobs"]
+        workflow = parse(self.workflow_text)
+        jobs = workflow["jobs"]
+        allowed = {("actions", "write"), ("actions", "read"), ("pull-requests", "read")}
         for name, held in jobs.items():
             self.assertNotIn("environment", held, name)
+            # A job's token has the job's permissions, else the workflow's, else the repository's default, which can
+            # write every scope. read-all and write-all give each scope.
+            granted = held.get("permissions", workflow.get("permissions", "write-all"))
+            if isinstance(granted, str):
+                granted = {"each scope": granted.removesuffix("-all")}
+            self.assertEqual({scope: level for scope, level in granted.items()
+                              if level != "none" and (scope, level) not in allowed}, {}, f"job {name}: {granted}")
         job = jobs["held-runs"]
         self.assertNotIn("secrets.", self.workflow_text)
         self.assertNotIn("id-token", self.workflow_text)

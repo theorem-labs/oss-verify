@@ -1235,10 +1235,9 @@ class PostingStep(Runner):
         self.assertLess(max(lengths), 131_072)
 
     def test_k1_the_step_gives_review_verdict_the_head_the_verdicts_and_the_values_of_the_gather_job(self):
-        """The step's one case of the record of the review in the check run's output.text (ReviewVerdict's k1 and k2
-        check what review-verdict makes of each verdict, hold and value): review-verdict, as the step runs it, gets the
-        step's head, the review's verdicts, and the criticality score, OSS-Fuzz and binary sizes that the gather job
-        gave."""
+        """The step's case of the record of a review in the check run's output.text (ReviewVerdict's k1 and k2 check
+        what review-verdict makes of each verdict, hold and value): review-verdict, as the step runs it, gets the step's
+        head, the review's verdicts, and the criticality score, OSS-Fuzz and binary sizes that the gather job gave."""
         verdicts = self.verdicts(D2="fail", E="person")
         sizes = {"parse": {"plain": {"text": 1000, "exec": 1200}, "asan": {"text": 3000, "exec": 3300}},
                  "dump": {"plain": {"text": 900, "exec": None}}}
@@ -1248,6 +1247,18 @@ class PostingStep(Runner):
         record = self.kept(self.record(requests))
         self.assertEqual(record, {"schema": "oss-verify/enrollment-review/1", "head": self.HEAD, "hold": None,
                                   "job": None, "verdicts": verdicts, "criticality_score": 0.07123, "oss_fuzz": False,
+                                  "sizes": sizes})
+
+    def test_k2_the_step_gives_review_verdict_the_values_of_the_gather_job_for_a_hold_too(self):
+        """The step's case of the record of a hold: the review job failed after the gather job gave its values. The
+        record names the hold and the job, has no verdict though the step has the review's verdicts, and keeps the
+        criticality score, OSS-Fuzz and binary sizes that the gather job gave."""
+        sizes = {"parse": {"plain": {"text": 1000, "exec": 1200}}}
+        _, requests = self.post(verdicts=self.verdicts(), REVIEW_RESULT="failure", CRITICALITY_SCORE="0.5",
+                                OSS_FUZZ="true", SIZES=json.dumps(sizes, separators=(",", ":")))
+        record = self.kept(self.record(requests))
+        self.assertEqual(record, {"schema": "oss-verify/enrollment-review/1", "head": self.HEAD, "hold": "failed",
+                                  "job": "review", "verdicts": {}, "criticality_score": 0.5, "oss_fuzz": True,
                                   "sizes": sizes})
 
     def test_the_comment_stays_under_githubs_limit(self):
@@ -2894,11 +2905,10 @@ class ReviewJob(unittest.TestCase):
             for name in self.AGAIN:
                 with self.subTest(outcome=outcome, step=name):
                     self.assertIs(bool(evaluate(self.steps[name]["if"], {"steps.review.outcome": outcome})), runs)
-        # GitHub runs a step whose if calls no status function only while no step before it failed without
-        # continue-on-error: the first attempt's failure must leave the job running, or neither retry step runs.
-        for name in self.AGAIN:
-            status = re.search(r"\b(always|failure|success|cancelled)\(\)", str(self.steps[name]["if"]))
-            self.assertTrue(status or self.steps["Review"].get("continue-on-error") is True, name)
+        # The first attempt's failure must not fail the job: GitHub fails a job that has a step that failed without
+        # continue-on-error, even when a later step runs (an always() in its if) and passes. With continue-on-error,
+        # the failed first attempt's conclusion is success, so the retry steps run on its outcome alone.
+        self.assertIs(self.steps["Review"].get("continue-on-error"), True)
         # The second attempt's failure fails the job.
         for name in self.AGAIN:
             self.assertNotIn("continue-on-error", self.steps[name])
@@ -2927,22 +2937,49 @@ class ReviewJob(unittest.TestCase):
     # and the Service's IPv4 address.
     COLLECTOR_URL = "http://100.116.58.240"
 
-    def test_the_tailnet_join_fails_the_review_logs_quietly_and_keeps_its_own_version(self):
-        join = self.steps["Join Theorem's tailnet, to reach the model gateway and export this review's usage"]
+    JOIN = "Join Theorem's tailnet, to reach the model gateway and export this review's usage"
+
+    def test_the_job_joins_the_tailnet_as_ossv_review(self):
+        join = self.steps[self.JOIN]
         # The review reaches the model gateway over the tailnet alone, so a join that fails fails the review.
         self.assertNotIn("continue-on-error", join)
-        # No `version:`, so the action keeps its own default, 1.104.2, which is above the 1.94 a Linux device needs to
-        # reach a Tailscale Service's address.
-        self.assertNotIn("version", join["with"])
+        # Exactly these settings: another one, `args:` for example, would change how the node joins while the join
+        # still passed. `version:` is forbidden here too, so the action keeps its own default, 1.104.2, which is
+        # above the 1.94 a Linux device needs to reach a Tailscale Service's address.
+        self.assertEqual(set(join["with"]),
+                         {"oauth-client-id", "audience", "tags", "hostname", "use-cache", "log-mode"})
+        # The node is the review's own: the one tag tag:ossv-review, whose grant reaches the cost collector and the
+        # model gateway alone (the top of review.yml), from the federated identity whose audience names that tag.
+        # Another tag, or a second one, would give the node that tag's grants.
+        self.assertEqual(join["with"]["tags"], "tag:ossv-review")
+        self.assertEqual(join["with"]["audience"].rpartition("/")[2], join["with"]["tags"].removeprefix("tag:"))
         # This public repository's log never shows the action's commands, even on a re-run with debug logging: with
         # another log-mode, the action prints the `tailscale up` command, which carries this job's GitHub identity
         # token, and the output of `tailscale status --json`, the tailnet's nodes.
         self.assertEqual(join["with"]["log-mode"], "quiet")
+        # The node is ephemeral, and the logout deletes it at once, whatever the steps before it did: GitHub runs a step
+        # whose if calls no status function only while no step before it failed, so its if calls always(), and holds
+        # when each step before it failed. A logout that fails stops none of the steps after it.
+        leave = self.steps["Leave the tailnet"]
+        self.assertRegex(str(leave.get("if")), r"\balways\(\)")
+        failed = {f"steps.{s['id']}.{of}": "failure" for s in self.jobs["review"]["steps"] if "id" in s
+                  for of in ("outcome", "conclusion")}
+        self.assertTrue(evaluate(leave["if"], failed), leave["if"])
+        self.assertIs(leave.get("continue-on-error"), True)
         # The logout comes after the review, and before the steps that keep the draft, the verdicts and a held finding.
         names = [s.get("name") for s in self.jobs["review"]["steps"]]
         self.assertLess(names.index("Review"), names.index("Leave the tailnet"))
         self.assertLess(names.index("Leave the tailnet"),
                         names.index("Keep the draft, and the held finding apart from it"))
+
+    def test_every_action_of_the_job_is_named_by_a_commit(self):
+        """A tag or a branch of an action's repository can be moved to other code, which would then run in this job,
+        which can ask for its GitHub identity token; a commit cannot be moved. So each action the job uses, the
+        tailnet's join among them, is named by a full commit: 40 hexadecimal digits."""
+        actions = [(s.get("name"), s["uses"]) for s in self.jobs["review"]["steps"] if "uses" in s]
+        self.assertIn(self.JOIN, [name for name, _ in actions])
+        self.assertEqual([(name, action) for name, action in actions
+                          if not re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", action)], [])
 
     def test_the_review_job_outlives_the_caps_of_its_steps(self):
         # A job cancelled at its own cap keeps no draft and no verdicts, so the job's cap holds every step's.
@@ -3010,6 +3047,18 @@ class ReviewJob(unittest.TestCase):
         # The sign-in comes right before the Review step: Google's identity token lives one hour.
         names = [s.get("name") for s in self.jobs["review"]["steps"]]
         self.assertEqual(names.index("Sign in to the model gateway") + 1, names.index("Review"))
+
+    def test_no_google_sign_in_of_the_job_leaves_its_credential_to_the_later_steps(self):
+        """Each Google sign-in of the review job, the model gateway's two among them, gives its token as its output
+        alone. The action's default writes a credentials file into the workspace, where the review's model works, and
+        exports its path and project to every later step: both are off."""
+        sign_ins = [(s["name"], s["with"]) for s in self.jobs["review"]["steps"]
+                    if s.get("uses", "").split("@")[0] == "google-github-actions/auth"]
+        self.assertLessEqual({"Sign in to the model gateway", "Sign in to the model gateway again"},
+                             {name for name, _ in sign_ins})
+        self.assertEqual([(name, given.get("create_credentials_file"), given.get("export_environment_variables"))
+                          for name, given in sign_ins if given.get("create_credentials_file") is not False
+                          or given.get("export_environment_variables") is not False], [])
 
     def export(self, outcome, name="libreac", kind="enrollment", answers=True):
         """The export step, with the job's own SPEND_COLLECTOR_URL as Actions gives it, and a stand-in curl that
@@ -3134,6 +3183,26 @@ class SessionCache(unittest.TestCase):
                                                                  "needs.gather.outputs.name": "libreac"})
                 self.assertEqual(saved, interpolated(key, {"needs.route.outputs.pr": "7",
                                                            "steps.project.outputs.name": "libreac"}))
+
+    def test_the_session_job_saves_the_artifact_the_review_job_kept_at_the_paths_it_kept(self):
+        """The review job's upload, its output session and the session job's download: the session job saves the one
+        artifact that the review job uploaded, with each file where the save step reads it."""
+        keep = step("review", "Keep this review's session for the next push's review")
+        take = step("session", "Take the session the review job kept")
+        save = step("session", "Keep it for the next push's review")
+        # upload-artifact leaves out each file and directory whose name starts with a dot unless include-hidden-files
+        # is true: the artifact keeps the whole session, whatever names Claude Code gives its files.
+        self.assertIs(keep["with"].get("include-hidden-files"), True)
+        # The upload's artifact id, through the review job's output session, is the one artifact the download takes.
+        output = interpolated(self.jobs["review"]["outputs"]["session"],
+                              {f"steps.{keep['id']}.outputs.artifact-id": "4242"})
+        self.assertEqual(interpolated(take["with"]["artifact-ids"], {"needs.review.outputs.session": output}), "4242")
+        # upload-artifact roots an artifact of several paths at their least common ancestor, and the download puts
+        # that root at its path: each path the review job kept is where the save step reads it.
+        kept = [pathlib.PurePosixPath(path) for path in keep["with"]["path"].split("\n")]
+        root = pathlib.PurePosixPath(os.path.commonpath(kept))
+        landed = [str(pathlib.PurePosixPath(take["with"]["path"]) / path.relative_to(root)) for path in kept]
+        self.assertEqual(landed, save["with"]["path"].split("\n"))
 
     def test_the_collector_collects_the_session_job(self):
         """When the review job kept a session, the check review jobs asks for the session job: it fails when that job
@@ -3419,22 +3488,22 @@ else:
 
 class Owners(unittest.TestCase):
 
-    def test_the_critical_paths_have_an_owner_and_the_patterns_with_an_owner_are_the_last_of_the_file(self):
-        """Every pattern of CODEOWNERS that names an owner names the two teams of people. The rules files the review
-        reads by name, and CODEOWNERS itself, which says who owns the rest, each have such a pattern. The patterns with
-        an owner come after every pattern without one: the last pattern that matches a file decides its owner, so no
-        later pattern takes the owner off a file."""
+    def test_only_the_listed_patterns_have_an_owner_and_they_are_the_last_of_the_file(self):
         lines = [line.split() for line in (ROOT / ".github" / "CODEOWNERS").read_text().splitlines()
                  if line.strip() and not line.lstrip().startswith("#")]
         teams = ["@theorem-labs/engineering", "@theorem-labs/research"]
-        owned = [line for line in lines if len(line) > 1]
-        self.assertTrue(owned, "CODEOWNERS names no owner")
-        self.assertEqual([line for line in owned if line[1:] != teams], [])
+        owned = [[pattern, *teams] for pattern in (
+            # Agent instructions and skills at any depth (the first patterns of CODEOWNERS).
+            "**/AGENTS.md", "**/CLAUDE.md", "**/SKILL.md", "skills/",
+            # What changes what a workflow runs (the top of CODEOWNERS).
+            "/.github/", "/src/", "/infra/", "/seeds/", ".claude/", "CLAUDE*.md", "AGENTS*.md", "/.mcp.json", "/*.py",
+            "/pytest.ini", "/.pytest.ini", "/pyproject.toml", "/uv.lock", "/.python-version", "/setup.cfg",
+            "/tox.ini",
+            "/review.md", "/review-change.md", "/review-issue.md", "/.claude/skills/write-to-maintainer/",
+            "/.github/CODEOWNERS")]
+        self.assertEqual([line for line in lines if len(line) > 1], owned)
         self.assertEqual(lines[-len(owned):], owned)
-        patterns = {line[0] for line in owned}
-        for name in ("review.md", "review-change.md", "review-issue.md", ".github/CODEOWNERS"):
-            self.assertIn("/" + name, patterns, name)
-            self.assertTrue((ROOT / name).is_file(), name)
+        self.assertTrue(all((ROOT / name).is_file() for name in ("review.md", "review-change.md", "review-issue.md")))
 
 
 if __name__ == "__main__":

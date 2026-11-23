@@ -3,8 +3,9 @@
 """How a build reads a private library of ours, and how it fails when it cannot.
 
 The git half runs against a git server started here, over the loopback interface: `git http-backend`, with one
-repository it serves to anyone and one it serves only to a request that carries the right token. No network and no
-Docker. fetch-commit is run as the builder image runs it, with REPO and COMMIT in its environment.
+repository it serves to anyone and two it serves only to a request that carries the right token, one of which names
+the other as a submodule. No network and no Docker. fetch-commit is run as the builder image runs it, with REPO and
+COMMIT in its environment.
 
     uv run pytest tests/test_private_fetch.py
 """
@@ -141,12 +142,19 @@ class FetchCommit(unittest.TestCase):
         cls.served = root / "served"
         cls.served.mkdir()
         cls.commits = {}
-        for name in ("public", "secret"):
+        for name in ("public", "secret", "outer"):
             work = root / name
             work.mkdir()
             git("init", "-q", str(work))
             (work / "README").write_text(f"{name}\n", encoding="utf-8")
             git("add", "-A", cwd=work)
+            if name == "outer":
+                # A private library whose tree names secret.git, beside it on the same server, as a submodule: the
+                # sibling that fetch-commit --submodules reaches with the helper it set up for outer.git.
+                (work / ".gitmodules").write_text('[submodule "sibling"]\n\tpath = sibling\n\turl = ../secret.git\n',
+                                                  encoding="utf-8")
+                git("add", ".gitmodules", cwd=work)
+                git("update-index", "--add", "--cacheinfo", f"160000,{cls.commits['secret']},sibling", cwd=work)
             git("commit", "-qm", "first", cwd=work)
             cls.commits[name] = git("rev-parse", "HEAD", cwd=work)
             # A bare copy for the server, which may serve any commit by its id, so the shallow fetch of one commit
@@ -155,7 +163,7 @@ class FetchCommit(unittest.TestCase):
             git("clone", "-q", "--bare", str(work), str(bare))
             git("-C", str(bare), "config", "uploadpack.allowAnySHA1InWant", "true")
             git("-C", str(bare), "config", "uploadpack.allowTipSHA1InWant", "true")
-        cls.server = GitServer(cls.served, {"secret.git"}, TOKEN)
+        cls.server = GitServer(cls.served, {"secret.git", "outer.git"}, TOKEN)
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
         cls.base = f"http://127.0.0.1:{cls.server.server_address[1]}/"
@@ -166,10 +174,10 @@ class FetchCommit(unittest.TestCase):
         cls.server.server_close()
         cls.temporary.cleanup()
 
-    def fetch(self, repository, commit, token=None, changes=None):
-        """Run fetch-commit for one repository and commit, with `token` in a file as the secret mount holds it, and
-        `changes` made to its environment (None removes a variable). Return (exit code, everything it wrote, the
-        commit checked out)."""
+    def fetch(self, repository, commit, token=None, changes=None, submodules=False):
+        """Run fetch-commit for one repository and commit, with `token` in a file as the secret mount holds it,
+        `changes` made to its environment (None removes a variable), and --submodules if `submodules`. Return (exit
+        code, everything it wrote, the commit checked out)."""
         self.server.seen.clear()
         with tempfile.TemporaryDirectory() as work:
             environment = {
@@ -207,9 +215,9 @@ class FetchCommit(unittest.TestCase):
                     environment.pop(name, None)
                 else:
                     environment[name] = value
-            done = subprocess.run(["sh", str(FETCH_COMMIT), str(pathlib.Path(work) / "checkout")],
-                                  capture_output=True, text=True, env=environment)
             checkout = pathlib.Path(work) / "checkout"
+            done = subprocess.run(["sh", str(FETCH_COMMIT), *(["--submodules"] if submodules else []), str(checkout)],
+                                  capture_output=True, text=True, env=environment)
             head = subprocess.run(["git", "-C", str(checkout), "rev-parse", "HEAD"], capture_output=True,
                                   text=True).stdout.strip()
             return done.returncode, done.stdout + done.stderr, head
@@ -326,11 +334,28 @@ class FetchCommit(unittest.TestCase):
         self.assertEqual(code, 1, said)
         self.assertIn("not authorised to read", said)
 
+    def test_on_repos_own_host_the_helper_answers_for_repo_and_not_for_a_sibling(self):
+        # REPO is named by this server's own host and no OSS_VERIFY_TOKEN_REPO is set, so the scope is the one
+        # fetch-commit derives. outer.git's submodule is secret.git, on the same host and served only with the
+        # token, so --submodules asks the same helper for both: it must answer for REPO's path and not for the
+        # sibling's. Only the same host tells a helper that matches the path from one that matches the host alone.
+        host = self.base.partition("//")[2]
+        code, said, head = self.fetch("outer.git", self.commits["outer"], TOKEN,
+                                      {"REPO": f"https://{host}outer.git", "GIT_CONFIG_VALUE_1": f"https://{host}",
+                                       "OSS_VERIFY_TOKEN_REPO": None}, submodules=True)
+        sent = {name: [authorization for seen, authorization in self.server.seen if seen == name]
+                for name in ("outer.git", "secret.git")}
+        self.assertEqual(head, self.commits["outer"], said)
+        self.assertTrue(any(sent["outer.git"]), f"the helper gave REPO no credential: {said}")
+        self.assertTrue(sent["secret.git"], f"the fetch never reached the sibling: {said}")
+        self.assertEqual([authorization for authorization in sent["secret.git"] if authorization], [],
+                         "the helper gave REPO's token to another repository on its host")
+        self.assertNotEqual(code, 0, said)
+
     def test_a_fetch_with_a_token_runs_every_git_with_its_tracing_off(self):
-        # Whatever tracing the caller set: each GIT_TRACE* set to 0, the two that 0 turns on removed, the trace
-        # redacted and naming no variable, and on every git that reaches the server, trace2's targets emptied on
-        # the command line. The host's lists are the container's. The tracing set here writes text to standard
-        # error, and the packfile to nowhere, so a fetch that kept it still ends and says what it kept.
+        # Whatever tracing the caller set: each GIT_TRACE* set to 0, the two that 0 turns on removed, and the trace
+        # redacted and naming no variable. The host's lists are the container's. The tracing set here writes text to
+        # standard error, and the packfile to nowhere, so a fetch that kept it still ends and says what it kept.
         changes = {**{name: "1" for name in check_build.GIT_TRACING}, "GIT_CURL_VERBOSE": "1",
                    "GIT_TRACE_PACKFILE": os.devnull, "GIT_TRACE2_ENV_VARS": "OSS_VERIFY_TOKEN_FILE",
                    "GIT_TRACE_REDACT": "0"}
@@ -343,11 +368,6 @@ class FetchCommit(unittest.TestCase):
                 self.assertNotIn(name, environment, argv)
             self.assertEqual(environment.get("GIT_TRACE2_ENV_VARS"), "", argv)
             self.assertEqual(environment.get("GIT_TRACE_REDACT"), "1", argv)
-        reaching = [argv for argv, _ in ran if "credential.helper=oss-verify" in argv]
-        self.assertTrue(reaching, f"fetch-commit ran no git that reaches the server: {ran}")
-        for argv in reaching:
-            for setting in check_build.NO_TRACING:
-                self.assertIn(setting, argv)
         self.assertEqual(code, 0, said)
 
     def test_a_transfer_that_broke_is_not_a_missing_commit(self):

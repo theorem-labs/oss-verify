@@ -133,6 +133,28 @@ class PatchDirective(unittest.TestCase):
         self.assertIn("demo.patch", self.refused(THROUGH_A_LINK))
         self.assertEqual((outside / "one.c").read_text(), ONE)
 
+    def configuration(self, repository):
+        """What git reads as the configuration of the repository at `repository`: its own file, and the value of
+        core.symlinks (with whether one is set)."""
+        local = subprocess.run(["git", "config", "--local", "--list"], cwd=repository, capture_output=True, text=True,
+                               check=True).stdout
+        symlinks = subprocess.run(["git", "config", "core.symlinks"], cwd=repository, capture_output=True, text=True)
+        return local, symlinks.returncode, symlinks.stdout
+
+    def test_the_apply_leaves_the_configuration_of_a_repository_as_it_was(self):
+        """core.symlinks=false is for the apply alone: in a clone's config it would make git write the real
+        symbolic links of that working tree as files of text. A tree that is a repository, and a tree below one,
+        take the patch and keep their configuration."""
+        for where in ("tree", "top"):
+            with self.subTest(repository=where):
+                self.setUp()  # a fresh tree for each, whatever the one before it left
+                repository = getattr(self, where)
+                subprocess.run(["git", "init", "-q", "."], cwd=repository, check=True)
+                before = self.configuration(repository)
+                self.lay_out(EDIT)
+                self.assertEqual((self.tree / "one.c").read_text(), "int one(void) { return 2; }\n")
+                self.assertEqual(self.configuration(repository), before)
+
     def test_a_repository_above_the_tree_does_not_take_the_patch(self):
         """Why the apply passes GIT_CEILING_DIRECTORIES: inside a repository, git apply reads the paths of a patch
         with a `diff --git` header from the repository's top, and a tree laid out under it gets nothing, with exit

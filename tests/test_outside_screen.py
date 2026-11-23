@@ -30,6 +30,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 import yaml
 
@@ -310,6 +311,20 @@ def comment_job_env(ctx):
 def interpolated(value, ctx):
     """A value with ${{ }} expressions in its text, as the runner gives it for ctx."""
     return re.sub(r"\$\{\{(.*?)\}\}", lambda m: as_text(evaluate(m.group(1), ctx)), value)
+
+
+def step_env(job, s, **given):
+    """The env review.yml's step s of the job `job` runs with: the workflow's, the job's and the step's own, each over
+    the one before, with `given` in place of the workflow's."""
+    return {**REVIEW["env"], **given, **REVIEW_JOBS[job].get("env", {}), **s.get("env", {})}
+
+
+def screen_script():
+    """.github/scripts/screen.py, loaded as a module as test_screen.py loads it."""
+    spec = importlib.util.spec_from_file_location("screen", SCRIPTS / "screen.py")
+    screen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(screen)
+    return screen
 
 
 def outputs_of(path):
@@ -1000,17 +1015,20 @@ class Routes(unittest.TestCase):
                 ctx = {"needs.route.outputs.trust": trust}
                 ran = [s for s in job["steps"] if "if" not in s or evaluate(s["if"], ctx)]
                 self.assertLess(sum(s["timeout-minutes"] for s in ran), int(evaluate(job["timeout-minutes"], ctx)))
-        spec = importlib.util.spec_from_file_location("screen", SCRIPTS / "screen.py")
-        screen = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(screen)
-        self.assertGreater(step("screen", "Screen")["timeout-minutes"] * 60, screen.DEADLINE_SECONDS)
+        self.assertGreater(step("screen", "Screen")["timeout-minutes"] * 60, screen_script().DEADLINE_SECONDS)
 
     def test_the_review_reads_what_the_screen_passed(self):
-        """The screen and the review take the gathered file with take-review-data, after the gather job, and only the
-        gather job gathers: it alone uploads review-data, and the review job runs neither review-gather nor
-        take-project, and restores no cache."""
+        """The screen and the review take the gathered file with take-review-data, by the gather job's digest, after
+        the gather job, and only the gather job gathers: it alone uploads review-data, and the review job runs neither
+        review-gather nor take-project, and restores no cache."""
+        # Each of the gather job's outputs, the head that route read and the run's commit, a SHA-256 of its own: each
+        # step takes the file by the gather job's digest, and by no other of them.
+        ctx = {name: hashlib.sha256(name.encode()).hexdigest() for name in (
+            *(f"needs.gather.outputs.{output}" for output in REVIEW_JOBS["gather"]["outputs"]),
+            "needs.route.outputs.sha", "github.sha")}
         for job in ("screen", "review"):
             take = step(job, "Take what the gather job kept")
+            self.assertEqual(interpolated(take["env"]["DIGEST"], ctx), ctx["needs.gather.outputs.digest"], job)
             self.assertIn(".github/scripts/take-review-data", take["run"])
             self.assertIn("gather", REVIEW_JOBS[job]["needs"])
         uploads = [(n, s) for n, j in REVIEW_JOBS.items() for s in j["steps"]
@@ -1074,9 +1092,16 @@ class Holdings(unittest.TestCase):
                     for identity in self.SCREEN_IDENTITIES:
                         self.assertNotIn(identity, text)
 
-    def test_no_job_reads_anything_of_the_screen_but_its_verdict_its_checks_and_its_result(self):
+    def test_the_screen_jobs_outputs_are_its_verdict_and_the_checks_that_ran(self):
         """The reason reaches no output: screen.py writes only the verdict and the checks that ran (test_screen.py),
-        and no other job reads anything of the screen but these and its result."""
+        and the job passes on only these, each the Screen step's output of its name; no other job reads anything of
+        the screen but these and its result."""
+        outputs = REVIEW_JOBS["screen"]["outputs"]
+        self.assertEqual(sorted(outputs), ["checks", "verdict"])
+        screen = step("screen", "Screen")["id"]
+        ctx = {f"steps.{screen}.outputs.{name}": f"the Screen step's {name}" for name in outputs}
+        for name, value in outputs.items():
+            self.assertEqual(interpolated(str(value), ctx), ctx[f"steps.{screen}.outputs.{name}"], name)
         for name, job in REVIEW_JOBS.items():
             for ref in re.findall(r"needs\.screen\.([a-z]+(?:\.[a-z]+)?)", json.dumps(job)):
                 self.assertIn(ref, ("result", "outputs.verdict", "outputs.checks"), name)
@@ -1136,6 +1161,24 @@ class Holdings(unittest.TestCase):
         self.assertNotIn(e["ANTHROPIC_SERVICE_ACCOUNT_ID"], review)
         self.assertNotIn(e["ANTHROPIC_FEDERATION_RULE_ID"], review)
         self.assertNotRegex(review, r"svac_|fdrl_")
+
+    def test_the_screen_holds_what_the_model_or_both_detectors_call_suspicious(self):
+        """The policy the measurement chose (.github/scripts/screen.py, RULES): the model's word suspicious holds an
+        item, and so do Model Armor's and Prompt Shields' together. screen.py, with the checks and the rule the Screen
+        step runs with, holds every outcome of the three checks' words that the policy holds: so the screen runs each
+        of the three, under no weaker rule (one detector, the detectors alone, the model alone, two of the three)."""
+        e = step_env("screen", step("screen", "Screen"))
+        screen = screen_script()
+        with mock.patch.dict(os.environ, {"SCREEN_CHECKS": e["SCREEN_CHECKS"], "SCREEN_RULE": e["SCREEN_RULE"]}):
+            ran = screen.listed()
+            rule = screen.rule(ran)
+        checks = ("model_armor", "prompt_shields", "claude")
+        self.assertLessEqual(set(checks), set(ran))
+        for words in itertools.product(("clean", "suspicious"), repeat=len(checks)):
+            said = dict(zip(checks, words))
+            if said["claude"] == "suspicious" or said["model_armor"] == said["prompt_shields"] == "suspicious":
+                with self.subTest(**said):
+                    self.assertEqual(screen.combine({c: said.get(c, "clean") for c in ran}, rule), "held")
 
 
 class TakeReviewData(Runner):
@@ -2124,8 +2167,8 @@ class ScreenedFooter(unittest.TestCase):
 
 
 class RunWiring(unittest.TestCase):
-    """The events build.yaml and review.yml start on and their concurrency, and a screened review that ran out of
-    time."""
+    """The events build.yaml and review.yml start on and their concurrency, a screened review that ran out of time, and
+    the Apps the review admits."""
 
     @staticmethod
     def group(ctx, workflow=REVIEW):
@@ -2192,3 +2235,14 @@ class RunWiring(unittest.TestCase):
                          {"gather", "screen", "review", "comment"})
         self.assertEqual(evaluate(REVIEW_JOBS["comment"]["env"]["HOLDING"], ctx), True)
         self.assertNotEqual(required(ctx)[0], 0)
+
+    def test_the_review_admits_the_apps_of_allowed_bots_alone(self):
+        """Each attempt of the review gives the action, as its allowed_bots, the one list of Apps whose runs it admits:
+        the workflow's ALLOWED_BOTS, which route reads through .github/scripts/actor-kind, whatever the list holds."""
+        listed = "an-app[bot],another-app[bot]"
+        attempts = [(job, s) for job, j in REVIEW_JOBS.items() for s in j["steps"]
+                    if "claude-code-action@" in s.get("uses", "")]
+        self.assertTrue(attempts, "no step runs claude-code-action")
+        for job, s in attempts:
+            ctx = {f"env.{k}": v for k, v in step_env(job, s, ALLOWED_BOTS=listed).items()}
+            self.assertEqual(interpolated(s["with"]["allowed_bots"], ctx), listed, s["name"])
