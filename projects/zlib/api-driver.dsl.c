@@ -769,12 +769,6 @@ static int ib_out(void *desc, unsigned char *buf, unsigned len) {
 
 /* ---------------------------------------------------------------- the ops -- */
 
-/* madler/zlib #1401 */
-__attribute__((noinline)) static int dsl_resetkeep_guarded(z_streamp s, int full) {
-  if (!full && ((deflate_state *)s->state)->lookahead != 0 && ((deflate_state *)s->state)->lit_bufsize != 0) exit(252);
-  return deflateResetKeep(s);
-}
-
 static int dsl_step(dsl_vm *V, unsigned op) {
   switch (op) {
 
@@ -1210,7 +1204,7 @@ static int dsl_step(dsl_vm *V, unsigned op) {
     int full = dsl_flag(V);
     int rc;
     if (s == NULL) return DSL_SKIP;
-    rc = full ? deflateReset(s) : dsl_resetkeep_guarded(s, full);
+    rc = full ? deflateReset(s) : deflateResetKeep(s);
     /* Both forms put a gzip stream back in GZIP_STATE, which is where
      * deflate.c re-zeroes gzindex, so a header may legally be set again. */
     if (rc == Z_OK) (void)dsl_hset(V, K_DEF, (void *)s, (void *)s, hn & ~(size_t)DEF_USED);
