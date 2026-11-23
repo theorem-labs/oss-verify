@@ -5,4 +5,4 @@ primary_contact: n/a
 homepage: https://www.zlib.net
 language: c++
 sanitizers: [address, undefined]
-fuzz_targets: [checksum_fuzzer, compress_fuzzer, example_dict_fuzzer, example_flush_fuzzer, example_large_fuzzer, example_small_fuzzer, gzio_fuzzer, minigzip_fuzzer, zlib_uncompress2_fuzzer, zlib_uncompress3_fuzzer, zlib_uncompress_fuzzer]
+fuzz_targets: [checksum_fuzzer, compress_fuzzer, compress_roundtrip_full_fuzzer, example_dict_fuzzer, example_flush_fuzzer, example_large_fuzzer, example_small_fuzzer, gzio_fuzzer, minigzip_fuzzer, zlib_uncompress2_fuzzer, zlib_uncompress3_fuzzer, zlib_uncompress_fuzzer]

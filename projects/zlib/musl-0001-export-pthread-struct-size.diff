@@ -1,0 +1,43 @@
+From e59173afcf1c78e28247889e96a08c20f54f3d98 Mon Sep 17 00:00:00 2001
+From: Theorem Labs
+Date: Mon, 17 Aug 2026 21:51:10 -0700
+Subject: [PATCH] export the size of the thread descriptor
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+🤖: A leak checker has to scan the thread descriptor as a root: the libc
+state a thread carries lives there, and an allocation whose only reference
+is in it otherwise looks unreachable.  The descriptor sits at (variant II)
+or just below (variant I) the thread pointer, but its size is an
+implementation detail that differs per architecture and changes between
+versions, so an out-of-tree tool cannot compute it and must not hardcode
+it.
+
+Export it as __pthread_struct_size.  It goes in __init_tls.c because that
+translation unit is pulled into every static link (__libc_start_main calls
+__init_tls), so a weak reference from outside always finds it.
+---
+ src/env/__init_tls.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/src/env/__init_tls.c b/src/env/__init_tls.c
+index a93141ed..acf923fa 100644
+--- a/src/env/__init_tls.c
++++ b/src/env/__init_tls.c
+@@ -11,6 +11,15 @@
+ 
+ volatile int __thread_list_lock;
+ 
++/* Size of the thread descriptor, which lives at (variant II) or just below
++ * (variant I) the thread pointer.  It is not part of any public interface and
++ * differs per architecture and per version, so a tool that has to know where
++ * the descriptor is cannot compute or hardcode it.  A leak checker needs it:
++ * everything a thread holds in libc state lives in the descriptor, and an
++ * allocation referenced only from there looks unreachable unless that memory
++ * is scanned as a root. */
++const size_t __pthread_struct_size = sizeof(struct pthread);
++
+ int __init_tp(void *p)
+ {
+ 	pthread_t td = p;
