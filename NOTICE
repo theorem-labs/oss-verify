@@ -104,4 +104,4 @@ they are the sources of the two DSL drivers as their theorem statements name the
 projects/zlib/zlib-sysfail_fuzzer.0002-gz_fetch-copy-partial-output-after-read-error.patch,
 zlib-sysfail_fuzzer.0003-gzseek64-overflow-after-initial-pushback.patch and
 zlib-sysfail_fuzzer.0004-gzwrite-finish-reset-on-failed-write.patch change zlib's code as the zlib pull requests
-that each one names, and keep zlib's licence (Zlib).
+(#1363, #1361 and #1399) that each one names, and keep zlib's licence (Zlib).
