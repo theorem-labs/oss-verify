@@ -44,8 +44,8 @@ src/oss_verify/validate.py, a file under seeds/, or a file under projects/<name>
 a row in seeds/builds.tsv) runs this and commits docs/seeded-projects.tsv. A pull request from a fork that changes a
 file under projects/ runs no test there and cannot commit the table. So enrollment (.github/scripts/take-project)
 refuses a fork that changes the port of a project that docs/seeded-projects.tsv marks seeded, and such a change cannot
-merge from a fork. A branch of this repository carries it and runs Committed. A push to main that makes the table stale
-fails the check tests on main's commit.
+merge from a fork. A branch of this repository carries it and runs Committed on the tree that its merge puts on main
+(the top of .github/workflows/tests.yaml says why), so a merge does not make main's table stale.
 """
 import argparse
 import dataclasses
