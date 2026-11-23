@@ -30,11 +30,14 @@ name: "Toolchain images"
 #                 record on the base image. On the C and C++ image, it also counts the calling functions that keep a
 #                 frame record in the C library, the C++ library and the AddressSanitizer runtime of the base image.
 #                 Its step summary gives the results. Thus a run makes each image once for its checks and its probes.
-#   docker-tests  After make. It is the job of frame-pointer-tests.yaml (Frame-pointer tests), which this file calls
-#                 (workflow_call). It makes the C and C++ image and the Rust image again, and
-#                 fails unless each digest is the digest that make made. Then it runs the classes FramePointersC and
-#                 FramePointersRust of tests/test_builder.py on the base images and on the new images.
-#                 frame-pointer-tests.yaml's header says what these tests check. It fails if a test is skipped.
+#   docker-tests  Beside make. It is the job of frame-pointer-tests.yaml (Frame-pointer tests), which this file calls
+#                 (workflow_call). It makes the C and C++ image and the Rust image itself, as make does, and runs the
+#                 classes FramePointersC and FramePointersRust of tests/test_builder.py on the base images and on the
+#                 new images. frame-pointer-tests.yaml's header says what these tests check. It fails if a test is
+#                 skipped. It keeps the digest of each image that it tested in the artifact fp-tested-digest.
+#   compare-digests  After make and docker-tests. It fails unless docker-tests gave a digest for the C and C++ row and
+#                 for the Rust row, and each is the digest that make made of that row: the images that docker-tests
+#                 tested are the images that make checked and probed.
 #
 # GitHub's paths filter below starts this file only for a change of what make reads, the inputs of the
 # images: this file, publish's file, frame-pointer-tests.yaml (the job docker-tests), the probes, infra/toolchains.tsv,
@@ -45,22 +48,23 @@ name: "Toolchain images"
 #
 # This file publishes nothing, and no job of it has a write permission. toolchain-images-publish.yaml (Toolchain
 # images: publish) puts the images on ghcr.io, all three in one package, FP_PACKAGE below. GitHub starts it when a run
-# of this file on main completes. Its job publish acts only when that run was for a push to main and passed: make
-# and docker-tests passed for every image. It takes the digest that make made from that run's artifact
+# of this file on main completes. Its job publish acts only when that run was for a push to main and passed: make,
+# docker-tests and compare-digests passed for every image. It takes the digest that make made from that run's artifact
 # fp-digest-<base row>, and it pushes nothing unless it makes the image again with that digest. Its header says how it
 # publishes, and what grant lets its token push to this package.
 #
 # OS Verify's Legion controller owns a failed run of this workflow on main, and a failed run of
 # toolchain-images-publish.yaml.
 #
-# If make or docker-tests fails in a run on main, publish does nothing for that run. Fix the cause, and run the
+# If a job of this file fails in a run on main, publish does nothing for that run. Fix the cause, and run the
 # failed jobs of that run again: when the run then passes, its completion starts publish. If publish fails,
 # toolchain-images-publish.yaml's header says how to run publish again.
 #
 # make and docker-tests run code of the pull request: the builder (infra/base-builder), the probes and the tests.
-# They have contents: read and no secret. GitHub gives docker-tests, a called workflow, no secret unless its caller job
-# passes one, which it does not, and a token with that job's permissions (contents: read) or fewer. No job of this file
-# has packages: write. Only publish has it, in toolchain-images-publish.yaml, which GitHub runs from main's copy alone.
+# They have contents: read and no secret; compare-digests has no permission. GitHub gives docker-tests, a called
+# workflow, no secret unless its caller job passes one, which it does not, and a token with that job's permissions
+# (contents: read) or fewer. No job of this file has packages: write. Only publish has it, in
+# toolchain-images-publish.yaml, which GitHub runs from main's copy alone.
 # This limits only these files: after the grant, a workflow file on any branch of this repository can ask for
 # packages: write and push to the package FP_PACKAGE (toolchain-images-publish.yaml's header).
 
@@ -92,12 +96,12 @@ on:
 permissions: {}
 
 env:
-  # These values, the base rows of make's matrix, the image of its registry and the pin of actions/checkout must stay
-  # equal to toolchain-images-publish.yaml's:
+  # These values, the base rows of make's matrix, the image of its registry and the pins of actions/checkout and
+  # actions/download-artifact must stay equal to toolchain-images-publish.yaml's:
   # test_publish_takes_what_toolchain_images_hands_over (tests/test_trigger_move.py) fails if one differs.
   # frame-pointer-tests.yaml, which docker-tests calls, holds its own copy of the crane values, of the registry image and
-  # of the pins of actions/checkout and actions/download-artifact, since a called workflow does not get its caller's
-  # env: that test compares its copies too.
+  # of the pin of actions/checkout, since a called workflow does not get its caller's env: that test compares its
+  # copies too.
   #
   # go-containerregistry's crane, pinned by version and by the SHA-256 of its release archive.
   CRANE_VERSION: v0.22.1
@@ -248,11 +252,11 @@ jobs:
             echo
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # This job's registry ends with the job. So docker-tests makes the image again, and compares its digest with this
-      # one. When ghcr.io does not hold the image, publish (toolchain-images-publish.yaml) also makes it again, and
-      # copies it to ghcr.io only if its digest is this one. A matrix job keeps one value of each output, so each
-      # image's digest is an artifact of its own.
-      - name: the digest, for docker-tests and publish
+      # This job's registry ends with the job. docker-tests makes the C and C++ image and the Rust image itself, beside
+      # this job, and compare-digests fails unless each has this digest. When ghcr.io does not hold the image, publish
+      # (toolchain-images-publish.yaml) also makes it again, and copies it to ghcr.io only if its digest is this one. A
+      # matrix job keeps one value of each output, so each image's digest is an artifact of its own.
+      - name: the digest, for compare-digests and publish
         env:
           MADE: ${{ steps.made.outputs.ref }}
         run: |
@@ -266,7 +270,7 @@ jobs:
           name: fp-digest-${{ matrix.base }}
           path: ${{ runner.temp }}/fp-digest/${{ matrix.base }}.digest
           if-no-files-found: error
-          # GitHub runs the jobs of a run again for up to 30 days: a rerun of docker-tests, or of a run of publish
+          # GitHub runs the jobs of a run again for up to 30 days: a rerun of compare-digests, or of a run of publish
           # (toolchain-images-publish.yaml), reads this.
           retention-days: 30
           # A rerun of the job replaces the artifact of its run.
@@ -280,10 +284,61 @@ jobs:
           FP: ${{ steps.made.outputs.ref }}
         run: .github/scripts/frame-pointers/probe "$BASE_ROW" "$BASE" "$FP"
 
-  # frame-pointer-tests.yaml's job docker-tests, on the images that make made. A job that calls a workflow has no
-  # steps or runner of its own: the called job's are in that file, with its timeout.
+  # frame-pointer-tests.yaml's job docker-tests. It starts beside make: it makes the C and C++ image and the Rust image
+  # itself, from the same base rows with the same crane mutate, and keeps the digest of each image that it tested in
+  # the artifact fp-tested-digest. A job that calls a workflow has no steps or runner of its own: the called job's are
+  # in that file, with its timeout.
   docker-tests:
-    needs: make
     permissions:
       contents: read
     uses: ./.github/workflows/frame-pointer-tests.yaml
+
+  # compare-digests: the images that docker-tests tested are the images that make made, checked and probed. It is the
+  # one job of this file that waits for others, so docker-tests runs beside make and its probes. It reads only the
+  # digest artifacts of this run, and runs no code of the pull request. Its downloads read this run, so the token
+  # needs no permission.
+  compare-digests:
+    needs: [make, docker-tests]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions: {}
+    env:
+      # The base rows whose images docker-tests tests: each must have a tested digest, equal to make's.
+      # test_compare_digests_requires_each_row_that_docker_tests_tests (tests/test_trigger_move.py) fails unless these
+      # are the rows of which frame-pointer-tests.yaml's docker-tests keeps a digest.
+      TESTED_ROWS: oss-fuzz-theorems-2026.10 oss-fuzz-theorems-2026.10-rust
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2 (sha-pinned)
+        with:
+          pattern: fp-digest-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/fp-digest
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2 (sha-pinned)
+        with:
+          name: fp-tested-digest
+          path: ${{ runner.temp }}/fp-tested-digest
+
+      - name: each image that docker-tests tested has the digest that make made
+        run: |
+          set -euo pipefail
+          read -r -a rows <<< "$TESTED_ROWS"
+          [ "${#rows[@]}" -gt 0 ] || { echo "::error::TESTED_ROWS names no row: nothing to compare"; exit 1; }
+          failed=0
+          for row in "${rows[@]}"; do
+            made=$(cat "$RUNNER_TEMP/fp-digest/$row.digest" 2> /dev/null || true)
+            tested=$(cat "$RUNNER_TEMP/fp-tested-digest/$row.digest" 2> /dev/null || true)
+            if ! [[ "$made" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::make gave no digest for $row: '$made'"
+              failed=1
+            elif ! [[ "$tested" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::docker-tests gave no digest for $row: '$tested'"
+              failed=1
+            elif [ "$tested" != "$made" ]; then
+              echo "::error::docker-tests tested the image $tested of $row, but make made $made"
+              failed=1
+            else
+              echo "$row: docker-tests tested \`$tested\`, the image that make made" | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+          exit "$failed"

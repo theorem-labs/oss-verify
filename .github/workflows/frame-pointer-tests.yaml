@@ -9,9 +9,10 @@ name: "Frame-pointer tests"
 # OFT_FRAME_POINTERS not set or set to the empty value. They fail unless compile fails on a base image with
 # OFT_FRAME_POINTERS=0. docker-tests also fails if a test is skipped.
 #
-# toolchain-images.yaml (Toolchain images) calls this file (workflow_call) as its job docker-tests, after make. The job
-# fails unless each image that it makes has the digest that make made in that run (make's artifact fp-digest-<base
-# row>). Publish (toolchain-images-publish.yaml) acts only when that whole run passed, this job too. The file has no
+# toolchain-images.yaml (Toolchain images) calls this file (workflow_call) as its job docker-tests, beside make. The job
+# keeps the digest of each image that it tested in the artifact fp-tested-digest. toolchain-images.yaml's job
+# compare-digests fails unless each is the digest that make made in that run (make's artifact fp-digest-<base row>).
+# Publish (toolchain-images-publish.yaml) acts only when that whole run passed, these jobs too. The file has no
 # trigger of its own: for any other change, the job docker of tests.yaml runs these tests, on the images that it makes
 # from the same base rows with the same crane mutate, with every other Docker test.
 #
@@ -72,17 +73,11 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$CRANE_ARCHIVE" -C "$RUNNER_TEMP/bin" crane
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
-      # make's digests, from this run of Toolchain images.
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2 (sha-pinned)
-        with:
-          pattern: fp-digest-*
-          merge-multiple: true
-          path: ${{ runner.temp }}/fp-digest
-
-      - name: make the C and C++ image and the Rust image, with the digests that make made
+      - name: make the C and C++ image and the Rust image
         id: made
         run: |
           set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/fp-tested-digest"
           for row in oss-fuzz-theorems-2026.10 oss-fuzz-theorems-2026.10-rust; do
             base=$(awk -F'\t' -v row="$row" '$1 == row { print $2 }' infra/toolchains.tsv)
             [[ "$base" =~ ^ghcr\.io/theorem-labs/oss-fuzz-theorems-toolchain(-[a-z]+)?@sha256:[0-9a-f]{64}$ ]] ||
@@ -90,11 +85,9 @@ jobs:
             name=${base%@*}
             ref=$(crane mutate "$base" --env OFT_FRAME_POINTERS=1 -t "localhost:5000/${name#ghcr.io/}:frame-pointers")
             [[ "$ref" =~ @sha256:[0-9a-f]{64}$ ]] || { echo "::error::crane gave no digest: '$ref'"; exit 1; }
-            want=$(cat "$RUNNER_TEMP/fp-digest/$row.digest" 2> /dev/null || true)
-            [[ "$want" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::make gave no digest for $row: '$want'"; exit 1; }
-            [ "${ref#*@}" = "$want" ] ||
-              { echo "::error::the image made here from $row is $ref, but make made $want"; exit 1; }
-            echo "$row: made $ref, the digest that make made"
+            echo "$row: made $ref"
+            # The digest that the tests test, for compare-digests of toolchain-images.yaml.
+            echo "${ref#*@}" > "$RUNNER_TEMP/fp-tested-digest/$row.digest"
             # The tests skip unless the base image is here, and build a builder FROM each of the two images.
             docker pull --quiet "$base" > /dev/null
             docker pull --quiet "$ref" > /dev/null
@@ -122,3 +115,14 @@ jobs:
             echo "::error::A FramePointers test did not run."
             exit 1
           fi
+
+      # The digests of the images that the tests passed on, after they passed: compare-digests of toolchain-images.yaml
+      # fails unless each is the digest that make made in this run.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (sha-pinned)
+        with:
+          name: fp-tested-digest
+          path: ${{ runner.temp }}/fp-tested-digest
+          if-no-files-found: error
+          retention-days: 30
+          # A rerun of the job replaces the artifact of its run.
+          overwrite: true

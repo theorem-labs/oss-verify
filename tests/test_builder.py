@@ -16,7 +16,8 @@ makes, named by OV_FP_TOOLCHAIN_C and OV_FP_TOOLCHAIN_RUST: each skips unless it
 .github/workflows/tests.yaml runs every test of this file in shards: each shard pulls the toolchain images that its
 classes need, makes the frame-pointer images of its FramePointers class again and sets its variable, and fails if a
 test skips. So does toolchain-images.yaml's job docker-tests (.github/workflows/frame-pointer-tests.yaml) for these two
-classes, on the images that its job make made.
+classes, on the images that it makes; toolchain-images.yaml's job compare-digests fails unless they are the images of
+its job make.
 """
 import os
 import pathlib

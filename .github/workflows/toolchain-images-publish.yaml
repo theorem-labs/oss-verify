@@ -4,10 +4,10 @@ name: "Toolchain images: publish"
 # toolchain-images-publish puts the frame-pointer toolchain images on ghcr.io. toolchain-images.yaml (Toolchain images)
 # makes them and checks them: its header says how. GitHub starts this workflow each time a run of Toolchain images on
 # the branch main completes. Its one job, publish, acts only when that run was for a push to main of this repository,
-# and passed: make and docker-tests passed for every image. For any other run, publish is skipped. docker-tests is
-# the job of frame-pointer-tests.yaml that Toolchain images calls. A push to main that changes only files that no image
-# depends on (the tests, or src/oss_verify/check_build.py alone) runs no Toolchain images: then nothing is published,
-# and no run looks for make's artifact.
+# and passed: make, docker-tests and compare-digests passed for every image. For any other run, publish is skipped.
+# docker-tests is the job of frame-pointer-tests.yaml that Toolchain images calls. A push to main that changes only
+# files that no image depends on (the tests, or src/oss_verify/check_build.py alone) runs no Toolchain images: then
+# nothing is published, and no run looks for make's artifact.
 #
 # publish runs once for each base image (the matrix). It checks out infra/toolchains.tsv at the commit that the run of
 # Toolchain images built, and takes the digest that make made in that run from its artifact fp-digest-<base row>. It
@@ -24,8 +24,8 @@ name: "Toolchain images: publish"
 #
 # It runs on workflow_run, so GitHub runs main's copy of this file, whatever the commit of the run that completed. Thus
 # main's file decides when publish acts and what it pushes. Toolchain images runs on pull_request too, and no job of
-# it has a write permission: the token has packages: write only here, in a job that acts only after make and
-# docker-tests of a push run on main passed.
+# it has a write permission: the token has packages: write only here, in a job that acts only after make,
+# docker-tests and compare-digests of a push run on main passed.
 #
 # The publish job of this file is the only route of these images to ghcr.io. No person and no agent pushes an image by
 # hand, with any token. No copy goes to a different registry or to a different package: publish pushes nothing to
