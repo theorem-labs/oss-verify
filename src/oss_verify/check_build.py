@@ -650,12 +650,17 @@ def containers_stopped():
     if signal.getsignal(signal.SIGINT) is signal.default_int_handler:
         caught.append(signal.SIGINT)
     cleaning = []  # not empty once the cleanup has begun: a signal then leaves it to run to its end
+    setting_up = [None]  # not empty while the setup below changes the process's signal state
+    taken = []  # each signal that arrived while the setup ran, which then ends the run
     nudged = []  # one entry each time the main thread has run the handler of the nudge
     stopping = threading.Event()
     nudge = signal.SIGWINCH
 
     def end(number, frame):
         if cleaning:
+            return
+        if setting_up:
+            taken.append(number)
             return
         if number == signal.SIGINT:
             raise KeyboardInterrupt
@@ -666,10 +671,8 @@ def containers_stopped():
 
     main = threading.main_thread().ident
     reading = writing = woken = waker = None
+    # Each handler that the setup changes, recorded before it changes it; the finally then puts back all of it.
     before = {number: signal.getsignal(number) for number in (*caught, nudge)}
-    # Held back while the setup below changes the process's signal state, so that no handler raises between a change
-    # and the record of what it replaced; the finally then puts back all of it. Only those not held back already.
-    held_back = {signal.SIGINT, *caught} - signal.pthread_sigmask(signal.SIG_BLOCK, [])
 
     def wake():
         while numbers := os.read(reading, 64):
@@ -686,21 +689,25 @@ def containers_stopped():
                 stopping.wait(0.05)
 
     try:
-        signal.pthread_sigmask(signal.SIG_BLOCK, held_back)
+        # end() first. From then on a signal that it handles raises nothing, whichever thread takes it, until the
+        # setup has recorded each change below (the wakeup fd that it replaces, above all), and then ends the run.
+        # Holding the signals back would not do: a thread blocks a signal only for itself, and any other thread that
+        # takes it has Python run its handler in the main thread.
+        for number in caught:
+            signal.signal(number, end)
         reading, writing = os.pipe()
         os.set_blocking(writing, False)
         woken = signal.set_wakeup_fd(writing, warn_on_full_buffer=False)
         signal.signal(nudge, nudge_handled)
         waker = threading.Thread(target=wake, name="containers_stopped wake", daemon=True)
         waker.start()
-        for number in caught:
-            signal.signal(number, end)
-        signal.pthread_sigmask(signal.SIG_UNBLOCK, held_back)  # a signal held back is taken here, by end()
+        setting_up.clear()
+        if taken:
+            end(taken[0], None)
         yield
     finally:
         cleaning.append(None)  # first: a signal that arrives from here on leaves the cleanup to run
         held = {number: signal.signal(number, signal.SIG_IGN) for number in (signal.SIGINT, *caught, nudge)}
-        signal.pthread_sigmask(signal.SIG_UNBLOCK, held_back)  # if the setup failed: a signal held back is ignored
         stopping.set()
         if woken is not None:
             signal.set_wakeup_fd(woken)
