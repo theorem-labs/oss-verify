@@ -1,5 +1,5 @@
 /* zlib-sysfail_fuzzer/dsl.c - the zlib DSL driver that also makes zlib's file
- * system calls fail (ZLIB-8, docs/dsl-sysfail-driver-2026-11-15.md).
+ * system calls fail.
  *
  * A VARIANT OF targets/zlib-checksum_fuzzer/dsl.c, which stays as it is. Ops
  * 0..27 below are that driver's, byte for byte and in the same order, so every
@@ -17,22 +17,22 @@
  *
  * PATHS ARE NOT A FILESYSTEM. dsl.h rule 4 holds: the run touches no file.
  * zlib's six system calls -- open, read, write, lseek, close, fcntl -- are
- * renamed in the derived archive copy to src/aef_sys.c's trampolines
- * (build.sh, pin key DSL_SYSFAIL=1), which answer them from ONE in-memory
+ * renamed in the derived archive copy to src/tramp_sys.c's trampolines
+ * (build.sh, OV_DSL_LIBRARY_REDEFS), which answer them from ONE in-memory
  * regular file. ANY path names that file; the path string is never read
  * (gzopen("x", ...) and gzopen("y", ...) open the same file). Its initial
  * content comes from the program (file_set), it starts present and empty at
  * every repeat, and a successful call answers as Linux answers for one
- * regular file on tmpfs (src/aef_sys.h lists the few documented non-claims;
- * tests/test_aef_sys.sh compares the model with the kernel call by call). This
+ * regular file on tmpfs (src/tramp_sys.h lists the few documented non-claims;
+ * a differential test compares the model with the kernel call by call). This
  * driver's own reading of its input (cli.c) and its stdout are real system
  * calls that no schedule reaches: dsl.o, cli.o and libc are never renamed, and
- * build.sh refuses a dsl.o that references any of the six.
+ * dsl.py refuses a driver object that names any of the six.
  *
  * THE SCHEDULE is in the program, as an op (sys_plan, 28): a kind byte (read,
  * write, lseek, open, close, fcntl; 6 clears every table) and up to 256 entry
  * bytes. Entry i decides the i-th call of that kind zlib makes after the frame:
- * success, a short count, 0, or -1 with a chosen errno (aef_sys.h: classes,
+ * success, a short count, 0, or -1 with a chosen errno (tramp_sys.h: classes,
  * rules; fcntl has none); past the table, every call succeeds. So a proof
  * about every input is a proof about every program AND every failure pattern.
  * The gz layer's own allocations (the file state, the path copy, the buffers,
@@ -56,7 +56,7 @@
  * returns a byte count that looks fine. Every op works with all-zero operands.
  *
  * BOUNDS (rule 1): the io scratch is 32 KiB, a file_set literal 64 KiB, the
- * in-memory file stores 1 MiB (aef_sys.h; zlib's writes past it get the Linux
+ * in-memory file stores 1 MiB (tramp_sys.h; zlib's writes past it get the Linux
  * model's answers, and every later file op of the repeat is skipped with a
  * `file_cap` note, see dsl_step), gzbuffer at most 64 KiB (and the
  * 0x80000000 request zlib refuses before allocating), a plan 256 bytes per
@@ -179,7 +179,7 @@
  *   near-duplicate of what the harness already runs.
  *
  * THE ONE SCAR, and it is a machine-load artefact rather than anything in this
- * file: tests/check_asan_containment.sh is flaky on this machine.
+ * file: the ASan containment check is flaky on this machine.
  * verify_one.sh's plain and ubsan stages and its cross-flavour comparison pass
  * every time; one of the eight asan-family gate runs intermittently reports
  *
@@ -200,7 +200,7 @@
  * `-D` trace FILE, not the run. targets/md4c-fuzz-mdhtml/dsl.c and
  * targets/libiec61850-fuzz_acse_parse/dsl.c record the same flake with the
  * same wandering binary and reach the same conclusion. Recorded rather than
- * worked around: tools/dsl and tests/ are not ours to edit.
+ * worked around: the checks are not this file's to edit.
  *
  * WHERE THE CLAMPS ARE AND WHAT THEY COST is written out at "the clamps"
  * below, because dsl.h rule 1 is the rule this project could most easily
@@ -214,7 +214,7 @@
  * output, so a stream that expands past 256 KiB is only decoded that far.
  *
  * EXTENDED 2026-09-02 FOR THE LINEAR VM WITH EXPECTATIONS (src/dsl.h op byte
- * 255, docs/dsl-driver.md "Expectations and exit 3"). Three things changed,
+ * 255, the DSL driver notes "Expectations and exit 3"). Three things changed,
  * and the op ORDER 0..25 did not, so every one-instruction witness keeps its
  * op byte:
  *
@@ -245,8 +245,8 @@
  * runs once, linearly, and probe.bin executes one frame (op 0x7b % 28 = 11,
  * def_query, which creates a deflate stream and succeeds).
  *
- * REBUILT 2026-09-03, landing the two items the 2026-09-02 lane measured and
- * queued (docs/dsl-2026-09-02/zlib-checksum_fuzzer.md, Deviations 3 and 4);
+ * REBUILT 2026-09-03, landing the two items the 2026-09-02 pass measured and
+ * queued (its Deviations 3 and 4);
  * the op table and its order are unchanged:
  *
  *   - want_def no longer asks deflateInit2_ for the one cell it rejects
@@ -259,9 +259,9 @@
  *     deflater and not yet emitted, and the fields inflate fills in from a
  *     gzip stream's header, were invisible to `expect obj`.
  */
-#define AEF_DSL_NAME "zlib-sysfail"
-#define AEF_DSL_ALLOC_HOOK 1
-#define AEF_DSL_SERIALIZE 1
+#define TRAMP_DSL_NAME "zlib-sysfail"
+#define TRAMP_DSL_ALLOC_HOOK 1
+#define TRAMP_DSL_SERIALIZE 1
 
 /* THE STEP BUDGET IS CUT TO A QUARTER OF THE DEFAULT, and the binding
  * constraint is the ARENA rather than qemu.
@@ -318,12 +318,12 @@
 #include "inftrees.h"
 #include "inflate.h"
 
-/* The in-memory file and the system-call schedule (src/aef_sys.h; the -I/work/src
- * of the DSL compile). Only the aef_sysm_* API is called from here. */
+/* The in-memory file and the system-call schedule (src/tramp_sys.h; the -I/work/src
+ * of the DSL compile). Only the tramp_sysm_* API is called from here. */
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
-#include "aef_sys.h"
+#include "tramp_sys.h"
 
 /* The 64-bit gz entry points are unconditional exports of gzlib.c (298, 372,
  * 450, 473) but zlib.h declares them only under _LARGEFILE64_SOURCE; on this
@@ -356,7 +356,7 @@ ZEXTERN z_off64_t ZEXPORT gzoffset64(gzFile);
 #define K_ZBUF 2   /* a (possibly truncated) deflate/zlib/gzip stream; n = length. */
 #define K_DEF  3   /* z_stream* initialised by deflateInit2_; n = windowBits + 64 */
 #define K_INF  4   /* z_stream* initialised by inflateInit2_; n = windowBits + 64 */
-/* ZLIB-8. Numbered above the four old kinds: nothing borrows across them (a
+/* Numbered above the four old kinds: nothing borrows across them (a
  * gzFile owns its own buffers and descriptor), so the teardown order is free. */
 #define K_GZ   5   /* gzFile; n = GZ_R (1) or GZ_W (2), from the mode string */
 #define K_FD   6   /* a descriptor of the in-memory file (fd_open); p = fd+1, n = fd */
@@ -489,7 +489,7 @@ ZEXTERN z_off64_t ZEXPORT gzoffset64(gzFile);
 
 static unsigned char *sc_in, *sc_out, *sc_dict, *sc_win;
 
-/* ZLIB-8 scratch: file-scope statics rather than arena blocks, so a program of
+/* Scratch: file-scope statics rather than arena blocks, so a program of
  * the old ops 0..27 has exactly the old driver's arena accounting. Each is
  * written before it is read by every op that uses it (a gz read's bytes are
  * reported only up to the count zlib returned). SC_IO + 1 so gz_gets's buffer
@@ -578,7 +578,7 @@ static free_func  free_fn(void)  { return fa_ready ? fa_zfree_hook  : (free_func
 /* Appended 2026-09-02; 0..25 are unchanged so prior witnesses stay comparable. */
 #define OP_CHECKSUM    26
 #define OP_MUTATE      27
-/* ZLIB-8 (zlib-sysfail_fuzzer): appended; 0..27 are the old driver's. */
+/* zlib-sysfail_fuzzer: appended; 0..27 are the old driver's. */
 #define OP_SYS_PLAN    28
 #define OP_FILE_SET    29
 #define OP_FILE_GET    30
@@ -709,7 +709,7 @@ static void dsl_begin(dsl_vm *V) {
   /* Every repeat starts from the same file system: the one file present and
    * empty, no descriptor, no plan, every counter zero. Repeats are identical
    * runs, so a repeat-2 difference is zlib's hidden state and nothing else. */
-  aef_sysm_reset();
+  tramp_sysm_reset();
 }
 
 static void dsl_end(dsl_vm *V) {
@@ -719,7 +719,7 @@ static void dsl_end(dsl_vm *V) {
    * gz_header to live there. */
   sc_in = sc_out = sc_dict = sc_win = NULL;
   memset(&ihdr, 0, sizeof ihdr);
-  aef_sysm_reset();   /* after every K_GZ was gzclosed by the teardown */
+  tramp_sysm_reset();   /* after every K_GZ was gzclosed by the teardown */
 }
 
 /* -------------------------------------------------------------- helpers ---- */
@@ -956,7 +956,7 @@ static int ib_out(void *desc, unsigned char *buf, unsigned len) {
   return 0;
 }
 
-/* ----------------------------------------------------- ZLIB-8 helpers ---- */
+/* ----------------------------------------------------- sysfail helpers ---- */
 
 /* keep() with a cap of the caller's (file_get keeps up to 16 KiB). */
 static void keep_cap(dsl_vm *V, int kind, const void *p, size_t n, size_t cap) {
@@ -970,7 +970,7 @@ static void keep_cap(dsl_vm *V, int kind, const void *p, size_t n, size_t cap) {
 /* Clear the slot holding exactly (kind, p) WITHOUT dsl_kill: for an object the
  * op has already destroyed (a gzFile its gzclose freed, a descriptor its close
  * released). Consumes no program byte, so it is the same at the same step in
- * every flavour (dsl.h's aef_still_live note). */
+ * every flavour (dsl.h's tramp_still_live note). */
 static void slot_forget(dsl_vm *V, int kind, const void *p) {
   int i;
   for (i = 0; i < DSL_HANDLES; i++) {
@@ -1023,17 +1023,17 @@ static int call_gzvprintf(gzFile f, const char *fmt, ...) {
 
 /* ---------------------------------------------------------------- the ops -- */
 
-/* 17b: patch 17's (c4) guard, its test byte for byte, moved out of dsl_step into its own non-inlined function at the
- * deflateResetKeep call, so dsl_step's code is left alone: a keep-reset while input is still buffered ends the run. */
+/* madler/zlib #1401: a keep-reset while input is still buffered ends the run. The guard is api-driver's, test for test,
+ * in its own non-inlined function at the deflateResetKeep call, so that dsl_step's code is left alone. */
 __attribute__((noinline)) static int dsl_resetkeep_guarded(z_streamp s, int full) {
-  if (!full && ((deflate_state *)s->state)->lookahead != 0 && ((deflate_state *)s->state)->lit_bufsize != 0) exit(252);  /* LX (c4) */
+  if (!full && ((deflate_state *)s->state)->lookahead != 0 && ((deflate_state *)s->state)->lit_bufsize != 0) exit(252);
   return deflateResetKeep(s);
 }
 
 static int dsl_step(dsl_vm *V, unsigned op) {
-  /* THE FILE CAP (review round 2). aef_sys.c answers every write as the Linux
+  /* THE FILE CAP (review round 2). tramp_sys.c answers every write as the Linux
    * model does, whole, at any size, but STORES only the file's first
-   * AEF_SYS_FILE_MAX bytes: a byte past that reads back as 0 where the model
+   * TRAMP_SYS_FILE_MAX bytes: a byte past that reads back as 0 where the model
    * returns what was written. So once the file is larger than that, every
    * later op of the new set (28..58: each one can reach zlib's file or the
    * model's state) is skipped, with a note, for the rest of the repeat; zlib
@@ -1044,9 +1044,9 @@ static int dsl_step(dsl_vm *V, unsigned op) {
    * never touch the file and are untouched, as G2 requires. Reached with no
    * schedule by a "wT" handle and 17 forward gz_seeks of 65535, which zlib
    * writes as zeros at the next write (check_sys_schedule.sh S7). */
-  if (op >= OP_SYS_PLAN && aef_sysm_file_size() > AEF_SYS_FILE_MAX) {
+  if (op >= OP_SYS_PLAN && tramp_sysm_file_size() > TRAMP_SYS_FILE_MAX) {
     dsl_note(V, "file_cap size=%llu: %s skipped (past the %u bytes the in-memory file stores)\n",
-             (unsigned long long)aef_sysm_file_size(), dsl_op_name(op), (unsigned)AEF_SYS_FILE_MAX);
+             (unsigned long long)tramp_sysm_file_size(), dsl_op_name(op), (unsigned)TRAMP_SYS_FILE_MAX);
     return DSL_SKIP;
   }
   switch (op) {
@@ -1898,18 +1898,18 @@ static int dsl_step(dsl_vm *V, unsigned op) {
     return DSL_OK;
   }
 
-  /* ====================== ZLIB-8: the schedule, the file, the gz layer ====== */
+  /* ====================== sysfail: the schedule, the file, the gz layer ====== */
 
   /* The system-call failure schedule: kind (0 read, 1 write, 2 lseek, 3 open,
    * 4 close, 5 fcntl: no failure class, 6 = clear every table) and up to 256
    * entry bytes as a u16-length literal. Replaces that kind's table and restarts
    * its count, so entry i decides the i-th call of the kind zlib makes after
-   * this frame (src/aef_sys.h: the classes, the short table, rules (a)-(f)). */
+   * this frame (src/tramp_sys.h: the classes, the short table, rules (a)-(f)). */
   case OP_SYS_PLAN: {
     unsigned kind = dsl_choice(V, 7);
     size_t n = 0;
-    const unsigned char *e = dsl_take(V, AEF_SYS_PLAN_MAX, &n);
-    aef_sysm_plan(kind, e, n);
+    const unsigned char *e = dsl_take(V, TRAMP_SYS_PLAN_MAX, &n);
+    tramp_sysm_plan(kind, e, n);
     dsl_report(V, "sys_plan", (int)kind, e, n);
     return DSL_OK;
   }
@@ -1935,9 +1935,9 @@ static int dsl_step(dsl_vm *V, unsigned op) {
       p = (const unsigned char *)h;
       n = hn;
     }
-    if (aef_sysm_file_set(p, n) != 0) return DSL_SKIP;
+    if (tramp_sysm_file_set(p, n) != 0) return DSL_SKIP;
     dsl_note(V, "file_set src=%u size=%lu h=%016llx\n", src, (unsigned long)n,
-             (unsigned long long)aef_sysm_file_digest());
+             (unsigned long long)tramp_sysm_file_digest());
     return DSL_OK;
   }
 
@@ -1945,8 +1945,8 @@ static int dsl_step(dsl_vm *V, unsigned op) {
    * then checked by an independent decoder, the old ops' inflate. */
   case OP_FILE_GET: {
     int kind = dsl_choice(V, 2) ? K_ZBUF : K_RAW;
-    size_t n = aef_sysm_file_get(sc_file, FILE_GET_MAX);
-    dsl_note(V, "file_get present=%d size=%lu\n", aef_sysm_file_present(), (unsigned long)aef_sysm_file_size());
+    size_t n = tramp_sysm_file_get(sc_file, FILE_GET_MAX);
+    dsl_note(V, "file_get present=%d size=%lu\n", tramp_sysm_file_present(), (unsigned long)tramp_sysm_file_size());
     dsl_report(V, "  bytes", 0, sc_file, n);
     keep_cap(V, kind, sc_file, n, FILE_GET_MAX);
     return DSL_OK;
@@ -1955,8 +1955,8 @@ static int dsl_step(dsl_vm *V, unsigned op) {
   /* Remove the file (only with no descriptor open: the model keeps no orphan
    * inode), so gzopen "r" meets ENOENT and "wx" can create. */
   case OP_FILE_UNLINK: {
-    int r = aef_sysm_unlink();
-    dsl_note(V, "file_unlink rc=%d fds=%d\n", r, aef_sysm_nfds());
+    int r = tramp_sysm_unlink();
+    dsl_note(V, "file_unlink rc=%d fds=%d\n", r, tramp_sysm_nfds());
     return r == 0 ? DSL_OK : DSL_SKIP;
   }
 
@@ -1966,10 +1966,10 @@ static int dsl_step(dsl_vm *V, unsigned op) {
    * `allocs` analogue). */
   case OP_SYS_STAT:
     dsl_note(V, "sys_stat present=%d size=%lu h=%016llx fds=%d calls=r%u/w%u/s%u/o%u/c%u/f%u\n",
-             aef_sysm_file_present(), (unsigned long)aef_sysm_file_size(),
-             (unsigned long long)aef_sysm_file_digest(), aef_sysm_nfds(),
-             aef_sysm_calls(AEF_SYS_READ), aef_sysm_calls(AEF_SYS_WRITE), aef_sysm_calls(AEF_SYS_LSEEK),
-             aef_sysm_calls(AEF_SYS_OPEN), aef_sysm_calls(AEF_SYS_CLOSE), aef_sysm_calls(AEF_SYS_FCNTL));
+             tramp_sysm_file_present(), (unsigned long)tramp_sysm_file_size(),
+             (unsigned long long)tramp_sysm_file_digest(), tramp_sysm_nfds(),
+             tramp_sysm_calls(TRAMP_SYS_READ), tramp_sysm_calls(TRAMP_SYS_WRITE), tramp_sysm_calls(TRAMP_SYS_LSEEK),
+             tramp_sysm_calls(TRAMP_SYS_OPEN), tramp_sysm_calls(TRAMP_SYS_CLOSE), tramp_sysm_calls(TRAMP_SYS_FCNTL));
     return DSL_OK;
 
   /* A descriptor of the file for gz_dopen, opened by the model directly (no
@@ -1985,7 +1985,7 @@ static int dsl_step(dsl_vm *V, unsigned op) {
     if (fb & 16u) flags |= O_NONBLOCK;
     if (fb & 32u) flags |= O_CLOEXEC;
     errno = 0;
-    fd = aef_sysm_open(flags);
+    fd = tramp_sysm_open(flags);
     err = fd < 0 ? errno : 0;
     dsl_note(V, "fd_open acc=%u flags=%02x fd=%d err=%d\n", acc, fb, fd, err);
     if (fd < 0) return DSL_LIBERR;
@@ -2002,7 +2002,7 @@ static int dsl_step(dsl_vm *V, unsigned op) {
     int r, err;
     if (h == NULL) return DSL_SKIP;
     errno = 0;
-    r = aef_sysm_close((int)hn);
+    r = tramp_sysm_close((int)hn);
     err = r ? errno : 0;
     slot_forget(V, K_FD, h);
     dsl_note(V, "fd_close fd=%d rc=%d err=%d\n", (int)hn, r, err);
@@ -2021,7 +2021,7 @@ static int dsl_step(dsl_vm *V, unsigned op) {
     v64 = dsl_flag(V);
     f = v64 ? gzopen64(path, mode) : gzopen(path, mode);
     dsl_note(V, "gz_open mode=%s v64=%d plen=%lu ok=%d fds=%d\n", mode, v64,
-             (unsigned long)strlen(path), f != NULL, aef_sysm_nfds());
+             (unsigned long)strlen(path), f != NULL, tramp_sysm_nfds());
     if (f == NULL) return DSL_LIBERR;
     dsl_hput(V, K_GZ, (void *)f, (size_t)(rw ? rw : GZ_R));
     return DSL_OK;
@@ -2031,7 +2031,7 @@ static int dsl_step(dsl_vm *V, unsigned op) {
    * 3..66 whether open or not. The literals 0, 1 and 2 reach zlib as 67, 68
    * and 69, past the model's 64-descriptor table and so never open: in the
    * Linux model the zlib team's proofs use, 0-2 are the process's open stdin,
-   * stdout and stderr, which aef_sys.c answers EBADF (the run must not read
+   * stdout and stderr, which tramp_sys.c answers EBADF (the run must not read
    * the real stdin or write the real stdout), so zlib must never be handed one
    * (review round 2: the first driver passed them through, and gzread on
    * gzdopen(0) answered -1 where the model reads stdin). 67..69 give zlib the
@@ -2048,11 +2048,11 @@ static int dsl_step(dsl_vm *V, unsigned op) {
       fd = (int)hn;
     } else if (src == 1) {
       fd = (int)dsl_choice(V, 16);
-      if (fd < AEF_SYS_FD_BASE) fd += AEF_SYS_FD_BASE + AEF_SYS_NFD;   /* 0..2 -> 67..69 */
+      if (fd < TRAMP_SYS_FD_BASE) fd += TRAMP_SYS_FD_BASE + TRAMP_SYS_NFD;   /* 0..2 -> 67..69 */
     } else if (src == 2) {
       fd = -1;
     } else {
-      fd = AEF_SYS_FD_BASE + (int)dsl_choice(V, AEF_SYS_NFD);
+      fd = TRAMP_SYS_FD_BASE + (int)dsl_choice(V, TRAMP_SYS_NFD);
     }
     build_mode(V, mode, &rw);
     f = gzdopen(fd, mode);
@@ -2383,7 +2383,7 @@ static int dsl_step(dsl_vm *V, unsigned op) {
     closes = v == 0 || (v == 1 && hn == GZ_R) || (v == 2 && hn == GZ_W);
     r = v == 0 ? gzclose(f) : v == 1 ? gzclose_r(f) : gzclose_w(f);
     if (closes) slot_forget(V, K_GZ, f);
-    dsl_note(V, "gz_close v=%u rc=%d closed=%d fds=%d\n", v, r, closes, aef_sysm_nfds());
+    dsl_note(V, "gz_close v=%u rc=%d closed=%d fds=%d\n", v, r, closes, tramp_sysm_nfds());
     return r == Z_OK ? DSL_OK : DSL_LIBERR;
   }
 
@@ -2395,7 +2395,7 @@ static int dsl_step(dsl_vm *V, unsigned op) {
 /* ------------------------------------------------------------ serializer ---
  *
  * The VALUE of a live handle, as bytes into the sink, for `expect obj` and
- * snap (src/dsl.h "THE SERIALIZER"; the contract is docs/dsl-driver.md
+ * snap (src/dsl.h "THE SERIALIZER"; the contract is the DSL driver notes
  * "Making a handle expectable"). An observation and nothing else: no operand
  * reads, no handle-table calls, no arena, no dsl_rand, no dsl_note. Scratch is
  * the one bounded file-scope static below.
@@ -2648,7 +2648,7 @@ static int dsl_serialize(dsl_vm *V, int kind, void *p, size_t n, dsl_ser *S) {
     return 0;
   }
 
-  /* ZLIB-8. A gzFile: the driver's record (read or write), the exposed
+  /* A gzFile: the driver's record (read or write), the exposed
    * gzFile_s counters (have, pos -- never next, an address), gzeof, gztell64,
    * and gzerror's errnum and message content: all read-only. NOT gzdirect (it
    * looks, which reads and allocates) and NOT gzoffset (an lseek: it would
@@ -2676,7 +2676,7 @@ static int dsl_serialize(dsl_vm *V, int kind, void *p, size_t n, dsl_ser *S) {
   case K_FD: {
     int64_t off = 0;
     int fl = 0, cx = 0;
-    int open = aef_sysm_fd_info((int)n, &off, &fl, &cx) == 0;
+    int open = tramp_sysm_fd_info((int)n, &off, &fl, &cx) == 0;
     dsl_ser_tag(S, 'F');
     dsl_ser_u32(S, (uint32_t)n);
     dsl_ser_u8(S, (unsigned)open);

@@ -1,16 +1,16 @@
-/* aef_sys.h - the system-call failure schedule and the one in-memory file it
- * acts on, for a DSL driver whose library makes file system calls (ZLIB-8,
- * docs/dsl-sysfail-driver-2026-11-15.md).
+/* tramp_sys.h - the system-call failure schedule and the one in-memory file it
+ * acts on, for a DSL driver whose library makes file system calls (zlib's
+ * gz functions).
  *
  * WHAT THIS IS. A DSL driver may not touch the filesystem (src/dsl.h rule 4:
  * the run must be a function of the input alone). A library whose file layer
  * calls open/read/write/lseek/close/fcntl (zlib's gz* functions) is therefore
  * given ONE in-memory regular file instead of a filesystem, and every one of
- * those six calls the LIBRARY makes is answered here, by aef_sys.c, without a
+ * those six calls the LIBRARY makes is answered here, by tramp_sys.c, without a
  * system call. build.sh renames the six names in a derived copy of the
- * pin-built archive to the aef_sys_<name> trampolines below (src/aef_sys.redefs,
+ * pin-built archive to the tramp_sys_<name> trampolines below (src/tramp_sys.redefs,
  * the same llvm-objcopy --redefine-syms mechanism the allocation schedule uses;
- * pin key DSL_SYSFAIL=1). The driver object, cli.o, libc and the sanitizer
+ * OV_DSL_LIBRARY_REDEFS). The driver object, cli.o, libc and the sanitizer
  * runtime are never renamed, so the driver's own reading of its input and its
  * writes to stdout are real system calls that no schedule can fail.
  *
@@ -20,22 +20,22 @@
  * O_APPEND, O_NONBLOCK, O_CLOEXEC; lseek SEEK_SET/CUR/END including past the
  * end, where the gap reads as zeros; reads at end of file return 0; writes
  * extend; descriptors are the lowest free number; a closed number is reused).
- * tests/test_aef_sys.sh runs the same random call sequences against this model
+ * a differential test runs the same random call sequences against this model
  * and against the kernel on tmpfs and compares every return value, errno,
  * byte, offset and descriptor flag; that differential is the evidence, not
  * this comment.
  *
  * AND AS THE LINUX MODEL ANSWERS. The zlib team's proofs reason with the
- * Linux model (lps r30q2), not with the kernel, so every success answer here
+ * Linux model (LPS), not with the kernel, so every success answer here
  * must also be that model's. Where the model and the kernel differ, the
  * model's answer is the one given, unless zlib cannot reach the case through
- * the driver; docs/dsl-sysfail-driver-2026-11-15.md, "The Linux model and the
+ * the driver; the driver's design notes, "The Linux model and the
  * kernel", lists every such difference and which side this file takes.
- * tests/test_aef_sys_model.c checks the zlib team's table of the model's
- * answers row by row (test_aef_sys.sh check (6)).
+ * A model test checks the zlib team's table of the model's
+ * answers row by row.
  *
  * THE SCHEDULE. For each of the six kinds there is a table of entry bytes,
- * installed by the driver from the fuzz input (aef_sysm_plan). Entry i decides
+ * installed by the driver from the fuzz input (tramp_sysm_plan). Entry i decides
  * the i-th call of that kind the library makes after the table was installed:
  * class = byte % NCLASS[kind], arg = byte / NCLASS[kind].
  *
@@ -71,7 +71,7 @@
  * objects, so it gives zlib musl's 0 (before round 2 it returned -1/EINTR, the
  * glibc answer, which the Linux model and the zlib team's gz model never give).
  *
- * A short transfer moves k bytes, k = AEF_SYS_SHORT[arg % 24] clamped to
+ * A short transfer moves k bytes, k = TRAMP_SYS_SHORT[arg % 24] clamped to
  * [1, m-1] where m is what the model would have moved (index 22 is m/2, index
  * 23 is m-1); a short with m < 2 is the model's own answer. "1 byte" is entry
  * 0x01 and "EIO" is entry 0x03 for read. Beyond the end of a table, and before
@@ -80,7 +80,7 @@
  *
  * The rules that make a schedule mean the same thing everywhere:
  *   (a) every trampoline ticks its kind's counter FIRST, before any argument is
- *       looked at (aef_alloc_deny does the same);
+ *       looked at (tramp_alloc_deny does the same);
  *   (b) an injected outcome applies only when the model's own answer would be a
  *       success; a call the model refuses (EBADF, ...) keeps the model's error;
  *   (c) an injected -1 changes no state (open: no create, no truncate, no
@@ -91,7 +91,7 @@
  *   (e) errno is set on every -1 and left untouched on success;
  *   (f) an injected errno Linux cannot return for that call is not injected and
  *       the model's answer stands: EAGAIN only on a descriptor with O_NONBLOCK
- *       (Jason's table: "EAGAIN in N mode"); and no fcntl failure at all, since
+ *       (the model's table: "EAGAIN in N mode"); and no fcntl failure at all, since
  *       EBADF on an open descriptor was the only one it had.
  *
  * DOCUMENTED NON-CLAIMS (the model answers these, and the answers are not
@@ -105,20 +105,20 @@
  *     descriptor);
  *   - lseek SEEK_DATA/SEEK_HOLE answer EINVAL (Linux supports them; zlib uses
  *     only SEEK_SET/CUR/END: gzlib.c:275,281,365,403,485);
- *   - PAST AEF_SYS_FILE_MAX the bytes are not stored. Every answer is still
+ *   - PAST TRAMP_SYS_FILE_MAX the bytes are not stored. Every answer is still
  *     the model's (and an unfull tmpfs's): a write lands all n bytes as far as
  *     its count, the offset and the size go, at any size (the kernel's
  *     MAX_RW_COUNT clamp and tmpfs's LLONG_MAX limit, EFBIG, are kept); but a
- *     read of a byte at or past AEF_SYS_FILE_MAX returns 0 where the model
- *     returns what was written, and aef_sysm_file_digest covers the stored
+ *     read of a byte at or past TRAMP_SYS_FILE_MAX returns 0 where the model
+ *     returns what was written, and tramp_sysm_file_digest covers the stored
  *     part only. zlib cannot reach that read through the driver: once the
- *     file is larger than AEF_SYS_FILE_MAX, the driver skips every file
+ *     file is larger than TRAMP_SYS_FILE_MAX, the driver skips every file
  *     operation for the rest of the repeat, with a `file_cap` note (dsl.c),
  *     and zlib reads its file only inside such an operation. (Review round 2:
  *     the first draft cut a write short at the cap and refused one past it
  *     with ENOSPC, answers the model never gives, and zlib reached them with no
  *     schedule: a "wT" handle, 17 forward gzseeks of 65535, then gzputc.);
- *   - AEF_SYS_NFD descriptors, numbered 3..66, lowest first; 0, 1 and 2 answer
+ *   - TRAMP_SYS_NFD descriptors, numbered 3..66, lowest first; 0, 1 and 2 answer
  *     EBADF. In the Linux model they are the process's open stdin, stdout and
  *     stderr; the driver never hands zlib one of them (its gz_dopen maps the
  *     literals 0..2 to 67..69, which are never open), so zlib cannot tell;
@@ -127,7 +127,7 @@
  *     O_DIRECT answer is tmpfs's since Linux 6.6 (measured on 6.12.95); tmpfs
  *     before 6.6 is believed to refuse it with EINVAL (not measured). The
  *     differential probes its kernel and says when it could not compare this;
- *   - aef_sysm_unlink refuses while any descriptor is open (no orphan inodes);
+ *   - tramp_sysm_unlink refuses while any descriptor is open (no orphan inodes);
  *   - buffer addresses are not checked against the address space: a read or
  *     write count above SSIZE_MAX answers EFAULT (the kernel's access_ok
  *     refuses every such range), but a count up to SSIZE_MAX whose range runs
@@ -172,15 +172,15 @@
  * 0 bytes answer 0, an overflowing offset answers EINVAL first), and the
  * differential passes NULL buffers to both sides.
  *
- * COMPILED WITH THE DRIVER'S COMPILER like aef_alloc.o (byte-identical across
+ * COMPILED WITH THE DRIVER'S COMPILER like tramp_alloc.o (byte-identical across
  * flavours, uninstrumented), no dynamic allocation, static state, not thread
  * safe: the DSL tier is single-threaded. Data moves with memcpy of exactly the
  * returned count, never the requested one, so in the asan flavours the sealed
  * runtime's memcpy interceptor (the static link's --wrap=memcpy) checks the
  * library's buffer for the bytes a kernel would have written into it.
  */
-#ifndef AEF_SYS_H
-#define AEF_SYS_H
+#ifndef TRAMP_SYS_H
+#define TRAMP_SYS_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -191,68 +191,68 @@ extern "C" {
 #endif
 
 /* The six kinds, in the order the plan's kind byte names them. */
-#define AEF_SYS_READ   0
-#define AEF_SYS_WRITE  1
-#define AEF_SYS_LSEEK  2
-#define AEF_SYS_OPEN   3
-#define AEF_SYS_CLOSE  4
-#define AEF_SYS_FCNTL  5
-#define AEF_SYS_NKINDS 6
+#define TRAMP_SYS_READ   0
+#define TRAMP_SYS_WRITE  1
+#define TRAMP_SYS_LSEEK  2
+#define TRAMP_SYS_OPEN   3
+#define TRAMP_SYS_CLOSE  4
+#define TRAMP_SYS_FCNTL  5
+#define TRAMP_SYS_NKINDS 6
 
-#define AEF_SYS_PLAN_MAX 256u               /* entry bytes per kind's table */
-#define AEF_SYS_FILE_MAX (1024u * 1024u)    /* the bytes of the one file that are STORED (not a size limit) */
-#define AEF_SYS_NFD      64                 /* descriptors 3 .. 3+64-1 */
-#define AEF_SYS_FD_BASE  3
+#define TRAMP_SYS_PLAN_MAX 256u               /* entry bytes per kind's table */
+#define TRAMP_SYS_FILE_MAX (1024u * 1024u)    /* the bytes of the one file that are STORED (not a size limit) */
+#define TRAMP_SYS_NFD      64                 /* descriptors 3 .. 3+64-1 */
+#define TRAMP_SYS_FD_BASE  3
 
 /* The short-count table (indices 22 and 23 are the m/2 and m-1 sentinels). */
-#define AEF_SYS_SHORT_N 24
+#define TRAMP_SYS_SHORT_N 24
 
 /* ---- the trampolines: reached ONLY through the archive rename ------------ */
-int aef_sys_open(const char *path, int flags, ...);
-ssize_t aef_sys_read(int fd, void *buf, size_t n);
-ssize_t aef_sys_write(int fd, const void *buf, size_t n);
-off_t aef_sys_lseek(int fd, off_t off, int whence);
-int aef_sys_close(int fd);
-int aef_sys_fcntl(int fd, int cmd, ...);
+int tramp_sys_open(const char *path, int flags, ...);
+ssize_t tramp_sys_read(int fd, void *buf, size_t n);
+ssize_t tramp_sys_write(int fd, const void *buf, size_t n);
+off_t tramp_sys_lseek(int fd, off_t off, int whence);
+int tramp_sys_close(int fd);
+int tramp_sys_fcntl(int fd, int cmd, ...);
 
 /* ---- the driver's API: never ticks, never injects ----------------------- */
 
 /* Everything back to the start of a repeat: the file present and empty, no
  * descriptor open, every table empty, every counter zero. */
-void aef_sysm_reset(void);
+void tramp_sysm_reset(void);
 
-/* Install `n` (<= AEF_SYS_PLAN_MAX; more is truncated) entry bytes as KIND's
+/* Install `n` (<= TRAMP_SYS_PLAN_MAX; more is truncated) entry bytes as KIND's
  * table, replacing the old one and zeroing that kind's plan position, so entry
- * i decides the i-th call of the kind after this. kind >= AEF_SYS_NKINDS
+ * i decides the i-th call of the kind after this. kind >= TRAMP_SYS_NKINDS
  * clears every table and every plan position. */
-void aef_sysm_plan(unsigned kind, const unsigned char *entries, size_t n);
+void tramp_sysm_plan(unsigned kind, const unsigned char *entries, size_t n);
 
 /* Calls of KIND the library made since the last reset (not since the plan). */
-unsigned aef_sysm_calls(unsigned kind);
+unsigned tramp_sysm_calls(unsigned kind);
 
 /* The file's content from outside the library (an external writer): present,
- * exactly these n bytes (n > AEF_SYS_FILE_MAX is refused with -1). Open
+ * exactly these n bytes (n > TRAMP_SYS_FILE_MAX is refused with -1). Open
  * descriptors keep their offsets. */
-int aef_sysm_file_set(const void *p, size_t n);
-size_t aef_sysm_file_get(void *dst, size_t cap);   /* min(size, cap) bytes, as reads return them */
-size_t aef_sysm_file_size(void);       /* the size, which may be past AEF_SYS_FILE_MAX */
-int aef_sysm_file_present(void);
-uint64_t aef_sysm_file_digest(void);   /* FNV-1a 64 over the stored content (the first AEF_SYS_FILE_MAX bytes at most) */
+int tramp_sysm_file_set(const void *p, size_t n);
+size_t tramp_sysm_file_get(void *dst, size_t cap);   /* min(size, cap) bytes, as reads return them */
+size_t tramp_sysm_file_size(void);       /* the size, which may be past TRAMP_SYS_FILE_MAX */
+int tramp_sysm_file_present(void);
+uint64_t tramp_sysm_file_digest(void);   /* FNV-1a 64 over the stored content (the first TRAMP_SYS_FILE_MAX bytes at most) */
 /* Remove the file: 0, or -1 if it is absent or any descriptor is open. */
-int aef_sysm_unlink(void);
+int tramp_sysm_unlink(void);
 
 /* The model's open and close with no tick and no injection (the driver's own
  * fd_open/fd_close). Same answers as the trampolines, errno included. */
-int aef_sysm_open(int flags);
-int aef_sysm_close(int fd);
+int tramp_sysm_open(int flags);
+int tramp_sysm_close(int fd);
 
-int aef_sysm_nfds(void);
+int tramp_sysm_nfds(void);
 /* 0 and the description of an open descriptor (offset; F_GETFL's value;
  * close-on-exec), or -1 if fd is not open. Any out pointer may be NULL. */
-int aef_sysm_fd_info(int fd, int64_t *off, int *flags, int *cloexec);
+int tramp_sysm_fd_info(int fd, int64_t *off, int *flags, int *cloexec);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* AEF_SYS_H */
+#endif /* TRAMP_SYS_H */
