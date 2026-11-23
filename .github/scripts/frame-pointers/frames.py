@@ -9,7 +9,7 @@
 It runs `llvm-objdump -d -M no-aliases --no-show-raw-insn` on each file, with the llvm-objdump on PATH, and splits what
 it prints into functions at their `<name>:` labels. A local label (.L...) inside a function does not start a new one.
 With --objdump-output FILE (- is standard input), it reads that text and runs no llvm-objdump; it then takes one
-BINARY or ARCHIVE, whose name it only prints. The probe job of .github/workflows/toolchain-images.yaml runs it in a
+BINARY or ARCHIVE, whose name it only prints. The job make of .github/workflows/toolchain-images.yaml runs it in a
 builder container, which has llvm-objdump and python3 (.github/scripts/frame-pointers/probe).
 
 The rules:

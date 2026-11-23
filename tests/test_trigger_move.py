@@ -937,9 +937,10 @@ match args:
     # The parts of handover_case, as its messages name them.
     EQUAL, RUN = "the values that both files hold", "make, then publish, on one table"
     # The run steps of make that part 2 of handover_case runs, in their order: the base image, the new image, the row
-    # check and the digest. make's other run steps install crane and check the new image. They give publish nothing.
+    # check and the digest. make's other run steps install crane, check the new image and probe it. They give publish
+    # nothing.
     MAKE_STEPS = ("the base image, from infra/toolchains.tsv", "make the image in the runner's registry", ROW_CHECK,
-                  "the digest, for probe, docker-tests and publish")
+                  "the digest, for docker-tests and publish")
 
     def handover_case(self, tree=ROOT, upto=RUN):
         """What toolchain-images.yaml hands over to publish (toolchain-images-publish.yaml): values, the digest
@@ -1411,7 +1412,7 @@ match args:
         self.assertIn("oss-fuzz-theorems-2026.10, none: make passes, publish fails", caught)
         self.assertIn("make gave no digest for oss-fuzz-theorems-2026.10: 'localhost:5000/", caught)
 
-    # make's line that writes the digest of its row, which probe, docker-tests and publish read.
+    # make's line that writes the digest of its row, which docker-tests and publish read.
     DIGEST_WRITE = '          echo "${MADE#*@}" > "$RUNNER_TEMP/fp-digest/$BASE_ROW.digest"\n'
 
     def no_digest_case(self, name, *changes):

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests of .github/scripts/frame-pointers/frames.py, which need no Docker and no llvm-objdump:  uv run pytest
 
-The probe job of .github/workflows/toolchain-images.yaml runs frames.py on llvm-objdump's disassembly of the probes
+The job make of .github/workflows/toolchain-images.yaml runs frames.py on llvm-objdump's disassembly of the probes
 (frames.py probe) and of the base image's libraries (frames.py count). Each test here runs it as a program on a short
 disassembly in the shape that `llvm-objdump -d -M no-aliases --no-show-raw-insn` prints for riscv64, given on standard
 input (--objdump-output -), with an empty PATH, so that it can run no llvm-objdump. What is tested is what a user of
@@ -17,7 +17,7 @@ import unittest
 
 FRAMES = pathlib.Path(__file__).resolve().parents[1] / ".github" / "scripts" / "frame-pointers" / "frames.py"
 PREFIX = "fp_probe_"  # the functions that probe reads
-BINARY = "/out/fp-c/fp_probe"  # the binary that probe reads, as the probe job names it
+BINARY = "/out/fp-c/fp_probe"  # the binary that probe reads, as .github/scripts/frame-pointers/probe names it
 ARCHIVE = "/opt/musl-sysroot/lib/libc.a"
 
 # The functions of a probe binary, as llvm-objdump prints them: the label, then one line for each instruction. A

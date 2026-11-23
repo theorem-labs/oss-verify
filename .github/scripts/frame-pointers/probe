@@ -2,7 +2,8 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 #
-# The probe job of .github/workflows/toolchain-images.yaml runs this once for each base row of infra/toolchains.tsv:
+# The job make of .github/workflows/toolchain-images.yaml runs this once for each base row of infra/toolchains.tsv,
+# on the frame-pointer image that it made:
 #
 #   .github/scripts/frame-pointers/probe ROW BASE_IMAGE FP_IMAGE
 #
