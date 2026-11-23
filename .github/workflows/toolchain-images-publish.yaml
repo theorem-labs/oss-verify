@@ -63,7 +63,8 @@ run-name: >-
   attempt ${{ github.event.workflow_run.run_attempt }}
 on:
   workflow_run:
-    # By name: the name of toolchain-images.yaml. A rename of either stops publishing (tests/test_trigger_move.py).
+    # By name: the name: of toolchain-images.yaml. A rename of that workflow, or a change of this entry alone, stops
+    # publishing with no failed run, and no test checks that the two match.
     workflows: ["Toolchain images"]
     types: [completed]
     branches: [main]
