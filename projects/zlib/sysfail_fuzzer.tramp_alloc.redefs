@@ -1,14 +1,14 @@
-# aef_alloc.redefs - the C allocation family, renamed to the trampolines.
+# tramp_alloc.redefs - the C allocation family, renamed to the trampolines.
 #
 # Fed to `llvm-objcopy --redefine-syms=` over a DERIVED copy of each pin-built
 # library archive under build/lib/<flav>/ (never the pinned archive itself,
 # never libc.a / libc++*.a / libunwind.a / libclang_rt.* / cli.o / dsl.o), so
 # that every reference the LIBRARY's own objects make to one of these names
-# resolves to the aef_<name> trampoline in aef_alloc.o (src/aef_alloc.c),
+# resolves to the tramp_<name> trampoline in tramp_alloc.o (src/tramp_alloc.c),
 # which ticks the process-wide allocation-failure schedule once and then
 # calls the real function. Applied to every selected archive; the C++ map
-# (aef_alloc_cxx.redefs) is added when `llvm-nm -u` shows an operator-new
-# reference. Design: docs/dsl-alloc-failure-mask-design-2026-09-10.md 4.2.
+# (tramp_alloc_cxx.redefs) is added when `llvm-nm -u` shows an operator-new
+# reference. Design: the allocation-failure design, 4.2.
 #
 # Format: one `old new` pair per line, whitespace-separated; `#` starts a
 # comment (both llvm-objcopy and GNU objcopy read this shape). A rename of a
@@ -24,13 +24,13 @@
 # of these names (fopen, getdelim, regcomp, strdup's own malloc): they are in
 # libc.a, which is never renamed, and a NULL there would be "a counterexample
 # that refutes nothing" (faultalloc.h).
-malloc aef_malloc
-calloc aef_calloc
-realloc aef_realloc
-reallocarray aef_reallocarray
-aligned_alloc aef_aligned_alloc
-posix_memalign aef_posix_memalign
-memalign aef_memalign
-valloc aef_valloc
-strdup aef_strdup
-strndup aef_strndup
+malloc tramp_malloc
+calloc tramp_calloc
+realloc tramp_realloc
+reallocarray tramp_reallocarray
+aligned_alloc tramp_aligned_alloc
+posix_memalign tramp_posix_memalign
+memalign tramp_memalign
+valloc tramp_valloc
+strdup tramp_strdup
+strndup tramp_strndup
