@@ -6,17 +6,19 @@ terms, or needs no box that accepts them.
 
     BODY=... AUTHOR=<login> ASSOCIATION=<association> HEAD_REPOSITORY=<owner>/<name> REPOSITORY=<owner>/<name> \
       PR=<number> HEAD_SHA=<commit> BASE_SHA=<commit> GH_TOKEN=... \
-      PYTHONPATH=src python3 .github/scripts/terms-accepted
+      python3 .github/scripts/terms-accepted
 
 Each variable but BASE_SHA comes from the pull_request event: the description, the login of the author and their
 association with this repository, the repository of the head, this repository, the number, and the head commit.
 BASE_SHA is the first parent of the merge commit: the base branch's commit on which GitHub built the merge. terms.yaml
-checks out that commit, and runs this program from it, with PYTHONPATH set to its src/. So the program reads
-docs/seeded-projects.tsv and each project.yaml of the base at the commit that it and terms.yaml come from (terms.yaml
-tells why). While that commit does not have this file, terms.yaml runs the copy of the merge commit in merge/, with
-merge/src. The program reads GitHub's API through `gh api` only, with a token that has no permission. It
-prints what it decides, each error as a line ::error::, and exits 0 when the check passes, else 1. PyYAML comes from
-the runner image only, and only the paths that load a project.yaml need it.
+checks out that commit, and runs this program from it. So the program reads docs/seeded-projects.tsv and each
+project.yaml of the base at the commit that it and terms.yaml come from (terms.yaml tells why). While that commit does
+not have this file, terms.yaml runs the copy of the merge commit in merge/. The program takes the rules of oss-verify
+validate from .github/scripts/validate_rules/ beside it, the copy of src/oss_verify/validate.py that
+.github/CODEOWNERS owns (.github/scripts/copy-validate-rules), and loads no code from src/, which has no code owner.
+The program reads GitHub's API through `gh api` only, with a token that has no permission. It prints what it decides,
+each error as a line ::error::, and exits 0 when the check passes, else 1. PyYAML comes from the runner image only, and
+only the paths that load a project.yaml need it.
 
 From a fork. A bot (dependabot[bot] or github-actions[bot]) and a maintainer of this repository (association OWNER,
 MEMBER or COLLABORATOR) need no box. Else the check passes when the description ticks the box of the pull request
@@ -27,7 +29,7 @@ From a branch of this repository. Only an account with write access can push a b
 its own. But it needs the adopter's record of the terms when it adopts a seeded project. The program reads the
 projects/<name>/project.yaml that the pull request changes and does not remove, under its new name only, of each
 project that docs/seeded-projects.tsv of the base marks yes in its second column. It loads the text of that file at
-the head and the text of the same path at the base, with load of src/oss_verify/validate.py, the reader of oss-verify
+the head and the text of the same path at the base, with load of validate_rules/validate.py, the reader of oss-verify
 validate: at most validate.MAX_CONFIG_BYTES, with yaml.safe_load. YAML reads the same key from many spellings: a
 quoted key, a space before the colon, a flow mapping, a block scalar, an alias. So the program compares the values
 that YAML gives, never the lines of a patch.
@@ -44,8 +46,8 @@ too. With unknown addresses at the base, each address at the head is new.
 
 The program reads the addresses from no other file: not from seeds/<name>/project.yaml, and not from the old name of a
 renamed file. This is enough because every seeds/<name>/project.yaml has primary_contact: n/a and no auto_ccs. A test
-in tests/test_seeded_projects.py holds this, and the tests check runs it for each change that is not only
-documentation, a change to seeds/ included. So an address gets into this repository only through
+in tests/test_seeded_projects.py holds this, and the tests check runs it for every change but a fork's change to
+projects/, which enrollment refuses if it changes seeds/. So an address gets into this repository only through
 projects/<name>/project.yaml, where this program reads it. A branch that moves seeds/<name>/ into projects/<name>/ and
 sets a contact adopts the project: at the base, projects/<name>/project.yaml is not there or has n/a.
 
@@ -168,13 +170,16 @@ def changed_files(repository, pr, head):
 
 
 def import_validate():
-    """oss_verify.validate, from PYTHONPATH. PyYAML comes from the runner image only. In run 44237068425, on image
-    ubuntu26/20261111.196, triage.yaml's "dpkg -s python3-yaml || apt-get ..." installed nothing: the image has
-    python3-yaml. Only the paths that load a project.yaml need it."""
+    """validate_rules.validate, from .github/scripts/validate_rules/ beside this file (the top of this file): this
+    file's directory goes first on sys.path, where python3 puts it for a program, but not with -P or PYTHONSAFEPATH.
+    PyYAML comes from the runner image only. In run 44237068425, on image ubuntu26/20261111.196, triage.yaml's
+    "dpkg -s python3-yaml || apt-get ..." installed nothing: the image has python3-yaml. Only the paths that load a
+    project.yaml need it."""
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
     try:
         # validate.py ends the program when it cannot import yaml, so this imports yaml first.
         import yaml  # noqa: F401
-        from oss_verify import validate
+        from validate_rules import validate
     except ImportError:
         fail("The runner image lacks PyYAML (python3-yaml), which .github/scripts/terms-accepted needs. Run this check "
              "again on an image that has it.")

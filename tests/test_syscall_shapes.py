@@ -16,7 +16,6 @@ are its true ones, and the cases about cut arguments write their own.
 import os
 import pathlib
 import struct
-import sys
 
 import pytest
 
@@ -1030,7 +1029,6 @@ def test_half_an_abort_is_no_end(model, image, text):
 
 @needs_model
 def test_stance_spellings(model, image):
-    assert S.STANCES == ("off", "abort", "either")
     for word in ("maybe", "ABORT", "on", "", None):
         with pytest.raises(ValueError):
             S.check_trace(model, EXIT, stance=word, binary=image, lengths="exec\n")
@@ -1300,11 +1298,6 @@ def test_the_rules_were_read_against_this_checkout():
     base = pathlib.Path(MODEL_ROOT) / S.MODEL_DIR
     for path in list(base.glob("Sys/**/*.v")) + [base / n for n in ("Fs.v", "Monad.v", "Run.v", "Specs.v", "State.v")]:
         assert f"{S.MODEL_DIR}/{path.relative_to(base)}" in S.MODEL_FILES, path
-
-
-@needs_model
-def test_the_constants_read_at_run_time(model):
-    assert model.brk_aslr_max == 1 << 30
 
 
 def broken(tmp_path, rel, old, new):

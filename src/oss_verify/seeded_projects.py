@@ -39,14 +39,13 @@ found that the binaries match the release's, the notes also say which binaries d
 a port stops the table: a port file that is missing or that cannot be read counts as absent.
 
 tests/test_seeded_projects.py fails when docs/seeded-projects.tsv is not what this writes. The workflow
-.github/workflows/tests.yaml runs its test Committed for a change to this file, src/oss_verify/validate.py, a file
-under seeds/, docs/seeded-projects.tsv, tests/test_seeded_projects.py, or a file under projects/<name>/ of a seeded
-project (a project with a row in seeds/builds.tsv). The top of that workflow lists these paths. A pull request that
-changes one of them runs this and commits docs/seeded-projects.tsv. A pull request from a fork that changes a file
-under projects/ runs no test there and cannot commit the table. So enrollment (.github/scripts/take-project) refuses
-a fork that changes the port of a project that docs/seeded-projects.tsv marks seeded, and such a change cannot merge
-from a fork. A branch of this repository carries it and runs Committed. A push to main that makes the table stale
-also runs Committed, and fails the check tests on main's commit.
+.github/workflows/tests.yaml runs its test Committed in every run, so a pull request that changes this file,
+src/oss_verify/validate.py, a file under seeds/, or a file under projects/<name>/ of a seeded project (a project with
+a row in seeds/builds.tsv) runs this and commits docs/seeded-projects.tsv. A pull request from a fork that changes a
+file under projects/ runs no test there and cannot commit the table. So enrollment (.github/scripts/take-project)
+refuses a fork that changes the port of a project that docs/seeded-projects.tsv marks seeded, and such a change cannot
+merge from a fork. A branch of this repository carries it and runs Committed on the tree that its merge puts on main
+(the top of .github/workflows/tests.yaml says why), so a merge does not make main's table stale.
 """
 import argparse
 import dataclasses
@@ -122,8 +121,7 @@ class Error(Exception):
 def tsv_fields(path, columns):
     """The fields of each row of a TSV file, one value for each of `columns`, without its comment lines (#) and its
     line of column names. A line ends at a newline only. Error for a file that holds another character at which
-    str.splitlines ends a line, such as a carriage return. The route job of .github/workflows/tests.yaml reads the
-    lines of seeds/builds.tsv between newlines, so the two read the same rows."""
+    str.splitlines ends a line, such as a carriage return, so no such character hides a row inside another."""
     for number, line in enumerate(path.read_bytes().decode("utf-8").split("\n"), 1):
         # str.splitlines gives the line itself only when it holds no other line end.
         if line and line.splitlines() != [line]:

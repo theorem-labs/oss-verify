@@ -19,8 +19,7 @@ from oss_verify import check_binaries
 from oss_verify import check_build
 from oss_verify import check_links
 from oss_verify import manifest
-from oss_verify import validate
-from test_builder import RUN, docker_ready
+from test_builder import RUN, compile_builds, docker_ready
 
 FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "example"
 TAG = f"oss-verify-test/example-records:{RUN}"
@@ -44,9 +43,7 @@ class Records(unittest.TestCase):
         check_build.build_project(job, "0" * 40, builder, TAG, cls.work)
         labels = check_build.work_label(cls.work)
         for kind, record in (("recorded", True), ("unrecorded", False)):
-            for build in BUILDS:
-                check_build.compile_build(TAG, build, validate.BUILDS[build], cls.work / kind / build, labels=labels,
-                                          record=record)
+            compile_builds(TAG, {build: cls.work / kind / build for build in BUILDS}, labels, record=record)
         cls.raw = {build: cls.work / "recorded" / build for build in BUILDS}
         cls.targets, _ = manifest.resolve_targets({b: manifest.discover(d) for b, d in cls.raw.items()})
         cls.entries, _ = manifest.collect(cls.raw, cls.targets, cls.work / "out")

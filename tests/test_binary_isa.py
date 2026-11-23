@@ -16,7 +16,6 @@ import os
 import pathlib
 import re
 import struct
-import sys
 import tempfile
 import time
 import unittest
@@ -717,6 +716,8 @@ GOAL_CLASSES = {"OpImm": "op-imm", "Op": "op", "Branch": "branch", "Mul32": "mul
 class ModelCheckout(unittest.TestCase):
     def test_the_model_files_have_the_code_the_rules_were_checked_against(self):
         from oss_verify import model_release
+        # An empty map has no stale file: it must name the files the rules rest on.
+        self.assertTrue(binary_isa.MODEL_FILES, "MODEL_FILES names no file")
         self.assertEqual(model_release.stale(MODEL, binary_isa.MODEL_FILES), [])
 
     def test_the_goal_checks_of_the_checkout_are_the_ones_ported(self):

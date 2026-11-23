@@ -19,10 +19,10 @@ from oss_verify import check_binaries
 from oss_verify import check_build
 from oss_verify import check_links
 from oss_verify import validate
-from test_builder import docker_ready, run_in_container
+from test_builder import RUN, compile_builds, docker_ready, run_in_container
 
 FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "target-settings"
-TAG = "oss-verify-test/target-settings:latest"
+TAG = f"oss-verify-test/target-settings:{RUN}"
 QEMU = shutil.which("qemu-riscv64-static")
 BUILDS = list(validate.BUILDS)
 LIMITS = range(27, 32)
@@ -39,6 +39,9 @@ class TargetSettings(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.scratch = tempfile.TemporaryDirectory(prefix="ov-test-target-settings.")
+        # Class cleanups run when setUpClass fails too, so a failed build removes this process's image as well.
+        cls.addClassCleanup(cls.scratch.cleanup)
+        cls.addClassCleanup(subprocess.run, ["docker", "image", "rm", TAG], capture_output=True)
         work = pathlib.Path(cls.scratch.name)
         job = check_build.Job(name="target-settings", directory=FIXTURE,
                               repo="https://example.invalid/target-settings", ref="", dockerfile="", builds=BUILDS,
@@ -47,13 +50,7 @@ class TargetSettings(unittest.TestCase):
         check_build.build_project(job, "0" * 40, builder, TAG, work)
         labels = check_build.work_label(work)
         cls.raw = {build: work / build for build in BUILDS}
-        for build in BUILDS:
-            check_build.compile_build(TAG, build, validate.BUILDS[build], cls.raw[build], labels=labels, record=True)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.scratch.cleanup()
-        subprocess.run(["docker", "image", "rm", TAG], capture_output=True)
+        compile_builds(TAG, cls.raw, labels, record=True)
 
     def record(self, build, target):
         """The record of the link of `target` in `build` (check_binaries.record_of), checked to be a whole record."""

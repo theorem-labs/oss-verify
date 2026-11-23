@@ -1,6 +1,6 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
-"""Tests that four pull_request jobs take the base branch's tools from the first parent of GitHub's merge commit
+"""Tests that three pull_request jobs take the base branch's tools from the first parent of GitHub's merge commit
 (OSSV-902):
 
     python3 -P -m pytest -q -p no:cacheprovider -c pyproject.toml -rs tests/test_base_tools.py
@@ -8,15 +8,14 @@
 On pull_request, GitHub reads each workflow file from the merge commit github.sha. The first parent of that commit is
 the commit of the base branch on which GitHub built the merge. The event's pull_request.base.sha is the base that GitHub
 recorded for the pull request, and it does not move when the base branch moves. So these jobs take their scripts from
-the first parent: project-builds of build.yaml, validate of validate.yaml, terms-accepted of terms.yaml, and, for a
-pull request from a fork, required of tests.yaml. A test of one job has the id <file>:<job>.
+the first parent: project-builds of build.yaml, validate of validate.yaml and terms-accepted of terms.yaml. A test of
+one job has the id <file>:<job>.
 
-Some tests read the workflow files:
+Two tests read the workflow files:
   - No workflow names pull_request.base.sha in an expression.
-  - No checkout of a workflow that starts on pull_request names a ref.
-  - In each job, the first checkout has fetch-depth: 2. The next step has id: parent. Its if: is none in project-builds
-    and terms-accepted, pull_request only in validate, and a fork only in required of tests.yaml.
-  - terms.yaml gives the program BASE_SHA from the output of that step.
+  - No checkout of any workflow names a ref, but the one REF_CHECKOUTS lists. A checkout that names a ref can take
+    the head of a pull request, in a workflow that starts on pull_request or in one that reads the files of a pull
+    request, as review.yml does.
 
 Other tests run the steps of each job in a scratch repository over file://. GitHub built the merge M on P1, a commit
 newer than the recorded base B, and then main moved on to N:
@@ -33,8 +32,8 @@ runs a step with no shell:. A stand-in gh answers the compare API with the statu
   - The step refuses a merge whose first parent is not in the history of the base branch (the compare answers behind
     or diverged), a compare that fails, a base branch that git ls-remote does not list, and a merge commit with one
     parent or three.
-  - The step does not run on a run by hand of validate.yaml, or on a pull request from a branch in tests.yaml.
-  - Each job runs its scripts, and src/oss_verify/, from P1.
+  - The step does not run on a run by hand of validate.yaml.
+  - Each job runs its scripts, and src/oss_verify/, from P1, and terms-accepted gets P1 as BASE_SHA.
 
 test_binary_sizes runs the build step of build.yaml with a stand-in oss-verify check and binary-sizes. When oss-verify
 check passes and a run of binary-sizes fails, the step writes a warning and a summary sentence with the exit status.
@@ -45,7 +44,7 @@ read a directory that a caller gives, so a control can run them on a changed cop
 test_control) copies the workflows into a temporary directory. It runs a test's case on that copy, where the case
 passes. The copy is the same for each control, so only the first control of a case and its arguments in a process
 runs it there, and the others read its pass (fails_only_on_the_change). Then it changes a second copy, runs the case
-there, and asserts that the case fails. Three controls change the step with id: parent of the four jobs: it checks out
+there, and asserts that the case fails. Three controls change the step with id: parent of the three jobs: it checks out
 the second parent, it only runs true, or it runs a script of the checkout. One control changes the build step: it
 writes no warning when binary-sizes fails, as at a417ab88.
 """
@@ -65,26 +64,23 @@ import pytest
 
 from test_outside_screen import evaluate
 from test_take_project import git, isolated_git_env
-from test_trigger_move import action_of, as_text, env_of, outputs, parse, render, triggers
+from test_trigger_move import action_of, as_text, env_of, outputs, parse, render
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
 REPO = "theorem-labs/oss-verify"
-# The head repository of each pull request here but one: tests.yaml takes the first parent only for a fork.
+# The head repository of each pull request here.
 FORK = "someone/oss-verify"
 # validate's step after take-project. It runs src/oss_verify/ of the checkout.
 VALIDATE_STEP = "Check projects/<name>/ with oss-verify validate"
-# The four jobs, as <file>:<job>, each a Job. parent_if: the if: of the step with id: parent, or None for no if:.
-# sparse: the sparse-checkout of the job's first checkout, or None for no sparse-checkout. tools: the files of the
-# checkout that the job runs. The first run: step after the step with id: parent runs the first file. next_step: the
-# name of the step that runs the other files after that step, or None. base_sha: whether a file of tools gets BASE_SHA.
-Job = collections.namedtuple("Job", "parent_if sparse tools next_step base_sha")
+# The three jobs, as <file>:<job>, each a Job. tools: the files of the checkout that the job runs. The first run: step
+# after the step with id: parent runs the first file. next_step: the name of the step that runs the other files after
+# that step, or None. base_sha: whether a file of tools gets BASE_SHA.
+Job = collections.namedtuple("Job", "tools next_step base_sha")
 JOBS = {
-    "build.yaml:project-builds": Job(None, None, (".github/scripts/take-project",), None, False),
-    "validate.yaml:validate": Job("github.event_name == 'pull_request'", None,
-                                  (".github/scripts/take-project", "src/oss_verify/__main__.py"), VALIDATE_STEP, False),
-    "terms.yaml:terms-accepted": Job(None, None, (".github/scripts/terms-accepted",), None, True),
-    "tests.yaml:required": Job("env.FORK == 'true'", ".github/scripts", (".github/scripts/collect",), None, False),
+    "build.yaml:project-builds": Job((".github/scripts/take-project",), None, False),
+    "validate.yaml:validate": Job((".github/scripts/take-project", "src/oss_verify/__main__.py"), VALIDATE_STEP, False),
+    "terms.yaml:terms-accepted": Job((".github/scripts/terms-accepted",), None, True),
 }
 # The paths of the traps in each commit. python3 -m oss_verify needs src/oss_verify/__init__.py too: without it, an
 # installed oss_verify would come before the checkout's.
@@ -116,8 +112,10 @@ REFUSALS = {
 # The cases of test_the_step_skips_where_r1_says: the run, and the words that name it.
 SKIPS = {
     "validate.yaml:validate": ({"event": "workflow_dispatch"}, "a run by hand"),
-    "tests.yaml:required": ({"fork": False}, "a pull request from a branch of this repository"),
 }
+# The one checkout of the workflows that names a ref, as (file, job, ref): publish checks out the commit of the run of
+# toolchain-images.yaml that it publishes, which ToolchainPublish of tests/test_trigger_move.py holds to a push to main.
+REF_CHECKOUTS = [("toolchain-images-publish.yaml", "publish", "${{ github.event.workflow_run.head_sha }}")]
 # The sizes that the stand-in binary-sizes prints: one line of JSON, as the real one prints it.
 SIZES = '{"demo_fuzzer":{"plain":{"exec":4096,"text":1024}}}'
 # The line that the build step writes when binary-sizes --cut exits 0 and prints nothing.
@@ -193,15 +191,6 @@ def load(workflows, name):
 def describe(step):
     """A step's name, or else its action or the start of its run:."""
     return repr(step.get("name") or step.get("uses") or str(step.get("run", "")).strip()[:60] or "none")
-
-
-def inner(expression):
-    """The text of an expression, without ${{ }} and with each run of spaces as one space; None for None."""
-    if expression is None:
-        return None
-    text = str(expression).strip()
-    found = re.fullmatch(r"\$\{\{(.*)\}\}", text, re.S)
-    return " ".join((found.group(1) if found else text).split())
 
 
 def from_checkout(label, steps):
@@ -347,12 +336,12 @@ class Host:
 class JobRun:
     """One run of the job `label` in the scratch repository, as GitHub runs it. It runs the steps from the job's first
     actions/checkout: each checkout by the checkout model, and each run: step under bash -e. `status` is the stand-in
-    gh's answer to the compare. The run is of pull request 7 (from FORK, or from this repository when `fork` is false),
-    or a run by hand on main. On pull_request, the run's github.sha is the merge commit `merge` (M, M1 or M3). The
-    checkout fetches github.sha by its SHA, so refs/pull/7/merge, which stays at M, does not change the run. `base` is
-    the pull request's base branch. The repository's default branch stays main."""
+    gh's answer to the compare. The run is of pull request 7 from FORK, or a run by hand on main. On pull_request, the
+    run's github.sha is the merge commit `merge` (M, M1 or M3). The checkout fetches github.sha by its SHA, so
+    refs/pull/7/merge, which stays at M, does not change the run. `base` is the pull request's base branch. The
+    repository's default branch stays main."""
 
-    def __init__(self, tmp_path, scratch, workflows, label, merge="M", status="ahead", event="pull_request", fork=True,
+    def __init__(self, tmp_path, scratch, workflows, label, merge="M", status="ahead", event="pull_request",
                  base="main"):
         self.label, self.scratch = label, scratch
         name, self.job = label.split(":")
@@ -372,7 +361,7 @@ class JobRun:
                         "github.event.pull_request.base.sha": commits["B"],
                         "github.event.pull_request.base.repo.default_branch": "main",
                         "github.event.pull_request.head.sha": commits["P2"],
-                        "github.event.pull_request.head.repo.full_name": FORK if fork else REPO})
+                        "github.event.pull_request.head.repo.full_name": FORK})
         else:
             # A run by hand on main: its commit is main's.
             assert event == "workflow_dispatch", event
@@ -653,7 +642,7 @@ def fails_only_on_the_change(tmp_path, copies, said, case, *args):
 
 
 def step_control(tmp_path, scratch, pattern, new, said):
-    """A control of the step with id: parent: control_copies changes that step in each of the four jobs. Then
+    """A control of the step with id: parent: control_copies changes that step in each of the three jobs. Then
     the_step_checks_out_the_first_parent, with the compare ahead, fails for each job, and its message holds `said`."""
     copies = control_copies(tmp_path, [(label, "parent") for label in JOBS], pattern, new)
     for label in JOBS:
@@ -680,49 +669,15 @@ def test_no_workflow_names_the_events_base_sha():
     assert not named, "These expressions name the event's pull_request.base.sha:\n" + "\n".join(named)
 
 
-def test_no_pull_request_checkout_names_a_ref():
+def test_no_checkout_names_a_ref():
     named = []
     for path in sorted(WORKFLOWS.glob("*.y*ml")):
-        workflow = load(WORKFLOWS, path.name)
-        if "pull_request" not in triggers(workflow):
-            continue
-        for job_id, job in (workflow.get("jobs") or {}).items():
+        for job_id, job in (load(WORKFLOWS, path.name).get("jobs") or {}).items():
             for step in job.get("steps") or []:
                 if action_of(step) == "actions/checkout" and "ref" in (step.get("with") or {}):
-                    named.append(f"{path.name}:{job_id}: ref: {step['with']['ref']}")
-    assert not named, "These checkouts of a workflow that starts on pull_request name a ref:\n" + "\n".join(named)
-
-
-@pytest.mark.parametrize("label", list(JOBS))
-def test_the_step_follows_the_checkout(label):
-    name, job_id = label.split(":")
-    job = JOBS[label]
-    steps = from_checkout(label, load(WORKFLOWS, name)["jobs"][job_id]["steps"])
-    inputs = steps[0].get("with") or {}
-    wrong = []
-    if str(inputs.get("fetch-depth")) != "2":
-        wrong.append(f"the checkout has fetch-depth: {inputs['fetch-depth']}" if "fetch-depth" in inputs
-                     else "the checkout has no fetch-depth")
-    if "ref" in inputs:
-        wrong.append(f"the checkout names ref: {inputs['ref']}")
-    sparse, want = str(inputs.get("sparse-checkout") or "").split(), job.sparse.split() if job.sparse else []
-    if sparse != want:
-        wrong.append(f"the checkout's sparse-checkout lines are {sparse}, not {want}")
-    step = steps[1] if len(steps) > 1 else {}
-    if step.get("id") != "parent" or "run" not in step or "uses" in step:
-        wrong.append(f"the next step, {describe(step)}, is not a run: step with id: parent")
-    elif inner(step.get("if")) != job.parent_if:
-        wrong.append(f"the step with id: parent has if: {step.get('if')}, not {job.parent_if or 'none'}")
-    assert not wrong, f"{label}: " + "; ".join(wrong) + " (R1: fetch-depth: 2, no ref, then the step with id: parent)"
-
-
-def test_terms_gives_base_sha_the_first_parent():
-    steps = load(WORKFLOWS, "terms.yaml")["jobs"]["terms-accepted"]["steps"]
-    found = [step for step in steps if ".github/scripts/terms-accepted" in str(step.get("run", ""))]
-    assert len(found) == 1, f"terms.yaml:terms-accepted: {len(found)} steps run .github/scripts/terms-accepted"
-    value = (found[0].get("env") or {}).get("BASE_SHA")
-    assert inner(value) == "steps.parent.outputs.sha", \
-        f"terms.yaml:terms-accepted: BASE_SHA is {value}, not ${{{{ steps.parent.outputs.sha }}}}"
+                    named.append((path.name, job_id, step["with"]["ref"]))
+    assert named == REF_CHECKOUTS, "The checkouts that name a ref, as (file, job, ref), are not REF_CHECKOUTS:\n" \
+        + "\n".join(map(str, named))
 
 
 @pytest.mark.parametrize("label, status", [pytest.param(label, status, id=f"{label}-{status}")

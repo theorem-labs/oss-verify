@@ -19,10 +19,9 @@ name: "Validate"
 # earlier base, and the validate job refuses a merge whose first parent is not a commit of the base branch (below).
 # This repository's own tests are tests.yaml.
 #
-# The jobs: route asks for validate on every event this workflow takes, since each is a commit to judge; validate takes
-# the project with take-project and runs oss-verify validate on it, or passes with nothing to validate; required always
-# runs, after both, and reports the required check enrollment with .github/scripts/collect, so that the check is never
-# a job that could be skipped.
+# One job, validate, reports the required check enrollment: it takes the project with take-project and runs oss-verify
+# validate on it, or passes with nothing to validate. It has no if:, so it runs on every event this workflow takes, each
+# a commit to judge, and the check is never a skipped job, which GitHub counts as a pass where a check is required.
 #
 # pull_request: the workflow file comes from the merge commit, so a pull request that changes it controls this run and
 # its check. The code-owner rule on /.github/ of .github/CODEOWNERS guards the merge of such a pull request.
@@ -58,30 +57,19 @@ on:
 
 permissions: {}
 
+# No job reads or writes the Actions cache (the top of this file).
+cache-mode: none
+
 concurrency:
   # By event too, so that a run started by hand never cancels the pull request's own run of the required check.
   group: validate-${{ github.event_name }}-${{ github.event.pull_request.number || inputs.pr }}
   cancel-in-progress: true
 
 jobs:
-  route:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions: {}
-    outputs:
-      validate: ${{ steps.decide.outputs.validate }}
-    steps:
-      - name: Every event here asks for validate
-        id: decide
-        run: |
-          echo "validate=true" >> "$GITHUB_OUTPUT"
-          message="validate runs: it takes the pull request's project, if it has one (.github/scripts/take-project)."
-          echo "$message"
-          echo "$message" >> "$GITHUB_STEP_SUMMARY"
-
   validate:
-    needs: route
-    if: needs.route.outputs.validate == 'true'
+    # The required check enrollment (the top of this file). A static name: GitHub reports the check under it on every
+    # run.
+    name: enrollment
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -167,27 +155,3 @@ jobs:
           echo "\`projects/$NAME/\` at \`${SHA:0:7}\` $result." >> "$GITHUB_STEP_SUMMARY"
           [ "$code" = 0 ] || echo "::error::projects/$NAME/ $result."
           exit "$code"
-
-  required:
-    # The required check enrollment (the top of this file), with .github/scripts/collect. A static name: GitHub reports
-    # the check under it on every run.
-    name: enrollment
-    needs: [route, validate]
-    if: always()
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      # Only for the checkout of .github/scripts.
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
-        with:
-          persist-credentials: false
-          sparse-checkout: .github/scripts
-
-      - name: Every job route asked for passed, and no other ran
-        env:
-          ROUTE: ${{ needs.route.result }}
-          ASKED: ${{ needs.route.outputs.validate == 'true' }}
-          VALIDATE: ${{ needs.validate.result }}
-        run: .github/scripts/collect "$ROUTE" "validate:$VALIDATE:$ASKED"

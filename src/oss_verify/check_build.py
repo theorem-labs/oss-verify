@@ -217,14 +217,6 @@ def output(*argv, env=None, token=None):
     return done.stdout
 
 
-# What turns git's own tracing off on the command line, where it outranks any configuration file. The environment
-# is cleared too (GIT_TRACING), but that is not enough on its own: trace2's targets are configuration, and
-# `trace2.envVars` names environment variables to WRITE INTO the trace, which GIT_TRACE_REDACT does not redact. A
-# review measured a whole token in a trace file that way.
-NO_TRACING = ("trace2.eventTarget=", "trace2.normalTarget=", "trace2.perfTarget=", "trace2.envVars=",
-              "trace2.configParams=")
-
-
 def git(*args, token=False):
     """git, over https only, even if a URL or a server redirect asks for another protocol.
 
@@ -232,15 +224,14 @@ def git(*args, token=False):
     host happens to have. With `token`: one credential helper in place of that empty list, the builder's own, which
     reads the token from OSS_VERIFY_GIT_TOKEN in the environment of this git process (git_environment()) and
     answers for one repository; `credential.useHttpPath` so the request carries the path the helper matches on,
-    without which the helper can only match the host and answers for every repository on it; and every trace
-    target emptied. The token itself is in no command line.
+    without which the helper can only match the host and answers for every repository on it. The token itself is in
+    no command line, and git_environment() turns git's tracing off.
     """
     os.environ["GIT_TERMINAL_PROMPT"] = "0"
     helper = ["-c", "credential.helper="]
     if token:
         helper += ["-c", f"credential.helper=!{shlex.quote(str(CREDENTIAL_HELPER))}",
                    "-c", "credential.useHttpPath=true"]
-        helper += [argument for setting in NO_TRACING for argument in ("-c", setting)]
     return ["git", *helper, "-c", "protocol.allow=never", "-c", "protocol.https.allow=always", *args]
 
 
@@ -263,9 +254,10 @@ def git_environment(token, repo=None):
     token, which leaves the process this one's environment as before."""
     if not token:
         return None
-    # Each is SET to 0, not removed: git reads trace2's targets from configuration as well, before `-c` is
-    # applied, and `trace2.envVars` names environment variables to write INTO the trace, which GIT_TRACE_REDACT
-    # does not redact. An environment variable of 0 turns that target off whatever the configuration says.
+    # Each is SET to 0, not removed: trace2's targets can also be set in a configuration file, where trace2.envVars
+    # can name environment variables to write INTO the trace, which GIT_TRACE_REDACT does not redact. An environment
+    # variable of 0 turns its target off whatever the configuration says; `-c trace2.eventTarget=` and the like do
+    # not (measured on git 2.43: the configured trace was still written, with the token in it).
     environment = {key: value for key, value in os.environ.items() if key not in GIT_TRACING_REMOVED}
     environment.update({name: "0" for name in GIT_TRACING})
     environment["GIT_TRACE2_ENV_VARS"] = ""
@@ -556,15 +548,23 @@ def require_buildkit():
 
 def build_builder(image=None, suffix="", no_cache=False):
     """Build the builder image from infra/base-builder, FROM the toolchain `image` (the newest for C if None). Return
-    its tag."""
+    its tag. Two runs on this host that build the same builder at once take turns (cache_lock), and the second finds
+    the first's layers in Docker's build cache: two BuildKit builds that export one tag together fail the second with
+    "image ... already exists" (Docker 29's containerd image store). The turn is a courtesy to another run: where the
+    cache directory cannot hold its lock (a read-only home), the build goes on without it."""
     image = image or newest_toolchain()
     tag = f"oss-verify-base-builder:{tree_hash(BUILDER_DIR)[:16]}-{toolchain_id(image)}{suffix}"
     require_buildkit()
     step(f"docker build: the builder ({tag}), FROM {image}")
     cache = ["--no-cache"] if no_cache else []
-    if run("docker", "build", "--progress=plain", *cache, "--build-arg", f"TOOLCHAIN={image}", "-t", tag,
-           str(BUILDER_DIR)) != 0:
-        raise Failed("the builder image does not build (is the toolchain image available?)")
+    with contextlib.ExitStack() as turn:
+        try:
+            turn.enter_context(cache_lock(CACHE / "builders" / tag))
+        except OSError as error:
+            say(f"note: no turn for the builder: {error}. Another run that builds it at the same time can fail.")
+        if run("docker", "build", "--progress=plain", *cache, "--build-arg", f"TOOLCHAIN={image}", "-t", tag,
+               str(BUILDER_DIR)) != 0:
+            raise Failed("the builder image does not build (is the toolchain image available?)")
     return tag
 
 
@@ -635,23 +635,96 @@ def in_threads(function, items, workers):
     return outcomes
 
 
-def _end(number, frame):
-    raise SystemExit(128 + number)
-
-
 @contextlib.contextmanager
 def containers_stopped():
     """Around a whole oss-verify check run, in the main thread: when it ends, however it ends (its result, an error,
     Ctrl-C, or SIGTERM or SIGHUP, which end it with the exit status 128 + the signal's number, as they would a shell),
-    stop the containers that it started (stop_containers()). No signal cuts that short. A signal that is ignored when
-    the run starts stays ignored, as a shell leaves it: under nohup, a SIGHUP does not end the run."""
+    stop the containers that it started (stop_containers()). Each signal raises until that cleanup begins, so a
+    second one stops a wait that the first one's unwinding is in, for a docker that does not answer; no signal cuts the
+    cleanup short. A signal that is ignored when the run starts stays ignored, as a shell leaves it: under nohup, a
+    SIGHUP does not end the run.
+
+    Python runs a signal's handler in the main thread, between two bytecodes. A signal that arrives just before the
+    main thread blocks in a wait (for a docker client, mostly) has been taken already and interrupts nothing, so the
+    run would end only when that wait does: hours later, for a docker run. Measured on 4 CPUs under load, 7 signals of
+    6,000 waited so. Python also writes each signal it takes to the wakeup fd. wake() reads it there and sends the main
+    thread SIGWINCH, whose handler does nothing, until that handler has run: a signal that reaches a thread in a wait
+    interrupts it, and Python then runs every handler that was waiting."""
+    if threading.current_thread() is not threading.main_thread():
+        raise ValueError("containers_stopped() works only in the main thread, where Python runs signal handlers")
     caught = [getattr(signal, name) for name in ("SIGTERM", "SIGHUP")
               if hasattr(signal, name) and signal.getsignal(getattr(signal, name)) is not signal.SIG_IGN]
-    before = {number: signal.signal(number, _end) for number in caught}
+    # Ctrl-C too, while it raises KeyboardInterrupt as Python's own handler does; a caller's other handler stays.
+    if signal.getsignal(signal.SIGINT) is signal.default_int_handler:
+        caught.append(signal.SIGINT)
+    cleaning = []  # not empty once the cleanup has begun: a signal then leaves it to run to its end
+    setting_up = [None]  # not empty while the setup below changes the process's signal state
+    taken = []  # each signal that arrived while the setup ran, which then ends the run
+    nudged = []  # one entry each time the main thread has run the handler of the nudge
+    stopping = threading.Event()
+    nudge = signal.SIGWINCH
+
+    def end(number, frame):
+        if cleaning:
+            return
+        if setting_up:
+            taken.append(number)
+            return
+        if number == signal.SIGINT:
+            raise KeyboardInterrupt
+        raise SystemExit(128 + number)
+
+    def nudge_handled(number, frame):
+        nudged.append(None)
+
+    main = threading.main_thread().ident
+    reading = writing = woken = waker = None
+    # Each handler that the setup changes, recorded before it changes it; the finally then puts back all of it.
+    before = {number: signal.getsignal(number) for number in (*caught, nudge)}
+
+    def wake():
+        while numbers := os.read(reading, 64):
+            if woken >= 0:  # whoever had the wakeup fd before still gets each signal
+                with contextlib.suppress(OSError):
+                    os.write(woken, numbers)
+            if not any(number in caught for number in numbers):
+                continue
+            # The nudge's handler runs in the same pass as any handler that was waiting, or, if one raised, in the
+            # next: once it has run, nothing waits.
+            seen = len(nudged)
+            while len(nudged) == seen and not stopping.is_set():
+                signal.pthread_kill(main, nudge)
+                stopping.wait(0.05)
+
     try:
+        # end() first. From then on a signal that it handles raises nothing, whichever thread takes it, until the
+        # setup has recorded each change below (the wakeup fd that it replaces, above all), and then ends the run.
+        # Holding the signals back would not do: a thread blocks a signal only for itself, and any other thread that
+        # takes it has Python run its handler in the main thread.
+        for number in caught:
+            signal.signal(number, end)
+        reading, writing = os.pipe()
+        os.set_blocking(writing, False)
+        woken = signal.set_wakeup_fd(writing, warn_on_full_buffer=False)
+        signal.signal(nudge, nudge_handled)
+        waker = threading.Thread(target=wake, name="containers_stopped wake", daemon=True)
+        waker.start()
+        setting_up.clear()
+        if taken:
+            end(taken[0], None)
         yield
     finally:
-        held = {number: signal.signal(number, signal.SIG_IGN) for number in (signal.SIGINT, *caught)}
+        cleaning.append(None)  # first: a signal that arrives from here on leaves the cleanup to run
+        held = {number: signal.signal(number, signal.SIG_IGN) for number in (signal.SIGINT, *caught, nudge)}
+        stopping.set()
+        if woken is not None:
+            signal.set_wakeup_fd(woken)
+        if writing is not None:
+            os.close(writing)
+        if waker is not None and waker.ident is not None:
+            waker.join()
+        if reading is not None:
+            os.close(reading)
         try:
             stop_containers()
         finally:

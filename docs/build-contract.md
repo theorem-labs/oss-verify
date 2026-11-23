@@ -62,7 +62,7 @@ In infra/toolchains.tsv, the row of a toolchain image with frame pointers has th
 
 On a toolchain image with frame pointers, the code that the link takes from the toolchain image has the same bytes as in the base image. This code is the C library, compiler-rt, the C++ library, the AddressSanitizer runtime and the other libraries of the sysroot. Thus it keeps the frame records that it has in the base image, and it gets no new ones.
 
-A calling function has a `jal` or a `jalr` that writes `ra`. A calling function keeps a frame record when an `addi s0, sp, N` comes before its first call. In the base image of the row `oss-fuzz-theorems-2026.10`, the `probe` job of the workflow counted these functions:
+A calling function has a `jal` or a `jalr` that writes `ra`. A calling function keeps a frame record when an `addi s0, sp, N` comes before its first call. In the base image of the row `oss-fuzz-theorems-2026.10`, the probes of the workflow counted these functions:
 
 * the C library, `/opt/musl-sysroot/usr/lib/libc.a`: 9 of 1,153 calling functions keep a frame record;
 * the C++ library, `/opt/musl-sysroot/usr/lib/libc++.a`: 5 of 1,853 calling functions keep a frame record;
@@ -73,7 +73,7 @@ To count them, do these steps in the root of this repository:
 1. Build the builder from the base image: `docker build --build-arg TOOLCHAIN=<image> -t <tag> infra/base-builder`. `<image>` is the image of the row `oss-fuzz-theorems-2026.10` in [infra/toolchains.tsv](../infra/toolchains.tsv).
 2. Run `docker run --rm --network=none --entrypoint python3 -v "$PWD/.github/scripts/frame-pointers:/fp:ro" <tag> /fp/frames.py count <archive>…`. Each `<archive>` is a path in the builder, for example `/opt/musl-sysroot/usr/lib/libc.a`.
 
-The builder does not hold `frames.py`, so step 2 mounts it from this repository. The `probe` job does these steps, and prints the count of each archive again on each run.
+The builder does not hold `frames.py`, so step 2 mounts it from this repository. The `make` job does these steps after it makes the image, and prints the count of each archive again on each run.
 
 ## What build.sh gets
 

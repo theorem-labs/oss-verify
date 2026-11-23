@@ -15,7 +15,7 @@ Linux starts processes with 0x33. Where they start with 0 (under gVisor, for one
 or without the write, so the test fails there and says so. A pass thus means that the scripts wrote the 0.
 
 Needs Docker on an x86-64 Linux host, and a cc that links statically: run-binaries compiles its tracer with the host's
-cc, and the tracer reads x86-64 registers. Without them the test is skipped, except in the suite job of tests.yaml,
+cc, and the tracer reads x86-64 registers. Without them the test is skipped, except in the job suite of tests.yaml,
 whose runner has them: there a missing one is a failure.
 """
 import io

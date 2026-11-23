@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+"""Write .github/scripts/validate_rules/, the rules of `oss-verify validate` for the jobs that hold a token, from
+src/oss_verify/:
+
+    python3 -P .github/scripts/copy-validate-rules
+
+src/ has no code owner (.github/CODEOWNERS), so no job that holds a token, or whose outputs such a job reads, loads
+code from it (tests/test_token_jobs.py). Those jobs run triage.py, review-gather and terms-accepted, which take the
+rules from .github/scripts/validate_rules/, which CODEOWNERS owns with the rest of .github/:
+
+    validate.py     src/oss_verify/validate.py, byte for byte.
+    check_build.py  what validate.py uses of src/oss_verify/check_build.py: each top-level statement that binds a name
+                    that validate.py reads as check_build.<name>, and each that binds a name that those read in turn,
+                    each with the comment lines just above it, in the order of that file, after its licence lines.
+                    Only ROOT differs: the copy is one directory deeper than src/oss_verify/, so its ROOT is
+                    parents[3], the same directory, the top of the checkout.
+
+tests/test_validate_rules.py fails while the files differ from what this writes. So a change to these rules in src/
+is made here too, by running this, and that change to .github/ needs a code owner's approval. A change to the rest of
+check_build.py, the build steps of oss-verify check, changes no file here. This program reads src/ as text: it imports
+nothing from it. It stops, and writes nothing, when src/ takes a shape that it cannot copy so: validate.py imports the
+package oss_verify by its name, or another module of it, or uses check_build other than as check_build.<name>; or
+check_build.py sets ROOT another way, or binds a name that the copy needs more than once, or in a statement other than
+an import, an assignment, a def or a class.
+"""
+import ast
+import pathlib
+import sys
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+SOURCE = ROOT / "src" / "oss_verify"
+COPY = ROOT / ".github" / "scripts" / "validate_rules"
+# The statement of src/oss_verify/check_build.py that sets ROOT, and the copy's.
+SOURCE_ROOT = "ROOT = pathlib.Path(__file__).resolve().parents[2]"
+COPY_ROOT = "ROOT = pathlib.Path(__file__).resolve().parents[3]"
+HEADER = ('# Written by .github/scripts/copy-validate-rules from src/oss_verify/check_build.py; do not edit.\n'
+          '"""What validate.py uses of src/oss_verify/check_build.py (.github/scripts/copy-validate-rules)."""\n')
+# The statements whose names the copy takes, the imports among them, and those that it puts two blank lines around.
+COPIED = (ast.Import, ast.ImportFrom, ast.Assign, ast.AnnAssign, ast.FunctionDef, ast.ClassDef)
+IMPORTS = (ast.Import, ast.ImportFrom)
+BLOCKS = (ast.FunctionDef, ast.ClassDef)
+
+
+class Unknown(Exception):
+    """src/oss_verify/ has a shape that this program cannot copy. The message says which."""
+
+
+def bound(statement):
+    """The names that a top-level statement binds."""
+    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return {statement.name}
+    if isinstance(statement, (ast.Import, ast.ImportFrom)):
+        return {(alias.asname or alias.name).split(".")[0] for alias in statement.names}
+    names = set()
+    for node in ast.walk(statement):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            names.add(node.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            names |= {(alias.asname or alias.name).split(".")[0] for alias in node.names}
+    return names
+
+
+def check_build_names(validate):
+    """The names that the text `validate` of validate.py reads as check_build.<name>. Raise Unknown when it imports the
+    package oss_verify by its name, which the copy would then load from src/, imports another module of the package, or
+    uses check_build other than as check_build.<name>."""
+    tree = ast.parse(validate)
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Import) and any(alias.name.split(".")[0] == "oss_verify" for alias in node.names)
+                or isinstance(node, ast.ImportFrom) and not node.level
+                and (node.module or "").split(".")[0] == "oss_verify"):
+            raise Unknown("src/oss_verify/validate.py imports the package oss_verify by its name")
+        if isinstance(node, ast.ImportFrom) and node.level \
+                and (node.module or [(alias.name, alias.asname) for alias in node.names] != [("check_build", None)]):
+            raise Unknown("src/oss_verify/validate.py imports from the package more than its module check_build")
+    reads = [node for node in ast.walk(tree)
+             if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "check_build"]
+    held = {id(node.value) for node in reads}
+    if any(isinstance(node, ast.Name) and node.id == "check_build" and id(node) not in held for node in ast.walk(tree)):
+        raise Unknown("src/oss_verify/validate.py uses check_build other than as check_build.<name>")
+    return {node.attr for node in reads}
+
+
+def check_build_copy(source, names):
+    """The text of the copy's check_build.py: of the text `source` of src/oss_verify/check_build.py, its licence lines,
+    and each top-level statement that binds one of `names`, or a name that a statement taken reads (above)."""
+    tree = ast.parse(source)
+    lines = source.splitlines(keepends=True)
+    binders = {}
+    for statement in tree.body:
+        for name in bound(statement):
+            binders.setdefault(name, []).append(statement)
+    kept, todo = [], sorted(names)
+    while todo:
+        name = todo.pop()
+        found = binders.get(name, [])
+        if len(found) != 1:
+            raise Unknown(f"src/oss_verify/check_build.py binds {name} {len(found)} times at its top level, not once")
+        [statement] = found
+        if not isinstance(statement, COPIED):
+            raise Unknown(f"src/oss_verify/check_build.py binds {name} in a {type(statement).__name__} statement")
+        if any(statement is taken for taken in kept):
+            continue
+        kept.append(statement)
+        todo += sorted({node.id for node in ast.walk(statement) if isinstance(node, ast.Name)} & binders.keys())
+    licence = []
+    for line in lines:
+        if not line.startswith("#"):
+            break
+        licence.append(line)
+    text, previous = "".join(licence) + HEADER, None
+    for statement in sorted(kept, key=lambda statement: statement.lineno):
+        start = min([statement.lineno, *(node.lineno for node in getattr(statement, "decorator_list", ()))])
+        top = start
+        while top > len(licence) + 1 and lines[top - 2].lstrip().startswith("#"):
+            top -= 1
+        comments, own = "".join(lines[top - 1:start - 1]), "".join(lines[start - 1:statement.end_lineno])
+        if bound(statement) == {"ROOT"}:
+            if own.strip() != SOURCE_ROOT:
+                raise Unknown(f"src/oss_verify/check_build.py no longer sets ROOT with: {SOURCE_ROOT}")
+            own = COPY_ROOT + "\n"
+        if previous is not None:
+            if isinstance(statement, BLOCKS) or isinstance(previous, BLOCKS):
+                text += "\n\n"
+            elif isinstance(previous, IMPORTS) != isinstance(statement, IMPORTS):
+                text += "\n"
+        text += comments + own
+        previous = statement
+    return text
+
+
+def copies():
+    """{path of a file of the copy: the bytes that it must hold}, from src/oss_verify/ as it is now."""
+    validate = (SOURCE / "validate.py").read_bytes()
+    check_build = (SOURCE / "check_build.py").read_text(encoding="utf-8")
+    names = check_build_names(validate.decode("utf-8"))
+    return {COPY / "validate.py": validate,
+            COPY / "check_build.py": check_build_copy(check_build, names).encode("utf-8")}
+
+
+def main():
+    try:
+        written = copies()
+    except Unknown as error:
+        sys.exit(f"copy-validate-rules: {error}. Nothing is written: change this program first.")
+    for path, data in written.items():
+        if not path.is_file() or path.read_bytes() != data:
+            path.write_bytes(data)
+            print(f"wrote {path.relative_to(ROOT)}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

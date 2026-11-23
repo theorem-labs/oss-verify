@@ -1115,9 +1115,11 @@ jobs:
               fi
             fi
           fi
-          echo "screen=$screen" >> "$GITHUB_OUTPUT"
-          echo "writers=${writers#,}" >> "$GITHUB_OUTPUT"
-          echo "app_comments=${app#,}" >> "$GITHUB_OUTPUT"
+          {
+            echo "screen=$screen"
+            echo "writers=${writers#,}"
+            echo "app_comments=${app#,}"
+          } >> "$GITHUB_OUTPUT"
       # The session goes with every item, screened or not: the review job takes it, and the screen job does not
       # (.github/scripts/take-review-data).
       - name: Keep it for the screen and the review
@@ -2251,7 +2253,9 @@ jobs:
     # Writes the triage comment of a pull request that touches projects/, after a Triage run that ended success, or on
     # a run by hand that a person starts (route's output triage). It reads the pull request through the GitHub API, as
     # data, with a read-only token. Its checkout is main, never the pull request, so no code from the pull request
-    # runs. It must never be given id-token: write, nor an environment.
+    # runs. Nor does code from src/, which has no code owner: the triage job posts this job's output, so triage.py
+    # takes the rules of oss-verify validate from .github/scripts/validate_rules/ (tests/test_token_jobs.py). It must
+    # never be given id-token: write, nor an environment.
     needs: route
     if: needs.route.outputs.triage == 'true'
     runs-on: ubuntu-latest
@@ -2271,8 +2275,6 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ needs.route.outputs.pr }}
-          # triage.py imports oss_verify.validate, from this repository's src/.
-          PYTHONPATH: ${{ github.workspace }}/src
         run: |
           dpkg -s python3-yaml > /dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
           # A random delimiter, so that no text in the comment can end the output early.
