@@ -680,16 +680,22 @@ class ContainerCleanup(unittest.TestCase):
     however it ends, and they keep no log on the Docker host."""
 
     # A stand-in for docker on PATH: it logs each command; `docker run` runs until it is killed, or until `docker rm`
-    # removes its container, which ends the real client too; `docker ps` lists two containers. With DOCKER_STARTED
-    # set, `docker run` writes a line to that FIFO once it has logged its command. A signal can land while
-    # subprocess.run is still starting the client, after the client has written that line: subprocess.run then never
-    # kills it, and only the `docker rm` ends it (seen in 1 run of 30 on a loaded machine).
+    # removes its container, which ends the real client too; `docker ps` lists two containers; `docker stop` is a
+    # docker that does not answer, and runs until it is killed, or until that `docker rm` removes the container that
+    # it waits for. With DOCKER_STARTED set, `docker run` writes a line to that FIFO once it has logged its command,
+    # and `docker stop` to DOCKER_STOPPING. A signal can land while subprocess.run is still starting either client,
+    # after the client has written that line: subprocess.run then never kills it, and only the `docker rm` ends it
+    # (seen for `docker run` in 1 run of 30 on a loaded machine).
     DOCKER = ('#!/bin/sh\nprintf "%s\\n" "$*" >> "$DOCKER_LOG"\n'
               'case $1 in\n'
               '  run) echo $$ > "$DOCKER_LOG.run"; [ -z "${DOCKER_STARTED-}" ] || echo > "$DOCKER_STARTED"\n'
               '       exec sleep 30 ;;\n'
+              '  stop) echo $$ > "$DOCKER_LOG.stop"; [ -z "${DOCKER_STOPPING-}" ] || echo > "$DOCKER_STOPPING"\n'
+              '        exec sleep 30 ;;\n'
               '  ps) printf "c1\\nc2\\n" ;;\n'
-              '  rm) [ ! -e "$DOCKER_LOG.run" ] || kill "$(cat "$DOCKER_LOG.run")" 2>/dev/null; exit 0 ;;\n'
+              '  rm) for client in run stop; do\n'
+              '        [ ! -e "$DOCKER_LOG.$client" ] || kill "$(cat "$DOCKER_LOG.$client")" 2>/dev/null\n'
+              '      done; exit 0 ;;\n'
               'esac\n')
     # A run as oss-verify check's __main__ makes it, whose one step is a docker run. Ctrl-C as from a terminal, and
     # SIGHUP and SIGTERM at their defaults, even where the tests run with one ignored (nohup pytest): a child keeps an
@@ -803,6 +809,123 @@ class ContainerCleanup(unittest.TestCase):
                 run = next(arg for arg in started.split() if arg.startswith(f"{check_build.RUN_LABEL}="))
                 self.assertEqual(listed, f"ps -aq --filter label={run}")
                 self.assertEqual(removed, "rm -f c1 c2")
+
+    # A run whose main thread is inside a write that a full pipe blocks, which nothing else interrupts, when another
+    # thread takes SIGTERM: Python then has the signal, and its handler waits for the main thread.
+    BLOCKED = ("import os, select, signal, threading; from oss_verify import check_build\n"
+               "check_build.stop_containers = lambda: None\n"
+               "signal.signal(signal.SIGTERM, signal.SIG_DFL)\n"
+               "reading, writing = os.pipe()\n"
+               "def take():\n"
+               "    select.select([reading], [], [], 20)  # data: the main thread is inside its write\n"
+               "    os.read(reading, 1)\n"
+               "    signal.pthread_kill(threading.get_ident(), signal.SIGTERM)\n"
+               "threading.Thread(target=take, daemon=True).start()\n"
+               "with check_build.containers_stopped():\n"
+               "    os.write(writing, bytes(1 << 20))  # more than a pipe holds\n")
+
+    def test_a_signal_taken_while_the_main_thread_waits_ends_the_run(self):
+        """Python runs a handler in the main thread, between bytecodes. A signal that arrives just before the main
+        thread blocks in a wait, or that another thread takes, interrupts no wait, so the run would go on until the wait
+        ends: here, never. containers_stopped() still ends it, with 143. In a child, so that a run that does not end
+        is killed at the deadline."""
+        try:
+            done = subprocess.run([sys.executable, "-P", "-c", self.BLOCKED],
+                                  env={**os.environ, "PYTHONPATH": str(SRC)}, stdin=subprocess.DEVNULL,
+                                  capture_output=True, text=True, timeout=20)
+        except subprocess.TimeoutExpired:
+            self.fail("the run went on after SIGTERM until it was killed at the deadline")
+        self.assertEqual(done.returncode, 143, done.stderr)
+
+    # A run whose Ctrl-C another thread, one that runs already, takes just after containers_stopped() has set its
+    # wakeup fd: Python then runs the handler in the main thread, in the setup. The wakeup fd before is a pipe of the
+    # run's own.
+    SETTING_UP = ("import os, signal, threading; from oss_verify import check_build\n"
+                  "stopped = []\n"
+                  "check_build.stop_containers = lambda: stopped.append(None)\n"
+                  "signal.signal(signal.SIGINT, signal.default_int_handler)\n"
+                  "reading, writing = os.pipe()\n"
+                  "os.set_blocking(writing, False)\n"
+                  "signal.set_wakeup_fd(writing)\n"
+                  "send, sent = threading.Event(), threading.Event()\n"
+                  "def take():\n"
+                  "    send.wait()\n"
+                  "    signal.pthread_kill(threading.get_ident(), signal.SIGINT)\n"
+                  "    sent.set()\n"
+                  "threading.Thread(target=take, daemon=True).start()\n"
+                  "set_wakeup_fd = signal.set_wakeup_fd\n"
+                  "def set_then_signal(fd, **options):\n"
+                  "    signal.set_wakeup_fd = set_wakeup_fd  # once\n"
+                  "    previous = set_wakeup_fd(fd, **options)\n"
+                  "    send.set()\n"
+                  "    sent.wait()  # the handler now waits for the main thread, which runs it here\n"
+                  "    return previous\n"
+                  "signal.set_wakeup_fd = set_then_signal\n"
+                  "interrupted = False\n"
+                  "try:\n"
+                  "    with check_build.containers_stopped():\n"
+                  "        pass\n"
+                  "except KeyboardInterrupt:\n"
+                  "    interrupted = True\n"
+                  "print(f'interrupted={interrupted} stopped={len(stopped)}',\n"
+                  "      f'wakeup_fd_restored={signal.set_wakeup_fd(-1) == writing}',\n"
+                  "      f'handler_restored={signal.getsignal(signal.SIGINT) is signal.default_int_handler}')\n")
+
+    def test_a_signal_taken_while_the_run_sets_up_ends_it_and_the_setup_is_put_back(self):
+        """A thread holds a signal back only for itself: one that runs already can take Ctrl-C while
+        containers_stopped() changes the process's signal state, and Python then runs the handler in the main thread,
+        in the setup. The run still ends with KeyboardInterrupt and removes its containers, and the wakeup fd is the one
+        before again, not the run's pipe, which it closed. In a child, whose signal state is its own."""
+        done = subprocess.run([sys.executable, "-P", "-c", self.SETTING_UP],
+                              env={**os.environ, "PYTHONPATH": str(SRC)}, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=20)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout.split(), ["interrupted=True", "stopped=1", "wakeup_fd_restored=True",
+                                               "handler_restored=True"], done.stderr)
+
+    # The run of CHILD, whose unwinding from the first signal waits on a docker that does not answer: `docker stop`.
+    STOPPING = ("import signal, subprocess, sys; from oss_verify import check_build\n"
+                "signal.signal(signal.SIGINT, signal.default_int_handler)\n"
+                "signal.signal(signal.SIGHUP, signal.SIG_DFL)\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_DFL)\n"
+                "with check_build.containers_stopped():\n"
+                "    try:\n"
+                "        try:\n"
+                "            subprocess.run(['docker', 'run', *check_build.work_label('/work'), 'image', 'compile'])\n"
+                "        except (KeyboardInterrupt, SystemExit):\n"
+                "            subprocess.run(['docker', 'stop', 'c1'])\n"
+                "            raise\n"
+                "    except KeyboardInterrupt:\n"
+                "        sys.exit(130)\n")
+
+    def test_a_second_signal_stops_a_wait_for_a_docker_that_does_not_answer(self):
+        """The first SIGTERM, SIGHUP or Ctrl-C ends the run; a second one stops whatever that ending waits for, as a
+        command's user expects, and the run still removes its containers and ends with 128 + the signal's number. A
+        user whose docker does not answer would otherwise need SIGKILL, which leaves the containers behind."""
+        import signal
+        for number, code in ((signal.SIGTERM, 143), (signal.SIGHUP, 129), (signal.SIGINT, 130)):
+            with self.subTest(signal=number.name), tempfile.TemporaryDirectory() as scratch:
+                env, log = self.fake_docker(scratch)
+                fifos = {}
+                for name in ("started", "stopping"):
+                    os.mkfifo(pathlib.Path(scratch) / name)
+                    fifos[name] = os.open(pathlib.Path(scratch) / name, os.O_RDONLY | os.O_NONBLOCK)
+                    self.addCleanup(os.close, fifos[name])
+                process = subprocess.Popen([sys.executable, "-P", "-c", self.STOPPING],
+                                           env={**env, "PYTHONPATH": str(SRC),
+                                                "DOCKER_STARTED": str(pathlib.Path(scratch) / "started"),
+                                                "DOCKER_STOPPING": str(pathlib.Path(scratch) / "stopping")},
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                self.addCleanup(process.kill)  # if it does not end, as a test that fails leaves it
+                select.select([fifos["started"]], [], [], 20)
+                process.send_signal(number)
+                select.select([fifos["stopping"]], [], [], 20)
+                process.send_signal(number)
+                # Well before `docker stop` would end by itself, after 30 s.
+                _, errors = process.communicate(timeout=10)
+                self.assertEqual(process.returncode, code, errors)
+                self.assertEqual([line.split()[0] for line in log.read_text(encoding="utf-8").splitlines()],
+                                 ["run", "stop", "ps", "rm"])
 
     def test_the_check_command_removes_its_containers_when_it_ends(self):
         """`oss-verify check` runs within containers_stopped(): even a run that starts none asks for its own."""
