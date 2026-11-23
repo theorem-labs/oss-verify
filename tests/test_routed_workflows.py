@@ -823,11 +823,13 @@ def test_triages_job_runs_unless_the_edit_is_of_the_title_alone(action, changes,
     assert bool(evaluate(jobs["triage"]["if"], ctx)) == runs
 
 
-def test_triage_starts_only_for_a_pull_request_that_changes_projects_and_no_required_check_is_path_filtered():
+def test_triage_starts_only_for_projects_and_no_required_check_is_path_filtered_on_a_pull_request():
     """triage.yaml's paths filter: GitHub starts Triage only for a pull request into main that changes a file under
     projects/, the only pull request that review.yml writes a triage comment for, on each of its four event types. A
     workflow that its paths filter skips leaves its checks pending, which blocks a merge only when the ruleset requires
-    one: triage is no required check, and no workflow that reports one has a paths filter."""
+    one: triage is no required check, and no workflow that reports one has a paths filter on a pull request's event.
+    A filter on a push (tests.yaml's, for a fork's enrollment) leaves no pull request waiting: the pull request's own
+    run reports the check."""
     triage = workflow("triage.yaml")
     assert triage[True]["pull_request"] == {"branches": ["main"], "paths": ["projects/**"],
                                             "types": ["opened", "edited", "reopened", "synchronize"]}
@@ -837,7 +839,8 @@ def test_triage_starts_only_for_a_pull_request_that_changes_projects_and_no_requ
     for name, check in reporters.items():
         assert check in {job.get("name", key) for key, job in workflow(name)["jobs"].items()}, name
         for event, spec in workflow(name)[True].items():
-            assert not {"paths", "paths-ignore"} & set(spec or {}), f"{name}: {event} has a paths filter"
+            if event != "push":
+                assert not {"paths", "paths-ignore"} & set(spec or {}), f"{name}: {event} has a paths filter"
 
 
 @pytest.mark.parametrize("files, want", [

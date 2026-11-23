@@ -70,8 +70,8 @@ on:
     # or Tests that completes, a push to main, an issue), with no bound on the wait.
     # A workflow that its paths filter skips leaves its checks pending, and a pending check that the ruleset requires
     # blocks the merge. The check triage is not required (the ruleset requires enrollment, project-builds,
-    # terms-accepted and tests), so the skip blocks nothing. Never put a paths filter on a workflow that posts a
-    # required check.
+    # terms-accepted and tests), so the skip blocks nothing. Never put a paths filter on a pull request's event of a
+    # workflow that posts a required check. A filter on a push to main blocks no pull request (tests.yaml has one).
     paths: ['projects/**']
     # edited: the comment reports on the checklist in the description.
     types: [opened, edited, reopened, synchronize]

@@ -1,10 +1,11 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 name: "Tests"
-# tests runs this repository's tests and checks every project with oss-verify validate, on main and on pull requests. It
-# runs the pull request's code, with GitHub's pull_request event: a run from a fork gets a read-only token and no
-# secret. While the author has no merged contribution here, GitHub holds the run until it is approved: review.yml
-# approves it after its automated screen passes the pull request (.github/workflows/held-runs.yml starts that screen).
+# tests runs this repository's tests and checks every project with oss-verify validate, on pull requests, and on a
+# push to main that changes a file under projects/ (below). It runs the pull request's code, with GitHub's pull_request
+# event: a run from a fork gets a read-only token and no secret. While the author has no merged contribution here,
+# GitHub holds the run until it is approved: review.yml approves it after its automated screen passes the pull request
+# (.github/workflows/held-runs.yml starts that screen).
 # A pull request from a fork that changes a file under projects/ is an enrollment: for it the job reads, as data, only
 # the paths that GitHub's merge changes, runs no code of the fork, and passes with "not run" in its summary. enrollment
 # (validate.yaml) refuses such a fork if it changes anything but one projects/<name>/, or if that project is seeded, and
@@ -38,6 +39,25 @@ name: "Tests"
 # or a rerun, can check out a merge into the earlier base (https://github.com/actions/checkout/issues/919). It then says
 # to push a commit, since a rerun checks out the same merge.
 #
+# On a push to main it runs only when the push changes a file under projects/ (push's paths filter), for a fork's
+# enrollment. Any other merge puts on main a tree that a run here has already tested. The ruleset of main, which
+# Theorem's infrastructure code declares and nobody may bypass, requires a pull request's branch to be up to date with
+# main before it merges (strict required status checks), and a linear history. So the head of a pull request that
+# merges holds main's tip, GitHub's merge of it into main has the head's tree, and the merge puts that tree on main: a
+# run on the push would test the same tree a second time. When main moves before the merge, the pull request cannot
+# merge until its branch is updated, and the update runs this again, on the new tree.
+# A fork's enrollment is the exception: its run here runs no code (above), so the run on its push to main is the one
+# run of the tests on what it merged. Every file it changes is under one projects/<name>/ (enrollment refuses any
+# other), so the filter starts that run. GitHub compares the push's commit with the one before it, a squash merge's
+# one commit here; a push that adds or deletes a file under projects/ matches too, and a diff that times out starts the
+# run anyway (https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#git-diff-comparisons).
+# A newer push to main that changes projects/ cancels that run (concurrency, below), and its run tests a tree that
+# holds the enrollment too. A pull request from a branch of this repository that changes projects/ runs twice, on the
+# pull request and on the push. Of the 270 commits on main from 2026-10-01 to 2026-11-22, 36 changed projects/; 26 of
+# those were pull requests, 17 of them from forks.
+# pull_request has no paths filter: the ruleset reads the check tests from a pull request's run, and a filter there
+# would leave that check pending, which blocks the merge (triage.yaml). To test main by hand, run this on main (below).
+#
 # No job gets a secret, cache, artifact or write permission. Never add one. The contents: read token goes to
 # actions/checkout and to the step that asks the API where the merge's first parent is, never to a step that runs the
 # branch's code.
@@ -50,8 +70,10 @@ name: "Tests"
 on:
   pull_request:
     types: [opened, reopened, synchronize]
+  # A merge of a fork's enrollment (the top of this file).
   push:
     branches: [main]
+    paths: ["projects/**"]
   workflow_dispatch:
 
 permissions: {}
