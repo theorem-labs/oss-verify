@@ -13,9 +13,10 @@ is skipped.
 
 FramePointersC and FramePointersRust also need the frame-pointer images that .github/workflows/toolchain-images.yaml
 makes, named by OV_FP_TOOLCHAIN_C and OV_FP_TOOLCHAIN_RUST: each skips unless its own is set. The job docker of
-.github/workflows/tests.yaml makes the images again, sets both, runs every test of this file, and fails if a test skips.
-So does toolchain-images.yaml's job docker-tests (.github/workflows/frame-pointer-tests.yaml) for these two classes, on
-the images that its job make made.
+.github/workflows/tests.yaml runs every test of this file in shards: each shard pulls the toolchain images that its
+classes need, makes the frame-pointer images of its FramePointers class again and sets its variable, and fails if a
+test skips. So does toolchain-images.yaml's job docker-tests (.github/workflows/frame-pointer-tests.yaml) for these two
+classes, on the images that its job make made.
 """
 import os
 import pathlib

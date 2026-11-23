@@ -766,6 +766,97 @@ def collected(*arguments):
     return ids
 
 
+# The step of tests.yaml's docker that pulls the toolchain images of its shard and makes its frame-pointer images.
+IMAGES_STEP = "Pull the toolchain images, and make the frame-pointer images"
+# Stand-ins for that step and for the Docker tests' skip conditions. docker: `docker pull --quiet <image>` adds the image
+# to the file $PULLED, and `docker image inspect <image>` (docker_ready and toolchain_ready in tests/test_builder.py)
+# finds only an image listed there. crane: `crane mutate ... -t <tag>` names the image it made by a digest.
+IMAGES_DOCKER = ('#!/bin/bash\ncase "$1 $2" in\n'
+                 '  "pull --quiet") echo "$3" >> "$PULLED" ;;\n'
+                 '  "image inspect") grep -qxF -- "$3" "$PULLED" ;;\n'
+                 '  *) exit 1 ;;\nesac\n')
+IMAGES_CRANE = ('#!/bin/bash\nwhile [ $# -gt 0 ]; do [ "$1" = -t ] && tag=$2; shift; done\n'
+                'echo "${tag%:*}@sha256:$(printf %064d 0)"\n')
+# Run with the node ids of the Docker tests' classes, or their files: for each class (each TestCase of a file), a line
+# "<class node id>\t<why the class, or a test of it, skips>", empty where none skips. Importing a file evaluates its
+# classes' skipUnless.
+SKIPS = r"""
+import importlib, pathlib, sys, unittest
+for spec in sys.argv[1:]:
+    path, _, name = spec.partition("::")
+    module = importlib.import_module(pathlib.Path(path).stem)
+    classes = [getattr(module, name)] if name else [
+        found for found in vars(module).values()
+        if isinstance(found, type) and issubclass(found, unittest.TestCase) and found.__module__ == module.__name__]
+    for cls in classes:
+        reasons = [cls.__unittest_skip_why__] if getattr(cls, "__unittest_skip__", False) else []
+        for test in unittest.TestLoader().getTestCaseNames(cls):
+            if getattr(getattr(cls, test), "__unittest_skip__", False):
+                reasons.append(f"{test}: {getattr(cls, test).__unittest_skip_why__}")
+        print(f"{path}::{cls.__name__}\t{'; '.join(reasons)}")
+"""
+
+
+def shard_skips(tmp_path, shard, edit=lambda text: text, **change):
+    """Run tests.yaml's IMAGES_STEP (its script through `edit`) as in the docker shard `shard`, with `change` to its
+    matrix entry, on IMAGES_DOCKER and IMAGES_CRANE, and check that it pulled each frame-pointer image that it names in
+    its outputs; then, where Docker has only the images that the step pulled and with the env of the shard's TESTS_STEP
+    (the step's outputs filled in), and a stand-in qemu-riscv64-static, read the skip conditions of the shard's classes
+    (SKIPS). Return {class node id: why it, or a test of it, skips, or ""}."""
+    tmp_path.mkdir(parents=True)
+    bin = tmp_path / "bin"
+    bin.mkdir()
+    for name, text in (("docker", IMAGES_DOCKER), ("crane", IMAGES_CRANE), ("qemu-riscv64-static", "#!/bin/sh\n"),
+                       ("python3", f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')):
+        (bin / name).write_text(text)
+        (bin / name).chmod(0o755)
+    docker = job_of_tests("docker")
+    [entry] = [e for e in docker["strategy"]["matrix"]["include"] if e["shard"] == shard]
+    ctx = {f"matrix.{key}": str(value) for key, value in {**entry, **change}.items()}
+    pulled, outputs = tmp_path / "pulled", tmp_path / "outputs"
+    pulled.touch()
+    outputs.touch()
+    ambient = {name: value for name, value in os.environ.items() if not name.startswith("OV_")}
+    standing = {**ambient, "PATH": f"{bin}:{os.environ['PATH']}", "PULLED": str(pulled)}
+    images = step(docker, IMAGES_STEP)
+    env = {name: interpolated(str(value), ctx) for name, value in images["env"].items()}
+    run = subprocess.run(["bash", "-e", "-c", edit(images["run"])], cwd=ROOT, capture_output=True, text=True,
+                         env={**standing, **env, "GITHUB_OUTPUT": str(outputs), "PYTHONPATH": str(ROOT / "src")})
+    assert run.returncode == 0, run.stdout + run.stderr
+    made = dict(line.split("=", 1) for line in outputs.read_text().splitlines())
+    # FramePointers skips only without the base image or the variable, so this checks the frame-pointer image itself.
+    assert set(made.values()) <= set(pulled.read_text().split()), ("a frame-pointer image not pulled", made)
+    ctx.update((f"steps.images.outputs.{name}", image) for name, image in made.items())
+    env = {name: interpolated(str(value), ctx) for name, value in step(docker, TESTS_STEP["docker"])["env"].items()}
+    run = subprocess.run([sys.executable, "-P", "-c", SKIPS, *ctx["matrix.tests"].split()], cwd=ROOT,
+                         capture_output=True, text=True, timeout=300,
+                         env={**standing, **env, "PYTHONPATH": f"{ROOT / 'src'}{os.pathsep}{ROOT / 'tests'}"})
+    assert run.returncode == 0, run.stdout[-4000:] + run.stderr[-4000:]
+    return dict(line.split("\t", 1) for line in run.stdout.splitlines())
+
+
+def test_each_class_of_a_docker_shard_finds_the_images_it_needs_there(tmp_path):
+    """Each shard of docker pulls the toolchain images, and makes the frame-pointer images, that its classes need: where
+    Docker has only the images that the shard's IMAGES_STEP pulled, with its TESTS_STEP's env, no class of the shard,
+    and no test of one, skips. Each class asks Docker for the images it needs in its own skipUnless, so this reads its
+    need from there. The classes read are all that pytest collects of the shard. Controls: the shard python without
+    the Python image, and the shard c without its frame-pointer row, are found, and so is a step that makes a
+    frame-pointer image and does not pull it."""
+    for shard, _, tests in shards():
+        skips = shard_skips(tmp_path / shard, shard)
+        assert set(skips) == {"::".join(test.split("::")[:2]) for test in collected(*tests)}, (shard, skips)
+        assert {name: why for name, why in skips.items() if why} == {}, shard
+    python = shard_skips(tmp_path / "python-on-c", "python", languages="c")
+    assert list(python) == ["tests/test_builder.py::PythonBuilder"], python
+    assert "the Python toolchain image" in python["tests/test_builder.py::PythonBuilder"], python
+    c = shard_skips(tmp_path / "c-without-frame-pointers", "c", frame_pointers="")
+    assert {name for name, why in c.items() if why} == {"tests/test_builder.py::FramePointersC"}, c
+    assert "OV_FP_TOOLCHAIN_C" in c["tests/test_builder.py::FramePointersC"], c
+    with pytest.raises(AssertionError, match="a frame-pointer image not pulled"):
+        shard_skips(tmp_path / "rust-made-not-pulled", "rust",
+                    edit=lambda text: text.replace('docker pull --quiet "$ref" > /dev/null\n', ""))
+
+
 def selection(tmp_path, job):
     """The arguments of pytest that choose the tests in the TESTS_STEP of tests.yaml's `job`, as run_the_tests_step
     finds them (for docker, those of every shard together): its arguments but -n, --dist, --durations, -q and -rs,
@@ -894,18 +985,22 @@ def test_the_package_check_builds_with_uvs_own_backend_and_runs_the_installed_pa
 
 
 def test_the_docker_job_makes_the_images_as_toolchain_images_yaml_does():
-    """docker's crane and registry are toolchain-images.yaml's, and it makes the frame-pointer images of the base rows
-    that tests/test_builder.py's FramePointersC and FramePointersRust build on."""
+    """docker's crane and registry are toolchain-images.yaml's, and its shards make the frame-pointer images of the base
+    rows that tests/test_builder.py's FramePointersC and FramePointersRust build on, each row in one shard: the step
+    makes those of its shard's frame_pointers."""
     from test_builder import FRAME_POINTER_IMAGES
 
     tests, images = workflow("tests.yaml"), workflow("toolchain-images.yaml")
     for name in ("CRANE_VERSION", "CRANE_SHA256", "CRANE_ARCHIVE"):
         assert tests["env"][name] == images["env"][name], name
     assert tests["jobs"]["docker"]["services"]["registry"] == images["jobs"]["make"]["services"]["registry"]
-    run = step(tests["jobs"]["docker"], "Pull the toolchain images, and make the frame-pointer images")["run"]
-    rows = re.findall(r"(?m)^for row in (.+); do$", run)
-    assert len(rows) == 1, run
-    assert rows[0].split() == [row for row, _ in FRAME_POINTER_IMAGES.values()]
+    pull = step(tests["jobs"]["docker"], IMAGES_STEP)
+    assert pull["env"]["FRAME_POINTERS"] == "${{ matrix.frame_pointers }}", pull["env"]
+    rows = re.findall(r"(?m)^for row in (.+); do$", pull["run"])
+    assert rows == ['"${rows[@]}"'], pull["run"]
+    made = [row for entry in tests["jobs"]["docker"]["strategy"]["matrix"]["include"]
+            for row in entry["frame_pointers"].split()]
+    assert sorted(made) == sorted(row for row, _ in FRAME_POINTER_IMAGES.values())
 
 
 # --- the triage comment: triage.yaml's one job, and review.yml's route after it ---

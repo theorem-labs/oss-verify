@@ -22,11 +22,12 @@ name: "Tests"
 #           These first steps run only git, gh and jq, and read the event and the merge's paths as data. Then the tests
 #           in tests/ but the Docker tests (DOCKER_TESTS, below), oss-verify validate on every project, actionlint and
 #           shellcheck over the workflows, and the package's wheel, built, installed and run.
-#   docker  The Docker tests: every test of DOCKER_TESTS, on the newest toolchain image of each language in
-#           infra/toolchains.tsv, on the frame-pointer images that it makes from two of them as toolchain-images.yaml
-#           does, and with qemu-riscv64-static. A matrix of shards, each on a runner of its own: each shard runs the
-#           classes or files that its entry names, and every test of DOCKER_TESTS is in exactly one shard
-#           (tests/test_routed_workflows.py checks it). Its first step after the checkout is suite's step for a fork's
+#   docker  The Docker tests: every test of DOCKER_TESTS, on the newest toolchain images of infra/toolchains.tsv, on the
+#           frame-pointer images that it makes from two of them as toolchain-images.yaml does, and with
+#           qemu-riscv64-static. A matrix of shards, each on a runner of its own: each shard runs the classes or files
+#           that its entry names, on the images that its entry names, those its classes need. Every test of
+#           DOCKER_TESTS is in exactly one shard, and each class of a shard finds there the images it needs
+#           (tests/test_routed_workflows.py checks both). Its first step after the checkout is suite's step for a fork's
 #           change to projects/, with the same text, so it runs no code of a fork's enrollment either. It does not run
 #           for a pull request into another branch than the default one, for which suite fails.
 #   tests   The required check tests: it passes only if suite and every shard of docker passed. It always runs, after
@@ -300,24 +301,35 @@ jobs:
     # builds once, and each has a runner's 4 cores: python is PythonBuilder alone (4 CPython builds), rust the two
     # classes that build Rust's standard library, and c and records split the rest about evenly by their CPU. workers
     # is the shard's pytest-xdist workers: one for each class that the shard can run beside another without leaving the
-    # cores to one. fail-fast is off, so each shard reports its own tests; the check tests waits for all of them.
+    # cores to one. languages are the languages whose newest toolchain image the shard pulls, and frame_pointers the
+    # rows of infra/toolchains.tsv whose frame-pointer image it makes: the images that its classes need, and no other,
+    # as pulling all of them took each shard 87-141 s. fail-fast is off, so each shard reports its own tests; the check
+    # tests waits for all of them.
     strategy:
       fail-fast: false
       matrix:
         include:
           - shard: python
             workers: 1
+            languages: python
+            frame_pointers: ""
             tests: tests/test_builder.py::PythonBuilder
           - shard: rust
             workers: 2
+            languages: rust
+            frame_pointers: oss-fuzz-theorems-2026.10-rust
             tests: tests/test_builder.py::RustBuilder tests/test_builder.py::FramePointersRust
           - shard: c
             workers: 2
+            languages: c go
+            frame_pointers: oss-fuzz-theorems-2026.10
             tests: >-
               tests/test_builder.py::Builder tests/test_builder.py::UbsanChecks tests/test_builder.py::GoBuilder
               tests/test_builder.py::AllocationFailureOnCjson tests/test_builder.py::FramePointersC
           - shard: records
             workers: 2
+            languages: c
+            frame_pointers: ""
             tests: >-
               tests/test_append_docker.py tests/test_binary_checks_docker.py tests/test_seed_runs_docker.py
               tests/test_target_settings_docker.py
@@ -387,24 +399,31 @@ jobs:
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
           echo "$RUNNER_TEMP/qemu/usr/bin" >> "$GITHUB_PATH"
 
-      # The newest toolchain image of each language (oss_verify.check_build.newest_toolchain), which the Docker tests
-      # build on, each pinned by its digest. Then the frame-pointer images of FramePointersC and FramePointersRust
-      # (tests/test_builder.py's FRAME_POINTER_IMAGES): for each of their base rows, the row's image with
-      # OFT_FRAME_POINTERS=1, made as make of toolchain-images.yaml makes it (crane mutate, into the registry on this
-      # runner), and the base image, which those tests build on too.
+      # The toolchain images of this shard (the matrix above): the newest toolchain image of each of its languages
+      # (oss_verify.check_build.newest_toolchain), which the Docker tests build on, each pinned by its digest. Then the
+      # frame-pointer images of its frame_pointers rows, for FramePointersC and FramePointersRust
+      # (tests/test_builder.py's FRAME_POINTER_IMAGES): for each row, the row's image with OFT_FRAME_POINTERS=1, made as
+      # make of toolchain-images.yaml makes it (crane mutate, into the registry on this runner), and the base image,
+      # which those tests build on too.
       - name: Pull the toolchain images, and make the frame-pointer images
         id: images
         if: steps.fork.outputs.enrollment != 'true'
+        env:
+          LANGUAGES: ${{ matrix.languages }}
+          FRAME_POINTERS: ${{ matrix.frame_pointers }}
         run: |
           set -euo pipefail
-          images=$(python3 -P -c 'from oss_verify import check_build
-          print(*sorted({check_build.newest_toolchain(language) for language in ("c", "rust", "python", "go")}))')
+          read -r -a languages <<< "$LANGUAGES"
+          read -r -a rows <<< "$FRAME_POINTERS"
+          images=$(python3 -P -c 'import sys
+          from oss_verify import check_build
+          print(*sorted({check_build.newest_toolchain(language) for language in sys.argv[1:]}))' "${languages[@]}")
           for image in $images; do
             [[ "$image" =~ ^ghcr\.io/theorem-labs/[a-z0-9-]+@sha256:[0-9a-f]{64}$ ]] ||
               { echo "::error::infra/toolchains.tsv names a toolchain image with no digest: '$image'"; exit 1; }
             docker pull --quiet "$image" > /dev/null
           done
-          for row in oss-fuzz-theorems-2026.10 oss-fuzz-theorems-2026.10-rust; do
+          for row in "${rows[@]}"; do
             base=$(awk -F'\t' -v row="$row" '$1 == row { print $2 }' infra/toolchains.tsv)
             [[ "$base" =~ ^ghcr\.io/theorem-labs/oss-fuzz-theorems-toolchain(-[a-z]+)?@sha256:[0-9a-f]{64}$ ]] ||
               { echo "::error::infra/toolchains.tsv has no row $row with a toolchain digest: '$base'"; exit 1; }
