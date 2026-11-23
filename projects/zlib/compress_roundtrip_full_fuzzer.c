@@ -283,17 +283,22 @@ size_t rt_deflate_room(int flush, size_t room) {
  * all the data so far (zlib.h: "All of the input data so far will be available to the decompressor"). At the end,
  * inflate answers Z_STREAM_END with every compressed byte used and every data byte given back.
  *
- * Streaming-file mode: the name must be bare, so an empty name, a slash or a 0 byte returns before any open. The file
- * is opened twice. The first descriptor feeds deflate, read in pieces of at most 64 KiB (the deflate steps' piece
- * sizes). The second is read, also at most 64 KiB at a time, to check inflate's bytes, and must end where inflate's
- * output ends. A failed open, read or close returns normally, at once, and nothing read before it is compared as if
- * it were the whole file. The memory is fixed at any file size, up to 2^63 - 1 bytes.
+ * Streaming-file mode: the name must be bare, so an empty name, a slash or a 0 byte returns before any open, and so do
+ * the names proc and sys, only when the working directory is "/": a guard for a gap of the process model, which does
+ * not reach those two names there. The file is opened twice, with O_NOFOLLOW and O_NONBLOCK, and each descriptor that
+ * is not a regular file returns at once, as a failed open does. The first descriptor feeds deflate, read in pieces of
+ * at most 64 KiB (the deflate steps' piece sizes). The second is read, also at most 64 KiB at a time, to check
+ * inflate's bytes, and must end where inflate's output ends. A failed open, read or close returns normally, at once,
+ * and nothing read before it is compared as if it were the whole file. The memory is fixed at any file size, up to
+ * 2^63 - 1 bytes.
  */
+#include <errno.h>
 #include <fcntl.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -560,18 +565,35 @@ static void stream_mem(const rt_plan *pl, const unsigned char *data, size_t n) {
 
 static void stream_file(const rt_plan *pl, const unsigned char *name, size_t len) {
   if (len == 0 || memchr(name, '/', len) != NULL || memchr(name, 0, len) != NULL) return;
+  if ((len == 4 && memcmp(name, "proc", 4) == 0) || (len == 3 && memcmp(name, "sys", 3) == 0)) {
+    /* a guard for a gap of the process model, which does not reach these two names in "/": refuse them only there
+       (getcwd fits in 2 bytes only for "/"), and on any getcwd error but ERANGE */
+    char cwd[2];
+    if (getcwd(cwd, sizeof cwd) != NULL || errno != ERANGE) return;
+  }
   char *path = rt_xmalloc(len + 1);
   memcpy(path, name, len);
   path[len] = 0;
-  int fd1 = open(path, O_RDONLY);
+  int fd1 = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
   if (fd1 < 0) {
     free(path);
     return;
   }
-  int fd2 = open(path, O_RDONLY);
+  struct stat sb;
+  if (fstat(fd1, &sb) != 0 || !S_ISREG(sb.st_mode)) {
+    (void)close(fd1);
+    free(path);
+    return;
+  }
+  int fd2 = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
   free(path);
   if (fd2 < 0) {
     (void)close(fd1);
+    return;
+  }
+  if (fstat(fd2, &sb) != 0 || !S_ISREG(sb.st_mode)) {
+    (void)close(fd1);
+    (void)close(fd2);
     return;
   }
   rt_run r;
