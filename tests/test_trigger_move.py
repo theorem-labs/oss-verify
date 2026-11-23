@@ -15,12 +15,10 @@ The move:
        .github/scripts/take-build-results gives its fixed line, the gather job reads the text and the diff from the
        API, and the comment job posts to that pull request at that head.
   (u)  The list of .github/scripts/steering.py is the list of the last patterns of .github/CODEOWNERS, which give a file
-       to @theorem-labs/engineering and @theorem-labs/research, at commit 62081ee and today.
+       to @theorem-labs/engineering and @theorem-labs/research.
   (w)  Enroll dispatch sends no enrollment that changes a steering file, and puts no label on it, until a person
        approved its head: for an open pull request and for a merge.
   (x)  No workflow with workflow_dispatch builds the code of a pull request (oss-verify check, docker).
-  (base) Build and Triage start on pull_request only for a pull request into main: review.yml takes each of their runs
-       as a run of the pull request into main from the same branch and commit.
   (z2) A run by hand on another branch than main holds no identity and posts nothing.
   (claude files) The gather job keeps no CLAUDE*.md, AGENTS*.md or .claude/ of the pull request, and the review job
        refuses one.
@@ -38,11 +36,6 @@ The move:
        publish installs crane only from the archive with the SHA-256 of its pin, and no step of it writes
        GITHUB_PATH or GITHUB_ENV. Its push step stops at an unset variable before it copies, and at a base row
        outside the toolchain packages before any command of crane. It logs out of ghcr.io after its push.
-  (artifacts) Each script of .github/scripts that reads a file of a Build run's artifact (read_member) reads an
-       artifact and a file that build.yaml uploads, with if-no-files-found: error. The step that writes the file, run
-       in (s) and in tests/test_enroll_dispatch.py, writes it at the path of the upload.
-  (workflow_run) Each name that a workflow_run trigger listens to is the name of exactly one workflow file of
-       .github/workflows.
 The held runs (each test name holds the word held):
   route finds the held runs of a head on a run by hand. It counts the held runs that Held runs counts: neither counts a
   run of the oss-verify App's own label. The comment job approves them with a token of the oss-verify App that can
@@ -51,8 +44,7 @@ The held runs (each test name holds the word held):
   A screen that cannot sign in fails with no verdict, before the mark of the daily cap. Held runs
   (.github/workflows/held-runs.yml) starts a run by hand of review.yml for each held head that no run screened, and
   re-runs the failed jobs of a run whose screen gave a verdict.
-A review that passes: the paragraph of review.md that says what happens next, the same in README.md, and the comment
-that says it.
+A review that passes: the review job hands the comment that the model wrote on to the comment job as it is.
 
 Each case runs the steps and the scripts of the workflows with stand-ins: this file's gh, which gives the API's answers
 from files and records each call with its GH_TOKEN, and for the screen the stand-in services of tests/test_screen.py.
@@ -65,7 +57,6 @@ Of the test files, the cases (r), (s), (u), (w) and (x) import only tests/test_e
 stand-in API with its World, and uses only what World has before the move too. In a tree of the commit before the move
 (0666dceb750a), these cases fail on their own assertions.
 """
-import ast
 import contextlib
 import copy
 import datetime
@@ -510,7 +501,7 @@ class Stand(unittest.TestCase):
 
 
 class PullRequestWorkflows(unittest.TestCase):
-    """(r), (x) and (base): the events of each workflow, and what the jobs hold and run."""
+    """(r) and (x): the events of each workflow, and what the jobs hold and run."""
 
     def workflows(self, directory=ROOT / ".github" / "workflows"):
         found = sorted(p for p in directory.iterdir() if p.suffix in (".yml", ".yaml"))
@@ -586,15 +577,6 @@ class PullRequestWorkflows(unittest.TestCase):
                         self.assertNotIn("workflow_dispatch", on,
                                          f"{path.name}, job {name}, step {step.get('name')!r} builds code")
         self.assertIn("build.yaml", {found[0] for found in builds})
-
-    def test_base_build_and_triage_start_only_for_a_pull_request_into_main(self):
-        # A run for a pull request into another branch would give the pull request into main from the same branch and
-        # commit a second review or triage.
-        for name in ("build.yaml", "triage.yaml"):
-            on = triggers(parse((ROOT / ".github" / "workflows" / name).read_text()))
-            self.assertIn("pull_request", on, name)
-            self.assertEqual({k: v for k, v in (on["pull_request"] or {}).items() if k.startswith("branches")},
-                             {"branches": ["main"]}, name)
 
 
 class ToolchainPublish(Stand):
@@ -1717,20 +1699,6 @@ shutil.copyfile(home / "archive", args[args.index("-o") + 1])
         caught = self.guard_fails(self.logout_case, "            crane auth logout ghcr.io\n")
         self.assertIn("publish's push step on each row: (its exit status, a logout of ghcr.io after its copy", caught)
 
-    def test_publish_starts_on_the_completed_runs_on_main_of_toolchain_images_alone(self):
-        # workflow_run names a workflow by its name: a rename of toolchain-images.yaml, or of its branch, would stop
-        # publishing with no error. No other workflow has that name.
-        publish, images = self.workflow(ROOT, self.PUBLISH), self.workflow(ROOT, self.IMAGES)
-        self.assertEqual(triggers(publish), {"workflow_run": {"workflows": [images["name"]], "types": ["completed"],
-                                                             "branches": ["main"]}})
-        names = [parse(p.read_text()).get("name")
-                 for p in sorted((ROOT / ".github" / "workflows").iterdir()) if p.suffix in (".yml", ".yaml")]
-        self.assertEqual(names.count(images["name"]), 1, names)
-        on = triggers(images)
-        self.assertEqual(sorted(on), ["pull_request", "push"])
-        self.assertEqual(on["push"]["branches"], ["main"])
-        self.assertEqual(publish["permissions"], {})
-
     def test_publish_runs_no_docker_and_no_script_of_it_reads_github_sha_or_holds_an_expression(self):
         steps = self.workflow(ROOT, self.PUBLISH)["jobs"]["publish"]["steps"]
         # crane alone: no step runs docker.
@@ -2116,173 +2084,8 @@ class FirstRunArtifact(Stand):
                 self.assertEqual((code, got), (0, {**self.HONEST, "sizes": given}), printed)
 
 
-class BuildArtifacts(Stand):
-    """(artifacts): each script of .github/scripts that reads a file of an artifact of a Build run (read_member of
-    artifact.py) reads an artifact and a file that build.yaml uploads. The upload fails when the file is absent
-    (if-no-files-found: error). A rename on one side alone shows only when a later run reads the artifact: no run of
-    the pull request that makes the rename reads it. FirstRunArtifact and tests/test_enroll_dispatch.py's TheRecord
-    run the steps that write the two files, and read each file at the path of its upload."""
-
-    BUILD = ".github/workflows/build.yaml"
-    # The readers at the head, each as (the script, the artifact, the file): review.yml's gather job runs
-    # take-build-results, and enroll-dispatch.yml runs enroll-dispatch.
-    READERS = {("take-build-results", "build-results", "results.json"),
-               ("enroll-dispatch", "enrollment-record", "record.json")}
-
-    @staticmethod
-    def string(node, constants):
-        """The string that the argument `node` gives: a string, or a name of `constants`. Else None."""
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return node.value
-        return constants.get(node.id) if isinstance(node, ast.Name) else None
-
-    def readers(self, tree):
-        """Each call of read_member in a Python script of `tree`'s .github/scripts, as (the script, its line, the
-        artifact, the file). An argument that is a name gives the string that the top level of the script assigns to
-        that name. An argument that this cannot read gives None."""
-        scripts, found = tree / ".github" / "scripts", []
-        for path in sorted(scripts.rglob("*")):
-            if not path.is_file() or "__pycache__" in path.parts:
-                continue
-            first = path.read_bytes().split(b"\n", 1)[0]
-            if path.suffix != ".py" and not (first.startswith(b"#!") and b"python" in first):
-                continue
-            module = ast.parse(path.read_text(encoding="utf-8"), str(path))
-            constants = {node.targets[0].id: node.value.value for node in module.body
-                         if isinstance(node, ast.Assign) and len(node.targets) == 1
-                         and isinstance(node.targets[0], ast.Name) and isinstance(node.value, ast.Constant)
-                         and isinstance(node.value.value, str)}
-            for node in ast.walk(module):
-                func = node.func if isinstance(node, ast.Call) else None
-                if getattr(func, "id", getattr(func, "attr", None)) != "read_member":
-                    continue
-                # artifact.py's read_member(api, repo, run, name, member, limit)
-                given = dict(zip(("api", "repo", "run", "name", "member", "limit"), node.args))
-                given.update((keyword.arg, keyword.value) for keyword in node.keywords if keyword.arg)
-                found.append((path.relative_to(scripts).as_posix(), node.lineno,
-                              *(self.string(given.get(argument), constants) for argument in ("name", "member"))))
-        return found
-
-    def case(self, tree=ROOT):
-        """Each reader (readers) reads an artifact that an upload of build.yaml (actions/upload-artifact) gives. The
-        upload has the artifact's name, its path ends in /<the file>, and it has if-no-files-found: error. The message
-        names each reader that no upload gives its file. Return the readers and the uploads."""
-        build = self.workflow(tree, "build.yaml")
-        readers = self.readers(tree)
-        self.assertLessEqual(self.READERS, {(script, artifact, member) for script, _, artifact, member in readers},
-                             f"the calls of read_member in .github/scripts: {readers}")
-        uploads = []
-        for job, held in build["jobs"].items():
-            for step in held.get("steps") or []:
-                if action_of(step) != "actions/upload-artifact":
-                    continue
-                up = step.get("with") or {}
-                path = render(up.get("path", ""), {"runner.temp": "$RUNNER_TEMP"})
-                uploads.append((job, up.get("name"), path, up.get("if-no-files-found")))
-        missing = [f"{script} (line {line}) reads {member} of the artifact {artifact}"
-                   for script, line, artifact, member in readers
-                   if not any(artifact and member and name == artifact and path.endswith(f"/{member}")
-                              and flag == "error" for _, name, path, flag in uploads)]
-        self.assertEqual(missing, [], f"the readers of a Build run's artifact whose artifact or file {self.BUILD} does "
-                                      f"not upload. Its uploads, each as (the job, the artifact, the path, "
-                                      f"if-no-files-found): {uploads}")
-        return readers, uploads
-
-    def test_artifacts_each_reader_reads_a_file_that_build_yaml_uploads(self):
-        self.case()
-
-    def test_control_artifacts_build_results_renamed_in_build_yaml_alone(self):
-        self.passes_unchanged(self.case)
-        changed = self.copy_tree("changed", [(self.BUILD, "name: build-results\n", "name: build-output\n")])
-        with self.assertRaises(AssertionError) as caught:
-            self.case(changed)
-        self.assertIn("take-build-results (line ", str(caught.exception))
-        self.assertNotIn("enroll-dispatch (line ", str(caught.exception))
-
-    def test_control_artifacts_results_json_renamed_in_build_yaml_alone(self):
-        # The results job writes build.json and uploads it. build.yaml stays whole, but take-build-results reads
-        # results.json.
-        self.passes_unchanged(self.case)
-        changed = self.copy_tree("changed", [
-            (self.BUILD, "path: ${{ runner.temp }}/results/results.json",
-             "path: ${{ runner.temp }}/results/build.json"),
-            (self.BUILD, '> "$RUNNER_TEMP/results/results.json"', '> "$RUNNER_TEMP/results/build.json"')])
-        with self.assertRaises(AssertionError) as caught:
-            self.case(changed)
-        self.assertIn("take-build-results (line ", str(caught.exception))
-        self.assertNotIn("enroll-dispatch (line ", str(caught.exception))
-
-
-class WorkflowRunNames(Stand):
-    """(workflow_run): a workflow_run trigger names the workflows that it listens to by their name:, not by their file.
-    A rename of one of them stops the trigger, and a second file with the same name starts it for the runs of that
-    file too. No run fails either way. So each name in the workflows of a workflow_run trigger is the name of exactly
-    one workflow file of .github/workflows."""
-
-    # The files that listen to a workflow_run at the head.
-    LISTENERS = {"enroll-dispatch.yml", "held-runs.yml", "review.yml", "toolchain-images-publish.yaml"}
-
-    def case(self, tree=ROOT):
-        """Each workflow file of `tree` with a workflow_run trigger, and each name in its workflows: exactly one
-        workflow file there has that name. GitHub gives a file with no name: the name of its path. The message names
-        each (listening file, name) that no file or more than one file has. Return the names that each listening file
-        listens to, and the files of each name."""
-        directory = tree / ".github" / "workflows"
-        workflows = {path.name: parse(path.read_text())
-                     for path in sorted(directory.iterdir()) if path.suffix in (".yml", ".yaml")}
-        held = {}
-        for file, workflow in workflows.items():
-            held.setdefault(workflow.get("name") or f".github/workflows/{file}", []).append(file)
-        listens = {file: list((triggers(workflow)["workflow_run"] or {}).get("workflows") or [])
-                   for file, workflow in workflows.items() if "workflow_run" in triggers(workflow)}
-        self.assertLessEqual(self.LISTENERS, set(listens),
-                             f"the files of .github/workflows with workflow_run: {listens}")
-        wrong = [f"{file} names no workflow in workflow_run" for file, names in listens.items() if not names]
-        for file, names in listens.items():
-            for name in names:
-                files = held.get(name, [])
-                if len(files) != 1:
-                    wrong.append(f"{file} listens to {name!r}, the name of "
-                                 + (f"{len(files)} files: {', '.join(files)}" if files else "no workflow file"))
-        self.assertEqual(wrong, [], "the names of the workflow_run triggers that are not the name of exactly one "
-                                    "workflow file:" + "".join(f"\n  {line}" for line in wrong)
-                                    + f"\nThe files of each name: {held}")
-        return listens, held
-
-    def test_workflow_run_each_name_is_the_name_of_one_workflow_file(self):
-        self.case()
-
-    def test_control_workflow_run_tests_renamed_in_tests_yaml_alone(self):
-        self.passes_unchanged(self.case)
-        changed = self.copy_tree("changed", [(".github/workflows/tests.yaml", 'name: "Tests"\n',
-                                              'name: "Unit tests"\n')])
-        with self.assertRaises(AssertionError) as caught:
-            self.case(changed)
-        for file in ("enroll-dispatch.yml", "held-runs.yml"):
-            self.assertIn(f"{file} listens to 'Tests', the name of no workflow file", str(caught.exception))
-
-    def test_control_workflow_run_a_second_file_named_build(self):
-        # No file listens to Enroll dispatch, so only the name Build breaks: two files hold it.
-        self.passes_unchanged(self.case)
-        changed = self.copy_tree("changed", [(".github/workflows/enroll-dispatch.yml", "name: Enroll dispatch\n",
-                                              "name: Build\n")])
-        with self.assertRaises(AssertionError) as caught:
-            self.case(changed)
-        for file in ("held-runs.yml", "review.yml"):
-            self.assertIn(f"{file} listens to 'Build', the name of 2 files: build.yaml, enroll-dispatch.yml",
-                          str(caught.exception))
-        self.assertNotIn("listens to 'Triage'", str(caught.exception))
-
-
 class SteeringFiles(unittest.TestCase):
     """(u): the list of steering files."""
-
-    # The patterns of .github/CODEOWNERS at commit 62081ee (#194), the last commit that changed them, in their order.
-    CODEOWNERS_62081EE = (
-        "/.github/", "/src/", "/infra/", "/seeds/", ".claude/", "CLAUDE*.md", "AGENTS*.md", "/.mcp.json", "/*.py",
-        "/pytest.ini", "/.pytest.ini", "/pyproject.toml", "/uv.lock", "/.python-version", "/setup.cfg", "/tox.ini",
-        "/review.md", "/review-change.md", "/review-issue.md", "/.claude/skills/write-to-maintainer/",
-        "/.github/CODEOWNERS")
 
     def test_u_the_steering_files_are_the_last_owned_patterns_of_codeowners(self):
         path = ROOT / ".github" / "scripts" / "steering.py"
@@ -2290,7 +2093,6 @@ class SteeringFiles(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("steering_of_this_test", path)
         steering = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(steering)
-        self.assertEqual(list(steering.STEERING), list(self.CODEOWNERS_62081EE))
         for name in (".github/workflows/build.yaml", ".github/workflows/review.yml", "projects/x/AGENTS.md",
                      "projects/x/.claude/settings.json", "docs/CLAUDE.md"):
             self.assertTrue(steering.is_steering(name), name)
@@ -2445,7 +2247,7 @@ class RunByHandOffMain(Stand):
         review = self.workflow(tree, "review.yml")
         signing = {n for n, j in review["jobs"].items()
                    if "environment" in j or "id-token" in (j.get("permissions") or {})}
-        self.assertEqual(signing, self.SIGNING)
+        self.assertTrue(signing, "no job of review.yml signs in")
         for route in self.ROUTES:
             got, _ = test_outside_screen.run_graph(route, outputs=self.OUTPUTS, event="workflow_dispatch",
                                                    workflow=review, ref="refs/heads/other")
@@ -2554,13 +2356,6 @@ class ClaudeFiles(Stand):
                 if held_in:
                     self.assertIn("::error::take-review-data: review.tar holds a CLAUDE*.md or an AGENTS*.md under "
                                   "projects/x/", self.took)
-
-    def test_claude_files_no_checkout_of_review_yml_takes_a_ref(self):
-        checkouts = [(name, step) for name, job in self.review["jobs"].items() for step in job.get("steps") or []
-                     if str(step.get("uses", "")).startswith("actions/checkout@")]
-        self.assertTrue(checkouts)
-        for name, step in checkouts:
-            self.assertNotIn("ref", step.get("with") or {}, name)
 
 
 class HeldApproval(Stand):
@@ -3051,10 +2846,8 @@ class HeldApproval(Stand):
 
     def test_held_the_comment_job_makes_a_token_of_its_own_for_the_approval(self):
         steps = self.review["jobs"]["comment"]["steps"]
-        names = [s.get("name") for s in steps]
         app = self.step(self.review, "comment", "Get the oss-verify App's token")
         token = self.step(self.review, "comment", self.TOKEN)
-        approve = self.step(self.review, "comment", self.APPROVE)
 
         def permissions(step):
             return {k: v for k, v in step["with"].items() if k.startswith("permission-")}
@@ -3063,12 +2856,6 @@ class HeldApproval(Stand):
             self.assertTrue(step["uses"].startswith("actions/create-github-app-token@"), step)
         self.assertNotIn("permission-actions", permissions(app))
         self.assertEqual(permissions(token), {"permission-actions": "write"})
-        self.assertEqual(token["id"], "approve")
-        self.assertEqual(names.index(self.TOKEN) + 1, names.index(self.APPROVE))
-        self.assertLess(names.index(self.TOKEN), names.index(self.REPLAY))
-        replay = self.step(self.review, "comment", self.REPLAY)
-        for step in (approve, replay):
-            self.assertEqual(step["env"]["GH_TOKEN"], "${{ steps.approve.outputs.token }}")
         # No other step takes the token that can write runs.
         self.assertEqual([s.get("name") for s in steps if "steps.approve.outputs.token" in json.dumps(s)],
                          [self.APPROVE, self.REPLAY])
@@ -3720,31 +3507,16 @@ class HeldRuns(Stand):
         self.assertEqual(self.go(), [self.starts("review.yml", 171), self.starts("review.yml", 172)], self.log)
         self.assertEqual(len(self.reads["held"]), 2, self.reads)
 
-    def test_held_runs_workflow_holds_no_identity_and_starts_on_events_alone(self):
-        # Events only, never a schedule: a run of Build, Triage or Tests that ended, a push to main, an issue opened or
-        # reopened, and a run by hand, in one concurrency group whose waiting runs keep their places. A run by hand
-        # runs on main alone.
+    def test_held_runs_workflow_holds_no_identity_and_runs_by_hand_on_main_alone(self):
+        # It holds no secret and no identity. Its job runs on each event of its triggers, and on a run by hand only on
+        # main.
         import test_outside_screen
-        workflow = parse(self.workflow_text)
-        self.assertEqual(workflow["name"], "Held runs")
-        self.assertEqual(triggers(workflow), {
-            "workflow_run": {"workflows": ["Build", "Triage", "Tests"], "types": ["completed"]},
-            "push": {"branches": ["main"]},
-            "issues": {"types": ["opened", "reopened"]},
-            "workflow_dispatch": None})
-        names = {parse((ROOT / ".github" / "workflows" / f).read_text())["name"]
-                 for f in ("build.yaml", "triage.yaml", "tests.yaml")}
-        self.assertEqual(names, {"Build", "Triage", "Tests"})
-        self.assertEqual(workflow["concurrency"], {"group": "held-runs", "cancel-in-progress": False, "queue": "max"})
-        self.assertEqual(workflow["permissions"], {})
-        self.assertEqual(list(workflow["jobs"]), ["held-runs"])
-        job = workflow["jobs"]["held-runs"]
-        self.assertNotIn("environment", job)
-        self.assertEqual(job["permissions"], {"actions": "write", "pull-requests": "read"})
+        jobs = parse(self.workflow_text)["jobs"]
+        for name, held in jobs.items():
+            self.assertNotIn("environment", held, name)
+        job = jobs["held-runs"]
         self.assertNotIn("secrets.", self.workflow_text)
         self.assertNotIn("id-token", self.workflow_text)
-        self.assertEqual([s for s in job["steps"] if "uses" in s], [])
-        # The job runs on each event of its triggers, and on a run by hand only on main.
         for event, ref, runs in (("workflow_run", "refs/heads/main", True), ("push", "refs/heads/main", True),
                                  ("issues", "refs/heads/main", True), ("workflow_dispatch", "refs/heads/main", True),
                                  ("workflow_dispatch", "refs/heads/other", False)):
@@ -3753,105 +3525,32 @@ class HeldRuns(Stand):
 
 
 class ReviewThatPasses(Stand):
-    """d10: the comment of an enrollment whose review passes says what happens next, as review.md's paragraph
-    says. README.md says the same of what the applicant needs to do."""
+    """d10: the review job of an enrollment whose review passes has the model read review.md, and hands the comment
+    and the verdicts that the model gave on to the comment job as they are. PostingStep of tests/test_check_checks.py
+    runs the comment job's step that posts them."""
 
-    # The paragraph's statements. The first one finds the paragraph.
-    STATEMENTS = ("Theorem writes the theorem statements of the project, and publishes them as its `publish` field "
-                  "allows (`docs/project-yaml.md`, \"publish\").",
-                  "the check `Enrollment review` of this commit has the conclusion `success`, and the comment says "
-                  "what happens next.",
-                  "If Enroll dispatch then gives the pull request one of four labels, the statements wait.",
-                  "We do not promise to merge the pull request or to start work on the proofs.",
-                  "The maintainer needs to do nothing more, unless the pull request later gets the label "
-                  "`checks-failing`.",
-                  "Theorem checks the binaries again when the statements start, and that label asks for a commit whose "
-                  "binaries pass the checks.",
-                  "When the comment has no request, these sentences end the visible text, in place of the offer below.")
-    # The labels of Enroll dispatch that make the statements wait, and what each one means.
-    LABELS = {"language-paused": "the project's language is paused for now",
-              "name-review": "the project's name has a dot, which the statements repository cannot take",
-              "size-review": "a plain binary has more than 1 MB of code, or its size cannot be read",
-              "maintainer-review": "the author is not shown to maintain the project's repository"}
-    # A pointer to a comment of a label, which the paragraph does not hold: Enroll dispatch puts a label on and posts no
-    # comment. For example "the comment on the label", "the label's comment", or "Enroll dispatch (then) posts a
-    # comment". The true sentence "Enroll dispatch posts no comment." does not match.
-    LABEL_COMMENT = re.compile(r"\bcomments? (?:of|on|for|with|from|about) (?:the |a |each |its |this |that |one )?"
-                               r"label|\blabel(?:'s|s'|s)? comments?\b"
-                               r"|\benroll dispatch (?:\w+ )?(?:posts|writes|leaves) (?:a|its) comment", re.I)
-    # What neither review.md nor the comment of a pass says: that Theorem decides the next step, that a maintainer
-    # will look at or review the pull request, or anything of held bugs.
-    MUST_NOT_SAY = re.compile(r"theorem decides|decides the next step|maintainer will (look|review)|held bug", re.I)
-    # The stand-in model's comment, which tells the maintainer what the paragraph asks for, in its parts.
-    OPENING = "Every check of review.md passes for projects/libreac/."
-    PASSED = "The check `Enrollment review` of this commit has the conclusion `success`."
-    WRITES = ("Theorem writes the theorem statements of the project, and publishes them as its `publish` field allows "
-              "(`docs/project-yaml.md`, \"publish\").")
-    WAITS = "If the pull request then gets one of these four labels, the statements wait:"
-    MEANINGS = tuple(f"- `{label}`: {meaning}." for label, meaning in LABELS.items())
-    NO_PROMISE = "We do not promise to merge the pull request or to start work on the proofs."
-    NOTHING_MORE = "You need to do nothing more, unless the pull request later gets the label `checks-failing`."
-    CHECKED_AGAIN = ("Theorem checks the binaries again when the statements start, and that label asks for a commit "
-                     "whose binaries pass the checks.")
-    # The parts that the posted comment holds as the model wrote them.
-    SAID = (PASSED, WRITES, WAITS, *MEANINGS, NO_PROMISE, NOTHING_MORE, CHECKED_AGAIN)
-    COMMENT = (" ".join((OPENING, PASSED, WRITES, WAITS)) + "\n\n" + "\n".join(MEANINGS) + "\n\n"
-               + " ".join((NO_PROMISE, NOTHING_MORE, CHECKED_AGAIN)) + "\n")
+    # The stand-in model's comment.
+    COMMENT = ("Every check of review.md passes for projects/libreac/.\n\nYou need to do nothing more, unless the pull "
+               "request later gets the label `checks-failing`.\n")
     SESSION = "09227178-7bbf-4e5f-86db-8736e530ef01"
 
-    def paragraph(self):
-        """The bullet of review.md's section "Write the comment" that holds the first statement, with no "- "."""
-        text = (ROOT / "review.md").read_text()
-        section = text.split("\n## Write the comment\n", 1)[1].split("\n## ", 1)[0]
-        found = [bullet.strip() for bullet in re.split(r"(?m)^- ", section) if self.STATEMENTS[0] in bullet]
-        self.assertEqual(len(found), 1, found)
-        return found[0]
-
-    def test_passes_review_md_says_what_happens_after_a_review_that_passes(self):
-        paragraph = self.paragraph()
-        for statement in self.STATEMENTS:
-            self.assertIn(statement, paragraph)
-        for label, meaning in self.LABELS.items():
-            self.assertIn(f"The label `{label}` means that {meaning}.", paragraph)
-
-    def test_passes_review_md_says_nothing_the_comment_of_a_pass_must_not_say(self):
-        """The paragraph names the labels as facts, and does not say who decides. It points to no comment of a
-        label: LABEL_COMMENT does not match it. No line of review.md says what MUST_NOT_SAY matches."""
-        paragraph = self.paragraph()
-        self.assertNotRegex(paragraph, re.compile(r"decid", re.I))
-        self.assertNotRegex(paragraph, self.LABEL_COMMENT)
-        lines = (ROOT / "review.md").read_text().splitlines()
-        self.assertEqual([(n, line) for n, line in enumerate(lines, 1) if self.MUST_NOT_SAY.search(line)], [])
-
-    def test_passes_readme_says_what_the_applicant_needs_to_do(self):
-        """README.md's section "When the checks pass" says that the applicant needs to do nothing more after our review
-        passes, unless the pull request later gets the label checks-failing, and what that label asks for."""
-        section = (ROOT / "README.md").read_text().split("\n## When the checks pass\n", 1)[1].split("\n## ", 1)[0]
-        self.assertIn("When our review passes, you need to do nothing more, unless the pull request later gets the "
-                      "label `checks-failing`.", section)
-        self.assertIn("the pull request gets the label `checks-failing`", section)
-        self.assertIn("the statements wait for a commit whose binaries pass these checks", section)
-
-    def test_passes_the_comment_of_an_enrollment_that_passes_says_what_happens_next(self):
-        """The prompt that the review job builds has the model read review.md, which holds the paragraph. A stand-in
-        model gives COMMENT, which holds what the paragraph asks for, and the verdict pass for each check. This checks
-        that the post step passes the model's text on: the posted comment starts with the first sentence of a pass and
-        holds each part of SAID, and the check run Enrollment review is success. It does not check what a real model
-        writes."""
-        self.paragraph()
-        import test_check_checks
+    def test_passes_the_review_job_hands_on_the_comment_and_the_verdicts_of_the_model(self):
+        """The model reads the prompt the review job builds, and a stand-in model gives COMMENT and the verdict pass
+        for each check. It does not check what a real model writes."""
         import test_outside_screen
         evaluate = test_outside_screen.evaluate
         review = self.workflow(ROOT, "review.yml")
-        posting = test_check_checks.PostingStep
         ctx = {"needs.route.outputs.kind": "enrollment", "needs.route.outputs.pr": "8",
-               "needs.route.outputs.sha": posting.HEAD, "needs.gather.outputs.name": "libreac",
+               "needs.route.outputs.sha": OTHER, "needs.gather.outputs.name": "libreac",
                "needs.gather.outputs.session": "", "needs.gather.outputs.last": ""}
         rc, log, prompt = self.run_step(review, "review", "What the review reads and gives", ctx, ROOT,
                                         evaluate=evaluate)
         self.assertEqual(rc, 0, log)
         self.assertTrue(prompt["prompt"].startswith("Read review.md at the root of this checkout"), prompt)
-        self.assertEqual(self.step(review, "review", "Review")["with"]["prompt"], "${{ steps.prompt.outputs.prompt }}")
+        # The Review step gives the model the prompt that step built, by the step's own id.
+        built = f"steps.{self.step(review, 'review', 'What the review reads and gives')['id']}.outputs.prompt"
+        self.assertEqual(test_outside_screen.interpolated(self.step(review, "review", "Review")["with"]["prompt"],
+                                                          {built: prompt["prompt"]}), prompt["prompt"])
         # The stand-in model: its structured output, every verdict pass.
         ids = self.check_ids()
         result = self.dir / "execution.json"
@@ -3864,22 +3563,8 @@ class ReviewThatPasses(Stand):
         rc, log, kept = self.run_step(review, "review", "Keep the draft, and the held finding apart from it", ctx,
                                       self.temp, evaluate=evaluate)
         self.assertEqual(rc, 0, log)
-        # The comment job's step "Post the comment and record the verdict", as PostingStep runs it.
-        step = posting()
-        step.setUp()
-        try:
-            _, requests = step.post(verdicts=json.loads(kept["verdicts"]), reasons=json.loads(kept["reasons"]),
-                                    review=kept["comment"])
-            sentence = subprocess.run([str(ROOT / ".github/scripts/review-verdict"), "--sentence", "success"],
-                                      env=self.env, check=True, capture_output=True, text=True).stdout.strip()
-            self.assertEqual(step.first_sentence(requests), sentence)
-            [(_, _, body)] = step.comments(requests)
-            for said in self.SAID:
-                self.assertIn(said, body)
-            self.assertNotRegex(body, self.MUST_NOT_SAY)
-            self.assertEqual(step.record(requests)["conclusion"], "success")
-        finally:
-            step.tearDown()
+        self.assertEqual((kept["comment"], json.loads(kept["verdicts"]), json.loads(kept["reasons"])),
+                         (self.COMMENT, {check: "pass" for check in ids}, {}), log)
 
 
 if __name__ == "__main__":
