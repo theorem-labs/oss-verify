@@ -1,35 +1,10 @@
 zlib gzseek64(): no signed overflow in the range checks when gzungetc() has left the position negative.
 
-Defect. gzungetc() on a read handle whose output buffer is empty decrements x.pos (gzread.c:588 at 99623ef7;
-gzread.c:612 for a further push), so a push before any read leaves x.pos = -1. gzseek64 with SEEK_CUR then
-computes pos = x.pos + skip = -1 and evaluates its guard `offset > GZ_OFF_MAX - pos` (gzlib.c:395):
-GZ_OFF_MAX + 1 overflows z_off64_t, a signed overflow, for any offset. With SEEK_SET and an offset near
-GZ_OFF_MAX the later displacement `pos - state->x.pos` (and the raw lseek offset) overflows the same way.
+Without it, a gzungetc() before any read leaves x.pos at -1, and gzseek64's guard (gzlib.c:395 at 99623ef7)
+overflows z_off64_t.
 
-Fix. The SEEK_CUR guard is evaluated only for a positive pos, and a target whose displacement from a negative
-x.pos does not fit in z_off64_t is refused (-1) before either displacement is computed.
-
-Upstream. madler/zlib pull request #1361, "Avoid gzseek overflow after initial pushback" (open on 2026-11-15),
-head commit ce2248ee97501aff83203a68a37369fa6c988eda (two commits on 757f0527: 2da30ec3, then ce2248ee). This is
-ONLY the pull request's gzlib.c hunk (gzseek64, +5/-1), not its test/example.c hunk: the zlib team's copy of
-that hunk (06-zlib-gzseek64-pr1361.patch, md5 2a8c147b11d0988a08695f35de23903a) with its paths rebased from
-ext-base/zlib-checksum_fuzzer/ to the tree root and its index line kept. Its hunk is byte for byte the pull
-request's gzlib.c hunk (`gh api repos/madler/zlib/pulls/1361` as a diff, gzlib.c index c3b3efc27..04220039c),
-and c3b3efc is gzlib.c's blob at aef's pin 99623ef7, where it applies with `patch -p1 --fuzz=0`.
-
-Scope. This patch is applied to the build of targets/zlib-sysfail_fuzzer ONLY, by the pin key LIB_PATCHES
-(tools/ossfuzz/recipes.sh aef_lib_patches, on the build's copy of the tree): no other zlib target, and not
-ext/zlib-sysfail_fuzzer/src, changes. The default patch stack (patches/github.com/madler/zlib/99623ef7.../)
-does not carry it. A release build (AEF_RELEASE=1) applies none of LIB_PATCHES: it is a library-defect fix,
-and the public release ships the library without those.
-
-Provenance. ZLIB-8 (2026-11-15): Jason's answer "No new report; patch it" for the system-call failure driver.
-The driver reaches this bug with no failure schedule (targets/zlib-sysfail_fuzzer/known-ub-ungetc-seek.dsl,
-found by the ZLIB-8 review): on an unpatched build the UBSan flavours trap in gzseek64 (status 132) where plain
-returns -1 (tests/check_sys_schedule.sh S6).
-
-Author of the fix: the pull request's author (GitHub cla7aye15I4nd). Carried unchanged by Claude Opus 5.5
-(aef, 2026-11-15).
+Upstream: madler/zlib pull request #1361, head commit ce2248ee97501aff83203a68a37369fa6c988eda. This is only the
+pull request's gzlib.c hunk, unchanged; its test/example.c hunk is left out.
 
 diff --git a/gzlib.c b/gzlib.c
 index c3b3efc..0422003 100644
