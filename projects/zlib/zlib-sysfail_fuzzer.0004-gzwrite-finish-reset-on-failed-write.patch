@@ -1,48 +1,74 @@
-zlib gz_comp(): when the write that follows Z_STREAM_END fails, set state->reset before the error return, as the
-success path does, so the next gzflush(Z_FINISH) or gzclose() writes the finished member instead of nothing.
+zlib gz_comp(): finish a gzip stream whose Z_FINISH a failed write cut short, so that gzflush(Z_FINISH) and
+gzclose() write the rest of the data and the gzip trailer after a write error.
 
-Defect. gz_comp with flush == Z_FINISH runs deflate() until Z_STREAM_END and then writes the output buffer
-(gzwrite.c:111-128 at 99623ef7). When that write() returns -1 (for example EAGAIN on a non-blocking descriptor,
-which sets state->again and leaves the file usable), gz_comp returns -1 at gzwrite.c:116-121 and never reaches
-`state->reset = 1` (gzwrite.c:144). The deflate stream has already ended, so the next gz_comp(state, Z_FINISH) (a
-retried gzflush(file, Z_FINISH), or gzclose_w) gets Z_STREAM_END again from deflate() with no new output and, with
-ret == Z_OK at the top of its loop, does not write the pending bytes: it returns 0, the call returns Z_OK, and the
-finished member is not written.
+Upstream: madler/zlib pull request #1399, at its head commit f9f20345627b4148c4f880775d3e9557c11e07af, which holds
+two commits on 99623ef7:
+  9e7904dd70bc986cfbea8f6df5937b930dedda96  Write the finished gzip stream after a gzflush(Z_FINISH) that stalls.
+  f9f20345627b4148c4f880775d3e9557c11e07af  Finish a gzip stream cut short by a write error before new input.
+The diff below is the diff from 99623ef7 to f9f20345, unchanged.
 
-Fix. In the write-error branch, when flush == Z_FINISH and ret == Z_STREAM_END, set state->reset = 1 before the
-return, as gzwrite.c:143-144 does on success. The pending bytes stay where they are (x.next .. next_out), and the
-next gz_comp takes the reset path and writes them, followed by one empty 20-byte gzip member, as 1.4 already does
-for any gzflush(Z_FINISH) followed by gzclose (a2b6127); gzread reads the members back as one stream. Nothing
-else changes.
-
-Upstream. madler/zlib pull request #1399, "Write the finished gzip stream after a gzflush(Z_FINISH) that stalls."
-("Fixes #1398"; open on 2026-11-18), head commit 9e7904dd70bc986cfbea8f6df5937b930dedda96, its only commit (on
-99623ef7, gzwrite.c +2/-0). The diff below is that commit's diff; only its index line names the two blobs in full
-(the pull request's diff abbreviates them to 32560fe0b..a7a78f170). It applies at aef's pin 99623ef7 with
-`patch -p1 --fuzz=0`, after the default patch stack and this target's 0001 and 0002, with no offset or fuzz.
-
-Scope. This patch is applied to the build of targets/zlib-sysfail_fuzzer ONLY, by the pin key LIB_PATCHES
-(tools/ossfuzz/recipes.sh aef_lib_patches, on the build's copy of the tree): no other zlib target, and not
-ext/zlib-sysfail_fuzzer/src, changes. The default patch stack (patches/github.com/madler/zlib/99623ef7.../)
-does not carry it. A release build (AEF_RELEASE=1) applies none of LIB_PATCHES: it is a library-defect fix,
-and the public release ships the library without those.
-
-Provenance. ZLIB-8 v5 (2026-11-18): found with the system-call failure driver (a gzflush(Z_FINISH) whose
-write-out fails with EAGAIN, then gzclose); Jason's word 2026-11-16 23:33:55Z: patch it.
-
-Author of the fix: Jason Gross and Claude Opus 5.5 (the pull request's commit). Carried unchanged by Claude Opus
-5.5 (aef, 2026-11-18).
-
+diff --git a/gzguts.h b/gzguts.h
+index df4b0d6..484049c 100644
+--- a/gzguts.h
++++ b/gzguts.h
+@@ -209,6 +209,7 @@ typedef struct {
+     int level;              /* compression level */
+     int strategy;           /* compression strategy */
+     int reset;              /* true if a reset is pending after a Z_FINISH */
++    int finish;             /* true if a write error cut a Z_FINISH short */
+         /* seek request */
+     z_off64_t skip;         /* amount to skip (already rewound if backwards) */
+         /* error information */
+diff --git a/gzlib.c b/gzlib.c
+index c3b3efc..d69121f 100644
+--- a/gzlib.c
++++ b/gzlib.c
+@@ -74,8 +74,10 @@ local void gz_reset(gz_statep state) {
+         state->how = LOOK;          /* look for gzip header */
+         state->junk = -1;           /* mark first member */
+     }
+-    else                            /* for writing ... */
++    else {                          /* for writing ... */
+         state->reset = 0;           /* no deflateReset pending */
++        state->finish = 0;          /* no Z_FINISH cut short */
++    }
+     state->again = 0;               /* no stalled i/o yet */
+     state->skip = 0;                /* no seek request pending */
+     gz_error(state, Z_OK, NULL);    /* clear error */
 diff --git a/gzwrite.c b/gzwrite.c
-index 32560fe0b026f5573fa30e07646ae902805d83be..a7a78f1702124abc7dece3a49a40182e563121f9 100644
+index 32560fe..9c1f41c 100644
 --- a/gzwrite.c
 +++ b/gzwrite.c
-@@ -116,6 +116,8 @@ local int gz_comp(gz_statep state, int flush) {
+@@ -90,6 +90,21 @@ local int gz_comp(gz_statep state, int flush) {
+         return 0;
+     }
+ 
++    /* if a write error cut a Z_FINISH short, then complete that gzip stream
++       before deflate() gets new input or a different flush */
++    if (state->finish) {
++        state->finish = 0;
++        if (strm->avail_in || flush != Z_FINISH) {
++            unsigned avail = strm->avail_in;
++
++            strm->avail_in = 0;
++            ret = gz_comp(state, Z_FINISH);
++            strm->avail_in = avail;
++            if (ret == -1)
++                return -1;
++        }
++    }
++
+     /* check for a pending reset */
+     if (state->reset) {
+         /* don't start a new gzip member unless there is data to write and
+@@ -116,6 +131,10 @@ local int gz_comp(gz_statep state, int flush) {
                  if (writ < 0) {
                      if (BLOCKED(errno))
                          state->again = 1;
 +                    if (flush == Z_FINISH && ret == Z_STREAM_END)
 +                        state->reset = 1;
++                    else if (flush == Z_FINISH)
++                        state->finish = 1;
                      gz_error(state, Z_ERRNO, zstrerror());
                      return -1;
                  }
