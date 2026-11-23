@@ -3495,8 +3495,11 @@ class Owners(unittest.TestCase):
         owned = [[pattern, *teams] for pattern in (
             # Agent instructions and skills at any depth (the first patterns of CODEOWNERS).
             "**/AGENTS.md", "**/CLAUDE.md", "**/SKILL.md", "skills/",
-            # What changes what a workflow runs (the top of CODEOWNERS).
-            "/.github/", "/src/", "/infra/", "/seeds/", ".claude/", "CLAUDE*.md", "AGENTS*.md", "/.mcp.json", "/*.py",
+            # What changes what a workflow runs (the top of CODEOWNERS): of src/, only the modules that a job holding a
+            # token imports from main's src/ (.github/scripts/steering.py keeps all of src/ as steering files).
+            "/.github/", "/src/oss_verify/__init__.py", "/src/oss_verify/__main__.py", "/src/oss_verify/validate.py",
+            "/src/oss_verify/check_build.py", "/infra/", "/seeds/", ".claude/", "CLAUDE*.md", "AGENTS*.md",
+            "/.mcp.json", "/*.py",
             "/pytest.ini", "/.pytest.ini", "/pyproject.toml", "/uv.lock", "/.python-version", "/setup.cfg",
             "/tox.ini",
             "/review.md", "/review-change.md", "/review-issue.md", "/.claude/skills/write-to-maintainer/",

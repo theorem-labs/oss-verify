@@ -10,7 +10,10 @@ skills/ @theorem-labs/engineering @theorem-labs/research
 #
 # The other lines own each file that changes what a workflow runs or what a verdict is, whoever opens the pull request:
 #   /.github/                     the workflows and the scripts they run.
-#   /src/                         the oss_verify package: `oss-verify check` and `oss-verify validate`.
+#   /src/oss_verify/__init__.py,  the modules of the oss_verify package that a job holding a token imports from main's
+#   __main__.py, validate.py,     src/: triage.py, review-gather and terms-accepted import oss_verify.validate, which
+#   check_build.py                imports check_build alone; review-gather also runs python3 -m oss_verify validate;
+#                                 enroll-dispatch.yml and review.yml put main's src/ on PYTHONPATH.
 #   /infra/                       the toolchains `oss-verify check` builds with (infra/toolchains.tsv,
 #                                 infra/base-builder/), and the code it runs in build containers (infra/checks/).
 #   /seeds/                       the seeded projects, which `oss-verify check` builds as it builds projects/.
@@ -34,7 +37,10 @@ skills/ @theorem-labs/engineering @theorem-labs/research
 # code owner unless it adds or changes such a file.
 # These lines stay the last patterns of the file: the last pattern that matches a file decides its owner.
 /.github/ @theorem-labs/engineering @theorem-labs/research
-/src/ @theorem-labs/engineering @theorem-labs/research
+/src/oss_verify/__init__.py @theorem-labs/engineering @theorem-labs/research
+/src/oss_verify/__main__.py @theorem-labs/engineering @theorem-labs/research
+/src/oss_verify/validate.py @theorem-labs/engineering @theorem-labs/research
+/src/oss_verify/check_build.py @theorem-labs/engineering @theorem-labs/research
 /infra/ @theorem-labs/engineering @theorem-labs/research
 /seeds/ @theorem-labs/engineering @theorem-labs/research
 .claude/ @theorem-labs/engineering @theorem-labs/research

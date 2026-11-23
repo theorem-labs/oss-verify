@@ -8,10 +8,14 @@ in the review job. A script in this directory imports it, as enroll-dispatch imp
     steering.is_steering(".github/workflows/build.yaml")  # True
 
 STEERING holds the last patterns of .github/CODEOWNERS, which give a file to @theorem-labs/engineering and
-@theorem-labs/research, in the order of that file, as they are at commit 62081ee. A change to one of the two must change
-the other: a test compares them. The four patterns above them (AGENTS.md, CLAUDE.md, SKILL.md and skills/ at any depth)
-give the same owners and are not in STEERING: AGENTS*.md and CLAUDE*.md already match each AGENTS.md and CLAUDE.md, and
-a skill that Claude Code loads in the review job is under .claude/.
+@theorem-labs/research, in the order of that file, as they were at commit 62081ee, with one difference: in place of
+STEERING's /src/, CODEOWNERS owns only /src/oss_verify/__init__.py, __main__.py, validate.py and check_build.py, the
+modules that a job holding a token imports from main's src/. A change to any src/ file is still a steering change, so
+its Build run's results wait for a person's approval of its head (below), but only those four modules need a code
+owner's approval to merge. A change to one of the two lists must change the other: a test compares them. The four
+patterns above them (AGENTS.md, CLAUDE.md, SKILL.md and skills/ at any depth) give the same owners and are not in
+STEERING: AGENTS*.md and CLAUDE*.md already match each AGENTS.md and CLAUDE.md, and a skill that Claude Code loads in
+the review job is under .claude/.
 
 The workflows that start on pull_request run the merge commit's copy of each workflow file and script. For a pull
 request that changes no steering file, that merge commit holds main's .github/, src/, infra/ and seeds/, so its Build
