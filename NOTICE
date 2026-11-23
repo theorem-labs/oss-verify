@@ -97,6 +97,11 @@ A file under projects/<name>/ or seeds/<name>/ copied from a project's own repos
 (https://github.com/google/oss-fuzz) keeps its licence: the one its header names, or for a file with no header, that
 of the repository it was copied from (for OSS-Fuzz, the Apache License, Version 2.0).
 
-projects/zlib/tramp_alloc.c, emit.h, target.h and the files projects/zlib/api-driver.* are Theorem Labs' and are
-licensed under the MIT licence (LICENSES/MIT.txt). They have no licence lines of their own: they are the sources of
-the API driver as its theorem statements name them.
+projects/zlib/aef_alloc.c, emit.h, target.h and the files projects/zlib/api-driver.* and projects/zlib/sysfail_fuzzer.*
+are Theorem Labs' and are licensed under the MIT licence (LICENSES/MIT.txt). They have no licence lines of their own:
+they are the sources of the two DSL drivers as their theorem statements name them.
+
+projects/zlib/zlib-sysfail_fuzzer.0002-gz_fetch-copy-partial-output-after-read-error.patch,
+zlib-sysfail_fuzzer.0003-gzseek64-overflow-after-initial-pushback.patch and
+zlib-sysfail_fuzzer.0004-gzwrite-finish-reset-on-failed-write.patch change zlib's code as the zlib pull requests
+that each one names, and keep zlib's licence (Zlib).
