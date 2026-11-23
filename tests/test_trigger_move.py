@@ -525,7 +525,7 @@ class PullRequestWorkflows(unittest.TestCase):
             copies[name] = pathlib.Path(self.enterContext(tempfile.TemporaryDirectory())) / "workflows"
             shutil.copytree(ROOT / ".github" / "workflows", copies[name])
         calling = copies["changed"] / "toolchain-images.yaml"
-        line = "      check-make-digests: true\n"
+        line = "    uses: ./.github/workflows/frame-pointer-tests.yaml\n"
         self.assertEqual(calling.read_text().count(line), 1, "the line of docker-tests that the control follows")
         calling.write_text(calling.read_text().replace(line, line + "    secrets: inherit\n"))
         self.r_case(copies["unchanged"])
@@ -1215,19 +1215,19 @@ match args:
         self.assertTrue(caught.endswith(f"the env CRANE_VERSION of .github/workflows/{self.FP_TESTS}"), caught)
 
     # frame-pointer-tests.yaml, the base rows that its step FP_MAKE reads, and that step: it makes the two images that
-    # FramePointers builds on. It compares each with make's digest only when toolchain-images.yaml calls the file.
+    # FramePointersC and FramePointersRust build on, and compares each with make's digest. toolchain-images.yaml calls
+    # the file, which has no trigger of its own.
     FP_TESTS = "frame-pointer-tests.yaml"
     FP_ROWS = ("oss-fuzz-theorems-2026.10", "oss-fuzz-theorems-2026.10-rust")
-    FP_MAKE = "make the C and C++ image and the Rust image, with the digests that make made when make ran"
+    FP_MAKE = "make the C and C++ image and the Rust image, with the digests that make made"
     # A stand-in docker: `docker pull --quiet <image>` passes, and each call goes to $FAKE_DOCKER_CALLS. It runs no other
     # command.
     DOCKER = ('#!/bin/sh\necho "$*" >> "$FAKE_DOCKER_CALLS"\n[ "$1 $2" = "pull --quiet" ] && [ $# -eq 3 ] && exit 0\n'
               'echo "the stand-in docker does not run: docker $*" >&2\nexit 1\n')
 
-    def fp_make(self, check, digests=None):
+    def fp_make(self, digests=None):
         """frame-pointer-tests.yaml's step FP_MAKE, with the stand-in crane and docker, on this repository's FP_ROWS.
-        check is inputs.check-make-digests: True when toolchain-images.yaml calls the file, None on the file's own
-        trigger. digests, a function of the digests that crane mutate makes ({row: digest}), gives the files of make's
+        digests, a function of the digests that crane mutate makes ({row: digest}), gives the files of make's
         artifact, fp-digest/<row>.digest; with no digests there is no fp-digest directory. Return its exit status, its
         log, its outputs, the digests that crane mutate makes, and the images that docker pulled."""
         tests = self.workflow(ROOT, self.FP_TESTS)
@@ -1247,7 +1247,7 @@ match args:
         rc, log, got = self.run_script(step["run"], self.checkout_of(bases), RUNNER_TEMP=str(temp),
                                        FAKE_CRANE=str(home), FAKE_DOCKER_CALLS=str(calls),
                                        PATH=f"{temp / 'bin'}{os.pathsep}{self.env['PATH']}",
-                                       **env_of(tests, "docker-tests", step, {"inputs.check-make-digests": check}))
+                                       **env_of(tests, "docker-tests", step, {}))
         pulled = [line.removeprefix("pull --quiet ") for line in calls.read_text().splitlines()]
         return rc, log, got, made, pulled
 
@@ -1261,15 +1261,15 @@ match args:
         pulled = [image for row in self.FP_ROWS for image in (bases[row][1], refs[row])]
         return {"c": refs[self.FP_ROWS[0]], "rust": refs[self.FP_ROWS[1]]}, pulled
 
-    def test_frame_pointer_tests_compares_with_make_only_when_called(self):
+    def test_frame_pointer_tests_compares_with_make(self):
         # Called by toolchain-images.yaml, with make's digests: each image has make's digest.
-        rc, log, got, made, pulled = self.fp_make(True, lambda made: made)
+        rc, log, got, made, pulled = self.fp_make(lambda made: made)
         self.assertEqual((rc, (got, pulled)), (0, self.fp_images(made)), log)
         self.assertEqual(log.count(", the digest that make made"), 2, log)
-        # On its own trigger, with no make job and no fp-digest: it compares nothing, and gives the same images.
-        rc, log, got, made, pulled = self.fp_make(None)
-        self.assertEqual((rc, (got, pulled)), (0, self.fp_images(made)), log)
-        self.assertEqual(log.count("; no make job in this run, so no digest to compare it with"), 2, log)
+
+    def test_frame_pointer_tests_starts_only_when_toolchain_images_calls_it(self):
+        # tests.yaml's job docker runs FramePointersC and FramePointersRust for every other change.
+        self.assertEqual(list(triggers(self.workflow(ROOT, self.FP_TESTS))), ["workflow_call"])
 
     def test_frame_pointer_tests_called_fails_without_makes_digest_or_on_another(self):
         c, rust = self.FP_ROWS
@@ -1281,7 +1281,7 @@ match args:
         }
         for case, (digests, error) in cases.items():
             with self.subTest(case=case):
-                rc, log, got, _, _ = self.fp_make(True, digests)
+                rc, log, got, _, _ = self.fp_make(digests)
                 self.assertNotEqual(rc, 0, log)
                 self.assertIn(error, log)
                 self.assertNotIn("rust", got, log)

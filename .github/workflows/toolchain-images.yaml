@@ -32,18 +32,17 @@ name: "Toolchain images"
 #                 image, it also counts the calling functions that keep a frame record in the C library, the C++
 #                 library and the AddressSanitizer runtime of the base image. Its step summary gives the results.
 #   docker-tests  After make. It is the job of frame-pointer-tests.yaml (Frame-pointer tests), which this file calls
-#                 (workflow_call) with check-make-digests. It makes the C and C++ image and the Rust image again, and
-#                 fails unless each digest is the digest that make made. Then it runs the class FramePointers of
-#                 tests/test_builder.py on the base images and on the new images. frame-pointer-tests.yaml's header
-#                 says what these tests check. It fails if a test is skipped.
+#                 (workflow_call). It makes the C and C++ image and the Rust image again, and
+#                 fails unless each digest is the digest that make made. Then it runs the classes FramePointersC and
+#                 FramePointersRust of tests/test_builder.py on the base images and on the new images.
+#                 frame-pointer-tests.yaml's header says what these tests check. It fails if a test is skipped.
 #
 # GitHub's paths filter below starts this file only for a change of what make and probe read, the inputs of the
 # images: this file, publish's file, frame-pointer-tests.yaml (the job docker-tests), the probes, infra/toolchains.tsv,
 # the builder and the fixture tests/fixtures/rust-example, whose Dockerfile, lock and crate/Cargo.toml the Rust probe
 # takes. A change of the other files that docker-tests reads (the tests, tests/fixtures/example,
-# src/oss_verify/check_build.py, pyproject.toml) changes no image: it starts frame-pointer-tests.yaml on its own
-# trigger, which runs docker-tests alone, and checks no digest against make. Such a change on main runs no job of this
-# file, so publish has nothing to act on.
+# src/oss_verify/check_build.py, pyproject.toml) changes no image, and runs no job of this file, so publish has nothing
+# to act on: the job docker of tests.yaml runs these tests for every change, on the images that it makes the same way.
 #
 # This file publishes nothing, and no job of it has a write permission. toolchain-images-publish.yaml (Toolchain
 # images: publish) puts the images on ghcr.io, all three in one package, FP_PACKAGE below. GitHub starts it when a run
@@ -351,5 +350,3 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/frame-pointer-tests.yaml
-    with:
-      check-make-digests: true
