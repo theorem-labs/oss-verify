@@ -28,6 +28,13 @@ def language_row(project, oss_fuzz, language, targets, held="-"):
                       f"https://github.com/example/{project}", "address,undefined", targets, targets, held)) + "\n"
 
 
+def block(name, key=None):
+    """The lines of build.sh that build fuzz_<name> in a block of the key `key` (kay-fuzz_<name> if None), after the
+    comment line that marks fuzz_<name> as a target of the release."""
+    key = f"kay-fuzz_{name}" if key is None else key
+    return f"# fuzz_{name}: the release's target {key}\n(\nov_target_begin {key}\nov_target_build fuzz_{name}\n)\n"
+
+
 class Committed(unittest.TestCase):
     def test_docs_seeded_projects_tsv_is_what_the_generator_writes(self):
         committed = seeded_projects.TABLE.read_bytes()
@@ -128,7 +135,8 @@ class Table(unittest.TestCase):
     }
 
     # kay's port, which applies the patch its check applied. The trees of kay-fuzz_b and kay-fuzz_c are links to
-    # that of kay-fuzz_a (kay-fuzz_c's through kay-fuzz_b's), and kay-fuzz_d reads the tree of the key kay-dep.
+    # that of kay-fuzz_a (kay-fuzz_c's through kay-fuzz_b's), and kay-fuzz_d reads the tree of the key kay-dep. build.sh
+    # marks each fuzz target as a target of the release, as a port made from the release's recipe does.
     PORT = {
         "projects/kay/series": "# the order of the patches\nkay-fuzz_a.0001-checked.patch\n",
         "projects/kay/kay-fuzz_a.0001-checked.patch": CHECKED_PATCH,
@@ -146,10 +154,10 @@ class Table(unittest.TestCase):
             "#!/bin/sh -e\n"
             "# A comment that names kay-fuzz_d, kay-dep and kay-fuzz_e does not count.\n"
             ". /usr/local/lib/oss-verify/release-target.sh\n"
-            "(\nov_target_begin kay-fuzz_a\nov_target_build fuzz_a\n)\n"
-            "(\nov_target_begin kay-fuzz_b\nov_target_build fuzz_b\n)\n"
-            "(\nov_target_begin kay-fuzz_c\nov_target_build fuzz_c\n)\n"
+            + "".join(block(name) for name in "abc")
+            + "# fuzz_d: the release's target kay-fuzz_d\n"
             "(\nov_target_begin kay-fuzz_d kay-dep\n  # the harness of kay-fuzz_d\nov_target_build fuzz_d\n)\n"
+            "# fuzz_e: the release's target kay-fuzz_e\n"
             "(\nov_target_begin kay-fuzz_e\nbuild_lib() {\n  oft_build_harness \"fuzz_e.c\"\n}\n"
             "ov_target_build fuzz_e\n)\n"),
     }
@@ -215,8 +223,7 @@ class Table(unittest.TestCase):
         # kay-fuzz_ab's key starts with kay-fuzz_a's, as openssl-asn1parse's starts with openssl-asn1's: a tree is a
         # list of path components, so targets/kay-fuzz_ab is not in targets/kay-fuzz_a. The tree of kay-fuzz_f is
         # in the tree of kay-fuzz_a, as a vendored library is.
-        build = (self.PORT["projects/kay/build.sh"] + "(\nov_target_begin kay-fuzz_ab\nov_target_build fuzz_ab\n)\n"
-                 "(\nov_target_begin kay-fuzz_f\nov_target_build fuzz_f\n)\n")
+        build = self.PORT["projects/kay/build.sh"] + block("ab") + block("f")
         links = "tree\text/kay-fuzz_ab/src\tupstream/kay\nlink\text/kay-fuzz_f/src\text/kay-fuzz_a/src/vendor\n"
         cases = {
             "a patch in the tree of a block": ("ext/kay-fuzz_e/src/lib", "fuzz_e"),
@@ -242,7 +249,7 @@ class Table(unittest.TestCase):
         # As the Rust ports share one vendor tree: the link ext/kay-fuzz_g/vendor is in the tree ext/kay-fuzz_g, so the
         # build of kay-fuzz_g reads ext/kay-fuzz_a/vendor. The links of kay-fuzz_b and kay-fuzz_c point only to
         # ext/kay-fuzz_a/src.
-        build = self.PORT["projects/kay/build.sh"] + "(\nov_target_begin kay-fuzz_g\nov_target_build fuzz_g\n)\n"
+        build = self.PORT["projects/kay/build.sh"] + block("g")
         links = "tree\text/kay-fuzz_a/vendor\tupstream/vendor\nlink\text/kay-fuzz_g/vendor\text/kay-fuzz_a/vendor\n"
         cases = {"a patch through the link": "ext/kay-fuzz_g/vendor/lib",
                  "a patch in the tree that the link points to": "ext/kay-fuzz_a/vendor/lib"}
@@ -255,7 +262,7 @@ class Table(unittest.TestCase):
     def test_a_patch_in_a_tree_that_a_link_in_a_linked_tree_points_to(self):
         # The link ext/kay-fuzz_h/vendor is in the tree ext/kay-fuzz_h and points to ext/kay-lib. The link
         # ext/kay-lib/vendor is in that tree and points to the patched tree. So the build of kay-fuzz_h reads it.
-        build = self.PORT["projects/kay/build.sh"] + "(\nov_target_begin kay-fuzz_h\nov_target_build fuzz_h\n)\n"
+        build = self.PORT["projects/kay/build.sh"] + block("h")
         links = ("tree\text/kay-fuzz_a/vendor\tupstream/vendor\ntree\text/kay-lib\tupstream/kay-lib\n"
                  "link\text/kay-lib/vendor\text/kay-fuzz_a/vendor\nlink\text/kay-fuzz_h/vendor\text/kay-lib\n")
         self.assertEqual(self.row("kay", ports=self.new_patch("ext/kay-fuzz_a/vendor/lib", links=links, build=build)),
@@ -266,7 +273,7 @@ class Table(unittest.TestCase):
         # The link ext/kay-fuzz_g/vendor points to ext/kay-fuzz_c/src/sub. ext/kay-fuzz_c/src is a link to
         # ext/kay-fuzz_b/src, which is a link to ext/kay-fuzz_a/src. So the build of kay-fuzz_g reads
         # ext/kay-fuzz_a/src/sub, and no other part of ext/kay-fuzz_a/src.
-        build = self.PORT["projects/kay/build.sh"] + "(\nov_target_begin kay-fuzz_g\nov_target_build fuzz_g\n)\n"
+        build = self.PORT["projects/kay/build.sh"] + block("g")
         links = "link\text/kay-fuzz_g/vendor\text/kay-fuzz_c/src/sub\n"
         cases = {"a patch in that tree": ("ext/kay-fuzz_a/src/sub/lib", "fuzz_a, fuzz_b, fuzz_c, fuzz_g"),
                  "a patch in another part of ext/kay-fuzz_a/src": ("ext/kay-fuzz_a/src/other",
@@ -292,8 +299,7 @@ class Table(unittest.TestCase):
         # patched path ext/kay-fuzz_q/src/dep/vendor reaches that link through ext/kay-fuzz_q/src/dep: the patch is in
         # ext/kay-lib. The builds of kay-fuzz_p and kay-fuzz_q read it through ext/kay-shared/vendor, and the build of
         # kay-fuzz_r reads it through ext/kay-fuzz_r/src.
-        build = self.PORT["projects/kay/build.sh"] + "".join(
-            f"(\nov_target_begin kay-fuzz_{name}\nov_target_build fuzz_{name}\n)\n" for name in "pqr")
+        build = self.PORT["projects/kay/build.sh"] + "".join(block(name) for name in "pqr")
         links = ("tree\text/kay-shared\tupstream/shared\ntree\text/kay-lib\tupstream/lib\n"
                  "tree\text/kay-fuzz_q/src\tupstream/q\n"
                  "link\text/kay-fuzz_p/src\text/kay-shared\nlink\text/kay-fuzz_p/src/vendor\text/kay-lib\n"
@@ -313,8 +319,7 @@ class Table(unittest.TestCase):
         # A fan: each of 2400 blocks has a link to one shared tree, which is the patched tree.
         names = sorted(f"fuzz_v{i}" for i in range(2400))
         fan = "tree\ts\tupstream/s\n" + "".join(f"link\text/v{i}/vendor\ts\n" for i in range(2400))
-        fan_build = self.PORT["projects/kay/build.sh"] + "".join(
-            f"(\nov_target_begin v{i}\nov_target_build fuzz_v{i}\n)\n" for i in range(2400))
+        fan_build = self.PORT["projects/kay/build.sh"] + "".join(block(f"v{i}", f"v{i}") for i in range(2400))
         # A long link: ext/w is a link whose target has 32,000 components. The first component, l39, is the top of a
         # ladder of 39 links. Each of the 23,000 keys of one ov_target_begin line is w/<n>, so the walk of the block
         # tree ext/w/<n> follows ext/w and the 39 links of the ladder, and then reads the rest of the target of ext/w.
@@ -326,14 +331,16 @@ class Table(unittest.TestCase):
         # Many keys: one ov_target_begin line that names the same key 130,000 times, or 60,000 different keys. The
         # table reads the trees of a key once, so the row of the same key names fuzz_k. For the 60,000 keys, the steps
         # run out at about the 15,000th key.
-        same_build = "(\nov_target_begin" + " k" * 130_000 + "\nov_target_build fuzz_k\n)\n"
+        same_build = ("# fuzz_k: the release's target k\n(\nov_target_begin" + " k" * 130_000
+                      + "\nov_target_build fuzz_k\n)\n")
         keys = ["".join(letters) for letters in itertools.product(string.ascii_letters, repeat=3)][:60_000]
         keys_build = "(\nov_target_begin " + " ".join(keys) + "\nov_target_build fuzz_k\n)\n"
         # A key with long trees, named many times: ext/D is a link whose target has 10,000 components, and one
         # ov_target_begin line names D 60,000 times. Each time that a block names a key, the table must not read the
         # key's trees again. So the row names fuzz_z.
         deep = "tree\tbase\tupstream/base\nlink\text/D\tbase" + "/x" * 10_000 + "\n"
-        deep_build = "(\nov_target_begin kay-fuzz_z" + " D" * 60_000 + "\nov_target_build fuzz_z\n)\n"
+        deep_build = ("# fuzz_z: the release's target kay-fuzz_z\n(\nov_target_begin kay-fuzz_z" + " D" * 60_000
+                      + "\nov_target_build fuzz_z\n)\n")
         # Keys with a character that is not a word character, a dot or a dash: 8,000 keys on one ov_target_begin line,
         # and one key +x+x... of 40,000 characters, which a line x+x+x... of 160,000 characters holds many times, each
         # time after an x. The table does not search build.sh for such a key. So the row cannot name the fuzz targets
@@ -473,15 +480,63 @@ class Table(unittest.TestCase):
                          "this table cannot name: the binaries of fuzz_d differ from the release's, and others may"
                          + KAY_NOTES)
 
+    def test_a_fuzz_target_that_the_release_did_not_build(self):
+        # As zlib's compress_roundtrip_full_fuzzer: the tree of kay-fuzz_n is a link to that of kay-fuzz_e, and build.sh
+        # does not mark fuzz_n as a target of the release. A patch at that tree changes fuzz_e and fuzz_n: the notes
+        # name only fuzz_e in the list of the patch and as a binary that differs from the release's, and end with
+        # fuzz_n, which the release did not build. A patch at targets/kay-fuzz_n changes fuzz_n only. When the port
+        # also applies kay.0003-new.patch, whose fuzz targets the table cannot name, the notes still end with fuzz_n.
+        build = (self.PORT["projects/kay/build.sh"] + "# fuzz_n: not a target of the release.\n"
+                 "(\nov_target_begin kay-fuzz_n\nov_target_build fuzz_n\n)\n")
+        links = "link\text/kay-fuzz_n/src\text/kay-fuzz_e/src\n"
+        cannot = "; applies kay.0003-new.patch, whose fuzz targets this table cannot name"
+        cases = {
+            "a patch that changes a fuzz target of the release and another": (
+                "ext/kay-fuzz_e/src", False, "applies kay.0002-new.patch to fuzz_e: the binaries of fuzz_e differ from "
+                "the release's; the release did not build fuzz_n"),
+            "a patch that changes no fuzz target of the release": (
+                "targets/kay-fuzz_n", False, "applies kay.0002-new.patch to no fuzz target that the release built; the "
+                "release did not build fuzz_n"),
+            "a patch that changes a fuzz target of the release and another, and one whose fuzz targets this table "
+            "cannot name": (
+                "ext/kay-fuzz_e/src", True,
+                "applies kay.0002-new.patch to fuzz_e" + cannot + ": the binaries of fuzz_e differ from the release's, "
+                "and others may; the release did not build fuzz_n"),
+            "a patch that changes no fuzz target of the release, and one whose fuzz targets this table cannot name": (
+                "targets/kay-fuzz_n", True,
+                "applies kay.0002-new.patch to no fuzz target that the release built" + cannot + ": some of its "
+                "binaries may differ from the release's; the release did not build fuzz_n"),
+        }
+        for case, (at, unnamed, words) in cases.items():
+            with self.subTest(case):
+                ports = self.new_patch(at, links=links, build=build)
+                if unnamed:
+                    # Series lists kay.0003-new.patch, and sources does not apply it.
+                    ports["projects/kay/series"] += "kay.0003-new.patch\n"
+                    ports["projects/kay/kay.0003-new.patch"] = NEW_PATCH
+                self.assertEqual(self.row("kay", ports=ports), SINCE + words + KAY_NOTES)
+
     def test_a_reproducible_row_with_a_patch_since_the_check(self):
+        # A row whose result is not reproduces names no binary that differs from the release's. Its notes still end
+        # with the fuzz targets that the patch changes and that the release did not build: in the second case, the
+        # tree of dee-other is a link to that of dee-fuzz, and build.sh does not mark fuzz_other as a target of the
+        # release.
         ports = {"projects/dee/series": "dee-fuzz.0001-new.patch\n", "projects/dee/dee-fuzz.0001-new.patch": NEW_PATCH,
                  "projects/dee/sources": "tree\text/dee-fuzz/src\tupstream/dee\n"
                                          "patch\text/dee-fuzz/src\tdee-fuzz.0001-new.patch\n",
-                 "projects/dee/build.sh": "(\nov_target_begin dee-fuzz\nov_target_build fuzz_dee\n)\n"}
-        self.assertEqual(self.row("dee", ports=ports),
-                         "dee\tyes\treproducible\tthe seed port's check: 4 binaries; a second build is identical; the "
-                         "release has none to compare; since that check the port applies dee-fuzz.0001-new.patch to "
-                         "fuzz_dee\t-")
+                 "projects/dee/build.sh": block("dee", "dee-fuzz")}
+        link = "link\text/dee-other/src\text/dee-fuzz/src\n"
+        other = "(\nov_target_begin dee-other\nov_target_build fuzz_other\n)\n"
+        unmarked = {**ports, "projects/dee/sources": ports["projects/dee/sources"] + link,
+                    "projects/dee/build.sh": ports["projects/dee/build.sh"] + other}
+        since = ("dee\tyes\treproducible\tthe seed port's check: 4 binaries; a second build is identical; the "
+                 "release has none to compare; since that check the port applies dee-fuzz.0001-new.patch to fuzz_dee")
+        cases = {"a patch that changes a fuzz target of the release": (ports, since + "\t-"),
+                 "a patch that also changes a fuzz target that the release did not build": (
+                     unmarked, since + "; the release did not build fuzz_other\t-")}
+        for case, (files, row) in cases.items():
+            with self.subTest(case):
+                self.assertEqual(self.row("dee", ports=files), row)
 
     def test_the_port_in_projects_decides(self):
         changed = self.new_patch("targets/kay-fuzz_d")

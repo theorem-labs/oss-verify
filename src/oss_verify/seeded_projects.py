@@ -35,8 +35,12 @@ them when sources shows that lay-out-sources cannot lay out the port:
 It also cannot name them when the sources and the build.sh of the port take more than 1,000,000 steps (STEPS) to
 read. The table does not search build.sh for a key with a character that is not a word character, a dot or a dash.
 So it also cannot name the fuzz targets of a patch that a build reads through a tree of such a key. When the check
-found that the binaries match the release's, the notes also say which binaries differ, or may differ. No content of
-a port stops the table: a port file that is missing or that cannot be read counts as absent.
+found that the binaries match the release's, the notes also say which binaries differ, or may differ. The list of
+the fuzz targets of a patch, and the list of the binaries that differ from the release's, name a fuzz target only
+when the release built it: a comment line of build.sh says "# <fuzz target>: the release's target <its name in the
+release>", as at the start of each block of a port made from the release's recipe. The notes end with the other
+fuzz targets that a patch changes, and say that the release did not build them. No content of a port stops the
+table: a port file that is missing or that cannot be read counts as absent.
 
 tests/test_seeded_projects.py fails when docs/seeded-projects.tsv is not what this writes. The workflow
 .github/workflows/tests.yaml runs its test Committed in every run, so a pull request that changes this file,
@@ -99,7 +103,7 @@ MAXSYMLINKS = 40
 # a path or the trie, and takes steps for what it reads. So the table ends on each port. A probe at a tree of a real
 # port takes fewer than 80,000 steps (projects/openssl). test_port_content_that_fills_sources_takes_a_bounded_time in
 # tests/test_seeded_projects.py makes a port of each kind of slow shape that we know. The table has all of STEPS for
-# each port, and the steps run out on some of them. The fan of 2400 blocks there takes about 425,000 steps. On the
+# each port, and the steps run out on some of them. The fan of 2400 blocks there takes about 525,000 steps. On the
 # machine where we measured, each of these ports takes less than 0.5 seconds of CPU time: the most is 0.35 to 0.45
 # seconds, for 2,100 patch lines at a tree that holds 20,000 trees. The slowest port that we found has the same kind
 # of shape, and takes all the steps and 0.4 to 0.6 seconds: 3,500 patch lines at a tree that holds the trees of 500
@@ -111,6 +115,9 @@ STEPS = 1_000_000
 KEY_STEPS = 40
 # A whole word of a line of build.sh: a run of word characters, dots and dashes that is as long as it can be.
 WORD = re.compile(r"[\w.-]+")
+# A comment line of build.sh that marks a fuzz target that the release built: "# <fuzz target>: the release's target
+# <its name in the release>", as at the start of each block of a port made from the release's recipe.
+RELEASE_TARGET = re.compile(r"\s*# (\S+): the release's target \S")
 LANGUAGE_NAMES = {"rust": "Rust", "python": "Python", "go": "Go", "javascript": "JavaScript", "jvm": "JVM"}
 
 
@@ -396,16 +403,17 @@ def meeting(index, path, steps):
 
 
 def target_blocks(build, steps):
-    """What the table reads of the text of a build.sh, without its comment lines (whose first character that is not
-    blank is #): (blocks, other).
+    """What the table reads of the text of a build.sh: (blocks, other, release_targets). blocks and other leave out
+    its comment lines (whose first character that is not blank is #).
       - blocks: [(keys, fuzz targets)] for each ov_target_begin line: the block's key and dependency keys, each once,
         and the fuzz targets that the ov_target_build lines after it name.
       - other: the text of the lines that are not ov_target_begin lines, with a newline between two lines.
+      - release_targets: the fuzz targets that a comment line marks as targets that the release built (RELEASE_TARGET).
     None if `steps` run out (see text_lines)."""
     lines = text_lines(build, steps)
     if lines is None:
         return None
-    blocks, other = [], []
+    blocks, other, release_targets = [], [], set()
     for line in lines:
         words = line.split()
         if words[:1] == ["ov_target_begin"]:
@@ -414,7 +422,11 @@ def target_blocks(build, steps):
             if words[:1] == ["ov_target_build"] and words[1:] and blocks:
                 blocks[-1][1].append(words[1])
             other.append(line)
-    return blocks, "\n".join(other)
+        else:
+            marked = RELEASE_TARGET.match(line)
+            if marked:
+                release_targets.add(marked[1])
+    return blocks, "\n".join(other), release_targets
 
 
 def named_elsewhere(keys, other, steps):
@@ -444,6 +456,7 @@ class Layout:
       - readers: for each tree, the blocks of build.sh that read it (their numbers in targets)
       - named: for each tree, whether it is a tree of a key that build.sh can name elsewhere (named_elsewhere)
       - targets: for each block of build.sh, the fuzz targets that it builds
+      - release_targets: the fuzz targets that build.sh marks as targets that the release built (target_blocks)
       - steps: the steps that the table can still take on the port"""
     patched: dict
     index: list
@@ -451,6 +464,7 @@ class Layout:
     readers: list
     named: list
     targets: list
+    release_targets: set
     steps: Steps
 
 
@@ -462,7 +476,7 @@ def port_layout(port):
     read = None if laid is None else target_blocks(port_text(port, "build.sh"), steps)
     if read is None:
         return None
-    (root, links, patched), (blocks, other) = laid, read
+    (root, links, patched), (blocks, other, release_targets) = laid, read
     trees = key_trees(root, blocks, names, steps)
     elsewhere = None if trees is None else named_elsewhere(trees, other, steps)
     if elsewhere is None:
@@ -492,7 +506,7 @@ def port_layout(port):
         for key in keys:
             for tree in numbers[key]:
                 readers[tree].append(block)
-    return Layout(patched, index, holders, readers, named, [targets for _, targets in blocks], steps)
+    return Layout(patched, index, holders, readers, named, [targets for _, targets in blocks], release_targets, steps)
 
 
 def reached_trees(layout, paths):
@@ -518,34 +532,37 @@ def reached_trees(layout, paths):
 
 def fuzz_targets(layout, patch):
     """The sorted fuzz targets whose builds read a tree that the sources of a port apply `patch` to, from the port's
-    `layout` (from port_layout). None if its sources and build.sh do not show them all (see the module's
-    docstring)."""
+    `layout` (from port_layout): (those that the release built, the others). None if its sources and build.sh do not
+    show them all (see the module's docstring)."""
     found = None if layout is None or patch not in layout.patched else reached_trees(layout, layout.patched[patch])
     if found is None or any(layout.named[tree] for tree in found):
         return None
     targets = [layout.targets[block] for block in {block for tree in found for block in layout.readers[tree]}]
     if not targets or not all(targets):
         return None
-    # Each fuzz target of each block takes one step, and one step for each of its characters, which the set and the
-    # sort of the fuzz targets compare.
+    # Each fuzz target of each block takes one step, and one step for each of its characters, which the set of the
+    # fuzz targets, its intersection and difference with layout.release_targets, and their sorts compare.
     if not layout.steps.take(sum(len(names) + sum(map(len, names)) for names in targets)):
         return None
-    return sorted({name for names in targets for name in names})
+    reached = {name for names in targets for name in names}
+    return sorted(reached & layout.release_targets), sorted(reached - layout.release_targets)
 
 
 def applied(patch, other_bytes, targets):
     """The words that name `patch`, which the port applies since the check of its seed port (in bytes other than
-    that check's, if `other_bytes`), and its fuzz `targets` (None if the table cannot name them)."""
+    that check's, if `other_bytes`), and the fuzz `targets` of the patch that the release built (None if the table
+    cannot name the fuzz targets of the patch)."""
     other = " in bytes other than that check's" if other_bytes else ""
     if targets is None:
         return f"applies {patch}{other}, whose fuzz targets this table cannot name"
-    return f"applies {patch}{other}{',' if other_bytes else ''} to {', '.join(targets)}"
+    named = ", ".join(targets) or "no fuzz target that the release built"
+    return f"applies {patch}{other}{',' if other_bytes else ''} to {named}"
 
 
 def port_changes(port, checked):
     """What `port` applies since the check of its seed port, which applied `checked` ({patch: sha256}): [(words,
-    fuzz targets or None)], first each patch applied since that check in series order, then each patch of
-    `checked` that the port no longer applies."""
+    fuzz targets that the release built or None, other fuzz targets)], first each patch applied since that check in
+    series order, then each patch of `checked` that the port no longer applies."""
     listed = dict.fromkeys(validate.series_entries(port_text(port, validate.SERIES)))
     # The layout of the port, made once, for the first patch whose fuzz targets are wanted.
     layout = functools.cache(lambda: port_layout(port))
@@ -554,25 +571,37 @@ def port_changes(port, checked):
         data = port_bytes(port, patch)
         if data is not None and checked.get(patch) == hashlib.sha256(data).hexdigest():
             continue
-        targets = None if data is None else fuzz_targets(layout(), patch)
-        changes.append((applied(patch, patch in checked, targets), targets))
-    return changes + [(f"no longer applies {patch}", None) for patch in checked if patch not in listed]
+        found = None if data is None else fuzz_targets(layout(), patch)
+        built, others = (None, []) if found is None else found
+        changes.append((applied(patch, patch in checked, built), built, others))
+    return changes + [(f"no longer applies {patch}", None, []) for patch in checked if patch not in listed]
 
 
 def build_notes(build, changes):
     """The build notes of a seeded project, from its row of seeds/builds.tsv and what its port applies since that
-    check (`changes`, from port_changes)."""
+    check (`changes`, from port_changes). They end with the fuzz targets that the changes reach and that the release
+    did not build."""
     if not changes:
         return build["detail"]
-    notes = f"the seed port's check: {build['detail']}; since that check the port {'; '.join(w for w, _ in changes)}"
+
+    def joined(lists):
+        """The fuzz targets in `lists` (each a list, or None for none), each once, sorted, with ", " between two."""
+        return ", ".join(sorted({name for names in lists for name in names or ()}))
+
+    words = "; ".join(w for w, _, _ in changes)
+    notes = f"the seed port's check: {build['detail']}; since that check the port {words}"
+    others = joined(names for _, _, names in changes)
+    end = f"; the release did not build {others}" if others else ""
     if build["result"] != "reproduces":
-        return notes
-    named = ", ".join(sorted({name for _, targets in changes for name in targets or ()}))
-    if all(targets is not None for _, targets in changes):
-        return f"{notes}: the binaries of {named} differ from the release's"
-    if named:
-        return f"{notes}: the binaries of {named} differ from the release's, and others may"
-    return f"{notes}: some of its binaries may differ from the release's"
+        return notes + end
+    named = joined(targets for _, targets, _ in changes)
+    if all(targets is not None for _, targets, _ in changes):
+        differ = f": the binaries of {named} differ from the release's" if named else ""
+    elif named:
+        differ = f": the binaries of {named} differ from the release's, and others may"
+    else:
+        differ = ": some of its binaries may differ from the release's"
+    return notes + differ + end
 
 
 def table(seeds=SEEDS, projects=PROJECTS):
