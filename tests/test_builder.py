@@ -146,6 +146,20 @@ def run_in_container(image, runner, *mounts):
                            image, "-c", f"{NO_CORE_MEMORY}\n{runner}"], capture_output=True, text=True, check=True)
 
 
+def compile_builds(tag, raw, labels, **options):
+    """check_build.compile_build of each build of `raw` ({build: the directory of its $OUT}), all at once, each in a
+    container of its own (check_build.in_threads), with `options`. Most of one build is one process at a time (CPython's
+    configure in a Python build, rustc on core and std in a Rust one), so one after another the builds left most of the
+    cores idle. The first failure is raised once every build has ended."""
+    outcomes = check_build.in_threads(
+        lambda build: check_build.compile_build(tag, build, validate.BUILDS[build], raw[build], labels=labels,
+                                                **options),
+        list(raw), len(raw))
+    for outcome in outcomes:
+        if isinstance(outcome, BaseException):
+            raise outcome
+
+
 @unittest.skipUnless(os.environ.get("OV_DOCKER_TESTS") == "1" and docker_ready(),
                      "set OV_DOCKER_TESTS=1, with Docker and the toolchain image, to build the fixture")
 class Builder(unittest.TestCase):
@@ -160,11 +174,8 @@ class Builder(unittest.TestCase):
                               dockerfile="", builds=BUILDS, fuzz_targets=None)
         builder = check_build.build_builder()
         check_build.build_project(job, "0" * 40, builder, TAG, cls.work)
-        cls.raw = {}
-        for build in BUILDS:
-            cls.raw[build] = cls.work / "raw" / build
-            check_build.compile_build(TAG, build, validate.BUILDS[build], cls.raw[build],
-                                      labels=check_build.work_label(cls.work))
+        cls.raw = {build: cls.work / "raw" / build for build in BUILDS}
+        compile_builds(TAG, cls.raw, check_build.work_label(cls.work))
         cls.found = {build: manifest.discover(directory) for build, directory in cls.raw.items()}
         cls.targets, cls.problems = manifest.resolve_targets(cls.found)
         cls.entries, cls.missing = manifest.collect(cls.raw, cls.targets, cls.work / "out")
@@ -318,11 +329,8 @@ class PythonBuilder(unittest.TestCase):
                               fuzz_targets=["fuzz_example"], language="python")
         builder = check_build.build_builder(check_build.newest_toolchain("python"))
         check_build.build_project(job, "0" * 40, builder, PYTHON_TAG, cls.work)
-        cls.raw = {}
-        for build in BUILDS:
-            cls.raw[build] = cls.work / "raw" / build
-            check_build.compile_build(PYTHON_TAG, build, validate.BUILDS[build], cls.raw[build],
-                                      labels=check_build.work_label(cls.work))
+        cls.raw = {build: cls.work / "raw" / build for build in BUILDS}
+        compile_builds(PYTHON_TAG, cls.raw, check_build.work_label(cls.work))
         found = {build: manifest.discover(directory) for build, directory in cls.raw.items()}
         cls.targets, cls.problems = manifest.resolve_targets(found, job.fuzz_targets)
         cls.entries, cls.missing = manifest.collect(cls.raw, cls.targets, cls.work / "out")
@@ -388,11 +396,8 @@ class RustBuilder(unittest.TestCase):
                               ref="", dockerfile="", builds=BUILDS, fuzz_targets=["example_fuzzer"], language="rust")
         builder = check_build.build_builder(check_build.newest_toolchain("rust"))
         check_build.build_project(job, "0" * 40, builder, RUST_TAG, cls.work)
-        cls.raw = {}
-        for build in BUILDS:
-            cls.raw[build] = cls.work / "raw" / build
-            check_build.compile_build(RUST_TAG, build, validate.BUILDS[build], cls.raw[build],
-                                      labels=check_build.work_label(cls.work))
+        cls.raw = {build: cls.work / "raw" / build for build in BUILDS}
+        compile_builds(RUST_TAG, cls.raw, check_build.work_label(cls.work))
         found = {build: manifest.discover(directory) for build, directory in cls.raw.items()}
         cls.targets, cls.problems = manifest.resolve_targets(found, job.fuzz_targets)
         cls.entries, cls.missing = manifest.collect(cls.raw, cls.targets, cls.work / "out")
@@ -537,11 +542,8 @@ class AllocationFailureOnCjson(unittest.TestCase):
                               dockerfile="", builds=BUILDS, fuzz_targets=None)
         builder = check_build.build_builder()
         check_build.build_project(job, CJSON_COMMIT, builder, CJSON_TAG, cls.work)
-        raw = {}
-        for build in BUILDS:
-            raw[build] = cls.work / "raw" / build
-            check_build.compile_build(CJSON_TAG, build, validate.BUILDS[build], raw[build],
-                                      labels=check_build.work_label(cls.work))
+        raw = {build: cls.work / "raw" / build for build in BUILDS}
+        compile_builds(CJSON_TAG, raw, check_build.work_label(cls.work))
         found = {build: manifest.discover(directory) for build, directory in raw.items()}
         cls.targets, _ = manifest.resolve_targets(found)
         cls.entries, _ = manifest.collect(raw, cls.targets, cls.work / "out")

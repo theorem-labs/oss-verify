@@ -19,7 +19,7 @@ from oss_verify import check_binaries
 from oss_verify import check_build
 from oss_verify import check_links
 from oss_verify import validate
-from test_builder import RUN, docker_ready, run_in_container
+from test_builder import RUN, compile_builds, docker_ready, run_in_container
 
 FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "target-settings"
 TAG = f"oss-verify-test/target-settings:{RUN}"
@@ -50,8 +50,7 @@ class TargetSettings(unittest.TestCase):
         check_build.build_project(job, "0" * 40, builder, TAG, work)
         labels = check_build.work_label(work)
         cls.raw = {build: work / build for build in BUILDS}
-        for build in BUILDS:
-            check_build.compile_build(TAG, build, validate.BUILDS[build], cls.raw[build], labels=labels, record=True)
+        compile_builds(TAG, cls.raw, labels, record=True)
 
     def record(self, build, target):
         """The record of the link of `target` in `build` (check_binaries.record_of), checked to be a whole record."""
