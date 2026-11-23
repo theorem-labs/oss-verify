@@ -57,6 +57,23 @@ int tramp_open(const char *path, int flags, ...) { (void)path; (void)flags; retu
 '''
 # An object of the link's own that defines a new name of the library map, which only a trampoline may define.
 IMPOSTOR = "int tramp_open(const char *path, int flags, ...) { (void)path; (void)flags; return 42; }\n"
+# The review's bypass: with -Wl,--wrap=tramp_open, the library's renamed open goes to __wrap_tramp_open, which calls the
+# real open. The linker writes its -y trace before it applies --wrap, so only the refusal of the wrap stops it.
+WRAP = r'''#include <fcntl.h>
+int __wrap_tramp_open(const char *path, int flags, ...) { return open(path, flags); }
+'''
+# Objects that already name a new name of a map, or that call one from where they may not.
+EARLY = "#include <stddef.h>\nvoid *tramp_malloc(size_t);\nint early(void) { return tramp_malloc(1) != 0; }\n"
+OWN = "#include <stddef.h>\nvoid *tramp_malloc(size_t);\nvoid *own_alloc(void) { return tramp_malloc(1); }\n"
+TRAMP_CALLS_OPEN = "int tramp_open(const char *, int, ...);\nint tramp_two(void) { return tramp_open(\"x\", 0); }\n"
+# A library split in two members: the one the driver pulls allocates and opens nothing; the other, which nothing
+# pulls, calls open.
+SPLIT_TEST = r'''#include <stdlib.h>
+int library_test(void) { void *p = malloc(8); if (!p) return 3; free(p); return 0; }
+'''
+SPLIT_OPEN = "#include <fcntl.h>\nint unused_open(void) { return open(\"x\", O_RDONLY); }\n"
+# A stand-in llvm-objcopy that copies its input to its output and renames nothing.
+COPYING_OBJCOPY = '#!/bin/sh\neval "src=\\${$(($# - 1))}" "dst=\\${$#}"\ncp -- "$src" "$dst"\n'
 
 
 @pytest.fixture(scope="session")
@@ -73,8 +90,10 @@ def objects(tmp_path_factory):
         return done
 
     run(*common, "-c", str(BASE / "driver/cli.c"), "-o", "cli.o")
+    run(*common, "-c", str(BASE / "driver/wrap_getenv.c"), "-o", "wrap_getenv.o")
     sources = {"library.c": LIBRARY, "dsl.c": DRIVER, "opening.c": OPENING_DRIVER, "tramp.c": TRAMPOLINES,
-               "impostor.c": IMPOSTOR}
+               "impostor.c": IMPOSTOR, "wrap.c": WRAP, "early.c": EARLY, "own.c": OWN,
+               "tramp_two.c": TRAMP_CALLS_OPEN, "split_test.c": SPLIT_TEST, "split_open.c": SPLIT_OPEN}
     for name, text in sources.items():
         (directory / name).write_text(text)
         run(*common, "-c", name, "-o", name[:-2] + ".o")
@@ -82,6 +101,8 @@ def objects(tmp_path_factory):
     # ar names the object's format, so that it loads no linker plugin (tests/test_allocation_library_links.py).
     form = run("objdump", "-f", "library.o").stdout.split("file format ", 1)[1].split()[0]
     run("ar", f"--target={form}", "rcs", "libfixture.a", "library.o")
+    run("ar", f"--target={form}", "rcs", "libearly.a", "early.o")
+    run("ar", f"--target={form}", "rcs", "libsplit.a", "split_test.o", "split_open.o")
     return directory
 
 
@@ -227,4 +248,52 @@ def test_the_trace_refuses_a_new_name_that_no_trampoline_defines(dsl):
     assert built.returncode == 0, built.stderr
     done = dsl.link("libfixture.a", "impostor.o", OV_DSL_TRAMPOLINES=str(dsl.dir / "tramp-noopen.o"))
     refused(done, "tramp_open is defined by")
+    assert not (dsl.dir / "target").exists()
+
+
+def test_a_wrap_of_a_new_name_is_refused(dsl):
+    """The review's bypass: a wrap of a trampoline's name, with an object that defines its __wrap_, sends the library's
+    calls past the trampoline, and the -y trace does not show it. The link refuses every wrap but the seals'."""
+    refused(dsl.link("libfixture.a", "wrap.o", "-Wl,--wrap=tramp_open"), "takes no linker option but the seals'")
+    refused(dsl.link("libfixture.a", "-Wl,--wrap=malloc"), "takes no linker option but the seals'")
+    assert not (dsl.dir / "target").exists()
+    # a seal's wrap, with the seal that defines its __wrap_, is the one the link takes
+    done = dsl.link("libfixture.a", "wrap_getenv.o", "-Wl,--wrap=getenv")
+    assert done.returncode == 0, done.stderr
+    assert dsl.run(bytes(6)) == 0
+
+
+def test_a_map_that_names_a_seal_is_refused(dsl):
+    (dsl.dir / "both.redefs").write_text("malloc tramp_malloc\ngetenv tramp_getenv\n")
+    refused(dsl.link(), "the maps name getenv, of a seal")
+
+
+def test_conservation_refuses_a_copy_that_was_not_renamed(dsl):
+    """With an llvm-objcopy that copies and renames nothing, each copy keeps its old names."""
+    objcopy = dsl.dir / "bin" / "llvm-objcopy"
+    objcopy.unlink()
+    objcopy.write_text(COPYING_OBJCOPY)
+    objcopy.chmod(0o755)
+    refused(dsl.link(), "conservation:")
+
+
+def test_a_library_or_a_driver_that_already_names_a_new_name_is_refused(dsl):
+    refused(dsl.link("libearly.a"), "already names tramp_malloc, a new name of a map")
+    refused(dsl.link(OV_DSL_DRIVER=str(dsl.dir / "early.o")), "already names tramp_malloc, a new name of a map")
+
+
+def test_the_trace_refuses_a_reference_from_an_object_of_the_links_own(dsl):
+    refused(dsl.link("libfixture.a", "own.o"), "own.o references tramp_malloc")
+    assert not (dsl.dir / "target").exists()
+
+
+def test_the_trace_refuses_a_trampoline_that_calls_a_library_map_name(dsl):
+    trampolines = f"{dsl.dir / 'tramp.o'} {dsl.dir / 'tramp_two.o'}"
+    refused(dsl.link(OV_DSL_TRAMPOLINES=trampolines), "tramp_two.o references tramp_open")
+
+
+def test_the_trace_refuses_a_library_map_that_the_link_never_reaches(dsl):
+    """The library calls open only in a member that nothing pulls into the link: the map renames a reference, so the
+    gates before the link pass, but the schedule of the six calls would cover nothing that runs."""
+    refused(dsl.link("libsplit.a"), "the link takes no reference from the library to any of tramp_open")
     assert not (dsl.dir / "target").exists()
