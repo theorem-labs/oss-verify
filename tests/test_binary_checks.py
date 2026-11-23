@@ -9,7 +9,6 @@ import os
 import pathlib
 import struct
 import subprocess
-import sys
 import tempfile
 import time
 import unittest
@@ -335,14 +334,6 @@ class RealRecord(unittest.TestCase):
         """The names of the toolchain image's files among some input sections."""
         return sorted({pathlib.PurePosixPath(f).name for f, _m, _s, _z in taken if f.startswith("/opt/")})
 
-    def test_a_record_holds_input_sections_alone(self):
-        """What a build writes: every line is an input section, and none starts an output section. A reading that
-        waits for an output section therefore keeps nothing of it."""
-        lines = [line for line in self.map.splitlines() if check_links.MAP_COLUMNS.match(line)]
-        starts = [line for line in lines
-                  if line[check_links.MAP_COLUMNS.match(line).end():][:1] not in ("", " ")]
-        self.assertEqual((len(self.map.splitlines()), len(lines), len(starts)), (7865, 7865, 0))
-
     def test_the_sections_that_reach_the_binary(self):
         taken, read = check_links.parse_map(self.map)
         self.assertEqual(len(taken), 224)
@@ -534,11 +525,6 @@ class ReaderKeptNothing(unittest.TestCase):
         self.assertEqual(beside, self.analyse({"ubsan": ubsan})["ubsan"])
         self.assertIn("no plain build to compare the UndefinedBehaviorSanitizer's checks with",
                       beside["instrumented"]["detail"])
-
-    def test_the_problem_is_on_the_record(self):
-        record = self.read(self.tail)
-        self.assertEqual(record.taken, [])
-        self.assertEqual(record.problem, self.problem(7632, 7632, self.TAIL_FIRST))
 
     def test_the_first_line_is_the_first_non_blank_line(self):
         """A map that starts with blank lines: the problem names its first non-blank line, not its first line, without

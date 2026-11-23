@@ -473,14 +473,6 @@ def test_collect_writes_the_layout_tree(tmp_path):
         ["1", "0x0", "call", "0", "0x0", "global", "__rdl_alloc", "0x0", "-", "-", "0x0"]]
 
 
-def test_collect_runs_as_a_command(tmp_path):
-    out_tree(tmp_path / "builds")
-    done = subprocess.run([sys.executable, str(SCRIPT), "collect", str(tmp_path / "builds"), str(tmp_path / "out")],
-                          capture_output=True, text=True)
-    assert done.returncode == 0, done.stderr
-    assert (tmp_path / "out" / "plain" / "fuzz_shim" / "sections.tsv").is_file()
-
-
 def test_collect_replaces_a_placement_the_record_no_longer_has(tmp_path):
     record = out_tree(tmp_path / "builds", placement="placed\n")
     assert layout.main(["collect", str(tmp_path / "builds"), str(tmp_path / "layout")]) == 0

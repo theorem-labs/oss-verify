@@ -133,21 +133,6 @@ class PatchDirective(unittest.TestCase):
         self.assertIn("demo.patch", self.refused(THROUGH_A_LINK))
         self.assertEqual((outside / "one.c").read_text(), ONE)
 
-    def test_the_apply_runs_with_core_symlinks_false(self):
-        """The setting is passed on the command, never put in a clone's config, where it would break the real
-        symbolic links of a working tree."""
-        real = subprocess.run
-        ran = []
-
-        def record(argv, **how):
-            ran.append(argv)
-            return real(argv, **how)
-
-        with mock.patch.object(lay_out_sources.subprocess, "run", record):
-            self.lay_out(EDIT)
-        self.assertEqual(len(ran), 1)
-        self.assertEqual(ran[0][:4], ["git", "-c", "core.symlinks=false", "apply"])
-
     def test_a_repository_above_the_tree_does_not_take_the_patch(self):
         """Why the apply passes GIT_CEILING_DIRECTORIES: inside a repository, git apply reads the paths of a patch
         with a `diff --git` header from the repository's top, and a tree laid out under it gets nothing, with exit

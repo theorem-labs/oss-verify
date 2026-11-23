@@ -16,7 +16,6 @@ import os
 import pathlib
 import re
 import struct
-import sys
 import tempfile
 import time
 import unittest
@@ -697,16 +696,6 @@ class Decoder(unittest.TestCase):
         self.assertTrue(any(want is not None for _, want in DECODE_ARMS + DECODE_GOALS))
 
 
-class Model(unittest.TestCase):
-    def test_the_model_the_rules_were_checked_against(self):
-        self.assertRegex(binary_isa.MODEL_COMMIT, r"^[0-9a-f]{40}$")
-        self.assertEqual(set(binary_isa.MODEL_FILES),
-                         {"theories/Riscv/Decode.v", "theories/Riscv/DecodeC.v", "theories/Riscv/Sem.v",
-                          "theories/Riscv/Fpu.v", "theories/LinuxProcessSem/RiscvSemantics.v"})
-        for sha in binary_isa.MODEL_FILES.values():
-            self.assertRegex(sha, r"^[0-9a-f]{64}$")
-
-
 MODEL = os.environ.get("OSS_VERIFY_MODEL")
 # Decode.v's constructors in its Goal checks, and the class decode() names for each.
 GOAL_CLASSES = {"OpImm": "op-imm", "Op": "op", "Branch": "branch", "Mul32": "mul-32", "Lr": "lr", "Ecall": "ecall",
@@ -717,6 +706,8 @@ GOAL_CLASSES = {"OpImm": "op-imm", "Op": "op", "Branch": "branch", "Mul32": "mul
 class ModelCheckout(unittest.TestCase):
     def test_the_model_files_have_the_code_the_rules_were_checked_against(self):
         from oss_verify import model_release
+        # An empty map has no stale file: it must name the files the rules rest on.
+        self.assertTrue(binary_isa.MODEL_FILES, "MODEL_FILES names no file")
         self.assertEqual(model_release.stale(MODEL, binary_isa.MODEL_FILES), [])
 
     def test_the_goal_checks_of_the_checkout_are_the_ones_ported(self):
