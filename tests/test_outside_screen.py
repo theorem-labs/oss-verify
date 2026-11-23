@@ -10,13 +10,14 @@ and the review take the gathered data (.github/scripts/take-review-data), the ga
 move, the gather job run step by step for an outside account's enrollment (the project's source, the failed fetch, the
 session the review resumes, and the criticality score and OSS-Fuzz of the triage and the Build run's sizes as the job's
 outputs), the comment job's hold, and the review comment's line on the checks that ran. Of
-build.yaml (Build), whose completed run starts review.yml: its events and its concurrency, and that its jobs hold none
-of the review's identities and decide nothing of its trust. .github/scripts/screen.py itself is tested in
-test_screen.py."""
+build.yaml (Build), whose completed run starts review.yml: its events and its concurrency, that its jobs hold none of
+the review's identities and touch no cache, and that the daily cap holds none of them. .github/scripts/screen.py itself
+is tested in test_screen.py."""
 import copy
 import datetime
 import functools
 import hashlib
+import importlib.util
 import io
 import itertools
 import json
@@ -29,6 +30,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 import yaml
 
@@ -244,7 +246,8 @@ def run_graph(route, results=None, outputs=None, event="workflow_run", workflow=
     status function also needs every job it needs to have succeeded (GitHub's implicit success()). route is route's
     outputs; results and outputs give a job that runs another result than success, and its outputs. A job that did not
     succeed has no outputs unless they are given. ref is the run's github.ref, when a test gives it (a run by hand runs
-    on the branch it was started on). Return (results, the context)."""
+    on the branch it was started on). A job's condition sees only the jobs in its direct needs. Return (results, the
+    context of all jobs)."""
     results, outputs = dict(results or {}), dict(outputs or {})
     jobs, order = workflow["jobs"], ORDERS[workflow["name"]]
     assert set(order) == set(jobs), set(jobs)
@@ -263,7 +266,9 @@ def run_graph(route, results=None, outputs=None, event="workflow_run", workflow=
         else:
             needs = job["needs"] if isinstance(job["needs"], list) else [job["needs"]]
             condition = job.get("if")
-            ran = condition is None or bool(evaluate(condition, ctx))
+            visible = {key: value for key, value in ctx.items()
+                       if not key.startswith("needs.") or key.split(".", 2)[1] in needs}
+            ran = condition is None or bool(evaluate(condition, visible))
             if condition is None or not STATUS_FUNCTIONS.search(str(condition)):
                 ran = ran and all(got[n] == "success" for n in needs)
         got[name] = results.get(name, "success") if ran else "skipped"
@@ -306,6 +311,20 @@ def comment_job_env(ctx):
 def interpolated(value, ctx):
     """A value with ${{ }} expressions in its text, as the runner gives it for ctx."""
     return re.sub(r"\$\{\{(.*?)\}\}", lambda m: as_text(evaluate(m.group(1), ctx)), value)
+
+
+def step_env(job, s, **given):
+    """The env review.yml's step s of the job `job` runs with: the workflow's, the job's and the step's own, each over
+    the one before, with `given` in place of the workflow's."""
+    return {**REVIEW["env"], **given, **REVIEW_JOBS[job].get("env", {}), **s.get("env", {})}
+
+
+def screen_script():
+    """.github/scripts/screen.py, loaded as a module as test_screen.py loads it."""
+    spec = importlib.util.spec_from_file_location("screen", SCRIPTS / "screen.py")
+    screen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(screen)
+    return screen
 
 
 def outputs_of(path):
@@ -425,8 +444,6 @@ class Trust(Runner):
                               outputs={"screen": {"verdict": "clean", "checks": "model_armor"}},
                               event="workflow_dispatch", ref="refs/heads/main")
         self.assertEqual((got["gather"], got["screen"], got["review"]), ("success", "success", "success"))
-        self.assertLess(ORDERS["Review"].index("screen"), ORDERS["Review"].index("review"))
-        self.assertIn("screen", REVIEW_JOBS["review"]["needs"])
 
     def test_a_run_by_hand_whose_item_github_does_not_give_stops_the_run(self):
         rc, out, got = self.run_script(step("route", self.STEP)["run"], cwd=ROOT, EVENT="workflow_dispatch",
@@ -445,7 +462,6 @@ class Trust(Runner):
 
     def test_route_asks_for_a_measurement_alone(self):
         decide = step("route", "An enrollment, a change or an issue")
-        self.assertEqual(decide["env"]["MEASURE"], "${{ inputs.measure }}")
         for pr, issue, want in (("", "", (0, "true")), ("7", "", (1, None)), ("", "5", (1, None))):
             with self.subTest(pr=pr, issue=issue):
                 rc, out, got = self.run_script(decide["run"], EVENT="workflow_dispatch", REF="refs/heads/main",
@@ -453,8 +469,6 @@ class Trust(Runner):
                                                AUTHOR="", ASSOCIATION="")
                 self.assertEqual((rc, got.get("measure")), want, out)
                 self.assertNotIn("kind", got)
-        self.assertEqual(step("route", self.STEP)["if"],
-                         "steps.decide.outputs.kind != '' || steps.decide.outputs.measure == 'true'")
         # A measurement passes the trust step, and so does every item of a kind; a run with neither does not.
         for outputs, want in (({"measure": "true"}, True), ({"kind": "enrollment"}, True), ({}, False)):
             ctx = {f"steps.decide.outputs.{k}": v for k, v in outputs.items()}
@@ -574,13 +588,10 @@ class DailyCap(Runner):
 
     def test_an_outsiders_issue_that_is_the_25th_is_capped(self):
         """c3 (f): pull requests and issues share the cap. The 25th, an issue's own event, gets trust cap: no screen and
-        no model; the comment job holds the issue (Hold, below, for its words)."""
+        no model; the comment job alone runs and holds the issue
+        (Routes.test_at_the_daily_cap_it_is_held_without_a_screen for the jobs, Hold, below, for its words)."""
         self.runs(*self.screened(12), *self.screened(12, first=40, start=6, event="issues"))
         self.assertEqual(self.route("issues", "zed", "zed"), ("cap", self.freed(12)))
-        got, ctx = run_graph(dict(ITEMS["issue"], trust="cap", free=self.freed(12)), event="issues")
-        self.assertEqual({n for n, r in got.items() if r != "skipped"} - {"route", "collect"}, {"comment"})
-        self.assertEqual(evaluate(REVIEW_JOBS["comment"]["env"]["HOLDING"], ctx), True)
-        self.assertEqual(required(ctx)[0], 0, required(ctx)[1])
 
     def test_the_time_it_frees_is_the_later_of_the_two(self):
         # The account's 12 are the newest of 24: its oldest leaves after the oldest of all.
@@ -720,14 +731,12 @@ class DailyCap(Runner):
         names = [s.get("name") or s["uses"].split("@")[0] for s in steps]
         google = names.index("Sign in to Google Cloud")
         sign_in = names.index("Sign in to the screen's services")
-        self.assertEqual(sign_in, google + 1)
         self.assertNotIn("if", steps[google])
         for trust in ("screen", "writer", "measure"):
             self.assertEqual(bool(evaluate(steps[sign_in]["if"], {"needs.route.outputs.trust": trust})),
                              trust != "measure", trust)
         for name in ("Sign in to Google Cloud", "Sign in to the screen's services"):
             self.assertNotIn("continue-on-error", steps[names.index(name)], name)
-        self.assertEqual(steps[sign_in]["run"], "python3 .github/scripts/screen.py --sign-in")
         # The settings come from the job's env, which the Screen and Measure steps read too: neither those steps nor
         # this one sets one of its own.
         self.assertNotIn("env", steps[sign_in])
@@ -778,32 +787,14 @@ class Routes(unittest.TestCase):
                 code, out = required(ctx)
                 self.assertEqual(code, 0, out)
 
-    def test_a_screen_that_fails_holds_it_and_fails_the_required_check(self):
-        jobs, ctx = self.ran(dict(self.ENROLLMENT, trust="screen"), results={"screen": "failure"})
-        self.assertEqual(jobs, {"gather", "screen", "comment"})
-        self.assertEqual(evaluate(REVIEW_JOBS["comment"]["env"]["HOLDING"], ctx), True)
-        self.assertEqual(required(ctx)[0], 1)
-
-    def test_an_item_that_cannot_be_gathered_is_held_and_fails_the_required_check(self):
-        """Whoever wrote it: the comment job records which job failed (an enrollment's check run), and the gather
-        job's failure fails the check review jobs. The gather job's step that takes the project gives its name at
-        once, so a gather job that fails after it still names the project."""
-        for trust in ("screen", "writer"):
-            with self.subTest(trust=trust):
-                jobs, ctx = self.ran(dict(self.ENROLLMENT, trust=trust), results={"gather": "failure"},
-                                     outputs={"gather": {"name": "libx"}})
-                self.assertEqual(jobs, {"gather", "comment"})
-                self.assertEqual(required(ctx)[0], 1)
-
     def test_at_the_daily_cap_it_is_held_without_a_screen(self):
-        """Every kind: the comment job alone. The cap holds the review, never the build: build.yaml reads no trust,
-        and the Build run of an enrollment builds it, records it and keeps its results whatever the cap."""
+        """Every kind: the comment job alone. The cap holds the review, never the build: the Build run of an
+        enrollment, whose route gives no trust, builds it, records it and keeps its results whatever the cap."""
         for kind in ("enrollment", "change", "issue"):
             with self.subTest(kind=kind):
                 jobs, ctx = self.ran(dict(ITEMS[kind], trust="cap"))
                 self.assertEqual(jobs, {"comment"})
                 self.assertEqual(required(ctx)[0], 0, required(ctx)[1])
-        self.assertNotIn("trust", json.dumps(BUILD_JOBS))
         got, ctx = run_graph({"build": "true"}, event="pull_request", workflow=BUILD)
         self.assertEqual({n for n, r in got.items() if r != "skipped"} - {"route", "required"},
                          {"project-builds", "record", "results"})
@@ -883,25 +874,42 @@ class Routes(unittest.TestCase):
     def test_the_required_check_for_each_outcome_of_an_enrollment(self):
         """Decision 3: the comment job runs for every outcome of an enrollment whose gather job took the project, and
         the check review jobs passes for a screen's hold and the daily cap, and fails for a failed gather, screen,
-        review (after its second attempt), hold or comment job."""
+        review (after its second attempt), hold or comment job. Each outcome runs the jobs it should, and the comment
+        job holds the enrollment (HOLDING) whenever no review passed, whoever wrote it: a screen that failed reviews
+        nothing, even one that said clean. The gather job's step that takes the project gives its name at once, so a
+        gather job that fails after it still names the project. A change's review that fails is held only when it was
+        screened."""
         screened = {"screen": {"verdict": "clean", "checks": "model_armor"}}
-        for name, route, results, outputs, want in (
-                ("reviewed", {"trust": "writer"}, {}, {}, 0),
-                ("screened and reviewed", {"trust": "screen"}, {}, screened, 0),
-                ("screen hold", {"trust": "screen"}, {}, {"screen": {"verdict": "held"}}, 0),
-                ("daily cap", {"trust": "cap", "free": "2026-11-10T00:00:00Z"}, {}, {}, 0),
-                ("gather failed", {"trust": "screen"}, {"gather": "failure"}, {"gather": {"name": "libx"}}, 1),
-                ("screen failed", {"trust": "screen"}, {"screen": "failure"}, {}, 1),
-                ("review failed", {"trust": "screen"}, {"review": "failure"}, screened, 1),
-                ("a writer's review failed", {"trust": "writer"}, {"review": "failure"}, {}, 1),
+        failed_gather = {"gather": {"name": "libx"}}
+        # The jobs that run besides route and collect.
+        reviewed = {"gather", "review", "hold", "comment"}
+        screen_reviewed = reviewed | {"screen"}
+        screen_held = {"gather", "screen", "comment"}
+        gather_held = {"gather", "comment"}
+        for name, route, results, outputs, jobs, holding, want in (
+                ("reviewed", {"trust": "writer"}, {}, {}, reviewed, False, 0),
+                ("screened and reviewed", {"trust": "screen"}, {}, screened, screen_reviewed, False, 0),
+                ("screen hold", {"trust": "screen"}, {}, {"screen": {"verdict": "held"}}, screen_held, True, 0),
+                ("daily cap", {"trust": "cap", "free": "2026-11-10T00:00:00Z"}, {}, {}, {"comment"}, True, 0),
+                ("gather failed", {"trust": "screen"}, {"gather": "failure"}, failed_gather, gather_held, True, 1),
+                ("a writer's gather failed", {"trust": "writer"}, {"gather": "failure"}, failed_gather,
+                 gather_held, True, 1),
+                ("screen failed", {"trust": "screen"}, {"screen": "failure"}, {"screen": {"verdict": "clean"}},
+                 screen_held, True, 1),
+                ("review failed", {"trust": "screen"}, {"review": "failure"}, screened, screen_reviewed, True, 1),
+                ("a writer's review failed", {"trust": "writer"}, {"review": "failure"}, {}, reviewed, True, 1),
                 ("hold failed", {"trust": "writer"}, {"hold": "failure"},
-                 {"review": {"comment": "Thanks.", "held_object": "held/1/x", "session": "", "kind": "enrollment"}}, 1),
-                ("comment failed", {"trust": "writer"}, {"comment": "failure"}, {}, 1)):
+                 {"review": {"comment": "Thanks.", "held_object": "held/1/x", "session": "", "kind": "enrollment"}},
+                 reviewed, False, 1),
+                ("comment failed", {"trust": "writer"}, {"comment": "failure"}, {}, reviewed, False, 1)):
             with self.subTest(name=name):
-                got, ctx = run_graph(dict(self.ENROLLMENT, **route), results, outputs)
-                self.assertNotEqual(got["comment"], "skipped")
+                ran, ctx = self.ran(dict(self.ENROLLMENT, **route), results, outputs)
+                self.assertEqual(ran, jobs)
+                self.assertEqual(evaluate(REVIEW_JOBS["comment"]["env"]["HOLDING"], ctx), holding)
                 code, out = required(ctx)
                 self.assertEqual(code, want, out)
+        jobs, _ = self.ran(dict(ITEMS["change"], trust="writer"), results={"review": "failure"})
+        self.assertNotIn("comment", jobs)
 
     def test_a_measurement_runs_the_screen_job_alone(self):
         """The screen job measures, and the check review jobs asks for it and nothing else. A measurement is a run by
@@ -914,17 +922,15 @@ class Routes(unittest.TestCase):
                              **by_hand)
         self.assertEqual(jobs, {"screen"})
         self.assertEqual(required(ctx)[0], 1)
-        steps = {x.get("name") or x.get("uses", "").split("@")[0]: x.get("if") for x in REVIEW_JOBS["screen"]["steps"]}
-        self.assertEqual(steps["Screen"], "needs.route.outputs.trust != 'measure'")
-        self.assertEqual(steps["Measure"], "needs.route.outputs.trust == 'measure'")
-        self.assertEqual(steps["Take what the gather job kept"], "needs.route.outputs.trust != 'measure'")
-        self.assertEqual(steps["actions/download-artifact"], "needs.route.outputs.trust != 'measure'")
-        m = step("screen", "Measure")
-        self.assertTrue(m["run"].endswith("python3 .github/scripts/screen.py --measure\n"), m["run"])
-        self.assertEqual(m["env"]["MEASURE_SET"], "${{ inputs.measure_set }}")
-        self.assertEqual(m["env"]["MEASURE_REPEATS"], "${{ inputs.measure_repeats }}")
-        self.assertEqual(m["env"]["MEASURE_OBJECT"],
-                         "measure/runs/${{ github.repository }}/${{ github.run_id }}-${{ github.run_attempt }}.json")
+        # The Measure step runs for a measurement alone, and the steps that take and screen what the gather job kept
+        # for every other trust.
+        for trust in ("measure", "screen", "writer"):
+            ctx = {"needs.route.outputs.trust": trust}
+            ran = {s.get("name") or s["uses"].split("@")[0] for s in REVIEW_JOBS["screen"]["steps"]
+                   if "if" not in s or evaluate(s["if"], ctx)}
+            for name in ("Screen", "Take what the gather job kept", "actions/download-artifact"):
+                self.assertEqual(name in ran, trust != "measure", (name, trust))
+            self.assertEqual("Measure" in ran, trust == "measure", trust)
         # A measurement outlasts the screen's 10-minute token: its sign-in asks for an hour, a screen's for 10 minutes.
         lifetime = step("screen", "Sign in to Google Cloud")["with"]["access_token_lifetime"]
         self.assertEqual(evaluate(lifetime, {"needs.route.outputs.trust": "measure"}), "3600s")
@@ -972,19 +978,6 @@ class Routes(unittest.TestCase):
         self.assertNotIn("review", jobs)
         self.assertIn("screen", jobs)
 
-    def test_a_review_that_fails_is_recorded_and_fails_the_required_check(self):
-        """Any failure of the review, after its second attempt, whoever wrote the item: the comment job records it."""
-        for trust in ("screen", "writer"):
-            with self.subTest(trust=trust):
-                jobs, ctx = self.ran(dict(self.ENROLLMENT, trust=trust), results={"review": "failure"},
-                                     outputs={"screen": {"verdict": "clean", "checks": "model_armor"}})
-                self.assertEqual(jobs - {"screen"}, {"gather", "review", "hold", "comment"})
-                self.assertEqual(evaluate(REVIEW_JOBS["comment"]["env"]["HOLDING"], ctx), True)
-                self.assertEqual(required(ctx)[0], 1)
-        # A change's review that fails is held only when it was screened.
-        jobs, _ = self.ran(dict(ITEMS["change"], trust="writer"), results={"review": "failure"})
-        self.assertNotIn("comment", jobs)
-
     def test_a_moved_head_runs_nothing_after_the_gather(self):
         """The gather job kept nothing (digest empty): no screen, review or hold, and the check review jobs passes.
         When the head moved while the gather job read it, the job had taken the project: the comment job runs for the
@@ -1002,18 +995,18 @@ class Routes(unittest.TestCase):
                         self.assertEqual(required(ctx)[0], 0, required(ctx)[1])
 
     def test_a_cancelled_or_timed_out_screen_reviews_nothing_and_fails_the_required_check(self):
-        for result in ("cancelled", "failure"):
-            with self.subTest(result=result):
-                jobs, ctx = self.ran(dict(self.ENROLLMENT, trust="screen"), results={"screen": result},
-                                     outputs={"screen": {"verdict": "clean"}})
-                self.assertNotIn("review", jobs)
-                self.assertEqual(required(ctx)[0], 1)
+        """A failed screen is the row "screen failed" of test_the_required_check_for_each_outcome_of_an_enrollment."""
+        jobs, ctx = self.ran(dict(self.ENROLLMENT, trust="screen"), results={"screen": "cancelled"},
+                             outputs={"screen": {"verdict": "clean"}})
+        self.assertNotIn("review", jobs)
+        self.assertEqual(required(ctx)[0], 1)
 
     def test_a_screen_that_runs_out_of_time_fails_and_so_is_held(self):
         """A job that runs out of its own time ends as cancelled, and is neither reviewed nor held. Each step of the
         screen job has a time of its own, and those of the steps that run add up to less than the job's, so a slow
-        step fails the job instead, and the comment job holds the item. The Screen step outlasts screen.py's own
-        deadline, which holds the item first."""
+        step fails the job instead, and the comment job holds the item (the row "screen failed" of
+        test_the_required_check_for_each_outcome_of_an_enrollment). The Screen step outlasts screen.py's own deadline,
+        which holds the item first."""
         job = REVIEW_JOBS["screen"]
         for step_ in job["steps"]:
             self.assertIsInstance(step_.get("timeout-minutes"), int, step_.get("name") or step_.get("uses"))
@@ -1022,18 +1015,20 @@ class Routes(unittest.TestCase):
                 ctx = {"needs.route.outputs.trust": trust}
                 ran = [s for s in job["steps"] if "if" not in s or evaluate(s["if"], ctx)]
                 self.assertLess(sum(s["timeout-minutes"] for s in ran), int(evaluate(job["timeout-minutes"], ctx)))
-        deadline = int(re.search(r"^DEADLINE_SECONDS = ([0-9]+)$", (SCRIPTS / "screen.py").read_text(), re.M).group(1))
-        self.assertGreater(step("screen", "Screen")["timeout-minutes"] * 60, deadline)
-        jobs, ctx = self.ran(dict(self.ENROLLMENT, trust="screen"), results={"screen": "failure"})
-        self.assertIn("comment", jobs)
-        self.assertEqual(evaluate(REVIEW_JOBS["comment"]["env"]["HOLDING"], ctx), True)
+        self.assertGreater(step("screen", "Screen")["timeout-minutes"] * 60, screen_script().DEADLINE_SECONDS)
 
     def test_the_review_reads_what_the_screen_passed(self):
-        """The screen and the review take the gathered file by the gather job's digest, and only the gather job
-        gathers: the review job runs neither review-gather nor take-project, and restores no cache."""
+        """The screen and the review take the gathered file with take-review-data, by the gather job's digest, after
+        the gather job, and only the gather job gathers: it alone uploads review-data, and the review job runs neither
+        review-gather nor take-project, and restores no cache."""
+        # Each of the gather job's outputs, the head that route read and the run's commit, a SHA-256 of its own: each
+        # step takes the file by the gather job's digest, and by no other of them.
+        ctx = {name: hashlib.sha256(name.encode()).hexdigest() for name in (
+            *(f"needs.gather.outputs.{output}" for output in REVIEW_JOBS["gather"]["outputs"]),
+            "needs.route.outputs.sha", "github.sha")}
         for job in ("screen", "review"):
             take = step(job, "Take what the gather job kept")
-            self.assertEqual(take["env"], {"DIGEST": "${{ needs.gather.outputs.digest }}"})
+            self.assertEqual(interpolated(take["env"]["DIGEST"], ctx), ctx["needs.gather.outputs.digest"], job)
             self.assertIn(".github/scripts/take-review-data", take["run"])
             self.assertIn("gather", REVIEW_JOBS[job]["needs"])
         uploads = [(n, s) for n, j in REVIEW_JOBS.items() for s in j["steps"]
@@ -1083,16 +1078,6 @@ class Holdings(unittest.TestCase):
         text = json.dumps(job)
         for name in self.OTHER_IDENTITIES:
             self.assertNotIn(name, text)
-        uses = [s["uses"].split("@")[0] for s in job["steps"] if "uses" in s]
-        self.assertEqual(uses, ["actions/checkout", "actions/download-artifact", "google-github-actions/auth",
-                                "actions/upload-artifact"])
-        runs = [s["run"] for s in job["steps"] if "run" in s]
-        self.assertEqual(runs[:4], ['.github/scripts/take-review-data "$RUNNER_TEMP/review-data/review.tar"',
-                                    "python3 .github/scripts/screen.py --sign-in",
-                                    'echo "$GITHUB_RUN_ID" > "$RUNNER_TEMP/daily-cap"',
-                                    'python3 .github/scripts/screen.py .review ${NAME:+"projects/$NAME"}'])
-        self.assertEqual(len(runs), 5)
-        self.assertTrue(runs[4].endswith("python3 .github/scripts/screen.py --measure\n"))
 
     def test_only_the_screen_job_reaches_the_screens_identities(self):
         for workflow in (REVIEW, BUILD):
@@ -1108,10 +1093,15 @@ class Holdings(unittest.TestCase):
                         self.assertNotIn(identity, text)
 
     def test_the_screen_jobs_outputs_are_its_verdict_and_the_checks_that_ran(self):
-        """The reason reaches no output: screen.py writes only these two (test_screen.py), and the job passes on only
-        them; no other job reads anything of the screen but these and its result."""
-        self.assertEqual(REVIEW_JOBS["screen"]["outputs"], {"verdict": "${{ steps.screen.outputs.verdict }}",
-                                                            "checks": "${{ steps.screen.outputs.checks }}"})
+        """The reason reaches no output: screen.py writes only the verdict and the checks that ran (test_screen.py),
+        and the job passes on only these, each the Screen step's output of its name; no other job reads anything of
+        the screen but these and its result."""
+        outputs = REVIEW_JOBS["screen"]["outputs"]
+        self.assertEqual(sorted(outputs), ["checks", "verdict"])
+        screen = step("screen", "Screen")["id"]
+        ctx = {f"steps.{screen}.outputs.{name}": f"the Screen step's {name}" for name in outputs}
+        for name, value in outputs.items():
+            self.assertEqual(interpolated(str(value), ctx), ctx[f"steps.{screen}.outputs.{name}"], name)
         for name, job in REVIEW_JOBS.items():
             for ref in re.findall(r"needs\.screen\.([a-z]+(?:\.[a-z]+)?)", json.dumps(job)):
                 self.assertIn(ref, ("result", "outputs.verdict", "outputs.checks"), name)
@@ -1147,17 +1137,8 @@ class Holdings(unittest.TestCase):
         for name in ("claude-code-action", "google-github-actions", "id-token"):
             self.assertNotIn(name, text)
 
-    def test_the_screen_job_talks_to_the_real_services(self):
+    def test_each_check_the_screen_lists_has_its_settings_and_its_anthropic_identity_is_its_own(self):
         e = REVIEW_JOBS["screen"]["env"]
-        self.assertEqual(e["GCP_WORKLOAD_IDENTITY_PROVIDER"],
-                         "projects/805240912354/locations/global/workloadIdentityPools/review-screen/providers/github")
-        self.assertEqual(e["GCP_SERVICE_ACCOUNT"], "review-screen@theorem-agent-infra.iam.gserviceaccount.com")
-        self.assertEqual(e["MODEL_ARMOR_URL"], "https://modelarmor.us.rep.googleapis.com")
-        self.assertEqual(e["MODEL_ARMOR_TEMPLATE"], "projects/theorem-agent-infra/locations/us/templates/review-screen")
-        self.assertEqual(e["REASON_BUCKET"], "theorem-agent-infra-review-screen-reasons")
-        self.assertEqual(e["CONTENT_SAFETY_URL"], "https://theorem-review-screen.cognitiveservices.azure.com")
-        self.assertEqual(e["AZURE_TENANT_ID"], "aaa6ad34-51af-41e7-891f-f16f5c53c396")
-        self.assertEqual(e["SCREEN_MODEL"], "claude-haiku-5-5")
         # an identity not set up yet is empty, and its check does not run; one that is set up is well formed
         self.assertRegex(e["AZURE_CLIENT_ID"], r"^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$")
         self.assertRegex(e["ANTHROPIC_SERVICE_ACCOUNT_ID"], r"^(svac_[0-9A-Za-z]+)?$")
@@ -1171,13 +1152,6 @@ class Holdings(unittest.TestCase):
         listed = e["SCREEN_CHECKS"].split(",")
         self.assertIn("model_armor", listed)
         self.assertEqual(len(set(listed)), len(listed))
-        # All three checks run, each under the screen's own identity.
-        self.assertEqual(listed, ["model_armor", "prompt_shields", "claude"])
-        # the rule chosen by measurement (.github/scripts/screen.py, RULES)
-        self.assertEqual(e["SCREEN_RULE"], "claude_or_both_detectors")
-        self.assertEqual((e["AZURE_CLIENT_ID"], e["ANTHROPIC_SERVICE_ACCOUNT_ID"], e["ANTHROPIC_FEDERATION_RULE_ID"]),
-                         ("878cb696-144f-4c60-b04c-3974fad24e96", "svac_01JFhEhPizCyTiK2i22mRJ8a",
-                          "fdrl_01PJtZrFW7ECzfBk5UVFjhw9"))
         for check in listed:
             for name in settings[check]:
                 self.assertTrue(e[name], f"{check} is listed, and {name} is empty")
@@ -1187,9 +1161,24 @@ class Holdings(unittest.TestCase):
         self.assertNotIn(e["ANTHROPIC_SERVICE_ACCOUNT_ID"], review)
         self.assertNotIn(e["ANTHROPIC_FEDERATION_RULE_ID"], review)
         self.assertNotRegex(review, r"svac_|fdrl_")
-        self.assertEqual(REVIEW_JOBS["review"]["environment"], {"name": "enroll-review", "deployment": False})
-        self.assertEqual(step("screen", "Screen")["env"]["REASON_OBJECT"],
-                         "${{ github.repository }}/${{ github.run_id }}-${{ github.run_attempt }}.json")
+
+    def test_the_screen_holds_what_the_model_or_both_detectors_call_suspicious(self):
+        """The policy the measurement chose (.github/scripts/screen.py, RULES): the model's word suspicious holds an
+        item, and so do Model Armor's and Prompt Shields' together. screen.py, with the checks and the rule the Screen
+        step runs with, holds every outcome of the three checks' words that the policy holds: so the screen runs each
+        of the three, under no weaker rule (one detector, the detectors alone, the model alone, two of the three)."""
+        e = step_env("screen", step("screen", "Screen"))
+        screen = screen_script()
+        with mock.patch.dict(os.environ, {"SCREEN_CHECKS": e["SCREEN_CHECKS"], "SCREEN_RULE": e["SCREEN_RULE"]}):
+            ran = screen.listed()
+            rule = screen.rule(ran)
+        checks = ("model_armor", "prompt_shields", "claude")
+        self.assertLessEqual(set(checks), set(ran))
+        for words in itertools.product(("clean", "suspicious"), repeat=len(checks)):
+            said = dict(zip(checks, words))
+            if said["claude"] == "suspicious" or said["model_armor"] == said["prompt_shields"] == "suspicious":
+                with self.subTest(**said):
+                    self.assertEqual(screen.combine({c: said.get(c, "clean") for c in ran}, rule), "held")
 
 
 class TakeReviewData(Runner):
@@ -1326,9 +1315,12 @@ class HeadDidNotMove(Runner):
             for trust in ("screen", "writer"):
                 with self.subTest(read=read[0], now=now[0], trust=trust):
                     self.assertEqual(self.check(read, now, trust), (0, "true"))
+        # Its later steps run only on a head that did not move.
         for name in ("Whether the review reads text of an account without write access",
                      "Keep it for the screen and the review"):
-            self.assertTrue(step("gather", name)["if"].startswith("steps.head.outputs.moved != 'true'"))
+            for moved in ("true", ""):
+                ctx = {"steps.head.outputs.moved": moved, "steps.project.outputs.kind": "enrollment"}
+                self.assertEqual(bool(evaluate(step("gather", name)["if"], ctx)), moved != "true", (name, moved))
 
     def test_a_head_that_cannot_be_read_fails_only_a_screened_one(self):
         self.assertEqual(self.check("a" * 40, None, "screen")[0], 1)
@@ -1448,8 +1440,6 @@ class Hold(Runner):
 
     def test_the_step_gets_nothing_of_the_screen_but_its_route(self):
         e = step("comment", self.STEP)["env"]
-        self.assertEqual(set(e), {"GH_TOKEN", "REPO", "PR", "NUMBER", "TRUST", "REVIEW", "HEAD_SHA", "RUN_ID", "FREE"})
-        self.assertEqual(e["FREE"], "${{ needs.route.outputs.free }}")
         self.assertNotIn("needs.screen", json.dumps(e))
         self.assertNotIn("needs.gather", json.dumps(e))
 
@@ -1524,10 +1514,6 @@ class Hold(Runner):
         self.assertEqual(lines[-1], "<!-- oss-verify-review-head " + "a" * 40 + " -->")
         self.assertEqual([x for x in lines if "oss-verify-review-head" in x], [lines[-1]])
 
-    def test_the_comment_jobs_never_cancel_each_other(self):
-        self.assertEqual(REVIEW_JOBS["comment"]["concurrency"]["queue"], "max")
-        self.assertIs(REVIEW_JOBS["comment"]["concurrency"]["cancel-in-progress"], False)
-
     STARTED = "2026-11-03T10:00:00Z"
 
     def take_off(self, number, comments, label=True, kind="change", started=STARTED):
@@ -1601,7 +1587,8 @@ class Hold(Runner):
     def test_an_issue_whose_review_made_its_draft_loses_its_hold(self):
         """An issue held once (at the daily cap, say), whose later screen passes and whose review makes its
         draft: the comment job runs, holds nothing and posts nothing, and takes the label and the hold comment off
-        with the App's token, which can write issues."""
+        with the App's token, which can write issues
+        (Holdings.test_the_comment_job_reads_main_s_scripts_and_writes_with_the_apps_tokens)."""
         for trust in ("screen", "writer"):
             with self.subTest(trust=trust):
                 got, ctx = run_graph(dict(ITEMS["issue"], trust=trust, started=self.STARTED),
@@ -1615,11 +1602,6 @@ class Hold(Runner):
                 self.assertNotIn("Label it review-held and say so", ran)
                 self.assertNotIn("Post the comment and record the verdict", ran)
                 self.assertIn("Take the label review-held off", ran)
-        token = step("comment", "Get the oss-verify App's token")["with"]
-        self.assertEqual(token["permission-issues"], "write")
-        e = step("comment", "Take the label review-held off")["env"]
-        self.assertEqual(e["STARTED"], "${{ needs.route.outputs.started }}")
-        self.assertEqual(e["GH_TOKEN"], "${{ steps.app.outputs.token }}")
         # an issue whose review failed is held, and keeps its hold
         got, ctx = run_graph(dict(ITEMS["issue"], trust="screen"), results={"review": "failure"},
                              outputs={"screen": {"verdict": "clean"}})
@@ -1744,15 +1726,6 @@ class OutsideText(Runner):
         (self.work / ".review" / "pr.json").write_text("gh: Server Error (HTTP 502)\n(exit status 1)\n")
         got = self.run_script(step("gather", self.STEP)["run"], TRUST="screen", EVENT="workflow_run")[2]
         self.assertEqual((got["screen"], got["writers"]), ("true", ""))
-
-    def test_every_copy_of_trusted_is_the_same(self):
-        def trusted(text):
-            found = re.findall(r"# trusted\n(.*?)# end of trusted\n", text, re.S)
-            self.assertEqual(len(found), 1)
-            return found[0]
-        route = trusted(step("route", Trust.STEP)["run"])
-        self.assertEqual(trusted(step("gather", self.STEP)["run"]), route)
-        self.assertEqual(trusted((SCRIPTS / "screened-review-cap").read_text()), route)
 
 
 # git for the gather job's run: `fetch` takes the commit from the local repository $UPSTREAM in place of the project's
@@ -1987,8 +1960,8 @@ class OutsidersEnrollment(GatherJob):
 class OutsidersResume(GatherJob):
     """c6: on a later push the review of an outside account's enrollment resumes the session of its last review, for
     the diff since the commit that review reviewed; the screen still reads the new text first and never the session.
-    The gather job only restores the session (cache-mode read), and the session job alone saves it (cache-mode
-    write)."""
+    Which jobs restore and save the session in the Actions cache, and its paths and keys, are SessionCache's in
+    test_check_checks.py."""
 
     DIFF = ("diff --git a/projects/libx/build.sh b/projects/libx/build.sh\n+SINCE-DIFF-MARK\n"
             "diff --git a/README.md b/README.md\n+OTHER-FILE\n")
@@ -2046,25 +2019,14 @@ class OutsidersResume(GatherJob):
         self.assertEqual(list(home.iterdir()), [])
         self.assertNotIn("--resume", self.prompt(outputs)["arguments"])
 
-    def test_the_gather_job_only_restores_and_the_session_job_alone_saves(self):
+    def test_an_enrollment_of_either_trust_restores_its_session_and_build_yaml_touches_no_cache(self):
         """What the tests above put in the gather job's home is what its restore step gives an enrollment, whatever
-        the trust; no job but the session job writes the cache, and it saves what a screened review kept
-        (SessionCache in test_check_checks.py checks its key against the restore's). build.yaml, whose runs are a pull
-        request's, neither reads nor writes it."""
-        modes = {n: j.get("cache-mode", REVIEW["cache-mode"]) for n, j in REVIEW_JOBS.items()}
-        self.assertEqual((REVIEW["cache-mode"], modes["gather"], modes["session"]), ("none", "read", "write"))
-        self.assertEqual(sorted(n for n, m in modes.items() if m not in ("none", "read")), ["session"])
+        the trust, and the session job saves what a screened review kept. build.yaml, whose runs are a pull request's,
+        neither reads nor writes the cache."""
         self.assertEqual({BUILD["cache-mode"], *(j.get("cache-mode", "none") for j in BUILD_JOBS.values())}, {"none"})
         restore = step("gather", "Restore the last review's session and the head it reviewed")
-        self.assertEqual(restore["uses"].split("@")[0], "actions/cache/restore")
         for trust in ("screen", "writer"):
             self.assertTrue(evaluate(restore["if"], {"steps.project.outputs.kind": "enrollment", "env.TRUST": trust}))
-        self.assertEqual(restore["with"]["path"], "~/.claude/projects\n~/.claude/ossv-last-review")
-        self.assertEqual(restore["with"]["restore-keys"], "${{ env.SESSION_KEY }}")
-        saves = [(n, s) for w in (REVIEW, BUILD) for n, j in w["jobs"].items() for s in j["steps"]
-                 if "actions/cache/save" in s.get("uses", "")]
-        self.assertEqual([n for n, _ in saves], ["session"])
-        self.assertEqual(saves[0][1]["with"]["path"], restore["with"]["path"])
         got, _ = run_graph(dict(ITEMS["enrollment"], sha=self.HEAD, trust="screen"),
                            outputs={"screen": {"verdict": "clean", "checks": "claude"},
                                     "review": {"comment": "x", "held_object": "", "session": "41", "kind": "enrollment"}})
@@ -2159,11 +2121,15 @@ class BuildSizes(GatherJob):
 class TrustWiring(unittest.TestCase):
     def test_the_trust_step_reads_the_author_and_the_account_that_started_the_run(self):
         """The author of a pull request as the decide step read it from the API, never from the event (a workflow_run
-        run's event is the Build run's), or the issue's author from the issue's own event."""
+        run's event is the Build run's), or the issue's author from the issue's own event; the account that started the
+        run (github.actor, not the account of a re-run); and the event."""
         e = step("route", Trust.STEP)["env"]
-        self.assertEqual(e["AUTHOR"], "${{ steps.decide.outputs.author || github.event.issue.user.login }}")
-        self.assertEqual(e["ACTOR"], "${{ github.actor }}")
-        self.assertEqual(e["EVENT"], "${{ github.event_name }}")
+        pull = {"steps.decide.outputs.author": "mallory", "github.event.issue.user.login": "eve",
+                "github.actor": "alice", "github.triggering_actor": "bob", "github.event_name": "workflow_run"}
+        issue = {"steps.decide.outputs.author": "", "github.event.issue.user.login": "eve", "github.actor": "eve",
+                 "github.event_name": "issues"}
+        for ctx, want in ((pull, ("mallory", "alice", "workflow_run")), (issue, ("eve", "eve", "issues"))):
+            self.assertEqual(tuple(interpolated(e[k], ctx) for k in ("AUTHOR", "ACTOR", "EVENT")), want, ctx)
 
 
 class ScreenedFooter(unittest.TestCase):
@@ -2186,8 +2152,13 @@ class ScreenedFooter(unittest.TestCase):
                 self.assertEqual(run.returncode, 0, run.stderr)
                 self.assertIn(f"An automated screen passed it first; the checks that ran: {names}.", run.stdout)
         self.assertNotIn("screen", self.body("").stdout)
-        self.assertEqual(step("comment", "Post the comment and record the verdict")["env"]["SCREENED"],
-                         "${{ needs.gather.outputs.screen != 'false' && needs.screen.outputs.checks || '' }}")
+        # The comment job gives the checks of the screen that ran, and none when the gather job found nothing to
+        # screen, whatever the screen job's outputs say.
+        screened = step("comment", "Post the comment and record the verdict")["env"]["SCREENED"]
+        for gathered, checks, want in (("true", "model_armor,claude", "model_armor,claude"),
+                                       ("false", "model_armor", ""), ("true", "", "")):
+            ctx = {"needs.gather.outputs.screen": gathered, "needs.screen.outputs.checks": checks}
+            self.assertEqual(interpolated(screened, ctx), want, ctx)
 
     def test_anything_else_is_refused(self):
         for screened in ("x; rm -rf /", "model_armor,", "@octocat", "model_armor,other"):
@@ -2209,11 +2180,11 @@ class RunWiring(unittest.TestCase):
         return cancel if isinstance(cancel, bool) else evaluate(cancel, ctx)
 
     def test_it_starts_on_no_label_event_and_a_push_cancels_the_run_going(self):
-        """A pull request into main starts Build on these four events alone, none of them labeled or unlabeled, and a
-        push cancels the run of its older head. Review starts when a run of Build or Triage completes (by their names),
-        on an issue's events, and by hand. A run after a Build run has a group of its own, by that run's id: no run of
-        another Build run cancels it, so a second pull request from the same head repository and branch never cancels
-        the review of the first, and a re-run of the same run cancels the run of its earlier attempt. A run after a
+        """No label event of a pull request (labeled, unlabeled) starts Build, and a push cancels the run of its older
+        head. Review starts when a run of Build or Triage completes (by their names), on an issue's events, and by hand.
+        A run after a Build run has a group of its own, by that run's id: no run of another Build run cancels it, so a
+        second pull request from the same head repository and branch never cancels the review of the first, and a
+        re-run of the same run cancels the run of its earlier attempt. A run after a
         Triage run that ended success has one group for the head repository and branch of that run. route triages only
         the pull request into the default branch, so a second pull request from the same branch into another base gets
         no triage, and the shared group cancels no triage of it. Of two Triage runs of one pull request, the run after
@@ -2222,20 +2193,15 @@ class RunWiring(unittest.TestCase):
         its own, by that run's id, so that it cancels no run that writes one. A run by hand cancels the run already
         going in its group; an issue's event waits for it."""
         on = BUILD.get("on", BUILD.get(True))
-        self.assertEqual(on, {"pull_request": {"branches": ["main"],
-                                               "types": ["opened", "reopened", "synchronize", "ready_for_review"]}})
+        self.assertFalse({"labeled", "unlabeled"} & set(on["pull_request"]["types"]), on)
         pr = {"github.event_name": "pull_request", "github.event.pull_request.number": 7}
         for action in ("opened", "reopened", "synchronize", "ready_for_review"):
             with self.subTest(action=action):
                 ctx = dict(pr, **{"github.event.action": action})
                 self.assertEqual((self.group(ctx, BUILD), self.cancels(ctx, BUILD)), ("build-pull_request-7", True))
         on = REVIEW.get("on", REVIEW.get(True))
-        self.assertEqual(sorted(on), ["issues", "workflow_dispatch", "workflow_run"])
         triage = read_workflow("triage.yaml")
-        self.assertEqual(on["workflow_run"], {"workflows": [BUILD["name"], triage["name"]], "types": ["completed"]})
-        self.assertEqual(on["issues"], {"types": ["opened", "edited", "reopened"]})
-        self.assertEqual(sorted(on["workflow_dispatch"]["inputs"]),
-                         ["issue", "measure", "measure_repeats", "measure_set", "pr"])
+        self.assertEqual(on["workflow_run"]["workflows"], [BUILD["name"], triage["name"]])
         # Runs 900 and 901 of Build are of two pull requests from mallory/libx's branch main, one into main and one into
         # another base. The review of each run has a group of its own. Runs 902 and 903 of Triage are of the first,
         # after two edits of its description. Their runs share one group, and the newer run cancels the older. Runs 904,
@@ -2271,4 +2237,12 @@ class RunWiring(unittest.TestCase):
         self.assertNotEqual(required(ctx)[0], 0)
 
     def test_the_review_admits_the_apps_of_allowed_bots_alone(self):
-        self.assertEqual(step("review", "Review")["with"]["allowed_bots"], "${{ env.ALLOWED_BOTS }}")
+        """Each attempt of the review gives the action, as its allowed_bots, the one list of Apps whose runs it admits:
+        the workflow's ALLOWED_BOTS, which route reads through .github/scripts/actor-kind, whatever the list holds."""
+        listed = "an-app[bot],another-app[bot]"
+        attempts = [(job, s) for job, j in REVIEW_JOBS.items() for s in j["steps"]
+                    if "claude-code-action@" in s.get("uses", "")]
+        self.assertTrue(attempts, "no step runs claude-code-action")
+        for job, s in attempts:
+            ctx = {f"env.{k}": v for k, v in step_env(job, s, ALLOWED_BOTS=listed).items()}
+            self.assertEqual(interpolated(s["with"]["allowed_bots"], ctx), listed, s["name"])

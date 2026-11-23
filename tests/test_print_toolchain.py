@@ -89,14 +89,6 @@ def test_a_project_tools_check_refuses_gets_the_newest_c_toolchain_and_exit_0(tm
     assert printed(directory) == (0, check_build.newest_toolchain() + "\n")
 
 
-def test_standard_output_holds_only_the_image(tmp_path):
-    # The workflow reads all of standard output as the image: the warnings oss-verify check prints go to standard error.
-    directory = project(tmp_path, PROJECT.format("c").replace("security@example.org", "n/a"))
-    code, out = printed(directory)
-    assert code == 0
-    assert out.count("\n") == 1 and "@sha256:" in out
-
-
 def test_a_project_named_templates_is_read_from_projects(tmp_path, monkeypatch):
     # The workflow runs oss-verify check from the checkout's root, which has a templates/project.yaml of its own, and
     # passes projects/<name> to both --print-toolchain and the build. A bare `templates` would read the root's

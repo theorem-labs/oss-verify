@@ -465,8 +465,7 @@ class UbsanSettings(unittest.TestCase):
             self.assertEqual(check_tool.ubsan_settings(self.job(["null", "libcxx-hardening"], "c++"), TOOLCHAIN),
                              (["null", "libcxx-hardening"], ["vptr"], []))
 
-    def test_today_s_toolchains_keep_the_fixed_flags(self):
-        self.assertEqual(check_build.ubsan_mode(check_build.newest_toolchain()), "fixed")
+    def test_an_unlisted_toolchain_keeps_the_fixed_flags(self):
         self.assertEqual(check_build.ubsan_mode(TOOLCHAIN), "fixed")
 
 

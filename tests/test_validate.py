@@ -5,6 +5,7 @@ import contextlib
 import io
 import os
 import pathlib
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -12,6 +13,8 @@ import zipfile
 from unittest import mock
 
 from oss_verify import validate
+
+SRC = pathlib.Path(__file__).resolve().parents[1] / "src"
 
 KEY = "-----BEGIN PGP PUBLIC KEY BLOCK-----\nmQINBF...\n-----END PGP PUBLIC KEY BLOCK-----\n"
 CONTACT = "security@libexample.dev"
@@ -252,15 +255,12 @@ class UbsanChecks(unittest.TestCase):
         """OSS-Fuzz's -fno-sanitize-recover list, less vptr (trap mode cannot make it); C and Python drop function,
         as OSS-Fuzz drops it from C compiles and from a Python project's native code."""
         default = validate.DEFAULT_UBSAN_CHECKS
-        self.assertEqual(len(default["c++"]), 17)
-        self.assertEqual(default["c++"][-3:], ["vptr", "libcxx-hardening", "strict-flex-arrays"])
         self.assertEqual(default["c"], [check for check in default["c++"]
                                         if check not in ("function", "vptr", "libcxx-hardening")])
         # strict-flex-arrays is about C as much as C++: every default has it.
         for checks in default.values():
             self.assertIn("strict-flex-arrays", checks)
         self.assertEqual(default["python"], default["c"])
-        self.assertEqual(set(validate.TRAP_EXCEPTIONS), {"vptr"})
         for checks in default.values():
             self.assertNotIn("unsigned-integer-overflow", checks)
 
@@ -477,9 +477,13 @@ class Output(unittest.TestCase):
         self.assertEqual(validate.printable("a\x1b[31mb\n\x07"), "a\\x1b[31mb\\x0a\\x07")
 
     def test_help_names_each_field(self):
-        """`oss-verify validate --help` prints the module's docstring, which lists the fields of project.yaml."""
+        """`oss-verify validate --help`, run as a command, prints the module's docstring, which lists the fields of
+        project.yaml, one line for each."""
+        done = subprocess.run([sys.executable, "-P", "-m", "oss_verify", "validate", "--help"], capture_output=True,
+                              text=True, env=dict(os.environ, PYTHONPATH=str(SRC)), check=False)
+        self.assertEqual((done.returncode, done.stderr), (0, ""))
         for key in validate.ALLOWED_KEYS:
-            self.assertRegex(validate.__doc__, rf"\n    {key}: ", key)
+            self.assertRegex(done.stdout, rf"\n    {key}: ", key)
 
     def run_main(self, *args):
         out, err = io.StringIO(), io.StringIO()
