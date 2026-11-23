@@ -15,13 +15,14 @@
 #
 # It sets up that build's compilers and flags (toolchain.sh), compiles the driver ($LIB_FUZZING_ENGINE), and runs
 # $SRC/build.sh with bash -eux from the image's working directory. build.sh builds each fuzz target into $OUT, as
-# under OSS-Fuzz, by linking it with $LIB_FUZZING_ENGINE through $CC or $CXX. A link that names
-# $LIB_ALLOCATION_FAILURE_ENGINE instead makes an allocation-failure fuzz target (docs/build-contract.md).
+# $LIB_FUZZING_ENGINE through $CC or $CXX. A link that names $LIB_ALLOCATION_FAILURE_ENGINE instead makes an
+# allocation-failure fuzz target, and one that names $LIB_DSL_ENGINE a DSL fuzz target (docs/build-contract.md).
 #
 # Such a link is made twice (link-fuzz-target): once as asked, with symbols, and once with --strip-all. The binaries
 # in $OUT keep their symbols, so that a fuzz target is found by its symbol table (an executable that defines
-# LLVMFuzzerTestOneInput). The stripped twin of each executable in $OUT is saved as $OUT/.stripped/<sha256 of the
-# executable>: those are the bytes that are published and that statements are about.
+# LLVMFuzzerTestOneInput). A DSL fuzz target defines none: compile lists each one in $OUT/.dsl-fuzz-targets. The
+# stripped twin of each executable in $OUT is saved as $OUT/.stripped/<sha256 of the executable>: those are the bytes
+# that are published and that statements are about.
 #
 # Before build.sh runs, it also compiles the driver's cli.c once for each input limit that the build of one fuzz
 # target can set: /tmp/ov/cli-limit<k>.o for k = 27 to 31 and, with OV_RECORD=1 (below), /tmp/ov/cli-limit<k>-quiet.o.
@@ -175,6 +176,11 @@ for f in malloc calloc realloc reallocarray aligned_alloc posix_memalign memalig
          _ZnwmSt11align_val_tRKSt9nothrow_t _ZnamSt11align_val_tRKSt9nothrow_t; do
   af_rename="$af_rename --redefine-sym $f=__ov_$f"
 done
+# The driver of a DSL fuzz target: cli.o with the target's own driver objects, linked only by link-fuzz-target, which
+# renames the library's calls through the target's maps (link-fuzz-target, dsl.py). Not an archive, for the reason
+# above.
+printf 'Not an archive: link a DSL fuzz target with $CC or $CXX (docs/build-contract.md).\n' > "$OV/libDslEngine.a"
+LIB_DSL_ENGINE=$OV/libDslEngine.a
 
 silent=""
 case "$FLAV" in asan|asanubsan) silent="-Wl,--defsym=__sanitizer_silent_reports=1" ;; esac
@@ -189,13 +195,14 @@ OV_AFE='$LIB_ALLOCATION_FAILURE_ENGINE'
 OV_AF_DRIVER='$OV/cli.o $OV/allocation_failure.o'
 OV_AFC='$LIB_ALLOCATION_COUNTING_ENGINE'
 OV_AFC_DRIVER='$OV/cli.o $OV/allocation_counting.o'
+OV_DSLE='$LIB_DSL_ENGINE'
 OV_RECORDS='$OV_RECORDS'
 OV_AF_RENAME='${af_rename# }'
 OV_BUILD='$BUILD'
 EOF
 
-# $CC and $CXX: the build's compiler, except that a link naming $LIB_FUZZING_ENGINE or $LIB_ALLOCATION_FAILURE_ENGINE
-# goes to link-fuzz-target.
+# $CC and $CXX: the build's compiler, except that a link naming $LIB_FUZZING_ENGINE, $LIB_ALLOCATION_FAILURE_ENGINE,
+# $LIB_ALLOCATION_COUNTING_ENGINE or $LIB_DSL_ENGINE goes to link-fuzz-target.
 write_wrapper() {
   cat > "$1" <<EOF
 #!/bin/sh
@@ -203,7 +210,7 @@ for a in "\$@"; do
   case "\$a" in -c|-E|-S|-fsyntax-only|-M|-MM|--version|-dumpmachine|-print-*) exec $2 "\$@" ;; esac
 done
 for a in "\$@"; do
-  case "\$a" in "$LIB_FUZZING_ENGINE"|"$LIB_ALLOCATION_FAILURE_ENGINE"|"$LIB_ALLOCATION_COUNTING_ENGINE")
+  case "\$a" in "$LIB_FUZZING_ENGINE"|"$LIB_ALLOCATION_FAILURE_ENGINE"|"$LIB_ALLOCATION_COUNTING_ENGINE"|"$LIB_DSL_ENGINE")
     exec $LIB/link-fuzz-target $2 "\$@" ;; esac
 done
 exec $2 "\$@"
@@ -240,7 +247,8 @@ EOF
 
 # OSS-Fuzz's names, and a few more that cross builds need. FUZZING_ENGINE is "none", OSS-Fuzz's name for a driver
 # that runs inputs from files.
-export CC CXX CFLAGS CXXFLAGS LIB_FUZZING_ENGINE LIB_ALLOCATION_FAILURE_ENGINE LIB_ALLOCATION_COUNTING_ENGINE
+export CC CXX CFLAGS CXXFLAGS LIB_FUZZING_ENGINE LIB_ALLOCATION_FAILURE_ENGINE LIB_ALLOCATION_COUNTING_ENGINE \
+  LIB_DSL_ENGINE
 export ARCHITECTURE=riscv64 FUZZING_ENGINE=none
 export CMAKE_TOOLCHAIN_FILE=$OV/toolchain.cmake
 export AR=$CHOST-ar NM=$CHOST-nm RANLIB=$CHOST-ranlib STRIP=$CHOST-strip OBJCOPY=$CHOST-objcopy
@@ -272,6 +280,10 @@ for f in "$OUT"/* "$OUT"/.[!.]*; do
     # Not grep -q: with pipefail, llvm-nm would be killed by the closed pipe and the test would fail.
     if llvm-nm --defined-only "$f" 2>/dev/null | grep ' T LLVMFuzzerTestOneInput$' >/dev/null; then
       echo "compile: fuzz target $(basename "$f")"
+      found=$((found + 1))
+    elif [ -f "$OV/dsl-targets/$sum" ]; then
+      basename "$f" >> "$OUT/.dsl-fuzz-targets"
+      echo "compile: fuzz target $(basename "$f") (DSL)"
       found=$((found + 1))
     fi
   fi

@@ -24,7 +24,7 @@ FROM ${TOOLCHAIN}
 # again. It is bind-mounted, so it leaves no file in the image.
 RUN --mount=type=bind,source=distrust-roots.py,target=/tmp/distrust-roots.py python3 /tmp/distrust-roots.py
 
-COPY toolchain.sh link-fuzz-target layout.py record-compile recipes.sh release-target.sh /usr/local/lib/oss-verify/
+COPY toolchain.sh link-fuzz-target layout.py dsl.py record-compile recipes.sh release-target.sh /usr/local/lib/oss-verify/
 COPY driver/ /usr/local/lib/oss-verify/driver/
 COPY rust/ /usr/local/lib/oss-verify/rust/
 COPY python/ /usr/local/lib/oss-verify/python/
