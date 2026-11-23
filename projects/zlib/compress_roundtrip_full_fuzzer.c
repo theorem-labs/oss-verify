@@ -4,7 +4,7 @@
  *   rt_settings.h 2a24a94988c386d6d081696b79aab01e
  *   rt_mem.c 5596b8eaf8120a4823450382528cd994
  *   rt_settings.c 734c9eb84ccc651f003da86d4e1e28a8
- *   compress_roundtrip_full_fuzzer.c 89defc74c7d3eddfbb11be4e79a53fca
+ *   compress_roundtrip_full_fuzzer.c 89defc74c7d3eddfbb11be4e79a53fca, before the file-mode change
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -284,13 +284,13 @@ size_t rt_deflate_room(int flush, size_t room) {
  * inflate answers Z_STREAM_END with every compressed byte used and every data byte given back.
  *
  * Streaming-file mode: the name must be bare, so an empty name, a slash or a 0 byte returns before any open, and so do
- * the names proc and sys, only when the working directory is "/": a guard for a gap of the process model, which does
- * not reach those two names there. The file is opened twice, with O_NOFOLLOW and O_NONBLOCK, and each descriptor that
- * is not a regular file returns at once, as a failed open does. The first descriptor feeds deflate, read in pieces of
- * at most 64 KiB (the deflate steps' piece sizes). The second is read, also at most 64 KiB at a time, to check
- * inflate's bytes, and must end where inflate's output ends. A failed open, read or close returns normally, at once,
- * and nothing read before it is compared as if it were the whole file. The memory is fixed at any file size, up to
- * 2^63 - 1 bytes.
+ * the names proc and sys when the working directory is "/" or getcwd fails other than with ERANGE: a guard for a gap of
+ * the process model, which does not reach those two names there. The file is opened twice, with O_NOFOLLOW, so a
+ * symlink is not followed, and O_NONBLOCK, so opening a FIFO or a device does not wait; a descriptor that fstat does
+ * not show as a regular file returns at once. The first descriptor feeds deflate, read in pieces of at most 64 KiB (the
+ * deflate steps' piece sizes). The second is read, also at most 64 KiB at a time, to check inflate's bytes, and must
+ * end where inflate's output ends. A failed open, fstat, read or close returns normally, at once, and nothing read
+ * before it is compared as if it were the whole file. The memory is fixed at any file size, up to 2^63 - 1 bytes.
  */
 #include <errno.h>
 #include <fcntl.h>

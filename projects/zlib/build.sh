@@ -47,7 +47,7 @@ ov_target_build compress_fuzzer
 # configure, make and make install), and no path rewrite. These give the bytes that its harness record pins.
 # compress_roundtrip_full_fuzzer.c is copied byte for byte from Theorem Labs' internal proofs repository, where the
 # fuzz target's harness record names it (projects/zlib/compress_roundtrip_full_fuzzer/source/
-# compress_roundtrip_full_fuzzer.c, sha256 11910d23066ab2b686aa6f9a49098fa39c2b3479a27ee5a0c422965f8a1d7201).
+# compress_roundtrip_full_fuzzer.c, sha256 a79a180200e27dee71b91bfaa08a6389437ff876e275a14ff66ede879d64217e).
 # Copyright 2026 Theorem Labs, PBC. It is under MIT OR Apache-2.0. It has no licence lines of its own: a line added at
 # its top would move the line numbers that its sanitizer builds hold, and so the bytes of its pinned binaries.
 (
@@ -73,6 +73,7 @@ ov_build_musl() {
 build_lib() {
   ov_build_musl
   oft_build_cmake
+  # The pinned binaries compiled the harness against the zconf.h that CMake writes, not the source tree's.
   if [ -f "$BUILDDIR/src/zconf.h" ]; then mv "$BUILDDIR/src/zconf.h" "$BUILDDIR/src/zconf.h.included" || return 1; fi
   oft_build_harness "compress_roundtrip_full_fuzzer.c"
   oft_seal_getenv
