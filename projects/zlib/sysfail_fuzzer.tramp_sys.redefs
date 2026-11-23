@@ -1,0 +1,28 @@
+# tramp_sys.redefs - the six file system calls, renamed to the trampolines of
+# tramp_sys.c (the in-memory file and the system-call failure schedule).
+#
+# build.sh gives this map as OV_DSL_LIBRARY_REDEFS, so oss-verify's dsl.py
+# (docs/build-contract.md, "DSL fuzz targets") applies it, in the same
+# llvm-objcopy call as the allocation map, to a DERIVED copy of the library
+# archive, lib/liboft.a, and to nothing else: not to the driver objects, cli.o,
+# libc.a, libc++, libunwind or the sanitizer runtime. dsl.py refuses a driver
+# object that names either side of a pair. cli.c reads the input with the real
+# open/read/close before the program runs, so the driver's own input reading
+# cannot fail, and musl's stdio reaches the kernel through its internal
+# syscall wrappers, not these names, so the driver's stdout cannot either.
+#
+# Format: one `old new` pair per line; `#` starts a comment.
+#
+# DELIBERATELY ABSENT: open64, lseek64, fcntl64, pread, pwrite, readv, writev,
+# creat, openat. zlib 1.4 at the pinned commit references none of them in any
+# build (under musl, gzlib.c:12-16 picks lseek). dsl.py checks that each pair
+# here moves every reference, and its census refuses a library copy that
+# still calls a name that the copy does not define, that is no new name of a
+# map, no sanitizer's, and no line of sysfail_fuzzer.sys.allow: a later zlib
+# that calls one of these fails the build instead of reaching the kernel.
+open tramp_sys_open
+read tramp_sys_read
+write tramp_sys_write
+lseek tramp_sys_lseek
+close tramp_sys_close
+fcntl tramp_sys_fcntl
