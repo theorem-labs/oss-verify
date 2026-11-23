@@ -10,22 +10,22 @@
 /* Human-readable target name, used only in diagnostics. */
 const char *target_name(void);
 
-/* Install the failure schedule. THE CONTRACT (docs/dsl-alloc-failure-mask-
- * design-2026-09-10.md s4.3): bit i set means the i-th call, after arming, that
+/* Install the failure schedule. THE CONTRACT (the allocation-failure
+ * design, s4.3): bit i set means the i-th call, after arming, that
  * the LIBRARY's own objects make to malloc/calloc/realloc/reallocarray/
  * aligned_alloc/posix_memalign/memalign/valloc/strdup/strndup/operator new --
  * or that the library routes through a driver-installed allocator hook --
  * returns NULL (operator new: throws bad_alloc), in call order. Keyed on
  * allocation index, never on address or size -- ASan changes both, and an
  * address-keyed schedule would not denote the same thing across a T2 pair.
- * The driver's own allocations and the sanitizer runtime's are never on the
- * schedule: on the DSL tier build.sh renames the family in a DERIVED copy of
- * the library archive only (src/aef_alloc.h), so nothing outside the library
- * can tick it.
+ * The driver's own arena and the sanitizer runtime are never on the schedule:
+ * the build renames the family in DERIVED copies of the library archive and
+ * of the driver objects, and the arena calls tramp_alloc_raw_malloc, a name no
+ * map renames (src/tramp_alloc.h).
  *
  * Bits 0-31 are this argument; on the DSL tier bit i >= 32 is bit (i-32)%8 of
  * config[2 + (i-32)/8], LSB first (src/dsl.h hands config[2..] to
- * aef_alloc_extend). Called once, before target_run. A target with no
+ * tramp_alloc_extend). Called once, before target_run. A target with no
  * allocator (jsmn) and the generic OSS-Fuzz adapter implement this as a no-op
  * and ignore the schedule. */
 void target_alloc_init(unsigned int fail_bitmap);

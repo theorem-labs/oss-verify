@@ -101,7 +101,7 @@
  *   near-duplicate of what the harness already runs.
  *
  * THE ONE SCAR, and it is a machine-load artefact rather than anything in this
- * file: tests/check_asan_containment.sh is flaky on this machine.
+ * file: the ASan containment check is flaky on this machine.
  * verify_one.sh's plain and ubsan stages and its cross-flavour comparison pass
  * every time; one of the eight asan-family gate runs intermittently reports
  *
@@ -122,7 +122,7 @@
  * `-D` trace FILE, not the run. targets/md4c-fuzz-mdhtml/dsl.c and
  * targets/libiec61850-fuzz_acse_parse/dsl.c record the same flake with the
  * same wandering binary and reach the same conclusion. Recorded rather than
- * worked around: tools/dsl and tests/ are not ours to edit.
+ * worked around: the checks are not this file's to edit.
  *
  * WHERE THE CLAMPS ARE AND WHAT THEY COST is written out at "the clamps"
  * below, because dsl.h rule 1 is the rule this project could most easily
@@ -136,7 +136,7 @@
  * output, so a stream that expands past 256 KiB is only decoded that far.
  *
  * EXTENDED 2026-09-02 FOR THE LINEAR VM WITH EXPECTATIONS (src/dsl.h op byte
- * 255, docs/dsl-driver.md "Expectations and exit 3"). Three things changed,
+ * 255, the DSL driver notes "Expectations and exit 3"). Three things changed,
  * and the op ORDER 0..25 did not, so every one-instruction witness keeps its
  * op byte:
  *
@@ -167,8 +167,8 @@
  * runs once, linearly, and probe.bin executes one frame (op 0x7b % 28 = 11,
  * def_query, which creates a deflate stream and succeeds).
  *
- * REBUILT 2026-09-03, landing the two items the 2026-09-02 lane measured and
- * queued (docs/dsl-2026-09-02/zlib-checksum_fuzzer.md, Deviations 3 and 4);
+ * REBUILT 2026-09-03, landing the two items the 2026-09-02 pass measured and
+ * queued (its Deviations 3 and 4);
  * the op table and its order are unchanged:
  *
  *   - want_def no longer asks deflateInit2_ for the one cell it rejects
@@ -181,9 +181,9 @@
  *     deflater and not yet emitted, and the fields inflate fills in from a
  *     gzip stream's header, were invisible to `expect obj`.
  */
-#define AEF_DSL_NAME "zlib"
-#define AEF_DSL_ALLOC_HOOK 1
-#define AEF_DSL_SERIALIZE 1
+#define TRAMP_DSL_NAME "zlib"
+#define TRAMP_DSL_ALLOC_HOOK 1
+#define TRAMP_DSL_SERIALIZE 1
 
 /* THE STEP BUDGET IS CUT TO A QUARTER OF THE DEFAULT, and the binding
  * constraint is the ARENA rather than qemu.
@@ -1633,7 +1633,7 @@ static int dsl_step(dsl_vm *V, unsigned op) {
 /* ------------------------------------------------------------ serializer ---
  *
  * The VALUE of a live handle, as bytes into the sink, for `expect obj` and
- * snap (src/dsl.h "THE SERIALIZER"; the contract is docs/dsl-driver.md
+ * snap (src/dsl.h "THE SERIALIZER"; the contract is the DSL driver notes
  * "Making a handle expectable"). An observation and nothing else: no operand
  * reads, no handle-table calls, no arena, no dsl_rand, no dsl_note. Scratch is
  * the one bounded file-scope static below.
@@ -1714,7 +1714,7 @@ static unsigned char ser_win[32768];
 _Static_assert(sizeof ser_win == (1u << 15), "ser_win must hold the largest w_size");
 
 /* A gz_header's CONTENT (added 2026-09-03; until then only `gzhead != NULL` /
- * `head != NULL` was sunk, and the previous lane measured the hole: with a
+ * `head != NULL` was sunk, and the previous pass measured the hole: with a
  * header attached to a gzip deflater but not yet emitted, changing its `time`
  * left every check passing). The struct and its three buffers are OURS -- arena
  * blocks, zeroed at allocation (op_def_header, op_inf_header) -- so every field

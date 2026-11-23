@@ -11,14 +11,14 @@
  * plugins (cjson, libpng, zlib, tomlc17, xz -- the -repro tier) call fa_init
  * with cli.c's u32 bitmap and take the deny decision from the u32 test on fa_n
  * below: 32 schedulable indices, a bit past the end inert. The DSL tier
- * (src/dsl.h) never calls fa_init: it #defines FA_DENY() as aef_alloc_deny()
+ * (src/dsl.h) never calls fa_init: it #defines FA_DENY() as tramp_alloc_deny()
  * before including this file, so the SAME hooks consult the process-wide
- * schedule in src/aef_alloc.h -- the u32 plus the config[2..] extension, one
+ * schedule in src/tramp_alloc.h -- the u32 plus the config[2..] extension, one
  * index shared with the library's direct allocation calls, which build.sh
  * routes to that file by renaming the archive's references. fa_n keeps
  * counting in both tiers (it is what fa_count() reports, and three DSL drivers
  * print it into their digest), so there are two counters with two meanings:
- * fa_n = allocations that came through THESE hooks; aef_alloc_count() = the
+ * fa_n = allocations that came through THESE hooks; tramp_alloc_count() = the
  * schedule index over every covered entry point. Only the decision moved.
  *
  * Wired through each target's NATIVE allocator hook rather than through
@@ -31,7 +31,7 @@
  *
  * Three functions, not one: fa_malloc/fa_free for the malloc-shaped hooks
  * (cJSON, libpng), and fa_realloc for the realloc-shaped ones (tomlc17's
- * mem_realloc, expat's realloc_fcn) -- see ruling-f-realloc-hooks.md. They
+ * mem_realloc, expat's realloc_fcn) -- see the realloc-hooks note. They
  * are written here as ONE allocator sharing a block layout, not three
  * independent functions, because a target that mixes hooks (expat calls
  * malloc_fcn and realloc_fcn on the same allocations) must be able to free
@@ -111,7 +111,7 @@ unsigned int fa_n = 0;
  * The default is the u32 test the plugin tier has always had -- the index is
  * fa_n - 1, because the increment has already happened -- so a translation
  * unit that defines nothing gets byte-for-byte today's behaviour. src/dsl.h
- * defines FA_DENY() as aef_alloc_deny() BEFORE including this file, which is
+ * defines FA_DENY() as tramp_alloc_deny() BEFORE including this file, which is
  * the whole of how the DSL tier's hooks join the process-wide schedule: one
  * tick of that schedule's index per hook call, the decision from its bits,
  * and fa_bitmap left at 0 because fa_init is never called there. A macro
@@ -128,11 +128,11 @@ static inline int fa_deny_bitmap(void) {
 
 /* THE REAL ALLOCATOR IS ONE MACRO TOO, FA_RAW_MALLOC(). The plugin tier's
  * default is malloc: there its hooks are the only thing between the library
- * and the allocator. src/dsl.h defines it as aef_alloc_raw_malloc BEFORE
+ * and the allocator. src/dsl.h defines it as tramp_alloc_raw_malloc BEFORE
  * including this file, because since 2026-09-14 build.sh renames the
- * allocation family in dsl.o as well as in the archives (LQ 158 mechanism A1),
- * so a literal malloc here would be compiled into dsl.o, renamed to aef_malloc,
- * and tick aef_alloc_deny() a SECOND time for an allocation FA_DENY() has
+ * allocation family in dsl.o as well as in the archives,
+ * so a literal malloc here would be compiled into dsl.o, renamed to tramp_malloc,
+ * and tick tramp_alloc_deny() a SECOND time for an allocation FA_DENY() has
  * just ticked -- two ticks per hook call, bit i denying a different allocation
  * than the count names (found by the review of that change). The raw name is
  * in no rename map and never ticks. free() needs no counterpart: it is not
