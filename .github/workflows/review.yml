@@ -1436,8 +1436,8 @@ jobs:
       # Service's address only with Tailscale 1.94 or later, or with --accept-routes
       # (https://tailscale.com/kb/1552, "Access Tailscale Services from other devices"): this action meets both at
       # the pinned commit. Its action.yml gives the version input the default 1.104.2, and its src/main.ts puts
-      # --accept-routes in every `tailscale up`. So the step gives no version input, which the test of this step
-      # checks (tests/test_check_checks.py); no test pins its other settings. use-cache is off: the action would
+      # --accept-routes in every `tailscale up`. The test of this step pins the exact set of its settings, so no
+      # version input can be given at all. use-cache is off: the action would
       # otherwise keep the tailscale binary in this repository's Actions cache and run it as root from there, and
       # the review job's cache holds its review session alone (above). log-mode is quiet: at the pinned commit
       # src/logging.ts silences the action's commands only when the run is not in debug, so a re-run with debug logging
