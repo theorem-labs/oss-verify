@@ -1,9 +1,10 @@
 #!/bin/bash -eu
 # SPDX-License-Identifier: (Apache-2.0 OR MIT)
 #
-# Builds the Racket CS fuzz targets of fuzz/ (this project's harness, which
-# the Dockerfile puts in the checkout) into $OUT: static riscv64 musl, no
-# threads, boot files and modules embedded in each target.
+# Builds the Racket CS fuzz targets of fuzz/ (the racket-fuzz package and
+# this project's driver, which the Dockerfile puts in the checkout) into
+# $OUT: static riscv64 musl, no threads, boot files and modules embedded
+# in each target.
 #
 # Racket CS cross-builds with a Racket and a Chez Scheme for the build
 # machine, so this first builds those natively, without threads to match
@@ -78,7 +79,7 @@ $CC -c -Ulinux -Uunix $FUZZ/embed-data.S -o $WORK/embed-data.o \
 for t in eval heap-eval read print-roundtrip number regexp fasl ; do
   $CC $CFLAGS -c -I$R/include/racket \
     -DFUZZ_ADDON_DIR='"/nonexistent/racket-addon"' \
-    -DFUZZ_ENTRY="\"fuzz-$t\"" $FUZZ/driver.c -o $WORK/driver-$t.o
+    -DFUZZ_ENTRY="\"fuzz-$t\"" $FUZZ/oss-verify-driver.c -o $WORK/driver-$t.o
   $CC $CFLAGS -static $WORK/driver-$t.o $WORK/embed-data.o \
     $R/lib/libracketcs.a $LIB_FUZZING_ENGINE -lm \
     -o $OUT/racket_${t}_fuzzer

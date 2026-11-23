@@ -1,10 +1,7 @@
 # kind	path	arguments: see lay-out-sources
 patch	racket	session-key.patch
-copy	racket/fuzz/driver.c	driver.c
-copy	racket/fuzz/embed-data.S	embed-data.S
-copy	racket/fuzz/embed-modules.rkt	embed-modules.rkt
-copy	racket/fuzz/libs.rkt	libs.rkt
-copy	racket/fuzz/safe-eval.rkt	safe-eval.rkt
+git	racket/fuzz	https://github.com/samth/racket-fuzz	0bde2c9adda9e198e9772ec9e08d7a86bd7493de
+copy	racket/fuzz/oss-verify-driver.c	driver.c
 copy	racket/fuzz/mutants/exact-number.patch	mutant-exact-number.diff
 copy	racket/fuzz/mutants/fasl-raise.patch	mutant-fasl-raise.diff
 copy	racket/fuzz/mutants/fasl-roundtrip.patch	mutant-fasl-roundtrip.diff
