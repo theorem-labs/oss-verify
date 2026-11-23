@@ -937,9 +937,10 @@ match args:
     # The parts of handover_case, as its messages name them.
     EQUAL, RUN = "the values that both files hold", "make, then publish, on one table"
     # The run steps of make that part 2 of handover_case runs, in their order: the base image, the new image, the row
-    # check and the digest. make's other run steps install crane and check the new image. They give publish nothing.
+    # check and the digest. make's other run steps install crane, check the new image and probe it. They give publish
+    # nothing.
     MAKE_STEPS = ("the base image, from infra/toolchains.tsv", "make the image in the runner's registry", ROW_CHECK,
-                  "the digest, for probe, docker-tests and publish")
+                  "the digest, for compare-digests and publish")
 
     def handover_case(self, tree=ROOT, upto=RUN):
         """What toolchain-images.yaml hands over to publish (toolchain-images-publish.yaml): values, the digest
@@ -1214,34 +1215,32 @@ match args:
         caught = self.handover_fails(self.EQUAL, (f".github/workflows/{self.FP_TESTS}", other_crane))
         self.assertTrue(caught.endswith(f"the env CRANE_VERSION of .github/workflows/{self.FP_TESTS}"), caught)
 
-    # frame-pointer-tests.yaml, the base rows that its step FP_MAKE reads, and that step: it makes the two images that
-    # FramePointersC and FramePointersRust build on, and compares each with make's digest. toolchain-images.yaml calls
-    # the file, which has no trigger of its own.
+    # frame-pointer-tests.yaml and its step FP_MAKE: it makes the two images that FramePointersC and FramePointersRust
+    # build on, from FP_ROWS, and writes the digest of each for an upload of its job. toolchain-images.yaml calls the
+    # file, which has no trigger of its own, as its job docker-tests, beside make; the step COMPARE of its job
+    # compare-digests fails unless each of those digests is make's.
     FP_TESTS = "frame-pointer-tests.yaml"
     FP_ROWS = ("oss-fuzz-theorems-2026.10", "oss-fuzz-theorems-2026.10-rust")
-    FP_MAKE = "make the C and C++ image and the Rust image, with the digests that make made"
+    FP_MAKE = "make the C and C++ image and the Rust image"
+    COMPARE = "each image that docker-tests tested has the digest that make made"
     # A stand-in docker: `docker pull --quiet <image>` passes, and each call goes to $FAKE_DOCKER_CALLS. It runs no other
     # command.
     DOCKER = ('#!/bin/sh\necho "$*" >> "$FAKE_DOCKER_CALLS"\n[ "$1 $2" = "pull --quiet" ] && [ $# -eq 3 ] && exit 0\n'
               'echo "the stand-in docker does not run: docker $*" >&2\nexit 1\n')
 
-    def fp_make(self, digests=None):
-        """frame-pointer-tests.yaml's step FP_MAKE, with the stand-in crane and docker, on this repository's FP_ROWS.
-        digests, a function of the digests that crane mutate makes ({row: digest}), gives the files of make's
-        artifact, fp-digest/<row>.digest; with no digests there is no fp-digest directory. Return its exit status, its
-        log, its outputs, the digests that crane mutate makes, and the images that docker pulled."""
-        tests = self.workflow(ROOT, self.FP_TESTS)
+    def fp_make(self, tree=ROOT):
+        """frame-pointer-tests.yaml's step FP_MAKE of `tree`, with the stand-in crane and docker, on a table of the base
+        rows of make's matrix, and then each upload of its job docker-tests: an upload of a directory holds each file
+        in it, under its name. Return its exit status, its log, its outputs, the digests that crane mutate makes, the
+        images that docker pulled, and each file that an upload gives, as (the artifact, the file)."""
+        tests = self.workflow(tree, self.FP_TESTS)
         step = self.step(tests, "docker-tests", self.FP_MAKE)
-        bases = self.base_rows(self.FP_ROWS)
+        bases = self.base_rows(self.workflow(tree, self.IMAGES)["jobs"]["make"]["strategy"]["matrix"]["base"])
         registry, made, _ = self.registry_of(bases)
         home, temp = self.crane_home(registry), pathlib.Path(tempfile.mkdtemp(dir=self.dir))
         self.put_crane(temp / "bin")
         (temp / "bin" / "docker").write_text(self.DOCKER)
         (temp / "bin" / "docker").chmod(0o755)
-        if digests is not None:
-            (temp / "fp-digest").mkdir()
-            for row, digest in digests(made).items():
-                (temp / "fp-digest" / f"{row}.digest").write_text(digest + "\n")
         calls = temp / "docker-calls"
         calls.write_text("")
         rc, log, got = self.run_script(step["run"], self.checkout_of(bases), RUNNER_TEMP=str(temp),
@@ -1249,7 +1248,13 @@ match args:
                                        PATH=f"{temp / 'bin'}{os.pathsep}{self.env['PATH']}",
                                        **env_of(tests, "docker-tests", step, {}))
         pulled = [line.removeprefix("pull --quiet ") for line in calls.read_text().splitlines()]
-        return rc, log, got, made, pulled
+        handed = []
+        for up in (s.get("with") or {} for s in tests["jobs"]["docker-tests"]["steps"]
+                   if action_of(s) == "actions/upload-artifact"):
+            path = pathlib.Path(render(up.get("path", ""), {"runner.temp": str(temp)}))
+            files = sorted(path.iterdir()) if path.is_dir() else [path] if path.is_file() else []
+            handed += [(render(up.get("name", "artifact"), {}), file) for file in files]
+        return rc, log, got, made, pulled, handed
 
     def fp_images(self, made):
         """The images that FP_MAKE gives FramePointers, as its outputs c and rust: each made in the runner's registry,
@@ -1261,30 +1266,130 @@ match args:
         pulled = [image for row in self.FP_ROWS for image in (bases[row][1], refs[row])]
         return {"c": refs[self.FP_ROWS[0]], "rust": refs[self.FP_ROWS[1]]}, pulled
 
-    def test_frame_pointer_tests_compares_with_make(self):
-        # Called by toolchain-images.yaml, with make's digests: each image has make's digest.
-        rc, log, got, made, pulled = self.fp_make(lambda made: made)
+    def test_frame_pointer_tests_hands_over_the_digests_of_the_images_that_it_tests(self):
+        # FramePointers gets each image by its digest, and an upload holds that digest, in <row>.digest, for each row.
+        rc, log, got, made, pulled, handed = self.fp_make()
         self.assertEqual((rc, (got, pulled)), (0, self.fp_images(made)), log)
-        self.assertEqual(log.count(", the digest that make made"), 2, log)
+        self.assertEqual({file.name: file.read_text() for _, file in handed},
+                         {f"{row}.digest": made[row] + "\n" for row in self.FP_ROWS}, log)
 
     def test_frame_pointer_tests_starts_only_when_toolchain_images_calls_it(self):
         # tests.yaml's job docker runs FramePointersC and FramePointersRust for every other change.
         self.assertEqual(list(triggers(self.workflow(ROOT, self.FP_TESTS))), ["workflow_call"])
 
-    def test_frame_pointer_tests_called_fails_without_makes_digest_or_on_another(self):
-        c, rust = self.FP_ROWS
-        cases = {
-            "no fp-digest": (None, f"::error::make gave no digest for {c}: ''"),
-            "no digest of the Rust row": (lambda made: {c: made[c]}, f"::error::make gave no digest for {rust}: ''"),
-            "another digest of the C row": (lambda made: {**made, c: "sha256:" + "0" * 64},
-                                            f"but make made sha256:{'0' * 64}"),
-        }
-        for case, (digests, error) in cases.items():
-            with self.subTest(case=case):
-                rc, log, got, _, _ = self.fp_make(digests)
-                self.assertNotEqual(rc, 0, log)
-                self.assertIn(error, log)
-                self.assertNotIn("rust", got, log)
+    def compare_case(self, tree=ROOT, tested=None):
+        """make's steps (run_make) for each base row of its matrix, and frame-pointer-tests.yaml's step FP_MAKE and its
+        uploads (fp_make), on one table with no frame-pointer row. Then the step COMPARE of compare-digests, with each
+        file of those uploads where the downloads of compare-digests put it (lands). `tested`, a function of the files
+        of docker-tests ({(the artifact, the file's name): its text}), gives the files that docker-tests hands over in
+        their place. compare-digests must wait for each job whose upload a download of it reads (needs): else it can
+        start before the file is there. Return COMPARE's exit status, its log, the digests that make made, and the
+        rows of the files of docker-tests."""
+        images = self.workflow(tree, self.IMAGES)
+        job = images["jobs"]["compare-digests"]
+        rows = images["jobs"]["make"]["strategy"]["matrix"]["base"]
+        bases = self.base_rows(rows)
+        registry, made, _ = self.registry_of(bases)
+        handed = {}
+        for row in rows:
+            outcome, log, files = self.run_make(images, row, self.checkout_of(bases), self.crane_home(registry))
+            self.assertEqual(outcome, "passes", log)
+            handed.update({("make", artifact, file.name): file.read_text() for artifact, file in files})
+        rc, log, _, _, _, files = self.fp_make(tree)
+        self.assertEqual(rc, 0, log)
+        theirs = {(artifact, file.name): file.read_text() for artifact, file in files}
+        theirs = tested(theirs) if tested else theirs
+        handed.update({("docker-tests", *key): text for key, text in theirs.items()})
+        temp = pathlib.Path(tempfile.mkdtemp(dir=self.dir))
+        downloads = [s.get("with") or {} for s in job["steps"] if action_of(s) == "actions/download-artifact"]
+        read = set()
+        for (by, artifact, name), text in handed.items():
+            for down in downloads:
+                to = self.lands(down, artifact, name, str(temp))
+                if to is not None:
+                    read.add(by)
+                    pathlib.Path(to).parent.mkdir(parents=True, exist_ok=True)
+                    pathlib.Path(to).write_text(text)
+        needs = job.get("needs") or []
+        self.assertEqual(read - set([needs] if isinstance(needs, str) else needs), set(),
+                         "the jobs whose uploads compare-digests reads, and does not wait for")
+        step = self.step(images, "compare-digests", self.COMPARE)
+        rc, log, _ = self.run_script(step["run"], temp, RUNNER_TEMP=str(temp), GITHUB_STEP_SUMMARY=str(temp / "summary"),
+                                     **env_of(images, "compare-digests", step, {"runner.temp": str(temp)}))
+        return rc, log, made, [name.removesuffix(".digest") for _, name in theirs]
+
+    def compare_passes(self, tree=ROOT):
+        """compare_case passes, and names the digest of each row of FP_ROWS."""
+        rc, log, made, _ = self.compare_case(tree)
+        self.assertEqual(rc, 0, log)
+        for row in self.FP_ROWS:
+            self.assertIn(f"{row}: docker-tests tested `{made[row]}`, the image that make made", log)
+
+    def test_compare_digests_passes_on_the_images_that_make_made(self):
+        self.compare_passes()
+
+    def test_control_docker_tests_uploads_its_digests_under_another_name(self):
+        # compare-digests' download then gets no file of docker-tests.
+        self.passes_unchanged(self.compare_passes)
+        changed = self.copy_tree("changed", [(f".github/workflows/{self.FP_TESTS}", "name: fp-tested-digest\n",
+                                              "name: fp-tested-digests\n")])
+        with self.assertRaises(AssertionError) as caught:
+            self.compare_passes(changed)
+        self.assertIn("::error::docker-tests gave no digest for oss-fuzz-theorems-2026.10: ''", str(caught.exception))
+
+    def test_control_compare_digests_does_not_wait_for_docker_tests(self):
+        images = f".github/workflows/{self.IMAGES}"
+        self.passes_unchanged(self.compare_passes)
+        changed = self.copy_tree("changed", [(images, "    needs: [make, docker-tests]\n", "    needs: make\n")])
+        with self.assertRaises(AssertionError) as caught:
+            self.compare_passes(changed)
+        self.assertIn("the jobs whose uploads compare-digests reads, and does not wait for", str(caught.exception))
+
+    def tested_rows_case(self, tree=ROOT):
+        """docker-tests hands over a digest of FP_ROWS alone, and compare-digests requires each of them: it passes with
+        these files, and fails when the file of any one of them is missing. So the rows that compare-digests requires
+        are the rows of which docker-tests keeps a digest."""
+        rc, log, _, rows = self.compare_case(tree)
+        self.assertEqual((rc, sorted(rows)), (0, sorted(self.FP_ROWS)), log)
+        for row in rows:
+            rc, log, _, _ = self.compare_case(
+                tree, lambda files, row=row: {k: v for k, v in files.items() if k[1] != f"{row}.digest"})
+            self.assertNotEqual(rc, 0, f"compare-digests passes without docker-tests' digest of {row}: {log}")
+            self.assertIn(f"::error::docker-tests gave no digest for {row}: ''", log)
+
+    def test_compare_digests_requires_each_row_that_docker_tests_tests(self):
+        self.tested_rows_case()
+
+    def test_control_compare_digests_requires_the_c_row_alone(self):
+        # Without the Rust row in TESTED_ROWS, compare-digests passes when docker-tests gives no digest of it.
+        self.passes_unchanged(self.tested_rows_case)
+        rows = "      TESTED_ROWS: oss-fuzz-theorems-2026.10 oss-fuzz-theorems-2026.10-rust\n"
+        changed = self.copy_tree("changed", [(f".github/workflows/{self.IMAGES}", rows,
+                                              "      TESTED_ROWS: oss-fuzz-theorems-2026.10\n")])
+        with self.assertRaises(AssertionError) as caught:
+            self.tested_rows_case(changed)
+        self.assertIn("compare-digests passes without docker-tests' digest of oss-fuzz-theorems-2026.10-rust",
+                      str(caught.exception))
+
+    def other_digest_case(self, tree=ROOT):
+        """docker-tests hands over another digest of the C and C++ row than make made: compare-digests fails, and names
+        both digests."""
+        c, other = self.FP_ROWS[0], "sha256:" + "0" * 64
+        rc, log, made, _ = self.compare_case(
+            tree, lambda files: {k: other + "\n" if k[1] == f"{c}.digest" else v for k, v in files.items()})
+        self.assertNotEqual(rc, 0, log)
+        self.assertIn(f"::error::docker-tests tested the image {other} of {c}, but make made {made[c]}", log)
+
+    def test_compare_digests_fails_when_docker_tests_tested_another_image(self):
+        self.other_digest_case()
+
+    def test_control_compare_digests_without_its_comparison(self):
+        self.passes_unchanged(self.other_digest_case)
+        changed = self.copy_tree("changed", [(f".github/workflows/{self.IMAGES}",
+                                              '            elif [ "$tested" != "$made" ]; then\n',
+                                              "            elif false; then\n")])
+        with self.assertRaises(AssertionError):
+            self.other_digest_case(changed)
 
     def test_control_fp_package_changed_in_publish_alone(self):
         line = f"  FP_PACKAGE: {self.PACKAGE}\n"
@@ -1411,7 +1516,7 @@ match args:
         self.assertIn("oss-fuzz-theorems-2026.10, none: make passes, publish fails", caught)
         self.assertIn("make gave no digest for oss-fuzz-theorems-2026.10: 'localhost:5000/", caught)
 
-    # make's line that writes the digest of its row, which probe, docker-tests and publish read.
+    # make's line that writes the digest of its row, which compare-digests and publish read.
     DIGEST_WRITE = '          echo "${MADE#*@}" > "$RUNNER_TEMP/fp-digest/$BASE_ROW.digest"\n'
 
     def no_digest_case(self, name, *changes):
