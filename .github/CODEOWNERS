@@ -10,10 +10,13 @@ skills/ @theorem-labs/engineering @theorem-labs/research
 #
 # The other lines own each file that changes what a workflow runs or what a verdict is, whoever opens the pull request:
 #   /.github/                     the workflows and the scripts they run.
-#   /src/oss_verify/__init__.py,  the modules of the oss_verify package that a job holding a token imports from main's
-#   __main__.py, validate.py,     src/: triage.py, review-gather and terms-accepted import oss_verify.validate, which
-#   check_build.py                imports check_build alone; review-gather also runs python3 -m oss_verify validate;
-#                                 enroll-dispatch.yml and review.yml put main's src/ on PYTHONPATH.
+#   /src/                         the oss_verify package and every other file under src/, but for the modules that
+#                                 the lines with no team list after /src/, whose owner they take off: the modules of
+#                                 `oss-verify check` that no job holding a token imports from main's src/. Such a job
+#                                 (triage.py, review-gather and terms-accepted, and enroll-dispatch.yml and
+#                                 review.yml, which put main's src/ on PYTHONPATH) imports __init__.py, __main__.py,
+#                                 validate.py and check_build.py, and a new file under src/ could shadow a module it
+#                                 imports, so each of those, and each new file, keeps its owner.
 #   /infra/                       the toolchains `oss-verify check` builds with (infra/toolchains.tsv,
 #                                 infra/base-builder/), and the code it runs in build containers (infra/checks/).
 #   /seeds/                       the seeded projects, which `oss-verify check` builds as it builds projects/.
@@ -27,7 +30,10 @@ skills/ @theorem-labs/engineering @theorem-labs/research
 #                                 module, and tests.yaml runs pytest with -c pyproject.toml, so it reads no other
 #                                 configuration file.
 # A pull request from a fork that changes no file under projects/ passes the enrollment checks, and tests.yaml runs the
-# fork's own copy of itself, so these lines are what keeps such a change from merging on one person's reading.
+# fork's own copy of itself, so these lines are what keeps such a change from merging on one person's reading. The
+# modules of src/ that the lines with no team list are the exception: a change to them, which can change what a Build
+# run reports, merges without a code owner. It is still a steering change (.github/scripts/steering.py), so the
+# enrollment review reads its pull request's own Build results only after a person approved its head.
 #
 # The ruleset of main requires a code owner's approval, so a change to any of these files, or to this file, which says
 # who owns them, needs the approval of a member of @theorem-labs/engineering or of @theorem-labs/research, each a team
@@ -37,10 +43,17 @@ skills/ @theorem-labs/engineering @theorem-labs/research
 # code owner unless it adds or changes such a file.
 # These lines stay the last patterns of the file: the last pattern that matches a file decides its owner.
 /.github/ @theorem-labs/engineering @theorem-labs/research
-/src/oss_verify/__init__.py @theorem-labs/engineering @theorem-labs/research
-/src/oss_verify/__main__.py @theorem-labs/engineering @theorem-labs/research
-/src/oss_verify/validate.py @theorem-labs/engineering @theorem-labs/research
-/src/oss_verify/check_build.py @theorem-labs/engineering @theorem-labs/research
+/src/ @theorem-labs/engineering @theorem-labs/research
+/src/oss_verify/binary_isa.py
+/src/oss_verify/check.py
+/src/oss_verify/check_binaries.py
+/src/oss_verify/check_checks.py
+/src/oss_verify/check_links.py
+/src/oss_verify/check_records.py
+/src/oss_verify/manifest.py
+/src/oss_verify/model_release.py
+/src/oss_verify/seeded_projects.py
+/src/oss_verify/syscall_shapes.py
 /infra/ @theorem-labs/engineering @theorem-labs/research
 /seeds/ @theorem-labs/engineering @theorem-labs/research
 .claude/ @theorem-labs/engineering @theorem-labs/research

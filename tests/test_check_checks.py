@@ -3495,17 +3495,32 @@ class Owners(unittest.TestCase):
         owned = [[pattern, *teams] for pattern in (
             # Agent instructions and skills at any depth (the first patterns of CODEOWNERS).
             "**/AGENTS.md", "**/CLAUDE.md", "**/SKILL.md", "skills/",
-            # What changes what a workflow runs (the top of CODEOWNERS): of src/, only the modules that a job holding a
-            # token imports from main's src/ (.github/scripts/steering.py keeps all of src/ as steering files).
-            "/.github/", "/src/oss_verify/__init__.py", "/src/oss_verify/__main__.py", "/src/oss_verify/validate.py",
-            "/src/oss_verify/check_build.py", "/infra/", "/seeds/", ".claude/", "CLAUDE*.md", "AGENTS*.md",
-            "/.mcp.json", "/*.py",
+            # What changes what a workflow runs (the top of CODEOWNERS).
+            "/.github/", "/src/", "/infra/", "/seeds/", ".claude/", "CLAUDE*.md", "AGENTS*.md", "/.mcp.json", "/*.py",
             "/pytest.ini", "/.pytest.ini", "/pyproject.toml", "/uv.lock", "/.python-version", "/setup.cfg",
             "/tox.ini",
             "/review.md", "/review-change.md", "/review-issue.md", "/.claude/skills/write-to-maintainer/",
             "/.github/CODEOWNERS")]
+        # The lines with no team, right after /src/, take the owner off the modules of `oss-verify check` that no job
+        # holding a token imports from main's src/. Every other file under src/ keeps the owner of /src/: the modules
+        # such a job imports, and a new file, which could shadow one of them.
+        unowned = [["/src/oss_verify/%s.py" % name] for name in (
+            "binary_isa", "check", "check_binaries", "check_checks", "check_links", "check_records", "manifest",
+            "model_release", "seeded_projects", "syscall_shapes")]
         self.assertEqual([line for line in lines if len(line) > 1], owned)
-        self.assertEqual(lines[-len(owned):], owned)
+        self.assertEqual([line for line in lines if len(line) == 1], unowned)
+        at = owned.index(["/src/", *teams]) + 1
+        last = owned[:at] + unowned + owned[at:]
+        self.assertEqual(lines[-len(last):], last)
+        package = ROOT / "src" / "oss_verify"
+        self.assertTrue(all((ROOT / line[0][1:]).is_file() for line in unowned))
+        imported = {"__init__", "__main__", "validate", "check_build"}
+        self.assertFalse(imported & {pathlib.PurePath(line[0]).stem for line in unowned})
+        # validate.py imports check_build alone of the package, and check_build imports nothing of it.
+        self.assertEqual(re.findall(r"^from \. import (\w+)", (package / "validate.py").read_text(), re.M),
+                         ["check_build"])
+        self.assertNotRegex((package / "check_build.py").read_text(),
+                            r"(?m)^\s*(from \.|import oss_verify|from oss_verify)")
         self.assertTrue(all((ROOT / name).is_file() for name in ("review.md", "review-change.md", "review-issue.md")))
 
 
