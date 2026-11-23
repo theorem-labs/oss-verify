@@ -1,10 +1,36 @@
 #!/bin/sh -e
-# Generated from the build recipe of the oss-fuzz-theorems 2026.10 release; do not edit.
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+# Modified 2026 by Theorem Labs, PBC: the DSL fuzz target api-driver, which is not of the release.
+#
+# Generated from the build recipe of the oss-fuzz-theorems 2026.10 release.
 #
 # Builds the fuzz targets of zlib into $OUT, each from the pin of the release's target for it.
 # compile runs build.sh with bash; the release ran each target's build with sh -e, and so does this.
 [ -z "${BASH_VERSION:-}" ] || exec sh -e "$0"
 . /usr/local/lib/oss-verify/release-target.sh
+
+# api-driver: not a target of the release. A DSL fuzz target (docs/build-contract.md, "DSL fuzz targets"): the input is
+# a script of zlib calls that api-driver.dsl.c runs on live streams. Its tree is checksum_fuzzer's, with the same patch.
+# zlib's allocations, and the driver's own, go to aef_alloc.c's trampolines through api-driver.aef_alloc.redefs, so the
+# input's allocation mask makes them fail. As zlib 1.4's CMake no longer does, the block moves the source tree's
+# zconf.h aside, so that the driver compiles against the configured one.
+(
+ov_target_begin zlib-api-driver
+build_lib() {
+  oft_build_cmake
+  if [ -f "$BUILDDIR/src/zconf.h" ]; then mv "$BUILDDIR/src/zconf.h" "$BUILDDIR/src/zconf.h.included" || return 1; fi
+  ov_dsl_driver dsl.c
+  ov_dsl_trampoline aef_alloc.c
+  oft_seal_getenv
+  oft_seal_mkstemp
+  oft_seal_getpid
+}
+LIB_ARCHIVE="lib/liboft.a"
+LIB_CFLAGS=""
+export OV_DSL_REDEFS="/work/targets/$T/aef_alloc.redefs"
+ov_target_build_dsl api-driver
+)
 
 # checksum_fuzzer: the release's target zlib-checksum_fuzzer
 (
