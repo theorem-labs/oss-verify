@@ -639,15 +639,17 @@ def in_threads(function, items, workers):
 def containers_stopped():
     """Around a whole oss-verify check run, in the main thread: when it ends, however it ends (its result, an error,
     Ctrl-C, or SIGTERM or SIGHUP, which end it with the exit status 128 + the signal's number, as they would a shell),
-    stop the containers that it started (stop_containers()). No signal cuts that short. A signal that is ignored when
-    the run starts stays ignored, as a shell leaves it: under nohup, a SIGHUP does not end the run.
+    stop the containers that it started (stop_containers()). Each signal raises until that cleanup begins, so a
+    second one stops a wait that the first one's unwinding is in, for a docker that does not answer; no signal cuts the
+    cleanup short. A signal that is ignored when the run starts stays ignored, as a shell leaves it: under nohup, a
+    SIGHUP does not end the run.
 
     Python runs a signal's handler in the main thread, between two bytecodes. A signal that arrives just before the
     main thread blocks in a wait (for a docker client, mostly) has been taken already and interrupts nothing, so the
     run would end only when that wait does: hours later, for a docker run. Measured on 4 CPUs under load, 7 signals of
-    6,000 waited so. Python also writes each signal it takes to the wakeup fd; wake() reads it there and sends the
-    signal again to the main thread until its handler has run. A signal that reaches a thread in a wait interrupts it,
-    and the handler, end(), acts once."""
+    6,000 waited so. Python also writes each signal it takes to the wakeup fd. wake() reads it there and sends the main
+    thread SIGWINCH, whose handler does nothing, until that handler has run: a signal that reaches a thread in a wait
+    interrupts it, and Python then runs every handler that was waiting."""
     if threading.current_thread() is not threading.main_thread():
         raise ValueError("containers_stopped() works only in the main thread, where Python runs signal handlers")
     caught = [getattr(signal, name) for name in ("SIGTERM", "SIGHUP")
@@ -655,22 +657,24 @@ def containers_stopped():
     # Ctrl-C too, while it raises KeyboardInterrupt as Python's own handler does; a caller's other handler stays.
     if signal.getsignal(signal.SIGINT) is signal.default_int_handler:
         caught.append(signal.SIGINT)
-    # Not empty once end() has acted, or once the run has begun to end without a signal. A plain list, as end() must
-    # take no lock: the signal that wake() sends again can run end() inside end(), at any bytecode.
-    ended = []
+    cleaning = []  # not empty once the cleanup has begun: a signal then leaves it to run to its end
+    nudged = []  # one entry each time the main thread has run the handler of the nudge
     stopping = threading.Event()
+    nudge = signal.SIGWINCH
 
     def end(number, frame):
-        if ended:
+        if cleaning:
             return
-        ended.append(number)
         if number == signal.SIGINT:
             raise KeyboardInterrupt
         raise SystemExit(128 + number)
 
+    def nudge_handled(number, frame):
+        nudged.append(None)
+
     main = threading.main_thread().ident
     reading = writing = woken = waker = None
-    before = {number: signal.getsignal(number) for number in caught}
+    before = {number: signal.getsignal(number) for number in (*caught, nudge)}
     # Held back while the setup below changes the process's signal state, so that no handler raises between a change
     # and the record of what it replaced; the finally then puts back all of it. Only those not held back already.
     held_back = {signal.SIGINT, *caught} - signal.pthread_sigmask(signal.SIG_BLOCK, [])
@@ -680,16 +684,21 @@ def containers_stopped():
             if woken >= 0:  # whoever had the wakeup fd before still gets each signal
                 with contextlib.suppress(OSError):
                     os.write(woken, numbers)
-            for number in numbers:
-                while number in caught and not (ended or stopping.is_set()):
-                    signal.pthread_kill(main, number)
-                    stopping.wait(0.05)
+            if not any(number in caught for number in numbers):
+                continue
+            # The nudge's handler runs in the same pass as any handler that was waiting, or, if one raised, in the
+            # next: once it has run, nothing waits.
+            seen = len(nudged)
+            while len(nudged) == seen and not stopping.is_set():
+                signal.pthread_kill(main, nudge)
+                stopping.wait(0.05)
 
     try:
         signal.pthread_sigmask(signal.SIG_BLOCK, held_back)
         reading, writing = os.pipe()
         os.set_blocking(writing, False)
         woken = signal.set_wakeup_fd(writing, warn_on_full_buffer=False)
+        signal.signal(nudge, nudge_handled)
         waker = threading.Thread(target=wake, name="containers_stopped wake", daemon=True)
         waker.start()
         for number in caught:
@@ -697,10 +706,9 @@ def containers_stopped():
         signal.pthread_sigmask(signal.SIG_UNBLOCK, held_back)  # a signal held back is taken here, by end()
         yield
     finally:
-        ended.append(None)  # first: a signal that arrives from here on leaves the cleanup to run
-        held = {number: signal.signal(number, signal.SIG_IGN) for number in (signal.SIGINT, *caught)}
+        cleaning.append(None)  # first: a signal that arrives from here on leaves the cleanup to run
+        held = {number: signal.signal(number, signal.SIG_IGN) for number in (signal.SIGINT, *caught, nudge)}
         signal.pthread_sigmask(signal.SIG_UNBLOCK, held_back)  # if the setup failed: a signal held back is ignored
-        # wake() sends nothing once the handlers are back: a SIGTERM it sent then would meet SIG_DFL.
         stopping.set()
         if woken is not None:
             signal.set_wakeup_fd(woken)
