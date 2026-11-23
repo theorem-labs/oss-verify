@@ -13,10 +13,14 @@ skills/ @theorem-labs/engineering @theorem-labs/research
 #   (src/ has no owner)           the oss_verify package, `oss-verify check` and `oss-verify validate`, has no code
 #                                 owner, by Sami's choice
 #                                 (dispatch://OSSV-276/ask/6c92b099-08f4-4177-aa5a-6a3fc6292878):
-#                                 a change under src/, the modules that jobs holding a token import from main's src/
-#                                 included, merges with its checks alone. Every file under src/ is still a steering
-#                                 file (.github/scripts/steering.py), so the enrollment review reads the Build results
-#                                 of a pull request that changes one only after a person approved its head.
+#                                 a change under src/ merges with its checks alone. So no job that holds a token, or
+#                                 whose outputs such a job reads, loads code from src/ (tests/test_token_jobs.py):
+#                                 they take the rules of `oss-verify validate` from .github/scripts/validate_rules/,
+#                                 which .github/scripts/copy-validate-rules writes from src/oss_verify/, and which
+#                                 tests/test_validate_rules.py fails while it differs from that. Every file under src/
+#                                 is still a steering file (.github/scripts/steering.py), so the enrollment review
+#                                 reads the Build results of a pull request that changes one only after a person
+#                                 approved its head.
 #   /infra/                       the toolchains `oss-verify check` builds with (infra/toolchains.tsv,
 #                                 infra/base-builder/), and the code it runs in build containers (infra/checks/).
 #   /seeds/                       the seeded projects, which `oss-verify check` builds as it builds projects/.

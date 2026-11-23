@@ -13,8 +13,8 @@
 #
 # review.yml's gather job runs it from the checkout of main, after take-project has put the pull request's
 # projects/<name>/ into that checkout. It runs no code of the pull request or of the project: it reads the pull request
-# through the API, clones the project's repository at the built commit as data, and runs this repository's own
-# oss-verify validate and .github/scripts/triage.py on them, as the validate and triage workflows do. The directory gets
+# through the API, clones the project's repository at the built commit as data, and runs the rules of oss-verify
+# validate and .github/scripts/triage.py on them, as the validate and triage workflows do. The directory gets
 # the files that the section "In CI" of .claude/skills/review-enrollment/SKILL.md lists, the build's results (BUILD,
 # BINARIES and CHECKS, which .github/scripts/take-build-results reads from the Build run) among them. A failed read
 # leaves its file with the error in it, and the review says what it could not check, with one exception: when COMMIT
@@ -44,9 +44,11 @@ resume=$(openssl rand -hex 16) && echo "::stop-commands::$resume"
 trap 'echo "::$resume::"' EXIT
 set -uo pipefail
 export LC_ALL=C
-# This repository's package, for python3 -P -m oss_verify and the import below: -P keeps the top of the checkout off
-# sys.path, and PYTHONPATH names its src/ alone.
-export PYTHONPATH="$PWD/src"
+# The rules of oss-verify validate, for python3 -P -m validate_rules.validate and the import below:
+# .github/scripts/validate_rules/, the copy of src/oss_verify/validate.py for the jobs that hold a token, which load no
+# code from src/ (.github/scripts/copy-validate-rules). -P keeps the top of the checkout off sys.path, and PYTHONPATH
+# names .github/scripts alone.
+export PYTHONPATH="$PWD/.github/scripts"
 
 out=${1:?usage: review-gather <directory>}
 # Run a command, and keep its standard output and error in a file, whatever its status.
@@ -165,7 +167,7 @@ facts=$(jq -rs 'if length == 1 and (.[0] | type) == "object" then .[0] else {} e
   || facts=$'criticality_score=null\noss_fuzz=null'
 rm -f "$out.facts.json"
 echo "$facts" >> "${GITHUB_OUTPUT:-/dev/null}"
-keep validate.txt python3 -P -m oss_verify validate "$dir"
+keep validate.txt python3 -P -m validate_rules.validate "$dir"
 # Claude Code reads a CLAUDE.md beside a file that it reads as instructions. The pull request's are data, so they go
 # from the checkout once the validator has reported them (rule 1 of review.md).
 find "$dir" -maxdepth 1 \( -iname 'CLAUDE*.md' -o -iname 'AGENTS*.md' \) -delete
@@ -222,7 +224,7 @@ done
 # an API path only if it has no `..` part.
 url=$(python3 -P - "$dir/project.yaml" <<'EOF' 2>/dev/null
 import sys
-from oss_verify import validate
+from validate_rules import validate
 url = validate.yaml.safe_load(open(sys.argv[1])).get("repo")
 print(url if validate.is_https_url(url) else "")
 EOF
