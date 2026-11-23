@@ -20,6 +20,7 @@ import os
 import pathlib
 import re
 import subprocess
+import sys
 
 import pytest
 
@@ -703,6 +704,51 @@ def test_the_tests_step_fails_when_a_test_skips(tmp_path, last_line, status, fai
     code, out, _ = run_the_tests_step(tmp_path, last_line, status)
     assert (code != 0) == fails, out
     assert ("::error::A test skipped here" in out) == (fails and status == 0), out
+
+
+# The Docker tests' files, which no job of tests.yaml runs yet: the pull request of the branch INFRA-5359-docker-job
+# adds the job docker, which runs them, and empties this list.
+RUN_BY_NO_JOB_YET = ["tests/test_builder.py", "tests/test_append_docker.py", "tests/test_binary_checks_docker.py",
+                     "tests/test_seed_runs_docker.py", "tests/test_target_settings_docker.py"]
+
+
+def collected(*arguments):
+    """The node ids that pytest collects from this repository with `arguments`, as tests.yaml runs it (-P, -c
+    pyproject.toml), with OV_DOCKER_TESTS unset: collection runs no test."""
+    environment = {name: value for name, value in os.environ.items() if not name.startswith("OV_")}
+    run = subprocess.run([sys.executable, "-P", "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider", "-c",
+                          "pyproject.toml", *arguments], cwd=ROOT, env=environment, capture_output=True, text=True,
+                         timeout=300)
+    assert run.returncode == 0, run.stdout[-4000:] + run.stderr[-2000:]
+    ids = {line for line in run.stdout.splitlines() if "::" in line}
+    assert ids, run.stdout[-4000:]
+    return ids
+
+
+def selection(tmp_path):
+    """The arguments of pytest that choose the tests of the job tests, as run_the_tests_step finds them: its arguments
+    but -n, --dist, --durations, -q and -rs, which choose how the tests run and what pytest prints, not which."""
+    _, _, argv = run_the_tests_step(tmp_path, "1 passed in 1.00s")
+    chosen, skip = [], False
+    for argument in argv:
+        if skip:
+            skip = False
+        elif argument in ("-n", "--dist"):
+            skip = True
+        elif not argument.startswith("--durations=") and argument not in ("-q", "-rs"):
+            chosen.append(argument)
+    return chosen
+
+
+def test_every_test_runs_in_the_job_tests_or_is_listed_as_run_by_no_job_yet(tmp_path):
+    """Each test that pytest collects under tests/ is one that the job tests runs, or one of RUN_BY_NO_JOB_YET's files:
+    no selection leaves out a test unnoticed. A control leaves a class out of the job's selection, and finds it."""
+    assert RUN_BY_NO_JOB_YET == workflow("tests.yaml")["env"]["DOCKER_TESTS"].split()
+    chosen, everything, listed = selection(tmp_path), collected(), collected(*RUN_BY_NO_JOB_YET)
+    assert everything - collected(*chosen) - listed == set()
+    left_out = "tests/test_no_frame_pointer_image.py::NoFramePointerImage"
+    found = everything - collected(*chosen, "--deselect", left_out) - listed
+    assert found == {f"{left_out}::test_frame_pointers_skips_when_no_frame_pointer_image_is_named"}, found
 
 
 def test_a_newer_run_of_a_pull_request_or_of_main_cancels_the_older():

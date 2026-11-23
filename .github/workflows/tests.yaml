@@ -59,8 +59,9 @@ env:
   # A pull request from a fork: when it changes a file under projects/, no step runs its code (the top of this file).
   FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
   # The Docker tests: the files whose tests build fixtures in the toolchain images, most of them running the binaries
-  # under qemu-riscv64-static (all but NoFramePointerImage of tests/test_builder.py, which needs no image). The job tests
-  # leaves the whole files out (--ignore), so none of their tests counts as a skip there.
+  # under qemu-riscv64-static. The job tests leaves the whole files out (--ignore), so none of their tests counts as a
+  # skip there. tests/test_routed_workflows.py lists them as run by no job yet (RUN_BY_NO_JOB_YET), and checks that every
+  # other test runs here.
   # .github/workflows/frame-pointer-tests.yaml runs the class FramePointers of tests/test_builder.py.
   DOCKER_TESTS: >-
     tests/test_builder.py tests/test_append_docker.py tests/test_binary_checks_docker.py tests/test_seed_runs_docker.py
