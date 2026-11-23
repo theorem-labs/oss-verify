@@ -804,6 +804,33 @@ class ContainerCleanup(unittest.TestCase):
                 self.assertEqual(listed, f"ps -aq --filter label={run}")
                 self.assertEqual(removed, "rm -f c1 c2")
 
+    # A run whose main thread is inside a write that a full pipe blocks, which nothing else interrupts, when another
+    # thread takes SIGTERM: Python then has the signal, and its handler waits for the main thread.
+    BLOCKED = ("import os, select, signal, threading; from oss_verify import check_build\n"
+               "check_build.stop_containers = lambda: None\n"
+               "signal.signal(signal.SIGTERM, signal.SIG_DFL)\n"
+               "reading, writing = os.pipe()\n"
+               "def take():\n"
+               "    select.select([reading], [], [], 20)  # data: the main thread is inside its write\n"
+               "    os.read(reading, 1)\n"
+               "    signal.pthread_kill(threading.get_ident(), signal.SIGTERM)\n"
+               "threading.Thread(target=take, daemon=True).start()\n"
+               "with check_build.containers_stopped():\n"
+               "    os.write(writing, bytes(1 << 20))  # more than a pipe holds\n")
+
+    def test_a_signal_taken_while_the_main_thread_waits_ends_the_run(self):
+        """Python runs a handler in the main thread, between bytecodes. A signal that arrives just before the main
+        thread blocks in a wait, or that another thread takes, interrupts no wait, so the run would go on until the wait
+        ends: here, never. containers_stopped() still ends it, with 143. In a child, so that a run that does not end
+        is killed at the deadline."""
+        try:
+            done = subprocess.run([sys.executable, "-P", "-c", self.BLOCKED],
+                                  env={**os.environ, "PYTHONPATH": str(SRC)}, stdin=subprocess.DEVNULL,
+                                  capture_output=True, text=True, timeout=20)
+        except subprocess.TimeoutExpired:
+            self.fail("the run went on after SIGTERM until it was killed at the deadline")
+        self.assertEqual(done.returncode, 143, done.stderr)
+
     def test_the_check_command_removes_its_containers_when_it_ends(self):
         """`oss-verify check` runs within containers_stopped(): even a run that starts none asks for its own."""
         with tempfile.TemporaryDirectory() as scratch:
