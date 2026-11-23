@@ -1,5 +1,5 @@
-/* aef_sys.c - the six file-system-call trampolines, the one in-memory regular
- * file they answer from, and the per-kind failure schedule. See aef_sys.h for
+/* tramp_sys.c - the six file-system-call trampolines, the one in-memory regular
+ * file they answer from, and the per-kind failure schedule. See tramp_sys.h for
  * the contract (what a schedule entry means, rules (a)-(f), the non-claims).
  *
  * What is specific to this translation unit:
@@ -21,17 +21,17 @@
  * fcntl ticks and never injects: it has no failure class.
  *
  * THE FILE: `fsize` is its size as the Linux model and the kernel state it, any
- * 64-bit value a write can reach. `fbytes` STORES its first AEF_SYS_FILE_MAX
+ * 64-bit value a write can reach. `fbytes` STORES its first TRAMP_SYS_FILE_MAX
  * bytes, with the invariant that every stored byte at or past `fsize` is zero.
  * Truncation zeroes [new, old) of the stored part; growth by a write past the
  * end therefore reads the gap as zeros with no memset, and the total cost of a
- * run is O(bytes written + bytes truncated). Bytes past AEF_SYS_FILE_MAX are
+ * run is O(bytes written + bytes truncated). Bytes past TRAMP_SYS_FILE_MAX are
  * counted, not kept: a write lands all of them as far as every answer goes
- * (count, offset, size), and a read of them returns zeros (aef_sys.h, "PAST
- * AEF_SYS_FILE_MAX"; the driver stops every file operation once the file is
+ * (count, offset, size), and a read of them returns zeros (tramp_sys.h, "PAST
+ * TRAMP_SYS_FILE_MAX"; the driver stops every file operation once the file is
  * that large, so zlib never reads one). The file starts PRESENT and empty
  * (`fabsent` is zero-initialised so even a process that never calls
- * aef_sysm_reset starts that way).
+ * tramp_sysm_reset starts that way).
  */
 #define _GNU_SOURCE 1
 #include <errno.h>
@@ -40,7 +40,7 @@
 #include <stdarg.h>
 #include <string.h>
 #include <unistd.h>
-#include "aef_sys.h"
+#include "tramp_sys.h"
 
 /* ------------------------------------------------- Linux's flag values ---- */
 #define M_O_ACCMODE   03
@@ -118,15 +118,15 @@ _Static_assert(sizeof(size_t) == 8, "the file's size and every count are 64-bit 
  * 6.12 (an F_SETFL of -1 on an O_RDWR descriptor read back 0x4cc02: these four,
  * O_LARGEFILE and the access mode; FASYNC does not stick on tmpfs, which has no
  * fasync method). O_DIRECT sticks only on a kernel whose tmpfs supports it (6.6
- * and later); see aef_sys.h's non-claims. */
+ * and later); see tramp_sys.h's non-claims. */
 #define SETFL_BITS (M_O_APPEND | M_O_NONBLOCK | M_O_DIRECT | M_O_NOATIME)
 
 /* ------------------------------------------------------------- state ----- */
-static unsigned char fbytes[AEF_SYS_FILE_MAX];   /* the stored part: bytes [0, AEF_SYS_FILE_MAX) */
-static size_t fsize;                         /* the size, which may pass AEF_SYS_FILE_MAX */
+static unsigned char fbytes[TRAMP_SYS_FILE_MAX];   /* the stored part: bytes [0, TRAMP_SYS_FILE_MAX) */
+static size_t fsize;                         /* the size, which may pass TRAMP_SYS_FILE_MAX */
 static int fabsent;                          /* 0 = present (the initial state) */
 
-/* Past AEF_SYS_FILE_MAX: a write's bytes are read from the caller's buffer into
+/* Past TRAMP_SYS_FILE_MAX: a write's bytes are read from the caller's buffer into
  * `sink` and dropped (so in the asan flavours the memcpy interceptor still
  * checks every byte a kernel's copy would read), and a read returns `zeros`. */
 static unsigned char sink[4096];
@@ -138,20 +138,20 @@ typedef struct {
   int status;       /* SETFL_BITS subset */
   int cloexec;
   int64_t off;
-} aef_desc;
-static aef_desc fds[AEF_SYS_NFD];
+} tramp_desc;
+static tramp_desc fds[TRAMP_SYS_NFD];
 
-static unsigned char plan_tab[AEF_SYS_NKINDS][AEF_SYS_PLAN_MAX];
-static unsigned plan_len[AEF_SYS_NKINDS];
-static unsigned plan_pos[AEF_SYS_NKINDS];
-static unsigned call_total[AEF_SYS_NKINDS];
+static unsigned char plan_tab[TRAMP_SYS_NKINDS][TRAMP_SYS_PLAN_MAX];
+static unsigned plan_len[TRAMP_SYS_NKINDS];
+static unsigned plan_pos[TRAMP_SYS_NKINDS];
+static unsigned call_total[TRAMP_SYS_NKINDS];
 
 /* fcntl has one class, success: its entries are spent and decide nothing
- * (aef_sys_fcntl; review round 3). */
-static const unsigned nclass[AEF_SYS_NKINDS] = { 6, 6, 3, 5, 3, 1 };
+ * (tramp_sys_fcntl). */
+static const unsigned nclass[TRAMP_SYS_NKINDS] = { 6, 6, 3, 5, 3, 1 };
 
 /* The short-count table; 0 marks the two sentinels at 22 (m/2) and 23 (m-1). */
-static const size_t short_tab[AEF_SYS_SHORT_N] = {
+static const size_t short_tab[TRAMP_SYS_SHORT_N] = {
   1, 2, 3, 4, 7, 8, 15, 16, 31, 32, 63, 64, 127, 128, 255, 256,
   511, 512, 1023, 1024, 4095, 4096, 0, 0
 };
@@ -170,7 +170,7 @@ static unsigned entry_arg(unsigned kind, int e) { return e < 0 ? 0u : (unsigned)
 
 /* k for a short transfer of a model count m >= 2: always in [1, m-1]. */
 static size_t short_count(size_t m, unsigned arg) {
-  unsigned idx = arg % AEF_SYS_SHORT_N;
+  unsigned idx = arg % TRAMP_SYS_SHORT_N;
   size_t k;
   if (idx == 22) k = m / 2;
   else if (idx == 23) k = m - 1;
@@ -184,7 +184,7 @@ static size_t short_count(size_t m, unsigned arg) {
 
 /* The stored part keeps the invariant: every stored byte at or past fsize is 0. */
 static void file_truncate(size_t n) {
-  size_t top = fsize < AEF_SYS_FILE_MAX ? fsize : AEF_SYS_FILE_MAX;
+  size_t top = fsize < TRAMP_SYS_FILE_MAX ? fsize : TRAMP_SYS_FILE_MAX;
   if (n < top) memset(fbytes + n, 0, top - n);
   fsize = n;
 }
@@ -192,8 +192,8 @@ static void file_truncate(size_t n) {
 /* n bytes of the file from position pos into dst: the stored part, then zeros. */
 static void file_copy_out(unsigned char *dst, uint64_t pos, size_t n) {
   size_t a = 0, c;
-  if (pos < AEF_SYS_FILE_MAX) {
-    a = AEF_SYS_FILE_MAX - (size_t)pos;
+  if (pos < TRAMP_SYS_FILE_MAX) {
+    a = TRAMP_SYS_FILE_MAX - (size_t)pos;
     if (a > n) a = n;
     memcpy(dst, fbytes + (size_t)pos, a);
   }
@@ -204,13 +204,13 @@ static void file_copy_out(unsigned char *dst, uint64_t pos, size_t n) {
 }
 
 /* n bytes from src into the file at position pos: the part below
- * AEF_SYS_FILE_MAX is stored, the rest is read and dropped. The empty asm
+ * TRAMP_SYS_FILE_MAX is stored, the rest is read and dropped. The empty asm
  * tells the compiler the sink's bytes are used, so it cannot delete the copies
  * that make the asan flavours check the source. */
 static void file_copy_in(uint64_t pos, const unsigned char *src, size_t n) {
   size_t a = 0, c;
-  if (pos < AEF_SYS_FILE_MAX) {
-    a = AEF_SYS_FILE_MAX - (size_t)pos;
+  if (pos < TRAMP_SYS_FILE_MAX) {
+    a = TRAMP_SYS_FILE_MAX - (size_t)pos;
     if (a > n) a = n;
     memcpy(fbytes + (size_t)pos, src, a);
   }
@@ -221,15 +221,15 @@ static void file_copy_in(uint64_t pos, const unsigned char *src, size_t n) {
   }
 }
 
-static aef_desc *desc_of(int fd) {
-  if (fd < AEF_SYS_FD_BASE || fd >= AEF_SYS_FD_BASE + AEF_SYS_NFD) return NULL;
-  if (!fds[fd - AEF_SYS_FD_BASE].used) return NULL;
-  return &fds[fd - AEF_SYS_FD_BASE];
+static tramp_desc *desc_of(int fd) {
+  if (fd < TRAMP_SYS_FD_BASE || fd >= TRAMP_SYS_FD_BASE + TRAMP_SYS_NFD) return NULL;
+  if (!fds[fd - TRAMP_SYS_FD_BASE].used) return NULL;
+  return &fds[fd - TRAMP_SYS_FD_BASE];
 }
 
 static int nfds_open(void) {
   int i, n = 0;
-  for (i = 0; i < AEF_SYS_NFD; i++) n += fds[i].used != 0;
+  for (i = 0; i < TRAMP_SYS_NFD; i++) n += fds[i].used != 0;
   return n;
 }
 
@@ -238,7 +238,7 @@ static int nfds_open(void) {
 static int open_check(int flags) {
   if ((flags & ~OPEN_OK_BITS) != 0) return EINVAL;
   if ((flags & M_O_ACCMODE) == M_O_ACCMODE) return EINVAL;
-  if (nfds_open() >= AEF_SYS_NFD) return EMFILE;
+  if (nfds_open() >= TRAMP_SYS_NFD) return EMFILE;
   if (fabsent && !(flags & M_O_CREAT)) return ENOENT;
   if (!fabsent && (flags & M_O_CREAT) && (flags & M_O_EXCL)) return EEXIST;
   return 0;
@@ -249,20 +249,20 @@ static int open_commit(int flags) {
   int i;
   if (fabsent) { fabsent = 0; file_truncate(0); }
   else if (flags & M_O_TRUNC) file_truncate(0);   /* every access mode, as tmpfs does */
-  for (i = 0; i < AEF_SYS_NFD; i++) {
+  for (i = 0; i < TRAMP_SYS_NFD; i++) {
     if (!fds[i].used) {
       fds[i].used = 1;
       fds[i].acc = flags & M_O_ACCMODE;
       fds[i].status = flags & OPEN_STATUS_BITS;
       fds[i].cloexec = (flags & M_O_CLOEXEC) != 0;
       fds[i].off = 0;
-      return AEF_SYS_FD_BASE + i;
+      return TRAMP_SYS_FD_BASE + i;
     }
   }
   return -1;   /* unreachable: open_check refused a full table */
 }
 
-static int getfl_of(const aef_desc *d) { return d->acc | d->status | M_O_LARGEFILE; }
+static int getfl_of(const tramp_desc *d) { return d->acc | d->status | M_O_LARGEFILE; }
 
 /* The kernel's rw_verify_area, which read and write run after access_ok and
  * before any transfer: EINVAL when offset + count passes LLONG_MAX (the
@@ -278,15 +278,15 @@ static int rw_overflows(int64_t off, size_t n) {
  * rw_verify_area runs next, and the fault comes from the copy itself, so read
  * at end of file answers 0, write of 0 bytes answers 0, an offset + count past
  * LLONG_MAX is EINVAL, and only a transfer of at least one byte is EFAULT,
- * with nothing changed. The first draft refused every NULL buffer with a
- * nonzero count up front, which the kernel does not (a review measured read at
- * end of file: kernel 0, model EFAULT; the differential, once it passed NULL
- * buffers, also found EFAULT where the kernel says EINVAL). */
+ * with nothing changed. Refusing every NULL buffer with a nonzero count up
+ * front would not be the kernel's answer: at end of file a read answers 0,
+ * not EFAULT, and an offset + count past LLONG_MAX answers EINVAL, not
+ * EFAULT. */
 
 /* ------------------------------------------------------- trampolines ----- */
 
-int aef_sys_open(const char *path, int flags, ...) {
-  int e = tick(AEF_SYS_OPEN), err;
+int tramp_sys_open(const char *path, int flags, ...) {
+  int e = tick(TRAMP_SYS_OPEN), err;
   unsigned cls;
   (void)path;                       /* paths are not a filesystem */
   err = open_check(flags);
@@ -295,7 +295,7 @@ int aef_sys_open(const char *path, int flags, ...) {
    * otherwise answer (its environment failures). ENOENT and EEXIST are never
    * injected: the model answers them from the file's state, deterministically,
    * and so does open_check above. */
-  cls = entry_class(AEF_SYS_OPEN, e);
+  cls = entry_class(TRAMP_SYS_OPEN, e);
   switch (cls) {
     case 1: errno = ENOMEM; return -1;
     case 2: errno = EACCES; return -1;
@@ -306,9 +306,9 @@ int aef_sys_open(const char *path, int flags, ...) {
   return open_commit(flags);
 }
 
-ssize_t aef_sys_read(int fd, void *buf, size_t n) {
-  int e = tick(AEF_SYS_READ);
-  aef_desc *d = desc_of(fd);
+ssize_t tramp_sys_read(int fd, void *buf, size_t n) {
+  int e = tick(TRAMP_SYS_READ);
+  tramp_desc *d = desc_of(fd);
   size_t m, k;
   unsigned cls;
   if (d == NULL || d->acc == M_O_WRONLY) { errno = EBADF; return -1; }
@@ -318,10 +318,10 @@ ssize_t aef_sys_read(int fd, void *buf, size_t n) {
   if (m > n) m = n;
   if (m > MAX_RW_COUNT) m = MAX_RW_COUNT;
   if (buf == NULL && m != 0) { errno = EFAULT; return -1; }   /* null_faults */
-  cls = entry_class(AEF_SYS_READ, e);
+  cls = entry_class(TRAMP_SYS_READ, e);
   k = m;
   switch (cls) {
-    case 1: if (m >= 2) k = short_count(m, entry_arg(AEF_SYS_READ, e)); break;
+    case 1: if (m >= 2) k = short_count(m, entry_arg(TRAMP_SYS_READ, e)); break;
     case 2: return 0;               /* early end of file: nothing moves */
     case 3: errno = EIO; return -1;
     case 4: errno = EINTR; return -1;
@@ -335,9 +335,9 @@ ssize_t aef_sys_read(int fd, void *buf, size_t n) {
   return (ssize_t)k;
 }
 
-ssize_t aef_sys_write(int fd, const void *buf, size_t n) {
-  int e = tick(AEF_SYS_WRITE);
-  aef_desc *d = desc_of(fd);
+ssize_t tramp_sys_write(int fd, const void *buf, size_t n) {
+  int e = tick(TRAMP_SYS_WRITE);
+  tramp_desc *d = desc_of(fd);
   uint64_t pos;
   size_t w, k;
   unsigned cls;
@@ -349,7 +349,7 @@ ssize_t aef_sys_write(int fd, const void *buf, size_t n) {
   if (n == 0) {
     /* Linux returns 0 before positioning: the offset does not move, even with
      * O_APPEND. Injections still apply to the success (rule (b)). */
-    cls = entry_class(AEF_SYS_WRITE, e);
+    cls = entry_class(TRAMP_SYS_WRITE, e);
     switch (cls) {
       case 2: errno = ENOSPC; return -1;
       case 3: errno = EIO; return -1;
@@ -360,9 +360,9 @@ ssize_t aef_sys_write(int fd, const void *buf, size_t n) {
     return 0;
   }
   /* Every byte lands, as the Linux model says and the kernel on a tmpfs with
-   * room does: no unscheduled short count and no ENOSPC, at any size (the first
-   * draft answered a short count at 1 MiB and ENOSPC past it, which zlib could
-   * reach with no schedule; review round 2). Past AEF_SYS_FILE_MAX the bytes
+   * room does: no unscheduled short count and no ENOSPC, at any size (a short
+   * count at 1 MiB, or ENOSPC past it, would be answers zlib could reach with
+   * no schedule, and the model never gives). Past TRAMP_SYS_FILE_MAX the bytes
    * are counted and dropped (file_copy_in). Then the kernel's two limits, which
    * zlib cannot reach: MAX_RW_COUNT, and tmpfs's s_maxbytes (LLONG_MAX), where
    * generic_write_check_limits answers EFBIG at the limit and clamps the count
@@ -373,10 +373,10 @@ ssize_t aef_sys_write(int fd, const void *buf, size_t n) {
   w = n < MAX_RW_COUNT ? n : MAX_RW_COUNT;                     /* the kernel's clamp, and the model's */
   if ((uint64_t)w > (uint64_t)INT64_MAX - pos) w = (size_t)((uint64_t)INT64_MAX - pos);
   if (buf == NULL) { errno = EFAULT; return -1; }   /* null_faults: w >= 1 bytes would move */
-  cls = entry_class(AEF_SYS_WRITE, e);
+  cls = entry_class(TRAMP_SYS_WRITE, e);
   k = w;
   switch (cls) {
-    case 1: if (w >= 2) k = short_count(w, entry_arg(AEF_SYS_WRITE, e)); break;
+    case 1: if (w >= 2) k = short_count(w, entry_arg(TRAMP_SYS_WRITE, e)); break;
     case 2: errno = ENOSPC; return -1;
     case 3: errno = EIO; return -1;
     case 4: errno = EINTR; return -1;
@@ -391,9 +391,9 @@ ssize_t aef_sys_write(int fd, const void *buf, size_t n) {
   return (ssize_t)k;
 }
 
-off_t aef_sys_lseek(int fd, off_t off, int whence) {
-  int e = tick(AEF_SYS_LSEEK);
-  aef_desc *d = desc_of(fd);
+off_t tramp_sys_lseek(int fd, off_t off, int whence) {
+  int e = tick(TRAMP_SYS_LSEEK);
+  tramp_desc *d = desc_of(fd);
   uint64_t base;
   int64_t nw;
   unsigned cls;
@@ -409,42 +409,42 @@ off_t aef_sys_lseek(int fd, off_t off, int whence) {
    * negative, and a negative result is EINVAL. Unsigned here, so no C overflow. */
   nw = (int64_t)(base + (uint64_t)(int64_t)off);
   if (nw < 0) { errno = EINVAL; return -1; }
-  cls = entry_class(AEF_SYS_LSEEK, e);
+  cls = entry_class(TRAMP_SYS_LSEEK, e);
   if (cls == 1) { errno = ESPIPE; return -1; }
   if (cls == 2) { errno = EINVAL; return -1; }
   d->off = nw;
   return (off_t)nw;
 }
 
-int aef_sys_close(int fd) {
-  int e = tick(AEF_SYS_CLOSE);
-  aef_desc *d = desc_of(fd);
+int tramp_sys_close(int fd) {
+  int e = tick(TRAMP_SYS_CLOSE);
+  tramp_desc *d = desc_of(fd);
   unsigned cls;
   if (d == NULL) { errno = EBADF; return -1; }
   d->used = 0;                      /* rule (d): released whatever close then says */
-  cls = entry_class(AEF_SYS_CLOSE, e);
+  cls = entry_class(TRAMP_SYS_CLOSE, e);
   if (cls == 1) { errno = EIO; return -1; }
   /* Class 2 is the kernel's -EINTR, answered as musl's close answers it: 0,
    * errno untouched (src/unistd/close.c, `if (r == -EINTR) r = 0;`; measured in
    * the riscv64 libc.a's close.lo, a compare with -4 and a branch to 0). This
    * trampoline REPLACES musl's close in zlib's objects, so it must give zlib
    * musl's answer, which is also the Linux model's (its close never fails) and
-   * the zlib team's gz model's (c_close). The first draft returned -1/EINTR, the
-   * glibc answer, which the kernel differential (on glibc) could not catch. */
+   * the proofs' gz model's (c_close). -1/EINTR, the glibc answer, would be
+   * neither, and a differential against the kernel on glibc cannot tell. */
   if (cls == 2) return 0;           /* EINTR as musl reports it: rule (d) */
   return 0;
 }
 
-int aef_sys_fcntl(int fd, int cmd, ...) {
-  aef_desc *d;
+int tramp_sys_fcntl(int fd, int cmd, ...) {
+  tramp_desc *d;
   int arg = 0, r;
   va_list ap;
   /* Rule (a): the call is counted and its entry, if any, is spent. But fcntl
-   * has NO failure class, so the entry decides nothing. Until review round 3
-   * class 1 was EBADF, injected on an OPEN descriptor, which Linux never
-   * answers there (rule (f)); through zlib's unchecked F_GETFL (gzdopen "N",
-   * gzlib.c:261) it made zlib's F_SETFL(-1 | O_NONBLOCK) set O_APPEND. */
-  (void)tick(AEF_SYS_FCNTL);
+   * has NO failure class, so the entry decides nothing. EBADF injected on an
+   * OPEN descriptor would be an answer Linux never gives (rule (f)), and
+   * through zlib's unchecked F_GETFL (gzdopen "N", gzlib.c:261) it would make
+   * zlib's F_SETFL(-1 | O_NONBLOCK) set O_APPEND. */
+  (void)tick(TRAMP_SYS_FCNTL);
   d = desc_of(fd);
   if (d == NULL) { errno = EBADF; return -1; }     /* the descriptor before the command */
   switch (cmd) {
@@ -468,7 +468,7 @@ int aef_sys_fcntl(int fd, int cmd, ...) {
 
 /* ------------------------------------------------------- driver API ------ */
 
-void aef_sysm_reset(void) {
+void tramp_sysm_reset(void) {
   file_truncate(0);
   fabsent = 0;
   memset(fds, 0, sizeof fds);
@@ -477,23 +477,23 @@ void aef_sysm_reset(void) {
   memset(call_total, 0, sizeof call_total);
 }
 
-void aef_sysm_plan(unsigned kind, const unsigned char *entries, size_t n) {
-  if (kind >= AEF_SYS_NKINDS) {
+void tramp_sysm_plan(unsigned kind, const unsigned char *entries, size_t n) {
+  if (kind >= TRAMP_SYS_NKINDS) {
     memset(plan_len, 0, sizeof plan_len);
     memset(plan_pos, 0, sizeof plan_pos);
     return;
   }
   if (entries == NULL) n = 0;
-  if (n > AEF_SYS_PLAN_MAX) n = AEF_SYS_PLAN_MAX;
+  if (n > TRAMP_SYS_PLAN_MAX) n = TRAMP_SYS_PLAN_MAX;
   if (n) memcpy(plan_tab[kind], entries, n);
   plan_len[kind] = (unsigned)n;
   plan_pos[kind] = 0;
 }
 
-unsigned aef_sysm_calls(unsigned kind) { return kind < AEF_SYS_NKINDS ? call_total[kind] : 0u; }
+unsigned tramp_sysm_calls(unsigned kind) { return kind < TRAMP_SYS_NKINDS ? call_total[kind] : 0u; }
 
-int aef_sysm_file_set(const void *p, size_t n) {
-  if (n > AEF_SYS_FILE_MAX || (p == NULL && n != 0)) return -1;
+int tramp_sysm_file_set(const void *p, size_t n) {
+  if (n > TRAMP_SYS_FILE_MAX || (p == NULL && n != 0)) return -1;
   fabsent = 0;
   file_truncate(0);
   if (n) memcpy(fbytes, p, n);
@@ -501,50 +501,50 @@ int aef_sysm_file_set(const void *p, size_t n) {
   return 0;
 }
 
-size_t aef_sysm_file_get(void *dst, size_t cap) {
+size_t tramp_sysm_file_get(void *dst, size_t cap) {
   size_t n = fabsent ? 0 : fsize;
   if (n > cap) n = cap;
   if (n && dst != NULL) file_copy_out((unsigned char *)dst, 0, n);
   return dst != NULL ? n : 0;
 }
 
-size_t aef_sysm_file_size(void) { return fabsent ? 0 : fsize; }
-int aef_sysm_file_present(void) { return !fabsent; }
+size_t tramp_sysm_file_size(void) { return fabsent ? 0 : fsize; }
+int tramp_sysm_file_present(void) { return !fabsent; }
 
-/* Over the STORED part only (at most AEF_SYS_FILE_MAX bytes): past it the
+/* Over the STORED part only (at most TRAMP_SYS_FILE_MAX bytes): past it the
  * content is not kept, and the driver asks for no digest then (it stops every
- * file operation once the file is past AEF_SYS_FILE_MAX). */
-uint64_t aef_sysm_file_digest(void) {
+ * file operation once the file is past TRAMP_SYS_FILE_MAX). */
+uint64_t tramp_sysm_file_digest(void) {
   uint64_t h = 1469598103934665603ULL;
-  size_t i, n = fabsent ? 0 : fsize < AEF_SYS_FILE_MAX ? fsize : AEF_SYS_FILE_MAX;
+  size_t i, n = fabsent ? 0 : fsize < TRAMP_SYS_FILE_MAX ? fsize : TRAMP_SYS_FILE_MAX;
   for (i = 0; i < n; i++) { h ^= (uint64_t)fbytes[i]; h *= 1099511628211ULL; }
   return h;
 }
 
-int aef_sysm_unlink(void) {
+int tramp_sysm_unlink(void) {
   if (fabsent || nfds_open() != 0) return -1;
   file_truncate(0);
   fabsent = 1;
   return 0;
 }
 
-int aef_sysm_open(int flags) {
+int tramp_sysm_open(int flags) {
   int err = open_check(flags);
   if (err) { errno = err; return -1; }
   return open_commit(flags);
 }
 
-int aef_sysm_close(int fd) {
-  aef_desc *d = desc_of(fd);
+int tramp_sysm_close(int fd) {
+  tramp_desc *d = desc_of(fd);
   if (d == NULL) { errno = EBADF; return -1; }
   d->used = 0;
   return 0;
 }
 
-int aef_sysm_nfds(void) { return nfds_open(); }
+int tramp_sysm_nfds(void) { return nfds_open(); }
 
-int aef_sysm_fd_info(int fd, int64_t *off, int *flags, int *cloexec) {
-  aef_desc *d = desc_of(fd);
+int tramp_sysm_fd_info(int fd, int64_t *off, int *flags, int *cloexec) {
+  tramp_desc *d = desc_of(fd);
   if (d == NULL) return -1;
   if (off) *off = d->off;
   if (flags) *flags = getfl_of(d);
