@@ -81,7 +81,7 @@ nothing else:
 - A list of arms asserted ahead of the model's text, and the call names such a list would add: an arm counts only
   when the model's text has it.
 - A separate number-to-name table from the build repository: the numbers are spec_table's, and SYSCALL_NUMBERS below
-  is the Linux riscv64 ABI (the names qemu -strace prints), checked against the arms at load.
+  is the Linux riscv64 ABI (asm-generic/unistd.h), checked against the arms at load.
 - Recorded transcripts of earlier runs, any export of results, and the summary lines a command-line gate prints.
 - Deriving the abort stance from the binary's bytes: the stance is the published statement's, and the caller passes
   it.
@@ -213,16 +213,18 @@ UNLINKAT_ERRNOS = {ENOMEM, EACCES, EPERM, EROFS, EBUSY}   # Sys/Fs/Namei.v unlin
 SOCKET_ERRNOS = {ENOMEM, EMFILE, ENFILE}                  # Sys/Net/Socket.v socket_errnos, accept_errnos
 BIND_ERRNOS = {EADDRINUSE}                                # Sys/Net/Socket.v bind_errnos, listen_errnos
 
-# The Linux riscv64 system-call numbers of the names qemu -strace prints (asm-generic/unistd.h). The model's arms are
-# numbers; this table names them. Model.load checks that every arm number is here, so an arm the table cannot name is
-# an error rather than a call the checker would pass on its name.
+# The Linux riscv64 system-call numbers of the names qemu -strace prints (asm-generic/unistd.h), and of pwritev2,
+# which qemu prints as `Unknown syscall 287`. The model's arms are numbers; this table names them. Model.load checks
+# that every arm number is here, so an arm the table cannot name is an error rather than a call the checker would pass
+# on its name.
 SYSCALL_NUMBERS = {
     "getcwd": 17, "eventfd2": 19, "epoll_create1": 20, "epoll_ctl": 21, "epoll_pwait": 22, "dup": 23, "dup3": 24,
     "fcntl": 25, "ioctl": 29, "flock": 32, "unlinkat": 35, "ftruncate": 46, "faccessat": 48, "openat": 56,
     "close": 57, "pipe2": 59, "getdents64": 61, "lseek": 62, "read": 63, "write": 64, "readv": 65, "writev": 66,
     "pread64": 67, "pwrite64": 68, "pselect6": 72, "ppoll": 73, "readlinkat": 78, "newfstatat": 79, "fstat": 80,
     "fsync": 82, "fdatasync": 83, "timerfd_create": 85, "exit": 93, "exit_group": 94, "set_tid_address": 96,
-    "futex": 98, "nanosleep": 101, "clock_gettime": 113, "sched_setscheduler": 119, "sched_getaffinity": 123,
+    "futex": 98, "set_robust_list": 99, "nanosleep": 101, "clock_gettime": 113, "clock_getres": 114,
+    "sched_setscheduler": 119, "sched_getaffinity": 123,
     "sched_yield": 124, "tkill": 130, "tgkill": 131, "sigaltstack": 132, "rt_sigaction": 134, "rt_sigprocmask": 135,
     "setgid": 144, "setuid": 146, "setresuid": 147, "setresgid": 149, "setsid": 157, "getgroups": 158,
     "setgroups": 159, "uname": 160, "prctl": 167, "gettimeofday": 169, "getpid": 172, "getuid": 174, "geteuid": 175,
@@ -230,7 +232,7 @@ SYSCALL_NUMBERS = {
     "accept": 202, "connect": 203, "getsockname": 204, "getpeername": 205, "sendto": 206, "recvfrom": 207,
     "setsockopt": 208, "getsockopt": 209, "shutdown": 210, "sendmsg": 211, "recvmsg": 212, "brk": 214, "munmap": 215,
     "mremap": 216, "clone": 220, "mmap": 222, "mprotect": 226, "madvise": 233, "accept4": 242, "wait4": 260,
-    "prlimit64": 261, "getrandom": 278, "clone3": 435, "faccessat2": 439,
+    "prlimit64": 261, "getrandom": 278, "pwritev2": 287, "clone3": 435, "faccessat2": 439,
 }
 
 # ---------------------------------------------------------------------------------------------------------------------

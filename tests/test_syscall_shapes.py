@@ -1332,6 +1332,20 @@ def test_a_model_these_rules_cannot_read_is_refused(tmp_path, rel, old, new, nee
 
 
 @needs_model
+def test_the_arms_of_release_2026_11_3_are_named(tmp_path):
+    # The model of release 2026.11.3 (c0dd863a) adds these arms; a table that cannot name one refuses the whole model.
+    # The copy gets each one the checkout lacks, so the test holds at the pinned model and at c0dd863a alike.
+    added = {99: "set_robust_list", 114: "clock_getres", 287: "pwritev2"}
+    table = (pathlib.Path(MODEL_ROOT) / S.MODEL_DIR / "Sys/SyscallTable.v").read_text(encoding="utf-8")
+    have = {int(n) for n in S.ARM.findall(table)}
+    arms = "".join(f"  (* {name} *) mkSpecArm {n}%Z (fun i => {name}_spec i) ::\n"
+                   for n, name in added.items() if n not in have)
+    loaded = S.Model.load(broken(tmp_path, "Sys/SyscallTable.v", "  nil.\n", arms + "  nil.\n"))
+    assert {n: loaded.arms[n] for n in added} == added
+    assert set(added.values()) <= loaded.names
+
+
+@needs_model
 def test_prose_that_names_an_arm_does_not_count(tmp_path):
     root = broken(tmp_path, "Sys/Mm/Mmap.v", "Definition mmap_noreplace_flags_b",
                   "(* Definition mmap_noreplace_flags_b *) Definition mmap_noreplace_flags_b_gone")
