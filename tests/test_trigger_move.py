@@ -972,8 +972,10 @@ match args:
         there: the called workflow holds them, and a caller's env does not reach it. So the jobs and the env of that
         workflow count as toolchain-images.yaml's here, and their values name its path.
         Each kind has at least one value, and each pair is equal. The message names each value that differs. Other
-        tests hold the trigger: case runs publish's if over PATHS, and
-        test_publish_starts_on_the_completed_runs_on_main_of_toolchain_images_alone holds its workflows and branches."""
+        tests hold the trigger: test_publish_acts_only_on_a_push_run_on_main_of_this_repository_that_passed runs
+        publish's if over each run (case) and holds that publish acts only on a push run on main of this repository
+        that passed, and test_publish_starts_on_the_runs_of_toolchain_images_by_its_name_alone holds the name of the
+        workflow that publish listens to."""
         job, make = publish["jobs"]["publish"], images["jobs"]["make"]
         kinds = {"the env": {}, "the actions": {}, "the services": {}, "the matrix": {}, "the job env": {}}
         # Each job, by the words that name it in a value ("make's"), and each env, by the words after its names.
