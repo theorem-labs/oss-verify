@@ -2465,7 +2465,7 @@ class SeedHex(unittest.TestCase):
         import tracemalloc
         from unittest import mock
         gather = (ROOT / ".github" / "scripts" / "review-gather").read_text()
-        opener = "python3 - \"$zip\" \"$out/seeds/$target.hex.txt\" <<'EOF'\n"
+        opener = "python3 -P - \"$zip\" \"$out/seeds/$target.hex.txt\" <<'EOF'\n"
         start = gather.index(opener) + len(opener)
         script = gather[start:gather.index("\nEOF\n", start) + 1]
         stored, deflated, spaces, size = bytes(range(256)) * 3, b"seed " * 200, b" " * (1 << 20), 64 << 20

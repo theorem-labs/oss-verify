@@ -174,7 +174,7 @@ find "$dir" -maxdepth 1 \( -iname 'CLAUDE*.md' -o -iname 'AGENTS*.md' \) -delete
 
 # Check B of review.md: each box of the description against today's template.
 jq -r '.body // ""' "$out/pr.json" > "$out/description.md" 2>/dev/null
-keep checklist.txt python3 - "$NAME" "$out/description.md" <<'EOF'
+keep checklist.txt python3 -P - "$NAME" "$out/description.md" <<'EOF'
 import re, sys
 name, body = sys.argv[1], open(sys.argv[2], encoding="utf-8", errors="replace").read()
 box = re.compile(r'^\s*[-*] \[([ xX])\] (.*?)\s*$', re.M)
@@ -199,7 +199,7 @@ for zip in "$dir"/*_seed_corpus.zip; do
   [ -f "$zip" ] || continue
   target=$(basename "$zip" _seed_corpus.zip)
   keep "seeds/$target.listing.txt" unzip -l "$zip"
-  python3 - "$zip" "$out/seeds/$target.hex.txt" <<'EOF'
+  python3 -P - "$zip" "$out/seeds/$target.hex.txt" <<'EOF'
 import sys, zipfile
 with zipfile.ZipFile(sys.argv[1]) as archive, open(sys.argv[2], "w") as out:
     for info in [i for i in archive.infolist() if not i.is_dir()][:200]:
