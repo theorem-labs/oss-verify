@@ -2,8 +2,8 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 #
-# The last job of a routed workflow (build.yaml, review.yml, validate.yaml, tests.yaml) runs this, after every other
-# job of its run and whatever their results:
+# The last job of a routed workflow (build.yaml, review.yml) runs this, after every other job of its run and whatever
+# their results:
 #
 #   .github/scripts/collect ROUTE_RESULT JOB:RESULT:ASKED...
 #

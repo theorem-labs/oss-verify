@@ -1,14 +1,17 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the routed workflows (build.yaml, validate.yaml, tests.yaml, review.yml) and their collector,
-.github/scripts/collect, and for the condition of triage.yaml's one job:  uv run pytest
+"""Tests for the routed workflows (build.yaml, review.yml) and their collector, .github/scripts/collect, for the
+workflows of one job that report a required check (tests.yaml, validate.yaml), and for the condition of triage.yaml's
+one job:  uv run pytest
 
-Each workflow has a route job that decides which jobs the run needs, and a collector job that always runs last,
-collects every result with the collector, and reports the workflow's one check: the job required reports the check
-that the ruleset requires, and review.yml's job collect the check review jobs, which no ruleset requires. These check
-the collector's verdicts, the shape every routed workflow keeps (the collector waits for every job, and no job a route
-may skip reports a required check), and the routes' own steps, run on made-up changes. They also run the steps of
-tests.yaml's jobs that choose their tests from route's outputs.
+A routed workflow has a route job that decides which jobs the run needs, and a collector job that always runs last,
+collects every result with the collector, and reports the workflow's one check: build.yaml's job required reports the
+check that the ruleset requires, and review.yml's job collect the check review jobs, which no ruleset requires. These
+check the collector's verdicts, the shape every routed workflow keeps (the collector waits for every job, and no job a
+route may skip reports a required check), and the routes' own steps, run on made-up changes. tests.yaml and
+validate.yaml have one job each, which reports their required check and runs on every event. These also run the steps
+of tests.yaml's job: the step that keeps a fork's change to projects/ from running any code, and the step that runs the
+tests.
 """
 import importlib.util
 import itertools
@@ -17,22 +20,24 @@ import os
 import pathlib
 import re
 import subprocess
+import sys
 
 import pytest
 
-from test_outside_screen import evaluate, read_workflow as workflow
+from test_outside_screen import evaluate, interpolated, read_workflow as workflow
 from test_take_project import git, isolated_git_env
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 COLLECT = ROOT / ".github" / "scripts" / "collect"
 WORKFLOWS = ROOT / ".github" / "workflows"
-# Each routed workflow, and the check its required job reports (the default branch's ruleset requires project-builds,
-# enrollment and tests).
+# The workflow that reports each required check but terms-accepted (the default branch's ruleset requires
+# project-builds, enrollment and tests).
 REQUIRED = {"build.yaml": "project-builds", "validate.yaml": "enrollment", "tests.yaml": "tests"}
-# Each routed workflow's collector job, and the check it reports. review.yml's is no required check: a check of a
-# workflow_run or workflow_dispatch run never satisfies one.
-COLLECTORS = {**{name: ("required", check) for name, check in REQUIRED.items()},
-              "review.yml": ("collect", "review jobs")}
+# Each routed workflow's collector job, and the check it reports: build.yaml's is the required check project-builds, and
+# review.yml's is no required check: a check of a workflow_run or workflow_dispatch run never satisfies one.
+COLLECTORS = {"build.yaml": ("required", REQUIRED["build.yaml"]), "review.yml": ("collect", "review jobs")}
+# Each workflow of one job, and the required check that its job reports.
+ONE_JOB = {name: REQUIRED[name] for name in ("tests.yaml", "validate.yaml")}
 # The checks the default branch's ruleset requires.
 RULESET = {"enrollment", "project-builds", "terms-accepted", "tests"}
 
@@ -111,6 +116,16 @@ def test_only_the_required_job_reports_the_required_check(name):
     for job_id, job in jobs.items():
         if job_id not in ("route", collector):
             assert "if" in job, f"{name}: {job_id} runs whatever route decides"
+
+
+@pytest.mark.parametrize("name", sorted(ONE_JOB))
+def test_a_workflow_of_one_job_reports_its_required_check_on_every_run(name):
+    jobs = workflow(name)["jobs"]
+    assert len(jobs) == 1, f"{name}: the jobs {sorted(jobs)}, not one"
+    [(job_id, job)] = jobs.items()
+    assert job.get("name", job_id) == ONE_JOB[name]
+    # GitHub counts a skipped job as a pass where a check is required: the job has no condition, and waits for no job.
+    assert "if" not in job and "needs" not in job, f"{name}: the job {job_id} can be skipped"
 
 
 def test_every_required_check_has_a_static_name():
@@ -476,7 +491,7 @@ def test_an_issues_event_reaches_route_only_as_data(tmp_path, sender, author, as
         assert sorted(where.glob("pwned-*")) == []
 
 
-# --- tests.yaml's route, run on made-up commits ---
+# --- tests.yaml's job, its steps run on made-up commits ---
 
 
 def write_files(directory, files):
@@ -497,174 +512,296 @@ def commit(directory, environment, files):
     return git("rev-parse", "HEAD", cwd=directory, env=environment)
 
 
-# kay is a seeded project (it has a row in seeds/builds.tsv), and projects/kay/ is its port. p is not seeded.
-TREE = {"README.md": "x\n", "AGENTS.md": "x\n", "docs/a.md": "x\n", "src/t.py": "x\n", "projects/p/project.yaml": "x\n",
-        "seeds/builds.tsv": "# a comment\nproject\tresult\tdetail\nkay\treproduces\tall binaries match the release's\n",
-        "projects/kay/series": "kay.0001-checked.patch\n"}
+TREE = {"README.md": "x\n", "docs/a.md": "x\n", "src/t.py": "x\n", "projects/p/project.yaml": "x\n"}
+# tests.yaml's step that keeps a fork's change to projects/ from running code, and the steps before it, which run only
+# git, gh and jq, or check out the commit (each by its name, or by its action).
+FORK_STEP = "A fork's change to projects/ runs no code here"
+BEFORE_FORK_STEP = ["The pull request targets the default branch", "actions/checkout",
+                    "The checkout is the merge into the base branch"]
+# A class of the Docker tests: it skips unless OV_DOCKER_TESTS is 1.
+DOCKER_CLASS = re.compile(r'@unittest\.skipUnless\(os\.environ\.get\("OV_DOCKER_TESTS"\) == "1"')
 
 
-def route_tests(tmp_path, change, event="pull_request", before=None, fork=None, tree=None):
-    """Run tests.yaml's "Which jobs the changes need" on a commit that makes `change` to TREE, as a run of a pull
-    request from a fork when `fork` is "true" or "false" (the workflow's FORK; unset by default). `tree` holds files
-    that replace TREE's in the first commit. Return its outputs."""
+# A stand-in gh: it logs its arguments, one call to a line, and answers the compare API's status with $STATUS, or fails
+# as on an error of the API when $STATUS is error.
+COMPARE_GH = ('#!/bin/sh\necho "$*" >> "$GH_LOG"\n'
+              '[ "$STATUS" = error ] && { echo "gh: Server Error (HTTP 502)" >&2; exit 1; }\necho "$STATUS"\n')
+# A file of the checkout: it logs its path when it runs.
+TRAP = '#!/bin/sh\necho "$0" >> "$TRAPPED"\n'
+
+
+def job_of_tests():
+    return workflow("tests.yaml")["jobs"]["tests"]
+
+
+def fork_step(tmp_path, change):
+    """Run tests.yaml's FORK_STEP, as on a fork's run, on a commit that makes `change` to TREE, its first parent, as
+    GitHub's merge is made on the base branch's commit. Each file of TREE is a TRAP, and none may run. Return the
+    step's outputs and its summary."""
     # git with no configuration from this machine, as in test_take_project.py.
     isolated = isolated_git_env(tmp_path)
     repo = tmp_path / "repo"
     repo.mkdir()
     git("init", "-q", "-b", "main", cwd=repo, env=isolated)
-    first = commit(repo, isolated, {**TREE, **(tree or {})})
+    commit(repo, isolated, {path: TRAP for path in TREE})
     commit(repo, isolated, change)
-    git("remote", "add", "origin", f"file://{repo}", cwd=repo, env=isolated)
-    paths = step(workflow("tests.yaml")["jobs"]["route"], "Which jobs the changes need")
+    for path in TREE:
+        if (repo / path).exists():
+            (repo / path).chmod(0o755)
     output, summary = tmp_path / "output", tmp_path / "summary"
-    environment = {**isolated, "EVENT": event, "BEFORE": first if before is None else before,
-                   "GITHUB_OUTPUT": str(output), "GITHUB_STEP_SUMMARY": str(summary), "RUNNER_TEMP": str(tmp_path),
-                   **({} if fork is None else {"FORK": fork})}
-    run = subprocess.run(["bash", "-e", "-c", paths["run"]], cwd=repo, env=environment, capture_output=True, text=True)
+    environment = {**isolated, "FORK": "true", "GITHUB_OUTPUT": str(output), "GITHUB_STEP_SUMMARY": str(summary),
+                   "RUNNER_TEMP": str(tmp_path), "TRAPPED": str(tmp_path / "trapped")}
+    run = subprocess.run(["bash", "-e", "-c", step(job_of_tests(), FORK_STEP)["run"]], cwd=repo, env=environment,
+                         capture_output=True, text=True)
     assert run.returncode == 0, run.stderr
-    return dict(line.split("=", 1) for line in output.read_text().splitlines()) if output.exists() else {}
+    assert not (tmp_path / "trapped").exists(), (tmp_path / "trapped").read_text()
+    outputs = dict(line.split("=", 1) for line in output.read_text().splitlines()) if output.exists() else {}
+    return outputs, summary.read_text()
 
 
-@pytest.mark.parametrize("change, outputs", [
-    # Documentation only: the tests that read it.
-    ({"docs/a.md": "y\n"}, {"docs": "true"}),
-    ({"docs/new/b.txt": "y\n", "AGENTS.md": "y\n", "CONTRIBUTING.md": "y\n"}, {"docs": "true"}),
-    ({"docs/a.md": None}, {"docs": "true"}),
-    # README.md is read by a test; a Markdown file below the top is not documentation; and anything else runs it all.
-    ({"README.md": "y\n"}, {"suite": "true"}),
-    ({"src/notes.md": "y\n"}, {"suite": "true"}),
-    ({"docs/a.md": "y\n", "src/t.py": "y\n"}, {"suite": "true"}),
-    ({"projects/p/project.yaml": "y\n"}, {"suite": "true"}),
-    ({".github/workflows/tests.yaml": "y\n"}, {"suite": "true"}),
-    # A rename out of the documentation is a change to both names.
-    ({"docs/a.md": None, "src/a.md": "x\n"}, {"suite": "true"}),
-    # A file that docs/seeded-projects.tsv depends on, the table, or its test: Committed runs too. A port of a seeded
-    # project is such a file.
-    ({"seeds/checked-patches.tsv": "y\n"}, {"suite": "true", "table": "true"}),
-    ({"src/oss_verify/seeded_projects.py": "y\n"}, {"suite": "true", "table": "true"}),
-    ({"src/oss_verify/validate.py": "y\n"}, {"suite": "true", "table": "true"}),
-    ({"tests/test_seeded_projects.py": "y\n"}, {"suite": "true", "table": "true"}),
-    ({"docs/seeded-projects.tsv": "y\n"}, {"docs": "true", "table": "true"}),
-    ({"projects/kay/series": "y\n"}, {"suite": "true", "table": "true"}),
-    ({"projects/kay/series": None}, {"suite": "true", "table": "true"}),
-    # A pull request that removes seeds/builds.tsv: route reads no such file, and the path is under seeds/.
-    ({"seeds/builds.tsv": None}, {"suite": "true", "table": "true"}),
-    # A change to the port of a project that is not seeded, as its enrollment makes, and any other change: Committed
-    # does not run.
-    ({"projects/p/series": "y\n"}, {"suite": "true"}),
-    ({"src/oss_verify/check.py": "y\n"}, {"suite": "true"}),
-    # No change: nothing to run.
-    ({}, {}),
-])
-def test_tests_route_asks_for_the_jobs_a_pull_requests_changes_need(tmp_path, change, outputs):
-    assert route_tests(tmp_path, change) == outputs
-    assert ("::Committed runs:" in (tmp_path / "summary").read_text()) == ("table" in outputs)
-
-
-def test_tests_route_compares_a_push_with_the_commit_before_it(tmp_path):
-    assert route_tests(tmp_path, {"docs/a.md": "y\n"}, event="push") == {"docs": "true"}
-
-
-def test_tests_route_runs_committed_for_a_push_that_changes_a_seeded_port(tmp_path):
-    # A push to main that makes the table stale runs Committed, which then fails the check tests on main's commit.
-    assert route_tests(tmp_path, {"projects/kay/series": "y\n"}, event="push") == {"suite": "true", "table": "true"}
-
-
-def test_tests_route_reads_a_last_row_that_no_newline_ends(tmp_path):
-    # The generator reads such a row of seeds/builds.tsv, so kay is seeded and a change to its port runs Committed.
-    builds = TREE["seeds/builds.tsv"].removesuffix("\n")
-    assert builds.endswith("\nkay\treproduces\tall binaries match the release's")
-    assert route_tests(tmp_path, {"projects/kay/series": "y\n"}, tree={"seeds/builds.tsv": builds}) == {
-        "suite": "true", "table": "true"}
-
-
-@pytest.mark.parametrize("change, outputs", [
-    # An enrollment, or any change under projects/: no job runs a fork's code, not even Committed for a seeded port.
-    ({"projects/p/project.yaml": "y\n"}, {}),
-    ({"projects/kay/series": "y\n"}, {}),
-    ({"projects/p/project.yaml": "y\n", "src/t.py": "y\n"}, {}),
-    ({"projects/p/project.yaml": None, "src/p.yaml": "x\n"}, {}),
+@pytest.mark.parametrize("change, enrollment", [
+    # An enrollment, or any change under projects/, alone or beside others, or a rename out of projects/ (both names
+    # count): no step after this one runs.
+    ({"projects/p/project.yaml": "y\n"}, True),
+    ({"projects/q/build.sh": "y\n"}, True),
+    ({"projects/p/project.yaml": "y\n", "src/t.py": "y\n"}, True),
+    ({"projects/p/project.yaml": None, "src/p.yaml": "x\n"}, True),
     # No file under projects/: tested as a branch of this repository is.
-    ({"src/t.py": "y\n"}, {"suite": "true"}),
-    ({".github/workflows/tests.yaml": "y\n"}, {"suite": "true"}),
-    ({"docs/a.md": "y\n"}, {"docs": "true"}),
-    ({"seeds/x.tsv": "y\n"}, {"suite": "true", "table": "true"}),
+    ({"src/t.py": "y\n"}, False),
+    ({".github/workflows/tests.yaml": "y\n"}, False),
+    ({"docs/a.md": "y\n"}, False),
+    ({"src/projects/x": "y\n"}, False),
+    ({}, False),
 ])
-def test_tests_route_runs_a_forks_change_only_when_it_changes_no_file_under_projects(tmp_path, change, outputs):
-    assert route_tests(tmp_path, change, fork="true") == outputs
-    summary = (tmp_path / "summary").read_text()
-    assert ("Not run: this pull request is from a fork" in summary) == (outputs == {})
+def test_a_forks_change_to_projects_is_an_enrollment(tmp_path, change, enrollment):
+    outputs, summary = fork_step(tmp_path, change)
+    assert outputs == ({"enrollment": "true"} if enrollment else {})
+    assert ("Not run: this pull request is from a fork" in summary) == enrollment
 
 
-def test_tests_route_runs_a_branchs_change_under_projects(tmp_path):
-    assert route_tests(tmp_path, {"projects/p/project.yaml": "y\n"}, fork="false") == {"suite": "true"}
-
-
-@pytest.mark.parametrize("event, before", [
-    ("push", "0" * 40),  # a new branch: no earlier commit
-    ("push", "1" * 40),  # an earlier commit that cannot be fetched
-    ("push", ""),
-    ("workflow_dispatch", ""),
-])
-def test_tests_route_runs_everything_with_nothing_to_compare_with(tmp_path, event, before):
-    assert route_tests(tmp_path, {"docs/a.md": "y\n"}, event=event, before=before) == {"suite": "true", "table": "true"}
-
-
-def test_the_docs_job_runs_the_tests_it_names(tmp_path):
-    run = step(workflow("tests.yaml")["jobs"]["docs"], "The tests that read the documentation")["run"]
-    nodes = re.findall(r'"(tests/test_[^"]+)"', run)
-    assert nodes
-    for node in nodes:
-        file, cls, test = node.split("::")
-        source = (ROOT / file).read_text()
-        assert re.search(rf"^class {cls}\b", source, re.M) and re.search(rf"^    def {test}\(", source, re.M), node
-
-
-COMMITTED = "tests/test_seeded_projects.py::Committed::test_docs_seeded_projects_tsv_is_what_the_generator_writes"
-TOOLCHAINS = "tests/test_check.py::Toolchains::test_infra_toolchains_tsv_is_the_one_file_that_names_a_toolchain_digest"
-
-
-@pytest.mark.parametrize("table", ["true", ""])
-def test_the_suite_and_docs_jobs_run_committed_only_when_route_asks_for_the_table(tmp_path, table):
-    # route's output table reaches each step as TABLE: "true", or "" when route does not write it. A stand-in python3
-    # records the arguments that pytest gets, and prints the line that the docs job's guard reads.
+def guard_step(tmp_path, name, base="main", status="ahead"):
+    """Run tests.yaml's step `name`, one of the steps before FORK_STEP, as on a pull request into `base` from a fork,
+    in a checkout of a merge commit whose first parent is main's commit. Each file of the checkout is a TRAP, the
+    stand-in COMPARE_GH answers `status`, and the default branch is main. Return the step's exit status, its output,
+    gh's calls, the traps that ran, and the merge's first parent."""
+    isolated = isolated_git_env(tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git("init", "-q", "-b", "main", cwd=repo, env=isolated)
+    commit(repo, isolated, {path: TRAP for path in TREE})
+    git("checkout", "-q", "-b", "pull", cwd=repo, env=isolated)
+    commit(repo, isolated, {"src/t.py": TRAP + "# changed\n"})
+    git("checkout", "-q", "--detach", "main", cwd=repo, env=isolated)
+    git("merge", "-q", "--no-ff", "-m", "merge", "pull", cwd=repo, env=isolated)
+    for path in TREE:
+        (repo / path).chmod(0o755)
     bin = tmp_path / "bin"
     bin.mkdir()
-    (bin / "python3").write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$ARGV"\necho "1 passed"\n')
-    (bin / "python3").chmod(0o755)
-    named = {"suite": [] if table == "true" else ["--deselect", COMMITTED],
-             "docs": [TOOLCHAINS, COMMITTED] if table == "true" else [TOOLCHAINS]}
-    jobs = workflow("tests.yaml")["jobs"]
-    for job, name in (("suite", "The tests in tests/"), ("docs", "The tests that read the documentation")):
-        tests = step(jobs[job], name)
-        run = subprocess.run(["bash", "-e", "-c", tests["run"]], cwd=tmp_path, capture_output=True, text=True,
-                             env={**os.environ, "PATH": f"{bin}:{os.environ['PATH']}", "ARGV": str(tmp_path / "argv"),
-                                  "RUNNER_TEMP": str(tmp_path), "TABLE": table})
-        assert run.returncode == 0, run.stderr
-        argv = (tmp_path / "argv").read_text().splitlines()
-        assert [a for a in argv if a == "--deselect" or a.startswith("tests/")] == named[job], job
+    (bin / "gh").write_text(COMPARE_GH)
+    (bin / "gh").chmod(0o755)
+    environment = {**isolated, "PATH": f"{bin}:{isolated['PATH']}", "GH_TOKEN": "x", "REPO": "o/r", "BASE": base,
+                   "DEFAULT": "main", "STATUS": status, "GH_LOG": str(tmp_path / "gh.log"),
+                   "TRAPPED": str(tmp_path / "trapped")}
+    run = subprocess.run(["bash", "-e", "-c", step(job_of_tests(), name)["run"]], cwd=repo, env=environment,
+                         capture_output=True, text=True)
+    calls = (tmp_path / "gh.log").read_text().splitlines() if (tmp_path / "gh.log").exists() else []
+    trapped = (tmp_path / "trapped").read_text().splitlines() if (tmp_path / "trapped").exists() else []
+    return run.returncode, run.stdout + run.stderr, calls, trapped, git("rev-parse", "HEAD^1", cwd=repo, env=isolated)
 
 
-def test_the_suite_runs_one_worker_for_each_core_each_with_the_top_of_the_checkout_off_sys_path(tmp_path):
-    # The suite step's own env and script, with a stand-in nproc that says 3, and a stand-in python3 that records its
-    # arguments and the PYTHONSAFEPATH it gets. Each pytest-xdist worker inherits that environment (the step's comment).
+@pytest.mark.parametrize("base, passes", [("main", True), ("ci/other", False)])
+def test_a_pull_request_into_another_branch_fails_the_check(tmp_path, base, passes):
+    code, out, calls, trapped, _ = guard_step(tmp_path, "The pull request targets the default branch", base=base)
+    assert (code == 0) == passes, out
+    assert ("::error::This pull request targets ci/other, not main" in out) == (not passes), out
+    assert (calls, trapped) == ([], [])
+
+
+@pytest.mark.parametrize("status, passes", [
+    # The merge's first parent is in the history of the base branch: the run checked out a merge into it.
+    ("identical", True), ("ahead", True),
+    # A merge into an earlier base (after a change of base), or a compare that fails.
+    ("behind", False), ("diverged", False), ("error", False),
+])
+def test_the_check_fails_unless_the_checkout_is_the_merge_into_the_base_branch(tmp_path, status, passes):
+    code, out, calls, trapped, parent = guard_step(tmp_path, "The checkout is the merge into the base branch",
+                                                   base="a/b c", status=status)
+    assert (code == 0) == passes, out
+    assert ("Push a commit to the branch" in out) == (status in ("behind", "diverged")), out
+    # One compare, of the merge's first parent with the base branch, its name encoded for the URL.
+    assert calls == [f"api repos/o/r/compare/{parent}...a%2Fb%20c --jq .status"]
+    assert trapped == []
+
+
+
+def test_no_step_after_the_fork_step_runs_for_a_forks_enrollment():
+    steps = job_of_tests()["steps"]
+    names = [s.get("name") or s["uses"].split("@")[0] for s in steps]
+    at = names.index(FORK_STEP)
+    # Before it, only steps that run no file of the checkout.
+    assert names[:at] == BEFORE_FORK_STEP
+    fork = steps[at]
+    assert fork["id"] == "fork"
+    assert [bool(evaluate(fork["if"], {"env.FORK": value})) for value in ("true", "false")] == [True, False]
+    assert steps[at + 1:], "no step after the fork step"
+    for later in steps[at + 1:]:
+        assert "if" in later, f"{later.get('name')} runs for a fork's enrollment"
+        for found, runs in (("true", False), ("", True)):
+            ctx = {"steps.fork.outputs.enrollment": found, "github.event_name": "pull_request"}
+            assert bool(evaluate(later["if"], ctx)) == runs, (later.get("name"), found)
+
+
+def run_the_tests_step(tmp_path, last_line, status=0):
+    """Run tests.yaml's step "The tests in tests/", with its own env and the workflow's DOCKER_TESTS, a stand-in nproc
+    that says 3, and a stand-in python3 that records its arguments and the PYTHONSAFEPATH it gets, prints `last_line`
+    as pytest's last line, and exits `status`. Each pytest-xdist worker inherits that environment (the step's comment).
+    Return the step's exit status, its output, and pytest's arguments after -m pytest."""
     bin = tmp_path / "bin"
     bin.mkdir()
     (bin / "nproc").write_text("#!/bin/sh\necho 3\n")
     (bin / "python3").write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$ARGV"\n'
-                                 'printf "%s\\n" "${PYTHONSAFEPATH-unset}" > "$ARGV.safepath"\n')
+                                 'printf "%s\\n" "${PYTHONSAFEPATH-unset}" > "$ARGV.safepath"\n'
+                                 f'echo "SKIPPED [1] tests/test_x.py:1: a reason"\necho {last_line!r}\nexit {status}\n')
     for name in ("nproc", "python3"):
         (bin / name).chmod(0o755)
-    tests = step(workflow("tests.yaml")["jobs"]["suite"], "The tests in tests/")
+    flow = workflow("tests.yaml")
+    tests = step(flow["jobs"]["tests"], "The tests in tests/")
     ambient = {name: value for name, value in os.environ.items() if name != "PYTHONSAFEPATH"}
     run = subprocess.run(["bash", "-e", "-c", tests["run"]], cwd=tmp_path, capture_output=True, text=True,
-                         env={**ambient, **tests["env"], "PATH": f"{bin}:{os.environ['PATH']}",
-                              "ARGV": str(tmp_path / "argv"), "RUNNER_TEMP": str(tmp_path), "TABLE": "true"})
-    assert run.returncode == 0, run.stderr
+                         env={**ambient, **tests["env"], "DOCKER_TESTS": flow["env"]["DOCKER_TESTS"],
+                              "PATH": f"{bin}:{os.environ['PATH']}", "ARGV": str(tmp_path / "argv"),
+                              "RUNNER_TEMP": str(tmp_path)})
     argv = (tmp_path / "argv").read_text().splitlines()
+    assert argv[:3] == ["-P", "-m", "pytest"], argv
+    assert (tmp_path / "argv.safepath").read_text() == "1\n"
+    return run.returncode, run.stdout + run.stderr, argv[3:]
+
+
+def test_the_tests_run_on_every_core_and_all_but_the_docker_tests_run(tmp_path):
+    code, out, argv = run_the_tests_step(tmp_path, "5 passed in 1.00s")
+    assert code == 0, out
     assert argv[argv.index("-n") + 1] == "3" and argv[argv.index("--dist") + 1] == "worksteal", argv
     assert "--durations=30" in argv, argv
-    assert (tmp_path / "argv.safepath").read_text() == "1\n"
+    # No test is chosen by name, path, keyword or marker: only the Docker tests' files are left out, with --ignore.
+    assert not [a for a in argv if a.startswith(("tests", "--deselect", "-k", "-m"))], argv
+    docker = workflow("tests.yaml")["env"]["DOCKER_TESTS"].split()
+    assert [a for a in argv if a.startswith("--ignore")] == [f"--ignore={path}" for path in docker]
+    # The Docker tests are the files of tests/ with a class that skips unless OV_DOCKER_TESTS is 1.
+    marked = sorted(f"tests/{path.name}" for path in (ROOT / "tests").glob("test_*.py")
+                    if DOCKER_CLASS.search(path.read_text()))
+    assert sorted(docker) == marked
+
+
+@pytest.mark.parametrize("last_line, status, fails", [
+    ("5 passed in 1.00s", 0, False),
+    ("5 passed, 2 deselected in 1.00s", 0, False),
+    # A test that skipped fails the step, as does pytest's own failure.
+    ("5 passed, 1 skipped in 1.00s", 0, True),
+    ("1 skipped in 1.00s", 0, True),
+    ("1 failed, 4 passed in 1.00s", 1, True),
+])
+def test_the_tests_step_fails_when_a_test_skips(tmp_path, last_line, status, fails):
+    code, out, _ = run_the_tests_step(tmp_path, last_line, status)
+    assert (code != 0) == fails, out
+    assert ("::error::A test skipped here" in out) == (fails and status == 0), out
+
+
+# The Docker tests' files, which no job of tests.yaml runs yet: the pull request of the branch INFRA-5359-docker-job
+# adds the job docker, which runs them, and empties this list.
+RUN_BY_NO_JOB_YET = ["tests/test_builder.py", "tests/test_append_docker.py", "tests/test_binary_checks_docker.py",
+                     "tests/test_seed_runs_docker.py", "tests/test_target_settings_docker.py"]
+
+
+def collected(*arguments):
+    """The node ids that pytest collects from this repository with `arguments`, as tests.yaml runs it (-P, -c
+    pyproject.toml), with OV_DOCKER_TESTS unset: collection runs no test."""
+    environment = {name: value for name, value in os.environ.items() if not name.startswith("OV_")}
+    run = subprocess.run([sys.executable, "-P", "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider", "-c",
+                          "pyproject.toml", *arguments], cwd=ROOT, env=environment, capture_output=True, text=True,
+                         timeout=300)
+    assert run.returncode == 0, run.stdout[-4000:] + run.stderr[-2000:]
+    ids = {line for line in run.stdout.splitlines() if "::" in line}
+    assert ids, run.stdout[-4000:]
+    return ids
+
+
+def selection(tmp_path):
+    """The arguments of pytest that choose the tests of the job tests, as run_the_tests_step finds them: its arguments
+    but -n, --dist, --durations, -q and -rs, which choose how the tests run and what pytest prints, not which."""
+    _, _, argv = run_the_tests_step(tmp_path, "1 passed in 1.00s")
+    chosen, skip = [], False
+    for argument in argv:
+        if skip:
+            skip = False
+        elif argument in ("-n", "--dist"):
+            skip = True
+        elif not argument.startswith("--durations=") and argument not in ("-q", "-rs"):
+            chosen.append(argument)
+    return chosen
+
+
+def test_every_test_runs_in_the_job_tests_or_is_listed_as_run_by_no_job_yet(tmp_path):
+    """Each test that pytest collects under tests/ is one that the job tests runs, or one of RUN_BY_NO_JOB_YET's files:
+    no selection leaves out a test unnoticed. A control leaves a class out of the job's selection, and finds it."""
+    assert RUN_BY_NO_JOB_YET == workflow("tests.yaml")["env"]["DOCKER_TESTS"].split()
+    chosen, everything, listed = selection(tmp_path), collected(), collected(*RUN_BY_NO_JOB_YET)
+    assert everything - collected(*chosen) - listed == set()
+    left_out = "tests/test_no_frame_pointer_image.py::NoFramePointerImage"
+    found = everything - collected(*chosen, "--deselect", left_out) - listed
+    assert found == {f"{left_out}::test_frame_pointers_skips_when_no_frame_pointer_image_is_named"}, found
+
+
+def test_a_newer_run_of_a_pull_request_or_of_main_cancels_the_older():
+    concurrency = workflow("tests.yaml")["concurrency"]
+    assert concurrency["cancel-in-progress"] is True
+
+    def group(event, ref, sha, number=None):
+        return interpolated(concurrency["group"], {"github.event_name": event, "github.ref": ref, "github.sha": sha,
+                                                   "github.event.pull_request.number": number})
+
+    older, newer = "a" * 40, "b" * 40
+    # Two pushes to main share one group, as do two pushes of one pull request.
+    assert group("push", "refs/heads/main", older) == group("push", "refs/heads/main", newer)
+    assert group("pull_request", "refs/pull/7/merge", older, 7) == group("pull_request", "refs/pull/7/merge", newer, 7)
+    # Another pull request, and a run by hand on main, cancel neither.
+    groups = {group("push", "refs/heads/main", older), group("pull_request", "refs/pull/7/merge", older, 7),
+              group("pull_request", "refs/pull/8/merge", older, 8), group("workflow_dispatch", "refs/heads/main", older)}
+    assert len(groups) == 4, groups
+
+
+@pytest.mark.parametrize("name", ["tests.yaml", "validate.yaml"])
+def test_no_job_reads_or_writes_the_actions_cache(name):
+    # GitHub gives a pull_request job write access to its merge ref's cache unless cache-mode says otherwise.
+    flow = workflow(name)
+    assert flow["cache-mode"] == "none"
+    assert [job for job, spec in flow["jobs"].items() if "cache-mode" in spec] == []
+
+
+@pytest.mark.parametrize("name, tools", [
+    ("actionlint and shellcheck pass the workflows", ("ACTIONLINT", "SHELLCHECK")),
+    ("The package builds, installs and runs", ("UV",)),
+])
+def test_the_job_checks_each_tool_it_fetches_by_its_sha256(name, tools):
+    checks = step(job_of_tests(), name)
+    for tool in tools:
+        assert re.fullmatch(r"\d+\.\d+\.\d+", str(checks["env"][f"{tool}_VERSION"])), tool
+        assert re.fullmatch(r"[0-9a-f]{64}", checks["env"][f"{tool}_SHA256"]), tool
+        # Checked before the archive is unpacked.
+        run = checks["run"]
+        assert -1 < run.index(f'echo "${tool}_SHA256  ') < run.index("tar -x", run.index(f"${tool}_VERSION")), tool
+
+
+def test_the_package_check_builds_with_uvs_own_backend_and_runs_the_installed_package():
+    run = step(job_of_tests(), "The package builds, installs and runs")["run"]
+    # uv builds offline only with the backend it bundles: the version that pyproject.toml's uv_build range names.
+    version = step(job_of_tests(), "The package builds, installs and runs")["env"]["UV_VERSION"]
+    pyproject = (ROOT / "pyproject.toml").read_text()
+    low, high = re.search(r'requires = \["uv_build>=([\d.]+),<([\d.]+)"\]', pyproject).groups()
+    as_tuple = lambda text: tuple(int(part) for part in text.split("."))
+    assert as_tuple(low) <= as_tuple(version) < as_tuple(high), (version, low, high)
+    assert "uv build --offline --wheel" in run
+    assert "--require-hashes -r" in run
+    assert 'env -u PYTHONPATH "$package/venv/bin/oss-verify" --help' in run
 
 
 # --- the triage comment: triage.yaml's one job, and review.yml's route after it ---

@@ -1,6 +1,6 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
-"""Tests that four pull_request jobs take the base branch's tools from the first parent of GitHub's merge commit
+"""Tests that three pull_request jobs take the base branch's tools from the first parent of GitHub's merge commit
 (OSSV-902):
 
     python3 -P -m pytest -q -p no:cacheprovider -c pyproject.toml -rs tests/test_base_tools.py
@@ -8,14 +8,14 @@
 On pull_request, GitHub reads each workflow file from the merge commit github.sha. The first parent of that commit is
 the commit of the base branch on which GitHub built the merge. The event's pull_request.base.sha is the base that GitHub
 recorded for the pull request, and it does not move when the base branch moves. So these jobs take their scripts from
-the first parent: project-builds of build.yaml, validate of validate.yaml, terms-accepted of terms.yaml, and, for a
-pull request from a fork, required of tests.yaml. A test of one job has the id <file>:<job>.
+the first parent: project-builds of build.yaml, validate of validate.yaml and terms-accepted of terms.yaml. A test of
+one job has the id <file>:<job>.
 
 Some tests read the workflow files:
   - No workflow names pull_request.base.sha in an expression.
   - No checkout of a workflow that starts on pull_request names a ref.
   - In each job, the first checkout has fetch-depth: 2. The next step has id: parent. Its if: is none in project-builds
-    and terms-accepted, pull_request only in validate, and a fork only in required of tests.yaml.
+    and terms-accepted, and pull_request only in validate.
   - terms.yaml gives the program BASE_SHA from the output of that step.
 
 Other tests run the steps of each job in a scratch repository over file://. GitHub built the merge M on P1, a commit
@@ -33,7 +33,7 @@ runs a step with no shell:. A stand-in gh answers the compare API with the statu
   - The step refuses a merge whose first parent is not in the history of the base branch (the compare answers behind
     or diverged), a compare that fails, a base branch that git ls-remote does not list, and a merge commit with one
     parent or three.
-  - The step does not run on a run by hand of validate.yaml, or on a pull request from a branch in tests.yaml.
+  - The step does not run on a run by hand of validate.yaml.
   - Each job runs its scripts, and src/oss_verify/, from P1.
 
 test_binary_sizes runs the build step of build.yaml with a stand-in oss-verify check and binary-sizes. When oss-verify
@@ -45,7 +45,7 @@ read a directory that a caller gives, so a control can run them on a changed cop
 test_control) copies the workflows into a temporary directory. It runs a test's case on that copy, where the case
 passes. The copy is the same for each control, so only the first control of a case and its arguments in a process
 runs it there, and the others read its pass (fails_only_on_the_change). Then it changes a second copy, runs the case
-there, and asserts that the case fails. Three controls change the step with id: parent of the four jobs: it checks out
+there, and asserts that the case fails. Three controls change the step with id: parent of the three jobs: it checks out
 the second parent, it only runs true, or it runs a script of the checkout. One control changes the build step: it
 writes no warning when binary-sizes fails, as at a417ab88.
 """
@@ -70,11 +70,11 @@ from test_trigger_move import action_of, as_text, env_of, outputs, parse, render
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
 REPO = "theorem-labs/oss-verify"
-# The head repository of each pull request here but one: tests.yaml takes the first parent only for a fork.
+# The head repository of each pull request here.
 FORK = "someone/oss-verify"
 # validate's step after take-project. It runs src/oss_verify/ of the checkout.
 VALIDATE_STEP = "Check projects/<name>/ with oss-verify validate"
-# The four jobs, as <file>:<job>, each a Job. parent_if: the if: of the step with id: parent, or None for no if:.
+# The three jobs, as <file>:<job>, each a Job. parent_if: the if: of the step with id: parent, or None for no if:.
 # sparse: the sparse-checkout of the job's first checkout, or None for no sparse-checkout. tools: the files of the
 # checkout that the job runs. The first run: step after the step with id: parent runs the first file. next_step: the
 # name of the step that runs the other files after that step, or None. base_sha: whether a file of tools gets BASE_SHA.
@@ -84,7 +84,6 @@ JOBS = {
     "validate.yaml:validate": Job("github.event_name == 'pull_request'", None,
                                   (".github/scripts/take-project", "src/oss_verify/__main__.py"), VALIDATE_STEP, False),
     "terms.yaml:terms-accepted": Job(None, None, (".github/scripts/terms-accepted",), None, True),
-    "tests.yaml:required": Job("env.FORK == 'true'", ".github/scripts", (".github/scripts/collect",), None, False),
 }
 # The paths of the traps in each commit. python3 -m oss_verify needs src/oss_verify/__init__.py too: without it, an
 # installed oss_verify would come before the checkout's.
@@ -116,7 +115,6 @@ REFUSALS = {
 # The cases of test_the_step_skips_where_r1_says: the run, and the words that name it.
 SKIPS = {
     "validate.yaml:validate": ({"event": "workflow_dispatch"}, "a run by hand"),
-    "tests.yaml:required": ({"fork": False}, "a pull request from a branch of this repository"),
 }
 # The sizes that the stand-in binary-sizes prints: one line of JSON, as the real one prints it.
 SIZES = '{"demo_fuzzer":{"plain":{"exec":4096,"text":1024}}}'
@@ -347,12 +345,12 @@ class Host:
 class JobRun:
     """One run of the job `label` in the scratch repository, as GitHub runs it. It runs the steps from the job's first
     actions/checkout: each checkout by the checkout model, and each run: step under bash -e. `status` is the stand-in
-    gh's answer to the compare. The run is of pull request 7 (from FORK, or from this repository when `fork` is false),
-    or a run by hand on main. On pull_request, the run's github.sha is the merge commit `merge` (M, M1 or M3). The
-    checkout fetches github.sha by its SHA, so refs/pull/7/merge, which stays at M, does not change the run. `base` is
-    the pull request's base branch. The repository's default branch stays main."""
+    gh's answer to the compare. The run is of pull request 7 from FORK, or a run by hand on main. On pull_request, the
+    run's github.sha is the merge commit `merge` (M, M1 or M3). The checkout fetches github.sha by its SHA, so
+    refs/pull/7/merge, which stays at M, does not change the run. `base` is the pull request's base branch. The
+    repository's default branch stays main."""
 
-    def __init__(self, tmp_path, scratch, workflows, label, merge="M", status="ahead", event="pull_request", fork=True,
+    def __init__(self, tmp_path, scratch, workflows, label, merge="M", status="ahead", event="pull_request",
                  base="main"):
         self.label, self.scratch = label, scratch
         name, self.job = label.split(":")
@@ -372,7 +370,7 @@ class JobRun:
                         "github.event.pull_request.base.sha": commits["B"],
                         "github.event.pull_request.base.repo.default_branch": "main",
                         "github.event.pull_request.head.sha": commits["P2"],
-                        "github.event.pull_request.head.repo.full_name": FORK if fork else REPO})
+                        "github.event.pull_request.head.repo.full_name": FORK})
         else:
             # A run by hand on main: its commit is main's.
             assert event == "workflow_dispatch", event
@@ -653,7 +651,7 @@ def fails_only_on_the_change(tmp_path, copies, said, case, *args):
 
 
 def step_control(tmp_path, scratch, pattern, new, said):
-    """A control of the step with id: parent: control_copies changes that step in each of the four jobs. Then
+    """A control of the step with id: parent: control_copies changes that step in each of the three jobs. Then
     the_step_checks_out_the_first_parent, with the compare ahead, fails for each job, and its message holds `said`."""
     copies = control_copies(tmp_path, [(label, "parent") for label in JOBS], pattern, new)
     for label in JOBS:

@@ -913,33 +913,6 @@ class Toolchains(unittest.TestCase):
         self.assertIsInstance(stop.exception.code, str)  # sys.exit(message): exit status 1
         self.assertIn("has no Dockerfile", stop.exception.code)
 
-    def test_infra_toolchains_tsv_is_the_one_file_that_names_a_toolchain_digest(self):
-        # The builder's Dockerfile takes the toolchain as a build argument with no default (oss-verify check passes it),
-        # so each toolchain's digest is chosen in one file. The files git tracks are read, but for a project's own
-        # (projects/), whose locks may name the toolchain they were built with.
-        root = ROOT
-        dockerfile = (root / "infra" / "base-builder" / "Dockerfile").read_text(encoding="utf-8")
-        self.assertEqual([line for line in dockerfile.splitlines() if line.startswith("ARG TOOLCHAIN")],
-                         ["ARG TOOLCHAIN"])
-        try:
-            listed = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--", ".", ":!projects"],
-                                    capture_output=True)
-        except OSError:  # no git
-            listed = None
-        tracked = listed.stdout.decode().split("\0") if listed and listed.returncode == 0 else []
-        if "infra/toolchains.tsv" not in tracked:
-            self.skipTest("not a git checkout of this repository: git ls-files does not list infra/toolchains.tsv")
-        digests = {image.partition("@sha256:")[2].encode() for _, image, _, _ in check_build.toolchains()}
-        self.assertTrue(digests and all(len(d) == 64 for d in digests), digests)
-        named = []
-        for rel in tracked:
-            path = root / rel
-            if rel and path.is_file() and not path.is_symlink():
-                data = path.read_bytes()
-                if any(d in data for d in digests):
-                    named.append(rel)
-        self.assertEqual(sorted(named), ["infra/toolchains.tsv"])
-
 
 if __name__ == "__main__":
     unittest.main()

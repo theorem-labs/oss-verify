@@ -44,8 +44,8 @@ too. With unknown addresses at the base, each address at the head is new.
 
 The program reads the addresses from no other file: not from seeds/<name>/project.yaml, and not from the old name of a
 renamed file. This is enough because every seeds/<name>/project.yaml has primary_contact: n/a and no auto_ccs. A test
-in tests/test_seeded_projects.py holds this, and the tests check runs it for each change that is not only
-documentation, a change to seeds/ included. So an address gets into this repository only through
+in tests/test_seeded_projects.py holds this, and the tests check runs it for every change but a fork's change to
+projects/, which enrollment refuses if it changes seeds/. So an address gets into this repository only through
 projects/<name>/project.yaml, where this program reads it. A branch that moves seeds/<name>/ into projects/<name>/ and
 sets a contact adopts the project: at the base, projects/<name>/project.yaml is not there or has n/a.
 
