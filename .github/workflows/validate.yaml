@@ -57,6 +57,9 @@ on:
 
 permissions: {}
 
+# No job reads or writes the Actions cache (the top of this file).
+cache-mode: none
+
 concurrency:
   # By event too, so that a run started by hand never cancels the pull request's own run of the required check.
   group: validate-${{ github.event_name }}-${{ github.event.pull_request.number || inputs.pr }}

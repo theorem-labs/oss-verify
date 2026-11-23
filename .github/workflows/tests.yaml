@@ -20,8 +20,9 @@ name: "Tests"
 #     first parent, renames as both names). If it does, the step says "Not run" in the summary, and each step after it
 #     is skipped, so the job passes having run no code of the fork. These first steps run only git, gh and jq, and read
 #     the event and the merge's paths as data.
-#   - The tests in tests/ but the Docker tests (DOCKER_TESTS, below), which fail the job if any test skips, and
-#     oss-verify validate on every project.
+#   - The tests in tests/ but the Docker tests (DOCKER_TESTS, below), which fail the job if any test skips,
+#     oss-verify validate on every project, actionlint and shellcheck over the workflows, and the package's wheel,
+#     built, installed and run.
 # tests/test_seeded_projects.py's Committed, the test that docs/seeded-projects.tsv is what
 # src/oss_verify/seeded_projects.py writes, runs in every run, so a change that makes the table stale fails the check
 # tests, and Committed's message names the command that writes the table. A fork's change to projects/ runs no test
@@ -54,6 +55,9 @@ on:
   workflow_dispatch:
 
 permissions: {}
+
+# No job reads or writes the Actions cache (the top of this file).
+cache-mode: none
 
 env:
   # A pull request from a fork: when it changes a file under projects/, no step runs its code (the top of this file).
@@ -192,3 +196,58 @@ jobs:
       - name: Every project passes oss-verify validate
         if: steps.fork.outputs.enrollment != 'true'
         run: python3 -P -m oss_verify validate < /dev/null
+
+      # actionlint over .github/workflows/: each workflow's keys, expressions and action pins, and shellcheck over the
+      # script of each run:. Both are pinned by version and by the SHA-256 of their release archive (actionlint's from
+      # its release's checksums file; shellcheck publishes none, so its archive's own, read on 2026-11-23), so that a
+      # new runner image changes no finding. pyflakes, which actionlint runs on Python run: scripts when it finds it,
+      # is not used: no step here has one. .github/actionlint.yaml lists the messages that it ignores, each with why.
+      - name: actionlint and shellcheck pass the workflows
+        if: steps.fork.outputs.enrollment != 'true'
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          SHELLCHECK_VERSION: 0.11.0
+          SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          set -euo pipefail
+          lint=$RUNNER_TEMP/lint
+          mkdir -p "$lint"
+          curl -fsSL -o "$lint/actionlint.tar.gz" \
+            "https://github.com/rhysd/actionlint/releases/download/v$ACTIONLINT_VERSION/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "$ACTIONLINT_SHA256  $lint/actionlint.tar.gz" | sha256sum -c --quiet
+          tar -xzf "$lint/actionlint.tar.gz" -C "$lint" actionlint
+          curl -fsSL -o "$lint/shellcheck.tar.xz" \
+            "https://github.com/koalaman/shellcheck/releases/download/v$SHELLCHECK_VERSION/shellcheck-v$SHELLCHECK_VERSION.linux.x86_64.tar.xz"
+          echo "$SHELLCHECK_SHA256  $lint/shellcheck.tar.xz" | sha256sum -c --quiet
+          tar -xJf "$lint/shellcheck.tar.xz" -C "$lint" --strip-components=1 "shellcheck-v$SHELLCHECK_VERSION/shellcheck"
+          "$lint/actionlint" -color -shellcheck "$lint/shellcheck" -pyflakes ""
+
+      # The package as a user installs it: the wheel that uv builds with pyproject.toml's build backend, uv_build,
+      # which uv runs itself (--offline: it fetches nothing), installed in a new virtual environment beside the
+      # dependencies that uv.lock pins, which uv fetches from PyPI and checks by their hashes. Then its command runs from
+      # that environment alone: PYTHONPATH, which names the checkout's src/ in this job, is unset, so the package that
+      # runs is the installed one. uv is pinned by version and by the SHA-256 of its release archive.
+      - name: The package builds, installs and runs
+        if: steps.fork.outputs.enrollment != 'true'
+        env:
+          UV_VERSION: 0.12.5
+          UV_SHA256: 68a509da24b06b4223a1c0175fb5eb5bc79342b76cbeff0cfe51ac3f5b17b6b2
+        run: |
+          set -euo pipefail
+          package=$RUNNER_TEMP/package
+          mkdir -p "$package/uv"
+          curl -fsSL -o "$package/uv.tar.gz" \
+            "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-x86_64-unknown-linux-gnu.tar.gz"
+          echo "$UV_SHA256  $package/uv.tar.gz" | sha256sum -c --quiet
+          tar -xzf "$package/uv.tar.gz" -C "$package/uv" --strip-components=1 uv-x86_64-unknown-linux-gnu/uv
+          uv() { "$package/uv/uv" "$@" --no-config --no-cache; }
+          uv build --offline --wheel --out-dir "$package/dist"
+          uv export --frozen --no-dev --no-emit-project --format requirements-txt -o "$package/requirements.txt"
+          uv venv --python "$(command -v python3)" "$package/venv"
+          uv pip install --python "$package/venv/bin/python" --require-hashes -r "$package/requirements.txt"
+          uv pip install --offline --python "$package/venv/bin/python" --no-deps "$package"/dist/*.whl
+          cd "$package"
+          env -u PYTHONPATH "$package/venv/bin/oss-verify" --help
+          installed=$(env -u PYTHONPATH "$package/venv/bin/python" -P -c 'import oss_verify; print(oss_verify.__file__)')
+          [[ $installed == "$package/venv/"* ]] || { echo "::error::oss_verify ran from $installed, not the wheel"; exit 1; }

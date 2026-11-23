@@ -1115,9 +1115,11 @@ jobs:
               fi
             fi
           fi
-          echo "screen=$screen" >> "$GITHUB_OUTPUT"
-          echo "writers=${writers#,}" >> "$GITHUB_OUTPUT"
-          echo "app_comments=${app#,}" >> "$GITHUB_OUTPUT"
+          {
+            echo "screen=$screen"
+            echo "writers=${writers#,}"
+            echo "app_comments=${app#,}"
+          } >> "$GITHUB_OUTPUT"
       # The session goes with every item, screened or not: the review job takes it, and the screen job does not
       # (.github/scripts/take-review-data).
       - name: Keep it for the screen and the review

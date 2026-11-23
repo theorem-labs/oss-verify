@@ -1,0 +1,16 @@
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+# actionlint's configuration (https://github.com/rhysd/actionlint/blob/main/docs/config.md). The job suite of
+# .github/workflows/tests.yaml runs actionlint over .github/workflows/, and fails on any finding not ignored here. Each
+# ignore below is one exact message, for a key of GitHub's workflow syntax that actionlint (1.7.12, its newest release)
+# does not know yet. Fix any other finding at its cause.
+paths:
+  .github/workflows/*.{yml,yaml}:
+    ignore:
+      # cache-mode: none, read or write, at the top of a workflow or in a job: the cache access its jobs get
+      # (https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#cache-mode).
+      - 'unexpected key "cache-mode" for "workflow" section\.'
+      - 'unexpected key "cache-mode" for "job" section\.'
+      # concurrency.queue: single or max, how many runs may wait in one concurrency group
+      # (https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency).
+      - 'unexpected key "queue" for "concurrency" section\.'

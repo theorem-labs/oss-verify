@@ -769,6 +769,41 @@ def test_a_newer_run_of_a_pull_request_or_of_main_cancels_the_older():
     assert len(groups) == 4, groups
 
 
+@pytest.mark.parametrize("name", ["tests.yaml", "validate.yaml"])
+def test_no_job_reads_or_writes_the_actions_cache(name):
+    # GitHub gives a pull_request job write access to its merge ref's cache unless cache-mode says otherwise.
+    flow = workflow(name)
+    assert flow["cache-mode"] == "none"
+    assert [job for job, spec in flow["jobs"].items() if "cache-mode" in spec] == []
+
+
+@pytest.mark.parametrize("name, tools", [
+    ("actionlint and shellcheck pass the workflows", ("ACTIONLINT", "SHELLCHECK")),
+    ("The package builds, installs and runs", ("UV",)),
+])
+def test_the_job_checks_each_tool_it_fetches_by_its_sha256(name, tools):
+    checks = step(job_of_tests(), name)
+    for tool in tools:
+        assert re.fullmatch(r"\d+\.\d+\.\d+", str(checks["env"][f"{tool}_VERSION"])), tool
+        assert re.fullmatch(r"[0-9a-f]{64}", checks["env"][f"{tool}_SHA256"]), tool
+        # Checked before the archive is unpacked.
+        run = checks["run"]
+        assert -1 < run.index(f'echo "${tool}_SHA256  ') < run.index("tar -x", run.index(f"${tool}_VERSION")), tool
+
+
+def test_the_package_check_builds_with_uvs_own_backend_and_runs_the_installed_package():
+    run = step(job_of_tests(), "The package builds, installs and runs")["run"]
+    # uv builds offline only with the backend it bundles: the version that pyproject.toml's uv_build range names.
+    version = step(job_of_tests(), "The package builds, installs and runs")["env"]["UV_VERSION"]
+    pyproject = (ROOT / "pyproject.toml").read_text()
+    low, high = re.search(r'requires = \["uv_build>=([\d.]+),<([\d.]+)"\]', pyproject).groups()
+    as_tuple = lambda text: tuple(int(part) for part in text.split("."))
+    assert as_tuple(low) <= as_tuple(version) < as_tuple(high), (version, low, high)
+    assert "uv build --offline --wheel" in run
+    assert "--require-hashes -r" in run
+    assert 'env -u PYTHONPATH "$package/venv/bin/oss-verify" --help' in run
+
+
 # --- the triage comment: triage.yaml's one job, and review.yml's route after it ---
 
 
