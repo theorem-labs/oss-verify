@@ -3517,8 +3517,8 @@ class Owners(unittest.TestCase):
         imported = {"__init__", "__main__", "validate", "check_build"}
         self.assertFalse(imported & {pathlib.PurePath(line[0]).stem for line in unowned})
         # validate.py imports check_build alone of the package, and check_build imports nothing of it.
-        self.assertEqual(re.findall(r"^from \. import (\w+)", (package / "validate.py").read_text(), re.M),
-                         ["check_build"])
+        self.assertEqual(re.findall(r"(?m)^[ \t]*(?:from \.|from oss_verify|import oss_verify).*$",
+                                    (package / "validate.py").read_text()), ["from . import check_build"])
         self.assertNotRegex((package / "check_build.py").read_text(),
                             r"(?m)^\s*(from \.|import oss_verify|from oss_verify)")
         self.assertTrue(all((ROOT / name).is_file() for name in ("review.md", "review-change.md", "review-issue.md")))

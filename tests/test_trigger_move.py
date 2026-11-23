@@ -2386,7 +2386,8 @@ class SteeringFiles(unittest.TestCase):
             self.assertTrue(steering.is_steering(name), name)
         for name in ("projects/x/build.sh", "docs/build-contract.md", "tests/test_x.py"):
             self.assertFalse(steering.is_steering(name), name)
-        # A line counts when either team owns it; each line of CODEOWNERS names both.
+        # A line counts when either team owns it; each line of CODEOWNERS that names a team names both. The lines
+        # with no team, which take the owner off some modules of src/, are not counted: they give no steering file.
         teams = {"@theorem-labs/engineering", "@theorem-labs/research"}
         owned = [line.split()[0] for line in (ROOT / ".github" / "CODEOWNERS").read_text().splitlines()
                  if line.strip() and not line.startswith("#") and teams & set(line.split()[1:])]
