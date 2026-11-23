@@ -658,11 +658,19 @@ def test_no_step_after_the_fork_step_runs_for_a_forks_enrollment(job):
 TESTS_STEP = {"suite": "The tests in tests/", "docker": "The Docker tests"}
 
 
-def run_the_tests_step(tmp_path, last_line, status=0, job="suite"):
-    """Run the TESTS_STEP of tests.yaml's `job`, with its own env and the workflow's DOCKER_TESTS, a stand-in nproc that
-    says 3, and a stand-in python3 that records its arguments and the PYTHONSAFEPATH it gets, prints `last_line` as
-    pytest's last line, and exits `status`. Each pytest-xdist worker inherits that environment (the step's comment).
-    Return the step's exit status, its output, and pytest's arguments after -m pytest."""
+def shards():
+    """tests.yaml's shards of the job docker: [(shard, its pytest-xdist workers, its tests)]."""
+    return [(entry["shard"], entry["workers"], entry["tests"].split())
+            for entry in job_of_tests("docker")["strategy"]["matrix"]["include"]]
+
+
+def run_the_tests_step(tmp_path, last_line, status=0, job="suite", shard=None):
+    """Run the TESTS_STEP of tests.yaml's `job`, with its own env, the workflow's DOCKER_TESTS and, for docker, the
+    matrix values of `shard` (the first by default), a stand-in nproc that says 3, and a stand-in python3 that records
+    its arguments and the PYTHONSAFEPATH it gets, prints `last_line` as pytest's last line, and exits `status`. Each
+    pytest-xdist worker inherits that environment (the step's comment). Return the step's exit status, its output, and
+    pytest's arguments after -m pytest."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
     bin = tmp_path / "bin"
     bin.mkdir()
     (bin / "nproc").write_text("#!/bin/sh\necho 3\n")
@@ -673,9 +681,15 @@ def run_the_tests_step(tmp_path, last_line, status=0, job="suite"):
         (bin / name).chmod(0o755)
     flow = workflow("tests.yaml")
     tests = step(flow["jobs"][job], TESTS_STEP[job])
+    matrix = {}
+    if job == "docker":
+        [entry] = [e for e in flow["jobs"]["docker"]["strategy"]["matrix"]["include"]
+                   if e["shard"] == (shard or shards()[0][0])]
+        matrix = {"${{ matrix.tests }}": entry["tests"], "${{ matrix.workers }}": str(entry["workers"])}
+    env = {name: matrix.get(value, value) for name, value in tests["env"].items()}
     ambient = {name: value for name, value in os.environ.items() if name != "PYTHONSAFEPATH"}
     run = subprocess.run(["bash", "-e", "-c", tests["run"]], cwd=tmp_path, capture_output=True, text=True,
-                         env={**ambient, **tests["env"], "DOCKER_TESTS": flow["env"]["DOCKER_TESTS"],
+                         env={**ambient, **env, "DOCKER_TESTS": flow["env"]["DOCKER_TESTS"],
                               "PATH": f"{bin}:{os.environ['PATH']}", "ARGV": str(tmp_path / "argv"),
                               "RUNNER_TEMP": str(tmp_path)})
     argv = (tmp_path / "argv").read_text().splitlines()
@@ -699,19 +713,44 @@ def test_the_tests_run_on_every_core_and_all_but_the_docker_tests_run(tmp_path):
     assert sorted(docker) == marked
 
 
-def test_the_docker_job_runs_every_docker_test_on_two_workers(tmp_path):
-    code, out, argv = run_the_tests_step(tmp_path, "5 passed in 1.00s", job="docker")
+@pytest.mark.parametrize("shard, workers, tests", shards())
+def test_each_docker_shard_runs_its_tests_on_its_workers(tmp_path, shard, workers, tests):
+    code, out, argv = run_the_tests_step(tmp_path, "5 passed in 1.00s", job="docker", shard=shard)
     assert code == 0, out
-    # Two workers, whatever the runner's cores (the step's comment says why), each with whole classes.
-    assert argv[argv.index("-n") + 1] == "2" and argv[argv.index("--dist") + 1] == "loadscope", argv
+    # The shard's workers, whatever the runner's cores (the job's comment says why), each with whole classes.
+    assert argv[argv.index("-n") + 1] == str(workers) and argv[argv.index("--dist") + 1] == "loadscope", argv
     assert "--durations=30" in argv, argv
-    # Each file of DOCKER_TESTS, and nothing left out or chosen by name, keyword or marker.
-    assert [a for a in argv if a.startswith("tests")] == workflow("tests.yaml")["env"]["DOCKER_TESTS"].split()
+    # The shard's classes and files, and nothing left out or chosen by keyword or marker.
+    assert [a for a in argv if a.startswith("tests")] == tests
     assert not [a for a in argv if a.startswith(("--ignore", "--deselect", "-k", "-m"))], argv
     env = step(job_of_tests("docker"), TESTS_STEP["docker"])["env"]
     assert env["OV_DOCKER_TESTS"] == "1", env
     assert env["OV_FP_TOOLCHAIN_C"] == "${{ steps.images.outputs.c }}", env
     assert env["OV_FP_TOOLCHAIN_RUST"] == "${{ steps.images.outputs.rust }}", env
+
+
+def twice_or_never(groups, docker):
+    """The tests of `docker` (a set of node ids) that no group of `groups` (sets of node ids) holds, and those that two
+    or more hold, and the tests the groups hold that are not of `docker`."""
+    counts = {}
+    for group in groups:
+        for test in group:
+            counts[test] = counts.get(test, 0) + 1
+    return docker - set(counts), {t for t, n in counts.items() if n > 1}, set(counts) - docker
+
+
+def test_every_docker_test_is_in_exactly_one_shard():
+    """The shards of the job docker partition the tests of DOCKER_TESTS: none is in no shard, none in two, and no shard
+    runs a test of another file. Controls: a class left out of every shard is found, and so is one in two shards."""
+    docker = collected(*workflow("tests.yaml")["env"]["DOCKER_TESTS"].split())
+    groups = {shard: collected(*tests) for shard, _, tests in shards()}
+    assert twice_or_never(groups.values(), docker) == (set(), set(), set())
+    python = {test for test in groups["python"]}
+    assert python and all("::PythonBuilder::" in test for test in python), python
+    left_out = twice_or_never([g for shard, g in groups.items() if shard != "python"], docker)
+    assert left_out == (python, set(), set()), left_out
+    doubled = twice_or_never([*groups.values(), python], docker)
+    assert doubled == (set(), python, set()), doubled
 
 
 def collected(*arguments):
@@ -729,17 +768,19 @@ def collected(*arguments):
 
 def selection(tmp_path, job):
     """The arguments of pytest that choose the tests in the TESTS_STEP of tests.yaml's `job`, as run_the_tests_step
-    finds them: its arguments but -n, --dist, --durations, -q and -rs, which choose how the tests run and what pytest
-    prints, not which tests run."""
-    _, _, argv = run_the_tests_step(tmp_path / job, "1 passed in 1.00s", job=job)
-    chosen, skip = [], False
-    for argument in argv:
-        if skip:
-            skip = False
-        elif argument in ("-n", "--dist"):
-            skip = True
-        elif not argument.startswith("--durations=") and argument not in ("-q", "-rs"):
-            chosen.append(argument)
+    finds them (for docker, those of every shard together): its arguments but -n, --dist, --durations, -q and -rs,
+    which choose how the tests run and what pytest prints, not which tests run."""
+    chosen = []
+    for shard in ([name for name, _, _ in shards()] if job == "docker" else [None]):
+        _, _, argv = run_the_tests_step(tmp_path / job / (shard or "all"), "1 passed in 1.00s", job=job, shard=shard)
+        skip = False
+        for argument in argv:
+            if skip:
+                skip = False
+            elif argument in ("-n", "--dist"):
+                skip = True
+            elif not argument.startswith("--durations=") and argument not in ("-q", "-rs"):
+                chosen.append(argument)
     return chosen
 
 

@@ -24,12 +24,14 @@ name: "Tests"
 #           shellcheck over the workflows, and the package's wheel, built, installed and run.
 #   docker  The Docker tests: every test of DOCKER_TESTS, on the newest toolchain image of each language in
 #           infra/toolchains.tsv, on the frame-pointer images that it makes from two of them as toolchain-images.yaml
-#           does, and with qemu-riscv64-static. Its first step after the checkout is suite's step for a fork's change to
-#           projects/, with the same text, so it runs no code of a fork's enrollment either. It does not run for a pull
-#           request into another branch than the default one, for which suite fails.
-#   tests   The required check tests: it passes only if suite and docker passed. It always runs, after both, and runs
-#           nothing of the checkout. GitHub counts a skipped job as a pass where a check is required, so neither suite
-#           nor docker reports the check.
+#           does, and with qemu-riscv64-static. A matrix of shards, each on a runner of its own: each shard runs the
+#           classes or files that its entry names, and every test of DOCKER_TESTS is in exactly one shard
+#           (tests/test_routed_workflows.py checks it). Its first step after the checkout is suite's step for a fork's
+#           change to projects/, with the same text, so it runs no code of a fork's enrollment either. It does not run
+#           for a pull request into another branch than the default one, for which suite fails.
+#   tests   The required check tests: it passes only if suite and every shard of docker passed. It always runs, after
+#           both, and runs nothing of the checkout. GitHub counts a skipped job as a pass where a check is required, so
+#           neither suite nor docker reports the check.
 # suite and docker run side by side, so a run takes as long as the longer of them, and fail if a test skips: each of
 # their tests needs only what its runner has, so a skip means that something is missing, such as strace, the model's
 # checkout, an image or qemu, and the check must not pass without the test.
@@ -289,8 +291,36 @@ jobs:
     if: >-
       github.event_name != 'pull_request'
       || github.event.pull_request.base.ref == github.event.pull_request.base.repo.default_branch
+    name: docker (${{ matrix.shard }})
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    # The shards. The Docker tests are CPU-bound: on one 4-core runner they took 3290-3323 CPU-s, in 1080-1094 s (an
+    # n2d-standard-4 VM, AMD Milan as on GitHub's runner, at 2fa3b63, INFRA-5359), so even with the builds of each class
+    # at once one runner needs about 14 minutes for them. Each shard is whole classes, or whole files, so a setUpClass
+    # builds once, and each has a runner's 4 cores: python is PythonBuilder alone (4 CPython builds), rust the two
+    # classes that build Rust's standard library, and c and records split the rest about evenly by their CPU. workers
+    # is the shard's pytest-xdist workers: one for each class that the shard can run beside another without leaving the
+    # cores to one. fail-fast is off, so each shard reports its own tests; the check tests waits for all of them.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: python
+            workers: 1
+            tests: tests/test_builder.py::PythonBuilder
+          - shard: rust
+            workers: 2
+            tests: tests/test_builder.py::RustBuilder tests/test_builder.py::FramePointersRust
+          - shard: c
+            workers: 2
+            tests: >-
+              tests/test_builder.py::Builder tests/test_builder.py::UbsanChecks tests/test_builder.py::GoBuilder
+              tests/test_builder.py::AllocationFailureOnCjson tests/test_builder.py::FramePointersC
+          - shard: records
+            workers: 2
+            tests: >-
+              tests/test_append_docker.py tests/test_binary_checks_docker.py tests/test_seed_runs_docker.py
+              tests/test_target_settings_docker.py
     permissions:
       contents: read
     services:
@@ -391,11 +421,9 @@ jobs:
           done
           df -h /
 
-      # Every test of DOCKER_TESTS, on two pytest-xdist workers. --dist loadscope keeps the tests of a class on one
-      # worker, so that its setUpClass builds its images once. Two, from what the builds use of the runner's 4 cores:
-      # the 7 FramePointers builds, run in series, kept 61% of them busy (measured on #287's first run), so a second
-      # stream of builds takes most of the rest, and a third would only share the same cores, disk and memory. A skip
-      # fails the step, as in suite.
+      # The tests of this shard (the matrix above), on its pytest-xdist workers. --dist loadscope keeps the tests of a
+      # class on one worker, so that its setUpClass builds its images once; each class runs the builds of its fixture at
+      # once (tests/test_builder.py, compile_builds). A skip fails the step, as in suite.
       - name: The Docker tests
         if: steps.fork.outputs.enrollment != 'true'
         env:
@@ -403,11 +431,13 @@ jobs:
           OV_FP_TOOLCHAIN_C: ${{ steps.images.outputs.c }}
           OV_FP_TOOLCHAIN_RUST: ${{ steps.images.outputs.rust }}
           PYTHONSAFEPATH: "1"
+          SHARD_TESTS: ${{ matrix.tests }}
+          WORKERS: ${{ matrix.workers }}
         run: |
           set -o pipefail
-          read -r -a files <<< "$DOCKER_TESTS"
-          python3 -P -m pytest -q -p no:cacheprovider -c pyproject.toml -rs -n 2 --dist loadscope --durations=30 \
-            "${files[@]}" | tee "$RUNNER_TEMP/pytest"
+          read -r -a tests <<< "$SHARD_TESTS"
+          python3 -P -m pytest -q -p no:cacheprovider -c pyproject.toml -rs -n "$WORKERS" --dist loadscope --durations=30 \
+            "${tests[@]}" | tee "$RUNNER_TEMP/pytest"
           if tail -n 1 "$RUNNER_TEMP/pytest" | grep -qE '(^|[ ,])[0-9]+ skipped'; then
             echo "::error::A test skipped here (each SKIPPED line above names one, and why): each test of this job must run."
             exit 1
