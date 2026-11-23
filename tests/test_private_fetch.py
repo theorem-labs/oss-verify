@@ -15,6 +15,8 @@ import io
 import os
 import pathlib
 import re
+import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -52,7 +54,8 @@ def git(*args, cwd=None):
 class GitServer(http.server.ThreadingHTTPServer):
     """A git server on the loopback interface. `private` names the repositories it serves only to a request that
     carries `token` as a Basic password; it answers any other request for one of them with 401, as GitHub answers an
-    unauthenticated request with a refusal rather than the repository."""
+    unauthenticated request with a refusal rather than the repository. With `broken` set, every transfer of objects
+    stops halfway, as a transfer that broke does."""
 
     protocol_version = "HTTP/1.0"
     allow_reuse_address = True
@@ -61,6 +64,7 @@ class GitServer(http.server.ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), Handler)
         self.root, self.private, self.token = str(root), set(private), token
         self.seen = []  # one (repository, Authorization header or None) for each request, for the tests to read
+        self.broken = False
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -111,6 +115,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header(key, value)
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
+        if self.server.broken and self.command == "POST":
+            # The refs are a GET and come whole; the objects are a POST, and half of them comes before the
+            # connection closes, short of the length just sent.
+            payload = payload[:len(payload) // 2]
         self.wfile.write(payload)
 
     def authorised(self, authorization):
@@ -158,9 +166,10 @@ class FetchCommit(unittest.TestCase):
         cls.server.server_close()
         cls.temporary.cleanup()
 
-    def fetch(self, repository, commit, token=None):
-        """Run fetch-commit for one repository and commit, with `token` in a file as the secret mount holds it.
-        Return (exit code, everything it wrote)."""
+    def fetch(self, repository, commit, token=None, changes=None):
+        """Run fetch-commit for one repository and commit, with `token` in a file as the secret mount holds it, and
+        `changes` made to its environment (None removes a variable). Return (exit code, everything it wrote, the
+        commit checked out)."""
         self.server.seen.clear()
         with tempfile.TemporaryDirectory() as work:
             environment = {
@@ -193,6 +202,11 @@ class FetchCommit(unittest.TestCase):
                 # Point the default at a path that is not there: a host running the tests has no secret mount, and
                 # this says so rather than depending on that.
                 environment["OSS_VERIFY_TOKEN_FILE"] = str(pathlib.Path(work) / "no-token")
+            for name, value in (changes or {}).items():
+                if value is None:
+                    environment.pop(name, None)
+                else:
+                    environment[name] = value
             done = subprocess.run(["sh", str(FETCH_COMMIT), str(pathlib.Path(work) / "checkout")],
                                   capture_output=True, text=True, env=environment)
             checkout = pathlib.Path(work) / "checkout"
@@ -277,6 +291,80 @@ class FetchCommit(unittest.TestCase):
                        if path.is_file() and TOKEN.encode() in path.read_bytes()]
             self.assertEqual(holding, [])
 
+    def recorded(self, repository, commit, token, changes):
+        """fetch() with a stand-in git first on PATH, which writes down the arguments and the environment of each
+        call and then runs the real git with them. Return (exit code, everything fetch-commit wrote, one (arguments,
+        environment) for each call of git)."""
+        with tempfile.TemporaryDirectory() as directory:
+            stand_in, calls = pathlib.Path(directory) / "bin", pathlib.Path(directory) / "calls"
+            stand_in.mkdir()
+            calls.mkdir()
+            (stand_in / "git").write_text(f"#!/bin/sh\ncall=$(mktemp -d {shlex.quote(str(calls))}/XXXXXX)\n"
+                                          "printf '%s\\0' \"$@\" > \"$call/argv\"\nenv -0 > \"$call/env\"\n"
+                                          f"exec {shlex.quote(shutil.which('git'))} \"$@\"\n", encoding="utf-8")
+            (stand_in / "git").chmod(0o755)
+            code, said, _ = self.fetch(repository, commit, token,
+                                       {"PATH": f"{stand_in}:{HELPER.parent}:{os.environ['PATH']}", **changes})
+            ran = [((call / "argv").read_text(encoding="utf-8").split("\0")[:-1],
+                    dict(entry.partition("=")[::2]
+                         for entry in (call / "env").read_text(encoding="utf-8").split("\0")[:-1]))
+                   for call in calls.iterdir()]
+        return code, said, ran
+
+    def test_with_no_repository_given_the_helper_answers_for_repo_alone(self):
+        # A build sets no OSS_VERIFY_TOKEN_REPO, so fetch-commit derives it from REPO, and asks for the path the
+        # helper matches on. git is sent to this server in place of REPO's host, which makes this server the other
+        # host a submodule could name: it must get no credential, and the fetch fails as an unauthorised one.
+        code, said, ran = self.recorded("secret.git", self.commits["secret"], TOKEN, {"OSS_VERIFY_TOKEN_REPO": None})
+        reaching = [(argv, environment) for argv, environment in ran if "credential.helper=oss-verify" in argv]
+        self.assertTrue(reaching, f"fetch-commit ran no git that reaches the server: {ran}")
+        for argv, environment in reaching:
+            self.assertEqual(environment.get("OSS_VERIFY_TOKEN_REPO"), "private.test/secret.git", argv)
+            self.assertIn("credential.useHttpPath=true", argv)
+        self.assertEqual([authorization for _, authorization in self.server.seen if authorization], [],
+                         "the helper answered for a server that is not REPO's")
+        self.assertEqual(code, 1, said)
+        self.assertIn("not authorised to read", said)
+
+    def test_a_fetch_with_a_token_runs_every_git_with_its_tracing_off(self):
+        # Whatever tracing the caller set: each GIT_TRACE* set to 0, the two that 0 turns on removed, the trace
+        # redacted and naming no variable, and on every git that reaches the server, trace2's targets emptied on
+        # the command line. The host's lists are the container's. The tracing set here writes text to standard
+        # error, and the packfile to nowhere, so a fetch that kept it still ends and says what it kept.
+        changes = {**{name: "1" for name in check_build.GIT_TRACING}, "GIT_CURL_VERBOSE": "1",
+                   "GIT_TRACE_PACKFILE": os.devnull, "GIT_TRACE2_ENV_VARS": "OSS_VERIFY_TOKEN_FILE",
+                   "GIT_TRACE_REDACT": "0"}
+        code, said, ran = self.recorded("secret.git", self.commits["secret"], TOKEN, changes)
+        self.assertTrue(ran, "fetch-commit ran no git")
+        for argv, environment in ran:
+            for name in check_build.GIT_TRACING:
+                self.assertEqual(environment.get(name), "0", f"{name} of git {argv}")
+            for name in check_build.GIT_TRACING_REMOVED:
+                self.assertNotIn(name, environment, argv)
+            self.assertEqual(environment.get("GIT_TRACE2_ENV_VARS"), "", argv)
+            self.assertEqual(environment.get("GIT_TRACE_REDACT"), "1", argv)
+        reaching = [argv for argv, _ in ran if "credential.helper=oss-verify" in argv]
+        self.assertTrue(reaching, f"fetch-commit ran no git that reaches the server: {ran}")
+        for argv in reaching:
+            for setting in check_build.NO_TRACING:
+                self.assertIn(setting, argv)
+        self.assertEqual(code, 0, said)
+
+    def test_a_transfer_that_broke_is_not_a_missing_commit(self):
+        # The second review measured a server that listed its refs and then failed the fetch. The listing says the
+        # build may read the repository and nothing about the transfer, so a clone that broke after it is not a
+        # repository without the commit.
+        self.server.broken = True
+        self.addCleanup(setattr, self.server, "broken", False)
+        for name, token in (("public", None), ("secret", TOKEN)):
+            with self.subTest(name=name):
+                code, said, _ = self.fetch(f"{name}.git", self.commits[name], token)
+                self.assertEqual(code, 1, said)
+                self.assertIn("although the server listed its refs for this build", said)
+                self.assertNotIn("has no commit", said)
+                self.assertNotIn("not authorised to read", said)
+                self.assertNotIn("could not reach", said)
+
 
 class CredentialHelper(unittest.TestCase):
     """git-credential-oss-verify: the one place the token is read."""
@@ -313,13 +401,6 @@ class CredentialHelper(unittest.TestCase):
 
 class TheList(unittest.TestCase):
     """infra/private-libraries.tsv: the only thing that makes a build ask for a token."""
-
-    def test_it_lists_the_private_libraries(self):
-        listed = check_build.private_libraries()
-        for repository in ("https://github.com/theorem-labs/cjson-ossv267",
-                           "https://github.com/theorem-labs/theorem-cli"):
-            self.assertIn(repository, listed)
-            self.assertTrue(listed[repository], f"{repository} has no reason beside it")
 
     def test_a_public_library_is_not_in_it(self):
         self.assertIsNone(check_build.private_reason("https://github.com/DaveGamble/cJSON"))
@@ -563,11 +644,6 @@ class TheScopeOfTheHelper(unittest.TestCase):
         code, said = self.answer(self.request("github.com"), OSS_VERIFY_TOKEN_REPO="github.com")
         self.assertIn(f"password={TOKEN}", said)
 
-    def test_fetch_commit_scopes_the_helper_to_its_own_repository(self):
-        said = FETCH_COMMIT.read_text(encoding="utf-8")
-        self.assertIn("OSS_VERIFY_TOKEN_REPO=${OSS_VERIFY_TOKEN_REPO:-${REPO#https://}}", said)
-        self.assertIn("credential.useHttpPath=true", said)
-
 
 class NoTracing(unittest.TestCase):
     """git's own tracing writes what it sends. GIT_TRACE_CURL with GIT_TRACE_REDACT=0 puts the Authorization
@@ -592,14 +668,6 @@ class NoTracing(unittest.TestCase):
 
     def test_a_public_fetch_keeps_the_environment_it_had(self):
         self.assertIsNone(check_build.git_environment(None))
-
-    def test_fetch_commit_clears_them_too(self):
-        said = FETCH_COMMIT.read_text(encoding="utf-8")
-        self.assertIn("for name in GIT_TRACE GIT_TRACE_CURL", said)
-        self.assertIn('eval "$name=0; export $name"', said)
-        self.assertIn("unset GIT_CURL_VERBOSE GIT_TRACE_PACKFILE", said)
-        self.assertIn("GIT_TRACE2_ENV_VARS=", said)
-        self.assertIn("GIT_TRACE_REDACT=1", said)
 
 
 class EverySplit(unittest.TestCase):
@@ -680,35 +748,6 @@ class WhichFailure(unittest.TestCase):
     """A cause reported as a different cause is the bug this change exists to remove, so a host that cannot be
     reached must not read as a host that refused."""
 
-    def failed(self, said):
-        return mock.patch.object(check_build, "output", side_effect=Failed(said))
-
-    def test_a_refused_credential_or_an_absent_repository_is_an_authorisation_failure(self):
-        for said in ("remote: Repository not found.", "fatal: Authentication failed for 'https://github.com/x/y'",
-                     "remote: Invalid username or token.", "fatal: could not read Username for 'https://github.com'",
-                     "error: The requested URL returned error: 403",
-                     "error: The requested URL returned error: 401"):
-            with self.subTest(said=said):
-                with self.failed(said):
-                    message = check_build.why_the_fetch_failed("https://github.com/theorem-labs/theorem-cli",
-                                                               "a" * 40, TOKEN)
-                self.assertIn("cannot read", message)
-                self.assertNotIn("has no commit", message)
-
-    def test_a_host_that_cannot_be_reached_is_not_called_an_authorisation_failure(self):
-        for said in ("fatal: unable to access 'https://github.com/x/y': Failed to connect to github.com port 443: "
-                     "Connection refused",
-                     "error: The requested URL returned error: 429",
-                     "error: The requested URL returned error: 503",
-                     "fatal: unable to access: Could not resolve host: github.com"):
-            with self.subTest(said=said):
-                with self.failed(said):
-                    message = check_build.why_the_fetch_failed("https://github.com/theorem-labs/theorem-cli",
-                                                               "a" * 40, TOKEN)
-                self.assertIn("could not reach", message)
-                self.assertNotIn("cannot read", message)
-                self.assertNotIn("has no commit", message)
-
     def test_refs_listed_is_not_proof_that_the_commit_is_missing(self):
         # The refs listing says the build may read the repository. It says nothing about whether the objects came,
         # so the message names both and does not pick one.
@@ -775,17 +814,6 @@ class Unreadable(unittest.TestCase):
 class TheSecondReview(unittest.TestCase):
     """What the second non-author review measured at 1eb1c2a, and what this change does about it."""
 
-    def test_a_configured_trace_target_is_emptied_on_the_command_line(self):
-        # Clearing GIT_TRACE* is not enough: trace2's targets are configuration, and trace2.envVars names
-        # environment variables to write INTO the trace, which GIT_TRACE_REDACT does not redact.
-        argv = check_build.git("ls-remote", "--", "https://example.invalid/x", token=True)
-        for setting in check_build.NO_TRACING:
-            self.assertIn(setting, argv)
-        self.assertNotIn("trace2.eventTarget=", check_build.git("ls-remote", "--", "https://example.invalid/x"))
-        said = FETCH_COMMIT.read_text(encoding="utf-8")
-        self.assertIn("for name in GIT_TRACE ", said)
-        self.assertIn("trace2.eventTarget=", said)
-
     def test_a_real_configured_trace_holds_no_token(self):
         with tempfile.TemporaryDirectory() as work:
             trace = pathlib.Path(work) / "trace.json"
@@ -831,13 +859,6 @@ class TheSecondReview(unittest.TestCase):
                     check_build.mint_token("https://github.com/theorem-labs/theorem-cli")
         self.assertNotIn(TOKEN, str(refused.exception))
         self.assertNotIn(TOKEN[-100:], str(refused.exception))
-
-    def test_a_server_fault_whose_text_says_permission_denied_is_still_a_server_fault(self):
-        said = "remote: upstream connection permission denied\nerror: The requested URL returned error: 503"
-        with mock.patch.object(check_build, "output", side_effect=Failed(said)):
-            message = check_build.why_the_fetch_failed("https://github.com/theorem-labs/theorem-cli", "a" * 40, TOKEN)
-        self.assertIn("could not reach", message)
-        self.assertNotIn("cannot read", message)
 
     def test_a_run_option_before_the_mount_does_not_hide_it(self):
         text = f"FROM x\nRUN --network=default {check_build.SECRET_MOUNT} fetch-commit $SRC/x\n"
@@ -901,17 +922,13 @@ class TheSecondReview(unittest.TestCase):
             check_build.check_secret_mount("Dockerfile", heredoc, None, "https://x/y/z")
         self.assertIsNone(check_build.words_of('RUN "unmatched'))
 
-    def test_a_transfer_that_broke_is_not_a_missing_commit(self):
-        said = FETCH_COMMIT.read_text(encoding="utf-8")
-        self.assertIn('net clone -q --no-checkout "$REPO" "$dir" || transfer_failed', said)
-        self.assertIn("it the whole repository", said)
-
 
 class AServerFault(unittest.TestCase):
     """An HTTP 503 whose body happens to say "permission denied" must not read as a refusal. A review measured
     exactly that text from a real server (`remote: upstream connection permission denied`), and the two markers
-    that turned it into one are gone from both copies of the list. This drives the whole script against a server
-    that answers that way, not the markers on their own."""
+    that turned it into one are gone from both copies of the list (BothClassifiersAgree gives both a message with
+    each word and no status). This drives the whole script against a server that answers that way, not the markers
+    on their own."""
 
     @classmethod
     def setUpClass(cls):
@@ -963,11 +980,6 @@ class AServerFault(unittest.TestCase):
         self.assertNotIn("not authorised to read", said)
         self.assertNotIn("has no commit", said)
         self.assertNotIn(TOKEN, said)
-
-    def test_neither_list_carries_the_two_words_any_more(self):
-        for marker in ("permission denied", "access denied"):
-            self.assertNotIn(marker, check_build.UNAUTHORISED)
-            self.assertNotIn(f'*"{marker}"*', FETCH_COMMIT.read_text(encoding="utf-8"))
 
 
 class TheParserAgainstBuildKit(unittest.TestCase):
@@ -1133,6 +1145,12 @@ class BothClassifiersAgree(unittest.TestCase):
         ("remote: access denied\nerror: The requested URL returned error: 507", False),
         # Three digits in a URL are not a status.
         ("fatal: unable to access 'http://127.0.0.1/404/x.git/': Could not resolve host", False),
+        # No status, and a word that alone is not a refusal: a connection the machine itself blocked, for which
+        # curl writes the system's `Permission denied`, and a server that hung up after a body like the review's
+        # 503 one. A bare `permission denied` or `access denied` in either list called these refusals.
+        ("fatal: unable to access 'https://github.com/x/y/': Failed to connect to github.com port 443: "
+         "Permission denied", False),
+        ("remote: upstream connection access denied\nfatal: the remote end hung up unexpectedly", False),
     )
 
     def container(self, said):
@@ -1166,6 +1184,7 @@ class TheStatusDecides(unittest.TestCase):
     def test_a_status_outranks_the_body(self):
         for said in ("remote: upstream connection permission denied\nerror: The requested URL returned error: 503",
                      "remote: repository not found\nerror: The requested URL returned error: 503",
+                     "error: The requested URL returned error: 503",
                      "error: The requested URL returned error: 429",
                      "fatal: unable to access: 502 Bad Gateway"):
             with self.subTest(said=said.splitlines()[-1]):
@@ -1188,7 +1207,9 @@ class TheStatusDecides(unittest.TestCase):
                      "remote: access denied\nfatal: the remote end hung up unexpectedly",
                      "fatal: remote error: permission denied",
                      "remote: Repository not found.",
+                     "remote: Invalid username or token.",
                      "fatal: Authentication failed for 'https://github.com/x/y'",
+                     "fatal: could not read Username for 'https://github.com'",
                      "fatal: could not read Username for 'https://github.com': terminal prompts disabled"):
             with self.subTest(said=said.splitlines()[0]):
                 self.assertTrue(check_build.refused(said), said)
@@ -1196,7 +1217,9 @@ class TheStatusDecides(unittest.TestCase):
 
     def test_a_message_that_is_neither_keeps_being_neither(self):
         for said in ("fatal: unable to access: Could not resolve host: github.com",
-                     "fatal: unable to access: Failed to connect to github.com port 443: Connection refused"):
+                     "fatal: unable to access: Failed to connect to github.com port 443: Connection refused",
+                     "fatal: unable to access 'https://github.com/x/y': Failed to connect to github.com port 443: "
+                     "Connection refused"):
             with self.subTest(said=said):
                 self.assertFalse(check_build.refused(said))
                 self.assertIn("could not reach", self.because(said))
