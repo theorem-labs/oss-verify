@@ -3,7 +3,8 @@ zlib gzseek64(): no signed overflow in the range checks when gzungetc() has left
 Without it, a gzungetc() before any read leaves x.pos at -1, and gzseek64's guard (gzlib.c:395 at 99623ef7)
 overflows z_off64_t.
 
-Upstream: madler/zlib pull request #1361, head commit ce2248ee97501aff83203a68a37369fa6c988eda. This is only the
+Upstream: madler/zlib pull request #1361, commit ce2248ee97501aff83203a68a37369fa6c988eda (its head, 192060e2, adds two
+empty commits, so the diff is the same). This is only the
 pull request's gzlib.c hunk, unchanged; its test/example.c hunk is left out.
 
 diff --git a/gzlib.c b/gzlib.c

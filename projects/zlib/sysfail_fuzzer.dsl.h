@@ -55,7 +55,7 @@
  *   [u16 config_len][config][u32 bitmap][      payload = the program      ]
  *
  * Not in config, and the reason is measurable rather than aesthetic. Every
- * input this repo generates -- build.sh's wrap_probe, tools/ossfuzz/reach.py's
+ * input this repo generates -- build.sh's wrap_probe, the reach tool's
  * wrap(), every corpus file the funnel replays -- writes a ONE-byte config and
  * puts all the bytes it varies in the payload. A program confined to config
  * would therefore be one byte long in every input the existing pipeline
@@ -82,9 +82,9 @@
  * global state actually goes wrong, and it is the one thing OSS-Fuzz's own
  * runner does that a single-shot driver does not.
  *
- * THE ALLOCATION-FAILURE SCHEDULE (docs/dsl-alloc-failure-mask-design-2026-09-10.md).
+ * THE ALLOCATION-FAILURE SCHEDULE.
  * The header's u32 is bits 0-31 and config[2..] continues it, so an input can
- * schedule the i-th allocation for any i below 32 + 8 * 4096 (src/aef_alloc.h
+ * schedule the i-th allocation for any i below 32 + 8 * 4096 (src/tramp_alloc.h
  * copies at most 4,096 extension bytes; bytes past that, like bits past the end
  * of what the input carried, read 0). Bit i set means: the i-th call, after
  * arming, that the library's own objects make to malloc/calloc/realloc/
@@ -96,7 +96,7 @@
  * is what keeps every input that exists today -- one config byte, all of them
  * -- meaning exactly what it meant. The library reaches the schedule because
  * build.sh renames the allocation family in a DERIVED copy of the pin-built
- * archives to the aef_* names src/aef_alloc.c defines; nothing here interposes
+ * archives to the tramp_* names src/tramp_alloc.c defines; nothing here interposes
  * on malloc. Since 2026-09-14 build.sh passes dsl.o and
  * dsl-quiet.o through the SAME rename as the archives, because a driver object
  * carries weak COMDAT copies of the library's allocating template helpers and
@@ -105,12 +105,12 @@
  * the authored driver -- a dsl.c's direct malloc/strdup (8 drivers, every one
  * NULL-checked to DSL_SKIP) and a dsl.cc's own std::string included, the same
  * in every flavour -- while the VM's ARENA stays out of it BY NAME: dsl_zalloc
- * calls aef_alloc_raw_malloc, a name no map contains, defined in the unrenamed
+ * calls tramp_alloc_raw_malloc, a name no map contains, defined in the unrenamed
  * trampoline object, so an arena refusal is still a DSL_SKIP that no mask can
  * manufacture. cli.o is not renamed (no library header; its buffer is
  * allocated before arming). cli.c is
- * UNCHANGED in this landing, so cli.o stays byte-identical to the shipped
- * vintage's and check_driver_object stays quiet against the flavours nobody
+ * UNCHANGED in this change, so cli.o stays byte-identical to the shipped
+ * vintage's and the driver-object check stays quiet against the flavours nobody
  * rebuilds. Its stale comment at cli.c:89-92 ("anything above 32 is past what
  * a u32 can schedule") is prose debt deferred to the next full vintage: in the
  * image's toolchain even a comment-only edit changes cli.o, because the DWARF 5
@@ -148,10 +148,10 @@
  * those give the property the encoding is FOR: an instruction's meaning is a
  * pure function of (op, its own operand bytes). To make operation k run with
  * operand bytes B, write [k][len(B)][B] -- nothing about the instructions
- * around it needs to be known, let alone simulated. tools/dsl/asm.py does
+ * around it needs to be known, let alone simulated. the assembler does
  * exactly that and nothing else.
  *
- * WHY FRAMES, MEASURED BEFORE PAID FOR (docs/dsl-reachability-design.md).
+ * WHY FRAMES, MEASURED BEFORE PAID FOR (the reachability design).
  * The first encoding had no len byte: an operation consumed operands
  * directly from the instruction stream, so the OFFSET of instruction i+1
  * depended on how many operands instruction i's step happened to read --
@@ -176,8 +176,8 @@
  * that was an operand on one pass became an op byte on the next. It existed so
  * the 13-byte probe.bin -- one of the two inputs every gate runs -- would
  * exercise more than the ~4 operations its bytes spell (measured then: 73 steps
- * on the first brotli build, 67 of them DSL_SKIP; docs/dsl-reachability-design.md
- * keeps the record). With authored programs (tools/dsl/asm.py, gen_program.py)
+ * on the first brotli build, 67 of them DSL_SKIP; the reachability design
+ * keeps the record). With authored programs (the assembler, gen_program.py)
  * it no longer earned its complexity -- and worse, it made "the final value of
  * the run" a function of the STEP BUDGET instead of of what the author wrote,
  * which is fatal to expectations (below). So: probe.bin now executes ONE frame
@@ -253,14 +253,14 @@
  * A DSL translation unit is that case by construction, not by accident: it
  * includes the library's headers and calls its API, so any static inline
  * function, macro body or C++ template the header defines is compiled INTO
- * dsl.o. tests/check_instrumented_rv64.sh reads exactly this from DWARF -- an
+ * dsl.o. the instrumentation check reads exactly this from DWARF -- an
  * object whose line program has rows attributed to a file under ext/<t>/src is
  * an object carrying library code, and it must be instrumented -- so the same
  * ruling applies and build.sh compiles dsl.c with $CC/$CFLAGS.
  *
  * What that does NOT change: cli.o and cli-quiet.o are still built by the
  * driver's compiler with identical command lines in every flavour, and
- * check_driver_object still compares them. Spec s4.2 check (B) is a claim
+ * the driver-object check still compares them. Spec s4.2 check (B) is a claim
  * about the DRIVER object, and the driver object is unmoved.
  *
  * The consequence to be clear-eyed about: in the ASan flavours the VM's own
@@ -273,7 +273,7 @@
  *
  * WHAT A PROJECT'S dsl.c LOOKS LIKE. One translation unit, in this order:
  *
- *     #define AEF_DSL_NAME "brotli"
+ *     #define TRAMP_DSL_NAME "brotli"
  *     #include "dsl.h"                  // this file; also pulls target.h
  *     #include <brotli/decode.h>        // the library's own headers
  *
@@ -385,7 +385,7 @@
  * always was, even at budget exhaustion.
  *
  * THE SERIALIZER. `expect obj` and snap's per-slot lines need the CONTENT of a
- * handle. A project opts in with `#define AEF_DSL_SERIALIZE 1` and
+ * handle. A project opts in with `#define TRAMP_DSL_SERIALIZE 1` and
  *
  *     static int dsl_serialize(dsl_vm *V, int kind, void *p, size_t n, dsl_ser *S);
  *
@@ -395,7 +395,7 @@
  * value is (accepted byte count, FNV-1a digest) after a trailer byte saying
  * whether DSL_SER_MAX truncated the stream -- never an address (rule 3), never
  * an allocator-chosen size, never anything whose ORDER depends on addresses.
- * The full contract is docs/dsl-driver.md, "Making a handle expectable". Cost:
+ * The full contract is the DSL driver notes, "Making a handle expectable". Cost:
  * a snap serializes EVERY live slot, so one snap frame is up to DSL_HANDLES x
  * DSL_SER_MAX bytes of hashing (measured: 16 x 16 KiB brotli buffers x 4079
  * snaps = ~1 GB hashed, 1.1 s native); a snap-per-frame program over 4 MiB
@@ -422,8 +422,8 @@
  * stderr when they are short, rather than assume a status < 124 came from
  * target_run.
  */
-#ifndef AEF_DSL_H
-#define AEF_DSL_H
+#ifndef TRAMP_DSL_H
+#define TRAMP_DSL_H
 
 #include <stdarg.h>
 #include <stddef.h>
@@ -437,13 +437,13 @@ extern "C" {
 #endif
 #include "emit.h"
 #include "target.h"
-#include "aef_alloc.h"  /* the one allocation-failure schedule; C linkage */
+#include "tramp_alloc.h"  /* the one allocation-failure schedule; C linkage */
 #ifdef __cplusplus
 }
 #endif
 
-#ifndef AEF_DSL_NAME
-#error "define AEF_DSL_NAME before including dsl.h"
+#ifndef TRAMP_DSL_NAME
+#error "define TRAMP_DSL_NAME before including dsl.h"
 #endif
 
 /* ---------------------------------------------------------------- budgets --
@@ -586,7 +586,7 @@ typedef struct dsl_vm {
 
   /* The current instruction's frame -- see "AN INSTRUCTION IS A FRAME" in the
    * header. op_off is the program offset its op byte was read from (for the
-   * loud trace and for tests/test_dsl_vm.c's linear-cursor check); frame_end is
+   * loud trace and for the VM test's linear-cursor check); frame_end is
    * one past its last operand byte, and every operand read below clamps to it. */
   size_t op_off;
   size_t frame_end;
@@ -615,7 +615,7 @@ typedef struct dsl_vm {
   unsigned alloc_base;       /* the schedule's tick count at the top of this
                               * repeat -- written by target_run's loop, never by
                               * a frame. `expect alloc` and `allocs` report
-                              * aef_alloc_count() - alloc_base, so a count
+                              * tramp_alloc_count() - alloc_base, so a count
                               * harvested from one repeat holds in every repeat */
 
   /* Output. */
@@ -685,10 +685,10 @@ static void dsl_end(dsl_vm *V);
 static int dsl_step(dsl_vm *V, unsigned op);
 
 /* THE ALLOCATION-FAILURE SCHEDULE IS EVERY DRIVER'S, and the decision lives in
- * one place. src/aef_alloc.h is the API: cli.c's u32 arms it (target_alloc_init
+ * one place. src/tramp_alloc.h is the API: cli.c's u32 arms it (target_alloc_init
  * below), target_run installs config[2..] as its extension, and the library's
  * own allocation calls reach it because build.sh renames malloc/calloc/.../
- * operator new in a derived copy of the pin-built archives to the aef_* names
+ * operator new in a derived copy of the pin-built archives to the tramp_* names
  * that object defines (header, "THE ALLOCATION-FAILURE SCHEDULE"). Nothing in
  * this header interposes on anything, and no driver has to do anything.
  *
@@ -697,35 +697,35 @@ static int dsl_step(dsl_vm *V, unsigned op);
  * covers allocation paths the rename cannot see -- header-only library code
  * compiled into dsl.o (templates, static inline allocators, stb-style macros)
  * and libraries that allocate only through a callback table. To opt in,
- * #define AEF_DSL_ALLOC_HOOK before the include and define
+ * #define TRAMP_DSL_ALLOC_HOOK before the include and define
  *
  *     static void dsl_alloc_install(void);
  *
  * which is called once, after arming and before the first execution. FA_DENY
  * is defined HERE, before faultalloc.h is included, so those hooks take their
- * verdict from aef_alloc_deny(): one tick of the SAME index the renamed calls
+ * verdict from tramp_alloc_deny(): one tick of the SAME index the renamed calls
  * tick, one schedule per process, no second bitmap (fa_init is never called in
  * this tier and fa_bitmap stays 0). fa_n still counts hook-routed calls, which
  * is what fa_count() has always meant and what three drivers print into their
- * digest. FA_RAW_MALLOC is defined here too, as aef_alloc_raw_malloc: since
+ * digest. FA_RAW_MALLOC is defined here too, as tramp_alloc_raw_malloc: since
  * 2026-09-14 build.sh renames the allocation family in dsl.o as
  * well, so the hooks' own malloc -- compiled into this object -- would land on
- * aef_malloc and tick a SECOND time for the allocation FA_DENY() just ticked.
+ * tramp_malloc and tick a SECOND time for the allocation FA_DENY() just ticked.
  * The same rule binds a hand-written hook: a hook body that asks
- * aef_alloc_deny() itself (postgis does, to hand the library exact malloc
- * chunks) must allocate through aef_alloc_raw_malloc, never through malloc;
- * a hook body that neither calls fa_malloc nor asks aef_alloc_deny() and
+ * tramp_alloc_deny() itself (postgis does, to hand the library exact malloc
+ * chunks) must allocate through tramp_alloc_raw_malloc, never through malloc;
+ * a hook body that neither calls fa_malloc nor asks tramp_alloc_deny() and
  * allocates through malloc is scheduled once, by the rename, like any other
  * allocation compiled into this object. */
 #ifdef FA_DENY
-#error "dsl.h owns FA_DENY: the DSL tier has exactly one allocation schedule (src/aef_alloc.h)"
+#error "dsl.h owns FA_DENY: the DSL tier has exactly one allocation schedule (src/tramp_alloc.h)"
 #endif
-#define FA_DENY() aef_alloc_deny()
+#define FA_DENY() tramp_alloc_deny()
 #ifdef FA_RAW_MALLOC
-#error "dsl.h owns FA_RAW_MALLOC: the hook tier's real allocator is aef_alloc_raw_malloc (src/aef_alloc.h)"
+#error "dsl.h owns FA_RAW_MALLOC: the hook tier's real allocator is tramp_alloc_raw_malloc (src/tramp_alloc.h)"
 #endif
-#define FA_RAW_MALLOC(n) aef_alloc_raw_malloc(n)
-#ifdef AEF_DSL_ALLOC_HOOK
+#define FA_RAW_MALLOC(n) tramp_alloc_raw_malloc(n)
+#ifdef TRAMP_DSL_ALLOC_HOOK
 #include "faultalloc.h"
 static void dsl_alloc_install(void);
 #endif
@@ -853,7 +853,7 @@ static void dsl_fill(dsl_vm *V, void *p, size_t n) {
  * The header sits before the payload and is sized as a union with a max-align
  * type, so the pointer handed back keeps the alignment malloc would have
  * given. That matters here for the same reason it matters in
- * ossfuzz_adapter.h's aef_aligned_copy: harnesses and libraries cast buffers
+ * ossfuzz_adapter.h's tramp_aligned_copy: harnesses and libraries cast buffers
  * to wider types, and a misaligned load is UB that the trap-mode UBSan build
  * turns into SIGILL.
  */
@@ -875,11 +875,11 @@ static void *dsl_zalloc(dsl_vm *V, size_t n) {
   total = sizeof(dsl_arena_hdr) + n;
   if (total < n) return NULL;
   if (V->live + total > (size_t)DSL_LIVE_MAX) return NULL;
-  /* aef_alloc_raw_malloc, not malloc: since 2026-09-14 build.sh
+  /* tramp_alloc_raw_malloc, not malloc: since 2026-09-14 build.sh
    * renames the allocation family in THIS object too, so a plain malloc here
    * would tick the library's schedule and a set bit could deny the VM its own
-   * arena. The raw name is outside every map and never ticks (aef_alloc.h). */
-  h = (dsl_arena_hdr *)aef_alloc_raw_malloc(total);
+   * arena. The raw name is outside every map and never ticks (tramp_alloc.h). */
+  h = (dsl_arena_hdr *)tramp_alloc_raw_malloc(total);
   if (h == NULL) return NULL;
   memset(h, 0, total);
   h->blk.next = V->arena;
@@ -1068,7 +1068,7 @@ static void dsl_hclear(dsl_vm *V, int slot) {
  * is a use-after-free whenever the program's slot byte happens to name the slot
  * f came from. MEASURED: cpp-httplib's driver held a BufferStream fetched from
  * K_STREAM across a dsl_hput(K_HEADERS, ...), and on one input of
- * tools/dsl/sweep_flavours.py's seed the put evicted exactly that slot --
+ * the flavour sweep's seed the put evicted exactly that slot --
  * heap-use-after-free WRITE at httplib.h:11663, plain and ubsan dying of
  * SIGSEGV while asan and asanubsan exited 1, i.e. a cross-flavour disagreement
  * caused by the DRIVER. Three sibling instances of the same shape were in the
@@ -1081,7 +1081,7 @@ static void dsl_hclear(dsl_vm *V, int slot) {
  * operation must, re-validate it afterwards by scanning the table for exactly
  * (kind, pointer) -- consuming NO program bytes, so the check is identical at
  * the same step in every flavour -- and treat a missing entry as DSL_SKIP.
- * cpp-httplib's dsl.cc carries that helper as aef_still_live(); it is per-project
+ * cpp-httplib's dsl.cc carries that helper as tramp_still_live(); it is per-project
  * rather than here only because it needs the project's own kind constants. */
 static int dsl_hput(dsl_vm *V, int kind, void *p, size_t n) {
   int slot = (int)dsl_choice(V, (unsigned)DSL_HANDLES);
@@ -1209,7 +1209,7 @@ static void dsl_ser_str(dsl_ser *S, const char *s) {
 }
 
 /* A one-byte tag, for a pre-order walk that needs to say which node kind
- * follows (docs/dsl-driver.md, "Making a handle expectable"). */
+ * follows (the DSL driver notes, "Making a handle expectable"). */
 static void dsl_ser_tag(dsl_ser *S, unsigned tag) { dsl_ser_u8(S, tag); }
 
 /* The compared value is (n, h) AFTER close: the trailer byte `truncated` is
@@ -1219,20 +1219,20 @@ static void dsl_ser_close(dsl_ser *S) {
   S->h *= 1099511628211ULL;
 }
 
-/* OPTIONAL per-project hook. #define AEF_DSL_SERIALIZE before the include and
+/* OPTIONAL per-project hook. #define TRAMP_DSL_SERIALIZE before the include and
  * define
  *
  *     static int dsl_serialize(dsl_vm *V, int kind, void *p, size_t n, dsl_ser *S);
  *
  * 0 = the stream written into S IS the object's value; nonzero = this kind is
  * not observable, so every `expect obj` on it FAILS and snap prints `ser=-`.
- * The contract (docs/dsl-driver.md, "Making a handle expectable"), in short: it
+ * The contract (the DSL driver notes, "Making a handle expectable"), in short: it
  * is an OBSERVATION -- no operand reads, no handle-table calls, no arena, no
  * dsl_rand, no dsl_note; read-only library queries only; never an address or
  * anything whose order depends on one; floats as bit patterns; return nonzero
  * for anything you cannot make deterministic. Without the define, every kind is
  * unsupported, which is the honest answer rather than a stub that passes. */
-#ifdef AEF_DSL_SERIALIZE
+#ifdef TRAMP_DSL_SERIALIZE
 static int dsl_serialize(dsl_vm *V, int kind, void *p, size_t n, dsl_ser *S);
 #else
 static int dsl_serialize(dsl_vm *V, int kind, void *p, size_t n, dsl_ser *S) {
@@ -1245,7 +1245,7 @@ static int dsl_serialize(dsl_vm *V, int kind, void *p, size_t n, dsl_ser *S) {
  *
  * The op-255 frames: snap and allocs (observe) and the seven checks. Everything
  * here obeys the TRANSPARENCY rule from the header, asserted by
- * tests/test_dsl_vm.c: a VM frame reads only its own operand bytes and VM state
+ * the VM test: a VM frame reads only its own operand bytes and VM state
  * (the schedule's tick count included -- reading it is not a tick); it never
  * calls dsl_rand, dsl_zalloc, dsl_hput/hget/hdrop/hset, and never changes
  * steps, n_ok, n_liberr, n_skip, saw_liberr, last_rc, digest, rng, alloc_base,
@@ -1307,7 +1307,7 @@ static void dsl_vop(dsl_vm *V) {
      * cover --allocs) and answer "which op does allocation #N fall in" from
      * one plain run -- and, byte-compared across flavours, certify that bit i
      * names the same allocation on both sides (header, "MEASURED"). */
-    dsl_vnote(V, "allocs n=%u\n", aef_alloc_count() - V->alloc_base);
+    dsl_vnote(V, "allocs n=%u\n", tramp_alloc_count() - V->alloc_base);
     return;
   }
   V->n_chk++;
@@ -1391,7 +1391,7 @@ static void dsl_vop(dsl_vm *V) {
     /* An uncapped count channel through the exit status: in the quiet tier
      * this decides 3 against the library's 0/1 with no write, so N is
      * recoverable by bisection where cli.c's counting mode clamps at 251. */
-    unsigned long want, got = (unsigned long)(aef_alloc_count() - V->alloc_base);
+    unsigned long want, got = (unsigned long)(tramp_alloc_count() - V->alloc_base);
     if (!dsl_expect_need(V, 4)) { dsl_vnote(V, "expect alloc short FAIL\n"); break; }
     want = dsl_u32(V);
     ok = (want == got);
@@ -1436,11 +1436,11 @@ static void dsl_unreached(dsl_vm *V) {
 extern "C" {
 #endif
 
-const char *target_name(void) { return AEF_DSL_NAME "-dsl"; }
+const char *target_name(void) { return TRAMP_DSL_NAME "-dsl"; }
 
 #if defined(__cplusplus) && (defined(__cpp_exceptions) || defined(__EXCEPTIONS))
-/* The dispatch loop's std::bad_alloc catch lives in src/aef_alloc_cxx.cc
- * (aef_call_catching_bad_alloc), reached through this thunk, and NOT in a
+/* The dispatch loop's std::bad_alloc catch lives in src/tramp_alloc_cxx.cc
+ * (tramp_call_catching_bad_alloc), reached through this thunk, and NOT in a
  * try/catch here -- because naming std::bad_alloc needs <new>, and this header
  * MUST NOT include any C++ standard header by angle name: build.sh compiles a
  * driver with the library's source root on the include path, -I directories
@@ -1456,19 +1456,19 @@ static int dsl_step_thunk(void *v, unsigned op) { return dsl_step((dsl_vm *)v, o
 
 /* ONE schedule for every driver, hooked or not. cli.c hands the header u32
  * here once, before target_run, and it goes straight to the trampoline object
- * (src/aef_alloc.c) that the library's renamed allocation references also
+ * (src/tramp_alloc.c) that the library's renamed allocation references also
  * reach. A hooked driver additionally remembers that arming happened, so that
  * target_run installs its hook exactly once, before the first execution, as
  * before. There is no "honest zero" branch any more: a driver without a hook
  * is scheduled through the archive rename, so its count is the true count of
  * covered allocations -- 0 only when the library allocated nothing, which
  * build.sh records as "schedule inert", never as "wired". */
-#ifdef AEF_DSL_ALLOC_HOOK
+#ifdef TRAMP_DSL_ALLOC_HOOK
 static int dsl_alloc_armed = 0;
 #endif
 void target_alloc_init(unsigned int fail_bitmap) {
-  aef_alloc_arm(fail_bitmap);
-#ifdef AEF_DSL_ALLOC_HOOK
+  tramp_alloc_arm(fail_bitmap);
+#ifdef TRAMP_DSL_ALLOC_HOOK
   dsl_alloc_armed = 1;
 #endif
 }
@@ -1477,7 +1477,7 @@ void target_alloc_init(unsigned int fail_bitmap) {
  * cli.c clamps it at 251 for the exit-status channel; the VM's `expect alloc`
  * and `allocs` sub-ops read it whole. NOT fa_count(): that is the hook-only
  * tick, which three drivers print and which keeps its meaning. */
-unsigned target_alloc_count(void) { return aef_alloc_count(); }
+unsigned target_alloc_count(void) { return tramp_alloc_count(); }
 
 int target_run(const unsigned char *config, size_t config_len,
                const unsigned char *payload, size_t payload_len) {
@@ -1493,14 +1493,14 @@ int target_run(const unsigned char *config, size_t config_len,
 
   /* config[2..] is the schedule's extension (header, "THE ALLOCATION-FAILURE
    * SCHEDULE"): installed before anything the library could allocate in --
-   * before the hook, before dsl_begin -- and COPIED by aef_alloc_extend,
+   * before the hook, before dsl_begin -- and COPIED by tramp_alloc_extend,
    * because config points into cli.c's input buffer, which cli.c frees while
-   * the schedule stays armed (src/aef_alloc.h says what goes wrong otherwise).
+   * the schedule stays armed (src/tramp_alloc.h says what goes wrong otherwise).
    * A one- or two-byte config installs an empty extension: today's inputs. */
-  if (config_len > 2) aef_alloc_extend(config + 2, config_len - 2);
-  else aef_alloc_extend(NULL, 0);
+  if (config_len > 2) tramp_alloc_extend(config + 2, config_len - 2);
+  else tramp_alloc_extend(NULL, 0);
 
-#ifdef AEF_DSL_ALLOC_HOOK
+#ifdef TRAMP_DSL_ALLOC_HOOK
   if (dsl_alloc_armed) { dsl_alloc_armed = 0; dsl_alloc_install(); }
 #endif
 
@@ -1532,7 +1532,7 @@ int target_run(const unsigned char *config, size_t config_len,
      * most one of them. Written by the loop, not by a frame: the transparency
      * rule is about what a FRAME may change. Taken before dsl_begin, whose
      * allocations are this repeat's. */
-    V.alloc_base = aef_alloc_count();
+    V.alloc_base = tramp_alloc_count();
 
     dsl_begin(&V);
 
@@ -1551,7 +1551,7 @@ int target_run(const unsigned char *config, size_t config_len,
         V.steps++;
 #if defined(__cplusplus) && (defined(__cpp_exceptions) || defined(__EXCEPTIONS))
         /* A scheduled denial of a throwing operator new arrives here as
-         * std::bad_alloc (src/aef_alloc_cxx.cc throws it from uninstrumented
+         * std::bad_alloc (src/tramp_alloc_cxx.cc throws it from uninstrumented
          * code, identically in every flavour), and so does a real
          * out-of-memory in a C++ driver's own `new`. Uncaught, either ends
          * the process through std::terminate -> abort, rc 134 in every
@@ -1561,11 +1561,11 @@ int target_run(const unsigned char *config, size_t config_len,
          * The op's partial state is whatever the op left (a handle it had
          * already stored is still stored; one it was about to store is gone),
          * which is deterministic and identical across flavours because the
-         * throw site is. The catch itself is in aef_alloc_cxx.o (see
+         * throw site is. The catch itself is in tramp_alloc_cxx.o (see
          * dsl_step_thunk above for why it cannot be spelled here). */
         {
           int caught = 0;
-          r = aef_call_catching_bad_alloc(dsl_step_thunk, &V, raw % nops, &caught);
+          r = tramp_call_catching_bad_alloc(dsl_step_thunk, &V, raw % nops, &caught);
           if (caught) {
             dsl_note(&V, "step: allocation refused (bad_alloc)\n");
             r = DSL_LIBERR;
@@ -1625,7 +1625,7 @@ int target_run(const unsigned char *config, size_t config_len,
       char line[DSL_LINE_MAX];
       int r = snprintf(line, sizeof line,
                        "%s rep=%u steps=%lu ok=%lu err=%lu skip=%lu chk=%lu fail=%lu out=%lu digest=%016llx\n",
-                       AEF_DSL_NAME, rep, V.steps, V.n_ok, V.n_liberr, V.n_skip,
+                       TRAMP_DSL_NAME, rep, V.steps, V.n_ok, V.n_liberr, V.n_skip,
                        V.n_chk, V.n_fail, V.out_bytes, (unsigned long long)V.digest);
       if (r > 0) {
         size_t n = (size_t)r < sizeof line - 1 ? (size_t)r : sizeof line - 1;
@@ -1650,16 +1650,16 @@ int target_run(const unsigned char *config, size_t config_len,
 }
 #endif
 
-/* AEF_REL_STR(internal, release): a string literal one of OUR driver sources compiles in,
- * spelled neutrally in a RELEASE build (build.sh AEF_RELEASE=1 defines AEF_RELEASE_BUILD;
- * tools/release/README.md). Use it ON THE LINE that held the literal, so that no line moves:
+/* TRAMP_REL_STR(internal, release): a string literal one of OUR driver sources compiles in,
+ * spelled neutrally in a RELEASE build (a release build defines TRAMP_RELEASE_BUILD;
+ * this build does not). Use it ON THE LINE that held the literal, so that no line moves:
  * assert messages carry __LINE__, and the internal build's bytes must stay what they were.
  * Keep the two spellings the same length where the program reads sizeof or strlen. Defined
  * last in this header, so no line above moved either. */
-#ifdef AEF_RELEASE_BUILD
-#define AEF_REL_STR(internal, release) release
+#ifdef TRAMP_RELEASE_BUILD
+#define TRAMP_REL_STR(internal, release) release
 #else
-#define AEF_REL_STR(internal, release) internal
+#define TRAMP_REL_STR(internal, release) internal
 #endif
 
-#endif /* AEF_DSL_H */
+#endif /* TRAMP_DSL_H */
