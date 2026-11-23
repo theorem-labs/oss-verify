@@ -24,11 +24,13 @@ is the old name of two pairs, or the new name of two, or both an old and a new n
 rename takes the link's own arguments. The library is each archive among them whose real path is not under /opt/ (the
 toolchain image's libraries, which are never renamed); at least one. An object file among them, such as a seal, is
 linked as it is. It refuses an argument that could hide an input from the renames: a source file, a response file
-(@file), -l, -Xlinker, --for-linker, --config, and -Wl, other than -Wl,--wrap=<name>. Before the renames it refuses a
-library that defines an old name of a map (it has its own <name>), and a library or a driver object that names a new
-name already. It refuses a driver object, loud or quiet, that names a name of a library map. It copies each library
-archive and each driver object, and renames the copies with llvm-objcopy --redefine-syms: the library with every map,
-the driver objects with the OV_DSL_REDEFS maps. Then the gates, each of which stops the link:
+(@file), -l, -Xlinker, --for-linker, --config, and -Wl, other than -Wl,--wrap=<name> of a seal's function (SEALS:
+getenv, getpid, getppid, mkstemp, mkostemp, mkstemps, mkostemps), none of which a map may name. A wrap of any other
+name would send calls past the trampolines unseen: the linker writes its -y trace before it applies --wrap. Before the
+renames it refuses a library that defines an old name of a map (it has its own <name>), and a library or a driver
+object that names a new name already. It refuses a driver object, loud or quiet, that names a name of a library map.
+It copies each library archive and each driver object, and renames the copies with llvm-objcopy --redefine-syms: the
+library with every map, the driver objects with the OV_DSL_REDEFS maps. Then the gates, each of which stops the link:
 
     conservation   for each pair, in the library copies and in each driver object's copy, the references (llvm-nm, U)
                    to the new name are as many as there were to the old name, and none to the old name is left; the
@@ -61,6 +63,9 @@ import subprocess
 import sys
 
 SANITIZER_PREFIXES = ("__asan_", "__ubsan_", "__sanitizer_", "__start_", "__stop_")
+# The functions the driver's seals wrap (docs/build-contract.md, "Functions that the AddressSanitizer runtime wraps"):
+# the only -Wl,--wrap=<name> a DSL link takes.
+SEALS = ("getenv", "getpid", "getppid", "mkstemp", "mkostemp", "mkstemps", "mkostemps")
 SOURCES = (".c", ".cc", ".cpp", ".cxx", ".c++", ".C", ".m", ".mm", ".s", ".S")
 TRACE = re.compile(r"^(.*): (reference to|definition of|common definition of|lazy definition of|"
                    r"shared definition of) (\S+)$")
@@ -114,6 +119,8 @@ def check_maps(maps):
             raise Refused(f"the maps rename {news[name]} names to {name}")
         if olds[name] and news[name]:
             raise Refused(f"the maps name {name} as an old name and as a new name")
+        if name in SEALS or name in {f"__wrap_{s}" for s in SEALS} or name in {f"__real_{s}" for s in SEALS}:
+            raise Refused(f"the maps name {name}, of a seal: the seals' wraps would act on it")
 
 
 def symbols(path):
@@ -144,8 +151,10 @@ def selected(arguments):
     library = []
     for index, word in enumerate(arguments):
         if word.startswith("-Wl,"):
-            if not re.fullmatch(r"-Wl,--wrap=[A-Za-z_][A-Za-z0-9_.$]*", word):
-                raise Refused(f"{word}: a DSL fuzz target's link takes no linker option but -Wl,--wrap=<name>")
+            wrap = re.fullmatch(r"-Wl,--wrap=([A-Za-z_][A-Za-z0-9_.$]*)", word)
+            if not wrap or wrap.group(1) not in SEALS:
+                raise Refused(f"{word}: a DSL fuzz target's link takes no linker option but the seals' "
+                              f"-Wl,--wrap=<name> ({', '.join(SEALS)})")
             continue
         if word.startswith("-l") or word in ("-Xlinker", "--config") or word.startswith(("--for-linker", "--config=")):
             raise Refused(f"{word}: name a DSL fuzz target's archives directly, without -l, linker forwarding or a "

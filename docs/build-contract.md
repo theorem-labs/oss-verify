@@ -475,13 +475,13 @@ Each is a list of absolute paths, separated by spaces.
     build_lib() {
       oft_build_cmake
       ov_dsl_driver dsl.c            # /work/targets/$T/dsl.c, with $CC, $CFLAGS and the library's include paths
-      ov_dsl_trampoline aef_alloc.c  # with $DRVCC $BASE_CFLAGS: no sanitizer, as cli.o
+      ov_dsl_trampoline alloc_tramp.c  # with $DRVCC $BASE_CFLAGS: no sanitizer, as cli.o
       oft_seal_getenv
       oft_seal_mkstemp
       oft_seal_getpid
     }
     LIB_ARCHIVE="lib/liboft.a"
-    export OV_DSL_REDEFS="/work/targets/$T/aef_alloc.redefs"
+    export OV_DSL_REDEFS="/work/targets/$T/alloc_tramp.redefs"
     ov_target_build_dsl api-driver
     )
 
@@ -489,7 +489,7 @@ Each is a list of absolute paths, separated by spaces.
 
     <compiler> -static -no-pie -Wl,--gc-sections cli.o <driver objects' copies> [<silent reports>] <the link's own arguments, the library's archives as copies> <trampolines> <seals>
 
-The link takes the library's archives and object files by name: it refuses `-l`, `-Wl,` options but `-Wl,--wrap=<name>`, `-Xlinker`, response files, configuration files, source files and LLVM bitcode, which could hide a call from the renames ([dsl.py](../infra/base-builder/dsl.py)). The library is each archive that the link names outside the toolchain image's `/opt`. Before it links, `dsl.py` stops the link when:
+The link takes the library's archives and object files by name: it refuses `-l`, every `-Wl,` option but the seals' `-Wl,--wrap=<name>` (getenv, getpid, getppid, mkstemp, mkostemp, mkstemps and mkostemps, none of which a map may name), `-Xlinker`, response files, configuration files, source files and LLVM bitcode, which could hide a call from the renames ([dsl.py](../infra/base-builder/dsl.py)). A wrap of any other name could send the library's calls past the trampolines, and the trace below would not show it: the linker writes its `-y` trace before it applies `--wrap`. The library is each archive that the link names outside the toolchain image's `/opt`. Before it links, `dsl.py` stops the link when:
 
 * a map has a malformed line or no pair, or the maps rename one name twice, give two names one new name, or name one name as old and new;
 * the library defines an old name itself, or the library or a driver object names a new name already;
