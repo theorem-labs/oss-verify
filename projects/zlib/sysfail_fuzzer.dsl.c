@@ -1023,13 +1023,6 @@ static int call_gzvprintf(gzFile f, const char *fmt, ...) {
 
 /* ---------------------------------------------------------------- the ops -- */
 
-/* 17b: patch 17's (c4) guard, its test byte for byte, moved out of dsl_step into its own non-inlined function at the
- * deflateResetKeep call, so dsl_step's code is left alone: a keep-reset while input is still buffered ends the run. */
-__attribute__((noinline)) static int dsl_resetkeep_guarded(z_streamp s, int full) {
-  if (!full && ((deflate_state *)s->state)->lookahead != 0 && ((deflate_state *)s->state)->lit_bufsize != 0) exit(252);  /* LX (c4) */
-  return deflateResetKeep(s);
-}
-
 static int dsl_step(dsl_vm *V, unsigned op) {
   /* THE FILE CAP (review round 2). aef_sys.c answers every write as the Linux
    * model does, whole, at any size, but STORES only the file's first
@@ -1483,7 +1476,7 @@ static int dsl_step(dsl_vm *V, unsigned op) {
     int full = dsl_flag(V);
     int rc;
     if (s == NULL) return DSL_SKIP;
-    rc = full ? deflateReset(s) : dsl_resetkeep_guarded(s, full);
+    rc = full ? deflateReset(s) : deflateResetKeep(s);
     /* Both forms put a gzip stream back in GZIP_STATE, which is where
      * deflate.c re-zeroes gzindex, so a header may legally be set again. */
     if (rc == Z_OK) (void)dsl_hset(V, K_DEF, (void *)s, (void *)s, hn & ~(size_t)DEF_USED);
