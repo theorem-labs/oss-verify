@@ -26,6 +26,7 @@ on:
       - .github/scripts/review-verdict
       - .github/scripts/take-build-results
       - .github/scripts/terms-accepted
+      - .github/scripts/workflow-credentials
       - infra/base-builder/lay-out-sources
       # The analysis.
       - .github/codeql/codeql-config.yml
