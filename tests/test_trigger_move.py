@@ -9,7 +9,9 @@ With `-k held`, only the cases of the held runs run. With `-k 'not held'`, only 
 
 The move:
   (r)  No workflow starts on pull_request_target. A workflow that starts on pull_request reads no secret, and its jobs
-       have no identity token, no environment and only read permissions.
+       have no identity token and no environment. A job of it that can run on pull_request has only read permissions:
+       a job with a write permission has the if github.event_name == 'push' (CodeQL's push jobs). A job that calls a
+       workflow of this repository is held to the same with that workflow's jobs, and passes it no secret.
   (s)  A Build run's artifact build-results that names another pull request or another head, or that holds a diff,
        changes nothing that review.yml reads or posts: route reads the pull request and its head from the API,
        .github/scripts/take-build-results gives its fixed line, the gather job reads the text and the diff from the
@@ -509,58 +511,207 @@ class Stand(unittest.TestCase):
 class PullRequestWorkflows(unittest.TestCase):
     """(r) and (x): the events of each workflow, and what the jobs hold and run."""
 
+    # The if of a job that runs only on push. In a workflow that starts on pull_request, a job with a write permission
+    # has exactly this if, so that no run on pull_request holds the permission (CodeQL's push job, which records main's
+    # results, is one).
+    PUSH_ONLY = "github.event_name == 'push'"
+    LOCAL_WORKFLOW = re.compile(r"\./(\.github/workflows/[^/@]+\.ya?ml)")
+
     def workflows(self, directory=ROOT / ".github" / "workflows"):
         found = sorted(p for p in directory.iterdir() if p.suffix in (".yml", ".yaml"))
         self.assertTrue(found)
         return found
 
-    def test_r_no_pull_request_target_and_a_pull_request_job_holds_nothing(self):
-        self.r_case()
-
     def test_control_r_a_calling_job_with_secrets_inherit(self):
         # toolchain-images.yaml's docker-tests calls frame-pointer-tests.yaml; with secrets: inherit it would pass that
         # workflow every secret, and the file would hold no text "secrets.".
-        copies = {}
-        for name in ("unchanged", "changed"):
-            copies[name] = pathlib.Path(self.enterContext(tempfile.TemporaryDirectory())) / "workflows"
-            shutil.copytree(ROOT / ".github" / "workflows", copies[name])
-        calling = copies["changed"] / "toolchain-images.yaml"
+        root = pathlib.Path(self.enterContext(tempfile.TemporaryDirectory()))
+        shutil.copytree(ROOT / ".github" / "workflows", root / ".github" / "workflows")
+        self.assertEqual(self.pull_request_holds(root, "toolchain-images.yaml"), [], "the unchanged copy")
+        calling = root / ".github" / "workflows" / "toolchain-images.yaml"
         line = "    uses: ./.github/workflows/frame-pointer-tests.yaml\n"
         self.assertEqual(calling.read_text().count(line), 1, "the line of docker-tests that the control follows")
         calling.write_text(calling.read_text().replace(line, line + "    secrets: inherit\n"))
-        self.r_case(copies["unchanged"])
-        with self.assertRaises(AssertionError) as caught:
-            self.r_case(copies["changed"])
-        self.assertIn("toolchain-images.yaml, the job docker-tests", str(caught.exception))
+        self.assertIn("toolchain-images.yaml, the job docker-tests: it passes secrets to "
+                      "./.github/workflows/frame-pointer-tests.yaml",
+                      self.pull_request_holds(root, "toolchain-images.yaml"))
 
-    def r_case(self, directory=ROOT / ".github" / "workflows"):
-        """(r) on the workflow files of `directory`."""
-        for path in self.workflows(directory):
-            text = path.read_text()
+    @staticmethod
+    def condition(job):
+        """A job's if, without ${{ }}, with each run of spaces as one space."""
+        text = str(job.get("if", "")).strip()
+        inner = re.fullmatch(r"\$\{\{(.*)\}\}", text, re.S)
+        return " ".join((inner[1] if inner else text).split())
+
+    def pull_request_holds(self, root, name):
+        """Each way the workflow .github/workflows/<name> of the tree `root` breaks (r), as "<file>, <where>: <why>";
+        none when it does not start on pull_request. A job that calls a workflow of this repository (uses:
+        ./.github/workflows/<file>) runs that file's jobs in its own run, with its own permissions at most: they are
+        held to the same, and run only on push when the calling job does."""
+        top = f".github/workflows/{name}"
+        problems = []
+
+        def check(path, push_only):
+            text = (root / path).read_text()
             workflow = yaml.load(text, Loader=YAML_LOADER)
-            on = triggers(workflow)
-            self.assertNotIn("pull_request_target", on, path.name)
-            if "pull_request" not in on:
-                continue
-            self.assertNotIn("secrets.", text, path.name)
-            holders = [("the workflow", workflow)] + [(f"the job {n}", job) for n, job in workflow["jobs"].items()]
-            for where, holder in holders:
+            file = pathlib.PurePosixPath(path).name
+            if re.search(r"\bsecrets\s*(?:\.|\[|\))", text):
+                problems.append(f"{file}: it reads a secret")
+            holders = [("the workflow", workflow, push_only)] + [
+                (f"the job {n}", job, push_only or self.condition(job) == self.PUSH_ONLY)
+                for n, job in (workflow.get("jobs") or {}).items()]
+            for where, holder, push in holders:
                 if holder is not workflow:
-                    self.assertNotIn("environment", holder, f"{path.name}, {where}")
-                    # A job that calls a workflow passes it a secret by its key secrets (secrets: inherit passes all),
-                    # with no text "secrets." in the file.
-                    self.assertNotIn("secrets", holder, f"{path.name}, {where}")
+                    if "environment" in holder:
+                        problems.append(f"{file}, {where}: it has an environment")
+                    if "secrets" in holder:
+                        problems.append(f"{file}, {where}: it passes secrets to {holder.get('uses')}")
+                    if "uses" in holder:
+                        called = self.LOCAL_WORKFLOW.fullmatch(str(holder["uses"]))
+                        if called:
+                            check(called[1], push)
+                        else:
+                            problems.append(f"{file}, {where}: it calls {holder['uses']}, a workflow of no file here")
                 permissions = holder.get("permissions")
                 if permissions is None:
-                    # A job with no permissions of its own takes the workflow's.
-                    self.assertIn("permissions", workflow, f"{path.name}, {where}: no permissions are given")
+                    # A job with no permissions of its own takes its workflow's, which the workflow that starts on
+                    # pull_request must give. A called workflow's jobs take the calling job's.
+                    if holder is workflow and path == top:
+                        problems.append(f"{file}, {where}: no permissions are given")
                     continue
                 if isinstance(permissions, str):
-                    self.assertEqual(permissions, "read-all", f"{path.name}, {where}")
+                    # write-all grants id-token: write too, which even a push-only job must not hold.
+                    if permissions == "write-all":
+                        problems.append(f"{file}, {where}: it has id-token: write")
+                    if permissions != "read-all" and not push:
+                        problems.append(f"{file}, {where}: permissions {permissions}, "
+                                        f"but its if is not {self.PUSH_ONLY}")
                     continue
-                self.assertNotIn("id-token", permissions, f"{path.name}, {where}")
+                if "id-token" in permissions:
+                    problems.append(f"{file}, {where}: it has id-token: {permissions['id-token']}")
                 for scope, level in permissions.items():
-                    self.assertIn(level, ("read", "none"), f"{path.name}, {where}: {scope}")
+                    if level not in ("read", "none") and not (push and holder is not workflow):
+                        problems.append(f"{file}, {where}: {scope}: {level}, but "
+                                        + (f"its if is not {self.PUSH_ONLY}" if holder is not workflow
+                                           else "the workflow's permissions reach every job"))
+
+        if "pull_request" in triggers(yaml.load((root / top).read_text(), Loader=YAML_LOADER)):
+            check(top, False)
+        return problems
+
+    def test_r_no_pull_request_target_and_a_pull_request_job_holds_nothing(self):
+        writers = []
+        for path in self.workflows():
+            workflow = yaml.load(path.read_text(), Loader=YAML_LOADER)
+            self.assertNotIn("pull_request_target", triggers(workflow), path.name)
+            self.assertEqual(self.pull_request_holds(ROOT, path.name), [], path.name)
+            if "pull_request" in triggers(workflow):
+                writers += [(path.name, n) for n, job in workflow["jobs"].items()
+                            if isinstance(job.get("permissions"), dict) and "write" in job["permissions"].values()]
+        # The rule's one exception has a case in this tree, so the rule is read on it: CodeQL's push jobs.
+        self.assertIn(("codeql-python.yml", "push"), writers)
+
+    # Controls of (r): each changes a copy of .github/workflows, and the rule must name the change.
+    CONTROLS = {
+        "a write job with no if": ("codeql-python.yml", "    if: github.event_name == 'push'\n", "",
+                                   "codeql-python.yml, the job push: security-events: write, but its if is not"),
+        "a write job whose if also holds on pull_request": (
+            "codeql-python.yml", "    if: github.event_name == 'push'\n",
+            "    if: github.event_name == 'push' || github.event_name == 'pull_request'\n",
+            "codeql-python.yml, the job push: security-events: write, but its if is not"),
+        "write permissions for the whole workflow": (
+            "codeql-python.yml", "permissions: {}\n", "permissions: {security-events: write}\n",
+            "codeql-python.yml, the workflow: security-events: write, but the workflow's permissions reach every job"),
+        "a workflow with no permissions": ("codeql-python.yml", "permissions: {}\n", "",
+                                           "codeql-python.yml, the workflow: no permissions are given"),
+        "a called job with an environment": ("codeql.yml", "    runs-on: ubuntu-24.04\n",
+                                             "    environment: comment\n    runs-on: ubuntu-24.04\n",
+                                             "codeql.yml, the job analyze: it has an environment"),
+        "a called job asking for write on pull_request": (
+            "codeql.yml", "    runs-on: ubuntu-24.04\n",
+            "    permissions: {security-events: write}\n    runs-on: ubuntu-24.04\n",
+            "codeql.yml, the job analyze: security-events: write, but its if is not"),
+        "secrets passed to a called workflow": (
+            "codeql-python.yml", "      language: python\n      build-mode: none\n\n",
+            "      language: python\n      build-mode: none\n    secrets: inherit\n\n",
+            "codeql-python.yml, the job pull-request: it passes secrets to"),
+        "a push job with write-all": (
+            "codeql-python.yml", "    permissions:\n      actions: read\n      contents: read\n"
+            "      security-events: write # to record main's results\n", "    permissions: write-all\n",
+            "codeql-python.yml, the job push: it has id-token: write"),
+        "a workflow with write-all": (
+            "codeql-python.yml", "permissions: {}\n", "permissions: write-all\n",
+            "codeql-python.yml, the workflow: permissions write-all, but its if is not"),
+        "a called job with write-all": (
+            "codeql.yml", "    runs-on: ubuntu-24.04\n",
+            "    permissions: write-all\n    runs-on: ubuntu-24.04\n",
+            "codeql.yml, the job analyze: it has id-token: write"),
+        "a secret read with bracket notation": (
+            "codeql-python.yml", "permissions: {}\n",
+            "permissions: {}\nenv:\n  CREDENTIAL: ${{ secrets['TOKEN'] }}\n",
+            "codeql-python.yml: it reads a secret"),
+        "a secret context read as JSON": (
+            "codeql-python.yml", "permissions: {}\n",
+            "permissions: {}\nenv:\n  CREDENTIAL: ${{ toJSON(secrets) }}\n",
+            "codeql-python.yml: it reads a secret"),
+        "a push job with an identity token": (
+            "codeql-python.yml", "      security-events: write # to record main's results\n",
+            "      security-events: write # to record main's results\n      id-token: write\n",
+            "codeql-python.yml, the job push: it has id-token: write"),
+        "a called workflow with write permissions": (
+            "codeql.yml", "jobs:\n", "permissions: {security-events: write}\n\njobs:\n",
+            "codeql.yml, the workflow: security-events: write, but the workflow's permissions reach every job"),
+    }
+
+    def test_r_workflow_read_all_permissions_hold_no_write_permission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            shutil.copytree(ROOT / ".github" / "workflows", root / ".github" / "workflows")
+            path = root / ".github" / "workflows" / "codeql-python.yml"
+            text = path.read_text()
+            self.assertEqual(text.count("permissions: {}\n"), 1)
+            path.write_text(text.replace("permissions: {}\n", "permissions: read-all\n", 1))
+            self.assertEqual(self.pull_request_holds(root, "codeql-python.yml"), [])
+
+    def test_codeql_concurrency_replaces_only_runs_of_the_same_pull_request(self):
+        from test_outside_screen import evaluate
+
+        for language in ("actions", "c-cpp", "python"):
+            with self.subTest(language):
+                workflow = parse((ROOT / ".github" / "workflows" / f"codeql-{language}.yml").read_text())
+                concurrency = workflow["concurrency"]
+
+                def context(event, run, sha, pull=None):
+                    return {"github.event_name": event, "github.run_id": run, "github.sha": sha,
+                            "github.event.pull_request.number": pull}
+
+                def group(ctx):
+                    return evaluate(concurrency["group"], ctx)
+
+                first = context("push", 1, HEAD)
+                repeat = context("push", 2, HEAD)
+                self.assertNotEqual(group(first), group(repeat), "distinct push events at the same commit")
+                self.assertFalse(evaluate(concurrency["cancel-in-progress"], first))
+                pull = context("pull_request", 3, HEAD, 7)
+                newer = context("pull_request", 4, OTHER, 7)
+                another = context("pull_request", 5, HEAD, 8)
+                self.assertEqual(group(pull), group(newer))
+                self.assertNotEqual(group(pull), group(another))
+                self.assertNotEqual(group(pull), group(first))
+                self.assertTrue(evaluate(concurrency["cancel-in-progress"], pull))
+
+    def test_r_control_each_change_breaks_the_rule(self):
+        for label, (file, old, new, said) in self.CONTROLS.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                shutil.copytree(ROOT / ".github" / "workflows", root / ".github" / "workflows")
+                self.assertEqual(self.pull_request_holds(root, "codeql-python.yml"), [], "the unchanged copy")
+                path = root / ".github" / "workflows" / file
+                text = path.read_text()
+                self.assertEqual(text.count(old), 1, label)
+                path.write_text(text.replace(old, new, 1))
+                problems = self.pull_request_holds(root, "codeql-python.yml")
+                self.assertTrue(any(p.startswith(said) for p in problems), (label, problems))
 
     # A command of a step that builds the code of a pull request: oss-verify check (but --print-toolchain, which only
     # names the toolchain), or docker.
