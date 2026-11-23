@@ -2,6 +2,7 @@
 # kind	path	arguments: see lay-out-sources
 tree	ext/zlib-checksum_fuzzer/src	upstream/zlib
 patch	ext/zlib-checksum_fuzzer/src	zlib-checksum_fuzzer.0001-inflate-memerr-totals.patch
+link	ext/zlib-api-driver/src	ext/zlib-checksum_fuzzer/src
 link	ext/zlib-compress_fuzzer/src	ext/zlib-checksum_fuzzer/src
 link	ext/zlib-example_dict_fuzzer/src	ext/zlib-checksum_fuzzer/src
 link	ext/zlib-example_flush_fuzzer/src	ext/zlib-checksum_fuzzer/src
@@ -33,3 +34,11 @@ link	targets/zlib-minigzip_fuzzer/minigzip_fuzzer.c	ext/oss-fuzz-zlib/projects/z
 file	targets/zlib-zlib_uncompress2_fuzzer/zlib_uncompress2_fuzzer.cc	https://raw.githubusercontent.com/google/oss-fuzz/fadbcdfb9e96aaa26734fbc936ab64a6f4f18ab4/projects/zlib/zlib_uncompress2_fuzzer.cc	afff986a00ba4cd11d9b72e9ccc9c103da0ee36712e92b40b89f9df5e914f6d4
 file	targets/zlib-zlib_uncompress3_fuzzer/zlib_uncompress3_fuzzer.cc	https://raw.githubusercontent.com/google/oss-fuzz/fadbcdfb9e96aaa26734fbc936ab64a6f4f18ab4/projects/zlib/zlib_uncompress3_fuzzer.cc	be171ee38f2c132fe9f99a9b0b9a2bbae2d9e41806719afafdf1e7cb5a652a48
 file	targets/zlib-zlib_uncompress_fuzzer/zlib_uncompress_fuzzer.cc	https://raw.githubusercontent.com/google/oss-fuzz/fadbcdfb9e96aaa26734fbc936ab64a6f4f18ab4/projects/zlib/zlib_uncompress_fuzzer.cc	518f9e2d49f4d64ffff78fafe3422d2441ce23e357b62d0e8c661fa6c7d3d9a9
+copy	targets/zlib-api-driver/dsl.c	api-driver.dsl.c
+copy	targets/zlib-api-driver/dsl.h	api-driver.dsl.h
+copy	targets/zlib-api-driver/aef_alloc.h	api-driver.aef_alloc.h
+copy	targets/zlib-api-driver/aef_alloc.redefs	api-driver.aef_alloc.redefs
+copy	targets/zlib-api-driver/faultalloc.h	api-driver.faultalloc.h
+copy	targets/zlib-api-driver/aef_alloc.c	aef_alloc.c
+copy	targets/zlib-api-driver/emit.h	emit.h
+copy	targets/zlib-api-driver/target.h	target.h
