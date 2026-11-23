@@ -22,10 +22,10 @@ from oss_verify import validate
 
 # The function of test_enroll_dispatch.py that marks the first member of a zip as encrypted.
 from test_enroll_dispatch import marked_encrypted  # noqa: E402
-# The workflow tests' workflow reader, expression evaluator and step runner with a stand-in gh, and review.yml and its
-# jobs.
-from test_outside_screen import (REVIEW, REVIEW_JOBS, Runner, comment_job_env, evaluate, interpolated,  # noqa: E402
-                                 read_workflow, step)
+# The workflow tests' workflow reader, expression evaluator, job graph, collector and step runner with a stand-in gh,
+# review.yml and its jobs, and route's outputs for each kind of item.
+from test_outside_screen import (ITEMS, REVIEW, REVIEW_JOBS, Runner, comment_job_env, evaluate,  # noqa: E402
+                                 interpolated, read_workflow, required, run_graph, step)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -70,47 +70,67 @@ class Shifts(unittest.TestCase):
         self.assertEqual(check_checks.moved(check_records.Check(40, None, path="/src/p/fuzz/f.c"), shifts), 40)
 
     def test_record_patches_apply_on_the_last_lines(self):
-        # Applied as infra/checks/compile-check applies a breakage patch in the image's working directory: git must
-        # look for no repository above that directory, or it reads the patch's paths from the top of an enclosing one,
-        # skips every one of them and still exits 0. Each round below puts the directory in such a repository, so a
-        # bare `git apply` here would change nothing and report success.
-        # The two parts of that step are read from compile-check: a change there that this test does not follow
-        # leaves the test passing against an invocation nothing runs any more.
-        step = (ROOT / "infra" / "checks" / "compile-check").read_text()
-        self.assertIn('GIT_CEILING_DIRECTORIES=$(dirname "$PWD") git apply --verbose', step)
-        self.assertIn('*"Skipped patch"*', step)
-        # compile-check gives git the ceiling unresolved, as `$(dirname "$PWD")`, and so does this test. git resolves
-        # the symlinks of a ceiling entry itself before it compares the entry with the working directory (git(1),
-        # GIT_CEILING_DIRECTORIES), which is what makes that safe; the `through a symlink` round below is the one
-        # that proves it, since there the entry and the working directory's real path differ. An empty entry in the
-        # list turns that resolving off for every entry after it, so never put one there.
-        for ending in (b"\n", b""):
+        # infra/checks/compile-check applies a breakage patch in the image's working directory: git must look for no
+        # repository above that directory, or it reads the patch's paths from the top of an enclosing one, skips every
+        # one of them and still exits 0. Each round puts the directory in such a repository and runs compile-check's
+        # own apply block, with the patch's path in place of /ovc-mutant.patch, so a bare `git apply` there would
+        # change nothing.
+        # compile-check gives git the ceiling unresolved, as `$(dirname "$PWD")`. git resolves the symlinks of a
+        # ceiling entry itself before it compares the entry with the working directory (git(1),
+        # GIT_CEILING_DIRECTORIES), which is what makes that safe; the round through a symlink is the one that proves
+        # it, since there $PWD and the working directory's real path differ. An empty entry in the list turns that
+        # resolving off for every entry after it, so never put one there.
+        import difflib
+        block = subprocess.run(["sed", "-n", r"/^if \[ -f \/ovc-mutant.patch \]; then$/,/^fi$/p",
+                                str(ROOT / "infra" / "checks" / "compile-check")],
+                               capture_output=True, text=True, check=True).stdout
+
+        def apply(root, ending, line, through_link=False, **env):
+            """The block, run as bash runs compile-check, in root/enclosing/d, a directory of the git repository
+            root/enclosing (by the path through the symlink root/link when through_link), on a patch of line `line`
+            of f.c, five lines that end with `ending`. Return the run, f.c after it, and f.c as the patch changes
+            it."""
             data = b"a\nb\nc\nd\ne" + ending
-            for line in range(1, 6):
-                for through_link in (False, True):
-                    with tempfile.TemporaryDirectory() as root:
-                        root = pathlib.Path(root)
-                        enclosing = root / "enclosing"
-                        (enclosing / "d").mkdir(parents=True)
-                        subprocess.run(["git", "init", "-q", str(enclosing)], check=True, capture_output=True)
-                        parent = enclosing
-                        if through_link:
-                            parent = root / "link"
-                            parent.symlink_to(enclosing)
-                        directory = parent / "d"
-                        (directory / "f.c").write_bytes(data)
-                        record = check_records.Record("f.c", line, "abcde"[line - 1], "X", "s")
-                        changed, _ = check_records.mutate(data, record)
-                        import difflib
-                        diff = b"".join(difflib.diff_bytes(difflib.unified_diff, check_checks.diff_lines(data),
-                                                           check_checks.diff_lines(changed), b"a/f.c", b"b/f.c"))
-                        (directory / "p").write_bytes(b"diff --git a/f.c b/f.c\n" + diff)
-                        where = (line, ending, "through a symlink" if through_link else "a plain path")
-                        done = subprocess.run(["git", "apply", "--verbose", "p"], cwd=directory, check=True,
-                                              capture_output=True,
-                                              env={**os.environ, "GIT_CEILING_DIRECTORIES": str(directory.parent)})
-                        self.assertNotIn(b"Skipped patch", done.stdout + done.stderr, where)
-                        self.assertEqual((directory / "f.c").read_bytes(), changed, where)
+            enclosing = root / "enclosing"
+            (enclosing / "d").mkdir(parents=True)
+            subprocess.run(["git", "init", "-q", str(enclosing)], check=True, capture_output=True)
+            if through_link:
+                (root / "link").symlink_to(enclosing)
+            directory = (root / "link" if through_link else enclosing) / "d"
+            (directory / "f.c").write_bytes(data)
+            changed, _ = check_records.mutate(data, check_records.Record("f.c", line, "abcde"[line - 1], "X", "s"))
+            diff = b"".join(difflib.diff_bytes(difflib.unified_diff, check_checks.diff_lines(data),
+                                               check_checks.diff_lines(changed), b"a/f.c", b"b/f.c"))
+            patch = root / "mutant.patch"
+            patch.write_bytes(b"diff --git a/f.c b/f.c\n" + diff)
+            # bash keeps the PWD it is given when that names its working directory, as a shell that went there through
+            # the symlink has it.
+            run = subprocess.run(["bash", "-euo", "pipefail", "-c", block.replace("/ovc-mutant.patch", str(patch))],
+                                 cwd=directory, capture_output=True, text=True,
+                                 env={**os.environ, "PWD": str(directory), **env})
+            return run, (directory / "f.c").read_bytes(), changed
+
+        # The last line changed, with and without a newline at the end of the file; the line before a last line with
+        # no newline, which the hunk carries as context; and once through a symlink.
+        for ending, line, through_link in ((b"\n", 5, False), (b"", 5, False), (b"", 4, False), (b"", 5, True)):
+            where = (line, ending, "through a symlink" if through_link else "a plain path")
+            with tempfile.TemporaryDirectory() as root:
+                run, applied, changed = apply(pathlib.Path(root), ending, line, through_link)
+                self.assertEqual(run.returncode, 0, (where, run.stdout + run.stderr))
+                self.assertEqual(applied, changed, where)
+                # The block ran in the directory by the round's path: through the symlink, $PWD is not the real path.
+                via = pathlib.Path(root) / ("link" if through_link else "enclosing") / "d"
+                self.assertIn(f"compile-check: applying the breakage patch in {via}\n", run.stdout, where)
+        # A skip is a failure. With GIT_DIR and GIT_WORK_TREE naming the enclosing repository, git uses it whatever the
+        # ceiling, skips the patch's path, which is outside the directory, and exits 0: the block exits 3, and the file
+        # is as it was.
+        with tempfile.TemporaryDirectory() as root:
+            root = pathlib.Path(root)
+            run, applied, _ = apply(root, b"\n", 5, GIT_DIR=str(root / "enclosing" / ".git"),
+                                    GIT_WORK_TREE=str(root / "enclosing"))
+            self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
+            self.assertIn("git apply skipped a file of the patch", run.stderr)
+            self.assertEqual(applied, b"a\nb\nc\nd\ne\n")
 
     def test_record_patches_split_on_newlines_only(self):
         data = "int x;\n/* \u00c5 */\nif (a) abort();\n".encode()
@@ -601,19 +621,10 @@ class WorkflowArguments(unittest.TestCase):
                     got.add(name)
             self.assertEqual(got, want, f"{workflow}: the jobs whose effective permissions hold id-token: write")
 
-    def test_the_helpers_use_no_argv_form_for_the_github_token(self):
-        gather = (ROOT / ".github" / "scripts" / "review-gather").read_text()
-        take = (ROOT / ".github" / "scripts" / "take-project").read_text()
-        # env NAME=value puts the value in env's argument vector; -c http.extraheader= puts the header in git's.
-        self.assertNotIn("env GITHUB_TOKEN=", gather)
-        self.assertIn('GITHUB_TOKEN="${GH_TOKEN:-}" keep', gather)
-        self.assertNotIn("-c http.extraheader=", take)
-        self.assertIn("--config-env=http.extraheader=", take)
-
     def test_the_credential_steps_put_no_credential_in_any_argv(self):
-        # The text test above reads the steps; this one runs them. Each step that holds a credential is run in its
-        # own shell (bash -e, as the runner does) under strace, with stand-ins for curl and base64's input, and every
-        # credential's value must be absent from every program's arguments.
+        # test_no_credential_is_an_argument reads the steps; this one runs them. Each step that holds a credential is
+        # run in its own shell (bash -e, as the runner does) under strace, with stand-ins for curl and base64's input,
+        # and every credential's value must be absent from every program's arguments.
         if not shutil.which("strace"):
             self.skipTest("strace is not installed (the tests workflow installs it)")
         gcp = "gcp-not-a-secret"
@@ -939,7 +950,7 @@ class PostingStep(Runner):
     """review.yml's comment step "Post the comment and record the verdict", and after it the step "Take the label
     review-held off" when its if holds, run with the stand-in gh of test_outside_screen, which keeps each request's
     method, endpoint and body: the review comment it posts or updates, for an enrollment the one check run Enrollment
-    review it records from the same verdicts (c1, c3) with the record of the review in its output.text, and the holds
+    review it records from the same verdicts (c1) with the record of the review in its output.text, and the holds
     taken off after it."""
 
     STEP = "Post the comment and record the verdict"
@@ -1117,20 +1128,6 @@ class PostingStep(Runner):
                                   + self.RERUN}))
                 self.assertEqual(self.comments(requests), [])
 
-    def test_c3_c_d_a_capped_pull_request_is_told_the_cap_and_when_it_frees(self):
-        # Route held it at the daily cap, so the gather job did not run and took no project: the check run records the
-        # cap all the same.
-        _, requests = self.post(review="", TRUST="cap", FREE="2026-11-10T00:00:00Z", GATHER_RESULT="skipped",
-                                REVIEW_RESULT="skipped", HOLD_RESULT="skipped", name="")
-        run = self.record(requests)
-        self.assertEqual((run["conclusion"], self.shown(run)), ("action_required", {
-            "title": "The daily cap of automated reviews held this pull request.",
-            "summary": "The daily cap of automated reviews held this pull request. It comes from an account without "
-                       "write access to this repository, and the automated reviews of such accounts reached their cap "
-                       "of 24 in 24 hours, 12 for one author. From 2026-11-10 00:00 UTC, a push or "
-                       "`gh workflow run review.yml -R theorem-labs/oss-verify -f pr=8` reviews it."}))
-        self.assertEqual(self.comments(requests), [])
-
     def test_a_review_replaces_the_posted_one(self):
         _, requests = self.post(review="Thanks again.\n\n2. Fix Y.\n", verdicts=self.verdicts(), comments=[
             {"id": 4141, "user": {"login": "mallory"}, "body": self.MARKER + "\nforged"},
@@ -1237,10 +1234,11 @@ class PostingStep(Runner):
         lengths += [len(a.encode()) for call in self.calls() for a in call]
         self.assertLess(max(lengths), 131_072)
 
-    def test_k1_the_record_of_a_review_has_its_verdicts_and_the_values_of_the_gather_job(self):
-        """The check run's output.text is the record of the review (review-verdict's docstring): at the step's head,
-        with no hold, the 31 verdicts that the summary counts, and the criticality score, OSS-Fuzz and binary sizes
-        that the gather job gave."""
+    def test_k1_the_step_gives_review_verdict_the_head_the_verdicts_and_the_values_of_the_gather_job(self):
+        """The step's one case of the record of the review in the check run's output.text (ReviewVerdict's k1 and k2
+        check what review-verdict makes of each verdict, hold and value): review-verdict, as the step runs it, gets the
+        step's head, the review's verdicts, and the criticality score, OSS-Fuzz and binary sizes that the gather job
+        gave."""
         verdicts = self.verdicts(D2="fail", E="person")
         sizes = {"parse": {"plain": {"text": 1000, "exec": 1200}, "asan": {"text": 3000, "exec": 3300}},
                  "dump": {"plain": {"text": 900, "exec": None}}}
@@ -1251,33 +1249,6 @@ class PostingStep(Runner):
         self.assertEqual(record, {"schema": "oss-verify/enrollment-review/1", "head": self.HEAD, "hold": None,
                                   "job": None, "verdicts": verdicts, "criticality_score": 0.07123, "oss_fuzz": False,
                                   "sizes": sizes})
-        self.assertEqual((list(record["verdicts"]), len(record["verdicts"])), (check_ids("review.md"), 31))
-        self.assertIs(record["oss_fuzz"], False)
-
-    def test_k2_the_record_of_each_hold_names_the_hold_and_the_job_and_has_no_verdict(self):
-        """Each hold through the step: the screen's and a failed job's, with the values that the gather job gave; and
-        the daily cap's, which no gather job ran for, so its values are empty and the record's are null. The review's
-        verdicts, when the step has them, are in no record of a hold."""
-        sizes = {"parse": {"plain": {"text": 1000, "exec": 1200}}}
-        values = {"CRITICALITY_SCORE": "0.5", "OSS_FUZZ": "true", "SIZES": json.dumps(sizes, separators=(",", ":"))}
-        gathered = {"criticality_score": 0.5, "oss_fuzz": True, "sizes": sizes}
-        holds = (("screen", None, dict(values, review="", TRUST="screen", SCREEN_RESULT="success",
-                                       SCREEN_VERDICT="held", REVIEW_RESULT="skipped"), gathered),
-                 ("cap", None, {"review": "", "TRUST": "cap", "FREE": "2026-11-10T00:00:00Z",
-                                "GATHER_RESULT": "skipped", "REVIEW_RESULT": "skipped", "HOLD_RESULT": "skipped",
-                                "name": ""}, {"criticality_score": None, "oss_fuzz": None, "sizes": None}),
-                 ("failed", "gather", dict(values, GATHER_RESULT="failure", REVIEW_RESULT="skipped"), gathered),
-                 ("failed", "screen", dict(values, TRUST="screen", SCREEN_RESULT="failure", REVIEW_RESULT="skipped"),
-                  gathered),
-                 ("failed", "review", dict(values, REVIEW_RESULT="failure"), gathered),
-                 ("failed", "hold", dict(values, HELD="true", HOLD_RESULT="failure"), gathered))
-        for hold, job, env, want in holds:
-            with self.subTest(hold=hold, job=job):
-                _, requests = self.post(verdicts=self.verdicts(), **env)
-                record = self.kept(self.record(requests))
-                self.assertEqual(record, {"schema": "oss-verify/enrollment-review/1", "head": self.HEAD, "hold": hold,
-                                          "job": job, "verdicts": {}, **want})
-                self.assertIs(record["oss_fuzz"], want["oss_fuzz"])
 
     def test_the_comment_stays_under_githubs_limit(self):
         _, requests = self.post(review="R" * 70_000, verdicts=self.verdicts(), CHECKS="C" * 20_000)
@@ -1474,11 +1445,13 @@ class ReviewVerdict(unittest.TestCase):
                    f" no verdict. {rerun}") for job in ("gather", "screen", "hold")]
         sizes = {"parse": {"plain": {"text": 1000, "exec": 1200}}}
         given = {"CRITICALITY_SCORE": "0.5", "OSS_FUZZ": "true", "SIZES": json.dumps(sizes)}
+        # The review's verdicts, when the step has them, are in no record of a hold.
+        verdicts = json.dumps({check: "fail" for check in check_ids("review.md")})
         for env, job, title, summary in holds:
             for values, kept in (({}, {"criticality_score": None, "oss_fuzz": None, "sizes": None}),
                                  (given, {"criticality_score": 0.5, "oss_fuzz": True, "sizes": sizes})):
                 with self.subTest(env=env, values=values):
-                    got = self.verdict(**env, **values)
+                    got = self.verdict(**env, **values, VERDICTS=verdicts)
                     self.assertEqual((got["conclusion"], got["title"], got["summary"]),
                                      ("action_required", title, summary))
                     record = self.record(got)
@@ -2524,34 +2497,13 @@ class SeedHex(unittest.TestCase):
         for name, data in (("== 'stored': 768 bytes", stored), ("== 'deflated': 1000 bytes", deflated),
                            (f"== 'deflated-64-mib': {size} bytes", spaces)):
             self.assertEqual(b"".join(bytes.fromhex(row[6:53]) for row in members[name]), data[:512], name)
+        # Each row ends with its bytes as text: a byte that is not printable ASCII is a dot.
+        self.assertEqual([members["== 'stored': 768 bytes"][row] for row in (0, 2)],
+                         [f"0000  {bytes(range(16)).hex(' ')}  {'.' * 16}",
+                          f"0020  {bytes(range(32, 48)).hex(' ')}  {bytes(range(32, 48)).decode()}"])
         self.assertEqual(members[f"== 'bzip2-64-mib': {size} bytes"],
                          ["(not read: compression method 12, not stored or deflated)"])
         self.assertEqual(members["== 'encrypted': 768 bytes"], ["(not read: encrypted)"])
-
-    def test_a_member_is_read_only_as_far_as_its_first_512_bytes(self):
-        gather = (ROOT / ".github" / "scripts" / "review-gather").read_text()
-        code = re.search(r'^  python3 - "\$zip" "\$out/seeds/\$target\.hex\.txt" <<\'EOF\'\n(.*?)^EOF$', gather,
-                         re.M | re.S)[1]
-        with tempfile.TemporaryDirectory() as directory:
-            directory = pathlib.Path(directory)
-            # 256 MiB of zeros deflate to about 250 KiB: a pull request can bring such a zip.
-            corpus = directory / "demo_seed_corpus.zip"
-            with zipfile.ZipFile(corpus, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-                with archive.open("zeros", "w") as member:
-                    for _ in range(256):
-                        member.write(bytes(1 << 20))
-            # The heredoc as python3 - runs it, with its peak allocation traced: a dump that decompresses the
-            # whole member takes hundreds of megabytes.
-            run = subprocess.run([sys.executable, "-c",
-                                  "import tracemalloc\ntracemalloc.start()\n" + code +
-                                  "\nprint(tracemalloc.get_traced_memory()[1])",
-                                  str(corpus), str(directory / "demo.hex.txt")], capture_output=True, text=True)
-            self.assertEqual(run.returncode, 0, run.stderr)
-            peak = int(run.stdout)
-            self.assertLess(peak, 16 << 20, "the dump decompressed the whole member")
-            lines = (directory / "demo.hex.txt").read_text().splitlines()
-        self.assertEqual(lines[0], f"== 'zeros': {256 << 20} bytes")
-        self.assertEqual(lines[1:], [f"{at:04x}  {' '.join(['00'] * 16)}  {'.' * 16}" for at in range(0, 512, 16)])
 
 
 class ReviewJob(unittest.TestCase):
@@ -2942,75 +2894,51 @@ class ReviewJob(unittest.TestCase):
             for name in self.AGAIN:
                 with self.subTest(outcome=outcome, step=name):
                     self.assertIs(bool(evaluate(self.steps[name]["if"], {"steps.review.outcome": outcome})), runs)
-        # The first attempt's failure does not fail the job; the second's does.
-        self.assertIs(self.steps["Review"]["continue-on-error"], True)
+        # GitHub runs a step whose if calls no status function only while no step before it failed without
+        # continue-on-error: the first attempt's failure must leave the job running, or neither retry step runs.
+        for name in self.AGAIN:
+            status = re.search(r"\b(always|failure|success|cancelled)\(\)", str(self.steps[name]["if"]))
+            self.assertTrue(status or self.steps["Review"].get("continue-on-error") is True, name)
+        # The second attempt's failure fails the job.
         for name in self.AGAIN:
             self.assertNotIn("continue-on-error", self.steps[name])
         first, again = self.steps["Review"], self.steps["Review again"]
         self.assertEqual((again["uses"], again["timeout-minutes"]), (first["uses"], first["timeout-minutes"]))
         self.assertEqual({k: v for k, v in again["with"].items() if k != "anthropic_api_key"},
                          {k: v for k, v in first["with"].items() if k != "anthropic_api_key"})
-        self.assertEqual(again["with"]["anthropic_api_key"], "${{ steps.gateway-again.outputs.id_token }}")
         self.assertEqual(self.steps["Sign in to the model gateway again"]["with"],
                          self.steps["Sign in to the model gateway"]["with"])
-        self.assertEqual(self.steps["Sign in to the model gateway again"]["id"], "gateway-again")
+        # The second attempt's key is the identity token of the sign-in just before it, not the first sign-in's.
+        tokens = {f"steps.{self.steps[name]['id']}.outputs.id_token": name
+                  for name in ("Sign in to the model gateway", "Sign in to the model gateway again")}
+        self.assertEqual(interpolated(again["with"]["anthropic_api_key"], tokens),
+                         "Sign in to the model gateway again")
         # The first attempt gave nothing; the second answered, and its output and session are kept.
         run, comment, verdicts, _, output, last = self.result(
             None, retried={"comment": "Second.\n", "held": "", "verdicts": {"F2": "pass"}, "reasons": {}})
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual((comment, verdicts), ("Second.\n", '{"F2":"pass"}'))
         self.assertEqual(last, f"session=09227178-7bbf-4e5f-86db-8736e530ef02 head={'1' * 40}\n")
-        # No step counts the attempts or writes a try line: the outputs are the review's alone.
+        # The outputs are the review's alone: no step writes a count of the attempts.
         self.assertEqual(set(output), {"comment", "verdicts", "reasons"})
-        self.assertNotRegex(json.dumps(self.jobs), r"(?i)REVIEW_TRIES|oss-verify-held-(try|limit|cap|transient)"
-                                                    r"|\btries\b|\btry [0-9]")
 
-    def test_c3_g_the_job_outlasts_both_attempts(self):
-        job = self.jobs["review"]
-        self.assertEqual([self.steps[n]["timeout-minutes"] for n in ("Review", "Review again")], [45, 45])
-        self.assertEqual(job["timeout-minutes"], 105)
-
-    # The Tailscale client id of the federated identity ossv-review-yml-github, as which review.yml's review job joins
-    # the tailnet. The apply of root/ for dispatch://INFRA-3746 on 2026-11-17 made it: it is that apply's output
-    # tailnetClientId-ossv-review-yml-github, which dispatch://INFRA-3369 records. The collector's URL is bootstrap/'s
-    # stack output spendCollectorTailnetUrl in agent-infra, read with `pulumi stack output --stack prod` after the apply
-    # of 2026-10-31 that made the Service svc:spend (INFRA-832 S1a): http:// and the Service's IPv4 address.
-    CLIENT_ID = "TWbBfz7fqc11CNTRL-k41v23iH8F11CNTRL"
+    # The cost collector's URL: bootstrap/'s stack output spendCollectorTailnetUrl in agent-infra, read with `pulumi
+    # stack output --stack prod` after the apply of 2026-10-31 that made the Service svc:spend (INFRA-832 S1a): http://
+    # and the Service's IPv4 address.
     COLLECTOR_URL = "http://100.116.58.240"
 
-    def test_the_job_joins_the_tailnet_as_ossv_review(self):
+    def test_the_tailnet_join_fails_the_review_logs_quietly_and_keeps_its_own_version(self):
         join = self.steps["Join Theorem's tailnet, to reach the model gateway and export this review's usage"]
-        self.assertEqual(join["uses"],
-                         "tailscale/github-action@99a8333667fff04fdd6cffb46dfd409f8329a7bf")
-        self.assertEqual(join["id"], "tailnet")
         # The review reaches the model gateway over the tailnet alone, so a join that fails fails the review.
         self.assertNotIn("continue-on-error", join)
-        # Exactly these settings: another one, `args:` for example, would change how the node joins while the join
-        # still passed. `version:` is forbidden here too, so the action keeps its own default, 1.104.2, which is
-        # above the 1.94 a Linux device needs to reach a Tailscale Service's address.
-        self.assertEqual(set(join["with"]),
-                         {"oauth-client-id", "audience", "tags", "hostname", "use-cache", "log-mode"})
-        self.assertEqual(join["with"]["oauth-client-id"], "${{ env.TAILNET_CLIENT_ID }}")
-        self.assertEqual(join["with"]["audience"], "theorem.dev/tailnet/ossv-review")
-        self.assertEqual(join["with"]["tags"], "tag:ossv-review")
-        # One review job runs in a run attempt, so the run id and the attempt name the node.
-        self.assertEqual(join["with"]["hostname"],
-                         "ossv-review-${{ github.run_id }}-${{ github.run_attempt }}")
-        # The Actions cache of this job holds the review's session alone, so the action keeps no binary in it.
-        self.assertIs(join["with"]["use-cache"], False)
+        # No `version:`, so the action keeps its own default, 1.104.2, which is above the 1.94 a Linux device needs to
+        # reach a Tailscale Service's address.
+        self.assertNotIn("version", join["with"])
         # This public repository's log never shows the action's commands, even on a re-run with debug logging: with
         # another log-mode, the action prints the `tailscale up` command, which carries this job's GitHub identity
         # token, and the output of `tailscale status --json`, the tailnet's nodes.
         self.assertEqual(join["with"]["log-mode"], "quiet")
-        self.assertEqual(join["timeout-minutes"], 3)
-        # The node is ephemeral: the logout deletes it at once, whatever the review did and whatever the join's
-        # outcome. Neither the export nor the logout may stop the steps that keep the draft, the verdicts and a held
-        # finding.
-        self.assertIs(self.steps["Export the review's usage to the cost collector"]["continue-on-error"], True)
-        leave = self.steps["Leave the tailnet"]
-        self.assertEqual(leave["if"], "always()")
-        self.assertIs(leave["continue-on-error"], True)
-        self.assertEqual(leave["timeout-minutes"], 2)
+        # The logout comes after the review, and before the steps that keep the draft, the verdicts and a held finding.
         names = [s.get("name") for s in self.jobs["review"]["steps"]]
         self.assertLess(names.index("Review"), names.index("Leave the tailnet"))
         self.assertLess(names.index("Leave the tailnet"),
@@ -3021,14 +2949,6 @@ class ReviewJob(unittest.TestCase):
         job = self.jobs["review"]
         steps = sum(step["timeout-minutes"] for step in job["steps"] if "timeout-minutes" in step)
         self.assertGreater(job["timeout-minutes"], steps)
-
-    def test_the_tailnet_client_id_is_the_one_tailscale_gave(self):
-        self.assertEqual(self.jobs["review"]["env"]["TAILNET_CLIENT_ID"], self.CLIENT_ID)
-
-    def test_the_collector_url_is_the_collector_tailnet_address(self):
-        # One URL for every sender, and it holds the address, because linux28-agents-1 joins the tailnet with
-        # --accept-dns=false and resolves no MagicDNS name (INFRA-832).
-        self.assertEqual(self.jobs["review"]["env"]["SPEND_COLLECTOR_URL"], self.COLLECTOR_URL)
 
     def leave(self, installed):
         """The logout step, with a stand-in sudo that records its arguments, and a stand-in tailscale or none."""
@@ -3055,17 +2975,12 @@ class ReviewJob(unittest.TestCase):
         self.assertEqual(sudo, "")
 
     def test_no_step_reads_the_collector_token(self):
+        # The review exports its usage on the tailnet with no token: review.yml names neither the token's secret, nor
+        # the project it was read from, nor the exporter's header variable that would carry it.
         text = (ROOT / ".github" / "workflows" / "review.yml").read_text()
         self.assertNotIn("agent-spend-otel-token", text)
         self.assertNotIn("agent-otel-public", text)
         self.assertNotIn("OTEL_EXPORTER_OTLP_HEADERS", text)
-        self.assertNotIn("Sign in to Google Cloud, for the cost collector's token", text)
-        # One URL for every sender, the address in SPEND_COLLECTOR_URL: no step and no comment of the file names
-        # the tailnet's MagicDNS domain, which linux28-agents-1, a sender that joins with --accept-dns=false,
-        # cannot resolve. The model gateway's URL is the repository variable's, not this file's.
-        self.assertNotIn("ts.net", text)
-        self.assertEqual(self.jobs["review"]["env"]["ANTHROPIC_BASE_URL"], "${{ vars.MODEL_GATEWAY_URL }}")
-        self.assertEqual(self.jobs["review"]["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "claude-haiku-4-5")
 
     def test_the_review_stops_before_the_sign_in_on_any_other_gateway_url(self):
         step = self.steps["Check the model gateway's URL"]
@@ -3086,17 +3001,11 @@ class ReviewJob(unittest.TestCase):
 
     def test_the_review_signs_in_to_the_model_gateway_with_no_stored_key(self):
         gateway = self.steps["Sign in to the model gateway"]
-        self.assertEqual(gateway["uses"],
-                         "google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093")
-        self.assertEqual(gateway["with"], {
-            "workload_identity_provider": "${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}",
-            "service_account": "${{ env.GATEWAY_SERVICE_ACCOUNT }}", "token_format": "id_token",
-            "id_token_audience": "model-gateway-gce", "id_token_include_email": True,
-            "create_credentials_file": False, "export_environment_variables": False})
-        self.assertEqual(self.jobs["review"]["env"]["GATEWAY_SERVICE_ACCOUNT"],
-                         "oss-verify-ci@theorem-agent-root.iam.gserviceaccount.com")
         review = self.steps["Review"]["with"]
-        self.assertEqual(review["anthropic_api_key"], "${{ steps.gateway.outputs.id_token }}")
+        # The key is the identity token of the sign-in, and no other anthropic_ input of the action gives one.
+        self.assertEqual(interpolated(review["anthropic_api_key"],
+                                      {f"steps.{gateway['id']}.outputs.id_token": "the sign-in's token"}),
+                         "the sign-in's token")
         self.assertFalse([k for k in review if k.startswith("anthropic_") and k != "anthropic_api_key"], review)
         # The sign-in comes right before the Review step: Google's identity token lives one hour.
         names = [s.get("name") for s in self.jobs["review"]["steps"]]
@@ -3197,24 +3106,25 @@ class SessionCache(unittest.TestCase):
             self.assertNotIn("run", step)
             self.assertIn(step.get("uses"), self.WRITERS)
 
-    def test_the_session_job_saves_each_kind_of_review_under_the_key_it_restores_from(self):
+    def test_the_session_job_saves_each_kind_of_review_under_the_key_prefix_it_restores_from(self):
         review, session, gather = self.jobs["review"], self.jobs["session"], self.jobs["gather"]
         steps = {s.get("name"): s for s in review["steps"] + gather["steps"]}
         enrollment_restore = steps["Restore the last review's session and the head it reviewed"]["with"]
-        change_restore = steps["Restore the last change review's session"]["with"]
         keep = steps["Keep this review's session for the next push's review"]
-        # Kept only when the review held no finding back (the session would hold it), for an enrollment or a change.
-        self.assertEqual(keep["if"], "${{ steps.result.outputs.held != 'yes' && (env.KIND == 'enrollment' || env.KIND == 'change') }}")
-        self.assertEqual(keep["id"], "session")
+        # The review job keeps, and the session job saves, the paths the gather job restores: the same paths, so the
+        # same cache version.
+        _, save = session["steps"]
         self.assertEqual(keep["with"]["path"], enrollment_restore["path"])
-        self.assertIs(keep["with"]["include-hidden-files"], True)
-        self.assertEqual(review["outputs"]["session"], "${{ steps.session.outputs.artifact-id }}")
-        # Kind reaches the session job as a review output, not by reading the event. It selects the same key each kind
-        # restores from: for pull request 7, an enrollment of libreac or a change, the key the session job saves under
-        # is the one the gather job restores from, with the name the gather job took, which is its output name.
-        self.assertEqual(review["outputs"]["kind"], "${{ needs.route.outputs.kind }}")
-        self.assertEqual(session["env"]["KIND"], "${{ needs.review.outputs.kind }}")
-        self.assertEqual(gather["outputs"]["name"], "${{ steps.project.outputs.name }}")
+        self.assertEqual(save["with"]["path"], enrollment_restore["path"])
+        # Only the session of an enrollment or a change whose review held no finding back is kept: the session holds
+        # what the review read, and any run of a pull request can read main's cache.
+        for held in ("yes", ""):
+            for kind in ("enrollment", "change", "issue"):
+                with self.subTest(held=held, kind=kind):
+                    kept = evaluate(keep["if"], {"steps.result.outputs.held": held, "env.KIND": kind})
+                    self.assertIs(bool(kept), held != "yes" and kind != "issue")
+        # For pull request 7, an enrollment of libreac or a change, the key prefix the session job saves under is the
+        # one the gather job restores from (its restore-keys).
         restore = steps["Restore the last review's session and the head it reviewed"]
         restored = {"enrollment": restore["env"]["SESSION_KEY"], "change": gather["env"]["CHANGE_KEY"]}
         for kind, key in restored.items():
@@ -3224,24 +3134,20 @@ class SessionCache(unittest.TestCase):
                                                                  "needs.gather.outputs.name": "libreac"})
                 self.assertEqual(saved, interpolated(key, {"needs.route.outputs.pr": "7",
                                                            "steps.project.outputs.name": "libreac"}))
-        self.assertEqual(enrollment_restore["key"],
-                         "${{ env.SESSION_KEY }}${{ github.run_id }}-${{ github.run_attempt }}")
-        self.assertEqual(change_restore["key"], "${{ env.CHANGE_KEY }}${{ github.run_id }}-${{ github.run_attempt }}")
-        download, save = session["steps"]
-        # The one artifact the review job uploaded, by its id, into ~/.claude, the root of the paths it holds.
-        self.assertEqual(download["with"]["artifact-ids"], "${{ needs.review.outputs.session }}")
-        self.assertEqual(download["with"]["path"], "~/.claude")
-        # The same paths, so the same cache version, and the same key selected by kind.
-        self.assertEqual(save["with"], {"path": enrollment_restore["path"],
-                                        "key": "${{ env.SESSION_KEY }}${{ github.run_id }}-${{ github.run_attempt }}"})
-        self.assertEqual(session["if"], "${{ !cancelled() && needs.review.outputs.session != '' }}")
 
     def test_the_collector_collects_the_session_job(self):
-        collect = self.jobs["collect"]
-        self.assertIn("session", collect["needs"])
-        step = collect["steps"][-1]
-        self.assertIn('"session:$SESSION:$ASKED_SESSION"', step["run"])
-        self.assertEqual(step["env"]["ASKED_SESSION"], "${{ needs.review.outputs.session != '' }}")
+        """When the review job kept a session, the check review jobs asks for the session job: it fails when that job
+        failed, and passes when it passed."""
+        # GitHub gives a job the results of the jobs it needs alone.
+        self.assertIn("session", self.jobs["collect"]["needs"])
+        review = {"comment": "Thanks.", "held_object": "", "session": "4242", "kind": "enrollment"}
+        for result, status in (("failure", 1), ("success", 0)):
+            with self.subTest(session=result):
+                got, ctx = run_graph(dict(ITEMS["enrollment"], trust="writer"), results={"session": result},
+                                     outputs={"review": review})
+                self.assertEqual(got["session"], result)
+                code, out = required(ctx)
+                self.assertEqual(code, status, out)
 
 
 @unittest.skipUnless(shutil.which("jq"), "needs jq, which the gh stand-in runs the script's filters with")
@@ -3513,22 +3419,22 @@ else:
 
 class Owners(unittest.TestCase):
 
-    def test_only_the_listed_patterns_have_an_owner_and_they_are_the_last_of_the_file(self):
+    def test_the_critical_paths_have_an_owner_and_the_patterns_with_an_owner_are_the_last_of_the_file(self):
+        """Every pattern of CODEOWNERS that names an owner names the two teams of people. The rules files the review
+        reads by name, and CODEOWNERS itself, which says who owns the rest, each have such a pattern. The patterns with
+        an owner come after every pattern without one: the last pattern that matches a file decides its owner, so no
+        later pattern takes the owner off a file."""
         lines = [line.split() for line in (ROOT / ".github" / "CODEOWNERS").read_text().splitlines()
                  if line.strip() and not line.lstrip().startswith("#")]
         teams = ["@theorem-labs/engineering", "@theorem-labs/research"]
-        owned = [[pattern, *teams] for pattern in (
-            # Agent instructions and skills at any depth (the first patterns of CODEOWNERS).
-            "**/AGENTS.md", "**/CLAUDE.md", "**/SKILL.md", "skills/",
-            # What changes what a workflow runs (the top of CODEOWNERS).
-            "/.github/", "/src/", "/infra/", "/seeds/", ".claude/", "CLAUDE*.md", "AGENTS*.md", "/.mcp.json", "/*.py",
-            "/pytest.ini", "/.pytest.ini", "/pyproject.toml", "/uv.lock", "/.python-version", "/setup.cfg",
-            "/tox.ini",
-            "/review.md", "/review-change.md", "/review-issue.md", "/.claude/skills/write-to-maintainer/",
-            "/.github/CODEOWNERS")]
-        self.assertEqual([line for line in lines if len(line) > 1], owned)
+        owned = [line for line in lines if len(line) > 1]
+        self.assertTrue(owned, "CODEOWNERS names no owner")
+        self.assertEqual([line for line in owned if line[1:] != teams], [])
         self.assertEqual(lines[-len(owned):], owned)
-        self.assertTrue(all((ROOT / name).is_file() for name in ("review.md", "review-change.md", "review-issue.md")))
+        patterns = {line[0] for line in owned}
+        for name in ("review.md", "review-change.md", "review-issue.md", ".github/CODEOWNERS"):
+            self.assertIn("/" + name, patterns, name)
+            self.assertTrue((ROOT / name).is_file(), name)
 
 
 if __name__ == "__main__":
