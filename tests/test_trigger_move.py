@@ -2392,8 +2392,14 @@ class SteeringFiles(unittest.TestCase):
                  if line.strip() and not line.startswith("#") and teams & set(line.split()[1:])]
         # The four patterns at the top give agent instructions and skills at any depth the same owners, and add no
         # steering file: AGENTS*.md and CLAUDE*.md already match each AGENTS.md and CLAUDE.md, and a skill that Claude
-        # Code loads in the review job is under .claude/.
-        self.assertEqual(owned, ["**/AGENTS.md", "**/CLAUDE.md", "**/SKILL.md", "skills/", *steering.STEERING])
+        # Code loads in the review job is under .claude/. src/ has no owner, by Sami's choice
+        # (dispatch://OSSV-276/ask/6c92b099-08f4-4177-aa5a-6a3fc6292878), and every file under it is still a steering
+        # file.
+        self.assertIn("/src/", steering.STEERING)
+        self.assertEqual(owned, ["**/AGENTS.md", "**/CLAUDE.md", "**/SKILL.md", "skills/",
+                                 *(pattern for pattern in steering.STEERING if pattern != "/src/")])
+        for name in ("src/oss_verify/validate.py", "src/oss_verify/syscall_shapes.py", "src/yaml.py"):
+            self.assertTrue(steering.is_steering(name), name)
 
 
 class SteeringGate(Stand):
