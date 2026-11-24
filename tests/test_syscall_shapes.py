@@ -1920,6 +1920,19 @@ def test_a_failed_map_fixed_over_live_memory_leaves_its_range_undecided(model, i
 
 
 @needs_model
+def test_an_munmap_of_an_unpinned_length_leaves_its_range_unknown(model, image):
+    """The reserved_va run's finding, in small: an munmap whose length no host line pins decides nothing, and it may
+    have unmapped more than its printed length, so a later grant over that range is undecided, never a fail."""
+    text = (FIRST + grant(4096, 0x7f16feaa1000) + "1 munmap(0x7f16feaa1000,4096) = 0\n" + grant(8192, 0x7f16feaa0000)
+            + EXIT)
+    log = "".join(ln + "\n" for ln in faithful_log(text).splitlines() if not ln.startswith("munmap "))
+    result = check(model, image, text, lengths=log)
+    assert result["verdict"] == "undecided" and result["unmodeled"] == [], (result["unmodeled"], result["undecided"])
+    assert [u["call"] for u in result["undecided"]] == ["munmap", "mmap"], result["undecided"]
+    assert "munmap length" in result["undecided"][0]["why"]
+
+
+@needs_model
 def test_an_undecided_call_is_not_a_verdict_against_the_run(model, image):
     # One undecided call and one unmodeled call: the unmodeled one decides, and both are reported.
     text = "1 brk(0x102000) = 0x102000\n1 getppid() = 1\n" + EXIT

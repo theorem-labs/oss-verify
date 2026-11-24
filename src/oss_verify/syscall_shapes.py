@@ -973,9 +973,20 @@ def map_contains(entries, lo, n):
     return any(a <= lo and lo + n <= a + sz for a, sz in entries)
 
 
-UNCERTAIN = ("an earlier MAP_FIXED that failed over live memory may have unmapped this range or left it in place "
-             "(Sys/Mm/Mmap.v mmap_spec answers -ENOMEM both ways, the second through mmap_fixed_destroyed_next), and "
-             "the trace does not say which")
+UNCERTAIN = ("an earlier call may have unmapped or changed this range or left it in place, and the trace does not "
+             "say which: a MAP_FIXED that failed over live memory (Sys/Mm/Mmap.v mmap_spec answers -ENOMEM both "
+             "ways, the second through mmap_fixed_destroyed_next), or an munmap or mprotect whose length the trace "
+             "does not pin")
+
+
+def unpinned_reach(led, addr, ret, why):
+    """An munmap or mprotect whose length the trace does not pin (`why`, an Undecided) decides nothing; if it may have
+    changed the ledger (it succeeded, or the trace has no return), every range it could have touched, [addr,
+    TASK_SIZE) (a length qemu printed in 32 bits is that value plus a multiple of 2**32), becomes unknown, so that a
+    later call meeting it is undecided, never judged against a ledger that may be stale. Returns `why`."""
+    if (ret is None or ret == 0) and addr % PAGE_SIZE == 0 and addr < TASK_SIZE:
+        led.uncertain.append((addr, TASK_SIZE - addr))
+    return why
 # A descriptor's kind, as State.v FdEntry names it. The replay stores a tuple: ("channel", n), ("file", path) for
 # FdFile, ("filew", path), ("filea", path), ("filerw", path), ("dir",), ("devnull", readable, writable),
 # ("urandom",), ("socket", True) for a fresh socket (State.v SkFresh), ("socket", False, state) once a bind, listen or
@@ -1466,12 +1477,12 @@ def _munmap(run, args, ret, errno, tid):
     cite = "Sys/Mm/Mmap.v munmap_spec"
     zero = length.is_zero()
     if zero is None:
-        return length.known("the munmap length")
+        return unpinned_reach(run.led, addr, ret, length.known("the munmap length"))
     if addr % PAGE_SIZE or zero:
         return errno_only(ret, errno, {EINVAL}, "munmap at an unaligned address or of length 0", cite)
     why = length.known("the munmap length")
     if why:
-        return why
+        return unpinned_reach(run.led, addr, ret, why)
     led = run.led
     n = page_round_up(length.v)
     if addr + n > TASK_SIZE:
@@ -1531,13 +1542,13 @@ def _mprotect(run, args, ret, errno, tid):
         return errno_only(ret, errno, {EINVAL}, "mprotect at an unaligned address", cite)
     zero = length.is_zero()
     if zero is None:
-        return length.known("the mprotect length")
+        return unpinned_reach(run.led, addr, ret, length.known("the mprotect length"))
     if zero:
         return None if ret in (None, 0) else (f"an mprotect of length 0 returned {ret_text(ret, errno)}: the model "
                                               f"answers 0 there ({cite})")
     why = length.known("the mprotect length")
     if why:
-        return why
+        return unpinned_reach(run.led, addr, ret, why)
     nz = page_round_up(length.v)
     if addr + nz >= TWO_POW_64:
         return errno_only(ret, errno, {ENOMEM}, "mprotect whose range reaches 2^64", cite)
