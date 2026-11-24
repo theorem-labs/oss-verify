@@ -1932,6 +1932,50 @@ def test_an_munmap_of_an_unpinned_length_leaves_its_range_unknown(model, image):
     assert "munmap length" in result["undecided"][0]["why"]
 
 
+MADVISE = "1 madvise({:#x},4096,MADV_DONTNEED) = 0\n"
+
+
+def drop_host_line(text, nth, call):
+    """The faithful host log of `text`, less the `nth` (0-based) line for `call`: a call whose length no line pins."""
+    lines, seen = [], 0
+    for ln in faithful_log(text).splitlines():
+        if ln.startswith(call + " "):
+            seen += 1
+            if seen - 1 == nth:
+                continue
+        lines.append(ln + "\n")
+    return "".join(lines)
+
+
+@needs_model
+@pytest.mark.parametrize("label,text,dropped,first", [
+    # a 1 MiB grant that starts inside the pair's band, then a madvise above the band inside the grant
+    ("grant in the pair's band", FIRST + grant(1048576, 0x7f16feab4000) + MADVISE.format(0x7f16feb00000), None, "mmap"),
+    # a hint that meets the pair's band, returned elsewhere, then a madvise on the grant
+    ("hint in the pair's band",
+     FIRST + "1 mmap(0x7f16feab3000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x7f16fe000000\n"
+     + MADVISE.format(0x7f16fe000000), None, "mmap"),
+    # an munmap of an unpinned length leaves [addr, TASK_SIZE) unknown; a hint there returned below it; a madvise on it
+    ("hint in an unknown range",
+     FIRST + grant(4096, 0x7f16feaa1000) + "1 munmap(0x7f16feaa1000,4096) = 0\n"
+     + "1 mmap(0x7f16feaa1000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x7f16fe000000\n"
+     + MADVISE.format(0x7f16fe000000), ("munmap", 0), "munmap"),
+    # an mmap of an unpinned length: its grant is live all the same, so a madvise on it is not a call on free memory
+    ("grant of an unpinned length", FIRST + grant(4096, 0x7f16feaa1000) + MADVISE.format(0x7f16feaa1000),
+     ("mmap", 1), "mmap"),
+])
+def test_an_undecided_grant_is_still_live(model, image, label, text, dropped, first):
+    """Review of 85d67d1f: an mmap that comes out undecided still made a grant, so the replay records it (or marks
+    the range it could cover unknown) before answering; a later call on that memory is never judged as a call on
+    free memory. Each case was a fail at 85d67d1f."""
+    text += EXIT
+    log = drop_host_line(text, dropped[1], dropped[0]) if dropped else None
+    result = check(model, image, text, lengths=log) if log else check(model, image, text)
+    assert result["verdict"] == "undecided" and result["unmodeled"] == [], (result["unmodeled"], result["undecided"])
+    assert result["undecided"][0]["call"] == first, result["undecided"]
+
+
+
 @needs_model
 def test_an_undecided_call_is_not_a_verdict_against_the_run(model, image):
     # One undecided call and one unmodeled call: the unmodeled one decides, and both are reported.
@@ -1960,10 +2004,14 @@ def test_a_length_that_is_not_whole_pages_is_found_by_its_rounding(model, image)
     result = check(model, image, GO_MAPS + EXIT)
     assert result["verdict"] == "pass", (result["unmodeled"], result["undecided"])
     # A host line whose length is not the rounding of the printed low 32 bits is no host call of this guest call:
-    # the length stays cut, and the call is undecided.
+    # the length stays cut, and the call is undecided. Its grant is live all the same, so [0x100000, TASK_SIZE)
+    # becomes unknown and the calls after it that meet that range are undecided too, never a fail.
     for wrong in ("11010", "13000"):
         log = faithful_log(GO_MAPS + EXIT).replace("mmap 1048576 100000 12000 ", f"mmap 1048576 100000 {wrong} ")
-        assert "the mmap length" in one_undecided(check(model, image, GO_MAPS + EXIT, lengths=log), "mmap")
+        result = check(model, image, GO_MAPS + EXIT, lengths=log)
+        assert result["verdict"] == "undecided" and result["unmodeled"] == [], result
+        assert result["undecided"][0]["call"] == "mmap", result["undecided"]
+        assert "the mmap length" in result["undecided"][0]["why"]
 
 
 @needs_model

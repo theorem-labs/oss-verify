@@ -987,6 +987,20 @@ def unpinned_reach(led, addr, ret, why):
     if (ret is None or ret == 0) and addr % PAGE_SIZE == 0 and addr < TASK_SIZE:
         led.uncertain.append((addr, TASK_SIZE - addr))
     return why
+
+
+def unpinned_grant(led, ret, why):
+    """An anonymous mmap whose length the trace does not pin (`why`, an Undecided) decides nothing, but its grant is
+    live all the same. On success every range it could cover, [ret, TASK_SIZE), becomes unknown, as unpinned_reach
+    does for munmap and mprotect; with no return in the trace the grant could be anywhere, so the whole user range
+    becomes unknown. Returns `why`."""
+    if ret is None:
+        led.uncertain.append((PAGE_SIZE, TASK_SIZE - PAGE_SIZE))
+    elif ret >= 0 and ret % PAGE_SIZE == 0 and ret < TASK_SIZE:
+        led.uncertain.append((ret, TASK_SIZE - ret))
+    return why
+
+
 # A descriptor's kind, as State.v FdEntry names it. The replay stores a tuple: ("channel", n), ("file", path) for
 # FdFile, ("filew", path), ("filea", path), ("filerw", path), ("dir",), ("devnull", readable, writable),
 # ("urandom",), ("socket", True) for a fresh socket (State.v SkFresh), ("socket", False, state) once a bind, listen or
@@ -1277,7 +1291,7 @@ def _mmap(run, args, ret, errno, tid):
         return f"flags {flags} without MAP_ANONYMOUS: a file mapping is unmodeled (Sys/Mm/Mmap.v mmap_spec)"
     zero = length.is_zero()
     if zero is None:
-        return length.known("the mmap length")
+        return unpinned_grant(led, ret, length.known("the mmap length"))
     if zero:
         # mmap_plain_anon_b: -EINVAL for a zero length, before any shape.
         if "MAP_HUGETLB" in fbits:
@@ -1285,7 +1299,7 @@ def _mmap(run, args, ret, errno, tid):
         return errno_only(ret, errno, {EINVAL}, "an mmap of length 0", "Sys/Mm/Mmap.v mmap_plain_anon_b")
     why = length.known("the mmap length")
     if why:
-        return why
+        return unpinned_grant(led, ret, why)
     if fbits - MMAP_MASK in NOREPLACE_FLAG_WORDS:
         return _mmap_noreplace(run, addr.v, length.v, prot, flags, off, ret, errno)
     shape = next((name for name, p, f in MMAP_SHAPES if bits(prot) == p and fbits - MMAP_MASK == f), None)
@@ -1305,11 +1319,13 @@ def _mmap(run, args, ret, errno, tid):
         # budget conjunct (mmap_noreserve_backed_ok) is not checked.
         g = addr.v - addr.v % PAGE_SIZE
         hint_free = False
+        hint_why = None
         if g and g + nz <= TASK_SIZE:
-            why = led.unknown(g, nz)
-            if why:
-                return und(f"mmap hint [{g:#x},{g + nz:#x}): {why} (Sys/Mm/Mmap.v place_declined_b)")
-            hint_free = bool(led.image_clear(g, nz) and region_free(led.maps, g, nz))
+            hint_why = led.unknown(g, nz)
+            if not hint_why:
+                hint_free = bool(led.image_clear(g, nz) and region_free(led.maps, g, nz))
+        if hint_why and (ret is None or ret < 0):
+            return und(f"mmap hint [{g:#x},{g + nz:#x}): {hint_why} (Sys/Mm/Mmap.v place_declined_b)")
         if ret is None:
             return None
         if ret < 0:
@@ -1325,7 +1341,14 @@ def _mmap(run, args, ret, errno, tid):
             # The run's first grant by the top-down search places the vdso pair: see Ledger.infer_vdso.
             led.infer_vdso(a, nz)
         why = led.unknown(a, nz)
-        if why:
+        if why or hint_why:
+            # the grant is live all the same: record it (and its PROT_NONE entry) before the undecided answer, so that a
+            # later call on it is not judged as a call on free memory
+            led.maps.append((a, nz))
+            if noaccess:
+                led.noaccess.append((a, nz))
+            if hint_why:
+                return und(f"mmap hint [{g:#x},{g + nz:#x}): {hint_why} (Sys/Mm/Mmap.v place_declined_b)")
             return und(f"mmap grant [{a:#x},{a + nz:#x}): {why}")
         if not led.image_clear(a, nz) or not region_free(led.maps, a, nz):
             return (f"mmap returned [{a:#x},{a + nz:#x}), which meets the binary's image or a mapping the replay holds "
