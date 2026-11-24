@@ -548,21 +548,36 @@ def fuzz_targets(layout, patch):
     return sorted(reached & layout.release_targets), sorted(reached - layout.release_targets)
 
 
-def applied(patch, other_bytes, targets):
+def applied(patch, other_bytes, built):
     """The words that name `patch`, which the port applies since the check of its seed port (in bytes other than
-    that check's, if `other_bytes`), and the fuzz `targets` of the patch that the release built (None if the table
-    cannot name the fuzz targets of the patch)."""
+    that check's, if `other_bytes`), and the fuzz targets of the patch that the release built, `built` (None if the
+    table cannot name the fuzz targets of the patch)."""
     other = " in bytes other than that check's" if other_bytes else ""
-    if targets is None:
+    if built is None:
         return f"applies {patch}{other}, whose fuzz targets this table cannot name"
-    named = ", ".join(targets) or "no fuzz target that the release built"
+    named = ", ".join(built) or "no fuzz target that the release built"
     return f"applies {patch}{other}{',' if other_bytes else ''} to {named}"
 
 
+@dataclasses.dataclass
+class Change:
+    """A change that a port makes since the check of its seed port, from port_changes: it applies a patch since that
+    check, new or in other bytes, or it no longer applies a patch of that check.
+      - words: the words that name the change in the build notes (see applied)
+      - built: the sorted fuzz targets that the patch changes and that the release built (from fuzz_targets). None if
+        the table cannot name the fuzz targets of the patch, which is not the same as a patch that changes no fuzz
+        target that the release built (an empty list).
+      - unbuilt: the sorted fuzz targets that the patch changes and that the release did not build. Empty if built is
+        None."""
+    words: str
+    built: list | None
+    unbuilt: list
+
+
 def port_changes(port, checked):
-    """What `port` applies since the check of its seed port, which applied `checked` ({patch: sha256}): [(words,
-    fuzz targets that the release built or None, other fuzz targets)], first each patch applied since that check in
-    series order, then each patch of `checked` that the port no longer applies."""
+    """What `port` changes since the check of its seed port, which applied `checked` ({patch: sha256}): a Change for
+    each patch applied since that check in series order, then a Change for each patch of `checked` that the port no
+    longer applies."""
     listed = dict.fromkeys(validate.series_entries(port_text(port, validate.SERIES)))
     # The layout of the port, made once, for the first patch whose fuzz targets are wanted.
     layout = functools.cache(lambda: port_layout(port))
@@ -572,33 +587,36 @@ def port_changes(port, checked):
         if data is not None and checked.get(patch) == hashlib.sha256(data).hexdigest():
             continue
         found = None if data is None else fuzz_targets(layout(), patch)
-        built, others = (None, []) if found is None else found
-        changes.append((applied(patch, patch in checked, built), built, others))
-    return changes + [(f"no longer applies {patch}", None, []) for patch in checked if patch not in listed]
+        built, unbuilt = (None, []) if found is None else found
+        changes.append(Change(words=applied(patch, patch in checked, built), built=built, unbuilt=unbuilt))
+    return changes + [Change(words=f"no longer applies {patch}", built=None, unbuilt=[])
+                      for patch in checked if patch not in listed]
+
+
+def joined(lists):
+    """The fuzz targets in `lists`, each once, sorted, with ", " between two. Each item of `lists` is the list of the
+    fuzz targets of one change (Change.built or Change.unbuilt), or None for a change whose fuzz targets this table
+    cannot name (Change.built): such a change adds no name here, and build_notes tells it apart by that None."""
+    return ", ".join(sorted({name for names in lists for name in names or ()}))
 
 
 def build_notes(build, changes):
-    """The build notes of a seeded project, from its row of seeds/builds.tsv and what its port applies since that
-    check (`changes`, from port_changes). They end with the fuzz targets that the changes reach and that the release
-    did not build."""
+    """The build notes of a seeded project, from its row of seeds/builds.tsv and what its port changes since that
+    check (`changes`, the Changes from port_changes). They end with the fuzz targets that the changes reach and that
+    the release did not build."""
     if not changes:
         return build["detail"]
-
-    def joined(lists):
-        """The fuzz targets in `lists` (each a list, or None for none), each once, sorted, with ", " between two."""
-        return ", ".join(sorted({name for names in lists for name in names or ()}))
-
-    words = "; ".join(w for w, _, _ in changes)
+    words = "; ".join(change.words for change in changes)
     notes = f"the seed port's check: {build['detail']}; since that check the port {words}"
-    others = joined(names for _, _, names in changes)
-    end = f"; the release did not build {others}" if others else ""
+    unbuilt_names = joined(change.unbuilt for change in changes)
+    end = f"; the release did not build {unbuilt_names}" if unbuilt_names else ""
     if build["result"] != "reproduces":
         return notes + end
-    named = joined(targets for _, targets, _ in changes)
-    if all(targets is not None for _, targets, _ in changes):
-        differ = f": the binaries of {named} differ from the release's" if named else ""
-    elif named:
-        differ = f": the binaries of {named} differ from the release's, and others may"
+    built_names = joined(change.built for change in changes)
+    if all(change.built is not None for change in changes):
+        differ = f": the binaries of {built_names} differ from the release's" if built_names else ""
+    elif built_names:
+        differ = f": the binaries of {built_names} differ from the release's, and others may"
     else:
         differ = ": some of its binaries may differ from the release's"
     return notes + differ + end

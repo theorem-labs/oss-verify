@@ -486,6 +486,9 @@ class Table(unittest.TestCase):
         # name only fuzz_e in the list of the patch and as a binary that differs from the release's, and end with
         # fuzz_n, which the release did not build. A patch at targets/kay-fuzz_n changes fuzz_n only. When the port
         # also applies kay.0003-new.patch, whose fuzz targets the table cannot name, the notes still end with fuzz_n.
+        # When kay.0002-new.patch is at targets/kay-fuzz_n and kay.0003-new.patch at the tree of kay-fuzz_e, which the
+        # tree of kay-fuzz_m is a link to too, both patches change fuzz_n, and the second also changes fuzz_m, which
+        # build.sh does not mark either: the notes end with each of them once, sorted.
         build = (self.PORT["projects/kay/build.sh"] + "# fuzz_n: not a target of the release.\n"
                  "(\nov_target_begin kay-fuzz_n\nov_target_build fuzz_n\n)\n")
         links = "link\text/kay-fuzz_n/src\text/kay-fuzz_e/src\n"
@@ -515,6 +518,17 @@ class Table(unittest.TestCase):
                     ports["projects/kay/series"] += "kay.0003-new.patch\n"
                     ports["projects/kay/kay.0003-new.patch"] = NEW_PATCH
                 self.assertEqual(self.row("kay", ports=ports), SINCE + words + KAY_NOTES)
+        with self.subTest("two patches that change fuzz_n, and the second also another fuzz target"):
+            ports = self.new_patch("targets/kay-fuzz_n", links=links + "link\text/kay-fuzz_m/src\text/kay-fuzz_e/src\n",
+                                   build=build + "# fuzz_m: not a target of the release.\n"
+                                   "(\nov_target_begin kay-fuzz_m\nov_target_build fuzz_m\n)\n")
+            ports["projects/kay/series"] += "kay.0003-new.patch\n"
+            ports["projects/kay/kay.0003-new.patch"] = NEW_PATCH
+            ports["projects/kay/sources"] += "patch\text/kay-fuzz_e/src\tkay.0003-new.patch\n"
+            self.assertEqual(self.row("kay", ports=ports),
+                             SINCE + "applies kay.0002-new.patch to no fuzz target that the release built; applies "
+                             "kay.0003-new.patch to fuzz_e: the binaries of fuzz_e differ from the release's; the "
+                             "release did not build fuzz_m, fuzz_n" + KAY_NOTES)
 
     def test_a_reproducible_row_with_a_patch_since_the_check(self):
         # A row whose result is not reproduces names no binary that differs from the release's. Its notes still end
