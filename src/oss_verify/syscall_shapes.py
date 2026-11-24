@@ -173,6 +173,8 @@ ALLOC_TOP_MIN = SP_WINDOW_LO - STACK_MAX_SIZE
 # not show.
 MMAP_BASE_MIN = 0x154555557000                # State.v mmap_base_min
 VDSO_FLOOR = MMAP_BASE_MIN - 20 * PAGE_SIZE
+VDSO_LEN_MIN, VDSO_LEN_MAX = 5 * PAGE_SIZE, 20 * PAGE_SIZE   # State.v vdso_len_bounds
+PMD_SIZE = 0x200000                           # Sys/Mm/Mmap.v pmd_size
 MMAP_MIN_ADDR = 4096                          # Sys/Mm/Mmap.v mmap_min_addr
 TASK_SIZE = 0x800000000000                    # State.v TASK_SIZE: the access_okb bound
 TWO_POW_64 = 1 << 64                          # State.v two_pow_64
@@ -946,6 +948,23 @@ def region_free(entries, lo, n):
     return not any(lo < a + sz and a < lo + n for a, sz in entries)
 
 
+def highest_gap(entries, lo, hi, n):
+    """Sys/Mm/Mmap.v highest_gap: the highest page base a with lo <= a, a + n <= hi and [a, a + n) clear of every
+    entry, or None. A fit above a range that meets an entry would meet it too, so the window shrinks to below it."""
+    while hi - n >= lo:
+        a = (hi - n) // PAGE_SIZE * PAGE_SIZE
+        hit = [b for b, sz in entries if a < b + sz and b < a + n]
+        if not hit:
+            return a
+        hi = min(hit)
+    return None
+
+
+def thp_align(ret):
+    """Sys/Mm/Mmap.v thp_align: the least multiple of pmd_size strictly above ret."""
+    return ret + PMD_SIZE - ret % PMD_SIZE
+
+
 def map_contains(entries, lo, n):
     """State.v map_contains: True when [lo, lo + n) lies inside ONE entry. The model never merges entries, so a range
     that two adjacent entries cover is not contained."""
@@ -1032,6 +1051,12 @@ class Ledger:
         # are written to memory, and the model's own numbering is shifted from the run's by qemu's descriptors). While
         # this is set, a descriptor the replay does not hold may be a pipe end or a stream-pair end.
         self.pipe_fds_unknown = False
+        # Placement (see infer_vdso): the base of the vdso pair of the replayed launch, the grant that showed it, the
+        # kb_thp values every grant since agrees with, and why placement is no longer decided (None while it is).
+        self.vdso_base = None
+        self.inferred_by = None
+        self.thp = {False, True}
+        self.placement_lost = None
         self.tid = None                     # m_tid
         self.rlimit_core_read = False       # m_rlimit_core is no longer None
         self.rlimit_core_hard = None        # rlim64_hard of the successful read print, or None when qemu omitted it
@@ -1053,14 +1078,92 @@ class Ledger:
                 return False
         elif self.min_brk is None or addr < self.min_brk:
             return None
-        return True if addr + n <= VDSO_FLOOR else None
+        if addr + n <= VDSO_FLOOR:
+            return True
+        if self.vdso_base is not None and (addr + n <= self.vdso_base or addr >= self.vdso_base + VDSO_LEN_MAX):
+            return True
+        return None
 
     def unknown(self, addr, n):
         """Why the replay cannot say what the model holds over [addr, addr + n), or None when it can."""
         if not region_free(self.uncertain, addr, n):
             return UNCERTAIN
         if self.image_clear(addr, n) is None:
-            return VDSO_UNKNOWN if addr + n > VDSO_FLOOR else IMAGE_UNKNOWN
+            if addr + n <= VDSO_FLOOR:
+                return IMAGE_UNKNOWN
+            if self.vdso_base is None:
+                return VDSO_UNKNOWN + (f" ({self.placement_lost})" if self.placement_lost else "")
+            return (f"the range meets [{self.vdso_base:#x},{self.vdso_base + VDSO_LEN_MAX:#x}), where the vdso/vvar "
+                    "pair the run's first top-down grant placed lies (State.v vdso_reserved: its length, 5 to 20 "
+                    "pages, follows the kernel build, which the trace does not show)")
+        return None
+
+    # -- placement: Sys/Mm/Mmap.v linux_place and topdown_search ---------------------------------------------------
+    # State.v init_reserved reserves the vdso/vvar pair at [top - vdso_len, top), top = vdso_top = mmap_top of the
+    # first ledger, the page-rounded min(mbase, alloc_top), before any call. Run.v valid_mmap_base admits every page
+    # base in [mmap_base_min, mmap_base_max] (State.v), and alloc_top >= ALLOC_TOP_MIN, so every page top in
+    # [MMAP_BASE_MIN, ALLOC_TOP_MIN] is a launch the model allows; vdso_len is 5 to 20 pages (State.v vdso_len_bounds)
+    # by the kernel build. The pair fills the top-down window [PAGE_SIZE, mmap_top) from its base up, so the first
+    # grant of the search ends at that base: the replay takes the launch whose pair starts there. Each later grant of
+    # the search must then be the highest gap below the base (topdown_search, with thp_align for a PMD multiple when
+    # kb_thp, which is per run: the replay keeps each value that every grant so far agrees with). The tracer places a
+    # guest mapping by its own host mmap, among mappings of its own that the trace does not show, so a grant elsewhere
+    # is undecided, never refused; after it the model's ledger is not the trace's, and no later grant is compared.
+    def infer_vdso(self, a, nz):
+        """Take the launch whose vdso pair starts at a + nz, the end of the run's first top-down grant [a, a + nz),
+        when one exists and is the only one; else record why placement is not decided."""
+        base = a + nz
+        if self.reserved is None:
+            self.placement_lost = "the binary's image is not known"
+        elif nz % PMD_SIZE == 0:
+            self.placement_lost = (f"the run's first top-down grant [{a:#x},{base:#x}) is a multiple of PMD_SIZE, so "
+                                   "where it puts the vdso pair depends on kb_thp (Sys/Mm/Mmap.v thp_align), which the "
+                                   "trace does not show")
+        elif base + VDSO_LEN_MAX < MMAP_BASE_MIN or base + VDSO_LEN_MIN > ALLOC_TOP_MIN:
+            self.placement_lost = (f"the run's first top-down grant ends at {base:#x}, where no launch's vdso pair "
+                                   "starts (State.v mmap_base_min, alloc_top)")
+        elif not region_free(self.reserved + self.maps + self.uncertain, base, VDSO_LEN_MAX):
+            self.placement_lost = (f"the run's first top-down grant ends at {base:#x}, under a range the run holds, "
+                                   "where the vdso pair cannot start")
+        else:
+            self.vdso_base = base
+
+    def place(self, a, nz, first):
+        """None when [a, a + nz) is the grant Sys/Mm/Mmap.v topdown_search gives under the replayed launch for some
+        kb_thp the run's earlier grants agree with; else why that is not decided. `first` is True for a grant with no
+        hint, the only kind that can be the run's first grant of the search."""
+        if self.placement_lost:
+            return self.placement_lost
+        if self.vdso_base is None:
+            return (f"the top-down search (Sys/Mm/Mmap.v topdown_search) reads the vdso pair's place, which no "
+                    f"earlier grant of the run has shown{'' if first else ' (a hint the model does not honour)'}")
+        if self.inferred_by is None:
+            self.inferred_by = (a, nz)
+            return None
+        entries = self.reserved + self.maps
+        answers = {}
+        for thp in sorted(self.thp):
+            got = None
+            if thp and nz % PMD_SIZE == 0:
+                ret = highest_gap(entries, PAGE_SIZE, self.vdso_base, nz + PMD_SIZE)
+                got = None if ret is None else thp_align(ret)
+            if got is None:
+                got = highest_gap(entries, PAGE_SIZE, self.vdso_base, nz)
+            answers[thp] = got
+        lowest = min([a] + [v for v in answers.values() if v is not None])
+        if None in answers.values() or not region_free(self.uncertain, lowest, self.vdso_base - lowest):
+            self.placement_lost = (f"the grant at {a:#x} would need the search's bottom-up fallback or a range an "
+                                   "earlier failed MAP_FIXED left unknown, which the trace does not decide")
+            return self.placement_lost
+        agree = {thp for thp, v in answers.items() if v == a}
+        if not agree:
+            shown = " or ".join(f"{v:#x}" for v in sorted(set(answers.values())))
+            self.placement_lost = (f"the model's top-down search gives {shown} for the grant the tracer put at {a:#x} "
+                                   "(Sys/Mm/Mmap.v topdown_search, thp_align): the tracer places guest mappings by its "
+                                   "own host mmap, so the difference is not the binary's, and from here on the "
+                                   "model's ledger is not the trace's")
+            return self.placement_lost
+        self.thp = agree
         return None
 
     def brk_shrink(self, lo, hi):
@@ -1201,6 +1304,9 @@ def _mmap(run, args, ret, errno, tid):
         if a + nz > ALLOC_TOP_MIN:
             return (f"mmap grant [{a:#x},{a + nz:#x}) ends above the smallest alloc_top {ALLOC_TOP_MIN:#x} "
                     "(Sys/Mm/Mmap.v linux_place; State.v alloc_top is per run)")
+        if g == 0 and led.vdso_base is None and led.placement_lost is None:
+            # The run's first grant by the top-down search places the vdso pair: see Ledger.infer_vdso.
+            led.infer_vdso(a, nz)
         why = led.unknown(a, nz)
         if why:
             return und(f"mmap grant [{a:#x},{a + nz:#x}): {why}")
@@ -1208,15 +1314,14 @@ def _mmap(run, args, ret, errno, tid):
             return (f"mmap returned [{a:#x},{a + nz:#x}), which meets the binary's image or a mapping the replay holds "
                     "live: the model places a grant clear of both (Sys/Mm/Mmap.v linux_place)")
         if hint_free and a != g:
-            return (f"mmap returned {a:#x}, not its free hint {g:#x}: the model honours the hint there (Sys/Mm/Mmap.v "
-                    "linux_place)")
+            return und(f"mmap returned {a:#x}, not its free hint {g:#x}: the model honours the hint there "
+                       "(Sys/Mm/Mmap.v linux_place), and the tracer places a guest mapping by its own host mmap, which "
+                       "may not")
+        placed = None if hint_free else led.place(a, nz, first=g == 0)
         led.maps.append((a, nz))
         if noaccess:
             led.noaccess.append((a, nz))
-        if hint_free:
-            return None
-        return und(f"mmap grant at {a:#x}: Sys/Mm/Mmap.v linux_place places it by the top-down search (topdown_search, "
-                   "thp_align), which reads the run's mmap base and the kernel's kb_thp, which the trace does not show")
+        return und(f"mmap grant at {a:#x}: {placed}") if placed else None
     # The MAP_FIXED tests, in the kernel's order: a range that wraps 2^64 is mmap_fixed_overflow; one that ends above
     # alloc_top is unmodeled (per run: see ALLOC_TOP_MIN); an address not page-aligned is -EINVAL; address 0 is
     # unmodeled (the -EPERM of cap_mmap_addr is not modeled). Then three ways on the ledgers, each answered at the
@@ -1316,6 +1421,10 @@ def _mmap_noreplace(run, addr, length, prot, flags, off, ret, errno):
             return None
         if errno == ENOMEM:
             return None
+        if errno == EEXIST and addr + nz > VDSO_FLOOR:
+            return und(f"MAP_FIXED_NOREPLACE range [{addr:#x},{addr + nz:#x}) answered -EEXIST on a range the replay "
+                       "calls free: above the vdso floor the tracer keeps mappings of its own, which the guest's "
+                       "trace does not show, so the refusal may be the tracer's")
         return (f"MAP_FIXED_NOREPLACE range [{addr:#x},{addr + nz:#x}) failed with errno {errno} on a range the replay "
                 "calls free: the model answers a grant or -ENOMEM there, never -EEXIST (the kernel saw a mapping the "
                 "replay does not track, such as the vdso)")

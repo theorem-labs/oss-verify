@@ -439,8 +439,6 @@ REJECT = [
      + EXIT),
     ("a MAP_FIXED that came back at another address",
      "1 mmap(0x100000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0) = 0x200000\n" + EXIT),
-    ("an mmap that did not take its free hint (linux_place)",
-     "1 mmap(0x100000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x200000\n" + EXIT),
     ("a file mmap of a descriptor the run does not hold that succeeded",
      "1 mmap(NULL,4096,PROT_READ,MAP_PRIVATE,5,0) = 0x100000\n" + EXIT),
     ("DONTNEED over the page an interior munmap cut",
@@ -1828,7 +1826,10 @@ def test_the_real_runs_ledgers(model, giflib_image, line, verdict, needle):
     (MADVISE_GRANT + "1 madvise(0x100000,0,MADV_DONTNEED) = 0\n" + EXIT, "madvise", "the madvise length"),
     # Sys/Mm/Mmap.v linux_place: an unhinted grant is the top-down search's, under the run's mmap base.
     ("1 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n" + EXIT, "mmap",
-     "linux_place"),
+     "no launch's vdso pair"),
+    # Sys/Mm/Mmap.v linux_place honours a free hint; the tracer's host mmap may not.
+    ("1 mmap(0x100000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x200000\n" + EXIT, "mmap",
+     "free hint"),
     ("1 mmap(0x7fff00000000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x7fff00000000\n" + EXIT,
      "mmap", "place_declined_b"),
     # State.v init_reserved: the vdso/vvar pair is in vm_reserved, at a place the trace does not show.
@@ -1843,6 +1844,50 @@ def test_the_real_runs_ledgers(model, giflib_image, line, verdict, needle):
 ])
 def test_what_the_trace_does_not_decide(model, image, text, call, needle):
     assert needle in one_undecided(check(model, image, text), call)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Placement: the run's first top-down grant places the vdso pair (Ledger.infer_vdso), and each later one must be
+# the model's top-down search (Sys/Mm/Mmap.v topdown_search, thp_align). The grant ends at 0x7f16feab3000.
+# ---------------------------------------------------------------------------------------------------------------------
+FIRST = "1 mmap(NULL,69632,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x7f16feaa2000\n"
+
+
+def grant(n, at, flags="MAP_PRIVATE|MAP_ANONYMOUS"):
+    return f"1 mmap(NULL,{n},PROT_READ|PROT_WRITE,{flags},-1,0) = {at:#x}\n"
+
+
+@needs_model
+@pytest.mark.parametrize("text,verdict,needle", [
+    # the first grant alone, and freed: the launch whose pair starts at its end
+    (FIRST, "pass", None),
+    (FIRST + "1 munmap(0x7f16feaa2000,69632) = 0\n", "pass", None),
+    # the next grant directly below it, the highest gap
+    (FIRST + grant(4096, 0x7f16feaa1000), "pass", None),
+    # a 2 MiB grant: under kb_thp, thp_align of the 4 MiB search's 0x7f16fe6a2000; without it, the 2 MiB search
+    (FIRST + grant(2097152, 0x7f16fe800000), "pass", None),
+    (FIRST + grant(2097152, 0x7f16fe8a2000), "pass", None),
+    # the tracer put the grant elsewhere: its host mmap, not the binary, chose it, so it is undecided, never a fail
+    (FIRST + grant(4096, 0x7f16fe000000), "undecided", "not the binary's"),
+    (FIRST + grant(4096, 0x7f16fe000000) + grant(4096, 0x7f16fdfff000), "undecided", "not the binary's"),
+    # kb_thp decides where a first grant of a PMD multiple puts the pair
+    (grant(2097152, 0x7f16fe800000), "undecided", "kb_thp"),
+    # a range the pair may hold: its length follows the kernel build
+    (FIRST + "1 munmap(0x7f16feab3000,4096) = 0\n", "undecided", "first top-down grant placed"),
+    # a refusal above the vdso floor may be the tracer's own mapping
+    (FIRST + "1 mmap(0x7f0000000000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0) = "
+     "-1 errno=17\n", "undecided", "tracer's"),
+    # negative controls: requests outside the model whatever the placement still fail
+    (FIRST + grant(4096, 0x7f16feaa1000, "MAP_SHARED|MAP_ANONYMOUS"), "fail", "modeled shapes"),
+    (FIRST + "1 kill(1234,SIGTERM) = 0\n", "fail", "not an arm of spec_table"),
+])
+def test_the_placement_replay(model, image, text, verdict, needle):
+    result = check(model, image, text + EXIT)
+    assert result["verdict"] == verdict, (result["unmodeled"], result["undecided"])
+    if verdict == "undecided":
+        assert result["unmodeled"] == [] and needle in result["undecided"][0]["why"], result["undecided"]
+    elif verdict == "fail":
+        assert needle in one_why(result)
 
 
 @needs_model
