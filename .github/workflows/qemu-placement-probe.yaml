@@ -30,7 +30,8 @@ jobs:
           chmod +x "$b"
           cd "$(mktemp -d)"
           printf '\0\0\0\0\0\0' > input.bin
-          for setting in "" "-R 0x10000000000" "-R 0x400000000000" "-R 0x7ffffffff000" "-B 0x100000000000" "-B 0x200000000000 -R 0x10000000000"; do
+          set +e
+          for setting in "-R 0x7ffffffff000" "-R 0x7fff00000000" "-B 0x100000000000" "-B 0x200000000000 -R 0x10000000000"; do
             echo "=== qemu-riscv64 $setting"
             # shellcheck disable=SC2086
             timeout 120 "$q" $setting -strace "$b" input.bin > out.txt 2> trace.txt; echo "exit $?"
