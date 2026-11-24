@@ -4,6 +4,8 @@ tree	ext/zlib-checksum_fuzzer/src	upstream/zlib
 patch	ext/zlib-checksum_fuzzer/src	zlib-checksum_fuzzer.0001-inflate-memerr-totals.patch
 link	ext/zlib-api-driver/src	ext/zlib-checksum_fuzzer/src
 link	ext/zlib-compress_fuzzer/src	ext/zlib-checksum_fuzzer/src
+# Not of the release: compress_roundtrip_full_fuzzer, on the zlib tree of zlib-checksum_fuzzer's pin
+link	ext/zlib-compress_roundtrip_full_fuzzer/src	ext/zlib-checksum_fuzzer/src
 link	ext/zlib-example_dict_fuzzer/src	ext/zlib-checksum_fuzzer/src
 link	ext/zlib-example_flush_fuzzer/src	ext/zlib-checksum_fuzzer/src
 link	ext/zlib-example_large_fuzzer/src	ext/zlib-checksum_fuzzer/src
@@ -19,6 +21,8 @@ file	targets/zlib-checksum_fuzzer/checksum_fuzzer.c	https://raw.githubuserconten
 file	ext/oss-fuzz-zlib/projects/zlib/compress_fuzzer.c	https://raw.githubusercontent.com/google/oss-fuzz/fadbcdfb9e96aaa26734fbc936ab64a6f4f18ab4/projects/zlib/compress_fuzzer.c	f8f339398b43a6dd3fbb5112d8518eef115149ae45fc50d987382fa1ca29befb
 patch	ext/oss-fuzz-zlib	zlib-compress_fuzzer.0001-oss-fuzz-16582.patch
 link	targets/zlib-compress_fuzzer/compress_fuzzer.c	ext/oss-fuzz-zlib/projects/zlib/compress_fuzzer.c
+# Not of the release: compress_roundtrip_full_fuzzer's harness source
+copy	targets/zlib-compress_roundtrip_full_fuzzer/compress_roundtrip_full_fuzzer.c	compress_roundtrip_full_fuzzer.c
 file	targets/zlib-example_dict_fuzzer/example_dict_fuzzer.c	https://raw.githubusercontent.com/google/oss-fuzz/fadbcdfb9e96aaa26734fbc936ab64a6f4f18ab4/projects/zlib/example_dict_fuzzer.c	f6d0673d0be1f5c2b4826535a2bdd5805844815b31e4a9772933cc5e17d9c7c6
 file	targets/zlib-example_flush_fuzzer/example_flush_fuzzer.c	https://raw.githubusercontent.com/google/oss-fuzz/fadbcdfb9e96aaa26734fbc936ab64a6f4f18ab4/projects/zlib/example_flush_fuzzer.c	1b152a8b6db3bf0c6eeba482599510038d2a97b8e381a3e430762cd7d338b95f
 file	targets/zlib-example_large_fuzzer/example_large_fuzzer.c	https://raw.githubusercontent.com/google/oss-fuzz/fadbcdfb9e96aaa26734fbc936ab64a6f4f18ab4/projects/zlib/example_large_fuzzer.c	97d7b5add541cef673eabe725c360106f987fb5dbcfeb7ae52a87e60817b77b6
@@ -42,3 +46,7 @@ copy	targets/zlib-api-driver/faultalloc.h	api-driver.faultalloc.h
 copy	targets/zlib-api-driver/tramp_alloc.c	tramp_alloc.c
 copy	targets/zlib-api-driver/emit.h	emit.h
 copy	targets/zlib-api-driver/target.h	target.h
+# Not of the release: musl f21a9653 and its two patches, the C library that compress_roundtrip_full_fuzzer's block builds
+git	ext/musl/src	https://git.musl-libc.org/git/musl	f21a96538f78fa8e2040831b4209b35f2fb581da
+copy	ext/musl/series/0001-export-pthread-struct-size.diff	musl-0001-export-pthread-struct-size.diff
+copy	ext/musl/series/0002-init-tls-check-mmap.diff	musl-0002-init-tls-check-mmap.diff
