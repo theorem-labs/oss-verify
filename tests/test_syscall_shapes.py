@@ -2586,6 +2586,8 @@ REVIEW_305_CASES = [
      "fail", "unmodeled"),
     ("sendto on a datagram socket, -EFAULT, buffer past TASK_SIZE",
      DGRAM3 + f"1 sendto(3,{TASK_TOP},2,0,NULL,0) = -1 errno=14\n", "pass", None),
+    ("sendto on a datagram socket, -EFAULT, buffer qemu printed as no address",
+     DGRAM3 + "1 sendto(3,?,2,0,NULL,0) = -1 errno=14\n", "undecided", "unparseable buffer"),
     # 2. socketpair AF_UNIX: socketpair_faulted is access_okb sv 4
     ("socketpair AF_UNIX, -EFAULT, sv in range", "1 socketpair(PF_UNIX,SOCK_STREAM,0,0x1000) = -1 errno=14\n",
      "fail", "socketpair"),

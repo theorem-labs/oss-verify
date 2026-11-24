@@ -2893,7 +2893,9 @@ def _clock_getres(run, args, ret, errno, tid):
     unmodeled (clock_getres_dst_ok_b); otherwise 0 with a resolution of clock_getres_resolution_b: tv_sec 0, tv_nsec
     1 for the CPU-time clocks (clock_getres_cpu_b) and in (0, 10^9) for the rest. The two alarm clocks may answer
     -EINVAL instead (clock_getres_alarm_b). qemu prints the id through print_enums (its name only when the whole
-    register is that id, else `%#x` of the low 32 bits) and the resolution after a 0 return."""
+    register is that id, else `%#x` of the low 32 bits) and the resolution after a 0 return. A success into a
+    non-NULL tp in range is undecided even when its resolution is admitted: qemu does not check that it wrote tp, so
+    the model's unmodeled read-only tp prints the same success."""
     if len(args) < 2:
         return und("unparseable argument list")
     cid, tp = low32(sym(args[0], CLOCK_IDS)), num(args[1])
@@ -4453,7 +4455,10 @@ def _sendto(run, args, ret, errno, tid):
         if efault and ret is not None and ret < 0 and errno == EFAULT:
             # access_ok_zero answers -EFAULT only for a buffer past access_okb; one in range reaches FdDgram or
             # the flags test below, which are unmodeled
-            ok = access_ok(Arg.full(num(args[1])), Arg.full(count))
+            buf = num(args[1])
+            if buf is None:
+                return und(f"unparseable buffer {args[1]}")
+            ok = access_ok(Arg.full(buf), Arg.full(count))
             if ok is False:
                 return None
             if ok is None:
