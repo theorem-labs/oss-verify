@@ -30,6 +30,10 @@ on:
 
 permissions: {}
 
+# No job reads or writes the Actions cache: a run on push to main could otherwise save in main's cache, which review.yml
+# restores for a review. The job says it too, as toolchain-images.yaml calls it.
+cache-mode: none
+
 env:
   # The same values as toolchain-images.yaml's (tests/test_trigger_move.py compares them with publish's): a caller's env
   # does not reach a called workflow.
@@ -50,6 +54,7 @@ jobs:
   docker-tests:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    cache-mode: none
     permissions:
       contents: read
     services:

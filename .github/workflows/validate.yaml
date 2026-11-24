@@ -24,7 +24,8 @@ name: "Validate"
 # a commit to judge, and the check is never a skipped job, which GitHub counts as a pass where a check is required.
 #
 # pull_request: the workflow file comes from the merge commit, so a pull request that changes it controls this run and
-# its check. The code-owner rule on /.github/ of .github/CODEOWNERS guards the merge of such a pull request.
+# its check. .github/CODEOWNERS owns this file: enroll-dispatch.yml acts on its check for an enrollment, whose run is
+# main's copy, so a change to it needs a code owner.
 # enroll-dispatch.yml sends no pull request for its theorem statements unless all its files are under one
 # projects/<name>/ (the_project() of .github/scripts/enroll-dispatch), and none that changes a steering file
 # (.github/scripts/steering.py) until a person approves its head. The validate job checks out the first parent of the

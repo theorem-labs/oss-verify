@@ -563,7 +563,7 @@ def fork_step(tmp_path, change):
 
 @pytest.mark.parametrize("change, enrollment", [
     # An enrollment, or any change under projects/, alone or beside others, or a rename out of projects/ (both names
-    # count): no step after this one runs.
+    # count): no step after this one runs, but suite's CREDENTIALS_STEP (below), which runs no file of the fork.
     ({"projects/p/project.yaml": "y\n"}, True),
     ({"projects/q/build.sh": "y\n"}, True),
     ({"projects/p/project.yaml": "y\n", "src/t.py": "y\n"}, True),
@@ -634,6 +634,22 @@ def test_the_check_fails_unless_the_checkout_is_the_merge_into_the_base_branch(t
     assert calls == [f"api repos/o/r/compare/{parent}...a%2Fb%20c --jq .status"]
     assert trapped == []
 
+
+# The step of suite after the fork step: the one step that runs for a fork's enrollment.
+CREDENTIALS_STEP = "Each workflow has a code owner, and no pull_request job holds a credential"
+# The contexts of a run on pull_request, as the steps after the fork step see them: (env.FORK, the fork step's
+# enrollment output, whether such a step runs). A fork's enrollment runs none of them; a fork's other change, whose
+# fork step gives no output, and a branch of this repository, whose fork step is skipped, run them all.
+RUNS_AFTER_THE_FORK_STEP = (("true", "true", False), ("true", "", True), ("false", "", True))
+
+
+def runs_after_the_fork_step(later):
+    """For each of RUNS_AFTER_THE_FORK_STEP, whether the step `later` of tests.yaml runs: its if, if it has one."""
+    return [bool(evaluate(later["if"], {"env.FORK": fork, "steps.fork.outputs.enrollment": found,
+                                        "github.event_name": "pull_request"})) if "if" in later else True
+            for fork, found, _ in RUNS_AFTER_THE_FORK_STEP]
+
+
 @pytest.mark.parametrize("job", sorted(BEFORE_FORK_STEP))
 def test_no_step_after_the_fork_step_runs_for_a_forks_enrollment(job):
     steps = job_of_tests(job)["steps"]
@@ -647,11 +663,77 @@ def test_no_step_after_the_fork_step_runs_for_a_forks_enrollment(job):
     assert fork["id"] == "fork"
     assert [bool(evaluate(fork["if"], {"env.FORK": value})) for value in ("true", "false")] == [True, False]
     assert steps[at + 1:], "no step after the fork step"
-    for later in steps[at + 1:]:
-        assert "if" in later, f"{later.get('name')} runs for a fork's enrollment"
-        for found, runs in (("true", False), ("", True)):
-            ctx = {"steps.fork.outputs.enrollment": found, "github.event_name": "pull_request"}
-            assert bool(evaluate(later["if"], ctx)) == runs, (later.get("name"), found)
+    later_steps = steps[at + 1:]
+    if job == "suite":
+        # The one step after it that runs for a fork's enrollment: workflow-credentials reads files only, and a fork's
+        # run takes the script from the merge's first parent (tests.yaml's top), so it runs no code of the fork.
+        credentials, *later_steps = later_steps
+        assert credentials.get("name") == CREDENTIALS_STEP, credentials.get("name")
+        assert "if" not in credentials, f"{CREDENTIALS_STEP} must run for a fork's enrollment too"
+    assert CREDENTIALS_STEP not in [s.get("name") for s in later_steps]
+    for later in later_steps:
+        assert runs_after_the_fork_step(later) == [runs for _, _, runs in RUNS_AFTER_THE_FORK_STEP], later.get("name")
+
+
+@pytest.mark.parametrize("condition", [
+    None,
+    "env.FORK == 'true'",
+    "steps.fork.outputs.enrollment != 'true' || env.FORK == 'true'",
+    "always()",
+])
+def test_control_a_step_that_runs_for_a_forks_enrollment(condition):
+    # Each of these ifs, or none, lets a step after the fork step run for a fork's enrollment: the case above names it.
+    later = {"name": "a step", "run": "true", **({"if": condition} if condition else {})}
+    assert runs_after_the_fork_step(later)[0] is True
+
+
+# A fork's file that runs as Python: it logs its path when it runs, and then fails.
+PYTHON_TRAP = 'import os, sys\nopen(os.environ["TRAPPED"], "a").write(__file__ + "\\n")\nsys.exit(9)\n'
+
+
+def credentials_step(tmp_path, run):
+    """Run suite's CREDENTIALS_STEP, its script `run`, as on a fork's run with the job's PYTHONPATH (the merge's
+    src/), in a checkout of a merge whose first parent holds this tree's .github/, the files the script reads, and
+    whose second side replaces .github/scripts/workflow-credentials and adds src/yaml.py, each a
+    PYTHON_TRAP, and changes a file under projects/ (an enrollment). A stand-in dpkg says PyYAML is installed, and
+    python3 is the interpreter of these tests. Return the step's exit status, its output, and the traps that ran."""
+    isolated = isolated_git_env(tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git("init", "-q", "-b", "main", cwd=repo, env=isolated)
+    tracked = subprocess.run(["git", "ls-files", "-z", "--", ".github"], cwd=ROOT, capture_output=True, text=True,
+                             check=True).stdout.split("\0")
+    commit(repo, isolated, {name: (ROOT / name).read_text() for name in tracked if name})
+    commit(repo, isolated, {".github/scripts/workflow-credentials": PYTHON_TRAP, "src/yaml.py": PYTHON_TRAP,
+                            "projects/p/project.yaml": "x\n"})
+    bin = tmp_path / "bin"
+    bin.mkdir()
+    (bin / "dpkg").write_text("#!/bin/sh\nexit 0\n")
+    (bin / "python3").write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+    for tool in ("dpkg", "python3"):
+        (bin / tool).chmod(0o755)
+    environment = {**isolated, "FORK": "true", "PYTHONPATH": str(repo / "src"), "TRAPPED": str(tmp_path / "trapped"),
+                   "PATH": f"{bin}{os.pathsep}{isolated.get('PATH', os.environ['PATH'])}"}
+    result = subprocess.run(["bash", "-e", "-c", run], cwd=repo, env=environment, capture_output=True, text=True)
+    trapped = tmp_path / "trapped"
+    return result.returncode, result.stdout + result.stderr, trapped.read_text() if trapped.exists() else ""
+
+
+def test_the_credentials_step_runs_the_base_branchs_script_and_no_code_of_a_fork(tmp_path):
+    run = step(job_of_tests(), CREDENTIALS_STEP)["run"]
+    code, out, trapped = credentials_step(tmp_path, run)
+    assert trapped == "", trapped
+    assert code == 0, out
+    assert out.startswith("Read "), out
+
+
+def test_control_the_credentials_step_with_python3_p_runs_the_forks_yaml(tmp_path):
+    # -P keeps PYTHONPATH, which names the merge's src/: the fork's src/yaml.py shadows PyYAML.
+    run = step(job_of_tests(), CREDENTIALS_STEP)["run"]
+    assert run.count("python3 -I ") == 2, run
+    code, out, trapped = credentials_step(tmp_path, run.replace("python3 -I ", "python3 -P "))
+    assert code != 0, out
+    assert trapped.strip().endswith("src/yaml.py"), trapped
 
 
 # The step of each of tests.yaml's jobs suite and docker that runs pytest.

@@ -8,8 +8,19 @@ skills/ @theorem-labs/engineering @theorem-labs/research
 # the draft reply to an issue says (.github/workflows/review.yml reads main's copies), and
 # .claude/skills/write-to-maintainer/ says how every message to a maintainer is written and checked.
 #
-# The other lines own each file that changes what a workflow runs or what a verdict is, whoever opens the pull request:
-#   /.github/                     the workflows and the scripts they run.
+# The other lines own each file that runs with a credential, changes what a credential does, or changes what a verdict
+# is, whoever opens the pull request:
+#   /.github/                     each workflow, each script that a job with a credential runs or reads, dependabot.yml,
+#                                 and each file added there later; but the files that the lines with no owner, after
+#                                 it, list. Every workflow file keeps an owner: a required check is matched by its name,
+#                                 not by its workflow file, so a job of any workflow could report a check under the
+#                                 name of a required one. Only a rule of the organization that binds a required check
+#                                 to its workflow file (required workflows) would let a workflow file go without an
+#                                 owner. dependabot.yml keeps one: its registries can send Dependabot's secrets to any
+#                                 host. tests.yaml's job suite runs .github/scripts/workflow-credentials, which fails a
+#                                 pull request that leaves a workflow file without an owner here. Owners in
+#                                 tests/test_check_checks.py derives what each workflow with a credential runs or
+#                                 reads, and fails when one of those files has no owner here.
 #   (src/ has no owner)           the oss_verify package, `oss-verify check` and `oss-verify validate`, has no code
 #                                 owner, by Sami's choice
 #                                 (dispatch://OSSV-276/ask/6c92b099-08f4-4177-aa5a-6a3fc6292878):
@@ -24,6 +35,9 @@ skills/ @theorem-labs/engineering @theorem-labs/research
 #   /infra/                       the toolchains `oss-verify check` builds with (infra/toolchains.tsv,
 #                                 infra/base-builder/), and the code it runs in build containers (infra/checks/).
 #   /seeds/                       the seeded projects, which `oss-verify check` builds as it builds projects/.
+#   /docs/seeded-projects.tsv     the table of the seeded projects, which enrollment (take-project) and triage.py read
+#                                 from the base branch to refuse a fork's change to a seeded project's port. Its
+#                                 content follows seeds/builds.tsv, so a change to it comes with an owned change.
 #   .claude/, CLAUDE*.md,         what Claude Code loads in the review job, which holds an identity token: settings
 #   AGENTS*.md (at any depth),    and hooks, skills, instructions and MCP servers.
 #   /.mcp.json
@@ -34,18 +48,41 @@ skills/ @theorem-labs/engineering @theorem-labs/research
 #                                 module, and tests.yaml runs pytest with -c pyproject.toml, so it reads no other
 #                                 configuration file.
 # A pull request from a fork that changes no file under projects/ passes the enrollment checks, and tests.yaml runs the
-# fork's own copy of itself, so these lines are what keeps such a change from merging on one person's reading.
+# fork's own copy of itself, so these lines are what keeps such a change to an owned file from merging on one person's
+# reading.
+# The lines with no owner, after /.github/, list the files there that only owned workflows run or read, in jobs that
+# hold only read permissions, so that no job of a pull request can use them to report a check or reach a credential.
+# A new file under scripts/frame-pointers/ has no owner either. No CodeQL analysis reads them:
+# .github/codeql/codeql-config.yml leaves .github/scripts/frame-pointers/ out, so the push jobs of codeql-python.yml
+# and codeql-c-cpp.yml, which hold security-events: write, read neither its frames.py nor its probe.c; actionlint.yaml
+# is no file that CodeQL reads as GitHub Actions; and no workflow analyses Rust, which would load its probe crate
+# (.github/workflows/codeql.yml says why).
+#   actionlint.yaml               actionlint's configuration, which tests.yaml's job suite reads to lint the workflows,
+#                                 which have owners.
+#   scripts/frame-pointers/       the probes of toolchain-images.yaml's job make (contents: read). On a push to main,
+#                                 toolchain-images-publish.yaml acts only after that run passed; but it makes each
+#                                 image again itself from infra/toolchains.tsv, which has an owner, and pushes it only
+#                                 when its digest is the one that make made. No toolchain uses the image until a row of
+#                                 that file names it.
+# .github/scripts/steering.py still counts each file under /.github/ and /src/ as a steering file, so
+# enroll-dispatch.yml sends no enrollment that changes one for its theorem statements until a person approves its head.
 #
-# The ruleset of main requires a code owner's approval, so a change to any of these files, or to this file, which says
+# The ruleset of main requires a code owner's approval, so a change to any owned file, or to this file, which says
 # who owns them, needs the approval of a member of @theorem-labs/engineering or of @theorem-labs/research, each a team
 # of people: research holds the people who were on engineering, and engineering is kept beside it. No other file has an
 # owner but an AGENTS.md, CLAUDE.md or SKILL.md file or a file under a directory named skills, at any depth, which the
-# patterns at the top of the file give the same owners, so a change to src/, tests/, docs/ or one projects/<name>/ needs
-# no code owner unless it adds or changes such a file.
+# patterns at the top of the file give the same owners, so a change to src/, tests/, docs/, one projects/<name>/ or a
+# file that a line with no owner lists needs no code owner unless it adds or changes such a file. The one exception is
+# under /.github/scripts/frame-pointers/: its line with no owner comes after the patterns at the top and decides, so a
+# SKILL.md or a file under a directory named skills there has no owner (AGENTS*.md and CLAUDE*.md, further down, own
+# an AGENTS.md or a CLAUDE.md there again).
 # These lines stay the last patterns of the file: the last pattern that matches a file decides its owner.
 /.github/ @theorem-labs/engineering @theorem-labs/research
+/.github/actionlint.yaml
+/.github/scripts/frame-pointers/
 /infra/ @theorem-labs/engineering @theorem-labs/research
 /seeds/ @theorem-labs/engineering @theorem-labs/research
+/docs/seeded-projects.tsv @theorem-labs/engineering @theorem-labs/research
 .claude/ @theorem-labs/engineering @theorem-labs/research
 CLAUDE*.md @theorem-labs/engineering @theorem-labs/research
 AGENTS*.md @theorem-labs/engineering @theorem-labs/research
