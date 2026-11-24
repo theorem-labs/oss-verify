@@ -1975,7 +1975,6 @@ def test_an_undecided_grant_is_still_live(model, image, label, text, dropped, fi
     assert result["undecided"][0]["call"] == first, result["undecided"]
 
 
-
 @needs_model
 def test_an_undecided_call_is_not_a_verdict_against_the_run(model, image):
     # One undecided call and one unmodeled call: the unmodeled one decides, and both are reported.
@@ -2010,7 +2009,7 @@ def test_a_length_that_is_not_whole_pages_is_found_by_its_rounding(model, image)
         log = faithful_log(GO_MAPS + EXIT).replace("mmap 1048576 100000 12000 ", f"mmap 1048576 100000 {wrong} ")
         result = check(model, image, GO_MAPS + EXIT, lengths=log)
         assert result["verdict"] == "undecided" and result["unmodeled"] == [], result
-        assert result["undecided"][0]["call"] == "mmap", result["undecided"]
+        assert [u["call"] for u in result["undecided"]] == ["mmap", "mmap", "munmap"], result["undecided"]
         assert "the mmap length" in result["undecided"][0]["why"]
 
 
