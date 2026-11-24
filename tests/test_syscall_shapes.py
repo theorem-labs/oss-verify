@@ -1872,6 +1872,19 @@ def grant(n, at, flags="MAP_PRIVATE|MAP_ANONYMOUS"):
     (FIRST + grant(4096, 0x7f16fe000000) + grant(4096, 0x7f16fdfff000), "undecided", "not the binary's"),
     # kb_thp decides where a first grant of a PMD multiple puts the pair
     (grant(2097152, 0x7f16fe800000), "undecided", "kb_thp"),
+    # a hinted grant takes no THP branch (Sys/Mm/Mmap.v linux_place: only a hint that rounds to 0 does): a hint that
+    # meets the first grant goes to the plain top-down search, whose only answer is 0x7f16fe8a2000
+    (FIRST + "1 mmap(0x7f16fe8b3000,2097152,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x7f16fe8a2000\n",
+     "pass", None),
+    (FIRST + "1 mmap(0x7f16fe8b3000,2097152,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x7f16fe800000\n",
+     "undecided", "not the binary's"),
+    # a grant the tracer put away from its free hint is still recorded: a later call on it is no call on free memory
+    (FIRST + "1 mmap(0x7f0000000000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x7f0000100000\n"
+     "1 madvise(0x7f0000100000,4096,MADV_DONTNEED) = 0\n", "undecided", "not its free hint"),
+    (FIRST + "1 mmap(0x7f0000000000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x7f0000100000\n"
+     "1 mremap(139637977776128,4096,4096,1,0,0) = 139637977776128\n", "undecided", "not its free hint"),
+    # kb_thp is one per run: a 2 MiB grant at the answer without it, then one at the answer with it, agree on none
+    (FIRST + grant(2097152, 0x7f16fe8a2000) + grant(2097152, 0x7f16fe600000), "undecided", "not the binary's"),
     # a range the pair may hold: its length follows the kernel build
     (FIRST + "1 munmap(0x7f16feab3000,4096) = 0\n", "undecided", "first top-down grant placed"),
     # a refusal above the vdso floor may be the tracer's own mapping

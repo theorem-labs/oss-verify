@@ -1100,8 +1100,10 @@ class Ledger:
 
     # -- placement: Sys/Mm/Mmap.v linux_place and topdown_search ---------------------------------------------------
     # State.v init_reserved reserves the vdso/vvar pair at [top - vdso_len, top), top = vdso_top = mmap_top of the
-    # first ledger, the page-rounded min(mbase, alloc_top), before any call. Run.v valid_mmap_base admits every page
-    # base in [mmap_base_min, mmap_base_max] (State.v), and alloc_top >= ALLOC_TOP_MIN, so every page top in
+    # first ledger, the page-rounded min(mbase, alloc_top), before any call. Run.v valid_launch_base (line 3758) is
+    # the rule that binds mbase: over the kernel builds (kb_rnd_bits up to 33 and the largest guard gap reach
+    # mmap_base_min, ASLR off gives mmap_base_max; Run.v's note on the pinned fields) it admits every page base in
+    # [mmap_base_min, mmap_base_max] (State.v), and alloc_top >= ALLOC_TOP_MIN, so every page top in
     # [MMAP_BASE_MIN, ALLOC_TOP_MIN] is a launch the model allows; vdso_len is 5 to 20 pages (State.v vdso_len_bounds)
     # by the kernel build. The pair fills the top-down window [PAGE_SIZE, mmap_top) from its base up, so the first
     # grant of the search ends at that base: the replay takes the launch whose pair starts there. Each later grant of
@@ -1143,13 +1145,15 @@ class Ledger:
         entries = self.reserved + self.maps
         answers = {}
         for thp in sorted(self.thp):
-            got = None
-            if thp and nz % PMD_SIZE == 0:
+            if thp and first and nz % PMD_SIZE == 0:
+                # Sys/Mm/Mmap.v linux_place takes the THP branch only for a grant whose hint rounds to 0 (first):
+                # a hint that is not free goes to topdown_search with no thp_align. When the padded search has no
+                # top-down fit, linux_place's fallback reads topdown_search's bottom-up window, which the replay
+                # does not follow: the answer is None, and placement is lost.
                 ret = highest_gap(entries, PAGE_SIZE, self.vdso_base, nz + PMD_SIZE)
-                got = None if ret is None else thp_align(ret)
-            if got is None:
-                got = highest_gap(entries, PAGE_SIZE, self.vdso_base, nz)
-            answers[thp] = got
+                answers[thp] = None if ret is None else thp_align(ret)
+            else:
+                answers[thp] = highest_gap(entries, PAGE_SIZE, self.vdso_base, nz)
         lowest = min([a] + [v for v in answers.values() if v is not None])
         if None in answers.values() or not region_free(self.uncertain, lowest, self.vdso_base - lowest):
             self.placement_lost = (f"the grant at {a:#x} would need the search's bottom-up fallback or a range an "
@@ -1314,6 +1318,12 @@ def _mmap(run, args, ret, errno, tid):
             return (f"mmap returned [{a:#x},{a + nz:#x}), which meets the binary's image or a mapping the replay holds "
                     "live: the model places a grant clear of both (Sys/Mm/Mmap.v linux_place)")
         if hint_free and a != g:
+            # the tracer's grant is live all the same: record it (and its PROT_NONE entry), as a top-down grant the
+            # tracer put elsewhere is recorded below, so that a later call on it is not judged as a call on free
+            # memory
+            led.maps.append((a, nz))
+            if noaccess:
+                led.noaccess.append((a, nz))
             return und(f"mmap returned {a:#x}, not its free hint {g:#x}: the model honours the hint there "
                        "(Sys/Mm/Mmap.v linux_place), and the tracer places a guest mapping by its own host mmap, which "
                        "may not")
