@@ -219,6 +219,13 @@ class Table(unittest.TestCase):
                          SINCE + "applies kay.0002-new.patch to fuzz_d: the binaries of fuzz_d differ from the "
                          "release's" + KAY_NOTES)
 
+    def test_a_patch_at_a_tree_of_a_dsl_fuzz_target(self):
+        """A block that links a DSL fuzz target (ov_target_build_dsl) names its fuzz target as ov_target_build does."""
+        build = self.PORT["projects/kay/build.sh"].replace("ov_target_build fuzz_d", "ov_target_build_dsl fuzz_d")
+        self.assertEqual(self.row("kay", ports=self.new_patch("targets/kay-fuzz_d", build=build)),
+                         SINCE + "applies kay.0002-new.patch to fuzz_d: the binaries of fuzz_d differ from the "
+                         "release's" + KAY_NOTES)
+
     def test_a_patch_in_a_tree_or_at_a_tree_that_holds_one(self):
         # kay-fuzz_ab's key starts with kay-fuzz_a's, as openssl-asn1parse's starts with openssl-asn1's: a tree is a
         # list of path components, so targets/kay-fuzz_ab is not in targets/kay-fuzz_a. The tree of kay-fuzz_f is
