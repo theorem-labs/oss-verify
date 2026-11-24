@@ -152,6 +152,7 @@ MODEL_FILES = {f"{MODEL_DIR}/{rel}": digest for rel, digest in {
     "Sys/SyscallTable.v": "69e580e125c702d19d8dabc800dd0e3c8ff803a463e7339a21a6bcef335d01d8",
     "Sys/Uaccess.v": "f71d78c20b19867ed126e50236988df07c5186b29c16e0bab65dbcd48518f276",
     "Sys/Uapi.v": "5087984eb9982d5fe99630b926b5695d3e1707f46f288bcb1c7d2fe0cf59d8a5",
+    "Vdso.v": "c214fd332740c6e1448a0b300e7619c34a38f3c277d42e8f6ff246df8d5a57df",
 }.items()}
 STANCES = ("off", "abort", "either")
 
@@ -207,6 +208,7 @@ SIGABRT = 6                                   # Sys/Uapi.v SIGABRT
 SIGPIPE = 13                                  # Sys/Uapi.v SIGPIPE
 SIGACTION_SIZE = 24                           # Sys/Kernel/Signal.v sigaction_struct: copy_bytes_map act 24
 TIMESPEC_SIZE = 16                            # Sys/Kernel/Time/PosixTimers.v, Hrtimer.v: copy_bytes_map tp 16
+STAT_SIZE = 128                               # Sys/Uapi.v STAT_SIZE: fstat's access_okb statbuf
 PID_MAX = 1 << 31                             # Sys/Kernel/Signal.v pid_positive: 1 <= pid < 2^31
 NGROUPS_MAX = 65536                           # Sys/Uapi.v NGROUPS_MAX
 PID_MAX_ENVELOPE = 1 << 22                    # Sys/Kernel/Fork.v PID_MAX_ENVELOPE: a task id is in (0, 2^22)
@@ -1997,6 +1999,10 @@ def _openat(run, args, ret, errno, tid):
         if why:
             return why
         install()
+        if fd is not None:
+            # the open found or created the name: the model's file system holds the key from here on (an
+            # exclusive create of it is -EEXIST, an unlink of it never -ENOENT) until a removal succeeds
+            run.present.add(path)
         return None
     if path == LOCALTIME_PATH:
         # Sys/Fs/Open.v openat_localtime_spec: -ENOENT for every word without O_CREAT; O_CREAT is unmodeled.
@@ -2196,7 +2202,7 @@ def _unlinkat(run, args, ret, errno, tid):
                           "Sys/Fs/Namei.v unlinkat_body_spec")
     if len(c) > NAME_MAX:
         return "a path longer than NAME_MAX (Sys/Fs/Namei.v unlinkat_body_spec)"
-    if found_vals and led.names_key(c):
+    if led.names_key(c):
         return (f"an unlink of {path!r} while a descriptor on it is open: the model declines "
                 "(Sys/Fs/Namei.v unlink_found_spec, fd_names_path)")
     if c in run.present:
@@ -2499,7 +2505,15 @@ def _readv(run, args, ret, errno, tid):
         if kind[0] != "devnull" and ret is not None and ret > 0:
             return (f"readv of a {kind_name(kind)} returned {ret}: a vectored read that delivers bytes there is "
                     f"unmodeled ({cite}, readv_buf_gap)")
-        return answered(ret, errno, {0}, {EFAULT, EINVAL}, what, cite)
+        why = answered(ret, errno, {0}, {EFAULT, EINVAL}, what, cite)
+        if why is None and kind[0] in ("eventfd", "dgram", "anon"):
+            # readv_imported answers 0 only for an iovec total of 0 and declines these kinds otherwise
+            # (ReadWrite.v:3449-3450, 3568, 3580); the total, and so the import's -EFAULT and -EINVAL, are behind
+            # the pointer
+            return und(f"{what} returned {ret_text(ret, errno) if ret is not None else 'nothing'}: the model "
+                       "answers 0 only for an iovec total of 0 and declines this kind otherwise, and the total is "
+                       f"behind the pointer ({cite}: readv_imported)")
+        return why
     if kind[0] == "dir":
         return answered(ret, errno, {0}, {EFAULT, EINVAL, EISDIR}, what, cite)
     if kind[0] == "socket":
@@ -2557,7 +2571,14 @@ def _writev(run, args, ret, errno, tid):
     if kind[0] in ("pipe", "eventfd"):
         if ret is not None and ret > 0:
             return f"{what} returned {ret}: a vectored write that moves bytes is unmodeled ({cite}: writev_buf_gap)"
-        return answered(ret, errno, {0}, {EFAULT, EINVAL}, what, cite)
+        why = answered(ret, errno, {0}, {EFAULT, EINVAL}, what, cite)
+        if why is None and kind[0] == "eventfd":
+            # the eventfd arm answers 0 only for an iovec total of 0 and declines otherwise (ReadWrite.v:3061);
+            # the total is behind the pointer
+            return und(f"{what} returned {ret_text(ret, errno) if ret is not None else 'nothing'}: the model "
+                       "answers 0 only for an iovec total of 0 and declines an eventfd otherwise, and the total is "
+                       f"behind the pointer ({cite})")
+        return why
     if kind[0] == "channel":
         # The channel arm's count is bounded only by the gathered bytes (below 2**64 and not an error address).
         return refused(ret, errno, {EFAULT, EINVAL}, what, cite)
@@ -2904,6 +2925,11 @@ def _nanosleep(run, args, ret, errno, tid):
     if past_task_size(rqtp, TIMESPEC_SIZE):
         return errno_only(ret, errno, {EFAULT}, "nanosleep of a request past TASK_SIZE", f"{cite}: access_okb rqtp 16")
     cut = EFAULT if rmtp != 0 and past_task_size(rmtp, TIMESPEC_SIZE) else EINTR
+    if cut == EFAULT and ret is not None and ret < 0 and errno == EFAULT:
+        # the -EFAULT of an rmtp past TASK_SIZE comes after rqtp is read; an rqtp in range that cannot be read is
+        # unmodeled (Hrtimer.v:439-441), and qemu prints rqtp as a pointer, so the trace does not say which
+        return und("nanosleep answered -EFAULT with rmtp past TASK_SIZE and rqtp in range: the model gives that "
+                   f"only for a readable rqtp, and an unreadable one is unmodeled ({cite})")
     return answered(ret, errno, {0}, {EINVAL, cut}, "nanosleep",
                     f"{cite}: an unreadable request or an unwritable rmtp in range is unmodeled, not -EFAULT")
 
@@ -2923,8 +2949,15 @@ def _fstat(run, args, ret, errno, tid):
         return kind_reason(fd, ret, errno, "fstat", cite)
     if kind[0] in ("channel", "dir", "socket", "pipe", "dgram", "stream", "eventfd"):
         return f"fstat of a {kind_name(kind)} descriptor is unmodeled ({cite})"
-    return answered(ret, errno, {0}, {EFAULT}, f"fstat of a {kind_name(kind)} descriptor",
-                    f"{cite}: fstat_file_spec, fstat_anon_spec, fstat_chrdev_spec")
+    # access_okb's -EFAULT is the only -EFAULT of these arms: a statbuf in range that cannot take all STAT_SIZE
+    # bytes is unmodeled (read_bytes_map of the writable map, Stat.v:559-562: a partial copy_to_user)
+    statbuf = num(args[1])
+    if statbuf is None:
+        return und(f"unparseable statbuf {args[1]}")
+    efault = {EFAULT} if past_task_size(statbuf, STAT_SIZE) else set()
+    return answered(ret, errno, {0}, efault, f"fstat of a {kind_name(kind)} descriptor",
+                    f"{cite}: fstat_file_spec, fstat_anon_spec, fstat_chrdev_spec (access_okb statbuf "
+                    f"{STAT_SIZE})")
 
 
 STATAT_FLAGS = {"AT_SYMLINK_NOFOLLOW": 0x100, "AT_EMPTY_PATH": 0x1000, "AT_NO_AUTOMOUNT": 0x800}
@@ -2995,7 +3028,14 @@ def _ioctl(run, args, ret, errno, tid):
         if ret == 0:
             return und("ioctl(SIOCGIFINDEX) that returned 0: the model answers that only for the name \"lo\", which "
                        "the trace does not show (Sys/Fs/Ioctl.v siocgifindex_spec, ifreq_names_lo)")
-        return errno_only(ret, errno, {EFAULT}, "ioctl(SIOCGIFINDEX)", "Sys/Fs/Ioctl.v siocgifindex_spec")
+        why = errno_only(ret, errno, {EFAULT}, "ioctl(SIOCGIFINDEX)", "Sys/Fs/Ioctl.v siocgifindex_spec")
+        if why is None and ret is not None:
+            # a readable name other than "lo", and an ifreq only partly writable, are unmodeled (Ioctl.v:207-221),
+            # and Linux answers -EFAULT from put_user_ifreq in both: the trace shows neither the name nor the memory
+            return und("ioctl(SIOCGIFINDEX) answered -EFAULT: the model gives that for an ifreq it cannot read or "
+                       "write, and is unmodeled for a name other than \"lo\" and for an ifreq only partly "
+                       "writable, which the trace does not show (Sys/Fs/Ioctl.v siocgifindex_spec)")
+        return why
     if req not in IOCTL_MODELED and (n is None or low32(n) not in IOCTL_NUMBERS):
         return (f"request {req}: the model answers only {'/'.join(sorted(IOCTL_MODELED))} "
                 "(Sys/Fs/Ioctl.v tty_only_request)")
@@ -3169,6 +3209,18 @@ def _rt_sigaction(run, args, ret, errno, tid):
         if act != 0 and past_task_size(act, SIGACTION_SIZE):
             return errno_only(ret, errno, {EFAULT}, "rt_sigaction(SIGPIPE) with an act past TASK_SIZE", cite)
         success = set() if oact != 0 and past_task_size(oact, SIGACTION_SIZE) else {0}
+        if ret is not None and ret < 0 and errno == EFAULT and (act or oact):
+            # The model answers -EFAULT for an unreadable act with no oact, and for no act and an oact past
+            # TASK_SIZE. With an act that reads as a handler other than SIG_DFL or SIG_IGN the arm is unmodeled
+            # (Signal.v:604) while the kernel still answers -EFAULT from a bad oact, and an oact in range that
+            # takes some of its bytes is unmodeled (sigpipe_oact_write, Signal.v:490); qemu prints act as a
+            # pointer, so the trace shows neither.
+            if (act != 0 and oact == 0) or (act == 0 and past_task_size(oact, SIGACTION_SIZE)):
+                return None
+            return und("rt_sigaction(SIGPIPE) answered -EFAULT with "
+                       + ("both act and oact" if act and oact else "an oact in range")
+                       + f": the model answers that only for an unreadable act with no oact, or for an oact past "
+                       f"TASK_SIZE, and qemu prints act as a pointer ({cite}, sigpipe_oact_write)")
         why = answered(ret, errno, success, {EFAULT} if act or oact else set(), "rt_sigaction(SIGPIPE)",
                        f"{cite}, sigpipe_oact_write")
         if why or act == 0 or (ret is not None and ret < 0):
@@ -3796,7 +3848,9 @@ def _clone(run, args, ret, errno, tid):
 def _clone3(run, args, ret, errno, tid):
     """Sys/Kernel/Fork.v clone3_spec: the size must be CLONE_ARGS_SIZE (88); then State.v copy_bytes_map: a uargs past
     access_okb is -EFAULT and nothing else; then the struct must be a plain fork (clone3_fork_args_b), then
-    clone3_resolve, which declines for the same shared descriptors as clone. qemu prints both arguments in full."""
+    clone3_resolve, which declines for the same shared descriptors as clone. qemu 10.0 has no clone3 (strace.list
+    has no entry and syscall.c no TARGET_NR_clone3 case), so the trace shows `Unknown syscall 435` and this rule
+    is not reached under it; it reads the arguments as the generic 64-bit format would print them."""
     if len(args) < 2:
         return und("unparseable argument list")
     if num(args[1]) != 88:
@@ -4114,8 +4168,14 @@ def _socketpair(run, args, ret, errno, tid):
     if ty & ~(SOCK_TYPE_MASK | SOCK_CLOEXEC | SOCK_NONBLOCK):
         return errno_only(ret, errno, {EINVAL}, f"socketpair with type {args[1]}", cite)
     if sint32(fam) == AF_UNIX and (ty & SOCK_TYPE_MASK) == 1 and sint32(proto) == 0:
-        why = answered(ret, errno, {0}, SOCKETPAIR_ERRNOS | {EFAULT}, "socketpair(AF_UNIX, SOCK_STREAM)",
-                       f"{cite}: socketpair_unix_written, socketpair_faulted")
+        # socketpair_faulted: -EFAULT only when access_okb sv 4 fails. An sv in range is writable, and then
+        # -EFAULT is no answer, or the arm is unmodeled.
+        sv = num(args[3])
+        if sv is None:
+            return und(f"unparseable sv {args[3]}")
+        efault = {EFAULT} if past_task_size(sv, 4) else set()
+        why = answered(ret, errno, {0}, SOCKETPAIR_ERRNOS | efault, "socketpair(AF_UNIX, SOCK_STREAM)",
+                       f"{cite}: socketpair_unix_written, socketpair_faulted (access_okb sv 4)")
         if why is None and ret == 0:
             run.led.pipe_fds_unknown = True
         return why
@@ -4376,7 +4436,13 @@ def _sendto(run, args, ret, errno, tid):
         return kind_reason(num(args[0]), ret, errno, "sendto", cite)
     if kind[0] in ("socket", "dgram") and (kind[0] == "dgram" or low32(fl) != MSG_NOSIGNAL):
         if efault and ret is not None and ret < 0 and errno == EFAULT:
-            return None
+            # access_ok_zero answers -EFAULT only for a buffer past access_okb; one in range reaches FdDgram or
+            # the flags test below, which are unmodeled
+            ok = access_ok(Arg.full(num(args[1])), Arg.full(count))
+            if ok is False:
+                return None
+            if ok is None:
+                return undecided("sendto's buffer range")
         return (f"sendto with flags {args[3]} on a {kind_name(kind)} returned {ret_text(ret, errno)}: unmodeled "
                 f"({cite}: past access_ok_zero only a socket with exactly MSG_NOSIGNAL is answered)")
     if kind[0] != "socket":
