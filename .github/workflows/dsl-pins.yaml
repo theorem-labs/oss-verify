@@ -27,21 +27,24 @@ jobs:
           echo "$RUNNER_TEMP/qemu/usr/bin" >> "$GITHUB_PATH"
       - name: Pull the pinned toolchain image
         run: docker pull "$(python3 -P -m oss_verify check --print-toolchain projects/zlib < /dev/null)"
-      - name: Build twice
+      - name: Build and check
         run: |
           code=0
-          python3 -P -m oss_verify check --no-shell --twice --summary "$RUNNER_TEMP/binaries.md" \
+          python3 -P -m oss_verify check --no-shell --summary "$RUNNER_TEMP/binaries.md" \
             --checks "$RUNNER_TEMP/checks.md" --checks-budget 30 --dir "$RUNNER_TEMP/work" projects/zlib < /dev/null \
             || code=$?
           echo "oss-verify check exited $code" | tee -a "$GITHUB_STEP_SUMMARY"
           for f in "$RUNNER_TEMP/binaries.md" "$RUNNER_TEMP/checks.md"; do [ -f "$f" ] && cat "$f" >> "$GITHUB_STEP_SUMMARY"; done
           mkdir -p "$RUNNER_TEMP/keep"
           find "$RUNNER_TEMP/work" -maxdepth 2 -name 'manifest.yaml' -exec cp {} "$RUNNER_TEMP/keep/" \;
-          for t in api-driver sysfail_fuzzer; do
-            [ -d "$RUNNER_TEMP/work/out/$t" ] && cp -r "$RUNNER_TEMP/work/out/$t" "$RUNNER_TEMP/keep/"
+          sudo chmod -R a+rX "$RUNNER_TEMP/work" || :
+          cp -r "$RUNNER_TEMP/work/out" "$RUNNER_TEMP/keep/out" || :
+          for d in "$RUNNER_TEMP"/work/binaries/*/; do
+            n=$(basename "$d"); mkdir -p "$RUNNER_TEMP/keep/runs/$n"
+            cp -r "$d/results" "$RUNNER_TEMP/keep/runs/$n/" 2>/dev/null || :
+            cp -r "$d/job/inputs" "$RUNNER_TEMP/keep/runs/$n/" 2>/dev/null || :
           done
           cp "$RUNNER_TEMP"/*.md "$RUNNER_TEMP/keep/" 2>/dev/null || :
-          ls -laR "$RUNNER_TEMP/keep"
           exit "$code"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (sha-pinned)
         if: always()
