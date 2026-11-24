@@ -1,7 +1,8 @@
-/* dsl.h - the shared machinery for the SECOND driver: a bytecode DSL that
+/* Copyright 2026 Theorem Labs, PBC
+ * SPDX-License-Identifier: MIT
+ * dsl.h - the shared machinery for the SECOND driver: a bytecode DSL that
  * drives a library's API directly, instead of forwarding one buffer to the
  * project's own fuzz harness.
- *
  * A target that carries a targets/<t>/dsl.c (or dsl.cc) gets a second family
  * of binaries beside its <t>-repro pair:
  *
@@ -380,9 +381,9 @@
  * walks the REMAINING frames' headers -- a pure function of the payload,
  * O(remaining bytes), no dispatch -- and every check frame it finds (op 255
  * whose sub is neither snap nor allocs, or with no sub byte at all) is one
- * FAILED check. A
- * program with no check frame is untouched by this: its status is 0/1 as it
- * always was, even at budget exhaustion.
+ * FAILED check. A program with no check frame is untouched by this: its
+ * status is 0 as it always was, even at budget exhaustion.
+ * (A library failure is never a status: see EXIT STATUS below.)
  *
  * THE SERIALIZER. `expect obj` and snap's per-slot lines need the CONTENT of a
  * handle. A project opts in with `#define TRAMP_DSL_SERIALIZE 1` and
@@ -403,12 +404,11 @@
  * divergence. Snap where the values matter.
  *
  * EXIT STATUS. 3 if any repeat had a failed check (short, unknown, dead,
- * unsupported, range and unreached included); else 1 if a library call
- * reported failure; else 0. 2 stays cli.c's. A program with no check frame can
- * never be 3. Loud and quiet builds compute IDENTICAL statuses: the VM's lines
- * go through the same counted, capped path as dsl_note, emit.h suppresses the
- * write and not the evaluation, and no check reads what was written.
- *
+ * unsupported, range and unreached included); else 0. A library failure is an
+ * observable (the trace, the summary's err= and the digest), never a status.
+ * 2 stays cli.c's. A program with no check frame can never be 3. Loud and quiet
+ * builds compute IDENTICAL statuses: emit.h suppresses the write and not the
+ * evaluation, and no check reads what was written.
  * That is the status THE VM returns. A library that ends the process itself --
  * exit(), abort(), an assert -- ends it with ITS status, mid-repeat, before the
  * summary line and before any check after that point (measured 2026-09-02:
@@ -533,12 +533,12 @@ extern "C" {
 
 /* ------------------------------------------------------- operation results --
  *
- * The distinction between LIBERR and SKIP is what keeps the exit status
+ * The distinction between LIBERR and SKIP is what keeps the counters
  * meaningful. LIBERR means the library was called and said no, which is a fact
  * about the input. SKIP means the operation never happened -- no handle of the
  * kind it needs was live, or the arena refused -- which is a fact about the
- * program's shape, and folding it into the status would make almost every
- * status 1 for a reason that is not about the library at all.
+ * program's shape. Neither is an exit status: the summary line counts both
+ * (err= and skip=), and the digest records each result.
  */
 #define DSL_OK      0   /* the library was called and reported success */
 #define DSL_LIBERR  1   /* the library was called and reported failure */
@@ -1389,7 +1389,7 @@ static void dsl_vop(dsl_vm *V) {
     break; }
   case DSL_VOP_ALLOC: {
     /* An uncapped count channel through the exit status: in the quiet tier
-     * this decides 3 against the library's 0/1 with no write, so N is
+     * this decides 3 against 0 with no write, so N is
      * recoverable by bisection where cli.c's counting mode clamps at 251. */
     unsigned long want, got = (unsigned long)(tramp_alloc_count() - V->alloc_base);
     if (!dsl_expect_need(V, 4)) { dsl_vnote(V, "expect alloc short FAIL\n"); break; }
@@ -1488,7 +1488,7 @@ int target_run(const unsigned char *config, size_t config_len,
   int terse = (c0 >> 2) & 1;
   unsigned scale = (unsigned)((c0 >> 3) & 3u);
   unsigned long step_max = (unsigned long)DSL_STEPS << (2u * scale);
-  int status = 0, any_failed = 0;
+  int any_failed = 0;
   unsigned rep;
 
   /* config[2..] is the schedule's extension (header, "THE ALLOCATION-FAILURE
@@ -1634,16 +1634,16 @@ int target_run(const unsigned char *config, size_t config_len,
     }
 
     if (V.failed) any_failed = 1;
-    if (V.saw_liberr) status = 1;
+    /* A library failure is an observable (err=, the digest), not a status. */
   }
 
   /* 3: some expectation failed in some repeat (including short, unknown, dead,
-   * unsupported, range and unreached). Else 1: a library call reported failure.
-   * Else 0. Never 2: cli.c reserves that for a harness or IO error, and an
+   * unsupported, range and unreached). Else 0, whatever the library returned:
+   * a library failure is one of the observables (docs/build-contract.md, "The
+   * fuzz targets"). Never 2: cli.c reserves that for a harness or IO error, and an
    * arena refusal is a SKIP rather than an error precisely so that a program's
-   * shape cannot masquerade as one. A program with no check frame can never
-   * be 3. */
-  return any_failed ? 3 : status;
+   * shape cannot masquerade as one. A program with no check frame can never be 3. */
+  return any_failed ? 3 : 0;
 }
 
 #ifdef __cplusplus

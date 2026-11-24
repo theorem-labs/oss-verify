@@ -1,7 +1,8 @@
-/* tramp_alloc.h - the DSL tier's allocation-failure schedule: one counter, one
+/* Copyright 2026 Theorem Labs, PBC
+ * SPDX-License-Identifier: MIT
+ * tramp_alloc.h - the DSL tier's allocation-failure schedule: one counter, one
  * schedule, for the whole process, consulted from an object that no flavour
  * instruments.
- *
  * Design: the allocation-failure design (sections 4.1,
  * 4.2, 4.4). This header is the API the driver (src/dsl.h) calls; the
  * trampolines the library's renamed references land on are declared at the
@@ -51,7 +52,6 @@
  * the real allocator would have refused them or not. An index that depended
  * on which requests a given allocator considers valid would denote different
  * allocations under musl and under the interceptor.
- *
  * Not thread-safe, on purpose: the tier is single-threaded (the DSL VM), and
  * a library that allocated from a second thread would make "the i-th
  * allocation" ill-defined in a way no counter could repair.

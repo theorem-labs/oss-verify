@@ -41,7 +41,9 @@ name: "Toolchain images: publish"
 # of this repository can write such a run. A run for a pull request from a fork gets a token that cannot write. A run
 # for a branch of this repository gets the permissions that its workflow file asks for. The package also holds the
 # release's own tags: 2026.10.0-rc.1, 2026.10.0-rc.2, 2026.10.0-rc.2-fix1 and the -base tag of each. So the controls
-# are the code owners' review of /.github/ on main (.github/CODEOWNERS) and who may push a branch of this repository.
+# are who may push a branch of this repository, and the code owners' review on main of each workflow: .github/CODEOWNERS
+# owns each one, and .github/scripts/workflow-credentials, which tests.yaml runs, fails a pull request that leaves one
+# with no owner.
 #
 # publish runs only on main, after the merge, so no pull-request run shows that it failed. OS Verify's Legion
 # controller owns a failed run of this workflow on main.

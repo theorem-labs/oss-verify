@@ -1,7 +1,8 @@
-/* faultalloc.h - the hook-side allocator of the allocation failure schedule:
+/* Copyright 2026 Theorem Labs, PBC
+ * SPDX-License-Identifier: MIT
+ * faultalloc.h - the hook-side allocator of the allocation failure schedule:
  * a malloc/realloc/free triple a library's pluggable-allocator hook can point
  * at, which counts every call and asks the schedule whether to refuse it.
- *
  * bit i of the schedule set means the i-th allocation the LIBRARY attempts
  * returns NULL. Keyed on allocation INDEX, never on address or size: ASan
  * changes both, and an address-keyed schedule would not denote the same thing
@@ -66,7 +67,6 @@
  * allocator, so both sides of the pair carry the identical header. It would
  * only matter if some theorem compared this allocator against an unhooked
  * one, and none does.
- *
  * The header-word addition (sizeof(fa_hdr_t) + sz) is guarded against
  * overflow in the allocator, not left to each caller. A hostile or merely
  * huge `sz` near SIZE_MAX would otherwise wrap that addition, so malloc()

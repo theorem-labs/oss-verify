@@ -1,5 +1,6 @@
-/* zlib-checksum_fuzzer/dsl.c - the DSL driver for zlib.
- *
+/* Copyright 2026 Theorem Labs, PBC
+ * SPDX-License-Identifier: MIT
+ * zlib-checksum_fuzzer/dsl.c - the DSL driver for zlib.
  * The optional second driver (src/dsl.h): a bytecode program decoded from the
  * input's payload, whose operations are zlib's own API rather than the one
  * entry point OSS-Fuzz's projects/zlib/checksum_fuzzer.c exposes.
@@ -175,7 +176,6 @@
  * REBUILT 2026-09-03, landing the two items the 2026-09-02 pass measured and
  * queued (its Deviations 3 and 4);
  * the op table and its order are unchanged:
- *
  *   - want_def no longer asks deflateInit2_ for the one cell it rejects
  *     (windowBits 8 with the raw or gzip wrapper), so every implicit creation
  *     succeeds as the comment above it always claimed; and both want_def and

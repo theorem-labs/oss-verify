@@ -1,6 +1,7 @@
-/* emit.h - the plugins' only route to stdout, and the thing -DHARNESS_QUIET
+/* Copyright 2026 Theorem Labs, PBC
+ * SPDX-License-Identifier: MIT
+ * emit.h - the plugins' only route to stdout, and the thing -DHARNESS_QUIET
  * actually silences.
- *
  * WHY THIS EXISTS. Spec s4 says the quiet driver "writes nothing to stdout or
  * stderr" on success, and spec s2 leans on it: T3's observable is the exit
  * code alone, which is only true if a successful quiet run emits no WriteEv at
@@ -19,7 +20,6 @@
  * build would have returned. That is the point: T3 is a claim about the
  * library's behaviour, and a quiet build that also skipped the work would be
  * proving something about a different program.
- *
  * WHY NOT REDEFINE printf. A macro over the stdio names would silence library
  * code that includes <stdio.h> too, which is not this file's business, and it
  * would break the plugins' snprintf() calls into fixed buffers -- those format

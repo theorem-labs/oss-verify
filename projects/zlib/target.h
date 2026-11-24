@@ -1,7 +1,7 @@
-/* target.h - the contract every target plugin implements.
- *
- * The driver knows nothing about any library. It decodes the input file,
- * installs the allocator failure schedule, and hands the two byte ranges over.
+/* Copyright 2026 Theorem Labs, PBC
+ * SPDX-License-Identifier: MIT
+ * target.h - the contract every target plugin implements. The driver knows nothing about any library.
+ * It decodes the input file, installs the allocator failure schedule, and hands the two byte ranges over.
  */
 #ifndef TARGET_H
 #define TARGET_H

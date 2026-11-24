@@ -1,7 +1,8 @@
-/* tramp_sys.h - the system-call failure schedule and the one in-memory file it
+/* Copyright 2026 Theorem Labs, PBC
+ * SPDX-License-Identifier: MIT
+ * tramp_sys.h - the system-call failure schedule and the one in-memory file it
  * acts on, for a DSL driver whose library makes file system calls (zlib's
  * gz functions).
- *
  * WHAT THIS IS. A DSL driver may not touch the filesystem (src/dsl.h rule 4:
  * the run must be a function of the input alone). A library whose file layer
  * calls open/read/write/lseek/close/fcntl (zlib's gz* functions) is therefore
@@ -171,7 +172,6 @@
  * only when at least one byte would move (read at end of file and transfers of
  * 0 bytes answer 0, an overflowing offset answers EINVAL first), and the
  * differential passes NULL buffers to both sides.
- *
  * COMPILED WITH THE DRIVER'S COMPILER like tramp_alloc.o (byte-identical across
  * flavours, uninstrumented), no dynamic allocation, static state, not thread
  * safe: the DSL tier is single-threaded. Data moves with memcpy of exactly the

@@ -1,7 +1,8 @@
-/* tramp_sys.c - the six file-system-call trampolines, the one in-memory regular
+/* Copyright 2026 Theorem Labs, PBC
+ * SPDX-License-Identifier: MIT
+ * tramp_sys.c - the six file-system-call trampolines, the one in-memory regular
  * file they answer from, and the per-kind failure schedule. See tramp_sys.h for
  * the contract (what a schedule entry means, rules (a)-(f), the non-claims).
- *
  * What is specific to this translation unit:
  *
  * THE FLAG VALUES ARE LINUX'S, SPELLED HERE. The library passes open/fcntl
@@ -19,7 +20,6 @@
  * (rules (b), (f)), then the state change, then the return. A failure the
  * model itself produces (EBADF on a closed descriptor) is never replaced.
  * fcntl ticks and never injects: it has no failure class.
- *
  * THE FILE: `fsize` is its size as the Linux model and the kernel state it, any
  * 64-bit value a write can reach. `fbytes` STORES its first TRAMP_SYS_FILE_MAX
  * bytes, with the invariant that every stored byte at or past `fsize` is zero.

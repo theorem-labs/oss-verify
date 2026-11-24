@@ -18,10 +18,10 @@ name: Enrollment merged
 #
 # This workflow holds no permission, checks out nothing, and runs no code of the pull request.
 # pull_request: the workflow file comes from the merge commit, so a pull request that changes it controls this run.
-# The code-owner rule on /.github/ of .github/CODEOWNERS guards the merge of such a pull request. enroll-dispatch.yml
-# sends no pull request for its theorem statements unless all its files are under one projects/<name>/ (the_project()
-# of .github/scripts/enroll-dispatch), and none that changes a steering file (.github/scripts/steering.py) until a
-# person approves its head.
+# .github/CODEOWNERS owns this file, as it owns every workflow, so a code owner approves the merge of such a pull
+# request. enroll-dispatch.yml sends no pull request for its theorem statements unless all its files are under one
+# projects/<name>/ (the_project() of .github/scripts/enroll-dispatch), and none that changes a steering file
+# (.github/scripts/steering.py) until a person approves its head.
 on:
   pull_request:
     types: [closed]
@@ -32,6 +32,9 @@ on:
         type: string
 run-name: "merged #${{ github.event.pull_request.number || inputs.pr }}"
 permissions: {}
+# No job reads or writes the Actions cache: a run by hand on main could otherwise save in main's cache, which review.yml
+# restores for a review.
+cache-mode: none
 jobs:
   merged:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
