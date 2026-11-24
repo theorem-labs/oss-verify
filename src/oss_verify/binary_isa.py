@@ -403,12 +403,12 @@ def decode(w):
             return "mul-32" if f3 in (0, 4, 5, 6, 7) else None
         return None
     if opc == 0x0F:
-        # fence needs rd = rs1 = 0, and fm = 0 or exactly fence.tso (fm = 8, pred = succ = rw); fence.i is one word.
+        # fence and fence.i keep their reserved fields raw (rd, rs1, fm, fence.i's imm): any of them decodes, and
+        # Sem.v's exec runs every fence as a no-op.
         if f3 == 0:
-            ok = rd == 0 and rs1 == 0 and (_bits(w, 28, 4) == 0 or _bits(w, 20, 12) == 0x833)
-            return "fence" if ok else None
+            return "fence"
         if f3 == 1:
-            return "fence.i" if w == 0x0000100F else None
+            return "fence.i"
         return None
     if opc == 0x73:
         # ecall and ebreak only: the privileged SYSTEM instructions decode to None.
@@ -445,17 +445,13 @@ def decode(w):
             return "fminmax" if f3 in (0, 1) else None
         if f7 in (0x50, 0x51):
             return "fcmp" if f3 in (0, 1, 2) else None
-        if f7 in (0x60, 0x61, 0x68):
+        if f7 in (0x60, 0x61, 0x68, 0x69):
+            # Every rm decodes, also on the exact fcvt.d.w and fcvt.d.wu; Sem.v's exec rejects rm 5 and 6.
             return "fcvt" if rs2 in (0, 1, 2, 3) else None
-        if f7 == 0x69:
-            # fcvt.d.w and fcvt.d.wu are exact, and decode only with rm = 0; fcvt.d.l and fcvt.d.lu take any rm.
-            if rs2 in (0, 1):
-                return "fcvt" if f3 == 0 else None
-            return "fcvt" if rs2 in (2, 3) else None
         if f7 == 0x20:
             return "fcvt" if rs2 == 1 else None
         if f7 == 0x21:
-            return "fcvt" if rs2 == 0 and f3 == 0 else None
+            return "fcvt" if rs2 == 0 else None
         if f7 in (0x70, 0x71):
             return "fmv/fclass" if rs2 == 0 and f3 in (0, 1) else None
         if f7 in (0x78, 0x79):
@@ -554,6 +550,11 @@ def outside(w):
     3. It is an F or D arithmetic, square root, fused multiply-add or conversion with the reserved rounding mode 5 or
        6: Sem.v's resolve_rm calls Fpu.v's rmode_of_field, which answers None for them, so exec answers EIllegal and
        interp_eff_accesses MachineUnmodeled. Rounding mode 7 takes frm at run time and is not decided here.
+
+    The model also gives up on two things a word does not show, which this check does not decide: a load whose
+    range meets the vvar pages (interp_eff_accesses answers MachineUnmodeled where any other failed load is
+    MachineFault), and a fetch from the vDSO text (fetch_failure answers MachineUnmodeled). Both depend on the
+    address at run time; the vDSO and vvar are mapped by execve, not by the file this check reads.
     """
     cls = decode(w)
     if cls is None:
