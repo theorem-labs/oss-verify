@@ -2919,7 +2919,11 @@ def _clock_getres(run, args, ret, errno, tid):
     if sec != 0 or not (nsec == 1 if cid in (2, 3) else 0 < nsec < 10 ** 9):
         return (f"clock_getres({args[0]}) answered the resolution {sec}s {nsec}ns, which clock_getres_resolution_b "
                 f"does not admit ({cite})")
-    return None
+    # qemu's TARGET_NR_clock_getres returns 0 without checking that host_to_target_timespec could write tp, and
+    # strace prints what tp then holds: a read-only tp in range, which the model leaves unmodeled
+    # (clock_getres_dst_ok_b, PosixTimers.v:685-690), prints the same success when its bytes read as a resolution
+    return und(f"clock_getres({args[0]}) into a tp in range answered 0: qemu does not check that it wrote tp, and "
+               f"a read-only tp, which the model leaves unmodeled, prints the same ({cite}: clock_getres_dst_ok_b)")
 
 
 def _nanosleep(run, args, ret, errno, tid):

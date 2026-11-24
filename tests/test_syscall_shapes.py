@@ -2523,7 +2523,8 @@ KERNEL_CASES = [
     ("1 set_robust_list(0x40007ff8b0,24) = -1 errno=38", "undecided"),
     ("1 set_robust_list(0x40007ff8b0,24) = 0", "undecided"),
     # Sys/Kernel/Time/PosixTimers.v clock_getres_spec.
-    ("1 clock_getres(CLOCK_MONOTONIC,0x40007ff8b0) = 0 ({tv_sec = 0,tv_nsec = 1})", "pass"),
+    # a success into a tp in range: a read-only tp prints the same, and the model leaves it unmodeled
+    ("1 clock_getres(CLOCK_MONOTONIC,0x40007ff8b0) = 0 ({tv_sec = 0,tv_nsec = 1})", "undecided"),
     ("1 clock_getres(CLOCK_MONOTONIC,0x40007ff8b0) = 0 ({tv_sec = 1,tv_nsec = 0})", "fail"),
     ("1 clock_getres(CLOCK_PROCESS_CPUTIME_ID,0x40007ff8b0) = 0 ({tv_sec = 0,tv_nsec = 4000000})", "fail"),
     ("1 clock_getres(CLOCK_MONOTONIC,NULL) = 0 (NULL)", "pass"),
@@ -2626,6 +2627,10 @@ REVIEW_305_CASES = [
     # 8. ioctl(SIOCGIFINDEX): -EFAULT is also Linux's answer where the model is unmodeled
     ("ioctl SIOCGIFINDEX, -EFAULT", DGRAM3 + "1 ioctl(3,SIOCGIFINDEX,0x40007ff8b0) = -1 errno=14\n", "undecided",
      "SIOCGIFINDEX"),
+    # 11. clock_getres: qemu returns 0 without checking that it wrote tp, so a read-only tp in range prints a success
+    ("clock_getres into a tp in range that answered 0",
+     "1 clock_getres(CLOCK_MONOTONIC,0x40007ff8b0) = 0 ({tv_sec = 0,tv_nsec = 1})\n", "undecided", "clock_getres"),
+    ("clock_getres with a NULL tp that answered 0", "1 clock_getres(CLOCK_MONOTONIC,NULL) = 0 (NULL)\n", "pass", None),
 ]
 
 
