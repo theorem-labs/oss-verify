@@ -1,0 +1,39 @@
+# Temporary, never merged: where qemu-user 10.0.11 places checksum_fuzzer.asan's anonymous mappings under each
+# placement setting (default, reserved_va, guest_base).
+name: qemu-placement-probe
+on:
+  push:
+    branches: ['ci/qemu-placement-probe']
+permissions: {contents: read, actions: read}
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install qemu-user 10.0.11
+        run: |
+          mkdir "$RUNNER_TEMP/qemu" && cd "$RUNNER_TEMP/qemu"
+          deb=qemu-user_10.0.11+ds-0+deb13u1_amd64.deb
+          curl -fsSL --retry 3 -o "$deb" https://snapshot.debian.org/file/a0eaa62f815efb2361d43b1e3f8011c17ad9123a
+          echo "6b6fea55551fbcc1eb30e146ad5abdfbb49f8fa8c5998016242126de4d7f80df  $deb" | sha256sum -c --quiet
+          dpkg-deb -x "$deb" .
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0 (sha-pinned)
+        with:
+          name: dsl-pins
+          run-id: 45297098811
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/art
+      - name: Probe
+        run: |
+          q="$RUNNER_TEMP/qemu/usr/bin/qemu-riscv64"
+          "$q" --version | head -1
+          b="$RUNNER_TEMP/art/out/checksum_fuzzer/checksum_fuzzer.asan"
+          chmod +x "$b"
+          cd "$(mktemp -d)"
+          printf '\0\0\0\0\0\0' > input.bin
+          for setting in "" "-R 0x10000000000" "-R 0x400000000000" "-R 0x7ffffffff000" "-B 0x100000000000" "-B 0x200000000000 -R 0x10000000000"; do
+            echo "=== qemu-riscv64 $setting"
+            # shellcheck disable=SC2086
+            timeout 120 "$q" $setting -strace "$b" input.bin > out.txt 2> trace.txt; echo "exit $?"
+            grep -E 'mmap\(NULL|munmap' trace.txt | head -12
+            tail -n 2 trace.txt
+          done
