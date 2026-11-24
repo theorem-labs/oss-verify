@@ -177,7 +177,7 @@
  * the 13-byte probe.bin -- one of the two inputs every gate runs -- would
  * exercise more than the ~4 operations its bytes spell (measured then: 73 steps
  * on the first brotli build, 67 of them DSL_SKIP; the reachability design
- * keeps the record). With authored programs (the assembler, gen_program.py)
+ * keeps the record). With authored programs (the assembler, the program generator)
  * it no longer earned its complexity -- and worse, it made "the final value of
  * the run" a function of the STEP BUDGET instead of of what the author wrote,
  * which is fatal to expectations (below). So: probe.bin now executes ONE frame
@@ -311,7 +311,7 @@
  *
  * THE ESCAPE. A frame whose op byte is 255 is not a project op. It is decoded
  * before the modulo, so exactly one of the 256 byte values changes meaning
- * (it used to mean `255 % dsl_ops()`); every asm.py-authored program and every
+ * (it used to mean `255 % dsl_ops()`); every assembler-authored program and every
  * witness_payload(k) is unchanged frame by frame. The first operand byte is
  * the SUB-op; the rest are its operands, little-endian, fixed width:
  *
@@ -353,7 +353,7 @@
  * something: [snap] + 4096 project frames runs 4095 of them under the default
  * budget, and the evicted project frame is not flagged (only CHECKS are
  * "unreached"; a project frame the budget cut is the budget doing what it
- * says). That is what lets gen_program.py record values from a plain run and
+ * says). That is what lets the program generator record values from a plain run and
  * assert them afterwards, and why it fits the budget to the CHECKED program,
  * not just the snap-bearing one.
  *
@@ -959,7 +959,7 @@ static void *dsl_buf(dsl_vm *V, size_t cap, size_t *out_n) {
  *
  * One path to stdout, and it is the only one a project may use: emit.h's
  * emit_bytes, through here. A project that calls printf directly writes in the
- * QUIET build too, and check_quiet.sh fails the binary -- which is the gate
+ * QUIET build too, and the quiet check fails the binary -- which is the gate
  * doing its job, but it is cheaper to read this paragraph.
  *
  * The digest is folded in the QUIET build as well. Nothing reads it there, and
@@ -1264,7 +1264,7 @@ static uint64_t dsl_vop_u64(dsl_vm *V) {
   return lo | (hi << 32);
 }
 
-/* snap: print the state a check could assert, in the form gen_program.py
+/* snap: print the state a check could assert, in the form the program generator
  * harvests. Not a check -- n_chk and n_fail are untouched. At most
  * 1 + DSL_HANDLES lines; the per-slot line carries kind and serialized (n, h)
  * only, never the handle's `n` (rule 3: it may be a pointer). */
@@ -1303,8 +1303,8 @@ static void dsl_vop(dsl_vm *V) {
   if (sub == DSL_VOP_SNAP) { dsl_snap(V); return; }   /* observe: not a check */
   if (sub == DSL_VOP_ALLOCS) {                         /* observe: not a check */
     /* This repeat's schedule ticks so far. Loud only and never folded, like
-     * every VM line, so a program can carry one after every frame (gen_program
-     * cover --allocs) and answer "which op does allocation #N fall in" from
+     * every VM line, so a program can carry one after every frame (the program
+     * generator's cover mode) and answer "which op does allocation #N fall in" from
      * one plain run -- and, byte-compared across flavours, certify that bit i
      * names the same allocation on both sides (header, "MEASURED"). */
     dsl_vnote(V, "allocs n=%u\n", tramp_alloc_count() - V->alloc_base);

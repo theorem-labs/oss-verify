@@ -7,7 +7,7 @@
  * all. Before this header, -DHARNESS_QUIET reached exactly one thing --
  * cli.c's DIAG(), which is stderr -- and every plugin wrote its result to
  * stdout unconditionally. A "quiet" build therefore still issued writev (and
- * with it the isatty ioctl, see check_syscalls.sh), so the trace that carries
+ * with it the isatty ioctl, see the system-call check), so the trace that carries
  * T3 was the loud trace with the diagnostics removed. The macro was named for
  * a property the build did not have.
  *
