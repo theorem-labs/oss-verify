@@ -41,10 +41,10 @@ LIB_CFLAGS=""
 ov_target_build compress_fuzzer
 )
 
-# compress_roundtrip_full_fuzzer: not a target of the release. Its block gives it the three settings of one fuzz target
-# (docs/build-contract.md): the 2^29-byte driver limit, the C library that the block builds (musl f21a9653 with the
-# patches musl-0001-export-pthread-struct-size.diff and musl-0002-init-tls-check-mmap.diff, built by musl's own
-# configure, make and make install), and no path rewrite. These give the bytes that its harness record pins.
+# compress_roundtrip_full_fuzzer: not a target of the release. Its block gives it two settings of one fuzz target
+# (docs/build-contract.md): the C library that the block builds (musl f21a9653 with the patches
+# musl-0001-export-pthread-struct-size.diff and musl-0002-init-tls-check-mmap.diff, built by musl's own configure, make
+# and make install), and no path rewrite. These give the bytes that its harness record pins.
 # compress_roundtrip_full_fuzzer.c is copied byte for byte from Theorem Labs' internal proofs repository, where the
 # fuzz target's harness record names it (projects/zlib/compress_roundtrip_full_fuzzer/source/
 # compress_roundtrip_full_fuzzer.c, sha256 a79a180200e27dee71b91bfaa08a6389437ff876e275a14ff66ede879d64217e).
@@ -82,7 +82,6 @@ build_lib() {
 }
 LIB_ARCHIVE="lib/liboft.a"
 LIB_CFLAGS=""
-export OV_MAX_INPUT_LOG2=29
 export OV_LIBC="$LIBROOT/$T.musl/install/usr/lib/libc.a"
 ov_target_build compress_roundtrip_full_fuzzer
 )

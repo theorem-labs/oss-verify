@@ -1,0 +1,22 @@
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+#
+# The CodeQL configuration of .github/workflows/codeql.yml: which files each analysis reads. The paths filters of the
+# workflows codeql-<language>.yml decide only when a pull request starts an analysis; this file decides what the
+# analysis reads, on a pull request and on a push to main. CodeQL honours paths-ignore for Python and GitHub Actions,
+# and for C/C++ in build mode none, the mode of each of them here.
+#
+# Not analysed:
+#   seeds/           the seeded projects: their build files and fuzz targets, much of them upstream's text.
+#   projects/        the enrolled projects: their build files and fuzz targets, which enrollment and review check.
+#   tests/fixtures/  the inputs of the tests: small projects and objects, some of them bad on purpose.
+#   .github/scripts/frame-pointers/
+#                    the probes of toolchain-images.yaml's job make, which runs them with contents: read alone. This
+#                    directory has no code owner (.github/CODEOWNERS), so no job that holds a credential may read it,
+#                    and the push jobs of the analysis hold security-events: write. It also holds the frame-pointer
+#                    probe crate, Rust, which no workflow analyses (.github/workflows/codeql.yml says why).
+paths-ignore:
+  - seeds
+  - projects
+  - tests/fixtures
+  - .github/scripts/frame-pointers

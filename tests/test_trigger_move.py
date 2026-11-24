@@ -8,14 +8,20 @@ first-time contributor after the screen (OSSV-679):
 With `-k held`, only the cases of the held runs run. With `-k 'not held'`, only the other cases run.
 
 The move:
-  (r)  No workflow starts on pull_request_target. A workflow that starts on pull_request reads no secret, and its jobs
-       have no identity token, no environment and only read permissions.
+  (r)  The rule is .github/scripts/workflow-credentials, which tests.yaml's job suite runs on every event, and these
+       cases run its pull_request_holds on this tree and on changed copies. No workflow starts on pull_request_target. A
+       workflow that starts on pull_request reads no secret, and its jobs have no identity token and no environment.
+       A job of it that can run on pull_request has only read permissions: a job with a write permission has the if
+       github.event_name == 'push', and that permission is security-events: write alone (CodeQL's push jobs). A job
+       that calls a workflow of this repository is held to the same with that workflow's jobs, and passes it no
+       secret.
   (s)  A Build run's artifact build-results that names another pull request or another head, or that holds a diff,
        changes nothing that review.yml reads or posts: route reads the pull request and its head from the API,
        .github/scripts/take-build-results gives its fixed line, the gather job reads the text and the diff from the
        API, and the comment job posts to that pull request at that head.
-  (u)  The list of .github/scripts/steering.py is the list of the last patterns of .github/CODEOWNERS, which give a file
-       to @theorem-labs/engineering and @theorem-labs/research, at commit 62081ee and today.
+  (u)  The list of .github/scripts/steering.py is the patterns that .github/CODEOWNERS owned at commit 62081ee, all of
+       /.github/ and /src/ among them, and each file that CODEOWNERS owns today is a steering file but
+       docs/seeded-projects.tsv (NOT_STEERING): take-project and triage.py read it from the base branch.
   (w)  Enroll dispatch sends no enrollment that changes a steering file, and puts no label on it, until a person
        approved its head: for an open pull request and for a merge.
   (x)  No workflow with workflow_dispatch builds the code of a pull request (oss-verify check, docker).
@@ -514,53 +520,163 @@ class PullRequestWorkflows(unittest.TestCase):
         self.assertTrue(found)
         return found
 
-    def test_r_no_pull_request_target_and_a_pull_request_job_holds_nothing(self):
-        self.r_case()
-
     def test_control_r_a_calling_job_with_secrets_inherit(self):
         # toolchain-images.yaml's docker-tests calls frame-pointer-tests.yaml; with secrets: inherit it would pass that
         # workflow every secret, and the file would hold no text "secrets.".
-        copies = {}
-        for name in ("unchanged", "changed"):
-            copies[name] = pathlib.Path(self.enterContext(tempfile.TemporaryDirectory())) / "workflows"
-            shutil.copytree(ROOT / ".github" / "workflows", copies[name])
-        calling = copies["changed"] / "toolchain-images.yaml"
+        root = pathlib.Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.copy_workflows(root)
+        self.assertEqual(self.pull_request_holds(root, "toolchain-images.yaml"), [], "the unchanged copy")
+        calling = root / ".github" / "workflows" / "toolchain-images.yaml"
         line = "    uses: ./.github/workflows/frame-pointer-tests.yaml\n"
         self.assertEqual(calling.read_text().count(line), 1, "the line of docker-tests that the control follows")
         calling.write_text(calling.read_text().replace(line, line + "    secrets: inherit\n"))
-        self.r_case(copies["unchanged"])
-        with self.assertRaises(AssertionError) as caught:
-            self.r_case(copies["changed"])
-        self.assertIn("toolchain-images.yaml, the job docker-tests", str(caught.exception))
+        self.assertIn("toolchain-images.yaml, the job docker-tests: it passes secrets to "
+                      "./.github/workflows/frame-pointer-tests.yaml",
+                      self.pull_request_holds(root, "toolchain-images.yaml"))
 
-    def r_case(self, directory=ROOT / ".github" / "workflows"):
-        """(r) on the workflow files of `directory`."""
-        for path in self.workflows(directory):
+    @staticmethod
+    def copy_workflows(root):
+        """Copy .github/workflows into the tree `root`, with the scripts of the rule (r): workflow-credentials, and
+        steering.py, which it imports."""
+        shutil.copytree(ROOT / ".github" / "workflows", root / ".github" / "workflows")
+        (root / ".github" / "scripts").mkdir()
+        for name in ("workflow-credentials", "steering.py"):
+            shutil.copy(ROOT / ".github" / "scripts" / name, root / ".github" / "scripts" / name)
+
+    def pull_request_holds(self, root, name):
+        """pull_request_holds of the tree `root`'s .github/scripts/workflow-credentials, the rule (r) that tests.yaml's
+        job suite runs: each way the workflow .github/workflows/<name> of `root` breaks (r), as "<file>, <where>: <why>"
+        or "<file>: <why>"."""
+        script = root / ".github" / "scripts" / "workflow-credentials"
+        self.assertTrue(script.is_file(), f"{script}: the tree has no rule (r)")
+        saved = list(sys.path)
+        try:
+            loader = importlib.machinery.SourceFileLoader("workflow_credentials_of_this_test", str(script))
+            module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+            loader.exec_module(module)
+        finally:
+            sys.path[:] = saved
+        return module.pull_request_holds(root, name)
+
+    def test_r_no_pull_request_target_and_a_pull_request_job_holds_nothing(self):
+        writers = []
+        for path in self.workflows():
+            workflow = yaml.load(path.read_text(), Loader=YAML_LOADER)
+            self.assertEqual(self.pull_request_holds(ROOT, path.name), [], path.name)
+            if "pull_request" in triggers(workflow):
+                writers += [(path.name, n) for n, job in workflow["jobs"].items()
+                            if isinstance(job.get("permissions"), dict) and "write" in job["permissions"].values()]
+        # The rule's one exception has a case in this tree, so the rule is read on it: CodeQL's push jobs.
+        self.assertIn(("codeql-python.yml", "push"), writers)
+
+    # Controls of (r): each changes a copy of .github/workflows, and the rule must name the change.
+    CONTROLS = {
+        "a write job with no if": ("codeql-python.yml", "    if: github.event_name == 'push'\n", "",
+                                   "codeql-python.yml, the job push: security-events: write, but its if is not"),
+        "a write job whose if also holds on pull_request": (
+            "codeql-python.yml", "    if: github.event_name == 'push'\n",
+            "    if: github.event_name == 'push' || github.event_name == 'pull_request'\n",
+            "codeql-python.yml, the job push: security-events: write, but its if is not"),
+        "write permissions for the whole workflow": (
+            "codeql-python.yml", "permissions: {}\n", "permissions: {security-events: write}\n",
+            "codeql-python.yml, the workflow: security-events: write, but the workflow's permissions reach every job"),
+        "a workflow with no permissions": ("codeql-python.yml", "permissions: {}\n", "",
+                                           "codeql-python.yml, the workflow: no permissions are given"),
+        "a called job with an environment": ("codeql.yml", "    runs-on: ubuntu-24.04\n",
+                                             "    environment: comment\n    runs-on: ubuntu-24.04\n",
+                                             "codeql.yml, the job analyze: it has an environment"),
+        "a called job asking for write on pull_request": (
+            "codeql.yml", "    runs-on: ubuntu-24.04\n",
+            "    permissions: {security-events: write}\n    runs-on: ubuntu-24.04\n",
+            "codeql.yml, the job analyze: security-events: write, but its if is not"),
+        "secrets passed to a called workflow": (
+            "codeql-python.yml", "      language: python\n      build-mode: none\n\n",
+            "      language: python\n      build-mode: none\n    secrets: inherit\n\n",
+            "codeql-python.yml, the job pull-request: it passes secrets to"),
+        "a push job with write-all": (
+            "codeql-python.yml", "    permissions:\n      actions: read\n      contents: read\n"
+            "      security-events: write # to record main's results\n", "    permissions: write-all\n",
+            "codeql-python.yml, the job push: it has id-token: write"),
+        "a workflow with write-all": (
+            "codeql-python.yml", "permissions: {}\n", "permissions: write-all\n",
+            "codeql-python.yml, the workflow: permissions write-all, but its if is not"),
+        "a called job with write-all": (
+            "codeql.yml", "    runs-on: ubuntu-24.04\n",
+            "    permissions: write-all\n    runs-on: ubuntu-24.04\n",
+            "codeql.yml, the job analyze: it has id-token: write"),
+        "a secret read with bracket notation": (
+            "codeql-python.yml", "permissions: {}\n",
+            "permissions: {}\nenv:\n  CREDENTIAL: ${{ secrets['TOKEN'] }}\n",
+            "codeql-python.yml: it reads a secret"),
+        "a secret context read as JSON": (
+            "codeql-python.yml", "permissions: {}\n",
+            "permissions: {}\nenv:\n  CREDENTIAL: ${{ toJSON(secrets) }}\n",
+            "codeql-python.yml: it reads a secret"),
+        "a push job with an identity token": (
+            "codeql-python.yml", "      security-events: write # to record main's results\n",
+            "      security-events: write # to record main's results\n      id-token: write\n",
+            "codeql-python.yml, the job push: it has id-token: write"),
+        "a push job with packages: write": (
+            "codeql-python.yml", "      security-events: write # to record main's results\n",
+            "      security-events: write # to record main's results\n      packages: write\n",
+            "codeql-python.yml, the job push: packages: write, but a push job may write only security-events"),
+        "a called workflow with write permissions": (
+            "codeql.yml", "jobs:\n", "permissions: {security-events: write}\n\njobs:\n",
+            "codeql.yml, the workflow: security-events: write, but the workflow's permissions reach every job"),
+        "a workflow on pull_request_target": (
+            "codeql-python.yml", "  pull_request:\n", "  pull_request_target:\n",
+            "codeql-python.yml: it starts on pull_request_target"),
+    }
+
+    def test_r_workflow_read_all_permissions_hold_no_write_permission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self.copy_workflows(root)
+            path = root / ".github" / "workflows" / "codeql-python.yml"
             text = path.read_text()
-            workflow = yaml.load(text, Loader=YAML_LOADER)
-            on = triggers(workflow)
-            self.assertNotIn("pull_request_target", on, path.name)
-            if "pull_request" not in on:
-                continue
-            self.assertNotIn("secrets.", text, path.name)
-            holders = [("the workflow", workflow)] + [(f"the job {n}", job) for n, job in workflow["jobs"].items()]
-            for where, holder in holders:
-                if holder is not workflow:
-                    self.assertNotIn("environment", holder, f"{path.name}, {where}")
-                    # A job that calls a workflow passes it a secret by its key secrets (secrets: inherit passes all),
-                    # with no text "secrets." in the file.
-                    self.assertNotIn("secrets", holder, f"{path.name}, {where}")
-                permissions = holder.get("permissions")
-                if permissions is None:
-                    # A job with no permissions of its own takes the workflow's.
-                    self.assertIn("permissions", workflow, f"{path.name}, {where}: no permissions are given")
-                    continue
-                if isinstance(permissions, str):
-                    self.assertEqual(permissions, "read-all", f"{path.name}, {where}")
-                    continue
-                self.assertNotIn("id-token", permissions, f"{path.name}, {where}")
-                for scope, level in permissions.items():
-                    self.assertIn(level, ("read", "none"), f"{path.name}, {where}: {scope}")
+            self.assertEqual(text.count("permissions: {}\n"), 1)
+            path.write_text(text.replace("permissions: {}\n", "permissions: read-all\n", 1))
+            self.assertEqual(self.pull_request_holds(root, "codeql-python.yml"), [])
+
+    def test_codeql_concurrency_replaces_only_runs_of_the_same_pull_request(self):
+        from test_outside_screen import evaluate
+
+        for language in ("actions", "c-cpp", "python"):
+            with self.subTest(language):
+                workflow = parse((ROOT / ".github" / "workflows" / f"codeql-{language}.yml").read_text())
+                concurrency = workflow["concurrency"]
+
+                def context(event, run, sha, pull=None):
+                    return {"github.event_name": event, "github.run_id": run, "github.sha": sha,
+                            "github.event.pull_request.number": pull}
+
+                def group(ctx):
+                    return evaluate(concurrency["group"], ctx)
+
+                first = context("push", 1, HEAD)
+                repeat = context("push", 2, HEAD)
+                self.assertNotEqual(group(first), group(repeat), "distinct push events at the same commit")
+                self.assertFalse(evaluate(concurrency["cancel-in-progress"], first))
+                pull = context("pull_request", 3, HEAD, 7)
+                newer = context("pull_request", 4, OTHER, 7)
+                another = context("pull_request", 5, HEAD, 8)
+                self.assertEqual(group(pull), group(newer))
+                self.assertNotEqual(group(pull), group(another))
+                self.assertNotEqual(group(pull), group(first))
+                self.assertTrue(evaluate(concurrency["cancel-in-progress"], pull))
+
+    def test_r_control_each_change_breaks_the_rule(self):
+        for label, (file, old, new, said) in self.CONTROLS.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                self.copy_workflows(root)
+                self.assertEqual(self.pull_request_holds(root, "codeql-python.yml"), [], "the unchanged copy")
+                path = root / ".github" / "workflows" / file
+                text = path.read_text()
+                self.assertEqual(text.count(old), 1, label)
+                path.write_text(text.replace(old, new, 1))
+                problems = self.pull_request_holds(root, "codeql-python.yml")
+                self.assertTrue(any(p.startswith(said) for p in problems), (label, problems))
 
     # A command of a step that builds the code of a pull request: oss-verify check (but --print-toolchain, which only
     # names the toolchain), or docker.
@@ -2367,39 +2483,76 @@ class WorkflowRunNames(Stand):
 class SteeringFiles(unittest.TestCase):
     """(u): the list of steering files."""
 
-    # The patterns of .github/CODEOWNERS at commit 62081ee (#194), the last commit that changed them, in their order.
-    CODEOWNERS_62081EE = (
+    # The steering list: the patterns that .github/CODEOWNERS owned at commit 62081ee (#194), in their order. CODEOWNERS
+    # now owns only the files under /.github/ that run with a credential, and this list stays as broad as it was: an
+    # enrollment that changes any file under /.github/ waits for a person before Enroll dispatch sends it.
+    STEERING_62081EE = (
         "/.github/", "/src/", "/infra/", "/seeds/", ".claude/", "CLAUDE*.md", "AGENTS*.md", "/.mcp.json", "/*.py",
         "/pytest.ini", "/.pytest.ini", "/pyproject.toml", "/uv.lock", "/.python-version", "/setup.cfg", "/tox.ini",
         "/review.md", "/review-change.md", "/review-issue.md", "/.claude/skills/write-to-maintainer/",
         "/.github/CODEOWNERS")
+    TEAMS = {"@theorem-labs/engineering", "@theorem-labs/research"}
+    # The four patterns at the top of CODEOWNERS give agent instructions and skills at any depth the same owners, and
+    # add no steering file: AGENTS*.md and CLAUDE*.md already match each AGENTS.md and CLAUDE.md, and a skill that
+    # Claude Code loads in the review job is under .claude/.
+    INSTRUCTIONS = ("**/AGENTS.md", "**/CLAUDE.md", "**/SKILL.md", "skills/")
+    # Owned, but no steering file, each with why: a pull request that changes it changes nothing its own runs do.
+    NOT_STEERING = {"/docs/seeded-projects.tsv": "take-project and triage.py read it from the base branch, never from "
+                                                 "the pull request"}
 
-    def test_u_the_steering_files_are_the_last_owned_patterns_of_codeowners(self):
+    @staticmethod
+    def steering():
         path = ROOT / ".github" / "scripts" / "steering.py"
-        self.assertTrue(path.is_file(), ".github/scripts/steering.py is absent")
         spec = importlib.util.spec_from_file_location("steering_of_this_test", path)
         steering = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(steering)
-        self.assertEqual(list(steering.STEERING), list(self.CODEOWNERS_62081EE))
-        for name in (".github/workflows/build.yaml", ".github/workflows/review.yml", "projects/x/AGENTS.md",
-                     "projects/x/.claude/settings.json", "docs/CLAUDE.md"):
+        return steering
+
+    def owned_but_not_steering(self, codeowners, steering):
+        """Each pattern of the CODEOWNERS text that either team owns, but the four at its top, whose files are not all
+        steering files. A pattern stands for its files by a path it matches: its * as x, and a file x under a
+        directory."""
+        found = []
+        for line in codeowners.splitlines():
+            fields = line.split()
+            if not fields or fields[0].startswith("#") or not self.TEAMS & set(fields[1:]) \
+                    or fields[0] in self.INSTRUCTIONS or fields[0] in self.NOT_STEERING:
+                continue
+            pattern = fields[0]
+            path = pattern.lstrip("/").replace("*", "x") + ("x" if pattern.endswith("/") else "")
+            self.assertTrue(steering.matches(pattern, path), (pattern, path))
+            if not steering.is_steering(path):
+                found.append(pattern)
+        return found
+
+    def test_u_each_owned_file_is_a_steering_file(self):
+        path = ROOT / ".github" / "scripts" / "steering.py"
+        self.assertTrue(path.is_file(), ".github/scripts/steering.py is absent")
+        steering = self.steering()
+        self.assertEqual(list(steering.STEERING), list(self.STEERING_62081EE))
+        for name in (".github/workflows/build.yaml", ".github/workflows/review.yml", ".github/scripts/binary-sizes",
+                     "projects/x/AGENTS.md", "projects/x/.claude/settings.json", "docs/CLAUDE.md"):
             self.assertTrue(steering.is_steering(name), name)
         for name in ("projects/x/build.sh", "docs/build-contract.md", "tests/test_x.py"):
             self.assertFalse(steering.is_steering(name), name)
-        # A line counts when either team owns it; each line of CODEOWNERS names both.
-        teams = {"@theorem-labs/engineering", "@theorem-labs/research"}
-        owned = [line.split()[0] for line in (ROOT / ".github" / "CODEOWNERS").read_text().splitlines()
-                 if line.strip() and not line.startswith("#") and teams & set(line.split()[1:])]
-        # The four patterns at the top give agent instructions and skills at any depth the same owners, and add no
-        # steering file: AGENTS*.md and CLAUDE*.md already match each AGENTS.md and CLAUDE.md, and a skill that Claude
-        # Code loads in the review job is under .claude/. src/ has no owner, by Sami's choice
-        # (dispatch://OSSV-276/ask/6c92b099-08f4-4177-aa5a-6a3fc6292878), and every file under it is still a steering
-        # file.
+        codeowners = (ROOT / ".github" / "CODEOWNERS").read_text()
+        self.assertEqual(self.owned_but_not_steering(codeowners, steering), [])
+        # The check reads the owned lines: /.github/ is one of them.
+        self.assertIn("/.github/ @theorem-labs/engineering @theorem-labs/research", codeowners)
+        # src/ has no owner, by Sami's choice (dispatch://OSSV-276/ask/6c92b099-08f4-4177-aa5a-6a3fc6292878), and every
+        # file under it is still a steering file.
         self.assertIn("/src/", steering.STEERING)
-        self.assertEqual(owned, ["**/AGENTS.md", "**/CLAUDE.md", "**/SKILL.md", "skills/",
-                                 *(pattern for pattern in steering.STEERING if pattern != "/src/")])
+        patterns = [line.split()[0] for line in codeowners.splitlines() if line.strip() and not line.startswith("#")]
+        self.assertFalse([pattern for pattern in patterns if pattern.startswith("/src")], patterns)
         for name in ("src/oss_verify/validate.py", "src/oss_verify/syscall_shapes.py", "src/yaml.py"):
             self.assertTrue(steering.is_steering(name), name)
+
+    def test_u_control_an_owned_file_that_is_not_steering(self):
+        steering = self.steering()
+        codeowners = (ROOT / ".github" / "CODEOWNERS").read_text()
+        self.assertEqual(self.owned_but_not_steering(codeowners, steering), [])
+        changed = codeowners + "/docs/ @theorem-labs/engineering @theorem-labs/research\n"
+        self.assertEqual(self.owned_but_not_steering(changed, steering), ["/docs/"])
 
 
 class SteeringGate(Stand):
