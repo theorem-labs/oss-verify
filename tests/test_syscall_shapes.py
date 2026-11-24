@@ -2288,3 +2288,21 @@ def test_input_bin_stays_found_after_a_writable_open(model, image):
                  '1 openat(AT_FDCWD,"input.bin",O_RDONLY|O_LARGEFILE) = -1 errno=2'):
         result = check(model, image, rdwr + line + "\n" + EXIT, inputs={"input.bin": INPUT})
         assert result["verdict"] == "fail", (line, result["undecided"])
+
+
+def test_unknown_record_in_quoted_path_is_ignored():
+    from types import SimpleNamespace
+    stub_model = SimpleNamespace(names={"openat", "exit_group"}, arms={}, brk_aslr_max=0)
+    text = '1 openat(AT_FDCWD,"1 Unknown syscall 999",O_RDONLY) = -1 errno=2\n' + EXIT
+    result = S.check_trace(stub_model, text, stance="off", require_exit=True)
+    assert result["names"] == ["exit_group", "openat"], result
+    assert not result["unmodeled"], result
+
+
+def test_unknown_record_with_overlong_syscall_number_does_not_raise():
+    from types import SimpleNamespace
+    stub_model = SimpleNamespace(names={"openat", "exit_group"}, arms={}, brk_aslr_max=0)
+    text = f"1 Unknown syscall {'9' * 4500}\n" + EXIT
+    result = S.check_trace(stub_model, text, stance="off", require_exit=True)
+    assert result["verdict"] == "fail", result
+    assert result["unmodeled"], result

@@ -356,13 +356,13 @@ class Model:
 # A record: qemu's task id, the name, the open parenthesis. A record starts a line, and a second record can follow on
 # the same line (split_records). The look-behind starts a search only at the head of a run of digits: the earliest
 # match is there anyway, and without it a long run of digits costs time quadratic in its length.
-RECORD = re.compile(r"(?<![0-9])(\d+)\s+([a-z_0-9]+)\(")
+RECORD = re.compile(r"(?<![0-9])(\d{1,19})\s+([a-z_0-9]+)\(")
 # qemu's line for a syscall number it has no name for (linux-user/strace.c print_syscall). It can follow an open
 # record on the same line, so it is searched for anywhere.
-UNKNOWN_RECORD = re.compile(r"(?:^|(?<=[\s)]))(\d+) Unknown syscall (\d+)")
+UNKNOWN_RECORD = re.compile(r"(?:^|(?<=[\s)]))(\d{1,19}) Unknown syscall (\d{1,19})")
 # The return value and the errno, read from the text after the call's own `)`, never from the whole line.
 RET_TAIL = re.compile(r"\s*=\s*(-?(?:0x[0-9a-fA-F]+|\d+))")
-ERRNO_TAIL = re.compile(r"\s*=\s*-1\s+errno=(\d+)")
+ERRNO_TAIL = re.compile(r"\s*=\s*-1\s+errno=(\d{1,19})")
 # qemu's line for the SIGABRT death after a self-kill: `--- SIGIOT {si_signo=SIGIOT, si_code=SI_TKILL, ...} ---`.
 # It too can land after an open record. kill_line reads the braces itself.
 KILL_HEAD = re.compile(r"---\s+SIG(?:IOT|ABRT)\s+\{")
@@ -436,6 +436,27 @@ def split_records(line):
         nxt = RECORD.search(line, off)
         yield int(m.group(1)), m.group(2), args, line[off:nxt.start() if nxt else len(line)], closed
         m = nxt
+
+
+def _quoted_spans(line):
+    """Return (start, end) byte ranges that fall inside double-quoted strings on `line`."""
+    spans = []
+    in_quote = False
+    start = -1
+    for i, ch in enumerate(line):
+        if ch == '"':
+            if in_quote:
+                spans.append((start, i + 1))
+                in_quote = False
+            else:
+                in_quote = True
+                start = i
+    return spans
+
+
+def _in_quoted_span(pos, spans):
+    """True if `pos` falls inside any span returned by _quoted_spans."""
+    return any(s <= pos < e for s, e in spans)
 
 
 def bits(arg):
@@ -4170,7 +4191,10 @@ def check_trace(model, text, *, stance, require_exit=True, binary=None, lengths=
                 judge(*pending, line)
                 pending = None
             continue                        # a return with no record waiting carries no call
+        qspans = _quoted_spans(line)
         for unknown in UNKNOWN_RECORD.finditer(line):
+            if _in_quoted_span(unknown.start(), qspans):
+                continue
             calls += 1
             number = int(unknown.group(2))
             name = model.arms.get(number)
