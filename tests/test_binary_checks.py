@@ -2493,6 +2493,7 @@ exit "${SHIM_STATUS:-0}"
                   "LIB=/usr/local/lib/oss-verify LIB_FUZZING_ENGINE=/tmp/ov/libFuzzingEngine.a\n"
                   "LIB_ALLOCATION_FAILURE_ENGINE=/tmp/ov/libAllocationFailureEngine.a\n"
                   "LIB_ALLOCATION_COUNTING_ENGINE=/tmp/ov/libAllocationCountingEngine.a OV_RECORDS=$2\n"
+                  "LIB_DSL_ENGINE=/tmp/ov/libDslEngine.a\n"
                   'write_wrapper "$3" /tmp/shim/riscv64-linux-musl-clang-plain\n')
         shim = "/tmp/shim/riscv64-linux-musl-clang-plain"
         expected = (
@@ -2500,7 +2501,7 @@ exit "${SHIM_STATUS:-0}"
             f'  case "$a" in -c|-E|-S|-fsyntax-only|-M|-MM|--version|-dumpmachine|-print-*) exec {shim} "$@" ;; esac\n'
             'done\nfor a in "$@"; do\n'
             '  case "$a" in "/tmp/ov/libFuzzingEngine.a"|"/tmp/ov/libAllocationFailureEngine.a"|'
-            '"/tmp/ov/libAllocationCountingEngine.a")\n'
+            '"/tmp/ov/libAllocationCountingEngine.a"|"/tmp/ov/libDslEngine.a")\n'
             f'    exec /usr/local/lib/oss-verify/link-fuzz-target {shim} "$@" ;; esac\n'
             f'done\nexec {shim} "$@"\n')
         for n, records in enumerate(("", "/tmp/ov/records")):

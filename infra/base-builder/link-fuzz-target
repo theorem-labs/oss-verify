@@ -25,6 +25,14 @@
 # $LIB_ALLOCATION_COUNTING_ENGINE makes the same, with counting mode on (allocation_counting.o), for sweep and test
 # builds.
 #
+# A link that names $LIB_DSL_ENGINE makes a DSL fuzz target (docs/build-contract.md, "DSL fuzz targets"): a driver
+# whose program is a script that the payload holds, run by the target's own driver objects (OV_DSL_DRIVER), which
+# define the functions cli.c calls. The driver is cli.o and those objects, in place of cli.o and adapter.o. The
+# library's archives and the driver objects are linked as copies renamed through the target's maps (OV_DSL_REDEFS,
+# OV_DSL_LIBRARY_REDEFS), and the target's trampolines (OV_DSL_TRAMPOLINES), which define the new names, come after
+# the link's own arguments. dsl.py makes the copies and checks them, and checks the first link's trace of the new
+# names (-Wl,-y); either stops the link when a gate fails. The first link's standard output is that trace.
+#
 # A recipe that compiles its own adapter (rust/recipes.sh, with plugin_rust.h; python/recipes.sh, with
 # python_tier_plugin.h) names it in OV_ADAPTER: it takes the place of adapter.o.
 #
@@ -71,11 +79,13 @@ out=a.out
 args=()
 seals=$OV_SEALS
 driver=$OV_DRIVER
+dsl=""
 while [ $# -gt 0 ]; do
   case "$1" in
     "$OV_LFE") ;;
     "$OV_AFE") driver=$OV_AF_DRIVER ;;
     "$OV_AFC") driver=$OV_AFC_DRIVER ;;
+    "$OV_DSLE") driver=$OV_CLI; dsl=1 ;;
     -Wl,--wrap=getenv|-Wl,--wrap=getpid|-Wl,--wrap=mkstemp)
       seals=""
       args+=("$1") ;;
@@ -90,6 +100,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -n "${OV_ADAPTER:-}" ]; then
+  [ -z "$dsl" ] || { echo "link-fuzz-target: a fuzz target with its own adapter has no DSL form" >&2; exit 1; }
   [ "$driver" = "$OV_DRIVER" ] || { echo "link-fuzz-target: a fuzz target with its own adapter has no allocation-failure form" >&2; exit 1; }
   driver="$OV_CLI $OV_ADAPTER"
 fi
@@ -216,6 +227,23 @@ if [ "$driver" = "$OV_AF_DRIVER" ] || [ "$driver" = "$OV_AFC_DRIVER" ]; then
   done
 fi
 
+# A DSL link (above): dsl.py rename refuses the link or writes the copies, the link's own arguments with the library's
+# archives replaced by their copies, and the -y words of the trace. The driver objects' copies follow cli.o, and the
+# trampolines the link's own arguments (words, below).
+dsl_work="" dsl_driver="" dsl_quiet="" dsl_tramps=""
+dsl_trace=()
+if [ -n "$dsl" ]; then
+  dsl_work=$(mktemp -d /tmp/ov/dsl.XXXXXX)
+  made+=("$dsl_work")
+  python3 "$(dirname -- "$0")/dsl.py" rename --work "$dsl_work" -- ${args[@]+"${args[@]}"}
+  args=()
+  while IFS= read -r -d '' word; do args+=("$word"); done < "$dsl_work/args"
+  dsl_driver=$(tr '\n' ' ' < "$dsl_work/driver")
+  dsl_quiet=$(tr '\n' ' ' < "$dsl_work/quiet")
+  dsl_tramps=$(tr '\n' ' ' < "$dsl_work/trampolines")
+  mapfile -t dsl_trace < "$dsl_work/trace-words"
+fi
+
 # With the input limit, cli-limit<value>.o takes the place of cli.o in the driver. This comes after the
 # allocation-failure copies, which compare the whole driver with link.env's, and before the first link: each link,
 # the command that layout.py gets and the record then name it.
@@ -231,11 +259,12 @@ fi
 
 tail=()
 # words <options>: the link's command in cmd, with <options> after -Wl,--gc-sections, and then the options of a declared
-# C library. It is built at each call, since record_link changes driver before the quiet link.
+# C library. It is built at each call, since record_link changes driver (and a DSL link's driver objects) before the
+# quiet link.
 words() {
   # shellcheck disable=SC2086,SC2206 # the lists in link.env are meant to be split
-  cmd=($real -static -no-pie -Wl,--gc-sections "$@" ${libc_words[@]+"${libc_words[@]}"} $driver $OV_SILENT_LD \
-    ${args[@]+"${args[@]}"} $seals)
+  cmd=($real -static -no-pie -Wl,--gc-sections "$@" ${libc_words[@]+"${libc_words[@]}"} $driver $dsl_driver \
+    $OV_SILENT_LD ${args[@]+"${args[@]}"} $dsl_tramps $seals)
 }
 link() {
   words "$@"
@@ -262,6 +291,7 @@ if [ -n "$entry" ]; then
   made+=("$work")
   renamed=()
   if [ -n "${copies:-}" ] && [ -f "$copies/renamed" ]; then renamed=(--renamed "$copies/renamed"); fi
+  if [ -n "$dsl_work" ]; then renamed=(--renamed "$dsl_work/renamed"); fi
   layout append --base "$entry" --work "$work" ${renamed[@]+"${renamed[@]}"} --script "$work/append.ld" \
     --placement "$work/placement.tsv" --wraps "$work/wraps"
   [ ! -s "$work/append.ld" ] || script=-Wl,-T,$work/append.ld
@@ -272,9 +302,22 @@ fi
 # archive member it came from. It is the last argument, so that it is the map the linker writes even when the link
 # names one of its own. The map changes no byte of either output. An append link's script comes before it, after the
 # link's own arguments and the seals, in the output's link and its stripped twin's.
+# A DSL link's first link also gets the -y words of its trace, before the map. dsl.py trace reads the lines that the
+# linker writes for them (on standard output or standard error, as the linker chooses), and the link passes each other
+# line of the two on to standard error. A trace that fails a gate removes the output and stops the link.
 tail=(${script:+"$script"})
+[ -z "$dsl" ] || tail+=(${dsl_trace[@]+"${dsl_trace[@]}"})
 [ -z "${OV_RECORDS:-}" ] || tail+=("-Wl,-Map=$OV_RECORDS/map.$$")
-link -o "$out"
+if [ -n "$dsl" ]; then
+  dsl_status=0
+  link -o "$out" > "$dsl_work/trace.log" 2>&1 || dsl_status=$?
+  grep -v -E ': (reference to|definition of|common definition of|lazy definition of|shared definition of) ' \
+    "$dsl_work/trace.log" >&2 || :
+  [ "$dsl_status" = 0 ] || exit "$dsl_status"
+  python3 "$(dirname -- "$0")/dsl.py" trace --work "$dsl_work" "$dsl_work/trace.log" || { rm -f -- "$out"; exit 1; }
+else
+  link -o "$out"
+fi
 tail=(${script:+"$script"})
 sum=$(sha256sum "$out" | cut -d' ' -f1)
 # The stripped twin is linked in a directory of this link's own, $OV_TWINS/.link.XXXXXX/, and then renamed to
@@ -284,6 +327,8 @@ twin_tmp=$(mktemp -d "$OV_TWINS/.link.XXXXXX")
 made+=("$twin_tmp")
 link -Wl,--strip-all -o "$twin_tmp/$sum"
 mv -f "$twin_tmp/$sum" "$OV_TWINS/$sum"
+# compile lists the fuzz targets that a DSL link made in $OUT/.dsl-fuzz-targets: they define no LLVMFuzzerTestOneInput.
+if [ -n "$dsl" ]; then mkdir -p /tmp/ov/dsl-targets && : > "/tmp/ov/dsl-targets/$sum"; fi
 # The quiet twin (below) is a normal link, with no script: its driver objects are other files, which no pattern of the
 # script names, and a quiet link that failed would leave no record at all.
 tail=()
@@ -295,14 +340,19 @@ tail=()
 #   map         the input sections of the linker's map, in the map's own order. The reader takes the output section
 #               each one belongs to, and whether the linker loads it, from that order and from the addresses
 #               (src/oss_verify/check_links.py, parse_map), so keep both: never sort or re-order the lines below.
-#   driver      the driver's objects and the seals, one a line: compiled without a sanitizer in every build, by design
+#   driver      the driver's objects and the seals, one a line: compiled without a sanitizer in every build, by design.
+#               A DSL link's trampolines are on the list; its driver objects, which the build compiles with its flags,
+#               are not
 #   inputs.tsv  each file the map names: <path as the map names it> <real path> <sha256> <bytes>
-#   renamed     for an allocation-failure link, each copy it made: <copy> <real path of the original> <its sha256>
+#   renamed     for an allocation-failure or a DSL link, each copy it made: <copy> <real path of the original> <its
+#               sha256>
 #   libc        with OV_LIBC: the declared C library, one row for each of libc.a, crt1.o, crti.o and crtn.o, in that
 #               order: <name> <real path> <sha256>
 #   quiet       the quiet twin: the same link, stripped, with each of the driver's objects compiled with -DHARNESS_QUIET
 #               (compile makes <object>-quiet.o beside each one; a recipe's own adapter names its quiet build in
-#               OV_ADAPTER_QUIET), so that the driver writes nothing. Absent when one of them has no quiet build.
+#               OV_ADAPTER_QUIET), so that the driver writes nothing. Absent when one of them has no quiet build. A DSL
+#               link's quiet twin takes the copies of the driver objects' quiet builds, <object>-quiet.o, and is absent
+#               when one of them has none.
 #   wraps       with OV_LAYOUT=1: the functions the link wraps (each --wrap=<f> of the linker), one a line (layout.py
 #               wraps; in an append link, layout.py append writes the same list)
 #   placement.tsv
@@ -333,9 +383,10 @@ record_link() {
   [ -s "$rec/map" ] || return 1   # a link whose map names no input section: the record would say nothing
   rm -f "$OV_RECORDS/map.$$" || return 1
   # shellcheck disable=SC2086 # lists of words
-  { for word in $driver $seals; do case "$word" in *.o) printf '%s\n' "$word" ;; esac; done; } > "$rec/driver" \
-    || return 1
+  { for word in $driver $dsl_tramps $seals; do case "$word" in *.o) printf '%s\n' "$word" ;; esac; done; } \
+    > "$rec/driver" || return 1
   if [ -n "${copies:-}" ] && [ -f "$copies/renamed" ]; then cp -- "$copies/renamed" "$rec/renamed" || return 1; fi
+  if [ -n "$dsl_work" ]; then cp -- "$dsl_work/renamed" "$rec/renamed" || return 1; fi
   if [ -n "$libc_rows" ]; then printf '%s' "$libc_rows" > "$rec/libc" || return 1; fi
   if [ "${OV_LAYOUT:-}" = 1 ]; then
     if [ -n "$entry" ]; then
@@ -369,7 +420,9 @@ record_link() {
     if [ -z "$twin" ] || [ ! -f "$twin" ]; then quiet=""; break; fi
     quiet="$quiet $twin"
   done
+  [ -z "$dsl" ] || [ -n "$dsl_quiet" ] || quiet=""
   if [ -n "$quiet" ]; then
+    [ -z "$dsl" ] || dsl_driver=$dsl_quiet
     driver=$quiet
     link -Wl,--strip-all -o "$rec/quiet" || return 1
   fi

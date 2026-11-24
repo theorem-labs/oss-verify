@@ -135,6 +135,16 @@ class Discovery(Scratch):
         (self.dir / "out/.go-fuzz-targets").unlink()
         self.assertEqual(sorted(manifest.discover(self.dir / "out")), ["c"])
 
+    def test_the_dsl_fuzz_targets_compile_lists(self):
+        """A DSL fuzz target defines no LLVMFuzzerTestOneInput; compile lists it in $OUT/.dsl-fuzz-targets, as it
+        lists a Go fuzz target, and the same names are refused."""
+        self.write("out/api", elf())
+        self.write("out/notes", b"text", 0o644)
+        self.write("out/c", elf([(ENTRY, GLOBAL_FUNC, 1)]))
+        (self.dir / "out/.dsl-fuzz-targets").write_text("api\nnotes\n../c\nmissing\n")
+        self.assertEqual(sorted(manifest.discover(self.dir / "out")), ["api", "c"])
+        self.assertEqual(sorted(manifest.listed_fuzz_targets(self.dir / "out", manifest.DSL_TARGETS)), ["api"])
+
     def test_resolve_targets(self):
         found = {"plain": {"a": 1, "b": 1}, "asan": {"a": 1, "b": 1}}
         self.assertEqual(manifest.resolve_targets(found), (["a", "b"], []))

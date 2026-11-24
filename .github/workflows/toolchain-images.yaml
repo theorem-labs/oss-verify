@@ -95,6 +95,10 @@ on:
 
 permissions: {}
 
+# No job reads or writes the Actions cache: a run on push to main could otherwise save in main's cache, which review.yml
+# restores for a review.
+cache-mode: none
+
 env:
   # These values, the base rows of make's matrix, the image of its registry and the pins of actions/checkout and
   # actions/download-artifact must stay equal to toolchain-images-publish.yaml's:
