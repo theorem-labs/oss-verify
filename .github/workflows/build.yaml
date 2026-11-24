@@ -77,10 +77,10 @@ name: "Build"
 # which the pull request can change. The job required also runs .github/scripts/collect of that merge commit. A pull
 # request that changes them controls its own run, its checks and its artifacts. That is safe for this repository
 # because:
-#   - The merge of a pull request that changes a workflow or a script needs the approval of a code owner. Each is a
-#     steering file (.github/scripts/steering.py), under the path /.github/ of .github/CODEOWNERS.
-#   - enroll-dispatch.yml sends no pull request that changes a steering file for its theorem statements until a person
-#     approves its head.
+#   - Each workflow and script is a steering file (.github/scripts/steering.py), and enroll-dispatch.yml sends no pull
+#     request that changes a steering file for its theorem statements until a person approves its head.
+#   - .github/CODEOWNERS owns this file and the scripts it runs: enroll-dispatch.yml acts on this check and on the
+#     sizes in its artifact for an enrollment, whose run is main's copy, so a change to them needs a code owner.
 #   - A fork's run gets a read-only token and no secret. No job of this file holds a secret, an identity token, an
 #     environment or a write permission.
 #   - With the repository's default setting, GitHub holds each run of a first-time contributor's pull request until

@@ -1,0 +1,58 @@
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+name: "CodeQL: GitHub Actions"
+# CodeQL's analysis of this repository's GitHub Actions workflows (.github/workflows/codeql.yml says how, and why each
+# language has a file of its own). It runs on each push to main, and on a pull request into main that changes a file of
+# the paths below: a workflow, or an action (action.yml) outside seeds/, projects/ and tests/fixtures/, which no
+# analysis reads, the files that CodeQL reads as GitHub Actions; or the configuration of the analysis. The workflows of
+# the analysis are workflows, so the first two paths name them.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/*.yml
+      - .github/workflows/*.yaml
+      - '**/action.yml'
+      - '**/action.yaml'
+      # The analysis.
+      - .github/codeql/codeql-config.yml
+      # Never analysed (.github/codeql/codeql-config.yml).
+      - '!seeds/**'
+      - '!projects/**'
+      - '!tests/fixtures/**'
+      - '!.github/scripts/frame-pointers/**'
+
+permissions: {}
+
+concurrency:
+  # A pull request's newer run cancels its older one. Each push run has its own group and is never cancelled.
+  group: >-
+    ${{ github.event_name == 'push' && format('codeql-actions-push-{0}', github.run_id)
+        || format('codeql-actions-{0}', github.event.pull_request.number) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  pull-request:
+    if: github.event_name == 'pull_request'
+    permissions:
+      actions: read          # codeql-action lists the Actions cache for main's database
+      contents: read
+      security-events: read
+    uses: ./.github/workflows/codeql.yml
+    with:
+      language: actions
+      build-mode: none
+
+  push:
+    if: github.event_name == 'push'
+    permissions:
+      actions: read
+      contents: read
+      security-events: write # to record main's results
+    uses: ./.github/workflows/codeql.yml
+    with:
+      language: actions
+      build-mode: none
