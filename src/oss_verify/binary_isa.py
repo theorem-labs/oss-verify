@@ -96,13 +96,13 @@ import sys
 # model file the rules transcribe, at that commit. LinuxProcessSem/RiscvSemantics.v fetches a word, intercepts ecall and
 # sorts each result into modeled and unmodeled; Riscv/DecodeC.v chooses the decoder and names the zero parcel
 # defined-illegal; Riscv/Decode.v decodes a 32-bit word; Riscv/Sem.v and Riscv/Fpu.v give it its effect.
-MODEL_COMMIT = "f1006fe8178338a499b5e5c41be83006c4edd058"
+MODEL_COMMIT = "c0dd863a0f8f307beca7f2ee5cb4d7686a875779"
 MODEL_FILES = {
-    "theories/LinuxProcessSem/RiscvSemantics.v": "e10ee5ef3c24003d148fc8fb20a26727e720b45502dc018a10e7c79712c1eaff",
-    "theories/Riscv/Decode.v": "b759119d79a63c9c1d68ecdab41f1058d409fbd4d04201d54b3fa63e8dddf9c8",
-    "theories/Riscv/DecodeC.v": "90f0a0831557233865a767d5cb2da5fbae5903995dd50d53bfd94510d52c5970",
-    "theories/Riscv/Fpu.v": "077d372a91939063063b9722e4ff03ad7b7f6cfeea14123458adc85bf3c9b15d",
-    "theories/Riscv/Sem.v": "965e972412f92002ad140afb7a55b72e45a4e4af270f49caa19f6e31e3ff3087",
+    "theories/LinuxProcessSem/RiscvSemantics.v": "5ea664dbd4b912509cb9a96331f17c83feb8c3f19932c30d09bb4b052f2a37bf",
+    "theories/Riscv/Decode.v": "1d24a3582ab2baef712106a8c1b7e0612016b079d81fe7c25bf6403970c2781d",
+    "theories/Riscv/DecodeC.v": "0761842d2811b458972f77235468c44eed66a383eecd8b9ecb53120881d94d56",
+    "theories/Riscv/Fpu.v": "961e86bc83ab3bf0e5c69d736d6f41dd818da693aaf6272ec0b37d6c3400a583",
+    "theories/Riscv/Sem.v": "2a3c18df21f005870d150ee4825179babd612d796685bdc2a61f67e3cdc5655b",
 }
 
 EM_RISCV = 0xF3
