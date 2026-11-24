@@ -4,8 +4,8 @@
 # sysfail_fuzzer.tramp_sys.redefs, and then accepts each name that the copy still leaves undefined only when the
 # copy defines it, it is a new name of a map, it starts with __asan_, __ubsan_, __sanitizer_, __start_ or
 # __stop_, or it is a line of this file (docs/build-contract.md, "DSL fuzz targets"). These are the C library
-# functions that zlib 1.4 calls at the pinned commit; none of them makes a system call, so none can touch a file
-# outside the schedule. malloc is not here because the allocation map renames it (tramp_malloc); free allocates
+# functions that zlib 1.4 calls at the pinned commit; none of them makes a file system call, so none can touch a
+# file outside the schedule. malloc is not here because the allocation map renames it (tramp_malloc); free allocates
 # nothing and is not scheduled (sysfail_fuzzer.tramp_alloc.redefs). strerror formats zlib's error messages from
 # errno; musl's makes no system call. A new name here must be argued the same way: one that can reach the kernel
 # belongs in a rename map, not in this list.

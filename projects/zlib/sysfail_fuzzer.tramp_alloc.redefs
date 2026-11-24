@@ -1,9 +1,10 @@
 # tramp_alloc.redefs - the C allocation family, renamed to the trampolines.
 #
-# Fed to `llvm-objcopy --redefine-syms=` over a DERIVED copy of each pin-built
-# library archive under build/lib/<flav>/ (never the pinned archive itself,
-# never libc.a / libc++*.a / libunwind.a / libclang_rt.* / cli.o / dsl.o), so
-# that every reference the LIBRARY's own objects make to one of these names
+# Fed to `llvm-objcopy --redefine-syms=` (OV_DSL_REDEFS) over DERIVED copies
+# of the library archive and of the driver object and its quiet build (never
+# the archive itself, never libc.a / libc++*.a / libunwind.a / libclang_rt.* /
+# cli.o), so that every reference the library's objects, and the library code
+# the driver compiles from its headers, make to one of these names
 # resolves to the tramp_<name> trampoline in tramp_alloc.o (src/tramp_alloc.c),
 # which ticks the process-wide allocation-failure schedule once and then
 # calls the real function. Applied to every selected archive; the C++ map

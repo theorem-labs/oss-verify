@@ -39,7 +39,7 @@
  *
  * Why fa_realloc cannot just call realloc(): musl's mallocng grows an
  * mmap-served block (anything past ~128 KB) with mremap, which is exactly why
- * src/grow_buf.h exists and why check_syscalls.sh lists mremap in AVOIDED.
+ * src/grow_buf.h exists and why the system-call check lists mremap as avoided.
  * Routing a library's growth through realloc() here would put mremap back on
  * the trace -- inside the library instead of the driver, but on the same
  * process, so the gate still fails. The failure is also input-dependent (it

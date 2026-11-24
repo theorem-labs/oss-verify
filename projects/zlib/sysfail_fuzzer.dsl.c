@@ -180,7 +180,7 @@
  *
  * THE ONE SCAR, and it is a machine-load artefact rather than anything in this
  * file: the ASan containment check is flaky on this machine.
- * verify_one.sh's plain and ubsan stages and its cross-flavour comparison pass
+ * the per-target check's plain and ubsan stages and its cross-flavour comparison pass
  * every time; one of the eight asan-family gate runs intermittently reports
  *
  *     FAIL: probe.bin: no read in the trace -- the run never reached its input
@@ -277,7 +277,7 @@
  * that would return DSL_SKIP -- a budget spent doing nothing, which is worse
  * than a smaller budget spent calling zlib.
  *
- * 1024 also keeps verify_one.sh's cfg.bin honest, and that is the measurement
+ * 1024 also keeps the per-target check's cfg.bin honest, and that is the measurement
  * the number is actually set by. That input carries config[0] = 0x0b: four
  * repeats at a 4x step scale, so it runs 4 x 4096 steps with the arena
  * released between repeats. Measured over those 16384 steps: ok=2960,
@@ -852,7 +852,7 @@ static z_streamp want_def(dsl_vm *V, size_t *hn) {
    * (deflate.c: `(windowBits == 8 && wrap != 1)` -> Z_STREAM_ERROR; the
    * 256-byte window is only promoted to 9 for the zlib wrapper), so base 8
    * with the raw or gzip wrap returned NULL and the op was DSL_SKIP -- which
-   * is how op_witness.py found OP_DEF_HEADER `needs-prereq` off the bytes
+   * is how the witness search found OP_DEF_HEADER `needs-prereq` off the bytes
    * `08 08`. Promoted to 9 here, which is what deflate.c itself does for the
    * zlib case; OP_DEF_NEW still drives the rejected cell on purpose. */
   if (base == 8 && wrap != 0) base = 9;
@@ -1043,7 +1043,7 @@ static int dsl_step(dsl_vm *V, unsigned op) {
    * open (a write handle's last flush lands like any other write). Ops 0..27
    * never touch the file and are untouched, as G2 requires. Reached with no
    * schedule by a "wT" handle and 17 forward gz_seeks of 65535, which zlib
-   * writes as zeros at the next write (check_sys_schedule.sh S7). */
+   * writes as zeros at the next write (the schedule check's case S7). */
   if (op >= OP_SYS_PLAN && tramp_sysm_file_size() > TRAMP_SYS_FILE_MAX) {
     dsl_note(V, "file_cap size=%llu: %s skipped (past the %u bytes the in-memory file stores)\n",
              (unsigned long long)tramp_sysm_file_size(), dsl_op_name(op), (unsigned)TRAMP_SYS_FILE_MAX);
@@ -2470,7 +2470,7 @@ static int dsl_step(dsl_vm *V, unsigned op) {
  *
  * No kind is opaque. Everything sunk is a library-computed value or
  * library-written bytes; nothing depends on an address or on an allocator's
- * choice, and gen_program.py verify step (c) -- four flavours, one stdout --
+ * choice, and the program generator's verify step (c) -- four flavours, one stdout --
  * is the instrument that measures that rather than assuming it. */
 static unsigned char ser_win[32768];
 _Static_assert(sizeof ser_win == (1u << 15), "ser_win must hold the largest w_size");
