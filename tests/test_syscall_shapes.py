@@ -1360,11 +1360,13 @@ def test_the_rules_were_read_against_this_checkout():
     assert model_release.stale(MODEL_ROOT, S.MODEL_FILES) == [], (
         f"{MODEL_ENV} is not the model at {S.MODEL_COMMIT}, or a rule's file changed")
     assert all(path.startswith(S.MODEL_DIR + "/") for path in S.MODEL_FILES)
-    for rel in MODEL_FILES_READ + ("Fs.v", "Monad.v", "Run.v", "Sys/Syscall.v", "Sys/Dispatch.v"):
+    # Vdso.v: vdso_errno reads vdso_fn_sysno, which says which calls have a vDSO function
+    for rel in MODEL_FILES_READ + ("Fs.v", "Monad.v", "Run.v", "Sys/Syscall.v", "Sys/Dispatch.v", "Vdso.v"):
         assert f"{S.MODEL_DIR}/{rel}" in S.MODEL_FILES
     # Every model file the checkout has under the directories the rules read is hashed.
     base = pathlib.Path(MODEL_ROOT) / S.MODEL_DIR
-    for path in list(base.glob("Sys/**/*.v")) + [base / n for n in ("Fs.v", "Monad.v", "Run.v", "Specs.v", "State.v")]:
+    tops = ("Fs.v", "Monad.v", "Run.v", "Specs.v", "State.v", "Vdso.v")
+    for path in list(base.glob("Sys/**/*.v")) + [base / n for n in tops]:
         assert f"{S.MODEL_DIR}/{path.relative_to(base)}" in S.MODEL_FILES, path
 
 
@@ -2468,7 +2470,8 @@ KERNEL_CASES = [
     (f"1 gettimeofday({TASK_TOP},NULL) = -1 errno=14", "undecided"),
     ("1 nanosleep(140737488355328,0,0,0,0,0) = -1 errno=14", "pass"),
     ("1 nanosleep(140737488355328,0,0,0,0,0) = 0", "fail"),
-    ("1 nanosleep(274886295728,140737488355328,0,0,0,0) = -1 errno=14", "pass"),
+    # an rmtp past TASK_SIZE gives -EFAULT only after rqtp is read, and an unreadable rqtp in range is unmodeled
+    ("1 nanosleep(274886295728,140737488355328,0,0,0,0) = -1 errno=14", "undecided"),
     ("1 nanosleep(274886295728,140737488355328,0,0,0,0) = -1 errno=4", "fail"),
     (f"1 getrandom({TASK_TOP},4,0) = -1 errno=14", "pass"),
     (f"1 getrandom({TASK_TOP},4,0) = 4", "fail"),
@@ -2499,3 +2502,66 @@ KERNEL_CASES = [
 def test_the_kernel_calls(model, image, line, verdict):
     result = check(model, image, line + "\n" + EXIT)
     assert result["verdict"] == verdict, (result["unmodeled"], result["undecided"])
+
+
+# The review of 43278dfb: rules that passed calls the model at c0dd863a leaves unmodeled, each with the review's trace
+# (and a control the model does answer). A call the model answers otherwise fails; one whose answer turns on what the
+# trace does not show is undecided.
+CREATED_OUT = '1 openat(AT_FDCWD,"out",O_WRONLY|O_CREAT|O_TRUNC,0666) = 3\n'
+REVIEW_305_CASES = [
+    # 1. sendto: access_ok_zero's -EFAULT is only for a buffer past access_okb; in range a datagram socket is FdDgram
+    ("sendto on a datagram socket, -EFAULT, buffer in range", DGRAM3 + "1 sendto(3,0x1000,2,0,NULL,0) = -1 errno=14\n",
+     "fail", "unmodeled"),
+    ("sendto on a datagram socket, -EFAULT, buffer past TASK_SIZE",
+     DGRAM3 + f"1 sendto(3,{TASK_TOP},2,0,NULL,0) = -1 errno=14\n", "pass", None),
+    # 2. socketpair AF_UNIX: socketpair_faulted is access_okb sv 4
+    ("socketpair AF_UNIX, -EFAULT, sv in range", "1 socketpair(PF_UNIX,SOCK_STREAM,0,0x1000) = -1 errno=14\n",
+     "fail", "socketpair"),
+    ("socketpair AF_UNIX, -EFAULT, sv past TASK_SIZE - 4",
+     "1 socketpair(PF_UNIX,SOCK_STREAM,0,0x7ffffffffffd) = -1 errno=14\n", "pass", None),
+    # 3. rt_sigaction(SIGPIPE): -EFAULT with both act and oact
+    ("rt_sigaction SIGPIPE, -EFAULT, act and an oact past TASK_SIZE",
+     f"1 rt_sigaction(SIGPIPE,0x40007ff8b0,{TASK_TOP}) = -1 errno=14\n", "undecided", "rt_sigaction(SIGPIPE)"),
+    ("rt_sigaction SIGPIPE, -EFAULT, act and an oact in range",
+     "1 rt_sigaction(SIGPIPE,0x40007ff8b0,0x40007ff8c8) = -1 errno=14\n", "undecided", "rt_sigaction(SIGPIPE)"),
+    # 4. nanosleep: rmtp past TASK_SIZE and rqtp in range
+    ("nanosleep, -EFAULT, rmtp past TASK_SIZE and rqtp in range", "1 nanosleep(16,140737488355328,0,0,0,0) = -1 errno=14\n",
+     "undecided", "nanosleep"),
+    # 5. a name the run created is in the model's file system
+    ("unlinkat AT_REMOVEDIR of a created name with its descriptor open, -ENOENT",
+     CREATED_OUT + '1 unlinkat(AT_FDCWD,"out",AT_REMOVEDIR) = -1 errno=2\n', "fail", "declines"),
+    ("unlinkat AT_REMOVEDIR of a created name, closed, -ENOENT",
+     CREATED_OUT + '1 close(3) = 0\n1 unlinkat(AT_FDCWD,"out",AT_REMOVEDIR) = -1 errno=2\n', "fail", "unlinkat"),
+    ("an exclusive append create of a created name that succeeded",
+     CREATED_OUT + '1 openat(AT_FDCWD,"out",O_WRONLY|O_CREAT|O_EXCL|O_APPEND,0666) = 4\n', "fail", "exclusive create"),
+    ("an exclusive append create of a created name, -EEXIST",
+     CREATED_OUT + '1 openat(AT_FDCWD,"out",O_WRONLY|O_CREAT|O_EXCL|O_APPEND,0666) = -1 errno=17\n', "pass", None),
+    # 6. readv and writev on the new kinds: 0, -EINVAL and -EFAULT turn on the iovec total, behind the pointer
+    ("readv of an eventfd, -EINVAL", "1 eventfd2(0,0) = 3\n1 readv(3,274886295728,1,0,0,0) = -1 errno=22\n",
+     "undecided", "iovec total"),
+    ("writev of an eventfd, -EINVAL", "1 eventfd2(0,0) = 3\n1 writev(3,0x40007ff8b0,0x1) = -1 errno=22\n",
+     "undecided", "iovec total"),
+    ("readv of an unlinked open file that returned 0",
+     '1 openat(AT_FDCWD,"/tmp/t",O_RDWR|O_CREAT|O_EXCL,0600) = 3\n1 unlinkat(AT_FDCWD,"/tmp/t",0) = 0\n'
+     "1 readv(3,274886295728,2,0,0,0) = 0\n", "undecided", "iovec total"),
+    ("readv of a datagram socket, -EFAULT", DGRAM3 + "1 readv(3,274886295728,1,0,0,0) = -1 errno=14\n", "undecided",
+     "iovec total"),
+    # 7. fstat: -EFAULT only for a statbuf past access_okb
+    ("fstat of an unlinked open file, -EFAULT, statbuf in range",
+     TMP_W3 + UNLINK_O + "1 fstat(3,0x1000) = -1 errno=14\n", "fail", "fstat"),
+    ("fstat of a file, -EFAULT, statbuf in range", OPEN3 + "1 fstat(3,0x1000) = -1 errno=14\n", "fail", "fstat"),
+    ("fstat of an unlinked open file, -EFAULT, statbuf past TASK_SIZE",
+     TMP_W3 + UNLINK_O + f"1 fstat(3,{TASK_TOP}) = -1 errno=14\n", "pass", None),
+    # 8. ioctl(SIOCGIFINDEX): -EFAULT is also Linux's answer where the model is unmodeled
+    ("ioctl SIOCGIFINDEX, -EFAULT", DGRAM3 + "1 ioctl(3,SIOCGIFINDEX,0x40007ff8b0) = -1 errno=14\n", "undecided",
+     "SIOCGIFINDEX"),
+]
+
+
+@needs_model
+@pytest.mark.parametrize("label,text,verdict,needle", REVIEW_305_CASES, ids=[c[0] for c in REVIEW_305_CASES])
+def test_what_the_review_of_43278dfb_found(model, image, label, text, verdict, needle):
+    result = check(model, image, text + EXIT)
+    assert result["verdict"] == verdict, (result["unmodeled"], result["undecided"])
+    if needle is not None:
+        assert needle in (whys(result) + [u["why"] for u in result["undecided"]])[0]
