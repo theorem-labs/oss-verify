@@ -1,6 +1,7 @@
-/* tramp_alloc.c - the one schedule, the one counter, and the C-family
+/* Copyright 2026 Theorem Labs, PBC
+ * SPDX-License-Identifier: MIT
+ * tramp_alloc.c - the one schedule, the one counter, and the C-family
  * trampolines the renamed library archives resolve to.
- *
  * See tramp_alloc.h for what a bit means and why the library is the only thing
  * that can reach this file. What is specific to this translation unit:
  *
@@ -28,7 +29,6 @@
  * libc that hides them anyway, and would make an INCOMPATIBLE system
  * prototype a compile error rather than a silent ABI mismatch. musl has no
  * pvalloc, so there is no trampoline for it.
- *
  * THE COUNT IS `unsigned`, uncapped. cli.c clamps its own copy at 251 for
  * the exit-status channel; the VM sub-ops read the full value. It wraps at
  * 2^32 allocations, which no program in this tier approaches (the largest
