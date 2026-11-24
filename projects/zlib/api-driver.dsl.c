@@ -39,15 +39,12 @@
  *     between deflate_stored/fast/slow), deflateTune, deflatePrime,
  *     inflatePrime;
  *   - the RESET family, which is where zlib's state machine is most easily
- *     left inconsistent: deflateReset, deflateResetKeep, inflateReset,
- *     inflateResetKeep, inflateReset2 (which can change the wrapper and the
- *     window size of a live stream);
+ *     left inconsistent: deflateReset, inflateReset, inflateReset2 (which can
+ *     change the wrapper and the window size of a live stream);
  *   - COPY: deflateCopy and inflateCopy, which duplicate an in-flight state
  *     including its allocated window and pending buffer;
  *   - the QUERY/RECOVERY surface: deflateBound, deflatePending, compressBound,
- *     inflateSync, inflateSyncPoint, inflateMark, inflateCodesUsed,
- *     inflateValidate, inflateUndermine, zError, zlibVersion,
- *     zlibCompileFlags, get_crc_table;
+ *     inflateSync, inflateMark, zlibVersion, zlibCompileFlags;
  *   - and every INTERLEAVING of the above, which is the point of a call-
  *     sequence program: a dictionary set after output has been produced, a
  *     header requested on a raw stream, deflateParams with no output room,
@@ -100,6 +97,15 @@
  *   them under _LARGEFILE64_SOURCE), so an operation for them would be a
  *   near-duplicate of what the harness already runs.
  *
+ *   Nothing outside zlib.h's documented API. zlib.h ends with a list of
+ *   "undocumented functions (not part of the zlib API)": zError,
+ *   inflateSyncPoint, get_crc_table, inflateUndermine, inflateValidate,
+ *   inflateCodesUsed, inflateResetKeep, deflateResetKeep and gzvprintf. This
+ *   driver calls none of them, includes none of zlib's private headers, and
+ *   reads nothing behind a stream's `state` pointer, which zlib.h marks "not
+ *   visible by applications". Every zlib call it makes is one zlib.h
+ *   documents.
+ *
  * THE ONE SCAR, and it is a machine-load artefact rather than anything in this
  * file: the ASan containment check is flaky on this machine.
  * the per-target check's plain and ubsan stages and its cross-flavour comparison pass
@@ -142,13 +148,12 @@
  *
  *   - EVERY HANDLE KIND IS EXPECTABLE (dsl_serialize, at the end of this
  *     file): K_RAW and K_ZBUF are their bytes; a K_DEF is its z_stream
- *     counters plus the Init-set scalars of deflate_state, the not-yet-flushed
- *     pending bytes, the not-yet-emitted symbol buffer and the window's
- *     contents (deflateGetDictionary); a K_INF is its counters, the Init-set
- *     scalars of inflate_state, the three read-only accessors and the window
- *     (inflateGetDictionary). No kind is opaque. That is what lets `expect
- *     obj` see a compressor that has buffered input and emitted nothing --
- *     a state no trace line reports.
+ *     counters, deflatePending's and deflateBound's answers and the window's
+ *     contents (deflateGetDictionary); a K_INF is its counters, inflateMark
+ *     and the window (inflateGetDictionary). No kind is opaque. That is what
+ *     lets `expect obj` see a compressor that has buffered input and emitted
+ *     nothing -- a state no trace line reports: the input is in total_in and
+ *     in the window.
  *   - TWO OPS APPENDED: `checksum` (26) drives the eight checksum entry points
  *     -- adler32, adler32_z, adler32_combine, crc32, crc32_z, crc32_combine,
  *     crc32_combine_gen, crc32_combine_op -- which the first version of this
@@ -176,10 +181,11 @@
  *     succeeds as the comment above it always claimed; and both want_def and
  *     want_inf NOTE the creation they perform, so the parameters of a stream
  *     an op built for itself are in the digest and not only in the serializer.
- *   - dsl_serialize sinks the CONTENT of an attached gz_header on both sides
- *     (ser_gzhead), where it sank only its presence: a header set on a gzip
- *     deflater and not yet emitted, and the fields inflate fills in from a
- *     gzip stream's header, were invisible to `expect obj`.
+ *   - dsl_serialize sank the CONTENT of an attached gz_header on both sides
+ *     (ser_gzhead). It no longer does: zlib.h has no query for the header a
+ *     stream holds, and this driver reads nothing behind the stream's `state`
+ *     pointer. deflateBound still counts a header set on a gzip deflater; the
+ *     fields inflate fills in are reported by op_inf_push (report_ihdr).
  */
 #define TRAMP_DSL_NAME "zlib"
 #define TRAMP_DSL_ALLOC_HOOK 1
@@ -222,23 +228,10 @@
 
 #include "zlib.h"
 
-/* READ-ONLY, FOR dsl_serialize AND NOTHING ELSE: the layouts of deflate_state
- * and inflate_state, from the pinned tree's own private headers (build.sh puts
- * ext/<t>/src on the DSL include path, so these are the headers the archive
- * was compiled from, not a copy). zlib has no getter for the compressor's
- * buffered state -- deflatePending gives a count, deflateGetDictionary the
- * window, and nothing at all exposes the symbol buffer, the bit accumulator or
- * the block-start position -- so a serializer that wants to see "input taken,
- * nothing emitted" has to read the struct. Every field the serializer reads is
- * named there with the line in deflate.c/inflate.c/trees.c that writes it at
- * Init/Reset time; no pointer is ever sunk, and no field that the library
- * writes only once the stream reaches the code that uses it.
- *
- * inftrees.h (which inflate.h needs before it, as inflate.c includes them)
- * typedefs `code`, so no local in this file may be called that. */
-#include "deflate.h"
-#include "inftrees.h"
-#include "inflate.h"
+/* zlib.h is the only zlib header here: none of zlib's private headers
+ * (deflate.h, inflate.h, zutil.h), and so no read of a stream's internal
+ * state. The serializer at the end of this file observes a stream through the
+ * z_stream fields and the read-only queries that zlib.h documents. */
 
 /* ---------------------------------------------------------------- handles --
  *
@@ -769,17 +762,11 @@ static int ib_out(void *desc, unsigned char *buf, unsigned len) {
 
 /* ---------------------------------------------------------------- the ops -- */
 
-/* madler/zlib #1401 */
-__attribute__((noinline)) static int dsl_resetkeep_guarded(z_streamp s, int full) {
-  if (!full && ((deflate_state *)s->state)->lookahead != 0 && ((deflate_state *)s->state)->lit_bufsize != 0) exit(252);
-  return deflateResetKeep(s);
-}
-
 static int dsl_step(dsl_vm *V, unsigned op) {
   switch (op) {
 
-  /* Version, compile-time configuration, the error-string table and the CRC
-   * table. All four are exported, none is reachable from the harness.
+  /* Version, compile-time configuration and the compression bound. All three
+   * are exported, none is reachable from the harness.
    *
    * zlibCompileFlags encodes sizeof(uInt)/sizeof(uLong)/sizeof(voidpf)/
    * sizeof(z_off_t) and the build's option macros. Those are properties of the
@@ -787,28 +774,15 @@ static int dsl_step(dsl_vm *V, unsigned op) {
    * -fsanitize=address does not change a type's size -- so it is a stable
    * observable rather than an address in disguise.
    *
-   * get_crc_table returns a pointer into zlib's own static table. The POINTER
-   * is not reported; the first 256 entries' VALUES are, folded arithmetically
-   * rather than through memcpy so the digest does not depend on the host's
-   * byte order. */
+   * zError and get_crc_table are not called: zlib.h lists both among its
+   * undocumented functions. */
   case OP_INFO: {
     const char *ver = zlibVersion();
-    int ecode = -8 + (int)dsl_choice(V, 12);  /* -8..3: two past each end of
-                                               * zutil.h's ERR_MSG range, so
-                                               * the clamped branch runs too
-                                               * (not `code`: inftrees.h) */
-    const char *emsg = zError(ecode);
     uLong flags = zlibCompileFlags();
     uLong slen = (uLong)(dsl_u32(V) & 0xFFFFFu);
-    const z_crc_t FAR *tab = get_crc_table();
-    uint64_t h = 1469598103934665603ULL;
-    int i;
-    for (i = 0; i < 256; i++) { h ^= (uint64_t)tab[i]; h *= 1099511628211ULL; }
-    dsl_note(V, "info flags=%08lx cbound=%lu crctab=%016llx\n",
-             (unsigned long)flags, (unsigned long)compressBound(slen),
-             (unsigned long long)h);
+    dsl_note(V, "info flags=%08lx cbound=%lu\n",
+             (unsigned long)flags, (unsigned long)compressBound(slen));
     if (ver != NULL) dsl_report(V, "  version", 0, ver, strlen(ver));
-    if (emsg != NULL) dsl_report(V, "  zerror", ecode, emsg, strlen(emsg));
     return DSL_OK;
   }
 
@@ -1199,23 +1173,21 @@ static int dsl_step(dsl_vm *V, unsigned op) {
     return DSL_OK;
   }
 
-  /* deflateReset and deflateResetKeep. The difference is one call to lm_init:
-   * Reset re-initialises the match finder, ResetKeep leaves the window and
-   * hash intact while resetting the wrapper state -- so a program can reset a
-   * gzip stream and immediately emit a second member, which is what a
-   * multi-member gzip writer does. */
+  /* deflateReset: the stream starts again with its parameters kept, so a
+   * program can reset a gzip stream and immediately emit a second member,
+   * which is what a multi-member gzip writer does. deflateResetKeep, which
+   * also keeps the window and the hash, is not called: zlib.h lists it among
+   * its undocumented functions. */
   case OP_DEF_RESET: {
     size_t hn = 0;
     z_streamp s = (z_streamp)want_def(V, &hn);
-    int full = dsl_flag(V);
     int rc;
     if (s == NULL) return DSL_SKIP;
-    rc = full ? deflateReset(s) : dsl_resetkeep_guarded(s, full);
-    /* Both forms put a gzip stream back in GZIP_STATE, which is where
+    rc = deflateReset(s);
+    /* deflateReset puts a gzip stream back in GZIP_STATE, which is where
      * deflate.c re-zeroes gzindex, so a header may legally be set again. */
     if (rc == Z_OK) (void)dsl_hset(V, K_DEF, (void *)s, (void *)s, hn & ~(size_t)DEF_USED);
-    dsl_note(V, "def_reset full=%d rc=%d adler=%08lx\n",
-             full, rc, (unsigned long)s->adler);
+    dsl_note(V, "def_reset rc=%d adler=%08lx\n", rc, (unsigned long)s->adler);
     return rc == Z_OK ? DSL_OK : DSL_LIBERR;
   }
 
@@ -1248,21 +1220,20 @@ static int dsl_step(dsl_vm *V, unsigned op) {
     return DSL_OK;
   }
 
-  /* inflateReset, inflateResetKeep and inflateReset2. The third can change a
-   * LIVE stream's wrapper and window size, which reallocates or discards the
-   * window underneath a half-decoded stream -- the sharpest state transition
+  /* inflateReset and inflateReset2. The second can change a LIVE stream's
+   * wrapper and window size, which reallocates or discards the window
+   * underneath a half-decoded stream -- the sharpest state transition
    * inflate.c has, and the handle's recorded windowBits is updated so later
-   * operations know what wrapper the stream now has. */
+   * operations know what wrapper the stream now has. inflateResetKeep is not
+   * called: zlib.h lists it among its undocumented functions. */
   case OP_INF_RESET: {
     size_t hn = 0;
     z_streamp s = (z_streamp)want_inf(V, &hn);
-    unsigned which = dsl_choice(V, 3);
+    unsigned which = dsl_choice(V, 2);
     int wb = WB_OF(hn), rc;
     if (s == NULL) return DSL_SKIP;
     if (which == 0) {
       rc = inflateReset(s);
-    } else if (which == 1) {
-      rc = inflateResetKeep(s);
     } else {
       int base = 8 + (int)dsl_choice(V, 8);
       unsigned mode = dsl_choice(V, 5);
@@ -1409,36 +1380,20 @@ static int dsl_step(dsl_vm *V, unsigned op) {
     return (rc == Z_OK || rc == Z_STREAM_END) ? DSL_OK : DSL_LIBERR;
   }
 
-  /* The five undocumented-but-exported inflate accessors, in one operation
-   * because each is a single line and none of them is reachable from the
-   * harness. inflateMark and inflateCodesUsed are the two that need care:
-   * inflateMark packs state->back and a length into a long, and
-   * inflateCodesUsed returns `state->next - state->codes`, a pointer
-   * DIFFERENCE. A difference is a count -- it is the number of code table
-   * entries inftrees.c has consumed for this stream -- so it is deterministic
-   * and identical under ASan, unlike either pointer on its own. That
-   * distinction is exactly dsl.h rule 3's line, and this is the one place in
-   * the file that sits close to it.
-   *
-   * inflateUndermine returns Z_DATA_ERROR in every ordinary build (the
-   * INFLATE_ALLOW_INVALID_DISTANCE_TOOFAR_ARRR macro is not defined), so it is
-   * counted as a library error rather than a skip -- the call happened. */
+  /* inflateMark: where inflate is in the stream, as two values packed in a
+   * long (zlib.h: the bit distance back to the code in progress, or -1, in the
+   * upper bits; a byte count in the lower 16), and -65536 for a stream whose
+   * state is inconsistent. Not reachable from the harness. The other
+   * read-only inflate accessors that zlib exports -- inflateCodesUsed,
+   * inflateSyncPoint, inflateValidate, inflateUndermine -- are not called:
+   * zlib.h lists them among its undocumented functions. */
   case OP_INF_QUERY: {
     z_streamp s = (z_streamp)want_inf(V, NULL);
-    int check = dsl_flag(V);
-    int subvert = dsl_flag(V);
-    int rcv, rcu, sync;
     long mark;
-    unsigned long used;
     if (s == NULL) return DSL_SKIP;
     mark = inflateMark(s);
-    used = inflateCodesUsed(s);
-    sync = inflateSyncPoint(s);
-    rcv = inflateValidate(s, check);
-    rcu = inflateUndermine(s, subvert);
-    dsl_note(V, "inf_query mark=%ld codes=%lu syncpt=%d val=%d(%d) und=%d(%d)\n",
-             mark, used, sync, rcv, check, rcu, subvert);
-    return rcv == Z_OK ? DSL_OK : DSL_LIBERR;
+    dsl_note(V, "inf_query mark=%ld\n", mark);
+    return mark == -65536L ? DSL_LIBERR : DSL_OK;
   }
 
   /* inflateSync: scan forward for a full-flush point (00 00 FF FF) and resume.
@@ -1449,16 +1404,15 @@ static int dsl_step(dsl_vm *V, unsigned op) {
   case OP_INF_SYNC: {
     z_streamp s = (z_streamp)want_inf(V, NULL);
     size_t in_n;
-    int rc, sync;
+    int rc;
     if (s == NULL || sc_in == NULL) return DSL_SKIP;
     in_n = stage_bytes(V, sc_in, SC_IN, K_ZBUF);
     s->next_in = sc_in;
     s->avail_in = (uInt)in_n;
     rc = inflateSync(s);
-    sync = inflateSyncPoint(s);
-    dsl_note(V, "inf_sync in=%lu rc=%d left=%lu tin=%lu syncpt=%d\n",
+    dsl_note(V, "inf_sync in=%lu rc=%d left=%lu tin=%lu\n",
              (unsigned long)in_n, rc, (unsigned long)s->avail_in,
-             (unsigned long)s->total_in, sync);
+             (unsigned long)s->total_in);
     note_msg(V, s);
     s->next_in = Z_NULL; s->avail_in = 0;
     return rc == Z_OK ? DSL_OK : DSL_LIBERR;
@@ -1642,69 +1596,36 @@ static int dsl_step(dsl_vm *V, unsigned op) {
  *
  *   K_DEF   tag 'D'; the driver's own record (n: windowBits + 64, DEF_USED);
  *           the z_stream counters zlib writes at Reset and updates on every
- *           call -- total_in, total_out, adler, data_type (deflate.c
- *           deflateResetKeep: 642-644, 658) -- and msg's CONTENTS (one of
- *           zutil.c's static strings; NULL is distinct from "");
- *           then the deflate_state scalars, every one written at Init/Reset:
- *             deflateInit2_  wrap w_bits w_size hash_bits lit_bufsize level
- *                            strategy method high_water (deflate.c 434-521)
- *             deflateResetKeep  status pending last_flush (647-663)
- *             lm_init        window_size max_lazy_match good_match nice_match
- *                            max_chain_length strstart block_start lookahead
- *                            insert match_length prev_length match_available
- *                            ins_h (673-692)
- *             _tr_init / init_block  bi_buf bi_valid sym_next opt_len
- *                            static_len matches (trees.c 439-476); sym_end is
- *                            Init-set in deflateInit2_
- *           and the gz_header gzhead points at (set NULL at Init; its CONTENT
- *           through ser_gzhead since 2026-09-03, never the pointer);
- *           then the not-yet-flushed PENDING bytes [pending_out, +pending) --
- *           every byte there was put_byte'd before `pending` counted it;
- *           then the not-yet-emitted SYMBOL buffer, sym_buf[0, sym_next)
- *           (LIT_MEM off, the pinned deflate.h's default) or d_buf/l_buf
- *           [0, sym_next) (LIT_MEM on) -- each entry written by _tr_tally
- *           before sym_next advanced;
+ *           call -- total_in, total_out, adler, data_type -- and msg's
+ *           CONTENTS (one of zutil.c's static strings; NULL is distinct from
+ *           ""); then deflatePending's answer: its return code and the bytes
+ *           and bits of output made and not yet delivered; then
+ *           deflateBound(strm, 0), a function of the stream's wrapper,
+ *           windowBits, memLevel, level, strategy and attached gzip header;
  *           then the WINDOW through deflateGetDictionary, which copies
  *           min(strstart + lookahead, w_size) bytes -- exactly the bytes
  *           fill_window and deflateSetDictionary have written -- into the
  *           32 KiB static (w_size <= 1 << 15; the same size argument as
- *           SC_DICT). NOT sunk: match_start, prev_match (written only inside
- *           longest_match / deflate_slow), gzindex (written when the header
- *           writer starts), the tree Freq/Code arrays (a function of sym_buf,
- *           and their internal nodes are built only per block), head[]/prev[]
- *           (a function of the window; prev[] is ZALLOC'd and written
- *           per-position), the three ZALLOC'd buffers' unused tails.
+ *           SC_DICT).
  *
  *   K_INF   tag 'I'; the driver's record; total_in total_out adler data_type
- *           msg; the inflate_state scalars written at Init/Reset:
- *             inflateResetKeep  total mode last havedict flags dmax hold bits
- *                            sane back (inflate.c 111-125)
- *             inflateReset   wsize whave wnext (135-137)
- *             inflateReset2  wrap wbits (173-174)
- *           the gz_header head points at (its CONTENT, filled in by inflate's
- *           header states, through ser_gzhead; the arena's zeros before them);
- *           then the three exported read-only accessors
- *           inflateMark, inflateCodesUsed (a pointer DIFFERENCE, a count of
- *           table entries), inflateSyncPoint; then the WINDOW through
- *           inflateGetDictionary (whave bytes, reassembled around wnext:
- *           exactly what updatewindow has written). NOT sunk: check (written
- *           only once a wrapped header is read), length offset extra ncode
- *           nlen ndist have lenbits distbits was lens[] work[] codes[] (all
- *           written by the decode loop as it reaches them).
+ *           msg; inflateMark; then the WINDOW through inflateGetDictionary
+ *           (whave bytes, reassembled around wnext: exactly what updatewindow
+ *           has written).
  *
- * strm->adler for a RAW inflate stream is never written by zlib
- * (inflateResetKeep sets it only `if (state->wrap)`); it is the arena's zero
- * from new_stream, deterministic in every flavour, and note_counters already
- * prints it.
+ * strm->adler for a RAW inflate stream is never written by zlib (it writes
+ * adler only for a wrapped stream); it is the arena's zero from new_stream,
+ * deterministic in every flavour, and note_counters already prints it.
  *
- * Why the struct fields and not deflatePending/deflateBound alone: the state
- * the brief's classifier control names -- "a compressor with buffered input
- * and nothing emitted" -- lives in the window (deflateGetDictionary sees it)
- * AND in the symbol buffer (nothing public sees it: after deflate(Z_NO_FLUSH)
- * on a short input the window holds the bytes, sym_buf holds the literals and
- * matches the match-finder chose, and pending is 0 or a 2-byte header). A
- * one-byte change in that input moves sym_buf and the window; deflatePending
- * says 2 either way.
+ * ONLY WHAT ZLIB.H DOCUMENTS. Each value above is a z_stream field that zlib.h
+ * documents or the answer of a read-only query that zlib.h documents
+ * (deflatePending, deflateBound, deflateGetDictionary, inflateMark,
+ * inflateGetDictionary). Nothing is read behind the stream's `state` pointer,
+ * so the parameters a stream was made with, its pending bytes, its symbol
+ * buffer and the gzip header attached to it are sunk only as far as these
+ * queries reflect them. The state that the classifier control names -- "a
+ * compressor with buffered input and nothing emitted" -- is still seen: the
+ * input is in total_in and in the window.
  *
  * No kind is opaque. Everything sunk is a library-computed value or
  * library-written bytes; nothing depends on an address or on an allocator's
@@ -1712,52 +1633,6 @@ static int dsl_step(dsl_vm *V, unsigned op) {
  * is the instrument that measures that rather than assuming it. */
 static unsigned char ser_win[32768];
 _Static_assert(sizeof ser_win == (1u << 15), "ser_win must hold the largest w_size");
-
-/* A gz_header's CONTENT (added 2026-09-03; until then only `gzhead != NULL` /
- * `head != NULL` was sunk, and the previous pass measured the hole: with a
- * header attached to a gzip deflater but not yet emitted, changing its `time`
- * left every check passing). The struct and its three buffers are OURS -- arena
- * blocks, zeroed at allocation (op_def_header, op_inf_header) -- so every field
- * is initialised at every point of observation whether or not zlib has reached
- * the state that writes it, and nothing here is an allocator's choice.
- *
- * The two sides read the struct differently, so the sink does too. WRITING
- * (deflateSetHeader): deflate.c reads extra[0, extra_len & 0xffff) when extra
- * is non-NULL, and name/comment up to their NUL (dsl_cstr's copies are
- * NUL-terminated by construction); extra_max/name_max/comm_max are unused.
- * READING (inflateGetHeader): inflate.c fills extra[0, extra_max), name[0,
- * name_max), comment[0, comm_max) -- a name longer than name_max has NO NUL
- * inside the buffer, so the reading side sinks the whole buffer and never
- * strlen()s it -- and sets the pointer of an absent field to Z_NULL (EXLEN /
- * NAME / COMMENT states); the buffers are exactly *_max bytes because
- * op_inf_header zeroes the max of any buffer the arena refused. Pointers are
- * sunk as present/absent only (rule 3). */
-static void ser_gzhead(dsl_ser *S, const gz_header *h, int reading) {
-  if (h == NULL) { dsl_ser_u8(S, 0); return; }
-  dsl_ser_u8(S, 1);
-  dsl_ser_i64(S, (int64_t)h->text);
-  dsl_ser_u64(S, (uint64_t)h->time);
-  dsl_ser_i64(S, (int64_t)h->xflags);
-  dsl_ser_i64(S, (int64_t)h->os);
-  dsl_ser_i64(S, (int64_t)h->hcrc);
-  dsl_ser_i64(S, (int64_t)h->done);
-  dsl_ser_u32(S, (uint32_t)h->extra_len);
-  dsl_ser_u32(S, (uint32_t)h->extra_max);
-  dsl_ser_u32(S, (uint32_t)h->name_max);
-  dsl_ser_u32(S, (uint32_t)h->comm_max);
-  dsl_ser_u8(S, h->extra != Z_NULL);
-  if (reading) {
-    if (h->extra != Z_NULL) dsl_ser_bytes(S, h->extra, (size_t)h->extra_max);
-    dsl_ser_u8(S, h->name != Z_NULL);
-    if (h->name != Z_NULL) dsl_ser_bytes(S, h->name, (size_t)h->name_max);
-    dsl_ser_u8(S, h->comment != Z_NULL);
-    if (h->comment != Z_NULL) dsl_ser_bytes(S, h->comment, (size_t)h->comm_max);
-  } else {
-    if (h->extra != Z_NULL) dsl_ser_bytes(S, h->extra, (size_t)(h->extra_len & 0xffffu));
-    dsl_ser_str(S, (const char *)h->name);
-    dsl_ser_str(S, (const char *)h->comment);
-  }
-}
 
 static int dsl_serialize(dsl_vm *V, int kind, void *p, size_t n, dsl_ser *S) {
   (void)V;
@@ -1769,7 +1644,8 @@ static int dsl_serialize(dsl_vm *V, int kind, void *p, size_t n, dsl_ser *S) {
 
   case K_DEF: {
     z_streamp strm = (z_streamp)p;
-    deflate_state *s = (deflate_state *)strm->state;
+    unsigned pending = 0;
+    int bits = 0, prc;
     uInt dlen = 0;
     dsl_ser_tag(S, 'D');
     dsl_ser_u32(S, (uint32_t)n);
@@ -1778,59 +1654,11 @@ static int dsl_serialize(dsl_vm *V, int kind, void *p, size_t n, dsl_ser *S) {
     dsl_ser_u64(S, (uint64_t)strm->adler);
     dsl_ser_i64(S, (int64_t)strm->data_type);
     dsl_ser_str(S, strm->msg);
-    if (s == NULL) { dsl_ser_tag(S, 0); return 0; }   /* cannot happen for a live handle */
-    dsl_ser_tag(S, 1);
-    dsl_ser_i64(S, (int64_t)s->status);
-    dsl_ser_i64(S, (int64_t)s->wrap);
-    dsl_ser_u32(S, (uint32_t)s->w_bits);
-    dsl_ser_u32(S, (uint32_t)s->w_size);
-    dsl_ser_u32(S, (uint32_t)s->hash_bits);
-    dsl_ser_u32(S, (uint32_t)s->lit_bufsize);
-    dsl_ser_i64(S, (int64_t)s->level);
-    dsl_ser_i64(S, (int64_t)s->strategy);
-    dsl_ser_u8(S, (unsigned)s->method);
-    dsl_ser_u64(S, (uint64_t)s->high_water);
-    dsl_ser_u64(S, (uint64_t)s->pending);
-    dsl_ser_i64(S, (int64_t)s->last_flush);
-    dsl_ser_u64(S, (uint64_t)s->window_size);
-    dsl_ser_u32(S, (uint32_t)s->max_lazy_match);
-    dsl_ser_u32(S, (uint32_t)s->good_match);
-    dsl_ser_i64(S, (int64_t)s->nice_match);
-    dsl_ser_u32(S, (uint32_t)s->max_chain_length);
-    dsl_ser_u32(S, (uint32_t)s->strstart);
-    dsl_ser_i64(S, (int64_t)s->block_start);
-    dsl_ser_u32(S, (uint32_t)s->lookahead);
-    dsl_ser_u32(S, (uint32_t)s->insert);
-    dsl_ser_u32(S, (uint32_t)s->match_length);
-    dsl_ser_u32(S, (uint32_t)s->prev_length);
-    dsl_ser_i64(S, (int64_t)s->match_available);
-    dsl_ser_u32(S, (uint32_t)s->ins_h);
-    dsl_ser_u32(S, (uint32_t)s->bi_buf);
-    dsl_ser_i64(S, (int64_t)s->bi_valid);
-    dsl_ser_u32(S, (uint32_t)s->sym_next);
-    dsl_ser_u32(S, (uint32_t)s->sym_end);
-    dsl_ser_u64(S, (uint64_t)s->opt_len);
-    dsl_ser_u64(S, (uint64_t)s->static_len);
-    dsl_ser_u32(S, (uint32_t)s->matches);
-    /* The header deflate will write (or is writing) into a gzip stream: our
-     * arena struct, set NULL at Init/Reset by deflate.c and stored by
-     * deflateSetHeader; deflate only ever READS it. */
-    ser_gzhead(S, s->gzhead, 0);
-    /* Pending output: written bytes only. pending_out stays inside pending_buf
-     * and pending <= pending_buf_size by deflate.c's own invariants. */
-    if (s->pending_out != NULL && s->pending != 0)
-      dsl_ser_bytes(S, s->pending_out, (size_t)s->pending);
-    /* The symbol buffer: the literals and (dist, len) pairs tallied for the
-     * block in progress. */
-#ifdef LIT_MEM
-    if (s->d_buf != NULL && s->l_buf != NULL && s->sym_next != 0) {
-      dsl_ser_bytes(S, s->d_buf, (size_t)s->sym_next * sizeof(ush));
-      dsl_ser_bytes(S, s->l_buf, (size_t)s->sym_next);
-    }
-#else
-    if (s->sym_buf != NULL && s->sym_next != 0)
-      dsl_ser_bytes(S, s->sym_buf, (size_t)s->sym_next);
-#endif
+    prc = deflatePending(strm, &pending, &bits);
+    dsl_ser_i64(S, (int64_t)prc);
+    dsl_ser_u32(S, (uint32_t)pending);
+    dsl_ser_i64(S, (int64_t)bits);
+    dsl_ser_u64(S, (uint64_t)deflateBound(strm, 0));
     /* The window: deflateGetDictionary is zlib's exported, read-only window
      * accessor; the buffer must be w_size bytes (see SC_DICT). */
     if (deflateGetDictionary(strm, ser_win, &dlen) == Z_OK && dlen <= sizeof ser_win) {
@@ -1844,7 +1672,6 @@ static int dsl_serialize(dsl_vm *V, int kind, void *p, size_t n, dsl_ser *S) {
 
   case K_INF: {
     z_streamp strm = (z_streamp)p;
-    struct inflate_state *st = (struct inflate_state *)strm->state;
     uInt dlen = 0;
     dsl_ser_tag(S, 'I');
     dsl_ser_u32(S, (uint32_t)n);
@@ -1853,30 +1680,7 @@ static int dsl_serialize(dsl_vm *V, int kind, void *p, size_t n, dsl_ser *S) {
     dsl_ser_u64(S, (uint64_t)strm->adler);
     dsl_ser_i64(S, (int64_t)strm->data_type);
     dsl_ser_str(S, strm->msg);
-    if (st == NULL) { dsl_ser_tag(S, 0); return 0; }   /* cannot happen for a live handle */
-    dsl_ser_tag(S, 1);
-    dsl_ser_u64(S, (uint64_t)st->total);
-    dsl_ser_i64(S, (int64_t)st->mode);
-    dsl_ser_i64(S, (int64_t)st->last);
-    dsl_ser_i64(S, (int64_t)st->wrap);
-    dsl_ser_i64(S, (int64_t)st->havedict);
-    dsl_ser_i64(S, (int64_t)st->flags);
-    dsl_ser_u32(S, (uint32_t)st->dmax);
-    dsl_ser_u64(S, (uint64_t)st->hold);
-    dsl_ser_u32(S, (uint32_t)st->bits);
-    dsl_ser_i64(S, (int64_t)st->sane);
-    dsl_ser_i64(S, (int64_t)st->back);
-    dsl_ser_u32(S, (uint32_t)st->wbits);
-    dsl_ser_u32(S, (uint32_t)st->wsize);
-    dsl_ser_u32(S, (uint32_t)st->whave);
-    dsl_ser_u32(S, (uint32_t)st->wnext);
-    /* The header inflate has filled in (or is filling in) from a gzip stream:
-     * our arena struct, set NULL at Reset by inflate.c and stored by
-     * inflateGetHeader; inflate WRITES its fields as the header states pass. */
-    ser_gzhead(S, st->head, 1);
     dsl_ser_i64(S, (int64_t)inflateMark(strm));
-    dsl_ser_u64(S, (uint64_t)inflateCodesUsed(strm));
-    dsl_ser_i64(S, (int64_t)inflateSyncPoint(strm));
     if (inflateGetDictionary(strm, ser_win, &dlen) == Z_OK && dlen <= sizeof ser_win) {
       dsl_ser_u32(S, (uint32_t)dlen);
       dsl_ser_bytes(S, ser_win, (size_t)dlen);
