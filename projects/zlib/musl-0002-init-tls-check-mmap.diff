@@ -1,0 +1,38 @@
+From: Theorem Labs
+Subject: __init_tls: exit cleanly when the TLS mapping is refused
+
+A static program whose thread-local storage does not fit musl's built-in
+buffer gets it from one anonymous mmap during start-up.  Upstream does
+not check the result: a refused mapping becomes a small negative pointer,
+and the process faults on the first store through it.  The kernel model
+that the fuzz target binaries are verified against may refuse any
+mapping, so that fault is reachable undefined behaviour.
+
+Check the result, and leave through exit_group with status 2, the status
+with which the fuzz target's driver refuses an input.  A raw system call,
+with no message and no a_crash: nothing that needs TLS exists at this
+point.  Every build links this one libc.a, so plain and instrumented
+programs leave the same way.
+
+Applies on top of 0001 (v1.2.6-20, f21a9653).
+--- a/src/env/__init_tls.c
++++ b/src/env/__init_tls.c
+@@ -147,9 +147,15 @@
+ 			SYS_mmap2,
+ 			0, libc.tls_size, PROT_READ|PROT_WRITE,
+ 			MAP_ANONYMOUS|MAP_PRIVATE, -1, 0);
+-		/* -4095...-1 cast to void * will crash on dereference anyway,
+-		 * so don't bloat the init code checking for error codes and
+-		 * explicitly calling a_crash(). */
++		/* Upstream leaves the result unchecked: -4095...-1 cast to
++		 * void * crashes on dereference.  Here a refused mapping is
++		 * a clean, fixed-status exit instead -- the kernel model this
++		 * libc is verified against may refuse any mapping, and a
++		 * process that faults on that refusal has no defined
++		 * behaviour to prove.  Raw syscall: nothing that needs TLS
++		 * exists yet.  Status 2 is the refusal status the drivers use. */
++		if ((unsigned long)mem > -4096UL)
++			__syscall(SYS_exit_group, 2);
+ 	} else {
+ 		mem = builtin_tls;
+ 	}
