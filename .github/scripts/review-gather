@@ -134,6 +134,12 @@ with zipfile.ZipFile(sys.argv[1]) as archive, open(sys.argv[2], "w") as out:
 EOF
   done
 }
+# Take each CLAUDE*.md, AGENTS*.md and .claude/ out of the folder $1, at any depth. Claude Code reads a CLAUDE.md, an
+# AGENTS.md or a .claude/ beside a file that it reads as instructions. The files of the folder are data, so these go
+# (rule 1 of review.md).
+drop_instructions() {
+  find "$1" \( -iname 'CLAUDE*.md' -o -iname 'AGENTS*.md' -o -name .claude \) -prune -exec rm -rf {} +
+}
 # KIND=setup (the header above): each command reads a file of FETCHED or LAST_REVIEW, or writes in the directory. No
 # command reads the network.
 gather_setup() {
@@ -158,12 +164,11 @@ gather_setup() {
   jq -r '.body // ""' "$FETCHED/pr.json" > "$out/description.md" 2> /dev/null
   # The head's .theorem/, in the place of projects/<name>/, as data: regular files and folders alone. cp -R copies a
   # symbolic link as a link and follows none, and find then takes out each file that is not a regular file or a
-  # folder. Claude Code reads a CLAUDE.md, an AGENTS.md or a .claude/ beside a file that it reads as instructions:
-  # the pull request's are data, so they go too (rule 1 of review.md).
+  # folder.
   rm -rf "$out/theorem"
   cp -R -- "$FETCHED/theorem" "$out/theorem"
   find "$out/theorem" -mindepth 1 ! -type f ! -type d -delete
-  find "$out/theorem" \( -iname 'CLAUDE*.md' -o -iname 'AGENTS*.md' -o -name .claude \) -prune -exec rm -rf {} +
+  drop_instructions "$out/theorem"
   # The checks of theorem app setup and their reasons, in the place of validate.txt and the triage comment. A check's
   # name is a short word, so that no line of setup.json can look like another check.
   {
@@ -243,7 +248,7 @@ if len(refused) > 20:
     print(f"review-gather: source.tar: not taken: {len(refused) - 20} more members", file=sys.stderr)
 EOF
   then
-    find "$out/source" \( -iname 'CLAUDE*.md' -o -iname 'AGENTS*.md' -o -name .claude \) -prune -exec rm -rf {} +
+    drop_instructions "$out/source"
   else
     rm -rf "$out/source"
     echo "Not gathered: source.tar of the fetch job could not be read as a tar file, so there is no source to read." \
@@ -463,9 +468,7 @@ if [[ ${COMMIT:-} =~ ^[0-9a-f]{40}$ ]]; then
     # Data only: no git metadata, and no symbolic link, which could point the reader outside the directory.
     rm -rf "$source/.git"
     find "$source" -type l -delete
-    # Claude Code reads a CLAUDE.md or .claude/ in a directory whose files it reads as instructions: the project's are
-    # data, so they go (rule 1 of review.md).
-    find "$source" \( -iname 'CLAUDE*.md' -o -iname 'AGENTS*.md' -o -name .claude \) -prune -exec rm -rf {} +
+    drop_instructions "$source"
   else
     rm -rf "$source"
     echo "review-gather: could not fetch $COMMIT from $repo" >&2

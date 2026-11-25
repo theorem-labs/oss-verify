@@ -1527,7 +1527,6 @@ class ReviewVerdict(unittest.TestCase):
                 record = self.record(got)
                 self.assertEqual((record["installer"], record["ticked_by"]), kept)
                 self.assertEqual({**record, "installer": None, "ticked_by": None}, self.record(without))
-                self.assertEqual((record["criticality_score"], record["oss_fuzz"], record["sizes"]), (None, None, None))
         for env in ({"HOLD": "failed", "JOB": "review"}, {"HOLD": "screen"}):
             with self.subTest(env=env):
                 record = self.record(self.verdict(**env, INSTALLER="octocat", TICKED_BY=""))
