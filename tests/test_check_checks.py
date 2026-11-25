@@ -3528,9 +3528,9 @@ class Owners(unittest.TestCase):
         *dict.fromkeys(("**/AGENTS.md", "**/CLAUDE.md", "**/SKILL.md", "skills/"), TEAMS).items(),
         # What runs with a credential, and what changes what a workflow runs (the top of CODEOWNERS). /.github/ owns
         # every workflow and each file added there later; the lines with no owner right after it take back only files
-        # that owned workflows run in jobs with read permissions alone. src/ has no owner, by Sami's choice
-        # (dispatch://OSSV-276/ask/6c92b099-08f4-4177-aa5a-6a3fc6292878); .github/scripts/steering.py keeps it a
-        # steering file, and tests/test_token_jobs.py keeps it out of every job that holds a token.
+        # that owned workflows run in jobs with read permissions alone. src/ has no owner, by Sami's choice;
+        # .github/scripts/steering.py keeps it a steering file, and tests/test_token_jobs.py keeps it out of every job
+        # that holds a token.
         ("/.github/", TEAMS), ("/.github/actionlint.yaml", []), ("/.github/scripts/frame-pointers/", []),
         *dict.fromkeys((
             "/infra/", "/seeds/", "/docs/seeded-projects.tsv", ".claude/", "CLAUDE*.md", "AGENTS*.md", "/.mcp.json",
