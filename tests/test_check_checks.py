@@ -2483,7 +2483,9 @@ class SinceLastReview(unittest.TestCase):
     def gathered(self, status, last=None):
         gather = (ROOT / ".github" / "scripts" / "review-gather").read_text()
         keep = re.search(r"^keep\(\) \{.*\}$", gather, re.M).group(0)
-        block = gather[gather.index("last=$(sed"):gather.index('ls -la "$out"')]
+        # The block reads LAST_REVIEW through last_review(), which the script defines with its other functions.
+        last_review = re.search(r"^last_review\(\) \{$.*?^\}$", gather, re.M | re.S).group(0)
+        block = gather[gather.index("last=$(last_review)"):gather.index('ls -la "$out"')]
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             for sub in ("bin", "out"):
@@ -2496,7 +2498,8 @@ class SinceLastReview(unittest.TestCase):
                           '  *) printf "diff --git a/projects/p/f b/projects/p/f\\n+x\\ndiff --git a/o b/o\\n+y\\n" ;;\n'
                           "esac\n")
             gh.chmod(0o755)
-            run = subprocess.run(["bash", "-c", f"set -euo pipefail\nout={root / 'out'}\ndir=projects/p\n{keep}\n{block}"],
+            script = f"set -euo pipefail\nout={root / 'out'}\ndir=projects/p\n{keep}\n{last_review}\n{block}"
+            run = subprocess.run(["bash", "-c", script],
                                  env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "REPO": "o/r",
                                       "HEAD_SHA": "1" * 40, "LAST_REVIEW": str(root / "last-review"),
                                       "GITHUB_OUTPUT": str(root / "output")},

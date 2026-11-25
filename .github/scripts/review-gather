@@ -38,7 +38,7 @@
 # .github/scripts/review-body writes. It never comes from the runs API, or from LAST_REVIEW, which sits in a cache
 # that review.yml's session job writes in main's scope with what the review job kept, after its model read the text
 # of the pull request, an outside one too. LAST_REVIEW gives the session's id, which is resumed only when the head
-# LAST_REVIEW names is that head.
+# LAST_REVIEW names is that head (resume_review, below).
 # KIND=issue, the draft reply to an issue (review-issue.md): only the issue's title, body, author and comments, in
 # issue.json, and nothing else.
 # KIND=setup, the review of a setup pull request: the pull request on an owner's repository that adds .theorem/.
@@ -66,10 +66,13 @@
 # description.md, as for an enrollment; theorem/, in the place of projects/<name>/; setup.txt, the checks of
 # setup.json and the reasons of setup.txt, in the place of validate.txt and the triage comment; record.json as it is;
 # repository.txt, from repository.json and contributors.json; source/, from source.tar; the seed listings of the seed
-# corpora of theorem/, as for an enrollment; and since-last-review.diff when FETCHED holds it, with only its sections
-# of files under .theorem/, as an enrollment's has only those of projects/<name>/. When last-review-head.txt names a
-# head, FETCHED holds since-last-review.diff, and LAST_REVIEW names a session kept for that head, it writes `session`
-# and `last` to GITHUB_OUTPUT, as for a change.
+# corpora of theorem/, as for an enrollment; and since-last-review.diff when FETCHED holds it, whole, as for a change.
+# As for a change, the review resumes the session of its last review, and this writes `session` and `last` to
+# GITHUB_OUTPUT, only when last-review-head.txt names a head and LAST_REVIEW names a session kept for that head. A setup
+# pull request changes only .theorem/, so the review also resumes only when since-last-review.diff is a diff of files
+# under .theorem/ alone (setup_diff, below). A diff that changes a file outside .theorem/ (after a merge of the default
+# branch into theorem/setup, for one), an empty file, or a file that is not a diff gives a fresh review, which reads
+# all of the directory again, and a line of the standard output says why.
 # The runner reads none of its output as a workflow command: the gathered text is the pull request's or the issue's.
 resume=$(openssl rand -hex 16) && echo "::stop-commands::$resume"
 trap 'echo "::$resume::"' EXIT
@@ -100,6 +103,49 @@ reviewed_head() {
   IFS=$'\x1f' read -r _ _ head <<< "$newest"
   if [[ ${head:-} =~ ^[0-9a-f]{40}$ ]]; then echo "$head"; fi
   return 0
+}
+# The line `session=<id> head=<commit>` of LAST_REVIEW, the file of the cache (the header above), as `<id> <commit>`:
+# its first line of that form, and nothing when LAST_REVIEW names no file or the file has no line of that form.
+last_review() {
+  sed -n 's/^session=\([0-9a-f-]\{36\}\) head=\([0-9a-f]\{40\}\)$/\1 \2/p' "${LAST_REVIEW:-/nonexistent}" 2> /dev/null \
+    | head -n 1
+  return 0
+}
+# Whether a change review or a setup review (the header above) resumes the session of its last review, for context,
+# with the diff from the head that review reviewed. $1 is the review's kind, $2 that head, from the review comment, or
+# nothing when there is none, $3 the head the diff goes to, or nothing, and $4... the command that gathers or reads that
+# diff, with $2 as its last argument: it exits 0 when the review can resume with the diff, and else it says why the
+# review is fresh. The session's id comes from LAST_REVIEW, and only when LAST_REVIEW names that same head: a session
+# kept for another head (a review whose save did not happen, an older run's entry) is not the session of that review,
+# and the command does not run. When the review resumes, this writes `session` and `last` to GITHUB_OUTPUT.
+resume_review() {
+  local kind=$1 reviewed=$2 to=$3 session kept
+  shift 3
+  read -r session kept <<< "$(last_review)"
+  [[ -n $reviewed && -n $session ]] || return 0
+  if [ "$kept" != "$reviewed" ]; then
+    echo "review-gather: the session in the cache was kept for $kept, not $reviewed: the review is fresh"
+  elif "$@" "$reviewed"; then
+    echo "review-gather: the $kind review resumes the session $session, with the diff from $reviewed, the head its" \
+      "last review reviewed (its review comment)${to:+, to $to}"
+    { echo "session=$session"; echo "last=$reviewed"; } >> "${GITHUB_OUTPUT:-/dev/null}"
+  fi
+  return 0
+}
+# For resume_review (above), a change review: since-last-review.diff, the diff from the head $1 to HEAD_SHA. GitHub's
+# compare diffs from the merge base, which is $1 only when HEAD_SHA descends from it (status "ahead"). After a
+# force-push, or on the same head, there is no diff, and the review is fresh.
+change_diff() {
+  local status
+  [[ ${HEAD_SHA:-} =~ ^[0-9a-f]{40}$ ]] || return 1
+  status=$(gh api "repos/$REPO/compare/$1...$HEAD_SHA" --jq .status 2> /dev/null) || status=""
+  if [ "$status" = ahead ]; then
+    keep since-last-review.diff gh api -H 'Accept: application/vnd.github.diff' "repos/$REPO/compare/$1...$HEAD_SHA"
+  fi
+  [ "$(tail -n 1 "$out/since-last-review.diff" 2> /dev/null)" = "(exit status 0)" ] && return 0
+  echo "review-gather: no diff from $1, the head the last review reviewed, to $HEAD_SHA (compare status" \
+    "${status:-unknown}): the review is fresh"
+  return 1
 }
 # Each seed corpus of the folder $1: its listing, and the first 512 bytes of each of its first 200 inputs, in
 # hexadecimal. The zip is the pull request's. read() with no size decompresses the whole member before it cuts the
@@ -140,10 +186,34 @@ EOF
 drop_instructions() {
   find "$1" \( -iname 'CLAUDE*.md' -o -iname 'AGENTS*.md' -o -name .claude \) -prune -exec rm -rf {} +
 }
+# For resume_review (above), a setup review: whether since-last-review.diff of FETCHED, the diff from the head $1 that
+# the fetch job wrote, is a diff of files under .theorem/ alone (the header above). It is when the file is not empty,
+# its first line starts with `diff --git `, and in each line `diff --git a/<path> b/<path>` both paths are under
+# .theorem/. A path can hold " b/", so each " b/" of such a line must start a path under .theorem/. A path that git
+# writes in quotes (for a name with a quote, a backslash or a byte that is not printable ASCII) does not start with
+# a/.theorem/, so its diff gives a fresh review too.
+setup_diff() {
+  local diff=$FETCHED/since-last-review.diff why
+  if [[ ! -f $diff || -L $diff ]]; then
+    echo "review-gather: no diff from $1, the head the last review reviewed: the review is fresh"
+    return 1
+  fi
+  why=$(awk 'NR == 1 && !/^diff --git / { why = "does not start with diff --git"; exit }
+             /^diff --git / {
+               n = split(substr($0, 12), path, " b/")
+               outside = n < 2 || index(path[1], "a/.theorem/") != 1
+               for (i = 2; i <= n; i++) outside = outside || index(path[i], ".theorem/") != 1
+               if (outside) { why = "changes a file outside .theorem/"; exit }
+             }
+             END { print (NR == 0 ? "is empty" : why) }' "$diff") || why="cannot be read"
+  [ -z "$why" ] && return 0
+  echo "review-gather: the diff from $1 $why: the review is fresh"
+  return 1
+}
 # KIND=setup (the header above): each command reads a file of FETCHED or LAST_REVIEW, or writes in the directory. No
 # command reads the network.
 gather_setup() {
-  local name reviewed="" session="" kept=""
+  local name reviewed=""
   [[ -n ${FETCHED:-} && -d $FETCHED && ! -L $FETCHED ]] || { echo "review-gather: FETCHED is not a folder" >&2; exit 2; }
   for name in pr.json pr.diff review-comments.txt review-comment-authors.txt theorem/ source.tar setup.json setup.txt \
       record.json repository.json contributors.json last-review-head.txt; do
@@ -202,11 +272,13 @@ gather_setup() {
   # The repository at the head, as data, from GitHub's tarball. Each of its members is in one top folder,
   # <owner>-<name>-<commit>/, and source/ gets what is in that folder. It takes only a folder or a regular file. It
   # does not take a symbolic link or a hard link, a device, a FIFO, a sparse file, a member whose path is absolute or
-  # has a part "..", or a member outside the top folder, and it names each one that it does not take. A PAX header can
-  # make a member of the type of a regular file sparse, with holes of any size that the tar holds no byte of, so a
-  # member is a sparse file by its header (issparse), whatever its type. It makes each folder and each file itself,
-  # and it makes no link, so nothing that it writes is outside source/. A tar that it cannot read gives no source/,
-  # and source.txt says so.
+  # has a part "..", a member outside the top folder, or a member whose folder or file it cannot make, because another
+  # member has its path or because the file system refuses its name (a part of its path is longer than 255 bytes,
+  # say). It goes on with the other members, and it names each member that it does not take, with the reason. A PAX
+  # header can make a member of the type of a regular file sparse, with holes of any size that the tar holds no byte
+  # of, so a member is a sparse file by its header (issparse), whatever its type. It makes each folder and each file
+  # itself, and it makes no link, so nothing that it writes is outside source/. A tar that it cannot read, the data of
+  # a member too, gives no source/, and source.txt says so.
   rm -rf "$out/source" "$out/source.txt"
   if python3 -P - "$FETCHED/source.tar" "$out/source" <<'EOF'
 import os, shutil, sys, tarfile
@@ -226,6 +298,7 @@ try:
                 refused.append((member.name, "it is not in the top folder"))
                 continue
             path = os.path.join(into, *rest)
+            file = None
             try:
                 if member.isdir():
                     os.makedirs(path, exist_ok=True)
@@ -234,12 +307,16 @@ try:
                 elif member.type in (tarfile.REGTYPE, tarfile.AREGTYPE):
                     os.makedirs(os.path.dirname(path), exist_ok=True)
                     file = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
-                    with os.fdopen(file, "wb") as out, archive.extractfile(member) as data:
-                        shutil.copyfileobj(data, out)
                 else:
                     refused.append((member.name, f"it is not a folder or a regular file (tar type {member.type!r})"))
             except (FileExistsError, NotADirectoryError, IsADirectoryError):
                 refused.append((member.name, "another member has its path"))
+            except OSError as e:
+                refused.append((member.name, f"it cannot be written here: {e.strerror or e}"))
+            # Outside the try above: an error while it copies the member's data goes to the except below.
+            if file is not None:
+                with os.fdopen(file, "wb") as out, archive.extractfile(member) as data:
+                    shutil.copyfileobj(data, out)
 except Exception as e:
     sys.exit(f"review-gather: source.tar is not a tar file that can be read: {type(e).__name__}: {e}")
 for name, why in refused[:20]:
@@ -255,31 +332,16 @@ EOF
       > "$out/source.txt"
   fi
   seed_listings "$out/theorem"
-  # The diff since the last review, with only its sections of files under .theorem/, as since_diff (below) keeps only
-  # those of projects/<name>/ for an enrollment: a setup pull request changes only .theorem/, but a merge of the
-  # default branch into theorem/setup puts each change of that branch in the diff from the last review's head.
+  # The diff since the last review, whole, as for a change: the review reads each change since its last review, and it
+  # resumes the session of that review only when the diff is of files under .theorem/ alone (setup_diff, above).
   if [[ -f $FETCHED/since-last-review.diff && ! -L $FETCHED/since-last-review.diff ]]; then
-    keep since-last-review.diff awk -v a="a/.theorem/" -v b="b/.theorem/" \
-      '/^diff --git / { take = index($0, "diff --git " a) == 1 || index($0, " " b) > 0 } take' \
-      "$FETCHED/since-last-review.diff"
+    keep since-last-review.diff cat -- "$FETCHED/since-last-review.diff"
   fi
   # As for a change: the head that the last review reviewed comes from the App's review comment, which the fetch job
-  # read (last-review-head.txt), and LAST_REVIEW gives the session's id only when it names that same head.
+  # read (last-review-head.txt).
   IFS= read -r reviewed < "$FETCHED/last-review-head.txt"
   [[ $reviewed =~ ^[0-9a-f]{40}$ ]] || reviewed=""
-  read -r session kept < <(sed -n 's/^session=\([0-9a-f-]\{36\}\) head=\([0-9a-f]\{40\}\)$/\1 \2/p' \
-    "${LAST_REVIEW:-/nonexistent}" 2> /dev/null | head -n 1)
-  if [[ -n $reviewed && -n $session && $kept != "$reviewed" ]]; then
-    echo "review-gather: the session in the cache was kept for $kept, not $reviewed: the review is fresh"
-  elif [[ -n $reviewed && -n $session ]]; then
-    if [ "$(tail -n 1 "$out/since-last-review.diff" 2> /dev/null)" = "(exit status 0)" ]; then
-      echo "review-gather: the setup review resumes the session $session, with the diff from $reviewed, the head its" \
-        "last review reviewed (its review comment)"
-      { echo "session=$session"; echo "last=$reviewed"; } >> "${GITHUB_OUTPUT:-/dev/null}"
-    else
-      echo "review-gather: no diff from $reviewed, the head the last review reviewed: the review is fresh"
-    fi
-  fi
+  resume_review setup "$reviewed" "" setup_diff
 }
 case ${KIND:-} in
   setup)
@@ -335,27 +397,7 @@ if [ "$KIND" = change ]; then
     status=${PIPESTATUS[0]}
     [ "$status" = 0 ] || [ "$status" = 141 ] || rm -f "$out/head/$path"
   done
-  reviewed=$(reviewed_head)
-  # The cache's file gives the session's id, and its head must be the one the review comment gave: a session kept for
-  # another head (a review whose save did not happen, an older run's entry) is not the session of that review.
-  read -r session kept < <(sed -n 's/^session=\([0-9a-f-]\{36\}\) head=\([0-9a-f]\{40\}\)$/\1 \2/p' \
-    "${LAST_REVIEW:-/nonexistent}" 2> /dev/null | head -n 1)
-  if [[ -n $reviewed && -n ${session:-} && ${kept:-} != "$reviewed" ]]; then
-    echo "review-gather: the session in the cache was kept for $kept, not $reviewed: the review is fresh"
-  elif [[ -n $reviewed && -n ${session:-} && ${HEAD_SHA:-} =~ ^[0-9a-f]{40}$ ]]; then
-    status=$(gh api "repos/$REPO/compare/$reviewed...$HEAD_SHA" --jq .status 2> /dev/null) || status=""
-    if [ "$status" = ahead ]; then
-      keep since-last-review.diff gh api -H 'Accept: application/vnd.github.diff' "repos/$REPO/compare/$reviewed...$HEAD_SHA"
-    fi
-    if [ "$(tail -n 1 "$out/since-last-review.diff" 2> /dev/null)" = "(exit status 0)" ]; then
-      echo "review-gather: the change review resumes the session $session, with the diff from $reviewed, the head its" \
-        "last review reviewed (its review comment), to $HEAD_SHA"
-      { echo "session=$session"; echo "last=$reviewed"; } >> "${GITHUB_OUTPUT:-/dev/null}"
-    else
-      echo "review-gather: no diff from $reviewed, the head the last review reviewed, to $HEAD_SHA (compare status" \
-        "${status:-unknown}): the review is fresh"
-    fi
-  fi
+  resume_review change "$(reviewed_head)" "${HEAD_SHA:-}" change_diff
   exit 0
 fi
 mkdir -p "$out/build" "$out/seeds"
@@ -482,8 +524,7 @@ fi
 # resumes: HEAD_SHA is the head commit the build took. GitHub's compare diffs from the merge base, which is the last
 # review's commit only when the head descends from it (status "ahead"). After a force-push, or on the same head (an
 # edit of the pull request), there is no diff, and the review is fresh.
-last=$(sed -n 's/^session=\([0-9a-f-]\{36\}\) head=\([0-9a-f]\{40\}\)$/\1 \2/p' "${LAST_REVIEW:-/nonexistent}" 2> /dev/null \
-  | head -n 1)
+last=$(last_review)
 session=${last% *} since=${last#* }
 since_diff() {
   gh api -H 'Accept: application/vnd.github.diff' "repos/$REPO/compare/$since...$HEAD_SHA" \

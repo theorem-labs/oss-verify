@@ -278,6 +278,20 @@ class SetupGather(unittest.TestCase):
             want = {info.name[len(TOP) + 1:] for info in given if info.isfile()}
         self.assertEqual(set(tree(self.out / "source")), want)
 
+    def test_a_member_that_cannot_be_written_is_not_taken_and_the_others_are(self):
+        """A member whose path has a part of 300 bytes, more than a file system takes in one name (255 bytes): it alone
+        is not taken, with the file system's reason, and source/ gets each other member, the one after it too."""
+        long = f"{TOP}/{'a' * 300}"
+        self.tar(member(long, data=b"long\n"), member(f"{TOP}/after", data=b"after\n"))
+        run = self.gather()
+        self.assertEqual(run.returncode, 0, run.stderr)
+        with tarfile.open(FIXTURE / "source.tar") as given:
+            want = {info.name[len(TOP) + 1:]: given.extractfile(info).read() for info in given if info.isfile()}
+        self.assertEqual(tree(self.out / "source"), {**want, "after": b"after\n"})
+        self.assertFalse((self.out / "source.txt").exists())
+        self.assertIn(f"not taken: {long!r}: it cannot be written here: File name too long", run.stderr)
+        self.no_network()
+
     def test_instructions_for_claude_and_links_are_taken_out(self):
         theorem = self.fetched / "theorem"
         (theorem / "CLAUDE.md").write_text("x")
@@ -317,21 +331,70 @@ class SetupGather(unittest.TestCase):
         self.assertIn(f"resumes the session {SESSION}", run.stdout)
         self.no_network()
 
-    def test_the_diff_since_the_last_review_keeps_only_the_sections_of_theorem(self):
-        """A merge of the default branch into theorem/setup puts each change of that branch in the fetched diff: the
-        review gets only the sections of .theorem/, and it still resumes the session."""
-        theorem = ("diff --git a/.theorem/config.yml b/.theorem/config.yml\n--- a/.theorem/config.yml\n"
-                   "+++ b/.theorem/config.yml\n@@ -1 +1,2 @@\n sanitizers:\n+  - address\n")
-        other = "diff --git a/src/x.c b/src/x.c\n--- a/src/x.c\n+++ b/src/x.c\n@@ -1 +1 @@\n-int x;\n+int y;\n"
+    def gather_since(self, diff):
+        """Run the script with `diff` as the fetched since-last-review.diff from HEAD, the head of the review comment,
+        and a session kept for HEAD. Return the run, after checking that the review's folder has the diff whole."""
         (self.fetched / "last-review-head.txt").write_text(HEAD + "\n")
-        (self.fetched / "since-last-review.diff").write_text(theorem + other)
+        (self.fetched / "since-last-review.diff").write_text(diff)
         (self.root / "last-review").write_text(f"session={SESSION} head={HEAD}\n")
         run = self.gather(LAST_REVIEW=str(self.root / "last-review"))
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual((self.out / "since-last-review.diff").read_text(), theorem + "(exit status 0)\n")
-        self.assertEqual(self.written(), f"session={SESSION}\nlast={HEAD}\n")
-        self.assertIn(f"resumes the session {SESSION}", run.stdout)
+        self.assertEqual((self.out / "since-last-review.diff").read_text(), diff + "(exit status 0)\n")
         self.no_network()
+        return run
+
+    def test_a_diff_of_theorem_alone_resumes(self):
+        """A change, a new file, a rename and a deletion, each under .theorem/."""
+        diff = ("diff --git a/.theorem/config.yml b/.theorem/config.yml\n--- a/.theorem/config.yml\n"
+                "+++ b/.theorem/config.yml\n@@ -1 +1,2 @@\n sanitizers:\n+  - address\n"
+                "diff --git a/.theorem/fuzz_new.c b/.theorem/fuzz_new.c\nnew file mode 100644\n--- /dev/null\n"
+                "+++ b/.theorem/fuzz_new.c\n@@ -0,0 +1 @@\n+int x;\n"
+                "diff --git a/.theorem/old.sh b/.theorem/build.sh\nsimilarity index 100%\nrename from .theorem/old.sh\n"
+                "rename to .theorem/build.sh\n"
+                "diff --git a/.theorem/gone.txt b/.theorem/gone.txt\ndeleted file mode 100644\n--- a/.theorem/gone.txt\n"
+                "+++ /dev/null\n@@ -1 +0,0 @@\n-x\n")
+        run = self.gather_since(diff)
+        self.assertEqual(self.written(), f"session={SESSION}\nlast={HEAD}\n")
+        self.assertIn(f"the setup review resumes the session {SESSION}, with the diff from {HEAD}", run.stdout)
+
+    def test_a_diff_that_changes_a_file_outside_theorem_is_whole_and_the_review_is_fresh(self):
+        """A merge of the default branch into theorem/setup puts each change of that branch in the fetched diff, and a
+        fuzz target or a Dockerfile can stay outside .theorem/: the review reads the diff whole, and it is fresh."""
+        theorem = ("diff --git a/.theorem/config.yml b/.theorem/config.yml\n--- a/.theorem/config.yml\n"
+                   "+++ b/.theorem/config.yml\n@@ -1 +1,2 @@\n sanitizers:\n+  - address\n")
+        other = "diff --git a/src/x.c b/src/x.c\n--- a/src/x.c\n+++ b/src/x.c\n@@ -1 +1 @@\n-int x;\n+int y;\n"
+        for why, diff in (
+                ("a section of .theorem/ and one of src/x.c", theorem + other),
+                ("src/x.c first", other + theorem),
+                ("a rename out of .theorem/", theorem + "diff --git a/.theorem/fuzz.c b/fuzz.c\nsimilarity index 100%\n"
+                 "rename from .theorem/fuzz.c\nrename to fuzz.c\n"),
+                ("a rename into .theorem/", "diff --git a/Dockerfile b/.theorem/Dockerfile\nsimilarity index 100%\n"
+                 "rename from Dockerfile\nrename to .theorem/Dockerfile\n"),
+                # From .theorem/x b/.theorem/y to src/z, or from .theorem/x to .theorem/y b/src/z: the line does not
+                # say which.
+                ("a path that holds ' b/'", "diff --git a/.theorem/x b/.theorem/y b/src/z\nsimilarity index 100%\n"
+                 "rename from .theorem/x b/.theorem/y\nrename to src/z\n")):
+            with self.subTest(why=why):
+                self.setUp()
+                run = self.gather_since(diff)
+                self.assertEqual(self.written(), "")
+                self.assertIn(f"review-gather: the diff from {HEAD} changes a file outside .theorem/: the review is "
+                              "fresh", run.stdout.splitlines())
+                self.assertNotIn("resumes", run.stdout)
+
+    def test_a_fetched_file_of_error_text_gives_a_fresh_review(self):
+        """The fetch job wrote the error of a diff that failed in the place of the diff."""
+        run = self.gather_since(f"fatal: bad object {HEAD}\n")
+        self.assertEqual(self.written(), "")
+        self.assertIn(f"review-gather: the diff from {HEAD} does not start with diff --git: the review is fresh",
+                      run.stdout.splitlines())
+        self.assertNotIn("resumes", run.stdout)
+
+    def test_an_empty_fetched_diff_gives_a_fresh_review(self):
+        run = self.gather_since("")
+        self.assertEqual(self.written(), "")
+        self.assertIn(f"review-gather: the diff from {HEAD} is empty: the review is fresh", run.stdout.splitlines())
+        self.assertNotIn("resumes", run.stdout)
 
     def test_no_session_for_another_head_or_without_the_diff(self):
         diff = "diff --git a/.theorem/config.yml b/.theorem/config.yml\n+sanitizers: [address]\n"
