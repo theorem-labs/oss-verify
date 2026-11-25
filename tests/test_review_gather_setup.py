@@ -319,18 +319,6 @@ class SetupGather(unittest.TestCase):
         self.assertIn("there is no source to read", (self.out / "source.txt").read_text())
         self.assertTrue((self.out / "setup.txt").exists())
 
-    def test_a_session_kept_for_the_reviewed_head_is_resumed(self):
-        diff = "diff --git a/.theorem/config.yml b/.theorem/config.yml\n+sanitizers: [address]\n"
-        (self.fetched / "last-review-head.txt").write_text(HEAD + "\n")
-        (self.fetched / "since-last-review.diff").write_text(diff)
-        (self.root / "last-review").write_text(f"session={SESSION} head={HEAD}\n")
-        run = self.gather(LAST_REVIEW=str(self.root / "last-review"))
-        self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(self.written(), f"session={SESSION}\nlast={HEAD}\n")
-        self.assertEqual((self.out / "since-last-review.diff").read_text(), diff + "(exit status 0)\n")
-        self.assertIn(f"resumes the session {SESSION}", run.stdout)
-        self.no_network()
-
     def gather_since(self, diff):
         """Run the script with `diff` as the fetched since-last-review.diff from HEAD, the head of the review comment,
         and a session kept for HEAD. Return the run, after checking that the review's folder has the diff whole."""
@@ -381,6 +369,26 @@ class SetupGather(unittest.TestCase):
                 self.assertIn(f"review-gather: the diff from {HEAD} changes a file outside .theorem/: the review is "
                               "fresh", run.stdout.splitlines())
                 self.assertNotIn("resumes", run.stdout)
+
+    def combined_section_gives_a_fresh_review(self, header):
+        """A section of .theorem/, then a section of a merge's combined diff that `header` starts: git diff --cc and
+        git diff --combined start no section with diff --git, so the script does not read its paths. The review reads
+        the diff whole, and it is fresh."""
+        theorem = ("diff --git a/.theorem/config.yml b/.theorem/config.yml\n--- a/.theorem/config.yml\n"
+                   "+++ b/.theorem/config.yml\n@@ -1 +1,2 @@\n sanitizers:\n+  - address\n")
+        combined = (f"{header}\nindex 1111111,2222222..3333333\n--- a/src/x.c\n+++ b/src/x.c\n"
+                    "@@@ -1,1 -1,1 +1,1 @@@\n- int x;\n -int y;\n++int z;\n")
+        run = self.gather_since(theorem + combined)
+        self.assertEqual(self.written(), "")
+        self.assertIn(f"review-gather: the diff from {HEAD} holds a section that is not of diff --git: the review is "
+                      "fresh", run.stdout.splitlines())
+        self.assertNotIn("resumes", run.stdout)
+
+    def test_a_diff_cc_section_after_theorem_gives_a_fresh_review(self):
+        self.combined_section_gives_a_fresh_review("diff --cc src/x.c")
+
+    def test_a_diff_combined_section_after_theorem_gives_a_fresh_review(self):
+        self.combined_section_gives_a_fresh_review("diff --combined src/x.c")
 
     def test_a_fetched_file_of_error_text_gives_a_fresh_review(self):
         """The fetch job wrote the error of a diff that failed in the place of the diff."""

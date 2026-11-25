@@ -2606,23 +2606,47 @@ class SeedHex(unittest.TestCase):
                          ["(not read: compression method 12, not stored or deflated)"])
         self.assertEqual(members["== 'encrypted': 768 bytes"], ["(not read: encrypted)"])
 
-    def test_an_input_whose_data_cannot_be_read_gets_a_line_and_the_next_are_read(self):
-        """The second of three deflated inputs has a deflate stream that zlib cannot decompress (its first byte gives
-        the block type 3, which deflate does not have): it gets a line that says that it is not read, with the error,
-        and the first and the third get their rows."""
-        inputs = {"first": b"first " * 100, "second": b"second " * 100, "third": bytes(range(256)) * 2}
+    # Three deflated inputs, for the tests of an input that cannot be read: the second, between two that are read.
+    INPUTS = {"first": b"first " * 100, "second": b"second " * 100, "third": bytes(range(256)) * 2}
+
+    @staticmethod
+    def entry(raw, info):
+        """Where the central directory entry of the member `info` starts in the zip `raw`. The end of central directory
+        record, the last 22 bytes, gives the offset of the first entry 16 bytes into it. An entry is 46 bytes, then its
+        name, extra field and comment, whose lengths are 28, 30 and 32 bytes into it; it gives the offset of its
+        member's local file header 42 bytes into it."""
+        def word(at, size):
+            return int.from_bytes(raw[at:at + size], "little")
+        at = word(len(raw) - 22 + 16, 4)
+        while word(at + 42, 4) != info.header_offset:
+            at += 46 + word(at + 28, 2) + word(at + 30, 2) + word(at + 32, 2)
+        return at
+
+    def flag(self, local, central):
+        """A change for second_of_three: set the bits `local` in the general purpose bit flag of the second input's
+        local file header, 6 bytes into it, and the bits `central` in that of its central directory entry, 8 bytes into
+        it."""
+        def change(raw, info):
+            for at, bits in ((info.header_offset + 6, local), (self.entry(raw, info) + 8, central)):
+                raw[at:at + 2] = (int.from_bytes(raw[at:at + 2], "little") | bits).to_bytes(2, "little")
+        return change
+
+    def second_of_three(self, change):
+        """Run the script, as review-gather runs it, on a zip of the three INPUTS, each deflated, after `change` has
+        changed its bytes: it gets them as a bytearray, and the ZipInfo of the second input. Check that the script
+        exits 0, that each input gets its line "== <name>: <size> bytes", and that the first and the third get their
+        rows. Return the lines that the second gets."""
         with tempfile.TemporaryDirectory() as directory:
             corpus, hex_file = pathlib.Path(directory) / "x_seed_corpus.zip", pathlib.Path(directory) / "x.hex.txt"
             with zipfile.ZipFile(corpus, "w") as archive:
-                for name, data in inputs.items():
+                for name, data in self.INPUTS.items():
                     archive.writestr(name, data, compress_type=zipfile.ZIP_DEFLATED)
-            with zipfile.ZipFile(corpus) as archive:
-                at = archive.getinfo("second").header_offset
             raw = bytearray(corpus.read_bytes())
-            # The local header: 30 bytes, then the name and the extra field, whose lengths are at 26 and 28.
-            at += 30 + int.from_bytes(raw[at + 26:at + 28], "little") + int.from_bytes(raw[at + 28:at + 30], "little")
-            raw[at:at + 4] = b"\xff" * 4
+            with zipfile.ZipFile(corpus) as archive:
+                change(raw, archive.getinfo("second"))
             corpus.write_bytes(bytes(raw))
+            with zipfile.ZipFile(corpus) as archive:
+                names = [info.filename for info in archive.infolist()]
             run = subprocess.run(["python3", "-P", "-", str(corpus), str(hex_file)], input=self.script(),
                                  capture_output=True, text=True)
             self.assertEqual(run.returncode, 0, run.stderr)
@@ -2633,12 +2657,48 @@ class SeedHex(unittest.TestCase):
                 rows = members.setdefault(line, [])
             else:
                 rows.append(line)
-        self.assertEqual(list(members), [f"== {name!r}: {len(data)} bytes" for name, data in inputs.items()])
-        for name in ("first", "third"):
-            rows = members[f"== {name!r}: {len(inputs[name])} bytes"]
-            self.assertEqual(b"".join(bytes.fromhex(row[6:53]) for row in rows), inputs[name][:512], name)
-        self.assertEqual(members["== 'second': 700 bytes"],
+        heads = [f"== {name!r}: {len(data)} bytes" for name, data in zip(names, self.INPUTS.values())]
+        self.assertEqual(list(members), heads)
+        for head, data in ((heads[0], self.INPUTS["first"]), (heads[2], self.INPUTS["third"])):
+            self.assertEqual(b"".join(bytes.fromhex(row[6:53]) for row in members[head]), data[:512], head)
+        return members[heads[1]]
+
+    def test_an_input_whose_data_cannot_be_read_gets_a_line_and_the_next_are_read(self):
+        """The second of three deflated inputs has a deflate stream that zlib cannot decompress (its first byte gives
+        the block type 3, which deflate does not have): it gets a line that says that it is not read, with the error,
+        and the first and the third get their rows."""
+        def corrupt(raw, info):
+            # The local header: 30 bytes, then the name and the extra field, whose lengths are at 26 and 28.
+            at = info.header_offset
+            at += 30 + int.from_bytes(raw[at + 26:at + 28], "little") + int.from_bytes(raw[at + 28:at + 30], "little")
+            raw[at:at + 4] = b"\xff" * 4
+        self.assertEqual(self.second_of_three(corrupt),
                          ["(not read: error: Error -3 while decompressing data: invalid block type)"])
+
+    def test_an_input_of_compressed_patched_data_gets_a_line_and_the_next_are_read(self):
+        """open() raises NotImplementedError for a member whose bit 0x20 of the general purpose bit flag (compressed
+        patched data) is set. The second of three inputs has it set, in its local file header and in its central
+        directory entry, and bit 0x1 not set: it gets a line that says that it is not read, and why."""
+        self.assertEqual(self.second_of_three(self.flag(0x20, 0x20)), ["(not read: compressed patched data)"])
+
+    def test_an_input_of_strong_encryption_gets_a_line_and_the_next_are_read(self):
+        """open() raises NotImplementedError for a member whose bit 0x40 of the general purpose bit flag (strong
+        encryption) is set. The second of three inputs has it set, in its local file header and in its central
+        directory entry, and bit 0x1 not set: it gets a line that says that it is not read, and why."""
+        self.assertEqual(self.second_of_three(self.flag(0x40, 0x40)), ["(not read: strong encryption)"])
+
+    def test_an_input_whose_name_is_marked_utf_8_and_is_not_gets_a_line_and_the_next_are_read(self):
+        """open() raises UnicodeDecodeError, a ValueError, for a member whose local file header has bit 0x800 of the
+        general purpose bit flag set (its name is UTF-8) and a name that is not UTF-8. The second of three inputs has
+        the name b"s\\xffcond" in its local file header (30 bytes into it) and in its central directory entry (46 bytes
+        into it), and the bit set in its local file header alone, so that ZipFile() reads the entry's name as cp437 and
+        only open() fails: it gets a line that says that it is not read, with the error."""
+        def rename(raw, info):
+            for at in (info.header_offset + 30, self.entry(raw, info) + 46):
+                raw[at:at + 6] = b"s\xffcond"
+            self.flag(0x800, 0)(raw, info)
+        self.assertEqual(self.second_of_three(rename), [
+            "(not read: UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position 1: invalid start byte)"])
 
 
 class ReviewJob(unittest.TestCase):
