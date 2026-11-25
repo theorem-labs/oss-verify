@@ -439,8 +439,6 @@ REJECT = [
      + EXIT),
     ("a MAP_FIXED that came back at another address",
      "1 mmap(0x100000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0) = 0x200000\n" + EXIT),
-    ("an mmap that did not take its free hint (linux_place)",
-     "1 mmap(0x100000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x200000\n" + EXIT),
     ("a file mmap of a descriptor the run does not hold that succeeded",
      "1 mmap(NULL,4096,PROT_READ,MAP_PRIVATE,5,0) = 0x100000\n" + EXIT),
     ("DONTNEED over the page an interior munmap cut",
@@ -1830,7 +1828,10 @@ def test_the_real_runs_ledgers(model, giflib_image, line, verdict, needle):
     (MADVISE_GRANT + "1 madvise(0x100000,0,MADV_DONTNEED) = 0\n" + EXIT, "madvise", "the madvise length"),
     # Sys/Mm/Mmap.v linux_place: an unhinted grant is the top-down search's, under the run's mmap base.
     ("1 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n" + EXIT, "mmap",
-     "linux_place"),
+     "no launch's vdso pair"),
+    # Sys/Mm/Mmap.v linux_place honours a free hint; the tracer's host mmap may not.
+    ("1 mmap(0x100000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x200000\n" + EXIT, "mmap",
+     "free hint"),
     ("1 mmap(0x7fff00000000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x7fff00000000\n" + EXIT,
      "mmap", "place_declined_b"),
     # State.v init_reserved: the vdso/vvar pair is in vm_reserved, at a place the trace does not show.
@@ -1847,6 +1848,63 @@ def test_what_the_trace_does_not_decide(model, image, text, call, needle):
     assert needle in one_undecided(check(model, image, text), call)
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# Placement: the run's first top-down grant places the vdso pair (Ledger.infer_vdso), and each later one must be
+# the model's top-down search (Sys/Mm/Mmap.v topdown_search, thp_align). The grant ends at 0x7f16feab3000.
+# ---------------------------------------------------------------------------------------------------------------------
+FIRST = "1 mmap(NULL,69632,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x7f16feaa2000\n"
+
+
+def grant(n, at, flags="MAP_PRIVATE|MAP_ANONYMOUS"):
+    return f"1 mmap(NULL,{n},PROT_READ|PROT_WRITE,{flags},-1,0) = {at:#x}\n"
+
+
+@needs_model
+@pytest.mark.parametrize("text,verdict,needle", [
+    # the first grant alone, and freed: the launch whose pair starts at its end
+    (FIRST, "pass", None),
+    (FIRST + "1 munmap(0x7f16feaa2000,69632) = 0\n", "pass", None),
+    # the next grant directly below it, the highest gap
+    (FIRST + grant(4096, 0x7f16feaa1000), "pass", None),
+    # a 2 MiB grant: under kb_thp, thp_align of the 4 MiB search's 0x7f16fe6a2000; without it, the 2 MiB search
+    (FIRST + grant(2097152, 0x7f16fe800000), "pass", None),
+    (FIRST + grant(2097152, 0x7f16fe8a2000), "pass", None),
+    # the tracer put the grant elsewhere: its host mmap, not the binary, chose it, so it is undecided, never a fail
+    (FIRST + grant(4096, 0x7f16fe000000), "undecided", "not the binary's"),
+    (FIRST + grant(4096, 0x7f16fe000000) + grant(4096, 0x7f16fdfff000), "undecided", "not the binary's"),
+    # kb_thp decides where a first grant of a PMD multiple puts the pair
+    (grant(2097152, 0x7f16fe800000), "undecided", "kb_thp"),
+    # a hinted grant takes no THP branch (Sys/Mm/Mmap.v linux_place: only a hint that rounds to 0 does): a hint that
+    # meets the first grant goes to the plain top-down search, whose only answer is 0x7f16fe8a2000
+    (FIRST + "1 mmap(0x7f16fe8b3000,2097152,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x7f16fe8a2000\n",
+     "pass", None),
+    (FIRST + "1 mmap(0x7f16fe8b3000,2097152,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x7f16fe800000\n",
+     "undecided", "not the binary's"),
+    # a grant the tracer put away from its free hint is still recorded: a later call on it is no call on free memory
+    (FIRST + "1 mmap(0x7f0000000000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x7f0000100000\n"
+     "1 madvise(0x7f0000100000,4096,MADV_DONTNEED) = 0\n", "undecided", "not its free hint"),
+    (FIRST + "1 mmap(0x7f0000000000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x7f0000100000\n"
+     "1 mremap(139637977776128,4096,4096,1,0,0) = 139637977776128\n", "undecided", "not its free hint"),
+    # kb_thp is one per run: a 2 MiB grant at the answer without it, then one at the answer with it, agree on none
+    (FIRST + grant(2097152, 0x7f16fe8a2000) + grant(2097152, 0x7f16fe600000), "undecided", "not the binary's"),
+    # a range the pair may hold: its length follows the kernel build
+    (FIRST + "1 munmap(0x7f16feab3000,4096) = 0\n", "undecided", "first top-down grant placed"),
+    # a refusal above the vdso floor may be the tracer's own mapping
+    (FIRST + "1 mmap(0x7f0000000000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0) = "
+     "-1 errno=17\n", "undecided", "tracer's"),
+    # negative controls: requests outside the model whatever the placement still fail
+    (FIRST + grant(4096, 0x7f16feaa1000, "MAP_SHARED|MAP_ANONYMOUS"), "fail", "modeled shapes"),
+    (FIRST + "1 kill(1234,SIGTERM) = 0\n", "fail", "not an arm of spec_table"),
+])
+def test_the_placement_replay(model, image, text, verdict, needle):
+    result = check(model, image, text + EXIT)
+    assert result["verdict"] == verdict, (result["unmodeled"], result["undecided"])
+    if verdict == "undecided":
+        assert result["unmodeled"] == [] and needle in result["undecided"][0]["why"], result["undecided"]
+    elif verdict == "fail":
+        assert needle in one_why(result)
+
+
 @needs_model
 @pytest.mark.parametrize("after", [
     "1 madvise(0x100000,4096,MADV_DONTNEED) = 0\n",
@@ -1859,6 +1917,62 @@ def test_a_failed_map_fixed_over_live_memory_leaves_its_range_undecided(model, i
     failed = "1 mmap(0x100000,8192,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0) = -1 errno=12\n"
     assert check(model, image, MADVISE_GRANT + failed + EXIT)["verdict"] == "pass"
     assert "does not say which" in one_undecided(check(model, image, MADVISE_GRANT + failed + after + EXIT))
+
+
+@needs_model
+def test_an_munmap_of_an_unpinned_length_leaves_its_range_unknown(model, image):
+    """The reserved_va run's finding, in small: an munmap whose length no host line pins decides nothing, and it may
+    have unmapped more than its printed length, so a later grant over that range is undecided, never a fail."""
+    text = (FIRST + grant(4096, 0x7f16feaa1000) + "1 munmap(0x7f16feaa1000,4096) = 0\n" + grant(8192, 0x7f16feaa0000)
+            + EXIT)
+    log = "".join(ln + "\n" for ln in faithful_log(text).splitlines() if not ln.startswith("munmap "))
+    result = check(model, image, text, lengths=log)
+    assert result["verdict"] == "undecided" and result["unmodeled"] == [], (result["unmodeled"], result["undecided"])
+    assert [u["call"] for u in result["undecided"]] == ["munmap", "mmap"], result["undecided"]
+    assert "munmap length" in result["undecided"][0]["why"]
+
+
+MADVISE = "1 madvise({:#x},4096,MADV_DONTNEED) = 0\n"
+
+
+def drop_host_line(text, nth, call):
+    """The faithful host log of `text`, less the `nth` (0-based) line for `call`: a call whose length no line pins."""
+    lines, seen = [], 0
+    for ln in faithful_log(text).splitlines():
+        if ln.startswith(call + " "):
+            seen += 1
+            if seen - 1 == nth:
+                continue
+        lines.append(ln + "\n")
+    return "".join(lines)
+
+
+@needs_model
+@pytest.mark.parametrize("label,text,dropped,first", [
+    # a 1 MiB grant that starts inside the pair's band, then a madvise above the band inside the grant
+    ("grant in the pair's band", FIRST + grant(1048576, 0x7f16feab4000) + MADVISE.format(0x7f16feb00000), None, "mmap"),
+    # a hint that meets the pair's band, returned elsewhere, then a madvise on the grant
+    ("hint in the pair's band",
+     FIRST + "1 mmap(0x7f16feab3000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x7f16fe000000\n"
+     + MADVISE.format(0x7f16fe000000), None, "mmap"),
+    # an munmap of an unpinned length leaves [addr, TASK_SIZE) unknown; a hint there returned below it; a madvise on it
+    ("hint in an unknown range",
+     FIRST + grant(4096, 0x7f16feaa1000) + "1 munmap(0x7f16feaa1000,4096) = 0\n"
+     + "1 mmap(0x7f16feaa1000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x7f16fe000000\n"
+     + MADVISE.format(0x7f16fe000000), ("munmap", 0), "munmap"),
+    # an mmap of an unpinned length: its grant is live all the same, so a madvise on it is not a call on free memory
+    ("grant of an unpinned length", FIRST + grant(4096, 0x7f16feaa1000) + MADVISE.format(0x7f16feaa1000),
+     ("mmap", 1), "mmap"),
+])
+def test_an_undecided_grant_is_still_live(model, image, label, text, dropped, first):
+    """Review of 85d67d1f: an mmap that comes out undecided still made a grant, so the replay records it (or marks
+    the range it could cover unknown) before answering; a later call on that memory is never judged as a call on
+    free memory. Each case was a fail at 85d67d1f."""
+    text += EXIT
+    log = drop_host_line(text, dropped[1], dropped[0]) if dropped else None
+    result = check(model, image, text, lengths=log) if log else check(model, image, text)
+    assert result["verdict"] == "undecided" and result["unmodeled"] == [], (result["unmodeled"], result["undecided"])
+    assert result["undecided"][0]["call"] == first, result["undecided"]
 
 
 @needs_model
@@ -1889,10 +2003,14 @@ def test_a_length_that_is_not_whole_pages_is_found_by_its_rounding(model, image)
     result = check(model, image, GO_MAPS + EXIT)
     assert result["verdict"] == "pass", (result["unmodeled"], result["undecided"])
     # A host line whose length is not the rounding of the printed low 32 bits is no host call of this guest call:
-    # the length stays cut, and the call is undecided.
+    # the length stays cut, and the call is undecided. Its grant is live all the same, so [0x100000, TASK_SIZE)
+    # becomes unknown and the calls after it that meet that range are undecided too, never a fail.
     for wrong in ("11010", "13000"):
         log = faithful_log(GO_MAPS + EXIT).replace("mmap 1048576 100000 12000 ", f"mmap 1048576 100000 {wrong} ")
-        assert "the mmap length" in one_undecided(check(model, image, GO_MAPS + EXIT, lengths=log), "mmap")
+        result = check(model, image, GO_MAPS + EXIT, lengths=log)
+        assert result["verdict"] == "undecided" and result["unmodeled"] == [], result
+        assert [u["call"] for u in result["undecided"]] == ["mmap", "mmap", "munmap"], result["undecided"]
+        assert "the mmap length" in result["undecided"][0]["why"]
 
 
 @needs_model
