@@ -352,6 +352,30 @@ class PythonBuilder(unittest.TestCase):
     def test_discovery(self):
         self.assertEqual((self.problems, self.missing, self.targets), ([], [], ["fuzz_example"]))
 
+    def test_each_build_names_the_same_paths(self):
+        """The debug information of each build's unstripped fuzz target names the paths of its build, and none that
+        differs between two builds, such as a directory that mktemp names. Each path is a whole string of the binary
+        (between two NULs) under /work, /src or /tmp, with the build's own directory, /work/build/lib/<flav>, written
+        with <flav>; the paths of the runtime's own build, /work/build/pyrt/ and /src/repo/build/pyrt/, are left out.
+        - The target's own directories (/work/build/lib/<flav>/example and /src/example, the neutral name that
+          release-target.sh gives it) are named only as the scratch directory that python/recipes.sh gives every build,
+          /work/build/lib/<flav>/example/py: no other entry, and nothing below it.
+        - The plain and the ubsan build name the same paths, and so do the asan and the asan-ubsan build: each pair is
+          two builds of one CPython runtime's sources, and the asan builds name one more source file. A name that a
+          build makes anew, anywhere under /work, /src or /tmp, differs between the two builds of a pair."""
+        named = {}
+        for build in BUILDS:
+            flav = build.replace("-", "").encode()
+            data = (self.raw[build] / "fuzz_example").read_bytes()
+            found = set(re.findall(rb"(?<=\0)/(?:work|src|tmp)/[^\0]*(?=\0)", data))
+            named[build] = {path.replace(b"/work/build/lib/" + flav + b"/", b"/work/build/lib/<flav>/")
+                            for path in found if not path.startswith((b"/work/build/pyrt/", b"/src/repo/build/pyrt/"))}
+            own = {path for path in named[build]
+                   if re.match(rb"/work/build/lib/<flav>/example(/|$)|/src/example(/|$)", path)}
+            self.assertEqual(own, {b"/work/build/lib/<flav>/example/py"}, build)
+        self.assertEqual(named["plain"], named["ubsan"])
+        self.assertEqual(named["asan"], named["asan-ubsan"])
+
     @unittest.skipUnless(QEMU, "no qemu-riscv64 on this machine")
     def test_exit_statuses(self):
         inputs = self.work / "in"
