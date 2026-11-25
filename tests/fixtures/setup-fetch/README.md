@@ -41,8 +41,10 @@ read on 2026-11-25 through the same REST paths with no token: `curl -sSL https:/
 
 GitHub's tarball of that commit has 529 members, in 866,356 bytes. `source.tar` keeps four small files of it and
 their folders: `NOTICE`, `debian/copyright`, `debian/source/format` and `fuzz/corpus/boxreg/find-absent`. It keeps
-the top folder `FreeREAC-libreac-4e09c7d/`, the header of each member, and the global header `comment=<commit>`. It
-is compressed with gzip, as GitHub's tarball is.
+the top folder `FreeREAC-libreac-4e09c7d/`, the header of each member, and the global header `comment=<commit>`.
+Python's `tarfile` cut it in the shape that `git archive` writes, the shape of GitHub's tarball: the global header
+first, at byte 0, then each member with its own ustar header alone, with no extended header. It is compressed with
+gzip, as GitHub's tarball is.
 
 ## `theorem/`: a small `.theorem/` from `projects/libreac/`
 
