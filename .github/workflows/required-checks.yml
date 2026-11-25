@@ -1,0 +1,209 @@
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+name: Required checks
+# Posts main's four required checks, project-builds, enrollment, tests and terms-accepted, as the oss-verify App, from
+# main's copy of this file. A check is matched by its name, and GitHub does not record which workflow file posted it:
+# any workflow file of a pull request can post a check named tests under GitHub Actions. A theorem-labs/agent-infra
+# change (github/main.go) makes main's ruleset require each of the four from the oss-verify App instead of GitHub
+# Actions, and this workflow is what posts the App's copy. It copies, for each check, the conclusion of the job of that
+# name in the newest pull_request run of the check's own workflow file at the pull request's head:
+#
+#   project-builds   build.yaml       enrollment       validate.yaml
+#   tests            tests.yaml       terms-accepted   terms.yaml
+#
+# On pull_request each of those four files runs the pull request's own copy, so this binds a check to the file, not to
+# main's text of it: .github/CODEOWNERS keeps an owner on the four files, and on the scripts and workflows they run.
+# It is temporary: OSSV-747 deletes validate.yaml, build.yaml and terms.yaml, and INFRA-4390 then makes Tests from main,
+# from GitHub Actions, the one required check; this file and its script go with them.
+#
+# Two jobs, as enroll-dispatch.yml keeps its decide and dispatch jobs apart. read, with a read-only token and no
+# environment, runs .github/scripts/required-check (its header says how it decides): it acts only for the open pull
+# request into main at the run's head, skips a head that moved, counts no run of another file or another head, and
+# lists only what changed. Its outputs are post and the check runs to post. post, which alone holds the GitHub
+# Environment `required-checks`, id-token: write and the App's key, checks the list's shape and posts it, and reads
+# nothing of a pull request. Each run reads all four checks, not only the one of the run that started it, so the next
+# run for a head posts what a lost or failed run of this workflow did not.
+#
+# When it runs. workflow_run takes the default branch's file and ref, so this file and the script are main's, whatever
+# the pull request holds, and no step checks out or runs the pull request's code: the script reads GitHub's API as
+# data. It runs when a run of Build, Validate, Tests or Terms ends (completed), and when a new run of Terms is
+# requested: terms-accepted reads the description, so an edit at the same commit withdraws the App's older result, as
+# GitHub Actions' own check goes back to pending when its job starts again. GitHub sends no requested event for a
+# re-run, and this workflow does not listen for in_progress (one more job for every run of the four): during a re-run
+# the App's earlier result stands, and the re-run's completion updates it. A workflow_run trigger names workflows by
+# name, so a file of another path with one of those names starts this too; the job's if counts only the four files,
+# and the script compares the path exactly (GitHub's == ignores case).
+#
+# By hand, on main, with the input head_sha, it posts the four checks for the open pull request at that commit from the
+# runs it has: for a pull request whose runs ended before this file was on main, before the ruleset requires the App's
+# checks, or after a run of this workflow failed. Such a run is in the head's concurrency group (below), so it cannot
+# post an older answer over a newer run of the head's own. For every open pull request into main:
+#   gh pr list -R theorem-labs/oss-verify --base main --state open --limit 1000 --json headRefOid --jq '.[].headRefOid' |
+#     sort -u | while read -r sha; do
+#       gh workflow run required-checks.yml -R theorem-labs/oss-verify --ref main -f head_sha="$sha"; done
+# Started on any other ref, read does not run, and the environment `required-checks` admits main alone.
+#
+# The credential. Only when there is something to post does post run, and read the App's key from Secret Manager, by
+# Google workload identity federation, as enroll-dispatch.yml's dispatch job reads it. The GitHub Environment
+# `required-checks`, which theorem-labs/agent-infra's github/ program declares with one branch policy, main, carries
+# the claim that its provider github-ossv needs (root/pools.go, ossvCIWorkflows). That provider's rule for this file
+# admits only a job of this file on main in that environment, and binds it to an account of its own,
+# ossv-required-checks, whose one grant is reading the App's key (root/accounts.go): none of the comment jobs' other
+# grants, such as the held findings. It mints a token with checks: write alone, for this repository alone, and posts
+# with it. .github/CODEOWNERS owns this file and the script.
+#
+# The runs for one head wait for each other (concurrency, for the whole run, a run by hand included), so each reads what
+# the one before it posted. queue: max keeps up to 100 pending runs in their order, so another head at the same commit
+# does not replace this head's pending run.
+run-name: >-
+  ${{ github.event_name == 'workflow_dispatch' && format('Required checks for {0}, by hand', inputs.head_sha)
+  || format('Required checks for run {0} attempt {1}', github.event.workflow_run.id,
+  github.event.workflow_run.run_attempt) }}
+on:
+  workflow_run:
+    workflows: [Build, Validate, Tests, Terms]
+    types: [requested, completed]
+  workflow_dispatch:
+    inputs:
+      head_sha:
+        description: "The head commit of the open pull request into main whose four checks to post"
+        required: true
+        type: string
+permissions: {}
+concurrency:
+  group: required-checks-${{ github.event.workflow_run.head_sha || inputs.head_sha }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  read:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+      || (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request'
+      && (github.event.action == 'completed'
+      || (github.event.action == 'requested' && github.event.workflow_run.path == '.github/workflows/terms.yaml'))
+      && (github.event.workflow_run.path == '.github/workflows/build.yaml'
+      || github.event.workflow_run.path == '.github/workflows/validate.yaml'
+      || github.event.workflow_run.path == '.github/workflows/tests.yaml'
+      || github.event.workflow_run.path == '.github/workflows/terms.yaml'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read        # the runs of the four files at a head, and their jobs
+      checks: read         # the App's check runs at a head
+      contents: read       # the checkout of main's .github/scripts
+      pull-requests: read  # the open pull requests
+    outputs:
+      post: ${{ steps.read.outputs.post }}
+      bodies: ${{ steps.read.outputs.bodies }}
+    steps:
+      # main's scripts alone: on workflow_run, and on a run by hand on main, the checkout is main's commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - name: Read the runs of the four checks
+        id: read
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
+          RUN_PATH: ${{ github.event.workflow_run.path }}
+          # The run's head, or on a run by hand the input head_sha, which the script checks is a commit id.
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha || inputs.head_sha }}
+          HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          python3 -I .github/scripts/required-check | tee -a "$GITHUB_STEP_SUMMARY"
+
+  post:
+    needs: read
+    if: needs.read.outputs.post == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Gets this job the App's key: only a token with this environment's claim may act as the account that reads it.
+    # deployment: false, so that a run posts no deployment; the claim is in the token either way.
+    environment:
+      name: required-checks
+      deployment: false
+    permissions:
+      # Only for the GitHub identity token that Google's federation trades for an access token of the account that
+      # reads the App's key. The job checks out nothing and reads nothing of a pull request.
+      id-token: write
+    env:
+      # Public identifiers, not credentials: the provider and the account that reads the App's key, as in
+      # enroll-dispatch.yml's dispatch job.
+      GCP_WORKLOAD_IDENTITY_PROVIDER: projects/844532188053/locations/global/workloadIdentityPools/github/providers/github-ossv
+      GCP_SERVICE_ACCOUNT: ossv-required-checks@theorem-agent-root.iam.gserviceaccount.com
+    steps:
+      # Before any credential: the list is of at most the four checks, once each, at this run's head alone. read builds
+      # it from GitHub's API; this keeps any other value off the App's token.
+      - name: Check the list of check runs
+        env:
+          BODIES: ${{ needs.read.outputs.bodies }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha || inputs.head_sha }}
+        run: |
+          set -euo pipefail
+          jq -e --arg sha "$HEAD_SHA" 'type == "array" and length > 0
+              and ([.[] | objects | .name] | unique | length) == length
+              and ($sha | test("^[0-9a-f]{40}$"))
+              and all(.[]; type == "object" and .head_sha == $sha
+                and (.name | IN("project-builds", "enrollment", "tests", "terms-accepted")))' <<< "$BODIES" > /dev/null \
+            || { echo "::error::The list holds no check run, or one that is not one of the four checks at this run's head."; exit 1; }
+
+      - name: Sign in to Google Cloud
+        id: gcp
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0 (sha-pinned)
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+          token_format: access_token
+          access_token_lifetime: 300s
+          # Nothing is written to the workspace and nothing is exported: the token is this step's output alone.
+          create_credentials_file: false
+          export_environment_variables: false
+
+      # The App's private key, from Secret Manager, as enroll-dispatch.yml's dispatch job reads it. Each non-blank line
+      # of the key is masked, and so is its base64 form.
+      - name: Read the oss-verify App's key
+        id: key
+        env:
+          GCP_ACCESS_TOKEN: ${{ steps.gcp.outputs.access_token }}
+        run: |
+          set -euo pipefail
+          payload=$(curl -q -sSf -H @<(builtin printf 'Authorization: Bearer %s\n' "$GCP_ACCESS_TOKEN") \
+            'https://secretmanager.googleapis.com/v1/projects/theorem-agent-infra/secrets/oss-verify-github-app-key/versions/latest:access' \
+            | jq -er '.payload.data | select(type == "string" and length > 0)')
+          builtin printf '::add-mask::%s\n' "$payload"
+          key=$(builtin printf '%s' "$payload" | base64 -d)
+          while IFS= read -r line; do
+            if [[ $line == *[![:space:]]* ]]; then builtin printf '::add-mask::%s\n' "$line"; fi
+          done <<< "$key"
+          delimiter="key-$(openssl rand -hex 16)"
+          { echo "key<<$delimiter"; builtin printf '%s\n' "$key"; echo "$delimiter"; } >> "$GITHUB_OUTPUT"
+
+      # With no owner and no repositories, the token is for this repository alone.
+      - name: Get the App's token for this repository's checks
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0 (sha-pinned)
+        with:
+          client-id: Iv23liAWPMahJZYsw3un
+          private-key: ${{ steps.key.outputs.key }}
+          permission-checks: write
+
+      # Each check run of the list, in its order. A post that fails fails the step, and the next run for the head
+      # posts what is still due.
+      - name: Post the checks
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REPO: ${{ github.repository }}
+          BODIES: ${{ needs.read.outputs.bodies }}
+        run: |
+          set -euo pipefail
+          jq -c '.[]' <<< "$BODIES" | while IFS= read -r body; do
+            gh api --method POST "repos/$REPO/check-runs" --input - \
+              --jq '"Posted the check run \(.name) at \(.head_sha) (\(.id)): \(.conclusion // .status)."' <<< "$body"
+          done

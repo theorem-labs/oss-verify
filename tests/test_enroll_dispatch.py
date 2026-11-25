@@ -161,6 +161,8 @@ class World:
         self.pulls = [self.pull(sha=sha)]
         self.project_yaml = b"repo: https://example.invalid/x\nlanguage: c\n"
         self.required = list(REQUIRED)
+        # The App main's ruleset requires each check from.
+        self.required_app = ACTIONS
 
     def check(self, check_id, name, run_id, conclusion="success", app=ACTIONS, repo=REPO):
         self.checks.append({"id": check_id, "name": name, "app": {"id": app}, "status": "completed",
@@ -196,7 +198,7 @@ class World:
             f"repos/{REPO}/rules/branches/main": [
                 {"type": "pull_request"},
                 {"type": "required_status_checks", "parameters": {"required_status_checks": [
-                    {"context": name, "integration_id": ACTIONS} for name in self.required]}}],
+                    {"context": name, "integration_id": self.required_app} for name in self.required]}}],
             f"repos/{REPO}/commits/{self.sha}/check-runs?filter=all&per_page=100": [{"check_runs": self.checks}],
             # As GitHub answers: every check run with filter=all, and only the newest with its default, latest.
             f"repos/{REPO}/commits/{self.sha}/check-runs?check_name=Enrollment%20review&filter=all&per_page=100":
@@ -353,6 +355,40 @@ class ForgedChecks(unittest.TestCase):
         world.required = []                          # the ruleset is off, or lists nothing
         world.checks = [c for c in world.checks if c["name"] != "tests"]
         self.assertNotSent(world, "tests (not run")
+
+    def test_the_four_are_read_from_github_actions_when_the_ruleset_requires_them_from_the_app(self):
+        # main's ruleset requires the four from the oss-verify App, whose copies .github/workflows/required-checks.yml
+        # posts only after each run ends: this run, which starts as the run ends, finds none of them yet.
+        world = World()
+        world.required_app = OSS_VERIFY
+        self.assertEqual(world.decide()["decision"], "dispatch")
+        # GitHub Actions' check is still bound to its own workflow file: a job named project-builds of tests.yaml that
+        # passed does not stand for build.yaml's failed one.
+        world = self.fails_project_builds(World())
+        world.required_app = OSS_VERIFY
+        world.run(208, ".github/workflows/tests.yaml", "pull_request")
+        world.check(609, "project-builds", 208)
+        self.assertNotSent(world, "project-builds (failure)")
+
+    def test_the_apps_copy_of_one_of_the_four_never_stands_for_github_actions_check(self):
+        # The App's copy names the job of the right run, as required-checks.yml posts it: it is still not read for the
+        # four, whether GitHub Actions' check of the run is missing or failed.
+        for actions in ("missing", "failure"):
+            world = World()
+            world.required_app = OSS_VERIFY
+            if actions == "missing":
+                world.checks = [c for c in world.checks if c["name"] != "tests"]
+            else:
+                world.checks[3]["conclusion"] = "failure"
+            world.check(611, "tests", 104, app=OSS_VERIFY)
+            self.assertNotSent(world, "tests (not run" if actions == "missing" else "tests (failure)")
+
+    def test_a_check_with_no_known_source_keeps_the_app_the_ruleset_names(self):
+        world = World()
+        world.required.append("lint")
+        world.required_app = OSS_VERIFY
+        self.assertIn(("lint", OSS_VERIFY), dispatch.required_checks(world.api(), REPO))
+        self.assertIn(("tests", ACTIONS), dispatch.required_checks(world.api(), REPO))
 
     def test_the_newest_bound_run_of_a_check_decides(self):
         # an older success, then a newer re-run that failed or is still running: not sent
