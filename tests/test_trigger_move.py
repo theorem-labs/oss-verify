@@ -2426,7 +2426,8 @@ class WorkflowRunNames(Stand):
     one workflow file of .github/workflows."""
 
     # The files that listen to a workflow_run at the head.
-    LISTENERS = {"enroll-dispatch.yml", "held-runs.yml", "review.yml", "toolchain-images-publish.yaml"}
+    LISTENERS = {"enroll-dispatch.yml", "held-runs.yml", "required-checks.yml", "review.yml",
+                 "toolchain-images-publish.yaml"}
 
     def case(self, tree=ROOT):
         """Each workflow file of `tree` with a workflow_run trigger, and each name in its workflows: exactly one
