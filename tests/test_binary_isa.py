@@ -545,9 +545,13 @@ DECODE_GOALS = [
     (0x0FF0000F, "fence"),       # fence iorw,iorw
     (0x8330000F, "fence"),       # fence.tso
     (0x0000100F, "fence.i"),
-    (0x00A0100F, None),          # fence.i with non-zero reserved fields
-    (0x0FF0080F, None),          # fence with rd != 0
-    (0x8120000F, None),          # fm = 8 without pred = succ = rw
+    (0x0FF0008F, "fence"),       # fence with rd = ra: reserved fields decode raw
+    (0x0FF0080F, "fence"),       # fence with rd = a6
+    (0x8120000F, "fence"),       # fm = 8 without pred = succ = rw
+    (0x0010100F, "fence.i"),     # fence.i with funct12 = 1
+    (0x00A0100F, "fence.i"),     # fence.i with funct12 = 10
+    (0xD2001053, "fcvt"),        # fcvt.d.w ft0,zero,rtz
+    (0x4201F553, "fcvt"),        # fcvt.d.s fa0,ft3,dyn
     (0x341022F3, "csr"),         # csrrs t0,mepc,zero
     (0x00C58553, "fp-arith"),    # fadd.s fa0,fa1,fa2,rne
     (0x40058553, None),          # fcvt.s.s
@@ -579,7 +583,9 @@ DECODE_ARMS = [
     (enc(0x3B, f3=1, f7=0x01), None),           # no mulhw
     (enc(0x3B, f3=0, f7=0x01), "mul-32"),       # mulw
     (0x0000000F, "fence"),                      # fm = 0, pred = succ = 0
-    (0x8320000F, None),                         # fm = 8, pred = rw, succ = r
+    (0x8320000F, "fence"),                      # fm = 8, pred = rw, succ = r
+    (enc(0x0F, rs1=5), "fence"),                # fence with rs1 != 0
+    (0xFFF3918F, "fence.i"),                    # fence.i with rd, rs1 and funct12 all non-zero
     (enc(0x0F, f3=2), None),
     (enc(0x73, f3=4), None),
     (csr(0xC00, 2, rd=10), "csr"),              # rdcycle a0: decodes
@@ -599,10 +605,12 @@ DECODE_ARMS = [
     (enc(0x53, f7=0x15, f3=2), None),           # fmin/fmax funct3 2
     (enc(0x53, f7=0x51, f3=3), None),           # fcmp funct3 3
     (enc(0x53, f7=0x60, rs2=4), None),          # fcvt to an integer type that is not w, wu, l or lu
-    (enc(0x53, f7=0x69, rs2=0, f3=1), None),    # fcvt.d.w: exact, rm must be 0
+    (enc(0x53, f7=0x69, rs2=0, f3=1), "fcvt"),  # fcvt.d.w: exact, still any rm
+    (enc(0x53, f7=0x69, rs2=1, f3=4), "fcvt"),  # fcvt.d.wu, rm 4
     (enc(0x53, f7=0x69, rs2=2, f3=1), "fcvt"),  # fcvt.d.l: any rm
     (enc(0x53, f7=0x20, rs2=1), "fcvt"),        # fcvt.s.d
-    (enc(0x53, f7=0x21, f3=1), None),           # fcvt.d.s: exact, rm must be 0
+    (enc(0x53, f7=0x21, f3=1), "fcvt"),         # fcvt.d.s: exact, still any rm
+    (enc(0x53, f7=0x21, rs2=1), None),          # fcvt.d.d
     (enc(0x53, f7=0x70, f3=2), None),           # fmv.x.w / fclass.s: funct3 0 or 1
     (enc(0x53, f7=0x71, f3=1), "fmv/fclass"),   # fclass.d
     (enc(0x53, f7=0x78, f3=1), None),           # fmv.w.x: funct3 0
@@ -642,17 +650,19 @@ SEM_CASES = [
     (enc(0x43, f3=6), "fp-reserved-rm"),         # fmadd.s, rm 6
     (enc(0x53, f7=0x60, f3=5), "fp-reserved-rm"),    # fcvt.w.s, rm 5
     (enc(0x53, f7=0x69, rs2=2, f3=6), "fp-reserved-rm"),   # fcvt.d.l, rm 6
+    (enc(0x53, f7=0x69, rs2=0, f3=5), "fp-reserved-rm"),   # fcvt.d.w, rm 5: decodes, exec rejects
+    (enc(0x53, f7=0x21, f3=6), "fp-reserved-rm"),          # fcvt.d.s, rm 6
+    (0xD205C553, None),                          # fcvt.d.w, rm 4
+    (0x4205C553, None),                          # fcvt.d.s, rm 4
+    (0x0FF0080F, None),                          # fence with rd != 0: a no-op
+    (0x00A0100F, None),                          # fence.i with non-zero reserved fields: a no-op
     (enc(0x53, f7=0x10, f3=2), None),            # fsgnjx.s: funct3 is not a rounding mode
     (enc(0x53, f7=0x51, f3=2), None),            # feq.d
     # Words decode rejects, with the family named for a reader.
     (0x00200073, "system-priv"),                 # uret
-    (0x00A0100F, "misc-mem-ext"),
-    (0x0FF0080F, "misc-mem-ext"),
-    (0x8120000F, "misc-mem-ext"),
+    (enc(0x0F, f3=3), "misc-mem-ext"),
     (0x40058553, "fp-ext"),                      # fcvt.s.s
     (0x42158553, "fp-ext"),                      # fcvt.d.d
-    (0xD205C553, "fp-ext"),                      # fcvt.d.w with rm != 0
-    (0x4205C553, "fp-ext"),                      # fcvt.d.s with rm != 0
     (0x00000001, "not-32bit"),
     (0x0000852A, "not-32bit"),
     (0x0C007057, "rvv-vsetvl"),                  # vsetvli zero,zero,e8,m1,ta,ma
@@ -709,7 +719,8 @@ class Model(unittest.TestCase):
 MODEL = os.environ.get("OSS_VERIFY_MODEL")
 # Decode.v's constructors in its Goal checks, and the class decode() names for each.
 GOAL_CLASSES = {"OpImm": "op-imm", "Op": "op", "Branch": "branch", "Mul32": "mul-32", "Lr": "lr", "Ecall": "ecall",
-                "Ebreak": "ebreak", "Fence": "fence", "FenceI": "fence.i", "Csr": "csr", "Fari": "fp-arith"}
+                "Ebreak": "ebreak", "Fence": "fence", "FenceI": "fence.i", "Csr": "csr", "Fari": "fp-arith",
+                "Fcvt": "fcvt"}
 
 
 @unittest.skipUnless(MODEL, "OSS_VERIFY_MODEL is not set: the directory of a checkout of the model, holding theories/")
