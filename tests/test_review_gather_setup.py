@@ -292,6 +292,32 @@ class SetupGather(unittest.TestCase):
         self.assertIn(f"not taken: {long!r}: it cannot be written here: File name too long", run.stderr)
         self.no_network()
 
+    def test_a_member_whose_name_holds_a_nul_byte_is_not_taken_and_the_others_are(self):
+        """A PAX header can give a member a name that holds a NUL byte, which no path of the file system can hold:
+        os.open() refuses it with ValueError. That member alone is not taken, with its own reason, and source/ gets
+        each other member, the one before it and the one after it too. tarfile's writer cuts a name at its NUL, so the
+        PAX record is made here: "<length> path=<name>\\n", whose length counts the whole record, its own digits too."""
+        name = f"{TOP}/b\x00c"
+        field = f" path={name}\n".encode()
+        digits = 1
+        while len(str(len(field) + digits)) != digits:
+            digits += 1
+        record = str(len(field) + digits).encode() + field
+        pax = tarfile.TarInfo("././@PaxHeader")
+        pax.type, pax.size = tarfile.XHDTYPE, len(record)
+        self.tar(member(f"{TOP}/before", data=b"before\n"), (pax, record), member(f"{TOP}/bxc", data=b"nul\n"),
+                 member(f"{TOP}/after", data=b"after\n"))
+        with tarfile.open(self.fetched / "source.tar") as given:
+            self.assertIn(name, given.getnames())
+        run = self.gather()
+        self.assertEqual(run.returncode, 0, run.stderr)
+        with tarfile.open(FIXTURE / "source.tar") as given:
+            want = {info.name[len(TOP) + 1:]: given.extractfile(info).read() for info in given if info.isfile()}
+        self.assertEqual(tree(self.out / "source"), {**want, "before": b"before\n", "after": b"after\n"})
+        self.assertFalse((self.out / "source.txt").exists())
+        self.assertIn(f"not taken: {name!r}: its name holds a NUL byte", run.stderr)
+        self.no_network()
+
     def test_instructions_for_claude_and_links_are_taken_out(self):
         theorem = self.fetched / "theorem"
         (theorem / "CLAUDE.md").write_text("x")

@@ -293,7 +293,8 @@ gather_setup() {
   # The repository at the head, as data, from GitHub's tarball. Each of its members is in one top folder,
   # <owner>-<name>-<commit>/, and source/ gets what is in that folder. It takes only a folder or a regular file. It
   # does not take a symbolic link or a hard link, a device, a FIFO, a sparse file, a member whose path is absolute or
-  # has a part "..", a member outside the top folder, or a member whose folder or file it cannot make, because another
+  # has a part "..", a member outside the top folder, a member whose name holds a NUL byte (a PAX header can give it
+  # one, and no path of the file system holds one), or a member whose folder or file it cannot make, because another
   # member has its path or because the file system refuses its name (a part of its path is longer than 255 bytes,
   # say). It goes on with the other members, and it names each member that it does not take, with the reason. A PAX
   # header can make a member of the type of a regular file sparse, with holes of any size that the tar holds no byte
@@ -309,6 +310,11 @@ try:
     with tarfile.open(tar, "r:*") as archive:
         os.mkdir(into)
         for member in archive:
+            # os.makedirs() and os.open() refuse a name that holds a NUL byte with ValueError, which the except below
+            # would take for a tar that cannot be read, so this refuses that member alone, first.
+            if "\x00" in member.name:
+                refused.append((member.name, "its name holds a NUL byte"))
+                continue
             parts = member.name.split("/")
             if member.name.startswith("/") or ".." in parts:
                 refused.append((member.name, "its path leaves the folder"))
