@@ -186,7 +186,10 @@ REQUIRED_SOURCES = {
     "terms-accepted": (".github/workflows/terms.yaml", PULL_EVENTS),
     "tests": (".github/workflows/tests.yaml", frozenset({"pull_request"})),
 }
-ACTIONS_APP = 15368  # GitHub Actions, the app of every check run above
+# GitHub Actions, the app of every check run above. A theorem-labs/agent-infra change makes main's ruleset require the
+# four from the oss-verify App, whose copy of each .github/workflows/required-checks.yml posts after the run ends. This
+# script reads GitHub Actions' own check run of each instead, whatever App the ruleset names (required_checks).
+ACTIONS_APP = 15368
 BUILD_WORKFLOW = ".github/workflows/build.yaml"
 RECORD_ARTIFACT = "enrollment-record"
 RECORD_SCHEMA = "oss-verify enrollment record v1"
@@ -269,12 +272,17 @@ class Runs:
 
 def required_checks(api: Api, repo: str) -> list[tuple[str, int | None]]:
     """(context, integration id) of every status check the default branch's rules require, and every check of
-    REQUIRED_SOURCES whether the rules list it or not: a ruleset that is off, or edited, lowers no bar here."""
-    out = {context: ACTIONS_APP for context in REQUIRED_SOURCES}
+    REQUIRED_SOURCES whether the rules list it or not: a ruleset that is off, or edited, lowers no bar here. A check of
+    REQUIRED_SOURCES is read from GitHub Actions whatever App the rules name for it. bound_checks binds that check run to
+    the run of its own workflow file, event and head, which is all that the oss-verify App's copy of it says
+    (.github/workflows/required-checks.yml), and the App posts its copy only after the run ends: this script, which
+    starts when the run ends, would not find the App's copy yet, and no later event would run it again."""
+    out: dict[str, int | None] = {context: ACTIONS_APP for context in REQUIRED_SOURCES}
     for rule in api.get(f"repos/{repo}/rules/branches/{DEFAULT_BRANCH}"):
         if rule.get("type") == "required_status_checks":
             for check in (rule.get("parameters") or {}).get("required_status_checks") or []:
-                out[check["context"]] = check.get("integration_id") or out.get(check["context"])
+                if check["context"] not in REQUIRED_SOURCES:
+                    out[check["context"]] = check.get("integration_id") or out.get(check["context"])
     return sorted(out.items())
 
 
