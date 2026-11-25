@@ -3520,7 +3520,7 @@ class Owners(unittest.TestCase):
 
     TEAMS = ["@theorem-labs/engineering", "@theorem-labs/research"]
     # Sami's handle. He alone owns the two texts that outside people read, app/sentences.yaml and review.md, so the
-    # ruleset of main requires his approval of each change to them (dispatch://OSSV-276/spec#b-r16).
+    # ruleset of main requires his approval of each change to them.
     SAMI = "@sjawhar"
     # The patterns of CODEOWNERS, in their order, each with its owners: TEAMS, none, or SAMI alone.
     LINES = (

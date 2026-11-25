@@ -6,9 +6,9 @@ skills/ @theorem-labs/engineering @theorem-labs/research
 
 # app/sentences.yaml holds every text that OSS Verify's GitHub Apps may write. review.md says what the enrollment
 # review checks and how it writes its comment to a maintainer. Outside people read these two texts. Sami (@sjawhar),
-# a person, alone owns them (dispatch://OSSV-276/spec#b-r16). The ruleset of main requires a code owner's review, so
-# it requires his approval of each change to them. Their lines name no other owner: with two owners on a line, the
-# approval of either one is sufficient.
+# a person, alone owns them. The ruleset of main requires a code owner's review, so it requires his approval of each
+# change to them. Their lines name no other owner: with two owners on a line, the approval of either one is
+# sufficient.
 #
 # review.md, review-change.md and review-issue.md say what the enrollment review and the change review check, and what
 # the draft reply to an issue says (.github/workflows/review.yml reads main's copies), and
