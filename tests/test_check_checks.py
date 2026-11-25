@@ -4129,7 +4129,7 @@ class WorkflowCredentials(unittest.TestCase):
             [UNOWN_TOOLCHAIN, (".github/workflows/toolchain-images.yaml", "\ncache-mode: none\n", "\n")],
             [f".github/workflows/toolchain-images.yaml: the job {job} holds write access to main's Actions cache "
              "(cache-mode: not given), but .github/CODEOWNERS gives .github/workflows/toolchain-images.yaml no owner"
-             for job in ("make", "compare-digests")]),
+             for job in ("make", "prebuilt", "compare-digests")]),
     }
 
     # How the check ends a package-code problem.
