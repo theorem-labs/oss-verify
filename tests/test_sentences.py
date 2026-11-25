@@ -331,6 +331,15 @@ class Controls(unittest.TestCase):
             "check_run.our_fault.conclusion: neutral, but the conclusion of a state is success, failure or "
             "action_required"])
 
+    def test_control_a_state_of_the_outside_proof_check_with_the_conclusion_neutral(self):
+        """R1: no key has the conclusion neutral, because GitHub counts a neutral required check as passed. The check
+        run of outside proof pull requests on theorem-labs/oss-verify-proofs (outside_proof_check_run) has states
+        too, and its state fails is a proof that does not hold."""
+        text = self.changed(("  fails:\n    conclusion: failure\n", "  fails:\n    conclusion: neutral\n"))
+        found = problems(text)
+        self.assertTrue([problem for problem in found
+                         if problem.startswith("outside_proof_check_run.fails.conclusion: neutral")], found)
+
     def test_control_a_required_key_deleted(self):
         line, = [line for line in self.text.splitlines(keepends=True) if line.startswith("  deleted_code: ")]
         text = self.changed((line, ""))
