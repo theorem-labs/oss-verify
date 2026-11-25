@@ -38,12 +38,19 @@ UNSET = ("GH_TOKEN", "GITHUB_TOKEN", "KIND", "FETCHED", "LAST_REVIEW", "GITHUB_O
 TOP = "FreeREAC-libreac-4e09c7d"
 SESSION = "09227178-7bbf-4e5f-86db-8736e530ef01"
 HEAD, OTHER = "b" * 40, "c" * 40
+# PAX records that tarfile cannot read, and finds that out only after it read the header of the member after them:
+# GNU.sparse.size makes it read GNU.sparse.offset as a number, and abc is none.
+BAD_PAX = {"GNU.sparse.size": "10", "GNU.sparse.offset": "abc"}
+# The reason that the script gives for a tar with a byte that is not zero after the place where tarfile ends it.
+ENDED = "ReadError: tarfile ended the tar at byte {}, but the tar holds bytes that are not zero from there on"
 
 
-def member(name, kind=tarfile.REGTYPE, link="", data=None):
-    """A member for SetupGather.tar: its header and its bytes (None for a member that holds none)."""
+def member(name, kind=tarfile.REGTYPE, link="", data=None, pax_headers=None):
+    """A member for SetupGather.tar: its header, with the PAX records `pax_headers`, and its bytes (None for a member
+    that holds none)."""
     info = tarfile.TarInfo(name)
     info.type, info.linkname, info.size = kind, link, len(data or b"")
+    info.pax_headers = dict(pax_headers or {})
     return info, data
 
 
@@ -101,11 +108,16 @@ class SetupGather(unittest.TestCase):
         return subprocess.run([str(SCRIPT), str(self.out)], cwd=self.checkout, env=environment, capture_output=True,
                               text=True, preexec_fn=limited if limit else None)
 
-    def tar(self, *extra):
-        """Make source.tar the fixture's tarball with the members `extra` after its own, compressed as GitHub's is."""
+    def tar(self, *extra, first=()):
+        """Make source.tar the fixture's tarball with the members `extra` after its own, compressed as GitHub's is.
+        The members `first` come before the fixture's own, in the place of its global PAX header, so that the first of
+        them starts the tar."""
         raw = io.BytesIO()
         with tarfile.open(FIXTURE / "source.tar") as given, tarfile.open(
-                fileobj=raw, mode="w", format=tarfile.PAX_FORMAT, pax_headers=given.pax_headers) as made:
+                fileobj=raw, mode="w", format=tarfile.PAX_FORMAT,
+                pax_headers=None if first else given.pax_headers) as made:
+            for info, data in first:
+                made.addfile(info, None if data is None else io.BytesIO(data))
             for info in given:
                 made.addfile(info, given.extractfile(info) if info.isfile() else None)
             for info, data in extra:
@@ -372,24 +384,79 @@ class SetupGather(unittest.TestCase):
         self.assertIn("there is no source to read", (self.out / "source.txt").read_text())
         self.assertTrue((self.out / "setup.txt").exists())
 
+    def gives_no_source(self, reason):
+        """Run the script on the source.tar of self.fetched: as for any tar that it cannot read, it gives no source/,
+        source.txt says that there is no source to read, and its standard error has the line of `reason`."""
+        run = self.gather()
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertFalse(os.path.lexists(self.out / "source"), run.stderr)
+        self.assertIn("there is no source to read", (self.out / "source.txt").read_text())
+        self.assertIn(f"review-gather: source.tar is not a tar file that can be read: {reason}",
+                      run.stderr.splitlines())
+        self.no_network()
+
     def test_a_tarball_with_a_bad_header_after_the_first_gives_no_source(self):
         """tarfile takes a header that it cannot read after the first one (here the last one, whose checksum is
         broken) for the end of the tar, and raises nothing. The script reads the tar on from that header to its end,
-        finds data there, and gives no source, as for any tar that it cannot read."""
+        finds data there, and gives no source."""
         self.tar(member(f"{TOP}/after", data=b"after\n"))
         raw = bytearray(gzip.decompress((self.fetched / "source.tar").read_bytes()))
         with tarfile.open(fileobj=io.BytesIO(raw)) as given:
             at = given.getmember(f"{TOP}/after").offset
         raw[at + 148:at + 156] = b"0000000\x00"
         (self.fetched / "source.tar").write_bytes(gzip.compress(bytes(raw)))
-        run = self.gather()
-        self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertFalse(os.path.lexists(self.out / "source"))
-        self.assertIn("there is no source to read", (self.out / "source.txt").read_text())
-        self.assertIn(f"review-gather: source.tar is not a tar file that can be read: ReadError: tarfile could not "
-                      f"read the header at byte {at} and took the tar to end there, but the tar holds data from "
-                      "there on", run.stderr.splitlines())
-        self.no_network()
+        self.gives_no_source(ENDED.format(at))
+
+    def test_a_tarball_with_a_bad_pax_header_on_the_last_member_gives_no_source(self):
+        """For a PAX header, tarfile reads the header of the member after it first, which moves its offset past the
+        data of that member, and then finds that it cannot read the PAX records (BAD_PAX): it takes the tar to end
+        there and raises nothing, with its offset on the zero blocks that end the tar. The script reads the tar on
+        from the PAX header, where that next() began, and gives no source."""
+        self.tar(member(f"{TOP}/a", data=b"a\n"), member(f"{TOP}/s", data=b"s\n", pax_headers=BAD_PAX))
+        with tarfile.open(self.fetched / "source.tar") as given:
+            self.assertEqual(given.getnames()[-1], f"{TOP}/a")
+            # The PAX header of s is in the block after the data of a, which is one block.
+            at = given.getmember(f"{TOP}/a").offset_data + tarfile.BLOCKSIZE
+        self.gives_no_source(ENDED.format(at))
+
+    def test_a_tarball_with_a_bad_pax_header_on_the_first_member_gives_no_source(self):
+        """The same member first in the tar, before the top folder: tarfile.open() reads it with the first next(),
+        from byte 0, takes the tar to end there and raises nothing, and the tar has no member. The script reads the
+        tar on from byte 0, and gives no source."""
+        self.tar(first=[member(f"{TOP}/s", data=b"s\n", pax_headers=BAD_PAX)])
+        with tarfile.open(self.fetched / "source.tar") as given:
+            self.assertEqual(given.getnames(), [])
+        self.gives_no_source(ENDED.format(0))
+
+    def test_a_tarball_whose_gzip_crc_is_not_its_datas_gives_no_source(self):
+        """gzip checks the CRC that GitHub's tarball holds (the 4 bytes before its last 4) against its data only at the
+        end of the data, after the zero block where tarfile ends the tar. The script reads the tar to its end, so gzip
+        checks it, and gives no source."""
+        gz = bytearray((self.fetched / "source.tar").read_bytes())
+        crc = int.from_bytes(gz[-8:-4], "little")
+        gz[-8:-4] = (crc ^ 1).to_bytes(4, "little")
+        (self.fetched / "source.tar").write_bytes(gz)
+        self.gives_no_source(f"BadGzipFile: CRC check failed {hex(crc ^ 1)} != {hex(crc)}")
+
+    def test_a_tarball_whose_gzip_length_is_not_its_datas_gives_no_source(self):
+        """The same for the length of the data (the last 4 bytes)."""
+        gz = bytearray((self.fetched / "source.tar").read_bytes())
+        length = int.from_bytes(gz[-4:], "little")
+        gz[-4:] = (length + 1).to_bytes(4, "little")
+        (self.fetched / "source.tar").write_bytes(gz)
+        self.gives_no_source("BadGzipFile: Incorrect length of data produced")
+
+    def test_a_tarball_with_data_after_its_end_blocks_gives_no_source(self):
+        """tarfile ends the tar at the first of the two zero blocks that end it, and reads no byte after them. POSIX
+        lets a tar hold any bytes there, but GitHub's tarball holds zero bytes alone there: a block that is not zero
+        after them gives no source."""
+        self.tar(member(f"{TOP}/after", data=b"after\n"))
+        raw = gzip.decompress((self.fetched / "source.tar").read_bytes())
+        with tarfile.open(fileobj=io.BytesIO(raw)) as given:
+            # The zero blocks are in the block after the data of after, which is one block.
+            end = given.getmember(f"{TOP}/after").offset_data + tarfile.BLOCKSIZE
+        (self.fetched / "source.tar").write_bytes(gzip.compress(raw + bytes(tarfile.BLOCKSIZE - 1) + b"\x01"))
+        self.gives_no_source(ENDED.format(end))
 
     def gather_since(self, diff):
         """Run the script with `diff` as the fetched since-last-review.diff from HEAD, the head of the review comment,

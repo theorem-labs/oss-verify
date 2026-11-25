@@ -333,12 +333,16 @@ gather_setup() {
   # header (issparse), whatever its type. It makes each folder and each file itself, and it makes no link, so nothing
   # that it writes is outside source/. A tar that it cannot read gives no source/, and source.txt says so: an error as
   # it opens the tar, reads the header of a member or reads the tar to its end, or data after the place where tarfile
-  # stops. TarFile.next() takes a header that it cannot read after the first one (a bad checksum, a block cut short) for
-  # the end of the tar, as it takes the zero block that ends a tar, and raises nothing: the members after it are not
-  # read. So after the last member, it reads the tar from the offset of that header to its end, 64 KiB at a time, and a
-  # byte there that is not zero is an error. That read also makes gzip check the CRC and the length of the data at its
-  # end. In a compressed tar (gzip, as GitHub's is, decompresses in order), an error in the data of a member makes the
-  # read of a header after it fail, or that check: then the tar gives no source/.
+  # stops. TarFile.next() takes a header that it cannot read after the first one (a bad checksum, a block cut short),
+  # or a PAX header with a record that it cannot read, the first one too, for the end of the tar, as it takes the zero
+  # block that ends a tar, and raises nothing: the members after it are not read. So after the last member, it reads
+  # the tar from the offset where the last next() began to its end, 64 KiB at a time, and a byte there that is not zero
+  # is an error. It does not read from TarFile.offset: for a PAX header, next() reads the header after it first, which
+  # moves TarFile.offset past the data of that member, and only then finds the record that it cannot read. Data after
+  # the two zero blocks that end the tar is an error too: POSIX lets a tar hold any bytes there, but GitHub's tarballs
+  # (git archive) hold zero bytes alone there, so the rule stays strict. That read also makes gzip check the CRC and
+  # the length of the data at its end. In a compressed tar (gzip, as GitHub's is, decompresses in order), an error in
+  # the data of a member makes the read of a header after it fail, or that check: then the tar gives no source/.
   rm -rf "$out/source" "$out/source.txt"
   if python3 -P - "$FETCHED/source.tar" "$out/source" <<'EOF'
 import os, shutil, sys, tarfile
@@ -347,7 +351,12 @@ top, refused = None, []
 try:
     with tarfile.open(tar, "r:*") as archive:
         os.mkdir(into)
+        # Where the last next() began (the comment above). tarfile.open() runs the first one, from byte 0, and each
+        # one after it begins at the offset where the member before it left archive.offset: nothing in the loop moves
+        # archive.offset, and the loop runs next() after each member.
+        start = 0
         for member in archive:
+            start = archive.offset
             # os.makedirs() and os.open() refuse a name that holds a NUL byte with ValueError, so this refuses that
             # member first, with its own reason.
             if "\x00" in member.name:
@@ -389,12 +398,12 @@ try:
                 # This run made the file (O_EXCL): it takes away the part that it wrote.
                 os.unlink(path)
                 refused.append((member.name, f"its data cannot be copied: {type(e).__name__}: {e}"))
-        # From the header where next() stopped to the end of the tar (the comment above): zero bytes alone.
-        archive.fileobj.seek(archive.offset)
+        # From where the last next() began to the end of the tar (the comment above): zero bytes alone.
+        archive.fileobj.seek(start)
         while chunk := archive.fileobj.read(1 << 16):
             if chunk.count(0) != len(chunk):
-                raise tarfile.ReadError(f"tarfile could not read the header at byte {archive.offset} and took the tar"
-                                        " to end there, but the tar holds data from there on")
+                raise tarfile.ReadError(f"tarfile ended the tar at byte {start}, but the tar holds bytes that are not"
+                                        " zero from there on")
 except Exception as e:
     sys.exit(f"review-gather: source.tar is not a tar file that can be read: {type(e).__name__}: {e}")
 for name, why in refused[:20]:
