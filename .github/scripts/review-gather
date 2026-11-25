@@ -323,32 +323,39 @@ gather_setup() {
   # commit, then folders, regular files and symbolic links, with an extended PAX header only for a long path, a long
   # link target or a large size. So the script reads that shape alone, and refuses a tar of any other shape rather
   # than reading it.
-  # First a walk reads the tar once, in order, to the end of the stream, which it decompresses by its first bytes
-  # (gzip, bzip2, xz or none). Each header has the ustar magic and version, a checksum that is the sum of its bytes,
-  # and a size of octal digits. A global PAX header is the first header of the tar, if there is one, and holds only
-  # comment (git archive adds mtime for a commit after the year 2242, and that tar is refused). An extended PAX header
-  # holds only path, linkpath and size (1 to 20 ASCII digits), and comes right before the header of a folder, a regular
-  # file or a symbolic link, with size only before a file and linkpath only before a link. A PAX header holds at most
-  # 64 KiB of records "<length> <keyword>=<value>\n", which fill it exactly, with no keyword twice, and zero bytes
-  # after them in its last block, where tarfile reads records too. A folder or a link has the size 0. A member of any
-  # other type (a hard link, a device, a FIFO, a GNU sparse file or long name) is refused. The tar ends at its first
-  # block of zero bytes, and each byte after it is zero; that read makes gzip check its CRC and length.
+  # GitHub's tarball is gzip, and both reads below decompress it with gzip alone: the walk with gzip.open, and tarfile
+  # with r:gz, which opens the same GzipFile, so that they read the same bytes. A file that does not start with the
+  # two bytes of gzip, 1f 8b, is refused before either reads it. tarfile's r:* would try bzip2 and xz before a plain
+  # tar, and its xz reads the LZMA-alone format too, which has no magic: a plain tar could hold, in fields that the
+  # walk does not read, a stream that tarfile would read as another tar.
+  # First a walk reads the tar once, in order, to the end of the stream. Each header has the ustar magic and version,
+  # a checksum that is the sum of its bytes, and a size of octal digits. A global PAX header is the first header of the
+  # tar, if there is one, and holds only comment (git archive adds mtime for a commit after the year 2242, and that
+  # tar is refused). An extended PAX header holds only path, linkpath and size (1 to 20 ASCII digits), and comes right
+  # before the header of a folder, a regular file or a symbolic link, with size only before a file and linkpath only
+  # before a link. A PAX header holds at most 1 MiB of records "<length> <keyword>=<value>\n", which fill it exactly,
+  # with no keyword twice, and zero bytes after them in its last block, where tarfile reads records too. The walk
+  # holds each PAX header in memory, and the bound keeps that small: git archive writes a PAX header only for a path,
+  # a link target or a size, and no path or link target of a real tree comes near 1 MiB. A folder or a link has the
+  # size 0. A member of any other type (a hard link, a device, a FIFO, a GNU sparse file or long name) is refused. The
+  # tar ends at its first block of zero bytes, and each byte after it is zero; that read makes gzip check its CRC and
+  # length.
   # Then tarfile reads the tar, and each member that it reads is the walk's next one: at the same offset, with its data
   # at the same offset, of the same size and type. After the last, no member of the walk is left. So tarfile takes no
   # member that the walk did not read, and skips none (it takes a header that it cannot read after the first for the
   # end of the tar, and raises nothing).
-  # A refused tar gives no source/, and source.txt says so; the reason of the walk names the byte offset and what is
-  # wrong.
+  # A refused tar gives no source/, and source.txt says so. The reason names what is wrong: for a file that is not
+  # gzip, its first bytes; else the byte offset of the header or the record, and what is wrong there.
   # source/ gets what is in the tar's one top folder, <owner>-<name>-<commit>/. It does not take a symbolic link, a
   # member whose name holds a NUL byte (a PAX path can hold one, and no path of the file system can), a member whose
   # path is absolute or has a part "..", a member outside the top folder, a member whose folder or file it cannot make
   # (another member has its path, or the file system refuses its name, longer than 255 bytes, say), or a member whose
   # data it cannot copy, whose file it then takes away. It names each, with the reason, and takes the others. It makes
-  # each folder and each file itself, with O_EXCL and O_NOFOLLOW, and no link, so nothing that it writes is outside
-  # source/.
+  # the folders with os.makedirs and each file with O_EXCL and O_NOFOLLOW, and it makes no link, so no path that it
+  # writes passes through a link and nothing that it writes is outside source/.
   rm -rf "$out/source" "$out/source.txt"
   if python3 -P - "$FETCHED/source.tar" "$out/source" <<'EOF'
-import bz2, gzip, lzma, os, re, shutil, sys, tarfile
+import gzip, os, re, shutil, sys, tarfile
 tar, into = sys.argv[1], sys.argv[2]
 top, refused = None, []
 BLOCK = 512
@@ -356,7 +363,8 @@ BLOCK = 512
 PAX = {b"g": ("global", (b"comment",), "comment"),
        b"x": ("extended", (b"path", b"linkpath", b"size"), "path, linkpath or size")}
 MEMBERS = (tarfile.REGTYPE, tarfile.DIRTYPE, tarfile.SYMTYPE)
-RECORD = re.compile(rb"([1-9][0-9]{0,4}) ([^=]*)=")
+# A record's length has at most 7 digits, so that one record can fill the 1 MiB that a PAX header may hold.
+RECORD = re.compile(rb"([1-9][0-9]{0,6}) ([^=]*)=")
 
 
 class ShapeError(Exception):
@@ -389,13 +397,14 @@ def records(kind, at, data):
 
 def walk(path):
     """[(offset, offset of the data, size, type)] of each member of the tar at `path`, as tarfile gives them: the
-    offset of a member with an extended PAX header is that of the header. A tar of another shape raises ShapeError."""
+    offset of a member with an extended PAX header is that of the header. A file that is not gzip, or a tar of another
+    shape, raises ShapeError."""
     with open(path, "rb") as raw:
-        magic = raw.read(6)
-    opener = (gzip.open if magic.startswith(b"\x1f\x8b") else bz2.open if magic.startswith(b"BZh")
-              else lzma.open if magic == b"\xfd7zXZ\x00" else open)
+        magic = raw.read(2)
+    if magic != b"\x1f\x8b":
+        raise ShapeError(f"the file starts with the bytes {magic!r}, not with those of gzip, b'\\x1f\\x8b'")
     members, at, extended = [], 0, None
-    with opener(path, "rb") as stream:
+    with gzip.open(path, "rb") as stream:
         def blocks(length, start, keep=False):
             # The data of the header at `start`, `length` bytes in whole blocks, kept or dropped.
             nonlocal at
@@ -438,9 +447,9 @@ def walk(path):
             if kind in PAX:
                 if kind == b"g" and start:
                     raise ShapeError(f"the global PAX header at byte {start} is not the first header of the tar")
-                if size > 1 << 16:
+                if size > 1 << 20:
                     raise ShapeError(f"the {PAX[kind][0]} PAX header at byte {start} holds {size} bytes, more than"
-                                     " 64 KiB")
+                                     " 1 MiB")
                 data = blocks(size, start, keep=True)
                 if data[size:].strip(b"\0"):
                     raise ShapeError(f"the {PAX[kind][0]} PAX header at byte {start} has a byte that is not zero after"
@@ -484,7 +493,7 @@ def reading(member):
 
 try:
     walked = iter(walk(tar))
-    with tarfile.open(tar, "r:*") as archive:
+    with tarfile.open(tar, "r:gz") as archive:
         os.mkdir(into)
         for member in archive:
             # Each member that tarfile reads is the walk's next one (the comment above).

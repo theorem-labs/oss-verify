@@ -7,10 +7,12 @@ The script reads only the fetch job's folder of the form setup-fetch/1, here tes
 says where each file comes from), and the file LAST_REVIEW. Each test runs the real script with no GH_TOKEN, with a gh,
 git, curl and wget on PATH that record each call and exit 1, and in a checkout whose triage.py and rules of
 validate_rules/ record that they ran. No test uses the network."""
+import bz2
 import errno
 import gzip
 import io
 import json
+import lzma
 import os
 import pathlib
 import re
@@ -45,10 +47,12 @@ GIT = shutil.which("git")
 # PAX records that tarfile cannot read, and finds that out only after it read the header of the member after them:
 # GNU.sparse.size makes it read GNU.sparse.offset as a number, and abc is none.
 BAD_PAX = {"GNU.sparse.size": "10", "GNU.sparse.offset": "abc"}
-# The reasons that the script gives for a tar that is not of the shape that git archive writes, each with the byte
-# offset of the header that it refuses: a member of a type other than a folder, a regular file and a symbolic link; a
-# checksum that is not the sum of the bytes of the header; a keyword other than comment in a global PAX header, or other
-# than path, linkpath and size in an extended one; and a size that is not 1 to 20 ASCII digits.
+# The reasons that the script gives for a file that is not gzip, with its first two bytes, and for a tar that is not of
+# the shape that git archive writes, each with the byte offset of the header that it refuses: a member of a type other
+# than a folder, a regular file and a symbolic link; a checksum that is not the sum of the bytes of the header; a
+# keyword other than comment in a global PAX header, or other than path, linkpath and size in an extended one; and a
+# size that is not 1 to 20 ASCII digits.
+NOT_GZIP = "ShapeError: the file starts with the bytes {!r}, not with those of gzip, b'\\x1f\\x8b'"
 TYPE = ("ShapeError: the header at byte {} is of the tar type {!r}, not a folder (5), a regular file (0) or a symbolic"
         " link (2)")
 CHECKSUM = "ShapeError: the header at byte {} has the checksum {!r}, which is not the sum of its bytes"
@@ -82,6 +86,20 @@ def pax_record(keyword, value):
     while len(str(len(field) + digits)) != digits:
         digits += 1
     return str(len(field) + digits).encode() + field
+
+
+def bare_header(name, size, kind):
+    """A tar header that holds only the fields that tarfile reads of it: the name `name`, the size `size` in octal
+    digits (none for 0), the tar type `kind` and the checksum, each cut short by NUL bytes, and NUL bytes in each other
+    field. No tar writer writes it, but tarfile reads it, and the LZMA stream of a tar of such headers is short."""
+    header = bytearray(tarfile.BLOCKSIZE)
+    header[:len(name)] = name
+    if size:
+        header[124:124 + len(b"%o" % size)] = b"%o" % size
+    header[156:157] = kind
+    header[148:156] = b" " * 8
+    header[148:156] = (b"%o" % sum(header)).ljust(8, b"\x00")
+    return bytes(header)
 
 
 def headers(raw):
@@ -563,9 +581,58 @@ class SetupGather(unittest.TestCase):
         self.no_network()
 
     def test_a_tarball_that_cannot_be_read_gives_no_source(self):
-        (self.fetched / "source.tar").write_bytes(b"not a tar file\n")
+        """A file of gzip, as GitHub's tarball is, that holds no tar."""
+        (self.fetched / "source.tar").write_bytes(gzip.compress(b"not a tar file\n"))
         self.gives_no_source("ShapeError: the tar ends at byte 15, in the header at byte 0")
         self.assertTrue((self.out / "setup.txt").exists())
+
+    def test_a_tarball_that_is_not_gzip_gives_no_source(self):
+        """GitHub's tarball is gzip. The fixture's tar as a plain tar, in bzip2 and in xz, each of which tarfile's r:*
+        reads, gives no source, and the reason names the first two bytes of the file."""
+        raw = gzip.decompress((FIXTURE / "source.tar").read_bytes())
+        for data in (raw, bz2.compress(raw), lzma.compress(raw)):
+            with self.subTest(start=data[:2]):
+                (self.fetched / "source.tar").write_bytes(data)
+                with tarfile.open(self.fetched / "source.tar", "r:*") as given, \
+                        tarfile.open(FIXTURE / "source.tar") as fixture:
+                    self.assertEqual(given.getnames(), fixture.getnames())
+                self.gives_no_source(NOT_GZIP.format(data[:2]))
+
+    def test_a_plain_tar_that_holds_an_lzma_alone_stream_gives_no_source(self):
+        """tarfile's r:* tries gzip, bzip2 and xz before a plain tar, and its xz (LZMAFile) reads the LZMA-alone format
+        too, which has no magic. Here a plain tar in the shape of git archive, with the good text in NOTICE, holds in
+        the first bytes of its global header (its name, mode, uid and gid, which the walk does not read) the LZMA-alone
+        stream of another tar, with the evil text in NOTICE, and then the bytes 0xFF, with which no stream starts:
+        LZMAFile takes them, and the rest of the file, for data after the stream, and drops them. The other tar has a
+        global header, a top folder and NOTICE at the offsets of the plain one, each of the same size and type, so that
+        the members that r:* reads are those of a walk of the plain tar; its headers are bare_header(), so that the
+        stream fits in the name field. Both readers read gzip alone, and the file, which does not start with the bytes
+        of gzip, gives no source."""
+        with tarfile.open(FIXTURE / "source.tar") as given:
+            folder, notice = given.getmember(TOP), given.getmember(f"{TOP}/NOTICE")
+        folder.pax_headers, notice.pax_headers, notice.size = {}, {}, len(b"the good text")
+        raw = io.BytesIO()
+        with tarfile.open(fileobj=raw, mode="w", format=tarfile.PAX_FORMAT, pax_headers={"comment": COMMIT}) as made:
+            made.addfile(folder)
+            made.addfile(notice, io.BytesIO(b"the good text"))
+        evil = (bare_header(b"", 1, tarfile.XGLTYPE) + bytes(tarfile.BLOCKSIZE)
+                + bare_header(b"t/", 0, tarfile.DIRTYPE) + bare_header(b"t/NOTICE", 13, tarfile.REGTYPE)
+                + b"the evil text".ljust(tarfile.BLOCKSIZE, b"\x00"))
+        stream = lzma.compress(evil, format=lzma.FORMAT_ALONE)
+        self.assertLessEqual(len(stream), 100)
+        good = bytearray(raw.getvalue())
+        good[:124] = stream.ljust(124, b"\xff")
+        good[148:156] = b" " * 8
+        good[148:156] = b"%06o\x00 " % sum(good[:tarfile.BLOCKSIZE])
+        (self.fetched / "source.tar").write_bytes(bytes(good))
+        for mode, names, text in (("r:*", ["t", "t/NOTICE"], b"the evil text"),
+                                  ("r:", [TOP, f"{TOP}/NOTICE"], b"the good text")):
+            with self.subTest(mode=mode), tarfile.open(self.fetched / "source.tar", mode) as given:
+                self.assertEqual([(info.name, info.offset, info.offset_data, info.size, info.type) for info in given],
+                                 [(names[0], 1024, 1536, 0, tarfile.DIRTYPE),
+                                  (names[1], 1536, 2048, 13, tarfile.REGTYPE)])
+                self.assertEqual(given.extractfile(names[1]).read(), text)
+        self.gives_no_source(NOT_GZIP.format(stream[:2]))
 
     def test_a_tarball_cut_short_gives_no_source(self):
         """A tar that ends inside a header, inside the data of a member, or before the block of zero bytes that ends
@@ -612,24 +679,36 @@ class SetupGather(unittest.TestCase):
                 self.gives_no_source(f"ShapeError: the header at byte {at} {why.format(field)}")
 
     def test_a_pax_header_whose_records_are_not_of_their_form_gives_no_source(self):
-        """Each record of a PAX header is "<length> <keyword>=<value>\\n", whose length has no leading zero and counts
-        the whole record, and the records fill the data of the header exactly, in at most 64 KiB, with no keyword
-        twice. A length too large, a leading zero, a record with no newline at its end, bytes after the last record, a
-        keyword twice, and 1 byte more than 64 KiB each give no source."""
+        """Each record of a PAX header is "<length> <keyword>=<value>\\n", whose length counts the whole record, and
+        the records fill the data of the header exactly, in at most 1 MiB, with no keyword twice. A length too large, a
+        record with no newline at its end, bytes after the last record, a keyword twice, and 1 byte more than 1 MiB
+        each give no source (a leading zero: test_a_pax_record_whose_length_has_a_leading_zero_gives_no_source)."""
         record = pax_record("path", f"{TOP}/r")
-        large = pax_record("path", "a" * (65537 - 12))
-        self.assertEqual(len(large), 65537)
+        large = pax_record("path", "a" * ((1 << 20) + 1 - 14))
+        self.assertEqual(len(large), (1 << 20) + 1)
         form = "has a record at byte {} that is not of the form '<length> <keyword>=<value>\\n'"
-        for data, at_record, why in ((b"1" + record, 0, form), (b"0" + record, 0, form),
+        for data, at_record, why in ((b"1" + record, 0, form),
                                      (record[:-1] + b"x", 0, form), (record + b"xyz", len(record), form),
                                      (record + record, None, "holds the keyword 'path' twice"),
-                                     (large, None, "holds 65537 bytes, more than 64 KiB")):
+                                     (large, None, "holds 1048577 bytes, more than 1 MiB")):
             with self.subTest(data=data[:40], length=len(data)):
                 self.tar(pax_header(tarfile.XHDTYPE, data), member(f"{TOP}/m", data=b"m\n"))
                 at, _ = self.added()[0]
                 if at_record is not None:
                     why = why.format(at + tarfile.BLOCKSIZE + at_record)
                 self.gives_no_source(f"ShapeError: the extended PAX header at byte {at} {why}")
+
+    def test_a_pax_record_whose_length_has_a_leading_zero_gives_no_source(self):
+        """The record "036 path=<path>\\n" is of the form in all but its leading zero: it is 36 bytes long, and tarfile
+        reads it. git archive writes a length with no leading zero, and the tar gives no source."""
+        record = f"036 path={TOP}/z\n".encode()
+        self.assertEqual(len(record), 36)
+        self.tar(pax_header(tarfile.XHDTYPE, record), member(f"{TOP}/m", data=b"m\n"))
+        with tarfile.open(self.fetched / "source.tar") as given:
+            self.assertEqual(given.getnames()[-1], f"{TOP}/z")
+        at, _ = self.added()[0]
+        self.gives_no_source(f"ShapeError: the extended PAX header at byte {at} has a record at byte "
+                             f"{at + tarfile.BLOCKSIZE} that is not of the form '<length> <keyword>=<value>\\n'")
 
     def test_a_header_that_tarfile_cannot_read_gives_no_source(self):
         """The header of bad has the mtime abc, which is not a number, and a checksum that is its sum. The walk does
@@ -710,28 +789,36 @@ class SetupGather(unittest.TestCase):
         self.gives_no_source(NOT_DIGITS.format(self.added()[0][0], b"abc"))
 
     def test_a_tarball_with_a_pax_size_under_another_extended_header_gives_no_source(self):
-        """An extended header with comment=hi, then the one of X with size=abc (x_hides_z()). tarfile applies the inner
-        one to X first: it reads the size as 0, and the header of Y in the data of X. Then the outer one replaces the
-        pax_headers of X with its own records, which hold no size. An extended header holds no comment, and the tar
-        gives no source."""
-        self.tar(pax_header(tarfile.XHDTYPE, b"14 comment=hi\n"), *x_hides_z({"size": "abc"}))
+        """An extended header with the path of X, then the one of X with size=abc (x_hides_z()). tarfile applies the
+        inner one to X first: it reads the size as 0, and the header of Y in the data of X. Then the outer one replaces
+        the pax_headers of X with its own records and those of the global header, which hold no size. The walk refuses
+        the tar at the rule that the header after an extended header is that of a member, as git archive writes it,
+        here at the second extended header, and the tar gives no source."""
+        self.tar(pax_header(tarfile.XHDTYPE, pax_record("path", f"{TOP}/X")), *x_hides_z({"size": "abc"}))
         with tarfile.open(self.fetched / "source.tar") as given:
             self.assertEqual(given.getnames()[-2:], [f"{TOP}/X", f"{TOP}/Y"])
-            self.assertEqual(given.getmember(f"{TOP}/X").pax_headers, {"comment": "hi"})
-        self.gives_no_source(EXTENDED_KEYWORD.format(self.added()[0][0], "comment"))
+            self.assertEqual(given.getmember(f"{TOP}/X").pax_headers, {"comment": COMMIT, "path": f"{TOP}/X"})
+        (outer, _), (inner, _), _, _ = self.added()
+        self.gives_no_source(f"ShapeError: the extended PAX header at byte {outer} is followed by a header of the tar "
+                             f"type b'x', at byte {inner}, not by the header of a member")
 
     def test_a_tarball_with_a_global_pax_size_after_an_extended_header_gives_no_source(self):
-        """An extended header with comment=hi, then a global one with size=abc, then the last member. tarfile applies
-        the global records to the member first, and reads its size as 0; then the extended one replaces its pax_headers
-        with its own records, which hold no size. The offset stays on the size in the header of the member, so tarfile
-        reads the tar on in its place, and the member as empty. An extended header holds no comment, and the tar gives
-        no source."""
-        self.tar(pax_header(tarfile.XHDTYPE, b"14 comment=hi\n"), pax_header(tarfile.XGLTYPE, b"12 size=abc\n"),
-                 member(f"{TOP}/last", data=b"last\n"))
+        """An extended header with the path of the last member, then a global one with size=abc, then the last member.
+        tarfile applies the global records to the member first, and reads its size as 0; then the extended one
+        replaces its pax_headers with its own records and those of the global header at byte 0, which hold no size.
+        The offset stays on the size in the header of the member, so tarfile reads the tar on in its place, and the
+        member as empty. The walk refuses the tar at the rule that the header after an extended header is that of a
+        member, as git archive writes it, here at the global header, before the rule that a global header is the first
+        header of the tar, and the tar gives no source."""
+        self.tar(pax_header(tarfile.XHDTYPE, pax_record("path", f"{TOP}/last")),
+                 pax_header(tarfile.XGLTYPE, b"12 size=abc\n"), member(f"{TOP}/last", data=b"last\n"))
         with tarfile.open(self.fetched / "source.tar") as given:
             last = given.getmembers()[-1]
-            self.assertEqual((last.name, last.size, last.pax_headers), (f"{TOP}/last", 0, {"comment": "hi"}))
-        self.gives_no_source(EXTENDED_KEYWORD.format(self.added()[0][0], "comment"))
+            self.assertEqual((last.name, last.size, last.pax_headers),
+                             (f"{TOP}/last", 0, {"comment": COMMIT, "path": f"{TOP}/last"}))
+        (extended, _), (global_, _), _ = self.added()
+        self.gives_no_source(f"ShapeError: the extended PAX header at byte {extended} is followed by a header of the "
+                             f"tar type b'g', at byte {global_}, not by the header of a member")
 
     def test_a_tarball_with_a_pax_size_of_more_than_20_digits_gives_no_source(self):
         """The PAX size 512, the size of X (x_hides_z()), in 4301 digits: int() refuses more than 4300 digits, so
@@ -781,6 +868,24 @@ class SetupGather(unittest.TestCase):
             self.assertEqual(given.extractfile(f"{TOP}/NOTICE").read(),
                              fixture.extractfile(f"{TOP}/NOTICE").read()[:1])
         self.gives_no_source(GLOBAL_KEYWORD.format(0, "size"))
+
+    def test_a_tarball_with_a_path_in_the_global_pax_header_gives_no_source(self):
+        """The shape of git archive, with a path in the global PAX header too: tarfile gives that path to each member
+        after it. git archive writes path in an extended header alone: a global header holds only comment, and the tar
+        gives no source."""
+        self.tar(global_records={"comment": COMMIT, "path": f"{TOP}/p"})
+        with tarfile.open(self.fetched / "source.tar") as given:
+            self.assertEqual(set(given.getnames()), {f"{TOP}/p"})
+        self.gives_no_source(GLOBAL_KEYWORD.format(0, "path"))
+
+    def test_a_tarball_with_a_linkpath_in_the_global_pax_header_gives_no_source(self):
+        """The shape of git archive, with a link target in the global PAX header too: tarfile gives that link target to
+        each member after it. git archive writes linkpath in an extended header alone: a global header holds only
+        comment, and the tar gives no source."""
+        self.tar(global_records={"comment": COMMIT, "linkpath": "NOTICE"})
+        with tarfile.open(self.fetched / "source.tar") as given:
+            self.assertEqual({info.linkname for info in given}, {"NOTICE"})
+        self.gives_no_source(GLOBAL_KEYWORD.format(0, "linkpath"))
 
     def test_a_tarball_with_a_pax_size_that_int_reads_but_is_not_decimal_gives_no_source(self):
         """int() reads the PAX size 0_2 as 2, the size of the member, but a decimal number is ASCII digits alone, as for
@@ -881,6 +986,33 @@ class SetupGather(unittest.TestCase):
         self.assertEqual(tree(self.out / "source"), {**want, "d": b"d\n"})
         self.assertFalse((self.out / "source.txt").exists())
         self.assertNotIn(f"not taken: '{TOP}/d'", run.stderr)
+        self.no_network()
+
+    def test_a_link_whose_target_needs_a_long_pax_header_is_not_taken_and_the_others_are(self):
+        """git archive writes a symbolic link whose target is longer than 100 bytes after an extended header with
+        linkpath. A target of 150,000 bytes gives one record of more than 64 KiB, whose length has six digits, in a
+        header of less than 1 MiB: that link alone is not taken, as any link, and source/ gets each other member, the
+        one after it too."""
+        target = "t" * 150000
+        record = pax_record("linkpath", target)
+        self.assertTrue(1 << 16 < len(record) < 1 << 20 and len(str(len(record))) == 6)
+        self.tar(member(f"{TOP}/longlink", tarfile.SYMTYPE, target), member(f"{TOP}/after", data=b"after\n"))
+        (at, extended), (_, link), _ = self.added()
+        self.assertEqual((extended, link), (tarfile.XHDTYPE, tarfile.SYMTYPE))
+        raw = self.raw()
+        self.assertEqual(raw[at + tarfile.BLOCKSIZE:at + tarfile.BLOCKSIZE + len(record)], record)
+        self.assertEqual(int(raw[at + 124:at + 136].split(b"\x00")[0], 8), len(record))
+        with tarfile.open(self.fetched / "source.tar") as given:
+            self.assertEqual(given.getmember(f"{TOP}/longlink").linkname, target)
+        run = self.gather()
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertFalse((self.out / "source.txt").exists(), run.stderr)
+        with tarfile.open(FIXTURE / "source.tar") as given:
+            want = {info.name[len(TOP) + 1:]: given.extractfile(info).read() for info in given if info.isfile()}
+        self.assertEqual(tree(self.out / "source"), {**want, "after": b"after\n"})
+        self.assertFalse(os.path.lexists(self.out / "source" / "longlink"))
+        self.assertEqual([line for line in run.stderr.splitlines() if "not taken" in line],
+                         [f"review-gather: source.tar: not taken: '{TOP}/longlink': it is a symbolic link"])
         self.no_network()
 
     def gather_since(self, diff):
