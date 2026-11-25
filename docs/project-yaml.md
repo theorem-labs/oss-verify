@@ -218,7 +218,7 @@ With `never`, we publish neither the proofs nor the theorem statements. With eac
 
 ## `.theorem/` on your repository
 
-A project can also enroll from its own repository, with the GitHub App Theorem Verify. The maintainer installs the App. The maintainer's coding agent writes the folder `.theorem/` at the root of the repository, with the skill `theorem-setup`. The maintainer opens the setup pull request from the branch `theorem/setup`. `theorem app setup` checks the folder, and `theorem app build` builds the project from it. Start from [templates/.theorem/](../templates/.theorem/).
+A project can also enroll from its own repository, with the GitHub App Theorem Verify. The maintainer installs the App. The maintainer's coding agent writes the folder `.theorem/` at the root of the repository, with the skill [`theorem-setup`](../.claude/skills/theorem-setup/SKILL.md). The maintainer opens the setup pull request from the branch `theorem/setup`. `theorem app setup` checks the folder, and `theorem app build` builds the project from it. Start from [templates/.theorem/](../templates/.theorem/).
 
 `.theorem/` holds the files of a project directory, and two folders:
 
