@@ -7,12 +7,14 @@ The script reads only the fetch job's folder of the form setup-fetch/1, here tes
 says where each file comes from), and the file LAST_REVIEW. Each test runs the real script with no GH_TOKEN, with a gh,
 git, curl and wget on PATH that record each call and exit 1, and in a checkout whose triage.py and rules of
 validate_rules/ record that they ran. No test uses the network."""
+import errno
 import gzip
 import io
 import json
 import os
 import pathlib
 import re
+import resource
 import shlex
 import shutil
 import subprocess
@@ -87,13 +89,17 @@ class SetupGather(unittest.TestCase):
         for path in ("triage.py", "validate_rules/__init__.py", "validate_rules/validate.py"):
             (scripts / path).write_text(ran)
 
-    def gather(self, **env):
-        """Run review-gather KIND=setup on self.fetched into self.out, with `env` over the job's environment."""
+    def gather(self, limit=None, **env):
+        """Run review-gather KIND=setup on self.fetched into self.out, with `env` over the job's environment, and with
+        `limit`, when it is given, as the most bytes that it and its commands can write to one file (RLIMIT_FSIZE)."""
         environment = {name: value for name, value in os.environ.items() if name not in UNSET}
         environment.update({"PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}", "KIND": "setup",
                             "FETCHED": str(self.fetched), "GITHUB_OUTPUT": str(self.output), **env})
+
+        def limited():
+            resource.setrlimit(resource.RLIMIT_FSIZE, (limit, resource.RLIM_INFINITY))
         return subprocess.run([str(SCRIPT), str(self.out)], cwd=self.checkout, env=environment, capture_output=True,
-                              text=True)
+                              text=True, preexec_fn=limited if limit else None)
 
     def tar(self, *extra):
         """Make source.tar the fixture's tarball with the members `extra` after its own, compressed as GitHub's is."""
@@ -292,6 +298,27 @@ class SetupGather(unittest.TestCase):
         self.assertIn(f"not taken: {long!r}: it cannot be written here: File name too long", run.stderr)
         self.no_network()
 
+    def test_a_member_whose_data_cannot_be_copied_is_not_taken_and_its_part_is_gone(self):
+        """A member of 2 MiB, with a limit of 1 MiB on each file that the script writes (RLIMIT_FSIZE): the copy of its
+        data fails with EFBIG after it wrote 1 MiB of the file. That member alone is not taken, with the error, the
+        part of its file that was written is gone, and source/ gets each other member, the one after it too. No tar
+        has a read of a member's data that fails and a next header that can then be read: a plain tar fails there only
+        when it is cut short, and gzip, GitHub's form, decompresses in order, so an error in a member's data stops the
+        read of each header after it too, and then there is no source, as in
+        test_a_tarball_that_cannot_be_read_gives_no_source."""
+        large = f"{TOP}/large"
+        self.tar(member(large, data=b"x" * (2 << 20)), member(f"{TOP}/after", data=b"after\n"))
+        run = self.gather(limit=1 << 20)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        with tarfile.open(FIXTURE / "source.tar") as given:
+            want = {info.name[len(TOP) + 1:]: given.extractfile(info).read() for info in given if info.isfile()}
+        self.assertEqual(tree(self.out / "source"), {**want, "after": b"after\n"})
+        self.assertFalse(os.path.lexists(self.out / "source" / "large"))
+        self.assertFalse((self.out / "source.txt").exists())
+        self.assertIn(f"not taken: {large!r}: its data cannot be copied: OSError: [Errno {errno.EFBIG}] "
+                      f"{os.strerror(errno.EFBIG)}", run.stderr)
+        self.no_network()
+
     def test_a_member_whose_name_holds_a_nul_byte_is_not_taken_and_the_others_are(self):
         """A PAX header can give a member a name that holds a NUL byte, which no path of the file system can hold:
         os.open() refuses it with ValueError. That member alone is not taken, with its own reason, and source/ gets
@@ -371,6 +398,19 @@ class SetupGather(unittest.TestCase):
         self.assertEqual(self.written(), f"session={SESSION}\nlast={HEAD}\n")
         self.assertIn(f"the setup review resumes the session {SESSION}, with the diff from {HEAD}", run.stdout)
 
+    def test_a_diff_of_theorem_alone_with_a_mode_a_binary_file_and_no_newline_at_the_end_resumes(self):
+        """git diff of two commits writes a change of mode with no hunk, a binary file as one line Binary files ...
+        differ, and the line \\ No newline at end of file after a hunk line: each is of a plain diff."""
+        diff = ("diff --git a/.theorem/build.sh b/.theorem/build.sh\nold mode 100755\nnew mode 100644\n"
+                "diff --git a/.theorem/seed.zip b/.theorem/seed.zip\nindex 20a6b40..213ab45 100644\n"
+                "Binary files a/.theorem/seed.zip and b/.theorem/seed.zip differ\n"
+                "diff --git a/.theorem/fuzz.c b/.theorem/fuzz.c\nindex 1039088..2a1d3c4 100644\n--- a/.theorem/fuzz.c\n"
+                "+++ b/.theorem/fuzz.c\n@@ -1,2 +1,2 @@\n #include <stdint.h>\n-int x;\n"
+                "\\ No newline at end of file\n+int y;\n\\ No newline at end of file\n")
+        run = self.gather_since(diff)
+        self.assertEqual(self.written(), f"session={SESSION}\nlast={HEAD}\n")
+        self.assertIn(f"the setup review resumes the session {SESSION}, with the diff from {HEAD}", run.stdout)
+
     def test_a_diff_that_changes_a_file_outside_theorem_is_whole_and_the_review_is_fresh(self):
         """A merge of the default branch into theorem/setup puts each change of that branch in the fetched diff, and a
         fuzz target or a Dockerfile can stay outside .theorem/: the review reads the diff whole, and it is fresh."""
@@ -394,6 +434,29 @@ class SetupGather(unittest.TestCase):
                 self.assertEqual(self.written(), "")
                 self.assertIn(f"review-gather: the diff from {HEAD} changes a file outside .theorem/: the review is "
                               "fresh", run.stdout.splitlines())
+                self.assertNotIn("resumes", run.stdout)
+
+    def test_a_diff_with_a_line_that_is_not_of_a_plain_diff_is_whole_and_the_review_is_fresh(self):
+        """Only the forms of lines that git diff writes for two commits resume. git diff --submodule=log writes a
+        submodule that changed as Submodule <path> <old>..<new>: and a line for each of its commits, with no diff --git
+        line; git diff --binary writes GIT binary patch and its data, which hold empty lines; and an empty line is of
+        no section. The review reads the diff whole, and it is fresh."""
+        theorem = ("diff --git a/.theorem/config.yml b/.theorem/config.yml\n--- a/.theorem/config.yml\n"
+                   "+++ b/.theorem/config.yml\n@@ -1 +1,2 @@\n sanitizers:\n+  - address\n")
+        for why, diff in (
+                ("a submodule's log after a section of .theorem/",
+                 theorem + "Submodule lib 025e3a3..4f0d847:\n  > two\n"),
+                ("a binary patch of .theorem/", "diff --git a/.theorem/seed.zip b/.theorem/seed.zip\n"
+                 "index 20a6b40ed53634d558b7e3c3db33b1139173c4b2..213ab45af4e73441335d80e131802e59f0e2b674 100644\n"
+                 "GIT binary patch\nliteral 7\nOcmWIWW@cevU<UvM9{{QV\n\nliteral 6\nNcmWIWW@cez0ssSf0Hy!{\n\n"),
+                ("an empty line between two sections of .theorem/",
+                 theorem + "\n" + theorem.replace("config.yml", "build.yml"))):
+            with self.subTest(why=why):
+                self.setUp()
+                run = self.gather_since(diff)
+                self.assertEqual(self.written(), "")
+                self.assertIn(f"review-gather: the diff from {HEAD} holds a line that is not of a plain diff: the "
+                              "review is fresh", run.stdout.splitlines())
                 self.assertNotIn("resumes", run.stdout)
 
     def combined_section_gives_a_fresh_review(self, header):

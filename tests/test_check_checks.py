@@ -2631,11 +2631,11 @@ class SeedHex(unittest.TestCase):
                 raw[at:at + 2] = (int.from_bytes(raw[at:at + 2], "little") | bits).to_bytes(2, "little")
         return change
 
-    def second_of_three(self, change):
+    def second_of_three(self, change, before=""):
         """Run the script, as review-gather runs it, on a zip of the three INPUTS, each deflated, after `change` has
-        changed its bytes: it gets them as a bytearray, and the ZipInfo of the second input. Check that the script
-        exits 0, that each input gets its line "== <name>: <size> bytes", and that the first and the third get their
-        rows. Return the lines that the second gets."""
+        changed its bytes: it gets them as a bytearray, and the ZipInfo of the second input. The python `before` runs
+        first, in the same process. Check that the script exits 0, that each input gets its line "== <name>: <size>
+        bytes", and that the first and the third get their rows. Return the lines that the second gets."""
         with tempfile.TemporaryDirectory() as directory:
             corpus, hex_file = pathlib.Path(directory) / "x_seed_corpus.zip", pathlib.Path(directory) / "x.hex.txt"
             with zipfile.ZipFile(corpus, "w") as archive:
@@ -2647,7 +2647,7 @@ class SeedHex(unittest.TestCase):
             corpus.write_bytes(bytes(raw))
             with zipfile.ZipFile(corpus) as archive:
                 names = [info.filename for info in archive.infolist()]
-            run = subprocess.run(["python3", "-P", "-", str(corpus), str(hex_file)], input=self.script(),
+            run = subprocess.run(["python3", "-P", "-", str(corpus), str(hex_file)], input=before + self.script(),
                                  capture_output=True, text=True)
             self.assertEqual(run.returncode, 0, run.stderr)
             lines = hex_file.read_text().splitlines()
@@ -2700,6 +2700,21 @@ class SeedHex(unittest.TestCase):
         self.assertEqual(self.second_of_three(rename), [
             "(not read: UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position 1: invalid start byte)"])
 
+    def test_an_input_whose_read_raises_another_error_gets_a_line_and_the_next_are_read(self):
+        """An error of any type while the script opens or reads an input. No zip that this test found makes zipfile
+        raise an error there that is not one of those of the tests above, so a few lines of python that run before the
+        script make zipfile's read of the input "second" raise RuntimeError. It gets a line that says that it is not
+        read, with the error, and the first and the third get their rows."""
+        before = ("import zipfile\n"
+                  "zipfile_read = zipfile.ZipExtFile.read\n"
+                  "def refuse(member, n=-1):\n"
+                  "    if member.name == 'second':\n"
+                  "        raise RuntimeError('the read of second fails')\n"
+                  "    return zipfile_read(member, n)\n"
+                  "zipfile.ZipExtFile.read = refuse\n")
+        self.assertEqual(self.second_of_three(lambda raw, info: None, before),
+                         ["(not read: RuntimeError: the read of second fails)"])
+
     def test_a_corpus_whose_central_directory_holds_a_name_marked_utf_8_that_is_not_says_why_it_is_not_read(self):
         """The same name b"s\\xffcond" with bit 0x800 set where a zip tool sets it, in the local file header and in the
         central directory entry. Then ZipFile() itself raises UnicodeDecodeError while it reads the central directory,
@@ -2722,6 +2737,24 @@ class SeedHex(unittest.TestCase):
                                  capture_output=True, text=True)
             self.assertTrue(hex_file.is_file(), run.stderr)
             self.assertIn("(not read: UnicodeDecodeError: ", hex_file.read_text(), run.stderr)
+
+    def test_a_corpus_that_zipfile_refuses_with_another_error_says_why_it_is_not_read(self):
+        """An error of any type while ZipFile() reads the central directory: here RuntimeError, from a few lines of
+        python that run before the script and make ZipFile() raise it. The hexadecimal file holds the one line that
+        says why, and the script exits 0."""
+        before = ("import zipfile\n"
+                  "def refuse(archive, *args, **kwargs):\n"
+                  "    raise RuntimeError('the central directory cannot be read')\n"
+                  "zipfile.ZipFile.__init__ = refuse\n")
+        with tempfile.TemporaryDirectory() as directory:
+            corpus, hex_file = pathlib.Path(directory) / "x_seed_corpus.zip", pathlib.Path(directory) / "x.hex.txt"
+            with zipfile.ZipFile(corpus, "w") as archive:
+                for name, data in self.INPUTS.items():
+                    archive.writestr(name, data, compress_type=zipfile.ZIP_DEFLATED)
+            run = subprocess.run(["python3", "-P", "-", str(corpus), str(hex_file)], input=before + self.script(),
+                                 capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(hex_file.read_text(), "(not read: RuntimeError: the central directory cannot be read)\n")
 
 
 class ReviewJob(unittest.TestCase):
