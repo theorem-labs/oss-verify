@@ -159,9 +159,13 @@ change_diff() {
 # bit 0x40 (strong encryption) is set, also without bit 0x1, so this reads no such member either, and gives a line for
 # it. A member that open() or the read refuses with another error (a corrupt deflate stream, a bad CRC, data cut
 # short, a local header that does not match the central directory, or one whose bit 0x800 says that its name is UTF-8
-# when it is not) gets a line with the error, and this goes on with the next member. A zip that ZipFile() cannot read,
-# as one cut short, which has lost its central directory, gets no line: the python stops with its error on the
-# standard error before it makes the hexadecimal file, and the listing holds the error of unzip -l.
+# when it is not) gets a line with the error, and this goes on with the next member. ZipFile() reads the central
+# directory before any member, and refuses a zip cut short, which has lost its central directory (BadZipFile; the
+# listing holds the error of unzip -l too), and one whose central directory gives a name with bit 0x800 set that is
+# not UTF-8, as a zip tool sets it (UnicodeDecodeError; unzip -l lists each member of it). For a zip that ZipFile()
+# refuses with BadZipFile, EOFError, OSError, ValueError or NotImplementedError, the hexadecimal file holds one line,
+# `(not read: <the error's name>: <its message>)`, the form of a member's line with an error, and no other, and the
+# python exits 0.
 seed_listings() {
   local zip target
   for zip in "$1"/*_seed_corpus.zip; do
@@ -170,31 +174,37 @@ seed_listings() {
     keep "seeds/$target.listing.txt" unzip -l "$zip"
     python3 -P - "$zip" "$out/seeds/$target.hex.txt" <<'EOF'
 import sys, zipfile, zlib
-with zipfile.ZipFile(sys.argv[1]) as archive, open(sys.argv[2], "w") as out:
-    for info in [i for i in archive.infolist() if not i.is_dir()][:200]:
-        out.write(f"== {info.filename!r}: {info.file_size} bytes\n")
-        if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
-            out.write(f"(not read: compression method {info.compress_type}, not stored or deflated)\n")
-            continue
-        if info.flag_bits & 0x1:
-            out.write("(not read: encrypted)\n")
-            continue
-        if info.flag_bits & 0x20:
-            out.write("(not read: compressed patched data)\n")
-            continue
-        if info.flag_bits & 0x40:
-            out.write("(not read: strong encryption)\n")
-            continue
-        try:
-            with archive.open(info) as member:
-                data = member.read(512)
-        except (zlib.error, zipfile.BadZipFile, EOFError, OSError, ValueError, NotImplementedError) as e:
-            out.write(f"(not read: {type(e).__name__}: {e})\n")
-            continue
-        for at in range(0, len(data), 16):
-            row = data[at:at + 16]
-            text = "".join(chr(b) if 32 <= b < 127 else "." for b in row)
-            out.write(f"{at:04x}  {row.hex(' '):<47}  {text}\n")
+with open(sys.argv[2], "w") as out:
+    try:
+        archive = zipfile.ZipFile(sys.argv[1])
+    except (zipfile.BadZipFile, EOFError, OSError, ValueError, NotImplementedError) as e:
+        out.write(f"(not read: {type(e).__name__}: {e})\n")
+    else:
+        with archive:
+            for info in [i for i in archive.infolist() if not i.is_dir()][:200]:
+                out.write(f"== {info.filename!r}: {info.file_size} bytes\n")
+                if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+                    out.write(f"(not read: compression method {info.compress_type}, not stored or deflated)\n")
+                    continue
+                if info.flag_bits & 0x1:
+                    out.write("(not read: encrypted)\n")
+                    continue
+                if info.flag_bits & 0x20:
+                    out.write("(not read: compressed patched data)\n")
+                    continue
+                if info.flag_bits & 0x40:
+                    out.write("(not read: strong encryption)\n")
+                    continue
+                try:
+                    with archive.open(info) as member:
+                        data = member.read(512)
+                except (zlib.error, zipfile.BadZipFile, EOFError, OSError, ValueError, NotImplementedError) as e:
+                    out.write(f"(not read: {type(e).__name__}: {e})\n")
+                    continue
+                for at in range(0, len(data), 16):
+                    row = data[at:at + 16]
+                    text = "".join(chr(b) if 32 <= b < 127 else "." for b in row)
+                    out.write(f"{at:04x}  {row.hex(' '):<47}  {text}\n")
 EOF
   done
 }
