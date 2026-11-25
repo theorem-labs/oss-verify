@@ -178,7 +178,7 @@ The review job of `check.yml` holds no GitHub token and no build data. It reads 
 
 Each check of the checklist is kept, taken from the folder, or dropped:
 
-- **Kept**: the check is as the checklist gives it. `DIR` is `$IN/theorem/`, the head's `.theorem/`. `config.yml` takes the place of `project.yaml`. `$IN/source/`, the repository at the head of the pull request, takes the place of the project's repository at the built commit.
+- **Kept**: the check is as the checklist gives it, with the changes that the column "what changes" of the table gives. `DIR` is `$IN/theorem/`, the head's `.theorem/`. `config.yml` takes the place of `project.yaml`. `$IN/source/`, the repository at the head of the pull request, takes the place of the project's repository at the built commit.
 - **Taken from the folder**: the check reads the files of `$IN` that the table below names, in the place of an input that a setup pull request does not have. The table says what changes. The rest of the check is as the checklist gives it.
 - **Dropped**: the check needs an input that a setup pull request does not have. Its verdict is **pass**, and its reason is "Not a check of a setup pull request." It puts nothing in the comment.
 
