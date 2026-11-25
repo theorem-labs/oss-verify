@@ -13,10 +13,11 @@ name: "Maintainer confirmed"
 # no new event at the head.
 #
 # pull_request: the workflow file comes from the merge commit, so a pull request that changes it controls this run.
-# .github/CODEOWNERS owns this file, as it owns every workflow, so a code owner approves the merge of such a pull
-# request. enroll-dispatch.yml sends no pull request for its theorem statements unless all its files are under one
-# projects/<name>/ (the_project() of .github/scripts/enroll-dispatch), and none that changes a steering file
-# (.github/scripts/steering.py) until a person approves its head.
+# .github/CODEOWNERS owns this file, as enroll-dispatch.yml, which holds a credential, acts on its runs (R10 of
+# dispatch://INFRA-5359/spec), so a code owner approves the merge of such a pull request. enroll-dispatch.yml sends no
+# pull request for its theorem statements unless all its files are under one projects/<name>/ (the_project() of
+# .github/scripts/enroll-dispatch), and none that changes a steering file (.github/scripts/steering.py) until a person
+# approves its head.
 on:
   pull_request:
     types: [labeled]

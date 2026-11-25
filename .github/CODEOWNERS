@@ -1,15 +1,81 @@
 # The last pattern that matches a file decides its owners. The ruleset of main requires a code owner's approval of
 # each change to an owned file.
-# Files with no owner on purpose: the files that no pattern matches (most files of src/, tests/, docs/ and
-# projects/), and the files of the two lines with no owner, which only owned workflows read, in jobs that hold only
-# read permissions.
+# Under .github/, a code owner only where a change can reach a credential or decide a required check
+# (dispatch://INFRA-5359/spec#b-r10): one line for each file of the inventory that .github/scripts/workflow-credentials
+# prints, and no line for a directory there, so a file added under .github/ has no owner until a line names it. The
+# exception is an agent instruction or skill (AGENTS*.md, CLAUDE*.md, SKILL.md, a file under skills/ or .claude/),
+# which the patterns for the whole repository own at any depth; such a file under .github/ is no file of the inventory,
+# so workflow-credentials fails a pull request that adds one there. That script, which the required check tests runs,
+# fails when a file of the inventory has no owner here or another file under .github/ has one. It reads what the jobs
+# of these workflows run or read in a small set of forms (SUPPORTED, in that script), and fails on any other form that
+# it cannot resolve; a path that a job assembles from parts is the one thing it does not see, and the code owner's
+# review of the owned file that assembles it covers it. This holds while main's ruleset requires the four required
+# checks from the oss-verify App (5447700), as theorem-labs/agent-infra#7010 made it, so a job of a workflow with no
+# owner cannot post one.
+# Files with no owner on purpose: the files that no pattern matches (most files of src/, tests/, docs/ and projects/,
+# and the files under .github/ that are no file of the inventory).
 **/AGENTS.md @theorem-labs/engineering @theorem-labs/research
 **/CLAUDE.md @theorem-labs/engineering @theorem-labs/research
 **/SKILL.md @theorem-labs/engineering @theorem-labs/research
 skills/ @theorem-labs/engineering @theorem-labs/research
-/.github/ @theorem-labs/engineering @theorem-labs/research
-/.github/actionlint.yaml
-/.github/scripts/frame-pointers/
+# The workflows that hold a credential.
+/.github/workflows/codeql-actions.yml @theorem-labs/engineering @theorem-labs/research
+/.github/workflows/codeql-c-cpp.yml @theorem-labs/engineering @theorem-labs/research
+/.github/workflows/codeql-python.yml @theorem-labs/engineering @theorem-labs/research
+/.github/workflows/codeql.yml @theorem-labs/engineering @theorem-labs/research
+/.github/workflows/enroll-dispatch.yml @theorem-labs/engineering @theorem-labs/research
+/.github/workflows/held-runs.yml @theorem-labs/engineering @theorem-labs/research
+/.github/workflows/required-checks.yml @theorem-labs/engineering @theorem-labs/research
+/.github/workflows/review.yml @theorem-labs/engineering @theorem-labs/research
+/.github/workflows/toolchain-images-publish.yaml @theorem-labs/engineering @theorem-labs/research
+# The workflows of the four required checks.
+/.github/workflows/build.yaml @theorem-labs/engineering @theorem-labs/research
+/.github/workflows/terms.yaml @theorem-labs/engineering @theorem-labs/research
+/.github/workflows/tests.yaml @theorem-labs/engineering @theorem-labs/research
+/.github/workflows/validate.yaml @theorem-labs/engineering @theorem-labs/research
+# The scripts that those four run, and the modules that the scripts import.
+/.github/scripts/binary-sizes @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/collect @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/steering.py @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/take-project @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/terms-accepted @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/validate_rules/__init__.py @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/validate_rules/check_build.py @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/validate_rules/validate.py @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/workflow-credentials @theorem-labs/engineering @theorem-labs/research
+# The other scripts and files that a workflow with a credential runs or reads, and the workflows whose runs it acts on.
+/.github/PULL_REQUEST_TEMPLATE.md @theorem-labs/engineering @theorem-labs/research
+/.github/codeql/codeql-config.yml @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/actor-kind @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/app-token @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/approve-held @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/artifact.py @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/enroll-dispatch @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/held-bucket-put @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/issue-draft-cap @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/required-check @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/review-body @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/review-gather @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/review-held @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/review-hold @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/review-neutralize @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/review-prompt @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/review-verdict @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/screen.py @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/screened-review-cap @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/store-issue-draft @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/take-build-results @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/take-review-data @theorem-labs/engineering @theorem-labs/research
+/.github/scripts/triage.py @theorem-labs/engineering @theorem-labs/research
+/.github/workflows/enroll-merged.yml @theorem-labs/engineering @theorem-labs/research
+/.github/workflows/maintainer-confirmed.yml @theorem-labs/engineering @theorem-labs/research
+/.github/workflows/triage.yaml @theorem-labs/engineering @theorem-labs/research
+# The configuration that actionlint, which tests.yaml runs, reads from its place: its ignore: can quiet a finding that
+# would fail the required check tests.
+/.github/actionlint.yaml @theorem-labs/engineering @theorem-labs/research
+# dependabot.yml, whose registries can send Dependabot's secrets to any host; this file is the last line.
+/.github/dependabot.yml @theorem-labs/engineering @theorem-labs/research
+# The files outside .github/.
 /infra/ @theorem-labs/engineering @theorem-labs/research
 /seeds/ @theorem-labs/engineering @theorem-labs/research
 /docs/seeded-projects.tsv @theorem-labs/engineering @theorem-labs/research

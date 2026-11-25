@@ -8,7 +8,7 @@ src/oss_verify/:
 
 src/ has no code owner (.github/CODEOWNERS), so no job that holds a token, or whose outputs such a job reads, loads
 code from it (tests/test_token_jobs.py). Those jobs run triage.py, review-gather and terms-accepted, which take the
-rules from .github/scripts/validate_rules/, which CODEOWNERS owns with the rest of .github/:
+rules from .github/scripts/validate_rules/, which CODEOWNERS owns, file by file, as what those jobs import (R10):
 
     validate.py     src/oss_verify/validate.py, byte for byte.
     check_build.py  what validate.py uses of src/oss_verify/check_build.py: each top-level statement that binds a name

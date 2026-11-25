@@ -7,12 +7,12 @@ name: "Tests"
 # GitHub holds the run until it is approved: review.yml approves it after its automated screen passes the pull request
 # (.github/workflows/held-runs.yml starts that screen).
 # A pull request from a fork that changes a file under projects/ is an enrollment: for it the jobs suite and docker
-# read, as data, only the paths that GitHub's merge changes (suite also reads its workflow files and .github/CODEOWNERS
-# with the base branch's workflow-credentials, below), run no code of the fork, and pass with "not run" in their
-# summary. enrollment (validate.yaml) refuses such a fork if it changes anything but one projects/<name>/, or if that
-# project is seeded, and project-builds (build.yaml) builds that project. A pull request from a fork that changes no
-# file under projects/ (a change to src/, say) is tested as a branch of this repository is, and review.yml gives it a
-# change review.
+# read, as data, only the paths that GitHub's merge changes (suite also reads the files under .github/ and those that
+# the workflows name, with the base branch's workflow-credentials, below), run no code of the fork, and pass with "not
+# run" in their summary. enrollment (validate.yaml) refuses such a fork if it changes anything but one projects/<name>/,
+# or if that project is seeded, and project-builds (build.yaml) builds that project. A pull request from a fork that
+# changes no file under projects/ (a change to src/, say) is tested as a branch of this repository is, and review.yml
+# gives it a change review.
 #
 # Each run tests the whole tree of its commit (for a pull request, GitHub's merge of it into the base branch), whatever
 # paths the change touches: no step chooses tests by the changed paths. The jobs:
@@ -22,15 +22,18 @@ name: "Tests"
 #           run" in the summary, and each step after it but the next one is skipped, so the job passes having run no
 #           code of the fork. These first steps run only git, gh and jq, and read the event and the merge's paths as
 #           data. The next step runs on every event, the fork's enrollment too: .github/scripts/workflow-credentials,
-#           which reads .github/CODEOWNERS and the workflow files as data, and runs no code of them. It fails when:
+#           which reads .github/CODEOWNERS, the workflow files, the files that their jobs and scripts name and the list
+#           of files under .github/ as data, and runs no code of them. It fails when:
 #             - it finds no workflow file to read;
 #             - .github/CODEOWNERS or a workflow file cannot be read, a workflow file is no YAML mapping, or is YAML
 #               that GitHub and the script could read differently (an explicit tag, the merge key <<, a key that is no
 #               plain scalar, a key repeated in any case);
-#             - .github/CODEOWNERS does not give a workflow file to both @theorem-labs/engineering and
-#               @theorem-labs/research (a required check is matched by its name, so a job of any workflow could
-#               report one), naming what its jobs hold (a secret, an environment, id-token, a write permission or
-#               write access to main's Actions cache);
+#             - .github/CODEOWNERS does not give a file of R10's inventory to both @theorem-labs/engineering and
+#               @theorem-labs/research, or gives an owner to another file under .github/. The inventory: CODEOWNERS,
+#               dependabot.yml, each workflow that holds a credential (a secret, an environment, id-token, a write
+#               permission or write access to main's Actions cache), the four workflows of the required checks with
+#               the workflows they call, the scripts they run and .github/actionlint.yaml, which the actionlint step
+#               below reads from its place, and each file that a workflow with a credential runs or reads;
 #             - a workflow starts on pull_request_target, or one that starts on pull_request breaks its rule (r): it
 #               reads a secret, a job has an environment, passes secrets, or calls a workflow of no file here, the
 #               workflow's permissions are missing, the workflow's or a job's permissions are write-all or another
@@ -214,7 +217,7 @@ jobs:
       # .github/scripts/workflow-credentials (the top of this file), on every event, with no token: it reads files
       # only. PyYAML comes from the runner image, else from apt. python3 -I reads no PYTHONPATH and no user site, so
       # only the script's own directory and the interpreter's packages are on sys.path.
-      - name: Each workflow has a code owner, and no pull_request job holds a credential
+      - name: Code owners where a change reaches a credential or a required check, and no credential on pull_request
         run: |
           dpkg -s python3-yaml > /dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
           if [ "$FORK" != true ]; then

@@ -33,9 +33,9 @@ name: "Terms"
 #
 # What runs, and from where. On pull_request, the workflow file comes from the merge commit, so the run: block of the
 # step below is the merge commit's. A pull request that changes this file runs its own copy, and so controls this run
-# and its check: a contributor could edit this check away in their own pull request. The code-owner rule on /.github/
-# of .github/CODEOWNERS guards the merge of such a pull request. enroll-dispatch.yml sends no pull request for its
-# theorem statements unless all its files are under one projects/<name>/ (the_project() of
+# and its check: a contributor could edit this check away in their own pull request. .github/CODEOWNERS owns this file,
+# the workflow of a required check, and so guards the merge of such a pull request. enroll-dispatch.yml sends no pull
+# request for its theorem statements unless all its files are under one projects/<name>/ (the_project() of
 # .github/scripts/enroll-dispatch), and none that changes a steering file (.github/scripts/steering.py) until a person
 # approves its head. The job checks out the first parent of the merge commit: the base branch's commit on which GitHub
 # built the merge. The run: block runs the program .github/scripts/terms-accepted from that checkout, with the rules of

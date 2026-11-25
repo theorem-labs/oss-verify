@@ -3537,49 +3537,24 @@ def workflow_credentials():
 
 
 class Owners(unittest.TestCase):
-    """.github/CODEOWNERS: which files a person must approve. It owns every workflow file (a required check is matched
-    by its name, so a job of any workflow could report one), and each file that runs with a credential: each file that
-    a job of a workflow with a credential (a secret, an environment, id-token or a write permission, its own or the
-    workflow's) runs or reads, as its steps and scripts name it. Every job
-    of such a workflow counts, as the outputs and artifacts of its other jobs are what the credential acts on; a job
-    that calls a workflow of this repository counts that file and its jobs too, through every level of calls. Local
-    actions count their metadata and entry scripts. A step or a script names a file when its code (no comment line,
-    no Python docstring or Markdown citation) holds the file's path from the top of the checkout, or, in a script of
-    .github/scripts, a sibling as "$here/<name>", "$(dirname ...)/<name>" or a Python import. A path that the code builds
-    from parts is not seen. Workflow-level environment values count as inputs to its jobs too."""
+    """.github/CODEOWNERS and R10's inventory (dispatch://INFRA-5359/spec#b-r10): a code owner only where a change can
+    reach a credential or decide a required check. .github/scripts/workflow-credentials finds the inventory; what a
+    workflow runs or reads is its followed, named and script_names, which these cases call, so that a change to tests/,
+    which has no owner, cannot weaken the derivation. The controls run the script as tests.yaml runs it, on a copy of
+    every file that git tracks: a workflow with a credential can read a file anywhere."""
 
     TEAMS = ["@theorem-labs/engineering", "@theorem-labs/research"]
-    # The patterns of CODEOWNERS, in their order, each with whether it gives the owners (True) or none (False).
-    LINES = (
-        # Agent instructions and skills at any depth (the first patterns of CODEOWNERS).
-        *((pattern, True) for pattern in ("**/AGENTS.md", "**/CLAUDE.md", "**/SKILL.md", "skills/")),
-        # What runs with a credential, and what changes what a workflow runs (the top of CODEOWNERS). /.github/ owns
-        # every workflow and each file added there later; the lines with no owner right after it take back only files
-        # that owned workflows run in jobs with read permissions alone. src/ has no owner, on purpose;
-        # .github/scripts/steering.py keeps it a steering file, and tests/test_token_jobs.py keeps it out of every job
-        # that holds a token. app/sentences.yaml, the texts of OSS Verify's GitHub Apps, has the same owners as
-        # review.md.
-        ("/.github/", True), ("/.github/actionlint.yaml", False), ("/.github/scripts/frame-pointers/", False),
-        *((pattern, True) for pattern in (
-            "/infra/", "/seeds/", "/docs/seeded-projects.tsv", ".claude/", "CLAUDE*.md", "AGENTS*.md", "/.mcp.json",
-            "/*.py", "/pytest.ini", "/.pytest.ini", "/pyproject.toml", "/uv.lock", "/.python-version", "/setup.cfg",
-            "/tox.ini", "/review.md", "/app/sentences.yaml", "/review-change.md", "/review-issue.md",
-            "/.claude/skills/write-to-maintainer/", "/.github/CODEOWNERS")))
-    # The files that a job of a workflow with a credential names but that have no owner, each with why that is safe:
-    # none today. unowned_reads reports an entry that no such workflow names.
-    NOT_OWNED = {}
-    # A workflow that a job with a credential names, but whose jobs are not followed, each with why: what its jobs run
-    # or read needs no owner for that job. Any other workflow that such a job names (a run whose checks, artifact or
-    # completion it acts on) is followed, and what its jobs run or read needs an owner too.
-    NOT_FOLLOWED = {
-        ".github/workflows/toolchain-images.yaml": "named in the if of toolchain-images-publish.yaml's job publish, "
-                                                   "which acts only on a push run of it on main that passed: publish "
-                                                   "makes each image again itself from infra/toolchains.tsv (owned), "
-                                                   "pushes it only when its digest is the one that make made, and no "
-                                                   "toolchain uses it until a row of that file names it",
-    }
-    WORKFLOW_FILE = re.compile(r"\.github/workflows/[^/]+\.ya?ml")
-    LOCAL_WORKFLOW = re.compile(r"\./(\.github/workflows/[^/@]+\.ya?ml)")
+    # The patterns of CODEOWNERS outside .github/, in their order, each giving TEAMS: the agent instructions and skills
+    # at any depth first, then what runs with a credential or changes a verdict. src/ has no owner, on purpose;
+    # .github/scripts/steering.py keeps it a steering file, and tests/test_token_jobs.py keeps it out of every job that
+    # holds a token. app/sentences.yaml, the texts of OSS Verify's GitHub Apps, has the same owners as review.md.
+    OUTSIDE = ("**/AGENTS.md", "**/CLAUDE.md", "**/SKILL.md", "skills/", "/infra/", "/seeds/",
+               "/docs/seeded-projects.tsv", ".claude/", "CLAUDE*.md", "AGENTS*.md", "/.mcp.json", "/*.py",
+               "/pytest.ini", "/.pytest.ini", "/pyproject.toml", "/uv.lock", "/.python-version", "/setup.cfg",
+               "/tox.ini", "/review.md", "/app/sentences.yaml", "/review-change.md", "/review-issue.md",
+               "/.claude/skills/write-to-maintainer/")
+    # The last line of CODEOWNERS, after which a control adds a pattern: the last pattern that matches decides.
+    LAST = "/.github/CODEOWNERS @theorem-labs/engineering @theorem-labs/research\n"
 
     @staticmethod
     def steering(root):
@@ -3590,14 +3565,10 @@ class Owners(unittest.TestCase):
         spec.loader.exec_module(module)
         return module
 
-    @classmethod
-    def matches(cls, root):
-        """steering.matches of `root`: whether a pattern of CODEOWNERS matches a path, as GitHub reads it."""
-        return cls.steering(root).matches
-
     @staticmethod
     def owners(codeowners_text, path, matches):
-        """The owners that the CODEOWNERS text gives `path`: the last pattern that matches it decides."""
+        """The owners that the CODEOWNERS text gives `path`, by `matches`: the last pattern that matches it decides.
+        Written here apart from the script's owners, for the cases that hold CODEOWNERS to files named one by one."""
         found = []
         for line in codeowners_text.splitlines():
             fields = line.split()
@@ -3606,166 +3577,58 @@ class Owners(unittest.TestCase):
         return found
 
     @staticmethod
-    def code(text, python):
-        """What a step or a script does: its lines but comment lines, and for Python its strings but docstrings, and
-        its imports as "import <module>"."""
-        if not python:
-            return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
-        tree, docstrings, parts = ast.parse(text), set(), []
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.body \
-                    and isinstance(node.body[0], ast.Expr) and isinstance(node.body[0].value, ast.Constant):
-                docstrings.add(id(node.body[0].value))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings:
-                parts.append(node.value)
-            elif isinstance(node, ast.Import):
-                parts += [f"import {alias.name}" for alias in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-                parts.append(f"import {node.module}")
-        return "\n".join(parts)
+    def inventory(root=ROOT):
+        """The script's inventory of `root`: ({path: [(class, why)]}, {class: why it is empty}, problems)."""
+        script = workflow_credentials()
+        return script.inventory(root, script.workflow_files(root))
 
     @staticmethod
-    def named(root, code, script_dir=False):
-        """The files of `root` that `code` names: a path from the top, a local action's metadata, and in a script of
-        .github/scripts a sibling. A citation of a document names it without reading it."""
-        code = re.sub(r"\((?:[\w.-]+/)*[\w.-]+\.md,\s[^()\n]*\)", "", code)
-        code = re.sub(r"\[[^\]\n]+\]\(https?://[^)\n]+\)", "", code)
-        code = re.sub(r"(?:[\w.-]+/)*[\w.-]+\.md#[\w.-]+", "", code)
-        found = set()
-        for token in re.findall(r"(?<![\w./+-])[\w.][\w./+-]*", code):
-            token = token.rstrip(".")
-            while token.startswith("./"):
-                token = token[2:]
-            # .git is git's own: a file in a linked worktree, a directory in a clone.
-            if not token or ".." in token.split("/") or token.split("/")[0] == ".git":
-                continue
-            if (root / token).is_file():
-                found.add(token)
-            elif (root / token).is_dir():
-                for metadata in ("action.yml", "action.yaml"):
-                    if (root / token / metadata).is_file():
-                        found.add(f"{token}/{metadata}")
-        if script_dir:
-            for name in re.findall(r"(?:\$here|\$\{here\}|\))/([\w.-]+)", code):
-                if (root / ".github" / "scripts" / name).is_file():
-                    found.add(f".github/scripts/{name}")
-            for module in re.findall(r"^import ([\w]+)$", code, re.M):
-                if (root / ".github" / "scripts" / f"{module}.py").is_file():
-                    found.add(f".github/scripts/{module}.py")
-        return found
+    def of(found, kind):
+        """The files of the inventory `found` that the class `kind` holds, sorted."""
+        return sorted(path for path, reasons in found.items() if kind in {k for k, _ in reasons})
 
-    def job_code(self, job):
-        """What a job does: its if, env, with and uses, and each step's if, run (comment lines left out), uses, with
-        and env."""
-        def values(value):
-            if isinstance(value, dict):
-                return [v for item in value.values() for v in values(item)]
-            if isinstance(value, list):
-                return [v for item in value for v in values(item)]
-            return [] if value is None else [str(value)]
-        parts = values([job.get(key) for key in ("if", "env", "with", "uses")])
-        for step in job.get("steps") or []:
-            parts.append(self.code(str(step.get("run", "")), python=False))
-            parts += values([step.get(key) for key in ("if", "uses", "with", "env")])
-        return "\n".join(parts)
-
-    def credential_reads(self, root):
-        """{each workflow with a credential: the files that it runs or reads, itself included}. A workflow has a
-        credential when a job of it, or of a workflow that it calls at every level, holds one (held of
-        .github/scripts/workflow-credentials). Each workflow that such a run names, but those of NOT_FOLLOWED, is
-        followed too: a run whose checks, artifact or completion it acts on."""
-        script, reads = workflow_credentials(), {}
-        for name in script.workflow_files(root):
-            path = f".github/workflows/{name}"
-            workflows, pending = {}, [path]
-            while pending:
-                current = pending.pop()
-                if current in workflows:
-                    continue
-                workflows[current] = script.load(root, current)
-                for job in script.jobs(workflows[current]).values():
-                    called = self.LOCAL_WORKFLOW.fullmatch(str(job.get("uses", "")))
-                    if called and (root / called[1]).is_file():
-                        pending.append(called[1])
-            if not any(script.held(workflow, job) for workflow in workflows.values()
-                       for job in script.jobs(workflow).values()):
-                continue
-            files, todo = set(), list(workflows)
-            for workflow in workflows.values():
-                todo += self.named(root, self.job_code(workflow))
-                for job in script.jobs(workflow).values():
-                    todo += self.named(root, self.job_code(job))
-            while todo:
-                current = todo.pop()
-                if current in files:
-                    continue
-                files.add(current)
-                text = (root / current).read_text(errors="replace")
-                if self.WORKFLOW_FILE.fullmatch(current):
-                    if current not in workflows and current not in self.NOT_FOLLOWED:
-                        # A run that a job with a credential acts on: what its jobs run or read steers that job.
-                        for job in script.jobs(script.parse(text, current)).values():
-                            todo += self.named(root, self.job_code(job))
-                    continue
-                if pathlib.PurePosixPath(current).name in ("action.yml", "action.yaml"):
-                    action = script.parse(text, current).get("runs") or {}
-                    directory = pathlib.PurePosixPath(current).parent.as_posix()
-                    steps = re.sub(r"\$\{\{\s*github\.action_path\s*\}\}", directory, self.job_code(action))
-                    todo += self.named(root, steps)
-                    for key in ("main", "pre", "post", "image"):
-                        if isinstance(action.get(key), str):
-                            todo += self.named(root, f"{directory}/{action[key]}")
-                elif current.startswith(".github/scripts/") or current.endswith(".py") or text.startswith("#!"):
-                    python = current.endswith(".py") or "python" in text.split("\n", 1)[0]
-                    todo += self.named(root, self.code(text, python), script_dir=current.startswith(".github/scripts/"))
-            reads[path] = files
-        return reads
-
-    def unowned_reads(self, root):
-        """Each file that a workflow with a credential runs or reads and CODEOWNERS of `root` does not own, as
-        "<file>, which <workflows> read"; and the entries of NOT_OWNED and NOT_FOLLOWED that no such workflow names. A
-        workflow file is left out: .github/scripts/workflow-credentials holds each one to its owners."""
-        codeowners, matches = (root / ".github" / "CODEOWNERS").read_text(), self.matches(root)
-        reads, readers = self.credential_reads(root), {}
-        for workflow, files in reads.items():
-            for name in files:
-                readers.setdefault(name, []).append(workflow.rsplit("/", 1)[1])
-        unowned = [f"{name}, which {', '.join(sorted(by))} read" for name, by in sorted(readers.items())
-                   if not self.WORKFLOW_FILE.fullmatch(name) and name not in self.NOT_OWNED
-                   and not set(self.TEAMS) & set(self.owners(codeowners, name, matches))]
-        return unowned, sorted((set(self.NOT_OWNED) | set(self.NOT_FOLLOWED)) - set(readers))
-
-    def test_only_the_listed_patterns_have_an_owner_and_they_are_the_last_of_the_file(self):
+    def test_each_line_of_github_names_one_file_of_the_inventory_and_the_other_lines_are_these(self):
         lines = [line.split() for line in (ROOT / ".github" / "CODEOWNERS").read_text().splitlines()
                  if line.strip() and not line.lstrip().startswith("#")]
-        # The instructions' four patterns first, the others in their order, each with its owners or none.
-        self.assertEqual(lines, [[pattern, *self.TEAMS] if owned else [pattern] for pattern, owned in self.LINES])
+        self.assertEqual([line for line in lines if not line[0].startswith("/.github/")],
+                         [[pattern, *self.TEAMS] for pattern in self.OUTSIDE])
+        inside = [line for line in lines if line[0].startswith("/.github/")]
+        self.assertTrue(inside, "CODEOWNERS has no line of .github/, so the case would read nothing")
+        for line in inside:
+            # One file, whole: no directory and no wildcard, so that a file added later has no owner.
+            self.assertEqual(line[1:], self.TEAMS, line)
+            self.assertTrue((ROOT / line[0][1:]).is_file() and not set("*?[") & set(line[0]), line)
+        self.assertEqual(lines[-1], self.LAST.split())
+        found, _, problems = self.inventory()
+        self.assertEqual(problems, [])
+        self.assertEqual(sorted(line[0][1:] for line in inside),
+                         [path for path in sorted(found) if path.startswith(".github/")])
         self.assertTrue(all((ROOT / name).is_file() for name in ("review.md", "review-change.md", "review-issue.md")))
 
+    # Files that a new workflow, script or local action could be.
     NEW_FILES = (".github/workflows/new.yml", ".github/scripts/new", ".github/actions/new/action.yml")
 
-    def test_a_new_file_under_github_has_an_owner(self):
-        codeowners, matches = (ROOT / ".github" / "CODEOWNERS").read_text(), self.matches(ROOT)
+    def test_a_new_file_under_github_has_no_owner(self):
+        script, codeowners = workflow_credentials(), (ROOT / ".github" / "CODEOWNERS").read_text()
         for name in self.NEW_FILES:
-            self.assertEqual(self.owners(codeowners, name, matches), self.TEAMS, name)
+            self.assertEqual(script.owners(codeowners, name), ([], None), name)
 
-    def test_control_a_new_file_under_github_loses_its_owner_without_the_github_line(self):
-        codeowners, matches = (ROOT / ".github" / "CODEOWNERS").read_text(), self.matches(ROOT)
-        line = "/.github/ @theorem-labs/engineering @theorem-labs/research\n"
-        self.assertEqual(codeowners.count(line), 1)
+    def test_control_a_line_for_all_of_github_gives_a_new_file_an_owner(self):
+        script = workflow_credentials()
+        changed = (ROOT / ".github" / "CODEOWNERS").read_text() + "/.github/ " + " ".join(self.TEAMS) + "\n"
         for name in self.NEW_FILES:
-            self.assertEqual(self.owners(codeowners.replace(line, ""), name, matches), [], name)
+            self.assertEqual(script.owners(changed, name), (self.TEAMS, "/.github/"), name)
 
     # Files that steer a credential or a verdict, named here one by one, not taken from CODEOWNERS or from
     # steering.STEERING: two lists that both lose a path agree, so their agreement alone shows nothing. Each must have
-    # its owners and be a steering file: a workflow whose jobs hold only read permissions too. A script that only an
-    # owned workflow runs, in a job with read permissions alone, has no owner, and is still a steering file. src/ is
-    # SteeringFiles' (tests/test_trigger_move.py).
+    # its owners and be a steering file. A file under .github/ of no class of the inventory has no owner, and is still a
+    # steering file: READ_ONLY. src/ is SteeringFiles' (tests/test_trigger_move.py).
     SENSITIVE = ("infra/base-builder/Dockerfile", "seeds/builds.tsv", "pyproject.toml", "uv.lock",
                  ".github/CODEOWNERS", ".github/workflows/review.yml", ".github/workflows/triage.yaml",
-                 ".github/dependabot.yml")
-    READ_ONLY = (".github/scripts/frame-pointers/probe",)
+                 ".github/dependabot.yml", ".github/workflows/tests.yaml", ".github/scripts/workflow-credentials",
+                 ".github/scripts/validate_rules/validate.py", ".github/actionlint.yaml")
+    READ_ONLY = (".github/scripts/frame-pointers/probe", ".github/workflows/toolchain-images.yaml",
+                 ".github/workflows/frame-pointer-tests.yaml", ".github/scripts/copy-validate-rules")
 
     def sensitive_problems(self, codeowners, steering):
         """Each path of SENSITIVE that the CODEOWNERS text `codeowners` does not give to TEAMS, and each of READ_ONLY
@@ -3799,85 +3662,67 @@ class Owners(unittest.TestCase):
         self.assertEqual(problems, ["infra/base-builder/Dockerfile: no owner",
                                     "infra/base-builder/Dockerfile: no steering file"])
 
-    def test_codeowners_owns_each_file_that_runs_with_a_credential(self):
-        reads = self.credential_reads(ROOT)
+    def test_the_inventory_of_this_tree_has_each_class(self):
+        script = workflow_credentials()
+        found, empty, problems = self.inventory()
+        self.assertEqual(problems, [])
+        _, _, holding, required, called, runs, tools, reads = (self.of(found, kind) for kind in script.CLASSES)
         # The workflows with a credential today: the check reads them, so it can fail.
-        self.assertEqual(sorted(reads), [f".github/workflows/{name}" for name in (
-            "codeql-actions.yml", "codeql-c-cpp.yml", "codeql-python.yml", "codeql.yml",
-            "enroll-dispatch.yml", "held-runs.yml", "required-checks.yml", "review.yml",
-            "toolchain-images-publish.yaml")])
-        self.assertIn(".github/scripts/review-gather", reads[".github/workflows/review.yml"])
-        # The poster's post job reads the script that its read job ran, through its outputs: both owned.
-        self.assertIn(".github/scripts/required-check", reads[".github/workflows/required-checks.yml"])
-        self.assertIn(".github/scripts/artifact.py", reads[".github/workflows/required-checks.yml"])
-        self.assertIn(".github/scripts/review-neutralize", reads[".github/workflows/review.yml"])
-        self.assertIn(".github/workflows/codeql.yml", reads[".github/workflows/codeql-python.yml"])
-        self.assertIn(".github/codeql/codeql-config.yml", reads[".github/workflows/codeql-python.yml"])
-        # The runs that enroll-dispatch acts on for an enrollment are main's: their workflows and scripts are followed.
-        for name in (".github/workflows/build.yaml", ".github/workflows/terms.yaml", ".github/scripts/binary-sizes",
-                     ".github/scripts/terms-accepted"):
-            self.assertIn(name, reads[".github/workflows/enroll-dispatch.yml"])
-        # tests.yaml, which has an owner, is followed too; toolchain-images.yaml is named in publish's if.
-        self.assertIn(".github/workflows/tests.yaml", reads[".github/workflows/enroll-dispatch.yml"])
-        self.assertIn(".github/scripts/collect", reads[".github/workflows/enroll-dispatch.yml"])
-        self.assertIn(".github/workflows/toolchain-images.yaml",
-                      reads[".github/workflows/toolchain-images-publish.yaml"])
-        unowned, stale = self.unowned_reads(ROOT)
-        self.assertEqual(unowned, [], "files that run with a credential, with no owner in .github/CODEOWNERS")
-        self.assertEqual(stale, [], "NOT_OWNED names files that no workflow with a credential names")
+        self.assertEqual(holding, [f".github/workflows/{name}" for name in (
+            "codeql-actions.yml", "codeql-c-cpp.yml", "codeql-python.yml", "codeql.yml", "enroll-dispatch.yml",
+            "held-runs.yml", "required-checks.yml", "review.yml", "toolchain-images-publish.yaml")])
+        self.assertEqual(required, sorted(script.REQUIRED_CHECKS))
+        # None of the four calls a workflow: the class says so, and shows no file owned.
+        self.assertEqual(called, [])
+        self.assertEqual(empty, {script.CLASSES[4]: "no job of .github/workflows/tests.yaml, "
+                                                    ".github/workflows/validate.yaml, .github/workflows/build.yaml, "
+                                                    ".github/workflows/terms.yaml calls a workflow of this repository"})
+        # What the four run, with the modules that a script imports: validate_rules/ is a package, which
+        # terms-accepted imports with `from validate_rules import validate`, and validate.py imports check_build
+        # relatively.
+        for name in ("workflow-credentials", "steering.py", "take-project", "binary-sizes", "collect", "terms-accepted",
+                     "validate_rules/__init__.py", "validate_rules/validate.py", "validate_rules/check_build.py"):
+            self.assertIn(f".github/scripts/{name}", runs)
+        # The configuration that actionlint, which tests.yaml runs, reads from its place (no .shellcheckrc is here).
+        self.assertEqual(tools, [".github/actionlint.yaml"])
+        self.assertIn("tests.yaml run actionlint", dict(found[".github/actionlint.yaml"])[script.CLASSES[6]])
+        # What a workflow with a credential runs or reads: scripts, texts, a module that required-check imports, a
+        # workflow that it calls, the workflows whose runs it acts on (enroll-dispatch acts on the four's), and files
+        # outside .github/.
+        for name in (".github/scripts/review-gather", ".github/scripts/review-neutralize",
+                     ".github/scripts/required-check", ".github/scripts/artifact.py",
+                     ".github/PULL_REQUEST_TEMPLATE.md", ".github/codeql/codeql-config.yml",
+                     ".github/workflows/codeql.yml", ".github/workflows/triage.yaml", ".github/workflows/build.yaml",
+                     ".github/scripts/binary-sizes", "review.md", "infra/toolchains.tsv"):
+            self.assertIn(name, reads)
+        self.assertIn("required-checks.yml", dict(found[".github/scripts/artifact.py"])[script.CLASSES[7]])
+        self.assertIn("required-checks.yml", dict(found[".github/scripts/required-check"])[script.CLASSES[7]])
+        self.assertIn("enroll-dispatch.yml", dict(found[".github/workflows/build.yaml"])[script.CLASSES[7]])
+        # Of no class: publish names toolchain-images.yaml but makes each image itself (NOT_FOLLOWED); only
+        # toolchain-images.yaml, which holds no credential, runs the rest, or no workflow does.
+        for name in (".github/workflows/toolchain-images.yaml", ".github/workflows/frame-pointer-tests.yaml",
+                     ".github/scripts/frame-pointers/probe", ".github/scripts/copy-validate-rules"):
+            self.assertNotIn(name, found)
 
-    # Controls: each changes a copy of the tree, and the check must name the file the change leaves unowned.
-    CONTROLS = {
-        "a read script loses its owner": (
-            ".github/CODEOWNERS", "/.github/scripts/frame-pointers/\n",
-            "/.github/scripts/frame-pointers/\n/.github/scripts/review-gather\n",
-            ".github/scripts/review-gather, which enroll-dispatch.yml, review.yml read"),
-        "a script of such a run loses its owner": (
-            ".github/CODEOWNERS", "/.github/scripts/frame-pointers/\n",
-            "/.github/scripts/frame-pointers/\n/.github/scripts/binary-sizes\n",
-            ".github/scripts/binary-sizes, which enroll-dispatch.yml"),
-        "a credential job runs an unowned script": (
-            ".github/workflows/review.yml", "run: .github/scripts/issue-draft-cap\n",
-            "run: .github/scripts/issue-draft-cap && .github/scripts/frame-pointers/probe\n",
-            ".github/scripts/frame-pointers/probe, which enroll-dispatch.yml, review.yml read"),
-        "a called workflow reads an unowned file": (
-            ".github/workflows/codeql.yml", "config-file: ./.github/codeql/codeql-config.yml\n",
-            "config-file: ./.github/actionlint.yaml\n", ".github/actionlint.yaml, which codeql-actions.yml"),
-        "a control reads its own steering matcher": (
-            ".github/scripts/steering.py", "            return True\n", "            return False\n",
-            ".github/PULL_REQUEST_TEMPLATE.md, which enroll-dispatch.yml, review.yml read"),
-        "a credential job reads a previously cited document": (
-            ".github/workflows/review.yml", "run: .github/scripts/issue-draft-cap\n",
-            "run: .github/scripts/issue-draft-cap && cat docs/project-yaml.md\n",
-            "docs/project-yaml.md, which enroll-dispatch.yml, review.yml read"),
-    }
-
-    def test_control_each_change_leaves_a_credential_file_unowned(self):
-        for label, (name, old, new, said) in self.CONTROLS.items():
-            with self.subTest(label), tempfile.TemporaryDirectory() as directory:
-                root = pathlib.Path(directory)
-                tracked = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, capture_output=True,
-                                         text=True, check=True)
-                names = [name for name in tracked.stdout.split("\0") if name]
-                self.assertTrue(names, "git enumerated no tracked files for the control")
-                for filename in names:
-                    target = root / filename
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy(ROOT / filename, target)
-                self.assertEqual(self.unowned_reads(root), ([], []), "the unchanged copy")
-                text = (root / name).read_text()
-                self.assertEqual(text.count(old), 1, label)
-                (root / name).write_text(text.replace(old, new, 1))
-                unowned, _ = self.unowned_reads(root)
-                self.assertTrue(any(line.startswith(said) for line in unowned), (label, unowned))
-
-    def tree(self, files):
+    def tree(self, files, git=False):
+        """A new directory that holds `files`, {path: text}; with `git`, the top of a new git work tree too, as the
+        script lists the files under .github/ with git."""
         root = pathlib.Path(self.enterContext(tempfile.TemporaryDirectory()))
         for name, text in files.items():
             path = root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text)
+        if git:
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
         return root
+
+    @staticmethod
+    def named(root, code):
+        """The files of `root` that the code `code` names, as the script's named reads them."""
+        script = workflow_credentials()
+        reading = script.Reading("test")
+        reading.code.append(code)
+        return script.named(root, reading)
 
     def test_named_paths_accept_relative_prefixes_and_plus_and_ignore_git_metadata(self):
         root = self.tree({"docs/a+b.txt": "data", "data.txt": "data", ".git/config": "metadata"})
@@ -3890,12 +3735,12 @@ class Owners(unittest.TestCase):
     def test_named_paths_distinguish_citations_from_reads(self):
         root = self.tree({"docs/project-yaml.md": "data", "CONTRIBUTING.md": "data"})
         self.assertEqual(self.named(root, "See (docs/project-yaml.md, Seeded projects). "
-                                   "[CONTRIBUTING.md](https://example.com/CONTRIBUTING.md) "
-                                   "language x: not built yet (docs/project-yaml.md#language)"), set())
+                                          "[CONTRIBUTING.md](https://example.com/CONTRIBUTING.md) "
+                                          "language x: not built yet (docs/project-yaml.md#language)"), set())
         self.assertEqual(self.named(root, "cat docs/project-yaml.md CONTRIBUTING.md"),
                          {"docs/project-yaml.md", "CONTRIBUTING.md"})
 
-    def test_credential_reads_follow_nested_calls_and_workflow_environment(self):
+    def test_followed_takes_nested_calls_and_the_workflows_environment(self):
         root = self.tree({
             ".github/workflows/outer.yml": "on: pull_request\njobs:\n  call:\n"
                                            "    uses: ./.github/workflows/middle.yml\n",
@@ -3905,30 +3750,11 @@ class Owners(unittest.TestCase):
                                            "    permissions: {contents: write}\n    runs-on: ubuntu-24.04\n"
                                            "    steps: [{run: 'cat \"$INPUT\"'}]\n",
             "docs/input.txt": "data"})
-        reads = self.credential_reads(root)
-        self.assertEqual(reads[".github/workflows/outer.yml"], {
+        self.assertEqual(workflow_credentials().followed(root, ".github/workflows/outer.yml")[:3], ({
             ".github/workflows/outer.yml", ".github/workflows/middle.yml", ".github/workflows/inner.yml",
-            "docs/input.txt"})
+            "docs/input.txt"}, set(), []))
 
-    def test_workflow_environment_secrets_make_its_jobs_credentialed(self):
-        root = self.tree({
-            ".github/workflows/secret.yml": "on: workflow_dispatch\nenv:\n  TOKEN: ${{ secrets['TOKEN'] }}\n"
-                                            "permissions: {contents: read}\njobs:\n  read:\n"
-                                            "    runs-on: ubuntu-24.04\n    steps: [{run: 'cat docs/input.txt'}]\n",
-            "docs/input.txt": "data"})
-        self.assertEqual(self.credential_reads(root), {".github/workflows/secret.yml": {
-            ".github/workflows/secret.yml", "docs/input.txt"}})
-
-    def test_control_an_unused_not_owned_exception_is_reported(self):
-        from unittest import mock
-
-        self.assertEqual(self.unowned_reads(ROOT), ([], []))
-        with mock.patch.object(self, "NOT_OWNED", {**self.NOT_OWNED, "docs/unused-exception.md": "not read"}):
-            unowned, stale = self.unowned_reads(ROOT)
-        self.assertEqual(unowned, [])
-        self.assertEqual(stale, ["docs/unused-exception.md"])
-
-    def test_credential_reads_follow_local_actions_and_their_scripts(self):
+    def test_followed_takes_local_actions_and_their_scripts(self):
         root = self.tree({
             ".github/workflows/local.yml": "on: workflow_dispatch\npermissions: {contents: write}\njobs:\n"
                                            "  read:\n    runs-on: ubuntu-24.04\n    steps:\n"
@@ -3938,18 +3764,644 @@ class Owners(unittest.TestCase):
                                                 "      run: bash ${{ github.action_path }}/helper\n",
             ".github/actions/local/helper": "#!/usr/bin/env bash\ncat docs/input.txt\n",
             "docs/input.txt": "data"})
-        self.assertEqual(self.credential_reads(root), {".github/workflows/local.yml": {
+        self.assertEqual(workflow_credentials().followed(root, ".github/workflows/local.yml")[0], {
             ".github/workflows/local.yml", ".github/actions/local/action.yml", ".github/actions/local/helper",
-            "docs/input.txt"}})
+            "docs/input.txt"})
+
+    def test_followed_takes_the_modules_that_a_script_imports(self):
+        # A Python script's absolute and relative imports, a package's __init__.py, a shell script's python3 -m and a
+        # heredoc's from ... import, each looked up in .github/scripts/. A module that is no file here (os) names
+        # nothing, and nor does a comment.
+        root = self.tree({
+            ".github/workflows/w.yml": "on: workflow_dispatch\njobs:\n  j:\n    runs-on: ubuntu-24.04\n"
+                                       "    steps: [{run: .github/scripts/py}, {run: .github/scripts/sh}]\n",
+            ".github/scripts/py": "#!/usr/bin/env python3\nimport os\nfrom pkg import mod\n",
+            ".github/scripts/sh": "#!/usr/bin/env bash\n# python3 -m commented\npython3 -P -m tool.main\n"
+                                  "python3 - <<'EOF'\nfrom single import x\nEOF\n",
+            ".github/scripts/pkg/__init__.py": "",
+            ".github/scripts/pkg/mod.py": "from . import other\n",
+            ".github/scripts/pkg/other.py": "",
+            ".github/scripts/tool/__init__.py": "",
+            ".github/scripts/tool/main.py": "",
+            ".github/scripts/single.py": "",
+            ".github/scripts/commented.py": ""})
+        self.assertEqual(workflow_credentials().followed(root, ".github/workflows/w.yml")[0], {
+            ".github/workflows/w.yml", ".github/scripts/py", ".github/scripts/sh", ".github/scripts/pkg/__init__.py",
+            ".github/scripts/pkg/mod.py", ".github/scripts/pkg/other.py", ".github/scripts/tool/__init__.py",
+            ".github/scripts/tool/main.py", ".github/scripts/single.py"})
+
+    def test_followed_takes_a_package_before_a_module_and_the_imports_of_inline_programs(self):
+        # Python imports the package probe_pkg/, not probe_pkg.py beside it; a python3 -c program in single or double
+        # quotes, with the options it knows, and a heredoc that python3 reads import modules too.
+        root = self.tree({
+            ".github/workflows/w.yml": "on: workflow_dispatch\njobs:\n  j:\n    runs-on: ubuntu-24.04\n    steps:\n"
+                                       "      - run: python3 -P -W ignore -X utf8 -c "
+                                       "'import probe_pkg, inline_single'\n"
+                                       "      - run: python3 -c \"from inline_double import x\"\n"
+                                       "      - run: |\n          python3 - <<'EOF'\n          import heredoc\n"
+                                       "          EOF\n",
+            ".github/scripts/probe_pkg/__init__.py": "", ".github/scripts/probe_pkg.py": "",
+            ".github/scripts/inline_single.py": "", ".github/scripts/inline_double.py": "",
+            ".github/scripts/heredoc.py": ""})
+        self.assertEqual(workflow_credentials().followed(root, ".github/workflows/w.yml")[:3], ({
+            ".github/workflows/w.yml", ".github/scripts/probe_pkg/__init__.py", ".github/scripts/inline_single.py",
+            ".github/scripts/inline_double.py", ".github/scripts/heredoc.py"}, set(), []))
+
+    def test_control_what_the_check_cannot_resolve_is_a_problem_on_its_line(self):
+        # Each run below is outside SUPPORTED (the top of the script): the check names the file and the line, and
+        # follows nothing that it could not resolve. An unknown command fails, and so does each form of a known one
+        # that can run a program that the check does not read.
+        script = workflow_credentials()
+        runs = {
+            "python3 -c 'not python ('": "it is no Python that the check can read (SyntaxError)",
+            'python3 -c "import x; print($y)"': "python3 -c with a program that the shell expands",
+            "python3 -Z -c 'import x'": "python3's option -Z, which the check does not read",
+            "python3 --frozen-modules=on x.py": "python3's option --frozen-modules=on, which the check does not read",
+            "curl https://example.invalid | python3": "python3 that reads its program from its standard input, which "
+                                                       "is no heredoc",
+            "bash -c \"$SCRIPT\"": "bash -c with a program that the shell expands",
+            'eval "$COMMAND"': "eval, which runs text that the check cannot read",
+            'source "$FILE"': 'source "$FILE", a file that the shell names from what the check cannot know',
+            "node x.js": "node, a command that the check does not know",
+            "frobnicate": "frobnicate, a command that the check does not know",
+            'cat "$0.data"': "the script's own path ($0, BASH_SOURCE) other than as $(dirname \"$0\")/<name>",
+            "python3 -c 'import importlib; importlib.import_module(\"x\")'": "import_module(), which loads code that "
+                                                                              "no import names",
+            "git -c core.sshCommand=true ls-remote origin": "git -c core.sshCommand, a setting that can run a program",
+            "git -c alias.probe='!true' probe": "git -c alias.probe, a setting that can run a program",
+            "git ls-remote --upload-pack=true origin": "git ls-remote --upload-pack, an option that names a program",
+            "git submodule foreach true": "git submodule, which runs a program",
+            "tar --to-command=cat -xf x.tar": "tar with an option that runs a program",
+            "sort --compress-program=gzip x": "sort --compress-program, which runs a program",
+            "dpkg -i x.deb": "dpkg with an action that is no query: installing a package runs its scripts",
+            "apt-get install ./x.deb": "apt-get with a file, a setting or an argument that the shell makes: a "
+                                       "package's scripts or a setting can run a program",
+            "gh extension install o/gh-x": "gh extension, which is no command of gh's own: an alias or an extension "
+                                           "runs a program",
+            'GIT_SSH_COMMAND="$X" git fetch': 'GIT_SSH_COMMAND="$X", a command that the shell makes',
+            "trap 'python3 -Z -c x' EXIT": "python3's option -Z, which the check does not read",
+            "flock /tmp/lock frobnicate": "frobnicate, a command that the check does not know",
+            "flock -nw 1 /tmp/lock true": "flock -nw, an option that the check does not read",
+            "mapfile -C cb -t lines": "mapfile -C, which runs a command",
+            "hash -p ./x ls": "hash -p, which names the program that a command runs",
+            "let 'a[$(true)]'": "let with a command substitution in a name that bash evaluates",
+            "[[ -v 'a[$(true)]' ]]": "shell text that the check cannot parse (a command substitution in a name that [[ "
+                                     "evaluates)",
+        }
+        steps = "".join(f"      - run: {json.dumps(run)}\n" for run in runs)
+        text = f"on: workflow_dispatch\njobs:\n  j:\n    runs-on: ubuntu-24.04\n    steps:\n{steps}"
+        root = self.tree({".github/workflows/w.yml": text})
+        problems = script.followed(root, ".github/workflows/w.yml")[2]
+        self.assertEqual(sorted(problems), sorted(f".github/workflows/w.yml:{6 + n}: {why}: {script.CANNOT}"
+                                                  for n, why in enumerate(runs.values())))
+        # The supported forms of the same, which follow what they name.
+        quiet = self.tree({".github/workflows/w.yml": "on: workflow_dispatch\njobs:\n  j:\n    runs-on: ubuntu-24.04\n"
+                                                      "    steps: [{run: 'python3 -I -c \"print(1)\" && bash -e x.sh "
+                                                      "&& . ./x.sh && gh api user && dpkg -s jq "
+                                                      "&& git -c protocol.allow=never -c credential.helper= fetch'}]\n",
+                           "x.sh": "echo\n"})
+        self.assertEqual(script.followed(quiet, ".github/workflows/w.yml")[:3],
+                         ({".github/workflows/w.yml", "x.sh"}, set(), []))
+
+    def test_followed_takes_pythonpath_of_each_env_into_the_scripts_that_a_job_runs(self):
+        # The PYTHONPATH of the workflow's env, the job's and the step's: python3 finds a module that a script that
+        # the step runs imports in each, so each is a file that the job runs. flock with options it knows runs its
+        # command, which is read.
+        script = workflow_credentials()
+        root = self.tree({
+            ".github/workflows/w.yml": "on: workflow_dispatch\nenv: {PYTHONPATH: w}\njobs:\n  j:\n"
+                                       "    runs-on: ubuntu-24.04\n    env: {PYTHONPATH: j}\n    steps:\n"
+                                       "      - env: {PYTHONPATH: s}\n"
+                                       "        run: flock -n -w 5 /tmp/lock python3 .github/scripts/r.py\n",
+            ".github/scripts/r.py": "import h1, h2, h3\n", "w/h1.py": "", "j/h2.py": "", "s/h3.py": ""})
+        self.assertEqual(script.followed(root, ".github/workflows/w.yml")[:3], (
+            {".github/workflows/w.yml", ".github/scripts/r.py", "w/h1.py", "j/h2.py", "s/h3.py"}, set(), []))
+
+    def test_control_a_variable_that_names_a_program_in_each_env(self):
+        # A program that git, a pager or bash runs, named in the env of the workflow, of a job or of a step: its
+        # literal value is read as shell text, and one that the runner makes is a problem.
+        script = workflow_credentials()
+        root = self.tree({".github/workflows/w.yml": "on: workflow_dispatch\nenv: {BASH_ENV: node a.js}\njobs:\n"
+                                                     "  j:\n    runs-on: ubuntu-24.04\n"
+                                                     "    env: {GIT_SSH_COMMAND: node b.js}\n    steps:\n"
+                                                     "      - env: {PAGER: '${{ inputs.p }}'}\n        run: echo\n"})
+        self.assertEqual(sorted(script.followed(root, ".github/workflows/w.yml")[2]), sorted([
+            f".github/workflows/w.yml:2: node, a command that the check does not know: {script.CANNOT}",
+            f".github/workflows/w.yml:6: node, a command that the check does not know: {script.CANNOT}",
+            f".github/workflows/w.yml:8: PAGER=${{{{ inputs.p }}}}, a command that the shell makes: {script.CANNOT}"]))
+
+    def test_followed_refuses_each_symbolic_link_on_the_way_to_a_file(self):
+        # A link in the checkout and one out of it: the check reads neither, and names the link as a problem.
+        script = workflow_credentials()
+        root = self.tree({
+            ".github/workflows/w.yml": "on: workflow_dispatch\njobs:\n  j:\n    runs-on: ubuntu-24.04\n"
+                                       "    steps: [{run: .github/scripts/linked}]\n",
+            ".github/scripts/elsewhere/real": "#!/usr/bin/env bash\ncat docs/input.txt\n", "docs/input.txt": "data"})
+        os.symlink("elsewhere/real", root / ".github" / "scripts" / "linked")
+        self.assertEqual(script.followed(root, ".github/workflows/w.yml")[:3], (
+            {".github/workflows/w.yml", ".github/scripts/linked"}, set(),
+            [f".github/scripts/linked: a symbolic link (to elsewhere/real), on the way to .github/scripts/linked: "
+             f"{script.CANNOT}"]))
+        outside = pathlib.Path(self.enterContext(tempfile.TemporaryDirectory())) / "outside"
+        outside.write_text("#!/usr/bin/env bash\n")
+        (root / ".github" / "scripts" / "linked").unlink()
+        os.symlink(outside, root / ".github" / "scripts" / "linked")
+        self.assertEqual(script.followed(root, ".github/workflows/w.yml")[2], [
+            f".github/scripts/linked: a symbolic link (to {outside}), on the way to .github/scripts/linked: "
+            f"{script.CANNOT}"])
+
+    def test_matches_agrees_with_git_on_each_pattern_of_codeowners(self):
+        # steering.matches against git check-ignore --no-index, which reads a pattern as .gitignore does, for each
+        # pattern of CODEOWNERS and a few more forms of **, on every tracked file and on paths at other depths. GitHub
+        # reads [, !, \ and a trailing /* otherwise than git: no line of CODEOWNERS has one.
+        codeowners = (ROOT / ".github" / "CODEOWNERS").read_text()
+        patterns = [line.split()[0] for line in codeowners.splitlines() if line.strip() and not line.startswith("#")]
+        self.assertFalse([p for p in patterns if set("[!\\") & set(p) or p.endswith("/*")], patterns)
+        patterns += ["**", "docs/**", "a/**/SKILL.md", "/**/CLAUDE.md", "projects/*/skills/"]
+        tracked = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, text=True, check=True)
+        paths = [path for path in tracked.stdout.split("\0") if path] + [
+            ".github/nested/SKILL.md", "SKILL.md", "a/b/c/SKILL.md", "a/SKILL.md", "x/skills/y/z", "skills",
+            "docs/a/b.md", "docs", "x/a/CLAUDE.md", ".github/AGENTS.md", "projects/p/skills/s/SKILL.md", "a.py/b",
+            "projects/p/.claude/settings.json", "src/x.py", "x.py"]
+        self.assertIn(".github/workflows/tests.yaml", paths, "git listed no tracked file")
+        steering, git = self.steering(ROOT), self.tree({}, git=True)
+        differ = []
+        for pattern in patterns:
+            (git / ".gitignore").write_text(pattern + "\n")
+            run = subprocess.run(["git", "check-ignore", "--no-index", "--stdin"], cwd=git, input="\n".join(paths),
+                                 capture_output=True, text=True)
+            self.assertIn(run.returncode, (0, 1), run.stderr)
+            ignored = set(run.stdout.splitlines())
+            differ += [(pattern, path, path in ignored) for path in paths
+                       if steering.matches(pattern, path) != (path in ignored)]
+        self.assertEqual(differ, [], "(pattern, path, what git says) where steering.matches differs")
+        self.assertTrue(steering.matches("**/SKILL.md", ".github/nested/SKILL.md"))
+
+    def test_a_workflow_environment_that_reads_a_secret_gives_each_job_a_credential(self):
+        root = self.tree({
+            ".github/workflows/secret.yml": "on: workflow_dispatch\ncache-mode: none\n"
+                                            "env:\n  TOKEN: ${{ secrets['TOKEN'] }}\n"
+                                            "permissions: {contents: read}\njobs:\n  read:\n"
+                                            "    runs-on: ubuntu-24.04\n    steps: [{run: 'cat docs/input.txt'}]\n",
+            "docs/input.txt": "data"})
+        found, _, _ = self.inventory(root)
+        self.assertEqual(found[".github/workflows/secret.yml"][0][1], "the job read holds a read of a secret")
+        self.assertIn("docs/input.txt", found)
+
+    # The controls of c-owners (dispatch://INFRA-5359/artifact/verification-md#b-c-owners) and the other ways a change
+    # breaks the owners, on a copy of every file that git tracks. Each is a list of changes (file, old, new), where old
+    # is None for a new file and new is None for a deleted one; and what the script must print: the exact ::error::
+    # lines, in order, or one line that must be among them where the change leaves many files of a class without an
+    # owner. A control that leaves one file of a class with no effective owner adds a later pattern with no owner after
+    # the last line.
+    TEAM_LINE = " @theorem-labs/engineering @theorem-labs/research"
+    CALLED = (".github/workflows/tests-called.yml", None,
+              "on: workflow_call\npermissions: {}\ncache-mode: none\njobs:\n  echo:\n    runs-on: ubuntu-24.04\n"
+              "    steps:\n      - run: echo\n")
+    CALLS = (".github/workflows/tests.yaml", "  tests:\n    # The required check tests (the top of this file).",
+             "  called:\n    permissions: {}\n    uses: ./.github/workflows/tests-called.yml\n\n"
+             "  tests:\n    # The required check tests (the top of this file).")
+    NEW_WORKFLOW = ("on: push\npermissions: {}\ncache-mode: none\njobs:\n  echo:\n    runs-on: ubuntu-24.04\n"
+                    "    steps:\n      - run: echo\n")
+    READS = "which hold a credential, run or read it"
+
+    @classmethod
+    def unown(cls, *paths):
+        """The change that adds, after the last line, a pattern with no owner for each of `paths`."""
+        return (".github/CODEOWNERS", cls.LAST, cls.LAST + "".join(f"/{path}\n" for path in paths))
+
+    @staticmethod
+    def no_owner(path, why):
+        """The problem of a file of the inventory with no owner."""
+        return f"{path}: {why}, but .github/CODEOWNERS gives {path} no owner"
+
+    @classmethod
+    def owned_extra(cls, path, pattern):
+        """The problem of a file of no class that has the owners."""
+        return (f"{path}: .github/CODEOWNERS gives it {' '.join(cls.TEAMS)} (the pattern {pattern}), but it is no "
+                "file of R10's inventory, so it has no code owner")
+
+    def controls(self):
+        """{label: (changes, the lines that the script prints: a list, exactly, or a str, among them)}."""
+        reads, cannot = self.READS, workflow_credentials().CANNOT
+        tests = (ROOT / ".github" / "workflows" / "tests.yaml").read_text()
+        # tests.yaml's actionlint step, its run moved into an owned script that the step runs.
+        lint_at = tests.index("      - name: actionlint and shellcheck pass the workflows\n")
+        run_at = tests.index("        run: |\n", lint_at)
+        lint_end = tests.index("      # The package as a user installs it", lint_at)
+        lint_run = tests[run_at:lint_end]
+        lint_body = "".join(line[10:] + "\n" for line in lint_run[len("        run: |\n"):].rstrip("\n").split("\n"))
+        ran = ("enroll-dispatch.yml, required-checks.yml, tests.yaml run {0}, which reads it from its place, and it "
+               "can change what {0} finds")
+        hold = (ROOT / ".github" / "scripts" / "review-hold").read_text()
+        terms = (ROOT / ".github" / "scripts" / "terms-accepted").read_text()
+        first_step = "      - name: The pull request targets the default branch\n"
+        # The line of the run: of a step put before first_step, as (name, run).
+        probe_line = f".github/workflows/tests.yaml:{tests[:tests.index(first_step)].count(chr(10)) + 2}"
+        return {
+            # One for each class of the inventory.
+            "CODEOWNERS loses its owner": (
+                [self.unown(".github/CODEOWNERS")],
+                [self.no_owner(".github/CODEOWNERS", "it says who owns each file")]),
+            "dependabot.yml loses its owner": (
+                [self.unown(".github/dependabot.yml")],
+                [self.no_owner(".github/dependabot.yml", "its registries can send Dependabot's secrets to any host")]),
+            "a workflow with a credential loses its owner": (
+                [self.unown(".github/workflows/held-runs.yml")],
+                [self.no_owner(".github/workflows/held-runs.yml", "the job held-runs holds actions: write, write "
+                                                                  "access to main's Actions cache (cache-mode: not "
+                                                                  "given)")]),
+            "a required-check workflow loses its owner": (
+                [self.unown(".github/workflows/terms.yaml")],
+                [self.no_owner(".github/workflows/terms.yaml", "it is the workflow of the required check "
+                                                               "terms-accepted")]),
+            "a workflow that a required-check workflow calls loses its owner": (
+                [self.CALLED, self.CALLS,
+                 (".github/CODEOWNERS", self.LAST, self.LAST + "/.github/workflows/tests-called.yml" + self.TEAM_LINE
+                  + "\n/.github/workflows/tests-called.yml\n")],
+                [self.no_owner(".github/workflows/tests-called.yml", "the job called of .github/workflows/tests.yaml, "
+                                                                     "the workflow of the required check tests, calls "
+                                                                     "it")]),
+            "a script that a required-check workflow runs loses its owner": (
+                [self.unown(".github/scripts/take-project")],
+                [self.no_owner(".github/scripts/take-project", "build.yaml, validate.yaml, the workflow of a required "
+                                                               "check, runs or reads it")]),
+            "the package that a required-check script imports loses its owner": (
+                [self.unown(".github/scripts/validate_rules/")],
+                [self.no_owner(f".github/scripts/validate_rules/{name}", "terms.yaml, the workflow of a required "
+                                                                         "check, runs or reads it")
+                 for name in ("__init__.py", "check_build.py", "validate.py")]),
+            "a text that a workflow with a credential reads loses its owner": (
+                [self.unown(".github/PULL_REQUEST_TEMPLATE.md")],
+                [self.no_owner(".github/PULL_REQUEST_TEMPLATE.md", f"enroll-dispatch.yml, review.yml, {reads}")]),
+            "a script that a workflow with a credential runs loses its owner": (
+                [self.unown(".github/scripts/review-gather")],
+                [self.no_owner(".github/scripts/review-gather", f"enroll-dispatch.yml, review.yml, {reads}")]),
+            "a module that such a script imports loses its owner": (
+                [self.unown(".github/scripts/artifact.py")],
+                [self.no_owner(".github/scripts/artifact.py", f"enroll-dispatch.yml, required-checks.yml, review.yml, "
+                                                              f"{reads}")]),
+            "the configuration that tests.yaml's actionlint reads loses its owner": (
+                [self.unown(".github/actionlint.yaml")], [self.no_owner(".github/actionlint.yaml",
+                                                                        ran.format("actionlint"))]),
+            "the configuration that actionlint reads ignores every finding and has no owner": (
+                [(".github/actionlint.yaml", "paths:\n", "paths:\n  '**':\n    ignore: ['.*']\n"),
+                 self.unown(".github/actionlint.yaml")],
+                [self.no_owner(".github/actionlint.yaml", ran.format("actionlint"))]),
+            "an owned script that tests.yaml runs runs actionlint, and actionlint.yaml has no owner": (
+                [(".github/scripts/lint-probe", None, "#!/usr/bin/env bash\n" + lint_body),
+                 (".github/workflows/tests.yaml", lint_run, "        run: bash .github/scripts/lint-probe\n\n"),
+                 (".github/CODEOWNERS", self.LAST,
+                  self.LAST + "/.github/scripts/lint-probe" + self.TEAM_LINE + "\n/.github/actionlint.yaml\n")],
+                [self.no_owner(".github/actionlint.yaml", ran.format("actionlint"))]),
+            "a .shellcheckrc, which shellcheck reads, at the top with no owner": (
+                [(".shellcheckrc", None, "disable=all\n")],
+                [self.no_owner(".shellcheckrc", ran.format("shellcheck"))]),
+            # A change of what a job of the four runs or reads.
+            "a python3 -c of tests.yaml imports a module with no owner": (
+                [(".github/scripts/probe_local.py", None, "VALUE = 1\n"),
+                 (".github/workflows/tests.yaml", first_step,
+                  "      - name: probe\n        env: {PYTHONPATH: .github/scripts}\n"
+                  "        run: python3 -c 'import probe_local'\n" + first_step)],
+                [self.no_owner(".github/scripts/probe_local.py",
+                               "tests.yaml, the workflow of a required check, runs or reads it")]),
+            "a python3 -W ignore -c of tests.yaml imports a module with no owner": (
+                [(".github/scripts/probe_local.py", None, "VALUE = 1\n"),
+                 (".github/workflows/tests.yaml", first_step,
+                  "      - name: probe\n        env: {PYTHONPATH: .github/scripts}\n"
+                  "        run: python3 -W ignore -c 'import probe_local'\n" + first_step)],
+                [self.no_owner(".github/scripts/probe_local.py",
+                               "tests.yaml, the workflow of a required check, runs or reads it")]),
+            # The two forms that a review of this check found passing unresolved, and a cd in a step.
+            "a quoted 'python3' -c of tests.yaml imports a module with no owner": (
+                [(".github/scripts/probe_local.py", None, "VALUE = 1\n"),
+                 (".github/workflows/tests.yaml", first_step,
+                  "      - name: probe\n        env: {PYTHONPATH: .github/scripts}\n"
+                  "        run: \"'python3' -c 'import probe_local'\"\n" + first_step)],
+                [self.no_owner(".github/scripts/probe_local.py",
+                               "tests.yaml, the workflow of a required check, runs or reads it")]),
+            "tests.yaml runs a script whose path has a space, with no owner": (
+                [(".github/scripts/probe file.py", None, "VALUE = 1\n"),
+                 (".github/workflows/tests.yaml", first_step,
+                  "      - name: probe\n        run: python3 '.github/scripts/probe file.py'\n" + first_step)],
+                [self.no_owner(".github/scripts/probe file.py",
+                               "tests.yaml, the workflow of a required check, runs or reads it")]),
+            "a step of tests.yaml goes into a directory of the checkout": (
+                [(".github/workflows/tests.yaml", first_step,
+                  "      - name: probe\n        run: cd .github/codeql\n" + first_step)],
+                [f"{probe_line}: cd .github/codeql, after which a path from the top names another file: {cannot}"]),
+            "a step of tests.yaml runs a command that the check does not know": (
+                [(".github/workflows/tests.yaml", first_step,
+                  "      - name: probe\n        run: frobnicate --now\n" + first_step)],
+                [f"{probe_line}: frobnicate, a command that the check does not know: {cannot}"]),
+            "an owned script that tests.yaml runs imports, through the step's PYTHONPATH, a module with no owner": (
+                [(".github/support/helper.py", None, "VALUE = 1\n"),
+                 (".github/scripts/reader.py", None, "import helper\n"),
+                 (".github/CODEOWNERS", self.LAST, self.LAST + "/.github/scripts/reader.py" + self.TEAM_LINE + "\n"),
+                 (".github/workflows/tests.yaml", first_step,
+                  "      - name: probe\n        env: {PYTHONPATH: .github/support}\n"
+                  "        run: python3 .github/scripts/reader.py\n" + first_step)],
+                [self.no_owner(".github/support/helper.py",
+                               "tests.yaml, the workflow of a required check, runs or reads it")]),
+            "a script of build.yaml imports a package whose __init__.py has no owner": (
+                [(".github/scripts/probe_pkg/__init__.py", None, "V = 'package'\n"),
+                 (".github/scripts/probe_pkg.py", None, "V = 'module, which Python does not import'\n"),
+                 (".github/scripts/binary-sizes", "\nimport sys\n", "\nimport sys\nimport probe_pkg\n")],
+                [self.no_owner(".github/scripts/probe_pkg/__init__.py", "build.yaml, the workflow of a required "
+                                                                        "check, runs or reads it")]),
+            "a script of build.yaml imports a module of a namespace package": (
+                [(".github/scripts/probe_ns/leaf.py", None, "print('loaded')\n"),
+                 (".github/scripts/binary-sizes", "\nimport sys\n", "\nimport sys\nimport probe_ns.leaf\n")],
+                [".github/scripts/binary-sizes: an import of probe_ns.leaf, whose probe_ns is a namespace package (no "
+                 f"__init__.py: .github/scripts/probe_ns): {cannot}"]),
+            "a Python script that terms.yaml runs is no Python": (
+                [(".github/scripts/terms-accepted", terms, terms + "\ndef (:\n")],
+                [f".github/scripts/terms-accepted: it is no Python that the check can read (SyntaxError): {cannot}"]),
+            "that script loads a module by name": (
+                [(".github/scripts/terms-accepted", terms,
+                  terms + "\nimport importlib\nimportlib.import_module('x')\n")],
+                [f".github/scripts/terms-accepted:{terms.count(chr(10)) + 3}: import_module(), which loads code that "
+                 f"no import names: {cannot}"]),
+            "a script of a job with a credential uses its own path otherwise than as its directory": (
+                [(".github/scripts/review-hold", hold, hold + '\ncat "$0.data"\n')],
+                [f".github/scripts/review-hold:{hold.count(chr(10)) + 2}: the script's own path ($0, BASH_SOURCE) "
+                 f"other than as $(dirname \"$0\")/<name>: {cannot}"]),
+            # A change of what a job with a credential runs or reads, with CODEOWNERS as it is.
+            "a job with a credential runs a script with no owner": (
+                [(".github/workflows/review.yml", "run: .github/scripts/issue-draft-cap\n",
+                  "run: .github/scripts/issue-draft-cap && .github/scripts/frame-pointers/probe\n")],
+                self.no_owner(".github/scripts/frame-pointers/probe", f"enroll-dispatch.yml, review.yml, {reads}")),
+            "a called workflow reads a file with no owner": (
+                [(".github/workflows/codeql.yml", "config-file: ./.github/codeql/codeql-config.yml\n",
+                  "config-file: ./.github/scripts/frame-pointers/probe.c\n")],
+                self.no_owner(".github/scripts/frame-pointers/probe.c", f"codeql-actions.yml, codeql-c-cpp.yml, "
+                                                                        f"codeql-python.yml, codeql.yml, {reads}")),
+            "a job with a credential reads a document outside .github/ that it used to cite": (
+                [(".github/workflows/review.yml", "run: .github/scripts/issue-draft-cap\n",
+                  "run: .github/scripts/issue-draft-cap && cat docs/project-yaml.md\n")],
+                [self.no_owner("docs/project-yaml.md", f"enroll-dispatch.yml, review.yml, {reads}")]),
+            "an unowned workflow gains a credential": (
+                [(".github/workflows/toolchain-images.yaml", "\ncache-mode: none\n", "\n")],
+                self.no_owner(".github/workflows/toolchain-images.yaml", "the job make holds write access to main's "
+                                                                         "Actions cache (cache-mode: not given)")),
+            "a new workflow with no owner writes contents": (
+                [(".github/workflows/new.yml", None, self.NEW_WORKFLOW.replace(
+                    "    steps:", "    permissions: {contents: write}\n    steps:"))],
+                [self.no_owner(".github/workflows/new.yml", "the job echo holds contents: write")]),
+            # The other half: a file of no class with an owner.
+            "a file of no class gets the owners": (
+                [(".github/CODEOWNERS", self.LAST,
+                  self.LAST + "/.github/scripts/copy-validate-rules" + self.TEAM_LINE + "\n")],
+                [self.owned_extra(".github/scripts/copy-validate-rules", "/.github/scripts/copy-validate-rules")]),
+            "a line for all of .github/, as before R10": (
+                [(".github/CODEOWNERS", self.LAST, self.LAST + "/.github/" + self.TEAM_LINE + "\n")],
+                self.owned_extra(".github/scripts/copy-validate-rules", "/.github/")),
+            "a skill added under .github/, which **/SKILL.md owns": (
+                [(".github/nested/SKILL.md", None, "")],
+                [self.owned_extra(".github/nested/SKILL.md", "**/SKILL.md")]),
+            "a required-check workflow is a directory": (
+                [(".github/workflows/terms.yaml", "", None), (".github/workflows/terms.yaml/x.txt", None, "x\n")],
+                ".github/workflows/terms.yaml: no such file, but it is the workflow of the required check "
+                "terms-accepted (R10), so the check cannot read what decides that check"),
+            "a workflow file that is no UTF-8": (
+                [(".github/workflows/probe.yml", None, b"on: push\njobs: {}\n# \xff\n")],
+                [".github/workflows/probe.yml: it cannot be read: 'utf-8' codec can't decode byte 0xff in position 20: "
+                 "invalid start byte"]),
+            # The check's own inputs.
+            "the check's matcher of patterns matches nothing": (
+                [(".github/scripts/steering.py",
+                  "    return any(0 < k < len(parts) or (k == len(parts) and not directory) for k in ends)\n",
+                  "    return False\n")],
+                self.no_owner(".github/PULL_REQUEST_TEMPLATE.md", f"enroll-dispatch.yml, review.yml, {reads}")),
+            "a job's steps are no list": (
+                [(".github/workflows/probe.yml", None, "on: push\npermissions: {contents: write}\njobs:\n  j:\n"
+                                                       "    runs-on: ubuntu-24.04\n    steps: 42\n")],
+                [".github/workflows/probe.yml, the job j: its steps are 42, no list of mappings, which GitHub "
+                 "refuses"]),
+            "publish no longer names the workflow that NOT_FOLLOWED leaves out for it": (
+                [(".github/workflows/toolchain-images-publish.yaml",
+                  "\n      && github.event.workflow_run.path == '.github/workflows/toolchain-images.yaml'\n", "\n")],
+                [".github/workflows/toolchain-images.yaml: NOT_FOLLOWED of .github/scripts/workflow-credentials takes "
+                 "it out of what .github/workflows/toolchain-images-publish.yaml reads, but "
+                 ".github/workflows/toolchain-images-publish.yaml holds no credential or does not name it"]),
+            "a required-check workflow is gone": (
+                [(".github/workflows/terms.yaml", "", None)],
+                ".github/workflows/terms.yaml: no such file, but it is the workflow of the required check "
+                "terms-accepted (R10), so the check cannot read what decides that check"),
+        }
+
+    # Changes that keep the copy passing: a new workflow or script that reaches no credential and decides no required
+    # check needs no owner (dispatch://INFRA-5359/ask/344a5bca-cb4e-45d3-8ff4-3060dc67cda3), and a workflow that a
+    # required-check workflow calls passes with its owners.
+    POSITIVES = {
+        "a new workflow with no credential and no owner": [(".github/workflows/new.yml", None, NEW_WORKFLOW)],
+        "a new script that no workflow runs, with no owner": [
+            (".github/scripts/new", None, "#!/usr/bin/env bash\necho new\n")],
+        "a workflow that a required-check workflow calls, with its owners": [
+            CALLED, CALLS,
+            (".github/CODEOWNERS", LAST, LAST + "/.github/workflows/tests-called.yml" + TEAM_LINE + "\n")],
+    }
+
+    def run_script(self, root, script=None):
+        """The copy's .github/scripts/workflow-credentials (or `script`) run on `root` as tests.yaml runs it, with
+        python3 -I: (its exit status, the lines it printed before the last, which states its limit on every run)."""
+        script = script or root / ".github" / "scripts" / "workflow-credentials"
+        run = subprocess.run([sys.executable, "-I", str(script), str(root)], capture_output=True, text=True,
+                             timeout=300)
+        lines = run.stdout.splitlines() + run.stderr.splitlines()
+        self.assertEqual(lines[-1:], [workflow_credentials().LIMIT], lines)
+        return run.returncode, lines[:-1]
+
+    def apply(self, root, changes):
+        """Make `changes` to the tree `root` (a new file's text may be bytes); return each file's text before them
+        (None: no such file)."""
+        before = {}
+        for name, old, new in changes:
+            path = root / name
+            before.setdefault(name, path.read_text() if path.is_file() else None)
+            if old is None:
+                self.assertFalse(path.exists(), name)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(new) if isinstance(new, bytes) else path.write_text(new)
+            elif new is None:
+                path.unlink()
+            else:
+                text = path.read_text()
+                self.assertEqual(text.count(old), 1, (name, old))
+                path.write_text(text.replace(old, new, 1))
+        return before
+
+    @staticmethod
+    def undo(root, before):
+        """Put back each file of `before`, apply's answer, the last made first, and remove each directory that a new
+        file made and that is empty again."""
+        for name, text in reversed(list(before.items())):
+            path = root / name
+            if text is None:
+                path.unlink()
+                parent = path.parent
+                while parent != root and not any(parent.iterdir()):
+                    parent.rmdir()
+                    parent = parent.parent
+            else:
+                if path.is_dir():
+                    path.rmdir()
+                path.write_text(text)
+
+    def whole_copy(self):
+        """A new directory that holds a copy of each file that git tracks, at the top of a new git work tree: the
+        script lists the files under .github/ with git, each file that git would add counting as one it tracks."""
+        root = pathlib.Path(self.enterContext(tempfile.TemporaryDirectory()))
+        tracked = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, text=True, check=True)
+        names = [name for name in tracked.stdout.split("\0") if name]
+        self.assertIn(".github/CODEOWNERS", names, "git enumerated no tracked files for the copy")
+        for name in names:
+            target = root / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(ROOT / name, target, follow_symlinks=False)
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        return root
+
+    def test_control_each_change_fails_the_check_and_each_positive_passes(self):
+        root = self.whole_copy()
+        code, lines = self.run_script(root)
+        self.assertEqual(code, 0, ("the unchanged copy", lines))
+        for label, changes in self.POSITIVES.items():
+            with self.subTest(label):
+                before = self.apply(root, changes)
+                code, lines = self.run_script(root)
+                self.undo(root, before)
+                self.assertEqual(code, 0, (label, lines))
+        for label, (changes, said) in self.controls().items():
+            with self.subTest(label):
+                before = self.apply(root, changes)
+                code, lines = self.run_script(root)
+                self.undo(root, before)
+                self.assertEqual(code, 1, (label, lines))
+                self.assertTrue(lines and all(line.startswith("::error::") for line in lines), (label, lines))
+                if isinstance(said, str):
+                    self.assertIn(f"::error::{said}", lines, label)
+                else:
+                    self.assertEqual(lines, [f"::error::{message}" for message in said], label)
+        code, lines = self.run_script(root)
+        self.assertEqual(code, 0, ("the copy after the controls", lines))
+
+    def test_control_a_line_for_all_of_github_leaves_no_file_without_an_owner(self):
+        # The line that this file had before R10: every file of no class has an owner, and the check shows no file
+        # without one, so it fails on that too.
+        root = self.whole_copy()
+        changes, _ = self.controls()["a line for all of .github/, as before R10"]
+        self.apply(root, changes)
+        code, lines = self.run_script(root)
+        files = workflow_credentials().github_files(root)
+        found, _, _ = self.inventory(root)
+        inside = len([path for path in found if path.startswith(".github/")])
+        self.assertEqual((code, lines[-1]), (1, f"::error::no file under .github/ but those of the inventory is "
+                                                f"without a code owner ({len(files)} files there, {inside} of the "
+                                                "inventory), so the check shows no file that R10 leaves without one"))
+
+    def test_control_an_unowned_workflow_that_gains_a_credential_makes_what_it_runs_need_owners(self):
+        # toolchain-images.yaml with no cache-mode can save in main's Actions cache: it is then a workflow with a
+        # credential, and the workflow that it calls and the scripts that it runs are read with that credential.
+        root = self.whole_copy()
+        changes, _ = self.controls()["an unowned workflow gains a credential"]
+        self.apply(root, changes)
+        code, lines = self.run_script(root)
+        self.assertEqual(code, 1, lines)
+        for name in (".github/workflows/frame-pointer-tests.yaml", ".github/scripts/frame-pointers/probe"):
+            self.assertIn("::error::" + self.no_owner(name, f"toolchain-images.yaml, {self.READS}"), lines)
+
+    def test_control_an_empty_tree_does_not_pass(self):
+        root = pathlib.Path(self.enterContext(tempfile.TemporaryDirectory()))
+        code, lines = self.run_script(root, ROOT / ".github" / "scripts" / "workflow-credentials")
+        self.assertEqual((code, lines), (1, [
+            f"::error::{root / '.github' / 'workflows'} holds no workflow file (*.yml, *.yaml): nothing was checked."]))
+
+    def test_control_a_tree_that_is_no_git_work_tree_does_not_pass(self):
+        # The check lists the files under .github/ with git: with no work tree it could list none, so it fails.
+        root = self.whole_copy()
+        shutil.rmtree(root / ".git")
+        code, lines = self.run_script(root)
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(len(lines), 1, lines)
+        self.assertRegex(lines[0], rf"\A::error::{re.escape(str(root))}: (git rev-parse failed \(.*\)|not the top of a "
+                                   r"git work tree \(.*\)), so the check cannot list the files under \.github/\Z")
+
+    def test_control_a_tree_of_the_inventory_alone_does_not_pass(self):
+        # CODEOWNERS, which gives no owner, and the four workflows alone: each file is one of the inventory with no
+        # owner, and no file under .github/ is left that R10 leaves without one, so the check shows nothing of that.
+        # NOT_FOLLOWED names a workflow of no file here, which is a problem too.
+        script = workflow_credentials()
+        root = self.tree({".github/CODEOWNERS": "", **{path: self.NEW_WORKFLOW for path in script.REQUIRED_CHECKS}},
+                         git=True)
+        code, lines = self.run_script(root, ROOT / ".github" / "scripts" / "workflow-credentials")
+        self.assertEqual((code, lines), (1, [f"::error::{message}" for message in (
+            self.no_owner(".github/CODEOWNERS", "it says who owns each file"),
+            *(self.no_owner(path, f"it is the workflow of the required check {script.REQUIRED_CHECKS[path]}")
+              for path in sorted(script.REQUIRED_CHECKS)),
+            "no file under .github/ but those of the inventory is without a code owner (5 files there, 5 of the "
+            "inventory), so the check shows no file that R10 leaves without one",
+            ".github/workflows/toolchain-images.yaml: NOT_FOLLOWED of .github/scripts/workflow-credentials takes it "
+            "out of what .github/workflows/toolchain-images-publish.yaml reads, but "
+            ".github/workflows/toolchain-images-publish.yaml holds no credential or does not name it")]))
+
+    def test_control_each_symbolic_link_that_a_protected_job_meets_fails(self):
+        # binary-sizes, which build.yaml runs, made a link to a file under frame-pointers/: the check reads no file
+        # through a link, whatever its owners, and so it fails with what it cannot resolve. The same for a link out of
+        # the checkout, and for a shell script run through a link, whose $(dirname "$0") is the link's directory.
+        cannot = workflow_credentials().CANNOT
+        root = self.whole_copy()
+        link, target = root / ".github/scripts/binary-sizes", root / ".github/scripts/frame-pointers/sizes-linked"
+        shutil.move(link, target)
+        os.symlink("frame-pointers/sizes-linked", link)
+        self.assertEqual(self.run_script(root), (1, [
+            "::error::.github/scripts/binary-sizes: a symbolic link (to frame-pointers/sizes-linked), on the way to "
+            f".github/scripts/binary-sizes: {cannot}"]))
+        outside = pathlib.Path(self.enterContext(tempfile.TemporaryDirectory())) / "binary-sizes"
+        shutil.move(target, outside)
+        link.unlink()
+        os.symlink(outside, link)
+        self.assertEqual(self.run_script(root), (1, [
+            f"::error::.github/scripts/binary-sizes: a symbolic link (to {outside}), on the way to "
+            f".github/scripts/binary-sizes: {cannot}"]))
+        link.unlink()
+        shutil.move(outside, link)
+        self.assertEqual(self.run_script(root)[0], 0)
+        self.apply(root, [(".github/scripts/sub/real", None, '#!/bin/sh\nhere=$(dirname "$0")\ncat "$here/input"\n'),
+                          (".github/scripts/input", None, "x\n"),
+                          (".github/workflows/tests.yaml",
+                           "      - name: The pull request targets the default branch\n",
+                           "      - name: probe\n        run: sh .github/scripts/link-probe\n"
+                           "      - name: The pull request targets the default branch\n")])
+        os.symlink("sub/real", root / ".github" / "scripts" / "link-probe")
+        code, lines = self.run_script(root)
+        self.assertEqual(code, 1, lines)
+        self.assertIn("::error::.github/scripts/link-probe: a symbolic link (to sub/real), on the way to "
+                      f".github/scripts/link-probe: {cannot}", lines)
+
+    def test_control_a_tracked_file_in_a_pycache_directory_counts(self):
+        # .gitignore ignores __pycache__/, so what python3 writes there is no file of the list; a file that git tracks
+        # there is one, and with an owner and no class it fails.
+        root = self.whole_copy()
+        self.apply(root, [(".github/__pycache__/unused.txt", None, "x\n"),
+                          (".github/CODEOWNERS", self.LAST,
+                           self.LAST + "/.github/__pycache__/unused.txt" + self.TEAM_LINE + "\n")])
+        self.assertEqual(self.run_script(root)[0], 0, "an ignored file is no file of the list")
+        subprocess.run(["git", "add", "-f", ".github/__pycache__/unused.txt"], cwd=root, check=True)
+        code, lines = self.run_script(root)
+        self.assertEqual((code, lines), (1, ["::error::" + self.owned_extra(".github/__pycache__/unused.txt",
+                                                                             "/.github/__pycache__/unused.txt")]))
 
 
 class WorkflowCredentials(unittest.TestCase):
     """.github/scripts/workflow-credentials, the check that tests.yaml's job suite runs on every event:
-    .github/CODEOWNERS gives each workflow file to both teams, naming what a file with no owner holds (writing main's
-    Actions cache is a credential too); each workflow that starts on pull_request keeps (r)
+    .github/CODEOWNERS gives each file of R10's inventory to both teams and no owner to another file under .github/
+    (Owners has the controls of each class), naming what a file with no owner holds or why it is in the inventory
+    (writing main's Actions cache is a credential too); each workflow that starts on pull_request keeps (r)
     (tests/test_trigger_move.py); and a workflow that GitHub and PyYAML could read differently is refused. Each case
     runs the script as that job does, with python3 -I, on this tree or on a copy of the files that git tracks under
-    .github/, the only files it reads."""
+    .github/. The files outside .github/ that a workflow names are absent from the copy, so its inventory holds none of
+    them."""
 
     SCRIPT = ROOT / ".github" / "scripts" / "workflow-credentials"
     CODEOWNERS = ".github/CODEOWNERS"
@@ -3961,11 +4413,10 @@ class WorkflowCredentials(unittest.TestCase):
     PUSH_IF = "    if: github.event_name == 'push'\n"
     # The start of triage.yaml's jobs.
     JOBS = "jobs:\n  triage:\n"
-    # The last line with no owner in CODEOWNERS, after which a control adds one.
-    LAST_UNOWNED = "/.github/scripts/frame-pointers/\n"
-    # The changes that take the owners from triage.yaml and from toolchain-images.yaml.
-    UNOWN_TRIAGE = (CODEOWNERS, LAST_UNOWNED, LAST_UNOWNED + "/.github/workflows/triage.yaml\n")
-    UNOWN_TOOLCHAIN = (CODEOWNERS, LAST_UNOWNED, LAST_UNOWNED + "/.github/workflows/toolchain-images.yaml\n")
+    # The last line of CODEOWNERS, after which a control adds a pattern with no owner: the last pattern decides.
+    LAST = "/.github/CODEOWNERS @theorem-labs/engineering @theorem-labs/research\n"
+    # The change that takes the owners from triage.yaml.
+    UNOWN_TRIAGE = (CODEOWNERS, LAST, LAST + "/.github/workflows/triage.yaml\n")
     # triage.yaml's one step.
     STEP = "    steps:\n      - run: echo"
     # What a read of a secret in triage.yaml, with no owner, fails: the owners' check, then (r).
@@ -3975,30 +4426,58 @@ class WorkflowCredentials(unittest.TestCase):
     DIFFERENTLY = ", which GitHub and this check could read differently"
 
     def run_on(self, root):
-        """The script run on the checkout `root`: (its exit status, the lines it printed)."""
+        """The script run on the checkout `root`: (its exit status, the lines it printed before the last, which states
+        its limit on every run)."""
         run = subprocess.run([sys.executable, "-I", str(self.SCRIPT), str(root)], capture_output=True, text=True,
                              timeout=120)
-        return run.returncode, run.stdout.splitlines() + run.stderr.splitlines()
+        lines = run.stdout.splitlines() + run.stderr.splitlines()
+        self.assertEqual(lines[-1:], [workflow_credentials().LIMIT], lines)
+        return run.returncode, lines[:-1]
 
     def copy(self):
-        """A new directory that holds a copy of each file that git tracks under .github/."""
+        """A new directory that holds a copy of each file that git tracks under .github/, and .gitignore, at the top of
+        a new git work tree (the script lists the files under .github/ with git)."""
         root = pathlib.Path(self.enterContext(tempfile.TemporaryDirectory()))
-        tracked = subprocess.run(["git", "ls-files", "-z", "--", ".github"], cwd=ROOT, capture_output=True, text=True,
-                                 check=True)
+        tracked = subprocess.run(["git", "ls-files", "-z", "--", ".github", ".gitignore"], cwd=ROOT,
+                                 capture_output=True, text=True, check=True)
         names = [name for name in tracked.stdout.split("\0") if name]
         self.assertIn(self.CODEOWNERS, names, "git enumerated no tracked file under .github/ for the copy")
         for name in names:
             target = root / name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(ROOT / name, target)
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
         return root
 
     def test_this_tree_passes(self):
         code, lines = self.run_on(ROOT)
         self.assertEqual(code, 0, lines)
-        self.assertEqual(len(lines), 1, lines)
-        # The check read the workflows with a credential, so it could fail.
-        self.assertRegex(lines[0], r"\ARead [1-9][0-9]* workflow files\. With a credential: [1-9][0-9]*; ")
+        script = workflow_credentials()
+        # The check read the workflows and the files under .github/, printed each class of the inventory, both sets of
+        # files under .github/, each non-empty, and its limit, so it could fail.
+        self.assertRegex(lines[0], r"\ARead [1-9][0-9]* workflow files and the [1-9][0-9]* files under \.github/\.\Z")
+        self.assertRegex(lines[1], r"\AR10's inventory, by class: \.github/CODEOWNERS gives each of its [1-9][0-9]* "
+                                   r"files to @theorem-labs/engineering and @theorem-labs/research\.\Z")
+        for line, kind in zip(lines[2:], script.CLASSES, strict=False):
+            self.assertTrue(line.startswith(f"  {kind} (") or line.startswith(f"  {kind}: none, as "), (kind, line))
+        self.assertRegex(lines[2 + len(script.CLASSES)],
+                         r"\AUnder \.github/, the [1-9][0-9]* files with a code owner, each a file of the inventory: ")
+        self.assertRegex(lines[3 + len(script.CLASSES)], r"\AUnder \.github/, the [1-9][0-9]* files with no code "
+                                                         r"owner: \.github/scripts/copy-validate-rules, ")
+        self.assertEqual(lines[-1], "Starting on pull_request: 11, and none breaks (r). No job with a credential runs "
+                                    "a CodeQL analysis that can run code of the packages it reads.")
+
+    # What toolchain-images.yaml with no cache-mode fails on the copy: it can then save in main's Actions cache, so it,
+    # the workflow that it calls and the script that its jobs name are read with a credential, and none of them has an
+    # owner. (probe, a script that a person reads, holds forms that the check cannot resolve too; this control is about
+    # the owners, which these lines say.)
+    TOOLCHAIN_CACHE = frozenset({
+        ".github/scripts/frame-pointers/probe: toolchain-images.yaml, which hold a credential, run or read it, but "
+        ".github/CODEOWNERS gives .github/scripts/frame-pointers/probe no owner",
+        ".github/workflows/frame-pointer-tests.yaml: toolchain-images.yaml, which hold a credential, run or read it, "
+        "but .github/CODEOWNERS gives .github/workflows/frame-pointer-tests.yaml no owner",
+        ".github/workflows/toolchain-images.yaml: the job make holds write access to main's Actions cache (cache-mode: "
+        "not given), but .github/CODEOWNERS gives .github/workflows/toolchain-images.yaml no owner"})
 
     # Controls: each makes its changes to a copy, each (file, old, new), where old is None for a new file. The
     # unchanged copy passes; the changed one fails with exactly the ::error:: lines of the messages given, in order: the
@@ -4026,9 +4505,8 @@ class WorkflowCredentials(unittest.TestCase):
             SECRET_READ),
         "triage.yaml, which holds no credential, loses its owner": (
             [UNOWN_TRIAGE],
-            [".github/workflows/triage.yaml: it is a workflow file, and a job of any workflow file can report a check "
-             "under the name of a required check, but .github/CODEOWNERS gives .github/workflows/triage.yaml "
-             "no owner"]),
+            [".github/workflows/triage.yaml: enroll-dispatch.yml, review.yml, which hold a credential, run or read it, "
+             "but .github/CODEOWNERS gives .github/workflows/triage.yaml no owner"]),
         "triage.yaml with no owner gets an environment": (
             [UNOWN_TRIAGE, (TRIAGE, JOB, "    timeout-minutes: 2\n    environment: comment\n    permissions: {}\n")],
             [".github/workflows/triage.yaml: the job triage holds an environment (comment), but .github/CODEOWNERS "
@@ -4068,35 +4546,28 @@ class WorkflowCredentials(unittest.TestCase):
             [(TRIAGE, JOBS, "jobs:\n  <<: {}\n  triage:\n")],
             [".github/workflows/triage.yaml: line 89: the merge key <<" + DIFFERENTLY]),
         "held-runs.yml, which holds actions: write, loses its owner": (
-            [(CODEOWNERS, LAST_UNOWNED, LAST_UNOWNED + "/.github/workflows/held-runs.yml\n")],
+            [(CODEOWNERS, LAST, LAST + "/.github/workflows/held-runs.yml\n")],
             [".github/workflows/held-runs.yml: the job held-runs holds actions: write, write access to main's Actions "
              "cache (cache-mode: not given), but .github/CODEOWNERS gives .github/workflows/held-runs.yml no owner"]),
         # A called workflow's job counts as able to save in main's cache whatever calls it: the check does not follow
         # the calling job's event.
         "a called workflow loses its owner": (
-            [(CODEOWNERS, LAST_UNOWNED, LAST_UNOWNED + "/.github/workflows/codeql.yml\n")],
-            [f".github/workflows/codeql.yml: the job {job} of .github/workflows/codeql-{language}.yml holds {what}"
-             "write access to main's Actions cache (cache-mode: not given) in the job analyze of "
-             ".github/workflows/codeql.yml and calls it, but .github/CODEOWNERS gives .github/workflows/codeql.yml "
-             "no owner"
-             for language in ("actions", "c-cpp", "python")
-             for job, what in (("pull-request", ""), ("push", "security-events: write, "))]
-            + [".github/workflows/codeql.yml: the job analyze holds write access to main's Actions cache (cache-mode: "
-               "not given), but .github/CODEOWNERS gives .github/workflows/codeql.yml no owner"]),
-        "a workflow with no owner calls one whose job has an environment": (
-            [(CODEOWNERS, LAST_UNOWNED, LAST_UNOWNED + "/.github/workflows/caller.yml\n"),
-             (".github/workflows/caller.yml", None,
+            [(CODEOWNERS, LAST, LAST + "/.github/workflows/codeql.yml\n")],
+            [".github/workflows/codeql.yml: the job analyze holds write access to main's Actions cache (cache-mode: "
+             "not given), but .github/CODEOWNERS gives .github/workflows/codeql.yml no owner"]),
+        "a new workflow with no owner calls a new one whose job has an environment": (
+            [(".github/workflows/caller.yml", None,
               "on: push\npermissions: {}\njobs:\n  call:\n    uses: ./.github/workflows/called.yml\n"),
              (".github/workflows/called.yml", None,
               "on: workflow_call\ncache-mode: none\njobs:\n  deploy:\n    runs-on: ubuntu-24.04\n"
               "    environment: comment\n    steps:\n      - run: echo\n")],
-            [".github/workflows/caller.yml: the job call holds an environment (comment) in the job deploy of "
+            [".github/workflows/called.yml: the job deploy holds an environment (comment), but .github/CODEOWNERS "
+             "gives .github/workflows/called.yml no owner",
+             ".github/workflows/caller.yml: the job call holds an environment (comment) in the job deploy of "
              ".github/workflows/called.yml, but .github/CODEOWNERS gives .github/workflows/caller.yml no owner"]),
-        "toolchain-images.yaml with no owner, which runs on push, can write main's Actions cache": (
-            [UNOWN_TOOLCHAIN, (".github/workflows/toolchain-images.yaml", "\ncache-mode: none\n", "\n")],
-            [f".github/workflows/toolchain-images.yaml: the job {job} holds write access to main's Actions cache "
-             "(cache-mode: not given), but .github/CODEOWNERS gives .github/workflows/toolchain-images.yaml no owner"
-             for job in ("make", "compare-digests")]),
+        "toolchain-images.yaml, which runs on push and has no owner, can write main's Actions cache": (
+            [(".github/workflows/toolchain-images.yaml", "\ncache-mode: none\n", "\n")],
+            TOOLCHAIN_CACHE),
     }
 
     # How the check ends a package-code problem.
@@ -4258,8 +4729,11 @@ class WorkflowCredentials(unittest.TestCase):
                     self.assertTrue(found, label)
                     path.write_text(f"{head}{change[1]}{tail}")
                 else:
+                    # A new workflow with a credential: it gets its owners, so that only the analysis fails.
                     self.assertFalse(path.exists(), label)
                     path.write_text(change)
+                    with (root / self.CODEOWNERS).open("a") as codeowners:
+                        codeowners.write(f"/.github/workflows/{name} {' '.join(Owners.TEAMS)}\n")
                 code, lines = self.run_on(root)
                 self.assertEqual(code, 1, (label, lines))
                 self.assertEqual(lines, [f"::error::{message}" for message in said], label)
@@ -4283,7 +4757,11 @@ class WorkflowCredentials(unittest.TestCase):
                 code, lines = self.run_on(root)
                 self.assertEqual(code, 1, (label, lines))
                 self.assertTrue(all(line.startswith("::error::") for line in lines), (label, lines))
-                self.assertEqual(lines, [f"::error::{message}" for message in said], label)
+                if isinstance(said, frozenset):
+                    # Lines that must be among those printed (TOOLCHAIN_CACHE says why).
+                    self.assertLessEqual({f"::error::{message}" for message in said}, set(lines), label)
+                else:
+                    self.assertEqual(lines, [f"::error::{message}" for message in said], label)
 
     def test_text_that_reads_no_secret_passes(self):
         # The shell's text of a run: outside ${{ }}, and a property named secrets after a dot, are no read of the

@@ -2486,8 +2486,9 @@ class SteeringFiles(unittest.TestCase):
     """(u): the list of steering files."""
 
     # The steering list: the patterns that .github/CODEOWNERS owned at commit 62081ee (#194), in their order. CODEOWNERS
-    # now owns only the files under /.github/ that run with a credential, and this list stays as broad as it was: an
-    # enrollment that changes any file under /.github/ waits for a person before Enroll dispatch sends it.
+    # now owns only the files under /.github/ that can reach a credential or decide a required check (R10 of
+    # dispatch://INFRA-5359/spec), and this list stays as broad as it was: an enrollment that changes any file under
+    # /.github/ waits for a person before Enroll dispatch sends it.
     STEERING_62081EE = (
         "/.github/", "/src/", "/infra/", "/seeds/", ".claude/", "CLAUDE*.md", "AGENTS*.md", "/.mcp.json", "/*.py",
         "/pytest.ini", "/.pytest.ini", "/pyproject.toml", "/uv.lock", "/.python-version", "/setup.cfg", "/tox.ini",
@@ -2541,8 +2542,8 @@ class SteeringFiles(unittest.TestCase):
             self.assertFalse(steering.is_steering(name), name)
         codeowners = (ROOT / ".github" / "CODEOWNERS").read_text()
         self.assertEqual(self.owned_but_not_steering(codeowners, steering), [])
-        # The check reads the owned lines: /.github/ is one of them.
-        self.assertIn("/.github/ @theorem-labs/engineering @theorem-labs/research", codeowners)
+        # The check reads the owned lines: those of /.github/ name one file each, as review.yml's.
+        self.assertIn("/.github/workflows/review.yml @theorem-labs/engineering @theorem-labs/research", codeowners)
         # src/ has no owner, on purpose, and every file under it is still a steering file.
         self.assertIn("/src/", steering.STEERING)
         patterns = [line.split()[0] for line in codeowners.splitlines() if line.strip() and not line.startswith("#")]
