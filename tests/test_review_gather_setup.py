@@ -43,6 +43,9 @@ HEAD, OTHER = "b" * 40, "c" * 40
 BAD_PAX = {"GNU.sparse.size": "10", "GNU.sparse.offset": "abc"}
 # The reason that the script gives for a tar with a byte that is not zero after the place where tarfile ends it.
 ENDED = "ReadError: tarfile ended the tar at byte {}, but the tar holds bytes that are not zero from there on"
+# The reason that the script gives for a PAX record of a length that is not a decimal number: its keyword, the name of
+# the member and the value.
+NOT_DECIMAL = "ReadError: the PAX record {} of {!r} is not a decimal number: {!r}"
 
 
 def member(name, kind=tarfile.REGTYPE, link="", data=None, pax_headers=None):
@@ -457,6 +460,54 @@ class SetupGather(unittest.TestCase):
             end = given.getmember(f"{TOP}/after").offset_data + tarfile.BLOCKSIZE
         (self.fetched / "source.tar").write_bytes(gzip.compress(raw + bytes(tarfile.BLOCKSIZE - 1) + b"\x01"))
         self.gives_no_source(ENDED.format(end))
+
+    def test_a_tarball_with_a_pax_size_that_is_not_a_number_gives_no_source(self):
+        """tarfile reads a PAX size that is not a number as 0. Here the record size=abc is on X, whose header gives it
+        512 bytes, which hold the header of Y, of 1024 bytes, which hold the header and the data of Z. tarfile reads X
+        as empty and the header of Y in its data, and Z is in the data of Y, so tarfile does not read it. GNU tar
+        refuses such a record, and the script gives no source."""
+        y = tarfile.TarInfo(f"{TOP}/Y")
+        y.size = 2 * tarfile.BLOCKSIZE
+        self.tar(member(f"{TOP}/X", data=y.tobuf(tarfile.USTAR_FORMAT), pax_headers={"size": "abc"}),
+                 member(f"{TOP}/Z", data=b"z\n"))
+        with tarfile.open(self.fetched / "source.tar") as given:
+            self.assertEqual(given.getnames()[-2:], [f"{TOP}/X", f"{TOP}/Y"])
+        self.gives_no_source(NOT_DECIMAL.format("size", f"{TOP}/X", "abc"))
+
+    def test_a_tarball_with_a_global_pax_size_that_is_not_a_number_gives_no_source(self):
+        """A global PAX header gives its records to each member after it, so tarfile reads size=abc there as 0 for each
+        one. The script gives no source, and names the first member after it, the top folder. The record is made here:
+        "<length> size=abc\\n", whose length counts the whole record, its own digits too."""
+        record = b"12 size=abc\n"
+        header = tarfile.TarInfo("pax_global_header")
+        header.type, header.size = tarfile.XGLTYPE, len(record)
+        self.tar(first=[(header, record)])
+        with tarfile.open(self.fetched / "source.tar") as given:
+            self.assertEqual(given.pax_headers, {"size": "abc"})
+        self.gives_no_source(NOT_DECIMAL.format("size", TOP, "abc"))
+
+    def test_a_tarball_with_a_pax_size_that_int_reads_but_is_not_decimal_gives_no_source(self):
+        """int() reads the PAX size 0_2 as 2, the size of the member, but a decimal number is ASCII digits alone, as for
+        GNU tar, which refuses 0_2: the script gives no source."""
+        self.tar(member(f"{TOP}/u", data=b"u\n", pax_headers={"size": "0_2"}))
+        with tarfile.open(self.fetched / "source.tar") as given:
+            self.assertEqual(given.getmember(f"{TOP}/u").size, 2)
+        self.gives_no_source(NOT_DECIMAL.format("size", f"{TOP}/u", "0_2"))
+
+    def test_a_member_with_a_decimal_pax_size_is_taken(self):
+        """A PAX size of ASCII digits alone, the size of the member: the script takes the member whole, beside each
+        other member."""
+        self.tar(member(f"{TOP}/d", data=b"d\n", pax_headers={"size": "2"}))
+        with tarfile.open(self.fetched / "source.tar") as given:
+            self.assertEqual(given.getmember(f"{TOP}/d").pax_headers["size"], "2")
+        run = self.gather()
+        self.assertEqual(run.returncode, 0, run.stderr)
+        with tarfile.open(FIXTURE / "source.tar") as given:
+            want = {info.name[len(TOP) + 1:]: given.extractfile(info).read() for info in given if info.isfile()}
+        self.assertEqual(tree(self.out / "source"), {**want, "d": b"d\n"})
+        self.assertFalse((self.out / "source.txt").exists())
+        self.assertNotIn(f"not taken: '{TOP}/d'", run.stderr)
+        self.no_network()
 
     def gather_since(self, diff):
         """Run the script with `diff` as the fetched since-last-review.diff from HEAD, the head of the review comment,
