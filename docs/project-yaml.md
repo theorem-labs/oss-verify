@@ -1,6 +1,6 @@
 # project.yaml
 
-This page describes each field of `projects/<name>/project.yaml` and each file in the project directory. It is for a maintainer, or a coding agent, who writes a project directory.
+This page describes each field of `projects/<name>/project.yaml` and each file in the project directory. It is for a maintainer, or a coding agent, who writes a project directory. A project can also enroll from its own repository, with the folder `.theorem/` ([below](#theorem-on-your-repository)).
 
 Start from [templates/project.yaml](../templates/project.yaml). `oss-verify validate` checks each rule on this page. We use the same rules when we import a project.
 
@@ -24,8 +24,8 @@ The field names come from OSS Scanner if it has the field, then from OSS-Fuzz. W
 | `mutants` | no | the directory of the breakage patches, from the `WORKDIR` of the `Dockerfile` ([below](#mutants)) | none |
 | `patch_style` | no | the path of your `patch_style.md` in your repository ([below](#patch_style)) | |
 | `budgets` | no | the memory budgets of the statements | today's values |
-| `proofs` | no | where we publish the proofs ([below](#proofs)) | the proofs repository |
-| `publish` | no | when we publish the proofs: `eager`, `after_fixes` or `never` ([below](#publish)) | `after_fixes` |
+| `proofs` | no | where we may publish the proofs ([below](#proofs)) | the proofs repository |
+| `publish` | no | when we may publish the proofs: `eager`, `after_fixes` or `never` ([below](#publish)) | `after_fixes` |
 
 `oss-verify validate` refuses each field that is not in this table.
 
@@ -81,7 +81,7 @@ A fuzz target source in the project directory has a suffix of C or C++: `*.c` `*
 
 ### dockerfile
 
-Use `dockerfile` only if the `Dockerfile` is in your repository. We recommend the path `.oss-verify/Dockerfile`.
+Use `dockerfile` only if the `Dockerfile` is in your repository. We recommend the path `.theorem/Dockerfile`.
 
 * If the `Dockerfile` and `build.sh` are in the project directory, do not set `dockerfile`. The build context is then the project directory.
 * If you set `dockerfile`, the build context is your repository at the commit that we build. Put `build.sh` next to the `Dockerfile`, unless the `Dockerfile` makes `$SRC/build.sh`. Then put your fuzz target sources, build patches and `sources` file in your repository too. Only `project.yaml`, `patch_style.md` and seed corpora can then be in the project directory.
@@ -196,7 +196,7 @@ A statement made under a project's own budgets names both of them. A smaller pla
 
 ### proofs
 
-Give the place where we publish the proofs: `repo`, an `https://` URL, with `#<branch>` if it is not the repository's default branch, and `path`, a directory in that repository. Most projects do not use this field. By default, we publish to the main branch of [oss-verify-proofs](https://github.com/theorem-labs/oss-verify-proofs), with the project's statements in `projects/<name>/` and its proofs in `proofs/<name>/`:
+Give the place where we may publish the proofs: `repo`, an `https://` URL, with `#<branch>` if it is not the repository's default branch, and `path`, a directory in that repository. Most projects do not use this field. By default, this place is the main branch of [oss-verify-proofs](https://github.com/theorem-labs/oss-verify-proofs), with the project's statements in `projects/<name>/` and its proofs in `proofs/<name>/`:
 
 ```yaml
 proofs:
@@ -206,15 +206,87 @@ proofs:
 
 ### publish
 
-Tell us when to publish the proofs:
+We decide whether to publish the proofs of your project, and we do not promise to publish them. `publish` only limits when we may publish them. We never publish them before the pull request that enrolls your project merges.
 
-| value | we publish the proofs |
+| value | we may publish the proofs |
 |---|---|
 | `after_fixes` (the default) | when each patch that we sent you is public or in your project |
 | `eager` | while we work on them |
 | `never` | never outside Theorem |
 
-With `never`, we publish neither the proofs nor the theorem statements. With each other value, we publish the theorem statements after the enrollment's checks pass. We hold back each statement that shows a finding that is not public yet. When we have a patch for a finding, or we reported it, we hold back all the statements of the project until the finding is public. A project that was private stays private, also if you change `publish` ([what-gets-proven.md](what-gets-proven.md#publishing)).
+With `never`, we publish neither the proofs nor the theorem statements. With each other value, we may also publish the theorem statements after that merge. We hold back each statement that shows a finding that is not public yet. When we have a patch for a finding, or we reported it, we hold back all the statements of the project until the finding is public. A project that was private stays private, also if you change `publish` ([what-gets-proven.md](what-gets-proven.md#publishing)).
+
+## `.theorem/` on your repository
+
+A project can also enroll from its own repository, with the GitHub App Theorem Verify. The maintainer installs the App. The maintainer's coding agent writes the folder `.theorem/` at the root of the repository, with the skill `theorem-setup`. The maintainer opens the setup pull request from the branch `theorem/setup`. `theorem app setup` checks the folder, and `theorem app build` builds the project from it. Start from [templates/.theorem/](../templates/.theorem/).
+
+`.theorem/` holds the files of a project directory, and two folders:
+
+| file | when |
+|---|---|
+| `config.yml` | always: the fields of `project.yaml`, with two changes ([below](#configyml)) |
+| `Dockerfile` | if `dockerfile` is not set ([below](#the-build-context)) |
+| `build.sh` | with a `Dockerfile` in `.theorem/` |
+| `patch_style.md`, fuzz target sources, `*.patch` and `series`, `sources` and the files that it copies or reads, `<target>_seed_corpus.zip` | optional, as in a project directory ([below](#the-files-in-the-project-directory)) |
+| `statements/<target>.<ext>` | optional: the statements of the fuzz target `<target>`, which Theorem's agents write ([below](#statements)) |
+| `contracts/<target>/` | optional: the contracts of the functions of the fuzz target `<target>`, which Theorem's agents write ([below](#contracts)) |
+
+Theorem's agents write the files of `statements/` and `contracts/`. The App commits them after a person at Theorem approves them. The maintainer's agent writes each other file.
+
+`theorem app setup` checks this form. Each rule of this page applies to `.theorem/` as it applies to `projects/<name>/`.
+
+### config.yml
+
+`config.yml` holds the fields of `project.yaml` ([above](#the-fields)), with two changes:
+
+* It has no `repo`. The project's repository is the repository that holds `.theorem/`.
+* It can have one more field, `name`: the name of the project. The default is the name of the repository, in lower case.
+
+`proofs` keeps its form: `repo` and `path` ([above](#proofs)). `theorem app setup` refuses `repo`. It also refuses each field that is neither `name` nor in the table of fields.
+
+`theorem app setup` refuses a `name` that another enrolled repository holds ([below](#a-project-that-is-enrolled-today)).
+
+### The build context
+
+The Docker build context is the root of the repository at the commit that `theorem app build` builds. This is also true for a `Dockerfile` in `.theorem/`. Thus the `Dockerfile` names each file by its path from the root, for example `COPY .theorem/build.sh $SRC/`. It takes the project's source with `COPY`, for example `COPY . $SRC/<name>`, not with `fetch-commit`.
+
+`theorem app build plan` builds the `Dockerfile` with the build arguments `COMMIT`, `REPO` and `BASE_BUILDER`. A `Dockerfile` must be in `.theorem/`, unless `dockerfile` names a `Dockerfile` in another place of the repository.
+
+### statements/
+
+`statements/` holds one file `<target>.<ext>` for each fuzz target that has statements. `<ext>` is the file extension of the prover that the fuzz target's `harness.yaml` names: `v` for Rocq, which is the only prover today. For example, the Rocq statements of the fuzz target `fuzz_pcap` are in `statements/fuzz_pcap.v`.
+
+`statements/` holds at most 1,000 files. Each file is at most 1 MiB.
+
+The fuzz target must be in `fuzz_targets`. It can be a fuzz target that the build does not make yet. Then its statements need a proof.
+
+### contracts/
+
+`contracts/<target>/` holds two files for each function of the proof plan of the fuzz target `<target>`. Theorem's agents write the proof plan.
+
+* `<function>.contract.md` is the contract of the function.
+* `<function>.check.<ext>` is the contract check of the function.
+
+`<function>` is the name of the function, with `_` in place of each character outside `A-Z a-z 0-9 _`. `<ext>` is the source extension of the language of the fuzz target: `c`, `cc`, `rs`, `py` or `go`. [rules.md](rules.md) tells what each of the two files must be. Each file is at most 256 KiB.
+
+### Limits
+
+`.theorem/` obeys these limits:
+
+* Beside `statements/` and `contracts/`, it holds at most 64 regular files.
+* It holds no symbolic link.
+* It holds no folder other than `statements/`, `contracts/` and `contracts/<target>/`, where `<target>` is a fuzz target of `config.yml`.
+* Each file name uses only `A-Z a-z 0-9 . _ -` and starts with a letter or digit.
+* Each file is UTF-8 text. A seed corpus is the only exception.
+* `config.yml` is at most 128 KiB.
+* `build.sh`, a fuzz target source, a file that `sources` copies or reads, and a build patch are each at most 256 KiB.
+* Each other file beside `statements/` and `contracts/` is at most 64 KiB.
+
+### A project that is enrolled today
+
+A project that is enrolled today has its directory `projects/<name>/` in this repository. The repository that its `repo` field names holds the name `<name>`. Thus the project keeps its name when it moves to `.theorem/`.
+
+In the setup pull request, the maintainer's agent moves the files of `projects/<name>/` into `.theorem/`, as the skill `theorem-setup` tells. `project.yaml` becomes `config.yml`, with no `repo`. The agent changes each `COPY` and each path of the `Dockerfile` for the new build context ([above](#the-build-context)). For example, `COPY build.sh $SRC/` becomes `COPY .theorem/build.sh $SRC/`.
 
 ## Seeded projects
 
@@ -222,13 +294,16 @@ We seeded some projects ourselves. A project whose proofs we publish in [oss-ver
 
 From [this commit of OSS-Fuzz](https://github.com/google/oss-fuzz/tree/bd2ce21991a94a362b92fb1bf25f86d5a1a60842), we seeded each project that our builder can build and that we can describe honestly. A seeded `project.yaml` gives only what the recorded build data tells, and no guess. [seeded-projects.tsv](seeded-projects.tsv) lists each of the 1,381 projects of OSS-Fuzz at that commit. For a project that we did not seed, it gives the reason.
 
+A seeded project needs no seed corpus and no `mutant:` record while it is seeded. We did not write the fuzz targets of a seeded project to the rules of step 3 of the add-project skill ([.claude/skills/add-project/SKILL.md](../.claude/skills/add-project/SKILL.md)).
+
 A core maintainer can adopt a seeded project. `enrollment` refuses a pull request from a fork that changes `projects/<name>/` of a seeded project. Such a change can change [seeded-projects.tsv](seeded-projects.tsv), and a pull request from a fork that changes `projects/` cannot change that table. So a maintainer of this repository makes the change on a branch of this repository, where the `tests` check runs the test of the table. To adopt a seeded project, make the change in a branch of your fork, and open its pull request with the checklist done, "I accept the OSS Verify terms" ticked, and `projects/<name>` in its description (the heading of the template names it). `enrollment` refuses that pull request, and it stays your record that you accept the terms. A maintainer of this repository then carries the change on a branch of this repository. The pull request of that branch names yours on a line `Adoption: #<number>` of its description. `terms-accepted` passes the branch only when your pull request comes from a fork, ticks the box, and names that project and no other. A later change of `primary_contact`, or an added `auto_ccs` address, of a seeded project needs the same record, from the new address. Every `seeds/<name>/project.yaml` keeps `primary_contact: n/a` and no `auto_ccs`: the addresses go in `projects/<name>/project.yaml`. Make the change with these steps:
 
 1. Copy its `projects/<name>/`, or its `seeds/<name>/`, to `projects/<name>/` in a branch of your fork.
 2. Remove each patch that fixes a bug. The directory of a seeded project whose proofs we publish can hold such a patch, but the directory of an enrolled project cannot ([above](#build-patches)). For each one, delete the patch file, its line in `series`, its `patch` line in `sources`, and its name where the `Dockerfile` or `build.sh` copies or applies it. `lay-out-sources` applies each `patch` line of `sources` in turn, and stops when those lines are not the patches that `series` lists, in the same order. So keep the patches that remain in their order in both files.
 3. Set `primary_contact` to the address that gets findings.
 4. Remove the two comment lines.
-5. Do the steps in the [README](../README.md#enroll-a-project) from step 3.
+5. Make the fuzz targets obey the rules of step 3 of the add-project skill ([.claude/skills/add-project/SKILL.md](../.claude/skills/add-project/SKILL.md)), with their seed corpora and breakages. Do this before you open the pull request that enrolls the project.
+6. Do the steps in the [README](../README.md#enroll-a-project) from step 3.
 
 The build files of a seeded project come from the build recipe of that release. They make that release's binaries again, byte for byte. A patch that the build files apply since the check of their seed port, or no longer apply, can change some of these binaries ([build-contract.md](build-contract.md#builds-ported-from-oss-fuzz-theorems)). The build notes in [seeded-projects.tsv](seeded-projects.tsv) name each such patch, and tell which binaries differ from the release's, or may differ. When the build notes of a project say that some binaries may differ and do not name them, each binary of that project may differ. Keep the build files, or write your own. If a seeded project has no build files, [seeded-projects.tsv](seeded-projects.tsv) tells why. Add a `Dockerfile` and a `build.sh` before you open the pull request.
 
@@ -262,7 +337,7 @@ The seed corpus of a `python` project is an input of the build of its fuzz targe
 
 The build applies each patch with `git apply` under `core.symlinks=false`, so a patch cannot make a symbolic link: a link in a patch becomes a regular file holding the text of its target.
 
-A patch in the `series` of an enrolled project can only change how the project builds. For example, it can make the build static, set up cross-compilation, correct a version stamp or make a generated file. A change that fixes a bug of your project never goes in the directory of your project. We send it to you as a patch, with its finding ([what-gets-proven.md](what-gets-proven.md#findings)). If a proof needed that patch, we publish the patch with the proof ([what-gets-proven.md](what-gets-proven.md#publishing)). Only the directory of a seeded project whose proofs we publish can hold such a patch ([build-contract.md](build-contract.md#build-patches)).
+A patch in the `series` of an enrolled project can only change how the project builds. For example, it can make the build static, set up cross-compilation, correct a version stamp or make a generated file. A change that fixes a bug of your project never goes in the directory of your project. We send it to you as a patch, with its finding ([what-gets-proven.md](what-gets-proven.md#findings)). If we publish a proof that needed that patch, we publish the patch with the proof ([what-gets-proven.md](what-gets-proven.md#publishing)). Only the directory of a seeded project whose proofs we publish can hold such a patch ([build-contract.md](build-contract.md#build-patches)).
 
 A build can declare its own C library. A patch of that C library is a file of the project directory. Its name does not end in `.patch`, because `oss-verify validate` asks `series` to list each file with that ending. A `copy` line of `sources` lays it out, and `build.sh` applies it. What such a patch can change is in [build-contract.md](build-contract.md#the-c-library), "The C library".
 

@@ -1,0 +1,80 @@
+# Adapted from OSS Scanner's templates/project.yaml (https://github.com/anthropics/oss-scanner), Copyright 2026
+# Anthropic PBC, Apache-2.0. Modified 2026 by Theorem Labs, PBC: OSS Verify's fields and files.
+# Modified 2026 by Theorem Labs, PBC: the config.yml of .theorem/, with no field repo and an optional field name.
+#
+# Copy this folder, templates/.theorem/, to .theorem/ at the root of your repository. Then fill in the fields below.
+# docs/project-yaml.md describes each field, and its section on .theorem/ describes the folder. theorem app setup
+# checks the folder, and theorem app build builds the project from it.
+
+# Optional. The name of the project. The default is the name of your repository, in lower case. theorem app setup
+# refuses a name that another enrolled repository holds.
+# name: example
+
+# REQUIRED. Who we send findings and build problems to, and contact for questions (one address). It is public.
+primary_contact: security@example.org
+
+# Optional. Additional email addresses we will CC on every report.
+auto_ccs:
+  - maintainer@example.org
+
+# Optional. The project's home page.
+homepage: https://example.org
+
+# Optional. Your armored OpenPGP public key. When you set it, we encrypt each report to it and send the report to
+# primary_contact only. Thus you cannot use it with auto_ccs.
+# Paste the whole block, including the BEGIN line and END line.
+# pgp: |
+#   -----BEGIN PGP PUBLIC KEY BLOCK-----
+#   mDMEZ...
+#   -----END PGP PUBLIC KEY BLOCK-----
+
+# Optional. true pauses the project without removing it. false, or no line, keeps it active.
+disabled: false
+
+# REQUIRED. The language of the code we build. docs/project-yaml.md lists the values.
+language: c
+
+# Optional. The sanitizer builds besides the plain one: a subset of [address, undefined]. With both there is also an
+# asan-ubsan build. This is the default.
+sanitizers: [address, undefined]
+
+# Optional, and only with the next toolchain version: changes to the UBSan checks of the ubsan and asan-ubsan builds,
+# whose default is the checks that OSS-Fuzz makes fatal, with strict-flex-arrays (docs/project-yaml.md#ubsan_checks).
+# Provisional format.
+# ubsan_checks:
+#   add: [alignment]
+#   remove: []
+#   reason: "why the project's checks differ from the default"
+
+# Optional. The fuzz targets to verify, as build.sh names them in $OUT. Without this field, we verify each fuzz target
+# that theorem app build makes. A fuzz target with statements in .theorem/statements/ must be in this list.
+fuzz_targets:
+  - example_fuzzer
+
+# A Dockerfile and a build.sh are REQUIRED. They are in this folder, beside this file: start from
+# templates/.theorem/Dockerfile and templates/.theorem/build.sh. Use the field dockerfile only if .theorem/ holds no
+# Dockerfile. Then give the path of the Dockerfile in your repository, and keep build.sh beside that Dockerfile.
+# dockerfile: build/Dockerfile
+
+# Optional: patch_style.md (start from templates/.theorem/patch_style.md) is free text for our AI: the findings,
+# reports and patches you want, and how they must look. Put it in this folder, beside this file. Use the field
+# patch_style only if patch_style.md is in another place of your repository. Then give its path.
+# patch_style: docs/patch_style.md
+
+# Optional. A limit on when we may publish the proofs about your project. We decide whether to publish them, and we
+# do not promise to (docs/project-yaml.md):
+#   after_fixes  (the default) once every patch we sent you is public or upstreamed
+#   eager        as the proofs progress
+#   never        never outside Theorem
+# publish: after_fixes
+
+# Optional, and rarely needed: the memory budgets of the statements (docs/what-gets-proven.md), and where we may publish
+# the proofs (docs/project-yaml.md). Set only what you want to change.
+# budgets:
+#   halts: 16GiB              # only 16GiB is supported
+#   agrees:
+#     address: [2GiB, 512GiB]
+#     undefined: [16GiB, 512GiB]
+# proofs:
+#   repo: https://github.com/theorem-labs/oss-verify-proofs
+#   path: projects/<name>

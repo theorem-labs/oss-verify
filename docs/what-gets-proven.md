@@ -1,6 +1,6 @@
 # What gets proven
 
-This page tells what our statements say and what a proof covers. It also tells what we do with a finding, and what we publish. It is for maintainers and for reviewers of our claims.
+This page tells what our statements say and what a proof covers. It also tells what we do with a finding, and what we may publish. It is for maintainers and for reviewers of our claims.
 
 This repository tells how to build the fuzz targets of a project. The statements and their proofs are in [oss-verify-proofs](https://github.com/theorem-labs/oss-verify-proofs), on its main branch: each project's statements and lock in `projects/<name>/`, and its proofs in `proofs/<name>/`. This page gives a summary. The Rocq definitions in the proofs repository are the authority.
 
@@ -162,7 +162,7 @@ There is no fixed timeline. A proof takes days of work, and often more. We can a
 
 ## Publishing
 
-The `publish` field tells us when to publish the proofs, and the `proofs` field tells where ([project-yaml.md](project-yaml.md#publish)). We publish:
+We decide whether to publish the proofs of your project, and we do not promise to publish them. The `publish` field only limits when we may publish them, and the `proofs` field tells where ([project-yaml.md](project-yaml.md#publish)). We never publish them before the pull request that enrolls your project merges. When we publish a project, we publish:
 
 * the statements about the project's binaries;
 * the proofs of these statements;
@@ -174,7 +174,7 @@ We write the lock from the manifest of `oss-verify check` ([build-contract.md](b
 
 * We publish nothing that shows a finding that is not public yet. We hold back the statements that the finding affects until it is public. What we publish does not tell why.
 * We publish a seeded project only while none of its findings is private.
-* If a proof needed a patch that fixes a bug, we publish it only once the finding of that bug is public. We publish the text of each such patch with the proof, as the list above tells. The `patches` list of the project's facts in the proofs repository gives the summary and the upstream state of each such patch. The state is one of three: the bug is reported to the project, the bug is fixed in the project, or it is not a bug. Where the facts publish it, `library.patch_count` gives the number of all the patches that the build applies ([facts.md](https://github.com/theorem-labs/oss-verify-proofs/blob/main/docs/facts.md)).
+* If a proof needed a patch that fixes a bug, we publish it only once the finding of that bug is public. When we publish such a proof, we publish the text of its patch with it, as the list above tells. The `patches` list of the project's facts in the proofs repository gives the summary and the upstream state of each such patch. The state is one of three: the bug is reported to the project, the bug is fixed in the project, or it is not a bug. Where the facts publish it, `library.patch_count` gives the number of all the patches that the build applies ([facts.md](https://github.com/theorem-labs/oss-verify-proofs/blob/main/docs/facts.md)).
 
 ## Where the claims come from
 

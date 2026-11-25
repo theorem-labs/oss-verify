@@ -19,6 +19,7 @@ where it had them, and says what was changed:
 
   README.md, CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md
   templates/project.yaml, templates/Dockerfile, templates/patch_style.md (from its templates/threat_model.md)
+  templates/.theorem/config.yml, templates/.theorem/Dockerfile, templates/.theorem/patch_style.md (the same three)
   src/oss_verify/validate.py, src/oss_verify/check.py, src/oss_verify/check_build.py
   .github/PULL_REQUEST_TEMPLATE.md, .github/dependabot.yml
   .github/workflows/validate.yaml, .github/workflows/build.yaml, .github/workflows/triage.yaml,
