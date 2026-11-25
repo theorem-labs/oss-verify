@@ -237,7 +237,8 @@ Theorem's agents write the files of `statements/` and `contracts/`. The App comm
 
 * `config.yml` takes the place of `project.yaml`, and it has no `repo` ([below](#configyml)). So the field `repo` of [the table](#the-fields) is not required in `.theorem/`.
 * [The build context](#the-build-context) takes the place of what [dockerfile](#dockerfile) says about the build context. In `.theorem/`, the build context is always the root of the repository.
-* [Limits](#limits) takes the place of the rules of [Rules for each file](#rules-for-each-file) on folders, on names, on sizes and on the number of files. `.theorem/` holds the folders `statements/` and `contracts/`, its 64 files are the files beside these folders, and a file in these folders has the size that its part gives. The rule of that part on `OFT_FRAME_POINTERS` applies to `.theorem/`.
+* With `dockerfile` set, `.theorem/` can still hold each file of [its table](#theorem-on-your-repository), because the `Dockerfile` reads the whole repository. So the last two sentences of the second item of [dockerfile](#dockerfile), on where the fuzz target sources, the build patches and `sources` go and on the files that the project directory can then hold, apply only to `projects/<name>/`.
+* [Limits](#limits) takes the place of the rules of [Rules for each file](#rules-for-each-file) on folders, on names, on sizes and on the number of files, and of its rule on the name of the project directory: the folder is `.theorem/`. `.theorem/` holds the folders `statements/` and `contracts/`, its 64 files are the files beside these folders, and a file in these folders has the size that its part gives. The rule of that part on `OFT_FRAME_POINTERS` applies to `.theorem/`.
 
 Each other rule of this page applies to `.theorem/` as it applies to `projects/<name>/`.
 
