@@ -3514,24 +3514,32 @@ class Owners(unittest.TestCase):
     actions count their metadata and entry scripts. A step or a script names a file when its code (no comment line,
     no Python docstring or Markdown citation) holds the file's path from the top of the checkout, or, in a script of
     .github/scripts, a sibling as "$here/<name>", "$(dirname ...)/<name>" or a Python import. A path that the code builds
-    from parts is not seen. Workflow-level environment values count as inputs to its jobs too."""
+    from parts is not seen. Workflow-level environment values count as inputs to its jobs too. Sami alone owns the two
+    texts that outside people read, app/sentences.yaml and review.md. Either team or Sami can own a file that runs with
+    a credential: a person code owner reviews each change to it."""
 
     TEAMS = ["@theorem-labs/engineering", "@theorem-labs/research"]
-    # The patterns of CODEOWNERS, in their order, each with whether it gives the owners (True) or none (False).
+    # Sami's handle. He alone owns the two texts that outside people read, app/sentences.yaml and review.md, so the
+    # ruleset of main requires his approval of each change to them (dispatch://OSSV-276/spec#b-r16).
+    SAMI = "@sjawhar"
+    # The patterns of CODEOWNERS, in their order, each with its owners: TEAMS, none, or SAMI alone.
     LINES = (
         # Agent instructions and skills at any depth (the first patterns of CODEOWNERS).
-        *((pattern, True) for pattern in ("**/AGENTS.md", "**/CLAUDE.md", "**/SKILL.md", "skills/")),
+        *dict.fromkeys(("**/AGENTS.md", "**/CLAUDE.md", "**/SKILL.md", "skills/"), TEAMS).items(),
         # What runs with a credential, and what changes what a workflow runs (the top of CODEOWNERS). /.github/ owns
         # every workflow and each file added there later; the lines with no owner right after it take back only files
         # that owned workflows run in jobs with read permissions alone. src/ has no owner, by Sami's choice
         # (dispatch://OSSV-276/ask/6c92b099-08f4-4177-aa5a-6a3fc6292878); .github/scripts/steering.py keeps it a
         # steering file, and tests/test_token_jobs.py keeps it out of every job that holds a token.
-        ("/.github/", True), ("/.github/actionlint.yaml", False), ("/.github/scripts/frame-pointers/", False),
-        *((pattern, True) for pattern in (
+        ("/.github/", TEAMS), ("/.github/actionlint.yaml", []), ("/.github/scripts/frame-pointers/", []),
+        *dict.fromkeys((
             "/infra/", "/seeds/", "/docs/seeded-projects.tsv", ".claude/", "CLAUDE*.md", "AGENTS*.md", "/.mcp.json",
             "/*.py", "/pytest.ini", "/.pytest.ini", "/pyproject.toml", "/uv.lock", "/.python-version", "/setup.cfg",
-            "/tox.ini", "/review.md", "/review-change.md", "/review-issue.md", "/.claude/skills/write-to-maintainer/",
-            "/.github/CODEOWNERS")))
+            "/tox.ini"), TEAMS).items(),
+        # The two texts that outside people read: Sami alone.
+        ("/review.md", [SAMI]), ("/app/sentences.yaml", [SAMI]),
+        *dict.fromkeys(("/review-change.md", "/review-issue.md", "/.claude/skills/write-to-maintainer/",
+                        "/.github/CODEOWNERS"), TEAMS).items())
     # The files that a job of a workflow with a credential names but that have no owner, each with why that is safe:
     # none today. unowned_reads reports an entry that no such workflow names.
     NOT_OWNED = {}
@@ -3690,24 +3698,27 @@ class Owners(unittest.TestCase):
         return reads
 
     def unowned_reads(self, root):
-        """Each file that a workflow with a credential runs or reads and CODEOWNERS of `root` does not own, as
-        "<file>, which <workflows> read"; and the entries of NOT_OWNED and NOT_FOLLOWED that no such workflow names. A
-        workflow file is left out: .github/scripts/workflow-credentials holds each one to its owners."""
+        """Each file that a workflow with a credential runs or reads and CODEOWNERS of `root` gives to neither team nor
+        to SAMI, as "<file>, which <workflows> read"; and the entries of NOT_OWNED and NOT_FOLLOWED that no such
+        workflow names. A workflow file is left out: .github/scripts/workflow-credentials holds each one to its
+        owners."""
         codeowners, matches = (root / ".github" / "CODEOWNERS").read_text(), self.matches(root)
         reads, readers = self.credential_reads(root), {}
         for workflow, files in reads.items():
             for name in files:
                 readers.setdefault(name, []).append(workflow.rsplit("/", 1)[1])
+        # Either team or Sami owns the file: a person code owner reviews each change to it.
+        accepted = {*self.TEAMS, self.SAMI}
         unowned = [f"{name}, which {', '.join(sorted(by))} read" for name, by in sorted(readers.items())
                    if not self.WORKFLOW_FILE.fullmatch(name) and name not in self.NOT_OWNED
-                   and not set(self.TEAMS) & set(self.owners(codeowners, name, matches))]
+                   and not accepted & set(self.owners(codeowners, name, matches))]
         return unowned, sorted((set(self.NOT_OWNED) | set(self.NOT_FOLLOWED)) - set(readers))
 
     def test_only_the_listed_patterns_have_an_owner_and_they_are_the_last_of_the_file(self):
         lines = [line.split() for line in (ROOT / ".github" / "CODEOWNERS").read_text().splitlines()
                  if line.strip() and not line.lstrip().startswith("#")]
         # The instructions' four patterns first, the others in their order, each with its owners or none.
-        self.assertEqual(lines, [[pattern, *self.TEAMS] if owned else [pattern] for pattern, owned in self.LINES])
+        self.assertEqual(lines, [[pattern, *owners] for pattern, owners in self.LINES])
         self.assertTrue(all((ROOT / name).is_file() for name in ("review.md", "review-change.md", "review-issue.md")))
 
     NEW_FILES = (".github/workflows/new.yml", ".github/scripts/new", ".github/actions/new/action.yml")
@@ -3813,6 +3824,14 @@ class Owners(unittest.TestCase):
             ".github/workflows/review.yml", "run: .github/scripts/issue-draft-cap\n",
             "run: .github/scripts/issue-draft-cap && cat docs/project-yaml.md\n",
             "docs/project-yaml.md, which enroll-dispatch.yml, review.yml read"),
+        # The check takes SAMI as an owner beside TEAMS, and no other account: a read text with no owner, or with
+        # another account as its owner, is unowned.
+        "a read text loses its owner": (
+            ".github/CODEOWNERS", "/review.md @sjawhar\n", "/review.md\n",
+            "review.md, which enroll-dispatch.yml, review.yml read"),
+        "a read text goes to another account": (
+            ".github/CODEOWNERS", "/review.md @sjawhar\n", "/review.md @someone-else\n",
+            "review.md, which enroll-dispatch.yml, review.yml read"),
     }
 
     def test_control_each_change_leaves_a_credential_file_unowned(self):

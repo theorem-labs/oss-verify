@@ -4,9 +4,17 @@
 **/SKILL.md @theorem-labs/engineering @theorem-labs/research
 skills/ @theorem-labs/engineering @theorem-labs/research
 
+# app/sentences.yaml holds every text that OSS Verify's GitHub Apps may write. review.md says what the enrollment
+# review checks and how it writes its comment to a maintainer. Outside people read these two texts. Sami (@sjawhar),
+# a person, alone owns them (dispatch://OSSV-276/spec#b-r16). The ruleset of main requires a code owner's review, so
+# it requires his approval of each change to them. Their lines name no other owner: with two owners on a line, the
+# approval of either one is sufficient.
+#
 # review.md, review-change.md and review-issue.md say what the enrollment review and the change review check, and what
 # the draft reply to an issue says (.github/workflows/review.yml reads main's copies), and
 # .claude/skills/write-to-maintainer/ says how every message to a maintainer is written and checked.
+# @theorem-labs/engineering and @theorem-labs/research own review-change.md, review-issue.md and
+# .claude/skills/write-to-maintainer/.
 #
 # The other lines own each file that runs with a credential, changes what a credential does, or changes what a verdict
 # is, whoever opens the pull request:
@@ -67,15 +75,16 @@ skills/ @theorem-labs/engineering @theorem-labs/research
 # .github/scripts/steering.py still counts each file under /.github/ and /src/ as a steering file, so
 # enroll-dispatch.yml sends no enrollment that changes one for its theorem statements until a person approves its head.
 #
-# The ruleset of main requires a code owner's approval, so a change to any owned file, or to this file, which says
-# who owns them, needs the approval of a member of @theorem-labs/engineering or of @theorem-labs/research, each a team
-# of people: research holds the people who were on engineering, and engineering is kept beside it. No other file has an
-# owner but an AGENTS.md, CLAUDE.md or SKILL.md file or a file under a directory named skills, at any depth, which the
-# patterns at the top of the file give the same owners, so a change to src/, tests/, docs/, one projects/<name>/ or a
-# file that a line with no owner lists needs no code owner unless it adds or changes such a file. The one exception is
-# under /.github/scripts/frame-pointers/: its line with no owner comes after the patterns at the top and decides, so a
-# SKILL.md or a file under a directory named skills there has no owner (AGENTS*.md and CLAUDE*.md, further down, own
-# an AGENTS.md or a CLAUDE.md there again).
+# The ruleset of main requires a code owner's approval, so a change to any owned file but app/sentences.yaml and
+# review.md, or to this file, which says who owns them, needs the approval of a member of @theorem-labs/engineering
+# or of @theorem-labs/research, each a team of people: research holds the people who were on engineering, and
+# engineering is kept beside it. A change to app/sentences.yaml or review.md needs Sami's approval instead. No other
+# file has an owner but these two texts, and an AGENTS.md, CLAUDE.md or SKILL.md file or a file under a directory
+# named skills, at any depth, which the patterns at the top of the file give to both teams. So a change to src/,
+# tests/, docs/, one projects/<name>/ or a file that a line with no owner lists needs no code owner unless it adds or
+# changes such a file. The one exception is under /.github/scripts/frame-pointers/: its line with no owner comes after
+# the patterns at the top and decides, so a SKILL.md or a file under a directory named skills there has no owner
+# (AGENTS*.md and CLAUDE*.md, further down, own an AGENTS.md or a CLAUDE.md there again).
 # These lines stay the last patterns of the file: the last pattern that matches a file decides its owner.
 /.github/ @theorem-labs/engineering @theorem-labs/research
 /.github/actionlint.yaml
@@ -95,7 +104,8 @@ AGENTS*.md @theorem-labs/engineering @theorem-labs/research
 /.python-version @theorem-labs/engineering @theorem-labs/research
 /setup.cfg @theorem-labs/engineering @theorem-labs/research
 /tox.ini @theorem-labs/engineering @theorem-labs/research
-/review.md @theorem-labs/engineering @theorem-labs/research
+/review.md @sjawhar
+/app/sentences.yaml @sjawhar
 /review-change.md @theorem-labs/engineering @theorem-labs/research
 /review-issue.md @theorem-labs/engineering @theorem-labs/research
 /.claude/skills/write-to-maintainer/ @theorem-labs/engineering @theorem-labs/research
