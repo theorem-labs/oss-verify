@@ -81,7 +81,7 @@ A fuzz target source in the project directory has a suffix of C or C++: `*.c` `*
 
 ### dockerfile
 
-Use `dockerfile` only if the `Dockerfile` is in your repository. We recommend the path `.oss-verify/Dockerfile`. In the folder `.theorem/` ([below](#theorem-on-your-repository)), put the `Dockerfile` in `.theorem/` and do not set `dockerfile`.
+Use `dockerfile` only if the `Dockerfile` is in your repository. We recommend the path `.oss-verify/Dockerfile`. In the folder `.theorem/` ([below](#theorem-on-your-repository)), put the `Dockerfile` in `.theorem/`, and set `dockerfile` only for a `Dockerfile` that your repository already holds in another place.
 
 * If the `Dockerfile` and `build.sh` are in the project directory, do not set `dockerfile`. The build context is then the project directory.
 * If you set `dockerfile`, the build context is your repository at the commit that we build. Put `build.sh` next to the `Dockerfile`, unless the `Dockerfile` makes `$SRC/build.sh`. Then put your fuzz target sources, build patches and `sources` file in your repository too. Only `project.yaml`, `patch_style.md` and seed corpora can then be in the project directory.

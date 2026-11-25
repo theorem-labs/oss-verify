@@ -29,21 +29,22 @@ Before you write `.theorem/`, check these three things with the maintainer. `gh 
 
 - The repository is not a fork. Set up the repository that it was forked from.
 - GitHub finds an open-source licence file in the repository. If it finds none, the maintainer adds one in a pull request of its own, before the setup pull request.
-- The maintainer installs the App Theorem Verify on the repository. Write down which account installs it: only that account can tick the box of the terms and merge (step 10).
+- The maintainer installs the App Theorem Verify on the repository. Ask which account installs it, and tell the maintainer that only that account can tick the box of the terms and merge (step 10).
 
 ## 2. A project that is enrolled today
 
 A project is enrolled today when theorem-labs/oss-verify has `projects/<name>/`, its `project.yaml` names this repository in `repo`, and its `primary_contact` is not `n/a`. For a seeded project, whose `primary_contact` is `n/a`, read the last item of [references/porting.md](references/porting.md). For a project that is enrolled today, move the files of `projects/<name>/` into `.theorem/`:
 
 1. Copy each file of `projects/<name>/` into `.theorem/`. Each file of code keeps its licence lines (4.8). Leave `projects/<name>/` of theorem-labs/oss-verify as it is.
-2. Rename `project.yaml` to `config.yml`, and remove its field `repo`.
+2. Rename `project.yaml` to `config.yml`, and remove its field `repo`. Remove the comments of `config.yml` that are about `repo` or the commit that it pins: `config.yml` has no pin.
 3. Keep the project's name. Set `name: <name>` in `config.yml` when the name of the repository in lower case is not `<name>`.
 4. A `Dockerfile` that the field `dockerfile` names in another place of the repository stays where it is, and `dockerfile` keeps naming it. It already builds from the repository root, and the setup check refuses a setup pull request that changes a file outside `.theorem/`.
 5. Rewrite each `COPY` and each path of a moved `Dockerfile` for the repository root as the build context ([docs/project-yaml.md, "The build context"](../../../docs/project-yaml.md#the-build-context)). For libreac, `COPY build.sh $SRC/` becomes `COPY .theorem/build.sh $SRC/`.
 6. Take the source with `COPY`, not with `fetch-commit`. For libreac, `RUN fetch-commit $SRC/libreac` becomes `COPY . $SRC/libreac`.
-7. Change no other build step. Then the build makes the same binaries as the pins only while the files that the build compiles are the same as at the pinned commit. The source that the build copies is now the head of the setup pull request, so a change that the repository made since the pin changes the binaries and the pins too.
+7. Change no other build step. Then the build makes the same binaries as the pins only while the files that the build compiles are the same as at the pinned commit. The source that the build copies is now the head of the setup pull request, so a change that the repository made since the pin changes the binaries and the pins too. When the default branch moved since the pinned commit, say so in the description of the setup pull request.
+8. Correct each comment of a moved file that the move makes false, for example a comment that names `fetch-commit` or says that the build copies only `build.sh`. In the description of the setup pull request, say what items 5, 6 and 8 changed in each file.
 
-The maintainer answered the questions of step 3 when the project enrolled. Ask only about what they want to change. Do steps 4 to 6 only for a file that is missing or that breaks a rule. A change to a fuzz target, to a build step or to the built source changes the binaries, so the pins change too. Make a change to a fuzz target or a build step only when a fuzz target breaks a rule of [docs/rules.md](../../../docs/rules.md), or when the maintainer asks for it, and say in the description of the setup pull request what changed and why.
+The maintainer answered the questions of step 3 when the project enrolled. Ask only about what they want to change. Do the items above for each project that is enrolled today. Do steps 4, 5 and 6 of this skill (the fuzz targets, the build and `config.yml`) only for a file that is missing or that breaks a rule. A change to a fuzz target, to a build step or to the built source changes the binaries, so the pins change too. Make a change to a fuzz target or a build step only when a fuzz target breaks a rule of [docs/rules.md](../../../docs/rules.md), or when the maintainer asks for it, and say in the description of the setup pull request what changed and why.
 
 ## 3. Ask the maintainer
 
@@ -116,7 +117,7 @@ Start from [templates/.theorem/config.yml](../../../templates/.theorem/config.ym
 
 ## 7. Prepare the setup pull request
 
-1. Write the description of the setup pull request. In a few lines, say what each fuzz target checks, and which files came from where (4.8). Then add this line, exactly as it is here, with the box not ticked:
+1. Write the title and the description of the setup pull request. A short title is enough, for example `Set up OSS Verify`. In the description, say in one line for each fuzz target what it checks, and say which files came from where (4.8). Then add this line, exactly as it is here, with the box not ticked:
 
        - [ ] I accept the [OSS Verify terms](https://theorem.dev/oss-verify/terms/)
 
