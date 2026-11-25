@@ -5,12 +5,14 @@
 write access may go to the review without a person.
 
     python3 .github/scripts/screen.py <the .review directory> [<the projects/<name> directory>]
-    python3 .github/scripts/screen.py <the .review directory> <the .review/theorem directory>
+    python3 .github/scripts/screen.py <the .review directory> [<the .review/theorem directory>]
     python3 .github/scripts/screen.py --sign-in
 
 For a setup pull request on an owner's repository, review-gather KIND=setup writes the head's .theorem/ to
-.review/theorem/, and the caller gives that directory in the place of projects/<name>/. The checks of a project's
-directory then apply to it: each of its files but a seed corpus must be text.
+.review/theorem/, and that directory is the project's, in the place of projects/<name>/: the caller gives it, or
+gives no second argument and the screen takes it. The checks of a project's directory then apply to it: each of its
+files but a seed corpus must be text. No other kind of item writes .review/theorem/, and only an item whose .review/
+holds it may have its seed corpus and its patch_style.md in .theorem/ (SETUP_SEED_CORPUS, SETUP_PATCH_STYLE_PATH).
 
 Up to three independent checks read the text that the review would read, and each answers one word, clean or
 suspicious. SCREEN_CHECKS names the ones that run, and must name Model Armor:
@@ -196,41 +198,51 @@ KEPT_STATUS = re.compile(r"\(exit status (\d+)\)\n?\Z")
 #   source/  the project's repository at the built commit: the repository an enrollment names, not text the pull
 #            request carries, and far more text than MAX_CHARS. review.yml's header says that it is not screened; the
 #            review of every enrollment reads it, whoever wrote the pull request.
-#   theorem/ the head's .theorem/ of a setup pull request (review-gather KIND=setup). Its files are the project's
-#            directory: pr.diff holds each line of them that the pull request adds, and the caller gives this
-#            directory as the project's, so each of its files but a seed corpus must be text.
+#   theorem/ the head's .theorem/ of a setup pull request (review-gather KIND=setup, and no other kind, writes it, so
+#            an item whose .review/ holds it is a setup pull request). Its files are the project's directory: pr.diff
+#            holds each line of them that the pull request adds, and parts() walks this directory as the project's
+#            when the caller gives none, so each of its files but a seed corpus must be text.
 NOT_SENT_DIRECTORIES = ("head", "source", "theorem")
 # A seed corpus's listing of its inputs in hexadecimal (review-gather): a row is an offset, 16 bytes and their text.
 SEED_ROW = re.compile(r"[0-9a-f]{4}  ((?:[0-9a-f]{2} ){0,15}[0-9a-f]{2}) *  .{1,16}")
 # A file a diff shows as binary, whose lines the diff does not hold (a quoted name, as git writes a name that is not
 # ASCII, too). A seed corpus is the one binary file an enrollment has, and its inputs are read from seeds/: its line is
 # exempt only in this exact form, with no space in the path, so that no crafted file name can take its form. The seed
-# corpus is in projects/<name>/, or in .theorem/ for a setup pull request.
+# corpus is in projects/<name>/ (SEED_CORPUS), and for a setup pull request, whose .review/ holds theorem/
+# (NOT_SENT_DIRECTORIES), in .theorem/ too (SETUP_SEED_CORPUS): review-gather KIND=setup lists the seed corpora of
+# theorem/ in seeds/. No other kind of item gathers a listing of a seed corpus in .theorem/, so its line is held there.
 BINARY_DIFF = re.compile(r"^Binary files (.*) and (.*) differ$", re.M)
-SEED_CORPUS = re.compile(r"Binary files (?:/dev/null|a/((?:projects/[^/ ]+|\.theorem)/[^/ ]+_seed_corpus\.zip)) and "
-                         r"b/((?:projects/[^/ ]+|\.theorem)/[^/ ]+_seed_corpus\.zip) differ")
-# A diff's section for one file, and the path of the file it writes. A project's patch_style.md (in projects/<name>/,
-# or in .theorem/ for a setup pull request) is read with its own question (PATCH_STYLE_SYSTEM), so its section comes
-# out of the diff and is read on its own, by the path in that section's own header: the lines before its first hunk,
-# which git writes, and never a line of the file, which an author writes and could shape like a header. The path is
-# taken as it stands, with nothing stripped: a path with a space in it or after it keeps that space, and the tab git
-# writes after such a name, and a path that holds a backslash, a quotation mark or a byte that is not ASCII is quoted
-# whole, so none of them matches here, and that file is read with the rest of the diff.
+SEED_CORPUS = re.compile(r"Binary files (?:/dev/null|a/(projects/[^/ ]+/[^/ ]+_seed_corpus\.zip)) and "
+                         r"b/(projects/[^/ ]+/[^/ ]+_seed_corpus\.zip) differ")
+SETUP_SEED_CORPUS = re.compile(r"Binary files (?:/dev/null|a/((?:projects/[^/ ]+|\.theorem)/[^/ ]+_seed_corpus\.zip))"
+                               r" and b/((?:projects/[^/ ]+|\.theorem)/[^/ ]+_seed_corpus\.zip) differ")
+# A diff's section for one file, and the path of the file it writes. A project's patch_style.md is read with its own
+# question (PATCH_STYLE_SYSTEM), so its section comes out of the diff and is read on its own, by the path in that
+# section's own header: the lines before its first hunk, which git writes, and never a line of the file, which an
+# author writes and could shape like a header. The path is taken as it stands, with nothing stripped: a path with a
+# space in it or after it keeps that space, and the tab git writes after such a name, and a path that holds a
+# backslash, a quotation mark or a byte that is not ASCII is quoted whole, so none of them matches here, and that file
+# is read with the rest of the diff. A project's patch_style.md is projects/<name>/patch_style.md (PATCH_STYLE_PATH),
+# and for a setup pull request, whose .review/ holds theorem/, .theorem/patch_style.md too (SETUP_PATCH_STYLE_PATH).
+# In any other item a .theorem/patch_style.md is a file of a change like any other: its section stays in the diff,
+# and the question for the text reads it.
 DIFF_SECTION = re.compile(r"^diff --git .*$", re.M)
 SECTION_PATH = re.compile(r"^\+\+\+ b/(.*)$", re.M)
-PATCH_STYLE_PATH = re.compile(r"(?:projects/[^/\s]+|\.theorem)/patch_style\.md")
+PATCH_STYLE_PATH = re.compile(r"projects/[^/\s]+/patch_style\.md")
+SETUP_PATCH_STYLE_PATH = re.compile(r"(?:projects/[^/\s]+|\.theorem)/patch_style\.md")
 
 
-def split_patch_style(text):
-    """A diff without the sections that write a projects/<name>/patch_style.md or a .theorem/patch_style.md, and
-    those sections as their own (path, section) pairs."""
+def split_patch_style(text, setup=False):
+    """A diff without the sections that write a projects/<name>/patch_style.md, or for a setup pull request (setup) a
+    .theorem/patch_style.md too, and those sections as their own (path, section) pairs."""
+    style_path = SETUP_PATCH_STYLE_PATH if setup else PATCH_STYLE_PATH
     starts = [m.start() for m in DIFF_SECTION.finditer(text)]
     rest, style, last = [], [], 0
     for start, end in zip(starts, starts[1:] + [len(text)]):
         section = text[start:end]
         hunk = section.find("\n@@")
         path = SECTION_PATH.search(section if hunk < 0 else section[:hunk])
-        if path and PATCH_STYLE_PATH.fullmatch(path.group(1)):
+        if path and style_path.fullmatch(path.group(1)):
             rest.append(text[last:start])
             style.append((path.group(1), section))
             last = end
@@ -482,16 +494,20 @@ def parts(review, project=None):
     files are not read, and why). Any other file the gather job writes is read too, so that a file added there
     is screened until someone says it is ours. Not read: the changed files under head/, the project's repository
     (source/), the .theorem/ of a setup pull request (theorem/, whose lines the diff holds), and the last review's
-    session. A projects/<name>/patch_style.md or a .theorem/patch_style.md the diff writes is read as a source of its
-    own, under its path: claude() asks another question of it.
+    session. A projects/<name>/patch_style.md the diff writes, and for a setup pull request a .theorem/patch_style.md
+    too, is read as a source of its own, under its path: claude() asks another question of it. A setup pull request
+    is an item whose review directory holds theorem/, which review-gather KIND=setup writes and no other kind does; in
+    any other item a .theorem/patch_style.md is text of the diff like any other.
 
     The filter is by author and by source, never by what the text says: main's own scripts write text addressed to
     a reviewer or to the review's model, and a screen that reads it answers about main, not about the account.
 
     Each file the review reads must still be text: a changed file of a change (head/), and each file of the
-    project's directory (projects/<name>/, or .review/theorem/ for a setup pull request) but a seed corpus, and the
-    diff must show it as text. The diff then shows every line a text file's change adds, and an image or another
-    binary file could carry what no check here reads."""
+    project's directory (project: projects/<name>/, or .review/theorem/ for a setup pull request, which is the
+    project's directory when no project is given) but a seed corpus, and the diff must show it as text. The diff then
+    shows every line a text file's change adds, and an image or another binary file could carry what no check here
+    reads. The one binary line it may hold is a seed corpus's, whose inputs are read from seeds/: in projects/<name>/
+    (SEED_CORPUS), and for a setup pull request in .theorem/ too (SETUP_SEED_CORPUS)."""
     found, unscreenable, whole_files = [], [], set()
     item_path = next((os.path.join(review, n) for n in ("pr.json", "issue.json")
                       if os.path.isfile(os.path.join(review, n))), None)
@@ -542,6 +558,11 @@ def parts(review, project=None):
                 names.append(f"{a.get('name') or ''} {a.get('email') or ''}")
     found.append((f"{shown_item}, the commit messages and the names an account chose", "\n".join(names)))
     ours_review_comments, diffs = all_review_comments_are_ours(review), set()
+    # A setup pull request's item: review-gather KIND=setup writes theorem/, and no other kind does.
+    setup = os.path.isdir(os.path.join(review, "theorem"))
+    if setup and project is None:
+        project = os.path.join(review, "theorem")
+    seed_corpus = SETUP_SEED_CORPUS if setup else SEED_CORPUS
     for root, dirs, files in os.walk(review):
         rel = os.path.relpath(root, review)
         dirs.sort()
@@ -563,11 +584,11 @@ def parts(review, project=None):
                 continue
             if source.endswith(".diff"):
                 for m in BINARY_DIFF.finditer(text):
-                    seed = SEED_CORPUS.fullmatch(m.group(0))
+                    seed = seed_corpus.fullmatch(m.group(0))
                     if m.group(2) == "/dev/null" or (seed and seed.group(1) in (None, seed.group(2))):
                         continue   # a deleted file is read by no one; a seed corpus is read from seeds/
                     unscreenable.append(f"{source} shows {m.group(2).strip(chr(34))[2:]} as binary")
-                text, style = split_patch_style(text)
+                text, style = split_patch_style(text, setup)
                 for style_path, section in style:
                     found.append((style_path, section))
                     diffs.add(style_path)
@@ -832,15 +853,18 @@ def claude_word(answer):
 
 
 def claude(found):
-    """The model, one question for the text and, when the pull request adds a projects/<name>/patch_style.md or a
-    .theorem/patch_style.md, one for that file (PATCH_STYLE_SYSTEM): the project writes it for us, and the first
-    question would answer about what the file is for. Each question is asked CLAUDE_ANSWERS times and its word is
-    the majority, since the model answers at its own temperature (the gateway's model takes no other) and one
-    answer on a long ordinary text is a coin with a small bias. Either question's word suspicious holds the item."""
+    """The model, one question for the text and, when the pull request adds a projects/<name>/patch_style.md, or a
+    setup pull request a .theorem/patch_style.md, one for that file (PATCH_STYLE_SYSTEM): the project writes it for
+    us, and the first question would answer about what the file is for. Of the sources parts() gives, a section it
+    took out of a diff (split_patch_style) has such a name, and it takes out a .theorem/patch_style.md only for a
+    setup pull request: in any other item that file stays in the diff, which the first question reads. Each question
+    is asked CLAUDE_ANSWERS times and its word is the majority, since the model answers at its own temperature (the
+    gateway's model takes no other) and one answer on a long ordinary text is a coin with a small bias. Either
+    question's word suspicious holds the item."""
     token = anthropic_token()
     base = env("ANTHROPIC_URL")
-    style = [(s, t) for s, t in found if PATCH_STYLE_PATH.fullmatch(s)]
-    questions = [("the text", [(s, t) for s, t in found if not PATCH_STYLE_PATH.fullmatch(s)], None)]
+    style = [(s, t) for s, t in found if SETUP_PATCH_STYLE_PATH.fullmatch(s)]
+    questions = [("the text", [(s, t) for s, t in found if not SETUP_PATCH_STYLE_PATH.fullmatch(s)], None)]
     if style:
         questions.append(("patch_style.md", style, PATCH_STYLE_SYSTEM))
     words, answers = {}, {}
