@@ -1,0 +1,3 @@
+terms: the description has no ticked line "I accept the [OSS Verify terms](https://theorem.dev/oss-verify/terms/)".
+scope: the pull request changes tools/tests/test_check_checks.py, which is not in .theorem/.
+ruleset: THEOREM_APP_VERIFY_ID is 0: the Theorem Verify App is not made yet, so no ruleset can require its check.

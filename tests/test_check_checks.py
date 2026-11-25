@@ -970,7 +970,7 @@ def record_in(case, text):
     case.assertLessEqual(len(text), 65_535)
     record = json.loads(text[5:-4])
     case.assertEqual(list(record), ["schema", "head", "hold", "job", "verdicts", "criticality_score", "oss_fuzz",
-                                    "sizes"])
+                                    "sizes", "installer", "ticked_by"])
     return record
 
 
@@ -1273,7 +1273,8 @@ class PostingStep(Runner):
     def test_k1_the_step_gives_review_verdict_the_head_the_verdicts_and_the_values_of_the_gather_job(self):
         """The step's case of the record of a review in the check run's output.text (ReviewVerdict's k1 and k2 check
         what review-verdict makes of each verdict, hold and value): review-verdict, as the step runs it, gets the step's
-        head, the review's verdicts, and the criticality score, OSS-Fuzz and binary sizes that the gather job gave."""
+        head, the review's verdicts, and the criticality score, OSS-Fuzz and binary sizes that the gather job gave. The
+        review of an enrollment is not of a setup pull request, so installer and ticked_by are null."""
         verdicts = self.verdicts(D2="fail", E="person")
         sizes = {"parse": {"plain": {"text": 1000, "exec": 1200}, "asan": {"text": 3000, "exec": 3300}},
                  "dump": {"plain": {"text": 900, "exec": None}}}
@@ -1283,7 +1284,7 @@ class PostingStep(Runner):
         record = self.kept(self.record(requests))
         self.assertEqual(record, {"schema": "oss-verify/enrollment-review/1", "head": self.HEAD, "hold": None,
                                   "job": None, "verdicts": verdicts, "criticality_score": 0.07123, "oss_fuzz": False,
-                                  "sizes": sizes})
+                                  "sizes": sizes, "installer": None, "ticked_by": None})
 
     def test_k2_the_step_gives_review_verdict_the_values_of_the_gather_job_for_a_hold_too(self):
         """The step's case of the record of a hold: the review job failed after the gather job gave its values. The
@@ -1295,7 +1296,7 @@ class PostingStep(Runner):
         record = self.kept(self.record(requests))
         self.assertEqual(record, {"schema": "oss-verify/enrollment-review/1", "head": self.HEAD, "hold": "failed",
                                   "job": "review", "verdicts": {}, "criticality_score": 0.5, "oss_fuzz": True,
-                                  "sizes": sizes})
+                                  "sizes": sizes, "installer": None, "ticked_by": None})
 
     def test_the_comment_stays_under_githubs_limit(self):
         _, requests = self.post(review="R" * 70_000, verdicts=self.verdicts(), CHECKS="C" * 20_000)
@@ -1336,10 +1337,10 @@ class ReviewVerdict(unittest.TestCase):
 
     def call(self, *arguments, **env):
         """Run review-verdict with `env` over a hold's values and the head HEAD40. A value of None leaves its variable
-        out, as CRITICALITY_SCORE, OSS_FUZZ and SIZES are when `env` does not give them."""
+        out, as CRITICALITY_SCORE, OSS_FUZZ, SIZES, INSTALLER and TICKED_BY are when `env` does not give them."""
         given = {**os.environ, "REVIEW_CAP": "24", "REVIEW_CAP_AUTHOR": "12", "REPO": "o/r", "PR": "8",
                  "RUN_URL": "https://github.com/o/r/actions/runs/77", "HEAD_SHA": HEAD40, "CRITICALITY_SCORE": None,
-                 "OSS_FUZZ": None, "SIZES": None, **env}
+                 "OSS_FUZZ": None, "SIZES": None, "INSTALLER": None, "TICKED_BY": None, **env}
         return subprocess.run([str(ROOT / ".github" / "scripts" / "review-verdict"), *arguments], capture_output=True,
                               text=True, env={name: value for name, value in given.items() if value is not None})
 
@@ -1368,7 +1369,7 @@ class ReviewVerdict(unittest.TestCase):
         """The record of a review at HEAD40 that gave no verdict (VERDICTS={}), with `values`."""
         return {"schema": "oss-verify/enrollment-review/1", "head": HEAD40, "hold": None, "job": None,
                 "verdicts": {check: "person" for check in check_ids("review.md")}, "criticality_score": None,
-                "oss_fuzz": None, "sizes": None, **values}
+                "oss_fuzz": None, "sizes": None, "installer": None, "ticked_by": None, **values}
 
     def test_its_ids_are_the_checklist_of_review_md_and_the_schema_requires_exactly_them(self):
         run = subprocess.run([str(ROOT / ".github" / "scripts" / "review-verdict"), "--ids"], capture_output=True,
@@ -1465,7 +1466,7 @@ class ReviewVerdict(unittest.TestCase):
         record = self.record(got)
         self.assertEqual(record, {"schema": "oss-verify/enrollment-review/1", "head": "c" * 40, "hold": None,
                                   "job": None, "verdicts": verdicts, "criticality_score": 0.07, "oss_fuzz": False,
-                                  "sizes": sizes})
+                                  "sizes": sizes, "installer": None, "ticked_by": None})
         self.assertEqual(list(record["verdicts"]), check_ids("review.md"))
         self.assertIs(record["oss_fuzz"], False)
 
@@ -1503,8 +1504,54 @@ class ReviewVerdict(unittest.TestCase):
                                      ("action_required", title, summary))
                     record = self.record(got)
                     self.assertEqual(record, {"schema": "oss-verify/enrollment-review/1", "head": HEAD40,
-                                              "hold": env["HOLD"], "job": job, "verdicts": {}, **kept})
+                                              "hold": env["HOLD"], "job": job, "verdicts": {}, **kept,
+                                              "installer": None, "ticked_by": None})
                     self.assertIs(record["oss_fuzz"], kept["oss_fuzz"])
+
+    def test_k3_a_setup_pull_request_records_the_installer_and_the_account_that_ticked_the_box(self):
+        """INSTALLER and TICKED_BY, which only the review of a setup pull request gives. The record has each after
+        sizes, as the login or null (empty or not set), and each other value and what a maintainer reads do not
+        change. That review gets no criticality score, OSS-Fuzz or sizes, so those are null. A hold records the two
+        values too."""
+        verdicts = json.dumps({check: "pass" for check in check_ids("review.md")})
+        without = self.verdict(VERDICTS=verdicts)
+        for installer, ticked_by, kept in (("octocat", "octocat", ("octocat", "octocat")),
+                                           ("Octo-Cat-2", "", ("Octo-Cat-2", None)),
+                                           ("octocat", None, ("octocat", None)),
+                                           ("", "mona-lisa", (None, "mona-lisa")),
+                                           ("", "", (None, None))):
+            with self.subTest(installer=installer, ticked_by=ticked_by):
+                got = self.verdict(VERDICTS=verdicts, INSTALLER=installer, TICKED_BY=ticked_by)
+                self.assertEqual([got[key] for key in ("conclusion", "title", "summary")],
+                                 [without[key] for key in ("conclusion", "title", "summary")])
+                record = self.record(got)
+                self.assertEqual((record["installer"], record["ticked_by"]), kept)
+                self.assertEqual({**record, "installer": None, "ticked_by": None}, self.record(without))
+                self.assertEqual((record["criticality_score"], record["oss_fuzz"], record["sizes"]), (None, None, None))
+        for env in ({"HOLD": "failed", "JOB": "review"}, {"HOLD": "screen"}):
+            with self.subTest(env=env):
+                record = self.record(self.verdict(**env, INSTALLER="octocat", TICKED_BY=""))
+                self.assertEqual((record["hold"], record["installer"], record["ticked_by"]),
+                                 (env["HOLD"], "octocat", None))
+
+    def test_an_installer_or_a_ticker_that_is_not_a_login_gives_no_record(self):
+        """A GitHub login has at most 39 characters, of letters, digits and single hyphens, and does not start or end
+        with a hyphen. Any other value of INSTALLER or TICKED_BY, a newline too, stops review-verdict with exit status
+        2, and it prints nothing."""
+        longest = "a-" * 19 + "a"
+        self.assertEqual(len(longest), 39)
+        for login in (longest, "x" * 39, "a", "0", "a-b"):
+            with self.subTest(login=login):
+                record = self.record(self.verdict(VERDICTS="{}", INSTALLER=login, TICKED_BY=login))
+                self.assertEqual((record["installer"], record["ticked_by"]), (login, login))
+        for login in ("x" * 40, longest + "b", "octo--cat", "-octocat", "octocat-", "-", "a\nb", "octocat\n",
+                      "\noctocat", "octo cat", " octocat", "octo_cat", "octocat[bot]", "\u00f6ctocat", "octo.cat"):
+            for name in ("INSTALLER", "TICKED_BY"):
+                for env in ({"VERDICTS": "{}"}, {"HOLD": "screen"}):
+                    with self.subTest(login=login, name=name, env=env):
+                        run = self.call(**env, **{name: login})
+                        self.assertEqual((run.returncode, run.stdout), (2, ""), run.stderr)
+                        self.assertIn(f"review-verdict: {name} ", run.stderr)
 
     def test_a_value_of_another_kind_is_null(self):
         """Only a finite JSON number that is not a boolean is a CRITICALITY_SCORE, only the text true or false is an

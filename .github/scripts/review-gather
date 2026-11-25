@@ -10,6 +10,7 @@
 #   KIND=change GH_TOKEN=... REPO=... PR=<number> HEAD_SHA=<head commit> [LAST_REVIEW=<file>] \
 #     .github/scripts/review-gather <directory>
 #   KIND=issue GH_TOKEN=... REPO=... ISSUE=<number> .github/scripts/review-gather <directory>
+#   KIND=setup FETCHED=<folder> [LAST_REVIEW=<file>] .github/scripts/review-gather <directory>
 #
 # review.yml's gather job runs it from the checkout of main, after take-project has put the pull request's
 # projects/<name>/ into that checkout. It runs no code of the pull request or of the project: it reads the pull request
@@ -27,7 +28,8 @@
 # For an enrollment it also writes to GITHUB_OUTPUT `criticality_score`, the repository's criticality score as a JSON
 # number, and `oss_fuzz`, true or false for whether the repository is in OSS-Fuzz, as .github/scripts/triage.py --facts
 # gives them: each is null when triage.py does not know it. They go in no file of the directory.
-# KIND is route's decision in review.yml, and this chooses its path on it once, here at its top.
+# KIND is route's decision in review.yml, or setup in check.yml's review job, and this chooses its path on it once,
+# here at its top.
 # KIND=change, a change review (review-change.md): only the pull request, its diff, its checks and review comments,
 # and each changed file as it is at HEAD_SHA, as data under head/, cut at 1 MiB. It resumes the session of the last
 # change review of the pull request, for context, with the diff from the head that review reviewed. That head comes
@@ -39,6 +41,34 @@
 # LAST_REVIEW names is that head.
 # KIND=issue, the draft reply to an issue (review-issue.md): only the issue's title, body, author and comments, in
 # issue.json, and nothing else.
+# KIND=setup, the review of a setup pull request: the pull request on an owner's repository that adds .theorem/.
+# check.yml's review job runs it from the checkout of this repository's main, with no token and no build data. It
+# reads only FETCHED, the folder that check.yml's fetch job wrote, and LAST_REVIEW. It calls no gh, git, curl or other
+# network command, and it runs neither .github/scripts/triage.py nor the rules of .github/scripts/validate_rules/.
+# FETCHED has the form setup-fetch/1 (tests/fixtures/setup-fetch/ is one):
+#   pr.json                     the setup pull request, as gh pr view --json number,title,author,isDraft,createdAt,
+#                               body,headRefOid,files,commits,comments,reviews gives it.
+#   pr.diff                     gh pr diff, as this script writes it for an enrollment.
+#   review-comments.txt         the review comments, and their authors one login a line, as this script writes
+#   review-comment-authors.txt  them for an enrollment.
+#   theorem/                    the head's .theorem/ folder, as data.
+#   source.tar                  the repository at the head, as GitHub's tarball gives it (gh api
+#                               repos/<owner>/<name>/tarball/<head>): one top folder, <owner>-<name>-<commit>/.
+#   setup.json, setup.txt       the standard output and the standard error of theorem app setup --at <head>
+#                               --repo <owner>/<name> --pr <number> --installer <login> --record record.json --json.
+#   record.json                 that command's record: {"installer": <login>, "ticked_by": <login> or null}.
+#   repository.json             gh api repos/<owner>/<name>.
+#   contributors.json           gh api "repos/<owner>/<name>/contributors?per_page=5".
+#   last-review-head.txt        the head that the App's review comment on the pull request names, or nothing.
+#   since-last-review.diff      only when that head is an ancestor of the pull request's head: the diff from it.
+# A file of the form that is not there stops this with exit status 2, and the message names the file. The directory
+# gets pr.json (with keep's last line, below), pr.diff, review-comments.txt, review-comment-authors.txt and
+# description.md, as for an enrollment; theorem/, in the place of projects/<name>/; setup.txt, the checks of
+# setup.json and the reasons of setup.txt, in the place of validate.txt and the triage comment; record.json as it is;
+# repository.txt, from repository.json and contributors.json; source/, from source.tar; the seed listings of the seed
+# corpora of theorem/, as for an enrollment; and since-last-review.diff when FETCHED holds it. When
+# last-review-head.txt names a head, FETCHED holds since-last-review.diff, and LAST_REVIEW names a session kept for
+# that head, it writes `session` and `last` to GITHUB_OUTPUT, as for a change.
 # The runner reads none of its output as a workflow command: the gathered text is the pull request's or the issue's.
 resume=$(openssl rand -hex 16) && echo "::stop-commands::$resume"
 trap 'echo "::$resume::"' EXIT
@@ -70,7 +100,177 @@ reviewed_head() {
   if [[ ${head:-} =~ ^[0-9a-f]{40}$ ]]; then echo "$head"; fi
   return 0
 }
+# Each seed corpus of the folder $1: its listing, and the first 512 bytes of each of its first 200 inputs, in
+# hexadecimal. The zip is the pull request's. read() with no size decompresses the whole member before it cuts the
+# member, so this reads 512 bytes through open(). zipfile decompresses bzip2 and lzma with no bound, also for a read
+# with a size. So this reads only a stored or deflated member, and gives a line for each other member that says that
+# it is not read. open() raises RuntimeError for an encrypted member, because this gives no password. So this reads no
+# member whose bit 0x1 of the general purpose bit flag is set, as read_member of .github/scripts/artifact.py does, and
+# gives a line for it too.
+seed_listings() {
+  local zip target
+  for zip in "$1"/*_seed_corpus.zip; do
+    [ -f "$zip" ] || continue
+    target=$(basename "$zip" _seed_corpus.zip)
+    keep "seeds/$target.listing.txt" unzip -l "$zip"
+    python3 -P - "$zip" "$out/seeds/$target.hex.txt" <<'EOF'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as archive, open(sys.argv[2], "w") as out:
+    for info in [i for i in archive.infolist() if not i.is_dir()][:200]:
+        out.write(f"== {info.filename!r}: {info.file_size} bytes\n")
+        if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+            out.write(f"(not read: compression method {info.compress_type}, not stored or deflated)\n")
+            continue
+        if info.flag_bits & 0x1:
+            out.write("(not read: encrypted)\n")
+            continue
+        with archive.open(info) as member:
+            data = member.read(512)
+        for at in range(0, len(data), 16):
+            row = data[at:at + 16]
+            text = "".join(chr(b) if 32 <= b < 127 else "." for b in row)
+            out.write(f"{at:04x}  {row.hex(' '):<47}  {text}\n")
+EOF
+  done
+}
+# KIND=setup (the header above): each command reads a file of FETCHED or LAST_REVIEW, or writes in the directory. No
+# command reads the network.
+gather_setup() {
+  local name reviewed="" session="" kept=""
+  [[ -n ${FETCHED:-} && -d $FETCHED && ! -L $FETCHED ]] || { echo "review-gather: FETCHED is not a folder" >&2; exit 2; }
+  for name in pr.json pr.diff review-comments.txt review-comment-authors.txt theorem/ source.tar setup.json setup.txt \
+      record.json repository.json contributors.json last-review-head.txt; do
+    if [[ $name == */ ]]; then
+      [[ -d $FETCHED/$name && ! -L $FETCHED/${name%/} ]] && continue
+    else
+      [[ -f $FETCHED/$name && ! -L $FETCHED/$name ]] && continue
+    fi
+    echo "review-gather: FETCHED has no $name, which the form setup-fetch/1 has" >&2
+    exit 2
+  done
+  mkdir -p "$out/seeds"
+  # pr.json with keep's last line, as the screen and the review read it: the status is jq's, which fails on a file
+  # that is not JSON.
+  keep pr.json jq -c . "$FETCHED/pr.json"
+  cp -- "$FETCHED/pr.diff" "$FETCHED/review-comments.txt" "$FETCHED/review-comment-authors.txt" \
+    "$FETCHED/record.json" "$out/"
+  jq -r '.body // ""' "$FETCHED/pr.json" > "$out/description.md" 2> /dev/null
+  # The head's .theorem/, in the place of projects/<name>/, as data: regular files and folders alone. cp -R copies a
+  # symbolic link as a link and follows none, and find then takes out each file that is not a regular file or a
+  # folder. Claude Code reads a CLAUDE.md, an AGENTS.md or a .claude/ beside a file that it reads as instructions:
+  # the pull request's are data, so they go too (rule 1 of review.md).
+  rm -rf "$out/theorem"
+  cp -R -- "$FETCHED/theorem" "$out/theorem"
+  find "$out/theorem" -mindepth 1 ! -type f ! -type d -delete
+  find "$out/theorem" \( -iname 'CLAUDE*.md' -o -iname 'AGENTS*.md' -o -name .claude \) -prune -exec rm -rf {} +
+  # The checks of theorem app setup and their reasons, in the place of validate.txt and the triage comment. A check's
+  # name is a short word, so that no line of setup.json can look like another check.
+  {
+    echo "== the checks of theorem app setup (setup.json): each check's name, and pass or fail"
+    jq -r 'if type == "array" and all(.[]; type == "object" and (.name | type == "string" and
+               test("\\A[a-z][a-z0-9_-]{0,63}\\z")) and (.result == "pass" or .result == "fail"))
+           then .[] | "\(.name) \(.result)"
+           else error("setup.json is not a list of checks, each with a name and the result pass or fail") end' \
+      "$FETCHED/setup.json"
+    echo "(exit status $?)"
+    echo
+    echo "== the reasons (setup.txt, the standard error of theorem app setup)"
+    cat -- "$FETCHED/setup.txt"
+    echo "(exit status $?)"
+  } > "$out/setup.txt" 2>&1
+  # The repository's facts, in the form of an enrollment's repository.txt (below) where FETCHED has them.
+  {
+    jq -r '"repo: \(.html_url)"' "$FETCHED/repository.json"
+    echo "Not read for a setup pull request, which reads no network: git ls-remote, the comparisons, and the pull" \
+      "requests of a ref."
+    echo
+    echo "== the repository on GitHub"
+    jq -cS '{full_name, default_branch, fork, archived, pushed_at, created_at, stargazers_count, forks_count,
+             license: .license.spdx_id}' "$FETCHED/repository.json"
+    echo "(exit status $?)"
+    echo
+    echo "== contributors (the top 5, with their commits)"
+    jq -r '.[] | "\(.login) \(.contributions)"' "$FETCHED/contributors.json"
+    echo "(exit status $?)"
+  } > "$out/repository.txt" 2>&1
+  # The repository at the head, as data, from GitHub's tarball. Each of its members is in one top folder,
+  # <owner>-<name>-<commit>/, and source/ gets what is in that folder. It takes only a folder or a regular file. It
+  # does not take a symbolic link or a hard link, a device, a FIFO, a sparse file, a member whose path is absolute or
+  # has a part "..", or a member outside the top folder, and it names each one that it does not take. It makes each
+  # folder and each file itself, and it makes no link, so nothing that it writes is outside source/. A tar that it
+  # cannot read gives no source/, and source.txt says so.
+  rm -rf "$out/source" "$out/source.txt"
+  if python3 -P - "$FETCHED/source.tar" "$out/source" <<'EOF'
+import os, shutil, sys, tarfile
+tar, into = sys.argv[1], sys.argv[2]
+top, refused = None, []
+try:
+    with tarfile.open(tar, "r:*") as archive:
+        os.mkdir(into)
+        for member in archive:
+            parts = member.name.split("/")
+            if member.name.startswith("/") or ".." in parts:
+                refused.append((member.name, "its path leaves the folder"))
+                continue
+            top = parts[0] if top is None else top
+            rest = [part for part in parts[1:] if part not in ("", ".")]
+            if parts[0] in ("", ".") or parts[0] != top or not (rest or member.isdir()):
+                refused.append((member.name, "it is not in the top folder"))
+                continue
+            path = os.path.join(into, *rest)
+            try:
+                if member.isdir():
+                    os.makedirs(path, exist_ok=True)
+                elif member.type in (tarfile.REGTYPE, tarfile.AREGTYPE):
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    file = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+                    with os.fdopen(file, "wb") as out, archive.extractfile(member) as data:
+                        shutil.copyfileobj(data, out)
+                else:
+                    refused.append((member.name, f"it is not a folder or a regular file (tar type {member.type!r})"))
+            except (FileExistsError, NotADirectoryError, IsADirectoryError):
+                refused.append((member.name, "another member has its path"))
+except Exception as e:
+    sys.exit(f"review-gather: source.tar is not a tar file that can be read: {type(e).__name__}: {e}")
+for name, why in refused[:20]:
+    print(f"review-gather: source.tar: not taken: {name!r}: {why}", file=sys.stderr)
+if len(refused) > 20:
+    print(f"review-gather: source.tar: not taken: {len(refused) - 20} more members", file=sys.stderr)
+EOF
+  then
+    find "$out/source" \( -iname 'CLAUDE*.md' -o -iname 'AGENTS*.md' -o -name .claude \) -prune -exec rm -rf {} +
+  else
+    rm -rf "$out/source"
+    echo "Not gathered: source.tar of the fetch job could not be read as a tar file, so there is no source to read." \
+      > "$out/source.txt"
+  fi
+  seed_listings "$out/theorem"
+  if [[ -f $FETCHED/since-last-review.diff && ! -L $FETCHED/since-last-review.diff ]]; then
+    keep since-last-review.diff cat -- "$FETCHED/since-last-review.diff"
+  fi
+  # As for a change: the head that the last review reviewed comes from the App's review comment, which the fetch job
+  # read (last-review-head.txt), and LAST_REVIEW gives the session's id only when it names that same head.
+  IFS= read -r reviewed < "$FETCHED/last-review-head.txt"
+  [[ $reviewed =~ ^[0-9a-f]{40}$ ]] || reviewed=""
+  read -r session kept < <(sed -n 's/^session=\([0-9a-f-]\{36\}\) head=\([0-9a-f]\{40\}\)$/\1 \2/p' \
+    "${LAST_REVIEW:-/nonexistent}" 2> /dev/null | head -n 1)
+  if [[ -n $reviewed && -n $session && $kept != "$reviewed" ]]; then
+    echo "review-gather: the session in the cache was kept for $kept, not $reviewed: the review is fresh"
+  elif [[ -n $reviewed && -n $session ]]; then
+    if [ "$(tail -n 1 "$out/since-last-review.diff" 2> /dev/null)" = "(exit status 0)" ]; then
+      echo "review-gather: the setup review resumes the session $session, with the diff from $reviewed, the head its" \
+        "last review reviewed (its review comment)"
+      { echo "session=$session"; echo "last=$reviewed"; } >> "${GITHUB_OUTPUT:-/dev/null}"
+    else
+      echo "review-gather: no diff from $reviewed, the head the last review reviewed: the review is fresh"
+    fi
+  fi
+}
 case ${KIND:-} in
+  setup)
+    gather_setup
+    exit 0
+    ;;
   issue)
     [[ ${ISSUE:-} =~ ^[0-9]+$ ]] || { echo "review-gather: ISSUE is not a number" >&2; exit 2; }
     mkdir -p "$out"
@@ -82,7 +282,7 @@ case ${KIND:-} in
     [[ ${NAME:-} =~ ^[a-z0-9][a-z0-9._-]{0,62}$ ]] || { echo "review-gather: NAME is not a project name" >&2; exit 2; }
     ;;
   *)
-    echo "review-gather: KIND is not enrollment, change or issue" >&2
+    echo "review-gather: KIND is not enrollment, change, issue or setup" >&2
     exit 2
     ;;
 esac
@@ -189,35 +389,8 @@ for t in got:
 EOF
 keep template-history.txt git log --format='%h %cI %s' -- .github/PULL_REQUEST_TEMPLATE.md
 
-# Each seed corpus: its listing, and the first 512 bytes of each of its first 200 inputs, in hexadecimal. The zip is the
-# pull request's. read() with no size decompresses the whole member before it cuts the member, so this reads 512 bytes
-# through open(). zipfile decompresses bzip2 and lzma with no bound, also for a read with a size. So this reads only a
-# stored or deflated member, and gives a line for each other member that says that it is not read. open() raises
-# RuntimeError for an encrypted member, because this gives no password. So this reads no member whose bit 0x1 of the
-# general purpose bit flag is set, as read_member of .github/scripts/artifact.py does, and gives a line for it too.
-for zip in "$dir"/*_seed_corpus.zip; do
-  [ -f "$zip" ] || continue
-  target=$(basename "$zip" _seed_corpus.zip)
-  keep "seeds/$target.listing.txt" unzip -l "$zip"
-  python3 -P - "$zip" "$out/seeds/$target.hex.txt" <<'EOF'
-import sys, zipfile
-with zipfile.ZipFile(sys.argv[1]) as archive, open(sys.argv[2], "w") as out:
-    for info in [i for i in archive.infolist() if not i.is_dir()][:200]:
-        out.write(f"== {info.filename!r}: {info.file_size} bytes\n")
-        if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
-            out.write(f"(not read: compression method {info.compress_type}, not stored or deflated)\n")
-            continue
-        if info.flag_bits & 0x1:
-            out.write("(not read: encrypted)\n")
-            continue
-        with archive.open(info) as member:
-            data = member.read(512)
-        for at in range(0, len(data), 16):
-            row = data[at:at + 16]
-            text = "".join(chr(b) if 32 <= b < 127 else "." for b in row)
-            out.write(f"{at:04x}  {row.hex(' '):<47}  {text}\n")
-EOF
-done
+# The seed listings of each seed corpus of projects/<name>/ (seed_listings, above).
+seed_listings "$dir"
 
 # The project's repository: the facts of check G1, and its source at the built commit, as data.
 # repo comes from the pull request: it is used only if oss-verify validate's rule for it holds, and its ref is used in

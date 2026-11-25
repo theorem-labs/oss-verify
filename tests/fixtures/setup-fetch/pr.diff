@@ -1,0 +1,49 @@
+diff --git a/tools/tests/test_check_checks.py b/tools/tests/test_check_checks.py
+index 864a387d..782379a8 100644
+--- a/tools/tests/test_check_checks.py
++++ b/tools/tests/test_check_checks.py
+@@ -1099,20 +1099,27 @@ def log_message(self, *args):
+         self.session = pathlib.Path(tempfile.mkdtemp())
+         self.addCleanup(shutil.rmtree, self.session)
+ 
+-    def fake_claude(self, *calls, wait=0):
+-        """A claude that, on its call N, appends the identity token file's text to `tokens` (and again after `wait`
+-        seconds, as Claude Code reads it again for each exchange), then prints the stream of a review whose turn
++    def fake_claude(self, *calls, until_new=0):
++        """A claude that, on its call N, appends the identity token file's text to `tokens` (and, with `until_new`,
++        again as soon as the file holds another token, as Claude Code reads it again for each exchange, polling for at
++        most that many seconds), then prints the stream of a review whose turn
+         calls[N-1][2] (by default claude-opus-5-5) answered and whose result is calls[N-1][0], and exits with
+         calls[N-1][1]."""
+         for n, (result, status, *model) in enumerate(calls, 1):
+             (self.directory / f"result.{n}").write_text(stream(result, *model))
+             (self.directory / f"status.{n}").write_text(str(status))
++        # With until_new, the second read waits for the file to hold another token than the first, at most that long.
++        poll = (f'first=$(cat "$ANTHROPIC_IDENTITY_TOKEN_FILE")\n'
++                f'for _ in $(seq {until_new * 10}); do\n'
++                f'  [ "$(cat "$ANTHROPIC_IDENTITY_TOKEN_FILE")" != "$first" ] && break; sleep 0.1\n'
++                f'done\nread_token\n') if until_new else ""
+         (self.directory / "bin" / "claude").write_text(
+             "#!/bin/bash\n"
+             f"cd {self.directory}\n"
+             "n=$(( $(cat calls 2> /dev/null || echo 0) + 1 )); echo $n > calls\n"
+             'read_token() { { cat "$ANTHROPIC_IDENTITY_TOKEN_FILE"; echo; } >> tokens; }\n'
+-            f"read_token\n{f'sleep {wait}; read_token' if wait else ''}\n"
++            "read_token\n"
++            f"{poll}"
+             '[ -f err.$n ] && cat err.$n >&2\n'
+             'cat result.$n; exit "$(cat status.$n)"\n')
+ 
+@@ -1324,8 +1331,10 @@ def test_the_conversation_is_kept_outside_the_checkout_with_its_commit(self):
+     def test_the_identity_token_file_gets_a_new_token_while_claude_runs(self):
+         # #48, #49 and #50 (runs 40275097872, 40275102913, 40275107446): Claude Code read the file again about ten
+         # minutes in, found the token it had exchanged at the start, and the exchange answered 401. Here it reads the
+-        # file at its start and again 3 seconds later, with a new token due every second.
+-        self.fake_claude(({"is_error": False, "result": "Thanks."}, 0), wait=3)
++        # file at its start and again as soon as it holds another token, with a new token due every second. It polls
++        # for that, up to 30 seconds, rather than reading once after a fixed 3 seconds: on a loaded machine the first
++        # rotation can come later than that, which failed the test with no fault in review-run.
++        self.fake_claude(({"is_error": False, "result": "Thanks."}, 0), until_new=30)
+         out = self.run_review(**self.identity(REVIEW_TOKEN_EVERY="1"))
+         self.assertEqual(out.returncode, 0, out.stderr)
+         first, later = self.tokens()

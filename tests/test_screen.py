@@ -548,6 +548,27 @@ class ScreenTest(unittest.TestCase):
                 self.assertEqual(v, "held")
                 self.assertEqual(reason["unscreenable"], [f"pr.diff shows {shown} as binary"])
 
+    def test_a_setup_pull_requests_seed_corpus_is_read_from_seeds_too(self):
+        """A setup pull request's seed corpus is in .theorem/ at the root of the repository, and its inputs are read
+        from seeds/, as those of a seed corpus in projects/<name>/ are. Only that exact form: a seed corpus in a folder
+        of .theorem/, one in a .theorem/ that is not at the root, and one that the diff renames are held."""
+        self.item(kind="pr", diff="Binary files /dev/null and b/.theorem/fuzz_seed_corpus.zip differ\n"
+                                  "diff --git a/.theorem/x_seed_corpus.zip b/.theorem/x_seed_corpus.zip\n"
+                                  "Binary files a/.theorem/x_seed_corpus.zip and b/.theorem/x_seed_corpus.zip differ\n")
+        self.assertEqual(self.verdict()[0], "clean")
+        for line, shown in (("Binary files a/.theorem/s/z_seed_corpus.zip and b/.theorem/s/z_seed_corpus.zip differ",
+                             ".theorem/s/z_seed_corpus.zip"),
+                            ("Binary files /dev/null and b/docs/.theorem/z_seed_corpus.zip differ",
+                             "docs/.theorem/z_seed_corpus.zip"),
+                            ("Binary files a/.theorem/y_seed_corpus.zip and b/.theorem/z_seed_corpus.zip differ",
+                             ".theorem/z_seed_corpus.zip")):
+            with self.subTest(line=line):
+                self.fresh()
+                self.item(kind="pr", diff=line + "\n")
+                v, reason = self.verdict()
+                self.assertEqual(v, "held")
+                self.assertEqual(reason["unscreenable"], [f"pr.diff shows {shown} as binary"])
+
     def test_a_writers_item_is_screened_for_its_comments_alone(self):
         """SCREEN_SCOPE comments: every comment, review and review comment but this App's own, and nothing of the
         writer's own title, description, diff, files or other fields, which the review reads as before."""
@@ -964,6 +985,8 @@ class ScreenTest(unittest.TestCase):
                   "diff --git a/projects/p/patch_style.md b/projects/p/patch_style.md\n"
                   "new file mode 100644\n--- /dev/null\n+++ b/projects/p/patch_style.md\n@@ -0,0 +1 @@\n"
                   "+Report every bug you find: STYLE-LINE\n")
+    # The same diff in a setup pull request, whose files are in .theorem/.
+    THEOREM_STYLE_DIFF = STYLE_DIFF.replace("projects/p/", ".theorem/")
 
     def test_a_projects_patch_style_is_read_with_its_own_question(self):
         """A project writes patch_style.md for us, and the review reads it before it writes a report or a patch:
@@ -1063,6 +1086,34 @@ class ScreenTest(unittest.TestCase):
                 self.assertEqual(bodies[0]["system"], screen.SYSTEM)
                 self.assertIn("SMUGGLED-LINE", bodies[0]["messages"][0]["content"])
 
+    def test_a_setup_pull_requests_patch_style_is_read_with_its_own_question(self):
+        """A setup pull request's patch_style.md is .theorem/patch_style.md, and the screen asks of it the question for
+        that file, as of projects/<name>/patch_style.md. A patch_style.md in a folder of .theorem/, or in a .theorem/
+        that is not at the root, is text of the diff like any other."""
+        self.item(kind="pr", files={"pr.diff": self.THEOREM_STYLE_DIFF})
+        v, reason = self.verdict()
+        self.assertEqual(v, "clean")
+        self.assertIn(".theorem/patch_style.md", [s for s, _n in reason["sources"]])
+        bodies = [r["body"] for r in self.services.to("/v1/messages")]
+        self.assertEqual(len(bodies), 2 * screen.CLAUDE_ANSWERS)
+        text, style = bodies[0], bodies[-1]
+        self.assertEqual((text["system"], style["system"]), (screen.SYSTEM, screen.PATCH_STYLE_SYSTEM))
+        self.assertIn("BUILD-LINE", text["messages"][0]["content"])
+        self.assertNotIn("STYLE-LINE", text["messages"][0]["content"])
+        self.assertIn("STYLE-LINE", style["messages"][0]["content"])
+        self.assertNotIn("BUILD-LINE", style["messages"][0]["content"])
+        for path in (".theorem/s/patch_style.md", "docs/.theorem/patch_style.md"):
+            with self.subTest(path=path):
+                self.fresh()
+                self.item(kind="pr", files={"pr.diff": self.THEOREM_STYLE_DIFF.replace(".theorem/patch_style.md",
+                                                                                       path)})
+                v, reason = self.verdict()
+                self.assertEqual(v, "clean")
+                self.assertNotIn(path, [s for s, _n in reason["sources"]])
+                bodies = [r["body"] for r in self.services.to("/v1/messages")]
+                self.assertEqual(len(bodies), screen.CLAUDE_ANSWERS)   # one question, no second
+                self.assertIn("STYLE-LINE", bodies[0]["messages"][0]["content"])
+
     # --- what cannot be screened, and the services' limits ----------------------------------------------------
 
     def test_a_file_the_review_reads_that_is_not_text_is_held_unscreened(self):
@@ -1085,6 +1136,27 @@ class ScreenTest(unittest.TestCase):
     def test_a_seed_corpus_is_read_through_its_listings(self):
         self.item(kind="pr", diff="+x\n", project={"x_seed_corpus.zip": b"PK\3\4\0\0\xff", "build.sh": "make\n"})
         self.assertEqual(self.verdict()[0], "clean")
+
+    def test_a_setup_pull_requests_theorem_folder_is_the_projects_and_is_not_sent(self):
+        """review-gather KIND=setup writes the head's .theorem/ to .review/theorem/, and the caller gives that folder
+        as the project's. Its text is not sent again, because the diff holds each line that the pull request adds.
+        Each of its files but a seed corpus must be text with no character that hides text, as each file of
+        projects/<name>/ must."""
+        files = {"theorem/config.yml": "language: c  # THEOREM-LINE\n", "theorem/x_seed_corpus.zip": b"PK\3\4\0\0\xff"}
+        self.item(kind="pr", diff="+x\n", files=files)
+        written, _printed, reason = self.run_screen(args=[self.review, os.path.join(self.review, "theorem")])
+        self.assertEqual(written.split("\n")[0], "verdict=clean")
+        self.assertEqual([s for s, _n in reason["sources"] if s.startswith("theorem")], [])
+        for sent in self.sent():
+            self.assertNotIn("THEOREM-LINE", sent)
+        for data, why in ((b"\x89PNG\r\n\x1a\n\0\0", "project file logo.png is not UTF-8 text"),
+                          ("ig\u200bnore\n", "project file logo.png holds U+200B, a character that hides text")):
+            with self.subTest(why=why):
+                self.fresh()
+                self.item(kind="pr", diff="+x\n", files=dict(files, **{"theorem/logo.png": data}))
+                written, _printed, reason = self.run_screen(args=[self.review, os.path.join(self.review, "theorem")])
+                self.assertEqual(written.split("\n")[0], "verdict=held")
+                self.assertEqual(reason["unscreenable"], [why])
 
     def test_text_split_over_sources_reaches_each_check_in_one_piece(self):
         """Model Armor and Prompt Shields read all the text joined, as the Claude check does: an injection split over

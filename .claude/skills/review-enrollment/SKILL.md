@@ -63,6 +63,22 @@ In the review job (Claude Code, through `anthropics/claude-code-action`), these 
 | the review comments of other reviewers (G5) | `$IN/review-comments.txt`, and `.reviews` in `$IN/pr.json` |
 | the changes since the last review (a later push) | `$IN/since-last-review.diff` |
 
+For a setup pull request, the pull request on an owner's repository that adds `.theorem/`, `check.yml`'s review job runs `.github/scripts/review-gather` with `KIND=setup` on the folder of its fetch job. That run reads no network, and `$IN` holds these files:
+
+| what the skill asks for | in CI, for a setup pull request |
+|---|---|
+| `DIR` | `$IN/theorem/`: the head's `.theorem/`, as data, with regular files and folders only, in the place of `projects/<name>/` |
+| the fuzz targets in the project's repository | `$IN/source/`: the repository at the head, from GitHub's tarball, with regular files and folders only. If it is missing, `$IN/source.txt` says why |
+| `pr.json`, `pr.diff`, the description | `$IN/pr.json`, `$IN/pr.diff`, `$IN/description.md` |
+| the checks of `theorem app setup` and their reasons, in the place of the triage comment and of the validator's output (C2) | `$IN/setup.txt` |
+| the account that installed the App, and the account that ticked the box of the terms | `$IN/record.json`: `installer` and `ticked_by` |
+| the repository's facts: the repository on GitHub and its contributors | `$IN/repository.txt`. It has no `git ls-remote`, no comparison and no pull requests of a ref |
+| the seed corpora (F3) | `$IN/seeds/<target>.listing.txt` and `$IN/seeds/<target>.hex.txt`, from `$IN/theorem/<target>_seed_corpus.zip`, as above |
+| the review comments of other reviewers (G5) | `$IN/review-comments.txt`, and `.reviews` in `$IN/pr.json` |
+| the changes since the last review (a later push) | `$IN/since-last-review.diff` |
+
+A setup pull request has no build results (`$IN/build/`), no `checks.json`, no triage files, no `checklist.txt` and no `template-history.txt`.
+
 ### A held finding
 
 In `held`, start each finding with the marker line `<!-- held finding -->` at the start of a line, then one field per line, then free text. The workflow never prints `held`; it sends each finding to the disclosure route as a private issue, and adds the pull request, its head, the comment's address and the run.

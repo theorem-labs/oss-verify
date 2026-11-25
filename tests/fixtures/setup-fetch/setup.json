@@ -1,0 +1,1 @@
+[{"name":"rules","result":"pass"},{"name":"statements","result":"pass"},{"name":"terms","result":"fail"},{"name":"scope","result":"fail"},{"name":"name","result":"pass"},{"name":"fork","result":"pass"},{"name":"license","result":"pass"},{"name":"ruleset","result":"fail"}]
