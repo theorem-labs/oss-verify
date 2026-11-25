@@ -1,0 +1,240 @@
+# app/sentences.yaml of theorem-labs/oss-verify.
+#
+# Every text that OSS Verify's two GitHub Apps write. The App Theorem Verify (theorem-verify[bot]) writes the texts
+# on the repositories that install it: its check runs and their buttons, the titles and bodies of the pull requests
+# that it opens, its comments and its commit messages. The App OSS Verify writes its texts on
+# theorem-labs/oss-verify-proofs, such as a publication's commit message and release texts. Each App takes each
+# text from this file, and a test refuses any other text in its code.
+# The file also holds the terms line of a setup pull request's description, which Theorem Verify reads and does
+# not write, so that no App's code holds a text that this file does not hold.
+#
+# Left out of this file:
+# - The texts of this repository's workflows that review outside pull requests and issues. They keep their
+#   own approved texts.
+# - The model's text of the enrollment review's comment, which follows `review.md`. The comment's first line
+#   and its footer are here.
+# - The files that the App commits: statements, contracts, contract checks and proofs. A person at Theorem
+#   approves each file before the App commits it.
+#
+# Each key holds one sentence, or the words that fill a {name} part of another key's sentence. A text of more
+# than one sentence has one key for each sentence, and the App joins them in the order of this file: with a space
+# in a footer, and with an empty line in a body.
+#
+# The App fills each {name} part with one value. The comment beside a text gives the kind of the value of each
+# of its parts: a number, a commit id, a time, a fuzz target's line, a fuzz target's name, a statement's name,
+# a repository's name, a login, a link to a public page, a release's version, or a sentence of another key of
+# this file, which the comment names. No part takes free text: no value is a title, a description or a comment
+# that a person wrote, a bug that Theorem found, or a crash input. No text promises a time, and no link goes to
+# a private repository.
+
+check_run:
+  name: "Theorem Verify"
+  text: "{target_lines}"  # {target_lines}: a fuzz target's line, one for each fuzz target. It is the check's text, and nothing else is.
+  target_line:  # one line per fuzz target, at most 150 characters
+    # The whole line is a fuzz target's line, as `theorem check` gives it. {target}: a fuzz target's name,
+    # PROJECT/TARGET. {plain}, {ubsan}, {asan}, {asan_ubsan}: a sentence of another key of this file, the key of
+    # build_states for that build.
+    form: "{target} plain={plain} ubsan={ubsan} asan={asan} asan-ubsan={asan_ubsan}"
+    build_states:  # the value of each of {plain}, {ubsan}, {asan} and {asan_ubsan}
+      same: "same"        # this build is byte-identical to the verified binary
+      changed: "changed"  # this build differs from the verified binary
+      missing: "missing"  # this build was not made
+    not_verified: "{target} not verified"  # {target}: a fuzz target's name. The fuzz target has no verified binary yet.
+  statement_line:  # one line per statement, in the summaries below
+    form: "{statement}: {statement_state}"  # {statement}: a statement's name. {statement_state}: a sentence of another key of this file, one key of statement_states.
+    statement_states:
+      holds: "holds"  # a proof of it passed for the binaries that this commit builds and for its text
+      needs_work: "needs a proof"  # it had a proof, but not for the binaries that this commit builds; a statement that a proof shows false gets this line too
+      not_met: "needs a proof"  # it has no proof yet
+  check_needed:  # on each new head of a pull request of an enrolled repository, and of a setup pull request
+    conclusion: action_required
+    button: check
+    title: "Not checked yet."
+    summary: "An account with write access runs the check with the button \"Check\" or a comment `@theorem-verify check`."
+  holds:
+    conclusion: success
+    title: "All {count} statements hold."  # {count}: a number
+    summary: "Each statement holds for the binaries that {commit} builds.\n{statement_lines}"  # {commit}: a commit id. {statement_lines}: a sentence of another key of this file, statement_line.form, one line for each statement.
+  no_statements:  # in place of holds, on a commit with no statement in `.theorem/statements/`
+    conclusion: success
+    title: "No statements to check."
+    summary: "This commit has no statements in `.theorem/statements/`."
+  proving:
+    conclusion: failure
+    title: "Proof work is running: {needs_proof} of {count} statements need a proof."  # {needs_proof}, {count}: a number
+    summary: "This check updates.\n{statement_lines}"  # {statement_lines}: a sentence of another key of this file, statement_line.form, one line for each statement.
+  waiting_for_maintainer:  # when a proof shows a statement false; the check never says that a statement does not hold
+    conclusion: failure
+    title: "Proof work is waiting for the maintainer."
+    summary: "The results go to the maintainers.\n{statement_lines}"  # {statement_lines}: a sentence of another key of this file, statement_line.form, one line for each statement.
+  did_not_build:
+    conclusion: failure
+    button: rerun
+    title: "The commit did not build."
+    summary: "{commit} did not build with the build steps in `.theorem/`.\n{statement_lines}"  # {commit}: a commit id. {statement_lines}: a sentence of another key of this file, statement_line.form, one line for each statement.
+  our_fault:
+    conclusion: failure
+    button: rerun
+    title: "A fault on Theorem's side stopped this check."
+    summary: "Nothing is needed from the author."
+  merged_unchecked:  # on a commit of the default branch whose tree no check passed
+    conclusion: failure
+    button: check
+    title: "This commit reached the default branch past the rule."
+    summary: "No check passed for this commit, and an account with write access runs the check with the button \"Check\"."
+  merge_group_unchecked:  # on a merge-group commit when no passing check run of the same tree exists
+    conclusion: failure
+    title: "The merge queue takes this pull request out."
+    summary: "No check passed for the tree of this merge-queue commit, so the author of the pull request runs the check on its head and adds it to the queue again."
+  not_enrolled:  # on each pull request of a repository that is not enrolled, except the setup pull request
+    conclusion: success
+    title: "Not enrolled yet: no statements to check."
+    summary: "This check passes until a pull request from the branch `theorem/setup` enrolls this repository."
+  setup:  # on a setup pull request while a check of setup fails
+    conclusion: failure
+    button: check
+    title: "{failed} of {count} setup checks failed."  # {failed}, {count}: a number
+    summary: "After each fix, ask for the check with the button \"Check\" or a comment `@theorem-verify check`.\n{failing_checks}\n{check_lines}"  # {failing_checks}: a sentence of another key of this file, setup_checks, one line for each check that failed. {check_lines}: a sentence of another key of this file, build_checks.line.form, one line for each fuzz target with a decided check.
+  setup_ready:
+    conclusion: success
+    title: "Setup is ready to merge."
+    summary: "Every check of setup passed at {commit}, and {repository} enrolls when {installer}, who installed the app, merges this pull request.\n{check_lines}"  # {commit}: a commit id. {repository}: a repository's name. {installer}: a login. {check_lines}: a sentence of another key of this file, build_checks.line.form, one line for each fuzz target with a decided check.
+  build_checks:  # the checks of each fuzz target's binaries and properties, as docs/rules.md gives them
+    # A check of the binaries fails for a fuzz target when one of its binaries has the result `fail`, and passes
+    # when each binary has the result `pass`. Any other result decides nothing. A check that decides nothing has
+    # no part in a line, and a fuzz target with no decided check has no line. A result changes no conclusion of
+    # the check run.
+    line:  # one line per fuzz target, at most 200 characters
+      form: "{target}: {check_results}"  # {target}: a fuzz target's name, PROJECT/TARGET. {check_results}: a sentence of another key of this file, build_checks.result.form, one for each check that decided, in the order of build_checks.names, joined with ", ".
+    result:
+      form: "{check} {result}"  # {check}: a sentence of another key of this file, one key of build_checks.names. {result}: a sentence of another key of this file, one key of build_checks.results.
+    names:  # one for each check, at most 20 characters
+      elf: "ELF and instructions"        # each binary is a static riscv64 program, and LPS executes each of its instructions
+      system_calls: "system calls"       # each system call of the binary's runs on its seed inputs is one that LPS has
+      quiet_loud: "quiet and loud"       # the quiet twin writes nothing and ends as the binary ends, on the same inputs
+      instrumented: "instrumented code"  # the binary links no code without the build's sanitizer, other than the code that docs/rules.md allows
+      reach: "reach"                     # a seed input reaches each property check of the fuzz target
+      breakage: "breakages"              # each breakage makes a property check fire, and each property check has one
+    results:
+      pass: "passed"
+      fail: "failed"
+  setup_checks:  # for each check of setup, keyed by its name: what is wrong when it fails, and what the maintainer changes
+    terms: "This pull request's description needs the line `- [x] I accept the [OSS Verify terms](https://theorem.dev/oss-verify/terms/)`, ticked by {installer}."  # {installer}: a login, of the account that installed the App
+    scope: "This pull request changes a file outside `.theorem/` or over 100 files, so change at most 100 files, all in `.theorem/`."
+    name: "Another repository has this project's name, so set another `name` in `.theorem/config.yml`."
+    fork: "This repository is a fork, so set up the repository it was forked from."
+    license: "GitHub finds no license file, or a source-available one, so add an open-source license file."
+    ruleset: "No ruleset of the default branch requires the check \"Theorem Verify\" from the app Theorem Verify with \"Require branches to be up to date before merging\", so add one that does."
+    rules: "`.theorem/` breaks a rule, so change it to follow https://github.com/theorem-labs/oss-verify/blob/main/docs/project-yaml.md."
+    statements: "A file of `.theorem/statements/` loads a module that a statement may not load, so remove that file."
+    build: "The fuzz targets did not build, so fix the build steps in `.theorem/`."
+  setup_missing_step:  # on the merge commit of a setup pull request whose merge did not enroll
+    conclusion: failure
+    title: "The project is not enrolled."
+    summary: "The merge did not enroll {repository}, because {missing_step}."  # {repository}: a repository's name. {missing_step}: a sentence of another key of this file, one key of missing_step.
+    missing_step:
+      box: "the terms box was not ticked"
+      account: "the account that installed the app did not tick the box and merge"
+      checks: "the check \"Theorem Verify\" had not passed at the pull request's head, or the merge changed `.theorem/`"
+  buttons:  # at most 20 characters
+    check: "Check"
+    rerun: "Re-run"
+  button_descriptions:  # GitHub shows these under each button, at most 40 characters
+    check: "Check this commit"
+    rerun: "Run this check again"
+
+outside_proof_check_run:  # on pull requests to theorem-labs/oss-verify-proofs
+  name: "OSS Verify"
+  holds:
+    conclusion: success
+    title: "Every proof holds."
+    summary: "{count} proofs hold at {commit}."  # {count}: a number. {commit}: a commit id.
+  fails:
+    conclusion: failure
+    title: "{failed} of {count} proofs do not hold."  # {failed}, {count}: a number
+    summary: "These proofs do not hold at {commit}: {targets}."  # {commit}: a commit id. {targets}: a fuzz target's name, PROJECT/TARGET, for each proof that does not hold, joined with ", ".
+
+setup_pull_request:  # the maintainer opens it from the branch `theorem/setup`; the App neither opens it nor writes its description
+  # The maintainer's agent writes this line into the description as an unticked task-list item, "- [ ] " before it,
+  # as the skill `theorem-setup` says. The check `terms` of setup passes when this line is ticked, "- [x] ", by the
+  # account that installed the App.
+  terms_line: "I accept the [OSS Verify terms](https://theorem.dev/oss-verify/terms/)"
+
+pull_requests:
+  statements:  # from an issue, or for a pull request from a fork, where an account with write access wrote `@theorem-verify make statements`
+    title: "Statements and contracts for #{issue}"  # {issue}: a number, of that issue or pull request
+    body:
+      what: "This pull request holds the statements and contracts for #{issue}."  # {issue}: a number
+      where: "The statements are in `.theorem/statements/`, and the contracts and contract checks are in `.theorem/contracts/`."
+      code: "Write each function to its contract, run its contract check with your usual build, and push to this branch."
+      merge: "This pull request can merge once the check \"Theorem Verify\" shows that every statement holds."
+  first_statements:  # after the merge of the setup pull request enrolls the repository
+    title: "First statements for {repository}"  # {repository}: a repository's name
+    body:
+      what: "This pull request holds the first statements for {repository}."  # {repository}: a repository's name
+      merge: "This pull request can merge once the check \"Theorem Verify\" shows that every statement holds."
+  proofs:
+    title: "Proofs of {count} statements at {commit}"  # {count}: a number. {commit}: a commit id.
+    body: "This pull request adds the proofs of {count} statements of {repository} at {commit}."  # {count}: a number. {repository}: a repository's name. {commit}: a commit id.
+
+commit_messages:
+  statements: "Add the statements and contracts for #{issue}"  # {issue}: a number
+  first_statements: "Add the first statements for {repository}"  # {repository}: a repository's name
+  proofs: "Add proofs of {count} statements at {commit}"  # {count}: a number. {commit}: a commit id.
+  publication: "Publish the proofs of {count} fuzz targets"  # {count}: a number
+
+releases:  # on theorem-labs/oss-verify-proofs, from a publication
+  publication:
+    title: "{release}"  # {release}: a release's version, such as 2026.11.2
+    body: "The changes are in [CHANGELOG.md]({changelog_link})."  # {changelog_link}: a link to a public page, CHANGELOG.md at the release's tag
+
+enrollment_review:  # today's texts of this repository's enrollment review, reworded, on the setup pull request
+  check_run_name: "Enrollment review"
+  conclusion_sentences:
+    success: "No change is needed."
+    failure: "The changes below are needed."
+    action_required: "No change is asked of you, and the review left some checks open."
+  no_verdict: "The review gave no verdict."
+  no_reason: "The review gave no reason."
+  not_run:
+    text_check:
+      title: "The automated review did not run."
+      summary: "An automated screen of text from accounts without write access did not pass or could not read this pull request, and no change is asked of you."
+    failed:
+      title: "A job of the review failed."
+      summary: "The review gave no verdict."
+  comment:
+    hidden_first_line: "<!-- oss-verify review of {commit} -->"  # {commit}: a commit id, the reviewed head. Not shown.
+    first_line: "{conclusion_sentence}"  # {conclusion_sentence}: a sentence of another key of this file, one key of conclusion_sentences.
+    # The model's text under `review.md` comes next, and this file leaves it out. Then comes the footer.
+    footer:
+      author: "Claude wrote this review of `{commit}`."  # {commit}: a commit id
+      caveat: "It can be wrong."
+      replaced: "A review of a later commit replaces it."
+      screened: "An automated screen passed this pull request first: {screens}."  # only when the screen ran. {screens}: a sentence of another key of this file, the keys of screens for the checks that ran, joined with ", ".
+    screens:
+      model_armor: "Google Cloud Model Armor"
+      prompt_shields: "Azure AI Content Safety Prompt Shields"
+      claude: "a Claude model with no tools"
+
+enrollment_checks_comment:  # today's triage comment of this repository, reworded, on the setup pull request
+  heading: "Enrollment checks: {repository}"  # {repository}: a repository's name
+  columns: ["", "Check", "Result"]
+  rows:  # one row for each check of setup
+    rules: "Form of `.theorem/`"
+    statements: "Statements"
+    build: "Build"
+    terms: "Terms box"
+    scope: "Pull request scope"
+    name: "Project name"
+    fork: "Fork"
+    license: "License"
+    ruleset: "Ruleset"
+  results:
+    pass: "Passed"
+    fail: "Failed"
+  footer: "Setup is finished only when every check passes."
+
+open_pull_requests:  # a person at Theorem posts one of these on each pull request to this repository that is still open when enrollment by pull request ends, then closes it
+  enrollment: "Your project now enrolls, or stays enrolled, through the GitHub App Theorem Verify (https://github.com/apps/theorem-verify) and a pull request that your coding agent writes with this repository's skill `theorem-setup` and opens from the branch `theorem/setup` on your project's repository."  # on an enrollment, a re-pin or a move of an enrolled project
+  deleted_code: "The code this pull request changes leaves this repository when enrollment moves to the GitHub App Theorem Verify, so this pull request closes."  # on a pull request that changes code that the end of enrollment by pull request deletes
