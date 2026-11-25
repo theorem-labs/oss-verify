@@ -20,8 +20,9 @@ The move:
        .github/scripts/take-build-results gives its fixed line, the gather job reads the text and the diff from the
        API, and the comment job posts to that pull request at that head.
   (u)  The list of .github/scripts/steering.py is the patterns that .github/CODEOWNERS owned at commit 62081ee, all of
-       /.github/ and /src/ among them, and each file that CODEOWNERS owns today is a steering file but
-       docs/seeded-projects.tsv (NOT_STEERING): take-project and triage.py read it from the base branch.
+       /.github/ and /src/ among them, and each file that CODEOWNERS owns today is a steering file but the files of
+       NOT_STEERING: take-project and triage.py read docs/seeded-projects.tsv from the base branch, and only tests read
+       app/sentences.yaml, as data, and no workflow runs it.
   (w)  Enroll dispatch sends no enrollment that changes a steering file, and puts no label on it, until a person
        approved its head: for an open pull request and for a merge.
   (x)  No workflow with workflow_dispatch builds the code of a pull request (oss-verify check, docker).
@@ -2497,9 +2498,11 @@ class SteeringFiles(unittest.TestCase):
     # add no steering file: AGENTS*.md and CLAUDE*.md already match each AGENTS.md and CLAUDE.md, and a skill that
     # Claude Code loads in the review job is under .claude/.
     INSTRUCTIONS = ("**/AGENTS.md", "**/CLAUDE.md", "**/SKILL.md", "skills/")
-    # Owned, but no steering file, each with why: a pull request that changes it changes nothing its own runs do.
+    # Owned, but no steering file, each with why: a change to it changes no code that a workflow runs, and nothing that
+    # Claude Code loads in the review job.
     NOT_STEERING = {"/docs/seeded-projects.tsv": "take-project and triage.py read it from the base branch, never from "
-                                                 "the pull request"}
+                                                 "the pull request",
+                    "/app/sentences.yaml": "only tests read it, as data, and no workflow runs it"}
 
     @staticmethod
     def steering():
@@ -2540,8 +2543,7 @@ class SteeringFiles(unittest.TestCase):
         self.assertEqual(self.owned_but_not_steering(codeowners, steering), [])
         # The check reads the owned lines: /.github/ is one of them.
         self.assertIn("/.github/ @theorem-labs/engineering @theorem-labs/research", codeowners)
-        # src/ has no owner, by Sami's choice (dispatch://OSSV-276/ask/6c92b099-08f4-4177-aa5a-6a3fc6292878), and every
-        # file under it is still a steering file.
+        # src/ has no owner, on purpose, and every file under it is still a steering file.
         self.assertIn("/src/", steering.STEERING)
         patterns = [line.split()[0] for line in codeowners.splitlines() if line.strip() and not line.startswith("#")]
         self.assertFalse([pattern for pattern in patterns if pattern.startswith("/src")], patterns)

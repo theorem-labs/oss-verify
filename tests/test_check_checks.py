@@ -3555,15 +3555,16 @@ class Owners(unittest.TestCase):
         *((pattern, True) for pattern in ("**/AGENTS.md", "**/CLAUDE.md", "**/SKILL.md", "skills/")),
         # What runs with a credential, and what changes what a workflow runs (the top of CODEOWNERS). /.github/ owns
         # every workflow and each file added there later; the lines with no owner right after it take back only files
-        # that owned workflows run in jobs with read permissions alone. src/ has no owner, by Sami's choice
-        # (dispatch://OSSV-276/ask/6c92b099-08f4-4177-aa5a-6a3fc6292878); .github/scripts/steering.py keeps it a
-        # steering file, and tests/test_token_jobs.py keeps it out of every job that holds a token.
+        # that owned workflows run in jobs with read permissions alone. src/ has no owner, on purpose;
+        # .github/scripts/steering.py keeps it a steering file, and tests/test_token_jobs.py keeps it out of every job
+        # that holds a token. app/sentences.yaml, the texts of OSS Verify's GitHub Apps, has the same owners as
+        # review.md.
         ("/.github/", True), ("/.github/actionlint.yaml", False), ("/.github/scripts/frame-pointers/", False),
         *((pattern, True) for pattern in (
             "/infra/", "/seeds/", "/docs/seeded-projects.tsv", ".claude/", "CLAUDE*.md", "AGENTS*.md", "/.mcp.json",
             "/*.py", "/pytest.ini", "/.pytest.ini", "/pyproject.toml", "/uv.lock", "/.python-version", "/setup.cfg",
-            "/tox.ini", "/review.md", "/review-change.md", "/review-issue.md", "/.claude/skills/write-to-maintainer/",
-            "/.github/CODEOWNERS")))
+            "/tox.ini", "/review.md", "/app/sentences.yaml", "/review-change.md", "/review-issue.md",
+            "/.claude/skills/write-to-maintainer/", "/.github/CODEOWNERS")))
     # The files that a job of a workflow with a credential names but that have no owner, each with why that is safe:
     # none today. unowned_reads reports an entry that no such workflow names.
     NOT_OWNED = {}
