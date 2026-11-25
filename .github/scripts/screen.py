@@ -247,8 +247,10 @@ def patch_style_form(folder):
 
 PATCH_STYLE_PATH = patch_style_form(r"projects/[^/\s]+")
 SETUP_PATCH_STYLE_PATH = patch_style_form(r"\.theorem")
-# A section that split_patch_style took out of a diff, as a pair of parts(): its path and the section. Its type is the
-# one record that a pair is such a section: finish() reads it as diff text, and claude() asks PATCH_STYLE_SYSTEM of it.
+# A section that split_patch_style took out of a diff, as a pair of parts(): its path and the section. measure() makes
+# one too, of a part of its labelled set under such a path, since the set holds each part's source and text alone. Its
+# type is the one record that a pair is such a section: finish() reads it as diff text, and claude() asks
+# PATCH_STYLE_SYSTEM of it.
 StyleSection = collections.namedtuple("StyleSection", "source text")
 
 
@@ -875,11 +877,12 @@ def claude_word(answer):
 def claude(found):
     """The model, one question for the text and, when the pull request adds a project's patch_style.md, one for that
     file (PATCH_STYLE_SYSTEM): the project writes it for us, and the first question would answer about what the file
-    is for. That file is each pair of found that split_patch_style took out of a diff (StyleSection), in the project's
-    folder that parts() chose for the item's kind; every other pair goes to the first question, the diff with any
-    other patch_style.md in it among them. Each question is asked CLAUDE_ANSWERS times and its word is the majority,
-    since the model answers at its own temperature (the gateway's model takes no other) and one answer on a long
-    ordinary text is a coin with a small bias. Either question's word suspicious holds the item."""
+    is for. That file is each pair of found that is a StyleSection: a section that split_patch_style took out of a
+    diff, in the project's folder that parts() chose for the item's kind, or a part of a labelled set that measure()
+    made one by its path. Every other pair goes to the first question, the diff with any other patch_style.md in it
+    among them. Each question is asked CLAUDE_ANSWERS times and its word is the majority, since the model answers at
+    its own temperature (the gateway's model takes no other) and one answer on a long ordinary text is a coin with a
+    small bias. Either question's word suspicious holds the item."""
     token = anthropic_token()
     base = env("ANTHROPIC_URL")
     style = [pair for pair in found if isinstance(pair, StyleSection)]
@@ -1029,9 +1032,13 @@ def measure():
     items = fetch(env("MEASURE_SET"))["items"]
     results = []
     for item in items:
-        # The set holds each part's source and text alone. A part under the path of a projects/<name>/patch_style.md
-        # is the section that parts() takes out of the diff of an item that is not a setup pull request.
-        found = [StyleSection(s, t) if PATCH_STYLE_PATH.fullmatch(s) else (s, t) for s, t in item["parts"]]
+        # The set holds each part's source and text alone. A part under the path of a project's patch_style.md, in
+        # projects/<name>/ (PATCH_STYLE_PATH) or in .theorem/ (SETUP_PATCH_STYLE_PATH), is the section that parts()
+        # took out of the diff of an item of that kind (split_patch_style), one that is not a setup pull request or one
+        # that is: no other part parts() makes has such a name. So it is a StyleSection, and claude() asks of it the
+        # question that screen() asks.
+        found = [StyleSection(s, t) if PATCH_STYLE_PATH.fullmatch(s) or SETUP_PATCH_STYLE_PATH.fullmatch(s)
+                 else (s, t) for s, t in item["parts"]]
         hidden = [c for c in (hiding(t) for _s, t in found) if c]
         for _ in range(repeats):
             words = {} if hidden else {c: r["word"] for c, r in run_checks(found, ran, sign_in_stops=False).items()}

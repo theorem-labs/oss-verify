@@ -420,25 +420,32 @@ class ScreenTest(unittest.TestCase):
                 self.assertIn("SCREEN_RULE", reason["unscreenable"][-1])
                 self.assertEqual(self.services.to(":sanitizeUserPrompt"), [])
 
-    def test_a_measurement_keeps_the_texts_private_and_counts_each_rule(self):
-        secret = "SET-TEXT-" + MARK
-        self.services.objects["measure/set-v1.json"] = {"items": [
-            {"name": "ordinary one " + secret, "label": "ordinary", "parts": [["body", "A fine report " + secret]]},
-            {"name": "only the model flags", "label": "ordinary", "parts": [["body", "MODEL-ONLY " + secret]]},
-            {"name": "injection", "label": "injection", "parts": [["body", "ARMOR-AND-MODEL " + secret]]},
-            {"name": "hidden", "label": "injection", "parts": [["body", "x\u202Ey " + secret]]}]}
-        self.services.answers[":sanitizeUserPrompt"] = lambda b: armor(
-            "MATCH_FOUND" if "ARMOR-AND-MODEL" in b["userPromptData"]["text"] else "NO_MATCH_FOUND")
-        self.services.answers["/v1/messages"] = lambda b: message(
-            '{"verdict": "suspicious"}' if "MODEL-ONLY" in json.dumps(b) or "ARMOR-AND-MODEL" in json.dumps(b)
-            else '{"verdict": "clean"}')
+    def measure(self, items, repeats):
+        """screen.py --measure as the Measure step runs it, in a process of its own, on a labelled set of items, each
+        answered repeats times: the finished process, which must exit 0 and write no error. The run's summary goes to
+        a file of this test, never to the summary of a workflow that runs these tests."""
+        self.services.objects["measure/set-v1.json"] = {"items": items}
         self.env.update(MEASURE_SET="measure/set-v1.json", MEASURE_OBJECT="measure/runs/acme/model/1-1.json",
-                        MEASURE_REPEATS="2", GITHUB_STEP_SUMMARY=os.path.join(self.dir, "summary"))
+                        MEASURE_REPEATS=str(repeats), GITHUB_STEP_SUMMARY=os.path.join(self.dir, "summary"))
         env = {k: v for k, v in os.environ.items() if not k.startswith(("ACTIONS_", "GITHUB_", "ANTHROPIC_"))}
         env.update(self.env)
         r = subprocess.run([sys.executable, str(SCRIPTS / "screen.py"), "--measure"], env=env,
                            capture_output=True, text=True, timeout=300)
         self.assertEqual((r.returncode, r.stderr), (0, ""))
+        return r
+
+    def test_a_measurement_keeps_the_texts_private_and_counts_each_rule(self):
+        secret = "SET-TEXT-" + MARK
+        self.services.answers[":sanitizeUserPrompt"] = lambda b: armor(
+            "MATCH_FOUND" if "ARMOR-AND-MODEL" in b["userPromptData"]["text"] else "NO_MATCH_FOUND")
+        self.services.answers["/v1/messages"] = lambda b: message(
+            '{"verdict": "suspicious"}' if "MODEL-ONLY" in json.dumps(b) or "ARMOR-AND-MODEL" in json.dumps(b)
+            else '{"verdict": "clean"}')
+        r = self.measure([
+            {"name": "ordinary one " + secret, "label": "ordinary", "parts": [["body", "A fine report " + secret]]},
+            {"name": "only the model flags", "label": "ordinary", "parts": [["body", "MODEL-ONLY " + secret]]},
+            {"name": "injection", "label": "injection", "parts": [["body", "ARMOR-AND-MODEL " + secret]]},
+            {"name": "hidden", "label": "injection", "parts": [["body", "x\u202Ey " + secret]]}], repeats=2)
         with open(self.env["GITHUB_STEP_SUMMARY"]) as f:
             summary = f.read()
         for public in (r.stdout, summary):
@@ -1176,6 +1183,37 @@ class ScreenTest(unittest.TestCase):
         self.assertEqual({b["system"] for b in bodies}, {screen.SYSTEM})
         self.assertIn("STYLE-LINE", bodies[0]["messages"][0]["content"])
         self.assertEqual(reason["checks"]["claude"]["words"], {"the text": "clean"})
+
+    def test_a_measurement_asks_a_patch_style_section_the_screens_question(self):
+        """A labelled set holds the parts of an item as parts() makes them, each part's source and text alone. The
+        section of a patch_style.md that parts() takes out of a diff, in projects/<name>/ or in a setup pull request's
+        .theorem/, is asked the question for that file, and the other parts the question for the text: the questions
+        the screen asks of the same item, so that the counts measure the screen that runs."""
+        def asked():
+            """Each question the model was asked: its system prompt and the text between its two markers."""
+            return [(r["body"]["system"], r["body"]["messages"][0]["content"].split("\n", 1)[1].rsplit("\n", 1)[0])
+                    for r in self.services.to("/v1/messages")]
+
+        for path, diff, setup in (("projects/p/patch_style.md", self.STYLE_DIFF, False),
+                                  (".theorem/patch_style.md", self.THEOREM_STYLE_DIFF, True)):
+            with self.subTest(path=path):
+                self.fresh()
+                self.item(kind="pr", files={"pr.diff": diff}, setup=setup)
+                self.verdict()
+                screened = asked()
+                found, unscreenable = screen.parts(self.review)
+                self.assertEqual(unscreenable, [])
+                self.services.requests.clear()
+                self.measure([{"name": "a pull request", "label": "ordinary", "parts": [list(p) for p in found]}],
+                             repeats=1)
+                measured = asked()
+                n = screen.CLAUDE_ANSWERS
+                self.assertEqual([s for s, _t in measured], [screen.SYSTEM] * n + [screen.PATCH_STYLE_SYSTEM] * n)
+                text, style = measured[0][1], measured[-1][1]
+                self.assertEqual(style, f"[{path}]\n{diff[diff.index('diff --git', 1):]}")
+                self.assertIn("BUILD-LINE", text)
+                self.assertNotIn("STYLE-LINE", text)
+                self.assertEqual(measured, screened)
 
     # --- what cannot be screened, and the services' limits ----------------------------------------------------
 
