@@ -233,7 +233,13 @@ A project can also enroll from its own repository, with the GitHub App Theorem V
 
 Theorem's agents write the files of `statements/` and `contracts/`. The App commits them after a person at Theorem approves them. The maintainer's agent writes each other file.
 
-`theorem app setup` checks this form. Each rule of this page applies to `.theorem/` as it applies to `projects/<name>/`.
+`theorem app setup` checks this form. The rules of this page for `projects/<name>/` apply to `.theorem/` too, with these changes:
+
+* `config.yml` takes the place of `project.yaml`, and it has no `repo` ([below](#configyml)). So the field `repo` of [the table](#the-fields) is not required in `.theorem/`.
+* [The build context](#the-build-context) takes the place of what [dockerfile](#dockerfile) says about the build context. In `.theorem/`, the build context is always the root of the repository.
+* [Limits](#limits) takes the place of the rules of [Rules for each file](#rules-for-each-file) on folders, on names, on sizes and on the number of files. `.theorem/` holds the folders `statements/` and `contracts/`, its 64 files are the files beside these folders, and a file in these folders has the size that its part gives. The rule of that part on `OFT_FRAME_POINTERS` applies to `.theorem/`.
+
+Each other rule of this page applies to `.theorem/` as it applies to `projects/<name>/`.
 
 ### config.yml
 
