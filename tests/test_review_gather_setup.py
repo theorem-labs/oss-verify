@@ -372,6 +372,25 @@ class SetupGather(unittest.TestCase):
         self.assertIn("there is no source to read", (self.out / "source.txt").read_text())
         self.assertTrue((self.out / "setup.txt").exists())
 
+    def test_a_tarball_with_a_bad_header_after_the_first_gives_no_source(self):
+        """tarfile takes a header that it cannot read after the first one (here the last one, whose checksum is
+        broken) for the end of the tar, and raises nothing. The script reads the tar on from that header to its end,
+        finds data there, and gives no source, as for any tar that it cannot read."""
+        self.tar(member(f"{TOP}/after", data=b"after\n"))
+        raw = bytearray(gzip.decompress((self.fetched / "source.tar").read_bytes()))
+        with tarfile.open(fileobj=io.BytesIO(raw)) as given:
+            at = given.getmember(f"{TOP}/after").offset
+        raw[at + 148:at + 156] = b"0000000\x00"
+        (self.fetched / "source.tar").write_bytes(gzip.compress(bytes(raw)))
+        run = self.gather()
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertFalse(os.path.lexists(self.out / "source"))
+        self.assertIn("there is no source to read", (self.out / "source.txt").read_text())
+        self.assertIn(f"review-gather: source.tar is not a tar file that can be read: ReadError: tarfile could not "
+                      f"read the header at byte {at} and took the tar to end there, but the tar holds data from "
+                      "there on", run.stderr.splitlines())
+        self.no_network()
+
     def gather_since(self, diff):
         """Run the script with `diff` as the fetched since-last-review.diff from HEAD, the head of the review comment,
         and a session kept for HEAD. Return the run, after checking that the review's folder has the diff whole."""
@@ -494,7 +513,7 @@ class SetupGather(unittest.TestCase):
         self.assertNotIn("resumes", run.stdout)
 
     def test_no_session_for_another_head_or_without_the_diff(self):
-        diff = "diff --git a/.theorem/config.yml b/.theorem/config.yml\n+sanitizers: [address]\n"
+        diff = "diff --git a/.theorem/config.yml b/.theorem/config.yml\n@@ -0,0 +1 @@\n+sanitizers: [address]\n"
         # Each case: the head of the review comment, the head that the cache's session was kept for, whether FETCHED
         # holds the diff, and whether the script says that the session was kept for another head. A head that is not
         # one commit id is no head, so the script does not compare the cache's head with it.

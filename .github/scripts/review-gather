@@ -331,10 +331,14 @@ gather_setup() {
   # and it names each member that it does not take, with the reason. A PAX header can make a member of the type of a
   # regular file sparse, with holes of any size that the tar holds no byte of, so a member is a sparse file by its
   # header (issparse), whatever its type. It makes each folder and each file itself, and it makes no link, so nothing
-  # that it writes is outside source/. A tar that it cannot read (an error as it opens the tar or reads the header of a
-  # member) gives no source/, and source.txt says so. In a compressed tar (gzip, as GitHub's is, decompresses in
-  # order), an error in the data of a member makes the read of the next header fail too: that member is refused, and
-  # then the tar gives no source/.
+  # that it writes is outside source/. A tar that it cannot read gives no source/, and source.txt says so: an error as
+  # it opens the tar, reads the header of a member or reads the tar to its end, or data after the place where tarfile
+  # stops. TarFile.next() takes a header that it cannot read after the first one (a bad checksum, a block cut short) for
+  # the end of the tar, as it takes the zero block that ends a tar, and raises nothing: the members after it are not
+  # read. So after the last member, it reads the tar from the offset of that header to its end, 64 KiB at a time, and a
+  # byte there that is not zero is an error. That read also makes gzip check the CRC and the length of the data at its
+  # end. In a compressed tar (gzip, as GitHub's is, decompresses in order), an error in the data of a member makes the
+  # read of a header after it fail, or that check: then the tar gives no source/.
   rm -rf "$out/source" "$out/source.txt"
   if python3 -P - "$FETCHED/source.tar" "$out/source" <<'EOF'
 import os, shutil, sys, tarfile
@@ -385,6 +389,12 @@ try:
                 # This run made the file (O_EXCL): it takes away the part that it wrote.
                 os.unlink(path)
                 refused.append((member.name, f"its data cannot be copied: {type(e).__name__}: {e}"))
+        # From the header where next() stopped to the end of the tar (the comment above): zero bytes alone.
+        archive.fileobj.seek(archive.offset)
+        while chunk := archive.fileobj.read(1 << 16):
+            if chunk.count(0) != len(chunk):
+                raise tarfile.ReadError(f"tarfile could not read the header at byte {archive.offset} and took the tar"
+                                        " to end there, but the tar holds data from there on")
 except Exception as e:
     sys.exit(f"review-gather: source.tar is not a tar file that can be read: {type(e).__name__}: {e}")
 for name, why in refused[:20]:
