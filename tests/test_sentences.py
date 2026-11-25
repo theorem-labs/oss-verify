@@ -16,9 +16,9 @@ when each list is empty:
   long_buttons      A label of check_run.buttons has at most 20 characters, and a text of check_run.button_descriptions
                     at most 40. GitHub refuses a longer one.
   missing_keys      The file holds each key of REQUIRED.
-  check_run_states  No state of the check run has the conclusion neutral, because GitHub counts a neutral required
-                    check as passed. Each state of CONCLUSIONS has its conclusion, its button of BUTTONS and its title
-                    of TITLES.
+  check_run_states  No key of the file has the conclusion neutral, because GitHub counts a neutral required check
+                    as passed: each key conclusion, at any depth, is one of ALLOWED. Each state of CONCLUSIONS, under
+                    check_run, has its conclusion, its button of BUTTONS and its title of TITLES.
   does_not_hold     No sentence of the check run says that a statement does not hold. A finding stays private until
                     the maintainer makes it public.
 Each control (its name starts with test_control) changes a copy of the text, and shows that its check names the fault.
@@ -49,7 +49,7 @@ CONCLUSIONS = {
     "setup": "failure", "setup_missing_step": "failure", "merged_unchecked": "failure",
     "merge_group_unchecked": "failure",
 }
-# The conclusions that a state of the check run can have.
+# The conclusions that a state can have: each key conclusion of the file, at any depth, not only under check_run.
 ALLOWED = ("success", "failure", "action_required")
 # The states that show a button, with the key of check_run.buttons that each shows. Every other state shows none.
 BUTTONS = {"check_needed": "check", "setup": "check", "merged_unchecked": "check", "did_not_build": "rerun",
@@ -211,6 +211,21 @@ def check_run_of(text):
     return mapping(mapping(yaml.safe_load(text)).get("check_run"))
 
 
+def conclusions(value, path=""):
+    """Each key conclusion under `value`, at any depth, list items too, as (its key's path, its value)."""
+    found = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_path = f"{path}.{key}" if path else str(key)
+            if key == "conclusion":
+                found.append((key_path, item))
+            found.extend(conclusions(item, key_path))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            found.extend(conclusions(item, f"{path}[{index}]"))
+    return found
+
+
 def long_buttons(text):
     """Each text of a button with more characters than LIMITS gives it."""
     check_run = check_run_of(text)
@@ -238,12 +253,15 @@ def missing_keys(text):
 
 
 def check_run_states(text):
-    """Each state of the check run with a conclusion outside ALLOWED, and each state of CONCLUSIONS without its
-    conclusion, its button or its title. A state is a key of check_run whose mapping has the key conclusion. When the
-    file does not hold a state of CONCLUSIONS, missing_keys names it."""
+    """Each key conclusion of the file with a value outside ALLOWED, at any depth, and each state of CONCLUSIONS
+    without its conclusion, its button or its title. A state of the check run is a key of check_run whose mapping has
+    the key conclusion; CONCLUSIONS, BUTTONS and TITLES are for these states only. A key conclusion elsewhere, such as
+    in a state of outside_proof_check_run, has the rule of ALLOWED alone. When the file does not hold a state of
+    CONCLUSIONS, missing_keys names it."""
     check_run = check_run_of(text)
     states = [*CONCLUSIONS, *(key for key, value in check_run.items()
                                if "conclusion" in mapping(value) and key not in CONCLUSIONS)]
+    allowed = f"{', '.join(ALLOWED[:-1])} or {ALLOWED[-1]}"
     problems = []
     for state in states:
         if state not in check_run:
@@ -251,8 +269,7 @@ def check_run_states(text):
         value = mapping(check_run[state])
         conclusion = value.get("conclusion")
         if conclusion not in ALLOWED:
-            problems.append(f"check_run.{state}.conclusion: {conclusion}, but the conclusion of a state is "
-                            f"{', '.join(ALLOWED[:-1])} or {ALLOWED[-1]}")
+            problems.append(f"check_run.{state}.conclusion: {conclusion}, but the conclusion of a state is {allowed}")
         elif state in CONCLUSIONS and conclusion != CONCLUSIONS[state]:
             problems.append(f"check_run.{state}.conclusion: {conclusion}, not {CONCLUSIONS[state]}")
         button = value.get("button")
@@ -260,6 +277,11 @@ def check_run_states(text):
             problems.append(f"check_run.{state}.button: {button or 'none'}, not {BUTTONS.get(state) or 'none'}")
         if state in TITLES and value.get("title") != TITLES[state]:
             problems.append(f"check_run.{state}.title: \"{value.get('title')}\", not \"{TITLES[state]}\"")
+    # The loop above names each state of check_run whose conclusion is outside ALLOWED, so this loop skips them.
+    named = {f"check_run.{key}.conclusion" for key in check_run}
+    for path, conclusion in conclusions(yaml.safe_load(text)):
+        if path not in named and conclusion not in ALLOWED:
+            problems.append(f"{path}: {conclusion}, but the conclusion of a state is {allowed}")
     return problems
 
 
