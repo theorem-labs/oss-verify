@@ -9,7 +9,7 @@ A rule that cites lines of another document links them at a fixed commit. Thus a
 * The links into this repository, theorem-labs/oss-verify, are to the commit [`889360251058a34691b2b30bdca79d941a0539fb`](https://github.com/theorem-labs/oss-verify/commit/889360251058a34691b2b30bdca79d941a0539fb).
 * The links into the public proofs repository, theorem-labs/oss-verify-proofs, are to the commit [`89eb8357aef1a7c20efddbf4f39c2c0fb9c764a5`](https://github.com/theorem-labs/oss-verify-proofs/commit/89eb8357aef1a7c20efddbf4f39c2c0fb9c764a5).
 
-A rule with no cited lines is new on this page. The rules of a contract are such rules. A link with no line numbers goes to a page of this repository that tells more about the same subject.
+A rule with no cited lines is new on this page. The rules of a contract are such rules. A link with no line numbers goes to a page that tells more about the same subject.
 
 ## How a fuzz target is declared and registered
 

@@ -81,7 +81,7 @@ A fuzz target source in the project directory has a suffix of C or C++: `*.c` `*
 
 ### dockerfile
 
-Use `dockerfile` only if the `Dockerfile` is in your repository. We recommend the path `.theorem/Dockerfile`.
+Use `dockerfile` only if the `Dockerfile` is in your repository. We recommend the path `.oss-verify/Dockerfile`. In the folder `.theorem/` ([below](#theorem-on-your-repository)), put the `Dockerfile` in `.theorem/` and do not set `dockerfile`.
 
 * If the `Dockerfile` and `build.sh` are in the project directory, do not set `dockerfile`. The build context is then the project directory.
 * If you set `dockerfile`, the build context is your repository at the commit that we build. Put `build.sh` next to the `Dockerfile`, unless the `Dockerfile` makes `$SRC/build.sh`. Then put your fuzz target sources, build patches and `sources` file in your repository too. Only `project.yaml`, `patch_style.md` and seed corpora can then be in the project directory.
@@ -276,7 +276,7 @@ The fuzz target must be in `fuzz_targets`. It can be a fuzz target that the buil
 * Beside `statements/` and `contracts/`, it holds at most 64 regular files.
 * It holds no symbolic link.
 * It holds no folder other than `statements/`, `contracts/` and `contracts/<target>/`, where `<target>` is a fuzz target of `config.yml`.
-* Each file name uses only `A-Z a-z 0-9 . _ -` and starts with a letter or digit.
+* Each file beside `statements/` and `contracts/` has a name that uses only `A-Z a-z 0-9 . _ -` and starts with a letter or digit.
 * Each file is UTF-8 text. A seed corpus is the only exception.
 * `config.yml` is at most 128 KiB.
 * `build.sh`, a fuzz target source, a file that `sources` copies or reads, and a build patch are each at most 256 KiB.

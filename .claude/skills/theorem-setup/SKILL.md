@@ -15,7 +15,7 @@ Who writes what:
 
 > **WARNING:** The App Theorem Verify is not made yet. Until it is made, setup refuses each setup pull request, and this skill gives no id of the App for the ruleset (step 8). You can write `.theorem/` now.
 
-Each path in this skill that does not start with `.theorem/` is a file of [theorem-labs/oss-verify](https://github.com/theorem-labs/oss-verify). First read [docs/project-yaml.md](../../../docs/project-yaml.md), with its section [`.theorem/` on your repository](../../../docs/project-yaml.md#theorem-on-your-repository), [docs/rules.md](../../../docs/rules.md), [docs/build-contract.md](../../../docs/build-contract.md), [docs/what-gets-proven.md](../../../docs/what-gets-proven.md) and, for API-level fuzz targets, [docs/dsl.md](../../../docs/dsl.md). Tell the maintainer what the README's ["Who can enroll"](../../../README.md#who-can-enroll) says about Theorem's capacity.
+Each relative link in this skill, and each path that starts with `docs/`, `templates/` or `app/`, is a file of [theorem-labs/oss-verify](https://github.com/theorem-labs/oss-verify). First read [docs/project-yaml.md](../../../docs/project-yaml.md), with its section [`.theorem/` on your repository](../../../docs/project-yaml.md#theorem-on-your-repository), [docs/rules.md](../../../docs/rules.md), [docs/build-contract.md](../../../docs/build-contract.md), [docs/what-gets-proven.md](../../../docs/what-gets-proven.md) and, for API-level fuzz targets, [docs/dsl.md](../../../docs/dsl.md). Tell the maintainer what the README's ["Who can enroll"](../../../README.md#who-can-enroll) says about Theorem's capacity.
 
 `theorem app setup` checks `.theorem/`, and `theorem app build` builds the project from it. You cannot run them, and the maintainer cannot run them: `theorem` is not public yet. The setup check runs them on the setup pull request (step 9).
 
@@ -41,9 +41,9 @@ A project is enrolled today when theorem-labs/oss-verify has `projects/<name>/`,
 4. A `Dockerfile` that the field `dockerfile` names in another place of the repository stays where it is, and `dockerfile` keeps naming it. It already builds from the repository root, and the setup check refuses a setup pull request that changes a file outside `.theorem/`.
 5. Rewrite each `COPY` and each path of a moved `Dockerfile` for the repository root as the build context ([docs/project-yaml.md, "The build context"](../../../docs/project-yaml.md#the-build-context)). For libreac, `COPY build.sh $SRC/` becomes `COPY .theorem/build.sh $SRC/`.
 6. Take the source with `COPY`, not with `fetch-commit`. For libreac, `RUN fetch-commit $SRC/libreac` becomes `COPY . $SRC/libreac`.
-7. Change no build step. Then the build makes the same binaries as the pins: the binaries, by their SHA-256, that Theorem's proofs are about.
+7. Change no other build step. Then the build makes the same binaries as the pins only while the files that the build compiles are the same as at the pinned commit. The source that the build copies is now the head of the setup pull request, so a change that the repository made since the pin changes the binaries and the pins too.
 
-The maintainer answered the questions of step 3 when the project enrolled. Ask only about what they want to change. Do steps 4 to 6 only for a file that is missing or that breaks a rule. A change to a fuzz target or to a build step changes the binaries, so the pins change too. Make such a change only when a fuzz target breaks a rule of [docs/rules.md](../../../docs/rules.md), or when the maintainer asks for it, and say in the description of the setup pull request what changed and why.
+The maintainer answered the questions of step 3 when the project enrolled. Ask only about what they want to change. Do steps 4 to 6 only for a file that is missing or that breaks a rule. A change to a fuzz target, to a build step or to the built source changes the binaries, so the pins change too. Make a change to a fuzz target or a build step only when a fuzz target breaks a rule of [docs/rules.md](../../../docs/rules.md), or when the maintainer asks for it, and say in the description of the setup pull request what changed and why.
 
 ## 3. Ask the maintainer
 
@@ -82,7 +82,7 @@ For each property, find a breakage: a one-line change, in the library or the fuz
 
 A property that no change can make fail checks nothing: write it again. A stop that is not a property, such as `if (!buf) abort();` after a failed allocation, gets `not a property: <reason>` in its comment in place of a record.
 
-A change of several lines can be a patch. Save it with `git diff` into one folder for all such patches, and set `mutants` in `config.yml` to that folder. `.theorem/` can hold no such folder (`docs/project-yaml.md`, "Limits"). So use patches only when the repository already holds that folder. Else write one-line records.
+A change of several lines can be a patch in the folder that `mutants` in `config.yml` names. Use such a patch only when the repository already holds it in that folder. Add no patch to that folder, because the setup pull request changes no file outside `.theorem/`, and `.theorem/` can hold no such folder (`docs/project-yaml.md`, "Limits"). Write each new breakage as a one-line record.
 
 ### 4.5 Make each run end quickly
 
@@ -116,13 +116,12 @@ Start from [templates/.theorem/config.yml](../../../templates/.theorem/config.ym
 
 ## 7. Prepare the setup pull request
 
-1. Commit `.theorem/` on the branch `theorem/setup`. The branch changes only files in `.theorem/`, at most 100.
-2. Write the description of the setup pull request. In a few lines, say what each fuzz target checks, and which files came from where (4.8). Then add this line, exactly as it is here, with the box not ticked:
+1. Write the description of the setup pull request. In a few lines, say what each fuzz target checks, and which files came from where (4.8). Then add this line, exactly as it is here, with the box not ticked:
 
        - [ ] I accept the [OSS Verify terms](https://theorem.dev/oss-verify/terms/)
 
    This line is `- [ ] ` followed by `setup_pull_request.terms_line` of [app/sentences.yaml](../../../app/sentences.yaml). Do not tick the box. The account that installed the App ticks it later (step 10). The setup check reads which account ticked it from the edits of the description.
-3. Show the branch and the description to the maintainer. The maintainer pushes the branch to the repository, and opens the setup pull request from it into the default branch. The App then shows the check "Theorem Verify" with the title "Not checked yet." on the setup pull request.
+2. Show the branch and the description to the maintainer. The maintainer pushes the branch to the repository, and opens the setup pull request from it into the default branch. The App then shows the check "Theorem Verify" with the title "Not checked yet." on the setup pull request.
 
 ## 8. Add the ruleset
 
