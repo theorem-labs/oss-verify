@@ -89,7 +89,7 @@ def pax_record(keyword, value):
 
 
 def bare_header(name, size, kind):
-    """A tar header that holds only the fields that tarfile reads of it: the name `name`, the size `size` in octal
+    """A tar header that holds only the fields that tarfile needs: the name `name`, the size `size` in octal
     digits (none for 0), the tar type `kind` and the checksum, each cut short by NUL bytes, and NUL bytes in each other
     field. No tar writer writes it, but tarfile reads it, and the LZMA stream of a tar of such headers is short."""
     header = bytearray(tarfile.BLOCKSIZE)
@@ -990,12 +990,12 @@ class SetupGather(unittest.TestCase):
 
     def test_a_link_whose_target_needs_a_long_pax_header_is_not_taken_and_the_others_are(self):
         """git archive writes a symbolic link whose target is longer than 100 bytes after an extended header with
-        linkpath. A target of 150,000 bytes gives one record of more than 64 KiB, whose length has six digits, in a
+        linkpath. A target of 1,000,000 bytes gives one record of more than 64 KiB, whose length has seven digits, in a
         header of less than 1 MiB: that link alone is not taken, as any link, and source/ gets each other member, the
         one after it too."""
-        target = "t" * 150000
+        target = "t" * 1000000
         record = pax_record("linkpath", target)
-        self.assertTrue(1 << 16 < len(record) < 1 << 20 and len(str(len(record))) == 6)
+        self.assertTrue(1 << 16 < len(record) < 1 << 20 and len(str(len(record))) == 7)
         self.tar(member(f"{TOP}/longlink", tarfile.SYMTYPE, target), member(f"{TOP}/after", data=b"after\n"))
         (at, extended), (_, link), _ = self.added()
         self.assertEqual((extended, link), (tarfile.XHDTYPE, tarfile.SYMTYPE))

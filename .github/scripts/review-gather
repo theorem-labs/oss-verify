@@ -324,7 +324,7 @@ gather_setup() {
   # link target or a large size. So the script reads that shape alone, and refuses a tar of any other shape rather
   # than reading it.
   # GitHub's tarball is gzip, and both reads below decompress it with gzip alone: the walk with gzip.open, and tarfile
-  # with r:gz, which opens the same GzipFile, so that they read the same bytes. A file that does not start with the
+  # with r:gz, which opens a GzipFile too, so that they read the same bytes. A file that does not start with the
   # two bytes of gzip, 1f 8b, is refused before either reads it. tarfile's r:* would try bzip2 and xz before a plain
   # tar, and its xz reads the LZMA-alone format too, which has no magic: a plain tar could hold, in fields that the
   # walk does not read, a stream that tarfile would read as another tar.
@@ -335,17 +335,18 @@ gather_setup() {
   # before the header of a folder, a regular file or a symbolic link, with size only before a file and linkpath only
   # before a link. A PAX header holds at most 1 MiB of records "<length> <keyword>=<value>\n", which fill it exactly,
   # with no keyword twice, and zero bytes after them in its last block, where tarfile reads records too. The walk
-  # holds each PAX header in memory, and the bound keeps that small: git archive writes a PAX header only for a path,
-  # a link target or a size, and no path or link target of a real tree comes near 1 MiB. A folder or a link has the
-  # size 0. A member of any other type (a hard link, a device, a FIFO, a GNU sparse file or long name) is refused. The
-  # tar ends at its first block of zero bytes, and each byte after it is zero; that read makes gzip check its CRC and
-  # length.
+  # holds each PAX header in memory, and the bound keeps that small: git archive writes an extended PAX header only
+  # for a path, a link target or a size, and no path or link target of a real tree comes near 1 MiB. A folder or a
+  # link has the size 0. A member of any other type (a hard link, a device, a FIFO, a GNU sparse file or long name) is
+  # refused. The tar ends at its first block of zero bytes, and each byte after it is zero; that read makes gzip check
+  # its CRC and length.
   # Then tarfile reads the tar, and each member that it reads is the walk's next one: at the same offset, with its data
   # at the same offset, of the same size and type. After the last, no member of the walk is left. So tarfile takes no
   # member that the walk did not read, and skips none (it takes a header that it cannot read after the first for the
   # end of the tar, and raises nothing).
   # A refused tar gives no source/, and source.txt says so. The reason names what is wrong: for a file that is not
-  # gzip, its first bytes; else the byte offset of the header or the record, and what is wrong there.
+  # gzip, its first bytes; for a gzip stream that gzip cannot read, gzip's or zlib's own error; else the byte offset of
+  # the header or the record, and what is wrong there.
   # source/ gets what is in the tar's one top folder, <owner>-<name>-<commit>/. It does not take a symbolic link, a
   # member whose name holds a NUL byte (a PAX path can hold one, and no path of the file system can), a member whose
   # path is absolute or has a part "..", a member outside the top folder, a member whose folder or file it cannot make
@@ -368,7 +369,8 @@ RECORD = re.compile(rb"([1-9][0-9]{0,6}) ([^=]*)=")
 
 
 class ShapeError(Exception):
-    """A tar of a shape that git archive does not write, or that tarfile reads otherwise (the comment above)."""
+    """A file that is not gzip, or a tar of a shape that git archive does not write, or that tarfile reads otherwise
+    (the comment above)."""
 
 
 def records(kind, at, data):
@@ -397,8 +399,9 @@ def records(kind, at, data):
 
 def walk(path):
     """[(offset, offset of the data, size, type)] of each member of the tar at `path`, as tarfile gives them: the
-    offset of a member with an extended PAX header is that of the header. A file that is not gzip, or a tar of another
-    shape, raises ShapeError."""
+    offset of a member with an extended PAX header is that of the header. A file that does not start with the bytes of
+    gzip, or a tar of another shape, raises ShapeError; a gzip stream that gzip cannot read raises gzip's or zlib's own
+    error."""
     with open(path, "rb") as raw:
         magic = raw.read(2)
     if magic != b"\x1f\x8b":
