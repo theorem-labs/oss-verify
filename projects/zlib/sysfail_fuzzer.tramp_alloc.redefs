@@ -1,0 +1,37 @@
+# tramp_alloc.redefs - the C allocation family, renamed to the trampolines.
+#
+# Fed to `llvm-objcopy --redefine-syms=` (OV_DSL_REDEFS) over DERIVED copies
+# of the library archive and of the driver object and its quiet build (never
+# the archive itself, never libc.a / libc++*.a / libunwind.a / libclang_rt.* /
+# cli.o), so that every reference the library's objects, and the library code
+# the driver compiles from its headers, make to one of these names
+# resolves to the tramp_<name> trampoline in tramp_alloc.o (src/tramp_alloc.c),
+# which ticks the process-wide allocation-failure schedule once and then
+# calls the real function. Applied to every selected archive; the C++ map
+# (tramp_alloc_cxx.redefs) is added when `llvm-nm -u` shows an operator-new
+# reference. Design: the allocation-failure design, 4.2.
+#
+# Format: one `old new` pair per line, whitespace-separated; `#` starts a
+# comment (both llvm-objcopy and GNU objcopy read this shape). A rename of a
+# name the archive does not reference is a no-op, which is why the two names
+# the survey found 0 references for (memalign, valloc) are still here: the
+# map is the contract, the survey is a measurement.
+#
+# DELIBERATELY ABSENT: free, malloc_usable_size (and operator delete, in the
+# C++ map). They allocate nothing, so they have no tick; and the trampolines
+# return the REAL allocator's pointer, so the pointer a renamed malloc hands
+# the library is exactly the one an unrenamed free expects -- pairing needs no
+# counterpart. Also absent: pvalloc (musl has none) and libc-internal callers
+# of these names (fopen, getdelim, regcomp, strdup's own malloc): they are in
+# libc.a, which is never renamed, and a NULL there would be "a counterexample
+# that refutes nothing" (faultalloc.h).
+malloc tramp_malloc
+calloc tramp_calloc
+realloc tramp_realloc
+reallocarray tramp_reallocarray
+aligned_alloc tramp_aligned_alloc
+posix_memalign tramp_posix_memalign
+memalign tramp_memalign
+valloc tramp_valloc
+strdup tramp_strdup
+strndup tramp_strndup

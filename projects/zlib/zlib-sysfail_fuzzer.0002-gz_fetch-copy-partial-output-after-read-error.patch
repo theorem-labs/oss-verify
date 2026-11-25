@@ -1,0 +1,25 @@
+zlib gz_fetch(): in transparent (COPY) mode, point x.next at the output buffer before gz_load() fills it, so a
+read that delivers some bytes and then fails leaves x.next at those bytes.
+
+Without it, gz_read copies x.have bytes from a stale pointer (gzread.c:369 at 99623ef7), which can read past the
+output buffer.
+
+Upstream: madler/zlib pull request #1363, head commit 37627fd3bb4726e064e43cbc048e740e8c6478c0, its only commit.
+The diff below is that commit's diff, unchanged.
+
+diff --git a/gzread.c b/gzread.c
+index b18f01bf9..fbade87f2 100644
+--- a/gzread.c
++++ b/gzread.c
+@@ -269,10 +269,10 @@ local int gz_fetch(gz_statep state) {
+                 return 0;
+             break;
+         case COPY:      /* -> COPY */
++            state->x.next = state->out;
+             if (gz_load(state, state->out, state->size << 1, &(state->x.have))
+                     == -1)
+                 return -1;
+-            state->x.next = state->out;
+             return 0;
+         case GZIP:      /* -> GZIP or LOOK (if end of gzip stream) */
+             strm->avail_out = state->size << 1;
