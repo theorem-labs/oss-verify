@@ -89,7 +89,7 @@ For a setup pull request, these rules of this section change:
 - `review.md`, "The review of a setup pull request", says which checks it keeps, takes from the folder `$IN`, or drops. A dropped check needs no file, so a missing file never makes it **person**. Its verdict is **pass**, with the reason that `review.md` gives.
 - No report is folded under your comment. Do not write "the report below".
 - `DIR` is `$IN/theorem/`. The checkout holds no project directory of the pull request.
-- On a later push, `$IN/since-last-review.diff` is the diff of the whole pull request, from the head of your last review to the new head. A new request comes only from that diff. Check D3 makes no exception, because the review of a setup pull request drops it.
+- On a later push, `$IN/since-last-review.diff` is the changes to `.theorem/` from the head of your last review to the new head. It has no change of another file, such as a change of the default branch that the maintainer merged into `theorem/setup`. A new request comes only from that diff. Check D3 makes no exception, because the review of a setup pull request drops it.
 - In a held finding, `upstream repository` is the repository of the pull request, and `upstream commit` is its head.
 
 ### A held finding

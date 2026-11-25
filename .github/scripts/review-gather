@@ -66,9 +66,10 @@
 # description.md, as for an enrollment; theorem/, in the place of projects/<name>/; setup.txt, the checks of
 # setup.json and the reasons of setup.txt, in the place of validate.txt and the triage comment; record.json as it is;
 # repository.txt, from repository.json and contributors.json; source/, from source.tar; the seed listings of the seed
-# corpora of theorem/, as for an enrollment; and since-last-review.diff when FETCHED holds it. When
-# last-review-head.txt names a head, FETCHED holds since-last-review.diff, and LAST_REVIEW names a session kept for
-# that head, it writes `session` and `last` to GITHUB_OUTPUT, as for a change.
+# corpora of theorem/, as for an enrollment; and since-last-review.diff when FETCHED holds it, with only its sections
+# of files under .theorem/, as an enrollment's has only those of projects/<name>/. When last-review-head.txt names a
+# head, FETCHED holds since-last-review.diff, and LAST_REVIEW names a session kept for that head, it writes `session`
+# and `last` to GITHUB_OUTPUT, as for a change.
 # The runner reads none of its output as a workflow command: the gathered text is the pull request's or the issue's.
 resume=$(openssl rand -hex 16) && echo "::stop-commands::$resume"
 trap 'echo "::$resume::"' EXIT
@@ -196,9 +197,11 @@ gather_setup() {
   # The repository at the head, as data, from GitHub's tarball. Each of its members is in one top folder,
   # <owner>-<name>-<commit>/, and source/ gets what is in that folder. It takes only a folder or a regular file. It
   # does not take a symbolic link or a hard link, a device, a FIFO, a sparse file, a member whose path is absolute or
-  # has a part "..", or a member outside the top folder, and it names each one that it does not take. It makes each
-  # folder and each file itself, and it makes no link, so nothing that it writes is outside source/. A tar that it
-  # cannot read gives no source/, and source.txt says so.
+  # has a part "..", or a member outside the top folder, and it names each one that it does not take. A PAX header can
+  # make a member of the type of a regular file sparse, with holes of any size that the tar holds no byte of, so a
+  # member is a sparse file by its header (issparse), whatever its type. It makes each folder and each file itself,
+  # and it makes no link, so nothing that it writes is outside source/. A tar that it cannot read gives no source/,
+  # and source.txt says so.
   rm -rf "$out/source" "$out/source.txt"
   if python3 -P - "$FETCHED/source.tar" "$out/source" <<'EOF'
 import os, shutil, sys, tarfile
@@ -221,6 +224,8 @@ try:
             try:
                 if member.isdir():
                     os.makedirs(path, exist_ok=True)
+                elif member.issparse():
+                    refused.append((member.name, "it is a sparse file"))
                 elif member.type in (tarfile.REGTYPE, tarfile.AREGTYPE):
                     os.makedirs(os.path.dirname(path), exist_ok=True)
                     file = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
@@ -245,8 +250,13 @@ EOF
       > "$out/source.txt"
   fi
   seed_listings "$out/theorem"
+  # The diff since the last review, with only its sections of files under .theorem/, as since_diff (below) keeps only
+  # those of projects/<name>/ for an enrollment: a setup pull request changes only .theorem/, but a merge of the
+  # default branch into theorem/setup puts each change of that branch in the diff from the last review's head.
   if [[ -f $FETCHED/since-last-review.diff && ! -L $FETCHED/since-last-review.diff ]]; then
-    keep since-last-review.diff cat -- "$FETCHED/since-last-review.diff"
+    keep since-last-review.diff awk -v a="a/.theorem/" -v b="b/.theorem/" \
+      '/^diff --git / { take = index($0, "diff --git " a) == 1 || index($0, " " b) > 0 } take' \
+      "$FETCHED/since-last-review.diff"
   fi
   # As for a change: the head that the last review reviewed comes from the App's review comment, which the fetch job
   # read (last-review-head.txt), and LAST_REVIEW gives the session's id only when it names that same head.

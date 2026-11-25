@@ -247,6 +247,22 @@ class SetupGather(unittest.TestCase):
         self.assertIn("NOTICE", tree(source))
         self.no_network()
 
+    def test_a_sparse_file_in_the_tarball_is_not_taken(self):
+        """A PAX header makes a member of the type of a regular file sparse, with a hole of 1 GiB that the tar holds no
+        byte of. It is not taken, and nothing large is written."""
+        sparse = tarfile.TarInfo(f"{TOP}/sparse")
+        sparse.pax_headers = {"GNU.sparse.map": "0,0", "GNU.sparse.size": str(1 << 30)}
+        self.tar((sparse, None))
+        with tarfile.open(self.fetched / "source.tar") as given:
+            self.assertTrue(given.getmember(f"{TOP}/sparse").issparse())
+        run = self.gather()
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertFalse(os.path.lexists(self.out / "source" / "sparse"))
+        self.assertIn(f"not taken: '{TOP}/sparse': it is a sparse file", run.stderr)
+        self.assertLess(sum(path.lstat().st_size for path in self.root.rglob("*") if path.is_file()), 1 << 20)
+        self.assertIn("NOTICE", tree(self.out / "source"))
+        self.no_network()
+
     def test_a_path_that_leaves_the_folder_is_not_taken(self):
         outside = self.root / "absolute"
         self.tar(member(f"{TOP}/../../dotdot", data=b"x"), member(f"{TOP}/debian/../../../dotdot", data=b"x"),
@@ -301,13 +317,33 @@ class SetupGather(unittest.TestCase):
         self.assertIn(f"resumes the session {SESSION}", run.stdout)
         self.no_network()
 
+    def test_the_diff_since_the_last_review_keeps_only_the_sections_of_theorem(self):
+        """A merge of the default branch into theorem/setup puts each change of that branch in the fetched diff: the
+        review gets only the sections of .theorem/, and it still resumes the session."""
+        theorem = ("diff --git a/.theorem/config.yml b/.theorem/config.yml\n--- a/.theorem/config.yml\n"
+                   "+++ b/.theorem/config.yml\n@@ -1 +1,2 @@\n sanitizers:\n+  - address\n")
+        other = "diff --git a/src/x.c b/src/x.c\n--- a/src/x.c\n+++ b/src/x.c\n@@ -1 +1 @@\n-int x;\n+int y;\n"
+        (self.fetched / "last-review-head.txt").write_text(HEAD + "\n")
+        (self.fetched / "since-last-review.diff").write_text(theorem + other)
+        (self.root / "last-review").write_text(f"session={SESSION} head={HEAD}\n")
+        run = self.gather(LAST_REVIEW=str(self.root / "last-review"))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual((self.out / "since-last-review.diff").read_text(), theorem + "(exit status 0)\n")
+        self.assertEqual(self.written(), f"session={SESSION}\nlast={HEAD}\n")
+        self.assertIn(f"resumes the session {SESSION}", run.stdout)
+        self.no_network()
+
     def test_no_session_for_another_head_or_without_the_diff(self):
         diff = "diff --git a/.theorem/config.yml b/.theorem/config.yml\n+sanitizers: [address]\n"
-        for why, head, kept_for, with_diff in (("the cache's session is another head's", HEAD, OTHER, True),
-                                               ("no diff: the head is not an ancestor", HEAD, HEAD, False),
-                                               ("no review comment", "", HEAD, True),
-                                               ("a head that is not a commit id", "main", HEAD, True),
-                                               ("a head of capitals", HEAD.upper(), HEAD.upper(), True)):
+        # Each case: the head of the review comment, the head that the cache's session was kept for, whether FETCHED
+        # holds the diff, and whether the script says that the session was kept for another head. A head that is not
+        # one commit id is no head, so the script does not compare the cache's head with it.
+        for why, head, kept_for, with_diff, another in (
+                ("the cache's session is another head's", HEAD, OTHER, True, True),
+                ("no diff: the head is not an ancestor", HEAD, HEAD, False, False),
+                ("no review comment", "", HEAD, True, False),
+                ("a head that is not a commit id", "main", HEAD, True, False),
+                ("a head of capitals", HEAD.upper(), HEAD, True, False)):
             with self.subTest(why=why):
                 self.setUp()
                 (self.fetched / "last-review-head.txt").write_text(head + "\n" if head else "")
@@ -319,6 +355,8 @@ class SetupGather(unittest.TestCase):
                 self.assertEqual(self.written(), "")
                 # The diff is still the review's to read when the folder holds it.
                 self.assertEqual((self.out / "since-last-review.diff").exists(), with_diff)
+                said = [line for line in run.stdout.splitlines() if "kept for" in line]
+                self.assertEqual(bool(said), another, run.stdout)
         # The cache's file of another shape, or none.
         self.setUp()
         (self.fetched / "last-review-head.txt").write_text(HEAD + "\n")
