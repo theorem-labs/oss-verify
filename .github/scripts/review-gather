@@ -328,33 +328,67 @@ gather_setup() {
   # say), or a member whose data it cannot copy, because the read of the data or the write of the file fails. Any error
   # while it makes a member's folder or file or copies its data refuses that member alone, with its reason, and when
   # the error comes in the copy, it takes away the file that it made for the member. It goes on with the other members,
-  # and it names each member that it does not take, with the reason. A PAX header can make a member of the type of a
-  # regular file sparse, with holes of any size that the tar holds no byte of, so a member is a sparse file by its
-  # header (issparse), whatever its type. It makes each folder and each file itself, and it makes no link, so nothing
-  # that it writes is outside source/. A tar that it cannot read gives no source/, and source.txt says so: an error as
-  # it opens the tar, reads the header of a member or reads the tar to its end, or data after the place where tarfile
-  # stops. tarfile reads a PAX size that is not a number as 0, and then reads the next header from the data of that
-  # member, so a PAX record of a length (size, GNU.sparse.size or GNU.sparse.realsize) that is not a decimal number is
-  # an error too, as it is for GNU tar. TarFile.next() takes a header that it cannot read after the first one (a bad
-  # checksum, a block cut short) for the end of the tar, as it takes the zero block that ends a tar, and raises
-  # nothing: the members after it are not read. It takes a PAX header, the first one too, for the end of the tar in the
-  # same way, after it has read the header after it, only for a GNU.sparse.offset or GNU.sparse.numbytes that is not a
-  # number, or a negative size; any other record that it cannot read raises, or ends the tar on the PAX header itself.
-  # So after the last member, it reads the tar from the offset where the last next() began to its end, 64 KiB at a
-  # time, and a byte there that is not zero is an error. It does not read from TarFile.offset: for such a PAX header,
-  # next() reads the header after it first, which moves TarFile.offset past the data of that member, and only then
-  # finds the record that it cannot read. Data after the two zero blocks that end the tar is an error too: POSIX lets a
-  # tar hold any bytes there, but GitHub's tarballs (git archive) hold zero bytes alone there, so the rule stays
-  # strict. That read also makes gzip check the CRC and the length of the data at its end. In a compressed tar (gzip,
-  # as GitHub's is, decompresses in order), an error in the data of a member makes the read of a header after it fail,
-  # or that check: then the tar gives no source/.
+  # and it names each member that it does not take, with the reason. A GNU sparse header (type S) gives a member holes
+  # of any size that the tar holds no byte of: such a member is a sparse file (issparse). It makes each folder and each
+  # file itself, and it makes no link, so nothing that it writes is outside source/. A tar that it cannot read gives no
+  # source/, and source.txt says so: an error as it opens the tar, reads the header of a member or reads the tar to its
+  # end, a PAX record that it refuses (below), or data after the place where tarfile stops. tarfile reads an extended
+  # PAX record size that is not a number as 0, and then reads the next header from the data of that member. A global
+  # record size on a member with no extended header leaves the offset on the ustar size (_proc_builtin takes the
+  # offset before it applies the global records), so it only empties the data, and that member is not taken whole
+  # either. member.pax_headers holds only the last set of records that tarfile applied: an extended header before
+  # another extended header or a global one replaces the set that holds the size. So a TarInfo of its own checks each
+  # set of PAX records that tarfile applies, extended, nested or global, before tarfile applies it: a size is 1 to 20
+  # ASCII digits (GNU tar takes ASCII digits alone, and 2^64 has 20 digits; int() also takes 1_0, +2 and the digits of
+  # other scripts, and refuses more than 4300 digits), and each GNU.sparse.* record is refused, since it takes no
+  # sparse file, and such a record sets the length of a member too. The error is of its own class: tarfile.open()
+  # hides a ReadError from the first member in a message of its own. If tarfile.TarInfo has no _apply_pax_info, the
+  # tar gives no source/. TarFile.next() takes a header that it cannot read after the first one (a bad checksum, a
+  # block cut short) for the end of the tar, as it takes the zero block that ends a tar, and raises nothing: the
+  # members after it are not read; only a header right after a PAX header or a GNU long name raises. It takes a PAX
+  # header for the end of the tar in the same way: on the PAX header itself for a record that is not of the form
+  # "<length> <keyword>=<value>\n" (the first header of the tar raises), and, the first one too, after it has read the
+  # header after it, for a GNU.sparse.offset or GNU.sparse.numbytes that is not a number beside a GNU.sparse.size.
+  # With the GNU.sparse.* records refused, those records reach no member either way. It reads an mtime, uid or gid
+  # that is not a number as 0 and goes on, and it applies no atime or ctime: no offset moves, and the reader uses none
+  # of them. So after the last member, it reads the tar from the offset where the last next() began to its end, 64 KiB
+  # at a time, and a byte there that is not zero is an error. It does not read from TarFile.offset: for such a PAX
+  # header, next() reads the header after it first, which moves TarFile.offset past the data of that member, and only
+  # then finds the record that it cannot read. Data after the two zero blocks that end the tar is an error too: POSIX
+  # lets a tar hold any bytes there, but GitHub's tarballs (git archive) hold zero bytes alone there, so the rule
+  # stays strict. That read also makes gzip check the CRC and the length of the data at its end. In a compressed tar
+  # (gzip, as GitHub's is, decompresses in order), an error in the data of a member makes the read of a header after
+  # it fail, or that check: then the tar gives no source/.
   rm -rf "$out/source" "$out/source.txt"
   if python3 -P - "$FETCHED/source.tar" "$out/source" <<'EOF'
 import os, re, shutil, sys, tarfile
 tar, into = sys.argv[1], sys.argv[2]
 top, refused = None, []
+
+
+class PaxError(Exception):
+    """A PAX record that the script refuses (the comment above)."""
+
+
+class CheckedInfo(tarfile.TarInfo):
+    def _apply_pax_info(self, pax_headers, encoding, errors):
+        # tarfile calls this with each set of PAX records that it applies to a member: extended, nested or global.
+        for keyword, value in pax_headers.items():
+            if keyword.startswith("GNU.sparse."):
+                why = "is for a sparse file"
+            elif keyword == "size" and not re.fullmatch(r"[0-9]{1,20}", value):
+                why = "is not 1 to 20 ASCII digits"
+            else:
+                continue
+            raise PaxError(f"the PAX record {keyword} of {self.name!r} {why}: {value[:40]!r}")
+        super()._apply_pax_info(pax_headers, encoding, errors)
+
+
 try:
-    with tarfile.open(tar, "r:*") as archive:
+    # A tarfile that applies the PAX records in a method of another name would skip the check.
+    if not callable(getattr(tarfile.TarInfo, "_apply_pax_info", None)):
+        raise PaxError("tarfile.TarInfo has no _apply_pax_info, so its PAX records cannot be checked")
+    with tarfile.open(tar, "r:*", tarinfo=CheckedInfo) as archive:
         os.mkdir(into)
         # Where the last next() began (the comment above). tarfile.open() runs the first one, from byte 0, and each
         # one after it begins at the offset where the member before it left archive.offset: nothing in the loop moves
@@ -362,13 +396,6 @@ try:
         start = 0
         for member in archive:
             start = archive.offset
-            # A PAX record of a length that is not a decimal number (the comment above). A decimal number is ASCII
-            # digits alone, as for GNU tar: int() also takes 1_0, " 2", "+2" and the digits of other scripts.
-            for keyword in ("size", "GNU.sparse.size", "GNU.sparse.realsize"):
-                value = member.pax_headers.get(keyword)
-                if value is not None and not re.fullmatch(r"[0-9]+", value):
-                    raise tarfile.ReadError(f"the PAX record {keyword} of {member.name!r} is not a decimal number: "
-                                            f"{value[:40]!r}")
             # os.makedirs() and os.open() refuse a name that holds a NUL byte with ValueError, so this refuses that
             # member first, with its own reason.
             if "\x00" in member.name:

@@ -43,9 +43,10 @@ HEAD, OTHER = "b" * 40, "c" * 40
 BAD_PAX = {"GNU.sparse.size": "10", "GNU.sparse.offset": "abc"}
 # The reason that the script gives for a tar with a byte that is not zero after the place where tarfile ends it.
 ENDED = "ReadError: tarfile ended the tar at byte {}, but the tar holds bytes that are not zero from there on"
-# The reason that the script gives for a PAX record of a length that is not a decimal number: its keyword, the name of
-# the member and the value.
-NOT_DECIMAL = "ReadError: the PAX record {} of {!r} is not a decimal number: {!r}"
+# The reasons that the script gives for a PAX record that it refuses, each with the name of the member and the value:
+# a size that is not 1 to 20 ASCII digits, and a record GNU.sparse.*, with its keyword.
+NOT_DIGITS = "PaxError: the PAX record size of {!r} is not 1 to 20 ASCII digits: {!r}"
+SPARSE_RECORD = "PaxError: the PAX record {} of {!r} is for a sparse file: {!r}"
 
 
 def member(name, kind=tarfile.REGTYPE, link="", data=None, pax_headers=None):
@@ -55,6 +56,24 @@ def member(name, kind=tarfile.REGTYPE, link="", data=None, pax_headers=None):
     info.type, info.linkname, info.size = kind, link, len(data or b"")
     info.pax_headers = dict(pax_headers or {})
     return info, data
+
+
+def pax_header(kind, record):
+    """A PAX header for SetupGather.tar, extended (tarfile.XHDTYPE) or global (tarfile.XGLTYPE), whose data is
+    `record`: "<length> <keyword>=<value>\\n", whose length counts the whole record, its own digits too."""
+    info = tarfile.TarInfo("pax_global_header" if kind == tarfile.XGLTYPE else "././@PaxHeader")
+    info.type, info.size = kind, len(record)
+    return info, record
+
+
+def x_hides_z(pax_headers):
+    """Two members for SetupGather.tar: X, with the PAX records `pax_headers`, whose header gives it 512 bytes, which
+    hold the header of Y, of 1024 bytes, which hold the header and the data of Z; and Z. A tarfile that reads X as
+    empty reads the header of Y in its data, and Z is in the data of Y, so it does not read Z."""
+    y = tarfile.TarInfo(f"{TOP}/Y")
+    y.size = 2 * tarfile.BLOCKSIZE
+    return (member(f"{TOP}/X", data=y.tobuf(tarfile.USTAR_FORMAT), pax_headers=pax_headers),
+            member(f"{TOP}/Z", data=b"z\n"))
 
 
 def tree(folder):
@@ -269,19 +288,30 @@ class SetupGather(unittest.TestCase):
         self.no_network()
 
     def test_a_sparse_file_in_the_tarball_is_not_taken(self):
-        """A PAX header makes a member of the type of a regular file sparse, with a hole of 1 GiB that the tar holds no
-        byte of. It is not taken, and nothing large is written."""
-        sparse = tarfile.TarInfo(f"{TOP}/sparse")
-        sparse.pax_headers = {"GNU.sparse.map": "0,0", "GNU.sparse.size": str(1 << 30)}
-        self.tar((sparse, None))
+        """A GNU sparse header (type S) makes a member sparse, with a hole of 1 GiB that the tar holds no byte of: its
+        size of 1 GiB is in the 12 bytes at 483 of the header, set here, with the checksum of the header made again.
+        The script refuses each PAX record GNU.sparse.* outright
+        (test_a_tarball_with_a_pax_sparse_size_gives_no_source), so this is the one form of a sparse file that reaches
+        its loop. That member alone is not taken, nothing large is written, and source/ gets each other member."""
+        self.tar(member(f"{TOP}/sparse", tarfile.GNUTYPE_SPARSE))
+        raw = bytearray(gzip.decompress((self.fetched / "source.tar").read_bytes()))
+        with tarfile.open(fileobj=io.BytesIO(raw)) as given:
+            at = given.getmember(f"{TOP}/sparse").offset
+        raw[at + 483:at + 495] = b"%011o\x00" % (1 << 30)
+        raw[at + 148:at + 156] = b" " * 8
+        raw[at + 148:at + 156] = b"%06o\x00 " % sum(raw[at:at + tarfile.BLOCKSIZE])
+        (self.fetched / "source.tar").write_bytes(gzip.compress(bytes(raw)))
         with tarfile.open(self.fetched / "source.tar") as given:
-            self.assertTrue(given.getmember(f"{TOP}/sparse").issparse())
+            sparse = given.getmember(f"{TOP}/sparse")
+            self.assertEqual((sparse.issparse(), sparse.size, sparse.pax_headers), (True, 1 << 30, {}))
         run = self.gather()
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertFalse(os.path.lexists(self.out / "source" / "sparse"))
         self.assertIn(f"not taken: '{TOP}/sparse': it is a sparse file", run.stderr)
         self.assertLess(sum(path.lstat().st_size for path in self.root.rglob("*") if path.is_file()), 1 << 20)
-        self.assertIn("NOTICE", tree(self.out / "source"))
+        with tarfile.open(FIXTURE / "source.tar") as given:
+            want = {info.name[len(TOP) + 1:]: given.extractfile(info).read() for info in given if info.isfile()}
+        self.assertEqual(tree(self.out / "source"), want)
         self.no_network()
 
     def test_a_path_that_leaves_the_folder_is_not_taken(self):
@@ -462,29 +492,88 @@ class SetupGather(unittest.TestCase):
         self.gives_no_source(ENDED.format(end))
 
     def test_a_tarball_with_a_pax_size_that_is_not_a_number_gives_no_source(self):
-        """tarfile reads a PAX size that is not a number as 0. Here the record size=abc is on X, whose header gives it
-        512 bytes, which hold the header of Y, of 1024 bytes, which hold the header and the data of Z. tarfile reads X
-        as empty and the header of Y in its data, and Z is in the data of Y, so tarfile does not read it. GNU tar
-        refuses such a record, and the script gives no source."""
-        y = tarfile.TarInfo(f"{TOP}/Y")
-        y.size = 2 * tarfile.BLOCKSIZE
-        self.tar(member(f"{TOP}/X", data=y.tobuf(tarfile.USTAR_FORMAT), pax_headers={"size": "abc"}),
-                 member(f"{TOP}/Z", data=b"z\n"))
+        """tarfile reads a PAX size that is not a number as 0. Here the record size=abc is on X (x_hides_z()): tarfile
+        reads X as empty and the header of Y in its data, and does not read Z. GNU tar refuses such a record, and the
+        script gives no source."""
+        self.tar(*x_hides_z({"size": "abc"}))
         with tarfile.open(self.fetched / "source.tar") as given:
             self.assertEqual(given.getnames()[-2:], [f"{TOP}/X", f"{TOP}/Y"])
-        self.gives_no_source(NOT_DECIMAL.format("size", f"{TOP}/X", "abc"))
+        self.gives_no_source(NOT_DIGITS.format(f"{TOP}/X", "abc"))
+
+    def test_a_tarball_with_a_pax_size_under_another_extended_header_gives_no_source(self):
+        """An extended header with comment=hi, then the one of X with size=abc (x_hides_z()). tarfile applies the inner
+        one to X first: it reads the size as 0, and the header of Y in the data of X. Then the outer one replaces the
+        pax_headers of X with its own records, which hold no size. The script checks each set of records that tarfile
+        applies, and gives no source."""
+        self.tar(pax_header(tarfile.XHDTYPE, b"14 comment=hi\n"), *x_hides_z({"size": "abc"}))
+        with tarfile.open(self.fetched / "source.tar") as given:
+            self.assertEqual(given.getnames()[-2:], [f"{TOP}/X", f"{TOP}/Y"])
+            self.assertEqual(given.getmember(f"{TOP}/X").pax_headers, {"comment": "hi"})
+        self.gives_no_source(NOT_DIGITS.format(f"{TOP}/X", "abc"))
+
+    def test_a_tarball_with_a_global_pax_size_after_an_extended_header_gives_no_source(self):
+        """An extended header with comment=hi, then a global one with size=abc, then the last member. tarfile applies
+        the global records to the member first, and reads its size as 0; then the extended one replaces its pax_headers
+        with its own records, which hold no size. The offset stays on the size in the header of the member, so tarfile
+        reads the tar on in its place, and the member as empty. The script gives no source."""
+        self.tar(pax_header(tarfile.XHDTYPE, b"14 comment=hi\n"), pax_header(tarfile.XGLTYPE, b"12 size=abc\n"),
+                 member(f"{TOP}/last", data=b"last\n"))
+        with tarfile.open(self.fetched / "source.tar") as given:
+            last = given.getmembers()[-1]
+            self.assertEqual((last.name, last.size, last.pax_headers), (f"{TOP}/last", 0, {"comment": "hi"}))
+        self.gives_no_source(NOT_DIGITS.format(f"{TOP}/last", "abc"))
+
+    def test_a_tarball_with_a_pax_size_of_more_than_20_digits_gives_no_source(self):
+        """The PAX size 512, the size of X (x_hides_z()), in 4301 digits: int() refuses more than 4300 digits, so
+        tarfile reads it as 0. The script takes at most 20 digits, as many as 2**64 has, and gives no source."""
+        size = "0" * 4298 + "512"
+        self.tar(*x_hides_z({"size": size}))
+        with tarfile.open(self.fetched / "source.tar") as given:
+            self.assertEqual(given.getnames()[-2:], [f"{TOP}/X", f"{TOP}/Y"])
+        self.gives_no_source(NOT_DIGITS.format(f"{TOP}/X", size[:40]))
+
+    def test_a_tarball_with_a_pax_size_in_the_digits_of_another_script_gives_no_source(self):
+        """The PAX size U+0660, ARABIC-INDIC DIGIT ZERO, on X (x_hides_z()): str.isdigit() takes it for a digit, and
+        int() reads it as 0. A size is ASCII digits alone, and the script gives no source."""
+        self.tar(*x_hides_z({"size": "\u0660"}))
+        with tarfile.open(self.fetched / "source.tar") as given:
+            self.assertEqual(given.getnames()[-2:], [f"{TOP}/X", f"{TOP}/Y"])
+        self.gives_no_source(NOT_DIGITS.format(f"{TOP}/X", "\u0660"))
 
     def test_a_tarball_with_a_global_pax_size_that_is_not_a_number_gives_no_source(self):
         """A global PAX header gives its records to each member after it, so tarfile reads size=abc there as 0 for each
-        one. The script gives no source, and names the first member after it, the top folder. The record is made here:
-        "<length> size=abc\\n", whose length counts the whole record, its own digits too."""
-        record = b"12 size=abc\n"
-        header = tarfile.TarInfo("pax_global_header")
-        header.type, header.size = tarfile.XGLTYPE, len(record)
-        self.tar(first=[(header, record)])
+        one. The script gives no source, and names the first member after it, the top folder."""
+        self.tar(first=[pax_header(tarfile.XGLTYPE, b"12 size=abc\n")])
         with tarfile.open(self.fetched / "source.tar") as given:
             self.assertEqual(given.pax_headers, {"size": "abc"})
-        self.gives_no_source(NOT_DECIMAL.format("size", TOP, "abc"))
+        self.gives_no_source(NOT_DIGITS.format(TOP, "abc"))
+
+    def test_a_tarball_with_a_global_pax_size_and_no_extended_header_gives_no_source(self):
+        """The form of git archive: a global PAX header, here with size=abc too, and the members of the fixture, each
+        with no extended header. tarfile takes the offset after each member from the size in its header before it
+        applies the global records, so it reads each member in its place, with the size 0. The script gives no source,
+        and names the first member, the top folder, which tarfile.open() reads."""
+        raw = io.BytesIO()
+        with tarfile.open(FIXTURE / "source.tar") as given, tarfile.open(
+                fileobj=raw, mode="w", format=tarfile.PAX_FORMAT,
+                pax_headers={**given.pax_headers, "size": "abc"}) as made:
+            for info in given:
+                # A new TarInfo, with no PAX record: PAX_FORMAT writes no extended header for it.
+                fresh, data = member(info.name, info.type, info.linkname,
+                                     given.extractfile(info).read() if info.isfile() else None)
+                made.addfile(fresh, None if data is None else io.BytesIO(data))
+        # The type of each header, up to the zero blocks that end the tar: the global header is the one PAX header.
+        written, kinds, at = raw.getvalue(), [], 0
+        while written[at:at + tarfile.BLOCKSIZE].strip(b"\x00"):
+            header = tarfile.TarInfo.frombuf(written[at:at + tarfile.BLOCKSIZE], "utf-8", "surrogateescape")
+            kinds.append(header.type)
+            at += tarfile.BLOCKSIZE + -(-header.size // tarfile.BLOCKSIZE) * tarfile.BLOCKSIZE
+        self.assertEqual([kind for kind in kinds if kind in (tarfile.XHDTYPE, tarfile.XGLTYPE)], [tarfile.XGLTYPE])
+        (self.fetched / "source.tar").write_bytes(gzip.compress(written))
+        with tarfile.open(self.fetched / "source.tar") as given, tarfile.open(FIXTURE / "source.tar") as fixture:
+            self.assertEqual(given.getnames(), fixture.getnames())
+            self.assertEqual({info.size for info in given}, {0})
+        self.gives_no_source(NOT_DIGITS.format(TOP, "abc"))
 
     def test_a_tarball_with_a_pax_size_that_int_reads_but_is_not_decimal_gives_no_source(self):
         """int() reads the PAX size 0_2 as 2, the size of the member, but a decimal number is ASCII digits alone, as for
@@ -492,7 +581,34 @@ class SetupGather(unittest.TestCase):
         self.tar(member(f"{TOP}/u", data=b"u\n", pax_headers={"size": "0_2"}))
         with tarfile.open(self.fetched / "source.tar") as given:
             self.assertEqual(given.getmember(f"{TOP}/u").size, 2)
-        self.gives_no_source(NOT_DECIMAL.format("size", f"{TOP}/u", "0_2"))
+        self.gives_no_source(NOT_DIGITS.format(f"{TOP}/u", "0_2"))
+
+    def test_a_tarball_with_a_pax_sparse_length_after_a_decimal_size_gives_no_source(self):
+        """One extended header on X (x_hides_z()) with size=512, its size, then GNU.sparse.realsize=0: tarfile applies
+        the records in their order, so the second makes the size of X 0. The script refuses each PAX record
+        GNU.sparse.*, and gives no source."""
+        self.tar(*x_hides_z({"size": "512", "GNU.sparse.realsize": "0"}))
+        with tarfile.open(self.fetched / "source.tar") as given:
+            self.assertEqual(given.getnames()[-2:], [f"{TOP}/X", f"{TOP}/Y"])
+            self.assertEqual(list(given.getmember(f"{TOP}/X").pax_headers)[-2:], ["size", "GNU.sparse.realsize"])
+        self.gives_no_source(SPARSE_RECORD.format("GNU.sparse.realsize", f"{TOP}/X", "0"))
+
+    def test_a_tarball_with_a_pax_sparse_size_gives_no_source(self):
+        """A decimal GNU.sparse.size alone: tarfile makes the member sparse, of that size. The script refuses each PAX
+        record GNU.sparse.*, and gives no source."""
+        self.tar(member(f"{TOP}/s", data=b"s\n", pax_headers={"GNU.sparse.size": "2"}))
+        with tarfile.open(self.fetched / "source.tar") as given:
+            self.assertTrue(given.getmember(f"{TOP}/s").issparse())
+        self.gives_no_source(SPARSE_RECORD.format("GNU.sparse.size", f"{TOP}/s", "2"))
+
+    def test_a_tarball_with_a_pax_sparse_realsize_gives_no_source(self):
+        """A decimal GNU.sparse.realsize alone: tarfile takes it for the size of the member, here 1 of its 2 bytes, and
+        the member is not sparse. The script refuses each PAX record GNU.sparse.*, and gives no source."""
+        self.tar(member(f"{TOP}/r", data=b"r\n", pax_headers={"GNU.sparse.realsize": "1"}))
+        with tarfile.open(self.fetched / "source.tar") as given:
+            r = given.getmember(f"{TOP}/r")
+            self.assertEqual((r.issparse(), r.size), (False, 1))
+        self.gives_no_source(SPARSE_RECORD.format("GNU.sparse.realsize", f"{TOP}/r", "1"))
 
     def test_a_member_with_a_decimal_pax_size_is_taken(self):
         """A PAX size of ASCII digits alone, the size of the member: the script takes the member whole, beside each
