@@ -588,6 +588,20 @@ class ScreenTest(unittest.TestCase):
                 self.assertEqual(v, "held")
                 self.assertEqual(reason["unscreenable"], ["pr.diff shows .theorem/x_seed_corpus.zip as binary"])
 
+    def test_a_setup_pull_requests_seed_corpus_in_projects_is_held(self):
+        """A control of the setup pull request's seed corpus, on its other side: a setup pull request's project folder
+        is .theorem/, and review-gather KIND=setup lists no seed corpus of projects/ in seeds/. A projects/x/
+        x_seed_corpus.zip that its diff adds or changes has no listing, so the diff's binary line of it is held, as any
+        other binary file's is."""
+        for line in ("Binary files /dev/null and b/projects/x/x_seed_corpus.zip differ",
+                     "Binary files a/projects/x/x_seed_corpus.zip and b/projects/x/x_seed_corpus.zip differ"):
+            with self.subTest(line=line):
+                self.fresh()
+                self.item(kind="pr", diff=line + "\n", setup=True)
+                v, reason = self.verdict()
+                self.assertEqual(v, "held")
+                self.assertEqual(reason["unscreenable"], ["pr.diff shows projects/x/x_seed_corpus.zip as binary"])
+
     def test_a_writers_item_is_screened_for_its_comments_alone(self):
         """SCREEN_SCOPE comments: every comment, review and review comment but this App's own, and nothing of the
         writer's own title, description, diff, files or other fields, which the review reads as before."""
@@ -1138,6 +1152,21 @@ class ScreenTest(unittest.TestCase):
         setup pull request, and a .theorem/patch_style.md it adds is a file of the change like any other. Its section
         stays in the diff, the question for the text reads it, and no other question is asked."""
         self.item(kind="pr", files={"pr.diff": self.THEOREM_STYLE_DIFF})
+        v, reason = self.verdict()
+        self.assertEqual(v, "clean")
+        self.assertEqual([s for s, _n in reason["sources"]],
+                         ["title", "body", "pr.json, the commit messages and the names an account chose", "pr.diff"])
+        bodies = [r["body"] for r in self.services.to("/v1/messages")]
+        self.assertEqual(len(bodies), screen.CLAUDE_ANSWERS)   # one question, no second
+        self.assertEqual({b["system"] for b in bodies}, {screen.SYSTEM})
+        self.assertIn("STYLE-LINE", bodies[0]["messages"][0]["content"])
+        self.assertEqual(reason["checks"]["claude"]["words"], {"the text": "clean"})
+
+    def test_a_setup_pull_requests_projects_patch_style_is_read_with_the_rest_of_the_diff(self):
+        """A control of the setup pull request's patch_style.md, on its other side: a setup pull request's project
+        folder is .theorem/, so a projects/x/patch_style.md it adds is a file of it like any other. Its section stays in
+        the diff, the question for the text reads it, and no other question is asked."""
+        self.item(kind="pr", files={"pr.diff": self.STYLE_DIFF.replace("projects/p/", "projects/x/")}, setup=True)
         v, reason = self.verdict()
         self.assertEqual(v, "clean")
         self.assertEqual([s for s, _n in reason["sources"]],
