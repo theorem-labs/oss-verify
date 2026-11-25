@@ -12,8 +12,8 @@ import os
 import pathlib
 import shutil
 import subprocess
-import tempfile
-import unittest
+
+import pytest
 
 from oss_verify import check_binaries
 from oss_verify import check_build
@@ -33,16 +33,15 @@ RUNS = [("limit_fuzzer", (1 << 29) - 1, 0), ("limit_fuzzer", 1 << 29, 2), ("limi
         ("limit_af_fuzzer", 1 << 29, 2), ("none_fuzzer", 1 << 26, 2)]
 
 
-@unittest.skipUnless(os.environ.get("OV_DOCKER_TESTS") == "1" and docker_ready(),
-                     "set OV_DOCKER_TESTS=1, with Docker and the toolchain image, to build the fixture")
-class TargetSettings(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.scratch = tempfile.TemporaryDirectory(prefix="ov-test-target-settings.")
-        # Class cleanups run when setUpClass fails too, so a failed build removes this process's image as well.
-        cls.addClassCleanup(cls.scratch.cleanup)
-        cls.addClassCleanup(subprocess.run, ["docker", "image", "rm", TAG], capture_output=True)
-        work = pathlib.Path(cls.scratch.name)
+@pytest.mark.skipif(os.environ.get("OV_DOCKER_TESTS") != "1" or not docker_ready(),
+                    reason="set OV_DOCKER_TESTS=1, with Docker and the toolchain image, to build the fixture")
+class TestTargetSettings:
+    @pytest.fixture(scope="class", autouse=True)
+    def set_up_class(self, request, tmp_path_factory):
+        cls = request.cls
+        work = tmp_path_factory.mktemp("ov-test-target-settings")
+        # A finalizer runs when this fixture fails too, so a failed build removes this process's image as well.
+        request.addfinalizer(lambda: subprocess.run(["docker", "image", "rm", TAG], capture_output=True))
         job = check_build.Job(name="target-settings", directory=FIXTURE,
                               repo="https://example.invalid/target-settings", ref="", dockerfile="", builds=BUILDS,
                               fuzz_targets=None)
@@ -55,7 +54,7 @@ class TargetSettings(unittest.TestCase):
     def record(self, build, target):
         """The record of the link of `target` in `build` (check_binaries.record_of), checked to be a whole record."""
         record, _ = check_binaries.record_of(self.raw[build], target)
-        self.assertIsInstance(record, check_links.Record, (build, target, record))
+        assert isinstance(record, check_links.Record), (build, target, record)
         return record
 
     def test_the_driver_objects_of_each_input_limit(self):
@@ -65,10 +64,10 @@ class TargetSettings(unittest.TestCase):
         names = sorted(f"cli-limit{k}{suffix}.o" for k in LIMITS for suffix in ("", "-quiet"))
         for build in BUILDS:
             objects = self.raw[build] / "driver-objects"
-            self.assertEqual(sorted(path.name for path in objects.glob("cli-limit*")), names, build)
+            assert sorted(path.name for path in objects.glob("cli-limit*")) == names, build
             cli = (objects / "cli.o").read_bytes()
             for k in LIMITS:
-                self.assertNotEqual((objects / f"cli-limit{k}.o").read_bytes(), cli, (build, k))
+                assert (objects / f"cli-limit{k}.o").read_bytes() != cli, (build, k)
 
     def test_the_records_of_the_settings(self):
         """In each build, the driver file of the record of limit_fuzzer and of limit_af_fuzzer names
@@ -77,28 +76,22 @@ class TargetSettings(unittest.TestCase):
         file."""
         for build in BUILDS:
             for target in ("limit_fuzzer", "limit_af_fuzzer"):
-                self.assertIn("/tmp/ov/cli-limit29.o", self.record(build, target).driver, (build, target))
-            self.assertEqual(sorted(self.record(build, "libc_fuzzer").libc), sorted(check_links.DECLARED_LIBC), build)
+                assert "/tmp/ov/cli-limit29.o" in self.record(build, target).driver, (build, target)
+            assert sorted(self.record(build, "libc_fuzzer").libc) == sorted(check_links.DECLARED_LIBC), build
             for target in ("none_fuzzer", "undeclared_fuzzer"):
-                self.assertEqual(self.record(build, target).libc, {}, (build, target))
+                assert self.record(build, target).libc == {}, (build, target)
 
-    @unittest.skipUnless(QEMU, "no qemu-riscv64-static on PATH")
-    def test_the_input_limit_of_the_binaries(self):
+    @pytest.mark.skipif(not QEMU, reason="no qemu-riscv64-static on PATH")
+    def test_the_input_limit_of_the_binaries(self, tmp_path):
         """In each build, each run of RUNS ends with its exit status. The inputs are sparse files, so they use no disk
         space."""
-        with tempfile.TemporaryDirectory(prefix="ov-test-target-settings-inputs.") as inputs:
-            for size in {size for _, size, _ in RUNS}:
-                zeros = pathlib.Path(inputs) / f"zeros-{size}"
-                zeros.touch()
-                os.truncate(zeros, size)
-            runner = "".join(f'timeout 600 /qemu /raw/{build}/{target} /in/zeros-{size} > /dev/null 2>&1; '
-                             f'echo "{build} {target} {size} $?"\n' for build in BUILDS for target, size, _ in RUNS)
-            done = run_in_container(check_build.newest_toolchain(), runner, (inputs, "/in"),
-                                    *((self.raw[build], f"/raw/{build}") for build in BUILDS))
+        for size in {size for _, size, _ in RUNS}:
+            zeros = tmp_path / f"zeros-{size}"
+            zeros.touch()
+            os.truncate(zeros, size)
+        runner = "".join(f'timeout 600 /qemu /raw/{build}/{target} /in/zeros-{size} > /dev/null 2>&1; '
+                         f'echo "{build} {target} {size} $?"\n' for build in BUILDS for target, size, _ in RUNS)
+        done = run_in_container(check_build.newest_toolchain(), runner, (tmp_path, "/in"),
+                                *((self.raw[build], f"/raw/{build}") for build in BUILDS))
         results = {tuple(line.split()[:3]): int(line.split()[3]) for line in done.stdout.splitlines()}
-        self.assertEqual(results, {(build, target, str(size)): status for build in BUILDS
-                                   for target, size, status in RUNS})
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert results == {(build, target, str(size)): status for build in BUILDS for target, size, status in RUNS}

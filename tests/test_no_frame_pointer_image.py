@@ -11,33 +11,27 @@ Docker and the base images, so this test needs no Docker, and the job suite of t
 """
 import os
 import pathlib
+import re
 import subprocess
 import sys
-import tempfile
-import unittest
 
 BUILDER_TESTS = pathlib.Path(__file__).resolve().parent / "test_builder.py"
 
 
-class NoFramePointerImage(unittest.TestCase):
-    def test_frame_pointers_skips_when_no_frame_pointer_image_is_named(self):
+class TestNoFramePointerImage:
+    def test_frame_pointers_skips_when_no_frame_pointer_image_is_named(self, tmp_path):
         root = BUILDER_TESTS.parents[1]
-        with tempfile.TemporaryDirectory(prefix="ov-test-no-frame-pointer-image.") as scratch:
-            docker = pathlib.Path(scratch) / "docker"
-            docker.write_text('#!/bin/sh\n[ "$1 $2" = "image inspect" ] && exit 0\necho "docker $*: not here" >&2\n'
-                              "exit 1\n")
-            docker.chmod(0o755)
-            environment = {name: value for name, value in os.environ.items()
-                           if name not in ("OV_FP_TOOLCHAIN_C", "OV_FP_TOOLCHAIN_RUST")}
-            environment.update(OV_DOCKER_TESTS="1", PATH=f"{scratch}{os.pathsep}{environment.get('PATH', '')}")
-            done = subprocess.run(
-                [sys.executable, "-P", "-m", "pytest", "-q", "-rs", "-p", "no:cacheprovider", "-c", "pyproject.toml",
-                 f"{BUILDER_TESTS}::FramePointersC", f"{BUILDER_TESTS}::FramePointersRust"],
-                cwd=root, env=environment, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300)
-        self.assertEqual(done.returncode, 0, done.stdout[-4000:] + done.stderr[-2000:])
+        docker = tmp_path / "docker"
+        docker.write_text('#!/bin/sh\n[ "$1 $2" = "image inspect" ] && exit 0\necho "docker $*: not here" >&2\n'
+                          "exit 1\n")
+        docker.chmod(0o755)
+        environment = {name: value for name, value in os.environ.items()
+                       if name not in ("OV_FP_TOOLCHAIN_C", "OV_FP_TOOLCHAIN_RUST")}
+        environment.update(OV_DOCKER_TESTS="1", PATH=f"{tmp_path}{os.pathsep}{environment.get('PATH', '')}")
+        done = subprocess.run(
+            [sys.executable, "-P", "-m", "pytest", "-q", "-rs", "-p", "no:cacheprovider", "-c", "pyproject.toml",
+             f"{BUILDER_TESTS}::FramePointersC", f"{BUILDER_TESTS}::FramePointersRust"],
+            cwd=root, env=environment, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300)
+        assert done.returncode == 0, done.stdout[-4000:] + done.stderr[-2000:]
         # The 7 tests of the two classes, each skipped.
-        self.assertRegex(done.stdout, r"(?m)^7 skipped in ", done.stdout[-4000:])
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert re.search(r"(?m)^7 skipped in ", done.stdout), done.stdout[-4000:]

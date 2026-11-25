@@ -7,7 +7,7 @@ check runs, and each verdict has a case that must land in it: a check that only 
 fails here. The decoder cases are theories/Riscv/Decode.v's own Goal checks, its other match arms, and the rules of
 theories/Riscv/Sem.v and theories/LinuxProcessSem/RiscvSemantics.v that decide whether the model gives a decoded word
 a meaning. No toolchain and no Docker. With OSS_VERIFY_MODEL set to a checkout of the model (the directory that holds
-theories/), ModelCheckout also checks MODEL_FILES and the Goal checks against that checkout.
+theories/), TestModelCheckout also checks MODEL_FILES and the Goal checks against that checkout.
 """
 import contextlib
 import io
@@ -16,9 +16,9 @@ import os
 import pathlib
 import re
 import struct
-import tempfile
 import time
-import unittest
+
+import pytest
 
 from oss_verify import binary_isa
 
@@ -135,9 +135,10 @@ def with_e_type(data, e_type):
     return bytes(b)
 
 
-class Base(unittest.TestCase):
-    def setUp(self):
-        self.dir = pathlib.Path(self.enterContext(tempfile.TemporaryDirectory(prefix="binary-isa.")))
+class Base:
+    @pytest.fixture(autouse=True)
+    def set_up(self, tmp_path):
+        self.dir = tmp_path
         self.n = 0
 
     def put(self, data):
@@ -150,31 +151,31 @@ class Base(unittest.TestCase):
         """scan() of `data`, which must have verdict `want_verdict` and the given counts; and check() of it as a
         file, whose result must follow from the verdict. Return (scan's counts, check's result)."""
         res = binary_isa.scan(data)
-        self.assertEqual(res["verdict"], want_verdict, res)
+        assert res["verdict"] == want_verdict, res
         for key, value in counts.items():
-            self.assertEqual(res[key], value, f"{key}: {res}")
+            assert res[key] == value, f"{key}: {res}"
         out = binary_isa.check(self.put(data))
-        self.assertEqual(set(out), API_KEYS)
-        self.assertEqual(out["result"], {"CLEAN": "pass", "UNEXAMINED": "error"}.get(want_verdict, "fail"), out)
-        self.assertEqual((out["words"], out["compressed"], out["outside_model"], out["unwinder_vlenb"]),
-                         (res["insn32"], res["rvc16"], res["outside_model"], res["unwinder_vlenb"]), out)
+        assert set(out) == API_KEYS
+        assert out["result"] == {"CLEAN": "pass", "UNEXAMINED": "error"}.get(want_verdict, "fail"), out
+        assert (out["words"], out["compressed"], out["outside_model"], out["unwinder_vlenb"]) == \
+            (res["insn32"], res["rvc16"], res["outside_model"], res["unwinder_vlenb"]), out
         return res, out
 
 
-class Verdicts(Base):
+class TestVerdicts(Base):
     def test_clean_with_a_zero_padding_word(self):
         res, out = self.one(mkelf(NOP + ADD + Z32 + NOP), "CLEAN", insn32=3, zero_parcels=2, rvc16=0, odd_zero=0,
                             exec_bytes=16)
-        self.assertEqual((out["e_type"], out["machine"], out["words"], out["first"]), ("ET_EXEC", "EM_RISCV", 3, None))
-        self.assertIn("every one in the model's ISA", out["detail"])
+        assert (out["e_type"], out["machine"], out["words"], out["first"]) == ("ET_EXEC", "EM_RISCV", 3, None)
+        assert "every one in the model's ISA" in out["detail"]
 
     def test_compressed_instructions_are_found_and_located(self):
         res, out = self.one(mkelf(NOP + CNOP + CADD + ADD), "RVC", rvc16=2, insn32=2)
-        self.assertEqual(out["first"], f"rvc16 at {TEXT_VADDR + 4:#x}")
-        self.assertIn("2 compressed (16-bit) instruction(s)", out["detail"])
-        self.assertIn(f"first rvc16 at {TEXT_VADDR + 4:#x}", out["detail"])
+        assert out["first"] == f"rvc16 at {TEXT_VADDR + 4:#x}"
+        assert "2 compressed (16-bit) instruction(s)" in out["detail"]
+        assert f"first rvc16 at {TEXT_VADDR + 4:#x}" in out["detail"]
         _, at = binary_isa.walk(NOP + CNOP + CADD + ADD, TEXT_VADDR)
-        self.assertEqual(at["rvc16"], [TEXT_VADDR + 4, TEXT_VADDR + 6])
+        assert at["rvc16"] == [TEXT_VADDR + 4, TEXT_VADDR + 6]
 
     def test_a_lone_zero_parcel_mid_stream_is_a_finding(self):
         # c.unimp, or padding that leaves the next instruction at 2 mod 4.
@@ -192,8 +193,8 @@ class Verdicts(Base):
 
     def test_a_long_encoding_is_not_rv64g(self):
         res, out = self.one(mkelf(NOP + LONG48 + Z16 + ADD), "NOT-RV64G", long=1, rvc16=0)
-        self.assertEqual(out["first"], f"long at {TEXT_VADDR + 4:#x}")
-        self.assertIn("not uniform aligned 32-bit code (long 1", out["detail"])
+        assert out["first"] == f"long at {TEXT_VADDR + 4:#x}"
+        assert "not uniform aligned 32-bit code (long 1" in out["detail"]
 
     def test_a_region_ending_inside_an_instruction(self):
         self.one(mkelf(NOP + ADD[:2]), "NOT-RV64G", tail=1)
@@ -206,56 +207,56 @@ class Verdicts(Base):
         # The words are in the model, but none of them is at a multiple of 4.
         res, _ = self.one(mkelf(NOP + ADD + NOP, text_vaddr=TEXT_VADDR + 1), "NOT-RV64G", misaligned32=3,
                           insn32=3)
-        self.assertEqual(res["first"], ("misaligned32", TEXT_VADDR + 1))
+        assert res["first"] == ("misaligned32", TEXT_VADDR + 1)
         self.one(mkelf(Z32 + NOP, text_vaddr=TEXT_VADDR + 3), "NOT-RV64G", odd_zero=1, misaligned32=1)
         # The census reads the walk's words, or none: an odd address is never read as a clean region.
-        with self.assertRaisesRegex(binary_isa.Unexamined, "an odd address has no aligned word"):
+        with pytest.raises(binary_isa.Unexamined, match="an odd address has no aligned word"):
             binary_isa.isa_census(NOP + ADD, TEXT_VADDR + 1, True, 2)
         # A region that starts at 2 mod 4 is never clean either: its first parcel is not aligned.
         _, at = binary_isa.walk(Z16 + NOP + ADD + Z16, TEXT_VADDR + 2)
-        self.assertEqual(at["odd_zero"], [TEXT_VADDR + 2])
+        assert at["odd_zero"] == [TEXT_VADDR + 2]
         # In a clean region, the one cast and the bytes.find search find what the slow path finds.
         buf = NOP + ADD + Z32 + VSETVLI + Z32 + VSETVLI
         counts, at = binary_isa.walk(buf, TEXT_VADDR)
-        self.assertFalse(any(at.values()), at)
+        assert not any(at.values()), at
         census, pairs = binary_isa.isa_census(buf, TEXT_VADDR, True, counts["insn32"])
         slow, slow_pairs = binary_isa.isa_census(buf, TEXT_VADDR, False, counts["insn32"])
-        self.assertEqual((census, list(pairs())), (slow, list(slow_pairs())))
+        assert (census, list(pairs())) == (slow, list(slow_pairs()))
         outw = {0x0C007057: "rvv-vsetvl"}
-        self.assertEqual(binary_isa.outside_sites(buf, TEXT_VADDR, True, outw, pairs),
-                         binary_isa.outside_sites(buf, TEXT_VADDR, False, outw, slow_pairs))
-        self.assertEqual(binary_isa.outside_sites(buf, TEXT_VADDR, True, outw, pairs),
-                         [(TEXT_VADDR + 12, 0x0C007057), (TEXT_VADDR + 20, 0x0C007057)])
+        assert binary_isa.outside_sites(buf, TEXT_VADDR, True, outw, pairs) == \
+            binary_isa.outside_sites(buf, TEXT_VADDR, False, outw, slow_pairs)
+        assert binary_isa.outside_sites(buf, TEXT_VADDR, True, outw, pairs) == \
+            [(TEXT_VADDR + 12, 0x0C007057), (TEXT_VADDR + 20, 0x0C007057)]
         # Past FIND_WORDS distinct words a clean region is read by the census's words; each word searched alone with
         # bytes.find finds the same sites.
         words = [0x57 | (k + 8) << 12 for k in range(binary_isa.FIND_WORDS + 1)]
         buf = b"".join(struct.pack("<I", w) + NOP + Z32 for w in words * 3)
         counts, at = binary_isa.walk(buf, TEXT_VADDR)
-        self.assertFalse(any(at.values()), at)
+        assert not any(at.values()), at
         _, pairs = binary_isa.isa_census(buf, TEXT_VADDR, True, counts["insn32"])
         alone = sorted(site for w in words for site in binary_isa.outside_sites(buf, TEXT_VADDR, True, {w: ""}, pairs))
-        self.assertEqual(binary_isa.outside_sites(buf, TEXT_VADDR, True, {w: "" for w in words}, pairs), alone)
-        self.assertEqual(len(alone), 3 * len(words))
+        assert binary_isa.outside_sites(buf, TEXT_VADDR, True, {w: "" for w in words}, pairs) == alone
+        assert len(alone) == 3 * len(words)
 
 
-class HeaderClaims(Base):
+class TestHeaderClaims(Base):
     """The EF_RISCV_RVC bit decides nothing; the instructions do."""
 
     def test_bit_set_over_code_without_compressed_instructions_passes(self):
         res, out = self.one(mkelf(NOP + ADD + NOP, e_flags=5), "CLEAN")
-        self.assertEqual(res["e_flags"], 5)
+        assert res["e_flags"] == 5
 
     def test_bit_clear_over_compressed_code_fails(self):
         res, out = self.one(mkelf(NOP + CNOP + CNOP + ADD, e_flags=4), "RVC", rvc16=2)
-        self.assertEqual(res["e_flags"], 4)
-        self.assertEqual(out["e_type"], "ET_EXEC")
+        assert res["e_flags"] == 4
+        assert out["e_type"] == "ET_EXEC"
 
 
-class WhereTheCodeIs(Base):
+class TestWhereTheCodeIs(Base):
     def test_a_text_segment_from_offset_0_does_not_decode_the_headers(self):
         res, out = self.one(mkelf(NOP + ADD, seg_from_zero=True), "CLEAN", exec_bytes=8)
-        self.assertEqual(res["pf_x"]["header_in_x"], 64 + 56)
-        self.assertEqual(res["pf_x"]["gap_zero"], TEXT_OFF - 64 - 56)
+        assert res["pf_x"]["header_in_x"] == 64 + 56
+        assert res["pf_x"]["gap_zero"] == TEXT_OFF - 64 - 56
 
     def test_a_section_header_table_in_the_text_segment_is_not_decoded(self):
         # Go's linker puts the section header table right after the program header table, in the text segment.
@@ -264,7 +265,7 @@ class WhereTheCodeIs(Base):
         b[0x200:0x200 + 64 * shnum] = b[shoff:shoff + 64 * shnum]
         struct.pack_into("<Q", b, 40, 0x200)
         res, _ = self.one(bytes(b), "CLEAN", exec_bytes=8, regions=1)
-        self.assertEqual(res["pf_x"]["header_in_x"], 64 + 56 + 64 * shnum)
+        assert res["pf_x"]["header_in_x"] == 64 + 56 + 64 * shnum
 
     def test_e_ehsize_does_not_hide_a_segment_gap(self):
         # There is no section header table. e_ehsize claims 65535 bytes, but the ELF header is still only 64 bytes and
@@ -272,7 +273,7 @@ class WhereTheCodeIs(Base):
         b = bytearray(mkelf(NOP + VSETVLI, sections=False, seg_from_zero=True))
         struct.pack_into("<H", b, 52, 0xFFFF)
         res, _ = self.one(bytes(b), "NOT-MODEL", outside_model=1, exec_bytes=TEXT_OFF + 8 - 64 - 56)
-        self.assertEqual(res["pf_x"]["header_in_x"], 64 + 56)
+        assert res["pf_x"]["header_in_x"] == 64 + 56
 
     def test_a_non_zero_gap_mapped_executable_is_decoded(self):
         self.one(mkelf(NOP + ADD, gap=CNOP + CNOP), "RVC", rvc16=2, regions=2)
@@ -280,44 +281,44 @@ class WhereTheCodeIs(Base):
     def test_the_first_finding_is_of_the_verdicts_kind_across_regions(self):
         # Sections are decoded before gaps. A finding in .text that loses to one in the gap is not named.
         res, out = self.one(mkelf(VSETVLI + NOP, gap=CNOP + CNOP), "RVC", rvc16=2, outside_model=1, regions=2)
-        self.assertEqual(out["first"], f"rvc16 at {TEXT_VADDR + 8:#x}")
-        self.assertIn(f"first rvc16 at {TEXT_VADDR + 8:#x}", out["detail"])
+        assert out["first"] == f"rvc16 at {TEXT_VADDR + 8:#x}"
+        assert f"first rvc16 at {TEXT_VADDR + 8:#x}" in out["detail"]
         res, out = self.one(mkelf(VSETVLI + NOP, gap=LONG48 + Z16 + ADD), "NOT-RV64G", long=1, rvc16=0,
                             outside_model=1, regions=2)
-        self.assertEqual(out["first"], f"long at {TEXT_VADDR + 8:#x}")
+        assert out["first"] == f"long at {TEXT_VADDR + 8:#x}"
         res, out = self.one(mkelf(NOP + LONG48 + Z16 + ADD, gap=CNOP + CNOP), "RVC", long=1, rvc16=2, regions=2)
-        self.assertEqual(out["first"], f"rvc16 at {TEXT_VADDR + 12:#x}")
+        assert out["first"] == f"rvc16 at {TEXT_VADDR + 12:#x}"
         # Outside-model words in two regions: the first region's is named.
         res, out = self.one(mkelf(VSETVLI + NOP, gap=CLZ + NOP), "NOT-MODEL", outside_model=2, regions=2)
-        self.assertEqual(out["first"], f"outside_model at {TEXT_VADDR:#x}")
+        assert out["first"] == f"outside_model at {TEXT_VADDR:#x}"
 
     def test_a_zero_gap_is_padding(self):
         res, _ = self.one(mkelf(NOP + ADD, gap=Z32 * 4), "CLEAN", regions=1)
-        self.assertEqual((res["pf_x"]["gap_zero"], res["pf_x"]["gap_nonzero"]), (16, 0))
+        assert (res["pf_x"]["gap_zero"], res["pf_x"]["gap_nonzero"]) == (16, 0)
 
     def test_without_section_headers_the_segment_is_decoded(self):
         self.one(mkelf(NOP + CNOP + CNOP, sections=False, seg_from_zero=True), "RVC", rvc16=2)
         res, _ = self.one(mkelf(NOP + ADD, sections=False, seg_from_zero=True), "CLEAN",
                           exec_bytes=TEXT_OFF + 8 - 64 - 56, rvc16=0)
-        self.assertEqual(res["located_by"], "segments")
+        assert res["located_by"] == "segments"
 
     def test_mapping_symbols_mark_data_without_passing_it(self):
         data = struct.pack("<I", 0x12345678)       # low bits 00: two "16-bit" parcels
         res, out = self.one(mkelf(NOP + data + ADD, mapsyms=[(TEXT_VADDR, "$x"), (TEXT_VADDR + 4, "$d"),
                                                              (TEXT_VADDR + 8, "$x")]),
                             "RVC", rvc16=2, in_data=2, mapping_symbols=3)
-        self.assertIn("2 finding(s) inside $d data", out["detail"])
+        assert "2 finding(s) inside $d data" in out["detail"]
 
     def test_a_data_section_mapped_executable_is_decoded(self):
         # The loader maps a PF_X segment executable whatever its section headers say: a section without
         # SHF_EXECINSTR inside one is named, and its bytes are decoded like a gap, so they never pass unexamined.
         for text, verdict in ((NOP + CNOP + CNOP, "RVC"), (NOP + VSETVLI, "NOT-MODEL"), (NOP + ADD, "CLEAN")):
             res, out = self.one(mkelf(text, text_flags=0x2), verdict)
-            self.assertEqual(res["pf_x"]["data_in_x"], [(".text", len(text))])
-            self.assertEqual((res["pf_x"]["gap_zero"], res["pf_x"]["gap_nonzero"]), (0, len(text)))
+            assert res["pf_x"]["data_in_x"] == [(".text", len(text))]
+            assert (res["pf_x"]["gap_zero"], res["pf_x"]["gap_nonzero"]) == (0, len(text))
         # All zero, it is padding, and nothing was examined.
         res, out = self.one(mkelf(Z32 * 2, text_flags=0x2), "UNEXAMINED", exec_bytes=0)
-        self.assertEqual((res["pf_x"]["gap_zero"], res["pf_x"]["gap_nonzero"]), (8, 0))
+        assert (res["pf_x"]["gap_zero"], res["pf_x"]["gap_nonzero"]) == (8, 0)
 
     def test_a_well_formed_note_section_mapped_executable_is_data(self):
         # Go's linker puts .note.go.buildid and .note.gnu.build-id in the text segment, in front of .text. A note
@@ -329,7 +330,7 @@ class WhereTheCodeIs(Base):
             return bytes(b)
         note = struct.pack("<III", 4, 8, 4) + b"Go\0\0" + b"\x01\x02\x03\x04\x05\x06\x07\x08"
         res, out = self.one(as_note(mkelf(note, text_flags=0x2, gap=NOP + ADD)), "CLEAN")
-        self.assertEqual(res["pf_x"]["data_in_x"], [(".text", len(note))])
+        assert res["pf_x"]["data_in_x"] == [(".text", len(note))]
         # The same bytes with a size that runs past the section are not notes: decoded, and they fail.
         bad = struct.pack("<III", 4, 4000, 4) + b"Go\0\0" + CNOP * 4
         res, out = self.one(as_note(mkelf(bad, text_flags=0x2, gap=NOP)), "RVC")
@@ -339,10 +340,10 @@ class WhereTheCodeIs(Base):
         # One Go and one GNU build id are notes; a second of either is not, so repeats cannot wrap any bytes.
         gnu = struct.pack("<III", 4, 8, 3) + b"GNU\0" + b"\x01\x02\x03\x04\x05\x06\x07\x08"
         res, out = self.one(as_note(mkelf(note + gnu, text_flags=0x2, gap=NOP + ADD)), "CLEAN")
-        self.assertEqual(res["pf_x"]["data_in_x"], [(".text", len(note + gnu))])
+        assert res["pf_x"]["data_in_x"] == [(".text", len(note + gnu))]
         wrap = struct.pack("<III", 4, 8, 3) + b"GNU\0" + CNOP * 4
         for twice in (gnu + wrap, struct.pack("<III", 4, 8, 4) + b"Go\0\0" + CNOP * 4 + note):
-            self.assertFalse(binary_isa.whole_notes(twice, 0, len(twice)))
+            assert not binary_isa.whole_notes(twice, 0, len(twice))
         self.one(as_note(mkelf(gnu + wrap, text_flags=0x2, gap=NOP)), "RVC")
         self.one(as_note(mkelf(note + struct.pack("<III", 4, 8, 4) + b"Go\0\0" + CNOP * 4, text_flags=0x2,
                                gap=NOP)), "RVC")
@@ -356,7 +357,7 @@ class WhereTheCodeIs(Base):
         b = bytearray(mkelf(first + second, text_flags=0x2, gap=NOP + ADD))
         shoff = struct.unpack_from("<Q", b, 40)[0]
         shnum = struct.unpack_from("<H", b, 60)[0]
-        self.assertEqual(shoff + shnum * 64, len(b), "the section header table ends the file")
+        assert shoff + shnum * 64 == len(b), "the section header table ends the file"
         header = bytearray(b[shoff + 64:shoff + 128])
         struct.pack_into("<I", b, shoff + 64 + 4, binary_isa.SHT_NOTE)
         struct.pack_into("<Q", b, shoff + 64 + 32, len(first))
@@ -366,25 +367,25 @@ class WhereTheCodeIs(Base):
         struct.pack_into("<H", b, 60, shnum + 1)
         self.one(bytes(b), "RVC")
         seen = set()
-        self.assertTrue(binary_isa.whole_notes(first, 0, len(first), seen))
-        self.assertFalse(binary_isa.whole_notes(second, 0, len(second), seen))
+        assert binary_isa.whole_notes(first, 0, len(first), seen)
+        assert not binary_isa.whole_notes(second, 0, len(second), seen)
 
     def test_a_section_must_be_where_its_segment_maps_it(self):
         # The code is at 2 mod 4, and its section header says 0 mod 4.
         b = bytearray(mkelf(NOP + ADD, text_vaddr=TEXT_VADDR + 2))
         shoff = struct.unpack_from("<Q", b, 40)[0]
         struct.pack_into("<Q", b, shoff + 64 + 16, TEXT_VADDR)
-        with self.assertRaisesRegex(binary_isa.Unexamined, r"section \.text says it is at 0x11000, but PF_X "
-                                                           r"LOAD\[0\] maps it at 0x11002"):
+        with pytest.raises(binary_isa.Unexamined, match=r"section \.text says it is at 0x11000, but PF_X "
+                                                        r"LOAD\[0\] maps it at 0x11002"):
             binary_isa.scan(bytes(b))
         out = binary_isa.check(self.put(bytes(b)))
-        self.assertEqual(out["result"], "error", out)
+        assert out["result"] == "error", out
 
 
-class NothingExamined(Base):
+class TestNothingExamined(Base):
     def test_no_executable_section_and_no_pf_x_segment(self):
         res, out = self.one(mkelf(NOP, text_flags=0x2, pf_x=False), "UNEXAMINED", exec_bytes=0)
-        self.assertIn("examined nothing", out["detail"])
+        assert "examined nothing" in out["detail"]
 
     def test_an_empty_executable_section(self):
         self.one(mkelf(b""), "UNEXAMINED", exec_bytes=0)
@@ -398,30 +399,30 @@ class NothingExamined(Base):
         for data, e_type in ((b"not an elf at all" * 8, None), (b"\x7fELF", None), (bytes(b), None),
                              (bytes(big), None), (cut, "ET_EXEC")):
             out = binary_isa.check(self.put(data))
-            self.assertEqual((out["result"], out["e_type"]), ("error", e_type), out)
-            self.assertTrue(out["detail"].startswith("cannot examine: "), out)
+            assert (out["result"], out["e_type"]) == ("error", e_type), out
+            assert out["detail"].startswith("cannot examine: "), out
         out = binary_isa.check(self.dir / "absent")
-        self.assertEqual(out["result"], "error", out)
-        self.assertTrue(out["detail"].startswith("cannot read the file: "), out)
+        assert out["result"] == "error", out
+        assert out["detail"].startswith("cannot read the file: "), out
 
     def test_another_machine_fails(self):
         out = binary_isa.check(self.put(mkelf(NOP, e_machine=0x3E)))
-        self.assertEqual((out["result"], out["machine"], out["words"]), ("fail", "0x3e", 0), out)
-        self.assertIn("not EM_RISCV", out["detail"])
-        with self.assertRaises(binary_isa.Unexamined):
+        assert (out["result"], out["machine"], out["words"]) == ("fail", "0x3e", 0), out
+        assert "not EM_RISCV" in out["detail"]
+        with pytest.raises(binary_isa.Unexamined):
             binary_isa.scan(mkelf(NOP, e_machine=0x3E))
 
     def test_et_dyn_fails_even_with_clean_code(self):
         out = binary_isa.check(self.put(with_e_type(mkelf(NOP + ADD), 3)))
-        self.assertEqual((out["result"], out["e_type"], out["words"], out["first"]), ("fail", "ET_DYN", 2, None), out)
-        self.assertTrue(out["detail"].startswith("e_type is ET_DYN, not ET_EXEC"), out)
+        assert (out["result"], out["e_type"], out["words"], out["first"]) == ("fail", "ET_DYN", 2, None), out
+        assert out["detail"].startswith("e_type is ET_DYN, not ET_EXEC"), out
         # The instructions are still examined and named.
         out = binary_isa.check(self.put(with_e_type(mkelf(NOP + CNOP + CNOP), 1)))
-        self.assertEqual((out["result"], out["e_type"], out["compressed"]), ("fail", "ET_REL", 2), out)
-        self.assertIn("; also 2 compressed (16-bit) instruction(s)", out["detail"])
+        assert (out["result"], out["e_type"], out["compressed"]) == ("fail", "ET_REL", 2), out
+        assert "; also 2 compressed (16-bit) instruction(s)" in out["detail"]
 
 
-class ModelISA(Base):
+class TestModelISA(Base):
     """A 32-bit word the model does not execute is a finding, and the modeled neighbours of each family are not."""
 
     def test_modeled_words_stay_clean(self):
@@ -431,14 +432,14 @@ class ModelISA(Base):
     def test_vector_and_bit_manipulation_words_are_outside(self):
         res, out = self.one(mkelf(NOP + VSETVLI + VLE8 + SH1ADD + CLZ + ADD), "NOT-MODEL", insn32=6,
                             outside_model=4, rvc16=0)
-        self.assertEqual(out["families"], {"rvv-mem": 1, "rvv-vsetvl": 1, "zba": 1, "zbb": 1})
-        self.assertEqual(out["first"], f"outside_model at {TEXT_VADDR + 4:#x}")
-        self.assertIn("4 word(s) outside the model's ISA (rvv-mem 1, rvv-vsetvl 1, zba 1, zbb 1) among 6 32-bit",
-                      out["detail"])
+        assert out["families"] == {"rvv-mem": 1, "rvv-vsetvl": 1, "zba": 1, "zbb": 1}
+        assert out["first"] == f"outside_model at {TEXT_VADDR + 4:#x}"
+        assert "4 word(s) outside the model's ISA (rvv-mem 1, rvv-vsetvl 1, zba 1, zbb 1) among 6 32-bit" in \
+            out["detail"]
 
     def test_a_csr_read_that_decodes_is_still_outside(self):
         res, out = self.one(mkelf(NOP + VLENB_A0 + VLENB_T0 + RDTIME), "NOT-MODEL", outside_model=3)
-        self.assertEqual(list(out["families"].items()), [("csr-vlenb", 2), ("csr-counter", 1)])
+        assert list(out["families"].items()) == [("csr-vlenb", 2), ("csr-counter", 1)]
 
     def test_a_reserved_rounding_mode_is_outside(self):
         self.one(mkelf(NOP + FADD_RM5), "NOT-MODEL", outside_model=1, families={"fp-reserved-rm": 1})
@@ -446,7 +447,7 @@ class ModelISA(Base):
     def test_compressed_outranks_outside_and_both_are_counted(self):
         # The slow path, for a region with a finding, must find the same words.
         res, out = self.one(mkelf(NOP + CNOP + CNOP + VSETVLI + ADD), "RVC", rvc16=2, outside_model=1)
-        self.assertEqual(out["families"], {"rvv-vsetvl": 1})
+        assert out["families"] == {"rvv-vsetvl": 1}
 
     def test_many_distinct_outside_words_take_little_time(self):
         """A region without a finding was searched with one bytes.find per distinct outside word, so its time grew with
@@ -454,27 +455,27 @@ class ModelISA(Base):
         text = b"".join(struct.pack("<I", 0x57 | k << 12) + NOP * 3 for k in range(30000))
         start = time.monotonic()
         res = binary_isa.scan(mkelf(text))
-        self.assertLess(time.monotonic() - start, 10)
-        self.assertEqual((res["verdict"], res["outside_model"], res["first"]),
-                         ("NOT-MODEL", 30000, ("outside_model", TEXT_VADDR)))
+        assert time.monotonic() - start < 10
+        assert (res["verdict"], res["outside_model"], res["first"]) == \
+            ("NOT-MODEL", 30000, ("outside_model", TEXT_VADDR))
 
     def test_the_first_finding_names_the_isa_failure(self):
         res, out = self.one(mkelf(NOP + VSETVLI + ADD), "NOT-MODEL")
-        self.assertTrue(out["first"].startswith("outside_model at "), out)
-        self.assertNotIn("compressed", out["detail"])
+        assert out["first"].startswith("outside_model at "), out
+        assert "compressed" not in out["detail"]
 
     def test_the_unwinder_read_is_exempt_when_no_cfi_names_7202(self):
         res, out = self.one(mkelf(NOP + UNW_IDIOM, ehframe=cie_fde(EH_SP_RA)), "CLEAN", outside_model=0,
                             unwinder_vlenb=1)
-        self.assertEqual({k: res["cfi"][k] for k in ("parsed", "names_vlenb", "sections", "cies", "fdes", "insns")},
-                         {"parsed": True, "names_vlenb": False, "sections": 1, "cies": 1, "fdes": 1, "insns": 6})
-        self.assertIn("1 libunwind vlenb read(s) exempt", out["detail"])
+        assert {k: res["cfi"][k] for k in ("parsed", "names_vlenb", "sections", "cies", "fdes", "insns")} == \
+            {"parsed": True, "names_vlenb": False, "sections": 1, "cies": 1, "fdes": 1, "insns": 6}
+        assert "1 libunwind vlenb read(s) exempt" in out["detail"]
 
     def test_the_unwinder_read_is_a_finding_when_cfi_names_7202(self):
         # DW_CFA_offset_extended 7202, 0: the rule a frame that saves vector state would carry.
         res, _ = self.one(mkelf(NOP + UNW_IDIOM, ehframe=cie_fde(b"\x05\xa2\x38\x00")), "NOT-MODEL",
                           outside_model=1, unwinder_vlenb=0)
-        self.assertEqual((res["cfi"]["parsed"], res["cfi"]["names_vlenb"]), (True, True))
+        assert (res["cfi"]["parsed"], res["cfi"]["names_vlenb"]) == (True, True)
         # 7202 inside a CFA expression (DW_OP_bregx 7202 0), found by the block search.
         self.one(mkelf(NOP + UNW_IDIOM, ehframe=cie_fde(b"\x0f\x04\x92\xa2\x38\x00")), "NOT-MODEL",
                  outside_model=1, unwinder_vlenb=0)
@@ -486,12 +487,12 @@ class ModelISA(Base):
         # 0x3f is no call-frame opcode: an .eh_frame this cannot read exempts nothing.
         res, _ = self.one(mkelf(NOP + UNW_IDIOM, ehframe=cie_fde(b"\x3f")), "NOT-MODEL", outside_model=1,
                           unwinder_vlenb=0)
-        self.assertEqual((res["cfi"]["parsed"], res["cfi"]["names_vlenb"]), (False, True))
+        assert (res["cfi"]["parsed"], res["cfi"]["names_vlenb"]) == (False, True)
 
     def test_the_unwinder_read_is_a_finding_without_an_eh_frame_to_read(self):
         # No .eh_frame section: call-frame information is found by program header, not by name.
         res, _ = self.one(mkelf(NOP + UNW_IDIOM), "NOT-MODEL", outside_model=1, unwinder_vlenb=0)
-        self.assertEqual((res["cfi"]["parsed"], res["cfi"]["sections"]), (False, 0))
+        assert (res["cfi"]["parsed"], res["cfi"]["sections"]) == (False, 0)
         # No section headers at all: the segment is still decoded, and nothing is exempt.
         self.one(mkelf(NOP + UNW_IDIOM, sections=False), "NOT-MODEL", outside_model=1, unwinder_vlenb=0)
 
@@ -680,40 +681,40 @@ SEM_CASES = [
 ]
 
 
-class Decoder(unittest.TestCase):
+class TestDecoder:
     def test_decode_v_goal_checks(self):
         for word, want in DECODE_GOALS:
-            self.assertEqual(binary_isa.decode(word), want, f"{word:#010x}")
+            assert binary_isa.decode(word) == want, f"{word:#010x}"
 
     def test_decode_v_match_arms(self):
         for word, want in DECODE_ARMS:
-            self.assertEqual(binary_isa.decode(word), want, f"{word:#010x}")
+            assert binary_isa.decode(word) == want, f"{word:#010x}"
 
     def test_sem_v_execution_rules(self):
         for word, want in SEM_CASES:
-            self.assertEqual(binary_isa.outside(word), want, f"{word:#010x}")
+            assert binary_isa.outside(word) == want, f"{word:#010x}"
 
     def test_every_goal_word_executes_unless_decode_rejects_it(self):
         # Of Decode.v's Goal words, only mepc's CSR read decodes and does not execute.
         for word, cls in DECODE_GOALS:
-            self.assertEqual(binary_isa.outside(word) is None, cls is not None and word != 0x341022F3, f"{word:#010x}")
+            assert (binary_isa.outside(word) is None) == (cls is not None and word != 0x341022F3), f"{word:#010x}"
 
     def test_both_sides_are_reached(self):
         # A decoder that accepted everything, or nothing, would fail one side.
-        self.assertTrue(any(want is None for _, want in SEM_CASES))
-        self.assertTrue(any(want is not None for _, want in SEM_CASES))
-        self.assertTrue(any(want is None for _, want in DECODE_ARMS + DECODE_GOALS))
-        self.assertTrue(any(want is not None for _, want in DECODE_ARMS + DECODE_GOALS))
+        assert any(want is None for _, want in SEM_CASES)
+        assert any(want is not None for _, want in SEM_CASES)
+        assert any(want is None for _, want in DECODE_ARMS + DECODE_GOALS)
+        assert any(want is not None for _, want in DECODE_ARMS + DECODE_GOALS)
 
 
-class Model(unittest.TestCase):
+class TestModel:
     def test_the_model_the_rules_were_checked_against(self):
-        self.assertRegex(binary_isa.MODEL_COMMIT, r"^[0-9a-f]{40}$")
-        self.assertEqual(set(binary_isa.MODEL_FILES),
-                         {"theories/Riscv/Decode.v", "theories/Riscv/DecodeC.v", "theories/Riscv/Sem.v",
-                          "theories/Riscv/Fpu.v", "theories/LinuxProcessSem/RiscvSemantics.v"})
+        assert re.search(r"^[0-9a-f]{40}$", binary_isa.MODEL_COMMIT)
+        assert set(binary_isa.MODEL_FILES) == {"theories/Riscv/Decode.v", "theories/Riscv/DecodeC.v",
+                                               "theories/Riscv/Sem.v", "theories/Riscv/Fpu.v",
+                                               "theories/LinuxProcessSem/RiscvSemantics.v"}
         for sha in binary_isa.MODEL_FILES.values():
-            self.assertRegex(sha, r"^[0-9a-f]{64}$")
+            assert re.search(r"^[0-9a-f]{64}$", sha)
 
 
 MODEL = os.environ.get("OSS_VERIFY_MODEL")
@@ -723,40 +724,37 @@ GOAL_CLASSES = {"OpImm": "op-imm", "Op": "op", "Branch": "branch", "Mul32": "mul
                 "Fcvt": "fcvt"}
 
 
-@unittest.skipUnless(MODEL, "OSS_VERIFY_MODEL is not set: the directory of a checkout of the model, holding theories/")
-class ModelCheckout(unittest.TestCase):
+@pytest.mark.skipif(not MODEL,
+                    reason="OSS_VERIFY_MODEL is not set: the directory of a checkout of the model, holding theories/")
+class TestModelCheckout:
     def test_the_model_files_have_the_code_the_rules_were_checked_against(self):
         from oss_verify import model_release
         # An empty map has no stale file: it must name the files the rules rest on.
-        self.assertTrue(binary_isa.MODEL_FILES, "MODEL_FILES names no file")
-        self.assertEqual(model_release.stale(MODEL, binary_isa.MODEL_FILES), [])
+        assert binary_isa.MODEL_FILES, "MODEL_FILES names no file"
+        assert model_release.stale(MODEL, binary_isa.MODEL_FILES) == []
 
     def test_the_goal_checks_of_the_checkout_are_the_ones_ported(self):
         text = (pathlib.Path(MODEL) / "theories" / "Riscv" / "Decode.v").read_text(encoding="utf-8")
         goals = re.findall(r"Goal\s+(?:bool_decide\s*\(\s*)?decode\s+(0x[0-9a-fA-F]+)\s*(?:\(\*.*?\*\)\s*)?"
                            r"=\s*(?:None|Some\s*\(?\s*(\w+))", text, re.S)
         found = [(int(word, 16), GOAL_CLASSES[ctor] if ctor else None) for word, ctor in goals]
-        self.assertEqual(found, DECODE_GOALS)
+        assert found == DECODE_GOALS
 
 
-class CommandLine(Base):
+class TestCommandLine(Base):
     def test_one_json_line_per_file_and_the_worst_status(self):
         clean, rvc = self.put(mkelf(NOP + ADD)), self.put(mkelf(NOP + CNOP + CNOP))
         bad = self.put(b"\x7fELF-truncated")
         for paths, status in (([clean], 0), ([clean, rvc], 1), ([rvc, bad, clean], 2)):
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
-                self.assertEqual(binary_isa.main([str(p) for p in paths]), status)
+                assert binary_isa.main([str(p) for p in paths]) == status
             rows = [json.loads(line) for line in stdout.getvalue().splitlines()]
-            self.assertEqual([row["path"] for row in rows], [str(p) for p in paths])
-            self.assertTrue(all(set(row) == API_KEYS | {"path"} for row in rows))
-        self.assertEqual(binary_isa.main([]), 2)
+            assert [row["path"] for row in rows] == [str(p) for p in paths]
+            assert all(set(row) == API_KEYS | {"path"} for row in rows)
+        assert binary_isa.main([]) == 2
 
     def test_first_has_the_documented_form(self):
         out = binary_isa.check(self.put(mkelf(NOP + CNOP + CNOP + ADD)))
-        self.assertRegex(out["first"], r"^[a-z0-9_]+ at 0x[0-9a-f]+$")
-        self.assertNotIn("\n", out["detail"])
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert re.search(r"^[a-z0-9_]+ at 0x[0-9a-f]+$", out["first"])
+        assert "\n" not in out["detail"]

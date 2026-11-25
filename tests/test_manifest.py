@@ -3,12 +3,9 @@
 """Tests for src/oss_verify/manifest.py:  uv run pytest"""
 import hashlib
 import os
-import pathlib
 import struct
-import sys
-import tempfile
-import unittest
 
+import pytest
 import yaml
 
 from oss_verify import manifest
@@ -68,13 +65,10 @@ PT_LOAD, PT_DYNAMIC, PT_INTERP = 1, 2, 3
 ENTRY = "LLVMFuzzerTestOneInput"
 
 
-class Scratch(unittest.TestCase):
-    def setUp(self):
-        self.scratch = tempfile.TemporaryDirectory()
-        self.dir = pathlib.Path(self.scratch.name)
-
-    def tearDown(self):
-        self.scratch.cleanup()
+class Scratch:
+    @pytest.fixture(autouse=True)
+    def set_up(self, tmp_path):
+        self.dir = tmp_path
 
     def write(self, relative, data, mode=0o755):
         path = self.dir / relative
@@ -84,7 +78,7 @@ class Scratch(unittest.TestCase):
         return path
 
 
-class Discovery(Scratch):
+class TestDiscovery(Scratch):
     def test_the_symbol_table_rule(self):
         cases = {
             "target": (elf([(ENTRY, GLOBAL_FUNC, 1)]), 0o755, True),
@@ -103,13 +97,13 @@ class Discovery(Scratch):
         }
         for name, (data, mode, expected) in cases.items():
             path = self.write(f"out/{name}", data, mode)
-            self.assertEqual(manifest.is_fuzz_target(path), expected, name)
+            assert manifest.is_fuzz_target(path) == expected, name
         os.symlink(self.dir / "out/target", self.dir / "out/link")
         (self.dir / "out/.stripped").mkdir()
         found = manifest.discover(self.dir / "out")
-        self.assertEqual(sorted(found), ["elf32", "pie", "target", "weak"])
-        self.assertTrue(manifest.has_symbol_table(self.dir / "out/target"))
-        self.assertFalse(manifest.has_symbol_table(self.dir / "out/stripped"))
+        assert sorted(found) == ["elf32", "pie", "target", "weak"]
+        assert manifest.has_symbol_table(self.dir / "out/target")
+        assert not manifest.has_symbol_table(self.dir / "out/stripped")
 
     def test_a_symbol_table_past_any_file_is_no_symbol_table(self):
         """The build writes $OUT, so the pull request chooses every byte of each file there. A symbol table, or its
@@ -120,9 +114,9 @@ class Discovery(Scratch):
         for index, offset in ((2, 2 ** 63), (1, 2 ** 64 - 1)):
             far = bytearray(data)
             far[headers + index * 64 + 24:headers + index * 64 + 32] = offset.to_bytes(8, "little")  # sh_offset
-            self.assertFalse(manifest.is_fuzz_target(self.write(f"out/far{index}", bytes(far), 0o755)), index)
+            assert not manifest.is_fuzz_target(self.write(f"out/far{index}", bytes(far), 0o755)), index
         self.write("out/target", data, 0o755)
-        self.assertEqual(list(manifest.discover(self.dir / "out")), ["target"])
+        assert list(manifest.discover(self.dir / "out")) == ["target"]
 
     def test_the_go_fuzz_targets_compile_lists(self):
         self.write("out/a", elf(symtab=False))
@@ -130,10 +124,10 @@ class Discovery(Scratch):
         self.write("out/notes", b"text", 0o644)
         self.write("out/c", elf([(ENTRY, GLOBAL_FUNC, 1)]))
         (self.dir / "out/.go-fuzz-targets").write_text("a\nnotes\n../c\nmissing\n")
-        self.assertEqual(sorted(manifest.discover(self.dir / "out")), ["a", "c"])
-        self.assertEqual(sorted(manifest.go_fuzz_targets(self.dir / "out")), ["a"])
+        assert sorted(manifest.discover(self.dir / "out")) == ["a", "c"]
+        assert sorted(manifest.go_fuzz_targets(self.dir / "out")) == ["a"]
         (self.dir / "out/.go-fuzz-targets").unlink()
-        self.assertEqual(sorted(manifest.discover(self.dir / "out")), ["c"])
+        assert sorted(manifest.discover(self.dir / "out")) == ["c"]
 
     def test_the_dsl_fuzz_targets_compile_lists(self):
         """A DSL fuzz target defines no LLVMFuzzerTestOneInput; compile lists it in $OUT/.dsl-fuzz-targets, as it
@@ -142,25 +136,25 @@ class Discovery(Scratch):
         self.write("out/notes", b"text", 0o644)
         self.write("out/c", elf([(ENTRY, GLOBAL_FUNC, 1)]))
         (self.dir / "out/.dsl-fuzz-targets").write_text("api\nnotes\n../c\nmissing\n")
-        self.assertEqual(sorted(manifest.discover(self.dir / "out")), ["api", "c"])
-        self.assertEqual(sorted(manifest.listed_fuzz_targets(self.dir / "out", manifest.DSL_TARGETS)), ["api"])
+        assert sorted(manifest.discover(self.dir / "out")) == ["api", "c"]
+        assert sorted(manifest.listed_fuzz_targets(self.dir / "out", manifest.DSL_TARGETS)) == ["api"]
 
     def test_resolve_targets(self):
         found = {"plain": {"a": 1, "b": 1}, "asan": {"a": 1, "b": 1}}
-        self.assertEqual(manifest.resolve_targets(found), (["a", "b"], []))
-        self.assertEqual(manifest.resolve_targets(found, ["b"]), (["b"], []))
+        assert manifest.resolve_targets(found) == (["a", "b"], [])
+        assert manifest.resolve_targets(found, ["b"]) == (["b"], [])
         targets, problems = manifest.resolve_targets({"plain": {"a": 1, "b": 1}, "asan": {"a": 1}})
-        self.assertEqual(targets, ["a"])
-        self.assertEqual(problems, ["fuzz target b is in the plain build but not in the asan build"])
+        assert targets == ["a"]
+        assert problems == ["fuzz target b is in the plain build but not in the asan build"]
         targets, problems = manifest.resolve_targets(found, ["a", "c"])
-        self.assertEqual(targets, ["a"])
-        self.assertIn("fuzz target c, which project.yaml lists, is not in any build", problems)
+        assert targets == ["a"]
+        assert "fuzz target c, which project.yaml lists, is not in any build" in problems
         targets, problems = manifest.resolve_targets({"plain": {}})
-        self.assertEqual(targets, [])
-        self.assertTrue(problems and "no fuzz target" in problems[0])
+        assert targets == []
+        assert problems and "no fuzz target" in problems[0]
 
 
-class Collection(Scratch):
+class TestCollection(Scratch):
     def test_collect_takes_the_stripped_twin(self):
         unstripped = elf([(ENTRY, GLOBAL_FUNC, 1)])
         twin = elf(symtab=False) + b"twin"
@@ -169,11 +163,11 @@ class Collection(Scratch):
             self.write(f"raw/{build}/.stripped/{hashlib.sha256(unstripped).hexdigest()}", twin)
         raw = {build: self.dir / "raw" / build for build in ("plain", "asan")}
         entries, problems = manifest.collect(raw, ["fuzzer"], self.dir / "out")
-        self.assertEqual(problems, [])
-        self.assertEqual((self.dir / "out/fuzzer/fuzzer.asan").read_bytes(), twin)
-        self.assertEqual(entries["fuzzer"]["plain"], {
+        assert problems == []
+        assert (self.dir / "out/fuzzer/fuzzer.asan").read_bytes() == twin
+        assert entries["fuzzer"]["plain"] == {
             "file": "fuzzer.plain", "bytes": len(twin), "sha256": hashlib.sha256(twin).hexdigest(),
-        })
+        }
 
     def test_collect_needs_a_twin_without_symbols(self):
         unstripped = elf([(ENTRY, GLOBAL_FUNC, 1)])
@@ -181,19 +175,19 @@ class Collection(Scratch):
         self.write("raw/plain/b", unstripped + b"b")
         self.write(f"raw/plain/.stripped/{hashlib.sha256(unstripped + b'b').hexdigest()}", unstripped)
         _, problems = manifest.collect({"plain": self.dir / "raw/plain"}, ["a", "b"], self.dir / "out")
-        self.assertEqual(len(problems), 2)
-        self.assertIn("a in the plain build has no stripped twin", problems[0])
-        self.assertIn("the stripped twin of b in the plain build has a symbol table", problems[1])
+        assert len(problems) == 2
+        assert "a in the plain build has no stripped twin" in problems[0]
+        assert "the stripped twin of b in the plain build has a symbol table" in problems[1]
 
 
-class Layout(Scratch):
+class TestLayout(Scratch):
     def test_text_size_is_read_by_name(self):
         sections = [(".text.startup", 11), (".rodata", 23), (".text", 4567), (".data", 89)]
         for wide in (True, False):
             path = self.write(f"target-{wide}", elf(symtab=False, wide=wide, sections=sections, segments=[PT_LOAD]))
-            self.assertEqual(manifest.binary_layout(path)["text_bytes"], 4567)
+            assert manifest.binary_layout(path)["text_bytes"] == 4567
         path = self.write("no-text", elf(symtab=False, sections=[(".data", 1)], segments=[PT_LOAD]))
-        self.assertIsNone(manifest.binary_layout(path)["text_bytes"])
+        assert manifest.binary_layout(path)["text_bytes"] is None
 
     def test_static_means_no_interpreter_and_no_dynamic_segment(self):
         cases = {
@@ -203,40 +197,40 @@ class Layout(Scratch):
         }
         for name, (segments, static) in cases.items():
             path = self.write(name, elf(symtab=False, sections=[(".text", 1)], segments=segments))
-            self.assertIs(manifest.binary_layout(path)["static"], static, name)
+            assert manifest.binary_layout(path)["static"] is static, name
 
     def test_executable_bytes_sum_the_executable_loaded_segments(self):
         segments = [(PT_LOAD, 5, 3000), (PT_LOAD, 4, 9000), (PT_LOAD, 7, 400), (PT_DYNAMIC, 1, 77)]
         for wide in (True, False):
             # .text says 10 bytes; the loader maps 3,400 executable bytes, and that is what is counted
             path = self.write(f"exec-{wide}", elf(symtab=False, wide=wide, sections=[(".text", 10)], segments=segments))
-            self.assertEqual(manifest.executable_bytes(path), 3400, wide)
-            self.assertEqual(manifest.binary_layout(path)["text_bytes"], 10, wide)
+            assert manifest.executable_bytes(path) == 3400, wide
+            assert manifest.binary_layout(path)["text_bytes"] == 10, wide
 
     def test_executable_bytes_of_a_file_that_cannot_be_read(self):
         data = elf(symtab=False, sections=[(".text", 1)], segments=[(PT_LOAD, 5, 8)])
-        self.assertIsNone(manifest.executable_bytes(self.write("truncated-exec", data[:len(data) - 200])))
-        self.assertIsNone(manifest.executable_bytes(self.write("not-elf", b"#!/bin/sh\n")))
-        self.assertEqual(manifest.executable_bytes(self.write("no-segments", elf(symtab=False))), 0)
+        assert manifest.executable_bytes(self.write("truncated-exec", data[:len(data) - 200])) is None
+        assert manifest.executable_bytes(self.write("not-elf", b"#!/bin/sh\n")) is None
+        assert manifest.executable_bytes(self.write("no-segments", elf(symtab=False))) == 0
         # e_phentsize smaller than one entry, and the PN_XNUM count: the program headers cannot be read
         for offset, value in ((54, 8), (56, 0xFFFF)):
             bad = data[:offset] + struct.pack("<H", value) + data[offset + 2:]
-            self.assertIsNone(manifest.executable_bytes(self.write(f"phdr-{offset}", bad)), offset)
+            assert manifest.executable_bytes(self.write(f"phdr-{offset}", bad)) is None, offset
 
     def test_a_truncated_file_is_not_read(self):
         data = elf(symtab=False, sections=[(".text", 1)], segments=[PT_LOAD, PT_INTERP])
         for size in (0, 20, 63, len(data) - 1):
-            self.assertIsNone(manifest.binary_layout(self.write(f"truncated-{size}", data[:size])), size)
+            assert manifest.binary_layout(self.write(f"truncated-{size}", data[:size])) is None, size
 
     def test_an_offset_past_any_file_is_not_read(self):
         data = elf(symtab=False, sections=[(".text", 1)], segments=[PT_LOAD])
         for start in (32, 40):  # e_phoff, e_shoff
             path = self.write(f"offset-{start}", data[:start] + struct.pack("<Q", 2**64 - 1) + data[start + 8:])
-            self.assertFalse(manifest.has_symbol_table(path), start)
-            self.assertIsNone(manifest.binary_layout(path), start)
+            assert not manifest.has_symbol_table(path), start
+            assert manifest.binary_layout(path) is None, start
 
 
-class Locks(Scratch):
+class TestLocks(Scratch):
     ENTRIES = {"fuzzer": {"plain": {"file": "fuzzer.plain", "bytes": 3, "sha256": "aa"},
                           "asan": {"file": "fuzzer.asan", "bytes": 4, "sha256": "bb"}}}
 
@@ -250,14 +244,14 @@ class Locks(Scratch):
         )
         manifest.write_manifest(self.dir / "manifest.yaml", data)
         text = (self.dir / "manifest.yaml").read_text()
-        self.assertTrue(text.startswith("# Generated by oss-verify check; do not edit.\n"))
-        self.assertEqual(yaml.safe_load(text)["layout"], layouts)
-        self.assertEqual(yaml.safe_load(text)["targets"], {"fuzzer": {"builds": self.ENTRIES["fuzzer"]}})
+        assert text.startswith("# Generated by oss-verify check; do not edit.\n")
+        assert yaml.safe_load(text)["layout"] == layouts
+        assert yaml.safe_load(text)["targets"] == {"fuzzer": {"builds": self.ENTRIES["fuzzer"]}}
         commit, pins, toolchain = manifest.load_lock(self.dir / "manifest.yaml")
-        self.assertEqual(commit, "c" * 40)
-        self.assertEqual(toolchain, "example.org/toolchain@sha256:" + "1" * 64)
-        self.assertEqual(pins[("fuzzer", "asan")]["sha256"], "bb")
-        self.assertEqual(manifest.compare(self.ENTRIES, pins, ["plain", "asan"]), ([], [], 2))
+        assert commit == "c" * 40
+        assert toolchain == "example.org/toolchain@sha256:" + "1" * 64
+        assert pins[("fuzzer", "asan")]["sha256"] == "bb"
+        assert manifest.compare(self.ENTRIES, pins, ["plain", "asan"]) == ([], [], 2)
 
     def test_harness_yaml(self):
         harness = {"schema": "oss-fuzz-theorems/harness/1", "harness": "fuzzer",
@@ -267,55 +261,58 @@ class Locks(Scratch):
                               "asan": {"file": "fuzzer.asan", "bytes": 4, "sha256": "00"}}}
         (self.dir / "harness.yaml").write_text(yaml.safe_dump(harness))
         commit, pins, toolchain = manifest.load_lock(self.dir / "harness.yaml")
-        self.assertEqual(commit, "d" * 40)
-        self.assertIsNone(toolchain)  # no project.yaml two directories up
+        assert commit == "d" * 40
+        assert toolchain is None  # no project.yaml two directories up
         # The release's harness.yaml is projects/<name>/<harness>/harness.yaml; its project.yaml names the builder.
         harness_dir = self.dir / "projects" / "p" / "fuzzer"
         harness_dir.mkdir(parents=True)
         (harness_dir / "harness.yaml").write_text(yaml.safe_dump(harness))
         (harness_dir.parent / "project.yaml").write_text("build:\n  builder: example.org/tc@sha256:" + "2" * 64 + "\n")
-        self.assertEqual(manifest.load_lock(harness_dir / "harness.yaml")[2], "example.org/tc@sha256:" + "2" * 64)
+        assert manifest.load_lock(harness_dir / "harness.yaml")[2] == "example.org/tc@sha256:" + "2" * 64
         (harness_dir.parent / "project.yaml").write_text("at: 2024-13-45\n")
-        self.assertIsNone(manifest.load_lock(harness_dir / "harness.yaml")[2])
+        assert manifest.load_lock(harness_dir / "harness.yaml")[2] is None
         differences, extras, matched = manifest.compare(self.ENTRIES, pins, ["plain", "asan"])
-        self.assertEqual(matched, 1)
-        self.assertEqual(extras, [])
-        self.assertEqual(len(differences), 1)
-        self.assertIn("fuzzer.asan: sha256 bb", differences[0])
+        assert matched == 1
+        assert extras == []
+        assert len(differences) == 1
+        assert "fuzzer.asan: sha256 bb" in differences[0]
         differences, extras, matched = manifest.compare(self.ENTRIES, pins, ["plain", "ubsan", "asan"])
-        self.assertIn("fuzzer.ubsan: in the lock, not in this build", differences)
+        assert "fuzzer.ubsan: in the lock, not in this build" in differences
 
-    def test_extras_and_bad_locks(self):
+    @pytest.mark.parametrize("text", [
+        pytest.param("- a\n", id="a-list"),
+        pytest.param("schema: something/else\n", id="another-schema"),
+        pytest.param("harness: x\nbuilds: {plain: {bytes: 1}}\n", id="a-build-with-no-sha256"),
+        pytest.param("a: [\n", id="no-yaml"),
+        pytest.param("at: 2024-13-45\n", id="a-date-that-does-not-exist"),
+        pytest.param("created: 2024-01-01T25:00:00\n", id="a-time-that-does-not-exist"),
+    ])
+    def test_extras_and_bad_locks(self, text):
         _, extras, _ = manifest.compare(self.ENTRIES, {("fuzzer", "plain"): {"sha256": "aa"}}, ["plain", "asan"])
-        self.assertEqual(extras, ["fuzzer.asan: in this build, not in the lock"])
-        for text in ("- a\n", "schema: something/else\n", "harness: x\nbuilds: {plain: {bytes: 1}}\n", "a: [\n",
-                     "at: 2024-13-45\n", "created: 2024-01-01T25:00:00\n"):
-            (self.dir / "lock.yaml").write_text(text)
-            with self.assertRaises(manifest.LockError, msg=text):
-                manifest.load_lock(self.dir / "lock.yaml")
+        assert extras == ["fuzzer.asan: in this build, not in the lock"]
+        (self.dir / "lock.yaml").write_text(text)
+        with pytest.raises(manifest.LockError):
+            manifest.load_lock(self.dir / "lock.yaml")
 
-    def test_a_lock_of_the_wrong_shape_is_a_lock_error(self):
+    HARNESS = "schema: oss-fuzz-theorems/harness/1\n"
+
+    @pytest.mark.parametrize("text", [
+        pytest.param("targets: {f: [1, 2]}\n", id="a-target-that-is-not-a-mapping"),
+        pytest.param("targets: {f: {builds: [plain]}}\n", id="builds-that-are-not-a-mapping"),
+        pytest.param(f"schema: {manifest.MANIFEST_SCHEMA}\ntargets: [f]\n", id="targets-that-are-not-a-mapping"),
+        pytest.param(HARNESS + "builds: {plain: {sha256: aa}}\n", id="no-harness"),
+        pytest.param(HARNESS + "harness: {a: b}\nbuilds: {plain: {sha256: aa}}\n", id="a-harness-that-is-a-mapping"),
+        pytest.param(HARNESS + "harness: f\nbuilds: [1]\n", id="harness-builds-that-are-not-a-mapping"),
+        pytest.param("harness: f\nbuilds: {plain: {sha256: aa}}\nlibrary: x\n", id="a-library-that-is-not-a-mapping"),
+    ])
+    def test_a_lock_of_the_wrong_shape_is_a_lock_error(self, text):
         """Every shape that is not a lock is refused with LockError, which oss-verify check reports as a message, never
         an AttributeError or KeyError that ends it with a traceback."""
-        harness = "schema: oss-fuzz-theorems/harness/1\n"
-        for text in (
-            "targets: {f: [1, 2]}\n",                                   # a target that is not a mapping
-            "targets: {f: {builds: [plain]}}\n",                        # builds that are not a mapping
-            f"schema: {manifest.MANIFEST_SCHEMA}\ntargets: [f]\n",      # targets that are not a mapping
-            harness + "builds: {plain: {sha256: aa}}\n",                # no harness
-            harness + "harness: {a: b}\nbuilds: {plain: {sha256: aa}}\n",
-            harness + "harness: f\nbuilds: [1]\n",
-            "harness: f\nbuilds: {plain: {sha256: aa}}\nlibrary: x\n",  # a library that is not a mapping
-        ):
-            (self.dir / "lock.yaml").write_text(text)
-            with self.assertRaises(manifest.LockError, msg=text):
-                manifest.load_lock(self.dir / "lock.yaml")
+        (self.dir / "lock.yaml").write_text(text)
+        with pytest.raises(manifest.LockError):
+            manifest.load_lock(self.dir / "lock.yaml")
         # Still a lock: a harness named by a number, and a manifest whose target has no builds yet.
-        (self.dir / "lock.yaml").write_text(harness + "harness: 7\nbuilds: {plain: {sha256: aa}}\n")
-        self.assertEqual(list(manifest.load_lock(self.dir / "lock.yaml")[1]), [("7", "plain")])
+        (self.dir / "lock.yaml").write_text(self.HARNESS + "harness: 7\nbuilds: {plain: {sha256: aa}}\n")
+        assert list(manifest.load_lock(self.dir / "lock.yaml")[1]) == [("7", "plain")]
         (self.dir / "lock.yaml").write_text("targets: {f: {builds: }}\n")
-        self.assertEqual(manifest.load_lock(self.dir / "lock.yaml")[1], {})
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert manifest.load_lock(self.dir / "lock.yaml")[1] == {}

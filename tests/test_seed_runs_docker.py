@@ -21,9 +21,8 @@ import os
 import pathlib
 import shutil
 import subprocess
-import tempfile
-import unittest
-from unittest import mock
+
+import pytest
 
 from oss_verify import check_binaries
 from oss_verify import check_build
@@ -60,20 +59,16 @@ SEEDS = [
 ]
 
 
-@unittest.skipUnless(os.environ.get("OV_DOCKER_TESTS") == "1" and QEMU and docker_ready(),
-                     "set OV_DOCKER_TESTS=1, with Docker and the toolchain image, and put qemu-riscv64-static on PATH, "
-                     "to build and run the fixture")
-class SeedRuns(unittest.TestCase):
-    # unittest cuts a long diff by default. Show all of it, so that a failure shows the status of each input.
-    maxDiff = None
-
-    @classmethod
-    def setUpClass(cls):
-        cls.scratch = tempfile.TemporaryDirectory(prefix="ov-test-seed-runs.")
-        # Class cleanups run when setUpClass fails too, so a compile failure removes this process's image as well.
-        cls.addClassCleanup(cls.scratch.cleanup)
-        cls.addClassCleanup(subprocess.run, ["docker", "image", "rm", TAG], capture_output=True)
-        cls.work = pathlib.Path(cls.scratch.name)
+@pytest.mark.skipif(os.environ.get("OV_DOCKER_TESTS") != "1" or not (QEMU and docker_ready()),
+                    reason="set OV_DOCKER_TESTS=1, with Docker and the toolchain image, and put qemu-riscv64-static on "
+                           "PATH, to build and run the fixture")
+class TestSeedRuns:
+    @pytest.fixture(scope="class", autouse=True)
+    def set_up_class(self, request, tmp_path_factory):
+        cls = request.cls
+        cls.work = tmp_path_factory.mktemp("ov-test-seed-runs")
+        # A finalizer runs when this fixture fails too, so a compile failure removes this process's image as well.
+        request.addfinalizer(lambda: subprocess.run(["docker", "image", "rm", TAG], capture_output=True))
         cls.labels = check_build.work_label(cls.work)
         job = check_build.Job(name="example", directory=FIXTURE, repo="https://example.invalid/example", ref="",
                               dockerfile="", builds=[BUILD], fuzz_targets=None)
@@ -83,10 +78,11 @@ class SeedRuns(unittest.TestCase):
         # change no byte of the binary (tests/test_binary_checks_docker.py, test_records_change_no_byte).
         check_build.compile_build(TAG, BUILD, validate.BUILDS[BUILD], cls.raw, labels=cls.labels, record=True)
 
-    def setUp(self):
+    @pytest.fixture(autouse=True)
+    def set_up(self, monkeypatch):
         # run_all and run_job read these when they start the runs.
-        self.enterContext(mock.patch.object(check_checks, "RUN_TIMEOUT", LIMIT))
-        self.enterContext(mock.patch.object(check_binaries, "RUN_SECONDS", LIMIT))
+        monkeypatch.setattr(check_checks, "RUN_TIMEOUT", LIMIT)
+        monkeypatch.setattr(check_binaries, "RUN_SECONDS", LIMIT)
 
     def test_seed_runs_read_each_exit_status(self):
         inputs, results = self.work / "inputs", self.work / "results"
@@ -96,13 +92,13 @@ class SeedRuns(unittest.TestCase):
         # As check_checks.checks does for its sanitizer build, the runs use the binary that compile wrote to $OUT.
         names = [name for name, _, _ in SEEDS]
         runs = check_checks.run_all(TAG, self.raw, inputs, {TARGET: names}, BUILD, results, labels=self.labels)
-        self.assertEqual([run.seed for run in runs], names)
+        assert [run.seed for run in runs] == names
         # Compare the statuses of all inputs in one assertion, so that a failure shows the status of each input.
         texts = {name: (results / TARGET / f"{n}.status").read_text().strip() for n, (name, _, _) in enumerate(SEEDS)}
-        self.assertEqual(texts, {name: str(expected) for name, _, expected in SEEDS},
-                         f"{check_checks.KILLED} is the status of a run the time limit stopped")
-        self.assertEqual({run.seed: run.status for run in runs}, {name: expected for name, _, expected in SEEDS})
-        self.assertEqual({run.seed: run.caught() for run in runs}, {name: expected != 0 for name, _, expected in SEEDS})
+        assert texts == {name: str(expected) for name, _, expected in SEEDS}, \
+            f"{check_checks.KILLED} is the status of a run the time limit stopped"
+        assert {run.seed: run.status for run in runs} == {name: expected for name, _, expected in SEEDS}
+        assert {run.seed: run.caught() for run in runs} == {name: expected != 0 for name, _, expected in SEEDS}
 
     def test_binary_runs_read_each_exit_status(self):
         # The job's files as check_binaries.binary_checks lays them out. binary_checks runs the stripped copy that
@@ -113,7 +109,7 @@ class SeedRuns(unittest.TestCase):
         (files / "inputs").mkdir(parents=True)
         shutil.copyfile(self.raw / TARGET, files / "binary")
         quiet = check_binaries.record_of(self.raw, TARGET)[1]
-        self.assertIsNotNone(quiet, "compile recorded no quiet twin")
+        assert quiet is not None, "compile recorded no quiet twin"
         (files / "quiet").write_bytes(quiet)
         os.chmod(files / "binary", 0o755)
         os.chmod(files / "quiet", 0o755)
@@ -126,16 +122,12 @@ class SeedRuns(unittest.TestCase):
         results = check_binaries.run_job(job_dir, check_build.newest_toolchain(), check_checks.qemu(), self.labels,
                                          600)
         loud = {name: (results / f"l{n}.status").read_text().strip() for n, (name, _) in enumerate(inputs)}
-        self.assertEqual(loud, {"h": "134", "m": "0"},
-                         f"{check_binaries.STOPPED} is the status of a run the time limit stopped")
+        assert loud == {"h": "134", "m": "0"}, \
+            f"{check_binaries.STOPPED} is the status of a run the time limit stopped"
         silent = {name: (results / f"q{n}.status").read_text().strip() for n, (name, _) in enumerate(inputs)}
-        self.assertEqual(silent, loud, "the quiet twin must exit with the binary's status")
+        assert silent == loud, "the quiet twin must exit with the binary's status"
         # An ASan abort writes no report (docs/build-contract.md, the sealed AddressSanitizer runtime). Thus on 'h'
         # the binary and its quiet twin both exit 134, the twin writes nothing, and check 3 counts 'h' as agreed.
         agreement = check_binaries.quiet_loud(True, "", inputs, results)
-        self.assertEqual(agreement,
-                         {"result": "pass", "detail": "the same status on 2 inputs, and the quiet twin wrote nothing"})
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert agreement == {"result": "pass",
+                             "detail": "the same status on 2 inputs, and the quiet twin wrote nothing"}
