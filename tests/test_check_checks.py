@@ -2700,6 +2700,29 @@ class SeedHex(unittest.TestCase):
         self.assertEqual(self.second_of_three(rename), [
             "(not read: UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position 1: invalid start byte)"])
 
+    def test_a_corpus_whose_central_directory_holds_a_name_marked_utf_8_that_is_not_says_why_it_is_not_read(self):
+        """The same name b"s\\xffcond" with bit 0x800 set where a zip tool sets it, in the local file header and in the
+        central directory entry. Then ZipFile() itself raises UnicodeDecodeError while it reads the central directory,
+        before the loop, and unzip -l still lists every input. The hexadecimal file must still be written and say that
+        the inputs are not read, with the error: else the review reads a listing of the seed corpus with no
+        hexadecimal file and no reason."""
+        with tempfile.TemporaryDirectory() as directory:
+            corpus, hex_file = pathlib.Path(directory) / "x_seed_corpus.zip", pathlib.Path(directory) / "x.hex.txt"
+            with zipfile.ZipFile(corpus, "w") as archive:
+                for name, data in self.INPUTS.items():
+                    archive.writestr(name, data, compress_type=zipfile.ZIP_DEFLATED)
+            raw = bytearray(corpus.read_bytes())
+            with zipfile.ZipFile(corpus) as archive:
+                info = archive.getinfo("second")
+            for at in (info.header_offset + 30, self.entry(raw, info) + 46):
+                raw[at:at + 6] = b"s\xffcond"
+            self.flag(0x800, 0x800)(raw, info)
+            corpus.write_bytes(bytes(raw))
+            run = subprocess.run(["python3", "-P", "-", str(corpus), str(hex_file)], input=self.script(),
+                                 capture_output=True, text=True)
+            self.assertTrue(hex_file.is_file(), run.stderr)
+            self.assertIn("(not read: UnicodeDecodeError: ", hex_file.read_text(), run.stderr)
+
 
 class ReviewJob(unittest.TestCase):
     """review.yml's review job: its own small steps, and the scripts it runs (review-gather, review-prompt), run with
