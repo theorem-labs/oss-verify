@@ -1,8 +1,9 @@
 #!/bin/sh -e
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
-# Modified 2026 by Theorem Labs, PBC: the fuzz target compress_roundtrip_full_fuzzer, which is not of the release,
-# and the C library that its block builds (musl and its two patches, which sources lays out).
+# Modified 2026 by Theorem Labs, PBC: the fuzz targets api-driver and sysfail_fuzzer (DSL fuzz targets) and
+# compress_roundtrip_full_fuzzer, which are not of the release, and the C library that compress_roundtrip_full_fuzzer's
+# block builds (musl and its two patches, which sources lays out).
 #
 # Generated from the build recipe of the oss-fuzz-theorems 2026.10 release.
 #
@@ -10,6 +11,30 @@
 # compile runs build.sh with bash; the release ran each target's build with sh -e, and so does this.
 [ -z "${BASH_VERSION:-}" ] || exec sh -e "$0"
 . /usr/local/lib/oss-verify/release-target.sh
+
+# api-driver: not a target of the release. A DSL fuzz target (docs/build-contract.md, "DSL fuzz targets"): the input is
+# a script of zlib calls that api-driver.dsl.c runs on live streams. Its tree is checksum_fuzzer's, with the same patch.
+# zlib's allocations go to tramp_alloc.c's trampolines through api-driver.tramp_alloc.redefs, so the input's allocation
+# mask makes them fail. The map renames the driver object too (OV_DSL_REDEFS), for the code it compiles from zlib's
+# headers; the driver's own arena calls tramp_alloc_raw_malloc, which no map renames, so it is on no schedule. As zlib
+# 1.4's CMake no longer does, the block moves the source tree's zconf.h aside, so that the driver compiles against the
+# configured one.
+(
+ov_target_begin zlib-api-driver
+build_lib() {
+  oft_build_cmake
+  if [ -f "$BUILDDIR/src/zconf.h" ]; then mv "$BUILDDIR/src/zconf.h" "$BUILDDIR/src/zconf.h.included" || return 1; fi
+  ov_dsl_driver dsl.c
+  ov_dsl_trampoline tramp_alloc.c
+  oft_seal_getenv
+  oft_seal_mkstemp
+  oft_seal_getpid
+}
+LIB_ARCHIVE="lib/liboft.a"
+LIB_CFLAGS=""
+export OV_DSL_REDEFS="/work/targets/$T/tramp_alloc.redefs"
+ov_target_build_dsl api-driver
+)
 
 # checksum_fuzzer: the release's target zlib-checksum_fuzzer
 (
@@ -175,6 +200,33 @@ build_lib() {
 LIB_ARCHIVE="lib/liboft.a"
 LIB_CFLAGS=""
 ov_target_build minigzip_fuzzer
+)
+
+# sysfail_fuzzer: not a target of the release. A DSL fuzz target, api-driver's driver with 31 more operations: zlib's
+# gz file functions over one file in memory, whose open, read, write, lseek, close and fcntl calls fail as the script
+# tells them to. Its own tree carries the inflate fix of madler/zlib #1390 and three fixes of zlib's gz layer
+# (zlib-sysfail_fuzzer.0002 to 0004). zlib's allocations go to tramp_alloc.c's trampolines
+# (sysfail_fuzzer.tramp_alloc.redefs), which rename the driver object too, while the driver's own arena is on no
+# schedule (it calls tramp_alloc_raw_malloc); and zlib's six system calls, in zlib alone, to tramp_sys.c's
+# (sysfail_fuzzer.tramp_sys.redefs). Each other function that zlib calls is a line of sysfail_fuzzer.sys.allow.
+(
+ov_target_begin zlib-sysfail_fuzzer
+build_lib() {
+  oft_build_cmake
+  if [ -f "$BUILDDIR/src/zconf.h" ]; then mv "$BUILDDIR/src/zconf.h" "$BUILDDIR/src/zconf.h.included" || return 1; fi
+  ov_dsl_driver dsl.c
+  ov_dsl_trampoline tramp_alloc.c
+  ov_dsl_trampoline tramp_sys.c
+  oft_seal_getenv
+  oft_seal_mkstemp
+  oft_seal_getpid
+}
+LIB_ARCHIVE="lib/liboft.a"
+LIB_CFLAGS=""
+export OV_DSL_REDEFS="/work/targets/$T/tramp_alloc.redefs"
+export OV_DSL_LIBRARY_REDEFS="/work/targets/$T/tramp_sys.redefs"
+export OV_DSL_ALLOW="/work/targets/$T/sys.allow"
+ov_target_build_dsl sysfail_fuzzer
 )
 
 # zlib_uncompress2_fuzzer: the release's target zlib-zlib_uncompress2_fuzzer

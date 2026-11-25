@@ -1,0 +1,74 @@
+zlib gz_comp(): finish a gzip stream whose Z_FINISH a failed write cut short, so that gzflush(Z_FINISH) and
+gzclose() write the rest of the data and the gzip trailer after a write error.
+
+Upstream: madler/zlib pull request #1399, at its head commit f9f20345627b4148c4f880775d3e9557c11e07af, which holds
+two commits on 99623ef7:
+  9e7904dd70bc986cfbea8f6df5937b930dedda96  Write the finished gzip stream after a gzflush(Z_FINISH) that stalls.
+  f9f20345627b4148c4f880775d3e9557c11e07af  Finish a gzip stream cut short by a write error before new input.
+The diff below is the diff from 99623ef7 to f9f20345, unchanged.
+
+diff --git a/gzguts.h b/gzguts.h
+index df4b0d6..484049c 100644
+--- a/gzguts.h
++++ b/gzguts.h
+@@ -209,6 +209,7 @@ typedef struct {
+     int level;              /* compression level */
+     int strategy;           /* compression strategy */
+     int reset;              /* true if a reset is pending after a Z_FINISH */
++    int finish;             /* true if a write error cut a Z_FINISH short */
+         /* seek request */
+     z_off64_t skip;         /* amount to skip (already rewound if backwards) */
+         /* error information */
+diff --git a/gzlib.c b/gzlib.c
+index c3b3efc..d69121f 100644
+--- a/gzlib.c
++++ b/gzlib.c
+@@ -74,8 +74,10 @@ local void gz_reset(gz_statep state) {
+         state->how = LOOK;          /* look for gzip header */
+         state->junk = -1;           /* mark first member */
+     }
+-    else                            /* for writing ... */
++    else {                          /* for writing ... */
+         state->reset = 0;           /* no deflateReset pending */
++        state->finish = 0;          /* no Z_FINISH cut short */
++    }
+     state->again = 0;               /* no stalled i/o yet */
+     state->skip = 0;                /* no seek request pending */
+     gz_error(state, Z_OK, NULL);    /* clear error */
+diff --git a/gzwrite.c b/gzwrite.c
+index 32560fe..9c1f41c 100644
+--- a/gzwrite.c
++++ b/gzwrite.c
+@@ -90,6 +90,21 @@ local int gz_comp(gz_statep state, int flush) {
+         return 0;
+     }
+ 
++    /* if a write error cut a Z_FINISH short, then complete that gzip stream
++       before deflate() gets new input or a different flush */
++    if (state->finish) {
++        state->finish = 0;
++        if (strm->avail_in || flush != Z_FINISH) {
++            unsigned avail = strm->avail_in;
++
++            strm->avail_in = 0;
++            ret = gz_comp(state, Z_FINISH);
++            strm->avail_in = avail;
++            if (ret == -1)
++                return -1;
++        }
++    }
++
+     /* check for a pending reset */
+     if (state->reset) {
+         /* don't start a new gzip member unless there is data to write and
+@@ -116,6 +131,10 @@ local int gz_comp(gz_statep state, int flush) {
+                 if (writ < 0) {
+                     if (BLOCKED(errno))
+                         state->again = 1;
++                    if (flush == Z_FINISH && ret == Z_STREAM_END)
++                        state->reset = 1;
++                    else if (flush == Z_FINISH)
++                        state->finish = 1;
+                     gz_error(state, Z_ERRNO, zstrerror());
+                     return -1;
+                 }

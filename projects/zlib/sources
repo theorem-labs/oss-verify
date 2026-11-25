@@ -2,6 +2,7 @@
 # kind	path	arguments: see lay-out-sources
 tree	ext/zlib-checksum_fuzzer/src	upstream/zlib
 patch	ext/zlib-checksum_fuzzer/src	zlib-checksum_fuzzer.0001-inflate-memerr-totals.patch
+link	ext/zlib-api-driver/src	ext/zlib-checksum_fuzzer/src
 link	ext/zlib-compress_fuzzer/src	ext/zlib-checksum_fuzzer/src
 # Not of the release: compress_roundtrip_full_fuzzer, on the zlib tree of zlib-checksum_fuzzer's pin
 link	ext/zlib-compress_roundtrip_full_fuzzer/src	ext/zlib-checksum_fuzzer/src
@@ -37,6 +38,31 @@ link	targets/zlib-minigzip_fuzzer/minigzip_fuzzer.c	ext/oss-fuzz-zlib/projects/z
 file	targets/zlib-zlib_uncompress2_fuzzer/zlib_uncompress2_fuzzer.cc	https://raw.githubusercontent.com/google/oss-fuzz/fadbcdfb9e96aaa26734fbc936ab64a6f4f18ab4/projects/zlib/zlib_uncompress2_fuzzer.cc	afff986a00ba4cd11d9b72e9ccc9c103da0ee36712e92b40b89f9df5e914f6d4
 file	targets/zlib-zlib_uncompress3_fuzzer/zlib_uncompress3_fuzzer.cc	https://raw.githubusercontent.com/google/oss-fuzz/fadbcdfb9e96aaa26734fbc936ab64a6f4f18ab4/projects/zlib/zlib_uncompress3_fuzzer.cc	be171ee38f2c132fe9f99a9b0b9a2bbae2d9e41806719afafdf1e7cb5a652a48
 file	targets/zlib-zlib_uncompress_fuzzer/zlib_uncompress_fuzzer.cc	https://raw.githubusercontent.com/google/oss-fuzz/fadbcdfb9e96aaa26734fbc936ab64a6f4f18ab4/projects/zlib/zlib_uncompress_fuzzer.cc	518f9e2d49f4d64ffff78fafe3422d2441ce23e357b62d0e8c661fa6c7d3d9a9
+copy	targets/zlib-api-driver/dsl.c	api-driver.dsl.c
+copy	targets/zlib-api-driver/dsl.h	api-driver.dsl.h
+copy	targets/zlib-api-driver/tramp_alloc.h	api-driver.tramp_alloc.h
+copy	targets/zlib-api-driver/tramp_alloc.redefs	api-driver.tramp_alloc.redefs
+copy	targets/zlib-api-driver/faultalloc.h	api-driver.faultalloc.h
+copy	targets/zlib-api-driver/tramp_alloc.c	tramp_alloc.c
+copy	targets/zlib-api-driver/emit.h	emit.h
+copy	targets/zlib-api-driver/target.h	target.h
+tree	ext/zlib-sysfail_fuzzer/src	upstream/zlib
+patch	ext/zlib-sysfail_fuzzer/src	zlib-sysfail_fuzzer.0001-inflate-memerr-totals.patch
+patch	ext/zlib-sysfail_fuzzer/src	zlib-sysfail_fuzzer.0002-gz_fetch-copy-partial-output-after-read-error.patch
+patch	ext/zlib-sysfail_fuzzer/src	zlib-sysfail_fuzzer.0003-gzseek64-overflow-after-initial-pushback.patch
+patch	ext/zlib-sysfail_fuzzer/src	zlib-sysfail_fuzzer.0004-gzwrite-finish-reset-on-failed-write.patch
+copy	targets/zlib-sysfail_fuzzer/dsl.c	sysfail_fuzzer.dsl.c
+copy	targets/zlib-sysfail_fuzzer/dsl.h	sysfail_fuzzer.dsl.h
+copy	targets/zlib-sysfail_fuzzer/tramp_alloc.h	sysfail_fuzzer.tramp_alloc.h
+copy	targets/zlib-sysfail_fuzzer/tramp_alloc.redefs	sysfail_fuzzer.tramp_alloc.redefs
+copy	targets/zlib-sysfail_fuzzer/faultalloc.h	sysfail_fuzzer.faultalloc.h
+copy	targets/zlib-sysfail_fuzzer/tramp_sys.c	sysfail_fuzzer.tramp_sys.c
+copy	targets/zlib-sysfail_fuzzer/tramp_sys.h	sysfail_fuzzer.tramp_sys.h
+copy	targets/zlib-sysfail_fuzzer/tramp_sys.redefs	sysfail_fuzzer.tramp_sys.redefs
+copy	targets/zlib-sysfail_fuzzer/sys.allow	sysfail_fuzzer.sys.allow
+copy	targets/zlib-sysfail_fuzzer/tramp_alloc.c	tramp_alloc.c
+copy	targets/zlib-sysfail_fuzzer/emit.h	emit.h
+copy	targets/zlib-sysfail_fuzzer/target.h	target.h
 # Not of the release: musl f21a9653 and its two patches, the C library that compress_roundtrip_full_fuzzer's block builds
 git	ext/musl/src	https://git.musl-libc.org/git/musl	f21a96538f78fa8e2040831b4209b35f2fb581da
 copy	ext/musl/series/0001-export-pthread-struct-size.diff	musl-0001-export-pthread-struct-size.diff
