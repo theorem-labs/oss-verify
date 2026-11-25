@@ -1,9 +1,9 @@
 ---
 name: review-enrollment
-description: Use when you review an enrollment pull request, one that adds or changes one projects/<name>/, by hand or as the review job of .github/workflows/review.yml.
+description: Use when you review an enrollment pull request of theorem-labs/oss-verify, one that adds or changes one project directory in projects/, by hand or as the review job of .github/workflows/review.yml, or a setup pull request that adds .theorem/ on a project's own repository, as the review job of check.yml.
 ---
 
-# Review an enrollment pull request
+# Review an enrollment pull request or a setup pull request
 
 The review job of `.github/workflows/review.yml` runs this skill after the build; a person at Theorem can also run it by hand. `review.md` at the root of the repository says what the review checks and how it writes the comment: read it first, as `main` has it. This skill gives the inputs, the commands and the two outputs:
 
@@ -11,6 +11,8 @@ The review job of `.github/workflows/review.yml` runs this skill after the build
 2. **The summary**, by hand only: a report for the people at Theorem who decide. Read [references/summary.md](references/summary.md) for its form.
 
 The review decides nothing. We merge an enrollment when we intend to prove the project.
+
+A setup pull request is a pull request on a project's own repository, from the branch `theorem/setup`, that adds `.theorem/`. The review job of `check.yml` runs this skill on it, and the account that installed the App Theorem Verify merges it. `review.md` says how you know which kind of pull request you review, and what changes in each check for a setup pull request.
 
 ## Inputs
 
@@ -30,6 +32,8 @@ Where the build output gives each binary's file size, `.text` size, linkage and 
 - `manifest.yaml`: `targets.<target>.builds.<build>.bytes`, `layout.<target>.<build>.text_bytes` and `.static`, and `repo`, `ref`, `commit` (the commit the build fetched) and `rebuild.result`.
 
 Run each command from the checkout of the base branch, never from the pull request's files. Keep your files in a scratch directory, `$WORK`, and write the two outputs to `$WORK/comment.md` and `$WORK/summary.md`.
+
+For a setup pull request, the inputs are the files that `.github/scripts/review-gather` writes with `KIND=setup`, as the section "In CI" lists them. To review one by hand, make a folder of the form `setup-fetch/1`, which the header of the script gives (`tests/fixtures/setup-fetch/` is one). Then run `KIND=setup FETCHED=<folder> .github/scripts/review-gather "$WORK/in"`, and read `$WORK/in` as `$IN`.
 
 ## In CI
 
@@ -60,6 +64,7 @@ In the review job (Claude Code, through `anthropics/claude-code-action`), these 
 | the reach and breakage measurements (F3, F4), and the table "The checks of the binaries" with "What each failure is" under it (D3) | `$IN/build/checks.md`, the report of `uv run oss-verify check --checks` |
 | the repository's facts: `git ls-remote`, the contributors, the comparisons of G1, and its pull requests | `$IN/repository.txt` |
 | the seed corpora (F3) | `$IN/seeds/<target>.listing.txt` (`unzip -l`) and `$IN/seeds/<target>.hex.txt` (the first 512 bytes of each of the first 200 inputs; an input that is not stored or deflated is not read, and its line says so) |
+| whether the project is seeded (F3, F4) | `primary_contact` in the `project.yaml` of `DIR`, which is `n/a` for a seeded project. F3 and F4 report nothing for a seeded project (`review.md`) |
 | the review comments of other reviewers (G5) | `$IN/review-comments.txt`, and `.reviews` in `$IN/pr.json` |
 | the changes since the last review (a later push) | `$IN/since-last-review.diff` |
 
@@ -78,6 +83,14 @@ For a setup pull request, the pull request on an owner's repository that adds `.
 | the changes since the last review (a later push) | `$IN/since-last-review.diff` |
 
 A setup pull request has no build results (`$IN/build/`), no `checks.json`, no triage files, no `checklist.txt` and no `template-history.txt`.
+
+For a setup pull request, these rules of this section change:
+
+- `review.md`, "The review of a setup pull request", says which checks it keeps, takes from the folder `$IN`, or drops. A dropped check needs no file, so a missing file never makes it **person**. Its verdict is **pass**, with the reason that `review.md` gives.
+- No report is folded under your comment. Do not write "the report below".
+- `DIR` is `$IN/theorem/`. The checkout holds no project directory of the pull request.
+- On a later push, `$IN/since-last-review.diff` is the diff of the whole pull request, from the head of your last review to the new head. A new request comes only from that diff. Check D3 makes no exception, because the review of a setup pull request drops it.
+- In a held finding, `upstream repository` is the repository of the pull request, and `upstream commit` is its head.
 
 ### A held finding
 
