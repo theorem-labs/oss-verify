@@ -2540,6 +2540,14 @@ class SeedHex(unittest.TestCase):
     """review-gather's seeds/<target>.hex.txt: the first 512 bytes of each of the first 200 inputs of a seed corpus, in
     hexadecimal. The seed corpus is a zip in the pull request's projects/<name>/."""
 
+    @staticmethod
+    def script():
+        """The python script of review-gather's seed_listings, which it runs as python3 -P - <zip> <hex file>."""
+        gather = (ROOT / ".github" / "scripts" / "review-gather").read_text()
+        opener = "python3 -P - \"$zip\" \"$out/seeds/$target.hex.txt\" <<'EOF'\n"
+        start = gather.index(opener) + len(opener)
+        return gather[start:gather.index("\nEOF\n", start) + 1]
+
     def test_a_member_of_64_mib_in_a_small_zip_is_read_in_little_memory(self):
         """A deflated member and a bzip2 member each hold 64 MiB of spaces, in a zip of less than 1 MiB. The script of
         review-gather runs in this process, so that tracemalloc sees its memory. It takes less than 16 MiB: a read of
@@ -2549,10 +2557,7 @@ class SeedHex(unittest.TestCase):
         password."""
         import tracemalloc
         from unittest import mock
-        gather = (ROOT / ".github" / "scripts" / "review-gather").read_text()
-        opener = "python3 -P - \"$zip\" \"$out/seeds/$target.hex.txt\" <<'EOF'\n"
-        start = gather.index(opener) + len(opener)
-        script = gather[start:gather.index("\nEOF\n", start) + 1]
+        script = self.script()
         stored, deflated, spaces, size = bytes(range(256)) * 3, b"seed " * 200, b" " * (1 << 20), 64 << 20
         with tempfile.TemporaryDirectory() as directory:
             corpus, hex_file = pathlib.Path(directory) / "x_seed_corpus.zip", pathlib.Path(directory) / "x.hex.txt"
@@ -2600,6 +2605,40 @@ class SeedHex(unittest.TestCase):
         self.assertEqual(members[f"== 'bzip2-64-mib': {size} bytes"],
                          ["(not read: compression method 12, not stored or deflated)"])
         self.assertEqual(members["== 'encrypted': 768 bytes"], ["(not read: encrypted)"])
+
+    def test_an_input_whose_data_cannot_be_read_gets_a_line_and_the_next_are_read(self):
+        """The second of three deflated inputs has a deflate stream that zlib cannot decompress (its first byte gives
+        the block type 3, which deflate does not have): it gets a line that says that it is not read, with the error,
+        and the first and the third get their rows."""
+        inputs = {"first": b"first " * 100, "second": b"second " * 100, "third": bytes(range(256)) * 2}
+        with tempfile.TemporaryDirectory() as directory:
+            corpus, hex_file = pathlib.Path(directory) / "x_seed_corpus.zip", pathlib.Path(directory) / "x.hex.txt"
+            with zipfile.ZipFile(corpus, "w") as archive:
+                for name, data in inputs.items():
+                    archive.writestr(name, data, compress_type=zipfile.ZIP_DEFLATED)
+            with zipfile.ZipFile(corpus) as archive:
+                at = archive.getinfo("second").header_offset
+            raw = bytearray(corpus.read_bytes())
+            # The local header: 30 bytes, then the name and the extra field, whose lengths are at 26 and 28.
+            at += 30 + int.from_bytes(raw[at + 26:at + 28], "little") + int.from_bytes(raw[at + 28:at + 30], "little")
+            raw[at:at + 4] = b"\xff" * 4
+            corpus.write_bytes(bytes(raw))
+            run = subprocess.run(["python3", "-P", "-", str(corpus), str(hex_file)], input=self.script(),
+                                 capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            lines = hex_file.read_text().splitlines()
+        members = {}
+        for line in lines:
+            if line.startswith("== "):
+                rows = members.setdefault(line, [])
+            else:
+                rows.append(line)
+        self.assertEqual(list(members), [f"== {name!r}: {len(data)} bytes" for name, data in inputs.items()])
+        for name in ("first", "third"):
+            rows = members[f"== {name!r}: {len(inputs[name])} bytes"]
+            self.assertEqual(b"".join(bytes.fromhex(row[6:53]) for row in rows), inputs[name][:512], name)
+        self.assertEqual(members["== 'second': 700 bytes"],
+                         ["(not read: error: Error -3 while decompressing data: invalid block type)"])
 
 
 class ReviewJob(unittest.TestCase):

@@ -153,7 +153,8 @@ change_diff() {
 # with a size. So this reads only a stored or deflated member, and gives a line for each other member that says that
 # it is not read. open() raises RuntimeError for an encrypted member, because this gives no password. So this reads no
 # member whose bit 0x1 of the general purpose bit flag is set, as read_member of .github/scripts/artifact.py does, and
-# gives a line for it too.
+# gives a line for it too. A member whose data cannot be read (a corrupt deflate stream, a bad CRC, a zip cut short)
+# gets a line with the error, and this goes on with the next member.
 seed_listings() {
   local zip target
   for zip in "$1"/*_seed_corpus.zip; do
@@ -161,7 +162,7 @@ seed_listings() {
     target=$(basename "$zip" _seed_corpus.zip)
     keep "seeds/$target.listing.txt" unzip -l "$zip"
     python3 -P - "$zip" "$out/seeds/$target.hex.txt" <<'EOF'
-import sys, zipfile
+import sys, zipfile, zlib
 with zipfile.ZipFile(sys.argv[1]) as archive, open(sys.argv[2], "w") as out:
     for info in [i for i in archive.infolist() if not i.is_dir()][:200]:
         out.write(f"== {info.filename!r}: {info.file_size} bytes\n")
@@ -171,8 +172,12 @@ with zipfile.ZipFile(sys.argv[1]) as archive, open(sys.argv[2], "w") as out:
         if info.flag_bits & 0x1:
             out.write("(not read: encrypted)\n")
             continue
-        with archive.open(info) as member:
-            data = member.read(512)
+        try:
+            with archive.open(info) as member:
+                data = member.read(512)
+        except (zlib.error, zipfile.BadZipFile, EOFError, OSError) as e:
+            out.write(f"(not read: {type(e).__name__}: {e})\n")
+            continue
         for at in range(0, len(data), 16):
             row = data[at:at + 16]
             text = "".join(chr(b) if 32 <= b < 127 else "." for b in row)
