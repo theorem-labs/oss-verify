@@ -108,6 +108,14 @@ status=$?
 { { [ "$status" = 0 ] && jq -r '.[0]' "$out/review-comments.json" 2> /dev/null; } || echo "-"
   echo "(exit status $status)"; } > "$out/review-comment-authors.txt"
 rm -f "$out/review-comments.json"
+# The reviews' authors, by each review's node id, as the REST API names them: an App with its [bot], which gh's reviews
+# in pr.json leave out. review.yml's gather job reads it to tell a review by an App of WRITER_BOTS from one by a user
+# who took that App's name; a read that failed names nobody, so each such review is screened.
+gh api --paginate "repos/$REPO/pulls/$PR/reviews?per_page=100" --jq '.[] | "\(.node_id) \(.user.login // "-")"' \
+  > "$out/review-authors.txt" 2> /dev/null
+status=$?
+[ "$status" = 0 ] || : > "$out/review-authors.txt"
+echo "(exit status $status)" >> "$out/review-authors.txt"
 # Each file of the pull request that the function $1 keeps, by its name and by its previous name, as it is at HEAD_SHA,
 # as data under head/, cut at 1 MiB, and its name in $2 when $2 is given. Every file, not only the first 100 that
 # pr.json lists. Claude Code reads a CLAUDE.md or .claude/ beside a file it reads as instructions: the pull request's

@@ -49,7 +49,18 @@ name: "Tests"
 #               pull_request_target, pull_request_review or pull_request_review_comment, or checks out other
 #               than its run's own commit (actions/checkout with a ref or a repository, gh pr checkout,
 #               refs/pull/, or a git fetch, checkout, switch, worktree, pull or reset); or a job that calls a
-#               workflow passes it secrets (R10 of dispatch://INFRA-5359/spec).
+#               workflow passes it secrets (R10 of dispatch://INFRA-5359/spec);
+#             - .github/workflows/review-approvals.yml is not there, or does not keep its whole shape, key by key:
+#               the name review.yml waits for, exactly the event pull_request_review with the activity types
+#               submitted and dismissed, no permission, no cache, jobs as one name mapped to one mapping, with
+#               that one condition, ubuntu-latest, a timeout of 1 to 10 minutes and steps that hold only run and
+#               name and echo one line of plain words, and no other key of the workflow, of its on or of the job,
+#               because a key the rule does not read (a defaults, a container, a concurrency, an env, a second
+#               event), or an entry of jobs that GitHub refuses, could keep its run from ending success.
+#               review.yml acts on a run of it that
+#               ended success by posting the check run review again with the approvals read then, so a pull request
+#               that loses it would keep a check run that a person's approval passed after that approval was taken
+#               back (dispatch://INFRA-5359/ask/605104e3-b85c-4c22-9a54-b254ba0e3c10).
 #           The script, steering.py, which it imports, .github/CODEOWNERS and this file have owners, so only a person
 #           can change the rule. A fork's run takes the script and steering.py from the merge's first parent, a commit
 #           of the base branch (the step that checks out the merge checks it is one), and runs it with python3 -I,

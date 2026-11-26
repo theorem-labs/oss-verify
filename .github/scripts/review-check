@@ -16,19 +16,23 @@ run: name review, head_sha HEAD_SHA, external_id PR, status completed, conclusio
 title, summary and text. The step adds the review comment's address. Each review is of one head, so a new head gets a
 new review and a new check run, never an earlier verdict. Of the check runs review at a head, GitHub's newest decides:
 a completed review that finds a blocking item replaces an earlier success with a failure. A review that fails or is
-cancelled posts a failure where review.yml records a hold for it (an enrollment's, and a screened change's, with the
-hold's title), and nothing for a writer's change, whose comment job does not run. So no success comes from a review
-that did not complete, and of the reviews that completed, the newest stands.
+cancelled posts a check where review.yml records a hold for it (an enrollment's, and a screened change's): a failure
+with the hold's title, or a success where a person approved that head (below); and nothing for a writer's change,
+whose comment job does not run. So a review that did not complete gives a success only on a person's approval, and
+of the reviews that completed, the newest stands.
 
 output.text is the record of the check run, which GitHub does not show: one JSON object in an HTML comment, schema
-SCHEMA, with the head, the kind, the project and OUTSIDE, the hold and its job, the five verdicts, and of each choice
-its check, whether it is reserved and whether it has a basis (never its text), with each <, > and & escaped as
-review-verdict escapes its record. --refresh decides again from RECORD, the output.text of the newest check run review
-of the oss-verify App for PR at HEAD_SHA, with the approvals read now, and prints the check run in the same shape, or
-nothing when RECORD is no record of this head or no approval can change it (a hold, or an enrollment with no file
+SCHEMA, with the head, the kind, the project and OUTSIDE, the hold and its job, the five verdicts, of each choice its
+check, whether it is reserved and whether it has a basis (never its text), and approver, the login whose approval of
+the head this check run rests on, with each <, > and & escaped as review-verdict escapes its record. review.yml's
+refresh compares the record it would write with the one the newest check run holds, so a check run that still credits
+an approval that was taken back is replaced. --refresh decides again from RECORD, the output.text of the newest check
+run review of the oss-verify App for PR at HEAD_SHA, with the approvals read now, and prints the check run in the same
+shape, or nothing when RECORD is no record of this head or no approval can change it (an enrollment with no file
 outside its project). review.yml's comment job runs it after a review of the pull request is submitted or dismissed
-(.github/workflows/review-approvals.yml), so an approval given after the review passes a reserved choice, and a
-dismissal fails it again, with no new review by the model.
+(.github/workflows/review-approvals.yml), so an approval given after the review passes a reserved choice, or a hold,
+and a dismissal, or a later request for changes, fails it again once no person's approval of that head stands, with
+no new review by the model.
 
 CHANGE is the review's verdicts and choices of review-change.md, as the review job keeps them: {"verdicts": {"1": ...,
 "5": ...}, "choices": [{"check": "4" or "5", "choice": ..., "reserved": true or false, "basis": ...}]}. The check
@@ -45,8 +49,12 @@ When it changes other files too (only a branch of this repository can), the same
 review-change.md, as CHANGE, and the check passes only as a change's does.
 
 HOLD gives no review: the screen held it, the daily cap stopped it, or a job failed (JOB). The check fails, with the
-title of the hold that .github/scripts/review-verdict gives the check run Enrollment review. A review that fails with
-no hold to record posts nothing, and the head has no check review: GitHub then holds the merge as for a failure.
+title of the hold that .github/scripts/review-verdict gives the check run Enrollment review, unless a person approved
+HEAD_SHA (.github/scripts/approval.py's person_approval: a User with write access who is not the author, whose newest
+deciding review is that approval). Then it passes, titled CLEARED, and its summary names that person and nothing of
+the pull request's text (dispatch://INFRA-5359/ask/605104e3-b85c-4c22-9a54-b254ba0e3c10, "A person approves"). An
+App's approval, an approval of another head and the author's own never pass it. A review that fails with no hold to
+record posts nothing, and the head has no check review: GitHub then holds the merge as for a failure.
 
 The text of a choice is what a pull request can steer: it reaches the summary only through
 .github/scripts/review-neutralize, as a reason of review-verdict does. The title is a fixed sentence made of check
@@ -81,6 +89,9 @@ ENROLLMENT_PASSED = ("Nothing blocks this pull request: it changes only projects
                      "Enrollment review holds that review's verdict.")
 # The length a choice's text keeps in the summary.
 CHOICE_LIMIT = 300
+# The title of a hold that a person's approval of the head passed (held; dispatch://INFRA-5359/ask/605104e3-b85c-4c22-
+# 9a54-b254ba0e3c10, "A person approves").
+CLEARED = "A person approved this head, so its hold does not block the merge."
 # The record of each check run review in its output.text, which GitHub does not show (record_of).
 SCHEMA = "oss-verify/review/1"
 
@@ -104,7 +115,7 @@ def shown(text):
     return " ".join(verdict.neutralize.neutralize(text, True).split())[:CHOICE_LIMIT] or "(none)"
 
 
-def judged(change, approved):
+def judged(change, approved, sha=""):
     """The blocking items of a review's CHANGE, each in fixed words, and the summary's lines about it. `approved` is
     called once, at the first reserved choice, and gives the login of a person who approved the head, or None."""
     change = change if isinstance(change, dict) else {}
@@ -144,7 +155,7 @@ def judged(change, approved):
     blocking += [f"a choice of check {number} that is reserved for a person waits for a person's approval of this head"
                  for number in sorted(unapproved)]
     if login:
-        lines.append(f"- {login}, who has write access, approved this head: each choice reserved for a person passes.")
+        lines.append(f"- {approved_by(login, sha)} Each choice reserved for a person passes.")
     return blocking, lines
 
 
@@ -159,9 +170,12 @@ def approval_of(repo, pr, sha):
     return person_approval(api, repo, int(pr), pull, sha) if isinstance(pull, dict) else None
 
 
-def record_of(sha, kind, name, outside, hold, job, change):
+def record_of(sha, kind, name, outside, hold, job, change, approver=""):
     """The record of the check run, as its output.text: what a refresh decides again from (main_refresh). The verdicts,
-    and of each choice its check, whether it is reserved and whether it has a basis, never its text."""
+    and of each choice its check, whether it is reserved and whether it has a basis, never its text. approver is the
+    login whose approval of the head this check run rests on, or "": review.yml's refresh compares the record it would
+    write with the one the newest check run holds, so a check run that still credits an approval that was taken back
+    is replaced. The record is this App's own text, and no text of the pull request reaches it."""
     change = change if isinstance(change, dict) else {}
     verdicts = change.get("verdicts") if isinstance(change.get("verdicts"), dict) else {}
     choices = change.get("choices")
@@ -172,22 +186,25 @@ def record_of(sha, kind, name, outside, hold, job, change):
         kept = "not read"
     record = {"schema": SCHEMA, "head": sha, "kind": kind, "name": name or None, "outside": outside,
               "hold": hold or None, "job": job or None,
-              "verdicts": {n: verdicts.get(n) for n in CHECKS if isinstance(verdicts.get(n), str)}, "choices": kept}
+              "verdicts": {n: verdicts.get(n) for n in CHECKS if isinstance(verdicts.get(n), str)}, "choices": kept,
+              "approver": approver or None}
     return "<!-- " + json.dumps(record, ensure_ascii=True, separators=(",", ":")).translate(verdict.ESCAPES) + " -->"
 
 
 def body(sha, pr, conclusion, title, summary, text):
+    """The check run as GitHub takes it. Its output.text is the record, which names the approval it rests on, so
+    review.yml's refresh compares the records and needs no key of its own."""
     return json.dumps({"name": "review", "head_sha": sha, "external_id": pr, "status": "completed",
                        "conclusion": conclusion, "output": {"title": title, "summary": summary, "text": text}})
 
 
-def decided(kind, name, change, approved, pure=False):
+def decided(kind, name, change, approved, pure=False, sha=""):
     """The conclusion, title and summary of a review that ran: of its CHANGE, or, when `pure`, of an enrollment whose
     every file is directly inside projects/NAME/, which passes once its review ran. A missing CHANGE is no pass."""
     if kind == "enrollment" and pure:
         title = ENROLLMENT_PASSED.format(name=name)
         return "success", title, title
-    blocking, lines = judged(change, approved)
+    blocking, lines = judged(change, approved, sha)
     title = f"Blocked: {'; '.join(blocking)}." if blocking else PASSED
     where = (f"Of the files outside projects/{name}/, which the enrollment review judged by review-change.md:"
              if kind == "enrollment" else "")
@@ -195,10 +212,46 @@ def decided(kind, name, change, approved, pure=False):
             "\n\n".join(part for part in (title, where, "\n".join(lines)) if part))
 
 
+def approved_by(login, sha):
+    """The one sentence that names whose approval of `sha` passed something, in the summary of a cleared hold and in
+    the line of a change's reserved choices. review.yml's refresh compares the records, not this text."""
+    return (f"Approved by {login}, a User with write access who is not the pull request's author, on {sha[:7]}, "
+            "with no newer review of theirs that takes it back (.github/scripts/approval.py).")
+
+
+def hold_title(hold, job):
+    """The title of the hold `hold` (a job of JOBS that failed, for failed), as review-verdict gives it; "" for a
+    record that names no hold it knows."""
+    if hold == "screen":
+        return verdict.SCREEN_HOLD
+    if hold == "cap":
+        return verdict.CAP_HOLD
+    return verdict.FAILED_HOLDS.get(job, "") if hold == "failed" and isinstance(job, str) else ""
+
+
+def held(title, summary, sha, login):
+    """The check run of a hold (`title`, its fixed words, and `summary`): success when `login`, a person who approved
+    the head `sha` (approval.person_approval), passed it, else failure. The summary names who passed it, and never
+    anything of the pull request's text."""
+    if login:
+        return "success", CLEARED, (f"{CLEARED} {title} {approved_by(login, sha)} No review of this head ran, so the "
+                                    "check review passes on that approval alone.")
+    return "failure", title, (f"{summary} The check review fails until a review of this head gives no blocking "
+                              "item, or a User with write access who is not the author approves this head.")
+
+
+def written(record, approver):
+    """The record again, with the login whose approval this check run rests on. review.yml's refresh compares the
+    record it would write with the one the newest check run holds, so a check run that still credits an approval that
+    was taken back is replaced. Only this App writes a record, and no text of the pull request reaches it."""
+    return verdict.as_text({**record, "approver": approver or None})
+
+
 def main_refresh(sha, repo, pr):
     """--refresh: the check run review again, from RECORD, the output.text of the newest one at the head, with the
     approvals read now. Nothing is printed when RECORD is no record of this head, or one whose conclusion no approval
-    changes (a hold, or an enrollment with no file outside its project)."""
+    changes (an enrollment with no file outside its project). A hold passes only on a person's approval of the head,
+    and fails again once no such approval stands, the last one dismissed or followed by a request for changes."""
     text = os.environ.get("RECORD", "")
     record = verdict.parsed(text[5:-4]) if text.startswith("<!-- ") and text.endswith(" -->") else None
     if not isinstance(record, dict) or record.get("schema") != SCHEMA or record.get("head") != sha:
@@ -206,9 +259,19 @@ def main_refresh(sha, repo, pr):
               file=sys.stderr)
         return
     kind, name, outside = record.get("kind"), record.get("name") or "", record.get("outside")
+    if record.get("hold"):
+        title = hold_title(record["hold"], record.get("job"))
+        if not title:
+            print("review-check: the record names no hold this script knows: nothing to refresh", file=sys.stderr)
+            return
+        login = approval_of(repo, pr, sha) or ""
+        conclusion, title, summary = held(title, f"{title} No review of this head ran.", sha, login)
+        summary += "\n\nPosted again after a review of the pull request was submitted or dismissed."
+        print(body(sha, pr, conclusion, title, summary, written(record, login)))
+        return
     # An enrollment whose outside files were not counted stays failing, as main() posted it: no approval counts them.
     uncounted = kind == "enrollment" and (isinstance(outside, bool) or not isinstance(outside, int))
-    if record.get("hold") or kind not in ("change", "enrollment") or outside == 0 and kind == "enrollment" or uncounted:
+    if kind not in ("change", "enrollment") or outside == 0 and kind == "enrollment" or uncounted:
         print("review-check: no approval changes this check run: nothing to refresh", file=sys.stderr)
         return
     choices = record.get("choices")
@@ -216,9 +279,11 @@ def main_refresh(sha, repo, pr):
         choices = [{**choice, "choice": "(the review comment names it)", "basis": "recorded" if choice.get("based")
                     is True else ""} if isinstance(choice, dict) else choice for choice in choices]
     change = {"verdicts": record.get("verdicts"), "choices": choices}
-    conclusion, title, summary = decided(kind, name, change, lambda: approval_of(repo, pr, sha))
+    found = []
+    conclusion, title, summary = decided(kind, name, change,
+                                         lambda: (found.append(approval_of(repo, pr, sha)), found[0])[1], sha=sha)
     summary += "\n\nPosted again after a review of the pull request was submitted or dismissed, from this head's review."
-    print(body(sha, pr, conclusion, title, summary, text))
+    print(body(sha, pr, conclusion, title, summary, written(record, (found[0] if found else None) or "")))
 
 
 def main():
@@ -239,18 +304,26 @@ def main():
     outside = int(given) if name and re.fullmatch("[0-9]+", given) else None
     pure = kind == "enrollment" and outside == 0
     change = None if pure else verdict.parsed(os.environ.get("CHANGE"))
+    seen = []
+
+    def approved():
+        """The login of a person who approved this head, read once, and kept for the record."""
+        if not seen:
+            seen.append(approval_of(repo, pr, sha) or "")
+        return seen[0]
+
     if hold:
         _, title, summary, _ = verdict.from_hold(hold)
-        conclusion = "failure"
-        summary += " The check review fails until a review of this head gives no blocking item."
+        conclusion, title, summary = held(title, summary, sha, approved())
     elif kind == "enrollment" and outside is None:
         conclusion = "failure"
         title = f"Blocked: the files that this pull request changes outside projects/{name}/ were not counted."
         summary = title + " A review of this head counts them (take-project's outside)."
     else:
-        conclusion, title, summary = decided(kind, name, change, lambda: approval_of(repo, pr, sha), pure)
+        conclusion, title, summary = decided(kind, name, change, approved, pure, sha)
     print(body(sha, pr, conclusion, title, summary,
-               record_of(sha, kind, name, outside, hold if hold else "", job if hold == "failed" else "", change)))
+               record_of(sha, kind, name, outside, hold if hold else "", job if hold == "failed" else "", change,
+                         seen[0] if seen else "")))
 
 
 if __name__ == "__main__":
