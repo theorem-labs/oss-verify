@@ -154,8 +154,8 @@ jobs:
           # .github/scripts: enroll-dispatch, and triage.py, which the maintainer check comes from, with the rules of
           # oss-verify validate it imports (.github/scripts/validate_rules/). .github/workflows: review.yml's
           # WRITER_BOTS, the Apps its rule for trusted accounts trusts. Main's copy, read as code of this repository;
-          # nothing of the pull request is checked out. Nor is src/, which has no code owner: no job that holds a token,
-          # or whose outputs such a job reads, loads code from it (tests/test_token_jobs.py).
+          # nothing of the pull request is checked out. Nor is src/: no job that holds a token, or whose outputs such a
+          # job reads, loads code from it (tests/test_token_jobs.py says why).
           sparse-checkout: |
             .github/scripts
             .github/workflows

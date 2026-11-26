@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for src/oss_verify/check_checks.py, review.yml's review steps and the review's helper scripts, that need no
 Docker: uv run pytest"""
-import ast
 import base64
 import functools
 import html
@@ -3567,420 +3566,12 @@ def workflow_credentials():
     return module
 
 
-class Owners(unittest.TestCase):
-    """.github/CODEOWNERS: which files a person must approve. It owns every workflow file (a required check is matched
-    by its name, so a job of any workflow could report one), and each file that runs with a credential: each file that
-    a job of a workflow with a credential (a secret, an environment, id-token or a write permission, its own or the
-    workflow's) runs or reads, as its steps and scripts name it. Every job
-    of such a workflow counts, as the outputs and artifacts of its other jobs are what the credential acts on; a job
-    that calls a workflow of this repository counts that file and its jobs too, through every level of calls. Local
-    actions count their metadata and entry scripts. A step or a script names a file when its code (no comment line,
-    no Python docstring or Markdown citation) holds the file's path from the top of the checkout, or, in a script of
-    .github/scripts, a sibling as "$here/<name>", "$(dirname ...)/<name>" or a Python import. A path that the code builds
-    from parts is not seen. Workflow-level environment values count as inputs to its jobs too."""
-
-    TEAMS = ["@theorem-labs/engineering", "@theorem-labs/research"]
-    # The patterns of CODEOWNERS, in their order, each with whether it gives the owners (True) or none (False).
-    LINES = (
-        # Agent instructions and skills at any depth (the first patterns of CODEOWNERS).
-        *((pattern, True) for pattern in ("**/AGENTS.md", "**/CLAUDE.md", "**/SKILL.md", "skills/")),
-        # What runs with a credential, and what changes what a workflow runs (the top of CODEOWNERS). /.github/ owns
-        # every workflow and each file added there later; the lines with no owner right after it take back only files
-        # that owned workflows run in jobs with read permissions alone. src/ has no owner, on purpose;
-        # .github/scripts/steering.py keeps it a steering file, and tests/test_token_jobs.py keeps it out of every job
-        # that holds a token. app/sentences.yaml, the texts of OSS Verify's GitHub Apps, has the same owners as
-        # review.md.
-        ("/.github/", True), ("/.github/actionlint.yaml", False), ("/.github/scripts/frame-pointers/", False),
-        *((pattern, True) for pattern in (
-            "/infra/", "/seeds/", "/docs/seeded-projects.tsv", ".claude/", "CLAUDE*.md", "AGENTS*.md", "/.mcp.json",
-            "/*.py", "/pytest.ini", "/.pytest.ini", "/pyproject.toml", "/uv.lock", "/.python-version", "/setup.cfg",
-            "/tox.ini", "/review.md", "/app/sentences.yaml", "/review-change.md", "/review-issue.md",
-            "/.claude/skills/write-to-maintainer/", "/.github/CODEOWNERS")))
-    # The files that a job of a workflow with a credential names but that have no owner, each with why that is safe:
-    # none today. unowned_reads reports an entry that no such workflow names.
-    NOT_OWNED = {}
-    # A workflow that a job with a credential names, but whose jobs are not followed, each with why: what its jobs run
-    # or read needs no owner for that job. Any other workflow that such a job names (a run whose checks, artifact or
-    # completion it acts on) is followed, and what its jobs run or read needs an owner too.
-    NOT_FOLLOWED = {
-        ".github/workflows/toolchain-images.yaml": "named in the if of toolchain-images-publish.yaml's job publish, "
-                                                   "which acts only on a push run of it on main that passed: publish "
-                                                   "makes each image again itself from infra/toolchains.tsv (owned), "
-                                                   "pushes it only when its digest is the one that make made, and no "
-                                                   "toolchain uses it until a row of that file names it",
-    }
-    WORKFLOW_FILE = re.compile(r"\.github/workflows/[^/]+\.ya?ml")
-    LOCAL_WORKFLOW = re.compile(r"\./(\.github/workflows/[^/@]+\.ya?ml)")
-
-    @staticmethod
-    def steering(root):
-        """.github/scripts/steering.py of `root`, as a module of its own."""
-        path = root / ".github" / "scripts" / "steering.py"
-        spec = importlib.util.spec_from_file_location("steering_of_owners", path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-
-    @classmethod
-    def matches(cls, root):
-        """steering.matches of `root`: whether a pattern of CODEOWNERS matches a path, as GitHub reads it."""
-        return cls.steering(root).matches
-
-    @staticmethod
-    def owners(codeowners_text, path, matches):
-        """The owners that the CODEOWNERS text gives `path`: the last pattern that matches it decides."""
-        found = []
-        for line in codeowners_text.splitlines():
-            fields = line.split()
-            if fields and not fields[0].startswith("#") and matches(fields[0], path):
-                found = fields[1:]
-        return found
-
-    @staticmethod
-    def code(text, python):
-        """What a step or a script does: its lines but comment lines, and for Python its strings but docstrings, and
-        its imports as "import <module>"."""
-        if not python:
-            return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
-        tree, docstrings, parts = ast.parse(text), set(), []
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.body \
-                    and isinstance(node.body[0], ast.Expr) and isinstance(node.body[0].value, ast.Constant):
-                docstrings.add(id(node.body[0].value))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings:
-                parts.append(node.value)
-            elif isinstance(node, ast.Import):
-                parts += [f"import {alias.name}" for alias in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-                parts.append(f"import {node.module}")
-        return "\n".join(parts)
-
-    @staticmethod
-    def named(root, code, script_dir=False):
-        """The files of `root` that `code` names: a path from the top, a local action's metadata, and in a script of
-        .github/scripts a sibling. A citation of a document names it without reading it."""
-        code = re.sub(r"\((?:[\w.-]+/)*[\w.-]+\.md,\s[^()\n]*\)", "", code)
-        code = re.sub(r"\[[^\]\n]+\]\(https?://[^)\n]+\)", "", code)
-        code = re.sub(r"(?:[\w.-]+/)*[\w.-]+\.md#[\w.-]+", "", code)
-        found = set()
-        for token in re.findall(r"(?<![\w./+-])[\w.][\w./+-]*", code):
-            token = token.rstrip(".")
-            while token.startswith("./"):
-                token = token[2:]
-            # .git is git's own: a file in a linked worktree, a directory in a clone.
-            if not token or ".." in token.split("/") or token.split("/")[0] == ".git":
-                continue
-            if (root / token).is_file():
-                found.add(token)
-            elif (root / token).is_dir():
-                for metadata in ("action.yml", "action.yaml"):
-                    if (root / token / metadata).is_file():
-                        found.add(f"{token}/{metadata}")
-        if script_dir:
-            for name in re.findall(r"(?:\$here|\$\{here\}|\))/([\w.-]+)", code):
-                if (root / ".github" / "scripts" / name).is_file():
-                    found.add(f".github/scripts/{name}")
-            for module in re.findall(r"^import ([\w]+)$", code, re.M):
-                if (root / ".github" / "scripts" / f"{module}.py").is_file():
-                    found.add(f".github/scripts/{module}.py")
-        return found
-
-    def job_code(self, job):
-        """What a job does: its if, env, with and uses, and each step's if, run (comment lines left out), uses, with
-        and env."""
-        def values(value):
-            if isinstance(value, dict):
-                return [v for item in value.values() for v in values(item)]
-            if isinstance(value, list):
-                return [v for item in value for v in values(item)]
-            return [] if value is None else [str(value)]
-        parts = values([job.get(key) for key in ("if", "env", "with", "uses")])
-        for step in job.get("steps") or []:
-            parts.append(self.code(str(step.get("run", "")), python=False))
-            parts += values([step.get(key) for key in ("if", "uses", "with", "env")])
-        return "\n".join(parts)
-
-    def credential_reads(self, root):
-        """{each workflow with a credential: the files that it runs or reads, itself included}. A workflow has a
-        credential when a job of it, or of a workflow that it calls at every level, holds one (held of
-        .github/scripts/workflow-credentials). Each workflow that such a run names, but those of NOT_FOLLOWED, is
-        followed too: a run whose checks, artifact or completion it acts on."""
-        script, reads = workflow_credentials(), {}
-        for name in script.workflow_files(root):
-            path = f".github/workflows/{name}"
-            workflows, pending = {}, [path]
-            while pending:
-                current = pending.pop()
-                if current in workflows:
-                    continue
-                workflows[current] = script.load(root, current)
-                for job in script.jobs(workflows[current]).values():
-                    called = self.LOCAL_WORKFLOW.fullmatch(str(job.get("uses", "")))
-                    if called and (root / called[1]).is_file():
-                        pending.append(called[1])
-            if not any(script.held(workflow, job) for workflow in workflows.values()
-                       for job in script.jobs(workflow).values()):
-                continue
-            files, todo = set(), list(workflows)
-            for workflow in workflows.values():
-                todo += self.named(root, self.job_code(workflow))
-                for job in script.jobs(workflow).values():
-                    todo += self.named(root, self.job_code(job))
-            while todo:
-                current = todo.pop()
-                if current in files:
-                    continue
-                files.add(current)
-                text = (root / current).read_text(errors="replace")
-                if self.WORKFLOW_FILE.fullmatch(current):
-                    if current not in workflows and current not in self.NOT_FOLLOWED:
-                        # A run that a job with a credential acts on: what its jobs run or read steers that job.
-                        for job in script.jobs(script.parse(text, current)).values():
-                            todo += self.named(root, self.job_code(job))
-                    continue
-                if pathlib.PurePosixPath(current).name in ("action.yml", "action.yaml"):
-                    action = script.parse(text, current).get("runs") or {}
-                    directory = pathlib.PurePosixPath(current).parent.as_posix()
-                    steps = re.sub(r"\$\{\{\s*github\.action_path\s*\}\}", directory, self.job_code(action))
-                    todo += self.named(root, steps)
-                    for key in ("main", "pre", "post", "image"):
-                        if isinstance(action.get(key), str):
-                            todo += self.named(root, f"{directory}/{action[key]}")
-                elif current.startswith(".github/scripts/") or current.endswith(".py") or text.startswith("#!"):
-                    python = current.endswith(".py") or "python" in text.split("\n", 1)[0]
-                    todo += self.named(root, self.code(text, python), script_dir=current.startswith(".github/scripts/"))
-            reads[path] = files
-        return reads
-
-    def unowned_reads(self, root):
-        """Each file that a workflow with a credential runs or reads and CODEOWNERS of `root` does not own, as
-        "<file>, which <workflows> read"; and the entries of NOT_OWNED and NOT_FOLLOWED that no such workflow names. A
-        workflow file is left out: .github/scripts/workflow-credentials holds each one to its owners."""
-        codeowners, matches = (root / ".github" / "CODEOWNERS").read_text(), self.matches(root)
-        reads, readers = self.credential_reads(root), {}
-        for workflow, files in reads.items():
-            for name in files:
-                readers.setdefault(name, []).append(workflow.rsplit("/", 1)[1])
-        unowned = [f"{name}, which {', '.join(sorted(by))} read" for name, by in sorted(readers.items())
-                   if not self.WORKFLOW_FILE.fullmatch(name) and name not in self.NOT_OWNED
-                   and not set(self.TEAMS) & set(self.owners(codeowners, name, matches))]
-        return unowned, sorted((set(self.NOT_OWNED) | set(self.NOT_FOLLOWED)) - set(readers))
-
-    def test_only_the_listed_patterns_have_an_owner_and_they_are_the_last_of_the_file(self):
-        lines = [line.split() for line in (ROOT / ".github" / "CODEOWNERS").read_text().splitlines()
-                 if line.strip() and not line.lstrip().startswith("#")]
-        # The instructions' four patterns first, the others in their order, each with its owners or none.
-        self.assertEqual(lines, [[pattern, *self.TEAMS] if owned else [pattern] for pattern, owned in self.LINES])
-        self.assertTrue(all((ROOT / name).is_file() for name in ("review.md", "review-change.md", "review-issue.md")))
-
-    NEW_FILES = (".github/workflows/new.yml", ".github/scripts/new", ".github/actions/new/action.yml")
-
-    def test_a_new_file_under_github_has_an_owner(self):
-        codeowners, matches = (ROOT / ".github" / "CODEOWNERS").read_text(), self.matches(ROOT)
-        for name in self.NEW_FILES:
-            self.assertEqual(self.owners(codeowners, name, matches), self.TEAMS, name)
-
-    def test_control_a_new_file_under_github_loses_its_owner_without_the_github_line(self):
-        codeowners, matches = (ROOT / ".github" / "CODEOWNERS").read_text(), self.matches(ROOT)
-        line = "/.github/ @theorem-labs/engineering @theorem-labs/research\n"
-        self.assertEqual(codeowners.count(line), 1)
-        for name in self.NEW_FILES:
-            self.assertEqual(self.owners(codeowners.replace(line, ""), name, matches), [], name)
-
-    # Files that steer a credential or a verdict, named here one by one, not taken from CODEOWNERS or from
-    # steering.STEERING: two lists that both lose a path agree, so their agreement alone shows nothing. Each must have
-    # its owners and be a steering file: a workflow whose jobs hold only read permissions too. A script that only an
-    # owned workflow runs, in a job with read permissions alone, has no owner, and is still a steering file. src/ is
-    # SteeringFiles' (tests/test_trigger_move.py).
-    SENSITIVE = ("infra/base-builder/Dockerfile", "seeds/builds.tsv", "pyproject.toml", "uv.lock",
-                 ".github/CODEOWNERS", ".github/workflows/review.yml", ".github/workflows/triage.yaml",
-                 ".github/dependabot.yml")
-    READ_ONLY = (".github/scripts/frame-pointers/probe",)
-
-    def sensitive_problems(self, codeowners, steering):
-        """Each path of SENSITIVE that the CODEOWNERS text `codeowners` does not give to TEAMS, and each of READ_ONLY
-        that it gives an owner; and each path of either that the module `steering` does not count as a steering file:
-        as "<path>: <what is wrong>"."""
-        problems = []
-        for path in self.SENSITIVE + self.READ_ONLY:
-            self.assertTrue((ROOT / path).is_file(), f"{path}: no such file here, so the case would read nothing")
-            given = self.owners(codeowners, path, steering.matches)
-            if path in self.SENSITIVE and not set(self.TEAMS) <= set(given):
-                problems.append(f"{path}: no owner")
-            if path in self.READ_ONLY and given:
-                problems.append(f"{path}: the owners {' '.join(given)}")
-            if not steering.is_steering(path):
-                problems.append(f"{path}: no steering file")
-        return problems
-
-    def test_each_sensitive_file_has_its_owners_and_is_a_steering_file(self):
-        self.assertEqual(self.sensitive_problems((ROOT / ".github" / "CODEOWNERS").read_text(), self.steering(ROOT)),
-                         [])
-
-    def test_control_a_sensitive_file_dropped_from_both_lists(self):
-        from unittest import mock
-
-        codeowners, steering = (ROOT / ".github" / "CODEOWNERS").read_text(), self.steering(ROOT)
-        line = "/infra/ @theorem-labs/engineering @theorem-labs/research\n"
-        self.assertEqual(codeowners.count(line), 1)
-        self.assertIn("/infra/", steering.STEERING)
-        with mock.patch.object(steering, "STEERING", tuple(p for p in steering.STEERING if p != "/infra/")):
-            problems = self.sensitive_problems(codeowners.replace(line, ""), steering)
-        self.assertEqual(problems, ["infra/base-builder/Dockerfile: no owner",
-                                    "infra/base-builder/Dockerfile: no steering file"])
-
-    def test_codeowners_owns_each_file_that_runs_with_a_credential(self):
-        reads = self.credential_reads(ROOT)
-        # The workflows with a credential today: the check reads them, so it can fail.
-        self.assertEqual(sorted(reads), [f".github/workflows/{name}" for name in (
-            "codeql-actions.yml", "codeql-c-cpp.yml", "codeql-python.yml", "codeql.yml",
-            "enroll-dispatch.yml", "held-runs.yml", "required-checks.yml", "review.yml",
-            "toolchain-images-publish.yaml")])
-        self.assertIn(".github/scripts/review-gather", reads[".github/workflows/review.yml"])
-        # The poster's post job reads the script that its read job ran, through its outputs: both owned.
-        self.assertIn(".github/scripts/required-check", reads[".github/workflows/required-checks.yml"])
-        self.assertIn(".github/scripts/artifact.py", reads[".github/workflows/required-checks.yml"])
-        self.assertIn(".github/scripts/review-neutralize", reads[".github/workflows/review.yml"])
-        self.assertIn(".github/workflows/codeql.yml", reads[".github/workflows/codeql-python.yml"])
-        self.assertIn(".github/codeql/codeql-config.yml", reads[".github/workflows/codeql-python.yml"])
-        # The runs that enroll-dispatch acts on for an enrollment are main's: their workflows and scripts are followed.
-        for name in (".github/workflows/build.yaml", ".github/workflows/terms.yaml", ".github/scripts/binary-sizes",
-                     ".github/scripts/terms-accepted"):
-            self.assertIn(name, reads[".github/workflows/enroll-dispatch.yml"])
-        # tests.yaml, which has an owner, is followed too; toolchain-images.yaml is named in publish's if.
-        self.assertIn(".github/workflows/tests.yaml", reads[".github/workflows/enroll-dispatch.yml"])
-        self.assertIn(".github/scripts/collect", reads[".github/workflows/enroll-dispatch.yml"])
-        self.assertIn(".github/workflows/toolchain-images.yaml",
-                      reads[".github/workflows/toolchain-images-publish.yaml"])
-        unowned, stale = self.unowned_reads(ROOT)
-        self.assertEqual(unowned, [], "files that run with a credential, with no owner in .github/CODEOWNERS")
-        self.assertEqual(stale, [], "NOT_OWNED names files that no workflow with a credential names")
-
-    # Controls: each changes a copy of the tree, and the check must name the file the change leaves unowned.
-    CONTROLS = {
-        "a read script loses its owner": (
-            ".github/CODEOWNERS", "/.github/scripts/frame-pointers/\n",
-            "/.github/scripts/frame-pointers/\n/.github/scripts/review-gather\n",
-            ".github/scripts/review-gather, which enroll-dispatch.yml, review.yml read"),
-        "a script of such a run loses its owner": (
-            ".github/CODEOWNERS", "/.github/scripts/frame-pointers/\n",
-            "/.github/scripts/frame-pointers/\n/.github/scripts/binary-sizes\n",
-            ".github/scripts/binary-sizes, which enroll-dispatch.yml"),
-        "a credential job runs an unowned script": (
-            ".github/workflows/review.yml", "run: .github/scripts/issue-draft-cap\n",
-            "run: .github/scripts/issue-draft-cap && .github/scripts/frame-pointers/probe\n",
-            ".github/scripts/frame-pointers/probe, which enroll-dispatch.yml, review.yml read"),
-        "a called workflow reads an unowned file": (
-            ".github/workflows/codeql.yml", "config-file: ./.github/codeql/codeql-config.yml\n",
-            "config-file: ./.github/actionlint.yaml\n", ".github/actionlint.yaml, which codeql-actions.yml"),
-        "a control reads its own steering matcher": (
-            ".github/scripts/steering.py", "            return True\n", "            return False\n",
-            ".github/PULL_REQUEST_TEMPLATE.md, which enroll-dispatch.yml, review.yml read"),
-        "a credential job reads a previously cited document": (
-            ".github/workflows/review.yml", "run: .github/scripts/issue-draft-cap\n",
-            "run: .github/scripts/issue-draft-cap && cat docs/project-yaml.md\n",
-            "docs/project-yaml.md, which enroll-dispatch.yml, review.yml read"),
-    }
-
-    def test_control_each_change_leaves_a_credential_file_unowned(self):
-        for label, (name, old, new, said) in self.CONTROLS.items():
-            with self.subTest(label), tempfile.TemporaryDirectory() as directory:
-                root = pathlib.Path(directory)
-                tracked = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, capture_output=True,
-                                         text=True, check=True)
-                names = [name for name in tracked.stdout.split("\0") if name]
-                self.assertTrue(names, "git enumerated no tracked files for the control")
-                for filename in names:
-                    target = root / filename
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy(ROOT / filename, target)
-                self.assertEqual(self.unowned_reads(root), ([], []), "the unchanged copy")
-                text = (root / name).read_text()
-                self.assertEqual(text.count(old), 1, label)
-                (root / name).write_text(text.replace(old, new, 1))
-                unowned, _ = self.unowned_reads(root)
-                self.assertTrue(any(line.startswith(said) for line in unowned), (label, unowned))
-
-    def tree(self, files):
-        root = pathlib.Path(self.enterContext(tempfile.TemporaryDirectory()))
-        for name, text in files.items():
-            path = root / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text)
-        return root
-
-    def test_named_paths_accept_relative_prefixes_and_plus_and_ignore_git_metadata(self):
-        root = self.tree({"docs/a+b.txt": "data", "data.txt": "data", ".git/config": "metadata"})
-        self.assertEqual(self.named(root, "cat ./docs/a+b.txt data.txt .git/config ./.git/config"),
-                         {"docs/a+b.txt", "data.txt"})
-        self.assertEqual(self.named(root, "cat missing.txt"), set())
-        root = self.tree({".git": "gitdir: /outside/control", "data.txt": "data"})
-        self.assertEqual(self.named(root, "cat .git ./.git data.txt"), {"data.txt"})
-
-    def test_named_paths_distinguish_citations_from_reads(self):
-        root = self.tree({"docs/project-yaml.md": "data", "CONTRIBUTING.md": "data"})
-        self.assertEqual(self.named(root, "See (docs/project-yaml.md, Seeded projects). "
-                                   "[CONTRIBUTING.md](https://example.com/CONTRIBUTING.md) "
-                                   "language x: not built yet (docs/project-yaml.md#language)"), set())
-        self.assertEqual(self.named(root, "cat docs/project-yaml.md CONTRIBUTING.md"),
-                         {"docs/project-yaml.md", "CONTRIBUTING.md"})
-
-    def test_credential_reads_follow_nested_calls_and_workflow_environment(self):
-        root = self.tree({
-            ".github/workflows/outer.yml": "on: pull_request\njobs:\n  call:\n"
-                                           "    uses: ./.github/workflows/middle.yml\n",
-            ".github/workflows/middle.yml": "on: workflow_call\njobs:\n  call:\n"
-                                            "    uses: ./.github/workflows/inner.yml\n",
-            ".github/workflows/inner.yml": "on: workflow_call\nenv:\n  INPUT: docs/input.txt\njobs:\n  read:\n"
-                                           "    permissions: {contents: write}\n    runs-on: ubuntu-24.04\n"
-                                           "    steps: [{run: 'cat \"$INPUT\"'}]\n",
-            "docs/input.txt": "data"})
-        reads = self.credential_reads(root)
-        self.assertEqual(reads[".github/workflows/outer.yml"], {
-            ".github/workflows/outer.yml", ".github/workflows/middle.yml", ".github/workflows/inner.yml",
-            "docs/input.txt"})
-
-    def test_workflow_environment_secrets_make_its_jobs_credentialed(self):
-        root = self.tree({
-            ".github/workflows/secret.yml": "on: workflow_dispatch\nenv:\n  TOKEN: ${{ secrets['TOKEN'] }}\n"
-                                            "permissions: {contents: read}\njobs:\n  read:\n"
-                                            "    runs-on: ubuntu-24.04\n    steps: [{run: 'cat docs/input.txt'}]\n",
-            "docs/input.txt": "data"})
-        self.assertEqual(self.credential_reads(root), {".github/workflows/secret.yml": {
-            ".github/workflows/secret.yml", "docs/input.txt"}})
-
-    def test_control_an_unused_not_owned_exception_is_reported(self):
-        from unittest import mock
-
-        self.assertEqual(self.unowned_reads(ROOT), ([], []))
-        with mock.patch.object(self, "NOT_OWNED", {**self.NOT_OWNED, "docs/unused-exception.md": "not read"}):
-            unowned, stale = self.unowned_reads(ROOT)
-        self.assertEqual(unowned, [])
-        self.assertEqual(stale, ["docs/unused-exception.md"])
-
-    def test_credential_reads_follow_local_actions_and_their_scripts(self):
-        root = self.tree({
-            ".github/workflows/local.yml": "on: workflow_dispatch\npermissions: {contents: write}\njobs:\n"
-                                           "  read:\n    runs-on: ubuntu-24.04\n    steps:\n"
-                                           "      - uses: ./.github/actions/local\n",
-            ".github/actions/local/action.yml": "name: local\ndescription: local\nruns:\n  using: composite\n"
-                                                "  steps:\n    - shell: bash\n"
-                                                "      run: bash ${{ github.action_path }}/helper\n",
-            ".github/actions/local/helper": "#!/usr/bin/env bash\ncat docs/input.txt\n",
-            "docs/input.txt": "data"})
-        self.assertEqual(self.credential_reads(root), {".github/workflows/local.yml": {
-            ".github/workflows/local.yml", ".github/actions/local/action.yml", ".github/actions/local/helper",
-            "docs/input.txt"}})
-
-
 class WorkflowCredentials(unittest.TestCase):
-    """.github/scripts/workflow-credentials, the check that tests.yaml's job suite runs on every event:
-    .github/CODEOWNERS gives each workflow file to both teams, naming what a file with no owner holds (writing main's
-    Actions cache is a credential too); each workflow that starts on pull_request keeps (r)
-    (tests/test_trigger_move.py); and a workflow that GitHub and PyYAML could read differently is refused. Each case
-    runs the script as that job does, with python3 -I, on this tree or on a copy of the files that git tracks under
-    .github/, the only files it reads."""
+    """.github/scripts/workflow-credentials, the check that tests.yaml's job suite runs on every event: each workflow
+    that starts on pull_request keeps (r) (tests/test_trigger_move.py), and a workflow that GitHub and PyYAML could read
+    differently is refused. Each case runs the script as that job does, with python3 -I, on this tree or on a copy of
+    the files that git tracks under .github/, the only files it reads. The pytest functions after this class test its
+    rules (c), of CODEOWNERS, and (m)."""
 
     SCRIPT = ROOT / ".github" / "scripts" / "workflow-credentials"
     CODEOWNERS = ".github/CODEOWNERS"
@@ -3992,16 +3583,10 @@ class WorkflowCredentials(unittest.TestCase):
     PUSH_IF = "    if: github.event_name == 'push'\n"
     # The start of triage.yaml's jobs.
     JOBS = "jobs:\n  triage:\n"
-    # The last line with no owner in CODEOWNERS, after which a control adds one.
-    LAST_UNOWNED = "/.github/scripts/frame-pointers/\n"
-    # The changes that take the owners from triage.yaml and from toolchain-images.yaml.
-    UNOWN_TRIAGE = (CODEOWNERS, LAST_UNOWNED, LAST_UNOWNED + "/.github/workflows/triage.yaml\n")
-    UNOWN_TOOLCHAIN = (CODEOWNERS, LAST_UNOWNED, LAST_UNOWNED + "/.github/workflows/toolchain-images.yaml\n")
     # triage.yaml's one step.
     STEP = "    steps:\n      - run: echo"
-    # What a read of a secret in triage.yaml, with no owner, fails: the owners' check, then (r), then (m).
-    SECRET_READ = [".github/workflows/triage.yaml: the job triage holds a read of a secret, but .github/CODEOWNERS "
-                   "gives .github/workflows/triage.yaml no owner", "triage.yaml: it reads a secret",
+    # What a read of a secret in triage.yaml fails: (r), then (m).
+    SECRET_READ = ["triage.yaml: it reads a secret",
                    *main_only_on_pull_request(".github/workflows/triage.yaml", "triage", "a read of a secret")]
     # What a file that GitHub and PyYAML could read differently fails.
     DIFFERENTLY = ", which GitHub and this check could read differently"
@@ -4029,67 +3614,49 @@ class WorkflowCredentials(unittest.TestCase):
         code, lines = self.run_on(ROOT)
         self.assertEqual(code, 0, lines)
         self.assertEqual(len(lines), 1, lines)
-        # The check read the workflows with a credential, so it could fail.
-        self.assertRegex(lines[0], r"\ARead [1-9][0-9]* workflow files\. With a credential: [1-9][0-9]*; ")
+        # The check read CODEOWNERS' patterns and the jobs that can get a credential, so it could fail.
+        self.assertRegex(lines[0], rf"\ARead [1-9][0-9]* workflow files and \.github/CODEOWNERS, which gives the "
+                                   rf"{len(CODEOWNER_PATTERNS)} patterns ")
+        self.assertRegex(lines[0], r"environment \(m\): [1-9][0-9]* \(")
 
     # Controls: each makes its changes to a copy, each (file, old, new), where old is None for a new file. The
-    # unchanged copy passes; the changed one fails with exactly the ::error:: lines of the messages given, in order: the
-    # owners' first, then those of (r). Where (r) allows the change, only the owners' check names it.
+    # unchanged copy passes; the changed one fails with exactly the ::error:: lines of the messages given, in order:
+    # those of (r) first, then those of (m).
     CONTROLS = {
         # The secrets context in each form GitHub reads: its name in any case, by a property, by an index, whole, in an
         # if: with no ${{ }}, and after a }} in a string, which ends no expression.
         "triage.yaml reads Secrets.TOKEN in a step's env": (
-            [UNOWN_TRIAGE, (TRIAGE, STEP, "    steps:\n      - env: {T: '${{ Secrets.TOKEN }}'}\n        run: echo")],
+            [(TRIAGE, STEP, "    steps:\n      - env: {T: '${{ Secrets.TOKEN }}'}\n        run: echo")],
             SECRET_READ),
         "triage.yaml reads secrets['TOKEN'] in a step's with": (
-            [UNOWN_TRIAGE,
-             (TRIAGE, STEP, "    steps:\n      - uses: ./x\n        with: {t: \"${{ secrets['TOKEN'] }}\"}\n"
+            [(TRIAGE, STEP, "    steps:\n      - uses: ./x\n        with: {t: \"${{ secrets['TOKEN'] }}\"}\n"
                             "      - run: echo")], SECRET_READ),
         "triage.yaml reads toJSON(SECRETS) in the job's env": (
-            [UNOWN_TRIAGE,
-             (TRIAGE, JOB, "    timeout-minutes: 2\n    permissions: {}\n    env: {ALL: '${{ toJSON(SECRETS) }}'}\n")],
+            [(TRIAGE, JOB, "    timeout-minutes: 2\n    permissions: {}\n    env: {ALL: '${{ toJSON(SECRETS) }}'}\n")],
             SECRET_READ),
         "triage.yaml reads sEcReTs.TOKEN in a step's if: with no ${{ }}": (
-            [UNOWN_TRIAGE, (TRIAGE, STEP, "    steps:\n      - if: sEcReTs.TOKEN != ''\n        run: echo")],
-            SECRET_READ),
+            [(TRIAGE, STEP, "    steps:\n      - if: sEcReTs.TOKEN != ''\n        run: echo")], SECRET_READ),
         "triage.yaml reads secrets.TOKEN after a }} in a string": (
-            [UNOWN_TRIAGE,
-             (TRIAGE, STEP, "    steps:\n      - env: {T: \"${{ '}}' && secrets.TOKEN }}\"}\n        run: echo")],
+            [(TRIAGE, STEP, "    steps:\n      - env: {T: \"${{ '}}' && secrets.TOKEN }}\"}\n        run: echo")],
             SECRET_READ),
-        "triage.yaml, which holds no credential, loses its owner": (
-            [UNOWN_TRIAGE],
-            [".github/workflows/triage.yaml: it is a workflow file, and a job of any workflow file can report a check "
-             "under the name of a required check, but .github/CODEOWNERS gives .github/workflows/triage.yaml "
-             "no owner"]),
-        "triage.yaml with no owner gets an environment": (
-            [UNOWN_TRIAGE, (TRIAGE, JOB, "    timeout-minutes: 2\n    environment: comment\n    permissions: {}\n")],
-            [".github/workflows/triage.yaml: the job triage holds an environment (comment), but .github/CODEOWNERS "
-             "gives .github/workflows/triage.yaml no owner", "triage.yaml, the job triage: it has an environment"]),
-        "triage.yaml with no owner gets an identity token": (
-            [UNOWN_TRIAGE, (TRIAGE, JOB, "    timeout-minutes: 2\n    permissions: {id-token: write}\n")],
-            [".github/workflows/triage.yaml: the job triage holds id-token: write, but .github/CODEOWNERS gives "
-             ".github/workflows/triage.yaml no owner", "triage.yaml, the job triage: it has id-token: write",
+        "triage.yaml gets an environment": (
+            [(TRIAGE, JOB, "    timeout-minutes: 2\n    environment: comment\n    permissions: {}\n")],
+            ["triage.yaml, the job triage: it has an environment"]),
+        "triage.yaml gets an identity token": (
+            [(TRIAGE, JOB, "    timeout-minutes: 2\n    permissions: {id-token: write}\n")],
+            ["triage.yaml, the job triage: it has id-token: write",
              "triage.yaml, the job triage: id-token: write, but its if is not github.event_name == 'push'",
              *main_only_on_pull_request(".github/workflows/triage.yaml", "triage", "id-token: write")]),
-        "triage.yaml with no owner gets packages: write on push": (
-            [UNOWN_TRIAGE, (TRIAGE, IF, PUSH_IF),
-             (TRIAGE, JOB, "    timeout-minutes: 2\n    permissions: {packages: write}\n")],
-            [".github/workflows/triage.yaml: the job triage holds packages: write, but .github/CODEOWNERS gives "
-             ".github/workflows/triage.yaml no owner",
-             "triage.yaml, the job triage: packages: write, but a push job may write only security-events"]),
-        "triage.yaml with no owner gets security-events: write on push, which (r) allows": (
-            [UNOWN_TRIAGE, (TRIAGE, IF, PUSH_IF),
-             (TRIAGE, JOB, "    timeout-minutes: 2\n    permissions: {security-events: write}\n")],
-            [".github/workflows/triage.yaml: the job triage holds security-events: write, but .github/CODEOWNERS "
-             "gives .github/workflows/triage.yaml no owner"]),
+        "triage.yaml gets packages: write on push": (
+            [(TRIAGE, IF, PUSH_IF), (TRIAGE, JOB, "    timeout-minutes: 2\n    permissions: {packages: write}\n")],
+            ["triage.yaml, the job triage: packages: write, but a push job may write only security-events"]),
         # YAML that PyYAML would read otherwise than GitHub: the keys on and yes are both true to PyYAML, which keeps
         # the last, so the job on would be hidden; a key repeated in another case; an explicit tag; the merge key.
-        "triage.yaml with no owner hides a job named on behind one named yes": (
-            [UNOWN_TRIAGE, (TRIAGE, JOBS, "jobs:\n  on:\n    runs-on: ubuntu-latest\n    environment: comment\n"
-                                          "    steps:\n      - run: echo\n  yes:\n    runs-on: ubuntu-latest\n"
-                                          "    steps:\n      - run: echo\n  triage:\n")],
-            [".github/workflows/triage.yaml: the job on holds an environment (comment), but .github/CODEOWNERS gives "
-             ".github/workflows/triage.yaml no owner", "triage.yaml, the job on: it has an environment"]),
+        "triage.yaml hides a job named on behind one named yes": (
+            [(TRIAGE, JOBS, "jobs:\n  on:\n    runs-on: ubuntu-latest\n    environment: comment\n"
+                            "    steps:\n      - run: echo\n  yes:\n    runs-on: ubuntu-latest\n"
+                            "    steps:\n      - run: echo\n  triage:\n")],
+            ["triage.yaml, the job on: it has an environment"]),
         "triage.yaml repeats a key in another case": (
             [(TRIAGE, JOBS, "jobs:\n  Triage:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n"
                             "  triage:\n")],
@@ -4100,36 +3667,6 @@ class WorkflowCredentials(unittest.TestCase):
         "triage.yaml merges a mapping into its jobs": (
             [(TRIAGE, JOBS, "jobs:\n  <<: {}\n  triage:\n")],
             [".github/workflows/triage.yaml: line 89: the merge key <<" + DIFFERENTLY]),
-        "held-runs.yml, which holds actions: write, loses its owner": (
-            [(CODEOWNERS, LAST_UNOWNED, LAST_UNOWNED + "/.github/workflows/held-runs.yml\n")],
-            [".github/workflows/held-runs.yml: the job held-runs holds actions: write, write access to main's Actions "
-             "cache (cache-mode: not given), but .github/CODEOWNERS gives .github/workflows/held-runs.yml no owner"]),
-        # A called workflow's job counts as able to save in main's cache whatever calls it: the check does not follow
-        # the calling job's event.
-        "a called workflow loses its owner": (
-            [(CODEOWNERS, LAST_UNOWNED, LAST_UNOWNED + "/.github/workflows/codeql.yml\n")],
-            [f".github/workflows/codeql.yml: the job {job} of .github/workflows/codeql-{language}.yml holds {what}"
-             "write access to main's Actions cache (cache-mode: not given) in the job analyze of "
-             ".github/workflows/codeql.yml and calls it, but .github/CODEOWNERS gives .github/workflows/codeql.yml "
-             "no owner"
-             for language in ("actions", "c-cpp", "python")
-             for job, what in (("pull-request", ""), ("push", "security-events: write, "))]
-            + [".github/workflows/codeql.yml: the job analyze holds write access to main's Actions cache (cache-mode: "
-               "not given), but .github/CODEOWNERS gives .github/workflows/codeql.yml no owner"]),
-        "a workflow with no owner calls one whose job has an environment": (
-            [(CODEOWNERS, LAST_UNOWNED, LAST_UNOWNED + "/.github/workflows/caller.yml\n"),
-             (".github/workflows/caller.yml", None,
-              "on: push\npermissions: {}\njobs:\n  call:\n    uses: ./.github/workflows/called.yml\n"),
-             (".github/workflows/called.yml", None,
-              "on: workflow_call\ncache-mode: none\njobs:\n  deploy:\n    runs-on: ubuntu-24.04\n"
-              "    environment: comment\n    steps:\n      - run: echo\n")],
-            [".github/workflows/caller.yml: the job call holds an environment (comment) in the job deploy of "
-             ".github/workflows/called.yml, but .github/CODEOWNERS gives .github/workflows/caller.yml no owner"]),
-        "toolchain-images.yaml with no owner, which runs on push, can write main's Actions cache": (
-            [UNOWN_TOOLCHAIN, (".github/workflows/toolchain-images.yaml", "\ncache-mode: none\n", "\n")],
-            [f".github/workflows/toolchain-images.yaml: the job {job} holds write access to main's Actions cache "
-             "(cache-mode: not given), but .github/CODEOWNERS gives .github/workflows/toolchain-images.yaml no owner"
-             for job in ("make", "prebuilt", "compare-digests")]),
     }
 
     # How the check ends a package-code problem.
@@ -4537,6 +4074,111 @@ def test_a_job_with_a_main_only_environment_and_its_own_checkout_passes(credenti
                                       [(ADDED, None, added_workflow(job, on="{workflow_run: {workflows: [Build]}}"))])
     assert code == 0, lines
     assert f"{ADDED} deploy in comment" in lines[0]
+
+
+# (c) of .github/scripts/workflow-credentials, R10 of dispatch://INFRA-5359/spec: .github/CODEOWNERS names its two
+# teams, and no one else, for itself and the agent instruction files alone, and has no line with no owner.
+CODEOWNERS_FILE = ".github/CODEOWNERS"
+OWNERS = "@theorem-labs/engineering @theorem-labs/research"
+# The patterns of CODEOWNERS, in their order, named here one by one and not taken from the script's ALLOWED: two lists
+# that both lose a pattern agree, so their agreement alone shows nothing.
+CODEOWNER_PATTERNS = ("**/AGENTS.md", "**/CLAUDE.md", "**/SKILL.md", "skills/", ".claude/", "CLAUDE*.md", "AGENTS*.md",
+                      "/review.md", "/review-change.md", "/review-issue.md", "/.github/CODEOWNERS")
+# The last line of CODEOWNERS, after which a control adds one.
+LAST_CODEOWNER = f"/.github/CODEOWNERS {OWNERS}\n"
+# What (c) says of a line that names an owner for another file, and of a line with no owner.
+ONLY_INSTRUCTIONS = (f", but {CODEOWNERS_FILE} names an owner only for itself and the agent instruction files (ALLOWED "
+                     "of .github/scripts/workflow-credentials): every other file merges through the change review, "
+                     "the required check review")
+NO_OWNER = (" names no owner: the last line that matches a file decides its owners, so a line with no owner takes the "
+            "owner back from each file of an earlier line that it matches")
+
+
+def no_line_names(pattern):
+    """What (c) says of a pattern of ALLOWED that no line of CODEOWNERS names."""
+    return (f"{CODEOWNERS_FILE}: no line names {pattern}, whose owners are @theorem-labs/engineering and "
+            f"@theorem-labs/research: {CODEOWNERS_FILE} itself and the agent instruction files keep their owner")
+
+
+def line_of(text, pattern):
+    """The number, from 1, of the one line of the CODEOWNERS text `text` whose pattern is `pattern`."""
+    [number] = [n for n, line in enumerate(text.splitlines(), 1) if line.split()[:1] == [pattern]]
+    return number
+
+
+def test_codeowners_names_its_teams_for_the_agent_instruction_files_and_itself_alone():
+    lines = [line.split() for line in (ROOT / CODEOWNERS_FILE).read_text().splitlines()
+             if line.strip() and not line.lstrip().startswith("#")]
+    assert lines == [[pattern, *OWNERS.split()] for pattern in CODEOWNER_PATTERNS]
+    assert sorted(workflow_credentials().ALLOWED) == sorted(CODEOWNER_PATTERNS)
+    # The patterns of one file each name a file of this tree.
+    assert all((ROOT / name).is_file()
+               for name in ("review.md", "review-change.md", "review-issue.md", CODEOWNERS_FILE))
+
+
+@pytest.mark.parametrize("old, new, pattern, said", [
+    pytest.param(LAST_CODEOWNER, f"{LAST_CODEOWNER}/.github/ {OWNERS}\n", "/.github/", f" names {OWNERS}"
+                 f"{ONLY_INSTRUCTIONS}", id="an owner for /.github/"),
+    pytest.param(LAST_CODEOWNER, f"{LAST_CODEOWNER}/src/ {OWNERS}\n", "/src/", f" names {OWNERS}{ONLY_INSTRUCTIONS}",
+                 id="an owner for /src/"),
+    pytest.param(f"/review.md {OWNERS}\n", "/review.md\n", "/review.md", NO_OWNER, id="/review.md loses its owner"),
+    pytest.param(f".claude/ {OWNERS}\n", f".claude/ {OWNERS}\n.claude/skills/\n", ".claude/skills/", NO_OWNER,
+                 id="a line with no owner after .claude/"),
+    pytest.param(f"/review.md {OWNERS}\n", "/review.md @theorem-labs/engineering\n", "/review.md",
+                 " names @theorem-labs/engineering, not @theorem-labs/engineering and @theorem-labs/research alone",
+                 id="/review.md keeps one team"),
+])
+def test_a_codeowners_line_that_breaks_c_fails(credentials_baseline, tmp_path, old, new, pattern, said):
+    changed = (credentials_baseline / CODEOWNERS_FILE).read_text().replace(old, new, 1)
+    got = credentials_control(credentials_baseline, tmp_path, [(CODEOWNERS_FILE, old, new)])
+    assert got == (1, [f"::error::{CODEOWNERS_FILE}, line {line_of(changed, pattern)}: {pattern}{said}"])
+
+
+def test_a_codeowners_without_a_pattern_of_allowed_fails(credentials_baseline, tmp_path):
+    got = credentials_control(credentials_baseline, tmp_path, [(CODEOWNERS_FILE, f"**/SKILL.md {OWNERS}\n", "")])
+    assert got == (1, [f"::error::{no_line_names('**/SKILL.md')}"])
+
+
+def test_an_empty_codeowners_fails_for_each_pattern_of_allowed(credentials_baseline, tmp_path):
+    # A CODEOWNERS with no line enumerates nothing: the check names each pattern it did not find, not a pass.
+    text = (credentials_baseline / CODEOWNERS_FILE).read_text()
+    code, lines = credentials_control(credentials_baseline, tmp_path, [(CODEOWNERS_FILE, text, "")])
+    assert (code, sorted(lines)) == (1, sorted(f"::error::{no_line_names(pattern)}" for pattern in CODEOWNER_PATTERNS))
+
+
+# Files that steer a credential or a verdict, named here one by one, not taken from steering.STEERING: two lists that
+# both lose a path agree, so their agreement alone shows nothing. Each is a steering file, so Enroll dispatch sends no
+# enrollment that changes it until a person approves its head. src/ is SteeringFiles' (tests/test_trigger_move.py).
+STEERING_NAMED = ("infra/base-builder/Dockerfile", "seeds/builds.tsv", "pyproject.toml", "uv.lock",
+                  ".github/CODEOWNERS", ".github/workflows/review.yml", ".github/workflows/triage.yaml",
+                  ".github/dependabot.yml", ".github/scripts/frame-pointers/probe")
+
+
+def steering_module():
+    """.github/scripts/steering.py of this tree, as a module of its own."""
+    path = ROOT / ".github" / "scripts" / "steering.py"
+    spec = importlib.util.spec_from_file_location("steering_of_check_checks", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def not_steering(steering):
+    """Each path of STEERING_NAMED that the module `steering` does not count as a steering file."""
+    for path in STEERING_NAMED:
+        assert (ROOT / path).is_file(), f"{path}: no such file here, so the case would read nothing"
+    return [path for path in STEERING_NAMED if not steering.is_steering(path)]
+
+
+def test_each_named_file_is_a_steering_file():
+    assert not_steering(steering_module()) == []
+
+
+def test_control_a_steering_file_dropped_from_the_list(monkeypatch):
+    steering = steering_module()
+    assert "/infra/" in steering.STEERING
+    monkeypatch.setattr(steering, "STEERING", tuple(p for p in steering.STEERING if p != "/infra/"))
+    assert not_steering(steering) == ["infra/base-builder/Dockerfile"]
 
 
 if __name__ == "__main__":

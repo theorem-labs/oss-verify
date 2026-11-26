@@ -3,8 +3,13 @@
 """No job of .github/workflows/ that holds a token, or whose outputs such a job reads, loads code from src/:
 uv run pytest tests/test_token_jobs.py
 
-src/ has no code owner (.github/CODEOWNERS, dispatch://OSSV-276/ask/6c92b099-08f4-4177-aa5a-6a3fc6292878), so a change
-to it merges with its checks alone. A job holds a token when it names a secret (secrets.<name>, or secrets: of a call
+src/ is the package that the tests and the builds of each pull request run. Every file but .github/CODEOWNERS and the
+agent instruction files merges through the change review alone (R10 of dispatch://INFRA-5359/spec; src/ had no code
+owner before, dispatch://OSSV-276/ask/6c92b099-08f4-4177-aa5a-6a3fc6292878), and check 4 of that review
+(review-change.md) reads a change to .github/, or to a script that a workflow runs, as code that can reach a
+credential. So the code that a job with a token runs is the code under .github/scripts/ that its steps name, with that
+directory's copy of the rules of oss-verify validate (.github/scripts/validate_rules/), and a change to src/ reaches no
+token: its review need not weigh one. A job holds a token when it names a secret (secrets.<name>, or secrets: of a call
 of a reusable workflow), has an environment, or has a write permission, id-token: write among them: in its own
 permissions:, else in the workflow's, else in the repository's default, which can write. The test checks each such
 job, each job of a reusable workflow that one of them calls, and each job that one of them needs, directly or through

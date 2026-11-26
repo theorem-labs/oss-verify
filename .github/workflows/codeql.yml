@@ -20,8 +20,8 @@ name: "CodeQL analysis"
 #         through the sysroot's proc-macro server (github/codeql rust/extractor/src/config.rs at
 #         e54be546741e764e42f1fe396b0a4816e28c327f, lines 164 and 235: load_out_dirs_from_check: true). In a push job,
 #         which holds security-events: write and can save to main's Actions cache, a Cargo package with a build.rs in
-#         a directory with no code owner (tests/, docs/) would run. So infra/base-builder/rust/oft-rust-rt/, the
-#         runtime that the Rust builds link (owned), goes unscanned; the frame-pointer probe crate under
+#         any directory of the tree (tests/, docs/) would run. So infra/base-builder/rust/oft-rust-rt/, the runtime
+#         that the Rust builds link, goes unscanned; the frame-pointer probe crate under
 #         .github/scripts/frame-pointers/rust/ would be left out anyway. .github/scripts/workflow-credentials fails a
 #         job with a credential that analyses Rust, a compiled language in another build mode than none, or a language
 #         it does not know.
@@ -40,8 +40,9 @@ name: "CodeQL analysis"
 # analysis of Python or C/C++ can extract only the files the pull request changes, on top of main's database, when the
 # action finds that database in the cache and turns incremental analysis on.
 #
-# A workflow whose job holds a write permission is a file that runs with a credential, so .github/CODEOWNERS owns this
-# file, each caller and the configuration.
+# A push job, which holds security-events: write, runs only on main, so it runs main's copy of this file, each caller
+# and the configuration, each of which merged through the change review, whose check review main's ruleset requires
+# (R14 of dispatch://INFRA-5359/spec).
 #
 # These workflows need CodeQL's default setup off. While it is on, code scanning refuses their results ("CodeQL
 # analyses from advanced configurations cannot be processed when the default setup is enabled"), and the step Analyze

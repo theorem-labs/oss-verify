@@ -2457,9 +2457,9 @@ jobs:
     # Writes the triage comment of a pull request that touches projects/, after a Triage run that ended success, or on
     # a run by hand that a person starts (route's output triage). It reads the pull request through the GitHub API, as
     # data, with a read-only token. Its checkout is main, never the pull request, so no code from the pull request
-    # runs. Nor does code from src/, which has no code owner: the triage job posts this job's output, so triage.py
-    # takes the rules of oss-verify validate from .github/scripts/validate_rules/ (tests/test_token_jobs.py). It must
-    # never be given id-token: write, nor an environment.
+    # runs. Nor does code from src/: the triage job posts this job's output, so triage.py takes the rules of oss-verify
+    # validate from .github/scripts/validate_rules/ (tests/test_token_jobs.py says why). It must never be given
+    # id-token: write, nor an environment.
     needs: route
     if: needs.route.outputs.triage == 'true'
     runs-on: ubuntu-latest

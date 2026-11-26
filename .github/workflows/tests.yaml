@@ -27,10 +27,10 @@ name: "Tests"
 #             - .github/CODEOWNERS or a workflow file cannot be read, a workflow file is no YAML mapping, or is YAML
 #               that GitHub and the script could read differently (an explicit tag, the merge key <<, a key that is no
 #               plain scalar, a key repeated in any case);
-#             - .github/CODEOWNERS does not give a workflow file to both @theorem-labs/engineering and
-#               @theorem-labs/research (a required check is matched by its name, so a job of any workflow could
-#               report one), naming what its jobs hold (a secret, an environment, id-token, a write permission or
-#               write access to main's Actions cache);
+#             - .github/CODEOWNERS names an owner for another pattern than those of itself and the agent instruction
+#               files (the script's ALLOWED), names other owners than @theorem-labs/engineering and
+#               @theorem-labs/research for one of them, lacks one of them, or has a line with no owner, which would
+#               take the owner back from a file of an earlier line (rule (c), R10 of dispatch://INFRA-5359/spec);
 #             - a workflow starts on pull_request_target, or one that starts on pull_request breaks its rule (r): it
 #               reads a secret, a job has an environment, passes secrets, or calls a workflow of no file here, the
 #               workflow's permissions are missing, the workflow's or a job's permissions are write-all or another
@@ -50,11 +50,12 @@ name: "Tests"
 #               than its run's own commit (actions/checkout with a ref or a repository, gh pr checkout,
 #               refs/pull/, or a git fetch, checkout, switch, worktree, pull or reset); or a job that calls a
 #               workflow passes it secrets (R10 of dispatch://INFRA-5359/spec).
-#           The script, steering.py, which it imports, .github/CODEOWNERS and this file have owners, so only a person
-#           can change the rule. A fork's run takes the script and steering.py from the merge's first parent, a commit
-#           of the base branch (the step that checks out the merge checks it is one), and runs it with python3 -I,
-#           which reads no PYTHONPATH (the job's names the merge's src/), so no module of the fork shadows one it
-#           imports and no step runs a fork's code; while that commit has no script, a fork's run skips the check.
+#           The script and this file merge through the change review, whose check review main's ruleset requires, as
+#           every file but CODEOWNERS and the agent instruction files does (R10 and R14 of
+#           dispatch://INFRA-5359/spec). A fork's run takes the script from the merge's first parent, a commit of the
+#           base branch (the step that checks out the merge checks it is one), and runs it with python3 -I, which reads
+#           no PYTHONPATH (the job's names the merge's src/), so no module of the fork shadows one it imports and no
+#           step runs a fork's code; while that commit has no script, a fork's run skips the check.
 #           Then the tests in tests/ but the Docker
 #           tests (DOCKER_TESTS, below), oss-verify validate on every project, actionlint and shellcheck over the
 #           workflows, and the package's wheel, built, installed and run.
@@ -219,9 +220,9 @@ jobs:
           fi
 
       # .github/scripts/workflow-credentials (the top of this file), on every event, with no token: it reads files
-      # only. PyYAML comes from the runner image, else from apt. python3 -I reads no PYTHONPATH and no user site, so
-      # only the script's own directory and the interpreter's packages are on sys.path.
-      - name: Each workflow has a code owner, and no pull_request job holds a credential
+      # only. PyYAML comes from the runner image, else from apt. python3 -I reads no PYTHONPATH and no user site, and
+      # puts neither the script's directory nor the working directory on sys.path: only the interpreter's packages.
+      - name: CODEOWNERS owns only itself and the agent instruction files, and no pull_request job holds a credential
         run: |
           dpkg -s python3-yaml > /dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
           if [ "$FORK" != true ]; then
@@ -232,11 +233,9 @@ jobs:
             echo "The base branch's commit $(git rev-parse HEAD^1) has no .github/scripts/workflow-credentials: no check."
             exit 0
           fi
-          tools=$(mktemp -d)
-          for name in workflow-credentials steering.py; do
-            git show "HEAD^1:.github/scripts/$name" > "$tools/$name"
-          done
-          python3 -I "$tools/workflow-credentials" .
+          script=$(mktemp)
+          git show HEAD^1:.github/scripts/workflow-credentials > "$script"
+          python3 -I "$script" .
 
       # strace: a test in tests/ checks that the review's helpers keep the GitHub token out of each process's arguments.
       # pytest-xdist: the tests in tests/ run in parallel (that step says why).
@@ -247,9 +246,8 @@ jobs:
       # The binary checks' rules (oss_verify.binary_isa, oss_verify.syscall_shapes) are tested against the files of the
       # public process model at the commit they were written against, fetched anonymously. Each python3 -c and -m here
       # runs with -P, or with PYTHONSAFEPATH=1, which does the same (the tests in tests/): either keeps the top of the
-      # checkout off sys.path, so that no file or directory there shadows a module (.github/CODEOWNERS owns the top's .py
-      # files and pyproject.toml). pytest runs with -c pyproject.toml, so that it reads no other configuration file, such
-      # as one that a change adds under tests/, which has no owner.
+      # checkout off sys.path, so that no file or directory there shadows a module. pytest runs with -c pyproject.toml,
+      # so that it reads no other configuration file, such as one that a change adds under tests/.
       - name: The process model the binary checks were written against
         if: steps.fork.outputs.enrollment != 'true'
         run: |

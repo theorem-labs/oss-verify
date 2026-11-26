@@ -6,9 +6,9 @@ src/oss_verify/:
 
     python3 -P .github/scripts/copy-validate-rules
 
-src/ has no code owner (.github/CODEOWNERS), so no job that holds a token, or whose outputs such a job reads, loads
-code from it (tests/test_token_jobs.py). Those jobs run triage.py, review-gather and terms-accepted, which take the
-rules from .github/scripts/validate_rules/, which CODEOWNERS owns with the rest of .github/:
+No job that holds a token, or whose outputs such a job reads, loads code from src/ (tests/test_token_jobs.py says
+why): the code that runs with a token is under .github/scripts/. Those jobs run triage.py, review-gather and
+terms-accepted, which take the rules from .github/scripts/validate_rules/:
 
     validate.py     src/oss_verify/validate.py, byte for byte.
     check_build.py  what validate.py uses of src/oss_verify/check_build.py: each top-level statement that binds a name
@@ -18,10 +18,11 @@ rules from .github/scripts/validate_rules/, which CODEOWNERS owns with the rest 
                     parents[3], the same directory, the top of the checkout.
 
 tests/test_validate_rules.py fails while the files differ from what this writes. So a change to these rules in src/
-is made here too, by running this, and that change to .github/ needs a code owner's approval. A change to the rest of
-check_build.py, the build steps of oss-verify check, changes no file here. This program reads src/ as text: it imports
-nothing from it. It stops, and writes nothing, when src/ takes a shape that it cannot copy so: validate.py imports the
-package oss_verify by its name, or another module of it, or uses check_build other than as check_build.<name>; or
+is made here too, by running this, and the pull request shows it under .github/scripts/, where check 4 of the change
+review (review-change.md) looks for code that runs in a job with a credential. A change to the rest of check_build.py,
+the build steps of oss-verify check, changes no file here. This program reads src/ as text: it imports nothing from
+it. It stops, and writes nothing, when src/ takes a shape that it cannot copy so: validate.py imports the package
+oss_verify by its name, or another module of it, or uses check_build other than as check_build.<name>; or
 check_build.py sets ROOT another way, or binds a name that the copy needs more than once, or in a statement other than
 an import, an assignment, a def or a class.
 """

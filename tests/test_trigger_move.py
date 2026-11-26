@@ -20,9 +20,8 @@ The move:
        .github/scripts/take-build-results gives its fixed line, the gather job reads the text and the diff from the
        API, and the comment job posts to that pull request at that head.
   (u)  The list of .github/scripts/steering.py is the patterns that .github/CODEOWNERS owned at commit 62081ee, all of
-       /.github/ and /src/ among them, and each file that CODEOWNERS owns today is a steering file but the files of
-       NOT_STEERING: take-project and triage.py read docs/seeded-projects.tsv from the base branch, and only tests read
-       app/sentences.yaml, as data, and no workflow runs it.
+       /.github/ and /src/ among them, and each file that CODEOWNERS owns today, itself and the agent instruction
+       files, is a steering file.
   (w)  Enroll dispatch sends no enrollment that changes a steering file, and puts no label on it, until a person
        approved its head: for an open pull request and for a merge.
   (x)  No workflow with workflow_dispatch builds the code of a pull request (oss-verify check, docker).
@@ -559,12 +558,11 @@ class PullRequestWorkflows(unittest.TestCase):
 
     @staticmethod
     def copy_workflows(root):
-        """Copy .github/workflows into the tree `root`, with the scripts of the rule (r): workflow-credentials, and
-        steering.py, which it imports."""
+        """Copy .github/workflows into the tree `root`, with the script of the rule (r), workflow-credentials."""
         shutil.copytree(ROOT / ".github" / "workflows", root / ".github" / "workflows")
         (root / ".github" / "scripts").mkdir()
-        for name in ("workflow-credentials", "steering.py"):
-            shutil.copy(ROOT / ".github" / "scripts" / name, root / ".github" / "scripts" / name)
+        shutil.copy(ROOT / ".github" / "scripts" / "workflow-credentials",
+                    root / ".github" / "scripts" / "workflow-credentials")
 
     def pull_request_holds(self, root, name):
         """pull_request_holds of the tree `root`'s .github/scripts/workflow-credentials, the rule (r) that tests.yaml's
@@ -3954,8 +3952,9 @@ class SteeringFiles(unittest.TestCase):
     """(u): the list of steering files."""
 
     # The steering list: the patterns that .github/CODEOWNERS owned at commit 62081ee (#194), in their order. CODEOWNERS
-    # now owns only the files under /.github/ that run with a credential, and this list stays as broad as it was: an
-    # enrollment that changes any file under /.github/ waits for a person before Enroll dispatch sends it.
+    # now owns only itself and the agent instruction files (R10 of dispatch://INFRA-5359/spec), and this list stays as
+    # broad as it was: an enrollment that changes any file under /.github/ waits for a person before Enroll dispatch
+    # sends it.
     STEERING_62081EE = (
         "/.github/", "/src/", "/infra/", "/seeds/", ".claude/", "CLAUDE*.md", "AGENTS*.md", "/.mcp.json", "/*.py",
         "/pytest.ini", "/.pytest.ini", "/pyproject.toml", "/uv.lock", "/.python-version", "/setup.cfg", "/tox.ini",
@@ -3966,11 +3965,6 @@ class SteeringFiles(unittest.TestCase):
     # add no steering file: AGENTS*.md and CLAUDE*.md already match each AGENTS.md and CLAUDE.md, and a skill that
     # Claude Code loads in the review job is under .claude/.
     INSTRUCTIONS = ("**/AGENTS.md", "**/CLAUDE.md", "**/SKILL.md", "skills/")
-    # Owned, but no steering file, each with why: a change to it changes no code that a workflow runs, and nothing that
-    # Claude Code loads in the review job.
-    NOT_STEERING = {"/docs/seeded-projects.tsv": "take-project and triage.py read it from the base branch, never from "
-                                                 "the pull request",
-                    "/app/sentences.yaml": "only tests read it, as data, and no workflow runs it"}
 
     @staticmethod
     def steering():
@@ -3988,7 +3982,7 @@ class SteeringFiles(unittest.TestCase):
         for line in codeowners.splitlines():
             fields = line.split()
             if not fields or fields[0].startswith("#") or not self.TEAMS & set(fields[1:]) \
-                    or fields[0] in self.INSTRUCTIONS or fields[0] in self.NOT_STEERING:
+                    or fields[0] in self.INSTRUCTIONS:
                 continue
             pattern = fields[0]
             path = pattern.lstrip("/").replace("*", "x") + ("x" if pattern.endswith("/") else "")
@@ -4009,8 +4003,8 @@ class SteeringFiles(unittest.TestCase):
             self.assertFalse(steering.is_steering(name), name)
         codeowners = (ROOT / ".github" / "CODEOWNERS").read_text()
         self.assertEqual(self.owned_but_not_steering(codeowners, steering), [])
-        # The check reads the owned lines: /.github/ is one of them.
-        self.assertIn("/.github/ @theorem-labs/engineering @theorem-labs/research", codeowners)
+        # The check reads the owned lines: /review.md is one of them.
+        self.assertIn("/review.md @theorem-labs/engineering @theorem-labs/research", codeowners)
         # src/ has no owner, on purpose, and every file under it is still a steering file.
         self.assertIn("/src/", steering.STEERING)
         patterns = [line.split()[0] for line in codeowners.splitlines() if line.strip() and not line.startswith("#")]

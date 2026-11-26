@@ -33,13 +33,15 @@ name: "Terms"
 #
 # What runs, and from where. On pull_request, the workflow file comes from the merge commit, so the run: block of the
 # step below is the merge commit's. A pull request that changes this file runs its own copy, and so controls this run
-# and its check: a contributor could edit this check away in their own pull request. The code-owner rule on /.github/
-# of .github/CODEOWNERS guards the merge of such a pull request. enroll-dispatch.yml sends no pull request for its
-# theorem statements unless all its files are under one projects/<name>/ (the_project() of
-# .github/scripts/enroll-dispatch), and none that changes a steering file (.github/scripts/steering.py) until a person
-# approves its head. The job checks out the first parent of the merge commit: the base branch's commit on which GitHub
-# built the merge. The run: block runs the program .github/scripts/terms-accepted from that checkout, with the rules of
-# oss-verify validate beside it (.github/scripts/validate_rules/, never src/, which has no code owner), and gives the
+# and its check: a contributor could edit this check away in their own pull request. The check review of the change
+# review, which main's ruleset requires (R14 of dispatch://INFRA-5359/spec), guards the merge of such a pull request,
+# and no job of this file can get a credential (rules (r) and (m) of .github/scripts/workflow-credentials).
+# enroll-dispatch.yml sends no pull request for its theorem statements unless all its files are under one
+# projects/<name>/ (the_project() of .github/scripts/enroll-dispatch), and none that changes a steering file
+# (.github/scripts/steering.py) until a person approves its head. The job checks out the first parent of the merge
+# commit: the base branch's commit on which GitHub built the merge. The run: block runs the program
+# .github/scripts/terms-accepted from that checkout, with the rules of oss-verify validate beside it
+# (.github/scripts/validate_rules/, never src/: tests/test_token_jobs.py), and gives the
 # program that commit as BASE_SHA. So the program and the files of the base that the program reads come from one
 # commit of the base branch. When the pull request does not change this file, this file comes from that commit too:
 # the program of another commit can read a variable that this file does not give it. GitHub, not the pull request,

@@ -840,7 +840,7 @@ def test_the_job_checks_out_the_merge_commit_into_merge_only_while_the_base_has_
     assert steps[merge]["uses"] == steps[checkouts[0]]["uses"]
     assert steps[merge]["if"] == "hashFiles('.github/scripts/terms-accepted') == ''"
     assert steps[merge]["with"] == {"path": "merge", "persist-credentials": False}
-    # The program takes the rules of oss-verify validate from beside it, never from src/, which has no code owner.
+    # The program takes the rules of oss-verify validate from beside it, never from src/ (tests/test_token_jobs.py).
     assert "PYTHONPATH" not in steps[program]["env"]
     assert "PYTHONPATH" not in steps[program]["run"]
 

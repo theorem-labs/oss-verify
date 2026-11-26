@@ -1,33 +1,18 @@
 # The last pattern that matches a file decides its owners. The ruleset of main requires a code owner's approval of
 # each change to an owned file.
-# Files with no owner on purpose: the files that no pattern matches (most files of src/, tests/, docs/ and
-# projects/), and the files of the two lines with no owner, which only owned workflows read, in jobs that hold only
-# read permissions.
+# This file names a person only for itself and the agent instruction files (R10 of dispatch://INFRA-5359/spec): the
+# files that instruct an agent, the change review's own rules among them, so that a change that weakens them does not
+# merge through that same review. Every other file merges through the change review, the required check review (R14).
+# .github/scripts/workflow-credentials (ALLOWED), which the required check tests runs, fails any other line, and any
+# line with no owner.
 **/AGENTS.md @theorem-labs/engineering @theorem-labs/research
 **/CLAUDE.md @theorem-labs/engineering @theorem-labs/research
 **/SKILL.md @theorem-labs/engineering @theorem-labs/research
 skills/ @theorem-labs/engineering @theorem-labs/research
-/.github/ @theorem-labs/engineering @theorem-labs/research
-/.github/actionlint.yaml
-/.github/scripts/frame-pointers/
-/infra/ @theorem-labs/engineering @theorem-labs/research
-/seeds/ @theorem-labs/engineering @theorem-labs/research
-/docs/seeded-projects.tsv @theorem-labs/engineering @theorem-labs/research
 .claude/ @theorem-labs/engineering @theorem-labs/research
 CLAUDE*.md @theorem-labs/engineering @theorem-labs/research
 AGENTS*.md @theorem-labs/engineering @theorem-labs/research
-/.mcp.json @theorem-labs/engineering @theorem-labs/research
-/*.py @theorem-labs/engineering @theorem-labs/research
-/pytest.ini @theorem-labs/engineering @theorem-labs/research
-/.pytest.ini @theorem-labs/engineering @theorem-labs/research
-/pyproject.toml @theorem-labs/engineering @theorem-labs/research
-/uv.lock @theorem-labs/engineering @theorem-labs/research
-/.python-version @theorem-labs/engineering @theorem-labs/research
-/setup.cfg @theorem-labs/engineering @theorem-labs/research
-/tox.ini @theorem-labs/engineering @theorem-labs/research
 /review.md @theorem-labs/engineering @theorem-labs/research
-/app/sentences.yaml @theorem-labs/engineering @theorem-labs/research
 /review-change.md @theorem-labs/engineering @theorem-labs/research
 /review-issue.md @theorem-labs/engineering @theorem-labs/research
-/.claude/skills/write-to-maintainer/ @theorem-labs/engineering @theorem-labs/research
 /.github/CODEOWNERS @theorem-labs/engineering @theorem-labs/research

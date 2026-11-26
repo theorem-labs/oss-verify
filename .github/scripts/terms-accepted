@@ -14,8 +14,8 @@ BASE_SHA is the first parent of the merge commit: the base branch's commit on wh
 checks out that commit, and runs this program from it. So the program reads docs/seeded-projects.tsv and each
 project.yaml of the base at the commit that it and terms.yaml come from (terms.yaml tells why). While that commit does
 not have this file, terms.yaml runs the copy of the merge commit in merge/. The program takes the rules of oss-verify
-validate from .github/scripts/validate_rules/ beside it, the copy of src/oss_verify/validate.py that
-.github/CODEOWNERS owns (.github/scripts/copy-validate-rules), and loads no code from src/, which has no code owner.
+validate from .github/scripts/validate_rules/ beside it, the copy of src/oss_verify/validate.py
+(.github/scripts/copy-validate-rules), and loads no code from src/ (tests/test_token_jobs.py says why).
 The program reads GitHub's API through `gh api` only, with a token that has no permission. It prints what it decides,
 each error as a line ::error::, and exits 0 when the check passes, else 1. PyYAML comes from the runner image only, and
 only the paths that load a project.yaml need it.

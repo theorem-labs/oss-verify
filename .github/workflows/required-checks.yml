@@ -12,7 +12,8 @@ name: Required checks
 #   tests            tests.yaml       terms-accepted   terms.yaml
 #
 # On pull_request each of those four files runs the pull request's own copy, so this binds a check to the file, not to
-# main's text of it: .github/CODEOWNERS keeps an owner on the four files, and on the scripts and workflows they run.
+# main's text of it: a pull request that changes one of the four files, or the scripts and workflows they run, merges
+# only through the change review, whose check review main's ruleset requires (R14 of dispatch://INFRA-5359/spec).
 # It is temporary: OSSV-747 deletes validate.yaml, build.yaml and terms.yaml, and INFRA-4390 then makes Tests from main,
 # from GitHub Actions, the one required check; this file and its script go with them.
 #
@@ -50,7 +51,8 @@ name: Required checks
 # admits only a job of this file on main in that environment, and binds it to an account of its own,
 # ossv-required-checks, whose one grant is reading the App's key (root/accounts.go): none of the comment jobs' other
 # grants, such as the held findings. It mints a token with checks: write alone, for this repository alone, and posts
-# with it. .github/CODEOWNERS owns this file and the script.
+# with it. A change to this file or the script merges through the change review too, and only main's copy of them runs
+# here, in the main-only environment required-checks (rule (m) of .github/scripts/workflow-credentials).
 #
 # The runs for one head wait for each other (concurrency, for the whole run, a run by hand included), so each reads what
 # the one before it posted. queue: max keeps up to 100 pending runs in their order, so another head at the same commit

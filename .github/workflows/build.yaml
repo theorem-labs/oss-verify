@@ -79,8 +79,9 @@ name: "Build"
 # because:
 #   - Each workflow and script is a steering file (.github/scripts/steering.py), and enroll-dispatch.yml sends no pull
 #     request that changes a steering file for its theorem statements until a person approves its head.
-#   - .github/CODEOWNERS owns this file and the scripts it runs: enroll-dispatch.yml acts on this check and on the
-#     sizes in its artifact for an enrollment, whose run is main's copy, so a change to them needs a code owner.
+#   - enroll-dispatch.yml acts on this check and on the sizes in its artifact for an enrollment, whose run is main's
+#     copy, so a change to this file or to the scripts it runs merges only through the change review, whose check
+#     review main's ruleset requires (R14 of dispatch://INFRA-5359/spec).
 #   - A fork's run gets a read-only token and no secret. No job of this file holds a secret, an identity token, an
 #     environment or a write permission.
 #   - With the repository's default setting, GitHub holds each run of a first-time contributor's pull request until

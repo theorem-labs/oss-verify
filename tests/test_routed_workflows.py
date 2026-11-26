@@ -695,7 +695,8 @@ def test_the_check_fails_unless_the_checkout_is_the_merge_into_the_base_branch(t
 
 
 # The step of suite after the fork step: the one step that runs for a fork's enrollment.
-CREDENTIALS_STEP = "Each workflow has a code owner, and no pull_request job holds a credential"
+CREDENTIALS_STEP = ("CODEOWNERS owns only itself and the agent instruction files, and no pull_request job holds a "
+                    "credential")
 # The contexts of a run on pull_request, as the steps after the fork step see them: (env.FORK, the fork step's
 # enrollment output, whether such a step runs). A fork's enrollment runs none of them; a fork's other change, whose
 # fork step gives no output, and a branch of this repository, whose fork step is skipped, run them all.

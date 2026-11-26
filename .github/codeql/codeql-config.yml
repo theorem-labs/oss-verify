@@ -11,10 +11,10 @@
 #   projects/        the enrolled projects: their build files and fuzz targets, which enrollment and review check.
 #   tests/fixtures/  the inputs of the tests: small projects and objects, some of them bad on purpose.
 #   .github/scripts/frame-pointers/
-#                    the probes of toolchain-images.yaml's job make, which runs them with contents: read alone. This
-#                    directory has no code owner (.github/CODEOWNERS), so no job that holds a credential may read it,
-#                    and the push jobs of the analysis hold security-events: write. It also holds the frame-pointer
-#                    probe crate, Rust, which no workflow analyses (.github/workflows/codeql.yml says why).
+#                    the probes of toolchain-images.yaml's job make, which runs them with contents: read alone:
+#                    programs that test the toolchain images, as tests/fixtures/ holds the inputs of the tests, and no
+#                    code of this repository's tools. It also holds the frame-pointer probe crate, Rust, which no
+#                    workflow analyses (.github/workflows/codeql.yml says why).
 paths-ignore:
   - seeds
   - projects

@@ -53,8 +53,7 @@ def test_the_copy_is_what_copy_validate_rules_writes_from_src():
     for path, data in copier.copies().items():
         assert path.read_bytes() == data, (
             f"{path.relative_to(ROOT)} is not what .github/scripts/copy-validate-rules writes from src/oss_verify/. "
-            "Run python3 -P .github/scripts/copy-validate-rules, and commit what it writes: the change to .github/ "
-            "needs a code owner's approval.")
+            "Run python3 -P .github/scripts/copy-validate-rules, and commit what it writes.")
 
 
 def test_validate_py_is_src_byte_for_byte():
